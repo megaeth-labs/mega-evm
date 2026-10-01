@@ -25,6 +25,7 @@ mod mode;
 pub mod roots;
 pub mod runner;
 pub mod skips;
+pub mod witness;
 
 pub use fork::*;
 pub use mode::*;

@@ -1,5 +1,5 @@
 ---
-description: Satin network upgrade (unstable) — MegaETH's execution rules restated on Optimism Karst (Ethereum Osaka) — EIP-8037 regular and state gas under a 200,000,000 execution cap with a state-gas reservoir, a history-gas ledger for the bytes a transaction appends, SALT-scaled state gas, per-transaction limits that stop a transaction with a revert, gas detention on withheld gas, EIP-7708 transfer logs, keyless deployment as a native creation, system calls on a split budget, the live system address read by the transaction itself, and block limits as packing budgets.
+description: Satin network upgrade (unstable) — MegaETH's execution rules restated on Optimism Karst (Ethereum Osaka) — EIP-8037 regular and state gas under a 200,000,000 execution cap with a state-gas reservoir, a history-gas ledger for the bytes a transaction appends, SALT-scaled state gas, per-transaction limits that stop a transaction with a revert, gas detention on withheld gas, EIP-7708 transfer logs, keyless deployment as a native creation, system calls on a split budget, the live system address read by the transaction itself, block limits as packing budgets, and the witness a stateless validator re-executes a block from.
 ---
 
 # Satin Network Upgrade
@@ -51,6 +51,7 @@ The changes, in the order this page records them:
 19. **The protocol's own transactions.**
 20. **Block limits.**
 21. **Transaction and block refusals.**
+22. **The stateless witness.** What a validator re-executing a block must be given, and what the engine exports for it.
 
 ## What Changed
 
@@ -674,7 +675,8 @@ An out-of-gas step halts the call, consuming its regular gas.
   1. make the EIP-2935 call;
   2. make the EIP-4788 call (neither call runs in the genesis block, and a block without a parent beacon block root is invalid, as EIP-2935 and EIP-4788 define);
   3. deploy the six MegaETH system contracts in address order — Oracle, High-Precision Timestamp, KeylessDeploy, MegaAccessControl, MegaLimitControl, SequencerRegistry — and then the [EIP-7997](https://eips.ethereum.org/EIPS/eip-7997) `CREATE2` factory at `0x4e59b44847b379578588920ca78fbf26c0b4956c` with nonce 1;
-  4. read whether the `SequencerRegistry` has a role change due in the block, and if it has, call `applyPendingChanges()`.
+  4. read whether the `SequencerRegistry` has a role change due in the block, and if it has, call `applyPendingChanges()`;
+  5. read the L1 block contract's account and its five fee slots, as [the stateless witness](#22-the-stateless-witness) lays out.
 - **Deploys.**
   Each deploy is idempotent: an address already holding the expected code is only read (its nonce kept).
   An absent account, or one with empty code and nonce 0, MUST get the code, nonce 1 and the registry's seed slots; it keeps any balance it has, and any storage it had is cleared.
@@ -682,7 +684,8 @@ An out-of-gas step halts the call, consuming its regular gas.
 - **Failure.**
   A pre-block call that does not succeed MUST make the block invalid, before its state is used.
   A database error the node's database declares fatal is an internal error of the node, not a verdict on the block; any other failure of a call — a non-fatal database error, another EVM error, an outcome that is not a success — makes the block invalid.
-  A database error in a deploy or in the due-change read is always an internal error.
+  A database error in a deploy, in the due-change read or in the read of the L1 block info is always an internal error.
+  The L1 block info is read for every block, whatever its transactions, so a node whose database cannot serve the L1 block contract's account, or one of the five slots of a contract the chain holds, cannot execute the block: it fails before the block's first transaction, as an internal error, even for a block of deposits alone, which prices nothing against the contract, or a block whose transactions never read the overhead slot (5).
 
 ### 19. The Protocol's Own Transactions
 
@@ -773,6 +776,77 @@ A block MUST be invalid when:
 - a pre-block call does not succeed (see [System Calls and Pre-Block Calls](#18-system-calls-and-pre-block-calls));
 - a system-contract address holds foreign code or has empty code and a used nonce, or the factory's address holds the factory's code at nonce 0;
 - it contains a transaction the rules above skip.
+
+### 22. The Stateless Witness
+
+#### Previous behavior
+
+- Block execution exported the SALT bucket ids of one cache, reset once per block, and the buckets a keyless deployment's sandbox asked about were never merged into it; the block hashes a block read were whatever its state cache held, which may include hashes an earlier block read.
+- The node collected the pre-block states through a state hook it installed on block execution.
+- The L1 block info a block's transactions were priced against was read on the block's state and landed in no state a node collects.
+- The oracle service's answers were known only to the node's own service, which sees every candidate the builder executes, included or not.
+
+#### New behavior
+
+A stateless validator re-executes a block from a witness of what the block read.
+The witness is defined by what the block's execution returns and exports, and a node building it and a validator consuming it MUST agree on the following.
+
+- **The witness.**
+  A block's witness holds:
+  - every account and every storage slot the block loads, in a pre-block step or in a transaction the block includes, as the chain held it before the block — an absent account recorded as absent and an empty slot as zero — and the code the chain held for every such account before the block;
+  - the hash of every block `BLOCKHASH` read, which the block's execution exports;
+  - the capacity of every SALT bucket the block's execution exports;
+  - the oracle service's answer to every oracle read the block's included transactions recorded, in block order.
+    A transaction loads every account and slot its execution reads from the state: in its validation, in its fee settlement, and in any of its frames, a frame that reverted or halted included.
+    A failed frame's writes are taken back, not its reads, and a validator re-executing the transaction makes the same reads in that frame.
+    The one exception is the L1 block info the transaction is priced against, which the pre-block phase loads for the whole block (see the L1 block info, below).
+    A read that gas or a limit skipped loads nothing (see the reads a validator makes again, below).
+    Execution reports what it loaded: a pre-block step in the pre-block state it hands over, and a transaction in its returned state, which names every account and slot the transaction loaded, whether it wrote it or not and whether the frame that loaded it succeeded or not.
+    The set is a function of those states and the exports alone, not of how the node caches state: a node that serves a block's execution from a state cache another block filled builds the same witness, because the states name what was loaded whether or not a database was asked for it.
+    A state names the keys; the values are the chain's.
+    The code in particular is not the code a returned state carries: a transaction that replaces an account's code — an EIP-7702 authority delegated anew — is admitted against the code the chain held, and its returned state carries the code it wrote.
+- **What the block reads, and where it lands.**
+  A transaction's loads are in its returned state: its sender, its recipient or created address with its code, every account, with its code, and every slot any of its frames loads, the fee recipients, the live system address a transaction of the system shape reads, and a keyless deployment's signer and deploy address.
+  The pre-block phase's reads land in the pre-block states, in order: the two EIP calls' states, each system-contract deploy's read-only or created entry, the registry's pending slots the due-change decision read, the `applyPendingChanges()` call's state, and last the L1 block info.
+  `BLOCKHASH` reads the chain's history outside the journal and its reads are exported; a SALT bucket's capacity and the oracle service's answer are read outside the database and are exported or recorded.
+  The header, the chain configuration — the schedule with the protocol limits and the sequencer registry parameters attached to it — the parent hash, the parent beacon block root, the extra data, the activation flag and the block's slot number are inputs a validator is given beside the witness.
+  `SLOTNUM` pushes the slot number the node supplies, and zero for a block that carries none, so a validator MUST be given the slot number the building node supplied, or that it supplied none.
+- **The L1 block info.**
+  A non-deposit transaction is priced against the L1 block contract (`0x4200000000000000000000000000000000000015`): its L1 base fee slot (1), its Ecotone fee scalars slot (3), its Ecotone blob base fee slot (7), its operator fee scalars slot (8), which also holds the DA footprint gas scalar, and, only when the Ecotone scalars are empty (the blob base fee scalar and the eight bytes of the two scalars zero), its L1 fee overhead slot (5).
+  These reads are made on the block's state, not through a transaction's journal, so they land in no transaction's returned state.
+  None is made before the block's first non-deposit transaction, and each finds the state the deposits before it left: whether the overhead is read is decided by the scalars those deposits left, not by the scalars the chain held before the block, and a deposit that empties the scalars names no overhead in its returned state.
+  The pre-block phase MUST therefore read the contract's account and all five slots, whatever the scalars it reads hold, and record them in a pre-block state as read-only entries, after every other pre-block step; on a chain that does not hold the contract it MUST record the account as not existing and read no slot, the slots of an account the block itself creates not being read from the chain.
+  A witness so holds the overhead of a block that never reads it again, and a block cannot be executed on a state that cannot serve one of the five slots, whether or not a transaction would have been priced with it.
+  The read changes nothing: the entries are not written, and a transaction finds the same values, or the ones the block's L1 attributes deposit wrote over them, which are in that deposit's own returned state.
+- **The reads a validator makes again.**
+  A read that gas or a limit skipped is skipped again on replay, so the witness need not carry it: a cold `SLOAD` or account load with less gas than the cold surcharge, a `BLOCKHASH` of the current block or outside the last 256 blocks, an oracle read the frame cannot pay, a read a frame whose volatile-data access is off is refused, a keyless deployment's reads after a rule refused it, and the bucket of a charge a system-originated transaction or a system call makes.
+- **The SALT buckets.**
+  Block execution exports the set of SALT buckets the SALT environment answered with a valid capacity during the block, emptied when the block starts and accumulated over everything executed for the block.
+  A bucket is in the set once it was answered with a valid capacity, whether or not the transaction that asked is in the block: a candidate the builder executed and dropped leaves its buckets in the set, which a validator does not need.
+  A lookup that failed is not in the set, whether the environment could not answer it or answered a capacity below `MIN_BUCKET_SIZE`: it fails its transaction, which is in no block, and a validator never makes it.
+  A witness MUST prove the capacity of every bucket in the set.
+  The set is complete for the transactions the block's own execution ran: a bucket is asked about at a state charge site and nowhere else, and a validator re-executing the block's transactions reaches the same charge sites.
+  A node that runs the block's transactions on several executions, or that empties the set between transactions, MUST take the union of what each reports; a transaction executed elsewhere and committed into the block adds nothing to the set of the execution it was committed into.
+  The pre-block calls and the system transactions price at the minimum bucket and add none.
+- **The block hashes.**
+  Block execution exports every hash `BLOCKHASH` was served, emptied when the block starts.
+  It is not what a node's state cache holds, which may carry hashes an earlier block read.
+- **The oracle.**
+  An `SLOAD` in the Oracle's own frame loads the chain's slot, which is in the transaction's returned state and so in the witness, then takes the service's answer over it.
+  The answer is in no database.
+  The engine records every read a transaction makes through the service, with the answer, in order, on the transaction's outcome; an answer can be none, where the service had no value and the slot's loaded value stood.
+  A node MUST take the oracle reads of the transactions it includes from their outcomes, in block order, and nothing of a candidate it executed and dropped.
+  A validator MUST do one of the following:
+  - be given those records, and answer each read its own execution makes from them, in order; or
+  - run no service, and find each answer in the Oracle's slot at its read — the value the journal holds for the slot when the read is made, as the block's earlier included transactions and the reading transaction's own frames left it.
+    This reproduces the block only when every answer an included transaction recorded equals the slot's value at that read; an answer of none always does.
+    Meeting it is the node's to arrange, by including a transaction that writes every value its service answers into the Oracle's storage before the transaction that reads it.
+    It cannot always be arranged: one transaction can be answered two values for one slot — it reads the slot, sends a hint that has the service fetch another value, and reads the slot again — and only the system address writes the Oracle's storage, so a transaction the system address does not send finds one value in the slot at both reads, and no value the slot can hold reproduces both.
+    A node that serves validators running no service MUST either give them the included transactions' own records, as the first option has it, or leave out of the block every transaction whose recorded answers the slot cannot hold at its reads.
+    A validator without a service that finds another value in the slot computes another block; a transaction that wrote the value but was dropped by the builder wrote nothing the chain holds.
+    Hints reach the service alone: they are not in the witness, and change nothing a validator computes except through the answers the service then gives, which the records carry.
+- **The check.**
+  A block replayed on exactly its witness MUST produce the same receipts, state changes, gas ledgers, logs, block counters and exports as the block's execution, and MUST read nothing the witness does not hold.
 
 ## Developer Impact
 

@@ -7,6 +7,7 @@ mod factory;
 mod genesis;
 mod hardfork;
 mod helpers;
+mod l1_block_info;
 mod limit;
 mod result;
 
@@ -17,5 +18,6 @@ pub use factory::*;
 pub use genesis::*;
 pub use hardfork::*;
 pub use helpers::*;
+pub use l1_block_info::*;
 pub use limit::*;
 pub use result::*;

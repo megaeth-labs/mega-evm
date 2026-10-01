@@ -43,7 +43,7 @@ use mega_evm::{
     revm::{
         context::{
             result::{EVMError, ExecutionResult},
-            CfgEnv,
+            BlockEnv, CfgEnv,
         },
         database::{EmptyDB, State},
         inspector::{inspectors::TracerEip3155, InspectCommitEvm},
@@ -577,7 +577,7 @@ fn print_outcome(config: Config, id: &TestId, outcome: &Outcome) {
 
 /// The chain id `unit` runs on: its own, or mainnet's when it names none, as the reference runner
 /// has it. One that does not fit a `u64` is a fixture error rather than a value clamped to fit.
-fn chain_id(unit: &TestUnit) -> Result<u64, Failure> {
+pub(crate) fn chain_id(unit: &TestUnit) -> Result<u64, Failure> {
     let id = unit.env.current_chain_id.unwrap_or(U256::ONE);
     id.try_into().map_err(|_| {
         Failure::new(FailureKind::Fixture, format!("currentChainID {id} does not fit a u64"))
@@ -598,33 +598,10 @@ fn execute_and_check(
     unit: &TestUnit,
     test: &Test,
 ) -> Result<Option<SkipReason>, Failure> {
-    let chain_id = chain_id(unit)?;
-
-    // The block is built the way the reference runner builds it, from the fork's Ethereum
-    // configuration: the blob base fee fraction and the default `prevrandao` come from there.
-    let mut eth_cfg = CfgEnv::new();
-    eth_cfg.chain_id = chain_id;
-    eth_cfg.set_spec_and_mainnet_gas_params(config.fork.spec_id());
-    eth_cfg.set_max_blobs_per_tx(MAX_BLOBS_PER_TX);
-    let block = unit.block_env(&mut eth_cfg);
-
-    let tx = match (test.tx_env(unit), &test.expect_exception) {
-        (Ok(tx), _) => tx,
-        (Err(error), Some(expected)) => {
-            return match exceptions::check_unbuildable(expected, &error, unit) {
-                Ok(()) => Ok(Some(SkipReason::UnbuildableInvalidTransaction)),
-                Err(_) => Err(Failure::new(
-                    FailureKind::WrongException,
-                    format!("expected {expected}, the transaction cannot be built: {error}"),
-                )),
-            }
-        }
-        (Err(error), None) => {
-            return Err(Failure::new(FailureKind::Fixture, format!("transaction: {error}")))
-        }
+    let Ready { chain_id, block, tx } = match prepare(config.fork, unit, test)? {
+        Ok(ready) => ready,
+        Err(reason) => return Ok(Some(reason)),
     };
-    let tx =
-        OpTx(OpTransaction { base: tx, enveloped_tx: Some(Bytes::new()), ..Default::default() });
 
     let basefee = block.basefee;
     let mut state =
@@ -642,6 +619,54 @@ fn execute_and_check(
     }
     check(config.fork, test, unit.out.as_ref(), &result, &state)?;
     Ok(None)
+}
+
+/// An entry ready to run: its chain id, block and transaction.
+pub(crate) struct Ready {
+    /// The chain id the entry runs on.
+    pub(crate) chain_id: u64,
+    /// The block the entry runs in.
+    pub(crate) block: BlockEnv,
+    /// The transaction the entry runs.
+    pub(crate) tx: OpTx,
+}
+
+/// Builds what an entry of `fork` runs: the chain id, the block, built the way the reference
+/// runner builds it from the fork's Ethereum configuration (the blob base fee fraction and the
+/// default `prevrandao` come from there), and the transaction; or the reason the entry is not
+/// executed. A transaction the fixture types cannot build is a skip when the fixture names the
+/// reason it cannot be, a failure otherwise.
+pub(crate) fn prepare(
+    fork: Fork,
+    unit: &TestUnit,
+    test: &Test,
+) -> Result<Result<Ready, SkipReason>, Failure> {
+    let chain_id = chain_id(unit)?;
+
+    let mut eth_cfg = CfgEnv::new();
+    eth_cfg.chain_id = chain_id;
+    eth_cfg.set_spec_and_mainnet_gas_params(fork.spec_id());
+    eth_cfg.set_max_blobs_per_tx(MAX_BLOBS_PER_TX);
+    let block = unit.block_env(&mut eth_cfg);
+
+    let tx = match (test.tx_env(unit), &test.expect_exception) {
+        (Ok(tx), _) => tx,
+        (Err(error), Some(expected)) => {
+            return match exceptions::check_unbuildable(expected, &error, unit) {
+                Ok(()) => Ok(Err(SkipReason::UnbuildableInvalidTransaction)),
+                Err(_) => Err(Failure::new(
+                    FailureKind::WrongException,
+                    format!("expected {expected}, the transaction cannot be built: {error}"),
+                )),
+            }
+        }
+        (Err(error), None) => {
+            return Err(Failure::new(FailureKind::Fixture, format!("transaction: {error}")))
+        }
+    };
+    let tx =
+        OpTx(OpTransaction { base: tx, enveloped_tx: Some(Bytes::new()), ..Default::default() });
+    Ok(Ok(Ready { chain_id, block, tx }))
 }
 
 /// Takes back out of `state` the base-fee vault account Satin's fee routing created, where

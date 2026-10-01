@@ -11,7 +11,7 @@ use std::{
     process::Command,
 };
 
-use alloy_primitives::{address, Address, B256};
+use alloy_primitives::{address, Address, B256, U256};
 use mega_evme::block::{CachedBlock, PreAccount};
 use serde_json::Value;
 
@@ -21,6 +21,16 @@ pub(crate) const BLOCKS: [u64; 3] = [26_400_001, 26_400_007, 26_400_110];
 /// The EIP-7997 factory, which Satin's pre-block changes deploy and the legacy engine never
 /// reads: the one account a Satin replay reads that the recording does not hold.
 pub(crate) const FACTORY: Address = address!("0x4e59b44847b379578588920cA78FbF26c0B4956C");
+
+/// The L1 block contract, whose L1 fee overhead slot Satin's pre-block changes read with the
+/// rest of the L1 block info, whatever the fee scalars hold. The legacy engine reads the slot
+/// only when the scalars are empty, which they are not on these blocks, so no recording holds it.
+pub(crate) const L1_BLOCK: Address = address!("0x4200000000000000000000000000000000000015");
+
+/// The L1 fee overhead slot of [`L1_BLOCK`].
+pub(crate) fn overhead_slot() -> B256 {
+    B256::with_last_byte(5)
+}
 
 /// The recorded block cache.
 pub(crate) fn fixtures() -> &'static Path {
@@ -58,17 +68,25 @@ pub(crate) fn cache_copy() -> tempfile::TempDir {
     dir
 }
 
-/// A copy of the recorded block cache in which every block's pre-state holds the factory, absent:
-/// what a Satin replay needs offline. `block_replay.rs` shows the factory's state changes no
-/// transaction row.
-pub(crate) fn cache_copy_with_absent_factory() -> tempfile::TempDir {
+/// A copy of the recorded block cache in which every block's pre-state holds what a Satin replay
+/// reads beyond the recording: the factory, absent, and the L1 fee overhead, zero, as the chain
+/// held both. `block_replay.rs` shows neither the factory's state nor the overhead's value changes
+/// a transaction row.
+pub(crate) fn cache_copy_for_satin() -> tempfile::TempDir {
     let dir = cache_copy();
     for number in BLOCKS {
         let mut block = read_block(dir.path(), number);
         block.prestate.accounts.insert(FACTORY, PreAccount::default());
+        set_overhead(&mut block, U256::ZERO);
         write_block(dir.path(), number, &block);
     }
     dir
+}
+
+/// Has `block`'s pre-state hold `value` as the L1 fee overhead.
+pub(crate) fn set_overhead(block: &mut CachedBlock, value: U256) {
+    let l1_block = block.prestate.accounts.get_mut(&L1_BLOCK).expect("every block reads it");
+    l1_block.storage.insert(overhead_slot(), value);
 }
 
 fn copy_dir(from: &Path, to: &Path) {

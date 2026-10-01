@@ -64,14 +64,27 @@
 //! # The pre-block observer
 //!
 //! Each pre-block step — the EIP-2935 call, the EIP-4788 call, every system-contract deploy, the
-//! read of the `SequencerRegistry`'s pending changes and the `applyPendingChanges()` call —
-//! produces an [`EvmState`] that this executor commits. alloy-evm 0.36
+//! read of the `SequencerRegistry`'s pending changes, the `applyPendingChanges()` call and the
+//! read of the L1 block info the block's transactions are priced against — produces an
+//! [`EvmState`] that this executor commits. alloy-evm 0.36
 //! re-exports revm's `OnStateHook` (`on_state(&EvmState)`) but has no `set_state_hook` on
 //! [`BlockExecutor`] and no source tag, so this crate names the step ([`PreBlockStateSource`]) and
 //! carries an optional [`PreBlockStateObserver`]. Every pre-block state is handed to the observer
-//! **before** it is committed, in execution order. The sequence is the witness a stateless client
-//! needs: revm drops untouched accounts from the committed transition, so a caller that only saw
-//! the database after the commit would miss the read-only deploy entries of a later block.
+//! **before** it is committed, in execution order. The sequence, with the returned states of the
+//! block's transactions and the exported block hashes and buckets, is the witness a stateless
+//! client needs: revm drops untouched accounts from the committed transition, so a caller that
+//! only saw the database after the commit would miss the read-only entries — a later block's
+//! deploys, the registry's pending slots, the L1 block info.
+//!
+//! The L1 block info is read here because nothing else puts it in a state: op-revm prices the
+//! block's first non-deposit transaction against the L1 block contract's slots read on the
+//! database itself, and this executor reads the DA footprint gas scalar the same way before every
+//! non-deposit transaction, so neither read lands in a transaction's returned state. The
+//! pre-block entry carries the account and every slot either read can reach, as the chain held
+//! them before the block ([`read_l1_block_info`]) — the L1 fee overhead among them, which
+//! op-revm reads only when the scalars the block's deposits left are empty; the block's own L1
+//! attributes deposit, when it has one, carries the values it writes over them in its own
+//! returned state.
 //!
 //! # The pre-block system calls
 //!
@@ -119,13 +132,13 @@ pub type MegaFinishedBlock<DB, INSP, ExtEnvs, R> =
     (MegaEvm<DB, INSP, ExtEnvs>, MegaBlockExecutionResult<<R as OpReceiptBuilder>::Receipt>);
 
 use crate::{
-    block::eips,
+    block::{eips, read_l1_block_info},
     estimated_da_size,
     system::{
         is_apply_pending_changes_due, system_contract_specs, transact_apply_pending_changes,
         transact_deploy, SequencerRegistryConfig, SystemContractDeployError,
     },
-    BlockGasCounters, BlockLimiter, BlockLimits, ExternalEnvTypes, HardforkParams,
+    BlockGasCounters, BlockLimiter, BlockLimits, BucketId, ExternalEnvTypes, HardforkParams,
     MegaBlockExecutionResult, MegaBlockTxResult, MegaContext, MegaEvm, MegaHardforks,
     MegaTransaction, MegaTransactionExt, ProtocolLimits,
 };
@@ -341,6 +354,11 @@ pub enum PreBlockStateSource {
     PendingChanges,
     /// The `SequencerRegistry.applyPendingChanges()` system call.
     ApplyPendingChanges,
+    /// The read of the L1 block info the block's transactions are priced against: the L1 block
+    /// contract's account and every slot of [`L1_BLOCK_INFO_SLOTS`](crate::L1_BLOCK_INFO_SLOTS),
+    /// as read-only entries, or the account as not existing on a chain that does not hold it. It
+    /// is the last pre-block state.
+    L1BlockInfo,
 }
 
 /// Receives each pre-block [`EvmState`] before the executor commits it.
@@ -533,7 +551,11 @@ where
     /// The data-availability footprint gas scalar the L1 block contract holds.
     ///
     /// Read per transaction, as the fork's rule is stated: the block's own L1 info transaction
-    /// may set it, and the transactions after it are held to the value it set.
+    /// may set it, and the transactions after it are held to the value it set. It is a read of
+    /// the block's state, made between transactions, so it lands in no transaction's returned
+    /// state; the pre-block phase's read of the same slot ([`read_l1_block_info`]) is what puts
+    /// it in the pre-block states a witness is built from, and this read finds it in the state
+    /// cache that read filled, or the value the L1 info transaction committed over it.
     fn da_footprint_gas_scalar(&mut self) -> Result<u64, BlockExecutionError> {
         // Load the L1 block account into the cache first; a database that has never seen it
         // cannot serve its storage.
@@ -637,6 +659,43 @@ where
     pub fn clear_accessed_block_hashes(&mut self) {
         self.evm.clear_accessed_block_hashes();
     }
+
+    /// The SALT buckets the SALT environment answered with a valid capacity during this block's
+    /// execution so far, in ascending order: every bucket a state charge was priced in.
+    ///
+    /// A bucket's capacity is read through the SALT environment, which no database sees, and a
+    /// validator that lacks a bucket's proof cannot price the charge that landed in it, so this is
+    /// where a stateless witness learns which buckets it must carry. The set is complete for the
+    /// transactions this executor's EVM ran: the engine asks about a bucket at a state charge site
+    /// and nowhere else, and a validator re-executing them reaches the same charge sites. A lookup
+    /// that failed, with an error or with a capacity below the minimum bucket, is not in it,
+    /// because it failed its transaction, which is in no block; the pre-block calls and the system
+    /// transactions read no bucket and add none.
+    ///
+    /// What the record covers, and what it does not:
+    ///
+    /// - It holds what this executor's EVM executed since the block started:
+    ///   [`apply_pre_execution_changes`](BlockExecutor::apply_pre_execution_changes) empties it,
+    ///   and nothing empties it between the block's transactions, whose own multiplier caches are
+    ///   forgotten one transaction at a time. A candidate the builder executed here and dropped
+    ///   leaves its buckets in the set, which a validator does not need but is not harmed by.
+    /// - It holds nothing of an outcome executed elsewhere: an outcome another EVM produced and
+    ///   this executor committed through
+    ///   [`commit_transaction_outcome`](Self::commit_transaction_outcome) added no bucket here. A
+    ///   node that executes on several EVMs, or builds one per transaction, takes the union of what
+    ///   each reports; one that clears the record between transactions
+    ///   ([`clear_accessed_bucket_ids`](Self::clear_accessed_bucket_ids)) does the same.
+    /// - An EVM reused across blocks outside a block executor is emptied by neither, and reports
+    ///   every block it ran since it was last cleared.
+    pub fn get_accessed_bucket_ids(&self) -> Vec<BucketId> {
+        self.evm.get_accessed_bucket_ids()
+    }
+
+    /// Forgets the SALT buckets asked about so far, so the next asks are attributable to one
+    /// transaction. The record decides nothing, so clearing it changes no execution result.
+    pub fn clear_accessed_bucket_ids(&mut self) {
+        self.evm.clear_accessed_bucket_ids();
+    }
 }
 
 impl<DB, INSP, ExtEnvs, R, Spec> BlockExecutor
@@ -656,17 +715,19 @@ where
 
     /// Runs what a block does before its transactions.
     ///
-    /// In order: the admission gate, the reset of the block-hash record, the EIP-2935 and
-    /// EIP-4788 pre-block calls, the system-contract deploys and the `SequencerRegistry`'s due
-    /// role changes. Each step's state is handed to the
+    /// In order: the admission gate, the reset of the block-hash and bucket records, the EIP-2935
+    /// and EIP-4788 pre-block calls, the system-contract deploys, the `SequencerRegistry`'s due
+    /// role changes and the read of the L1 block info. Each step's state is handed to the
     /// pre-block observer and then committed here rather than inside its helper, so a witness
     /// generator sees every step's read and write set. The sequence the observer receives is
     /// the witness a stateless client needs.
     ///
-    /// The L1 block info is not read here. op-revm's handler reads it when it deducts the caller
-    /// of the first non-deposit transaction, which is after the block's own L1 info deposit has
-    /// committed; reading it here would price every transaction of the block against the parent
-    /// block's values.
+    /// The transactions are not priced against the read made here. op-revm's handler fetches the
+    /// L1 block info when it deducts the caller of the first non-deposit transaction, which is
+    /// after the block's own L1 info deposit has committed; pricing from this read would price
+    /// every transaction of the block against the parent block's values. The read here puts the
+    /// L1 block contract's account and every slot that fetch can reach in the pre-block states,
+    /// and nothing else.
     ///
     /// The EIP-2935 and EIP-4788 calls run before the deploy. They write the parent hash and
     /// the parent beacon root into their own contracts (`0x0…2935` and `0x0…4788`), which are
@@ -686,9 +747,10 @@ where
         self.check_admission()?;
         self.require_protocol_limits()?;
 
-        // The block starts with an empty block-hash record, so what it holds at the end is what
-        // this block read.
+        // The block starts with empty block-hash and bucket records, so what they hold at the end
+        // is what this block read.
         self.evm.clear_accessed_block_hashes();
+        self.evm.clear_accessed_bucket_ids();
 
         let state = eips::transact_blockhashes_contract_call(
             &self.spec,
@@ -740,6 +802,15 @@ where
             let ResultAndState { state, .. } = transact_apply_pending_changes(&mut self.evm)?;
             self.deliver_pre_block(PreBlockStateSource::ApplyPendingChanges, state);
         }
+
+        // The L1 block info the transactions are priced against is read on the database itself,
+        // by op-revm once per block and by `execute` before every non-deposit transaction, so it
+        // lands in no transaction's state. Read here, it is in the pre-block states instead:
+        // every slot those reads can reach, because which ones they reach is decided by the state
+        // the block's deposits leave, not by this one. The read fills the state cache and commits
+        // nothing.
+        let state = read_l1_block_info(self.evm.db_mut()).map_err(BlockExecutionError::other)?;
+        self.deliver_pre_block(PreBlockStateSource::L1BlockInfo, state);
 
         Ok(())
     }

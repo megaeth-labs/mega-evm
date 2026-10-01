@@ -1,6 +1,7 @@
 //! Tests of the block executor.
 
 mod block_hashes;
+mod bucket_ids;
 mod common;
 mod counters;
 mod deploy;
@@ -21,3 +22,4 @@ mod sequencer_registry;
 mod sequences;
 mod state_gas;
 mod transfer_logs;
+mod witness;
