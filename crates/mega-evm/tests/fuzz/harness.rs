@@ -4,8 +4,7 @@
 //! Two modes, chosen by the environment:
 //!
 //! - **bounded** (the default): a fixed seed and a small number of cases per property, so the run
-//!   is deterministic and finishes in CI in about two minutes for the whole target, in debug and in
-//!   release;
+//!   is deterministic and finishes in seconds for the whole target, in debug and in release;
 //! - **long** (`MEGA_FUZZ_LONG=1`): many more cases and a seed drawn from the clock unless
 //!   `MEGA_FUZZ_SEED` names one; the seed is printed at the start of every property so a failure of
 //!   a long run is reproducible.
@@ -138,7 +137,7 @@ impl FuzzConfig {
 /// the property's own thread, because a boxed strategy cannot be sent to one.
 ///
 /// `bounded_cases` is the property's case count in the bounded mode: enough to hit every arm of
-/// the generators, few enough for the whole target to finish in about two minutes.
+/// the generators, few enough for the whole target to finish well within a minute in debug.
 pub(crate) fn check<S>(
     name: &str,
     bounded_cases: u32,
