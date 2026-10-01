@@ -802,6 +802,8 @@ A node, a stateless validator and a replay tool must agree on everything below, 
   The history of the write records a transaction's start makes is charged when it runs too: one record for the recipient of its value or the account it creates, and one for each authority that applies.
   So the least gas limit validation admits is not what a transaction needs: at that gas limit a transfer of value to another account runs out of gas on its recipient's record, and one to a new account needs that account's state gas as well.
   A deposit and a Mega System Transaction pay no history gas; a pool that recognizes the latter needs the live system address from the state.
+  That address changes only in a block's pre-block step and then holds for the whole block, so a pool reads it again for every block, from the state after that block's pre-block changes.
+  An address read from another state treats the old system address's transactions as the protocol's and the new one's as a user's, or the reverse.
   A deposit is never refused: one that fails validation is included as a failed deposit, which bumps its sender's nonce and uses its whole gas limit.
 - **Reporting a limit stop.**
   A stop is a revert whose output is `MegaLimitExceeded(kind, limit)`, and a contract can revert with the same bytes, as can a caller that re-raises what a frame budget returned.

@@ -222,9 +222,10 @@ where
 ///
 /// It is what a transaction pool gives
 /// [`validate_transaction_stateless`](crate::validate_transaction_stateless), read off the state
-/// the pool validates against. `None` when the registry names no address this engine trusts: it
-/// has no account, it holds other code than [`SEQUENCER_REGISTRY_CODE`], or its
-/// `_currentSystemAddress` is zero.
+/// the pool validates against, and it holds for the block whose pre-block changes made that
+/// state: a later block's pre-block step may change it, so a pool reads it again for every block.
+/// `None` when the registry names no address this engine trusts: it has no account, it holds
+/// other code than [`SEQUENCER_REGISTRY_CODE`], or its `_currentSystemAddress` is zero.
 ///
 /// It reads two things and writes nothing, so any database serves: pass `&mut db` for a
 /// [`Database`](revm::Database) the caller keeps, and `WrapDatabaseRef(&db)`

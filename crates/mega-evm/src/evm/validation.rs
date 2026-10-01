@@ -105,8 +105,19 @@ impl IntrinsicGas {
 /// either: the limit stops such a transaction when it runs.
 ///
 /// `system_address` is the live system address: the one the `SequencerRegistry` names in the
-/// state the pool validates against. A transaction of the system shape from it is a
-/// system-address transaction; with `None`, no transaction is.
+/// state the pool validates against ([`live_system_address`](crate::system::live_system_address)).
+/// A transaction of the system shape from it is a system-address transaction; with `None`, no
+/// transaction is.
+///
+/// The address changes only in a block's pre-block step, which applies a change the registry's
+/// admin scheduled in an earlier block, and it then holds for every transaction of that block. So
+/// a pool reads it again for every block, off the state that block's transactions run on: the
+/// state after its pre-block changes. Against the head's state, that is the head's address unless
+/// a change is due in the next block
+/// ([`is_apply_pending_changes_due`](crate::system::is_apply_pending_changes_due)), and then the
+/// one the state [`transact_apply_pending_changes`](crate::system::transact_apply_pending_changes)
+/// leaves names. An address read from another state treats the old system address's transactions
+/// as the protocol's — no fees, no history gas — and the new one's as a user's, or the reverse.
 ///
 /// # Errors
 ///
