@@ -260,7 +260,7 @@ impl Case {
     /// The case with no self-destruction left inside init code: the init code of a creation
     /// transaction, of a keyless deployment and of every creation the programs make can no longer
     /// destroy the account it is creating, in its own code or in code it borrows through
-    /// `CALLCODE` or `DELEGATECALL` (see [`Program::as_init_without_destruction`]). A contract
+    /// `CALLCODE` or `DELEGATECALL` (see [`Program::into_init_without_destruction`]). A contract
     /// that existed before the transaction still destroys itself.
     ///
     /// For the comparison with Ethereum on Amsterdam, where a contract destroyed in the
@@ -277,7 +277,7 @@ impl Case {
             world: self.world.clone(),
             tx,
             main: if is_creation {
-                main.as_init_without_destruction()
+                main.into_init_without_destruction()
             } else {
                 main.without_destruction_in_creations()
             },

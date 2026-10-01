@@ -514,11 +514,11 @@ impl InitCode {
 
     /// The init code with no way left to destroy the account it is creating: a self-destruction
     /// becomes an empty deployment, and a program inside is rewritten by
-    /// [`Program::as_init_without_destruction`].
+    /// [`Program::into_init_without_destruction`].
     pub(crate) fn without_destruction(self) -> Self {
         match self {
             Self::Selfdestructs { .. } => Self::Empty,
-            Self::Runs(program) => Self::Runs(Box::new(program.as_init_without_destruction())),
+            Self::Runs(program) => Self::Runs(Box::new(program.into_init_without_destruction())),
             other => other,
         }
     }
@@ -701,7 +701,7 @@ impl Program {
     /// `SELFDESTRUCT` becomes a `STOP`, and a `CALLCODE` or `DELEGATECALL`, which would run
     /// another contract's code, and its ending, as the account being created, becomes a `CALL`.
     /// The init codes it creates with are rewritten the same way.
-    pub(crate) fn as_init_without_destruction(self) -> Self {
+    pub(crate) fn into_init_without_destruction(self) -> Self {
         let end = match self.end {
             End::Selfdestruct { .. } => End::Stop,
             other => other,
