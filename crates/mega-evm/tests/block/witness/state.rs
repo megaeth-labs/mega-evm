@@ -1,6 +1,7 @@
-//! State-changing mechanisms through the harness: an EIP-7702 delegation, a creation, the two
-//! shapes of `SELFDESTRUCT`, a value transfer that creates its recipient, and deposits — with the
-//! L1 block info a user transaction is priced against, which the pre-block phase carries.
+//! State-changing mechanisms through the harness: an EIP-7702 delegation and its replacement, a
+//! creation, the two shapes of `SELFDESTRUCT`, a value transfer that creates its recipient, and
+//! deposits — with the L1 block info a user transaction is priced against, which the pre-block
+//! phase carries.
 
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
@@ -14,7 +15,7 @@ use op_revm::constants::{
 };
 use revm::{
     bytecode::opcode::{CODECOPY, PUSH0, RETURN},
-    state::Account,
+    state::{Account, AccountInfo, Bytecode},
 };
 
 use super::{
@@ -68,6 +69,52 @@ fn test_a_delegation_replays() {
     if !common::state_is_free() {
         assert!(!run.bucket_ids.is_empty(), "the authority's account and the slot were priced");
     }
+}
+
+/// An authority the chain holds delegated to one contract is delegated anew: the engine loads
+/// the delegation the chain holds to admit the authorization, and the returned state carries the
+/// one the transaction wrote over it. The witness holds the authority's code as the chain held
+/// it, which a witness built from the code the returned states carry would lack.
+#[test]
+fn test_a_replaced_delegation_replays_from_the_code_the_chain_held() {
+    let (signed, authority) = authorization(CONTRACT, 1);
+    let held = Bytecode::new_eip7702(EMPTY);
+    let written = Bytecode::new_eip7702(CONTRACT);
+    let mut db = common::database();
+    db.set_account_code(CONTRACT, slot_writer());
+    db.insert_account_info(
+        authority,
+        AccountInfo {
+            nonce: 1,
+            code_hash: held.hash_slow(),
+            code: Some(held.clone()),
+            ..Default::default()
+        },
+    );
+    let case = Case::new("replaced delegation", db).tx(eip7702(
+        0,
+        authority,
+        slot(5),
+        vec![signed],
+        CREATION_GAS,
+    ));
+
+    let recorded = case.record();
+    assert!(recorded.tx(0).result.is_success(), "{:?}", recorded.tx(0).result);
+    let account = &recorded.tx(0).state[&authority];
+    assert_eq!(account.info.nonce, 2, "the authorization was applied");
+    assert_eq!(account.info.code.as_ref(), Some(&written), "the state carries the new delegation");
+    assert!(account.storage.get(&U256::from(5)).is_some_and(|slot| slot.is_changed()));
+    assert_eq!(
+        recorded.record.codes.get(&held.hash_slow()),
+        Some(&held),
+        "the engine loaded the delegation the chain held"
+    );
+    let witness = case.channel_witness(&recorded);
+    assert_eq!(witness.codes.get(&held.hash_slow()), Some(&held), "which the witness holds");
+    assert!(!witness.codes.contains_key(&written.hash_slow()), "and not the one the block wrote");
+
+    case.run();
 }
 
 /// A creation transaction, then a call to what it created.

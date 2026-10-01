@@ -12,11 +12,14 @@
 //!
 //! - **From the channels a node has**, with [`WitnessRecord::from_channels`]: the accounts and
 //!   slots the pre-block states and the included transactions' returned states name, collected by
-//!   [`WitnessKeys`] and resolved against the state the block ran on; the code those states carry
-//!   and the chain holds for those accounts; the block hashes and buckets the engine exported; and
-//!   the oracle reads the included transactions recorded. That is the witness a node builds, and a
-//!   replay on it is the check a validator's witness must pass: a read the engine makes outside
-//!   every state and export is a key the record lacks, and the replay fails on it.
+//!   [`WitnessKeys`] and resolved against the state the block ran on; the code the chain holds for
+//!   those accounts; the block hashes and buckets the engine exported; and the oracle reads the
+//!   included transactions recorded. That is the witness a node builds, and a replay on it is the
+//!   check a validator's witness must pass: a read the engine makes outside every state and export
+//!   is a key the record lacks, and the replay fails on it. The code a returned state carries is
+//!   not taken: it is what the transaction left the account with, which for an account whose code
+//!   the transaction replaced — an EIP-7702 authority delegated anew — is not the code the engine
+//!   loaded from the chain.
 //! - **From every read the database served**, with a [`RecordingDatabase`] and the
 //!   [`RecordingEnvFactory`]'s environments around the block: what a recorder at the database level
 //!   sees. A replay on it shows the block reads nothing outside its database and environments and
@@ -51,7 +54,7 @@ use std::{
 use alloy_primitives::{Address, BlockNumber, Bytes, B256, U256};
 use revm::{
     database::DBErrorMarker,
-    primitives::{HashMap, StorageKey, StorageValue},
+    primitives::{HashMap, StorageKey, StorageValue, KECCAK_EMPTY},
     state::{AccountInfo, Bytecode, EvmState},
     Database, DatabaseCommit,
 };
@@ -86,31 +89,26 @@ pub struct WitnessRecord {
 }
 
 /// The keys a node's witness builder collects from its channels: every account and slot the
-/// pre-block states and the included transactions' returned states name, and the bytecode those
-/// states carry for the accounts the engine loaded with their code.
+/// pre-block states and the included transactions' returned states name.
+///
+/// The keys are all it takes from a state. The values a state carries are what the block made of
+/// them; the witness holds what the chain held before the block, which the builder resolves the
+/// keys against ([`WitnessRecord::from_channels`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WitnessKeys {
     /// Every account a state names.
     pub accounts: BTreeSet<Address>,
     /// Every slot a state names, with its account.
     pub slots: BTreeSet<(Address, StorageKey)>,
-    /// The bytecode the states carry, by hash: the code of every account loaded with its code,
-    /// and the code the block deployed.
-    pub codes: BTreeMap<B256, Bytecode>,
 }
 
 impl WitnessKeys {
-    /// Adds every account and slot `state` names, and the code it carries.
+    /// Adds every account and slot `state` names.
     pub fn add_state(&mut self, state: &EvmState) {
         for (address, account) in state {
             self.accounts.insert(*address);
             for key in account.storage.keys() {
                 self.slots.insert((*address, *key));
-            }
-            if let Some(code) = &account.info.code {
-                if !code.is_empty() {
-                    self.codes.insert(account.info.code_hash, code.clone());
-                }
             }
         }
     }
@@ -119,11 +117,11 @@ impl WitnessKeys {
 impl WitnessRecord {
     /// The witness a node builds from its channels, resolved against `chain`, the state the block
     /// ran on: every account `keys` names as the chain holds it, an absent one recorded as absent,
-    /// with the code the chain holds for it beside the code the states carried; every slot `keys`
-    /// names of an account the chain holds, zeroes included — the slots of an absent account are
-    /// zero without a read, so none is recorded; and the block hashes, the buckets and the
-    /// included transactions' oracle reads as given. Hints are not in it: a validator has no
-    /// service to hand them to.
+    /// with the code the chain holds for it; every slot `keys` names of an account the chain
+    /// holds, zeroes included — the slots of an absent account are zero without a read, so none
+    /// is recorded; and the block hashes, the buckets and the included transactions' oracle reads
+    /// as given. Nothing else is in it: no code but the chain's for a named account, and no hint,
+    /// a validator having no service to hand one to.
     ///
     /// # Errors
     ///
@@ -135,22 +133,21 @@ impl WitnessRecord {
         buckets: BTreeMap<BucketId, Result<u64, String>>,
         oracle_reads: Vec<OracleRead>,
     ) -> Result<Self, DB::Error> {
-        let mut record = Self {
-            codes: keys.codes.clone(),
-            block_hashes,
-            buckets,
-            oracle_reads,
-            ..Self::default()
-        };
+        let mut record = Self { block_hashes, buckets, oracle_reads, ..Self::default() };
         for address in &keys.accounts {
-            let info = chain.basic(*address)?.map(|mut info| {
-                if let Some(code) = info.code.take() {
-                    if !code.is_empty() {
-                        record.codes.insert(info.code_hash, code);
-                    }
+            let mut info = chain.basic(*address)?;
+            if let Some(info) = &mut info {
+                // The chain's code for the account: handed over with the account, or, by a chain
+                // that serves code by hash, on request.
+                let code = match info.code.take() {
+                    Some(code) => code,
+                    None if info.code_hash == KECCAK_EMPTY => Bytecode::default(),
+                    None => chain.code_by_hash(info.code_hash)?,
+                };
+                if !code.is_empty() {
+                    record.codes.insert(info.code_hash, code);
                 }
-                info
-            });
+            }
             record.accounts.insert(*address, info);
         }
         for (address, key) in &keys.slots {
@@ -545,5 +542,128 @@ impl<S: SaltEnv + Clone> ExternalEnvFactory for StrictEnvFactory<S> {
 
     fn external_envs(&self, _block: BlockNumber) -> ExternalEnvs<Self::EnvTypes> {
         ExternalEnvs { salt_env: self.salt.clone(), oracle_env: self.oracle.clone() }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy_primitives::{address, keccak256};
+    use revm::state::{Account, EvmStorageSlot, TransactionId};
+
+    use super::*;
+    use crate::test_utils::MemoryDatabase;
+
+    /// An account the chain holds, with code and a slot.
+    const HELD: Address = address!("0x00000000000000000000000000000000000000a1");
+    /// An account the chain holds, whose code the chain serves by hash alone.
+    const LAZY: Address = address!("0x00000000000000000000000000000000000000a2");
+    /// An account the chain does not hold.
+    const ABSENT: Address = address!("0x00000000000000000000000000000000000000a3");
+    /// An account the chain holds and no state names.
+    const UNNAMED: Address = address!("0x00000000000000000000000000000000000000a4");
+
+    /// The code the chain holds for [`HELD`], and the code a transaction left it with.
+    const CHAIN_CODE: [u8; 2] = [0x60, 0x00];
+    const WRITTEN_CODE: [u8; 1] = [0x5f];
+    /// The code the chain holds for [`LAZY`].
+    const LAZY_CODE: [u8; 3] = [0x60, 0x01, 0x50];
+
+    /// A chain holding the three accounts: [`HELD`] with a slot, [`LAZY`] with its code behind
+    /// its hash, and [`UNNAMED`].
+    fn chain() -> MemoryDatabase {
+        let mut chain = MemoryDatabase::default()
+            .account_code(HELD, Bytes::from_static(&CHAIN_CODE))
+            .account_nonce(HELD, 3)
+            .account_storage(HELD, U256::from(1), U256::from(11))
+            .account_lazy_code(LAZY, keccak256(LAZY_CODE))
+            .account_code(UNNAMED, Bytes::from_static(&[0xfe]))
+            .account_storage(UNNAMED, U256::from(1), U256::from(77));
+        chain.insert_contract(&mut AccountInfo {
+            code_hash: keccak256(LAZY_CODE),
+            code: Some(Bytecode::new_legacy(Bytes::from_static(&LAZY_CODE))),
+            ..Default::default()
+        });
+        chain
+    }
+
+    /// A returned state naming [`HELD`], as a transaction that replaced its code, bumped its
+    /// nonce, rewrote slot 1 and read the empty slot 2 left it; [`LAZY`], untouched; and
+    /// [`ABSENT`] with a slot.
+    fn state() -> EvmState {
+        let mut held = Account::default();
+        held.info.nonce = 4;
+        held.info.code_hash = keccak256(WRITTEN_CODE);
+        held.info.code = Some(Bytecode::new_legacy(Bytes::from_static(&WRITTEN_CODE)));
+        let mut written = EvmStorageSlot::new(U256::from(11), TransactionId::ZERO);
+        written.present_value = U256::from(99);
+        held.storage.insert(U256::from(1), written);
+        held.storage.insert(U256::from(2), EvmStorageSlot::new(U256::ZERO, TransactionId::ZERO));
+
+        let mut absent = Account::new_not_existing(TransactionId::ZERO);
+        absent.storage.insert(U256::from(5), EvmStorageSlot::new(U256::ZERO, TransactionId::ZERO));
+
+        EvmState::from_iter([(HELD, held), (LAZY, Account::default()), (ABSENT, absent)])
+    }
+
+    /// The keys are every account and slot the states name, each once, and nothing a state
+    /// carries beside them.
+    #[test]
+    fn test_the_keys_are_the_accounts_and_slots_the_states_name() {
+        let mut keys = WitnessKeys::default();
+        keys.add_state(&state());
+        keys.add_state(&state());
+        assert_eq!(keys.accounts, BTreeSet::from([HELD, LAZY, ABSENT]));
+        assert_eq!(
+            keys.slots,
+            BTreeSet::from([(HELD, U256::from(1)), (HELD, U256::from(2)), (ABSENT, U256::from(5))])
+        );
+    }
+
+    /// The channel witness holds what the chain held for the keys, not what the states carry:
+    /// the chain's account, its code — served with the account or by hash — and its slots,
+    /// zeroes included; an absent account as absent, with no slot; nothing of an account no state
+    /// names; and the exports and oracle reads as given.
+    #[test]
+    fn test_the_channel_witness_holds_the_chains_values_for_the_named_keys() {
+        let mut keys = WitnessKeys::default();
+        keys.add_state(&state());
+        let block_hashes = BTreeMap::from([(7, B256::repeat_byte(7))]);
+        let buckets = BTreeMap::from([(9, Ok(512))]);
+        let reads = Vec::from([OracleRead { slot: U256::from(42), answer: Some(U256::from(1)) }]);
+        let Ok(record) = WitnessRecord::from_channels(
+            &mut chain(),
+            &keys,
+            block_hashes.clone(),
+            buckets.clone(),
+            reads.clone(),
+        );
+
+        assert_eq!(record.accounts.keys().copied().collect::<Vec<_>>(), [HELD, LAZY, ABSENT]);
+        let held = record.accounts[&HELD].as_ref().expect("the chain holds it");
+        assert_eq!(held.nonce, 3, "the chain's nonce, not the transaction's");
+        assert_eq!(held.code_hash, keccak256(CHAIN_CODE), "the chain's code hash");
+        assert!(held.code.is_none(), "code travels by hash");
+        assert!(record.accounts[&ABSENT].is_none(), "an absent account is recorded absent");
+
+        assert_eq!(
+            record.codes.keys().copied().collect::<BTreeSet<_>>(),
+            BTreeSet::from([keccak256(CHAIN_CODE), keccak256(LAZY_CODE)]),
+            "the chain's code for the named accounts, and not the code a state carries"
+        );
+        assert_eq!(record.codes[&keccak256(CHAIN_CODE)].original_byte_slice(), CHAIN_CODE);
+        assert_eq!(record.codes[&keccak256(LAZY_CODE)].original_byte_slice(), LAZY_CODE);
+
+        assert_eq!(
+            record.storage,
+            BTreeMap::from([
+                ((HELD, U256::from(1)), U256::from(11)),
+                ((HELD, U256::from(2)), U256::ZERO)
+            ]),
+            "the chain's values, a zero included, and no slot of an absent account"
+        );
+        assert_eq!(record.block_hashes, block_hashes);
+        assert_eq!(record.buckets, buckets);
+        assert_eq!(record.oracle_reads, reads);
+        assert!(record.hints.is_empty());
     }
 }

@@ -5,12 +5,12 @@
 //! environments that serve exactly a witness and refuse everything else ([`StrictDatabase`],
 //! [`StrictEnvFactory`]): once on the record of every database read, once on the witness a node
 //! builds from its channels — the accounts and slots the transaction's returned state names, as
-//! the pre-state holds them, the code it carries, the block hashes and buckets the engine
-//! exported, and the oracle reads the transaction recorded. Each replay is held to the first
-//! run: the result, the state, the gas by ledger, the usage and the stop, the state changes
-//! committed, and the buckets and block hashes the engine exported. A replay that reads what its
-//! witness does not hold fails on the read; one that computes something else fails on the
-//! comparison.
+//! the pre-state holds them, with the code the pre-state holds for those accounts, the block
+//! hashes and buckets the engine exported, and the oracle reads the transaction recorded. Each
+//! replay is held to the first run: the result, the state, the gas by ledger, the usage and the
+//! stop, the state changes committed, and the buckets and block hashes the engine exported. A
+//! replay that reads what its witness does not hold fails on the read; one that computes
+//! something else fails on the comparison.
 //!
 //! The channel witness is what a stateless validator is given for the transaction, so its replay
 //! is the check the witness must pass; the database-level replay shows the transaction reads
