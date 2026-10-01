@@ -11,7 +11,7 @@ use mega_evm::{
     OracleRead,
 };
 use revm::{
-    bytecode::opcode::{BALANCE, BLOCKHASH, CALL, GAS, POP, PUSH0, SLOAD},
+    bytecode::opcode::{BALANCE, BLOCKHASH, CALL, GAS, MSTORE, POP, PUSH0, RETURN, SLOAD},
     context::result::ExecutionResult,
 };
 
@@ -97,26 +97,46 @@ fn test_a_cold_account_load_short_of_gas_reads_no_account() {
     assert_eq!(replay.recorded.record.accounts.get(&STRANGER), Some(&None));
 }
 
-/// An oracle read the frame cannot pay is neither loaded nor asked: a call into the Oracle with
-/// less gas than a cold access leaves the slot out of the record and the service unasked, on a
-/// chain that holds the Oracle, so the slot would have been read from the database otherwise.
+/// Code that calls the Oracle's `getSlot(42)` forwarding `gas` and returns whether the call
+/// succeeded, as a word.
+fn oracle_read_forwarding(gas: u64) -> Bytes {
+    let input = IOracle::getSlotCall { slot: U256::from(42) }.abi_encode();
+    BytecodeBuilder::default()
+        .mstore(0, &input)
+        .append_many([PUSH0, PUSH0])
+        .push_number(input.len() as u64)
+        .append_many([PUSH0, PUSH0])
+        .push_address(ORACLE_CONTRACT_ADDRESS)
+        .push_number(gas)
+        .append_many([CALL, PUSH0, MSTORE])
+        .push_number(32_u8)
+        .append_many([PUSH0, RETURN])
+        .build()
+}
+
+/// An oracle read the frame cannot pay is neither loaded nor asked: a call into the Oracle
+/// forwarded less gas than a cold access fails, leaving the slot out of the record and the
+/// service unasked, on a chain that holds the Oracle, so the slot would have been read from the
+/// database otherwise. The gas is the call's own, set by its caller, so the frame is short of the
+/// cold access whatever a byte costs.
 #[test]
 fn test_an_oracle_read_short_of_gas_asks_nothing() {
-    let input: Bytes = IOracle::getSlotCall { slot: U256::from(42) }.abi_encode().into();
-    let calldata = input.len() as u64;
-    let case = |room: u64| {
-        Case::new("oracle short of gas", chain_with_oracle())
+    let case = |forwarded: u64| {
+        let mut db = chain_with_oracle();
+        db.set_account_code(CONTRACT, oracle_read_forwarding(forwarded));
+        Case::new("oracle short of gas", db)
             .envs(super::harness::Envs::new().with_oracle_storage(U256::from(42), U256::from(1)))
-            .tx(call(
-                0,
-                ORACLE_CONTRACT_ADDRESS,
-                input.clone(),
-                intrinsic() + common::body_history(calldata) + room,
-            ))
+            .tx(call(0, CONTRACT, Bytes::new(), 1_000_000 + common::body_history(0)))
     };
-    let short = case(1_500).run();
-    assert!(matches!(short.recorded.tx(0).result, ExecutionResult::Halt { .. }));
+    let succeeded = |run: &super::harness::Run| {
+        assert!(run.tx(0).result.is_success(), "{:?}", run.tx(0).result);
+        U256::from_be_slice(run.tx(0).result.output().expect("the flag")) == U256::from(1)
+    };
+
+    let short = case(2_000).run();
+    assert!(!succeeded(&short.recorded), "the call into the Oracle ran out of gas");
     assert!(short.recorded.record.oracle_reads.is_empty(), "the service was not asked");
+    assert!(short.recorded.tx(0).oracle_reads.is_empty(), "and the transaction recorded no read");
     assert!(!short
         .recorded
         .record
@@ -124,7 +144,7 @@ fn test_an_oracle_read_short_of_gas_asks_nothing() {
         .contains_key(&(ORACLE_CONTRACT_ADDRESS, U256::from(42))));
 
     let enough = case(50_000).run();
-    assert!(enough.recorded.tx(0).result.is_success());
+    assert!(succeeded(&enough.recorded));
     assert_eq!(
         enough.recorded.record.oracle_reads,
         vec![OracleRead { slot: U256::from(42), answer: Some(U256::from(1)) }]

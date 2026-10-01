@@ -15,6 +15,7 @@ use op_revm::constants::{
 };
 use revm::{
     bytecode::opcode::{CODECOPY, PUSH0, RETURN},
+    context_interface::cfg::GasId,
     state::{Account, AccountInfo, Bytecode},
 };
 
@@ -46,8 +47,19 @@ fn deploying(runtime: &[u8]) -> Bytes {
     code.into()
 }
 
-/// A gas limit with room for a creation and a new account at any byte price.
-const CREATION_GAS: u64 = 5_000_000;
+/// A gas limit with room for a creation and two new accounts at the byte prices in effect:
+/// 1,000,000 of regular gas on top of the state of two new accounts, a fresh slot and a short
+/// runtime's deposit, a kilobyte of history beyond the body, and 64 times the history of two
+/// write records — a contract that creates, or a factory that forwards all but a 64th of its gas
+/// to the creation, pays the records of the frame it starts from the 64th it keeps.
+pub(super) fn creation_gas() -> u64 {
+    1_000_000 +
+        2 * common::new_account_state_gas() +
+        common::slot_state_gas() +
+        64 * mega_evm::satin_gas_params().get(GasId::code_deposit_state_gas()) +
+        common::body_history(1_000) +
+        64 * mega_evm::write_record_history_gas(2).expect("two records have a price")
+}
 
 /// An EIP-7702 call to an authority delegating to the slot writer: the authority's absent account
 /// is in the record, it is created with its delegation, and its slot is written.
@@ -57,7 +69,7 @@ fn test_a_delegation_replays() {
     db.set_account_code(CONTRACT, slot_writer());
     let (signed, authority) = authorization(CONTRACT, 0);
     let replay = Case::new("delegation", db)
-        .tx(eip7702(0, authority, slot(5), vec![signed], CREATION_GAS))
+        .tx(eip7702(0, authority, slot(5), vec![signed], creation_gas()))
         .run();
     let run = &replay.recorded;
     assert!(run.tx(0).result.is_success(), "{:?}", run.tx(0).result);
@@ -96,7 +108,7 @@ fn test_a_replaced_delegation_replays_from_the_code_the_chain_held() {
         authority,
         slot(5),
         vec![signed],
-        CREATION_GAS,
+        creation_gas(),
     ));
 
     let recorded = case.record();
@@ -122,7 +134,7 @@ fn test_a_replaced_delegation_replays_from_the_code_the_chain_held() {
 fn test_a_creation_replays() {
     let created = CALLER.create(0);
     let replay = Case::new("creation", common::database())
-        .tx(create(0, deploying(&[0x00; 5]), CREATION_GAS))
+        .tx(create(0, deploying(&[0x00; 5]), creation_gas()))
         .tx(call(1, created, Bytes::new(), common::empty_call_gas()))
         .run();
     let run = &replay.recorded;
@@ -149,8 +161,8 @@ fn test_selfdestructs_replay() {
     );
     db.set_account_nonce(CONTRACT, 1);
     let replay = Case::new("selfdestruct", db)
-        .tx(call(0, DESTROYER, Bytes::new(), CREATION_GAS))
-        .tx(call(1, CONTRACT, Bytes::new(), CREATION_GAS))
+        .tx(call(0, DESTROYER, Bytes::new(), creation_gas()))
+        .tx(call(1, CONTRACT, Bytes::new(), creation_gas()))
         .run();
     let run = &replay.recorded;
     assert!(run.tx(0).result.is_success() && run.tx(1).result.is_success());
@@ -166,7 +178,7 @@ fn test_selfdestructs_replay() {
 #[test]
 fn test_a_transfer_creating_its_recipient_replays() {
     let replay = Case::new("transfer", common::database())
-        .tx(call_with_value(0, EMPTY, U256::from(7), Bytes::new(), CREATION_GAS))
+        .tx(call_with_value(0, EMPTY, U256::from(7), Bytes::new(), creation_gas()))
         .run();
     let run = &replay.recorded;
     assert!(run.tx(0).result.is_success(), "{:?}", run.tx(0).result);
@@ -247,6 +259,7 @@ fn l1_entry(run: &Run) -> &Account {
 fn test_a_deposit_only_block_replays_and_reads_no_l1_slot() {
     let mut db = common::database();
     db.set_account_code(CONTRACT, slot_writer());
+    // The first deposit also pays for the account the engine creates for its caller.
     let replay = Case::new("deposits", db)
         .tx(deposit(
             DEPOSITOR,
@@ -254,7 +267,7 @@ fn test_a_deposit_only_block_replays_and_reads_no_l1_slot() {
             1_000_000_000,
             U256::ZERO,
             slot(9),
-            write_gas(),
+            write_gas() + common::new_account_state_gas(),
         ))
         .tx(deposit(DEPOSITOR, TxKind::Call(CONTRACT), 0, U256::ZERO, slot(10), write_gas()))
         .run();

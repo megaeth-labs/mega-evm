@@ -18,6 +18,7 @@ use revm::bytecode::opcode::{CODECOPY, PUSH0, RETURN};
 use super::{
     basics::{slot, slot_writer, write_gas},
     harness::{call, deposit, Case},
+    state::creation_gas,
 };
 use crate::common::{self, CALLER, CONTRACT};
 
@@ -92,7 +93,7 @@ fn test_a_deployment_through_the_factory_replays() {
     let mut input = vec![0x11_u8; 32];
     input.extend_from_slice(&init_code());
     let replay = Case::new("factory", chain_with_contracts())
-        .tx(call(0, CREATE2_FACTORY_ADDRESS, input.into(), 5_000_000))
+        .tx(call(0, CREATE2_FACTORY_ADDRESS, input.into(), creation_gas()))
         .run();
     let run = &replay.recorded;
     assert!(run.tx(0).result.is_success(), "{:?}", run.tx(0).result);
