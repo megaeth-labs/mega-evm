@@ -479,12 +479,27 @@ impl AdditionalLimit {
     ///
     /// The bytes are counted before the payload is decoded, so a caller cannot make the node
     /// materialise a payload for free by appending bytes an ABI decoder ignores. They are the
-    /// transaction's, not the calling frame's: the hint has left the machine by the time the
-    /// frame could fail, so nothing takes it back. A crossing latches the transaction, and the
-    /// hint is not forwarded.
+    /// transaction's, not the calling frame's, and no frame's budget holds them. Nothing the frame
+    /// or the transaction does afterwards takes them back, not even for a payload that fails to
+    /// decode and is never forwarded, for two separate reasons: a payload forwarded to the oracle
+    /// service cannot be taken back, and admitting a payload and decoding it is work done whether
+    /// or not it decodes.
+    ///
+    /// The limit is checked before the bytes are counted. A hint that would cross it latches the
+    /// transaction with the usage it would have reached, is not forwarded and is not counted: its
+    /// payload never left the machine, so the stopped transaction keeps none of it, as it keeps
+    /// nothing of a log that crossed the limit.
     pub(crate) fn record_hint_bytes(&mut self, bytes: u64) -> LimitCheck {
-        self.tracker.record_tx(LimitUsage { data_size: bytes, write_records: 0 });
-        self.check()
+        let hint = LimitUsage { data_size: bytes, write_records: 0 };
+        let reached = self.tracker.net().saturating_add(hint);
+        if let Some((kind, limit, used)) = reached.crossing(self.limits.tx_usage_limit()) {
+            let stop = self.latch(kind, limit, used);
+            if stop.exceeded_limit() {
+                return stop;
+            }
+        }
+        self.tracker.record_tx(hint);
+        LimitCheck::WithinLimit
     }
 
     /// Records the account writes of the applied EIP-7702 authorities other than the sender:
@@ -931,6 +946,21 @@ impl AdditionalLimit {
             self.apply_latch(result);
         }
     }
+
+    /// Settles a transaction the handler answered with a result after an error: op-revm's failed
+    /// deposit, which reports a halt whether the deposit was refused before it ran or halted after
+    /// its frames ran. The halt is what the transaction reports, so a stop its body latched before
+    /// op-revm refused it is cleared.
+    ///
+    /// Nothing counted is touched. A deposit refused before it ran counted its body alone. One
+    /// that halted had its frames' lanes discarded as any failed frame's are, which leaves the
+    /// body and every Oracle hint input it admitted, one that then failed to decode included.
+    /// Those stay counted, as they do for any other transaction that halts, for two separate
+    /// reasons: a payload forwarded to the oracle service cannot be taken back, and admitting an
+    /// input and decoding it is work done whether or not it decodes.
+    pub(crate) const fn on_transaction_error(&mut self) {
+        self.standing = LimitCheck::WithinLimit;
+    }
 }
 
 /// `remaining` × [`FRAME_DATA_SHARE_NUMERATOR`] / [`FRAME_DATA_SHARE_DENOMINATOR`], rounded down.
@@ -1058,6 +1088,37 @@ mod tests {
             target_address: target,
             ..call_inputs(CallScheme::Call, value)
         }))
+    }
+
+    /// A hint is held to the transaction's data-size limit before it is counted: one that fits is
+    /// counted, one that would cross latches the transaction at the usage it would have reached
+    /// and leaves the count as it was, and an exempt transaction's is counted whatever it crosses.
+    #[test]
+    fn test_a_hint_that_would_cross_the_limit_is_not_counted() {
+        let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(100);
+        let kept = |limit: &AdditionalLimit| limit.usage().data_size;
+
+        let mut limit = AdditionalLimit::new(limits);
+        assert_eq!(limit.record_tx_body(40), LimitCheck::WithinLimit);
+        assert_eq!(limit.record_hint_bytes(60), LimitCheck::WithinLimit, "it fits exactly");
+        assert_eq!(kept(&limit), 100);
+        assert_eq!(limit.latched(), None);
+        let stop = LimitCheck::ExceedsLimit {
+            kind: LimitKind::DataSize,
+            limit: 100,
+            used: 101,
+            frame_local: false,
+        };
+        assert_eq!(limit.record_hint_bytes(1), stop, "one more byte crosses");
+        assert_eq!(kept(&limit), 100, "the hint that crossed is not counted");
+        assert_eq!(limit.latched(), Some(&stop));
+
+        let mut exempt = AdditionalLimit::new(limits);
+        exempt.exempt();
+        assert_eq!(exempt.record_tx_body(40), LimitCheck::WithinLimit);
+        assert_eq!(exempt.record_hint_bytes(61), LimitCheck::WithinLimit);
+        assert_eq!(kept(&exempt), 101, "an exempt transaction's hint is counted");
+        assert_eq!(exempt.latched(), None);
     }
 
     /// A layer with the transaction's own frame started: `SENDER` calling `CALLEE`, which has

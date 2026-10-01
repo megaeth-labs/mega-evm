@@ -177,7 +177,7 @@ The root `Cargo.toml` pins `revm = "=40.0.3"` and redirects all twelve revm crat
   A start past the call-stack limit, of any scheme or a creation, is answered by the depth guard with revm's own `CallTooDeep` before it is counted, so no start is counted for a nonce revm never bumps.
   A debug build asserts after every frame start that revm refused exactly the starts predicted and journaled exactly the log that was counted; `tests/satin/transfer_logs.rs` pins every site, and a unit test in `evm/history.rs` holds each against the same transaction with the switch off: the same gas on every ledger and the same state, 160 bytes of data size per log.
 - The data-size limit holds a transaction to `EvmTxRuntimeLimits::tx_data_size_limit` and every frame to a budget: the transaction's own frame gets what its body leaves, and a child 98% of what its parent has left, under an optional frame cap.
-  The bytes are the byte table's, counted where they are made: the body before any frame, the authorities' records before the first frame, a frame start's records when it starts (none for a start revm refuses on its caller's account), a storage write, a log or a `SELFDESTRUCT`'s beneficiary once the opcode completed, an EIP-7708 transfer log with the frame-start records or the `SELFDESTRUCT` that moves the value, deployed code once `return_create` has made every charge for it and before it commits the creation (`MegaContext::admit_code_deposit`; code starting with `0xEF` or over the code-size limit, and a creation that cannot pay a part of its deposit, the history included, fail the creation alone and are not counted), an Oracle hint before it is forwarded.
+  The bytes are the byte table's, counted where they are made: the body before any frame, the authorities' records before the first frame, a frame start's records when it starts (none for a start revm refuses on its caller's account), a storage write, a log or a `SELFDESTRUCT`'s beneficiary once the opcode completed, an EIP-7708 transfer log with the frame-start records or the `SELFDESTRUCT` that moves the value, deployed code once `return_create` has made every charge for it and before it commits the creation (`MegaContext::admit_code_deposit`; code starting with `0xEF` or over the code-size limit, and a creation that cannot pay a part of its deposit, the history included, fail the creation alone and are not counted), an Oracle hint before it is forwarded (one that would cross the transaction's limit is neither counted nor forwarded, so the stopped transaction keeps none of its bytes).
   A frame that crosses its budget reverts alone; a transaction that crosses its limit is stopped through the latch (the contracts below).
   A bare `MegaContext` sets no limit but detention's caps; a block executor installs the chain's (see the protocol limits below), whose default holds each transaction to `TX_DATA_LIMIT` and the block to `BLOCK_DATA_LIMIT`, 12.5 MiB each.
   The block's data size is a packing budget like the block's execution gas (see the block executor below).
@@ -444,9 +444,51 @@ Every later mechanism plugs into these; a change to one comes back to this layer
 - `satin/` — tests of the Satin engine (integration tests; add new ones here or in a new directory with a `main.rs`).
 - `block/` — tests of block execution: the Karst block rules, the block-level limits, the counters, the factory and the admission gate.
 - `system/` — tests of the system contracts: the interceptor dispatch, what each contract answers, keyless deployment (`system/keyless/`) and the system-address transaction.
+- `fuzz/` — randomized tests: properties the engine must hold on any input, and the neutral differential against op-revm and revm's mainnet EVM (see Randomized tests below).
 - `_pending/` — no test any more: its `README.md` records where each legacy test the test inventory kept went, ported into one of the targets above or retired, and why.
   It has no `main.rs`, so Cargo builds nothing there.
 - Unit tests live next to the code in `#[cfg(test)] mod tests`.
+
+### Randomized tests (`crates/mega-evm/tests/fuzz/`)
+
+The hand-written tests fix an input and an expectation; the randomized ones draw the input and state what must hold of any outcome.
+They run on `proptest`, through the target's own runner (`harness.rs`), and every property is one `#[test]`.
+
+```bash
+cargo test -p mega-evm --test fuzz                                  # the bounded mode, as CI runs it
+cargo test --release -p mega-evm --test fuzz                        # the same in release, where the debug assertions are gone
+MEGA_FUZZ_LONG=1 cargo test -p mega-evm --test fuzz -- --nocapture  # the long mode: 50x the cases, a seed from the clock, printed
+MEGA_FUZZ_SEED=7 MEGA_FUZZ_CASES=5000 cargo test -p mega-evm --test fuzz -- --nocapture a_stop_keeps  # one property, a chosen run
+for s in $(seq 1 20); do MEGA_FUZZ_SEED=$s cargo test --release -p mega-evm --test fuzz || break; done  # other seeds, before changing a generator
+```
+
+- **Two modes.**
+  The bounded mode is deterministic: seed 0, a fixed case count per property (128 to 768), under ten seconds in debug.
+  It is part of `cargo test --workspace`, and the `fuzz-release` job of `build-and-test.yml` runs it in release.
+  The long mode (`MEGA_FUZZ_LONG=1`) multiplies each property's count by fifty and draws a seed from the clock unless `MEGA_FUZZ_SEED` names one; `fuzz.yml` runs it on `workflow_dispatch`, in debug and in release, since a schedule fires only on the default branch.
+  `MEGA_FUZZ_SEED` names the seed in either mode.
+  `MEGA_FUZZ_CASES` names the case count in either mode, and it is the count: every property runs exactly that many cases, and the long mode's multiplier does not apply to it.
+  Either variable set to the empty string counts as unset, which is how `fuzz.yml` passes an input left empty.
+- **The properties hold for any seed.**
+  Seed 0 is what CI runs, not what the properties are true of: a change to a generator redraws every case, so a property that held on one seed by luck fails on the pull request that touches a weight.
+  Before changing a generator or a property, run the bounded mode on a few dozen seeds and the long mode on a few; a failure there is a bug to fix or a property to correct, never a seed to avoid.
+- **A failure is reproducible.**
+  The runner panics with the property's name, the reason, the seed and case count that reproduce the run, and the minimal case proptest shrank to, rendered as the generator types (`Case`, `BlockCase`), from which a regression test is written by hand into `regressions.rs`.
+- **The generators** (`gen/`) build a `Case`: a `World` (four fixed accounts, a beneficiary that may be one of them, a delegation, SALT capacities with multipliers above one and a failing bucket, the Oracle's answers, valid runtime limits, the block), a `Tx` of one of six shapes (call, creation, EIP-7702, deposit, system-address, keyless) at five gas tiers, and the `Program`s of the three contracts, lists of self-contained ops biased towards what the engine meters.
+  A keyless deployment carries its own world: the signer's funds, nonce and code, what the deploy address holds, how the carried transaction is encoded and what it is signed for, so that each of its rules is reached.
+  The keyless property also pads one init code in eight with zero bytes, which never run, to the initcode size limit, one byte past it or twice it; the other properties draw init code at its own size, since a mebibyte of calldata in their cases would buy nothing they check.
+  The weights keep what refuses a transaction before it runs rare — about one case in five — because most properties have nothing to check of a refusal.
+  `Case::execute` runs it on a fresh EVM; `blocks.rs` runs envelopes through `MegaBlockExecutor`.
+  `Flavor::Neutral` replaces what only `MegaETH` has by its plain counterpart, for the differential, and `Case::without_destruction_in_creation` takes every self-destruction out of init code for the one comparison that settles it otherwise, Ethereum's on Amsterdam.
+- **What the properties state** (`properties.rs`, `keyless.rs`, `blocks.rs`, `differential.rs`): no panic; the same outcome twice, under a recording inspector, and on an EVM that already ran another transaction, one that ended in an error included; the gas ledgers, the reservoir exactly; `KV × 40 ≤ data size` after every instruction, and every transaction keeps its body and the hints it forwarded; what a stop keeps; a keyless deployment's rules in the spec's order, its answer and its signer's nonce; a block's counters as the sum of what its transactions report, and its budgets; the neutral differential.
+  Several print a tally of what they reached (`--nocapture`): the outcome classes and each refusal, how the previous transaction ended, each keyless rule, the cases rewritten for Amsterdam.
+- **To add a property**, write a `#[test]` that calls `harness::check(name, bounded_cases, || case(Flavor::Satin), |case| { ... })` and returns `Err` through `prop_eq!` / `prop_check!` where the outcome breaks the property; keep the bounded case count such that the whole target stays under a minute in debug.
+  A property that does not hold by design is stated as what does hold, with the reason in its doc comment, never weakened silently.
+  An expected value is computed from the case or from what the transactions themselves report, never read back from the thing under test: an assertion that restates a definition, or compares a counter with itself, cannot fail.
+  To add an op or a transaction shape, extend the enum and its strategy in `gen/`, its assembly, and, if op-revm cannot express it, its `neutralized` counterpart.
+- **The byte prices** are a process-wide constant, so a case cannot run at two prices in one test.
+  `prices.rs` checks the schedule builder's monotonicity in-process, and under `satin-price-override` records what every case spent (`MEGA_FUZZ_PRICE_RECORD`) for `scripts/fuzz_price_monotonic.py` to compare two runs at two prices, which `fuzz.yml` does.
+  The properties themselves hold at any byte price and run in the byte-price grid; the regression tests that fall short of a charge pin a minimal case at the spec's prices and return early at others.
 
 ## Test Gates
 

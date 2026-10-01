@@ -29,6 +29,7 @@ use revm::{
     },
     handler::{
         evm::{ContextDbError, FrameInitResult, FrameTr},
+        execution::runtime_oog_unwind,
         instructions::InstructionProvider,
         EthFrame, EvmTr, EvmTrError, FrameInitOrResult, FrameResult, Handler, ItemOrResult,
         PreExecutionOutput,
@@ -164,8 +165,13 @@ where
     ) -> Result<Option<PreExecutionOutput>, Self::Error> {
         self.load_accounts(evm)?;
         let checkpoint = evm.ctx().journal_mut().checkpoint();
+        // A bail-out of the runtime gas phase unwinds as revm's does: the checkpoint is reverted
+        // and a creation's sender gets the nonce bump the frame would have made, so an included
+        // out-of-gas creation cannot be replayed. revm's own pre-execution never needs the bump,
+        // because only an EIP-7702 transaction, always a call, can bail out there; the two
+        // charges made here can fail for a creation too.
         if self.deposit_creates_caller.get() && !charge_created_caller(evm.ctx_mut(), gas) {
-            evm.ctx().journal_mut().checkpoint_revert(checkpoint);
+            runtime_oog_unwind(evm.ctx(), checkpoint)?;
             return Ok(None);
         }
         if evm.ctx_ref().additional_limit.latched().is_some() {
@@ -173,7 +179,7 @@ where
         }
         let gas_before = *gas;
         let Some(eip7702_refund) = self.apply_eip7702_auth_list(evm, gas)? else {
-            evm.ctx().journal_mut().checkpoint_revert(checkpoint);
+            runtime_oog_unwind(evm.ctx(), checkpoint)?;
             return Ok(None);
         };
         let authorities =
@@ -185,7 +191,7 @@ where
             return Ok(Some(PreExecutionOutput { eip7702_refund: 0, checkpoint }));
         }
         if !charge_records_made_outside_a_frame(evm.ctx_mut(), gas, authorities.applied) {
-            evm.ctx().journal_mut().checkpoint_revert(checkpoint);
+            runtime_oog_unwind(evm.ctx(), checkpoint)?;
             return Ok(None);
         }
         Ok(Some(PreExecutionOutput { eip7702_refund, checkpoint }))
@@ -292,11 +298,23 @@ where
             return Ok(Some(unbuilt_first_frame(evm.ctx_ref(), gas)));
         }
         let stands = gas.state_gas_spent();
-        let frame = self.op.first_frame_input(evm, gas)?;
+        let Some(frame) = self.op.first_frame_input(evm, gas)? else {
+            // The runtime gas phase could not pay for the first frame's start: EIP-2780's charge
+            // for the account the frame adds, a call's recipient or a creation's account, or the
+            // access to the code a delegated recipient runs, warm or cold. A price of that account
+            // charge that could not be read ends here too: the lookup recorded its cause, which
+            // fails the transaction when it settles. In each case revm drops the phase's partial
+            // charges by rebuilding the transaction's gas from its intrinsic cost, and the history
+            // charged for the first frame's write record went with them: the settlement must not
+            // give it back a second time, into a reservoir a transaction below the execution cap
+            // never had.
+            evm.ctx_mut().additional_limit.set_top_level_write_record_gas(0);
+            return Ok(None);
+        };
         let spent = gas.state_gas_spent();
         evm.ctx_mut().additional_limit.on_state_gas_before_frames(stands, spent);
         evm.ctx_mut().mark_beneficiary_delegate();
-        Ok(frame)
+        Ok(Some(frame))
     }
 
     /// Settles the outermost frame: pops its lane and, when the transaction is latched, turns its
@@ -385,12 +403,20 @@ where
         self.op.execution_result(evm, result, result_gas)
     }
 
+    /// op-revm's error handling, which answers a deposit's transaction error with a failed-deposit
+    /// halt and discards everything the deposit did. The halt is what the transaction reports, so
+    /// the common execution layer drops a stop the deposit's body may have latched before the
+    /// error, and nothing else: what the deposit counted stands, the body and the Oracle hints it
+    /// forwarded before it halted. Any other error refuses the transaction, and the layer's state
+    /// is reset by the next one.
     fn catch_error(
         &self,
         evm: &mut Self::Evm,
         error: Self::Error,
     ) -> Result<revm::context::result::ExecutionResult<Self::HaltReason>, Self::Error> {
-        self.op.catch_error(evm, error)
+        let result = self.op.catch_error(evm, error)?;
+        evm.ctx_mut().additional_limit.on_transaction_error();
+        Ok(result)
     }
 }
 

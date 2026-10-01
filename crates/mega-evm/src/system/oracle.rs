@@ -52,17 +52,19 @@ pub use mega_system_contracts::oracle::IOracle;
 /// new. A hint that fails any of them is neither forwarded nor counted.
 ///
 /// Gas above zero does not promise that the bytecode succeeds: a hint forwarded with one gas
-/// reaches the service and the frame it was sent from then runs out of gas. An admitted hint is a
+/// reaches the service and the frame it was sent from then runs out of gas. A forwarded hint is a
 /// synchronous, irreversible side effect — the service holds it whatever the frame, or the
-/// transaction, does next. That is also why its bytes are counted on the transaction rather than
-/// on the frame.
+/// transaction, does next. That is one reason its bytes are counted on the transaction rather than
+/// on the frame; the other, which holds as well for an admitted payload that fails to decode and
+/// is never forwarded, is that admitting it and decoding it is work done either way.
 ///
 /// A `STATICCALL` does forward: `sendHint` is a view method and writes nothing.
 ///
 /// The payload is counted toward the transaction's data size before it is decoded
 /// ([`AdditionalLimit::record_hint_bytes`](crate::AdditionalLimit)), so trailing bytes an ABI
-/// decoder ignores are paid for; a payload that crosses the transaction's limit is not
-/// forwarded, and the limit stops the transaction at the frame the call would have started.
+/// decoder ignores are paid for; a payload that would cross the transaction's limit is neither
+/// forwarded nor counted, and the limit stops the transaction at the frame the call would have
+/// started. So the data size a transaction keeps holds exactly the hints that were admitted.
 ///
 /// `depth` is the depth of the frame the call would start; the calling frame is one level above
 /// it, and a transaction that calls the Oracle directly has no frame above it, so nothing it
