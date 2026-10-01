@@ -1,12 +1,17 @@
 //! State-changing mechanisms through the harness: an EIP-7702 delegation and its replacement, a
 //! creation, the two shapes of `SELFDESTRUCT`, a value transfer that creates its recipient, and
 //! deposits — with the L1 block info a user transaction is priced against, which the pre-block
-//! phase carries.
+//! phase carries, and which a block cannot start without.
 
+use alloy_evm::{
+    block::{BlockExecutionError, BlockExecutor},
+    EvmFactory,
+};
+use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
-    test_utils::{BytecodeBuilder, MemoryDatabase},
-    PreBlockStateSource,
+    test_utils::{BytecodeBuilder, ErrorInjectingDatabase, MemoryDatabase},
+    MegaBlockExecutor, MegaEvmFactory, PreBlockStateSource,
 };
 use op_revm::constants::{
     BASE_FEE_SCALAR_OFFSET, BLOB_BASE_FEE_SCALAR_OFFSET, ECOTONE_L1_BLOB_BASE_FEE_SLOT,
@@ -16,6 +21,7 @@ use op_revm::constants::{
 use revm::{
     bytecode::opcode::{CODECOPY, PUSH0, RETURN},
     context_interface::cfg::GasId,
+    database::State,
     state::{Account, AccountInfo, Bytecode},
 };
 
@@ -512,4 +518,35 @@ fn test_a_deposit_creating_the_l1_block_contract_adds_no_slot_read() {
     assert_same_run("L1 block contract created in the block", &recorded, &channel);
 
     case.run();
+}
+
+/// The pre-block read of the L1 block info is made for every block, so a database that cannot
+/// serve the contract's account, or one of the five slots of a contract the chain holds, cannot
+/// start the block: the read fails before the first transaction, whatever the block holds — a
+/// block of deposits alone, which prices nothing against the contract, included — and so does a
+/// read of the overhead beside set scalars, which no transaction of the block would make. The
+/// failure is the node's database's, not a verdict on the block: an internal error.
+#[test]
+fn test_a_database_that_cannot_serve_the_l1_entry_fails_the_block_as_internal() {
+    let refusals = [
+        ("the account", Some(L1_BLOCK_CONTRACT), None),
+        ("the L1 base fee", None, Some((L1_BLOCK_CONTRACT, L1_BASE_FEE_SLOT))),
+        ("the overhead beside set scalars", None, Some((L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT))),
+    ];
+    for (what, account, slot) in refusals {
+        let mut db = ErrorInjectingDatabase::new(chain_with_l1_info(Bytes::from(vec![0x00])));
+        db.fail_on_account = account;
+        db.fail_on_storage = slot;
+        let mut state = State::builder().with_database(db).with_bundle_update().build();
+        let evm = MegaEvmFactory::new().create_evm(&mut state, common::evm_env());
+        let mut executor = MegaBlockExecutor::new(
+            evm,
+            common::unlimited_ctx(),
+            common::chain_spec(),
+            OpAlloyReceiptBuilder::default(),
+        );
+        let err = executor.apply_pre_execution_changes().expect_err(what);
+        assert!(matches!(err, BlockExecutionError::Internal(_)), "{what}: {err:?}");
+        assert!(err.to_string().contains(&L1_BLOCK_CONTRACT.to_string()), "{what}: {err}");
+    }
 }
