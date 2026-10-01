@@ -366,7 +366,7 @@ fn test_an_out_of_gas_before_the_first_frame_bills_the_whole_gas_limit_to_the_bl
     let mut state = common::state();
     let fee_recipients =
         [Address::ZERO, BASE_FEE_RECIPIENT, L1_FEE_RECIPIENT, OPERATOR_FEE_RECIPIENT];
-    let mut balance = |state: &mut State<mega_evm::test_utils::MemoryDatabase>, address| {
+    let balance = |state: &mut State<mega_evm::test_utils::MemoryDatabase>, address| {
         state.basic(address).expect("the account is read").map_or(U256::ZERO, |info| info.balance)
     };
     let sender_before = balance(&mut state, common::CALLER);
