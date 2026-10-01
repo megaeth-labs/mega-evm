@@ -12,7 +12,7 @@ use mega_evm::{
     system::is_system_originated,
     test_utils::{GasInspector, MemoryDatabase},
     transaction_body_bytes, LimitCheck, MegaContext, MegaTransaction, MegaTransactionOutcome,
-    TX_BODY_SIZE, WRITE_RECORD_SIZE,
+    WRITE_RECORD_SIZE,
 };
 use revm::{
     context::{result::ExecutionResult, Transaction},
@@ -303,8 +303,8 @@ fn test_property_gas_ledgers() {
 }
 
 /// After every instruction the KV count never weighs more than the data size, `KV × 40 ≤ data
-/// size`; at the end the same holds, the history bytes are within the data size, and a transaction
-/// held to the limits keeps at least its body.
+/// size`; at the end the same holds, the history bytes are within the data size, and every
+/// transaction keeps at least its body and the Oracle hints it forwarded.
 #[test]
 fn test_property_kv_weighs_no_more_than_data_size() {
     #[derive(Default)]
@@ -348,16 +348,30 @@ fn test_property_kv_weighs_no_more_than_data_size() {
                 "the history bytes are within the data size: {:?} vs {usage:?}",
                 outcome.gas
             );
-            if !is_exempt(&tx) {
-                prop_check!(usage.data_size >= TX_BODY_SIZE, "the body is counted: {usage:?}");
-                prop_check!(
-                    usage.data_size >= transaction_body_bytes(&tx),
-                    "the whole body is counted: {usage:?}"
-                );
-            }
+            // What left the machine stays counted, whatever became of the transaction, an exempt
+            // one and a failed deposit included: the body, which is in the block, and the hints
+            // forwarded to the oracle service.
+            let hints = forwarded_hint_bytes(&evm);
+            prop_check!(
+                usage.data_size >= transaction_body_bytes(&tx) + hints,
+                "the body and the {hints} bytes of hints forwarded are counted: {usage:?}"
+            );
             Ok(())
         },
     );
+}
+
+/// What the Oracle hints `evm`'s transaction forwarded weigh as data size. A forwarded hint's
+/// payload is its call's whole input: the selector, the topic, the offset and length of the data,
+/// and the data padded to a word.
+fn forwarded_hint_bytes<I>(evm: &mega_evm::MegaEvm<MemoryDatabase, I, Envs>) -> u64 {
+    evm.ctx()
+        .external_envs()
+        .oracle_env
+        .recorded_hints()
+        .iter()
+        .map(|hint| 4 + 3 * 32 + (hint.data.len() as u64).div_ceil(32) * 32)
+        .sum()
 }
 
 /// A stopped transaction keeps only what the spec says survives: the stop is a revert carrying
@@ -383,17 +397,7 @@ fn test_property_a_stop_keeps_only_what_survives() {
             let (execution, evm) = case.execute_with_evm();
             let Ok(outcome) = execution else { return Ok(()) };
             let Some(stop) = outcome.limit_exceeded else { return Ok(()) };
-            // A forwarded hint's payload is its call's whole input: the selector, the topic, the
-            // offset and length of the data, and the data padded to a word.
-            let hint_bytes: u64 = evm
-                .ctx()
-                .external_envs()
-                .oracle_env
-                .recorded_hints()
-                .iter()
-                .map(|hint| 4 + 3 * 32 + (hint.data.len() as u64).div_ceil(32) * 32)
-                .sum();
-            check_survivors(case, &tx, &outcome, stop, hint_bytes)
+            check_survivors(case, &tx, &outcome, stop, forwarded_hint_bytes(&evm))
         },
     );
 }
