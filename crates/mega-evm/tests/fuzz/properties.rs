@@ -318,9 +318,11 @@ fn test_property_kv_weighs_no_more_than_data_size() {
 /// nonce and fee, the fee recipients' credit, an applied EIP-7702 authority's nonce and
 /// delegation, and a deposit's mint; the records kept are the applied authorities', and the data
 /// size is the body, those records and the payloads of the Oracle hints it forwarded, which have
-/// left the machine and are counted whatever the frame that sent them did; the state gas kept is
-/// the authorities' and that of the caller account a deposit created, which is the body's account
-/// and no record.
+/// left the machine and are counted whatever the frame that sent them did, and nothing of a hint
+/// that crossed the limit, which was not forwarded; the state gas kept is the applied
+/// authorizations', the sender's own delegation included, and that of the caller account a deposit
+/// created, which is the body's account and no record. An authority that is also a fee recipient
+/// is credited the fee, as any fee recipient is.
 #[test]
 fn test_property_a_stop_keeps_only_what_survives() {
     check(
@@ -447,6 +449,13 @@ pub(crate) fn check_survivors(
                     account.info.balance <= before_balance,
                     "the sender pays and receives nothing\n{rendered}"
                 );
+            } else if fee_recipients.contains(address) {
+                // An authority may be the block beneficiary, which the transaction's fee is
+                // credited to whatever stopped it.
+                prop_check!(
+                    account.info.balance >= before_balance,
+                    "an authority that is a fee recipient is credited: {address}\n{rendered}"
+                );
             } else {
                 prop_eq!(
                     account.info.balance,
@@ -530,7 +539,10 @@ pub(crate) fn check_survivors(
             "the history gas is the body's and the records'\n{rendered}"
         );
     }
-    if applied == 0 && created_caller == 0 {
+    // Every applied authorization keeps the state gas of its delegation, the sender's own
+    // included: a sender that delegates itself makes no record, its account being the body's, and
+    // pays the state gas of the designator all the same.
+    if expected.is_empty() && created_caller == 0 {
         prop_eq!(outcome.gas.state, 0, "a stop keeps no state gas\n{rendered}");
     }
     Ok(())
