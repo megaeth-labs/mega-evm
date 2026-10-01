@@ -486,6 +486,9 @@ fn run_block(case: &BlockCase) -> Result<BlockRun, proptest::test_runner::TestCa
                 );
                 let fits = admits_after(executor.limiter(), gas.state, is_deposit);
                 let logs = outcome.result.logs().to_vec();
+                // What the transaction itself reports it kept, taken before the commit: the
+                // block's usage must be the sum of these, not a figure read back from the block.
+                let usage = outcome.usage;
                 match executor.commit_transaction_outcome(outcome) {
                     Ok(_) => {
                         prop_check!(
@@ -494,10 +497,8 @@ fn run_block(case: &BlockCase) -> Result<BlockRun, proptest::test_runner::TestCa
                         );
                         expected.record(&gas);
                         expected_gas_used += gas.gas_used;
-                        expected_usage.data_size +=
-                            case_usage(executor.limiter(), &expected_usage).0;
-                        expected_usage.write_records +=
-                            case_usage(executor.limiter(), &expected_usage).1;
+                        expected_usage.data_size += usage.data_size;
+                        expected_usage.write_records += usage.write_records;
                         let receipt = executor
                             .receipts()
                             .last()
@@ -594,11 +595,6 @@ fn run_block(case: &BlockCase) -> Result<BlockRun, proptest::test_runner::TestCa
         run.accounts.push_str(&format!("{address}: {info:?}\n"));
     }
     Ok(run)
-}
-
-/// What the limiter's usage grew by since `before`: the last committed transaction's.
-fn case_usage(limiter: &BlockLimiter, before: &LimitUsage) -> (u64, u64) {
-    (limiter.usage.data_size - before.data_size, limiter.usage.write_records - before.write_records)
 }
 
 /// A block's counters are the sum of its committed transactions', its gas used the sum of its
