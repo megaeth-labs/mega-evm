@@ -1,10 +1,10 @@
-//! The minimal cases the properties found, one named test each, so a finding is pinned without
-//! its seed.
+//! The minimal cases the properties found, and the ones a review of them found, one named test
+//! each, so a finding is pinned without its seed.
 //!
-//! Each case is pinned at the spec's byte prices, where it was found: its gas limit is the one the
-//! minimal case carries, and the charge it falls short on moves with the prices. At other prices
-//! the tests return early, with the note the byte-price grid counts; the properties themselves
-//! hold at any price and run there.
+//! A case whose gas limit falls short of a charge is pinned at the spec's byte prices, where it
+//! was found: its gas limit is the one the minimal case carries, and the charge moves with the
+//! prices. At other prices those tests return early, with the note the byte-price grid counts; the
+//! properties themselves hold at any price and run there.
 
 use crate::{
     gen::{
@@ -216,4 +216,63 @@ fn test_an_out_of_gas_creation_bumps_the_sender_s_nonce() {
         1,
         "the nonce moves by one\n{rendered}"
     );
+}
+
+/// A deposit whose callee forwards an Oracle hint and then halts is a failed deposit that keeps
+/// its body and the hint's payload as data size, as the same program does when an ordinary
+/// transaction reaches it: the hint left the machine before the halt.
+///
+/// Found by comparing every case's outcome before and after the failed deposit's settlement was
+/// added: that settlement reset the whole count to the body, the forwarded hint with it.
+#[test]
+fn test_a_failed_deposit_keeps_the_hint_it_forwarded() {
+    use crate::gen::program::{Op, Scheme, SystemMethod};
+    let hint = SystemMethod::SendHint { len: 21 };
+    let hint_bytes = hint.calldata().len() as u64;
+    let program = Program {
+        ops: vec![Op::System { method: hint, scheme: Scheme::Call, value: Value::Zero }],
+        end: End::Invalid,
+    };
+    let run = |shape: Shape| {
+        let case = Case {
+            world: plain_world(),
+            tx: Tx {
+                shape,
+                value: Value::Zero,
+                gas: GasTier::Medium,
+                price: Price::Free,
+                nonce_ok: true,
+            },
+            main: program.clone(),
+            a: stop(),
+            b: stop(),
+        };
+        let (execution, evm) = case.execute_with_evm();
+        let hints = evm.ctx().external_envs().oracle_env.recorded_hints().len();
+        let body = mega_evm::transaction_body_bytes(&case.transaction());
+        let rendered = render(&execution);
+        (execution.expect("the transaction is included"), hints, body, rendered)
+    };
+
+    let (outcome, hints, body, rendered) = run(Shape::Deposit {
+        to: Who::Contract,
+        mint: Value::Zero,
+        data_len: 0,
+        system: false,
+        create: false,
+    });
+    assert!(
+        matches!(&outcome.result, revm::context::result::ExecutionResult::Halt { reason, .. }
+            if *reason == mega_evm::MegaHaltReason::FailedDeposit),
+        "{rendered}"
+    );
+    assert_eq!(hints, 1, "the hint was forwarded\n{rendered}");
+    let kept = mega_evm::LimitUsage { data_size: body + hint_bytes, write_records: 0 };
+    assert_eq!(outcome.usage, kept, "the body and the hint stay counted\n{rendered}");
+
+    let (outcome, hints, call_body, rendered) =
+        run(Shape::Call { to: Who::Contract, data_len: 0, access_list: vec![] });
+    assert!(outcome.result.is_halt(), "{rendered}");
+    assert_eq!((hints, call_body), (1, body), "{rendered}");
+    assert_eq!(outcome.usage, kept, "an ordinary transaction keeps the same bytes\n{rendered}");
 }

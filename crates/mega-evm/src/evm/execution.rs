@@ -372,10 +372,11 @@ where
     }
 
     /// op-revm's error handling, which answers a deposit's transaction error with a failed-deposit
-    /// halt and discards everything the deposit did. The common execution layer then settles as it
-    /// does for an out-of-gas before the first frame: the halt is what the transaction reports,
-    /// not a stop its body may have latched before the error, and the body is what it kept. Any
-    /// other error refuses the transaction, and the layer's state is reset by the next one.
+    /// halt and discards everything the deposit did. The halt is what the transaction reports, so
+    /// the common execution layer drops a stop the deposit's body may have latched before the
+    /// error, and nothing else: what the deposit counted stands, the body and the Oracle hints it
+    /// forwarded before it halted. Any other error refuses the transaction, and the layer's state
+    /// is reset by the next one.
     fn catch_error(
         &self,
         evm: &mut Self::Evm,
