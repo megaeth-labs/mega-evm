@@ -61,8 +61,9 @@ pub use mega_system_contracts::oracle::IOracle;
 ///
 /// The payload is counted toward the transaction's data size before it is decoded
 /// ([`AdditionalLimit::record_hint_bytes`](crate::AdditionalLimit)), so trailing bytes an ABI
-/// decoder ignores are paid for; a payload that crosses the transaction's limit is not
-/// forwarded, and the limit stops the transaction at the frame the call would have started.
+/// decoder ignores are paid for; a payload that would cross the transaction's limit is neither
+/// forwarded nor counted, and the limit stops the transaction at the frame the call would have
+/// started. So the data size a transaction keeps holds exactly the hints that were admitted.
 ///
 /// `depth` is the depth of the frame the call would start; the calling frame is one level above
 /// it, and a transaction that calls the Oracle directly has no frame above it, so nothing it

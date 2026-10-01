@@ -11,6 +11,7 @@ Fix wording in the release candidate PR while it is open, or, after it merges, b
 - evm: an out-of-gas before the first frame no longer hands the history of the first frame's write record back into a reservoir the transaction never had; it burns its whole gas limit as op-revm does
 - evm: a creation transaction that runs out of gas before its first frame bumps its sender's nonce, as revm's unwind of the runtime gas phase does, so it cannot be replayed
 - limit: a failed deposit reports the halt and not the stop its body latched before op-revm refused it
+- limit: an Oracle hint that would cross the transaction's data-size limit is not counted in the data size the stopped transaction keeps, so a payload that never left the node no longer reaches the block's data-size counter
 
 ### Tests
 
