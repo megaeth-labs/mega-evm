@@ -63,7 +63,10 @@ fn test_property_no_panic() {
                         ExecutionResult::Halt { reason, .. } => format!("halt {reason:?}"),
                     }
                 }
-                Err(error) => format!("refused {}", error.split('(').next().unwrap_or("")),
+                // The error's own name, without its fields: `Transaction(Base(NonceTooHigh`.
+                Err(error) => {
+                    format!("refused {}", error.split([' ', '{', ')']).next().unwrap_or(""))
+                }
             };
             *tally.lock().unwrap().entry(class).or_default() += 1;
             Ok(())

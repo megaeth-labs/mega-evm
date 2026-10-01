@@ -48,10 +48,10 @@ fn account() -> impl Strategy<Value = AccountShape> {
     account_with(balance())
 }
 
-/// The sender's account: rich more often than not, so most transactions pay their way in.
+/// The sender's account: rich nearly always, so most transactions pay their way in.
 fn sender() -> impl Strategy<Value = AccountShape> {
     account_with(
-        prop_oneof![1 => Just(Balance::Zero), 1 => Just(Balance::Small), 8 => Just(Balance::Rich)],
+        prop_oneof![1 => Just(Balance::Zero), 2 => Just(Balance::Small), 21 => Just(Balance::Rich)],
     )
 }
 
@@ -122,7 +122,7 @@ fn salt() -> impl Strategy<Value = Salt> {
         prop_oneof![6 => Just(1u8), 2 => Just(2), 1 => Just(3), 1 => Just(7)],
         proptest::collection::vec((super::who(), 2u8..=9), 0..=2),
         proptest::collection::vec((super::who(), 0u8..4, 2u8..=9), 0..=2),
-        proptest::option::weighted(0.05, super::who()),
+        proptest::option::weighted(0.1, super::who()),
     )
         .prop_map(|(default_multiplier, crowded_accounts, crowded_slots, failing_account)| {
             Salt { default_multiplier, crowded_accounts, crowded_slots, failing_account }
@@ -214,10 +214,10 @@ impl DetentionCap {
 
 fn detention_cap() -> impl Strategy<Value = DetentionCap> {
     prop_oneof![
-        2 => Just(DetentionCap::Tiny),
+        3 => Just(DetentionCap::Tiny),
         2 => Just(DetentionCap::Small),
         1 => Just(DetentionCap::Medium),
-        4 => Just(DetentionCap::Default),
+        3 => Just(DetentionCap::Default),
         1 => Just(DetentionCap::Max),
     ]
 }
@@ -265,15 +265,18 @@ impl Limits {
 
 pub(crate) fn limits() -> impl Strategy<Value = Limits> {
     let custom = (
+        // The data size is checked before the records wherever both cross, so a KV stop needs a
+        // data-size limit with room: the roomy ones are drawn as often as the tight ones, and the
+        // KV limit is mostly one or two records.
         prop_oneof![
             1 => Just(DataLimit::Body),
             2 => Just(DataLimit::BodyPlusRecord),
             3 => (1u16..=2_000).prop_map(DataLimit::Small),
-            2 => Just(DataLimit::Medium),
-            2 => Just(DataLimit::Unlimited),
+            3 => Just(DataLimit::Medium),
+            3 => Just(DataLimit::Unlimited),
         ],
         proptest::option::weighted(0.3, prop_oneof![Just(1u16), Just(40), Just(200), Just(2_000)]),
-        proptest::option::weighted(0.5, 1u8..=6),
+        proptest::option::weighted(0.5, prop_oneof![3 => 1u8..=2, 2 => 3u8..=6]),
         proptest::option::weighted(0.3, 1u8..=3),
         prop_oneof![
             1 => Just(StateLimit::One),
@@ -305,10 +308,12 @@ pub(crate) struct BlockShape {
 }
 
 fn block() -> impl Strategy<Value = BlockShape> {
+    // A base fee refuses every transaction priced below it, and a block with no blob price every
+    // transaction but a deposit: each is drawn often enough to be covered and no more.
     (
-        prop_oneof![7 => Just(0u64), 1 => Just(7)],
+        prop_oneof![15 => Just(0u64), 1 => Just(7)],
         prop_oneof![1 => Just(0u64), 1 => Just(9)],
-        prop_oneof![15 => Just(true), 1 => Just(false)],
+        prop_oneof![31 => Just(true), 1 => Just(false)],
     )
         .prop_map(|(basefee, slot_num, blob)| BlockShape { basefee, slot_num, blob })
 }

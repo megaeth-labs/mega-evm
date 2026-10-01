@@ -108,10 +108,11 @@ impl Value {
 }
 
 pub(crate) fn value() -> impl Strategy<Value = Value> {
+    // More than any account holds refuses a transaction and fails a call: one in twenty-two.
     prop_oneof![
-        5 => Just(Value::Zero),
-        3 => Just(Value::One),
-        2 => Just(Value::Some),
+        10 => Just(Value::Zero),
+        6 => Just(Value::One),
+        5 => Just(Value::Some),
         1 => Just(Value::Huge),
     ]
 }

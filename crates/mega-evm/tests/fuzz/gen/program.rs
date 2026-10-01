@@ -897,10 +897,10 @@ fn op(depth: u32) -> impl Strategy<Value = Op> {
         2 => (precompile(), precompile_input(), forward())
             .prop_map(|(which, input, forward)| Op::Precompile { which, input, forward }),
         4 => creates,
-        4 => volatile_read().prop_map(Op::Volatile),
+        5 => volatile_read().prop_map(Op::Volatile),
         2 => (target(), account_read()).prop_map(|(target, read)| Op::Account { target, read }),
-        1 => (1u16..=8_000).prop_map(|rounds| Op::Work { rounds }),
-        1 => (1u16..=5_000).prop_map(|rounds| Op::Burn { rounds }),
+        3 => (1u16..=8_000).prop_map(|rounds| Op::Work { rounds }),
+        3 => (1u16..=5_000).prop_map(|rounds| Op::Burn { rounds }),
         1 => prop_oneof![Just(0u32), Just(32), Just(1_000), Just(100_000), Just(50_000_000)]
             .prop_map(|len| Op::Keccak { len }),
         1 => prop_oneof![Just(0u32), Just(1_000), Just(100_000), Just(1 << 24), Just(u32::MAX)]

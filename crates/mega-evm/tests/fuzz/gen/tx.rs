@@ -402,8 +402,8 @@ fn shape(flavor: Flavor) -> impl Strategy<Value = Shape> {
     let keyless = keyless_shape();
     let system_address = (
         sys_call(),
-        prop_oneof![5 => Just(true), 1 => Just(false)],
-        prop_oneof![5 => Just(true), 1 => Just(false)],
+        prop_oneof![9 => Just(true), 1 => Just(false)],
+        prop_oneof![9 => Just(true), 1 => Just(false)],
         prop_oneof![5 => Just(false), 1 => Just(true)],
     )
         .prop_map(|(call, nonce_ok, chain_ok, off_whitelist)| Shape::SystemAddress {
@@ -416,7 +416,14 @@ fn shape(flavor: Flavor) -> impl Strategy<Value = Shape> {
         10 => (who(), 0u16..=200, access_list())
             .prop_map(|(to, data_len, access_list)| Shape::Call { to, data_len, access_list }),
         3 => Just(Shape::Create),
-        3 => (who(), proptest::collection::vec(auth(), 0..=3))
+        // An empty authorization list refuses the transaction: one in sixteen covers it.
+        3 => (
+            who(),
+            prop_oneof![
+                1 => Just(Vec::new()),
+                15 => proptest::collection::vec(auth(), 1..=3),
+            ],
+        )
             .prop_map(|(to, auths)| Shape::Eip7702 { to, auths }),
         3 => (who(), value(), 0u16..=100, prop_oneof![7 => Just(false), 1 => Just(true)], prop_oneof![4 => Just(false), 1 => Just(true)])
             .prop_map(|(to, mint, data_len, system, create)| Shape::Deposit { to, mint, data_len, system, create }),
@@ -464,8 +471,9 @@ pub(crate) fn keyless_tx() -> impl Strategy<Value = Tx> {
 /// A transaction of a shape `shape` draws.
 fn tx_of(shape: impl Strategy<Value = Shape>) -> impl Strategy<Value = Tx> {
     // A keyless deployment draws its call's value and gas from generators of its own: the call
-    // takes no value, so any is one refusal, and its creation needs room to start.
-    let keyless_value = prop_oneof![12 => Just(Value::Zero), 1 => Just(Value::One)];
+    // takes no value, so any is one refusal, and its creation needs room to start. A
+    // system-address transaction draws the same value: its sender holds nothing to send.
+    let own_value = prop_oneof![12 => Just(Value::Zero), 1 => Just(Value::One)];
     let keyless_gas = prop_oneof![
         1 => Just(GasTier::Small),
         6 => Just(GasTier::Medium),
@@ -474,14 +482,16 @@ fn tx_of(shape: impl Strategy<Value = Shape>) -> impl Strategy<Value = Tx> {
     ];
     (
         shape,
-        (value(), keyless_value),
+        (value(), own_value),
         (gas_tier(), keyless_gas),
         price(),
-        prop_oneof![8 => Just(true), 1 => Just(false)],
+        // A nonce one too high refuses the transaction: one case in twenty-four covers it.
+        prop_oneof![23 => Just(true), 1 => Just(false)],
     )
-        .prop_map(|(shape, (value, keyless_value), (gas, keyless_gas), price, nonce_ok)| {
+        .prop_map(|(shape, (value, own_value), (gas, keyless_gas), price, nonce_ok)| {
             let (value, gas) = match shape {
-                Shape::Keyless { .. } => (keyless_value, keyless_gas),
+                Shape::Keyless { .. } => (own_value, keyless_gas),
+                Shape::SystemAddress { .. } => (own_value, gas),
                 _ => (value, gas),
             };
             Tx { shape, value, gas, price, nonce_ok }
