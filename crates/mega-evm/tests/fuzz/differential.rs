@@ -4,11 +4,20 @@
 //!
 //! The cases are the generators' in the neutral flavor: what only `MegaETH` has — the system
 //! contracts and their interceptors, the Oracle's answers, the `SLOTNUM` opcode on the Osaka base
-//! (a registered deviation of the execution-spec gate), a self-destruction inside init code (the
-//! other registered deviation: the Osaka base settles it as Satin does), keyless deployments and
-//! system-address transactions — is replaced by its plain counterpart, because the references
-//! cannot express it. The SALT environment is left out too, so every bucket is minimal, as the
-//! gate's runner has it. Everything else is drawn from the same space as the properties.
+//! (a registered deviation of the execution-spec gate), keyless deployments and system-address
+//! transactions — is replaced by its plain counterpart, because the references cannot express it.
+//! The SALT environment is left out too, so every bucket is minimal, as the gate's runner has it.
+//! Everything else is drawn from the same space as the properties.
+//!
+//! One thing more is taken out, for one arm on one fork. A contract destroyed in the transaction
+//! that created it is settled on Amsterdam by EIP-8246, which Satin's Osaka base does not have:
+//! the gate's other registered deviation. op-revm shares that base, and Ethereum on Osaka has the
+//! same rule, so both are compared on the case as drawn. Ethereum on Amsterdam is compared on the
+//! case with every self-destruction inside init code taken out
+//! (`Case::without_destruction_in_creation`): the ending of a creation transaction's own init
+//! code, of the init code a `CREATE` or `CREATE2` runs, and of the code either borrows through
+//! `CALLCODE` or `DELEGATECALL`, which runs as the account being created. No case is skipped for
+//! it, and the test prints how many it rewrote.
 //!
 //! op-revm's arm takes every transaction but a deposit from an account that does not exist yet:
 //! Satin charges the account such a deposit creates for its caller, op-revm does not, and the
@@ -17,6 +26,8 @@
 //! routes fees differently, so its arm takes the other transactions at a gas price of zero in a
 //! block with no base fee, and op-revm's three fee vaults, touched empty, are taken out of
 //! `MegaEvm`'s state before the two are compared, as `tests/satin/neutral.rs` does.
+
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use alloy_op_evm::OpTx;
 use mega_evm::{
@@ -171,9 +182,12 @@ fn test_differential_neutral_mega_evm_matches_op_revm() {
 
 /// Under the neutral configuration of each fork, an unpriced transaction that is not a deposit
 /// produces on `MegaEvm` what revm's mainnet EVM produces on the fork, but for the three fee vaults
-/// op-revm touches.
+/// op-revm touches. On Amsterdam the case runs without the self-destructions its init codes held,
+/// which EIP-8246 settles there and Satin's Osaka base does not have; on Osaka it runs as drawn.
 #[test]
 fn test_differential_neutral_mega_evm_matches_ethereum() {
+    let compared = AtomicU32::new(0);
+    let rewritten = AtomicU32::new(0);
     check(
         "differential_ethereum",
         CASES,
@@ -182,7 +196,13 @@ fn test_differential_neutral_mega_evm_matches_ethereum() {
             if case.tx.is_deposit() {
                 return Ok(());
             }
+            let on_amsterdam = case.without_destruction_in_creation();
+            compared.fetch_add(1, Ordering::Relaxed);
+            if on_amsterdam != *case {
+                rewritten.fetch_add(1, Ordering::Relaxed);
+            }
             for fork in FORKS {
+                let case = if fork == EthSpecId::AMSTERDAM { &on_amsterdam } else { case };
                 let block = BlockEnv { basefee: 0, ..case.block() };
                 let mut tx = case.transaction().0;
                 tx.base.gas_price = 0;
@@ -201,5 +221,11 @@ fn test_differential_neutral_mega_evm_matches_ethereum() {
             }
             Ok(())
         },
+    );
+    println!(
+        "differential_ethereum: {} cases compared on both forks, {} of them on Amsterdam without \
+         the self-destruction their init code held",
+        compared.load(Ordering::Relaxed),
+        rewritten.load(Ordering::Relaxed)
     );
 }

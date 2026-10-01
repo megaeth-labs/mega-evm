@@ -31,7 +31,9 @@ pub(crate) enum Flavor {
     /// Everything Satin runs: the whole space.
     Satin,
     /// What op-revm and revm's mainnet EVM run too: no system contract, no Oracle read, no
-    /// `SLOTNUM`, no self-destruction inside init code (see the neutral differential).
+    /// `SLOTNUM` (see the neutral differential). A self-destruction inside init code stays: the
+    /// differential takes it out where the reference settles it otherwise
+    /// (`Case::without_destruction_in_creation`).
     Neutral,
 }
 

@@ -487,13 +487,21 @@ impl InitCode {
         }
     }
 
-    /// The init code with what the references cannot express replaced: a self-destruction inside
-    /// init code, which the Osaka base settles as Satin does and not as Osaka does, becomes an
-    /// empty deployment, and a program inside is neutralized.
+    /// The init code with what only `MegaETH` has replaced: a program inside is neutralized.
     fn neutralized(self) -> Self {
         match self {
-            Self::Selfdestructs { .. } => Self::Empty,
             Self::Runs(program) => Self::Runs(Box::new(program.neutralized())),
+            other => other,
+        }
+    }
+
+    /// The init code with no way left to destroy the account it is creating: a self-destruction
+    /// becomes an empty deployment, and a program inside is rewritten by
+    /// [`Program::as_init_without_destruction`].
+    pub(crate) fn without_destruction(self) -> Self {
+        match self {
+            Self::Selfdestructs { .. } => Self::Empty,
+            Self::Runs(program) => Self::Runs(Box::new(program.as_init_without_destruction())),
             other => other,
         }
     }
@@ -633,6 +641,50 @@ impl Program {
                 Op::Create { init, .. } => init.destroys(),
                 _ => false,
             })
+    }
+
+    /// The program with every init code it creates with rewritten so that it cannot destroy the
+    /// account it is creating ([`InitCode::without_destruction`]). The program's own ending
+    /// stands: run as a contract's code it destroys an account that existed before the
+    /// transaction.
+    pub(crate) fn without_destruction_in_creations(self) -> Self {
+        let ops = self
+            .ops
+            .into_iter()
+            .map(|op| match op {
+                Op::Create { value, salt, init } => {
+                    Op::Create { value, salt, init: init.without_destruction() }
+                }
+                other => other,
+            })
+            .collect();
+        Self { ops, end: self.end }
+    }
+
+    /// The program as init code that cannot destroy the account it is creating: an ending
+    /// `SELFDESTRUCT` becomes a `STOP`, and a `CALLCODE` or `DELEGATECALL`, which would run
+    /// another contract's code, and its ending, as the account being created, becomes a `CALL`.
+    /// The init codes it creates with are rewritten the same way.
+    pub(crate) fn as_init_without_destruction(self) -> Self {
+        let end = match self.end {
+            End::Selfdestruct { .. } => End::Stop,
+            other => other,
+        };
+        let ops = self
+            .ops
+            .into_iter()
+            .map(|op| match op {
+                Op::Call {
+                    scheme: Scheme::CallCode | Scheme::DelegateCall,
+                    target,
+                    value,
+                    forward,
+                    args_len,
+                } => Op::Call { scheme: Scheme::Call, target, value, forward, args_len },
+                other => other,
+            })
+            .collect();
+        Self { ops, end }.without_destruction_in_creations()
     }
 
     /// The program with what only `MegaETH` has replaced, op by op ([`Op::neutralized`]), so that

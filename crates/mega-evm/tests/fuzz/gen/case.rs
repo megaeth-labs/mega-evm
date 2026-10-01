@@ -215,6 +215,35 @@ impl Case {
         evm.execute_transaction(tx).map_err(|error| format!("{error:?}"))
     }
 
+    /// The case with no self-destruction left inside init code: the init code of a creation
+    /// transaction, of a keyless deployment and of every creation the programs make can no longer
+    /// destroy the account it is creating, in its own code or in code it borrows through
+    /// `CALLCODE` or `DELEGATECALL` (see [`Program::as_init_without_destruction`]). A contract
+    /// that existed before the transaction still destroys itself.
+    ///
+    /// For the comparison with Ethereum on Amsterdam, where a contract destroyed in the
+    /// transaction that created it is settled by EIP-8246, which Satin's Osaka base does not have.
+    pub(crate) fn without_destruction_in_creation(&self) -> Self {
+        let is_creation =
+            matches!(self.tx.shape, Shape::Create | Shape::Deposit { create: true, .. });
+        let main = self.main.clone();
+        let mut tx = self.tx.clone();
+        if let Shape::Keyless { init, .. } = &mut tx.shape {
+            *init = init.clone().without_destruction();
+        }
+        Self {
+            world: self.world.clone(),
+            tx,
+            main: if is_creation {
+                main.as_init_without_destruction()
+            } else {
+                main.without_destruction_in_creations()
+            },
+            a: self.a.clone().without_destruction_in_creations(),
+            b: self.b.clone().without_destruction_in_creations(),
+        }
+    }
+
     /// Whether any program of the case, or any init code in them, destroys an account.
     pub(crate) fn destroys(&self) -> bool {
         self.main.destroys() ||
