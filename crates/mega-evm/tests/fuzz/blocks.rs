@@ -23,7 +23,7 @@ use mega_evm::{
 use op_alloy_consensus::TxDeposit;
 use proptest::prelude::*;
 use revm::{
-    context::{result::ExecutionResult, transaction::AccessList, BlockEnv},
+    context::{transaction::AccessList, BlockEnv},
     database::State,
     Database,
 };
@@ -619,6 +619,3 @@ fn test_property_block_determinism() {
         Ok(())
     });
 }
-
-#[allow(dead_code)]
-fn _unused(_: ExecutionResult<mega_evm::MegaHaltReason>) {}
