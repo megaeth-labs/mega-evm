@@ -81,6 +81,14 @@ fn run_both(db: MemoryDatabase, tx: TxEnv) -> (MegaTransactionOutcome, Outcome, 
     run_both_in(db, tx, block())
 }
 
+/// Runs `tx` on `db` through op-revm's `OpEvm` alone, on the `CfgEnv` a `MegaEvm` context holds:
+/// for a gas limit that is op-revm's own, which Satin, charging the body's history on top, may
+/// refuse at validation.
+fn run_op_alone(db: MemoryDatabase, tx: TxEnv) -> Outcome {
+    let (_, mut op, _) = both_evms(db, block());
+    op.transact(op_transaction(tx)).unwrap()
+}
+
 /// [`run_both`] in `block`.
 fn run_both_in(
     db: MemoryDatabase,
@@ -782,7 +790,7 @@ fn test_an_out_of_gas_before_the_first_frame_matches_op_revm() {
     assert!(mega_limit > op_limit, "Satin charges the body's and the record's history on top");
 
     let (mega, _, cfg) = run_both(db(), transfer(mega_limit));
-    let (_, op, _) = run_both(db(), transfer(op_limit));
+    let op = run_op_alone(db(), transfer(op_limit));
     assert_satin_cfg(&cfg);
     for (engine, result, gas_limit) in
         [("Satin", &mega.result, mega_limit), ("op-revm", &op.result, op_limit)]
@@ -833,7 +841,7 @@ fn test_an_out_of_gas_creation_before_the_first_frame_matches_op_revm() {
     let op_limit = op_success.result.gas().total_gas_spent() - 1;
 
     let (mega, _, cfg) = run_both(db(), creation(mega_limit));
-    let (_, op, _) = run_both(db(), creation(op_limit));
+    let op = run_op_alone(db(), creation(op_limit));
     assert_satin_cfg(&cfg);
     for (engine, result, gas_limit) in
         [("Satin", &mega.result, mega_limit), ("op-revm", &op.result, op_limit)]
