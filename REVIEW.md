@@ -108,6 +108,14 @@ These checks guard every change to the Satin engine.
   `crates/mega-state-test/DEVIATIONS.md` is rendered from the registry, and a test keeps the two equal.
 - Neither workflow is a required check; `execution-spec gate on Satin` is the job a branch rule would require.
 
+### Witness replay
+
+- `crates/mega-evm/tests/block/witness/` executes a block on a recorder of every read and replays the transactions it included twice, on a strict database and environments that serve exactly a witness and refuse everything else: once on the record of every database read, once on the witness a node builds from the pre-block states, the included transactions' returned states and the engine's exports.
+  `witness::check_replay` in `crates/mega-state-test` does the same for a fixture's transaction; its sample over the execution-spec fixtures is ignored by default and runs where `MEGA_STATE_TEST_FIXTURES` names them.
+- The replay on the node's witness is the one that finds a read the witness lacks; the replay on the record of every read shows the block has no input outside its database and environments.
+  A change that makes block execution read state outside a transaction's journal hands the read to the pre-block observer as a read-only entry, or exports it, and adds the case that makes the read.
+- The block cases run in the `test` check; the fixture sample is run by hand.
+
 ### Byte-price grid
 
 - `.github/workflows/price-grid.yml` runs the `mega-evm` suite at byte prices other than the constants, through `scripts/price_grid.sh`: a cost per state byte and a cost per history byte per point, each run with `--no-fail-fast`.
