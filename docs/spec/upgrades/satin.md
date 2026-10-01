@@ -819,11 +819,15 @@ The witness is defined by what the block's execution returns and exports, and a 
 - **The oracle.**
   An `SLOAD` in the Oracle's own frame loads the chain's slot, which is in the transaction's returned state and so in the witness, then takes the service's answer over it.
   The answer is in no database.
-  The engine records every read a transaction makes through the service, with the answer, in order, on the transaction's outcome.
+  The engine records every read a transaction makes through the service, with the answer, in order, on the transaction's outcome; an answer can be none, where the service had no value and the slot's loaded value stood.
   A node MUST take the oracle reads of the transactions it includes from their outcomes, in block order, and nothing of a candidate it executed and dropped.
   A validator MUST do one of the following:
   - be given those records, and answer each read its own execution makes from them, in order; or
-  - run no service, and find the answered value in the Oracle's slot at the read — the value the journal holds for the slot when the read is made, as the block's earlier included transactions and the reading transaction's own frames left it — which is the node's to arrange, by including a transaction that writes every value its service answers into the Oracle's storage before the transaction that reads it.
+  - run no service, and find each answer in the Oracle's slot at its read — the value the journal holds for the slot when the read is made, as the block's earlier included transactions and the reading transaction's own frames left it.
+    This reproduces the block only when every answer an included transaction recorded equals the slot's value at that read; an answer of none always does.
+    Meeting it is the node's to arrange, by including a transaction that writes every value its service answers into the Oracle's storage before the transaction that reads it.
+    It cannot always be arranged: one transaction can be answered two values for one slot — it reads the slot, sends a hint that has the service fetch another value, and reads the slot again — and only the system address writes the Oracle's storage, so a transaction the system address does not send finds one value in the slot at both reads, and no value the slot can hold reproduces both.
+    A node that serves validators running no service MUST either give them the included transactions' own records, as the first option has it, or leave out of the block every transaction whose recorded answers the slot cannot hold at its reads.
     A validator without a service that finds another value in the slot computes another block; a transaction that wrote the value but was dropped by the builder wrote nothing the chain holds.
     Hints reach the service alone: they are not in the witness, and change nothing a validator computes except through the answers the service then gives, which the records carry.
 - **The check.**
