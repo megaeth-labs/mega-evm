@@ -799,6 +799,8 @@ A node, a stateless validator and a replay tool must agree on everything below, 
   The gas limit must cover the intrinsic regular gas (EIP-2780's base and recipient and value charges, calldata, access list, authorizations, init code) plus the history gas of the transaction's body, and the calldata floor; above the execution cap, the intrinsic regular gas and the floor must fit under the cap.
   The rest of the stateless validation is the base layer's.
   Whether a recipient, a created account or an authority is new is the state's to say: EIP-2780 charges it when the transaction runs, and a gas limit that cannot pay it runs out of gas rather than being refused.
+  The history of the write records a transaction's start makes is charged when it runs too: one record for the recipient of its value or the account it creates, and one for each authority that applies.
+  So the least gas limit validation admits is not what a transaction needs: at that gas limit a transfer of value to another account runs out of gas on its recipient's record, and one to a new account needs that account's state gas as well.
   A deposit and a Mega System Transaction pay no history gas; a pool that recognizes the latter needs the live system address from the state.
   A deposit is never refused: one that fails validation is included as a failed deposit, which bumps its sender's nonce and uses its whole gas limit.
 - **Reporting a limit stop.**

@@ -14,19 +14,19 @@ use mega_evm::{
     system::{live_system_address, ORACLE_CONTRACT_ADDRESS},
     test_utils::{op_transaction, MemoryDatabase},
     transaction_body_bytes, validate_transaction_stateless, IntrinsicGas, MegaEvm, MegaSpecId,
-    MegaTransaction,
+    MegaTransaction, WRITE_RECORD_SIZE,
 };
 use op_revm::{OpHaltReason, OpTransactionError};
 use revm::{
     context::{
-        result::{EVMError, ExecutionResult, InvalidTransaction},
+        result::{EVMError, ExecutionResult, HaltReason, InvalidTransaction},
         transaction::{AccessList, AccessListItem, TransactionType},
         CfgEnv, TxEnv,
     },
     ExecuteEvm,
 };
 
-use crate::common::{authorizing_call, block, context, history_is_free};
+use crate::common::{account_state_gas, authorizing_call, block, context, history_is_free};
 
 const CALLER: Address = address!("0000000000000000000000000000000000c00000");
 const EXISTING: Address = address!("0000000000000000000000000000000000c00001");
@@ -405,4 +405,53 @@ fn test_the_execution_cap_is_held_alike() {
         "{refused:?}",
     );
     assert_eq!(evm(above_the_cap(len), None), Verdict::Refused(refused.unwrap_err()));
+}
+
+/// The least gas limit is what validation requires, not what a transaction's start costs: the
+/// history of the write record a value transfer makes for its recipient, and the state gas of a
+/// recipient that is new, are charged once the transaction is admitted. At the least gas limit a
+/// call without value and a transfer to the sender run; a value transfer runs out of gas unless
+/// its record's history is on top, and one to a new account unless that account's state gas is
+/// too: it is included, and halts out of gas. It holds at any byte price: a price of nothing
+/// leaves nothing to pay on top.
+#[test]
+fn test_the_least_gas_limit_leaves_out_what_the_start_adds() {
+    let succeeds = |build: Build, gas_limit| {
+        let mut evm = MegaEvm::new(context(db(None)));
+        let result = ExecuteEvm::transact(&mut evm, build(gas_limit)).expect("admitted").result;
+        if !result.is_success() {
+            assert!(
+                matches!(
+                    result,
+                    ExecutionResult::Halt {
+                        reason: OpHaltReason::Base(HaltReason::OutOfGas(_)),
+                        ..
+                    }
+                ),
+                "{result:?}"
+            );
+        }
+        result.is_success()
+    };
+    let least = |build: Build| helper(build(ROOMY), None).unwrap().min_gas_limit();
+    let record = history_gas(WRITE_RECORD_SIZE).unwrap();
+    let account = account_state_gas();
+
+    assert!(succeeds(call, least(call)));
+    assert!(succeeds(value_to_self, least(value_to_self)));
+
+    let existing = least(value_to_existing);
+    assert_eq!(succeeds(value_to_existing, existing), record == 0);
+    assert!(succeeds(value_to_existing, existing + record));
+    if record > 0 {
+        assert!(!succeeds(value_to_existing, existing + record - 1));
+    }
+
+    let new = least(value_to_new);
+    assert_eq!(new, existing, "the intrinsic gas does not say whether the recipient is new");
+    assert_eq!(succeeds(value_to_new, new + record), account == 0);
+    assert!(succeeds(value_to_new, new + record + account));
+    if record + account > 0 {
+        assert!(!succeeds(value_to_new, new + record + account - 1));
+    }
 }

@@ -22,9 +22,19 @@ use crate::{
 /// The gas a transaction's gas limit must cover before it runs, by ledger, as the EVM charges it
 /// when it validates the transaction.
 ///
-/// It is fixed by the transaction's own fields. What the state decides — a recipient or a created
-/// account that EIP-2780 finds new, an EIP-7702 authority that applies — is charged when the
-/// transaction runs, and a gas limit that cannot pay it runs out of gas rather than being refused.
+/// It is fixed by the transaction's own fields, and it is not all a transaction is charged before
+/// its first instruction. What the state decides is charged once the transaction is admitted,
+/// when it runs:
+///
+/// - each EIP-7702 authority that applies: the write to its account, and the state gas of the
+///   account and of the delegation it adds when it adds them;
+/// - the state gas of a recipient of value or a created account that EIP-2780 finds new;
+/// - the history of the write records the transaction's start makes: one for the recipient of its
+///   value or the account it creates, and one for each authority that applies.
+///
+/// State gas is priced at the SALT bucket the account lands in. Whether an authority applies and
+/// whether an account is new are the state's to say; a gas limit that cannot pay them runs out of
+/// gas rather than being refused.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct IntrinsicGas {
     /// Regular gas: EIP-2780's base cost with its recipient and value charges, the calldata, the
@@ -58,6 +68,14 @@ impl IntrinsicGas {
     /// No gas limit below it is valid. One at or above it can still be refused by the other
     /// rules: the block's gas limit, and, for a gas limit above the execution cap, a regular part
     /// or a floor that the cap does not cover.
+    ///
+    /// It is what validation requires, not what the transaction needs to succeed: it leaves out
+    /// what the state decides (see [`IntrinsicGas`]) and the execution. At the spec's byte prices
+    /// and this gas limit, a call without value to an account without code runs, and so does a
+    /// transfer of value to the sender itself; a transfer of value to another account runs out of
+    /// gas on the history of its recipient's write record, and one to a new account needs that
+    /// account's state gas as well. Such a transaction is admitted, included, and halts out of
+    /// gas.
     pub fn min_gas_limit(&self) -> u64 {
         self.total().max(self.floor)
     }
