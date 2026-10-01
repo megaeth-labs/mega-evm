@@ -383,7 +383,7 @@ fn genesis_of(dir: &tempfile::TempDir, chain_id: u64, satin_time: u64) -> String
 /// one a forced Satin runs before the file's `satinTime`, and a block of another chain.
 #[test]
 fn test_a_genesis_file_runs_its_chains_blocks_on_its_schedule() {
-    let cache = cache_copy_with_absent_factory();
+    let cache = cache_copy_for_satin();
     let dir = tempfile::tempdir().unwrap();
 
     let run = replay(BLOCKS[0], cache.path(), &["--genesis", &mainnet_genesis(&dir, 0)]);
