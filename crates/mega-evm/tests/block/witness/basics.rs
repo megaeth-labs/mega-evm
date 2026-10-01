@@ -1,9 +1,12 @@
 //! The harness on ordinary blocks: writes, an empty block, a refused transaction, a dropped
-//! candidate, a SALT lookup that fails and one answered below the minimum bucket.
+//! candidate, the reads of a frame that failed, a SALT lookup that fails and one answered below
+//! the minimum bucket.
 
-use alloy_primitives::{Bytes, U256};
+use alloy_primitives::{address, Bytes, U256};
 use mega_evm::{test_utils::BytecodeBuilder, SaltEnv, MIN_BUCKET_SIZE};
-use revm::bytecode::opcode::{CALLDATALOAD, PUSH0, SSTORE};
+use revm::bytecode::opcode::{
+    BALANCE, CALL, CALLDATALOAD, GAS, INVALID, POP, PUSH0, REVERT, SLOAD, SSTORE,
+};
 
 use super::harness::{call, Case, Envs};
 use crate::common::{self, CONTRACT};
@@ -173,4 +176,45 @@ fn test_a_capacity_below_the_minimum_fails_its_transaction_and_is_not_exported()
     assert_eq!(run.receipts.len(), 1);
     assert_eq!(run.record.buckets.get(&below), Some(&Ok(capacity)), "the environment answered");
     assert_eq!(run.bucket_ids, vec![valid], "the export holds the valid bucket alone");
+}
+
+/// A frame that failed has loaded what it read: its failure takes back its writes, not its
+/// reads. A call into a contract that reads one of its slots and another account's balance, then
+/// reverts or halts, leaves the transaction a success whose state names the slot and the account,
+/// so the channel witness holds them and the block replays from it — a validator re-executing the
+/// transaction makes the same reads in the same frame.
+#[test]
+fn test_the_reads_of_a_frame_that_failed_are_in_the_witness() {
+    let reader = address!("0x4000000000000000000000000000000000000007");
+    let read = address!("0x4000000000000000000000000000000000000008");
+    let caller = BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0, PUSH0])
+        .push_address(reader)
+        .append_many([GAS, CALL, POP])
+        .stop()
+        .build();
+    for (how, ending) in [("reverts", vec![PUSH0, PUSH0, REVERT]), ("halts", vec![INVALID])] {
+        let code = BytecodeBuilder::default()
+            .push_number(7_u8)
+            .append_many([SLOAD, POP])
+            .push_address(read)
+            .append_many([BALANCE, POP])
+            .append_many(ending)
+            .build();
+        let db = common::database()
+            .account_code(CONTRACT, caller.clone())
+            .account_code(reader, code)
+            .account_storage(reader, U256::from(7), U256::from(70))
+            .account_balance(read, U256::from(80));
+        let replay = Case::new(&format!("a frame that {how}"), db)
+            .tx(call(0, CONTRACT, Bytes::new(), 1_000_000 + common::body_history(0)))
+            .run();
+        let run = &replay.recorded;
+        assert!(run.tx(0).result.is_success(), "{how}: {:?}", run.tx(0).result);
+        let state = &run.tx(0).state;
+        assert!(state[&reader].storage.contains_key(&U256::from(7)), "{how}: the slot is named");
+        assert!(state.contains_key(&read), "{how}: the account is named");
+        assert!(run.keys.slots.contains(&(reader, U256::from(7))), "{how}: and is a key");
+        assert!(run.keys.accounts.contains(&read), "{how}: as is the account");
+    }
 }
