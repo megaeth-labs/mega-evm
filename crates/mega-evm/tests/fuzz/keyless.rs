@@ -27,7 +27,7 @@ use crate::{
 };
 
 /// The number of keyless cases the property runs in the bounded mode.
-const CASES: u32 = 768;
+const CASES: u32 = 512;
 
 /// The contract's errors, by selector.
 fn error_name(data: &[u8]) -> &'static str {

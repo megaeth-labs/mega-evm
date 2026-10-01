@@ -456,9 +456,9 @@ pub(crate) enum InitCode {
     Invalid,
     /// Destroys the account it is creating, to `to`.
     Selfdestructs { to: Who },
-    /// Calls its caller with all its gas, then deploys a byte: the creator's own code runs
-    /// again under its creation, and may create again. In a keyless deployment the caller is the
-    /// signer, whose code is its delegate's.
+    /// Calls its caller with two million gas, then deploys a byte: the creator's own code runs
+    /// again under its creation, and may create again, a few levels deep before the gas is gone.
+    /// In a keyless deployment the caller is the signer, whose code is its delegate's.
     CallsCaller,
     /// Runs a program of its own; what it returns is deployed.
     Runs(Box<Program>),
@@ -485,7 +485,9 @@ impl InitCode {
             }
             Self::CallsCaller => {
                 let prefix = BytecodeBuilder::default()
-                    .append_many([PUSH0, PUSH0, PUSH0, PUSH0, PUSH0, CALLER, GAS, CALL, POP])
+                    .append_many([PUSH0, PUSH0, PUSH0, PUSH0, PUSH0, CALLER])
+                    .push_number(2_000_000_u32)
+                    .append_many([CALL, POP])
                     .build_vec();
                 constructor(&prefix, &[STOP])
             }
