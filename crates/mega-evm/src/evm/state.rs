@@ -12,11 +12,11 @@
 //!
 //! A SALT bucket's capacity is read through the transaction's [`SaltEnv`](crate::SaltEnv), a side
 //! channel no database sees, and a validator that lacks a bucket's proof cannot price the charge
-//! that landed in it. The context records every bucket the SALT environment answered in the
-//! [`BucketRecord`], which is emptied when a block starts and not between its transactions: the
-//! per-transaction cache of multipliers ([`BucketMultipliers`](crate::BucketMultipliers)) is
-//! forgotten before every transaction, and a record that lived there would lose every
-//! transaction's buckets but the last one's.
+//! that landed in it. The context records every bucket the SALT environment answered with a valid
+//! capacity in the [`BucketRecord`], which is emptied when a block starts and not between its
+//! transactions: the per-transaction cache of multipliers
+//! ([`BucketMultipliers`](crate::BucketMultipliers)) is forgotten before every transaction, and a
+//! record that lived there would lose every transaction's buckets but the last one's.
 //!
 //! The oracle service's answers are in no database either: an `SLOAD` in the Oracle's own frame
 //! loads the chain's slot and takes the service's answer over it. The context records every such
@@ -66,14 +66,15 @@ impl BlockHashRecord {
     }
 }
 
-/// The SALT buckets the SALT environment answered the capacity of.
+/// The SALT buckets the SALT environment answered with a valid capacity.
 ///
-/// One entry per bucket, recorded once the environment answered its capacity, on the cache miss
-/// that asked it. A lookup that fails is not recorded: it fails its transaction with its cause,
-/// so the transaction is in no block and a validator never makes the lookup, and a builder whose
-/// environment failed on the bucket is not held to proving it. What a block's execution was
-/// answered is what a validator re-executing the block asks about, because the engine reads a
-/// bucket at a charge site and nothing else decides whether a charge site is reached.
+/// One entry per bucket, recorded once the environment answered it with a valid capacity, on the
+/// cache miss that asked it. A lookup that fails, with an error or with a capacity below the
+/// minimum bucket, is not recorded: it fails its transaction with its cause, so the transaction is
+/// in no block and a validator never makes the lookup, and a builder whose environment failed on
+/// the bucket is not held to proving it. What a block's execution was answered is what a validator
+/// re-executing the block asks about, because the engine reads a bucket at a charge site and
+/// nothing else decides whether a charge site is reached.
 ///
 /// The record accumulates over everything one EVM executes for a block — the pre-block calls and
 /// the system transactions included, which read none, and a candidate the builder executed and

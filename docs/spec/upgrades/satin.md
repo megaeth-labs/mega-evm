@@ -806,9 +806,9 @@ The witness is defined by what the block's execution returns and exports, and a 
 - **The reads a validator makes again.**
   A read that gas or a limit skipped is skipped again on replay, so the witness need not carry it: a cold `SLOAD` or account load with less gas than the cold surcharge, a `BLOCKHASH` of the current block or outside the last 256 blocks, an oracle read the frame cannot pay, a read a frame whose volatile-data access is off is refused, a keyless deployment's reads after a rule refused it, and the bucket of a charge a system-originated transaction or a system call makes.
 - **The SALT buckets.**
-  Block execution exports the set of SALT buckets whose capacity the SALT environment answered during the block, emptied when the block starts and accumulated over everything executed for the block.
-  A bucket is in the set once its capacity was answered, whether or not the transaction that asked is in the block: a candidate the builder executed and dropped leaves its buckets in the set, which a validator does not need.
-  A lookup that failed is not in the set: it fails its transaction, which is in no block, and a validator never makes it.
+  Block execution exports the set of SALT buckets the SALT environment answered with a valid capacity during the block, emptied when the block starts and accumulated over everything executed for the block.
+  A bucket is in the set once it was answered with a valid capacity, whether or not the transaction that asked is in the block: a candidate the builder executed and dropped leaves its buckets in the set, which a validator does not need.
+  A lookup that failed is not in the set, whether the environment could not answer it or answered a capacity below `MIN_BUCKET_SIZE`: it fails its transaction, which is in no block, and a validator never makes it.
   A witness MUST prove the capacity of every bucket in the set.
   The set is complete for the transactions the block's own execution ran: a bucket is asked about at a state charge site and nowhere else, and a validator re-executing the block's transactions reaches the same charge sites.
   A node that runs the block's transactions on several executions, or that empties the set between transactions, MUST take the union of what each reports; a transaction executed elsewhere and committed into the block adds nothing to the set of the execution it was committed into.

@@ -660,16 +660,17 @@ where
         self.evm.clear_accessed_block_hashes();
     }
 
-    /// The SALT buckets whose capacity the SALT environment answered during this block's execution
-    /// so far, in ascending order: every bucket a state charge was priced in.
+    /// The SALT buckets the SALT environment answered with a valid capacity during this block's
+    /// execution so far, in ascending order: every bucket a state charge was priced in.
     ///
     /// A bucket's capacity is read through the SALT environment, which no database sees, and a
     /// validator that lacks a bucket's proof cannot price the charge that landed in it, so this is
     /// where a stateless witness learns which buckets it must carry. The set is complete for the
     /// transactions this executor's EVM ran: the engine asks about a bucket at a state charge site
     /// and nowhere else, and a validator re-executing them reaches the same charge sites. A lookup
-    /// that failed is not in it, because it failed its transaction, which is in no block; the
-    /// pre-block calls and the system transactions read no bucket and add none.
+    /// that failed, with an error or with a capacity below the minimum bucket, is not in it,
+    /// because it failed its transaction, which is in no block; the pre-block calls and the system
+    /// transactions read no bucket and add none.
     ///
     /// What the record covers, and what it does not:
     ///

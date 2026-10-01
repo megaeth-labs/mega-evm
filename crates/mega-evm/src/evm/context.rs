@@ -300,7 +300,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// ([`BucketError`](crate::BucketError)).
     ///
     /// The bucket is recorded for the block's witness ([`bucket_record`](Self::bucket_record))
-    /// once the environment answered its capacity; see
+    /// once the environment answered it with a valid capacity; see
     /// [`bucket_multiplier`](Self::bucket_multiplier).
     pub fn account_bucket_multiplier(
         &mut self,
@@ -324,11 +324,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// environment answers, which is cached for the transaction and recorded for the block's
     /// witness.
     ///
-    /// The record is written on the cache miss alone, once the environment answered: a cache
-    /// hit adds nothing the miss did not, and a lookup that failed fails the transaction with its
-    /// cause, so the transaction is in no block and a validator never makes the lookup — a proof
-    /// of that bucket is one nobody uses, and a builder whose environment failed on it must not
-    /// be held to proving it.
+    /// The record is written on the cache miss alone, once the environment answered with a valid
+    /// capacity: a cache hit adds nothing the miss did not, and a lookup that failed, with an error
+    /// or with a capacity below the minimum bucket, fails the transaction with its cause, so the
+    /// transaction is in no block and a validator never makes the lookup — a proof of that bucket
+    /// is one nobody uses, and a builder whose environment failed on it must not have to prove it.
     fn bucket_multiplier(
         &mut self,
         bucket: BucketId,

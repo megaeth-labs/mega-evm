@@ -255,8 +255,8 @@ where
         self.ctx_mut().clear_block_hash_record();
     }
 
-    /// The SALT buckets whose capacity the SALT environment answered on this EVM so far, in
-    /// ascending order.
+    /// The SALT buckets the SALT environment answered with a valid capacity on this EVM so far,
+    /// in ascending order.
     ///
     /// A bucket's capacity is read through a side channel no database sees, so this is where a
     /// stateless witness learns which buckets it must prove. The record holds what this EVM
