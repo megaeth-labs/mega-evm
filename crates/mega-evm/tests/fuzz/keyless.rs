@@ -22,7 +22,7 @@ use crate::{
         tx::{DeployAddress, Encoding, Override, Shape, SignerCode},
         Value,
     },
-    harness::{check, fail, prop_check, prop_eq},
+    harness::{check, fail, print_tally, prop_check, prop_eq},
     render::render_outcome,
 };
 
@@ -275,7 +275,5 @@ fn test_property_a_keyless_deployment_follows_its_rules() {
         }
         Ok(())
     });
-    for (class, n) in tally.lock().unwrap().iter() {
-        println!("{n:5} {class}");
-    }
+    print_tally("keyless_deployment_follows_its_rules", tally.into_inner().unwrap());
 }

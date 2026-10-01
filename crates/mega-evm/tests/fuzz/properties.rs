@@ -28,7 +28,7 @@ use crate::{
         tx::{tx, Delegate, Shape},
         Flavor, Who, SYSTEM_ADDRESS,
     },
-    harness::{check, prop_check, prop_eq},
+    harness::{check, print_tally, prop_check, prop_eq},
     render::{render, render_outcome},
 };
 
@@ -72,9 +72,7 @@ fn test_property_no_panic() {
             Ok(())
         },
     );
-    for (class, n) in tally.lock().unwrap().iter() {
-        println!("{n:5} {class}");
-    }
+    print_tally("no_panic", tally.into_inner().unwrap());
 }
 
 /// The same input twice gives byte-identical outcomes: the result, its gas, logs and output, the
@@ -136,9 +134,7 @@ fn test_property_a_reused_evm_runs_a_transaction_as_a_fresh_one_does() {
             Ok(())
         },
     );
-    for (ended, n) in tally.lock().unwrap().iter() {
-        println!("{n:5} {ended}");
-    }
+    print_tally("reused_evm", tally.into_inner().unwrap());
 }
 
 /// An inspector that only records changes nothing: without one, under the gas inspector of the

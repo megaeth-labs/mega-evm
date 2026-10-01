@@ -10,9 +10,12 @@
 //!   `MEGA_FUZZ_SEED` names one; the seed is printed at the start of every property so a failure of
 //!   a long run is reproducible.
 //!
-//! `MEGA_FUZZ_CASES` overrides the case count in either mode; `MEGA_FUZZ_SEED` the seed. A failure
-//! panics with the property's name, the reason, the seed and case count that reproduce the run and
-//! the minimal failing case, as `Debug` renders it.
+//! `MEGA_FUZZ_CASES` replaces a property's case count in either mode: every property then runs
+//! exactly that many cases, and the long mode's multiplier does not apply. `MEGA_FUZZ_SEED` names
+//! the seed in either mode. Either variable set to the empty string counts as unset, so a caller
+//! that always exports them, as a workflow input does, need not unset them. A failure panics with
+//! the property's name, the reason, the seed and case count that reproduce the run and the minimal
+//! failing case, as `Debug` renders it.
 
 use std::{fmt::Debug, time::SystemTime};
 
@@ -52,25 +55,57 @@ impl FuzzConfig {
     /// Reads the mode from the environment; `bounded_cases` is the property's case count in the
     /// bounded mode.
     pub(crate) fn from_env(bounded_cases: u32) -> Self {
-        let long = std::env::var(LONG_ENV_VAR)
-            .map(|v| !matches!(v.trim(), "" | "0" | "false"))
-            .unwrap_or(false);
-        let cases = match std::env::var(CASES_ENV_VAR) {
-            Ok(v) => {
-                v.trim().parse().unwrap_or_else(|_| panic!("{CASES_ENV_VAR}={v:?} is not a number"))
+        let var = |name: &str| std::env::var(name).ok();
+        Self::from_vars(
+            bounded_cases,
+            var(LONG_ENV_VAR).as_deref(),
+            var(CASES_ENV_VAR).as_deref(),
+            var(SEED_ENV_VAR).as_deref(),
+            || {
+                SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(DEFAULT_SEED)
+            },
+        )
+    }
+
+    /// The mode the three variables choose, each `None` when unset; `clock` draws the long mode's
+    /// seed when none is named.
+    ///
+    /// - The long mode is on when its variable is anything but empty, `0` or `false`.
+    /// - A case count, when named, is the count: it replaces the bounded count and the long mode's
+    ///   multiple of it alike. Unnamed, the count is the bounded one, times [`LONG_MULTIPLIER`] in
+    ///   the long mode.
+    /// - A seed, when named, is the seed. Unnamed, the bounded mode's is [`DEFAULT_SEED`] and the
+    ///   long mode's comes from the clock.
+    /// - An empty value is an unnamed one.
+    ///
+    /// # Panics
+    ///
+    /// When a case count or a seed is named and is not a number.
+    fn from_vars(
+        bounded_cases: u32,
+        long: Option<&str>,
+        cases: Option<&str>,
+        seed: Option<&str>,
+        clock: impl FnOnce() -> u64,
+    ) -> Self {
+        fn named(value: Option<&str>) -> Option<&str> {
+            value.map(str::trim).filter(|v| !v.is_empty())
+        }
+        let long = named(long).is_some_and(|v| !matches!(v, "0" | "false"));
+        let cases = match named(cases) {
+            Some(v) => {
+                v.parse().unwrap_or_else(|_| panic!("{CASES_ENV_VAR}={v:?} is not a number"))
             }
-            Err(_) if long => bounded_cases.saturating_mul(LONG_MULTIPLIER),
-            Err(_) => bounded_cases,
+            None if long => bounded_cases.saturating_mul(LONG_MULTIPLIER),
+            None => bounded_cases,
         };
-        let seed = match std::env::var(SEED_ENV_VAR) {
-            Ok(v) => {
-                v.trim().parse().unwrap_or_else(|_| panic!("{SEED_ENV_VAR}={v:?} is not a number"))
-            }
-            Err(_) if long => SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(DEFAULT_SEED),
-            Err(_) => DEFAULT_SEED,
+        let seed = match named(seed) {
+            Some(v) => v.parse().unwrap_or_else(|_| panic!("{SEED_ENV_VAR}={v:?} is not a number")),
+            None if long => clock(),
+            None => DEFAULT_SEED,
         };
         Self { cases, seed, long }
     }
@@ -151,6 +186,19 @@ pub(crate) fn check<S>(
     }
 }
 
+/// Prints what a property counted along its run, one line per class under the property's name,
+/// in one write, so the tallies of properties running side by side do not interleave.
+pub(crate) fn print_tally<K: std::fmt::Display>(
+    name: &str,
+    tally: impl IntoIterator<Item = (K, u32)>,
+) {
+    let mut out = format!("{name}:\n");
+    for (class, n) in tally {
+        out.push_str(&format!("{n:7} {class}\n"));
+    }
+    print!("{out}");
+}
+
 /// Fails the running case with `message`, as a property does when it finds a counterexample.
 pub(crate) fn fail(message: impl Into<String>) -> TestCaseError {
     TestCaseError::fail(message.into())
@@ -180,3 +228,76 @@ macro_rules! prop_check {
 
 pub(crate) use prop_check;
 pub(crate) use prop_eq;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BOUNDED: u32 = 256;
+    const CLOCK: u64 = 77;
+
+    fn config(long: Option<&str>, cases: Option<&str>, seed: Option<&str>) -> FuzzConfig {
+        FuzzConfig::from_vars(BOUNDED, long, cases, seed, || CLOCK)
+    }
+
+    /// Every combination of the three variables unset, empty and set: the mode, the case count
+    /// and the seed each chooses.
+    #[test]
+    fn test_the_mode_the_environment_chooses() {
+        let unset_or_empty = [None, Some(""), Some("  ")];
+        for long_off in [None, Some(""), Some("0"), Some("false")] {
+            for cases in unset_or_empty {
+                for seed in unset_or_empty {
+                    assert_eq!(
+                        config(long_off, cases, seed),
+                        FuzzConfig { cases: BOUNDED, seed: DEFAULT_SEED, long: false },
+                        "the bounded mode: {long_off:?} {cases:?} {seed:?}"
+                    );
+                }
+            }
+            assert_eq!(
+                config(long_off, Some("5000"), Some("9")),
+                FuzzConfig { cases: 5_000, seed: 9, long: false },
+                "the bounded mode takes a case count and a seed"
+            );
+        }
+        for long_on in [Some("1"), Some("true"), Some("yes")] {
+            for cases in unset_or_empty {
+                for seed in unset_or_empty {
+                    assert_eq!(
+                        config(long_on, cases, seed),
+                        FuzzConfig { cases: BOUNDED * LONG_MULTIPLIER, seed: CLOCK, long: true },
+                        "the long mode: {long_on:?} {cases:?} {seed:?}"
+                    );
+                }
+                assert_eq!(
+                    config(long_on, cases, Some("9")),
+                    FuzzConfig { cases: BOUNDED * LONG_MULTIPLIER, seed: 9, long: true },
+                    "a named seed replaces the clock's"
+                );
+            }
+            assert_eq!(
+                config(long_on, Some("20000"), None),
+                FuzzConfig { cases: 20_000, seed: CLOCK, long: true },
+                "a named case count is the count: the multiplier does not apply to it"
+            );
+            assert_eq!(
+                config(long_on, Some(" 20000 "), Some(" 9 ")),
+                FuzzConfig { cases: 20_000, seed: 9, long: true },
+                "surrounding blanks are ignored"
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "MEGA_FUZZ_CASES=\"many\" is not a number")]
+    fn test_a_case_count_that_is_not_a_number_is_refused() {
+        config(None, Some("many"), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "MEGA_FUZZ_SEED=\"lucky\" is not a number")]
+    fn test_a_seed_that_is_not_a_number_is_refused() {
+        config(Some("1"), None, Some("lucky"));
+    }
+}
