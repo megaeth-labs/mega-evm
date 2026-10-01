@@ -466,7 +466,7 @@ for s in $(seq 1 20); do MEGA_FUZZ_SEED=$s cargo test --release -p mega-evm --te
 
 - **Two modes.**
   The bounded mode is deterministic: seed 0, a fixed case count per property (128 to 768), under ten seconds in debug.
-  It is part of `cargo test --workspace`, and the `fuzz-release` job of `build-and-test.yml` runs it in release.
+  It is part of `cargo test --workspace`, which `build-and-test.yml` runs in debug (`test`), where every debug assertion runs, and in release (`test-release`), where none does.
   The long mode (`MEGA_FUZZ_LONG=1`) multiplies each property's count by fifty and draws a seed from the clock unless `MEGA_FUZZ_SEED` names one; `fuzz.yml` runs it on `workflow_dispatch`, in debug and in release, since a schedule fires only on the default branch.
   `MEGA_FUZZ_SEED` names the seed in either mode.
   `MEGA_FUZZ_CASES` names the case count in either mode, and it is the count: every property runs exactly that many cases, and the long mode's multiplier does not apply to it.

@@ -102,25 +102,6 @@ jobs:
       - name: Check no_std
         run: cargo check -p mega-evm --target riscv64imac-unknown-none-elf --no-default-features --locked
 
-  # The randomized tests (crates/mega-evm/tests/fuzz) in their bounded mode, in a release build:
-  # the debug run is part of `cargo test --workspace` above and exercises every debug assertion;
-  # the release run exercises the code the sequencer ships, where those assertions are gone. Both
-  # are deterministic (a fixed seed, a fixed case count) and finish in well under a minute.
-  # The long mode runs on dispatch (fuzz.yml).
-  fuzz-release:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-      - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-      - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
-      - name: Run the randomized tests in release
-        run: cargo test --release --locked -p mega-evm --test fuzz
-
   no-std:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
