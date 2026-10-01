@@ -111,6 +111,13 @@ const ARBITRARY_PRECISION_NUMBER: &str = "$serde_json::private::Number";
 ///   same object written into the file alike, so both are read as the number; every reader parses
 ///   here, so every reader reads it the same.
 ///
+/// The parser reads no other fork's key. Satin runs on the OP Karst fork and the Ethereum forks
+/// Karst includes, Osaka among them, and [`hardforks`](Self::hardforks) schedules those at genesis;
+/// a node, whose own schedule times those forks, must check when it loads the configuration that
+/// every one of them is active at `satinTime`, and refuse it otherwise. The engine executes every
+/// Satin block on Karst, so a configuration that activates Satin before one of them has the node
+/// and the engine apply different rules to the same block.
+///
 /// A flat key is one entry of the object, so a checker that freezes a configuration key by key
 /// freezes each parameter on its own and names it when it changes. It does not stop a key being
 /// added later; a rule that refuses a new key starting with `satin` once the configuration was
@@ -188,6 +195,10 @@ impl SatinChainConfig {
 
     /// The hardfork schedule this configuration makes: [`MegaHardforkConfig::new`]'s base forks,
     /// Satin at [`activation_time`](Self::activation_time), and both params types attached.
+    ///
+    /// The base forks, every OP and Ethereum fork up to Karst, are at genesis here whatever the
+    /// genesis file times them at: a node checks the file's own times against `satinTime` (see
+    /// the [format](Self)).
     ///
     /// # Errors
     ///

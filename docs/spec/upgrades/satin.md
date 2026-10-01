@@ -831,6 +831,9 @@ A node, a stateless validator and a replay tool must agree on everything below, 
   Addresses are hex strings.
   The key format is provisional until a network publishes a genesis file carrying it.
 
+  The Satin keys do not time the forks Satin runs on: Optimism Karst and the Ethereum forks it includes, Osaka among them, are timed by the configuration's own keys for them.
+  Every Satin block executes on Karst's rules, so a node must check, when it loads the configuration, that each of those forks is active at `satinTime`, and refuse the configuration otherwise: a Satin block before one of them would be executed on rules the node's own schedule does not apply to it.
+
 ## Safety and Compatibility
 
 Satin changes nothing about blocks under earlier specs: a node replaying history resolves each block's spec from its timestamp and applies that spec's rules.
