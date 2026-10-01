@@ -26,7 +26,8 @@ const SLOT: U256 = U256::from_limbs([42, 0, 0, 0]);
 const SERVICE_VALUE: U256 = U256::from_limbs([0x1234_5678, 0, 0, 0]);
 const STATE_VALUE: U256 = U256::from_limbs([0xfedc_ba98, 0, 0, 0]);
 
-/// A second slot, which a dropped candidate reads, and the value the service answers for it.
+/// A second slot, which a dropped candidate reads, and the value the service answers for it —
+/// and answers a dropped candidate for [`SLOT`] before it moves on to [`SERVICE_VALUE`].
 const OTHER_SLOT: U256 = U256::from_limbs([43, 0, 0, 0]);
 const OTHER_VALUE: U256 = U256::from_limbs([0x0bad_cafe, 0, 0, 0]);
 
@@ -177,6 +178,65 @@ fn test_the_replayed_answers_are_the_included_transactions_own() {
     assert!(!log.oracle_replayed_exactly, "the log's first read is not the transaction's");
     assert_eq!(returned(&log, 1), STATE_VALUE);
     assert_differs("the service's log", &recorded, &log);
+}
+
+/// A dropped candidate that read the same slot as an included transaction, the service having
+/// moved on between the two: its log holds both answers for the slot, in execution order, and
+/// the included transaction's record holds its own.
+///
+/// A validator given the included transaction's record replays the block. One handed the
+/// service's log answers the included read with the candidate's answer — the slot is the same, so
+/// no read is out of place, and only the answer left over tells — and computes another block. A
+/// validator without a service depends on the slot alone: it computes the block when the journal
+/// holds the included read's answer at the read, whatever the service answered before, and
+/// another block when it holds the candidate's.
+#[test]
+fn test_a_dropped_read_of_the_same_slot_leaves_the_included_read_its_own_answer() {
+    let case = |chain_value: U256| {
+        Case::new(
+            "oracle read after a dropped read of the same slot",
+            db().account_storage(ORACLE_CONTRACT_ADDRESS, SLOT, chain_value),
+        )
+        .envs(Envs::new().with_oracle_storage(SLOT, OTHER_VALUE))
+        .tx(call(0, ORACLE_CONTRACT_ADDRESS, get_slot(), gas(36)))
+        .dropped(0)
+        .service_answers_after(0, SLOT, SERVICE_VALUE)
+        .tx(call(0, ORACLE_CONTRACT_ADDRESS, get_slot(), gas(36)))
+    };
+    let dropped_read = OracleRead { slot: SLOT, answer: Some(OTHER_VALUE) };
+
+    // The chain holds the answer the dropped candidate was given.
+    let stale = case(OTHER_VALUE);
+    let recorded = stale.record();
+    assert!(recorded.txs[0].is_err(), "the candidate was dropped");
+    assert_eq!(returned(&recorded, 1), SERVICE_VALUE, "the service had moved on");
+    assert_eq!(recorded.record.oracle_reads, vec![dropped_read, SLOT_READ], "one slot, twice");
+    assert_eq!(recorded.tx(1).oracle_reads, vec![SLOT_READ], "the included one recorded its own");
+    assert_eq!(recorded.included_oracle_reads(), vec![SLOT_READ]);
+
+    let own = stale.replay_channels(&recorded, Oracle::Recorded);
+    assert_same_run("the included transaction's record", &recorded, &own);
+    assert!(own.oracle_replayed_exactly);
+
+    let mut witness = stale.channel_witness(&recorded);
+    witness.oracle_reads.clone_from(&recorded.record.oracle_reads);
+    let log = stale.replay(&witness, &recorded.included(), Oracle::Recorded);
+    assert_eq!(returned(&log, 1), OTHER_VALUE, "the candidate's answer, for the same slot");
+    assert_eq!(log.tx(1).oracle_reads, vec![dropped_read]);
+    assert!(!log.oracle_replayed_exactly, "an answer was left over");
+    assert_differs("the service's log", &recorded, &log);
+
+    let without = stale.replay_channels(&recorded, Oracle::Absent);
+    assert_eq!(returned(&without, 1), OTHER_VALUE, "the slot holds the candidate's answer");
+    assert_differs("no service, the candidate's answer in the slot", &recorded, &without);
+
+    // The chain holds the answer the included transaction was given.
+    let held = case(SERVICE_VALUE);
+    let recorded = held.record();
+    assert_eq!(recorded.record.oracle_reads, vec![dropped_read, SLOT_READ]);
+    assert_eq!(returned(&recorded, 1), SERVICE_VALUE);
+    let without = held.replay_channels(&recorded, Oracle::Absent);
+    assert_same_run("no service, the included answer in the slot", &recorded, &without);
 }
 
 /// A validator without a service finds the answer in the slot only if an included transaction

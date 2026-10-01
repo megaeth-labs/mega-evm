@@ -73,6 +73,9 @@ pub(crate) struct Case {
     pub txs: Vec<Tx>,
     /// The candidates the builder executes and then does not commit.
     pub dropped: BTreeSet<usize>,
+    /// The answers the oracle service moves on to while the block is built: `(index, slot,
+    /// value)` has it answer `value` for `slot` once the candidate at `index` was executed.
+    pub service_updates: Vec<(usize, U256, U256)>,
 }
 
 /// Why a candidate is not in the recorded block.
@@ -93,6 +96,7 @@ impl Case {
             env: common::evm_env(),
             txs: Vec::new(),
             dropped: BTreeSet::new(),
+            service_updates: Vec::new(),
         }
     }
 
@@ -107,6 +111,20 @@ impl Case {
     pub(crate) fn dropped(mut self, index: usize) -> Self {
         self.dropped.insert(index);
         self
+    }
+
+    /// Has the oracle service answer `value` for `slot` from the moment the candidate at `index`
+    /// was executed: the service moves on while the builder works, so two executions that read
+    /// one slot may be answered differently.
+    pub(crate) fn service_answers_after(mut self, index: usize, slot: U256, value: U256) -> Self {
+        self.service_updates.push((index, slot, value));
+        self
+    }
+
+    /// Sets the oracle service's answer for `slot`. The environments a recording runs against
+    /// share their answers with the case's, so the running block sees the change.
+    fn set_service_answer(&self, slot: U256, value: U256) {
+        drop(self.envs.clone().with_oracle_storage(slot, value));
     }
 
     /// Runs against `envs`.
@@ -134,7 +152,9 @@ impl Case {
     }
 
     /// Runs the block, recording every read: every candidate is executed, and the ones the
-    /// builder drops are not committed.
+    /// builder drops are not committed. The oracle service moves on to its later answers as the
+    /// candidates are executed, and is put back where the block found it afterwards, so another
+    /// recording of the case meets the same service.
     pub(crate) fn record(&self) -> Run {
         let record = SharedWitnessRecord::default();
         let state = State::builder()
@@ -142,7 +162,23 @@ impl Case {
             .with_bundle_update()
             .build();
         let factory = RecordingEnvFactory::new(self.envs.clone(), record.clone());
-        let mut run = self.drive(state, factory, |_| true);
+        let answers = self.envs.oracle_storage();
+        let mut run = self.drive(
+            state,
+            factory,
+            |_| true,
+            |executed| {
+                for (index, slot, value) in &self.service_updates {
+                    if *index == executed {
+                        self.set_service_answer(*slot, *value);
+                    }
+                }
+            },
+        );
+        self.envs.clear_oracle_storage();
+        for (slot, value) in answers {
+            self.set_service_answer(slot, value);
+        }
         run.record = record.take();
         run
     }
@@ -163,7 +199,7 @@ impl Case {
             Oracle::Absent => StrictEnvFactory::<Envs>::without_oracle(witness),
         };
         let factory = RecordingEnvFactory::new(strict.clone(), reads.clone());
-        let mut run = self.drive(state, factory, |index| included[index]);
+        let mut run = self.drive(state, factory, |index| included[index], |_| {});
         run.record = reads.take();
         run.oracle_replayed_exactly = strict.oracle().replayed_exactly();
         run
@@ -246,8 +282,15 @@ impl Case {
     }
 
     /// Runs the block on `state` with the environments `factory` makes, executing the candidates
-    /// `include` admits and committing those the builder does not drop.
-    fn drive<DB, F>(&self, mut state: State<DB>, factory: F, include: impl Fn(usize) -> bool) -> Run
+    /// `include` admits and committing those the builder does not drop; `executed` is told each
+    /// candidate's index once its execution returned, whatever it returned.
+    fn drive<DB, F>(
+        &self,
+        mut state: State<DB>,
+        factory: F,
+        include: impl Fn(usize) -> bool,
+        executed: impl Fn(usize),
+    ) -> Run
     where
         DB: Database<Error: core::error::Error + Send + Sync + 'static> + Debug,
         F: ExternalEnvFactory,
@@ -275,7 +318,9 @@ impl Case {
                 txs.push(Err(NOT_INCLUDED.into()));
                 continue;
             }
-            let outcome = match executor.run_transaction(tx) {
+            let outcome = executor.run_transaction(tx);
+            executed(index);
+            let outcome = match outcome {
                 Ok(outcome) => outcome,
                 Err(error) => {
                     txs.push(Err(error.to_string()));
