@@ -1,8 +1,8 @@
 //! The harness on ordinary blocks: writes, an empty block, a refused transaction, a dropped
-//! candidate and a SALT lookup that fails.
+//! candidate, a SALT lookup that fails and one answered below the minimum bucket.
 
 use alloy_primitives::{Bytes, U256};
-use mega_evm::{test_utils::BytecodeBuilder, SaltEnv};
+use mega_evm::{test_utils::BytecodeBuilder, SaltEnv, MIN_BUCKET_SIZE};
 use revm::bytecode::opcode::{CALLDATALOAD, PUSH0, SSTORE};
 
 use super::harness::{call, Case, Envs};
@@ -146,4 +146,31 @@ fn test_a_failed_salt_lookup_fails_its_transaction_and_is_not_exported() {
         "the environment recorded the failure"
     );
     assert_eq!(run.bucket_ids, vec![answered], "the export holds the answered bucket alone");
+}
+
+/// A SALT environment that answers a capacity below the minimum bucket has answered nothing a
+/// bucket can hold: the lookup fails its transaction as an error does, so the bucket is not
+/// exported although the environment's record holds its answer, and the block's other
+/// transaction replays on a witness that proves the valid bucket alone.
+#[test]
+fn test_a_capacity_below_the_minimum_fails_its_transaction_and_is_not_exported() {
+    if common::state_is_free() {
+        return;
+    }
+    let below = <Envs as SaltEnv>::bucket_id_for_slot(CONTRACT, U256::from(1));
+    let valid = <Envs as SaltEnv>::bucket_id_for_slot(CONTRACT, U256::from(2));
+    let capacity = MIN_BUCKET_SIZE as u64 - 1;
+    let mut db = common::database();
+    db.set_account_code(CONTRACT, slot_writer());
+    let replay = Case::new("capacity below the minimum", db)
+        .envs(Envs::new().with_bucket_capacity(below, capacity))
+        .tx(call(0, CONTRACT, slot(1), write_gas()))
+        .tx(call(0, CONTRACT, slot(2), write_gas()))
+        .run();
+    let run = &replay.recorded;
+    assert!(run.refusal(0).contains("below the minimum bucket"), "{}", run.refusal(0));
+    assert!(run.tx(1).result.is_success());
+    assert_eq!(run.receipts.len(), 1);
+    assert_eq!(run.record.buckets.get(&below), Some(&Ok(capacity)), "the environment answered");
+    assert_eq!(run.bucket_ids, vec![valid], "the export holds the valid bucket alone");
 }

@@ -30,7 +30,7 @@ use mega_evm::{
     BlockGasCounters, BucketId, ExternalEnvFactory, LimitCheck, LimitUsage, MegaBlockExecutionCtx,
     MegaBlockExecutor, MegaEvmFactory, MegaGasUsage, MegaHaltReason, MegaHardforkConfig,
     MegaSpecId, MegaTxEnvelope, OracleRead, PreBlockStateSource, ProtocolLimits, SaltEnv,
-    TestExternalEnvs,
+    TestExternalEnvs, MIN_BUCKET_SIZE,
 };
 use op_alloy_consensus::TxDeposit;
 use revm::{
@@ -234,7 +234,8 @@ impl Case {
     /// read and on the channel witness, against the included transactions' recorded oracle
     /// answers, and asserts every replay produced the block the recording produced; that the
     /// engine's oracle records are the service's own view of the block; and that the executor's
-    /// exports are the recorded side-channel reads.
+    /// exports are the recorded side-channel reads, a bucket only where the environment answered
+    /// it with a valid capacity.
     ///
     /// A replay that asks for a key its witness does not hold is refused the read, and the
     /// transaction or the block that asked fails with it, so the comparison with the recording is
@@ -260,15 +261,20 @@ impl Case {
             "{}: the engine's oracle records are the service's view of every execution",
             self.name
         );
+        // A capacity below the minimum bucket fails its lookup as an error does.
+        let valid = |answer: &Result<u64, String>| {
+            answer.as_ref().is_ok_and(|capacity| *capacity >= MIN_BUCKET_SIZE as u64)
+        };
         assert_eq!(
             recorded.bucket_ids,
             recorded
                 .record
                 .buckets
                 .iter()
-                .filter_map(|(id, answer)| answer.is_ok().then_some(*id))
+                .filter_map(|(id, answer)| valid(answer).then_some(*id))
                 .collect::<Vec<_>>(),
-            "{}: the exported buckets are the SALT lookups the environment answered",
+            "{}: the exported buckets are the SALT lookups the environment answered with a valid \
+             capacity",
             self.name
         );
         assert_eq!(
