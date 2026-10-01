@@ -785,15 +785,20 @@ The witness is defined by what the block's execution returns and exports, and a 
 
 - **The witness.**
   A block's witness holds:
-  - every account and every storage slot named by a pre-block state or by the returned state of a transaction the block includes, as the chain held it before the block — an absent account recorded as absent and an empty slot as zero — and the code the chain held for every such account before the block;
+  - every account and every storage slot the block loads, in a pre-block step or in a transaction the block includes, as the chain held it before the block — an absent account recorded as absent and an empty slot as zero — and the code the chain held for every such account before the block;
   - the hash of every block `BLOCKHASH` read, which the block's execution exports;
   - the capacity of every SALT bucket the block's execution exports;
   - the oracle service's answer to every oracle read the block's included transactions recorded, in block order.
-    The set is a function of the block's states and exports alone, not of how the node caches state: a node that serves a block's execution from a state cache another block filled builds the same witness, because the returned states name what was read whether or not a database was asked for it.
+    A transaction loads every account and slot its execution reads from the state: in its validation, in its fee settlement, and in any of its frames, a frame that reverted or halted included.
+    A failed frame's writes are taken back, not its reads, and a validator re-executing the transaction makes the same reads in that frame.
+    The one exception is the L1 block info the transaction is priced against, which the pre-block phase loads for the whole block (see the L1 block info, below).
+    A read that gas or a limit skipped loads nothing (see the reads a validator makes again, below).
+    Execution reports what it loaded: a pre-block step in the pre-block state it hands over, and a transaction in its returned state, which names every account and slot the transaction loaded, whether it wrote it or not and whether the frame that loaded it succeeded or not.
+    The set is a function of those states and the exports alone, not of how the node caches state: a node that serves a block's execution from a state cache another block filled builds the same witness, because the states name what was loaded whether or not a database was asked for it.
     A state names the keys; the values are the chain's.
     The code in particular is not the code a returned state carries: a transaction that replaces an account's code — an EIP-7702 authority delegated anew — is admitted against the code the chain held, and its returned state carries the code it wrote.
 - **What the block reads, and where it lands.**
-  A transaction's reads through its journal land in its returned state: its sender, its recipient or created address with its code, the accounts, code and slots its frames touch, the fee recipients, the live system address a transaction of the system shape reads, and a keyless deployment's signer and deploy address.
+  A transaction's loads are in its returned state: its sender, its recipient or created address with its code, every account, with its code, and every slot any of its frames loads, the fee recipients, the live system address a transaction of the system shape reads, and a keyless deployment's signer and deploy address.
   The pre-block phase's reads land in the pre-block states, in order: the two EIP calls' states, each system-contract deploy's read-only or created entry, the registry's pending slots the due-change decision read, the `applyPendingChanges()` call's state, and last the L1 block info.
   `BLOCKHASH` reads the chain's history outside the journal and its reads are exported; a SALT bucket's capacity and the oracle service's answer are read outside the database and are exported or recorded.
   The header, the chain configuration — the schedule with the protocol limits and the sequencer registry parameters attached to it — the parent hash, the parent beacon block root, the extra data, the activation flag and the block's slot number are inputs a validator is given beside the witness.
