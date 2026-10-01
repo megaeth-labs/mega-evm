@@ -21,7 +21,10 @@ use revm::{
 
 use super::{
     basics::{slot, slot_writer, write_gas},
-    harness::{authorization, call, call_with_value, create, deposit, eip7702, Case, Run},
+    harness::{
+        assert_same_run, authorization, call, call_with_value, create, deposit, eip7702, Case,
+        Oracle, Run,
+    },
 };
 use crate::{
     common::{self, CALLER, CONTRACT},
@@ -385,4 +388,128 @@ fn test_the_l1_attributes_deposit_first_prices_the_transactions_after_it() {
         "priced against the deposit's write"
     );
     assert_ne!(tx.da_footprint, tx.da_size * u64::from(PARENT_FOOTPRINT_SCALAR));
+}
+
+/// Code that empties the Ecotone fee scalars: a write to the L1 block contract, which the engine
+/// accepts from a deposit like any other.
+fn scalars_emptier() -> Bytes {
+    BytecodeBuilder::default().sstore(ECOTONE_L1_FEE_SCALARS_SLOT, U256::ZERO).stop().build()
+}
+
+/// A block whose first transaction is a deposit that empties the Ecotone scalars, on a chain
+/// that holds them set and holds `overhead`, followed by a user transaction.
+fn scalars_emptied_in_the_block(overhead: U256) -> Case {
+    let mut db = chain_with_l1_info(scalars_emptier());
+    db.set_account_storage(L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT, overhead);
+    Case::new("scalars emptied in the block", db)
+        .tx(deposit(
+            L1_ATTRIBUTES_DEPOSITOR,
+            TxKind::Call(L1_BLOCK_CONTRACT),
+            0,
+            U256::ZERO,
+            Bytes::new(),
+            200_000 + common::new_account_state_gas(),
+        ))
+        .tx(call(0, CONTRACT, slot(1), write_gas()))
+}
+
+/// The scalars are set before the block and a deposit empties them, so the L1 info the next
+/// transaction is priced against is fetched with empty scalars and reads the overhead. No
+/// transaction's state names that slot: the deposit wrote the scalars alone, and the fetch is not
+/// in the user transaction's journal. The pre-block entry carries the overhead whatever the
+/// scalars hold before the block, so the channel witness holds it and the block replays.
+#[test]
+fn test_a_deposit_emptying_the_scalars_leaves_the_overhead_in_the_witness() {
+    let case = scalars_emptied_in_the_block(OVERHEAD);
+    let recorded = case.record();
+    assert!(recorded.tx(0).result.is_success(), "{:?}", recorded.tx(0).result);
+    assert!(recorded.tx(1).result.is_success(), "{:?}", recorded.tx(1).result);
+
+    let written = &recorded.tx(0).state[&L1_BLOCK_CONTRACT].storage;
+    let scalars = &written[&ECOTONE_L1_FEE_SCALARS_SLOT];
+    assert_eq!(scalars.original_value, fee_scalars_word(1_000_000, 1_000_000), "set before");
+    assert_eq!(scalars.present_value, U256::ZERO, "the deposit emptied the scalars");
+    assert!(!written.contains_key(&L1_OVERHEAD_SLOT), "the deposit's state names no overhead");
+    let tx = recorded.tx(1);
+    assert!(!tx.state.contains_key(&L1_BLOCK_CONTRACT), "nor does the transaction after it");
+    assert!(
+        tx.state.get(&L1_FEE_RECIPIENT).is_none_or(|vault| vault.info.balance.is_zero()),
+        "priced against the scalars the deposit left: no L1 fee"
+    );
+    assert_eq!(
+        recorded.record.storage.get(&(L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT)),
+        Some(&OVERHEAD),
+        "the block read the overhead from the database"
+    );
+
+    let witness = case.channel_witness(&recorded);
+    let channel = case.replay(&witness, &recorded.included(), Oracle::Recorded);
+    assert!(
+        channel.txs[1].is_ok(),
+        "the transaction after the deposit replays from the channel witness: {:?}",
+        channel.txs[1].as_ref().err()
+    );
+    assert_eq!(
+        witness.storage.get(&(L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT)),
+        Some(&OVERHEAD),
+        "which holds the overhead"
+    );
+    let entry = l1_entry(&recorded).storage.get(&L1_OVERHEAD_SLOT).expect("in the entry");
+    assert_eq!(entry.present_value, OVERHEAD, "named by the pre-block entry, with set scalars");
+
+    case.run();
+}
+
+/// The overhead is a slot the block must be able to read, and nothing more: the fee of a
+/// transaction priced with empty scalars does not take it in, so the same block on a chain that
+/// holds another overhead produces the same transactions, receipts and state changes.
+#[test]
+fn test_the_overhead_a_block_reads_decides_no_result() {
+    let held = scalars_emptied_in_the_block(OVERHEAD).run().recorded;
+    let zero = scalars_emptied_in_the_block(U256::ZERO).run().recorded;
+    assert_eq!(l1_entry(&held).storage[&L1_OVERHEAD_SLOT].present_value, OVERHEAD);
+    assert_eq!(l1_entry(&zero).storage[&L1_OVERHEAD_SLOT].present_value, U256::ZERO);
+    assert_eq!(held.txs, zero.txs, "the transactions");
+    assert_eq!(held.receipts, zero.receipts, "the receipts");
+    assert_eq!(held.bundle, zero.bundle, "the state changes");
+    assert_eq!((held.gas_used, held.blob_gas_used), (zero.gas_used, zero.blob_gas_used));
+}
+
+/// The entry's other condition: a chain that does not hold the L1 block contract has it recorded
+/// as not existing, with no slot. A deposit that creates the account in the block does not turn
+/// its slots into database reads: the slots of an account the block created are the block's own,
+/// so the transaction priced after the deposit reads none from the chain, and the witness, which
+/// holds the account as absent and no slot of it, replays the block.
+#[test]
+fn test_a_deposit_creating_the_l1_block_contract_adds_no_slot_read() {
+    let mut db = common::database();
+    db.set_account_code(CONTRACT, slot_writer());
+    let case = Case::new("L1 block contract created in the block", db)
+        .tx(deposit(
+            DEPOSITOR,
+            TxKind::Call(L1_BLOCK_CONTRACT),
+            1_000,
+            U256::from(1_000),
+            Bytes::new(),
+            200_000 + 2 * common::new_account_state_gas(),
+        ))
+        .tx(call(0, CONTRACT, slot(1), write_gas()));
+    let recorded = case.record();
+    assert!(recorded.tx(0).result.is_success(), "{:?}", recorded.tx(0).result);
+    assert!(recorded.tx(1).result.is_success(), "{:?}", recorded.tx(1).result);
+    assert!(l1_entry(&recorded).is_loaded_as_not_existing(), "absent before the block");
+    let created = &recorded.tx(0).state[&L1_BLOCK_CONTRACT];
+    assert_eq!(created.info.balance, U256::from(1_000), "the deposit created the account");
+    assert!(
+        !recorded.record.storage.keys().any(|(address, _)| *address == L1_BLOCK_CONTRACT),
+        "no slot of it is read from the database, before the deposit or after"
+    );
+
+    let witness = case.channel_witness(&recorded);
+    assert_eq!(witness.accounts.get(&L1_BLOCK_CONTRACT), Some(&None), "held as absent");
+    assert!(!witness.storage.keys().any(|(address, _)| *address == L1_BLOCK_CONTRACT));
+    let channel = case.replay(&witness, &recorded.included(), Oracle::Recorded);
+    assert_same_run("L1 block contract created in the block", &recorded, &channel);
+
+    case.run();
 }
