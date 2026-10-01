@@ -24,7 +24,7 @@ use revm::{
 
 use super::{
     program::{program, Program},
-    tx::{tx, Shape, Tx},
+    tx::{keyless_tx, tx, DeployAddress, Shape, SignerCode, Tx},
     world::{world, AccountShape, World},
     Flavor, Who, CHAIN_ID, SYSTEM_ADDRESS,
 };
@@ -51,12 +51,21 @@ pub(crate) fn case(flavor: Flavor) -> impl Strategy<Value = Case> {
         .prop_map(|(world, tx, main, a, b)| Case { world, tx, main, a, b })
 }
 
+/// A case whose transaction is a keyless deployment, for the property that holds one to its
+/// rules: among every shape a bounded run draws too few of them to reach each rule.
+pub(crate) fn keyless_case() -> impl Strategy<Value = Case> {
+    let flavor = Flavor::Satin;
+    (world(), keyless_tx(), program(flavor), program(flavor), program(flavor))
+        .prop_map(|(world, tx, main, a, b)| Case { world, tx, main, a, b })
+}
+
 /// How a case ran: the outcome, or the error the engine refused the transaction with.
 pub(crate) type Execution = Result<MegaTransactionOutcome, String>;
 
 impl Case {
     /// The pre-state: the system contracts, the registry naming the system address, the fixed
-    /// accounts with their programs, the delegation, and the keyless signer's funds.
+    /// accounts with their programs, the delegation, and, for a keyless deployment, its signer's
+    /// account and what its deploy address holds.
     pub(crate) fn database(&self) -> MemoryDatabase {
         let mut db = MemoryDatabase::default()
             .account_code(ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE)
@@ -93,10 +102,38 @@ impl Case {
         if world.system_nonce > 0 {
             db.set_account_nonce(SYSTEM_ADDRESS, world.system_nonce as u64);
         }
-        if let (Some(deployment), Shape::Keyless { signer_funded: true, .. }) =
+        if let (Some(deployment), Shape::Keyless { signer, deploy_address, .. }) =
             (self.tx.deployment(), &self.tx.shape)
         {
-            db.set_account_balance(deployment.signer, U256::from(10u64.pow(18)));
+            if let Some(address) = deployment.signer.filter(|_| !signer.is_empty()) {
+                let code = match signer.code {
+                    SignerCode::None => None,
+                    SignerCode::Plain => Some(Bytecode::new_legacy(Bytes::from_static(&[0x00]))),
+                    SignerCode::Delegates(who) => Some(Bytecode::new_eip7702(who.address())),
+                };
+                db.insert_account_info(
+                    address,
+                    AccountInfo {
+                        balance: if signer.funded { U256::from(10u64.pow(18)) } else { U256::ZERO },
+                        nonce: signer.nonce as u64,
+                        code_hash: code
+                            .as_ref()
+                            .map_or(alloy_primitives::KECCAK256_EMPTY, Bytecode::hash_slow),
+                        code,
+                        ..Default::default()
+                    },
+                );
+            }
+            if let Some(address) = deployment.deploy_address() {
+                match deploy_address {
+                    DeployAddress::Empty => {}
+                    DeployAddress::Code => {
+                        db.set_account_code(address, Bytes::from_static(&[0x00]));
+                    }
+                    DeployAddress::Balance => db.set_account_balance(address, U256::from(1)),
+                    DeployAddress::Nonce => db.set_account_nonce(address, 1),
+                }
+            }
         }
         db
     }

@@ -8,6 +8,7 @@ mod blocks;
 mod differential;
 mod gen;
 mod harness;
+mod keyless;
 mod prices;
 mod properties;
 mod regressions;

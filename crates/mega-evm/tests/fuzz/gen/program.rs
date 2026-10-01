@@ -64,6 +64,9 @@ pub(crate) enum Target {
     SelfAddress,
     /// The block beneficiary (`COINBASE`): a volatile read of its account.
     Coinbase,
+    /// The frame's caller (`CALLER`): the contract that called this one, the transaction's
+    /// sender, or, in the init code of a keyless deployment, the signer.
+    Caller,
     /// A system contract, by address; a call runs its bytecode or its interceptor.
     System(SystemContract),
     /// A precompile.
@@ -86,6 +89,7 @@ fn push_target(code: BytecodeBuilder, target: Target) -> BytecodeBuilder {
         Target::Who(who) => code.push_address(who.address()),
         Target::SelfAddress => code.append(ADDRESS),
         Target::Coinbase => code.append(COINBASE),
+        Target::Caller => code.append(CALLER),
         Target::System(contract) => code.push_address(contract.address()),
         Target::Precompile(precompile) => code.push_address(precompile.address()),
     }
@@ -96,6 +100,7 @@ fn target() -> impl Strategy<Value = Target> {
         8 => who().prop_map(Target::Who),
         1 => Just(Target::SelfAddress),
         2 => Just(Target::Coinbase),
+        1 => Just(Target::Caller),
         3 => system_contract().prop_map(Target::System),
         2 => precompile().prop_map(Target::Precompile),
     ]
@@ -451,6 +456,10 @@ pub(crate) enum InitCode {
     Invalid,
     /// Destroys the account it is creating, to `to`.
     Selfdestructs { to: Who },
+    /// Calls its caller with all its gas, then deploys a byte: the creator's own code runs
+    /// again under its creation, and may create again. In a keyless deployment the caller is the
+    /// signer, whose code is its delegate's.
+    CallsCaller,
     /// Runs a program of its own; what it returns is deployed.
     Runs(Box<Program>),
 }
@@ -473,6 +482,12 @@ impl InitCode {
             Self::Invalid => vec![INVALID],
             Self::Selfdestructs { to } => {
                 BytecodeBuilder::default().selfdestruct(to.address()).build_vec()
+            }
+            Self::CallsCaller => {
+                let prefix = BytecodeBuilder::default()
+                    .append_many([PUSH0, PUSH0, PUSH0, PUSH0, PUSH0, CALLER, GAS, CALL, POP])
+                    .build_vec();
+                constructor(&prefix, &[STOP])
             }
             Self::Runs(program) => program.assemble(),
         }
@@ -528,6 +543,7 @@ fn init_code() -> impl Strategy<Value = InitCode> {
         1 => Just(InitCode::Reverts),
         1 => Just(InitCode::Invalid),
         2 => who().prop_map(|to| InitCode::Selfdestructs { to }),
+        1 => Just(InitCode::CallsCaller),
         3 => leaf.prop_map(|program| InitCode::Runs(Box::new(program))),
     ]
 }
