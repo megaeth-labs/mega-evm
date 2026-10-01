@@ -374,7 +374,7 @@ Three dimensions are limited per transaction; compute is not one of them (see [T
 
 - **Data size** counts the byte table of [History Gas](#7-history-gas), plus two items that pay no history: an EIP-7708 transfer log, counted as `TRANSFER_LOG_SIZE` = 160 bytes (a `LOG3` of one word), and an Oracle hint's payload, counted by its length before it is forwarded.
   It counts the body before any frame; the applied authorities' records before the first frame; a frame start's records and transfer log when the frame starts; a storage write's record, a log, and a `SELFDESTRUCT`'s beneficiary record and transfer log once the opcode completed; deployed code once every deposit charge is made and before the creation commits; a hint before it is forwarded, unless it would cross the transaction's limit, in which case it is neither counted nor forwarded (see [Oracle Storage Reads and Hints](#16-oracle-storage-reads-and-hints)).
-  A deposit's data size is counted like any transaction's, and a deposit that fails keeps what it counted: its body and the hints it forwarded.
+  A deposit's data size is counted like any transaction's, and a deposit that fails keeps what it counted: its body and the hints it admitted.
 - **Write records.**
   One record per account or storage write the transaction keeps: a slot's first change in the transaction (taken back when the slot is written back to its original value); a value transfer's sender and recipient; a creation's creator nonce and created account; a `SELFDESTRUCT` that moves a balance to another account (its beneficiary); an applied EIP-7702 authority; the transaction's value recipient or created account.
   The sender's own account and the four fee accounts are part of the body and MUST NOT be counted as records; a frame running as the sender records nothing for the sender's account.
@@ -421,8 +421,8 @@ What was applied before the first frame is not the frames' doing, and a later st
 - the sender's nonce and the fees it pays; for a deposit, its mint and the caller account it created, with that account's state gas;
 - the EIP-7702 authorizations admitted before the first frame: their authorities' nonce and delegation writes, their state gas, their write records, and the history gas those records cost.
 
-An Oracle hint a frame forwarded before the stop is not the frames' state either: its payload has reached the oracle service, so it MUST stay counted as data size through the stop.
-A hint that would itself cross the data-size limit is neither forwarded nor counted (see [Oracle Storage Reads and Hints](#16-oracle-storage-reads-and-hints)).
+An Oracle hint a frame admitted before the stop is not the frames' state either: it MUST stay counted as data size through the stop, whether its payload reached the oracle service or failed to decode (see [Oracle Storage Reads and Hints](#16-oracle-storage-reads-and-hints)).
+A hint that would itself cross the data-size limit is neither forwarded nor counted.
 
 A limit is enforced before the writes it guards:
 
