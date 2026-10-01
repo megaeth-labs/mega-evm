@@ -593,7 +593,8 @@ impl LimitStop {
     /// The stop a transaction ended with, read off its `result` and the `limit_exceeded` it
     /// reports: [`MegaTransactionOutcome::limit_exceeded`](crate::MegaTransactionOutcome), or,
     /// for a transaction run through another entry point,
-    /// [`AdditionalLimit::latched`] on the EVM's context once it ran.
+    /// [`AdditionalLimit::latched`] on the EVM's context, read after the transaction ran and
+    /// before the next transaction or system call starts on the EVM, which resets it.
     ///
     /// `Some` when both say so: `limit_exceeded` names a transaction-level limit, and `result` is
     /// a revert whose output is that limit's [`MegaLimitExceeded`]. The output alone never makes a
