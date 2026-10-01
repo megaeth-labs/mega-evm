@@ -105,7 +105,11 @@ const ARBITRARY_PRECISION_NUMBER: &str = "$serde_json::private::Number";
 ///   already kept the last one.
 /// - A value of the wrong type is refused, naming its key; a value its params type refuses
 ///   ([`HardforkParams::validate`]) is refused, and so is a schedule
-///   [`validate_schedule`](MegaHardforks::validate_schedule) refuses.
+///   [`validate_schedule`](MegaHardforks::validate_schedule) refuses. One object is read as an
+///   integer: `{"$serde_json::private::Number": "<digits>"}`, the form `serde_json` hands a number
+///   over in when its `arbitrary_precision` feature is on. A deserializer shows that form and the
+///   same object written into the file alike, so both are read as the number; every reader parses
+///   here, so every reader reads it the same.
 ///
 /// A flat key is one entry of the object, so a checker that freezes a configuration key by key
 /// freezes each parameter on its own and names it when it changes. It does not stop a key being
