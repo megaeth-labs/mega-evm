@@ -801,11 +801,11 @@ The witness is defined by what the block's execution returns and exports, and a 
   - the hash of every block `BLOCKHASH` read, which the block's execution exports;
   - the capacity of every SALT bucket the block's execution exports;
   - the oracle service's answer to every oracle read the block's included transactions recorded, in block order.
-    A transaction loads every account and slot its execution reads from the state: in its validation, in its fee settlement, and in any of its frames, a frame that reverted or halted included.
-    A failed frame's writes are taken back, not its reads, and a validator re-executing the transaction makes the same reads in that frame.
+    A transaction loads every account and slot its execution reads from the state: in its validation, in its fee settlement, and in any of its frames, a frame that reverted or halted included, and a frame of a deposit that failed.
+    A failed frame's writes are taken back, not its reads; a failed deposit takes back everything but its sender's nonce bump and mint, not its reads; and a validator re-executing the transaction makes the same reads in the same frames.
     The one exception is the L1 block info the transaction is priced against, which the pre-block phase loads for the whole block (see the L1 block info, below).
     A read that gas or a limit skipped loads nothing (see the reads a validator makes again, below).
-    Execution reports what it loaded: a pre-block step in the pre-block state it hands over, and a transaction in its returned state, which names every account and slot the transaction loaded, whether it wrote it or not and whether the frame that loaded it succeeded or not.
+    Execution reports what it loaded: a pre-block step in the pre-block state it hands over, and a transaction in its returned state, which names every account and slot the transaction loaded, whether it wrote it or not, whether the frame that loaded it succeeded or not, and, for a deposit, whether the deposit failed or not.
     The set is a function of those states and the exports alone, not of how the node caches state: a node that serves a block's execution from a state cache another block filled builds the same witness, because the states name what was loaded whether or not a database was asked for it.
     A state names the keys; the values are the chain's.
     The code in particular is not the code a returned state carries: a transaction that replaces an account's code — an EIP-7702 authority delegated anew — is admitted against the code the chain held, and its returned state carries the code it wrote.
