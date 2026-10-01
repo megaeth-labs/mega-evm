@@ -271,11 +271,15 @@ where
         }
         let stands = gas.state_gas_spent();
         let Some(frame) = self.op.first_frame_input(evm, gas)? else {
-            // The runtime gas phase ran out of gas on EIP-2780's charge for the account the first
-            // frame adds. revm drops the phase's partial charges by rebuilding the transaction's
-            // gas from its intrinsic cost, and the history charged for the first frame's write
-            // record went with them: the settlement must not give it back a second time, into a
-            // reservoir a transaction below the execution cap never had.
+            // The runtime gas phase could not pay for the first frame's start: EIP-2780's charge
+            // for the account the frame adds, a call's recipient or a creation's account, or the
+            // access to the code a delegated recipient runs, warm or cold. A price of that account
+            // charge that could not be read ends here too: the lookup recorded its cause, which
+            // fails the transaction when it settles. In each case revm drops the phase's partial
+            // charges by rebuilding the transaction's gas from its intrinsic cost, and the history
+            // charged for the first frame's write record went with them: the settlement must not
+            // give it back a second time, into a reservoir a transaction below the execution cap
+            // never had.
             evm.ctx_mut().additional_limit.set_top_level_write_record_gas(0);
             return Ok(None);
         };
