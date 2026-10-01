@@ -233,9 +233,13 @@ impl Case {
     /// Records the block, replays its included transactions on the record of every database
     /// read and on the channel witness, against the included transactions' recorded oracle
     /// answers, and asserts every replay produced the block the recording produced; that the
-    /// database-level replay read nothing the record does not hold; that the engine's oracle
-    /// records are the service's own view of the block; and that the executor's exports are the
-    /// recorded side-channel reads.
+    /// engine's oracle records are the service's own view of the block; and that the executor's
+    /// exports are the recorded side-channel reads.
+    ///
+    /// A replay that asks for a key its witness does not hold is refused the read, and the
+    /// transaction or the block that asked fails with it, so the comparison with the recording is
+    /// what catches a missing key; a replay's own record holds only the reads its witness served,
+    /// and cannot show one.
     pub(crate) fn run(self) -> Replay {
         let recorded = self.record();
         let included = recorded.included();
@@ -244,12 +248,6 @@ impl Case {
         record.oracle_reads = recorded.included_oracle_reads();
         let replayed = self.replay(&record, &included, Oracle::Recorded);
         assert_same_run(&self.name, &recorded, &replayed);
-        assert!(
-            recorded.record.covers(&replayed.record),
-            "{}: the replay read what the record does not hold: {:?}",
-            self.name,
-            recorded.record.missing_from(&replayed.record)
-        );
         assert!(replayed.oracle_replayed_exactly, "{}: the oracle reads were replayed", self.name);
 
         let channel = self.replay_channels(&recorded, Oracle::Recorded);

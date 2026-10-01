@@ -139,26 +139,20 @@ pub fn check_replay(
     );
     let record: WitnessRecord = record.take();
 
-    let reads = SharedWitnessRecord::default();
+    // A replay that asks for a key its witness does not hold is refused the read and fails with
+    // it, so the comparison is what catches a missing key.
     let strict = StrictEnvFactory::<EmptyExternalEnv>::replaying(&record);
     let replayed = run(
         mode,
         fork,
-        RecordingDatabase::new(StrictDatabase::new(record.clone()), reads.clone()),
-        RecordingEnvFactory::new(strict.clone(), reads.clone()),
+        StrictDatabase::new(record),
+        strict.clone(),
         block.clone(),
         chain_id,
         tx.clone(),
     );
-    let reads: WitnessRecord = reads.take();
 
     compare(&recorded, &replayed)?;
-    if !record.covers(&reads) {
-        return Err(format!(
-            "the replay read what the record does not hold: {:?}",
-            record.missing_from(&reads)
-        ));
-    }
     if !strict.oracle().replayed_exactly() {
         return Err("the oracle reads were not replayed in order".into());
     }
@@ -185,17 +179,9 @@ pub fn check_replay(
         outcome.oracle_reads.clone(),
     )
     .map_err(|error| format!("the pre-state could not be read: {error}"))?;
-    let reads = SharedWitnessRecord::default();
     let strict = StrictEnvFactory::<EmptyExternalEnv>::replaying(&witness);
-    let channel = run(
-        mode,
-        fork,
-        RecordingDatabase::new(StrictDatabase::new(witness), reads.clone()),
-        RecordingEnvFactory::new(strict.clone(), reads),
-        block,
-        chain_id,
-        tx,
-    );
+    let channel =
+        run(mode, fork, StrictDatabase::new(witness), strict.clone(), block, chain_id, tx);
     compare(&recorded, &channel).map_err(|why| format!("on the channel witness: {why}"))?;
     if !strict.oracle().replayed_exactly() {
         return Err("the oracle reads were not replayed in order on the channel witness".into());
