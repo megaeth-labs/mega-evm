@@ -754,12 +754,15 @@ A transaction MUST be rejected before inclusion when:
 - it is a Mega System Transaction that fails the chain-id, nonce or EIP-3607 check;
 - it fails any inherited validation.
 
+A deposit is never rejected: a deposit that fails any of these checks MUST be included as a failed deposit, which bumps its sender's nonce, credits its mint, uses its whole gas limit and applies nothing else.
+A Mega System Transaction is a legacy transaction until it passes its own chain-id, nonce and EIP-3607 checks, so failing one of those is a rejection; once it passes them it runs as a deposit, and a check it fails after that includes it as a failed deposit.
+
 A transaction MUST be skipped for the current block, and MAY be included in a later one, when:
 
 - its declared gas limit does not fit in the block's remaining gas;
 - its data-availability footprint does not fit in what the block's gas limit has left for footprints;
-- the block has reached the chain's execution-gas, data-size or KV limit;
-- the block has reached the chain's state-gas limit and the transaction adds state gas;
+- it is not a deposit and the block has reached the chain's execution-gas, data-size or KV limit;
+- it is not a deposit, the block has reached the chain's state-gas limit, and the transaction adds state gas;
 - it is not a deposit and the block activates Satin or an Optimism fork from Jovian onward.
 
 A block that contains a transaction it should have skipped is invalid.
