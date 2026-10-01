@@ -2,12 +2,14 @@
 //! access-list transaction, a deposit, a system-address transaction and a keyless deployment,
 //! each at a gas limit below or above the execution cap.
 
+use std::cell::RefCell;
+
 use alloy_op_evm::OpTx;
 use alloy_primitives::{hex, Address, Bytes, Signature, TxKind, B256, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
     alloy_consensus::{Signed, TxLegacy},
-    constants::TX_GAS_LIMIT_CAP,
+    constants::{MAX_INITCODE_SIZE, TX_GAS_LIMIT_CAP},
     system::{
         keyless::{IKeylessDeploy, KEYLESS_DEPLOY_ADDRESS},
         IOracle, ORACLE_CONTRACT_ADDRESS,
@@ -291,6 +293,53 @@ pub(crate) enum DeployAddress {
     Nonce,
 }
 
+/// The size of a keyless deployment's init code: as drawn, or padded with zero bytes to the
+/// initcode size limit or past it. The padding never runs, since a frame that runs off the end of
+/// its code stops as it does on a zero byte, so the init code does what it did unpadded; only its
+/// size, and what the size costs, change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InitSize {
+    /// As drawn: a few hundred bytes at most.
+    Drawn,
+    /// The initcode size limit exactly, which the rule admits.
+    AtLimit,
+    /// One byte over the limit.
+    JustOver,
+    /// Twice the limit.
+    TwiceOver,
+}
+
+impl InitSize {
+    /// The size of init code drawn at `drawn` bytes.
+    pub(crate) const fn size(self, drawn: usize) -> usize {
+        match self {
+            Self::Drawn => drawn,
+            Self::AtLimit => MAX_INITCODE_SIZE,
+            Self::JustOver => MAX_INITCODE_SIZE + 1,
+            Self::TwiceOver => 2 * MAX_INITCODE_SIZE,
+        }
+    }
+
+    /// `code` at this size.
+    fn pad(self, mut code: Vec<u8>) -> Vec<u8> {
+        let size = self.size(code.len());
+        assert!(code.len() <= size, "init code is drawn below the size it is padded to");
+        code.resize(size, 0);
+        code
+    }
+}
+
+/// The size of the init code the keyless property draws: as drawn mostly, and in one case in eight
+/// at the boundary of the initcode size limit or far past it.
+fn init_size() -> impl Strategy<Value = InitSize> {
+    prop_oneof![
+        21 => Just(InitSize::Drawn),
+        1 => Just(InitSize::AtLimit),
+        1 => Just(InitSize::JustOver),
+        1 => Just(InitSize::TwiceOver),
+    ]
+}
+
 /// The shape of a transaction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Shape {
@@ -307,10 +356,12 @@ pub(crate) enum Shape {
     /// engine when the registry names its caller. Off the whitelist it is an ordinary
     /// transaction.
     SystemAddress { call: SysCall, nonce_ok: bool, chain_ok: bool, off_whitelist: bool },
-    /// A `keylessDeploy` call deploying `init`, signed at `signed_nonce` for `signed_gas` and
-    /// carrying `signed_value`, into a world where the signer and the deploy address are as given.
+    /// A `keylessDeploy` call deploying `init` at `init_size`, signed at `signed_nonce` for
+    /// `signed_gas` and carrying `signed_value`, into a world where the signer and the deploy
+    /// address are as given.
     Keyless {
         init: InitCode,
+        init_size: InitSize,
         encoding: Encoding,
         signed_nonce: u8,
         signed_value: Value,
@@ -325,11 +376,12 @@ fn access_list() -> impl Strategy<Value = Vec<(Who, u8)>> {
     proptest::collection::vec((who(), 0u8..=3), 0..=2)
 }
 
-/// A keyless deployment.
-fn keyless_shape() -> impl Strategy<Value = Shape> {
+/// A keyless deployment, its init code at a size `init_size` draws.
+fn keyless_shape(init_size: impl Strategy<Value = InitSize>) -> impl Strategy<Value = Shape> {
     let init = super::program::program_with(Flavor::Satin, 0, 6);
     // Most keyless cases pass every rule and start their creation; each rule's refusal is drawn
-    // often enough to be hit in a bounded run.
+    // often enough to be hit in a bounded run of the keyless property, the initcode size limit's
+    // through the sizes that property draws.
     (
         prop_oneof![
             4 => init.prop_map(|p| InitCode::Runs(Box::new(p))),
@@ -370,6 +422,7 @@ fn keyless_shape() -> impl Strategy<Value = Shape> {
             1 => Just(DeployAddress::Balance),
             1 => Just(DeployAddress::Nonce),
         ],
+        init_size,
     )
         .prop_map(
             |(
@@ -381,8 +434,10 @@ fn keyless_shape() -> impl Strategy<Value = Shape> {
                 gas_override,
                 signer,
                 deploy_address,
+                init_size,
             )| Shape::Keyless {
                 init,
+                init_size,
                 encoding,
                 signed_nonce,
                 signed_value,
@@ -399,7 +454,9 @@ fn shape(flavor: Flavor) -> impl Strategy<Value = Shape> {
         Flavor::Satin => 2,
         Flavor::Neutral => 1,
     };
-    let keyless = keyless_shape();
+    // Init code at the size limit is a mebibyte of calldata, which would cost every property for
+    // a rule only the keyless property holds the engine to: here it is always as drawn.
+    let keyless = keyless_shape(Just(InitSize::Drawn));
     let system_address = (
         sys_call(),
         prop_oneof![9 => Just(true), 1 => Just(false)],
@@ -463,9 +520,10 @@ pub(crate) fn tx(flavor: Flavor) -> impl Strategy<Value = Tx> {
     tx_of(shape(flavor))
 }
 
-/// A keyless deployment, and nothing else.
+/// A keyless deployment, and nothing else, its init code sometimes at the initcode size limit or
+/// past it.
 pub(crate) fn keyless_tx() -> impl Strategy<Value = Tx> {
-    tx_of(keyless_shape())
+    tx_of(keyless_shape(init_size()))
 }
 
 /// A transaction of a shape `shape` draws.
@@ -490,7 +548,10 @@ fn tx_of(shape: impl Strategy<Value = Shape>) -> impl Strategy<Value = Tx> {
     )
         .prop_map(|(shape, (value, own_value), (gas, keyless_gas), price, nonce_ok)| {
             let (value, gas) = match shape {
-                Shape::Keyless { .. } => (own_value, keyless_gas),
+                // Init code at the size limit is a mebibyte of calldata, whose history only the
+                // tier above the execution cap covers at the spec's byte prices.
+                Shape::Keyless { init_size: InitSize::Drawn, .. } => (own_value, keyless_gas),
+                Shape::Keyless { .. } => (own_value, GasTier::AboveCap),
                 Shape::SystemAddress { .. } => (own_value, gas),
                 _ => (value, gas),
             };
@@ -561,19 +622,41 @@ impl Deployment {
 
 impl Tx {
     /// The deployment a keyless transaction carries, if it is one.
+    ///
+    /// A case asks for it three times — for its database, its transaction and the property — and
+    /// init code at the size limit is a mebibyte or two, which a debug build takes tens of
+    /// milliseconds to encode and recover the signer of, so the last one built on the thread is
+    /// kept.
     pub(crate) fn deployment(&self) -> Option<Deployment> {
-        match &self.shape {
-            Shape::Keyless { init, encoding, signed_nonce, signed_value, signed_gas, .. } => {
-                Some(Deployment::new(
-                    *encoding,
-                    *signed_nonce as u64,
-                    signed_gas.limit(),
-                    signed_value.wei(),
-                    init.assemble().into(),
-                ))
-            }
-            _ => None,
+        thread_local! {
+            static LAST: RefCell<Option<(Shape, Deployment)>> = const { RefCell::new(None) };
         }
+        let Shape::Keyless {
+            init,
+            init_size,
+            encoding,
+            signed_nonce,
+            signed_value,
+            signed_gas,
+            ..
+        } = &self.shape
+        else {
+            return None;
+        };
+        LAST.with_borrow_mut(|last| {
+            if let Some((_, deployment)) = last.as_ref().filter(|(shape, _)| *shape == self.shape) {
+                return Some(deployment.clone());
+            }
+            let deployment = Deployment::new(
+                *encoding,
+                *signed_nonce as u64,
+                signed_gas.limit(),
+                signed_value.wei(),
+                init_size.pad(init.assemble()).into(),
+            );
+            *last = Some((self.shape.clone(), deployment.clone()));
+            Some(deployment)
+        })
     }
 
     /// Whether the transaction is a deposit at the envelope level.

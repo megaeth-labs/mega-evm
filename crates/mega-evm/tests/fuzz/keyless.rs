@@ -4,7 +4,8 @@
 //! reach each rule, so this property draws nothing else: a `keylessDeploy` call over a signer and
 //! a deploy address the generators set up — the signer's nonce, funds and code, a contract, a
 //! balance or a nonce at the deploy address — carrying a transaction that may be encoded as the
-//! rules want it or not, signed at a nonce and for a gas limit that may or may not pass.
+//! rules want it or not, signed at a nonce and for a gas limit that may or may not pass, with init
+//! code that may be at the initcode size limit or past it.
 //!
 //! The rules are restated here from the generator's own fields, in the order the spec gives them,
 //! so the property holds the engine to the order as well as to each rule.
@@ -13,13 +14,13 @@ use std::{collections::BTreeMap, sync::Mutex};
 
 use alloy_primitives::{Address, KECCAK256_EMPTY, U256};
 use alloy_sol_types::{SolCall, SolError};
-use mega_evm::{system::keyless::IKeylessDeploy, MegaLimitExceeded};
+use mega_evm::{constants::MAX_INITCODE_SIZE, system::keyless::IKeylessDeploy, MegaLimitExceeded};
 use revm::context::result::{ExecutionResult, HaltReason};
 
 use crate::{
     gen::{
         case::{keyless_case, Case},
-        tx::{DeployAddress, Encoding, Override, Shape, SignerCode},
+        tx::{DeployAddress, Encoding, InitSize, Override, Shape, SignerCode},
         Value,
     },
     harness::{check, fail, print_tally, prop_check, prop_eq},
@@ -82,9 +83,12 @@ const NEVER_PRODUCED: [&str; 7] = [
 /// What the generator's fields say of a keyless call, rule by rule.
 struct Rules {
     /// The first rule that refuses the call whatever gas it has, in the spec's order: the call's
-    /// value, the encoding, the signed nonce, the override against the signed gas limit, the
-    /// signature, the signer's nonce, the signer's code. `None` when each admits it.
+    /// value, the encoding, the signed nonce, the init code's size, the override against the
+    /// signed gas limit, the signature, the signer's nonce, the signer's code. `None` when each
+    /// admits it.
     refused: Option<&'static str>,
+    /// The size of the init code the carried transaction holds.
+    init_size: usize,
     /// Whether the deploy address holds a contract, which refuses the call once the rules above
     /// and the gas admit it.
     exists: bool,
@@ -94,6 +98,8 @@ struct Rules {
 
 fn rules(case: &Case) -> Rules {
     let Shape::Keyless {
+        init,
+        init_size,
         encoding,
         signed_nonce,
         signed_value,
@@ -105,6 +111,7 @@ fn rules(case: &Case) -> Rules {
     else {
         unreachable!("a keyless case")
     };
+    let init_size = init_size.size(init.assemble().len());
     let refused = if case.tx.value != Value::Zero {
         Some("NoEtherTransfer")
     } else if matches!(encoding, Encoding::Truncated | Encoding::Trailing) {
@@ -115,6 +122,8 @@ fn rules(case: &Case) -> Rules {
         Some("NotPreEIP155")
     } else if *signed_nonce != 0 {
         Some("NonZeroTxNonce")
+    } else if init_size > MAX_INITCODE_SIZE {
+        Some("InitCodeTooLarge")
     } else if matches!(gas_override, Override::Zero | Override::Short) {
         Some("GasLimitTooLow")
     } else if *encoding == Encoding::BadSignature {
@@ -129,6 +138,7 @@ fn rules(case: &Case) -> Rules {
     let balance = if signer.funded { U256::from(10u64.pow(18)) } else { U256::ZERO };
     Rules {
         refused,
+        init_size,
         exists: *deploy_address == DeployAddress::Code,
         underfunded: balance < signed_value.wei(),
     }
@@ -137,7 +147,8 @@ fn rules(case: &Case) -> Rules {
 /// A `keylessDeploy` call follows its rules, in their order, and settles its signer:
 ///
 /// - a call a rule refuses whatever its gas reverts with that rule's error, the first in the spec's
-///   order, unless it ran out of gas before or a limit stopped the transaction;
+///   order, unless it ran out of gas before or a limit stopped the transaction, and init code over
+///   the initcode size limit is refused naming its size and the limit;
 /// - a call those rules admit reverts only with `GasLimitTooLow`, when what it has left no longer
 ///   covers the signed gas limit, with `ContractAlreadyExists` when the deploy address holds a
 ///   contract, with `InsufficientBalance` when the signer cannot fund the carried value, or with
@@ -158,7 +169,9 @@ fn test_property_a_keyless_deployment_follows_its_rules() {
     let tally: Mutex<BTreeMap<String, u32>> = Mutex::new(BTreeMap::new());
     check("keyless_deployment_follows_its_rules", CASES, keyless_case, |case| {
         let count = |class: String| *tally.lock().unwrap().entry(class).or_default() += 1;
-        let Shape::Keyless { signer, .. } = &case.tx.shape else { unreachable!("a keyless case") };
+        let Shape::Keyless { signer, init_size, .. } = &case.tx.shape else {
+            unreachable!("a keyless case")
+        };
         let Ok(outcome) = case.execute() else {
             count("the transaction is refused".to_string());
             return Ok(());
@@ -202,6 +215,16 @@ fn test_property_a_keyless_deployment_follows_its_rules() {
                     !NEVER_PRODUCED.contains(&error) && error != "an unknown error",
                     "the call reverts with {error}\n{rendered}"
                 );
+                if error == "InitCodeTooLarge" {
+                    let Ok(refusal) = IKeylessDeploy::InitCodeTooLarge::abi_decode(output) else {
+                        return Err(fail(format!("the refusal does not decode\n{rendered}")));
+                    };
+                    prop_eq!(
+                        (refusal.size, refusal.max),
+                        (rules.init_size as u64, MAX_INITCODE_SIZE as u64),
+                        "the refusal names the init code's size and the limit\n{rendered}"
+                    );
+                }
                 match rules.refused {
                     Some(rule) => prop_eq!(
                         error,
@@ -270,6 +293,11 @@ fn test_property_a_keyless_deployment_follows_its_rules() {
                 }
                 if signer.nonce == 1 && nonce == Some(1) {
                     count("  the creation's bump is taken back from nonce 1".to_string());
+                }
+                if *init_size == InitSize::AtLimit {
+                    count(
+                        "  init code at the initcode size limit started its creation".to_string(),
+                    );
                 }
             }
         }
