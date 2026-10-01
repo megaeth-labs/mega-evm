@@ -783,11 +783,13 @@ The witness is defined by what the block's execution returns and exports, and a 
 
 - **The witness.**
   A block's witness holds:
-  - every account and every storage slot named by a pre-block state or by the returned state of a transaction the block includes, as the chain held it before the block — an absent account recorded as absent and an empty slot as zero — and the code of every such account;
+  - every account and every storage slot named by a pre-block state or by the returned state of a transaction the block includes, as the chain held it before the block — an absent account recorded as absent and an empty slot as zero — and the code the chain held for every such account before the block;
   - the hash of every block `BLOCKHASH` read, which the block's execution exports;
   - the capacity of every SALT bucket the block's execution exports;
   - the oracle service's answer to every oracle read the block's included transactions recorded, in block order.
     The set is a function of the block's states and exports alone, not of how the node caches state: a node that serves a block's execution from a state cache another block filled builds the same witness, because the returned states name what was read whether or not a database was asked for it.
+    A state names the keys; the values are the chain's.
+    The code in particular is not the code a returned state carries: a transaction that replaces an account's code — an EIP-7702 authority delegated anew — is admitted against the code the chain held, and its returned state carries the code it wrote.
 - **What the block reads, and where it lands.**
   A transaction's reads through its journal land in its returned state: its sender, its recipient or created address with its code, the accounts, code and slots its frames touch, the fee recipients, the live system address a transaction of the system shape reads, and a keyless deployment's signer and deploy address.
   The pre-block phase's reads land in the pre-block states, in order: the two EIP calls' states, each system-contract deploy's read-only or created entry, the registry's pending slots the due-change decision read, the `applyPendingChanges()` call's state, and last the L1 block info.
