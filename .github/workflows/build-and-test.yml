@@ -75,6 +75,33 @@ jobs:
         working-directory: crates/system-contracts
         run: forge test
 
+  msrv:
+    runs-on: ubuntu-24.04
+    # Sized for a cold cache, which compiles the whole graph, the legacy leg's included, and then
+    # the no_std target.
+    timeout-minutes: 15
+    env:
+      # The workspace's declared `rust-version`; the variable takes precedence over
+      # rust-toolchain.toml, so every cargo call below runs on it.
+      RUSTUP_TOOLCHAIN: "1.94.0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Rust 1.94.0
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          # Installed in place of rust-toolchain.toml's, and set as the directory's override; the
+          # cache is keyed on it, apart from the other jobs'.
+          toolchain: "1.94.0"
+          target: riscv64imac-unknown-none-elf
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+      - name: Check the workspace
+        run: cargo check --workspace --all-targets --all-features --locked
+      - name: Check no_std
+        run: cargo check -p mega-evm --target riscv64imac-unknown-none-elf --no-default-features --locked
+
   no-std:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

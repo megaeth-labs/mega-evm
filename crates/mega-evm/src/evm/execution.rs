@@ -87,6 +87,39 @@ impl<EVM, ERROR, FRAME> Default for MegaHandler<EVM, ERROR, FRAME> {
     }
 }
 
+impl<DB, EVM, ERROR, FRAME, ExtEnvs> MegaHandler<EVM, ERROR, FRAME>
+where
+    DB: Database,
+    ExtEnvs: ExternalEnvTypes,
+    EVM: EvmTr<Context = MegaContext<DB, ExtEnvs>, Frame = FRAME>,
+    ERROR: EvmTrError<EVM> + From<OpTransactionError> + FromStringError + IsTxError,
+    FRAME: FrameTr<FrameResult = FrameResult, FrameInit = FrameInit>,
+{
+    /// [`validate_env`](Handler::validate_env) once it is decided whether the transaction is a
+    /// system-address transaction: prepares the common execution layer for it, validates a
+    /// system-address transaction and promotes it to a deposit, then validates the transaction as
+    /// op-revm does.
+    ///
+    /// The handler decides it from the live system address it reads out of the state, and checks
+    /// the system address's nonce and code. What validates a transaction without state
+    /// ([`validate_transaction_stateless`](crate::validate_transaction_stateless)) is given the
+    /// address and leaves the account to the state, as it leaves every sender's
+    /// (`check_system_account` false); every other step is this one.
+    pub(crate) fn validate_env_as(
+        &self,
+        evm: &mut EVM,
+        system_transaction: bool,
+        check_system_account: bool,
+    ) -> Result<(), ERROR> {
+        let ctx = evm.ctx_mut();
+        ctx.on_new_tx(system_transaction);
+        if system_transaction {
+            crate::system::validate_and_promote::<_, _, ERROR>(ctx, check_system_account)?;
+        }
+        self.op.validate_env(evm)
+    }
+}
+
 impl<DB, EVM, ERROR, FRAME, ExtEnvs> Handler for MegaHandler<EVM, ERROR, FRAME>
 where
     DB: Database,
@@ -169,13 +202,8 @@ where
     /// system shape reads the live system address, from the journal and without warming it; every
     /// other transaction pays the shape test, a comparison or two on its own fields.
     fn validate_env(&self, evm: &mut Self::Evm) -> Result<(), Self::Error> {
-        let ctx = evm.ctx_mut();
-        let system_transaction = crate::system::is_live_system_transaction(ctx)?;
-        ctx.on_new_tx(system_transaction);
-        if system_transaction {
-            crate::system::validate_and_promote::<_, _, Self::Error>(ctx)?;
-        }
-        self.op.validate_env(evm)
+        let system_transaction = crate::system::is_live_system_transaction(evm.ctx_mut())?;
+        self.validate_env_as(evm, system_transaction, true)
     }
 
     /// Notes whether this transaction's caller is an account executing it creates, then deducts

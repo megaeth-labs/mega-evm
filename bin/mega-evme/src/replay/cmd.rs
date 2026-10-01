@@ -23,11 +23,11 @@ use op_alloy_rpc_types::Transaction;
 
 use crate::{
     common::{
-        op_receipt_to_tx_receipt, parse_bucket_capacity, parse_limits_override,
-        print_execution_summary, print_execution_trace, print_receipt, print_satin_report,
-        satin_schedule, BuildProviderOutput, EvmeExternalEnvs, EvmeOutcome, ExecutionSummary,
-        ExternalEnvSnapshot, LimitsOverride, OpTxReceipt, RpcCacheStore, SatinReport,
-        TxOverrideArgs,
+        check_genesis_chain, op_receipt_to_tx_receipt, parse_bucket_capacity,
+        parse_limits_override, print_execution_summary, print_execution_trace, print_receipt,
+        print_satin_report, satin_schedule, BuildProviderOutput, EvmeExternalEnvs, EvmeOutcome,
+        ExecutionSummary, ExternalEnvSnapshot, LimitsOverride, OpTxReceipt, RpcCacheStore,
+        SatinReport, TxOverrideArgs,
     },
     engine::Engine,
     run, EvmeState,
@@ -132,13 +132,15 @@ impl Cmd {
     /// at a scheduled timestamp, the timestamp of the block the replay runs the transaction in,
     /// from the source the replay itself reads, through a provider that persists nothing: the
     /// transaction's block, or for a pending transaction the latest block, whose environment and
-    /// schedule the replay runs it in.
+    /// schedule the replay runs it in. Under `--genesis` a chain other than the file's is refused
+    /// once the chain id is read, before an engine is picked for it.
     pub async fn engine(&self) -> Result<Engine> {
         let tx_hash = self.tx_hash();
         if let Some(spec) = &self.spec_override {
             return Engine::of_spec(spec);
         }
         let (provider, chain_id) = self.rpc_args.build_lookup_provider().await?;
+        check_genesis_chain(chain_id)?;
         if let Some(engine) = Engine::of_chain(chain_id) {
             return Ok(engine);
         }

@@ -19,6 +19,7 @@ mod result;
 mod schedule;
 mod spec;
 mod state;
+mod validation;
 
 pub use context::*;
 pub use execution::*;
@@ -33,6 +34,7 @@ pub use result::*;
 pub use schedule::*;
 pub use spec::*;
 pub use state::*;
+pub use validation::*;
 
 #[cfg(not(feature = "std"))]
 use alloc as std;

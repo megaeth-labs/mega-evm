@@ -437,7 +437,18 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     }
 }
 
-/// Sets the configuration fields the spec fixes.
+/// The configuration Satin runs on: `cfg` with every field the spec fixes set from the spec, and
+/// every other field (chain id, disabled checks, blob schedule) as `cfg` holds it.
+///
+/// It is the function [`MegaContext::with_cfg`] applies, so an EVM created from an alloy-evm
+/// `EvmEnv` runs `spec_cfg(env.cfg_env)` whatever the env held. A node that builds an `EvmEnv`
+/// passes its configuration through it too: what reads the env before an EVM exists — reth's gas
+/// estimation reads the execution cap off it — then reads the configuration the EVM runs with.
+/// Applying it twice changes nothing.
+///
+/// A deposit, a system-originated transaction and a system call pay no history gas, and the EVM
+/// runs them on a schedule that prices a deposited byte at nothing; it installs that schedule for
+/// such a transaction and the spec's own for every other, so a configuration never carries it.
 ///
 /// Satin runs the Satin gas schedule (see [`satin_gas_params`]) on its Karst base, with EIP-8037
 /// state gas and the EIP-2780 intrinsic cost switched on and gas above the execution cap going to
@@ -456,7 +467,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
 /// executing the chain. It reaches system calls only: every transaction's gas is split by the
 /// execution cap as before, the system-address transaction's included, which is a deposit and
 /// not a system call.
-fn spec_cfg(mut cfg: CfgEnv<MegaSpecId>) -> CfgEnv<MegaSpecId> {
+pub fn spec_cfg(mut cfg: CfgEnv<MegaSpecId>) -> CfgEnv<MegaSpecId> {
     cfg.gas_params = satin_gas_params();
     cfg.enable_amsterdam_eip8037 = true;
     cfg.enable_amsterdam_eip2780 = true;

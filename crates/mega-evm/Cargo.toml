@@ -20,7 +20,7 @@ alloy-evm.workspace = true
 alloy-hardforks.workspace = true
 alloy-op-evm.workspace = true
 alloy-op-hardforks.workspace = true
-alloy-primitives.workspace = true
+alloy-primitives = { workspace = true, features = ["serde"] }
 alloy-sol-types.workspace = true
 op-alloy-consensus.workspace = true
 op-revm = { workspace = true, features = ["dev", "serde"] }
@@ -35,7 +35,7 @@ mega-system-contracts = { workspace = true, default-features = false }
 auto_impl.workspace = true
 delegate.workspace = true
 derive_more = { workspace = true, optional = true, features = ["debug", "deref", "deref_mut", "display", "error"] }
-serde = { workspace = true, features = ["derive"] }
+serde = { workspace = true, features = ["alloc", "derive"] }
 
 [dev-dependencies]
 # alloy

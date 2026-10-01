@@ -788,6 +788,56 @@ A signer at nonce 1 stays at 1 whether its deployment succeeds or fails, so fail
 
 A `receive()` hook reached through Solidity's `transfer()` can emit one three-topic event with one word of data from the history allowance; a second event must be paid from the 2,300-gas stipend and cannot be.
 
+### Node integrators
+
+A node, a stateless validator and a replay tool must agree on everything below, or they execute different chains.
+
+- **The execution configuration.**
+  The spec fixes part of the configuration a transaction runs on, whatever a node supplies: the Satin gas schedule, EIP-8037, EIP-2780 and EIP-7708 on, the 200,000,000 execution cap, and the 512 KiB and 1 MiB code-size limits.
+  A node that reads the configuration before it executes anything — gas estimation reads the execution cap — must read these values, not its own.
+- **What a transaction pool can check without state.**
+  The gas limit must cover the intrinsic regular gas (EIP-2780's base and recipient and value charges, calldata, access list, authorizations, init code) plus the history gas of the transaction's body, and the calldata floor; above the execution cap, the intrinsic regular gas and the floor must fit under the cap.
+  The rest of the stateless validation is the base layer's.
+  Whether a recipient, a created account or an authority is new is the state's to say: EIP-2780 charges it when the transaction runs, and a gas limit that cannot pay it runs out of gas rather than being refused.
+  The history of the write records a transaction's start makes is charged when it runs too: one record for the recipient of its value or the account it creates, and one for each authority that applies.
+  So the least gas limit validation admits is not what a transaction needs: at that gas limit a transfer of value to another account runs out of gas on its recipient's record, and one to a new account needs that account's state gas as well.
+  A deposit and a Mega System Transaction pay no history gas; a pool that recognizes the latter needs the live system address from the state.
+  That address changes only in a block's pre-block step and then holds for the whole block, so a pool reads it again for every block, from the state after that block's pre-block changes.
+  An address read from another state treats the old system address's transactions as the protocol's and the new one's as a user's, or the reverse.
+  A deposit is never refused: one that fails validation is included as a failed deposit, which bumps its sender's nonce and uses its whole gas limit.
+- **Reporting a limit stop.**
+  A stop is a revert whose output is `MegaLimitExceeded(kind, limit)`, and a contract can revert with the same bytes, as can a caller that re-raises what a frame budget returned.
+  Execution reports whether a transaction-level limit stopped the transaction; a node must read that report, and must not infer a stop from the output alone.
+- **The chain configuration.**
+  A genesis file's `config` object carries Satin as flat keys beside the other forks': `satinTime`, the activation timestamp, and one key per parameter, the `satin` prefix before the parameter's own name.
+
+  | Key                                  | Parameter                                                                          |
+  | ------------------------------------ | ---------------------------------------------------------------------------------- |
+  | `satinInitialSystemAddress`          | The `SequencerRegistry`'s initial system address                                   |
+  | `satinInitialSequencer`              | Its initial sequencer                                                              |
+  | `satinInitialAdmin`                  | Its admin                                                                          |
+  | `satinInitialFromBlock`              | The first block its historical lookups are valid for                               |
+  | `satinMinRotationDelay`              | Its minimum rotation delay, in blocks                                              |
+  | `satinTxDataSizeLimit`               | A transaction's data-size limit                                                    |
+  | `satinFrameDataSizeLimit`            | A frame's data-size cap                                                            |
+  | `satinTxKvUpdateLimit`               | A transaction's KV-update limit                                                    |
+  | `satinFrameKvUpdateLimit`            | A frame's KV-update cap                                                            |
+  | `satinTxStateGasLimit`               | A transaction's state-gas limit                                                    |
+  | `satinBlockEnvAccessComputeGasLimit` | Detention's cap after a read of the block environment or the beneficiary's account |
+  | `satinOracleAccessComputeGasLimit`   | Detention's cap after a read of the Oracle's storage                               |
+  | `satinBlockExecutionGasLimit`        | The block's execution-gas limit                                                    |
+  | `satinBlockStateGasLimit`            | The block's state-gas limit                                                        |
+  | `satinBlockTxsDataLimit`             | The block's data-size limit                                                        |
+  | `satinBlockKvUpdateLimit`            | The block's KV-update limit                                                        |
+
+  Once `satinTime` is present every key is required, and none has a default; a key that starts with `satin` and is not one of these is refused, and so is a value its parameter refuses.
+  Integers are JSON numbers up to 2^64 − 1, which leaves a limit unlimited; detention's caps must be below 199,987,900 (see [Gas Detention on Withheld Gas](#12-gas-detention-on-withheld-gas)), and no limit may be zero.
+  Addresses are hex strings.
+  The key format is provisional until a network publishes a genesis file carrying it.
+
+  The Satin keys do not time the forks Satin runs on: Optimism Karst and the Ethereum forks it includes, Osaka among them, are timed by the configuration's own keys for them.
+  Every Satin block executes on Karst's rules, so a node must check, when it loads the configuration, that each of those forks is active at `satinTime`, and refuse the configuration otherwise: a Satin block before one of them would be executed on rules the node's own schedule does not apply to it.
+
 ## Safety and Compatibility
 
 Satin changes nothing about blocks under earlier specs: a node replaying history resolves each block's spec from its timestamp and applies that spec's rules.

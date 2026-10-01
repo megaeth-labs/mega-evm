@@ -153,6 +153,9 @@ impl AdditionalLimit {
     /* The latch and the exemption */
 
     /// The stop a transaction-level limit latched, if any.
+    ///
+    /// It is the running transaction's, or the last one's until the next transaction or system
+    /// call starts: each resets it first, so a stop read after that is the next one's.
     pub const fn latched(&self) -> Option<&LimitCheck> {
         match &self.standing {
             latched @ LimitCheck::ExceedsLimit { .. } => Some(latched),
