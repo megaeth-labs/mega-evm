@@ -1,14 +1,17 @@
 //! The harness on ordinary blocks: writes, an empty block, a refused transaction, a dropped
-//! candidate, the reads of a frame that failed, a SALT lookup that fails and one answered below
-//! the minimum bucket.
+//! candidate, the reads of a frame that failed and of a deposit that failed, a SALT lookup that
+//! fails and one answered below the minimum bucket.
 
-use alloy_primitives::{address, Bytes, U256};
-use mega_evm::{test_utils::BytecodeBuilder, SaltEnv, MIN_BUCKET_SIZE};
-use revm::bytecode::opcode::{
-    BALANCE, CALL, CALLDATALOAD, GAS, INVALID, POP, PUSH0, REVERT, SLOAD, SSTORE,
+use alloy_primitives::{address, Bytes, TxKind, U256};
+use mega_evm::{test_utils::BytecodeBuilder, MegaHaltReason, SaltEnv, MIN_BUCKET_SIZE};
+use revm::{
+    bytecode::opcode::{
+        BALANCE, CALL, CALLDATALOAD, GAS, INVALID, POP, PUSH0, REVERT, SLOAD, SSTORE,
+    },
+    context::result::ExecutionResult,
 };
 
-use super::harness::{call, Case, Envs};
+use super::harness::{call, deposit, Case, Envs};
 use crate::common::{self, CONTRACT};
 
 /// Code that sets the slot the first calldata word names to one.
@@ -217,4 +220,57 @@ fn test_the_reads_of_a_frame_that_failed_are_in_the_witness() {
         assert!(run.keys.slots.contains(&(reader, U256::from(7))), "{how}: and is a key");
         assert!(run.keys.accounts.contains(&read), "{how}: as is the account");
     }
+}
+
+/// A deposit that failed has loaded what its frames read, as a frame that failed has: the
+/// failure takes back everything but the sender's nonce bump and mint, not the reads. A deposit
+/// from a sender that does not exist into a contract that reads one of its slots and another
+/// account's balance, then halts, is included as a failed deposit whose state names the slot and
+/// the account beside the sender it created, so the channel witness holds them and the block
+/// replays from it — a validator re-executing the deposit makes the same reads in the same frame.
+/// The failed deposit uses its whole gas limit, all of it regular gas: the account it creates for
+/// its sender carries no state gas on any ledger, and it pays no history.
+#[test]
+fn test_the_reads_of_a_deposit_that_failed_are_in_the_witness() {
+    let depositor = address!("0x4000000000000000000000000000000000000009");
+    let reader = address!("0x4000000000000000000000000000000000000007");
+    let read = address!("0x4000000000000000000000000000000000000008");
+    let code = BytecodeBuilder::default()
+        .push_number(7_u8)
+        .append_many([SLOAD, POP])
+        .push_address(read)
+        .append_many([BALANCE, POP])
+        .append(INVALID)
+        .build();
+    let db = common::database()
+        .account_code(reader, code)
+        .account_storage(reader, U256::from(7), U256::from(70))
+        .account_balance(read, U256::from(80));
+    let (mint, gas_limit) = (1_000_000_000, 1_000_000 + common::new_account_state_gas());
+    let replay = Case::new("a deposit that failed", db)
+        .tx(deposit(depositor, TxKind::Call(reader), mint, U256::ZERO, Bytes::new(), gas_limit))
+        .run();
+    let run = &replay.recorded;
+    let tx = run.tx(0);
+    assert!(
+        matches!(tx.result, ExecutionResult::Halt { reason: MegaHaltReason::FailedDeposit, .. }),
+        "{:?}",
+        tx.result
+    );
+    assert!(tx.state[&reader].storage.contains_key(&U256::from(7)), "the slot is named");
+    assert!(tx.state.contains_key(&read), "the account is named");
+    assert!(run.keys.slots.contains(&(reader, U256::from(7))), "and is a key");
+    assert!(run.keys.accounts.contains(&read), "as is the account");
+
+    assert_eq!(run.record.accounts.get(&depositor), Some(&None), "the sender did not exist");
+    let sender = &tx.state[&depositor].info;
+    assert_eq!(sender.nonce, 1, "the failure keeps the nonce bump");
+    assert_eq!(sender.balance, U256::from(mint), "and the mint");
+    assert_eq!(tx.gas.gas_used, gas_limit, "a failed deposit uses its whole gas limit");
+    assert_eq!(
+        (tx.gas.regular, tx.gas.state, tx.gas.history, tx.gas.history_bytes),
+        (gas_limit, 0, 0, 0),
+        "all of it regular gas: the account it created carries no state gas"
+    );
+    assert_eq!((run.gas.state, run.gas.history), (0, 0), "nor does the block count any");
 }

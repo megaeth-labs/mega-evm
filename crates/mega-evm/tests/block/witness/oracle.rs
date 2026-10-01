@@ -8,7 +8,7 @@
 //! is a value the slot can hold at that read: a transaction answered two values for one slot
 //! replays from its record alone.
 
-use alloy_primitives::{Bytes, TxKind, B256, U256};
+use alloy_primitives::{address, Bytes, TxKind, B256, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
     system::{
@@ -16,11 +16,16 @@ use mega_evm::{
         ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE,
     },
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    OracleRead,
+    MegaHaltReason, OracleRead,
 };
-use revm::bytecode::opcode::{CALL, GAS, POP, PUSH0};
+use revm::{
+    bytecode::opcode::{CALL, GAS, INVALID, POP, PUSH0},
+    context::result::ExecutionResult,
+};
 
-use super::harness::{assert_differs, assert_same_run, call, legacy_from, Case, Envs, Oracle};
+use super::harness::{
+    assert_differs, assert_same_run, call, deposit, legacy_from, Case, Envs, Oracle,
+};
 use crate::common::{self, CONTRACT};
 
 /// The slot the tests read, the value the service answers, and the value the chain holds.
@@ -139,6 +144,54 @@ fn test_an_unanswered_oracle_read_replays() {
         .run();
     assert_eq!(returned(&replay.recorded, 0), STATE_VALUE);
     assert_eq!(replay.recorded.record.oracle_reads, vec![OracleRead { slot: SLOT, answer: None }]);
+}
+
+/// A deposit that failed keeps on its outcome the oracle reads its frames made: the failure takes
+/// back everything but the sender's nonce bump and mint, not what the service answered, and a
+/// validator re-executing the deposit makes the same reads. A deposit into a contract that reads
+/// [`SLOT`] through the Oracle and then halts is included as a failed deposit that recorded the
+/// read and its answer; the chain's slot is a key, and the channel replay is answered exactly
+/// from the record.
+#[test]
+fn test_a_failed_deposits_oracle_read_is_recorded_and_replayed() {
+    let depositor = address!("0x4000000000000000000000000000000000000009");
+    let read = get_slot();
+    let read_then_halt = BytecodeBuilder::default()
+        .mstore(0, &read)
+        .append_many([PUSH0, PUSH0])
+        .push_number(read.len() as u64)
+        .append_many([PUSH0, PUSH0])
+        .push_address(ORACLE_CONTRACT_ADDRESS)
+        .append_many([GAS, CALL, POP, INVALID])
+        .build();
+    let db = db().account_code(CONTRACT, read_then_halt).account_storage(
+        ORACLE_CONTRACT_ADDRESS,
+        SLOT,
+        STATE_VALUE,
+    );
+    let replay = Case::new("a failed deposit that read the oracle", db)
+        .envs(Envs::new().with_oracle_storage(SLOT, SERVICE_VALUE))
+        .tx(deposit(
+            depositor,
+            TxKind::Call(CONTRACT),
+            1_000_000_000,
+            U256::ZERO,
+            Bytes::new(),
+            1_000_000 + common::new_account_state_gas(),
+        ))
+        .run();
+    let run = &replay.recorded;
+    assert!(
+        matches!(
+            run.tx(0).result,
+            ExecutionResult::Halt { reason: MegaHaltReason::FailedDeposit, .. }
+        ),
+        "{:?}",
+        run.tx(0).result
+    );
+    assert_eq!(run.tx(0).oracle_reads, vec![SLOT_READ], "the read is on the failed deposit");
+    assert!(run.keys.slots.contains(&(ORACLE_CONTRACT_ADDRESS, SLOT)), "the chain's slot is a key");
+    assert!(replay.channel.oracle_replayed_exactly, "the replay was answered from the record");
 }
 
 /// The answers a validator replays are the included transactions' own, in block order, not the
