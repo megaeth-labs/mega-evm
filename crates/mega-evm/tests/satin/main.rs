@@ -33,6 +33,7 @@ mod salt_deposit;
 mod salt_failure;
 mod salt_refund;
 mod schedule;
+mod spec_numbers;
 mod state;
 mod state_gas_limit;
 mod static_callee;

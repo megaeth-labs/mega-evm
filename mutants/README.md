@@ -162,4 +162,7 @@ python3 scripts/umutate.py run --packs spec-gate --diff origin/main --output tar
 ## Suppressions and CI
 
 Spec-gate equivalents (e.g. a gate guarding a state no test exercises — expect a meaningful rate) go in the **same** `suppressions.toml`, as `kind = "line"` entries matching the mutant text, prefixed with the pack name.
-The PR gate runs diff-scoped (instant on PRs that touch no gate lines); the full crate sweep runs on a nightly schedule (the `spec-gate-sweep` job in `.github/workflows/mutation.yml`).
+A single-spec engine has no spec gate for these operators to mutate, so mutation CI does not run the pack.
+The operator pack stays on disk.
+Suppression hygiene still plans it and accepts an empty plan.
+The commands above run it by hand once a later spec has a gate to mutate.

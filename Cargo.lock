@@ -3648,6 +3648,7 @@ dependencies = [
  "alloy-op-hardforks 0.5.0",
  "alloy-primitives",
  "alloy-sol-types",
+ "alloy-trie",
  "auto_impl",
  "codspeed-criterion-compat",
  "delegate",

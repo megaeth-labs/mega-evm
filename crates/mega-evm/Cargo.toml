@@ -38,6 +38,9 @@ derive_more = { workspace = true, optional = true, features = ["debug", "deref",
 serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
+# alloy
+alloy-trie = { workspace = true, features = ["std", "ethereum"] }
+
 # CodSpeed drop-in: `codspeed-criterion-compat` re-exports criterion's API, so
 # `use criterion::...` in the benches is unchanged. Under a normal `cargo bench`
 # it behaves exactly like criterion; under `cargo codspeed` it runs each bench
