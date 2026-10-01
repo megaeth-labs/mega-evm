@@ -476,8 +476,11 @@ impl AdditionalLimit {
     ///
     /// The bytes are counted before the payload is decoded, so a caller cannot make the node
     /// materialise a payload for free by appending bytes an ABI decoder ignores. They are the
-    /// transaction's, not the calling frame's: the hint has left the machine by the time the
-    /// frame could fail, so nothing takes it back, and no frame's budget holds them.
+    /// transaction's, not the calling frame's, and no frame's budget holds them. Nothing the frame
+    /// or the transaction does afterwards takes them back, not even for a payload that fails to
+    /// decode and is never forwarded, for two separate reasons: a payload forwarded to the oracle
+    /// service cannot be taken back, and admitting a payload and decoding it is work done whether
+    /// or not it decodes.
     ///
     /// The limit is checked before the bytes are counted. A hint that would cross it latches the
     /// transaction with the usage it would have reached, is not forwarded and is not counted: its
@@ -948,8 +951,10 @@ impl AdditionalLimit {
     ///
     /// Nothing counted is touched. A deposit refused before it ran counted its body alone. One
     /// that halted had its frames' lanes discarded as any failed frame's are, which leaves the
-    /// body and the Oracle hints it forwarded: those have left the machine, so they stay counted,
-    /// as they do for any other transaction that halts.
+    /// body and every Oracle hint input it admitted, one that then failed to decode included.
+    /// Those stay counted, as they do for any other transaction that halts, for two separate
+    /// reasons: a payload forwarded to the oracle service cannot be taken back, and admitting an
+    /// input and decoding it is work done whether or not it decodes.
     pub(crate) const fn on_transaction_error(&mut self) {
         self.standing = LimitCheck::WithinLimit;
     }

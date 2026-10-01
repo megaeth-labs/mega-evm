@@ -52,10 +52,11 @@ pub use mega_system_contracts::oracle::IOracle;
 /// new. A hint that fails any of them is neither forwarded nor counted.
 ///
 /// Gas above zero does not promise that the bytecode succeeds: a hint forwarded with one gas
-/// reaches the service and the frame it was sent from then runs out of gas. An admitted hint is a
+/// reaches the service and the frame it was sent from then runs out of gas. A forwarded hint is a
 /// synchronous, irreversible side effect — the service holds it whatever the frame, or the
-/// transaction, does next. That is also why its bytes are counted on the transaction rather than
-/// on the frame.
+/// transaction, does next. That is one reason its bytes are counted on the transaction rather than
+/// on the frame; the other, which holds as well for an admitted payload that fails to decode and
+/// is never forwarded, is that admitting it and decoding it is work done either way.
 ///
 /// A `STATICCALL` does forward: `sendHint` is a view method and writes nothing.
 ///

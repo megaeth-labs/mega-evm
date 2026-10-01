@@ -627,7 +627,8 @@ An out-of-gas step halts the call, consuming its regular gas.
   A hint that fails any of those conditions is dropped and counts nothing; the call runs the Oracle's bytecode either way.
   The value condition is new.
 - An admitted hint MUST count the call's whole input length as data size on the transaction, before the input is decoded, and pays no history gas.
-  The count stands whatever the calling frame or the transaction does afterwards — a revert, a halt, a later stop, a failed deposit: the hint has reached the service and cannot be taken back.
+  Every admitted input stays counted, whatever the calling frame or the transaction does afterwards — a revert, a halt, a later stop, a failed deposit — and that includes an input that fails to decode, which reaches no service.
+  Two reasons keep the count, each on its own: a payload forwarded to the service cannot be taken back, and admitting an input and decoding it is work the node has done whether or not the input decodes.
 - A hint whose input length would take the transaction's data size over its data-size limit MUST NOT be forwarded and MUST NOT be counted.
   The limit stops the transaction, and the stop reports the data size the hint would have reached.
   The data size the stopped transaction keeps, which the block's data-size budget counts, holds none of the hint's bytes: the payload never left the node, so it is taken back as a log that crosses the limit is.
