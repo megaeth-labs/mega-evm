@@ -245,7 +245,12 @@ impl Case {
         (execution, evm)
     }
 
-    fn execute_on<I>(evm: &mut MegaEvm<MemoryDatabase, I, Envs>, tx: MegaTransaction) -> Execution
+    /// Runs `tx` on `evm`, without committing: the next transaction on it runs over the same
+    /// pre-state.
+    pub(crate) fn execute_on<I>(
+        evm: &mut MegaEvm<MemoryDatabase, I, Envs>,
+        tx: MegaTransaction,
+    ) -> Execution
     where
         I: Inspector<MegaContext<MemoryDatabase, Envs>, EthInterpreter>,
     {

@@ -25,7 +25,7 @@ use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 use crate::{
     gen::{
         case::{case, Case, Envs},
-        tx::{Delegate, Shape},
+        tx::{tx, Delegate, Shape},
         Flavor, Who, SYSTEM_ADDRESS,
     },
     harness::{check, prop_check, prop_eq},
@@ -89,6 +89,53 @@ fn test_property_determinism() {
             Ok(())
         },
     );
+}
+
+/// A transaction's outcome does not depend on what its EVM ran before: on an EVM that already ran
+/// another transaction over the same pre-state it is byte-identical to its outcome on a fresh
+/// one, whether that transaction succeeded, reverted, halted, was stopped by a limit or was
+/// refused with an error, and running it once more gives the same again.
+///
+/// Nothing is committed between the runs, so the state is the same each time; what could differ
+/// is what the engine keeps for one transaction and must reset for the next: the limits layer and
+/// its latch, gas detention, the SALT multipliers it read, the keyless frame. A transaction that
+/// ends in an error leaves through no settlement, so the reset is all that stands between it and
+/// the next. The tally of how the previous transaction ended is printed.
+#[test]
+fn test_property_a_reused_evm_runs_a_transaction_as_a_fresh_one_does() {
+    let tally: Mutex<BTreeMap<&'static str, u32>> = Mutex::new(BTreeMap::new());
+    check(
+        "reused_evm",
+        CASES,
+        || (case(Flavor::Satin), tx(Flavor::Satin)),
+        |(case, previous)| {
+            let fresh = render(&case.execute());
+            let mut evm = case.evm();
+            let previous = previous.build(&case.world, &case.main.assemble());
+            let ended = match Case::execute_on(&mut evm, previous) {
+                // A SALT bucket that cannot be read fails the transaction where the charge is
+                // made, in the middle of its run; every other error refuses it before it runs.
+                Err(error) if error.contains("the bucket cannot be read") => {
+                    "the previous transaction ended in an error while it ran"
+                }
+                Err(_) => "the previous transaction was refused with an error",
+                Ok(outcome) if outcome.limit_exceeded.is_some() => {
+                    "the previous transaction was stopped by a limit"
+                }
+                Ok(outcome) if outcome.result.is_success() => "the previous transaction succeeded",
+                Ok(_) => "the previous transaction reverted or halted",
+            };
+            *tally.lock().unwrap().entry(ended).or_default() += 1;
+            let reused = render(&Case::execute_on(&mut evm, case.transaction()));
+            prop_eq!(fresh, reused, "the outcome on a reused EVM differs: {ended}");
+            let again = render(&Case::execute_on(&mut evm, case.transaction()));
+            prop_eq!(fresh, again, "the outcome of a second run on the same EVM differs");
+            Ok(())
+        },
+    );
+    for (ended, n) in tally.lock().unwrap().iter() {
+        println!("{n:5} {ended}");
+    }
 }
 
 /// An inspector that only records changes nothing: without one, under the gas inspector of the
