@@ -12,22 +12,26 @@ use std::{
     rc::Rc,
 };
 
-use alloy_primitives::{Address, Bytes};
+use alloy_primitives::{Address, Bytes, B256};
 use alloy_rpc_types_trace::geth::{
-    CallConfig, CallFrame, DefaultFrame, GethDebugTracingOptions, GethDefaultTracingOptions,
-    GethTrace, PreStateConfig, PreStateFrame,
+    AccountState, CallConfig, CallFrame, DefaultFrame, GethDebugTracingOptions,
+    GethDefaultTracingOptions, GethTrace, PreStateConfig, PreStateFrame, PreStateMode,
 };
 use alloy_sol_types::SolError;
 use mega_evm::{
     alloy_evm::Evm as _,
-    test_utils::{op_transaction, zero_fee_l1_block_info, MemoryDatabase},
+    op_revm::constants::L1_BLOCK_CONTRACT,
+    test_utils::{
+        op_transaction, zero_fee_l1_block_info, MemoryDatabase, RecordingDatabase, WitnessRecord,
+    },
     EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaLimitExceeded, MegaSpecId, MegaTransaction,
-    MegaTransactionOutcome,
+    MegaTransactionOutcome, L1_BLOCK_INFO_SLOTS,
 };
 use revm::{
     context::{BlockEnv, TxEnv},
     inspector::inspectors::TracerEip3155,
-    primitives::U256,
+    primitives::{KECCAK_EMPTY, U256},
+    Database,
 };
 use revm_inspectors::tracing::{DebugInspector, TracingInspector, TracingInspectorConfig};
 use serde::Serialize;
@@ -49,7 +53,7 @@ pub(crate) fn block() -> BlockEnv {
 }
 
 /// A Satin context over `db` with zero L1 fees.
-pub(crate) fn context(db: MemoryDatabase) -> MegaContext<MemoryDatabase> {
+pub(crate) fn context<DB: Database>(db: DB) -> MegaContext<DB> {
     MegaContext::new(db, MegaSpecId::SATIN).with_block(block()).with_chain(zero_fee_l1_block_info())
 }
 
@@ -106,6 +110,8 @@ pub(crate) struct Traced {
     pub inspector: TracingInspector,
     /// The pre-state database the prestate tracer reads.
     pub pre_db: MemoryDatabase,
+    /// Every account, slot and code the first run read from the pre-state database.
+    pub reads: WitnessRecord,
     /// The transaction, kept to run it again under another tracer.
     tx: MegaTransaction,
     /// The runtime limits it ran under.
@@ -113,14 +119,19 @@ pub(crate) struct Traced {
 }
 
 impl Traced {
-    /// Runs `tx` on a fresh Satin EVM over `db`.
+    /// Runs `tx` on a fresh Satin EVM over `db`, recording every read the database serves.
     pub(crate) fn run(db: MemoryDatabase, tx: MegaTransaction, limits: EvmTxRuntimeLimits) -> Self {
         let pre_db = db.clone();
+        let record = Rc::new(RefCell::new(WitnessRecord::default()));
+        let recording = RecordingDatabase::new(db, record.clone());
         let inspector = TracingInspector::new(TracingInspectorConfig::all());
-        let mut evm =
-            MegaEvm::new(context(db).with_tx_runtime_limits(limits)).with_inspector(inspector);
+        let mut evm = MegaEvm::new(context(recording).with_tx_runtime_limits(limits))
+            .with_inspector(inspector);
         let outcome = evm.execute_transaction(tx.clone()).expect("the transaction is valid");
-        Self { outcome, inspector: evm.inspector().clone(), pre_db, tx, limits }
+        let inspector = evm.inspector().clone();
+        drop(evm);
+        let reads = record.borrow().clone();
+        Self { outcome, inspector, pre_db, reads, tx, limits }
     }
 
     /// The EIP-3155 trace: one JSON line per step, then the summary line.
@@ -281,21 +292,53 @@ pub(crate) fn assert_root_gas_is_the_gas_limit(traced: &Traced) {
     }
 }
 
-/// Every account the transaction's post-state names appears in the prestate tracer.
-pub(crate) fn assert_prestate_covers_touched(traced: &Traced) {
-    let pre = traced.prestate(false);
-    let traced_accounts: BTreeSet<Address> = pre.pre_state().keys().copied().collect();
-    let missing: Vec<_> = traced
-        .outcome
-        .state
+/// The prestate names every account the engine read from the database, with what it read.
+///
+/// The first run read the pre-state through a `RecordingDatabase`, which records every account,
+/// slot and code it serves the engine. The prestate tracer instead walks the state the
+/// transaction returned and reads the pre-state database itself. An account the engine read that
+/// the returned state does not carry — a read outside the journal, or a frame's accounts dropped
+/// on a stop — would be recorded here and missing from the prestate, as it would from a witness
+/// built from the same state.
+///
+/// One read is outside every transaction's state by design, and is the only one excused: op-revm
+/// reads the L1 block contract's account and the slots of `L1_BLOCK_INFO_SLOTS` on the database
+/// itself, not through the journal, to price a transaction's L1 fee. Block execution hands
+/// exactly those keys to the witness as a pre-block read (`read_l1_block_info`). The excuse is
+/// those keys, read or not, and nothing else.
+pub(crate) fn assert_prestate_covers_reads(traced: &Traced) {
+    let PreStateFrame::Default(PreStateMode(prestate)) = traced.prestate(false) else {
+        panic!("the default prestate mode");
+    };
+    let reads = &traced.reads;
+    let traced_accounts: BTreeSet<Address> = prestate.keys().copied().collect();
+    let missing: Vec<_> = reads
+        .accounts
         .keys()
         .copied()
-        .filter(|address| !traced_accounts.contains(address))
+        .filter(|address| *address != L1_BLOCK_CONTRACT && !traced_accounts.contains(address))
         .collect();
-    assert!(
-        missing.is_empty(),
-        "prestateTracer missed accounts the transaction touched: {missing:?}; traced {traced_accounts:?}"
-    );
+    assert!(missing.is_empty(), "the prestate misses accounts the engine read: {missing:?}");
+    for (address, served) in reads.accounts.iter().filter(|(a, _)| **a != L1_BLOCK_CONTRACT) {
+        let served = served.clone().unwrap_or_default();
+        let code = (served.code_hash != KECCAK_EMPTY).then(|| {
+            reads.codes.get(&served.code_hash).expect("served code is recorded").original_bytes()
+        });
+        let expected = AccountState::from_account_info(served.nonce, served.balance, code);
+        let traced = &prestate[address];
+        assert_eq!(traced.balance, expected.balance, "prestate balance of {address}");
+        assert_eq!(traced.nonce, expected.nonce, "prestate nonce of {address}");
+        assert_eq!(traced.code, expected.code, "prestate code of {address}");
+    }
+    for ((address, slot), value) in &reads.storage {
+        if *address == L1_BLOCK_CONTRACT {
+            assert!(L1_BLOCK_INFO_SLOTS.contains(slot), "an L1 block slot outside the pricing's");
+            continue;
+        }
+        let traced =
+            prestate.get(address).and_then(|account| account.storage.get(&B256::from(*slot)));
+        assert_eq!(traced, Some(&B256::from(*value)), "prestate slot {slot} of {address}");
+    }
 }
 
 /// Every call frame's output is the ABI encoding of `MegaLimitExceeded`.

@@ -32,7 +32,7 @@ use revm::{
 use crate::harness::{
     assert_call_gas_matches_receipt, assert_keyless_steps,
     assert_keyless_struct_logs_miss_the_creation, assert_limit_stop_outputs,
-    assert_prestate_covers_touched, assert_root_gas_is_the_gas_limit, at_spec_prices, call_tx,
+    assert_prestate_covers_reads, assert_root_gas_is_the_gas_limit, at_spec_prices, call_tx,
     create_tx, pin_tracer_views, Traced,
 };
 
@@ -53,7 +53,7 @@ fn pin(name: &str, traced: &Traced) {
         pin_tracer_views(name, traced);
     }
     assert_call_gas_matches_receipt(traced);
-    assert_prestate_covers_touched(traced);
+    assert_prestate_covers_reads(traced);
     assert_root_gas_is_the_gas_limit(traced);
 }
 
