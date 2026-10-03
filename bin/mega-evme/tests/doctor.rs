@@ -632,6 +632,15 @@ fn cases() -> Vec<Case> {
             mutation: rewrite(&[RECEIPT_KEY]),
         },
         Case {
+            op: "rewrite_receipt_of",
+            apply: |env| {
+                env.rewrite_receipt_of(TX, |result| {
+                    result["cumulativeGasUsed"] = Value::String("0x2".into());
+                })
+            },
+            mutation: rewrite(&[RECEIPT_KEY]),
+        },
+        Case {
             op: "null_receipt",
             apply: |env| env.null_receipt(),
             mutation: rewrite(&[RECEIPT_KEY]),

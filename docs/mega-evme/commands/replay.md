@@ -224,6 +224,16 @@ Anything that prevents the comparison from running is an infrastructure failure 
 - The receipt describes a different transaction than the one requested (its `transactionHash` is not the hash the receipt was asked for — an inconsistent endpoint, or a tampered capture): reported as an `rpc` failure, because the verdict would describe the wrong transaction, and two transactions sharing their consensus facts would even yield a spurious match.
 - The target is a pending transaction, which has no receipt yet: rejected up front in single-transaction mode, and reported as a `pending` error entry in batch mode.
 
+Each of those checks answers one receipt's own question, so a receipt rewritten under its own transaction hash and inclusion would pass them all.
+When a batch run has fetched and admitted the receipt of every transaction of a block (a `--block` run asks for all of them), the receipts are therefore also authenticated as a set: their consensus encodings, in body order, must rebuild the receipts root the block's authenticated header commits to.
+That root covers each receipt's cumulative gas but not the `gasUsed` an RPC receipt reports beside it, so each `gasUsed` must also equal the rise in cumulative gas over the receipt before it (over zero for the first).
+A set that fails either check is endpoint data the block does not commit to, so every receipt of that block is reported as unverified (`rpc`, exit `3`) rather than compared, and no verdict rests on it.
+
+What a verdict rests on therefore depends on the mode:
+
+- A `--block` run, or a `--tx-file` run that lists every transaction of a block, compares receipts the header commits to: their consensus fields through the receipts root, and their `gasUsed` through the cumulative gas.
+- A single-transaction run, or a `--tx-file` run that covers only part of a block, cannot rebuild the root: each receipt passes the per-receipt admission checks above, and its consensus fields and its `gasUsed` are then compared as served.
+
 In batch mode, when a target already produced an execution result and only the receipt fetch failed, the target keeps its full result line (execution summary, local receipt, timing) and reports the failure on that line as `"verification": {"error": "…"}`.
 The target still counts as `replayed`; the unanswered receipt is tallied as `rpc` and the run exits `3`.
 A target that never reached execution (pending, not-found, block setup failure) remains a bare error entry, exactly like any other infrastructure failure before replay.

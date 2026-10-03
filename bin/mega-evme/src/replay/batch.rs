@@ -39,6 +39,7 @@ use mega_evm::{
     revm::{context::result::ExecutionResult, inspector::NoOpInspector, DatabaseRef},
     MegaBlockExecutionCtx, MegaHaltReason, MegaHardforks, MegaSpecId, MegaTxEnvelope,
 };
+use op_alloy_consensus::OpReceiptEnvelope;
 use op_alloy_rpc_types::Transaction;
 use serde::Serialize;
 use state_test::types::MegaEnv;
@@ -1123,7 +1124,7 @@ where
     // each feature below.
     let need_receipts = verify_receipt || dump_dir.is_some();
     let onchain_receipts = if need_receipts {
-        fetch_target_receipts(provider, &targets, block.hash()).await
+        fetch_target_receipts(provider, &targets, &block).await
     } else {
         BTreeMap::new()
     };
@@ -1692,21 +1693,37 @@ fn fixture_report_from_build_err(err: fixture::FixtureBuildError) -> FixtureRepo
 ///
 /// Each target maps either to the consensus facts its receipt reports, or to the
 /// message explaining why it could not be verified (the endpoint failed the
-/// call or pruned the receipt, or the receipt describes a different inclusion
-/// than the block being replayed).
+/// call or pruned the receipt, the receipt describes a different inclusion
+/// than the block being replayed, or the block's receipts do not rebuild the
+/// receipts root its header commits to).
+///
+/// When the targets cover the whole body and every receipt was admitted, the
+/// set is authenticated against the header's `receiptsRoot`
+/// ([`coherence::require_committed_receipts`]), and each receipt's served
+/// `gasUsed`, which that root does not cover, against its share of the
+/// committed cumulative gas ([`coherence::require_receipt_gas`]). A set that
+/// fails either is endpoint data no verdict may rest on, so every receipt of the
+/// block becomes unavailable — the same unanswered class as a receipt the
+/// endpoint could not serve — instead of being compared. A partial set cannot
+/// rebuild the root and is left as fetched.
 async fn fetch_target_receipts<P>(
     provider: &P,
     targets: &[B256],
-    block_hash: B256,
+    block: &Block<Transaction>,
 ) -> BTreeMap<B256, std::result::Result<ReceiptFacts, String>>
 where
     P: Provider<op_alloy_network::Optimism>,
 {
+    let block_hash = block.hash();
     let mut receipts = BTreeMap::new();
+    let mut consensus = HashMap::with_capacity(targets.len());
     for tx_hash in targets {
         let fetched = match verify::fetch_receipt(provider, *tx_hash).await {
             Ok(receipt) => match verify::check_inclusion(receipt.block_hash(), block_hash) {
-                Ok(()) => Ok(ReceiptFacts::from_onchain(&receipt)),
+                Ok(()) => {
+                    consensus.insert(*tx_hash, verify::consensus_receipt(&receipt));
+                    Ok(ReceiptFacts::from_onchain(&receipt))
+                }
                 Err(message) => Err(message),
             },
             // The reported entry already carries the `rpc` kind, so the error's
@@ -1719,7 +1736,47 @@ where
         }
         receipts.insert(*tx_hash, fetched);
     }
+
+    let body: Vec<B256> = block.transactions.hashes().collect();
+    if let Some(ordered) = whole_body_receipts(&body, &mut consensus) {
+        let number = block.header.number();
+        let authentic = coherence::require_committed_receipts(
+            number,
+            block_hash,
+            block.header.receipts_root(),
+            &ordered,
+        )
+        .and_then(|()| {
+            // Every receipt of the body was admitted, so each has its facts.
+            let served_gas: Vec<(B256, u64, u64)> = body
+                .iter()
+                .filter_map(|hash| match receipts.get(hash) {
+                    Some(Ok(facts)) => Some((*hash, facts.gas_used, facts.cumulative_gas_used)),
+                    _ => None,
+                })
+                .collect();
+            coherence::require_receipt_gas(number, block_hash, &served_gas)
+        });
+        if let Err(incoherence) = authentic {
+            let message = incoherence.to_string();
+            warn!(block = number, %message, "On-chain receipts do not authenticate against the block");
+            for fetched in receipts.values_mut() {
+                *fetched = Err(message.clone());
+            }
+        }
+    }
     receipts
+}
+
+/// The admitted consensus receipts of every transaction of `body`, in body
+/// order, or `None` when any of them is missing — a body transaction that is not
+/// a target, or whose receipt was not admitted — so the set cannot rebuild the
+/// block's receipts root.
+fn whole_body_receipts(
+    body: &[B256],
+    consensus: &mut HashMap<B256, OpReceiptEnvelope>,
+) -> Option<Vec<OpReceiptEnvelope>> {
+    body.iter().map(|hash| consensus.remove(hash)).collect()
 }
 
 /// Fetch a block by number, using the same call shape as the single-transaction path.

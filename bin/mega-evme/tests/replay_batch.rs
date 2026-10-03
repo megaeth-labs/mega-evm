@@ -1788,6 +1788,11 @@ fn test_replay_block_verify_block_after_an_abort_is_unavailable() {
 /// the header's transactions root, which depends only on what the endpoint
 /// served, so the block verdict is the endpoint's failure to answer — the error
 /// shape, rpc-class (exit 3) — rather than a divergence of the replay.
+///
+/// With `--verify-receipt` too, the receipts served for the forged listing are
+/// the whole listed body's, so they are authenticated as a set — and one
+/// committed receipt short, they do not rebuild the header's receipts root. No
+/// receipt verdict rests on them either: every one is unverified.
 #[test]
 fn test_replay_block_forged_body_listing_is_unverified() {
     let (dropped, dropped_index) = BLOCK_TXS[2];
@@ -1796,33 +1801,58 @@ fn test_replay_block_forged_body_listing_is_unverified() {
         .remove_from_block_body(BLOCK, &[dropped])
         .write_to_temp("verify_block_forged_body");
 
-    let (stdout, code) = replay_envelope_with_code(
+    let block_only = replay_envelope_with_code(
+        &path,
+        &["--block", &BLOCK.to_string(), "--verify-block", "--json"],
+    );
+    let with_receipts = replay_envelope_with_code(
         &path,
         &["--block", &BLOCK.to_string(), "--verify-receipt", "--verify-block", "--json"],
     );
     let _ = std::fs::remove_file(&path);
-    let error = run_error(&stdout);
-    let lines = ndjson(&stdout);
-    let verdict = only_block_line(&lines)["block_verification"].clone();
-    let (targets, _) = split_block_lines(lines);
 
-    assert_eq!(code, Some(3), "a body the header does not commit to is unanswered: {stdout}");
-    assert_eq!(targets.len(), BLOCK_TX_COUNT - 1, "only the listed transactions replay");
-    for line in &targets {
-        assert_eq!(line["verification"], serde_json::json!({ "match": true }), "{line}");
+    for ((stdout, code), verify_receipt) in [(block_only, false), (with_receipts, true)] {
+        assert_eq!(code, Some(3), "a body the header does not commit to is unanswered: {stdout}");
+        let error = run_error(&stdout);
+        let lines = ndjson(&stdout);
+        let verdict = only_block_line(&lines)["block_verification"].clone();
+        let (targets, _) = split_block_lines(lines);
+
+        assert_eq!(targets.len(), BLOCK_TX_COUNT - 1, "only the listed transactions replay");
+        for line in &targets {
+            assert!(line.get("error").is_none(), "every listed transaction replays: {line}");
+            if verify_receipt {
+                assert!(
+                    line["verification"]["error"]
+                        .as_str()
+                        .is_some_and(|m| m.contains("receipts the block does not commit to")),
+                    "the forged listing's receipts are unverified: {line}"
+                );
+            }
+        }
+        assert!(
+            verdict.get("match").is_none(),
+            "an unanswered verdict carries no match: {verdict}"
+        );
+        let message = verdict["error"].as_str().unwrap_or_default();
+        assert!(
+            message.starts_with(&format!("the transactions served for block {BLOCK} (")) &&
+                message
+                    .contains("the endpoint served a block body the header does not commit to"),
+            "{verdict}"
+        );
+        assert_eq!(error["error"]["kind"].as_str(), Some("rpc-failure"));
+        let expected = if verify_receipt {
+            format!(
+                "{0} of {0} target transaction(s) failed (0 execution, {0} rpc); 1 block(s) \
+                 could not be verified against the block header",
+                BLOCK_TX_COUNT - 1
+            )
+        } else {
+            "1 block(s) could not be verified against the block header".to_string()
+        };
+        assert_eq!(error["error"]["message"].as_str(), Some(expected.as_str()));
     }
-    assert!(verdict.get("match").is_none(), "an unanswered verdict carries no match: {verdict}");
-    let message = verdict["error"].as_str().unwrap_or_default();
-    assert!(
-        message.starts_with(&format!("the transactions served for block {BLOCK} (")) &&
-            message.contains("the endpoint served a block body the header does not commit to"),
-        "{verdict}"
-    );
-    assert_eq!(error["error"]["kind"].as_str(), Some("rpc-failure"));
-    assert_eq!(
-        error["error"]["message"].as_str(),
-        Some("1 block(s) could not be verified against the block header"),
-    );
 }
 
 /// An authentic header served with an emptied listing: whole-block mode has no
@@ -1959,4 +1989,119 @@ fn test_replay_tx_file_rejects_verify_block() {
     assert_eq!(code, Some(1), "{stdout}");
     let message = run_error(&stdout)["error"]["message"].as_str().unwrap_or_default().to_string();
     assert!(message.contains("--verify-block") && message.contains("--tx-file"), "{message}");
+}
+
+/// Whole-block receipt verification authenticates the fetched receipts against
+/// the header's receipts root. One receipt rewritten under its own transaction
+/// hash passes every per-receipt check, but the set no longer rebuilds the root
+/// the header commits to: every verdict of the block becomes unavailable (exit
+/// 3) instead of being compared, while the replay itself still reproduces the
+/// header.
+#[test]
+fn test_replay_block_uncommitted_receipts_are_unverified_not_mismatched() {
+    let (tampered, _) = BLOCK_TXS[1];
+    let path = DoctoredEnvelope::load(envelope())
+        .rewrite_receipt_of(tampered, |receipt| {
+            receipt["status"] = serde_json::Value::String("0x0".into());
+        })
+        .write_to_temp("uncommitted_receipts");
+
+    let (stdout, code) = replay_envelope_with_code(
+        &path,
+        &["--block", &BLOCK.to_string(), "--verify-receipt", "--verify-block", "--json"],
+    );
+    let _ = std::fs::remove_file(&path);
+    let error = run_error(&stdout);
+    let lines = ndjson(&stdout);
+    let block_line = only_block_line(&lines).clone();
+    let (targets, _) = split_block_lines(lines);
+
+    assert_eq!(code, Some(3), "unauthentic endpoint data is unanswered, not a mismatch: {stdout}");
+    assert_eq!(targets.len(), BLOCK_TX_COUNT, "every target still replayed");
+    for line in &targets {
+        assert!(line.get("error").is_none(), "the target keeps its result line: {line}");
+        let message = line["verification"]["error"].as_str().unwrap_or_default();
+        assert!(
+            message.starts_with(&format!("the on-chain receipts served for block {BLOCK} (")) &&
+                message.contains("receipts the block does not commit to"),
+            "every verdict carries the authentication failure: {line}"
+        );
+    }
+    assert_eq!(block_line["block_verification"], serde_json::json!({ "match": true }));
+    assert_eq!(error["error"]["kind"].as_str(), Some("rpc-failure"));
+}
+
+/// The receipts root covers each receipt's cumulative gas but not its RPC
+/// `gasUsed`. A receipt whose `gasUsed` alone is rewritten still rebuilds the
+/// root, so it is checked against its share of the committed cumulative gas
+/// instead: the forgery makes every verdict of the block unavailable (exit 3)
+/// rather than a false `gas_used` mismatch, while the replay itself still
+/// reproduces the header.
+#[test]
+fn test_replay_block_forged_receipt_gas_used_is_unverified_not_mismatched() {
+    let (tampered, _) = BLOCK_TXS[1];
+    let path = DoctoredEnvelope::load(envelope())
+        .rewrite_receipt_of(tampered, |receipt| {
+            receipt["gasUsed"] = serde_json::Value::String("0x1".into());
+        })
+        .write_to_temp("forged_receipt_gas_used");
+
+    let (stdout, code) = replay_envelope_with_code(
+        &path,
+        &["--block", &BLOCK.to_string(), "--verify-receipt", "--verify-block", "--json"],
+    );
+    let _ = std::fs::remove_file(&path);
+    let error = run_error(&stdout);
+    let lines = ndjson(&stdout);
+    let block_line = only_block_line(&lines).clone();
+    let (targets, _) = split_block_lines(lines);
+
+    assert_eq!(code, Some(3), "a forged gasUsed is unanswered, not a mismatch: {stdout}");
+    assert_eq!(targets.len(), BLOCK_TX_COUNT, "every target still replayed");
+    for line in &targets {
+        assert!(line.get("error").is_none(), "the target keeps its result line: {line}");
+        assert!(line["verification"].get("match").is_none(), "no verdict is rendered: {line}");
+        let message = line["verification"]["error"].as_str().unwrap_or_default();
+        assert!(
+            message.starts_with(&format!(
+                "the on-chain receipt served for transaction {tampered} of block {BLOCK} ("
+            )) && message.contains("reports gasUsed 1, but the block's committed cumulative gas"),
+            "every verdict carries the gas inconsistency: {line}"
+        );
+    }
+    assert_eq!(block_line["block_verification"], serde_json::json!({ "match": true }));
+    assert_eq!(error["error"]["kind"].as_str(), Some("rpc-failure"));
+}
+
+/// The receipts-root check needs the whole body's receipts: a `--tx-file` run
+/// over part of the block cannot rebuild the root, so a rewritten receipt is
+/// compared as served and reported as the mismatch it describes.
+#[test]
+fn test_replay_tx_file_partial_receipts_are_compared_as_served() {
+    let (tampered, _) = BLOCK_TXS[1];
+    let path = DoctoredEnvelope::load(envelope())
+        .rewrite_receipt_of(tampered, |receipt| {
+            receipt["status"] = serde_json::Value::String("0x0".into());
+        })
+        .write_to_temp("partial_uncommitted_receipts");
+    let list =
+        std::env::temp_dir().join(format!("mega_evme_partial_receipts_{}.txt", std::process::id()));
+    std::fs::write(&list, format!("{tampered}\n")).expect("write tx list");
+
+    let (stdout, code) = replay_envelope_with_code(
+        &path,
+        &["--tx-file", list.to_str().expect("utf-8 path"), "--verify-receipt", "--json"],
+    );
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&list);
+    let lines = ndjson(&stdout);
+
+    assert_eq!(code, Some(2), "{stdout}");
+    assert_eq!(lines.len(), 1);
+    assert_eq!(
+        lines[0]["verification"]["diff"]["status"],
+        serde_json::json!({ "onchain": false, "replay": true }),
+        "{}",
+        lines[0]
+    );
 }

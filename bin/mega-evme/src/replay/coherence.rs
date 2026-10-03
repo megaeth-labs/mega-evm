@@ -16,15 +16,17 @@
 //! Every [`Incoherence`] describes the *endpoint* contradicting itself (a reorg
 //! landing between two calls, a load-balanced endpoint serving divergent views,
 //! a served block header that does not hash to the hash it is served under, or
-//! that answers a numbered fetch from another height, or a served block body the
-//! header does not commit to), never a definitive answer about the target. Both
-//! drivers therefore report all of them as infrastructure failures.
+//! that answers a numbered fetch from another height, or a served block body or
+//! set of receipts the header does not commit to), never a definitive answer
+//! about the target. Both drivers therefore report all of them as infrastructure
+//! failures.
 
 use alloy_primitives::{logs_bloom, Bloom, Bytes, Log, B256};
 use alloy_rpc_types_eth::Header;
 use core::fmt;
+use op_alloy_consensus::OpReceiptEnvelope;
 
-use super::header::transactions_root;
+use super::header::{receipts_root, transactions_root};
 
 /// Where the endpoint placed a target, as read from its `(block_number,
 /// block_hash)` pair.
@@ -129,6 +131,35 @@ pub(super) enum Incoherence {
         /// Transactions root the block's header commits to.
         committed: B256,
     },
+    /// The receipts served for every transaction of a block do not rebuild the
+    /// receipts root its header commits to.
+    UncommittedReceipts {
+        /// Height of the block whose receipts were fetched.
+        number: u64,
+        /// Hash of that block.
+        block_hash: B256,
+        /// Receipts root the served receipts rebuild to.
+        served: B256,
+        /// Receipts root the block's header commits to.
+        committed: B256,
+    },
+    /// A served receipt's `gasUsed` is not its share of the block's cumulative
+    /// gas: the rise in cumulative gas from the receipt before it (from zero for
+    /// the first one).
+    InconsistentReceiptGas {
+        /// Height of the block whose receipts were fetched.
+        number: u64,
+        /// Hash of that block.
+        block_hash: B256,
+        /// Transaction the receipt was served for.
+        tx_hash: B256,
+        /// The `gasUsed` the receipt reports.
+        served: u64,
+        /// Cumulative gas of the block before this transaction.
+        cumulative_before: u64,
+        /// Cumulative gas of the block up to and including this transaction.
+        cumulative_after: u64,
+    },
     /// The block body does not list a target the endpoint placed in it.
     AbsentFromBody {
         /// Height of the block that was expected to list the target.
@@ -218,6 +249,34 @@ impl fmt::Display for Incoherence {
                  root {served}, but its header commits to {committed}: the endpoint served a \
                  block body the header does not commit to (an inconsistent backend, or a \
                  tampered capture); the block is unverified"
+            ),
+            // Each receipt was checked against the question it answers (its
+            // transaction and inclusion); the root is what ties the set to the
+            // block, so a set that does not rebuild it is not the block's.
+            Self::UncommittedReceipts { number, block_hash, served, committed } => write!(
+                f,
+                "the on-chain receipts served for block {number} ({block_hash}) rebuild receipts \
+                 root {served}, but its header commits to {committed}: the endpoint served \
+                 receipts the block does not commit to (an inconsistent backend, or a tampered \
+                 capture); every receipt of the block is unverified"
+            ),
+            // The receipts root covers each receipt's cumulative gas but not the
+            // RPC `gasUsed` beside it, so the two are checked against each other.
+            Self::InconsistentReceiptGas {
+                number,
+                block_hash,
+                tx_hash,
+                served,
+                cumulative_before,
+                cumulative_after,
+            } => write!(
+                f,
+                "the on-chain receipt served for transaction {tx_hash} of block {number} \
+                 ({block_hash}) reports gasUsed {served}, but the block's committed cumulative \
+                 gas goes from {cumulative_before} to {cumulative_after} at it: the endpoint \
+                 served a gasUsed that contradicts the receipts the header commits to (an \
+                 inconsistent backend, or a tampered capture); every receipt of the block is \
+                 unverified"
             ),
             Self::AbsentFromBody { number, block_hash, tx_hash, claim } => {
                 let expectation = match claim {
@@ -389,6 +448,63 @@ pub(super) fn require_committed_body(
     let served = transactions_root(transactions);
     if served != committed {
         return Err(Incoherence::UncommittedBody { number, block_hash, served, committed });
+    }
+    Ok(())
+}
+
+/// Require that the receipts served for a whole block body are the ones its
+/// header commits to.
+///
+/// `receipts` are the consensus receipts the endpoint served for every
+/// transaction of the body, in body order, each already checked to describe its
+/// transaction and this block. Those checks answer each receipt's own question;
+/// only the header's `receiptsRoot` ties the set to the block, so a receipt
+/// rewritten under a valid identity passes them and is caught here. A caller
+/// holding receipts for only part of the body cannot rebuild the root and does
+/// not ask.
+pub(super) fn require_committed_receipts(
+    number: u64,
+    block_hash: B256,
+    committed: B256,
+    receipts: &[OpReceiptEnvelope],
+) -> Result<(), Incoherence> {
+    let served = receipts_root(receipts);
+    if served != committed {
+        return Err(Incoherence::UncommittedReceipts { number, block_hash, served, committed });
+    }
+    Ok(())
+}
+
+/// Require that every served receipt's `gasUsed` is its share of the block's
+/// cumulative gas.
+///
+/// `receipts` are `(transaction, served gasUsed, cumulative gas)` for every
+/// transaction of the body, in body order, whose receipts already rebuilt the
+/// header's receipts root ([`require_committed_receipts`]). That root covers
+/// the cumulative gas but not the RPC `gasUsed` field beside it, so a receipt
+/// whose `gasUsed` alone was rewritten still authenticates; comparing the replay
+/// against it would report a gas divergence the chain never had. On `MegaETH` a
+/// receipt's `gasUsed` is exactly the rise in cumulative gas over the receipt
+/// before it (over zero for the first), so any other value is the endpoint
+/// contradicting the receipts it served.
+pub(super) fn require_receipt_gas(
+    number: u64,
+    block_hash: B256,
+    receipts: &[(B256, u64, u64)],
+) -> Result<(), Incoherence> {
+    let mut cumulative_before = 0;
+    for &(tx_hash, served, cumulative_after) in receipts {
+        if cumulative_after.checked_sub(cumulative_before) != Some(served) {
+            return Err(Incoherence::InconsistentReceiptGas {
+                number,
+                block_hash,
+                tx_hash,
+                served,
+                cumulative_before,
+                cumulative_after,
+            });
+        }
+        cumulative_before = cumulative_after;
     }
     Ok(())
 }
@@ -569,6 +685,37 @@ mod tests {
                 ),
             ),
             (
+                Incoherence::UncommittedReceipts {
+                    number: 12,
+                    block_hash: HASH_A,
+                    served: HASH_B,
+                    committed: HASH_C,
+                },
+                format!(
+                    "the on-chain receipts served for block 12 ({a}) rebuild receipts root {b}, \
+                     but its header commits to {c}: the endpoint served receipts the block does \
+                     not commit to (an inconsistent backend, or a tampered capture); every \
+                     receipt of the block is unverified"
+                ),
+            ),
+            (
+                Incoherence::InconsistentReceiptGas {
+                    number: 12,
+                    block_hash: HASH_A,
+                    tx_hash: HASH_B,
+                    served: 21_001,
+                    cumulative_before: 40_000,
+                    cumulative_after: 61_000,
+                },
+                format!(
+                    "the on-chain receipt served for transaction {b} of block 12 ({a}) reports \
+                     gasUsed 21001, but the block's committed cumulative gas goes from 40000 to \
+                     61000 at it: the endpoint served a gasUsed that contradicts the receipts the \
+                     header commits to (an inconsistent backend, or a tampered capture); every \
+                     receipt of the block is unverified"
+                ),
+            ),
+            (
                 Incoherence::AbsentFromBody {
                     number: 12,
                     block_hash: HASH_A,
@@ -741,6 +888,75 @@ mod tests {
                 "{served:?}"
             );
         }
+    }
+
+    /// A receipt with the given status and cumulative gas, as a block commits to
+    /// it.
+    fn committed_receipt(status: bool, cumulative_gas_used: u64) -> OpReceiptEnvelope {
+        let receipt = alloy_consensus::Receipt {
+            status: alloy_consensus::Eip658Value::Eip658(status),
+            cumulative_gas_used,
+            logs: vec![],
+        };
+        OpReceiptEnvelope::Eip1559(receipt.with_bloom())
+    }
+
+    /// The served receipts authenticate exactly when they rebuild the root the
+    /// header commits to; a single rewritten field of a single receipt breaks
+    /// it, and the verdict carries both roots.
+    #[test]
+    fn test_require_committed_receipts_accepts_only_the_committed_set() {
+        let receipts = [committed_receipt(true, 21_000), committed_receipt(true, 42_000)];
+        let committed = receipts_root(&receipts);
+
+        assert_eq!(require_committed_receipts(7, HASH_A, committed, &receipts), Ok(()));
+
+        let tampered = [committed_receipt(true, 21_000), committed_receipt(false, 42_000)];
+        assert_eq!(
+            require_committed_receipts(7, HASH_A, committed, &tampered),
+            Err(Incoherence::UncommittedReceipts {
+                number: 7,
+                block_hash: HASH_A,
+                served: receipts_root(&tampered),
+                committed,
+            }),
+        );
+
+        let reordered = [receipts[1].clone(), receipts[0].clone()];
+        assert!(
+            require_committed_receipts(7, HASH_A, committed, &reordered).is_err(),
+            "the root commits to the body order"
+        );
+    }
+
+    /// Each served `gasUsed` must be its receipt's rise in cumulative gas, the
+    /// first one's over zero; a forged value anywhere, or cumulative gas that
+    /// falls, is named with the receipt it is found at.
+    #[test]
+    fn test_require_receipt_gas_accepts_only_the_cumulative_deltas() {
+        let honest = [(HASH_A, 40_000, 40_000), (HASH_B, 21_000, 61_000), (HASH_C, 0, 61_000)];
+        assert_eq!(require_receipt_gas(7, HASH_A, &honest), Ok(()));
+        assert_eq!(require_receipt_gas(7, HASH_A, &[]), Ok(()));
+
+        let first_forged = [(HASH_A, 39_999, 40_000), (HASH_B, 21_000, 61_000)];
+        assert_eq!(
+            require_receipt_gas(7, HASH_C, &first_forged),
+            Err(Incoherence::InconsistentReceiptGas {
+                number: 7,
+                block_hash: HASH_C,
+                tx_hash: HASH_A,
+                served: 39_999,
+                cumulative_before: 0,
+                cumulative_after: 40_000,
+            }),
+        );
+        let later_forged = [(HASH_A, 40_000, 40_000), (HASH_B, 1, 61_000)];
+        assert!(matches!(
+            require_receipt_gas(7, HASH_C, &later_forged),
+            Err(Incoherence::InconsistentReceiptGas { tx_hash, served: 1, .. }) if tx_hash == HASH_B
+        ));
+        let falling = [(HASH_A, 40_000, 40_000), (HASH_B, 0, 39_000)];
+        assert!(require_receipt_gas(7, HASH_C, &falling).is_err(), "cumulative gas cannot fall");
     }
 
     /// Linkage, anchoring, and membership accept agreement and reject anything

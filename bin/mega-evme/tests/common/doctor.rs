@@ -67,6 +67,7 @@ pub(crate) const PUBLIC_MUTATING_OPS: &[&str] = &[
     "mark_transaction_pending",
     "push_cloned_transaction",
     "rewrite_receipt",
+    "rewrite_receipt_of",
     "null_receipt",
     "drop_receipt",
     "null_block",
@@ -434,6 +435,30 @@ impl DoctoredEnvelope {
     #[must_use]
     pub(crate) fn rewrite_receipt(mut self, doctor: impl FnOnce(&mut Value)) -> Self {
         let idx = self.receipt_index();
+        self.rewrite_result_at(idx, doctor);
+        self
+    }
+
+    /// Rewrites the receipt result of `tx_hash`, for captures holding more than
+    /// one receipt.
+    ///
+    /// The receipt is located by its own `transactionHash`, so the rewritten
+    /// answer still describes the transaction it was requested for.
+    #[must_use]
+    pub(crate) fn rewrite_receipt_of(
+        mut self,
+        tx_hash: &str,
+        doctor: impl FnOnce(&mut Value),
+    ) -> Self {
+        let idx = self.find_one(
+            |entry| {
+                is_receipt_entry(entry) &&
+                    result_object(entry).is_some_and(|result| {
+                        result.get("transactionHash").and_then(Value::as_str) == Some(tx_hash)
+                    })
+            },
+            &format!("receipt for {tx_hash}"),
+        );
         self.rewrite_result_at(idx, doctor);
         self
     }
