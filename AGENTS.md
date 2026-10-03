@@ -509,7 +509,7 @@ for s in $(seq 1 20); do MEGA_FUZZ_SEED=$s cargo test --release -p mega-evm --te
   The channel replay is the check a validator's witness must pass; the database-level replay shows the block has no hidden input.
   A fixture entry the engine rejects has no returned state to build the channel witness from, and replays on the record alone.
   The block tests cover each mechanism that reads, in the `test` job; `exec-spec-satin.yml` replays every Osaka and Amsterdam entry of the fixture releases in both modes and fails on any entry that does not replay, counting the entries replayed on both witnesses apart from the rejected ones.
-  The fixture test is ignored unless `MEGA_STATE_TEST_FIXTURES` names the fixtures.
+  The fixture test is always ignored by default: it runs only with `-- --ignored` (or `--include-ignored`) and `MEGA_STATE_TEST_FIXTURES` set to the fixtures, and setting the variable alone runs nothing.
 - **The byte-price grid** (`scripts/price_grid.sh`, `.github/workflows/price-grid.yml`): the `mega-evm` suite with the `satin-price-override` feature at other costs per state and history byte, five points on a pull request and the whole grid nightly.
   The prices are provisional, so a test holds at any of them — a byte price of nothing, or one gas per byte up to the grid's dearest point: it sizes its gas from the schedule at the prices in effect, and a case whose scenario is state or history gas returns early where that byte costs nothing (`state_is_free`, `history_is_free`).
   Below one gas per byte the schedule's entries round to nothing one at a time, and no test is held there.

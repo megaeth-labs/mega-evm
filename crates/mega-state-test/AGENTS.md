@@ -16,7 +16,7 @@ The `state-test` CLI (`crates/state-test`) is a thin front end over this crate.
 - `src/roots.rs`: the post-state root and the logs hash.
 - `src/witness.rs`: `check_replay`, a fixture entry executed on a recorder of every read and replayed on a strict database and environments serving exactly a witness: the record of every read, and, for an entry the engine executed, the channel witness a node builds; `Replayed` says which.
 - `tests/runner.rs`: the runner on fixtures written in the test, filled from revm's mainnet EVM on the fixture's fork.
-- `tests/witness.rs`: `check_replay` on two fixtures written in the test, an executed one and a rejected one, and on the execution-spec fixtures `MEGA_STATE_TEST_FIXTURES` names (ignored without them; `.github/workflows/exec-spec-satin.yml` runs it on every file of both releases in both modes).
+- `tests/witness.rs`: `check_replay` on two fixtures written in the test, an executed one and a rejected one, and on the execution-spec fixtures `MEGA_STATE_TEST_FIXTURES` names (always ignored by default: it runs only with `-- --ignored` and the variable set; `.github/workflows/exec-spec-satin.yml` runs it on every file of both releases in both modes).
 
 The fixture types are the revm fork's own (`revm::statetest_types`, the `test-types` feature), re-exported as `state_test::types`.
 

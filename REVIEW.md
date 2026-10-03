@@ -118,11 +118,11 @@ These checks guard every change to the Satin engine.
 
 - `crates/mega-evm/tests/block/witness/` executes a block on a recorder of every read and replays the transactions it included twice, on a strict database and environments that serve exactly a witness and refuse everything else: once on the record of every database read, once on the witness a node builds from the pre-block states, the included transactions' returned states and the engine's exports.
   `witness::check_replay` in `crates/mega-state-test` does the same for a fixture's transaction; an entry the engine rejects has no returned state and replays on the record alone.
-  Its test over the execution-spec fixtures is ignored unless `MEGA_STATE_TEST_FIXTURES` names them.
+  Its test over the execution-spec fixtures is always ignored by default: it runs only with `-- --ignored` (or `--include-ignored`) and `MEGA_STATE_TEST_FIXTURES` set to the fixtures, and setting the variable alone runs nothing.
 - The replay on the node's witness is the one that finds a read the witness lacks; the replay on the record of every read shows the block has no input outside its database and environments.
   A change that makes block execution read state outside a transaction's journal hands the read to the pre-block observer as a read-only entry, or exports it, and adds the case that makes the read.
 - The block cases run in the `test` check.
-  `.github/workflows/exec-spec-satin.yml` runs the fixture replay after the equivalence gate, on the same fixture releases: every Osaka and Amsterdam entry, in equivalence and in Satin mode; an entry that does not replay fails the job, and so `execution-spec gate on Satin`.
+  `.github/workflows/exec-spec-satin.yml` runs the fixture replay after the equivalence gate, on the same fixture releases: every Osaka and Amsterdam entry, in equivalence and in Satin mode; an entry that does not replay fails the job, and so `execution-spec gate on Satin`, and so does a run that prints no single well-formed summary, executes nothing or reports a failed entry.
   The step summary counts the entries replayed on both witnesses apart from the rejected ones.
 
 ### Byte-price grid
