@@ -14,10 +14,12 @@ use std::{
 
 use alloy_primitives::{Address, Bytes};
 use alloy_rpc_types_trace::geth::{
-    CallConfig, CallFrame, DefaultFrame, GethDefaultTracingOptions, PreStateConfig, PreStateFrame,
+    CallConfig, CallFrame, DefaultFrame, GethDebugTracingOptions, GethDefaultTracingOptions,
+    GethTrace, PreStateConfig, PreStateFrame,
 };
 use alloy_sol_types::SolError;
 use mega_evm::{
+    alloy_evm::Evm as _,
     test_utils::{op_transaction, zero_fee_l1_block_info, MemoryDatabase},
     EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaLimitExceeded, MegaSpecId, MegaTransaction,
     MegaTransactionOutcome,
@@ -27,7 +29,7 @@ use revm::{
     inspector::inspectors::TracerEip3155,
     primitives::U256,
 };
-use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
+use revm_inspectors::tracing::{DebugInspector, TracingInspector, TracingInspectorConfig};
 use serde::Serialize;
 
 /// Directory that holds the pinned JSON files, relative to this crate's manifest.
@@ -136,57 +138,63 @@ impl Traced {
         String::from_utf8(bytes).expect("EIP-3155 output is UTF-8")
     }
 
-    /// Receipt gas: the three ledgers after the refund, at least the EIP-7623 floor.
+    /// What a node's `debug_traceTransaction` returns for this transaction under `opts`.
     ///
-    /// `callTracer`'s top-level `gasUsed` is filled from this figure (the same number
-    /// `ExecutionResult::gas().tx_gas_used()` reports). It is **not** the regular / execution
-    /// ledger alone, and it is not state or history gas on their own.
-    pub(crate) fn receipt_gas(&self) -> u64 {
-        self.outcome.gas.gas_used
+    /// The transaction runs again, on a fresh EVM over the same pre-state, under revm-inspectors'
+    /// `DebugInspector` built from `opts`, and the trace is built by `DebugInspector::get_result`,
+    /// which is what reth's debug API calls. It sets the root frame's gas limit and caller to the
+    /// transaction's before it builds a view, and hands the call and opcode tracers the receipt's
+    /// gas used.
+    fn node_trace(&self, opts: GethDebugTracingOptions) -> GethTrace {
+        let inspector = DebugInspector::new(opts).expect("a built-in tracer");
+        let mut evm =
+            MegaEvm::new(context(self.pre_db.clone()).with_tx_runtime_limits(self.limits))
+                .with_inspector(inspector);
+        let outcome = evm.execute_transaction(self.tx.clone()).expect("the transaction is valid");
+        assert_eq!(outcome.result, self.outcome.result, "the traced run executed differently");
+        let mut pre_db = self.pre_db.clone();
+        evm.inspector_mut()
+            .get_result(None, &self.tx, &block(), &outcome.result_and_state, &mut *pre_db)
+            .expect("the trace builds")
     }
 
     /// Geth call tracer output.
     pub(crate) fn call_frame(&self, with_log: bool) -> CallFrame {
-        self.inspector.geth_builder().geth_call_traces(
-            CallConfig { only_top_call: Some(false), with_log: Some(with_log) },
-            self.receipt_gas(),
-        )
+        let config = CallConfig { only_top_call: Some(false), with_log: Some(with_log) };
+        self.node_trace(GethDebugTracingOptions::call_tracer(config))
+            .try_into_call_frame()
+            .expect("a call frame")
     }
 
     /// Geth opcode / struct-log tracer. Memory and storage are omitted; the stack is kept.
     pub(crate) fn struct_logs(&self) -> DefaultFrame {
-        let output = match &self.outcome.result {
-            revm::context::result::ExecutionResult::Success { output, .. } => output.data().clone(),
-            revm::context::result::ExecutionResult::Revert { output, .. } => output.clone(),
-            revm::context::result::ExecutionResult::Halt { .. } => Bytes::new(),
+        let config = GethDefaultTracingOptions {
+            disable_memory: Some(true),
+            disable_stack: Some(false),
+            disable_storage: Some(true),
+            enable_return_data: Some(false),
+            ..Default::default()
         };
-        self.inspector.geth_builder().geth_traces(
-            self.receipt_gas(),
-            output,
-            GethDefaultTracingOptions {
-                disable_memory: Some(true),
-                disable_stack: Some(false),
-                disable_storage: Some(true),
-                enable_return_data: Some(false),
-                ..Default::default()
-            },
-        )
+        self.node_trace(GethDebugTracingOptions { config, ..Default::default() })
+            .try_into_default_frame()
+            .expect("a struct-log frame")
     }
 
     /// Geth prestate tracer.
     pub(crate) fn prestate(&self, diff_mode: bool) -> PreStateFrame {
-        self.inspector
-            .geth_builder()
-            .geth_prestate_traces(
-                &self.outcome.result_and_state,
-                &PreStateConfig {
-                    diff_mode: Some(diff_mode),
-                    disable_code: Some(false),
-                    disable_storage: Some(false),
-                },
-                &*self.pre_db,
-            )
-            .expect("prestate tracer")
+        let config = PreStateConfig {
+            diff_mode: Some(diff_mode),
+            disable_code: Some(false),
+            disable_storage: Some(false),
+        };
+        self.node_trace(GethDebugTracingOptions::prestate_tracer(config))
+            .try_into_pre_state_frame()
+            .expect("a prestate frame")
+    }
+
+    /// The transaction's gas limit.
+    pub(crate) fn gas_limit(&self) -> u64 {
+        self.tx.0.base.gas_limit
     }
 }
 
@@ -233,11 +241,11 @@ pub(crate) fn pin_tracer_views(scenario: &str, traced: &Traced) {
     assert_golden_text(&format!("{scenario}/eip3155.jsonl"), &traced.eip3155());
 }
 
-/// callTracer top-level `gasUsed` versus the receipt gas ledger. See [`Traced::receipt_gas`].
+/// callTracer top-level `gasUsed` versus the receipt gas ledger.
 pub(crate) fn assert_call_gas_matches_receipt(traced: &Traced) {
     let frame = traced.call_frame(false);
     let tracer = u64::try_from(frame.gas_used).expect("gasUsed fits u64");
-    let receipt = traced.receipt_gas();
+    let receipt = traced.outcome.gas.gas_used;
     let result_gas = traced.outcome.result.gas().tx_gas_used();
     assert_eq!(receipt, result_gas, "receipt gas and ExecutionResult gas must agree");
     if tracer != receipt {
@@ -253,6 +261,24 @@ pub(crate) fn assert_call_gas_matches_receipt(traced: &Traced) {
         tracer, receipt,
         "callTracer gasUsed should be the receipt gas (three ledgers after refund, at least the floor), not the regular ledger alone"
     );
+}
+
+/// The root frame's `gas` in both call tracer views is the transaction's gas limit, as a node
+/// reports it.
+///
+/// What the engine hands the first frame is less: the intrinsic gas, the body's history and what
+/// is charged before the first frame are taken out of it, and the reservoir above the execution
+/// cap is not regular gas at all. `DebugInspector::get_result` overwrites the root's gas limit
+/// with the transaction's before it builds the call frames, so neither shows here.
+pub(crate) fn assert_root_gas_is_the_gas_limit(traced: &Traced) {
+    for with_log in [false, true] {
+        let frame = traced.call_frame(with_log);
+        assert_eq!(
+            frame.gas,
+            U256::from(traced.gas_limit()),
+            "root gas (withLog = {with_log}) is not the transaction's gas limit"
+        );
+    }
 }
 
 /// Every account the transaction's post-state names appears in the prestate tracer.

@@ -28,7 +28,8 @@ use revm::{
 
 use crate::harness::{
     assert_call_gas_matches_receipt, assert_keyless_steps, assert_limit_stop_outputs,
-    assert_prestate_covers_touched, at_spec_prices, call_tx, create_tx, pin_tracer_views, Traced,
+    assert_prestate_covers_touched, assert_root_gas_is_the_gas_limit, at_spec_prices, call_tx,
+    create_tx, pin_tracer_views, Traced,
 };
 
 const CALLER: Address = address!("0x0000000000000000000000000000000000400000");
@@ -49,6 +50,7 @@ fn pin(name: &str, traced: &Traced) {
     }
     assert_call_gas_matches_receipt(traced);
     assert_prestate_covers_touched(traced);
+    assert_root_gas_is_the_gas_limit(traced);
 }
 
 /// Ordinary ETH transfer. The 7708 transfer log is what `call_with_log` pins.
