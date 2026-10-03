@@ -14,7 +14,8 @@
 //!
 //! The goldens are the output of the tracers `Cargo.lock` resolves: revm-inspectors 0.40.4 (the
 //! workspace asks for `0.40.1` or later) and the revm fork's inspector crate. A lock update that
-//! changes what a tracer prints moves them; the relations each test asserts do not depend on it.
+//! changes what a tracer prints moves them, and fails the named tracer-shape assertions it
+//! touches, such as the keyless struct logs' gap and the detention step's rendering.
 //!
 //! Default: compare pretty JSON, and the EIP-3155 trace as JSON lines, byte-for-byte with
 //! `tests/tracers/goldens/<scenario>/`.
