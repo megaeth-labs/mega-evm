@@ -1,12 +1,14 @@
-//! Fixtures replayed from the witness of their own execution: a fixture written here, always,
-//! and a sample of the execution-spec fixtures on demand.
+//! Fixtures replayed from the witness of their own execution: two fixtures written here, always,
+//! and the execution-spec fixtures where they are named.
 //!
-//! The sample needs the fixtures the gate downloads. Point `MEGA_STATE_TEST_FIXTURES` at a
-//! `state_tests` directory and run the ignored test:
+//! The execution-spec fixtures are the ones the gate downloads. Point `MEGA_STATE_TEST_FIXTURES`
+//! at a `state_tests` directory, by an absolute path (the test runs in the package's directory),
+//! and run the ignored test, as the gate's workflow does for every file of both releases in both
+//! modes:
 //!
 //! ```text
-//! MEGA_STATE_TEST_FIXTURES=fixtures/main/state_tests cargo test -p mega-state-test --release \
-//!     --test witness -- --ignored
+//! MEGA_STATE_TEST_FIXTURES=$PWD/fixtures/main/state_tests cargo test -p mega-state-test \
+//!     --release --test witness -- --ignored
 //! ```
 //!
 //! `MEGA_STATE_TEST_SAMPLE` is how many fixture files to take, spread over the tree (300 unless

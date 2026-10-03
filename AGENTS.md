@@ -42,6 +42,10 @@ UPDATE_SATIN_PRICING_TABLE=1 cargo test -p mega-evm --test satin
 cargo run --release -p state-test -- --fork Osaka <main-fixtures>/state_tests
 cargo run --release -p state-test -- --fork Amsterdam <devnet-fixtures>/state_tests
 cargo run --release -p state-test -- --mode satin --fork Osaka <main-fixtures>/state_tests  # the report
+# The witness replay over the fixtures, as the gate's job runs it: every file (SAMPLE=0), per fork and mode,
+# the fixtures named by an absolute path (the test runs in the package's directory)
+MEGA_STATE_TEST_FIXTURES=$PWD/<main-fixtures>/state_tests MEGA_STATE_TEST_SAMPLE=0 MEGA_STATE_TEST_FORK=Osaka \
+  MEGA_STATE_TEST_MODE=satin cargo test --release -p mega-state-test --test witness -- --ignored --nocapture
 # Regenerate the rendered deviation registry after changing crates/mega-state-test/src/deviations.rs
 UPDATE_DEVIATIONS=1 cargo test -p mega-state-test --lib deviations
 
@@ -503,7 +507,9 @@ for s in $(seq 1 20); do MEGA_FUZZ_SEED=$s cargo test --release -p mega-evm --te
   - Satin mode is a report: the same fixtures under Satin's own configuration, counted by outcome in the step summary; it never fails the job.
 - **The witness replay** (`tests/block/witness/`, `crates/mega-state-test`'s `witness::check_replay`): a block, or a fixture's transaction, executed on a recorder of every read and replayed twice on a strict database and environments that serve exactly a witness and refuse everything else — once on the record of every database read, once on the witness a node builds from the pre-block states, the included transactions' returned states and the engine's exports (`WitnessRecord::from_channels`); every replay runs only the transactions the recorded block included and must agree with the recording on everything produced, the replay must read nothing its witness does not hold, and the executor's exported buckets and block hashes must be the side-channel reads the block made, a bucket only where the SALT environment answered it with a valid capacity.
   The channel replay is the check a validator's witness must pass; the database-level replay shows the block has no hidden input.
-  The block tests cover each mechanism that reads; `MEGA_STATE_TEST_FIXTURES` names the fixtures for the ignored state-test sample.
+  A fixture entry the engine rejects has no returned state to build the channel witness from, and replays on the record alone.
+  The block tests cover each mechanism that reads, in the `test` job; `exec-spec-satin.yml` replays every Osaka and Amsterdam entry of the fixture releases in both modes and fails on any entry that does not replay, counting the entries replayed on both witnesses apart from the rejected ones.
+  The fixture test is ignored unless `MEGA_STATE_TEST_FIXTURES` names the fixtures.
 - **The byte-price grid** (`scripts/price_grid.sh`, `.github/workflows/price-grid.yml`): the `mega-evm` suite with the `satin-price-override` feature at other costs per state and history byte, five points on a pull request and the whole grid nightly.
   The prices are provisional, so a test holds at any of them — a byte price of nothing, or one gas per byte up to the grid's dearest point: it sizes its gas from the schedule at the prices in effect, and a case whose scenario is state or history gas returns early where that byte costs nothing (`state_is_free`, `history_is_free`).
   Below one gas per byte the schedule's entries round to nothing one at a time, and no test is held there.

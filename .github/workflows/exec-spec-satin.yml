@@ -11,6 +11,11 @@ name: Execution-spec tests on Satin
 #   listed; the executed and skipped counts are pinned below.
 # - Satin mode, a report: the same entries under Satin's own configuration, counted by outcome
 #   in the step summary. It does not fail the job.
+# - the witness replay, a gate: every entry of both fixture releases, in both modes, executed on
+#   a recorder of every read and replayed on a strict database and environments that serve
+#   exactly a witness (crates/mega-state-test/src/witness.rs). An entry the engine executes
+#   replays on the record of every read and on the witness a node builds from its channels; one
+#   it rejects, on the record alone. Any entry that fails to replay fails the job.
 #
 # The fixture releases are the ones the revm fork's `scripts/run-tests.sh` names at the tag
 # Cargo.lock pins, so this gate and the fork runner's (exec-spec.yml) judge the same fixtures.
@@ -249,6 +254,42 @@ jobs:
               jq -r --arg fork "$fork" '.summary as $s | "| \($fork) | \($s.executed) | \([$s.skipped[]] | add // 0) | \($s.passed) | \([$s.failed[]] | add // 0) | \($s.failed | to_entries | map("\(.key) \(.value)") | join(", ")) |"' \
                 "satin-$fork.json" >> "$GITHUB_STEP_SUMMARY"
             fi
+          done
+          exit "$status"
+
+      - name: Witness replay over the fixtures, the gate
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          {
+            echo "### Witness replay"
+            echo
+            echo "| Fixtures | Mode | Replayed on both witnesses | Rejected, replayed on the record alone | Skipped | Failed |"
+            echo "|---|---|---:|---:|---:|---:|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          cargo test --release --locked -p mega-state-test --test witness --no-run || exit 1
+          status=0
+          for run in "Osaka fixtures/main/state_tests" "Amsterdam fixtures/devnet/state_tests"; do
+            read -r fork dir <<< "$run"
+            for mode in equivalence satin; do
+              # The test runs in the package's directory, so the fixtures are named by an absolute path.
+              rc=0
+              MEGA_STATE_TEST_FIXTURES="$GITHUB_WORKSPACE/$dir" MEGA_STATE_TEST_SAMPLE=0 \
+                MEGA_STATE_TEST_FORK="$fork" MEGA_STATE_TEST_MODE="$mode" \
+                cargo test --release --locked -p mega-state-test --test witness -- --ignored --nocapture \
+                2>&1 | tee "witness-$fork-$mode.log" || rc=$?
+              if [ "$rc" -ne 0 ]; then
+                echo "::error::the witness replay failed on the $fork fixtures in $mode mode"
+                status=1
+              fi
+              line=$(grep -m1 '^witness replay of ' "witness-$fork-$mode.log" || true)
+              if [ -n "$line" ]; then
+                printf '%s\n' "$line" | sed -E "s/^.*: ([0-9]+) executed .*, ([0-9]+) rejected .*, ([0-9]+) skipped, ([0-9]+) failed\$/| $fork | $mode | \\1 | \\2 | \\3 | \\4 |/" \
+                  >> "$GITHUB_STEP_SUMMARY"
+              else
+                echo "| $fork | $mode | | | | did not finish |" >> "$GITHUB_STEP_SUMMARY"
+              fi
+            done
           done
           exit "$status"
 

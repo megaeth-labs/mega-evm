@@ -64,10 +64,10 @@ Each replay is held to the first run: the result, the state, the gas by ledger, 
 The replay on the channel witness is the check a stateless validator's witness must pass, run on Ethereum's fixtures; the database-level replay shows the transaction reads nothing outside its database and environments.
 An entry the engine rejects replays on the record of every database read alone: it has no returned state to build the channel witness from, and is in no block.
 `check_replay` says which witnesses an entry replayed on (`Replayed`), and the fixture test counts the two apart: the entries executed and replayed on both witnesses, and the entries rejected and replayed on the database record alone.
-A fixture written into the test always runs, an executed one and a rejected one; a sample of the execution-spec fixtures runs on demand:
+A fixture written into the test always runs, an executed one and a rejected one; the execution-spec fixtures run where `MEGA_STATE_TEST_FIXTURES` names them, which `.github/workflows/exec-spec-satin.yml` does for every file of both releases in both modes:
 
 ```bash
-MEGA_STATE_TEST_FIXTURES=<main>/state_tests cargo test -p mega-state-test --release --test witness -- --ignored
+MEGA_STATE_TEST_FIXTURES=$PWD/<main>/state_tests cargo test -p mega-state-test --release --test witness -- --ignored
 ```
 
 `MEGA_STATE_TEST_SAMPLE` is how many fixture files to take, spread over the tree (300 unless set, 0 for all), `MEGA_STATE_TEST_FORK` the fork (`Osaka` unless set) and `MEGA_STATE_TEST_MODE` the mode (`satin` unless set).
