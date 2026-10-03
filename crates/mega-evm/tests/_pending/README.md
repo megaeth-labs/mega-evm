@@ -2,7 +2,6 @@
 
 The test inventory made for the engine rewrite kept a set of the legacy engine's tests; every one of them has since been ported into a real test target or retired, and none is parked here any more.
 This file records where each one went: the sections below list them by the mechanism that ported or retired them.
-Decision ids (`Dnn`) index the Satin decision table, the numbered list of design decisions behind this engine; it is published with the engine's specification.
 
 The directory holds this record alone.
 It has no `main.rs`, and Cargo discovers integration tests only as `tests/*.rs` and `tests/*/main.rs`, so nothing here is built; do not add one.
@@ -29,16 +28,16 @@ These rows came back with the code they test and run in `crates/mega-evm/src`.
 
 What the retired `tests/mutation/` rows cited, for the mechanisms that own them.
 
-| Owning mechanism | Tests | Disposition | Decision |
+| Owning mechanism | Tests | Disposition | Reason |
 |---|---:|---|---|
-| the Satin gas table | 2 | rewrite | D04 |
-| the Satin gas table | 1 | rewrite | D11 |
+| the Satin gas table | 2 | rewrite | the base is Karst on Osaka, with KZG point evaluation at 100,000 and a 512 KiB contract size |
+| the Satin gas table | 1 | rewrite | the schedule is Amsterdam's with EIP-8038's repricing pressed back to Osaka |
 | SALT pricing | 8 | keep | the test gates regenerate |
-| compute gas | 1 | rewrite | D53 |
+| compute gas | 1 | rewrite | compute is the regular ledger read off `Gas`, apart from state and history gas |
 | the data-size limit | 2 | keep | 13,107,200 unchanged |
 | detention | 6 | keep | the test gates regenerate |
-| the state-growth and KV limits | 1 | undecided | D46 |
-| the state-growth and KV limits | 1 | rewrite | D45 |
+| the state-growth and KV limits | 1 | undecided | whether the KV limit stays, open when the inventory was made |
+| the state-growth and KV limits | 1 | rewrite | state growth is held as EIP-8037 state gas |
 | the block executor | 17 | keep | the test gates regenerate |
 | the block executor | 5 | rewrite | single spec / Satin schedule |
 
@@ -127,12 +126,12 @@ These 61 rows run in a real test target now, adapted to the Satin API and to the
 |---|---|---:|---|
 | `compute_gas/claims.rs` | the system contract interceptors (2) | 2 | `tests/system/dispatch.rs` |
 | `mini_rex/mega_system_transaction.rs` | the system contract interceptors (15) | 15 | `src/system/tx.rs`, `tests/system/system_tx.rs` |
-| `rex3/keyless_deploy.rs` | the system contract interceptors (2) | 2 | `tests/system/keyless.rs` |
+| `rex3/keyless_deploy.rs` | the system contract interceptors (2) | 2 | `tests/system/keyless/` |
 | `rex4/limit_control.rs` | the system contract interceptors (5) | 5 | `tests/system/dispatch.rs`, `tests/system/limit_control.rs` |
 | `rex5/db_error.rs` | the system contract interceptors (1) | 1 | `tests/system/dispatch.rs` |
 | `rex5/deposit_caller_accounting.rs` | the system contract interceptors (7) | 7 | `tests/system/system_tx.rs` |
 | `rex5/interceptor_selector_probe.rs` | the system contract interceptors (6) | 6 | `tests/system/dispatch.rs`, `tests/system/oracle.rs` |
-| `rex5/keyless_deploy_dispatch_parity.rs` | the system contract interceptors (3) | 3 | `tests/system/keyless.rs` |
+| `rex5/keyless_deploy_dispatch_parity.rs` | the system contract interceptors (3) | 3 | `tests/system/keyless/dispatch.rs` |
 | `rex5/system_tx_replay.rs` | the system contract interceptors (12) | 12 | `tests/system/system_tx.rs` |
 | `src/system/intercept.rs` | the system contract interceptors (2) | 2 | `tests/system/dispatch.rs`, `tests/system/limit_control.rs` |
 | `src/system/tx.rs` | the system contract interceptors (6) | 6 | `src/system/tx.rs` |
@@ -317,7 +316,7 @@ These 4 rows run in a real test target now, adapted to the Satin API: block exec
 These 28 rows were the last ones parked, and run in a real test target now.
 The CREATE and CREATE2 rows owed to the common execution layer keep their transactions and what Satin keeps of their expectations: the halt reasons, and the order in which revm's own `CREATE2` checks its operands, at the Satin init-code limit; what they compared with another legacy spec or read off the legacy compute ledger has no counterpart.
 Six of them are the static-callee rows, whose Satin assertions already ran in `tests/satin/static_callee.rs` under the same names; the rest of each compared with a legacy spec.
-The rows that waited for D57 and D58 take the answer the engine gives, which is Ethereum's: a preload-warm address (a precompile, the block beneficiary, an access-list address) is charged warm on its first touch, and a call or creation forwards all but a 64th of its gas.
+The rows that waited on the two decisions about the first touch of a preload-warm address and about forwarding take the answer the engine gives, which is Ethereum's: a preload-warm address (a precompile, the block beneficiary, an access-list address listed without storage keys) is charged warm on its first touch, and a call or creation forwards all but a 64th of its gas.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
