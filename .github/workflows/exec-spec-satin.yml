@@ -282,12 +282,29 @@ jobs:
                 echo "::error::the witness replay failed on the $fork fixtures in $mode mode"
                 status=1
               fi
-              line=$(grep -m1 '^witness replay of ' "witness-$fork-$mode.log" || true)
-              if [ -n "$line" ]; then
-                printf '%s\n' "$line" | sed -E "s/^.*: ([0-9]+) executed .*, ([0-9]+) rejected .*, ([0-9]+) skipped, ([0-9]+) failed\$/| $fork | $mode | \\1 | \\2 | \\3 | \\4 |/" \
-                  >> "$GITHUB_STEP_SUMMARY"
+              # A run passes only on exactly one summary line, in the full format, for this fork and
+              # mode, that executed entries and failed none: a run that tested nothing, or whose
+              # output changed shape, fails the gate rather than passing silently.
+              mapfile -t lines < <(grep '^witness replay of ' "witness-$fork-$mode.log" || true)
+              summary='^witness replay of ([0-9]+) fixture files in ([a-z]+) mode on ([A-Za-z]+): ([0-9]+) executed and replayed on both witnesses, ([0-9]+) rejected and replayed on the database record alone, ([0-9]+) skipped, ([0-9]+) failed$'
+              if [ "${#lines[@]}" -ne 1 ]; then
+                echo "::error::the $fork $mode run printed ${#lines[@]} summary lines, not one"
+                status=1
+              elif ! [[ ${lines[0]} =~ $summary ]]; then
+                echo "::error::the $fork $mode summary is not in the expected format: ${lines[0]}"
+                status=1
+              elif [ "${BASH_REMATCH[3]}" != "$fork" ] || [ "${BASH_REMATCH[2]}" != "$mode" ]; then
+                echo "::error::the $fork $mode run reported ${BASH_REMATCH[3]} in ${BASH_REMATCH[2]} mode"
+                status=1
+              elif [ "${BASH_REMATCH[1]}" -eq 0 ] || [ "${BASH_REMATCH[4]}" -eq 0 ]; then
+                echo "::error::the $fork $mode run executed nothing: ${lines[0]}"
+                status=1
+              elif [ "${BASH_REMATCH[7]}" -ne 0 ]; then
+                echo "::error::the $fork $mode run failed ${BASH_REMATCH[7]} entries"
+                status=1
               else
-                echo "| $fork | $mode | | | | did not finish |" >> "$GITHUB_STEP_SUMMARY"
+                echo "| $fork | $mode | ${BASH_REMATCH[4]} | ${BASH_REMATCH[5]} | ${BASH_REMATCH[6]} | ${BASH_REMATCH[7]} |" \
+                  >> "$GITHUB_STEP_SUMMARY"
               fi
             done
           done
