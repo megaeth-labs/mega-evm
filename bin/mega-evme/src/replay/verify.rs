@@ -580,15 +580,20 @@ pub(super) fn check_transaction_identity(
 /// Because the check runs here, at the one seam every fetched transaction is
 /// admitted through, `tx_hash()` on an authenticated transaction is a verified
 /// value and no consumer has to recompute it.
+///
+/// Returns the EIP-2718 encoding the hash was recomputed from, so a caller that
+/// needs the authenticated bytes (the transactions root of an executed block)
+/// does not encode the transaction a second time.
 pub(super) fn authenticate_transaction(
     tx: &Transaction,
     requested_tx_hash: B256,
-) -> std::result::Result<(), String> {
+) -> std::result::Result<Bytes, String> {
     let envelope = tx.inner.inner.inner();
     // Hash the consensus encoding directly: `trie_hash()`/`tx_hash()` return
     // the envelope's *cached* hash, which an RPC deserialization seeds from the
     // response's own `hash` field — the very value being authenticated.
-    let computed = keccak256(envelope.encoded_2718());
+    let encoded = envelope.encoded_2718();
+    let computed = keccak256(&encoded);
     if computed != requested_tx_hash {
         return Err(format!(
             "the served transaction hashes to {computed}, but transaction {requested_tx_hash} \
@@ -621,7 +626,7 @@ pub(super) fn authenticate_transaction(
              inconsistent transaction (a corrupted backend, or a tampered capture)"
         ));
     }
-    Ok(())
+    Ok(encoded.into())
 }
 
 /// Check that a fetched receipt describes the block the replay executed.

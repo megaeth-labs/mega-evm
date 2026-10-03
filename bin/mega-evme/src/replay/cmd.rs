@@ -1136,6 +1136,7 @@ impl Cmd {
                     hash: ctx.block.hash(),
                 },
                 tx_hashes: &tx_hashes,
+                body_len: ctx.block.transactions.len(),
                 targets: &targets,
             },
             &mut lifecycle,
@@ -1158,8 +1159,10 @@ impl Cmd {
             kernel::LoopOutcome::Completed(proof) => proof,
             kernel::LoopOutcome::Aborted { error, .. } => return Err(error),
         };
+        // The whole executed block, which exists only when the target closes its
+        // block, is not part of a single-transaction report.
         let harvested = match finish {
-            kernel::FinishOutcome::Harvested(targets) => targets,
+            kernel::FinishOutcome::Harvested { targets, whole_block: _ } => targets,
             kernel::FinishOutcome::Failed { error, .. } => return Err(error),
         };
         let target = match harvested.into_iter().next() {

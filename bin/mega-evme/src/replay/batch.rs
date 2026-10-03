@@ -723,7 +723,7 @@ where
                 Err(message) => {
                     failures.push(FailedTx { tx_hash: *hash, kind: BatchErrorKind::Rpc, message })
                 }
-                Ok(()) => match coherence::classify_placement(tx.block_number, tx.block_hash) {
+                Ok(_) => match coherence::classify_placement(tx.block_number, tx.block_hash) {
                     Ok(TargetPlacement::Mined { number, inclusion_hash }) => {
                         grouped
                             .entry(number)
@@ -1058,6 +1058,7 @@ where
             fork_block: parent_block.header.number(),
             identity: kernel::BlockIdentity { number, timestamp, hash: block.hash() },
             tx_hashes: &tx_hashes,
+            body_len: block_tx_order.len(),
             targets: &target_set,
         },
         &mut hook,
@@ -1087,7 +1088,8 @@ where
     // `entries` already holds any inclusion/membership failure recorded before
     // the block started; the harvested targets are appended to it here.
     match finish {
-        kernel::FinishOutcome::Harvested(harvest) => {
+        // The whole executed block is not consumed by this driver yet.
+        kernel::FinishOutcome::Harvested { targets: harvest, whole_block: _ } => {
             for harvested in harvest {
                 let target = match harvested {
                     kernel::TargetHarvest::Receipt(target) => target,
