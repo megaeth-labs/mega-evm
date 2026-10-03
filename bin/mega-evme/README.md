@@ -120,7 +120,7 @@ mega-evme run --create 0x6080604052...
 | `--input <HEX>`      | Input data as hex string           |
 | `--inputfile <PATH>` | Path to file containing input data |
 
-For detailed documentation, see [run/README.md](src/run/README.md).
+For detailed documentation, see [the `run` command's page](../../docs/mega-evme/commands/run.md).
 
 ---
 
@@ -133,10 +133,10 @@ Run a transaction with full transaction context. Similar to `run`, but with addi
 mega-evme tx --input 0x1234 --receiver 0x1234...
 
 # Fork state from remote RPC
-mega-evme tx --fork --fork.rpc https://rpc.example.com --receiver 0x1234...
+mega-evme tx --fork --rpc https://rpc.example.com --receiver 0x1234...
 
 # Fork from specific block
-mega-evme tx --fork --fork.block 12345678 --receiver 0x1234...
+mega-evme tx --fork --rpc https://rpc.example.com --fork.block 12345678 --receiver 0x1234...
 ```
 
 #### Transaction Options
@@ -209,11 +209,11 @@ mega-evme tx --tx-type 4 \
 
 #### Fork Options
 
-| Option                  | Default               | Description                          |
-| ----------------------- | --------------------- | ------------------------------------ |
-| `--fork`                | false                 | Enable state forking from RPC        |
-| `--fork.rpc <URL>`      | http://localhost:8545 | RPC URL for forking (env: `RPC_URL`) |
-| `--fork.block <NUMBER>` | latest                | Block number to fork from            |
+| Option                  | Default         | Description                                                                                  |
+| ----------------------- | --------------- | -------------------------------------------------------------------------------------------- |
+| `--fork`                | false           | Enable state forking from RPC                                                                |
+| `--rpc <URL>`           | none — required | RPC URL for forking (alias `--rpc-url`; `--fork.rpc` is accepted); `RPC_URL` is not read     |
+| `--fork.block <NUMBER>` | latest          | Block number to fork from                                                                    |
 
 ---
 
@@ -224,13 +224,10 @@ The spec, and so the engine, comes from the chain's schedule at the block's time
 
 ```bash
 # Replay a transaction
-mega-evme replay 0x1234...txhash...5678
-
-# Replay with custom RPC
-mega-evme replay 0x1234...txhash --rpc https://rpc.example.com
+mega-evme replay 0x1234...txhash...5678 --rpc https://rpc.example.com
 
 # Replay with execution trace
-mega-evme replay 0x1234...txhash --trace
+mega-evme replay 0x1234...txhash --rpc https://rpc.example.com --trace
 ```
 
 #### Arguments
@@ -241,9 +238,9 @@ mega-evme replay 0x1234...txhash --trace
 
 #### Options
 
-| Option        | Default               | Description                       |
-| ------------- | --------------------- | --------------------------------- |
-| `--rpc <URL>` | http://localhost:8545 | RPC URL to fetch transaction from |
+| Option        | Default         | Description                                                                                                 |
+| ------------- | --------------- | ----------------------------------------------------------------------------------------------------------- |
+| `--rpc <URL>` | none — required | RPC URL to fetch the transaction from (alias `--rpc-url`; `--fork.rpc` is accepted); `RPC_URL` is not read |
 
 #### Transaction Override Options
 
@@ -393,7 +390,7 @@ mega-evme run --create 0x6080604052... --dump
 # Fork mainnet state and execute against a contract
 mega-evme tx \
   --fork \
-  --fork.rpc https://eth-mainnet.example.com \
+  --rpc https://eth-mainnet.example.com \
   --receiver 0xContractAddress \
   --input 0xMethodSelector...
 ```
@@ -451,4 +448,4 @@ State files use JSON format with Ethereum quantity encoding:
 
 ## See Also
 
-- [run Command Documentation](src/run/README.md)
+- [The `run`, `tx` and `replay` command pages](../../docs/mega-evme/commands/)
