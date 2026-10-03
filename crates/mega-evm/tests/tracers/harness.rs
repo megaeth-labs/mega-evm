@@ -318,7 +318,6 @@ pub(crate) fn assert_golden_text(name: &str, text: &str) {
     assert_eq!(expected, text, "golden mismatch for {name}");
 }
 
-/// Pins every tracer view of `traced` under `scenario/`.
 /// The files a scenario's directory holds, one per view [`pin_tracer_views`] pins.
 pub(crate) const VIEWS: [&str; 6] = [
     "call.json",
@@ -329,6 +328,7 @@ pub(crate) const VIEWS: [&str; 6] = [
     "eip3155.jsonl",
 ];
 
+/// Pins every tracer view of `traced` under `scenario/`.
 pub(crate) fn pin_tracer_views(scenario: &str, traced: &Traced) {
     assert_golden(&format!("{scenario}/call.json"), &traced.call_frame(false));
     assert_golden(&format!("{scenario}/call_with_log.json"), &traced.call_frame(true));
