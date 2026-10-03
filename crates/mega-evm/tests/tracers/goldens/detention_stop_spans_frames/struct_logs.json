@@ -1,0 +1,1083 @@
+{
+  "failed": true,
+  "gas": 45280,
+  "returnValue": "0x84b9026700000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000bbe",
+  "structLogs": [
+    {
+      "pc": 0,
+      "op": "PUSH0",
+      "gas": 4957720,
+      "gasCost": 2,
+      "depth": 1,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "POP",
+      "gas": 4957718,
+      "gasCost": 2,
+      "depth": 1,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 2,
+      "op": "TIMESTAMP",
+      "gas": 4957716,
+      "gasCost": 2,
+      "depth": 1,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "POP",
+      "gas": 4957714,
+      "gasCost": 2,
+      "depth": 1,
+      "stack": [
+        "0x6553f100"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 4,
+      "op": "PUSH0",
+      "gas": 4957712,
+      "gasCost": 2,
+      "depth": 1,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 5,
+      "op": "PUSH0",
+      "gas": 4957710,
+      "gasCost": 2,
+      "depth": 1,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 6,
+      "op": "PUSH0",
+      "gas": 4957708,
+      "gasCost": 2,
+      "depth": 1,
+      "stack": [
+        "0x0",
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 7,
+      "op": "PUSH0",
+      "gas": 4957706,
+      "gasCost": 2,
+      "depth": 1,
+      "stack": [
+        "0x0",
+        "0x0",
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 8,
+      "op": "PUSH32",
+      "gas": 4957704,
+      "gasCost": 3,
+      "depth": 1,
+      "stack": [
+        "0x0",
+        "0x0",
+        "0x0",
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 41,
+      "op": "PUSH20",
+      "gas": 4957701,
+      "gasCost": 3,
+      "depth": 1,
+      "stack": [
+        "0x0",
+        "0x0",
+        "0x0",
+        "0x0",
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 62,
+      "op": "GAS",
+      "gas": 4957698,
+      "gasCost": 2,
+      "depth": 1,
+      "stack": [
+        "0x0",
+        "0x0",
+        "0x0",
+        "0x0",
+        "0x0",
+        "0x400003"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 63,
+      "op": "CALL",
+      "gas": 4957696,
+      "gasCost": 4880273,
+      "depth": 1,
+      "stack": [
+        "0x0",
+        "0x0",
+        "0x0",
+        "0x0",
+        "0x0",
+        "0x400003",
+        "0x4ba600"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 0,
+      "op": "JUMPDEST",
+      "gas": 4877673,
+      "gasCost": 1,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "PUSH1",
+      "gas": 4877672,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "JUMP",
+      "gas": 4877669,
+      "gasCost": 8,
+      "depth": 2,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 0,
+      "op": "JUMPDEST",
+      "gas": 4877661,
+      "gasCost": 1,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "PUSH1",
+      "gas": 4877660,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "JUMP",
+      "gas": 4877657,
+      "gasCost": 8,
+      "depth": 2,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 0,
+      "op": "JUMPDEST",
+      "gas": 4877649,
+      "gasCost": 1,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "PUSH1",
+      "gas": 4877648,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "JUMP",
+      "gas": 4877645,
+      "gasCost": 8,
+      "depth": 2,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 0,
+      "op": "JUMPDEST",
+      "gas": 4877637,
+      "gasCost": 1,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "PUSH1",
+      "gas": 4877636,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "JUMP",
+      "gas": 4877633,
+      "gasCost": 8,
+      "depth": 2,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 0,
+      "op": "JUMPDEST",
+      "gas": 4877625,
+      "gasCost": 1,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "PUSH1",
+      "gas": 4877624,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "JUMP",
+      "gas": 4877621,
+      "gasCost": 8,
+      "depth": 2,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 0,
+      "op": "JUMPDEST",
+      "gas": 4877613,
+      "gasCost": 1,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "PUSH1",
+      "gas": 4877612,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "JUMP",
+      "gas": 4877609,
+      "gasCost": 8,
+      "depth": 2,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 0,
+      "op": "JUMPDEST",
+      "gas": 4877601,
+      "gasCost": 1,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "PUSH1",
+      "gas": 4877600,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "JUMP",
+      "gas": 4877597,
+      "gasCost": 8,
+      "depth": 2,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 0,
+      "op": "JUMPDEST",
+      "gas": 4877589,
+      "gasCost": 1,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "PUSH1",
+      "gas": 4877588,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "JUMP",
+      "gas": 4877585,
+      "gasCost": 8,
+      "depth": 2,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 0,
+      "op": "JUMPDEST",
+      "gas": 4877577,
+      "gasCost": 1,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "PUSH1",
+      "gas": 4877576,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "JUMP",
+      "gas": 4877573,
+      "gasCost": 8,
+      "depth": 2,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 0,
+      "op": "JUMPDEST",
+      "gas": 4877565,
+      "gasCost": 1,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "PUSH1",
+      "gas": 4877564,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "JUMP",
+      "gas": 4877561,
+      "gasCost": 8,
+      "depth": 2,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 0,
+      "op": "JUMPDEST",
+      "gas": 4877553,
+      "gasCost": 1,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "PUSH1",
+      "gas": 4877552,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "JUMP",
+      "gas": 4877549,
+      "gasCost": 8,
+      "depth": 2,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 0,
+      "op": "JUMPDEST",
+      "gas": 4877541,
+      "gasCost": 1,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "PUSH1",
+      "gas": 4877540,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "JUMP",
+      "gas": 4877537,
+      "gasCost": 8,
+      "depth": 2,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 0,
+      "op": "JUMPDEST",
+      "gas": 4877529,
+      "gasCost": 1,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "PUSH1",
+      "gas": 4877528,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "JUMP",
+      "gas": 4877525,
+      "gasCost": 8,
+      "depth": 2,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 0,
+      "op": "JUMPDEST",
+      "gas": 4877517,
+      "gasCost": 1,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "PUSH1",
+      "gas": 4877516,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "JUMP",
+      "gas": 4877513,
+      "gasCost": 8,
+      "depth": 2,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 0,
+      "op": "JUMPDEST",
+      "gas": 4877505,
+      "gasCost": 1,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "PUSH1",
+      "gas": 4877504,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "JUMP",
+      "gas": 4877501,
+      "gasCost": 8,
+      "depth": 2,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 0,
+      "op": "JUMPDEST",
+      "gas": 4877493,
+      "gasCost": 1,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "PUSH1",
+      "gas": 4877492,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "JUMP",
+      "gas": 4877489,
+      "gasCost": 8,
+      "depth": 2,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 0,
+      "op": "JUMPDEST",
+      "gas": 4877481,
+      "gasCost": 1,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "PUSH1",
+      "gas": 4877480,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "JUMP",
+      "gas": 4877477,
+      "gasCost": 8,
+      "depth": 2,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 0,
+      "op": "JUMPDEST",
+      "gas": 4877469,
+      "gasCost": 1,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "PUSH1",
+      "gas": 4877468,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "JUMP",
+      "gas": 4877465,
+      "gasCost": 8,
+      "depth": 2,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 0,
+      "op": "JUMPDEST",
+      "gas": 4877457,
+      "gasCost": 1,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "PUSH1",
+      "gas": 4877456,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "JUMP",
+      "gas": 4877453,
+      "gasCost": 8,
+      "depth": 2,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 0,
+      "op": "JUMPDEST",
+      "gas": 4877445,
+      "gasCost": 1,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "PUSH1",
+      "gas": 4877444,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "JUMP",
+      "gas": 4877441,
+      "gasCost": 8,
+      "depth": 2,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 0,
+      "op": "JUMPDEST",
+      "gas": 4877433,
+      "gasCost": 1,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "PUSH1",
+      "gas": 4877432,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "JUMP",
+      "gas": 4877429,
+      "gasCost": 8,
+      "depth": 2,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 0,
+      "op": "JUMPDEST",
+      "gas": 4877421,
+      "gasCost": 1,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "PUSH1",
+      "gas": 4877420,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "JUMP",
+      "gas": 4877417,
+      "gasCost": 8,
+      "depth": 2,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 0,
+      "op": "JUMPDEST",
+      "gas": 4877409,
+      "gasCost": 1,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "PUSH1",
+      "gas": 4877408,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "JUMP",
+      "gas": 4877405,
+      "gasCost": 8,
+      "depth": 2,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 0,
+      "op": "JUMPDEST",
+      "gas": 4877397,
+      "gasCost": 1,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "PUSH1",
+      "gas": 4877396,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "JUMP",
+      "gas": 4877393,
+      "gasCost": 8,
+      "depth": 2,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 0,
+      "op": "JUMPDEST",
+      "gas": 4877385,
+      "gasCost": 1,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "PUSH1",
+      "gas": 4877384,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "JUMP",
+      "gas": 4877381,
+      "gasCost": 8,
+      "depth": 2,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 0,
+      "op": "JUMPDEST",
+      "gas": 4877373,
+      "gasCost": 1,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "PUSH1",
+      "gas": 4877372,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "JUMP",
+      "gas": 4877369,
+      "gasCost": 8,
+      "depth": 2,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 0,
+      "op": "JUMPDEST",
+      "gas": 4877361,
+      "gasCost": 1,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "PUSH1",
+      "gas": 4877360,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "JUMP",
+      "gas": 4877357,
+      "gasCost": 8,
+      "depth": 2,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 0,
+      "op": "JUMPDEST",
+      "gas": 4877349,
+      "gasCost": 1,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "PUSH1",
+      "gas": 4877348,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "JUMP",
+      "gas": 4877345,
+      "gasCost": 8,
+      "depth": 2,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 0,
+      "op": "JUMPDEST",
+      "gas": 4877337,
+      "gasCost": 1,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "PUSH1",
+      "gas": 4877336,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "JUMP",
+      "gas": 4877333,
+      "gasCost": 8,
+      "depth": 2,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 0,
+      "op": "JUMPDEST",
+      "gas": 4877325,
+      "gasCost": 1,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "PUSH1",
+      "gas": 4877324,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "JUMP",
+      "gas": 4877321,
+      "gasCost": 8,
+      "depth": 2,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 0,
+      "op": "JUMPDEST",
+      "gas": 4877313,
+      "gasCost": 1,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "PUSH1",
+      "gas": 4877312,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "JUMP",
+      "gas": 4877309,
+      "gasCost": 8,
+      "depth": 2,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 0,
+      "op": "JUMPDEST",
+      "gas": 4877301,
+      "gasCost": 1,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "PUSH1",
+      "gas": 4877300,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "JUMP",
+      "gas": 4877297,
+      "gasCost": 4877297,
+      "depth": 2,
+      "error": "Some(OutOfGas)",
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    }
+  ]
+}

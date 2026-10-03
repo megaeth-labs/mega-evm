@@ -24,11 +24,11 @@ use mega_evm::{
     test_utils::{
         op_transaction, zero_fee_l1_block_info, MemoryDatabase, RecordingDatabase, WitnessRecord,
     },
-    EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaLimitExceeded, MegaSpecId, MegaTransaction,
-    MegaTransactionOutcome, L1_BLOCK_INFO_SLOTS,
+    EvmTxRuntimeLimits, LimitCheck, LimitKind, MegaContext, MegaEvm, MegaLimitExceeded, MegaSpecId,
+    MegaTransaction, MegaTransactionOutcome, L1_BLOCK_INFO_SLOTS,
 };
 use revm::{
-    context::{BlockEnv, TxEnv},
+    context::{result::ExecutionResult, BlockEnv, TxEnv},
     inspector::inspectors::TracerEip3155,
     primitives::{KECCAK_EMPTY, U256},
     Database,
@@ -341,25 +341,59 @@ pub(crate) fn assert_prestate_covers_reads(traced: &Traced) {
     }
 }
 
-/// Every call frame's output is the ABI encoding of `MegaLimitExceeded`.
-pub(crate) fn assert_limit_stop_outputs(traced: &Traced) {
-    let expected = traced
-        .outcome
-        .limit_exceeded
-        .as_ref()
-        .expect("the transaction is a limit stop")
-        .revert_data();
-    let decoded = MegaLimitExceeded::abi_decode(&expected).expect("stop data is MegaLimitExceeded");
-    fn walk(frame: &CallFrame, decoded: &MegaLimitExceeded) {
-        let output = frame.output.as_ref().expect("limit-stop frame has output");
-        let got = MegaLimitExceeded::abi_decode(output)
-            .unwrap_or_else(|_| panic!("frame output is not MegaLimitExceeded: {output}"));
-        assert_eq!(&got, decoded, "frame {} output", frame.typ);
+/// The kind and limit of a `MegaLimitExceeded` revert.
+pub(crate) fn decode_stop(output: &[u8]) -> (LimitKind, u64) {
+    let stop = MegaLimitExceeded::abi_decode(output)
+        .unwrap_or_else(|_| panic!("not MegaLimitExceeded: {}", Bytes::copy_from_slice(output)));
+    (LimitKind::from_u8(stop.kind).expect("a limit kind"), stop.limit)
+}
+
+/// The transaction was stopped by the transaction-level limit `kind` at `limit`, and every one of
+/// its `frames` call frames — the one that crossed it and every caller, which must not resume —
+/// returns that stop, as the node's call tracer shows them.
+pub(crate) fn assert_every_frame_stops(
+    traced: &Traced,
+    kind: LimitKind,
+    limit: u64,
+    frames: usize,
+) {
+    let Some(LimitCheck::ExceedsLimit { kind: latched, limit: latched_limit, frame_local, .. }) =
+        traced.outcome.limit_exceeded
+    else {
+        panic!("the transaction is not stopped: {:?}", traced.outcome.result);
+    };
+    assert_eq!((latched, latched_limit), (kind, limit), "the limit the transaction latched");
+    assert!(!frame_local, "a transaction-level limit");
+    let ExecutionResult::Revert { output, .. } = &traced.outcome.result else {
+        panic!("a stop settles as a revert: {:?}", traced.outcome.result);
+    };
+    assert_eq!(decode_stop(output), (kind, limit), "the transaction's revert data");
+    fn walk(frame: &CallFrame, expected: (LimitKind, u64), seen: &mut usize) {
+        *seen += 1;
+        let output = frame.output.as_ref().unwrap_or_else(|| panic!("no output: {frame:?}"));
+        assert_eq!(
+            frame.error.as_deref(),
+            Some("execution reverted"),
+            "frame {}",
+            frame.to.unwrap_or_default()
+        );
+        assert_eq!(decode_stop(output), expected, "frame {}", frame.to.unwrap_or_default());
         for child in &frame.calls {
-            walk(child, decoded);
+            walk(child, expected, seen);
         }
     }
-    walk(&traced.call_frame(true), &decoded);
+    let mut seen = 0;
+    walk(&traced.call_frame(true), (kind, limit), &mut seen);
+    assert_eq!(seen, frames, "the frames the stop spans");
+}
+
+/// The transaction's own frame ran no instruction after the call that returned the stop: its
+/// last struct-log step at depth 1 is a call.
+pub(crate) fn assert_parent_does_not_resume(traced: &Traced) {
+    let logs = traced.struct_logs().struct_logs;
+    let last = logs.iter().rev().find(|log| log.depth == 1).expect("the parent ran");
+    assert_eq!(last.op, "CALL", "the parent's last instruction is the call that was stopped");
+    assert!(logs.iter().all(|log| log.op != "SSTORE"), "the parent wrote nothing after the call");
 }
 
 /// The keyless call frame recorded no opcode steps; the creation frame recorded some.
