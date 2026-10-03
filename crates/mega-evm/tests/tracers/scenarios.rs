@@ -5,6 +5,8 @@
 //! fails, the golden still records the current output and the failure is a suspected issue for
 //! the report, not an engine change.
 
+use std::collections::BTreeMap;
+
 use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U256};
 use alloy_rpc_types_trace::geth::PreStateFrame;
 use alloy_sol_types::SolCall;
@@ -146,6 +148,8 @@ fn test_sstore_new_slot_charges_state_gas() {
     let sstore = step(&traced, "SSTORE", 1);
     let spilled = gas::slot_state() + gas::records(1);
     assert_eq!(sstore.gas_cost, gas::sstore_fresh_cold() + spilled, "the SSTORE step's cost");
+    let written = BTreeMap::from([(B256::with_last_byte(1), B256::with_last_byte(1))]);
+    assert_eq!(sstore.storage, Some(written), "the SSTORE step shows the slot it filled");
     pin("sstore_new_slot", &traced, fresh_slot_ledgers());
 }
 

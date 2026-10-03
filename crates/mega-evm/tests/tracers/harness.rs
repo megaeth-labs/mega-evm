@@ -182,15 +182,11 @@ impl Traced {
             .expect("a call frame")
     }
 
-    /// Geth opcode / struct-log tracer. Memory and storage are omitted; the stack is kept.
+    /// Geth opcode / struct-log tracer, with the options a node gets when `debug_traceTransaction`
+    /// names none: the stack and the storage an `SLOAD` or `SSTORE` touched are kept, memory and
+    /// return data are not.
     pub(crate) fn struct_logs(&self) -> DefaultFrame {
-        let config = GethDefaultTracingOptions {
-            disable_memory: Some(true),
-            disable_stack: Some(false),
-            disable_storage: Some(true),
-            enable_return_data: Some(false),
-            ..Default::default()
-        };
+        let config = GethDefaultTracingOptions::default();
         self.node_trace(GethDebugTracingOptions { config, ..Default::default() })
             .try_into_default_frame()
             .expect("a struct-log frame")
