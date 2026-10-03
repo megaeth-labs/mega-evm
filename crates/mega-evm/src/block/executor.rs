@@ -20,11 +20,13 @@ use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 use revm::{context::result::ResultAndState, database::State, handler::EvmTr, Inspector};
 
 use crate::{
-    block::eips, flat_system_contract_specs, is_apply_pending_changes_due, resolve_system_address,
-    transact_apply_pending_changes, transact_deploy, transact_deploy_sequencer_registry,
-    BlockLimiter, BlockMegaTransactionOutcome, BucketId, MegaBlockExecutionCtx, MegaHardforks,
-    MegaSystemCallOutcome, MegaTransaction, MegaTransactionExt, MegaTransactionOutcome,
-    StateChangePostBlockSource, StateChangePreBlockSource, StateChangeSource,
+    block::eips, flat_system_contract_specs_for, is_apply_pending_changes_due,
+    resolve_system_address, transact_apply_pending_changes, transact_deploy,
+    transact_deploy_sequencer_registry_for, BlockLimiter, BlockMegaTransactionOutcome, BucketId,
+    MegaBlockExecutionCtx, MegaHardforks, MegaSpecId, MegaSystemCallOutcome, MegaTransaction,
+    MegaTransactionExt, MegaTransactionOutcome, SequencerRegistryConfig,
+    SequencerRegistryRex6Config, StateChangePostBlockSource, StateChangePreBlockSource,
+    StateChangeSource,
 };
 
 /// Block executor for the `MegaETH` chain.
@@ -180,12 +182,21 @@ where
         // journal's spec during finalize rather than by a flag on the state database, so there is
         // nothing to set here.
 
-        let block_timestamp: u64 = self.evm.block().timestamp.saturating_to();
-        let is_rex_5 = self.hardforks.is_rex_5_active_at_timestamp(block_timestamp);
+        // Every pre-block gate below derives from the executing spec in the EVM's cfg — the
+        // same source `resolve_system_address` reads — compared by POSITION (`reaches`): setup
+        // stays additive by construction — a config that schedules only a later fork still gets
+        // every earlier fork's predeploys and fail-closed checks, and an alias window
+        // (`MINI_REX_1`, live on mainnet) rolls back behavior without dropping the Oracle
+        // predeploys or their read-only witness entries. On node paths the constructor asserts
+        // this spec equals the schedule's resolution; tools that override the cfg spec get a
+        // coherent what-if (setup and execution move together) instead of a hybrid block.
+        let setup_spec = self.evm.ctx().mega_spec();
+        let is_rex_5 = setup_spec.reaches(MegaSpecId::REX5);
 
         // EIP-2935
         let result_and_state = eips::transact_blockhashes_contract_call(
             &self.hardforks,
+            setup_spec,
             self.ctx.parent_hash,
             &mut self.evm,
         )?;
@@ -207,6 +218,7 @@ where
         // EIP-4788
         let result_and_state = eips::transact_beacon_root_contract_call(
             &self.hardforks,
+            setup_spec,
             self.ctx.parent_beacon_block_root,
             &mut self.evm,
         )?;
@@ -236,7 +248,7 @@ where
         // MegaAccessControl, MegaLimitControl) share one deploy path via the canonical
         // registry. We tentatively use `StateChangeSource::Transaction(0)` as the state
         // change source, as alloy defines no specific source for these predeploys.
-        for spec in flat_system_contract_specs(&self.hardforks, block_timestamp) {
+        for spec in flat_system_contract_specs_for(setup_spec) {
             let state =
                 transact_deploy(self.evm.db_mut(), &spec).map_err(BlockExecutionError::other)?;
             outcomes
@@ -249,14 +261,15 @@ where
         if is_rex_5 {
             // Deploy: seeds system address, sequencer, admin, and initialFromBlock
             // into storage on first deploy.
-            // Cloned so the helper below can take `&mut self`; two addresses, once per block.
+            // Cloned so the helper below can take `&mut self`; a few words, once per block.
             let params = self
                 .hardforks
-                .fork_params::<crate::SequencerRegistryConfig>()
+                .fork_params::<SequencerRegistryConfig>()
                 .ok_or_else(|| BlockValidationError::BlockHashContractCall {
                     message: "Rex5 active but SequencerRegistryConfig not configured".into(),
                 })?
                 .clone();
+            let rex6_params = self.hardforks.fork_params::<SequencerRegistryRex6Config>().cloned();
 
             // The deploy and apply-pending-changes outcomes commit in push order, while the
             // apply system call always executes against the not-yet-committed state and thus
@@ -269,11 +282,12 @@ where
             // `applyPendingChanges()` logic is identical in v1/v2 (v2 changes only rotation
             // scheduling), so its semantics do not depend on which side of the deploy it
             // executes. Pre-Rex6 blocks keep the original deploy-then-apply order untouched.
-            let is_rex_6 = self.hardforks.is_rex_6_active_at_timestamp(block_timestamp);
+            let is_rex_6 = setup_spec.reaches(MegaSpecId::REX6);
 
             if !is_rex_6 {
                 self.push_deploy_sequencer_registry_outcome(
-                    block_timestamp,
+                    setup_spec,
+                    rex6_params.as_ref(),
                     block_number,
                     &params,
                     &mut outcomes,
@@ -302,7 +316,8 @@ where
 
             if is_rex_6 {
                 self.push_deploy_sequencer_registry_outcome(
-                    block_timestamp,
+                    setup_spec,
+                    rex6_params.as_ref(),
                     block_number,
                     &params,
                     &mut outcomes,
@@ -317,14 +332,15 @@ where
     /// and pushes its outcome.
     fn push_deploy_sequencer_registry_outcome(
         &mut self,
-        block_timestamp: u64,
+        setup_spec: MegaSpecId,
+        rex6_params: Option<&SequencerRegistryRex6Config>,
         block_number: u64,
-        params: &crate::SequencerRegistryConfig,
+        params: &SequencerRegistryConfig,
         outcomes: &mut Vec<MegaSystemCallOutcome>,
     ) -> Result<(), BlockExecutionError> {
-        let result_and_state = transact_deploy_sequencer_registry(
-            &self.hardforks,
-            block_timestamp,
+        let result_and_state = transact_deploy_sequencer_registry_for(
+            setup_spec,
+            rex6_params,
             block_number,
             self.evm.db_mut(),
             params,
@@ -817,7 +833,9 @@ where
 
         // After all pre-block outcomes are committed, resolve the system address for this block.
         // This reads _currentSystemAddress from the now-committed SequencerRegistry storage.
-        // The returned EvmState captures the read as a witness record.
+        // The returned EvmState captures the read as a witness record. Inside the resolver the
+        // behavior projection gates whether dynamic resolution applies, and the position
+        // projection selects the expected registry bytecode version.
         let spec = self.evm.ctx().mega_spec();
         let (system_address, read_state) =
             resolve_system_address(&self.hardforks, spec, self.evm.db_mut())?;

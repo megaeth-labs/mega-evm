@@ -420,6 +420,24 @@ impl AdditionalLimit {
     /// wrapper, removing a call across the `RefMut<AdditionalLimit>` boundary.
     #[inline]
     pub(crate) fn record_compute_gas(&mut self, compute_gas_used: u64) -> bool {
+        self.record_compute_gas_impl::<true>(compute_gas_used)
+    }
+
+    /// [`Self::record_compute_gas`] for the frame-end hook, which may meet a non-compute dimension
+    /// that is over its limit without having latched: a SELFDESTRUCT whose pre-inner recorder ran
+    /// and whose inner instruction then halted never reaches its trailing all-dimension check, so
+    /// its usage is still pending when the frame ends. The frame-end limit check that follows
+    /// handles it. The two methods differ only in the debug-only latch-protocol guard.
+    #[inline]
+    fn record_frame_end_compute_gas(&mut self, compute_gas_used: u64) -> bool {
+        self.record_compute_gas_impl::<false>(compute_gas_used)
+    }
+
+    #[inline]
+    fn record_compute_gas_impl<const GUARD_LATCH_PROTOCOL: bool>(
+        &mut self,
+        compute_gas_used: u64,
+    ) -> bool {
         // Record unconditionally, even when another dimension has already latched an exceed:
         // the compute work was performed, and the recorded total feeds the transaction outcome
         // and block-level compute accounting. Skipping the record would under-report compute
@@ -438,12 +456,14 @@ impl AdditionalLimit {
         // non-compute dimension is over limit but not yet latched, some mutation site is missing
         // its `check_limit()` — catch it here in tests, not in production. The sub-tracker
         // `check_limit()` calls are non-mutating, so this compiles out of release builds. (The
-        // one pre-inner recorder, SELFDESTRUCT, routes through `record_compute_gas_all_dims`, not
-        // this method, so it never trips this.)
+        // one pre-inner recorder, SELFDESTRUCT, latches in `record_compute_gas_all_dims` when its
+        // inner instruction succeeds; when that instruction halts instead, the usage is still
+        // pending at frame end, which is why the frame-end hook skips this guard.)
         debug_assert!(
-            !self.data_size.check_limit().exceeded_limit() &&
-                !self.kv_update.check_limit().exceeded_limit() &&
-                !self.state_growth.check_limit().exceeded_limit(),
+            !GUARD_LATCH_PROTOCOL ||
+                (!self.data_size.check_limit().exceeded_limit() &&
+                    !self.kv_update.check_limit().exceeded_limit() &&
+                    !self.state_growth.check_limit().exceeded_limit()),
             "non-compute limit exceeded without latching: a mutation site is missing check_limit()",
         );
         // Recording compute gas can only change the compute-gas dimension, so check just that one
@@ -698,7 +718,7 @@ impl AdditionalLimit {
     ) {
         if let Some(gas_remaining_before) = gas_remaining_before_process_action {
             let compute_gas_cost = gas_remaining_before.saturating_sub(result.gas().remaining());
-            if !self.record_compute_gas(compute_gas_cost) {
+            if !self.record_frame_end_compute_gas(compute_gas_cost) {
                 mark_frame_result_as_exceeding_limit(
                     result,
                     self.exceeding_instruction_result(),

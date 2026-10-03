@@ -21,9 +21,12 @@ pub struct EvmTxRuntimeLimits {
 impl EvmTxRuntimeLimits {
     /// Creates a new `TxLimits` instance from the given `MegaSpecId`.
     pub fn from_spec(spec: MegaSpecId) -> Self {
+        // An alias spec is grouped with its `behavior()` target so it runs under exactly the
+        // target's limits; the grouping must agree with `behavior()`, pinned by
+        // `test_alias_specs_use_their_behavior_targets_limits`.
         match spec {
-            MegaSpecId::EQUIVALENCE => Self::equivalence(),
-            MegaSpecId::MINI_REX => Self::mini_rex(),
+            MegaSpecId::EQUIVALENCE | MegaSpecId::MINI_REX_1 => Self::equivalence(),
+            MegaSpecId::MINI_REX | MegaSpecId::MINI_REX_2 => Self::mini_rex(),
             MegaSpecId::REX | MegaSpecId::REX1 | MegaSpecId::REX2 => Self::rex(),
             MegaSpecId::REX3 => Self::rex3(),
             MegaSpecId::REX4 => Self::rex4(),
@@ -185,5 +188,23 @@ mod tests {
         let limits = EvmTxRuntimeLimits::rex();
         assert_eq!(limits.tx_state_growth_limit, constants::rex::TX_STATE_GROWTH_LIMIT);
         assert_ne!(limits.tx_state_growth_limit, u64::MAX, "REX must bound the state growth");
+    }
+
+    /// Every alias spec must run under exactly its `behavior()` target's limits — the
+    /// match in `from_spec` states the alias→target mapping a second time, and this
+    /// test is the reconciliation between the two.
+    #[test]
+    fn test_alias_specs_use_their_behavior_targets_limits() {
+        for spec in MegaSpecId::ALL {
+            if !spec.is_alias() {
+                continue;
+            }
+            assert_eq!(
+                EvmTxRuntimeLimits::from_spec(*spec),
+                EvmTxRuntimeLimits::from_spec(spec.behavior()),
+                "{spec:?} limits diverge from its behavior target {:?}",
+                spec.behavior(),
+            );
+        }
     }
 }

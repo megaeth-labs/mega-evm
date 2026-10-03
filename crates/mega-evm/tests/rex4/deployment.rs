@@ -21,6 +21,9 @@ type TestEvm<'a, 'db> = MegaEvm<&'a mut TestState<'db>, NoOpInspector, EmptyExte
 type TestExecutor<'a, 'db> =
     MegaBlockExecutor<MegaHardforkConfig, TestEvm<'a, 'db>, OpAlloyReceiptBuilder>;
 
+// Complete ladders topping out at the target fork. Expressing these as
+// `with_all_activated().without(Rex5)` instead would leave Rex6 activated, and pre-block setup
+// gates compare rung positions — which would still report REX6 and open every lower gate.
 fn rex4_chain_spec() -> MegaHardforkConfig {
     MegaHardforkConfig::default().with_all_activated_through(MegaSpecId::REX4)
 }

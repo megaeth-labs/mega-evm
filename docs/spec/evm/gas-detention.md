@@ -148,12 +148,21 @@ The detained compute gas limit MUST remain in effect for the rest of the transac
 #### Frames That Run Out of Gas on the Triggering Opcode
 
 Detention is triggered by the volatile read itself, not by the successful completion of the opcode that issues it.
-`BALANCE`, `EXTCODESIZE`, `EXTCODEHASH`, `SLOAD` and `SELFDESTRUCT` consume their operands and register their volatile access before that access is charged for.
+`BALANCE`, `EXTCODESIZE`, `EXTCODEHASH`, `EXTCODECOPY`, `SLOAD` and `SELFDESTRUCT` consume their operands and register their volatile access before that access is charged for.
+For `EXTCODECOPY` this includes its copy cost and its memory expansion: both are charged after the access is registered.
 A frame that reaches one of them holding less gas than the access costs therefore still registers the access, and the registration MUST survive that frame's out-of-gas halt for the rest of the transaction.
-The reduced compute gas limit binds at detention enforcement points, which are the volatile-guarded opcodes themselves: a registration made by a halting frame takes effect at the next volatile-guarded opcode the transaction executes, in any frame.
-A transaction whose halting read is its final volatile access reaches no further enforcement point, and its remainder runs under the limit already in effect.
-The CALL-family opcodes are excluded from this registration guarantee: their base access cost — and, for value transfers, the transfer cost — is charged before the target account is read, so a frame that cannot afford those charges halts without registering the access.
-`EXTCODECOPY` is excluded for the same reason: its copy cost is charged before the target account is read, so only a frame that affords the copy cost registers the access.
+`SELFDESTRUCT` checks for a static context before it consumes its operand, so a `SELFDESTRUCT` rejected in a static frame registers nothing.
+From Rex5, a `SELFDESTRUCT` that sends a nonzero balance to an empty beneficiary first charges the new-account storage gas, and registers the access only if that charge succeeds.
+The CALL-family opcodes register the access when they read the target account.
+That read follows the operand consumption, the new-account storage gas where one is charged, the rejection of a value transfer from a static context, and the input and output memory expansion, but precedes the base access cost and the value-transfer cost.
+A CALL-family frame that halts on the base access cost or the value-transfer cost therefore still registers the access, and one that halts on any earlier step does not.
+From Rex6, a CALL-family opcode whose target delegates through EIP-7702 to the beneficiary registers the access in the same way.
+The reduced compute gas limit binds at detention enforcement points.
+Once execution has started, these are the volatile-guarded opcodes that complete, and, before Rex3, a call into the oracle contract that registers oracle access, as its frame starts.
+The volatile-guarded opcodes are the block-environment opcodes listed above together with `BALANCE`, `EXTCODESIZE`, `EXTCODECOPY` and `EXTCODEHASH`, `SLOAD` from Rex3, and `SELFBALANCE`, `SELFDESTRUCT` and the CALL-family opcodes from Rex4; each is an enforcement point whatever account or slot it reads.
+A volatile-guarded opcode that halts, or that `disableVolatileDataAccess()` rejects, enforces nothing, with one exception: from Rex4 the CALL-family opcodes enforce the limit even when their frame halts, so a registration they make binds at once.
+A registration made by any other halting frame takes effect at the next enforcement point the transaction reaches, in any frame.
+If a halting read leaves a registration unapplied and the transaction reaches no later enforcement point, its remainder runs under the limit already in effect.
 An access blocked by [`disableVolatileDataAccess()`](../system-contracts/mega-access-control.md) is the exception: the blocked opcode never runs, so it reads nothing and triggers nothing.
 
 ## Constants

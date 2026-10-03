@@ -15,6 +15,8 @@
 //! - **`mixed_workload`**: Realistic combined workload
 //! - **`eip7702_authlist`**: REX5 pre-execution authority-list scan scaling with list size
 //! - **`staticcall_selfdestruct`**: SELFDESTRUCT inside a STATICCALL frame vs a STOP control
+//! - **`halting_call_window`**: CALL-family frames that halt before revm's body loads their target,
+//!   where the handlers recreate the journal entries the deployed schedule left
 
 #![allow(missing_docs)]
 
@@ -28,8 +30,8 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{
-        ADD, CALL, COINBASE, CREATE, CREATE2, DELEGATECALL, GAS, LOG0, LOG1, LOG2, LOG4, NUMBER,
-        POP, PUSH0, SELFDESTRUCT, SLOAD, SSTORE, STATICCALL, STOP, TIMESTAMP,
+        ADD, CALL, CALLCODE, COINBASE, CREATE, CREATE2, DELEGATECALL, GAS, LOG0, LOG1, LOG2, LOG4,
+        NUMBER, POP, PUSH0, SELFDESTRUCT, SLOAD, SSTORE, STATICCALL, STOP, TIMESTAMP,
     },
     context::tx::TxEnvBuilder,
     ExecuteEvm as _,
@@ -950,6 +952,118 @@ fn bench_oracle_real_data(c: &mut Criterion) {
     group.finish();
 }
 
+//
+// ============================================================================
+// Halting CALL-Family Window Benchmarks
+// ============================================================================
+//
+// revm 40 charges the CALL family's static gas ahead of revm's body and its
+// value-transfer cost ahead of the load, where the schedule MegaETH deployed
+// charged both after. A frame that halts on either — or on a memory expansion
+// it could have paid for before the static charge — therefore has to recreate
+// the journal entries the deployed schedule left behind, which costs a stack
+// read and a host load on those exits.
+//
+// The parent loops fixed-gas CALLs to a child holding one CALLCODE, and the
+// forwarded budget picks which exit the child takes. `succeeding` is the
+// control the recreation must not touch: it pays the same per-opcode
+// bookkeeping (the operand capture) without ever reaching the recreation. The
+// `call_succeeding` row is the same control for CALL, where the metered address
+// *is* the operand and the whole capture folds away at compile time.
+//
+
+const WINDOW_CHILD: Address = address!("00000000000000000000000000000000000b0001");
+
+/// The identity precompile: a CALLCODE operand that is not the child's own
+/// address, so on `Rex6` its entry is the one the recreation is about.
+const WINDOW_CALLCODE_TARGET: Address = address!("0000000000000000000000000000000000000004");
+
+/// Parent that performs `iterations` CALLs to `target`, each forwarding a fixed
+/// `gas_each`, then STOPs.
+fn make_repeated_call_fixedgas(target: Address, gas_each: u64, iterations: usize) -> Bytes {
+    let mut builder = BytecodeBuilder::default();
+    for _ in 0..iterations {
+        builder = builder
+            .push_number(0u64) // retSize
+            .push_number(0u64) // retOffset
+            .push_number(0u64) // argsSize
+            .push_number(0u64) // argsOffset
+            .push_number(0u64) // value
+            .push_address(target)
+            .push_number(gas_each) // forwarded gas (fixed)
+            .append(CALL)
+            .append(POP);
+    }
+    builder.append(STOP).build()
+}
+
+/// Child holding one `opcode` call to `target` returning into `ret_size` bytes
+/// of memory. Seven `PUSH`es at 3 gas each, so the child reaches the opcode with
+/// its forwarded budget minus 21.
+fn make_single_call_child(opcode: u8, target: Address, ret_size: u64) -> Bytes {
+    BytecodeBuilder::default()
+        .push_number(ret_size)
+        .push_number(0u64) // retOffset
+        .push_number(0u64) // argsSize
+        .push_number(0u64) // argsOffset
+        .push_number(0u64) // value
+        .push_address(target)
+        .push_number(0u64) // gas
+        .append(opcode)
+        .append(STOP)
+        .build()
+}
+
+fn bench_halting_call_window(c: &mut Criterion) {
+    const ITERS: usize = 500;
+    /// 150 gas at the opcode: pays the 100-gas static charge, then cannot
+    /// afford the 98-gas return-range expansion it could have paid for before.
+    const MEMORY_WINDOW_GAS: u64 = 171;
+    /// 59 gas at the opcode, short of the static charge itself.
+    const STATIC_WINDOW_GAS: u64 = 80;
+    /// Enough for the call to run to completion.
+    const SUCCEEDING_GAS: u64 = 100_000;
+
+    let workload = |gas_each: u64, child_code: Bytes| {
+        Workload::single(
+            vec![
+                Account::new(CONTRACT).code(make_repeated_call_fixedgas(
+                    WINDOW_CHILD,
+                    gas_each,
+                    ITERS,
+                )),
+                Account::new(WINDOW_CHILD).code(child_code),
+                Account::new(CALLER).balance(U256::from(10).pow(U256::from(18))),
+            ],
+            TxSpec::call(CALLER, CONTRACT).gas_limit(FEATURE_GAS_LIMIT),
+        )
+    };
+
+    const REX6_ONLY: &[(&str, MegaSpecId)] = &[("rex6", MegaSpecId::REX6)];
+    let callcode_child =
+        |ret_size| make_single_call_child(CALLCODE, WINDOW_CALLCODE_TARGET, ret_size);
+
+    let mut group = c.benchmark_group("halting_call_window");
+    for (variant, gas_each, child) in [
+        ("callcode_memory_window", MEMORY_WINDOW_GAS, callcode_child(1024)),
+        ("callcode_static_window", STATIC_WINDOW_GAS, callcode_child(0)),
+        ("callcode_succeeding", SUCCEEDING_GAS, callcode_child(0)),
+        (
+            "call_succeeding",
+            SUCCEEDING_GAS,
+            make_single_call_child(CALL, WINDOW_CALLCODE_TARGET, 0),
+        ),
+    ] {
+        register_mega_specs_suffixed(
+            &mut group,
+            REX6_ONLY,
+            &format!("{variant}/{ITERS}"),
+            &workload(gas_each, child),
+        );
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_volatile_data,
@@ -967,5 +1081,6 @@ criterion_group!(
     bench_eip7702_authlist,
     bench_staticcall_selfdestruct,
     bench_salt_dynamic_gas,
+    bench_halting_call_window,
 );
 criterion_main!(benches);

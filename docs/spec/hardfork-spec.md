@@ -15,9 +15,35 @@ The protocol distinguishes between two related concepts:
 - **[Hardfork](glossary.md#hardfork-megahardfork)** — A network upgrade event: _when_ changes are activated on the chain. A hardfork may include protocol-level changes beyond MegaEVM (e.g., networking, state sync, RPC behavior).
 - **[Spec](glossary.md#spec-megaspecid)** — A set of MegaETH verifiable behaviors: _what_ a correct node does. A spec captures the execution-layer semantics that determine node correctness.
 
-Multiple hardforks can map to the same spec.
-A hardfork can also map to an older spec.
-For example: `MiniRex` → `MINI_REX`, `MiniRex1` → `EQUIVALENCE` (rollback), `MiniRex2` → `MINI_REX` (restoration).
+Hardforks map one-to-one onto specs: every hardfork schedules a spec rung of its own.
+A rollback is expressed by scheduling an alias spec — a rung whose behavior is identical to an earlier spec (see below).
+For example: `MiniRex` → `MINI_REX`, `MiniRex1` → `MINI_REX_1` (behavior: `EQUIVALENCE`), `MiniRex2` → `MINI_REX_2` (behavior: `MINI_REX`).
+
+### Alias Specs: Behavior vs. Position
+
+Hardforks map one-to-one onto specs, so the spec resolved for a block — the latest activated hardfork's spec — only ever climbs.
+A rollback is expressed by an **alias spec**: a rung of its own whose behavior is defined to be identical to an earlier spec.
+`MiniRex1` maps to the alias spec `MINI_REX_1` (behavior: `EQUIVALENCE`), and `MiniRex2` maps to `MINI_REX_2` (behavior: `MINI_REX`).
+
+The one resolved spec is therefore read through two projections that answer different questions.
+
+- **Behavior** — which semantics the EVM applies in this block.
+  An alias spec executes exactly its target's semantics: during the `MiniRex1` window MegaEVM behaves as `EQUIVALENCE` again.
+- **Position** — how far the ladder has climbed.
+  This is monotone and never decreases; an alias rung stands above the specs whose behavior it rolls back.
+
+The distinction matters for chain setup that is one-way.
+System contracts predeployed under a hardfork remain deployed, and pre-block rules remain in effect, even while an alias rung rolls the executing semantics back.
+A rollback changes how transactions execute; it does not un-deploy a contract or retract a system call.
+
+A node MUST determine pre-block setup — system-contract predeploys, their bytecode versions, and the fail-closed rules on the pre-block EIP-2935/EIP-4788 system calls — from the resolved spec's position.
+A node MUST determine all other behavior — opcode behavior, gas costs, resource limits, transaction classification — from the resolved spec's behavior.
+
+Spec ranges elsewhere in this specification — "from MiniRex onward", "MiniRex through Rex5" — are stated on behavior.
+An alias rung counts as its behavior target in such ranges: during the `MiniRex1` window, a rule stated "from MiniRex onward" does not apply, because the behavior in effect is `EQUIVALENCE`.
+
+A published hardfork schedule MUST climb the spec ladder rung by rung: a hardfork MUST NOT be scheduled unless every hardfork of a lower rung is scheduled, with one exception — a network MAY omit an alias hardfork, since an alias rung carries no setup of its own.
+Execution is additionally robust to a malformed schedule: because setup derives from position, a scheduled hardfork implies its predecessors' setup even if they were never scheduled.
 
 This documentation covers specs — the verifiable behavioral definitions that determine correctness of a MegaETH node.
 Protocol-level changes outside the verifiable execution layer (e.g., networking, peer discovery) that are part of a hardfork are not covered here.
@@ -25,10 +51,11 @@ Protocol-level changes outside the verifiable execution layer (e.g., networking,
 ## Spec Progression
 
 ```
-EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4 → REX5 → REX6 → REX7
+EQUIVALENCE → MINI_REX → MINI_REX_1 → MINI_REX_2 → REX → REX1 → REX2 → REX3 → REX4 → REX5 → REX6 → REX7
 ```
 
-Each newer spec includes all previous behaviors.
+Each newer behavior-introducing spec includes all previous behaviors.
+The alias rungs `MINI_REX_1` (behavior: `EQUIVALENCE`) and `MINI_REX_2` (behavior: `MINI_REX`) are the exception: an alias rung introduces no behavior of its own and instead executes exactly its target's earlier behavior (see [Alias Specs](#alias-specs-behavior-vs-position)).
 All specs build on Optimism Isthmus (Ethereum Prague) as the base layer.
 All specs through REX6 are frozen; REX7 is **unstable** and under active development.
 
@@ -69,6 +96,15 @@ The first spec to introduce MegaETH-specific modifications:
 - **Large contract support** — 512 KB contracts (21x increase from 24 KB)
 
 _See [MiniRex Network Upgrade](upgrades/minirex.md) for full details._
+
+### MINI_REX_1 and MINI_REX_2
+
+Alias rungs with no behavior of their own.
+
+- `MINI_REX_1` (behavior: `EQUIVALENCE`) — scheduled by the `MiniRex1` hardfork; rolls execution semantics back to `EQUIVALENCE`.
+- `MINI_REX_2` (behavior: `MINI_REX`) — scheduled by the `MiniRex2` hardfork; restores `MINI_REX` semantics.
+
+See [Alias Specs](#alias-specs-behavior-vs-position) for how behavior and position project from an alias rung.
 
 ### REX
 
