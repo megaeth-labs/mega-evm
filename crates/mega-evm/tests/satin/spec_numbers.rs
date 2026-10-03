@@ -259,7 +259,7 @@ fn limits(doc: &str) {
     require(
         safety,
         &format!(
-            "the data-size limits are {} bytes, and the detention caps are {} each",
+            "the data-size limits at {} bytes, and the detention caps at {} each",
             grouped(TX_DATA_LIMIT),
             grouped(BLOCK_ENV_ACCESS_COMPUTE_GAS)
         ),

@@ -4,8 +4,8 @@ description: Satin network upgrade (unstable) — MegaETH's execution rules rest
 
 # Satin Network Upgrade
 
-This page is an informative summary of the Satin specification.
-For the full normative definition, see the Satin spec in the mega-evm repository.
+This page is the Satin specification.
+The concept pages under `docs/spec/` still describe Rex6; this page states, normatively, the rules Satin executes on in their place.
 
 {% hint style="warning" %}
 **Unstable** — Satin is under active development.
@@ -303,7 +303,7 @@ The bytes MUST be those of the byte table below, which is also the table the dat
 
 When each charge is made:
 
-- The body — `TX_BODY_SIZE`, the calldata, the access list and the authorizations — MUST be charged before execution, as intrinsic state gas: the reservoir pays it first, and it does not count against the execution cap.
+- The body — `TX_BODY_SIZE`, the calldata, the access list and the authorizations — MUST be charged before execution, as intrinsic state gas: the reservoir pays it first and its excess the regular budget, and it is not part of the intrinsic regular gas the execution cap is validated against.
   A gas limit that cannot cover it MUST make the transaction invalid (see [Two-Pool Gas](#4-two-pool-gas-eip-8037-replaces-the-dual-gas-model)).
   The body's history gas MUST NOT be reported on the state ledger.
 - The records of the applied EIP-7702 authorities, and the record the transaction's own frame makes (its value's recipient or its created account), MUST be charged before the first frame.
@@ -325,7 +325,7 @@ These MUST NOT pay history gas:
   For these the deposited-code history gas is zero too.
 
 The EIP-7623 floor is still computed and validated.
-At these prices it never raises a receipt's gas used, because the history gas of the same bytes is higher; it does bind the figure a block counts towards its execution-gas limit, `max(regular, floor)` (see [Two-Pool Gas](#4-two-pool-gas-eip-8037-replaces-the-dual-gas-model)).
+At these prices it never raises the gas used of a transaction that pays history gas, because the history gas of the same bytes is higher; it can still raise that of a transaction exempt from history gas, a deposit or one of the protocol's own; and it does bind the figure a block counts towards its execution-gas limit, `max(regular, floor)` (see [Two-Pool Gas](#4-two-pool-gas-eip-8037-replaces-the-dual-gas-model)).
 
 ### 8. History Allowance Replaces the Storage Gas Stipend
 
@@ -395,7 +395,8 @@ Three dimensions are limited per transaction; compute is not one of them (see [T
   A start the caller's account refuses — a value the caller cannot fund, a creation whose creator nonce cannot be bumped — MUST count nothing, be charged nothing, and be stopped by no limit.
   A creation onto an occupied address is counted, and a crossing it causes stops it where it would otherwise have failed on the collision.
 - The per-transaction limits and the per-frame caps are protocol values: the chain configuration carries them as parameters of the Satin hardfork, together with the detention caps and the block limits, and a node MUST hold every transaction to the values the chain configures, never to values it is handed with a block.
-  The values above are the defaults.
+  The values above are the reference implementation's defaults, which it runs on only where no chain configuration names the values: an unknown chain, or an EVM built without the chain's schedule.
+  A chain configuration that activates Satin MUST state every one of them (see [Node integrators](#node-integrators)).
   A chain configuration that activates Satin without these parameters MUST be refused when it is loaded, and so MUST one that sets a limit to zero, a transaction data-size limit below `TX_BODY_SIZE`, or a detention cap no transaction's compute reaches (see [Gas Detention on Withheld Gas](#12-gas-detention-on-withheld-gas)).
   The 98/100 share is not a parameter.
   At the default data-size limit a transaction keeps fewer than 327,680 write records (13,107,200 / 40), so a KV limit binds only below that.
@@ -731,7 +732,7 @@ Four of those counts can be limited:
   A Mega System Transaction is a legacy transaction in the block, so at block level it is held to these budgets and to the data-availability limits like any non-deposit transaction.
 - History gas has no block limit; the block's history bytes are reported, not limited.
 - The block gas limit is unchanged: a transaction's declared gas limit MUST fit in what the block has left.
-- The four limits are protocol values the chain configuration carries as parameters of the Satin hardfork, with the per-transaction limits (see [Resource Limits](#10-resource-limits)); the defaults are the table's.
+- The four limits are protocol values the chain configuration carries as parameters of the Satin hardfork, with the per-transaction limits (see [Resource Limits](#10-resource-limits)); the table's last column is the reference implementation's default, which binds only where no chain configuration names the values.
   A node validating a block MUST hold it to the chain's values, as the rules above state them, and to no other value.
 - A block builder MAY pack tighter, as building policy: it MAY refuse a transaction for its declared gas limit, its encoded size or its data-availability size, hold the block to an encoded-size or data-availability budget, and hold any of the four limits below the chain's value, never above it.
   A building policy MUST NOT refuse a deposit, which the block derived from L1 must include: none of those per-transaction limits and budgets applies to one.
@@ -934,7 +935,7 @@ The six system contracts keep their Rex6 bytecode and ABI; the Satin deploy step
 A system-address transaction without the system shape is now executed as a user transaction instead of being refused; only the holder of the system key can send one.
 
 The per-transaction and block limits and the detention caps are protocol values: the chain configuration carries them as parameters of the Satin hardfork, so every node executing a chain holds its blocks to the same ones, and a configuration that activates Satin without them does not load.
-By default the KV-update and state-gas limits and the block's execution-gas limit are unlimited, the data-size limits are 13,107,200 bytes, and the detention caps are 20,000,000 each.
+A chain configuration that activates Satin states every one of them; where none names them — an unknown chain, or an EVM built without the chain's schedule — the reference implementation runs with the KV-update and state-gas limits and the block's execution-gas limit unlimited, the data-size limits at 13,107,200 bytes, and the detention caps at 20,000,000 each.
 The per-transaction gas-limit, encoded-size and data-availability limits are a block builder's policy, not the chain's: a node validating a block does not apply them.
 
 Satin is unstable and not scheduled on any network: its prices, limits and rules may change in either direction until it is frozen.
