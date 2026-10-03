@@ -917,6 +917,7 @@ A node, a stateless validator and a replay tool must agree on everything below, 
   | `satinBlockKvUpdateLimit`            | The block's KV-update limit                                                        |
 
   Once `satinTime` is present every key is required, and none has a default; a key that starts with `satin` and is not one of these is refused, and so is a value its parameter refuses.
+  A key given twice is refused only where the reader still sees both copies, as a parser handed the object's text does; a reader that first parses the file into a JSON value, as the reference CLI and a node do, sees only the last copy and reads it.
   Integers are JSON numbers up to 2^64 − 1, which leaves a limit unlimited; detention's caps must be below 199,987,900 (see [Gas Detention on Withheld Gas](#12-gas-detention-on-withheld-gas)), and no limit may be zero.
   Addresses are hex strings.
   The key format is provisional until a network publishes a genesis file carrying it.

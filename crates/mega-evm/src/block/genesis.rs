@@ -101,8 +101,11 @@ const ARBITRARY_PRECISION_NUMBER: &str = "$serde_json::private::Number";
 ///   default. A `satin` key without `satinTime` is refused too.
 /// - A key starting with `satin`, in any case, that is not in the table is refused, so a misspelled
 ///   key cannot stand in for the one it meant. Every other key is another fork's and is not read.
-/// - A key given twice is refused wherever the deserializer shows both; a `serde_json::Value` has
-///   already kept the last one.
+/// - A key given twice is refused only where the deserializer still shows both copies, as the
+///   object's text through a `serde_json::Deserializer` does. A `serde_json::Value` has already
+///   kept the last copy, so a reader that parses the file into one first — `mega-evme --genesis`
+///   does, and so does a node that serializes its chain-config type — reads the last value and
+///   refuses nothing.
 /// - A value of the wrong type is refused, naming its key; a value its params type refuses
 ///   ([`HardforkParams::validate`]) is refused, and so is a schedule
 ///   [`validate_schedule`](MegaHardforks::validate_schedule) refuses. One object is read as an
