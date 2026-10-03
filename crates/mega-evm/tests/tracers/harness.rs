@@ -33,8 +33,13 @@ use revm::{
     primitives::{KECCAK_EMPTY, U256},
     Database,
 };
-use revm_inspectors::tracing::{DebugInspector, TracingInspector, TracingInspectorConfig};
+use revm_inspectors::tracing::{
+    types::{CallTraceNode, CallTraceStep, TraceMemberOrder},
+    DebugInspector, TracingInspector, TracingInspectorConfig,
+};
 use serde::Serialize;
+
+use crate::gas::Ledgers;
 
 /// Directory that holds the pinned JSON files, relative to this crate's manifest.
 const GOLDENS_DIR: &str = "tests/tracers/goldens";
@@ -291,26 +296,133 @@ pub(crate) fn pin_tracer_views(scenario: &str, traced: &Traced) {
     assert_golden_text(&format!("{scenario}/eip3155.jsonl"), &traced.eip3155());
 }
 
-/// callTracer top-level `gasUsed` versus the receipt gas ledger.
-pub(crate) fn assert_call_gas_matches_receipt(traced: &Traced) {
-    let frame = traced.call_frame(false);
-    let tracer = u64::try_from(frame.gas_used).expect("gasUsed fits u64");
-    let receipt = traced.outcome.gas.gas_used;
-    let result_gas = traced.outcome.result.gas().tx_gas_used();
-    assert_eq!(receipt, result_gas, "receipt gas and ExecutionResult gas must agree");
-    if tracer != receipt {
-        // Keep the golden as-is. A mismatch is a tracer-shape issue, not an engine bug to fix.
-        eprintln!(
-            "suspected issue: callTracer gasUsed={tracer} receipt_gas={receipt} regular={} state={} history={}",
-            traced.outcome.gas.regular,
-            traced.outcome.gas.state,
-            traced.outcome.gas.history
+/// The transaction is billed `expected`, ledger by ledger, and its receipt is their sum.
+pub(crate) fn assert_ledgers(traced: &Traced, expected: Ledgers) {
+    let gas = &traced.outcome.gas;
+    assert_eq!(
+        (gas.regular, gas.state, gas.history),
+        (expected.regular, expected.state, expected.history),
+        "the ledgers (regular, state, history)"
+    );
+    assert_eq!(gas.gas_used, expected.receipt(), "the receipt's gas used");
+}
+
+/// The tracer's own figure for the transaction's frame, against the receipt.
+///
+/// revm-inspectors records the regular gas the engine handed the transaction's frame as the root
+/// node's `gas_limit` and, when the frame ends, what the frame spent of it as `gas_used`
+/// (`Gas::total_gas_spent`: the limit less what is left, so state and history gas that spilled
+/// onto regular gas is in it, and what the reservoir paid is not). What the frame did not spend
+/// goes back to the sender with the reservoir left and the refund; everything else the
+/// transaction's gas limit bought is the receipt:
+///
+/// `gas_limit = receipt + (root.gas_limit − root.gas_used) + given_back + reservoir left + refund`
+///
+/// `given_back` is the state and history gas the frame spilled onto its regular gas and got back
+/// because it failed. revm gives a failed frame that gas back when the frame's result is merged
+/// (`handle_reservoir_remaining_gas`, for the transaction's own frame in `last_frame_result`),
+/// which is after the inspector's `call_end` read it: the tracer counts it as spent, the receipt
+/// does not bill it.
+///
+/// The first run's inspector is read here: the node path overwrites the root's gas limit with the
+/// transaction's.
+pub(crate) fn assert_root_frame_settles(traced: &Traced, given_back: u64) {
+    let root = &traced.inspector.traces().nodes()[0].trace;
+    let unspent = root.gas_limit - root.gas_used;
+    let gas = &traced.outcome.gas;
+    let refund = traced.outcome.result.gas().final_refunded();
+    assert_eq!(
+        traced.gas_limit(),
+        gas.gas_used + unspent + given_back + gas.reservoir_remaining + refund,
+        "the receipt, the root frame's unspent gas ({unspent}), what its failure gave back \
+         ({given_back}), the reservoir left and the refund do not make up the gas limit"
+    );
+}
+
+/// The steps the first run's inspector recorded, in execution order, each with the index of the
+/// frame that ran it.
+fn steps_in_order(traced: &Traced) -> Vec<(usize, &CallTraceStep)> {
+    fn walk<'a>(nodes: &'a [CallTraceNode], idx: usize, out: &mut Vec<(usize, &'a CallTraceStep)>) {
+        let node = &nodes[idx];
+        for member in &node.ordering {
+            match member {
+                TraceMemberOrder::Step(step) => out.push((idx, &node.trace.steps[*step])),
+                TraceMemberOrder::Call(child) => walk(nodes, node.children[*child], out),
+                TraceMemberOrder::Log(_) => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(traced.inspector.traces().nodes(), 0, &mut out);
+    out
+}
+
+/// The `gasUsed` of the EIP-3155 trace's summary line.
+pub(crate) fn eip3155_summary_gas_used(traced: &Traced) -> u64 {
+    let eip3155 = traced.eip3155();
+    let summary = eip3155.lines().last().expect("the summary line");
+    let summary: serde_json::Value = serde_json::from_str(summary).expect("a JSON line");
+    quantity(&summary["gasUsed"])
+}
+
+/// A `0x`-prefixed hex quantity of the EIP-3155 trace.
+fn quantity(value: &serde_json::Value) -> u64 {
+    let text = value.as_str().expect("a hex quantity");
+    u64::from_str_radix(text.trim_start_matches("0x"), 16).expect("a hex quantity")
+}
+
+/// The EIP-3155 trace against the other tracer's steps and the receipt.
+///
+/// - Its op lines are the steps the first run's inspector recorded, in execution order, the
+///   creation of a keyless deployment included: the same program counter, opcode, gas before the
+///   step and cost.
+/// - Its summary passes exactly when the transaction succeeded.
+/// - Its summary's `gasUsed` is the transaction's gas limit less the regular gas the last executed
+///   step left: the fork's `GasInspector` tracks nothing else, and starts from nothing when no
+///   frame ran a step. Where that step is the transaction's own frame's, the frame is a call and it
+///   was not stopped by gas detention, whose crossing the tracer sees zeroed, it is the receipt
+///   plus the reservoir left and the refund: the reservoir is not regular gas, so the summary
+///   counts what is left of it as used. A creation is charged its deposit after its last step,
+///   which the creation scenario asserts by itself.
+pub(crate) fn assert_eip3155_agrees(traced: &Traced) {
+    let lines: Vec<serde_json::Value> = traced
+        .eip3155()
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("a JSON line"))
+        .collect();
+    let (summary, ops) = lines.split_last().expect("the summary line");
+    assert!(summary.get("stateRoot").is_some(), "the last line is the summary: {summary}");
+    let steps = steps_in_order(traced);
+    assert_eq!(ops.len(), steps.len(), "the EIP-3155 op lines are the inspector's steps");
+    for (line, (_, step)) in ops.iter().zip(&steps) {
+        let recorded =
+            (step.pc as u64, u64::from(step.op.get()), step.gas_remaining, step.gas_cost);
+        let printed = (
+            line["pc"].as_u64().expect("pc"),
+            line["op"].as_u64().expect("op"),
+            quantity(&line["gas"]),
+            quantity(&line["gasCost"]),
+        );
+        assert_eq!(printed, recorded, "EIP-3155 step (pc, op, gas, gasCost)");
+    }
+    assert_eq!(summary["pass"], traced.outcome.result.is_success(), "the summary's pass");
+    let left = steps.last().map_or(0, |(_, step)| step.gas_remaining - step.gas_cost);
+    let gas_used = quantity(&summary["gasUsed"]);
+    assert_eq!(gas_used, traced.gas_limit() - left, "the summary's gasUsed");
+    let detained = matches!(
+        traced.outcome.limit_exceeded,
+        Some(LimitCheck::ExceedsLimit { kind: LimitKind::ComputeGas, .. })
+    );
+    let is_call = traced.tx.0.base.kind.is_call();
+    if steps.last().is_some_and(|(frame, _)| *frame == 0) && is_call && !detained {
+        let gas = &traced.outcome.gas;
+        let refund = traced.outcome.result.gas().final_refunded();
+        assert_eq!(
+            gas_used,
+            gas.gas_used + gas.reservoir_remaining + refund,
+            "the summary's gasUsed is the receipt plus the reservoir left and the refund"
         );
     }
-    assert_eq!(
-        tracer, receipt,
-        "callTracer gasUsed should be the receipt gas (three ledgers after refund, at least the floor), not the regular ledger alone"
-    );
 }
 
 /// The root frame's `gas` in both call tracer views is the transaction's gas limit, as a node
@@ -424,6 +536,17 @@ pub(crate) fn assert_every_frame_stops(
     let mut seen = 0;
     walk(&traced.call_frame(true), (kind, limit), &mut seen);
     assert_eq!(seen, frames, "the frames the stop spans");
+}
+
+/// Gas detention stopped the transaction at `compute`: the compute the stop reports as used, which
+/// the regular ledger bills.
+pub(crate) fn assert_compute_at_stop(traced: &Traced, compute: u64) {
+    let Some(LimitCheck::ExceedsLimit { kind: LimitKind::ComputeGas, used, .. }) =
+        traced.outcome.limit_exceeded
+    else {
+        panic!("gas detention did not stop the transaction: {:?}", traced.outcome.limit_exceeded);
+    };
+    assert_eq!(used, compute, "the compute at the crossing");
 }
 
 /// The transaction's own frame ran no instruction after the call that returned the stop: its
