@@ -419,13 +419,17 @@ fn quantity(value: &serde_json::Value) -> u64 {
 ///   creation of a keyless deployment included: the same program counter, opcode, gas before the
 ///   step and cost.
 /// - Its summary passes exactly when the transaction succeeded.
+/// - Its summary's `fork` is `Osaka`: the fork's tracer prints the L1 name of the spec the
+///   configuration runs, which for Satin is Karst's base, not the schedule Satin prices with.
 /// - Its summary's `gasUsed` is the transaction's gas limit less the regular gas the last executed
 ///   step left: the fork's `GasInspector` tracks nothing else, and starts from nothing when no
 ///   frame ran a step. Where that step is the transaction's own frame's, the frame is a call and it
 ///   was not stopped by gas detention, whose crossing the tracer sees zeroed, it is the receipt
 ///   plus the reservoir left and the refund: the reservoir is not regular gas, so the summary
 ///   counts what is left of it as used. A creation is charged its deposit after its last step,
-///   which the creation scenario asserts by itself.
+///   which the creation and keyless scenarios assert by themselves. Where a child frame ran the
+///   last step, as in a stop that spans frames, the figure is that child's leftover read against
+///   the transaction's gas limit, and bears no relation to the receipt.
 pub(crate) fn assert_eip3155_agrees(traced: &Traced) {
     let lines: Vec<serde_json::Value> = traced
         .eip3155()
@@ -434,6 +438,10 @@ pub(crate) fn assert_eip3155_agrees(traced: &Traced) {
         .collect();
     let (summary, ops) = lines.split_last().expect("the summary line");
     assert!(summary.get("stateRoot").is_some(), "the last line is the summary: {summary}");
+    assert_eq!(
+        summary["fork"], "Osaka",
+        "the fork's tracer prints the L1 name of the Karst base spec, not the schedule's"
+    );
     let steps = steps_in_order(traced);
     assert_eq!(ops.len(), steps.len(), "the EIP-3155 op lines are the inspector's steps");
     for (line, (_, step)) in ops.iter().zip(&steps) {
