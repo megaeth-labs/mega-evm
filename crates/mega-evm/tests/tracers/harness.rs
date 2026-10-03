@@ -320,6 +320,9 @@ pub(crate) fn assert_limit_stop_outputs(traced: &Traced) {
 }
 
 /// The keyless call frame recorded no opcode steps; the creation frame recorded some.
+///
+/// This reads the inspector's own record of the frames. What a node's opcode tracer makes of it
+/// is [`assert_keyless_struct_logs_miss_the_creation`].
 pub(crate) fn assert_keyless_steps(traced: &Traced, expect_create: bool) {
     let nodes = traced.inspector.traces().nodes();
     assert!(!nodes.is_empty(), "the tracer recorded a call frame");
@@ -346,4 +349,34 @@ pub(crate) fn at_spec_prices() -> bool {
     }
     mega_evm::test_utils::note_price_guard("tracer goldens are pinned at the spec's byte prices");
     false
+}
+
+/// Known limitation: the opcode tracer a node runs shows no step of a keyless deployment, though
+/// the creation ran its init code.
+///
+/// The engine runs no instruction in the `keylessDeploy` call's frame, so the frame has no steps,
+/// and the creation is its child one level below. revm-inspectors' struct-log builder starts
+/// from the root frame's steps and enters a child frame only through a call-opcode step of its
+/// parent (`push_steps_on_stack`), so it never reaches the creation's steps, which the inspector
+/// did record and the EIP-3155 trace prints.
+///
+/// A change on either side — the engine giving the call frame a step that leads to its child, or
+/// the builder walking a frame's children without one — makes this fail; that is the moment to
+/// require the creation's steps in the struct logs instead and regenerate the keyless goldens.
+pub(crate) fn assert_keyless_struct_logs_miss_the_creation(traced: &Traced) {
+    let nodes = traced.inspector.traces().nodes();
+    let creation_steps = nodes[1].trace.steps.len();
+    assert!(nodes[0].trace.steps.is_empty(), "the keyless call frame ran no instruction");
+    assert!(creation_steps > 0, "the inspector recorded the creation's steps");
+    let eip3155_steps = traced.eip3155().lines().filter(|line| line.contains("\"opName\"")).count();
+    assert_eq!(eip3155_steps, creation_steps, "the EIP-3155 trace prints the creation's steps");
+    let struct_logs = traced.struct_logs().struct_logs;
+    assert!(
+        struct_logs.is_empty(),
+        "known limitation lifted: the struct logs of a keyless deployment now show {} step(s) of \
+         its creation (the inspector recorded {creation_steps}); require them in \
+         `assert_keyless_struct_logs_miss_the_creation` instead of their absence, and regenerate \
+         the keyless goldens with UPDATE_GOLDENS=1",
+        struct_logs.len()
+    );
 }

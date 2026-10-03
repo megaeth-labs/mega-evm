@@ -10,7 +10,10 @@ use alloy_sol_types::SolCall;
 use mega_evm::{
     constants::TX_GAS_LIMIT_CAP,
     system::{
-        keyless::{IKeylessDeploy, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE},
+        keyless::{
+            decode_error_result, IKeylessDeploy, KeylessDeployError, KEYLESS_DEPLOY_ADDRESS,
+            KEYLESS_DEPLOY_CODE,
+        },
         ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE, HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
         HIGH_PRECISION_TIMESTAMP_ORACLE_CODE, LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE,
         ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE, SEQUENCER_REGISTRY_ADDRESS,
@@ -21,13 +24,14 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{
-        CALL, GAS as GAS_OP, JUMP, JUMPDEST, POP, PUSH0, RETURN, REVERT, TIMESTAMP,
+        CALL, CODECOPY, GAS as GAS_OP, JUMP, JUMPDEST, POP, PUSH0, RETURN, REVERT, TIMESTAMP,
     },
-    context::TxEnv,
+    context::{result::ExecutionResult, TxEnv},
 };
 
 use crate::harness::{
-    assert_call_gas_matches_receipt, assert_keyless_steps, assert_limit_stop_outputs,
+    assert_call_gas_matches_receipt, assert_keyless_steps,
+    assert_keyless_struct_logs_miss_the_creation, assert_limit_stop_outputs,
     assert_prestate_covers_touched, assert_root_gas_is_the_gas_limit, at_spec_prices, call_tx,
     create_tx, pin_tracer_views, Traced,
 };
@@ -127,6 +131,8 @@ fn system_db() -> MemoryDatabase {
 /// A pre-EIP-155 signed creation, as Nick's Method makes one.
 struct Deployment {
     tx: Bytes,
+    /// The address the signature recovers to.
+    signer: Address,
 }
 
 impl Deployment {
@@ -150,8 +156,8 @@ impl Deployment {
         );
         let mut encoded = Vec::new();
         signed.rlp_encode(&mut encoded);
-        signed.recover_signer().expect("Nick's-Method signature recovers");
-        Self { tx: encoded.into() }
+        let signer = signed.recover_signer().expect("Nick's-Method signature recovers");
+        Self { tx: encoded.into(), signer }
     }
 
     fn call_data(&self) -> Bytes {
@@ -164,41 +170,88 @@ impl Deployment {
     }
 }
 
-fn deploying_empty() -> Bytes {
-    Bytes::from_static(&[PUSH0, PUSH0, RETURN])
+/// The runtime the creation scenarios deploy: it returns nothing.
+fn runtime() -> Bytes {
+    BytecodeBuilder::default().return_empty().build()
+}
+
+/// Init code that copies [`runtime`] from its own tail and deposits it.
+fn deploying_runtime() -> Bytes {
+    let runtime = runtime();
+    let len = u8::try_from(runtime.len()).expect("a short runtime");
+    let prefix = BytecodeBuilder::default()
+        .push_number(len)
+        .push_number(0_u16)
+        .append(PUSH0)
+        .append(CODECOPY)
+        .push_number(len)
+        .append(PUSH0)
+        .append(RETURN);
+    let tail = u16::try_from(prefix.len()).expect("a short prefix");
+    BytecodeBuilder::default()
+        .push_number(len)
+        .push_number(tail)
+        .append(PUSH0)
+        .append(CODECOPY)
+        .push_number(len)
+        .append(PUSH0)
+        .append(RETURN)
+        .append_many(runtime)
+        .build()
 }
 
 fn keyless_tx(data: Bytes) -> MegaTransaction {
     call_tx(CALLER, KEYLESS_DEPLOY_ADDRESS, data, U256::ZERO, TX_GAS)
 }
 
-/// A successful `keylessDeploy`: the call frame has no steps, the creation frame has some.
+/// A `keylessDeploy` that deploys: the answer names the signer's first creation address and no
+/// error, and that address holds the runtime afterwards.
 #[test]
 fn test_keyless_deploy_succeeds() {
-    let deployment = Deployment::signed(U256::ZERO, deploying_empty());
+    let deployment = Deployment::signed(U256::ZERO, deploying_runtime());
     let traced = Traced::run(
         system_db(),
         keyless_tx(deployment.call_data()),
         EvmTxRuntimeLimits::no_limits(),
     );
-    assert!(traced.outcome.result.is_success(), "{:?}", traced.outcome.result);
+    let ExecutionResult::Success { output, .. } = &traced.outcome.result else {
+        panic!("the keyless call succeeds: {:?}", traced.outcome.result);
+    };
+    let answer = IKeylessDeploy::keylessDeployCall::abi_decode_returns(output.data())
+        .expect("a keylessDeploy answer");
+    let deployed = deployment.signer.create(0);
+    assert_ne!(deployed, Address::ZERO);
+    assert_eq!(answer.deployedAddress, deployed, "the answer names the deploy address");
+    assert!(answer.errorData.is_empty(), "a deployment that deployed reports no error");
+    let code =
+        traced.outcome.state[&deployed].info.code.as_ref().expect("the code is in the state");
+    assert_eq!(code.original_bytes(), runtime(), "the deploy address holds the runtime");
+    // Below the execution cap the transaction has no reservoir, so every charge the creation
+    // made, its code deposit's state and history gas included, drew its regular gas: the
+    // creation frame's spent gas, as the tracer measured it, is what it spent from both pools.
+    let creation = &traced.inspector.traces().nodes()[1].trace;
+    assert_eq!(answer.gasUsed, creation.gas_used, "gasUsed is the creation frame's spend");
     pin("keyless_success", &traced);
     assert_keyless_steps(&traced, true);
+    assert_keyless_struct_logs_miss_the_creation(&traced);
 }
 
 /// A `keylessDeploy` the rules refuse: value with an unfunded signer. No creation starts.
 #[test]
 fn test_keyless_deploy_refused() {
-    let deployment = Deployment::signed(U256::from(1), deploying_empty());
+    let deployment = Deployment::signed(U256::from(1), deploying_runtime());
     let traced = Traced::run(
         system_db(),
         keyless_tx(deployment.call_data()),
         EvmTxRuntimeLimits::no_limits(),
     );
-    assert!(
-        matches!(traced.outcome.result, revm::context::result::ExecutionResult::Revert { .. }),
-        "{:?}",
-        traced.outcome.result
+    let ExecutionResult::Revert { output, .. } = &traced.outcome.result else {
+        panic!("the keyless call reverts: {:?}", traced.outcome.result);
+    };
+    assert_eq!(
+        decode_error_result(output),
+        Some(KeylessDeployError::InsufficientBalance),
+        "the signer cannot fund the carried value"
     );
     pin("keyless_refused", &traced);
     assert_keyless_steps(&traced, false);
