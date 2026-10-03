@@ -1,0 +1,231 @@
+{
+  "failed": true,
+  "gas": 42360,
+  "returnValue": "0x84b9026700000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000052",
+  "structLogs": [
+    {
+      "pc": 0,
+      "op": "TIMESTAMP",
+      "gas": 4957720,
+      "gasCost": 2,
+      "depth": 1,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "POP",
+      "gas": 4957718,
+      "gasCost": 2,
+      "depth": 1,
+      "stack": [
+        "0x6553f100"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 2,
+      "op": "JUMPDEST",
+      "gas": 4957716,
+      "gasCost": 1,
+      "depth": 1,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "PUSH8",
+      "gas": 4957715,
+      "gasCost": 3,
+      "depth": 1,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 12,
+      "op": "JUMP",
+      "gas": 4957712,
+      "gasCost": 8,
+      "depth": 1,
+      "stack": [
+        "0x2"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 2,
+      "op": "JUMPDEST",
+      "gas": 4957704,
+      "gasCost": 1,
+      "depth": 1,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "PUSH8",
+      "gas": 4957703,
+      "gasCost": 3,
+      "depth": 1,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 12,
+      "op": "JUMP",
+      "gas": 4957700,
+      "gasCost": 8,
+      "depth": 1,
+      "stack": [
+        "0x2"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 2,
+      "op": "JUMPDEST",
+      "gas": 4957692,
+      "gasCost": 1,
+      "depth": 1,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "PUSH8",
+      "gas": 4957691,
+      "gasCost": 3,
+      "depth": 1,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 12,
+      "op": "JUMP",
+      "gas": 4957688,
+      "gasCost": 8,
+      "depth": 1,
+      "stack": [
+        "0x2"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 2,
+      "op": "JUMPDEST",
+      "gas": 4957680,
+      "gasCost": 1,
+      "depth": 1,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "PUSH8",
+      "gas": 4957679,
+      "gasCost": 3,
+      "depth": 1,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 12,
+      "op": "JUMP",
+      "gas": 4957676,
+      "gasCost": 8,
+      "depth": 1,
+      "stack": [
+        "0x2"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 2,
+      "op": "JUMPDEST",
+      "gas": 4957668,
+      "gasCost": 1,
+      "depth": 1,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "PUSH8",
+      "gas": 4957667,
+      "gasCost": 3,
+      "depth": 1,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 12,
+      "op": "JUMP",
+      "gas": 4957664,
+      "gasCost": 8,
+      "depth": 1,
+      "stack": [
+        "0x2"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 2,
+      "op": "JUMPDEST",
+      "gas": 4957656,
+      "gasCost": 1,
+      "depth": 1,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "PUSH8",
+      "gas": 4957655,
+      "gasCost": 3,
+      "depth": 1,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 12,
+      "op": "JUMP",
+      "gas": 4957652,
+      "gasCost": 8,
+      "depth": 1,
+      "stack": [
+        "0x2"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 2,
+      "op": "JUMPDEST",
+      "gas": 4957644,
+      "gasCost": 1,
+      "depth": 1,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "PUSH8",
+      "gas": 4957643,
+      "gasCost": 3,
+      "depth": 1,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 12,
+      "op": "JUMP",
+      "gas": 4957640,
+      "gasCost": 4957640,
+      "depth": 1,
+      "error": "Some(OutOfGas)",
+      "stack": [
+        "0x2"
+      ],
+      "refund": 0
+    }
+  ]
+}

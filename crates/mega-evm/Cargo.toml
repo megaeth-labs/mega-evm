@@ -39,6 +39,7 @@ serde = { workspace = true, features = ["alloc", "derive"] }
 
 [dev-dependencies]
 # alloy
+alloy-rpc-types-trace = { workspace = true }
 alloy-trie = { workspace = true, features = ["std", "ethereum"] }
 
 # CodSpeed drop-in: `codspeed-criterion-compat` re-exports criterion's API, so

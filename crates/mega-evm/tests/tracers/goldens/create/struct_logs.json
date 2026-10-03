@@ -1,0 +1,39 @@
+{
+  "failed": false,
+  "gas": 238718,
+  "returnValue": "0x",
+  "structLogs": [
+    {
+      "pc": 0,
+      "op": "PUSH0",
+      "gas": 4761286,
+      "gasCost": 2,
+      "depth": 1,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "PUSH0",
+      "gas": 4761284,
+      "gasCost": 2,
+      "depth": 1,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 2,
+      "op": "RETURN",
+      "gas": 4761282,
+      "gasCost": 0,
+      "depth": 1,
+      "stack": [
+        "0x0",
+        "0x0"
+      ],
+      "refund": 0
+    }
+  ]
+}

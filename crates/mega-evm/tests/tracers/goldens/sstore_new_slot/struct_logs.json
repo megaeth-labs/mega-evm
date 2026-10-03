@@ -1,0 +1,48 @@
+{
+  "failed": false,
+  "gas": 165826,
+  "returnValue": "0x",
+  "structLogs": [
+    {
+      "pc": 0,
+      "op": "PUSH32",
+      "gas": 4957720,
+      "gasCost": 3,
+      "depth": 1,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 33,
+      "op": "PUSH32",
+      "gas": 4957717,
+      "gasCost": 3,
+      "depth": 1,
+      "stack": [
+        "0x1"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 66,
+      "op": "SSTORE",
+      "gas": 4957714,
+      "gasCost": 123540,
+      "depth": 1,
+      "stack": [
+        "0x1",
+        "0x1"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 67,
+      "op": "STOP",
+      "gas": 4834174,
+      "gasCost": 0,
+      "depth": 1,
+      "stack": [],
+      "refund": 0
+    }
+  ]
+}
