@@ -396,6 +396,36 @@ pub(crate) fn assert_parent_does_not_resume(traced: &Traced) {
     assert!(logs.iter().all(|log| log.op != "SSTORE"), "the parent wrote nothing after the call");
 }
 
+/// Known shape: the last opcode step of a gas-detention stop reads as an out-of-gas that cost
+/// the frame all the gas it had, though the engine never made that charge.
+///
+/// The crossing charge fails in the interpreter the way an out-of-gas does, which zeroes the
+/// frame's gas, and both the struct-log builder and the EIP-3155 tracer take the step's cost and
+/// status in `step_end`, from that state. The engine puts the frame's gas back to what it had
+/// before the charge only when it settles the frame's result, after the step, so the receipt
+/// bills the compute before the charge while the step shows the frame's whole gas as its cost.
+///
+/// If the engine starts settling the crossing before `step_end` sees it, or a tracer stops
+/// reading it there, this fails: the step then has a cost no larger than the charge that
+/// crossed, and the assertion should require that instead.
+pub(crate) fn assert_detention_step_reads_as_out_of_gas(traced: &Traced, crossing_op: &str) {
+    let logs = traced.struct_logs().struct_logs;
+    let last = logs.last().expect("the frames ran");
+    let shape = "the detention crossing's step reads as an out-of-gas that spent the frame's \
+                 whole gas (a fix makes this fail: require the step's own cost instead)";
+    assert_eq!(last.op, crossing_op, "{shape}");
+    assert_eq!(last.error.as_deref(), Some("Some(OutOfGas)"), "{shape}");
+    assert_eq!(last.gas_cost, last.gas, "{shape}");
+    assert!(last.gas_cost > traced.outcome.gas.gas_used, "{shape}: the receipt bills none of it");
+    let eip3155 = traced.eip3155();
+    let last_step =
+        eip3155.lines().filter(|line| line.contains("\"opName\"")).last().expect("a step");
+    let step: serde_json::Value = serde_json::from_str(last_step).expect("a JSON line");
+    assert_eq!(step["opName"], crossing_op, "{shape} (EIP-3155)");
+    assert_eq!(step["error"], "OutOfGas", "{shape} (EIP-3155)");
+    assert_eq!(step["gasCost"], step["gas"], "{shape} (EIP-3155)");
+}
+
 /// The keyless call frame recorded no opcode steps; the creation frame recorded some.
 ///
 /// This reads the inspector's own record of the frames. What a node's opcode tracer makes of it

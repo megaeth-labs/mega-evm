@@ -32,10 +32,10 @@ use revm::{
 };
 
 use crate::harness::{
-    assert_call_gas_matches_receipt, assert_every_frame_stops, assert_keyless_steps,
-    assert_keyless_struct_logs_miss_the_creation, assert_parent_does_not_resume,
-    assert_prestate_covers_reads, assert_root_gas_is_the_gas_limit, at_spec_prices, call_tx,
-    create_tx, decode_stop, pin_tracer_views, Traced,
+    assert_call_gas_matches_receipt, assert_detention_step_reads_as_out_of_gas,
+    assert_every_frame_stops, assert_keyless_steps, assert_keyless_struct_logs_miss_the_creation,
+    assert_parent_does_not_resume, assert_prestate_covers_reads, assert_root_gas_is_the_gas_limit,
+    at_spec_prices, call_tx, create_tx, decode_stop, pin_tracer_views, Traced,
 };
 
 const CALLER: Address = address!("0x0000000000000000000000000000000000400000");
@@ -384,6 +384,7 @@ fn test_timestamp_detention_stop() {
         EvmTxRuntimeLimits::no_limits().with_block_env_access_compute_gas_limit(cap),
     );
     assert_every_frame_stops(&traced, LimitKind::ComputeGas, limit, 1);
+    assert_detention_step_reads_as_out_of_gas(&traced, "JUMP");
     pin("timestamp_detention", &traced);
 }
 
@@ -410,6 +411,7 @@ fn test_detention_stop_spans_frames() {
     );
     assert_every_frame_stops(&traced, LimitKind::ComputeGas, limit, 2);
     assert_parent_does_not_resume(&traced);
+    assert_detention_step_reads_as_out_of_gas(&traced, "JUMP");
     pin("detention_stop_spans_frames", &traced);
 }
 
