@@ -20,7 +20,7 @@
 //! answer about the target. Both drivers therefore report all of them as
 //! infrastructure failures.
 
-use alloy_primitives::B256;
+use alloy_primitives::{logs_bloom, Bloom, Log, B256};
 use alloy_rpc_types_eth::Header;
 use core::fmt;
 
@@ -87,6 +87,13 @@ pub(super) enum Incoherence {
         requested: u64,
         /// Height the served header claims.
         served: u64,
+    },
+    /// A served receipt's logs bloom is not the bloom of the logs it carries.
+    UnauthenticReceiptBloom {
+        /// Transaction the receipt was served for.
+        tx_hash: B256,
+        /// How many logs the receipt carries.
+        logs: usize,
     },
     /// The target was resolved into the genesis block, which has no parent to
     /// fork the pre-state from.
@@ -159,6 +166,15 @@ impl fmt::Display for Incoherence {
                  numbered fetch was served a header from another height (an inconsistent backend, \
                  or a tampered capture); the block environment it describes is not the one the run \
                  asked for"
+            ),
+            // The bloom is a function of the logs beside it, so a receipt can be
+            // checked against itself without asking anything further.
+            Self::UnauthenticReceiptBloom { tx_hash, logs } => write!(
+                f,
+                "the on-chain receipt served for transaction {tx_hash} carries a logs bloom that \
+                 is not the bloom of its own {logs} log(s): the endpoint served an inconsistent \
+                 receipt (a corrupted backend, or a tampered capture); the transaction is \
+                 unverified"
             ),
             Self::GenesisPlacement => write!(
                 f,
@@ -264,6 +280,23 @@ pub(super) fn authenticate_block_header(
     Ok(())
 }
 
+/// Require that a served receipt's logs bloom is the bloom of its own logs.
+///
+/// The bloom is a consensus field of the receipt, but it is derived from the
+/// logs: a receipt whose bloom says something its logs do not is not a receipt
+/// any execution produced. Checking it at admission is what lets a comparison
+/// of the logs stand for a comparison of the bloom too.
+pub(super) fn require_receipt_bloom(
+    tx_hash: B256,
+    served: Bloom,
+    logs: &[Log],
+) -> Result<(), Incoherence> {
+    if logs_bloom(logs) != served {
+        return Err(Incoherence::UnauthenticReceiptBloom { tx_hash, logs: logs.len() });
+    }
+    Ok(())
+}
+
 /// Require that the block a target was resolved into has a parent to fork from.
 ///
 /// An endpoint resolving a target into block 0 contradicts itself: genesis has
@@ -335,6 +368,7 @@ pub(super) const fn require_body_membership(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::Address;
 
     /// Distinct, recognizable hashes for the message assertions.
     const HASH_A: B256 = B256::repeat_byte(0xaa);
@@ -439,6 +473,15 @@ mod tests {
                  backend, or a tampered capture); the block environment it describes is not the \
                  one the run asked for"
                     .to_string(),
+            ),
+            (
+                Incoherence::UnauthenticReceiptBloom { tx_hash: HASH_A, logs: 2 },
+                format!(
+                    "the on-chain receipt served for transaction {a} carries a logs bloom that is \
+                     not the bloom of its own 2 log(s): the endpoint served an inconsistent \
+                     receipt (a corrupted backend, or a tampered capture); the transaction is \
+                     unverified"
+                ),
             ),
             (
                 Incoherence::GenesisPlacement,
@@ -591,6 +634,22 @@ mod tests {
     }
 
     /// Genesis is the only height without a parent to fork from.
+    /// A receipt is admitted exactly when its bloom is the bloom of its logs.
+    #[test]
+    fn test_require_receipt_bloom_accepts_only_the_bloom_of_the_logs() {
+        let log = Log::new_unchecked(Address::repeat_byte(0xaa), vec![HASH_B], Default::default());
+        let logs = [log];
+
+        assert_eq!(require_receipt_bloom(HASH_A, logs_bloom(&logs), &logs), Ok(()));
+        assert_eq!(require_receipt_bloom(HASH_A, Bloom::ZERO, &[]), Ok(()));
+        for (served, logs) in [(Bloom::ZERO, &logs[..]), (Bloom::repeat_byte(0xff), &[][..])] {
+            assert_eq!(
+                require_receipt_bloom(HASH_A, served, logs),
+                Err(Incoherence::UnauthenticReceiptBloom { tx_hash: HASH_A, logs: logs.len() }),
+            );
+        }
+    }
+
     #[test]
     fn test_require_forkable_block_rejects_only_genesis() {
         assert_eq!(require_forkable_block(0), Err(Incoherence::GenesisPlacement));

@@ -1444,7 +1444,7 @@ where
     for tx_hash in targets {
         let fetched = match verify::fetch_receipt(provider, *tx_hash).await {
             Ok(receipt) => match verify::check_inclusion(receipt.block_hash(), block_hash) {
-                Ok(()) => Ok(ReceiptFacts::from_receipt(&receipt.inner)),
+                Ok(()) => Ok(ReceiptFacts::from_onchain(&receipt)),
                 Err(message) => Err(message),
             },
             // The reported entry already carries the `rpc` kind, so the error's

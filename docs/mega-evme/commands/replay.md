@@ -195,13 +195,18 @@ Replaying a transaction only proves that the local EVM produced _some_ result; e
 Verify every replayed transaction against its on-chain receipt.
 Supported in both single-transaction and [batch](#batch-replay) mode.
 
-Three dimensions are compared:
+Every field of the consensus receipt encoding is compared, plus the transaction's own gas:
 
 - **Status** — the success flag.
-- **Gas used** — the transaction's gas, not the block's cumulative gas.
+- **Gas used** — the transaction's own gas.
+- **Cumulative gas used** — the block's gas up to and including this transaction, which a preceding transaction that used different gas shifts even when this one's own gas agrees.
+- **Receipt type** — the EIP-2718 type of the receipt envelope.
+- **Deposit nonce** and **deposit receipt version** — the two fields a deposit receipt adds; absent (`null`) on any other type.
 - **Logs** — the number of logs, and each log's `address`, `topics`, and `data`.
 
 Logs are compared explicitly rather than inferred from gas: `LOG` gas depends on topic count and data length, never on content, so two executions can burn identical gas yet emit different log payloads.
+The logs bloom is not compared as a dimension of its own: it is a function of the logs, an on-chain receipt is only admitted when its bloom is the bloom of its own logs (see below), and the replay's bloom is built from its logs, so equal logs mean equal blooms.
+The fields an RPC receipt adds beside the consensus encoding — `contractAddress`, `effectiveGasPrice`, and the L1 fee fields — are not compared.
 
 The receipt is fetched with the same call the [fixture dump](#self-validating-fixture-dump) uses, so a run with `--rpc.capture-file` records it and a later `--rpc.replay-file` run verifies the same transaction offline.
 An envelope captured without `--verify-receipt` (or by any earlier run that never needed a receipt) holds no receipts, so verifying against it fails the receipt fetch — capture once online with the flag, then re-verify offline as often as you like.
@@ -209,9 +214,11 @@ An envelope captured without `--verify-receipt` (or by any earlier run that neve
 ### Verified, Unverified, and Mismatched
 
 A transaction is only reported as mismatched when both receipts were compared and disagreed.
+In every mode, a fetched receipt is admitted only after it is checked against the request and against itself — it describes the requested transaction, its inclusion is the replayed block, and its bloom is the bloom of its logs; the remaining fields are then compared as served.
 Anything that prevents the comparison from running is an infrastructure failure — the transaction is _unverified_, which is a different finding from a divergence:
 
 - The endpoint fails the receipt call, or has pruned the receipt below its retention height (common on non-archive endpoints): reported as an `rpc` failure.
+- The receipt contradicts itself: its `logsBloom` is not the bloom of the logs it carries (a corrupted backend, or a tampered capture): reported as an `rpc` failure, because no execution produced that receipt, and its logs could otherwise match while its bloom is forged.
 - The receipt describes a different inclusion than the replayed block (its `blockHash` differs from the replayed block, or is null — a reorg in progress, or a load-balanced endpoint serving divergent views): reported as an `rpc` failure, because comparing against it would compare the replay to the wrong on-chain execution, and a receipt with no inclusion hash cannot be anchored at all.
 - The receipt describes a different transaction than the one requested (its `transactionHash` is not the hash the receipt was asked for — an inconsistent endpoint, or a tampered capture): reported as an `rpc` failure, because the verdict would describe the wrong transaction, and two transactions sharing their consensus facts would even yield a spurious match.
 - The target is a pending transaction, which has no receipt yet: rejected up front in single-transaction mode, and reported as a `pending` error entry in batch mode.
@@ -239,7 +246,8 @@ An unanswered receipt (fetch failed, pruned, reorg / divergent inclusion) carrie
 { "error": "No on-chain receipt was fetched for this transaction" }
 ```
 
-A mismatch carries a `diff` holding only the dimensions that disagreed, each as `{"onchain": …, "replay": …}`:
+A mismatch carries a `diff` holding only the dimensions that disagreed, each as `{"onchain": …, "replay": …}`.
+The keys are `status`, `gas_used`, `cumulative_gas_used`, `tx_type`, `deposit_nonce`, `deposit_receipt_version`, and `logs`; a deposit field is `null` on a side whose receipt is not a deposit.
 
 ```json
 {
@@ -247,6 +255,7 @@ A mismatch carries a `diff` holding only the dimensions that disagreed, each as 
   "diff": {
     "status": { "onchain": true, "replay": false },
     "gas_used": { "onchain": 75514, "replay": 75500 },
+    "cumulative_gas_used": { "onchain": 412093, "replay": 412079 },
     "logs": {
       "count": { "onchain": 2, "replay": 1 },
       "first_mismatch": {
@@ -271,7 +280,7 @@ verification: MISMATCH (gas_used: onchain 75514 vs replay 75500)
 verification: FAILED (No on-chain receipt was fetched for this transaction)
 ```
 
-The mismatch line names every dimension that disagreed, comma-separated.
+The mismatch line names every dimension that disagreed, comma-separated, under the same keys as the JSON `diff` (`logs_count` and `logs[i].<field>` for the two log findings), and prints an absent deposit field as `none`.
 The failed line is used when the comparison never ran.
 
 ### Exit Status

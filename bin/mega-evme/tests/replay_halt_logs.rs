@@ -8,8 +8,8 @@
 //!
 //! A full-history replay of the pre-REX4 range caught three mainnet transactions doing exactly
 //! that. They are captured here with their on-chain receipts, so the regression is pinned against
-//! the chain rather than against a hand-written expectation: `--verify-receipt` compares status,
-//! gas and logs, and fails the run on any difference.
+//! the chain rather than against a hand-written expectation: `--verify-receipt` compares every
+//! consensus field of the receipt (status, gas, logs, type), and fails the run on any difference.
 //!
 //! Runs fully offline — `--rpc.replay-file` never falls back to the network, and a cache miss is a
 //! hard error. The unit-level coverage of the same defect lives in the `mega-evm` crate's
