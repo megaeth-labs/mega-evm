@@ -450,8 +450,8 @@ fn test_keyless_deploy_succeeds() {
         call.gas_limit - call_charges,
         "the creation gets what the call has left after its own charges"
     );
-    assert_keyless_steps(&traced, true);
     assert_keyless_struct_logs_miss_the_creation(&traced);
+    assert_keyless_steps(&traced, true);
     // The call's overhead, the `CREATE` opcode's regular gas, the signer's account (it was empty)
     // and the created account, the creation's two records (the signer's nonce and the created
     // account), and what the creation spent: its init code and its deposit.

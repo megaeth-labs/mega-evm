@@ -636,10 +636,11 @@ pub(crate) fn assert_detention_step_reads_as_out_of_gas(traced: &Traced, crossin
 pub(crate) fn assert_keyless_steps(traced: &Traced, expect_create: bool) {
     let nodes = traced.inspector.traces().nodes();
     assert!(!nodes.is_empty(), "the tracer recorded a call frame");
-    assert!(
-        nodes[0].trace.steps.is_empty(),
-        "the keyless call frame must have no struct-log steps, got {}",
-        nodes[0].trace.steps.len()
+    let call_steps = nodes[0].trace.steps.len();
+    assert_eq!(
+        call_steps, 0,
+        "the keyless call frame now runs {call_steps} step(s): this lifts the known limitation \
+         `assert_keyless_struct_logs_miss_the_creation` names; update both together"
     );
     if expect_create {
         assert!(nodes.len() >= 2, "expected a creation child, got {} frames", nodes.len());
@@ -676,7 +677,14 @@ pub(crate) fn at_spec_prices() -> bool {
 pub(crate) fn assert_keyless_struct_logs_miss_the_creation(traced: &Traced) {
     let nodes = traced.inspector.traces().nodes();
     let creation_steps = nodes[1].trace.steps.len();
-    assert!(nodes[0].trace.steps.is_empty(), "the keyless call frame ran no instruction");
+    let call_steps = nodes[0].trace.steps.len();
+    assert_eq!(
+        call_steps, 0,
+        "known limitation lifted on the engine's side: the keyless call frame now runs \
+         {call_steps} step(s), which may lead the struct-log builder to its creation; require the \
+         creation's steps in the struct logs here instead of their absence, update \
+         `assert_keyless_steps`, and regenerate the keyless goldens with UPDATE_GOLDENS=1"
+    );
     assert!(creation_steps > 0, "the inspector recorded the creation's steps");
     let eip3155_steps = traced.eip3155().lines().filter(|line| line.contains("\"opName\"")).count();
     assert_eq!(eip3155_steps, creation_steps, "the EIP-3155 trace prints the creation's steps");
