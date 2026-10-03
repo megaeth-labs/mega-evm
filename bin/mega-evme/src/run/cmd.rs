@@ -113,14 +113,14 @@ impl Cmd {
 
         // Log execution result
         match &exec_result {
-            ExecutionResult::Success { gas_used, .. } => {
-                info!(gas_used, "Execution succeeded");
+            ExecutionResult::Success { .. } => {
+                info!(gas_used = exec_result.tx_gas_used(), "Execution succeeded");
             }
-            ExecutionResult::Revert { gas_used, .. } => {
-                warn!(gas_used, "Execution reverted");
+            ExecutionResult::Revert { .. } => {
+                warn!(gas_used = exec_result.tx_gas_used(), "Execution reverted");
             }
-            ExecutionResult::Halt { reason, gas_used } => {
-                warn!(?reason, gas_used, "Execution halted");
+            ExecutionResult::Halt { reason, .. } => {
+                warn!(?reason, gas_used = exec_result.tx_gas_used(), "Execution halted");
             }
         }
 

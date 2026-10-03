@@ -5,12 +5,8 @@ use std::collections::BTreeMap;
 use super::{AccountInfo, Env, MegaEnv, SpecName, Test, TransactionParts};
 use mega_evm::revm::{
     context::{block::BlockEnv, cfg::CfgEnv},
-    context_interface::block::calc_excess_blob_gas,
     database::CacheState,
-    primitives::{
-        eip4844::TARGET_BLOB_GAS_PER_BLOCK_CANCUN, hardfork::SpecId, keccak256, Address, Bytes,
-        B256,
-    },
+    primitives::{hardfork::SpecId, keccak256, Address, Bytes, B256},
     state::Bytecode,
 };
 
@@ -87,7 +83,7 @@ impl TestUnit {
     ///
     /// A [`CacheState`] object containing the pre-state accounts and storages.
     pub fn state(&self) -> CacheState {
-        let mut cache_state = CacheState::new(false);
+        let mut cache_state = CacheState::new();
         for (address, info) in &self.pre {
             let code_hash = keccak256(&info.code);
             let bytecode = Bytecode::new_raw_checked(info.code.clone())
@@ -95,6 +91,7 @@ impl TestUnit {
             let acc_info = mega_evm::revm::state::AccountInfo {
                 balance: info.balance,
                 code_hash,
+                account_id: None,
                 code: Some(bytecode),
                 nonce: info.nonce,
             };
@@ -142,12 +139,9 @@ impl TestUnit {
         {
             block.set_blob_excess_gas_and_price(
                 calc_excess_blob_gas(
-                    parent_blob_gas_used.to(),
                     parent_excess_blob_gas.to(),
-                    self.env
-                        .parent_target_blobs_per_block
-                        .map(|i| i.to())
-                        .unwrap_or(TARGET_BLOB_GAS_PER_BLOCK_CANCUN),
+                    parent_blob_gas_used.to(),
+                    eip4844::TARGET_BLOB_GAS_PER_BLOCK_CANCUN,
                 ),
                 eip4844::BLOB_BASE_FEE_UPDATE_FRACTION_CANCUN,
             );
@@ -159,5 +153,105 @@ impl TestUnit {
         }
 
         block
+    }
+}
+
+/// Calculates a block's `excess_blob_gas` from its parent's blob-gas fields.
+///
+/// The EIP-4844 update rule, parameterized on the parent's target blob gas per
+/// block. Alloy's `calc_excess_blob_gas` pins the Cancun target instead of taking
+/// it as an argument, so it cannot serve fixtures that declare their own target.
+fn calc_excess_blob_gas(
+    parent_excess_blob_gas: u64,
+    parent_blob_gas_used: u64,
+    parent_target_blob_gas_per_block: u64,
+) -> u64 {
+    parent_excess_blob_gas
+        .saturating_add(parent_blob_gas_used)
+        .saturating_sub(parent_target_blob_gas_per_block)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Builds a fixture whose only meaningful content is the blob-gas part of
+    /// `env`, so [`TestUnit::block_env`] can be exercised in isolation.
+    ///
+    /// `env_blob_fields` is spliced verbatim into the `env` object, so it must be
+    /// a comma-terminated list of JSON members.
+    fn blob_fixture(env_blob_fields: &str) -> TestUnit {
+        let json = format!(
+            r#"{{
+                "env": {{
+                    {env_blob_fields}
+                    "currentCoinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba",
+                    "currentGasLimit": "0x016345785d8a0000",
+                    "currentNumber": "0x01",
+                    "currentTimestamp": "0x03e8"
+                }},
+                "pre": {{}},
+                "post": {{}},
+                "transaction": {{
+                    "data": [],
+                    "gasLimit": [],
+                    "nonce": "0x00",
+                    "secretKey": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                    "value": []
+                }}
+            }}"#
+        );
+        serde_json::from_str(&json).expect("blob fixture deserializes")
+    }
+
+    fn excess_blob_gas(unit: &TestUnit) -> u64 {
+        unit.block_env(&CfgEnv::<MegaSpecId>::default())
+            .blob_excess_gas_and_price
+            .expect("blob excess gas and price is set")
+            .excess_blob_gas
+    }
+
+    #[test]
+    fn test_block_env_falls_back_to_cancun_target_without_fixture_target() {
+        // 0 + 786432 - 393216 = 393216.
+        let unit = blob_fixture(
+            r#""parentExcessBlobGas": "0x00",
+               "parentBlobGasUsed": "0xc0000","#,
+        );
+        assert_eq!(excess_blob_gas(&unit), 786_432 - eip4844::TARGET_BLOB_GAS_PER_BLOCK_CANCUN);
+    }
+
+    #[test]
+    fn test_block_env_current_excess_blob_gas_wins_over_parent_fields() {
+        // An explicit `currentExcessBlobGas` is the block's value as-is; the
+        // parent fields are not consulted.
+        let unit = blob_fixture(
+            r#""currentExcessBlobGas": "0x20000",
+               "parentExcessBlobGas": "0x00",
+               "parentBlobGasUsed": "0xc0000","#,
+        );
+        assert_eq!(excess_blob_gas(&unit), 131_072);
+    }
+
+    #[test]
+    fn test_cancun_target_derivation_matches_alloy() {
+        // Fixtures without a target keep deriving exactly what the Cancun-pinned
+        // alloy helper produced, so replacing that call changed nothing for them.
+        for parent_excess_blob_gas in [0, 1, 131_072, 393_215, 393_216, 786_432, 10_000_000] {
+            for parent_blob_gas_used in [0, 1, 131_072, 393_216, 786_432, 1_000_000] {
+                assert_eq!(
+                    calc_excess_blob_gas(
+                        parent_excess_blob_gas,
+                        parent_blob_gas_used,
+                        eip4844::TARGET_BLOB_GAS_PER_BLOCK_CANCUN,
+                    ),
+                    alloy_eips::eip4844::calc_excess_blob_gas(
+                        parent_excess_blob_gas,
+                        parent_blob_gas_used,
+                    ),
+                    "excess={parent_excess_blob_gas} used={parent_blob_gas_used}"
+                );
+            }
+        }
     }
 }

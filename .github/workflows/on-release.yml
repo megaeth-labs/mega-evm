@@ -70,6 +70,16 @@ jobs:
 
       - uses: foundry-rs/foundry-toolchain@b00af27efadbc7b4ca8b82abbd903b17cc874d2a # v1
 
+      # Packaging fails fast on manifests crates.io would reject — e.g. git-pinned
+      # dependencies without a registry version — before anything is uploaded. Without this
+      # check a multi-crate publish can upload the first crates and then fail midway, leaving a
+      # partial release on crates.io. Keep the list in step with the allowlist below.
+      - name: Pre-flight packaging check
+        run: |
+          for crate in mega-system-contracts mega-evm mega-state-test mega-evme; do
+            cargo package -p "$crate" --no-verify --locked
+          done
+
       - uses: megaeth-labs/.github/.github/actions/release-publish-rust-crates@main
         with:
           # Explicit allowlist: state-test is publish = false; mega-t8n is not published.

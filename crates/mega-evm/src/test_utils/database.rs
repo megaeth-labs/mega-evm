@@ -4,8 +4,8 @@ use alloy_primitives::{Address, Bytes, B256, U256};
 use delegate::delegate;
 use revm::{
     database::{AccountState, CacheDB, DBErrorMarker, EmptyDB},
-    primitives::{HashMap, StorageKey, StorageValue},
-    state::{Account, AccountInfo, Bytecode},
+    primitives::{StorageKey, StorageValue},
+    state::{AccountInfo, Bytecode},
 };
 
 /// A memory database for testing purposes.
@@ -116,7 +116,7 @@ impl revm::Database for MemoryDatabase {
 impl revm::DatabaseCommit for MemoryDatabase {
     delegate! {
         to self.db {
-            fn commit(&mut self, changes: revm::primitives::HashMap<Address, revm::state::Account>);
+            fn commit(&mut self, changes: revm::state::EvmState);
         }
     }
 }
@@ -189,7 +189,7 @@ impl revm::Database for ErrorInjectingDatabase {
 }
 
 impl revm::DatabaseCommit for ErrorInjectingDatabase {
-    fn commit(&mut self, changes: HashMap<Address, Account>) {
+    fn commit(&mut self, changes: revm::state::EvmState) {
         self.inner.commit(changes);
     }
 }

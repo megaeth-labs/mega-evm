@@ -16,10 +16,7 @@ use std::convert::Infallible;
 
 use alloy_consensus::{transaction::Recovered, Signed, TxLegacy};
 use alloy_evm::{
-    block::{
-        BlockExecutor, BlockValidationError, OnStateHook, StateChangePreBlockSource,
-        StateChangeSource,
-    },
+    block::{BlockExecutor, BlockValidationError, OnStateHook},
     Evm as _, EvmEnv,
 };
 use alloy_hardforks::ForkCondition;
@@ -132,17 +129,25 @@ fn install_eip4788_beacon_roots(db: &mut MemoryDatabase) {
     );
 }
 
-/// Recording state hook capturing every reported `StateChangeSource`, so a test can assert that a
+/// Recording state hook capturing every committed `EvmState` delta, so a test can assert that a
 /// pre-block call's state delta reached the witness path (i.e., the call succeeded and committed).
+///
+/// The commit hook no longer carries a `StateChangeSource` label, so a pre-block call is
+/// identified by the system-contract address its delta touches.
 #[derive(Debug, Default, Clone)]
 struct RecordingStateHook {
-    events: Arc<Mutex<Vec<StateChangeSource>>>,
+    events: Arc<Mutex<Vec<EvmState>>>,
 }
 
 impl OnStateHook for RecordingStateHook {
-    fn on_state(&mut self, source: StateChangeSource, _state: &EvmState) {
-        self.events.lock().unwrap().push(source);
+    fn on_state(&mut self, state: &EvmState) {
+        self.events.lock().unwrap().push(state.clone());
     }
+}
+
+/// Whether any recorded delta changed the state of `address`.
+fn touched(recorded: &[EvmState], address: Address) -> bool {
+    recorded.iter().any(|state| state.contains_key(&address))
 }
 
 fn oracle_set_slots_calldata(slot: U256, value: B256) -> Bytes {
@@ -197,27 +202,25 @@ fn test_rex6_pre_block_calls_accepted_under_heavy_salt() {
         Bytes::new(),
         BlockLimits::no_limits(),
     );
+    // The hook lives on the `State` database and fires from `DatabaseCommit::commit`, so
+    // install it before the executor takes its `&mut` borrow.
+    let recorder = RecordingStateHook::default();
+    let events = recorder.events.clone();
+    state.set_state_hook(Some(Box::new(recorder)));
+
     let mut executor = block_executor_factory.create_executor(
         &mut state,
         block_ctx,
         rex6_evm_env(BLOCK_GAS_LIMIT),
     );
 
-    let recorder = RecordingStateHook::default();
-    let events = recorder.events.clone();
-    BlockExecutor::set_state_hook(&mut executor, Some(Box::new(recorder)));
-
     executor
         .apply_pre_execution_changes()
         .expect("REX6 must accept pre-block system calls even under heavy SALT");
 
     let recorded = events.lock().unwrap();
-    let saw_block_hashes = recorded.iter().any(|s| {
-        matches!(s, StateChangeSource::PreBlock(StateChangePreBlockSource::BlockHashesContract))
-    });
-    let saw_beacon_root = recorded.iter().any(|s| {
-        matches!(s, StateChangeSource::PreBlock(StateChangePreBlockSource::BeaconRootContract))
-    });
+    let saw_block_hashes = touched(&recorded, alloy_eips::eip2935::HISTORY_STORAGE_ADDRESS);
+    let saw_beacon_root = touched(&recorded, alloy_eips::eip4788::BEACON_ROOTS_ADDRESS);
     assert!(saw_block_hashes, "EIP-2935 pre-block call must succeed and commit under REX6");
     assert!(saw_beacon_root, "EIP-4788 pre-block call must succeed and commit under REX6");
 }
@@ -351,7 +354,7 @@ fn test_rex6_system_tx_storage_gas_independent_of_bucket_capacity() {
         let tx = oracle_system_tx(0, ORACLE_SLOT, value);
         let outcome = executor.run_transaction(&tx).expect("oracle system tx must execute");
         assert!(outcome.result.is_success(), "must succeed: {:?}", outcome.result);
-        let gas_used = outcome.result.gas_used();
+        let gas_used = outcome.result.tx_gas_used();
         executor.commit_transaction_outcome(outcome).expect("commit");
         let slot = executor
             .evm

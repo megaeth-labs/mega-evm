@@ -18,8 +18,8 @@
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    LimitUsage, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, SaltEnv,
-    TestExternalEnvs, MIN_BUCKET_SIZE,
+    LimitUsage, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    MegaTransactionNew as _, SaltEnv, TestExternalEnvs, MIN_BUCKET_SIZE,
 };
 use revm::{
     bytecode::opcode::*,
@@ -60,6 +60,25 @@ fn transact(
     let r = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
     let usage = evm.ctx_ref().additional_limit.borrow().get_usage();
     (r, usage)
+}
+
+fn transact_with_envs(
+    spec: MegaSpecId,
+    db: &mut MemoryDatabase,
+    tx: TxEnv,
+    external_envs: &TestExternalEnvs<std::convert::Infallible>,
+) -> (ResultAndState<MegaHaltReason>, LimitUsage) {
+    let mut context = MegaContext::new(db, spec).with_external_envs(external_envs.into());
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+    let mut evm = MegaEvm::new(context);
+    let mut tx = MegaTransaction::new(tx);
+    tx.enveloped_tx = Some(Bytes::new());
+    let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+    let usage = evm.ctx_ref().additional_limit.borrow().get_usage();
+    (result, usage)
 }
 
 /// Sets EIP-7702 delegation bytecode on an account, making it delegate to `delegate_to`.
@@ -127,10 +146,17 @@ fn test_call_with_value_to_eip7702_authority_rex5_vs_rex4() {
     let tx =
         TxEnvBuilder::default().caller(CALLER).call(PARENT).gas_limit(100_000_000).build_fill();
 
-    let (result_rex5, usage_rex5) = transact(MegaSpecId::REX5, &mut build_db(), tx.clone());
+    let authority_bucket =
+        TestExternalEnvs::<std::convert::Infallible>::bucket_id_for_account(AUTHORITY);
+    let external_envs = TestExternalEnvs::<std::convert::Infallible>::new()
+        .with_bucket_capacity(authority_bucket, MIN_BUCKET_SIZE as u64 * 2);
+
+    let (result_rex5, usage_rex5) =
+        transact_with_envs(MegaSpecId::REX5, &mut build_db(), tx.clone(), &external_envs);
     assert!(result_rex5.result.is_success(), "REX5 should succeed: {result_rex5:?}");
 
-    let (result_rex4, usage_rex4) = transact(MegaSpecId::REX4, &mut build_db(), tx);
+    let (result_rex4, usage_rex4) =
+        transact_with_envs(MegaSpecId::REX4, &mut build_db(), tx, &external_envs);
     assert!(result_rex4.result.is_success(), "REX4 should succeed: {result_rex4:?}");
 
     // REX4 should record state growth for the "new account" (via delegation to empty).
@@ -141,6 +167,10 @@ fn test_call_with_value_to_eip7702_authority_rex5_vs_rex4() {
          REX4 incorrectly counts authority as new account via delegation",
         usage_rex4.state_growth,
         usage_rex5.state_growth,
+    );
+    assert!(
+        result_rex4.result.tx_gas_used() > result_rex5.result.tx_gas_used(),
+        "REX4 delegated emptiness must charge the hot-bucket new-account storage premium",
     );
 
     // REX5 should have zero state growth from the CALL target.
@@ -284,7 +314,7 @@ fn test_rex5_create_inside_delegated_frame_uses_authority_nonce() {
     tx_rex5.enveloped_tx = Some(Bytes::new());
     let r5 = alloy_evm::Evm::transact_raw(&mut evm_rex5, tx_rex5).unwrap();
     assert!(r5.result.is_success(), "REX5 should succeed: {:?}", r5.result);
-    let gas_rex5 = r5.result.gas_used();
+    let gas_rex5 = r5.result.tx_gas_used();
 
     // REX4: uses delegate's nonce → wrong bucket (high capacity, 3x multiplier).
     let mut db_rex4 = build_db();
@@ -299,7 +329,7 @@ fn test_rex5_create_inside_delegated_frame_uses_authority_nonce() {
     tx_rex4.enveloped_tx = Some(Bytes::new());
     let r4 = alloy_evm::Evm::transact_raw(&mut evm_rex4, tx_rex4).unwrap();
     assert!(r4.result.is_success(), "REX4 should succeed: {:?}", r4.result);
-    let gas_rex4 = r4.result.gas_used();
+    let gas_rex4 = r4.result.tx_gas_used();
 
     // REX4 queries the high-capacity bucket (3x multiplier) → more gas.
     // REX5 queries the correct bucket (1x multiplier) → less gas.

@@ -18,7 +18,8 @@ use mega_evm::{
     sandbox::{calculate_keyless_deploy_address, decode_error_result, KeylessDeployError},
     test_utils::MemoryDatabase,
     BucketHasher, IKeylessDeploy, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    MegaTransaction, SimpleBucketHasher, TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS, MIN_BUCKET_SIZE,
+    MegaTransaction, MegaTransactionNew as _, SimpleBucketHasher, TestExternalEnvs,
+    KEYLESS_DEPLOY_ADDRESS, MIN_BUCKET_SIZE,
 };
 use revm::{context::TxEnv, inspector::NoOpInspector, Database as _};
 

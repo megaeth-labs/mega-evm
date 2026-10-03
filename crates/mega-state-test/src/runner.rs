@@ -12,10 +12,7 @@ use indicatif::{ProgressBar, ProgressDrawTarget};
 use mega_evm::{
     revm::{
         context::{block::BlockEnv, cfg::CfgEnv, tx::TxEnv},
-        context_interface::{
-            result::{EVMError, ExecutionResult},
-            Cfg,
-        },
+        context_interface::result::{EVMError, ExecutionResult},
         database,
         database::State,
         database_interface::EmptyDB,
@@ -24,7 +21,7 @@ use mega_evm::{
         ExecuteCommitEvm,
     },
     AHashBucketHasher, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MegaTransactionError,
+    MegaTransactionError, MegaTransactionNew as _,
 };
 use serde_json::json;
 use std::{
@@ -185,7 +182,10 @@ fn build_json_output(
     test_name: &str,
     exec_result: &Result<
         ExecutionResult<MegaHaltReason>,
-        EVMError<Infallible, MegaTransactionError>,
+        EVMError<
+            mega_evm::revm::database_interface::bal::EvmDatabaseError<Infallible>,
+            MegaTransactionError,
+        >,
     >,
     validation: &TestValidationResult,
     spec: MegaSpecId,
@@ -195,7 +195,7 @@ fn build_json_output(
         "stateRoot": validation.state_root,
         "logsRoot": validation.logs_root,
         "output": exec_result.as_ref().ok().and_then(|r| r.output().cloned()).unwrap_or_default(),
-        "gasUsed": exec_result.as_ref().ok().map(|r| r.gas_used()).unwrap_or_default(),
+        "gasUsed": exec_result.as_ref().ok().map(|r| r.tx_gas_used()).unwrap_or_default(),
         "pass": error.is_none(),
         "errorMsg": error.unwrap_or_default(),
         "evmResult": format_evm_result(exec_result),
@@ -211,7 +211,10 @@ fn build_json_output(
 fn format_evm_result(
     exec_result: &Result<
         ExecutionResult<MegaHaltReason>,
-        EVMError<Infallible, MegaTransactionError>,
+        EVMError<
+            mega_evm::revm::database_interface::bal::EvmDatabaseError<Infallible>,
+            MegaTransactionError,
+        >,
     >,
 ) -> String {
     match exec_result {
@@ -228,7 +231,10 @@ fn validate_exception(
     test: &Test,
     exec_result: &Result<
         ExecutionResult<MegaHaltReason>,
-        EVMError<Infallible, MegaTransactionError>,
+        EVMError<
+            mega_evm::revm::database_interface::bal::EvmDatabaseError<Infallible>,
+            MegaTransactionError,
+        >,
     >,
 ) -> Result<bool, TestErrorKind> {
     match (&test.expect_exception, exec_result) {
@@ -298,7 +304,7 @@ fn validate_mega_expectations(
     actual_result: &ExecutionResult<MegaHaltReason>,
 ) -> Result<(), TestErrorKind> {
     if let Some(expected) = test.mega_gas_used {
-        let got = actual_result.gas_used();
+        let got = actual_result.tx_gas_used();
         if got != expected {
             return Err(TestErrorKind::GasUsedMismatch { got, expected });
         }
@@ -321,7 +327,10 @@ fn check_evm_execution(
     test_name: &str,
     exec_result: &Result<
         ExecutionResult<MegaHaltReason>,
-        EVMError<Infallible, MegaTransactionError>,
+        EVMError<
+            mega_evm::revm::database_interface::bal::EvmDatabaseError<Infallible>,
+            MegaTransactionError,
+        >,
     >,
     db: &State<EmptyDB>,
     spec: MegaSpecId,
@@ -384,6 +393,16 @@ fn check_evm_execution(
 
     print_json(None);
     Ok(())
+}
+
+/// Apply a fixture post-map / unit [`MegaSpecId`] onto `cfg`, keeping mainnet
+/// [`mega_evm::revm::context_interface::cfg::GasParams`] in sync.
+///
+/// revm 40 stores per-spec gas params in [`CfgEnv`]. Assigning `cfg.spec` alone
+/// leaves the previous params in place and drifts gas accounting. Shared by
+/// [`execute_test_suite`] and single-unit execution.
+fn set_cfg_spec_and_mainnet_gas_params(cfg: &mut CfgEnv<MegaSpecId>, spec: MegaSpecId) {
+    cfg.set_spec_and_mainnet_gas_params(spec);
 }
 
 /// Sets the per-spec maximum blobs per transaction on the config.
@@ -452,6 +471,11 @@ pub fn execute_test_suite(
 
         // Setup base configuration
         let mut cfg = CfgEnv::default();
+        // revm 40 flipped `tx_chain_id_check` default to `true`. State-test fixtures
+        // often omit tx chainId (TxEnv defaults to Some(1)) while `env.currentChainID`
+        // is the real chain — revm 27 accepted that; pin the same gate-off default.
+        // `MegaContext::new` also pins false, but `with_cfg` would re-apply this CfgEnv.
+        cfg.tx_chain_id_check = false;
         cfg.chain_id = resolve_chain_id(&unit.env).map_err(|kind| TestError {
             name: name.clone(),
             path: path.clone(),
@@ -465,11 +489,14 @@ pub fn execute_test_suite(
                 continue;
             }
 
-            cfg.spec = spec_name.to_spec_id().map_err(|e| TestError {
-                name: name.clone(),
-                path: path.clone(),
-                kind: TestErrorKind::FixtureError(format!("post spec: {e}")),
-            })?;
+            set_cfg_spec_and_mainnet_gas_params(
+                &mut cfg,
+                spec_name.to_spec_id().map_err(|e| TestError {
+                    name: name.clone(),
+                    path: path.clone(),
+                    kind: TestErrorKind::FixtureError(format!("post spec: {e}")),
+                })?,
+            );
             configure_max_blobs(&mut cfg);
 
             // Setup block environment for this spec
@@ -580,8 +607,7 @@ fn inject_block_hashes(state: &mut State<EmptyDB>, unit: &TestUnit) -> Result<()
 
 fn execute_single_test<'a>(ctx: TestExecutionContext<'a>) -> Result<(), TestErrorKind> {
     // Prepare state
-    let mut cache = ctx.cache_state.clone();
-    cache.set_state_clear_flag(ctx.cfg.spec.into_eth_spec().is_enabled_in(SpecId::SPURIOUS_DRAGON));
+    let cache = ctx.cache_state.clone();
     let mut state =
         database::State::builder().with_cached_prestate(cache).with_bundle_update().build();
     inject_block_hashes(&mut state, ctx.unit)?;
@@ -620,7 +646,7 @@ fn execute_single_test<'a>(ctx: TestExecutionContext<'a>) -> Result<(), TestErro
         ctx.name,
         &exec_result,
         db,
-        ctx.cfg.spec(),
+        *ctx.cfg.spec(),
         ctx.print_json_outcome,
     )
 }
@@ -663,15 +689,19 @@ fn run_unit_once(
 ) -> Result<(Duration, ExecutionResult<MegaHaltReason>, Option<TestValidationResult>), TestErrorKind>
 {
     let mut cfg = CfgEnv::default();
+    // See execute_test_suite: revm-27 chain-id gate-off (revm 40 default is true).
+    cfg.tx_chain_id_check = false;
     cfg.chain_id = resolve_chain_id(&unit.env)?;
-    cfg.spec = spec.to_spec_id().map_err(|e| TestErrorKind::FixtureError(format!("spec: {e}")))?;
+    set_cfg_spec_and_mainnet_gas_params(
+        &mut cfg,
+        spec.to_spec_id().map_err(|e| TestErrorKind::FixtureError(format!("spec: {e}")))?,
+    );
     configure_max_blobs(&mut cfg);
 
     let block = unit.block_env(&cfg);
     let tx = tx_env_at(unit, TxPartIndices { data: 0, gas: 0, value: 0 })?;
 
-    let mut cache = unit.state();
-    cache.set_state_clear_flag(cfg.spec.into_eth_spec().is_enabled_in(SpecId::SPURIOUS_DRAGON));
+    let cache = unit.state();
     let mut state =
         database::State::builder().with_cached_prestate(cache).with_bundle_update().build();
     inject_block_hashes(&mut state, unit)?;
@@ -711,7 +741,7 @@ pub fn execute_unit_collect(
     Ok(ExecutedUnit {
         state_root: validation.state_root,
         logs_root: validation.logs_root,
-        gas_used: result.gas_used(),
+        gas_used: result.tx_gas_used(),
         status: execution_status(&result).to_string(),
         halt_reason: halt_reason(&result),
         output: result.output().cloned(),
@@ -728,7 +758,7 @@ pub fn time_unit_execution(
     spec: &SpecName,
 ) -> Result<(Duration, u64, String), TestErrorKind> {
     let (elapsed, result, _validation) = run_unit_once(unit, spec, false)?;
-    Ok((elapsed, result.gas_used(), execution_status(&result).to_string()))
+    Ok((elapsed, result.tx_gas_used(), execution_status(&result).to_string()))
 }
 
 /// Benchmark result for one [`TestUnit`]: the timing distribution plus the gas
@@ -969,8 +999,7 @@ fn debug_failed_test<'a>(ctx: DebugContext<'a>) {
     println!("\nTraces:");
 
     // Re-run with tracing
-    let mut cache = ctx.cache_state.clone();
-    cache.set_state_clear_flag(ctx.cfg.spec.into_eth_spec().is_enabled_in(SpecId::SPURIOUS_DRAGON));
+    let cache = ctx.cache_state.clone();
     let mut state =
         database::State::builder().with_cached_prestate(cache).with_bundle_update().build();
 
@@ -1182,21 +1211,46 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mega_evm::revm::context::result::{Output, SuccessReason};
+    use mega_evm::revm::{
+        context::result::{Output, ResultGas, SuccessReason},
+        context_interface::cfg::GasParams,
+        primitives::hardfork::SpecId,
+    };
     use serde_json::json;
+
+    /// Regression for the revm 40 gas-params drift: after the runner applies a
+    /// fixture spec, `cfg.gas_params` must match `GasParams::new_spec` for the
+    /// mapped eth hardfork — bare `cfg.spec = ...` would leave poisoned params.
+    #[test]
+    fn test_set_cfg_spec_and_mainnet_gas_params_syncs_gas_params() {
+        let mut cfg = CfgEnv::<MegaSpecId>::default();
+        // Poison with Frontier params so a bare `cfg.spec = ...` cannot pass.
+        cfg.gas_params = GasParams::new_spec(SpecId::FRONTIER);
+        assert_ne!(cfg.gas_params, GasParams::new_spec(SpecId::from(MegaSpecId::EQUIVALENCE)));
+
+        let spec = SpecName::Cancun.to_spec_id().expect("Cancun maps to EQUIVALENCE");
+        set_cfg_spec_and_mainnet_gas_params(&mut cfg, spec);
+
+        assert_eq!(cfg.spec, MegaSpecId::EQUIVALENCE);
+        assert_eq!(cfg.gas_params, GasParams::new_spec(SpecId::from(spec)));
+    }
+
+    /// Build a [`ResultGas`] whose `tx_gas_used()` is exactly `gas_used`.
+    fn result_gas(gas_used: u64) -> ResultGas {
+        ResultGas::default().with_total_gas_spent(gas_used)
+    }
 
     fn success(gas_used: u64) -> ExecutionResult<MegaHaltReason> {
         ExecutionResult::Success {
             reason: SuccessReason::Stop,
-            gas_used,
-            gas_refunded: 0,
+            gas: result_gas(gas_used),
             logs: vec![],
             output: Output::Call(Bytes::new()),
         }
     }
 
     fn revert(gas_used: u64) -> ExecutionResult<MegaHaltReason> {
-        ExecutionResult::Revert { gas_used, output: Bytes::new() }
+        ExecutionResult::Revert { gas: result_gas(gas_used), logs: vec![], output: Bytes::new() }
     }
 
     fn test_with_mega(mega_gas_used: Option<u64>, mega_status: Option<&str>) -> Test {
@@ -1273,8 +1327,7 @@ mod tests {
     fn success_with_output(output: &[u8]) -> ExecutionResult<MegaHaltReason> {
         ExecutionResult::Success {
             reason: SuccessReason::Stop,
-            gas_used: 21_000,
-            gas_refunded: 0,
+            gas: result_gas(21_000),
             logs: vec![],
             output: Output::Call(Bytes::copy_from_slice(output)),
         }
@@ -1283,7 +1336,8 @@ mod tests {
     fn halt() -> ExecutionResult<MegaHaltReason> {
         ExecutionResult::Halt {
             reason: MegaHaltReason::DataLimitExceeded { limit: 0, actual: 0 },
-            gas_used: 21_000,
+            gas: result_gas(21_000),
+            logs: vec![],
         }
     }
 

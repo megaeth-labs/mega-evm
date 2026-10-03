@@ -19,7 +19,7 @@ Second, it introduces the **[KeylessDeploy](../system-contracts/keyless-deploy.m
 
 #### Previous behavior
 
-- `SELFDESTRUCT` halts execution with `InvalidFEOpcode`.
+- `SELFDESTRUCT` halts execution and consumes the frame's entire remaining gas.
 
 #### New behavior
 

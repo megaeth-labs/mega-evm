@@ -55,7 +55,7 @@ fn deploy_ctt(spec: MegaSpecId) -> (Address, MemoryDatabase) {
         .create()
         .data(Bytes::from(deploy_data))
         .build_fill();
-    let mut mega_tx = MegaTransaction::new(tx);
+    let mut mega_tx = MegaTransaction(op_revm::OpTransaction::new(tx));
     mega_tx.enveloped_tx = Some(Bytes::new());
 
     let result = evm.transact_commit(mega_tx).expect("deployment should succeed");
@@ -111,7 +111,7 @@ fn execute_batch_transfer(
 
     let tx =
         TxEnvBuilder::new().caller(CALLER).call(contract_addr).data(calldata.clone()).build_fill();
-    let mut mega_tx = MegaTransaction::new(tx);
+    let mut mega_tx = MegaTransaction(op_revm::OpTransaction::new(tx));
     mega_tx.enveloped_tx = Some(Bytes::new());
 
     let result = evm.transact(mega_tx).expect("transaction should succeed");

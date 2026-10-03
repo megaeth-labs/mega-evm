@@ -23,7 +23,7 @@ use mega_evm::{
     constants::mini_rex::MAX_INITCODE_SIZE,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     BucketHasher, BucketId, EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
-    TestExternalEnvs,
+    MegaTransactionNew as _, TestExternalEnvs,
 };
 use revm::{
     bytecode::opcode::{CREATE, CREATE2, STATICCALL, STOP},

@@ -6,7 +6,7 @@
 
 use alloy_evm::Database;
 use alloy_primitives::{address, Address};
-use revm::{database::State, state::EvmState};
+use revm::state::EvmState;
 
 use crate::{MegaHardforks, MegaSpecId, SystemContractSpec};
 
@@ -27,7 +27,7 @@ pub use mega_system_contracts::limit_control::IMegaLimitControl;
 pub fn transact_deploy_limit_control_contract<DB: Database>(
     hardforks: impl MegaHardforks,
     block_timestamp: u64,
-    db: &mut State<DB>,
+    db: &mut DB,
 ) -> Result<Option<EvmState>, DB::Error> {
     limit_control_spec(hardforks.spec_id(block_timestamp))
         .map(|s| crate::transact_deploy(db, &s))
@@ -50,7 +50,7 @@ mod tests {
     use super::*;
     use alloy_primitives::{keccak256, B256};
     use revm::{
-        database::InMemoryDB,
+        database::{InMemoryDB, State},
         state::{AccountInfo, Bytecode},
     };
 
@@ -100,6 +100,7 @@ mod tests {
                 nonce: 0,
                 code_hash: LIMIT_CONTROL_CODE_HASH,
                 code: Some(Bytecode::new_raw(LIMIT_CONTROL_CODE)),
+                account_id: None,
             },
         );
         let mut state = State::builder().with_database(&mut db).build();
@@ -144,6 +145,7 @@ mod tests {
                 nonce: 0,
                 code_hash: B256::ZERO,
                 code: Some(Bytecode::new_raw(alloy_primitives::Bytes::from_static(&[0x60, 0x00]))),
+                account_id: None,
             },
         );
         let mut state = State::builder().with_database(&mut db).build();

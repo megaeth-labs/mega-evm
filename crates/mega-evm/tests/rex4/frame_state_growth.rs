@@ -10,9 +10,10 @@ use std::convert::Infallible;
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolError;
 use mega_evm::{
+    alloy_op_evm::OpTxError,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaLimitExceeded, MegaSpecId,
-    MegaTransaction, MegaTransactionError,
+    MegaTransaction, MegaTransactionNew as _,
 };
 use revm::{
     bytecode::opcode::*,
@@ -44,7 +45,7 @@ fn transact(
     db: &mut MemoryDatabase,
     state_growth_limit: u64,
     tx: TxEnv,
-) -> Result<(ResultAndState<MegaHaltReason>, u64), EVMError<Infallible, MegaTransactionError>> {
+) -> Result<(ResultAndState<MegaHaltReason>, u64), EVMError<Infallible, OpTxError>> {
     let mut context = MegaContext::new(db, spec).with_tx_runtime_limits(
         EvmTxRuntimeLimits::no_limits().with_tx_state_growth_limit(state_growth_limit),
     );
@@ -398,7 +399,7 @@ fn test_frame_local_exceed_gas_returned_to_parent() {
 
     assert!(result.result.is_success());
     assert_eq!(state_growth, 1, "Parent wrote 1 slot after child revert");
-    let gas_used = result.result.gas_used();
+    let gas_used = result.result.tx_gas_used();
     assert!(gas_used < gas_limit, "Gas should not be fully consumed");
 }
 

@@ -1,8 +1,6 @@
 use alloy_consensus::{Transaction, TxReceipt};
 use alloy_eips::Encodable2718;
-use alloy_evm::{
-    block::BlockExecutorFor, Database, EvmEnv, EvmFactory, FromRecoveredTx, FromTxWithEncoded,
-};
+use alloy_evm::{block::StateDB, Database, EvmEnv, EvmFactory, FromRecoveredTx, FromTxWithEncoded};
 use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
 use alloy_primitives::{Bytes, B256};
 use revm::{database::State, inspector::NoOpInspector, Inspector};
@@ -142,6 +140,7 @@ impl<Hardforks, ExtEnvFactory, ReceiptBuilder> alloy_evm::block::BlockExecutorFa
     for MegaBlockExecutorFactory<Hardforks, crate::MegaEvmFactory<ExtEnvFactory>, ReceiptBuilder>
 where
     ReceiptBuilder: OpReceiptBuilder<Transaction = MegaTxEnvelope, Receipt: TxReceipt>,
+    MegaTxEnvelope: alloy_consensus::TransactionEnvelope,
     Hardforks: MegaHardforks + Clone,
     ExtEnvFactory: crate::ExternalEnvFactory + Clone,
     crate::MegaTransaction: FromRecoveredTx<ReceiptBuilder::Transaction>
@@ -149,9 +148,21 @@ where
     Self: 'static,
 {
     type EvmFactory = crate::MegaEvmFactory<ExtEnvFactory>;
+    type TxExecutionResult = crate::MegaBlockTxResult<
+        <ReceiptBuilder::Transaction as alloy_consensus::TransactionEnvelope>::TxType,
+    >;
     type ExecutionCtx<'a> = MegaBlockExecutionCtx;
     type Transaction = ReceiptBuilder::Transaction;
     type Receipt = ReceiptBuilder::Receipt;
+    type Executor<
+        'a,
+        DB: StateDB,
+        I: Inspector<<Self::EvmFactory as alloy_evm::EvmFactory>::Context<DB>>,
+    > = MegaBlockExecutor<
+        &'a Hardforks,
+        <Self::EvmFactory as alloy_evm::EvmFactory>::Evm<DB, I>,
+        &'a ReceiptBuilder,
+    >;
 
     fn evm_factory(&self) -> &Self::EvmFactory {
         self.evm_factory_ref()
@@ -159,12 +170,12 @@ where
 
     fn create_executor<'a, DB, I>(
         &'a self,
-        evm: <Self::EvmFactory as alloy_evm::EvmFactory>::Evm<&'a mut State<DB>, I>,
+        evm: <Self::EvmFactory as alloy_evm::EvmFactory>::Evm<DB, I>,
         ctx: Self::ExecutionCtx<'a>,
-    ) -> impl BlockExecutorFor<'a, Self, DB, I>
+    ) -> Self::Executor<'a, DB, I>
     where
-        DB: Database + 'a,
-        I: Inspector<<Self::EvmFactory as alloy_evm::EvmFactory>::Context<&'a mut State<DB>>> + 'a,
+        DB: StateDB,
+        I: Inspector<<Self::EvmFactory as alloy_evm::EvmFactory>::Context<DB>>,
     {
         // Synchronize EVM tx runtime limits with the block context's BlockLimits.
         // This mirrors the inherent factory paths above which apply this

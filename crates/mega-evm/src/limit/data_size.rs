@@ -403,4 +403,10 @@ mod tests {
         tracker.push_empty_frame();
         assert!(tracker.has_active_frame(), "a frame is on the stack");
     }
+
+    /// The `TxRuntimeLimit::tx_limit` accessor must report the configured TX-level budget.
+    #[test]
+    fn test_tx_limit_reports_configured_limit() {
+        assert_eq!(DataSizeTracker::new(MegaSpecId::MINI_REX, 4_321).tx_limit(), 4_321);
+    }
 }
