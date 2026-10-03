@@ -120,7 +120,8 @@ KZG point evaluation keeps its Rex6 semantics: a call given less than 100,000 ga
 #### Previous behavior
 
 - A transaction's gas is one pool; `total_gas_used = compute_gas_used + storage_gas_used`.
-- Compute gas is separately limited to 200,000,000 per transaction, a limit that halts the transaction.
+- Compute gas is separately limited to 200,000,000 per transaction.
+  Crossed during execution, the limit reverts the frame that crossed it, the transaction's own frame included; crossed by usage recorded outside every frame's budget — the pre-frame intrinsic compute, or the limit a read of volatile data lowers — it halts the transaction.
 - Storage gas is charged out of the same pool for `SSTORE` of a fresh slot, account creation and contract creation (`base × (multiplier − 1)`), code deposit (10,000 per byte), logs (3,750 per topic and 80 per data byte) and calldata (40 per zero byte and 160 per non-zero byte, floors 100 and 400), plus 39,000 intrinsic storage gas per transaction.
 
 #### New behavior
@@ -240,7 +241,7 @@ A deposit-like transaction whose caller account does not exist MUST be charged t
 Deposited code MUST be charged, once the creation's code passed its checks and in this order: the regular per-byte cost (zero), the hashing cost of the code at 6 gas per 32-byte word, the state gas of the code, and its history gas.
 A creation that cannot pay any of the four runs out of gas and leaves no code.
 
-A node MUST charge account access to the addresses the inherited rules treat as warm from the start of a transaction — precompiles, access-list addresses and the block beneficiary — as warm, as [EIP-2929](https://eips.ethereum.org/EIPS/eip-2929) has it: Rex6's cold charge on the first `CALL`-family touch of such an address does not apply.
+A node MUST charge account access to the addresses the inherited rules treat as warm from the start of a transaction — precompiles, the block beneficiary and access-list addresses listed without storage keys — as warm, as [EIP-2929](https://eips.ethereum.org/EIPS/eip-2929) has it: Rex6's cold charge on the first `CALL`-family or `SELFDESTRUCT`-beneficiary touch of such an address does not apply.
 
 ### 6. State Gas and SALT Pricing
 
@@ -360,7 +361,7 @@ At these prices it never raises the gas used of a transaction that pays history 
 - Four runtime transaction-level limits: compute gas `TX_COMPUTE_GAS_LIMIT` = 200,000,000, data size `TX_DATA_LIMIT` = 13,107,200 bytes, KV updates `TX_KV_UPDATE_LIMIT` = 500,000, state growth `TX_STATE_GROWTH_LIMIT` = 1,000 new accounts and slots.
 - Every call frame gets 98/100 of its parent's remaining budget in each of the four dimensions.
 - Data size and KV updates are counted by Rex6's own per-operation rules; the post-execution fee-reward credits are recorded after the transaction's result is final, and cannot change it.
-- A transaction crossing a limit halts; a frame crossing its budget reverts alone.
+- A frame crossing its budget reverts alone, the transaction's own frame included, whose budget is what the transaction has left; usage recorded outside every frame's budget — the pre-frame intrinsic usage, an Oracle hint's bytes, the compute limit a read of volatile data lowers — that crosses a transaction-level limit halts the transaction.
 
 #### New behavior
 
@@ -405,7 +406,8 @@ Three dimensions are limited per transaction; compute is not one of them (see [T
 
 #### Previous behavior
 
-- A transaction crossing a runtime transaction-level limit halts: it produces a failed receipt, its remaining gas is preserved and refunded to the sender, and it is included in the block.
+- A transaction crossing a runtime transaction-level limit through usage recorded outside every frame's budget halts: it produces a failed receipt, its remaining gas is preserved and refunded to the sender, and it is included in the block.
+  A crossing during a frame's execution, the transaction's own frame included, reverts that frame with its budget's `MegaLimitExceeded` (see [Resource Limits](#10-resource-limits)).
 - A frame crossing its budget reverts with `MegaLimitExceeded(uint8 kind, uint64 limit)` and its parent continues.
 
 #### New behavior
@@ -560,7 +562,7 @@ A node MUST apply [EIP-7708](https://eips.ethereum.org/EIPS/eip-7708):
 
 - A top-level `keylessDeploy(bytes,uint256)` call runs the signed creation in a sandbox: a separate, fee-free transaction with its own resource trackers, capped to the parent's remaining budgets, whose state is merged into the parent afterwards.
 - Inside the sandbox `ORIGIN` is the signer and `GASPRICE` is 0.
-- A transaction-level limit crossed after the sandbox ran halts the outer call with `OutOfGas` and merges nothing; a sandbox preflight failure reverts with `ParentBudgetExceeded`; a failed read reverts with `InternalError()`.
+- A transaction-level limit crossed after the sandbox ran halts the outer call with `OutOfGas` and merges none of the sandbox's state or logs, while its resource usage and volatile-access marks stay merged, since they are what crossed the limit; a sandbox preflight failure reverts with `ParentBudgetExceeded`; a failed read reverts with `InternalError()`.
 - `gasUsed` is the sandbox transaction's gas used, its intrinsic gas included.
 
 #### New behavior
