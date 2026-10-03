@@ -618,8 +618,18 @@ pub(crate) fn assert_detention_step_reads_as_out_of_gas(traced: &Traced, crossin
     let shape = "the detention crossing's step reads as an out-of-gas that spent the frame's \
                  whole gas (a fix makes this fail: require the step's own cost instead)";
     assert_eq!(last.op, crossing_op, "{shape}");
-    assert_eq!(last.error.as_deref(), Some("Some(OutOfGas)"), "{shape}");
+    let error = last.error.as_deref();
+    assert!(error.is_some_and(|error| error.contains("OutOfGas")), "{shape}: error {error:?}");
     assert_eq!(last.gas_cost, last.gas, "{shape}");
+    // How revm-inspectors renders the error, apart from what it is: the `Debug` of the step's
+    // `Option` status. A tracer that prints the status alone changes only this.
+    assert_eq!(
+        error,
+        Some("Some(OutOfGas)"),
+        "revm-inspectors renders a step's error as the Debug of an Option; a tracer that prints \
+         the status alone makes this fail: update the expected string and regenerate the \
+         detention goldens with UPDATE_GOLDENS=1"
+    );
     assert!(last.gas_cost > traced.outcome.gas.gas_used, "{shape}: the receipt bills none of it");
     let eip3155 = traced.eip3155();
     let last_step = eip3155.lines().rfind(|line| line.contains("\"opName\"")).expect("a step");
