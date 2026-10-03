@@ -9,6 +9,13 @@
 //! calls the trace builders directly, without setting the root frame's gas limit to the
 //! transaction's, so the root `gas` it prints is the first frame's budget instead.
 //!
+//! The EIP-3155 trace is the revm fork's `TracerEip3155`, the tracer the state-test runner runs
+//! Satin under.
+//!
+//! The goldens are the output of the tracers `Cargo.lock` resolves: revm-inspectors 0.40.4 (the
+//! workspace asks for `0.40.1` or later) and the revm fork's inspector crate. A lock update that
+//! changes what a tracer prints moves them; the relations each test asserts do not depend on it.
+//!
 //! Default: compare pretty JSON, and the EIP-3155 trace as JSON lines, byte-for-byte with
 //! `tests/tracers/goldens/<scenario>/`.
 //! Rewrite: `UPDATE_GOLDENS=1 cargo test -p mega-evm --test tracers`.
