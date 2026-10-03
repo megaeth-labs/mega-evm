@@ -106,25 +106,38 @@ where
     Run { outcome, bundle: state.take_bundle(), cache: state.cache, bucket_ids, block_hashes }
 }
 
+/// How [`check_replay`] checked an entry that passed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Replayed {
+    /// The engine executed the entry, and it replayed on both witnesses: the record of every
+    /// database read and the witness a node builds from its channels.
+    Both,
+    /// The engine rejected the entry, and it replayed on the record of every database read
+    /// alone: a rejected transaction has no returned state to build the channel witness from.
+    RecordOnly,
+    /// The entry was not executed, for the reason the reference runner shares.
+    Skipped(SkipReason),
+}
+
 /// Executes the entry `test` of `unit` on `fork` in `mode`, records what it read, replays it on
 /// exactly the record and, when the engine executed it, on the witness a node builds from the
 /// transaction's returned state and the engine's exports, and compares each replay to the first
 /// run.
 ///
-/// `Ok(None)` when every replay produced the same result, state, ledgers, usage, stop, state
-/// changes and exports, having read nothing its witness does not hold; `Ok(Some(reason))` when
-/// the entry is not executed, for the reason the reference runner shares; `Err` with what
-/// differed, or what the fixture lacks, otherwise.
+/// `Ok` with the witnesses it replayed on when every replay produced the same result, state,
+/// ledgers, usage, stop, state changes and exports, having read nothing its witness does not
+/// hold, or with the reason the entry is not executed; `Err` with what differed, or what the
+/// fixture lacks, otherwise.
 pub fn check_replay(
     mode: Mode,
     fork: Fork,
     unit: &TestUnit,
     test: &Test,
-) -> Result<Option<SkipReason>, String> {
+) -> Result<Replayed, String> {
     let Ready { chain_id, block, tx } =
         match prepare(fork, unit, test).map_err(|failure| failure.detail)? {
             Ok(ready) => ready,
-            Err(reason) => return Ok(Some(reason)),
+            Err(reason) => return Ok(Replayed::Skipped(reason)),
         };
 
     let record = SharedWitnessRecord::default();
@@ -160,7 +173,7 @@ pub fn check_replay(
     // The channel witness: what a node builds for a transaction it includes, so only for an
     // entry the engine executed.
     let Ok(outcome) = &recorded.outcome else {
-        return Ok(None);
+        return Ok(Replayed::RecordOnly);
     };
     let mut keys = WitnessKeys::default();
     keys.add_state(&outcome.state);
@@ -186,7 +199,7 @@ pub fn check_replay(
     if !strict.oracle().replayed_exactly() {
         return Err("the oracle reads were not replayed in order on the channel witness".into());
     }
-    Ok(None)
+    Ok(Replayed::Both)
 }
 
 /// What differs between two runs of one entry, if anything.

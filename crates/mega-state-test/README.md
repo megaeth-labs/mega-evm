@@ -62,7 +62,9 @@ cargo run --release -p state-test -- --mode satin --fork Osaka <main>/state_test
 `witness::check_replay` executes an entry on a database and environments that record every read, then replays it twice on a strict database and environments that serve exactly a witness and refuse everything else: once on the record of every database read, once on the witness a node builds from the transaction's returned state and the engine's exports, with the oracle reads the transaction recorded.
 Each replay is held to the first run: the result, the state, the gas by ledger, the usage, the stop, the state changes, and the buckets and block hashes the engine exported.
 The replay on the channel witness is the check a stateless validator's witness must pass, run on Ethereum's fixtures; the database-level replay shows the transaction reads nothing outside its database and environments.
-A fixture written into the test always runs; a sample of the execution-spec fixtures runs on demand:
+An entry the engine rejects replays on the record of every database read alone: it has no returned state to build the channel witness from, and is in no block.
+`check_replay` says which witnesses an entry replayed on (`Replayed`), and the fixture test counts the two apart: the entries executed and replayed on both witnesses, and the entries rejected and replayed on the database record alone.
+A fixture written into the test always runs, an executed one and a rejected one; a sample of the execution-spec fixtures runs on demand:
 
 ```bash
 MEGA_STATE_TEST_FIXTURES=<main>/state_tests cargo test -p mega-state-test --release --test witness -- --ignored

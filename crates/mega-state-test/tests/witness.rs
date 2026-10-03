@@ -12,13 +12,21 @@
 //! `MEGA_STATE_TEST_SAMPLE` is how many fixture files to take, spread over the tree (300 unless
 //! set; 0 for all of them), `MEGA_STATE_TEST_FORK` the fork whose entries run (`Osaka` unless
 //! set) and `MEGA_STATE_TEST_MODE` the mode (`satin` unless set).
+//!
+//! It reports the entries the engine executed, which replayed on both witnesses, apart from the
+//! entries it rejected, which replayed on the record of every database read alone.
 
 use std::{
     panic::{catch_unwind, AssertUnwindSafe},
     path::PathBuf,
 };
 
-use state_test::{runner::find_json_files, types::TestSuite, witness::check_replay, Fork, Mode};
+use state_test::{
+    runner::find_json_files,
+    types::TestSuite,
+    witness::{check_replay, Replayed},
+    Fork, Mode,
+};
 
 /// A fixture of the execution-spec shape: a call to a contract that writes one slot, expected to
 /// execute. The post-state hashes are the fixture's own and are not judged here.
@@ -79,17 +87,31 @@ const FIXTURE: &str = r#"{
   }
 }"#;
 
-/// The fixture above replays from its witness in both modes.
-#[test]
-fn test_a_fixture_replays_from_its_witness() {
-    let suite: TestSuite = serde_json::from_str(FIXTURE).expect("a fixture");
+/// Checks every Osaka entry of `fixture` in both modes, expecting `expected` of each.
+fn check_fixture(fixture: &str, expected: Replayed) {
+    let suite: TestSuite = serde_json::from_str(fixture).expect("a fixture");
     let (_, unit) = suite.0.iter().next().expect("one test");
     let tests = unit.post.iter().find(|(spec, _)| Fork::Osaka.is(spec)).expect("Osaka").1;
     for mode in Mode::ALL {
         for test in tests {
-            assert_eq!(check_replay(mode, Fork::Osaka, unit, test), Ok(None), "{mode}");
+            assert_eq!(check_replay(mode, Fork::Osaka, unit, test), Ok(expected), "{mode}");
         }
     }
+}
+
+/// The fixture above executes, and replays on both witnesses in both modes.
+#[test]
+fn test_a_fixture_replays_from_its_witness() {
+    check_fixture(FIXTURE, Replayed::Both);
+}
+
+/// The fixture above with a sender that cannot pay for its gas: the engine rejects it, so it
+/// replays on the record of every database read alone, in both modes.
+#[test]
+fn test_a_rejected_fixture_replays_from_its_record_alone() {
+    let unfunded = FIXTURE.replace("0x3635c9adc5dea00000", "0x00");
+    assert_ne!(unfunded, FIXTURE, "the sender's balance is in the fixture");
+    check_fixture(&unfunded, Replayed::RecordOnly);
 }
 
 /// A sample of the execution-spec fixtures replays from its witness. Ignored: it needs the
@@ -114,7 +136,7 @@ fn test_a_sample_of_the_fixtures_replays_from_its_witness() {
     let sampled: Vec<_> =
         files.iter().step_by(stride).take(if sample == 0 { usize::MAX } else { sample }).collect();
 
-    let (mut executed, mut skipped, mut failed) = (0, 0, Vec::new());
+    let (mut both, mut record_only, mut skipped, mut failed) = (0, 0, 0, Vec::new());
     for path in &sampled {
         let json = std::fs::read_to_string(path).expect("a readable fixture");
         let suite: TestSuite = match serde_json::from_str(&json) {
@@ -133,8 +155,9 @@ fn test_a_sample_of_the_fixtures_replays_from_its_witness() {
                     let outcome =
                         catch_unwind(AssertUnwindSafe(|| check_replay(mode, fork, unit, test)));
                     match outcome {
-                        Ok(Ok(None)) => executed += 1,
-                        Ok(Ok(Some(_))) => skipped += 1,
+                        Ok(Ok(Replayed::Both)) => both += 1,
+                        Ok(Ok(Replayed::RecordOnly)) => record_only += 1,
+                        Ok(Ok(Replayed::Skipped(_))) => skipped += 1,
                         Ok(Err(why)) => {
                             failed.push(format!("{}::{name}[{entry}]: {why}", path.display()))
                         }
@@ -147,7 +170,7 @@ fn test_a_sample_of_the_fixtures_replays_from_its_witness() {
         }
     }
     eprintln!(
-        "witness replay of {} fixture files in {mode} mode on {fork}: {executed} replayed, {skipped} skipped, {} failed",
+        "witness replay of {} fixture files in {mode} mode on {fork}: {both} executed and replayed on both witnesses, {record_only} rejected and replayed on the database record alone, {skipped} skipped, {} failed",
         sampled.len(),
         failed.len()
     );
@@ -155,5 +178,5 @@ fn test_a_sample_of_the_fixtures_replays_from_its_witness() {
         eprintln!("  {failure}");
     }
     assert!(failed.is_empty(), "{} entries did not replay from their witness", failed.len());
-    assert!(executed > 0, "nothing executed");
+    assert!(both > 0, "nothing executed");
 }
