@@ -418,8 +418,7 @@ pub(crate) fn assert_detention_step_reads_as_out_of_gas(traced: &Traced, crossin
     assert_eq!(last.gas_cost, last.gas, "{shape}");
     assert!(last.gas_cost > traced.outcome.gas.gas_used, "{shape}: the receipt bills none of it");
     let eip3155 = traced.eip3155();
-    let last_step =
-        eip3155.lines().filter(|line| line.contains("\"opName\"")).last().expect("a step");
+    let last_step = eip3155.lines().rfind(|line| line.contains("\"opName\"")).expect("a step");
     let step: serde_json::Value = serde_json::from_str(last_step).expect("a JSON line");
     assert_eq!(step["opName"], crossing_op, "{shape} (EIP-3155)");
     assert_eq!(step["error"], "OutOfGas", "{shape} (EIP-3155)");
