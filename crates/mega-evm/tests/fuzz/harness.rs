@@ -1,5 +1,5 @@
 //! The runner every property runs on: a seeded, bounded proptest run whose failure names the seed
-//! that reproduces it and prints the minimal case it shrank to.
+//! that reproduces it and prints the case it shrank to, within the shrink limits below.
 //!
 //! Two modes, chosen by the environment:
 //!
