@@ -51,11 +51,11 @@ use crate::{
     harness::{
         assert_compute_at_stop, assert_detention_step_reads_as_out_of_gas, assert_eip3155_agrees,
         assert_every_frame_stops, assert_keyless_steps,
-        assert_keyless_struct_logs_miss_the_creation, assert_ledgers, assert_logs,
-        assert_parent_does_not_resume, assert_prestate_covers_reads, assert_root_frame_settles,
-        assert_root_gas_is_the_gas_limit, at_spec_prices, call_tx, create_tx, decode_stop,
-        eip3155_steps, eip3155_summary_gas_used, goldens_dir, pin_tracer_views, step, Traced,
-        VIEWS,
+        assert_keyless_struct_logs_miss_the_creation, assert_ledgers,
+        assert_log_index_counts_discarded, assert_logs, assert_parent_does_not_resume,
+        assert_prestate_covers_reads, assert_root_frame_settles, assert_root_gas_is_the_gas_limit,
+        at_spec_prices, call_tx, create_tx, decode_stop, eip3155_steps, eip3155_summary_gas_used,
+        goldens_dir, pin_tracer_views, step, Traced, VIEWS,
     },
 };
 
@@ -157,6 +157,7 @@ fn test_eth_transfer_emits_7708_log() {
     );
     assert!(traced.outcome.result.is_success(), "{:?}", traced.outcome.result);
     assert_logs(&traced.call_frame(true).logs, &[transfer_log(CALLER, PAYEE, U256::from(1))]);
+    assert_log_index_counts_discarded(&traced, &[0]);
     // The recipient does not exist: EIP-2780 charges the account the transfer adds, and the
     // transaction's own frame makes one record, the recipient's.
     let expected = Ledgers {
@@ -287,6 +288,9 @@ fn test_nested_call_inner_reverts() {
     assert!(callee.logs.is_empty(), "the callee's logs are discarded");
     assert_eq!(root.logs.len(), 1, "the caller's log alone, no transfer log");
     assert_eq!(root.logs[0].address, Some(CONTRACT));
+    // The receipt keeps the caller's log alone, at index 0; before it the callee's transfer log
+    // and its `LOG1` were emitted and discarded with the callee.
+    assert_log_index_counts_discarded(&traced, &[2]);
     // The callee ran on what the caller forwarded and the value's stipend, and handed back what it
     // left, so the caller pays the callee's regular spend less the stipend; the callee's state and
     // history gas came back with its revert.
@@ -599,6 +603,9 @@ fn test_frame_budget_reverts_the_child_alone() {
     let root = traced.call_frame(true);
     assert_eq!(root.error, None, "the parent succeeds");
     assert_eq!(root.logs.len(), 1, "the parent resumed and logged");
+    // The tracer saw the child's `LOG0` before the frame budget refused it; the receipt keeps the
+    // parent's log alone, at index 0.
+    assert_log_index_counts_discarded(&traced, &[1]);
     let [child] = root.calls.as_slice() else { panic!("one child frame: {root:?}") };
     assert_eq!(child.error.as_deref(), Some("execution reverted"));
     assert_eq!(
@@ -844,6 +851,7 @@ fn test_deposit_transaction() {
     assert_eq!(history, (0, 0), "a deposit pays no history");
     let root = traced.call_frame(true);
     assert_logs(&root.logs, &[transfer_log(CALLER, CONTRACT, value)]);
+    assert_log_index_counts_discarded(&traced, &[0]);
     let PreStateFrame::Diff(diff) = traced.prestate(true) else { panic!("the diff mode") };
     let before = diff.pre[&CALLER].balance.expect("the caller's balance");
     assert_eq!(

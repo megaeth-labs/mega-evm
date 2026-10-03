@@ -229,6 +229,37 @@ pub(crate) fn assert_logs(logs: &[CallLogFrame], expected: &[Log]) {
     assert_eq!(got, expected, "the call tracer's logs");
 }
 
+/// Known shape: the call tracer numbers a log among every log the transaction emitted, those a
+/// failed frame discarded included.
+///
+/// revm-inspectors gives a log the count of logs it has recorded so far, in every frame, as its
+/// `index`, and never takes back the logs of a frame that fails; the call builder then drops a
+/// failed frame's logs and keeps the survivors' numbers. So the `index` of a log the receipt
+/// keeps is its index in the receipt plus the logs discarded before it — under Satin among them
+/// the EIP-7708 transfer log of a value call whose callee fails, and a log a limit refused after
+/// the tracer saw it. `discarded_before` gives that count for each of the root frame's logs.
+///
+/// A tracer that numbers the kept logs only makes this fail: require the receipt's index then.
+pub(crate) fn assert_log_index_counts_discarded(traced: &Traced, discarded_before: &[u64]) {
+    let root = traced.call_frame(true);
+    assert_eq!(root.logs.len(), discarded_before.len(), "the root frame's logs");
+    let receipt = traced.outcome.result.logs();
+    for (log, discarded) in root.logs.iter().zip(discarded_before) {
+        let kept = log.clone().into_log();
+        let receipt_index =
+            receipt.iter().position(|logged| *logged == kept).expect("the receipt keeps the log");
+        assert_eq!(
+            log.index,
+            Some(receipt_index as u64 + discarded),
+            "known shape: the call tracer's log index ({:?}) is the receipt's ({receipt_index}) \
+             plus the {discarded} log(s) a failed frame discarded before it; a tracer that numbers \
+             kept logs only makes them equal: require the receipt's index here and regenerate the \
+             goldens with UPDATE_GOLDENS=1",
+            log.index,
+        );
+    }
+}
+
 /// The struct-log step of the first `op` at `depth` in the node's opcode trace.
 pub(crate) fn step(traced: &Traced, op: &str, depth: u64) -> StructLog {
     traced
