@@ -1,0 +1,699 @@
+{
+  "chain_id": 4326,
+  "salt": "default-minimum",
+  "blocks": [
+    {
+      "number": 1277159,
+      "hash": "0x22e587a927ba1bab836e891faceeddfc44751113fef8710462558cd82c7f8c78",
+      "spec": "MiniRex",
+      "tx_count": 2,
+      "archive": "1277159.cache.json.tar.xz",
+      "sha256": "d35538af6f94227661a8cf67d1ee4a5d5ebc4468c8fe6a22640bf1512083eb25",
+      "note": "earliest block in the corpus"
+    },
+    {
+      "number": 1708174,
+      "hash": "0x3b4be7f397108d2230c8cf7349217db456213f3c77b821bbaac852dc7c5617cd",
+      "spec": "MiniRex",
+      "tx_count": 2,
+      "archive": "1708174.cache.json.tar.xz",
+      "sha256": "6b34af1ab0f597823bf63e618dad58a189fb07c95e33ee6a3553bc907d2c5655",
+      "note": "failed deposit CREATE, whose receipt still reports the contractAddress it targeted"
+    },
+    {
+      "number": 1790368,
+      "hash": "0xc100644c4616dc157455e38214176baec3aa8784e8a658286503df874b137ae1",
+      "spec": "MiniRex",
+      "tx_count": 5,
+      "archive": "1790368.cache.json.tar.xz",
+      "sha256": "d49ffbbfcd5fdc2481345fb290ec0ad33796936b184eee5ce04d259d75c3b5dd",
+      "note": "failed deposit beside legacy transactions"
+    },
+    {
+      "number": 1883527,
+      "hash": "0x814e9e196964f28d77f692a4dd8b01a8eaefbf31fe52c7a0622f9a155c5c2673",
+      "spec": "MiniRex",
+      "tx_count": 2,
+      "archive": "1883527.cache.json.tar.xz",
+      "sha256": "737332f459ebad340dab879cd6abe52c0c7baa2c7694672dd153ca932d419c6f"
+    },
+    {
+      "number": 2052680,
+      "hash": "0xf87252bff694d792bc67ae7d941614617c5b7bbd124c41414092c0b96f2c99e9",
+      "spec": "MiniRex1",
+      "tx_count": 8,
+      "archive": "2052680.cache.json.tar.xz",
+      "sha256": "b1963c992f126bbc11fb180f93e991fcb0b3a6472bfd268b8ea959aa8e215365",
+      "note": "MiniRex1 alias rung, executing Equivalence behavior"
+    },
+    {
+      "number": 2053779,
+      "hash": "0x51b1f50710c0e94342aa3c0ff672d5f4cb3b4a1aa2246e666145541c90c00734",
+      "spec": "MiniRex2",
+      "tx_count": 2,
+      "archive": "2053779.cache.json.tar.xz",
+      "sha256": "7448d4b183dce805596ed5dd78572248a8665075bc2933eebb9b32941a71fa28",
+      "note": "MiniRex2 alias rung, executing MiniRex behavior"
+    },
+    {
+      "number": 3182971,
+      "hash": "0x3d38b649a20d924ed13950eb512f995dd2e0011e1160dc27b1af70bd209b8191",
+      "spec": "Rex",
+      "tx_count": 22,
+      "archive": "3182971.cache.json.tar.xz",
+      "sha256": "4fe7851947bbfccdb2927ef4a3d46793baca80a72d2d6c81bf495dd6b915378e",
+      "note": "successful CREATE"
+    },
+    {
+      "number": 3224158,
+      "hash": "0x1adca0bcef3a06756304e6b43642c37ef693a34b10e4c9f6513497a741fdaa76",
+      "spec": "Rex",
+      "tx_count": 22,
+      "archive": "3224158.cache.json.tar.xz",
+      "sha256": "1a77e8126e315c1c615fffe20274621c0186051b4bdd8c86b911ae026e26a7bb"
+    },
+    {
+      "number": 3451849,
+      "hash": "0x6da3fe19e89817ff5280478947c63d1b846eb38431d2e08e6ebcc8c59429594f",
+      "spec": "Rex",
+      "tx_count": 22,
+      "archive": "3451849.cache.json.tar.xz",
+      "sha256": "996db83eb19bcc45d84a94367979f93143bdcc60592a1e5b09ead796368ec462",
+      "note": "failed CREATE that burns 67M gas"
+    },
+    {
+      "number": 3644041,
+      "hash": "0xc8abfecc2b8884c19be68858cf62cda95ea63e49de836a43ecb10117badc9c3e",
+      "spec": "Rex1",
+      "tx_count": 22,
+      "archive": "3644041.cache.json.tar.xz",
+      "sha256": "5bbc8f414c159822809a840f324a9c75cf759b5cde62d83f97d07771b3ed4330"
+    },
+    {
+      "number": 7057359,
+      "hash": "0xa06a037f8575ea54c744ea411e9e135a9400d6efbbb90d1abdcc4a68f0ddb21b",
+      "spec": "Rex1",
+      "tx_count": 36,
+      "archive": "7057359.cache.json.tar.xz",
+      "sha256": "1893b8e2ca58143f14cb2ab9949b9f42db660d22d34def708c51fffb1605b2cd",
+      "note": "320M gas block"
+    },
+    {
+      "number": 7193432,
+      "hash": "0xffdd7bc8ce5e3d6e07788b19a850c1060511ed12e422f0e18aacfb85c7a47c4e",
+      "spec": "Rex1",
+      "tx_count": 27,
+      "archive": "7193432.cache.json.tar.xz",
+      "sha256": "24b9fd591d82f2328713a57119296013fc7a314050b1d0a1046ab2017cf85a2c"
+    },
+    {
+      "number": 7266754,
+      "hash": "0x92d3c9ac237ee3d3ed0fb4e566c063c2c6cd4270631840dd0668b51ec31bd6c7",
+      "spec": "Rex1",
+      "tx_count": 26,
+      "archive": "7266754.cache.json.tar.xz",
+      "sha256": "609500737513537ad8d225f5582572c74757d30935d286b32d9fa1ff33cae01f"
+    },
+    {
+      "number": 7448989,
+      "hash": "0x9ea4deaa6e0503972890af25135fa5f9348b229b3e0427a642a0a11a119d301e",
+      "spec": "Rex2",
+      "tx_count": 25,
+      "archive": "7448989.cache.json.tar.xz",
+      "sha256": "01377606eb1575b958aff4703c93846bcee29aef40f6fb76e26bb8f3f23bc353",
+      "note": "Rex2 activation block"
+    },
+    {
+      "number": 7487457,
+      "hash": "0x318177f902ba8c9b554d3f7a639a76ce4c3152f9dac1a107353808eb2313c47e",
+      "spec": "Rex2",
+      "tx_count": 27,
+      "archive": "7487457.cache.json.tar.xz",
+      "sha256": "f0aea682d223436ef709a5d386eaf3d1a73ad0de0379a6bcb16acebbaa874a4b"
+    },
+    {
+      "number": 7808664,
+      "hash": "0x2fd881051efe463fd264648cef4a54b7517433c774597e2cb43b960ee75e6e6d",
+      "spec": "Rex2",
+      "tx_count": 10,
+      "archive": "7808664.cache.json.tar.xz",
+      "sha256": "2bb2cdc781c88639d5eec6d03e1eb0e149666bc32faa0cb7035f3fb122dde026",
+      "note": "EIP-7702 transaction burning 384M gas"
+    },
+    {
+      "number": 7921084,
+      "hash": "0x3b6d08a7619c49864e952765f5601b9647cd55080390a9b588b9d536f699f199",
+      "spec": "Rex2",
+      "tx_count": 25,
+      "archive": "7921084.cache.json.tar.xz",
+      "sha256": "e6901859f029b9d12954f4449a7d31327c62a108e205cd8a9135e33522eec13b"
+    },
+    {
+      "number": 7942160,
+      "hash": "0xe8584ad412fae71c26f776b70739faa4e7dc8d451e2a9c0ad4ed44d89a7e4bde",
+      "spec": "Rex2",
+      "tx_count": 25,
+      "archive": "7942160.cache.json.tar.xz",
+      "sha256": "6d0afda5217d3a5656eeb3b2d404f8a937759036ffea456177532e6eead792dd"
+    },
+    {
+      "number": 8013460,
+      "hash": "0x588123464bf94845183870349e3b71b683e036bcea1319717332839fb3beec82",
+      "spec": "Rex2",
+      "tx_count": 25,
+      "archive": "8013460.cache.json.tar.xz",
+      "sha256": "59a0cd4a0c3c838ff4ce486818437e29ca12da70903d77561610a0f684d17697"
+    },
+    {
+      "number": 8046913,
+      "hash": "0x4172abe09fe6b8af1f1f8a8b0aca8883206672d12881a30cae48df9209599408",
+      "spec": "Rex2",
+      "tx_count": 26,
+      "archive": "8046913.cache.json.tar.xz",
+      "sha256": "0101e0d4443026b524eaea66ba8818b684df999b596534ce832fdf54ddcd2269"
+    },
+    {
+      "number": 8064067,
+      "hash": "0x7b5833e73147deab9690395cecacc78cff06c5a0cc40a5687c4cee602c7ec554",
+      "spec": "Rex2",
+      "tx_count": 24,
+      "archive": "8064067.cache.json.tar.xz",
+      "sha256": "819c0ea00e507c5b8590a3b27796fc546c55c77f0b045076843264f627e3779a"
+    },
+    {
+      "number": 8095833,
+      "hash": "0xb31d088718f4b6ceb018a47702418865aca0b2fa0413f35cbbb87ec6a6e5bcf5",
+      "spec": "Rex2",
+      "tx_count": 25,
+      "archive": "8095833.cache.json.tar.xz",
+      "sha256": "6b45f7de24ec3bfa726cd8c8bf9790af5cab8ce9583c1d7833269a9d1c44e6ad"
+    },
+    {
+      "number": 8588594,
+      "hash": "0x527806d5273d5ce0847b2950464cd681a377d31503c8fc1ea3f4cb60940b13c5",
+      "spec": "Rex2",
+      "tx_count": 29,
+      "archive": "8588594.cache.json.tar.xz",
+      "sha256": "dcb7ba91c2e9f2f55b7892dc4a21e891a0c693f2a7bb4a2a3b78a0677141699d"
+    },
+    {
+      "number": 8679271,
+      "hash": "0xeea5f2d3786e0d5556dd8fda4fd7584b339dab8b5e23ae5f0b7533aa9bb8babb",
+      "spec": "Rex2",
+      "tx_count": 27,
+      "archive": "8679271.cache.json.tar.xz",
+      "sha256": "00040d0397c5c7c6f2e368135a2a33a9061a3d547a56b82eedf5f8e532d136dc"
+    },
+    {
+      "number": 8715390,
+      "hash": "0xfc4a2b95ae7d0b8d8a89c406b923a6e3f029b4307813c1a5602aaffe583510a1",
+      "spec": "Rex2",
+      "tx_count": 49,
+      "archive": "8715390.cache.json.tar.xz",
+      "sha256": "136e193933172cd39fa38b575ee8f66d93f41ea91ff3f4edac74ca18416c4dfb"
+    },
+    {
+      "number": 8990018,
+      "hash": "0xf65190a2f9f36113c575d6a3f7213b529cacedcab1f7483548e4ea9167591e26",
+      "spec": "Rex3",
+      "tx_count": 23,
+      "archive": "8990018.cache.json.tar.xz",
+      "sha256": "7110843ce9f420a3cf618351483bb1ee19e60cf55e3d3e7f04537bd6d05f5cc0",
+      "note": "failed legacy CREATE"
+    },
+    {
+      "number": 10108963,
+      "hash": "0x9e21bb092456c3bd20c9cc788b0e0412d5480cf0d04eb7a5a254284385817fce",
+      "spec": "Rex3",
+      "tx_count": 48,
+      "archive": "10108963.cache.json.tar.xz",
+      "sha256": "8768fad045617501bdc396c1e751722dbb3dce1618abf19e34d8b62f4b087f06",
+      "note": "failed deposit"
+    },
+    {
+      "number": 10206729,
+      "hash": "0x805b9057a1183627c9f74dca12110170a5507f9110370ef5fc56d2b02b2d12af",
+      "spec": "Rex3",
+      "tx_count": 131,
+      "archive": "10206729.cache.json.tar.xz",
+      "sha256": "ea84f3fbd892364639e87325c23e979126c23ffad2585fe66446d102815dad70",
+      "note": "only type-1 (EIP-2930) transactions in the corpus"
+    },
+    {
+      "number": 12747297,
+      "hash": "0x9aa7579ec7a161ba36cbd9a0b8364a9c423d32ccd95072bf26b9a15aaf7200ca",
+      "spec": "Rex3",
+      "tx_count": 28,
+      "archive": "12747297.cache.json.tar.xz",
+      "sha256": "be088820c28d6f6b72fb395afd7a525b7ae5f0edd4c54b01eb4b1959c6862059"
+    },
+    {
+      "number": 12956090,
+      "hash": "0x21c5d162de0e4deba3b2741036f6649ce84e1242bf9f8a86bd66d6ae6ebd5eaf",
+      "spec": "Rex3",
+      "tx_count": 28,
+      "archive": "12956090.cache.json.tar.xz",
+      "sha256": "63e5802e80a2ffa907698ab04bed6acc1e419137b12041475a6854a0b8becac7"
+    },
+    {
+      "number": 14104013,
+      "hash": "0x4f700ab073cabf96dad67c130fa24b1f820ae38b9fe5a920edd179e1f7157ce1",
+      "spec": "Rex4",
+      "tx_count": 28,
+      "archive": "14104013.cache.json.tar.xz",
+      "sha256": "434d64f3ab1e146dfa40f770905abeb17dffced721a9bce578d50540a8598572"
+    },
+    {
+      "number": 14208515,
+      "hash": "0x714d6b6cedadba5d7cc29b6976bcb817a83ecae4ff7f657cf4f3b84d5adb28ee",
+      "spec": "Rex4",
+      "tx_count": 31,
+      "archive": "14208515.cache.json.tar.xz",
+      "sha256": "c1008a19ef3aeb3babdf000b756c9dd4faedd11dcdc6c1b479085839f39fbf8a"
+    },
+    {
+      "number": 14753409,
+      "hash": "0x4314014aa470beb208e62cfcb9f9120e643b1abb394a09288d5af50df1fafabd",
+      "spec": "Rex4",
+      "tx_count": 119,
+      "archive": "14753409.cache.json.tar.xz",
+      "sha256": "1abd2e5364cd1f7f01a28521a5a28bb31d2230ce6ac76787d771f33e25fea27e"
+    },
+    {
+      "number": 14924732,
+      "hash": "0xa3e83b0de9e2a0dfe4d69fd2786fe019e6c72be0456cc260bbb0331b1ad28201",
+      "spec": "Rex4",
+      "tx_count": 31,
+      "archive": "14924732.cache.json.tar.xz",
+      "sha256": "18306106ed8ba8a1cc35884826385015b1ef8377e4f2ed9ebb61333faba308ab"
+    },
+    {
+      "number": 15052089,
+      "hash": "0x9c9246753a6e6541b6902ccbb91ce5e5fe709896156dc5c646e1f8f7fe575d0f",
+      "spec": "Rex4",
+      "tx_count": 30,
+      "archive": "15052089.cache.json.tar.xz",
+      "sha256": "3f40b69b40a2839d0061b7ef232b4549da07e65eb169d58873689894b07698b8"
+    },
+    {
+      "number": 15197778,
+      "hash": "0xdde8e89e4486cdff0dccda73ed469b468150a0288a927fee9d43e0ac25f09a22",
+      "spec": "Rex4",
+      "tx_count": 35,
+      "archive": "15197778.cache.json.tar.xz",
+      "sha256": "2c6dab2ce58b05e503e0b7ee4ca66dfb18920286d84cff118818c1f922a1f852",
+      "note": "largest transaction in the corpus (3.29B gas)"
+    },
+    {
+      "number": 15212274,
+      "hash": "0xc4f698612b00fac6000a3735dabee0c7ad3ec17fb2d246e774dac2de4c323494",
+      "spec": "Rex4",
+      "tx_count": 28,
+      "archive": "15212274.cache.json.tar.xz",
+      "sha256": "b749535710b637ae37b826e1bedd1aef9ce0785c5865ba1687eef2842aa2675f"
+    },
+    {
+      "number": 15297491,
+      "hash": "0x4fd1411499ac5df9eee85f360aee060c9bd2c883c99e137211ef2ce17be4acf9",
+      "spec": "Rex4",
+      "tx_count": 45,
+      "archive": "15297491.cache.json.tar.xz",
+      "sha256": "49c0a34c4920138cc3d940efc58384855f1d54104b9187ae834b9f9273564a18"
+    },
+    {
+      "number": 16095618,
+      "hash": "0x7d8644fa513c53a47d550c7789f443d83f1c0dc8c6cb160ecc15a1c546255047",
+      "spec": "Rex4",
+      "tx_count": 28,
+      "archive": "16095618.cache.json.tar.xz",
+      "sha256": "5feb4c983d5c5706872373811e153b94489a3bc5d56aae7ff1005c9d0e678bd3"
+    },
+    {
+      "number": 16219408,
+      "hash": "0x6d9d65cc98ac911d04727a918672342ee6dca920e61e263598504f1f9e20d639",
+      "spec": "Rex4",
+      "tx_count": 36,
+      "archive": "16219408.cache.json.tar.xz",
+      "sha256": "32842dc9be3fd8457de8382038d17737a272b9848b7c600c133ebe0cc94dfec4"
+    },
+    {
+      "number": 16511216,
+      "hash": "0x9d7858fd033b3648da7db555eefbce4fe03574d2e9905ee6222b19867df5b539",
+      "spec": "Rex4",
+      "tx_count": 42,
+      "archive": "16511216.cache.json.tar.xz",
+      "sha256": "46494f7b4aab46ea226c40696e6d4a7749b271cbd0b173e1af273b60bff9f745"
+    },
+    {
+      "number": 16575691,
+      "hash": "0xf7178fa1ba369aa278ce07eb6bf31bb6a89c0fd26eed01a9c3fc1cae89351bd3",
+      "spec": "Rex4",
+      "tx_count": 42,
+      "archive": "16575691.cache.json.tar.xz",
+      "sha256": "c977904f9e125569717cfdedaa549c016f1f243ad45a06378e07ea38ec5d8545"
+    },
+    {
+      "number": 17256656,
+      "hash": "0x0c3cff7dbe6522128615eef798e2aebaa9bd2b327d27083ba9a3d89bfe9de2cb",
+      "spec": "Rex4",
+      "tx_count": 32,
+      "archive": "17256656.cache.json.tar.xz",
+      "sha256": "c59a843a2315471f5f738882da087f0dfc9563f3eb451120adb036ac39c8c700"
+    },
+    {
+      "number": 17399514,
+      "hash": "0x0ea0f76ed6bcaa70b2f108fc7a968cf1c861d9c2af10549ece9407b3dc4cad97",
+      "spec": "Rex4",
+      "tx_count": 28,
+      "archive": "17399514.cache.json.tar.xz",
+      "sha256": "a69a912737950112367a240abf3942905adca85c7bd2fd31e735d342e7f6a162"
+    },
+    {
+      "number": 17444065,
+      "hash": "0x5ca349360b7a6e08dc8879f02bb02ed804976dbae5ad4cbfcd287d7897f30133",
+      "spec": "Rex4",
+      "tx_count": 29,
+      "archive": "17444065.cache.json.tar.xz",
+      "sha256": "4d254b687b841dcb22d83c931b28207acdb14c08dd02fdf0175dfabbdd1e961f"
+    },
+    {
+      "number": 17537999,
+      "hash": "0xc544d7c50147b1f7444a14d62a7212ddbe41c1dd37677b2ed47ed85d096905b1",
+      "spec": "Rex4",
+      "tx_count": 45,
+      "archive": "17537999.cache.json.tar.xz",
+      "sha256": "1b4687630ddbbf22f4ef20ffa39126e57bc2249e566f6b9dad4933a1c0469d58"
+    },
+    {
+      "number": 17545017,
+      "hash": "0x916d7127294d4198bca4688df731b5fcb8e238306492270d865d354307f0a1f1",
+      "spec": "Rex4",
+      "tx_count": 29,
+      "archive": "17545017.cache.json.tar.xz",
+      "sha256": "2d7a6c8e4e43caf96b3d987a2722030f8e5e211d8dfa889e01f1f0f2c37b5697"
+    },
+    {
+      "number": 17822091,
+      "hash": "0x347689511ab2bd092f04e0d42ffb800268b85efc9f0a332097bd835a71df2ab8",
+      "spec": "Rex4",
+      "tx_count": 38,
+      "archive": "17822091.cache.json.tar.xz",
+      "sha256": "eb79b29812715da2c7ddd22a691d73fc2526c39fe749262bf22559ffbe9313a5"
+    },
+    {
+      "number": 17834989,
+      "hash": "0xcb5b5b86dc4d894a8db2a8c5be6041f3673fbb16c75d54a1916dfec86f9f4c4c",
+      "spec": "Rex5",
+      "tx_count": 34,
+      "archive": "17834989.cache.json.tar.xz",
+      "sha256": "d949e68a82ea739377e073e10945061e3b7b7a54b9207271339c7bb31fa35b91",
+      "note": "Rex5 activation block"
+    },
+    {
+      "number": 18062966,
+      "hash": "0x61439ad6a8d049abcc1723f26fc87f1024549f3fedf2857014aa66823f880082",
+      "spec": "Rex5",
+      "tx_count": 65,
+      "archive": "18062966.cache.json.tar.xz",
+      "sha256": "2df757238cfc7b67cb9c31a49553f3036f36bc936d2678973f5d85d64686303c"
+    },
+    {
+      "number": 18076959,
+      "hash": "0x7ba490bb4706b2fed17adea9a8d105c755273748dee13927fbe8041d021ce54f",
+      "spec": "Rex5",
+      "tx_count": 30,
+      "archive": "18076959.cache.json.tar.xz",
+      "sha256": "08aa47d14323e1be089181e604172df89ec18a813c403119ab40fd4e7c30620d"
+    },
+    {
+      "number": 18303634,
+      "hash": "0xe7ed6889a1139099964ad668c8bec7958c1b72938420ab1d103c0bf45fb46a04",
+      "spec": "Rex5",
+      "tx_count": 32,
+      "archive": "18303634.cache.json.tar.xz",
+      "sha256": "a8ecc4fdb3ae97187a5616f3791e97d29629427585f1ab8b1e315b6618de37c8",
+      "note": "successful CREATE under Rex5"
+    },
+    {
+      "number": 18751390,
+      "hash": "0x67b9ef1795a72ceef5ca199144575490982f554e08e7032b4c63b5b269adc5d6",
+      "spec": "Rex5",
+      "tx_count": 34,
+      "archive": "18751390.cache.json.tar.xz",
+      "sha256": "074b094d4cf83f909a22068b7b434cb3eb27bad8039788b5e23d35c412416fd9"
+    },
+    {
+      "number": 18922221,
+      "hash": "0xddc2ba02086d32056505ca1284ec32d2629cf01721169bcf9c46fcaa1cd7d7cd",
+      "spec": "Rex5",
+      "tx_count": 137,
+      "archive": "18922221.cache.json.tar.xz",
+      "sha256": "4f3ab9c1a90e04d45d948586a3a779b306ab6e5a1cecfba25fac3b9d8ff7732b"
+    },
+    {
+      "number": 19004244,
+      "hash": "0xd34da24fdc8036204de3bf6684767a23a72c8dcb4f0ce6c63ab738a172f6c291",
+      "spec": "Rex5",
+      "tx_count": 28,
+      "archive": "19004244.cache.json.tar.xz",
+      "sha256": "7836d5e697591933e05c604d0fdf31046a2fb397904cc4ade682bb005bb1d82c"
+    },
+    {
+      "number": 19673098,
+      "hash": "0x9b3f50f9778d4052fc813b2459b8dd735f6ff0d80788dda84ae5bebb7e79ded7",
+      "spec": "Rex5",
+      "tx_count": 35,
+      "archive": "19673098.cache.json.tar.xz",
+      "sha256": "80760423fd355b822fffb55d39f30b3f7a162980c92b6d44cd529d38e16387c0"
+    },
+    {
+      "number": 20492161,
+      "hash": "0xa61561d619b7b328449b3da7ccb148b0a846504013faa5f6f3ee633c53c891e5",
+      "spec": "Rex5",
+      "tx_count": 32,
+      "archive": "20492161.cache.json.tar.xz",
+      "sha256": "cb262cc2b8529e7562a2feaa92b6139c524a18fb22520df3d4f72b90058705df"
+    },
+    {
+      "number": 21478836,
+      "hash": "0x77c02ecf87049f3c27ae46874afe3f65afa054bc785c84d354f49d38fcc90f71",
+      "spec": "Rex5",
+      "tx_count": 30,
+      "archive": "21478836.cache.json.tar.xz",
+      "sha256": "d6c46ad7b9cca50fddb53c6a3563c1c83a2810f8d4cc5a36f3b6308d422ae29b"
+    },
+    {
+      "number": 22016777,
+      "hash": "0x7423505d551a44ecdc128e1a1e0db64938d858daba93740a1332910f4a6cc2a0",
+      "spec": "Rex5",
+      "tx_count": 27,
+      "archive": "22016777.cache.json.tar.xz",
+      "sha256": "176f5d4d6a14ab5ffe5b2a38055197de40189dbec99b1c484bc61e9c974dd12a",
+      "note": "user deposit beside the L1 attributes deposit"
+    },
+    {
+      "number": 22018358,
+      "hash": "0x88a4fd35c09950bb0af97f3f43c0ff882e5389bb0e28ad4cc64ba0d62e69e4db",
+      "spec": "Rex5",
+      "tx_count": 35,
+      "archive": "22018358.cache.json.tar.xz",
+      "sha256": "869b6b0ddc01ba24b474a6f08066176bd5a575533cb10ea5f92937b6df5635de",
+      "note": "failed CREATE under Rex5"
+    },
+    {
+      "number": 22037073,
+      "hash": "0x39a840d375fc7862c16dfdf2c2d0d309c8aa1d5006d93000cb16f45515ab0f26",
+      "spec": "Rex5",
+      "tx_count": 162,
+      "archive": "22037073.cache.json.tar.xz",
+      "sha256": "915d4cf0d27fe30f841deee5ab644cfa5cd9dfd72bca291fc8de8a0779d74598",
+      "note": "most transactions in the corpus (162)"
+    },
+    {
+      "number": 22770953,
+      "hash": "0xfb63279436ad994242bfe959960439075ef850dfb041b071023e0146a6a33324",
+      "spec": "Rex5",
+      "tx_count": 25,
+      "archive": "22770953.cache.json.tar.xz",
+      "sha256": "43d549e1f12189a566768533b1debcff8de9e1ca2e69f18edb66c05aed56431d"
+    },
+    {
+      "number": 22815990,
+      "hash": "0x7252b43ec0b0e398a22bc03ac4934fa79d8f3e3d13509856fc92068b1c34089a",
+      "spec": "Rex5",
+      "tx_count": 53,
+      "archive": "22815990.cache.json.tar.xz",
+      "sha256": "0b73ad97c72d4d26d3c65f6fb93adf5dd89625a94f51713310fb46db04313230"
+    },
+    {
+      "number": 23001113,
+      "hash": "0x5ba6babeffba7f9dd918ca527f75f7caa57b6619fd711c5d86fb1de72639d334",
+      "spec": "Rex5",
+      "tx_count": 25,
+      "archive": "23001113.cache.json.tar.xz",
+      "sha256": "bb61a348821b990348b61958a49266353088a947dd15969ade7cee28bdaceb53"
+    },
+    {
+      "number": 23661359,
+      "hash": "0x11046f733cdd86241e47e59ba84e2094c05f18014a7b716d06cfa76d6054fd4d",
+      "spec": "Rex5",
+      "tx_count": 71,
+      "archive": "23661359.cache.json.tar.xz",
+      "sha256": "3d67c111abc17552fa7819ca4617535d2bbe155f11f22618ff262d587dc5ffae"
+    },
+    {
+      "number": 24061835,
+      "hash": "0x2927975c7d3bc5812125c48c1b8f3d79833e997a875a81df43f7ffa471d30035",
+      "spec": "Rex5",
+      "tx_count": 29,
+      "archive": "24061835.cache.json.tar.xz",
+      "sha256": "f152d056b2799f6afb4b7eefe2177cb3bda36220630d4465fe58633640b4ee87"
+    },
+    {
+      "number": 24328495,
+      "hash": "0x969d096bee84c07331c72c87fd88f327d4689394d03d61888195520b9aed5991",
+      "spec": "Rex5",
+      "tx_count": 113,
+      "archive": "24328495.cache.json.tar.xz",
+      "sha256": "6f9ffcf1c0e77028b4bbcc2b9f3e1c6d1b8297cb518c385ee377d433c0393ef1"
+    },
+    {
+      "number": 24376466,
+      "hash": "0x8cd1ea24555c08f1855afdebef26449dde00dfcc679dda7e167f4f13d19a0ccd",
+      "spec": "Rex5",
+      "tx_count": 47,
+      "archive": "24376466.cache.json.tar.xz",
+      "sha256": "0a1a97528ebdafff2f35421816146f87e5c537dd7b136eac9bae139d00b8ef5b"
+    },
+    {
+      "number": 24405273,
+      "hash": "0x0e938ab051650a5083820314280bc4e2d8636c0c7f9491d778841d1503613f0c",
+      "spec": "Rex5",
+      "tx_count": 40,
+      "archive": "24405273.cache.json.tar.xz",
+      "sha256": "1b32c55158c1a87667cada952fa2620c4059260954dae31f11f3142d0b7624fd"
+    },
+    {
+      "number": 24410814,
+      "hash": "0x67c83508fcda9e9f59603874def0f37690b2e75d9d695e42f480464158fe1796",
+      "spec": "Rex5",
+      "tx_count": 30,
+      "archive": "24410814.cache.json.tar.xz",
+      "sha256": "f5d4c48a98aed950b312cdaf58c8766e2b1e21a20fa0567b4ba779dc655cfd49"
+    },
+    {
+      "number": 24829789,
+      "hash": "0x9dfbc5514180137eef514447b3a511d13858efe3c8516bef657abf90d1881582",
+      "spec": "Rex6",
+      "tx_count": 25,
+      "archive": "24829789.cache.json.tar.xz",
+      "sha256": "856e4fa882afbc63ff6e08454b18fc31e3fe7d677047a6ed88209660463b31a7",
+      "note": "Rex6 activation block"
+    },
+    {
+      "number": 24985478,
+      "hash": "0xe93a63eaf9713d0cb08d9d459395840a3b2d8cba44a31ee21e873a0ec944f251",
+      "spec": "Rex6",
+      "tx_count": 24,
+      "archive": "24985478.cache.json.tar.xz",
+      "sha256": "35e830a1c2ccdae37c4225100b7f17ada241ea7b01c0eb325e7d01f367d7228c"
+    },
+    {
+      "number": 25086401,
+      "hash": "0x71671137e5908df92ac5f4a4dbd2b31fad5ccbdf8e5bc961fe39e4b2701f227c",
+      "spec": "Rex6",
+      "tx_count": 25,
+      "archive": "25086401.cache.json.tar.xz",
+      "sha256": "1763717e7f9a028048feecf1051286b341f820becef7bbbba80a3a574a596aa8"
+    },
+    {
+      "number": 25447376,
+      "hash": "0x4699a0a3b212db6c6da0965118c4f2f3822b37131ad735429850376cee4f0f7c",
+      "spec": "Rex6",
+      "tx_count": 25,
+      "archive": "25447376.cache.json.tar.xz",
+      "sha256": "7db08bd4a4725a371a56b1e789b8846783656c3c938139462f75b6aa3746aa27"
+    },
+    {
+      "number": 25650673,
+      "hash": "0x71d3c5b357996964464acd41837c20e6ac73a3a3591e0cdae6f0c1d00f263716",
+      "spec": "Rex6",
+      "tx_count": 27,
+      "archive": "25650673.cache.json.tar.xz",
+      "sha256": "6be00e7f4059d3704213b594a7f30093cf9e85bb89863a1f33dfdd4fb36404ee"
+    },
+    {
+      "number": 25732615,
+      "hash": "0xe139a581db2ea59c0ef08e4bac2eae059102e3550f6dedb64a6fa98b184b7120",
+      "spec": "Rex6",
+      "tx_count": 47,
+      "archive": "25732615.cache.json.tar.xz",
+      "sha256": "c3943cbe3b71cb556ec92deeab149c9faa38d99f4cb3143a64041bf34f695781"
+    },
+    {
+      "number": 25996947,
+      "hash": "0xea6cada8facde58d790d8fe2558a956cf3f824e75472a07b7f6ed1c363d6a4be",
+      "spec": "Rex6",
+      "tx_count": 26,
+      "archive": "25996947.cache.json.tar.xz",
+      "sha256": "cbd13015e9b8cf08a85edfb0962a737586232e9607a78bd491bf5e56c71c1f2d"
+    },
+    {
+      "number": 26743363,
+      "hash": "0xd69d3c50fc476fb238960aaf38d3e072c4dcc657da78b0c8309b7448d282d9f0",
+      "spec": "Rex6",
+      "tx_count": 26,
+      "archive": "26743363.cache.json.tar.xz",
+      "sha256": "b7a9f2c973f65121f7f38a8943f73475d7bdfab44ceb6cd1bfe8153fe8ead275"
+    },
+    {
+      "number": 27167408,
+      "hash": "0xee91b40f4bdbc9bf8278ba402a004fcddd580a01cecbb254173ad6cff60f912a",
+      "spec": "Rex6",
+      "tx_count": 24,
+      "archive": "27167408.cache.json.tar.xz",
+      "sha256": "6ec5994de6004954a7c3eade1ecb563497e4a22631e9e82080c7a23a04effa2e"
+    },
+    {
+      "number": 27269572,
+      "hash": "0xaf3a0e6ed4273cf70a319b45af9a409810be0e87bc9d38cf0930f3e23febf509",
+      "spec": "Rex6",
+      "tx_count": 30,
+      "archive": "27269572.cache.json.tar.xz",
+      "sha256": "09c945c314674cec5943521483bef445a3c8b62f1f17f315c76e28c5ebdd63dc"
+    },
+    {
+      "number": 27670576,
+      "hash": "0xf96cd0b4d326faefe3074f186f1e568b92b5ebe5d8642fd79280afd401f5c786",
+      "spec": "Rex6",
+      "tx_count": 23,
+      "archive": "27670576.cache.json.tar.xz",
+      "sha256": "cc0e7a215b9050ec618746cc3f01bcb20f2be82e38854ff9bc80dae2d6d66c54"
+    },
+    {
+      "number": 27765585,
+      "hash": "0x59ddfcd7485594252489495880bff603258abe798c4ab6213fbadb0e1fad1541",
+      "spec": "Rex6",
+      "tx_count": 48,
+      "archive": "27765585.cache.json.tar.xz",
+      "sha256": "27f10aa347f1f6e0e9b5bc7265ed8f4d8959719513c832644206fd0e7da2209d"
+    },
+    {
+      "number": 27768650,
+      "hash": "0x2b427f1c4ff5ac7081c84c75eba7ce4691d0b91abedd64cd906d7e06ed6c6b0c",
+      "spec": "Rex6",
+      "tx_count": 23,
+      "archive": "27768650.cache.json.tar.xz",
+      "sha256": "00f07848a69fd3769469244dfb09d9df8922c8ebd733d83308d4bea622cc7272",
+      "note": "EIP-7702 transaction under Rex6"
+    },
+    {
+      "number": 27784007,
+      "hash": "0xd6d649bb2a5990ab9d8d3b7646d7ecbb1c26216c0846a1a9db3128d082b84473",
+      "spec": "Rex6",
+      "tx_count": 45,
+      "archive": "27784007.cache.json.tar.xz",
+      "sha256": "1ac7e55f54a00d870f915819c9b5312f7f806801608ce487f85ae863719ce64a"
+    }
+  ]
+}
