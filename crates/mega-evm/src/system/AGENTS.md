@@ -1,7 +1,7 @@
 # AGENTS.md
 
 ## OVERVIEW
-The six system contracts: their addresses and bytecode, the interceptor dispatch that answers calls to four of them, the system-address transaction, and the pre-block deploy of those six plus the EIP-7997 factory, and the `SequencerRegistry`'s pre-block steps: the due-change read and the `applyPendingChanges()` system call. The live system address is read by a transaction of the system shape when it is validated, not before the block.
+The six system contracts: their addresses and bytecode, the interceptor dispatch over four of them (`MegaAccessControl` and `MegaLimitControl` answer, the Oracle's `sendHint` runs a side effect and falls through, and `KeylessDeploy` is routed but left to the keyless dispatch), the system-address transaction, and the pre-block deploy of those six plus the EIP-7997 factory, and the `SequencerRegistry`'s pre-block steps: the due-change read and the `applyPendingChanges()` system call. The live system address is read by a transaction of the system shape when it is validated, not before the block.
 
 ## STRUCTURE
 - `oracle.rs`: the Oracle's address, code and ABI, and the `sendHint` side effect. Its storage is read by the Host (`evm/host.rs`), through the oracle environment.

@@ -243,5 +243,5 @@ The crate builds on Rust 1.94.
 
 ## Documentation
 
-- [Specification](https://megaeth-labs.github.io/mega-evm/) (describes the legacy engine until the Satin pages land)
+- [The Satin specification](../../docs/spec/upgrades/satin.md); the other pages under `docs/spec/` describe the legacy engine
 - [Architecture](../../ARCH.md)

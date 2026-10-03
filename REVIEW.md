@@ -89,6 +89,12 @@ This is the single most important correctness concern in mega-evm.
 These checks guard every change to the Satin engine.
 `lint`, `test`, `no-std` and `require-label` are the required checks on `satin`; the rest inform the review, and the reviewer reads them.
 
+### The op-revm baseline
+
+- `crates/mega-evm/tests/satin/equivalence.rs` runs ordinary transactions through `MegaEvm` and through op-revm on the same configuration, and holds Satin to op-revm's total plus the history ledger, on op-revm's own state gas, logs and state.
+- It runs in the `test` check.
+- A change that makes Satin differ from op-revm on purpose updates a case or adds one, so the difference is pinned; a case changed to absorb a difference nobody chose is the defect.
+
 ### Differential harness
 
 - The differential harness, which runs JSON scenarios through `MegaEvm` and through stock revm and compares them field by field, is maintained outside this repository.
