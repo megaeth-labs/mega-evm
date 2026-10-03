@@ -32,7 +32,7 @@ use alloy_rpc_types_eth::Block;
 use mega_evm::{
     alloy_evm::EvmEnv,
     revm::{context::result::ExecutionResult, inspector::NoOpInspector, DatabaseRef},
-    BlockLimits, MegaBlockExecutionCtx, MegaHaltReason, MegaHardforks, MegaSpecId, MegaTxEnvelope,
+    MegaBlockExecutionCtx, MegaHaltReason, MegaHardforks, MegaSpecId, MegaTxEnvelope,
 };
 use op_alloy_rpc_types::Transaction;
 use serde::Serialize;
@@ -44,7 +44,7 @@ use crate::{
         print_execution_summary, print_receipt, BatchExitFloor, BatchFailureCounts,
         EvmeExternalEnvs, ExecutionSummary, ExitCode, OpTxReceipt,
     },
-    replay::get_hardfork_config,
+    replay::{get_hardfork_config, ReplayHardforks},
     ChainArgs,
 };
 
@@ -1014,17 +1014,21 @@ where
     let executed_spec = cfg_env.spec;
     let evm_env = EvmEnv::new(cfg_env, block_env);
 
-    let Some(hardfork) = hardforks.hardfork(timestamp) else {
-        let message = format!("No `MegaHardfork` active at block timestamp: {timestamp}");
-        return BlockReplayOutcome::ordered(
-            fail_remaining(&targets, entries, BatchErrorKind::Execution, &message),
-            &job_targets,
-            Some(&block_tx_order),
-            None,
-        );
+    // A batch replays the chain's own schedule, so a block older than its first hardfork fails
+    // here for want of limits to execute under.
+    let block_limits = match ReplayHardforks::Chain(&hardforks)
+        .block_limits(timestamp, block.header.gas_limit())
+    {
+        Ok(limits) => limits,
+        Err(message) => {
+            return BlockReplayOutcome::ordered(
+                fail_remaining(&targets, entries, BatchErrorKind::Execution, &message),
+                &job_targets,
+                Some(&block_tx_order),
+                None,
+            );
+        }
     };
-    let block_limits =
-        BlockLimits::from_hardfork_and_block_gas_limit(hardfork, block.header.gas_limit());
     let block_ctx = MegaBlockExecutionCtx::new(
         parent_block.hash(),
         block.header.parent_beacon_block_root(),

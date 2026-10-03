@@ -20,8 +20,8 @@ use mega_evm::{
         state::EvmState,
         DatabaseRef,
     },
-    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory, MegaHaltReason,
-    MegaHardforks, MegaSpecId, MegaTxEnvelope,
+    MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory, MegaHaltReason, MegaHardforks,
+    MegaSpecId, MegaTxEnvelope,
 };
 use revm_inspectors::tracing::TracingInspector;
 use state_test::types::MegaEnv;
@@ -1022,17 +1022,13 @@ impl Cmd {
             _ => None,
         };
 
-        // Both the per-transaction and the block-level dimensions come from the fork resolved out
-        // of the schedule above, so a spec override moves all of them at once. The no-override
-        // path keeps the "no fork active" failure: a block older than the chain's first hardfork
-        // has no limits to execute under. A synthesized schedule always has one active.
-        let block_limits = BlockLimits::from_hardfork_and_block_gas_limit(
-            hardforks.hardfork(ctx.block.header.timestamp()).ok_or(ReplayError::Other(format!(
-                "No `MegaHardfork` active at block timestamp: {}",
-                ctx.block.header.timestamp()
-            )))?,
-            ctx.block.header.gas_limit(),
-        );
+        // Both the per-transaction and the block-level dimensions come from the schedule above,
+        // so a spec override moves all of them at once. The no-override path keeps the "no fork
+        // active" failure: a block older than the chain's first hardfork has no limits to execute
+        // under.
+        let block_limits = hardforks
+            .block_limits(ctx.block.header.timestamp(), ctx.block.header.gas_limit())
+            .map_err(ReplayError::Other)?;
 
         let setup = BlockSetup {
             hardforks,

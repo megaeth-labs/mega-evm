@@ -3,7 +3,7 @@ use core::any::Any;
 use mega_evm::{
     alloy_hardforks::{EthereumHardfork, ForkCondition},
     alloy_op_hardforks::{EthereumHardforks, OpHardfork, OpHardforks},
-    MegaHardfork, MegaHardforkConfig, MegaHardforks, MegaSpecId,
+    BlockLimits, EvmTxRuntimeLimits, MegaHardfork, MegaHardforkConfig, MegaHardforks, MegaSpecId,
 };
 
 use crate::common::FixedHardfork;
@@ -42,6 +42,31 @@ impl<'a> ReplayHardforks<'a> {
         match spec_override {
             Some(spec) => Self::Forced(FixedHardfork::new(spec).with_params_from(chain)),
             None => Self::Chain(chain),
+        }
+    }
+
+    /// The block limits a block at `timestamp` with header gas limit `gas_limit` executes under.
+    ///
+    /// Both the per-transaction and the block-level dimensions come from the fork the schedule
+    /// resolves at `timestamp`, so a spec override moves all of them at once.
+    ///
+    /// The two worlds part company when no fork is active. On the chain's own schedule that is a
+    /// block older than the chain's first hardfork, which has no limits to execute under, so it
+    /// is an error. A forced world activates no fork only when the forced spec sits below every
+    /// fork's rung (`EQUIVALENCE`, since `MiniRex1` schedules its own alias rung); it still has a
+    /// well-defined world: the forced spec's per-transaction limits, the header's gas limit, and
+    /// no block-level data, KV-update or state-growth limit — what the `MiniRex1` arm of
+    /// [`BlockLimits::from_hardfork_and_block_gas_limit`] gives, since that rung executes
+    /// `EQUIVALENCE` behavior.
+    pub fn block_limits(&self, timestamp: u64, gas_limit: u64) -> Result<BlockLimits, String> {
+        match (self.hardfork(timestamp), self) {
+            (Some(fork), _) => Ok(BlockLimits::from_hardfork_and_block_gas_limit(fork, gas_limit)),
+            (None, Self::Forced(_)) => Ok(BlockLimits::no_limits()
+                .with_tx_runtime_limits(EvmTxRuntimeLimits::from_spec(self.spec_id(timestamp)))
+                .with_block_gas_limit(gas_limit)),
+            (None, Self::Chain(_)) => {
+                Err(format!("No `MegaHardfork` active at block timestamp: {timestamp}"))
+            }
         }
     }
 }
@@ -84,8 +109,8 @@ impl MegaHardforks for ReplayHardforks<'_> {
 mod tests {
     use super::*;
     use mega_evm::{
-        flat_system_contract_specs, BlockLimits, EvmTxRuntimeLimits, SequencerRegistryConfig,
-        SequencerRegistryRex6Config, MAINNET_CHAIN_ID, TESTNET_CHAIN_ID,
+        flat_system_contract_specs, SequencerRegistryConfig, SequencerRegistryRex6Config,
+        MAINNET_CHAIN_ID, TESTNET_CHAIN_ID,
     };
 
     /// A mainnet timestamp inside the Rex4 window: Rex4 is active, Rex5 is not.
@@ -251,6 +276,59 @@ mod tests {
         assert_eq!(
             forced_limits.to_evm_tx_runtime_limits(),
             EvmTxRuntimeLimits::from_spec(MegaSpecId::REX5),
+        );
+
+        // The helper both replay drivers build their limits through agrees with both.
+        assert_eq!(historical.block_limits(MINI_REX_TIMESTAMP, gas_limit), Ok(historical_limits));
+        assert_eq!(forced.block_limits(MINI_REX_TIMESTAMP, gas_limit), Ok(forced_limits));
+    }
+
+    /// Forcing `EQUIVALENCE` activates no hardfork at all: `MiniRex1` schedules its own alias
+    /// rung, which sits above `EQUIVALENCE` on the ladder. The forced world still executes, under
+    /// the limits the `MiniRex1` arm gives — the rung that executes `EQUIVALENCE` behavior — and
+    /// not under whatever fork the chain had active at the block.
+    #[test]
+    fn test_forced_world_without_an_active_fork_gets_equivalence_limits() {
+        let chain = get_hardfork_config(MAINNET_CHAIN_ID);
+        let gas_limit = 10_000_000_000;
+        let forced = ReplayHardforks::resolve(&chain, Some(MegaSpecId::EQUIVALENCE));
+
+        for timestamp in [0, MINI_REX_TIMESTAMP, REX4_TIMESTAMP, u64::MAX] {
+            assert_eq!(forced.hardfork(timestamp), None, "at {timestamp}");
+            let limits = forced
+                .block_limits(timestamp, gas_limit)
+                .unwrap_or_else(|e| panic!("a forced world always has limits: {e}"));
+            assert_eq!(
+                limits,
+                BlockLimits::from_hardfork_and_block_gas_limit(MegaHardfork::MiniRex1, gas_limit),
+                "at {timestamp}",
+            );
+            assert_eq!(limits.block_gas_limit, gas_limit);
+            assert_eq!(limits.block_txs_data_limit, u64::MAX);
+            assert_eq!(limits.block_kv_update_limit, u64::MAX);
+            assert_eq!(limits.block_state_growth_limit, u64::MAX);
+            assert_eq!(
+                limits.to_evm_tx_runtime_limits(),
+                EvmTxRuntimeLimits::from_spec(MegaSpecId::EQUIVALENCE),
+            );
+        }
+    }
+
+    /// On the chain's own schedule a block older than the first hardfork has no limits to execute
+    /// under, and the replay reports that rather than inventing a world.
+    #[test]
+    fn test_chain_world_without_an_active_fork_has_no_limits() {
+        let chain =
+            MegaHardforkConfig::new().with(MegaHardfork::Rex, ForkCondition::Timestamp(100));
+        let world = ReplayHardforks::resolve(&chain, None);
+
+        assert_eq!(
+            world.block_limits(99, 30_000_000),
+            Err("No `MegaHardfork` active at block timestamp: 99".to_string()),
+        );
+        assert_eq!(
+            world.block_limits(100, 30_000_000),
+            Ok(BlockLimits::from_hardfork_and_block_gas_limit(MegaHardfork::Rex, 30_000_000)),
         );
     }
 }
