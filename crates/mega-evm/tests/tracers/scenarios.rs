@@ -421,11 +421,31 @@ fn test_keyless_deploy_succeeds() {
     let code =
         traced.outcome.state[&deployed].info.code.as_ref().expect("the code is in the state");
     assert_eq!(code.original_bytes(), runtime(), "the deploy address holds the runtime");
-    // Below the execution cap the transaction has no reservoir, so every charge the creation
-    // made, its code deposit's state and history gas included, drew its regular gas: the
-    // creation frame's spent gas, as the tracer measured it, is what it spent from both pools.
-    let creation = &traced.inspector.traces().nodes()[1].trace;
-    assert_eq!(answer.gasUsed, creation.gas_used, "gasUsed is the creation frame's spend");
+    // `gasUsed` is what the creation spent from both pools: its init code and its deposit, the
+    // deposit's state and history gas included. Below the execution cap there is no reservoir,
+    // so all of it drew the creation frame's regular gas, which the tracer measured.
+    let len = runtime().len();
+    let creation_spend = deploying_runtime_regular() +
+        satin_gas_params().code_deposit_state_gas(len) +
+        gas::history(len as u64);
+    assert_eq!(answer.gasUsed, creation_spend, "gasUsed is the creation's init code and deposit");
+    let nodes = traced.inspector.traces().nodes();
+    let (call, creation) = (&nodes[0].trace, &nodes[1].trace);
+    assert_eq!(answer.gasUsed, creation.gas_used, "and the tracer measured the creation the same");
+    // The call forwards all it has left once it paid for itself: the overhead, the `CREATE`
+    // opcode's regular gas, the signer's account and the created account, and the creation's two
+    // records, which spilled onto its regular gas.
+    let call_charges = KEYLESS_DEPLOY_OVERHEAD_GAS +
+        satin_gas_params().create_cost() +
+        satin_gas_params().initcode_cost(deploying_runtime().len()) +
+        gas::account_state() +
+        gas::entry(GasId::create_state_gas()) +
+        gas::records(2);
+    assert_eq!(
+        creation.gas_limit,
+        call.gas_limit - call_charges,
+        "the creation gets what the call has left after its own charges"
+    );
     assert_keyless_steps(&traced, true);
     assert_keyless_struct_logs_miss_the_creation(&traced);
     // The call's overhead, the `CREATE` opcode's regular gas, the signer's account (it was empty)
@@ -433,7 +453,6 @@ fn test_keyless_deploy_succeeds() {
     // account), and what the creation spent: its init code and its deposit.
     let calldata = deployment.call_data();
     let init = deploying_runtime();
-    let len = runtime().len();
     let expected = Ledgers {
         regular: gas::call_intrinsic(&calldata, false) +
             KEYLESS_DEPLOY_OVERHEAD_GAS +
