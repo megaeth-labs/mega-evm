@@ -79,19 +79,13 @@
 mod common;
 
 use std::{
-    collections::HashSet,
     fs,
     path::{Path, PathBuf},
     process::{Command, Output},
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Mutex, OnceLock,
-    },
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
-use tempfile::TempDir;
-
-use common::{doctor::DoctoredEnvelope, is_run_error, json_values};
+use common::{doctor::DoctoredEnvelope, extracted_root, fixture, is_run_error, json_values};
 
 // ---------------------------------------------------------------------------
 // Captures and their transactions
@@ -207,61 +201,10 @@ const DURATION_LABEL: &str = "Execution Time:";
 // ---------------------------------------------------------------------------
 // Fixture resolution
 // ---------------------------------------------------------------------------
-
-/// Resolve a capture in `tests/fixtures/` by name, extracting it if it is
-/// stored compressed.
-///
-/// A fixture is either the file itself, or a `<name>.tar.gz` holding exactly
-/// that one file. Archives are extracted once per test binary into a temporary
-/// directory that lives for the whole run, so the committed fixtures are never
-/// written to. Extraction shells out to `tar`: every platform that runs these
-/// tests has one.
-fn fixture(name: &str) -> PathBuf {
-    let plain = fixtures_dir().join(name);
-    if plain.is_file() {
-        return plain;
-    }
-
-    let archive = fixtures_dir().join(format!("{name}.tar.gz"));
-    assert!(
-        archive.is_file(),
-        "no fixture named {name}: neither {} nor {} exists",
-        plain.display(),
-        archive.display(),
-    );
-
-    static EXTRACTED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    let mut extracted =
-        EXTRACTED.get_or_init(|| Mutex::new(HashSet::new())).lock().expect("fixture lock");
-
-    let root = extracted_root();
-    let path = root.join(name);
-    if extracted.insert(name.to_string()) {
-        let status = Command::new("tar")
-            .arg("-xzf")
-            .arg(&archive)
-            .arg("-C")
-            .arg(root)
-            .status()
-            .expect("failed to run tar");
-        assert!(status.success(), "failed to extract {}", archive.display());
-        assert!(path.is_file(), "{} does not contain {name}", archive.display());
-    }
-    path
-}
-
-/// Directory the committed captures live in.
-fn fixtures_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
-}
-
-/// Directory compressed captures are extracted into, shared by every test in
-/// this binary and removed when the process exits.
-fn extracted_root() -> &'static Path {
-    static ROOT: OnceLock<TempDir> = OnceLock::new();
-    ROOT.get_or_init(|| tempfile::tempdir().expect("failed to create a temp dir for captures"))
-        .path()
-}
+//
+// Captures resolve through the shared `common::fixture`, which extracts a
+// compressed capture under `common::extracted_root`; the normalization below
+// names that directory.
 
 /// Directory the golden snapshots are committed in.
 fn golden_dir() -> PathBuf {
@@ -1052,7 +995,7 @@ fn substitutions(row: &Row, capture: &Path, scratch: &Path) -> Vec<(String, &'st
         subs.push((display(path), placeholder));
     }
     subs.push((display(scratch), SCRATCH_PATH));
-    subs.push((display(extracted_root()), EXTRACTED_PATH));
+    subs.push((display(&extracted_root()), EXTRACTED_PATH));
     subs.push((display(Path::new(env!("CARGO_MANIFEST_DIR"))), CRATE_PATH));
     subs
 }

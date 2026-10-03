@@ -2,8 +2,8 @@
 //!
 //! Replaying whole blocks needs an RPC capture covering every transaction of
 //! each block, which is far larger than a single-transaction capture. The
-//! envelope is committed as a gzipped archive and extracted into a temporary
-//! directory once per test binary, so these run in CI without setup. They are
+//! envelope is committed as an xz-compressed archive and extracted into a
+//! temporary directory once per test binary, so these run in CI without setup. They are
 //! the only tests that exercise the batch driver's multi-target paths: more
 //! than one target in a block, whole-block mode, grouping targets across
 //! blocks, sweeping targets on both sides of a mid-block abort, and
@@ -20,7 +20,8 @@
 //!   mega-evme replay --rpc <URL> --rpc.capture-file replay_batch_blocks.cache.json \
 //!     --block "$block" --verify-receipt --json
 //! done
-//! tar -czf replay_batch_blocks.cache.json.tar.gz replay_batch_blocks.cache.json
+//! COPYFILE_DISABLE=1 tar --format ustar -cf - replay_batch_blocks.cache.json \
+//!   | xz -9e > replay_batch_blocks.cache.json.tar.xz
 //! ```
 //!
 //! The endpoint must serve state at those blocks; a pruning node fails every

@@ -11,65 +11,113 @@
 pub(crate) mod doctor;
 
 use std::{
-    collections::HashSet,
     path::{Path, PathBuf},
     process::Command,
-    sync::{Mutex, OnceLock},
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 use clap::Parser;
 use mega_evme::common::RpcArgs;
-use tempfile::TempDir;
 use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
 
 /// Resolve a fixture in `tests/fixtures/` by name, extracting it if it is
 /// stored compressed.
 ///
-/// A fixture is either the file itself, or a `<name>.tar.gz` holding exactly
-/// that one file. Compression is worth it only where the raw file would bloat a
-/// pull-request diff — git already compresses blobs, so it buys little on its
-/// own, and a compressed blob cannot delta against its previous revision.
+/// A fixture is either the file itself, or a `<name>.tar.xz` holding exactly
+/// that one file. `name` may name a file in a subdirectory
+/// (`corpus/<N>.cache.json`); its archive sits beside it and still holds only
+/// the file itself. Compression is worth it only where the raw file would bloat
+/// a pull-request diff — git already compresses blobs, so it buys little on its
+/// own, and a compressed blob cannot delta against its previous revision. A
+/// capture is JSON with long runs of repeated hex, which xz shrinks to about half
+/// of what gzip leaves.
 ///
-/// Archives are extracted once per test binary into a temporary directory that
-/// lives for the whole run. Extraction shells out to `tar` rather than linking a
-/// decompressor: every platform that runs these tests has one, and this is the
-/// only place that reads an archive.
+/// To (re)pack a capture, archive the one file and nothing else (macOS `tar`
+/// would otherwise add `._*` metadata members):
+///
+/// ```bash
+/// COPYFILE_DISABLE=1 tar --format ustar -cf - <name> | xz -9e > <name>.tar.xz
+/// ```
+///
+/// An archive is extracted under [`extracted_root`], into a directory named by
+/// the keccak-256 of the archive's bytes, so the committed fixtures are never
+/// written to and:
+///
+/// - an extraction is reused by every later test binary and every later run for as long as its
+///   archive is unchanged, so the directory does not grow from run to run;
+/// - a changed archive (a recapture, or a branch switch) has a different digest, so an extraction
+///   of an earlier version is never served for it; that earlier extraction stays until `cargo
+///   clean`;
+/// - concurrent extractions — parallel tests, or test binaries running at once — each unpack into a
+///   private scratch directory and rename the file into place, which is atomic, so a reader sees
+///   either no file or a complete one, and two writers write the same bytes.
+///
+/// Extraction shells out to `tar -xJf` rather than linking a decompressor:
+/// every platform that runs these tests has one, and this is the only place
+/// that reads an archive.
 pub(crate) fn fixture(name: &str) -> PathBuf {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let dir = fixtures_dir();
     let plain = dir.join(name);
     if plain.is_file() {
         return plain;
     }
 
-    let archive = dir.join(format!("{name}.tar.gz"));
+    let archive = dir.join(format!("{name}.tar.xz"));
     assert!(
         archive.is_file(),
         "no fixture named {name}: neither {} nor {} exists",
         plain.display(),
         archive.display(),
     );
+    let member = plain.file_name().expect("a fixture names a file");
 
-    static ROOT: OnceLock<TempDir> = OnceLock::new();
-    static EXTRACTED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    let root = ROOT.get_or_init(|| {
-        tempfile::tempdir().expect("failed to create a temp dir for extracted fixtures")
-    });
-    let mut extracted =
-        EXTRACTED.get_or_init(|| Mutex::new(HashSet::new())).lock().expect("fixture lock");
-
-    let path = root.path().join(name);
-    if extracted.insert(name.to_string()) {
-        let status = Command::new("tar")
-            .arg("-xzf")
-            .arg(&archive)
-            .arg("-C")
-            .arg(root.path())
-            .status()
-            .expect("failed to run tar");
-        assert!(status.success(), "failed to extract {}", archive.display());
-        assert!(path.is_file(), "{} does not contain {name}", archive.display());
+    let bytes = std::fs::read(&archive)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", archive.display()));
+    let digest = alloy_primitives::keccak256(&bytes);
+    let root = extracted_root();
+    let extracted = root.join(format!("{digest:x}")).join(member);
+    if extracted.is_file() {
+        return extracted;
     }
-    path
+
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let scratch = root.join(format!(
+        ".extracting-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&scratch).expect("failed to create the extraction directory");
+    let status = Command::new("tar")
+        .arg("-xJf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&scratch)
+        .status()
+        .expect("failed to run tar");
+    assert!(status.success(), "failed to extract {}", archive.display());
+    let unpacked = scratch.join(member);
+    assert!(unpacked.is_file(), "{} does not contain {name}", archive.display());
+
+    std::fs::create_dir_all(extracted.parent().expect("an extraction has a parent directory"))
+        .expect("failed to create the extraction directory");
+    std::fs::rename(&unpacked, &extracted)
+        .expect("failed to move the extracted fixture into place");
+    let _ = std::fs::remove_dir_all(&scratch);
+    extracted
+}
+
+/// Directory the committed fixtures live in.
+pub(crate) fn fixtures_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+}
+
+/// Directory compressed fixtures are extracted into.
+///
+/// It lives under cargo's per-target scratch directory (`CARGO_TARGET_TMPDIR`),
+/// which persists across test runs and is removed by `cargo clean`. Exposed so a
+/// test that normalizes the paths a run prints can name it.
+pub(crate) fn extracted_root() -> PathBuf {
+    Path::new(env!("CARGO_TARGET_TMPDIR")).join("mega-evme-fixtures")
 }
 
 /// The authentic hash of a served block header: the hash its own consensus
