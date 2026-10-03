@@ -1,11 +1,17 @@
-//! The ten Satin scenarios the tracer goldens pin.
+//! The Satin scenarios the tracer goldens pin, listed in [`SCENARIOS`], one test each so a
+//! mismatch names the case.
 //!
-//! Each scenario is a standalone test so a mismatch names the case. Relationship checks that
-//! would pin a tracer bug as if it were required behaviour are written as assertions; if one
-//! fails, the golden still records the current output and the failure is a suspected issue for
-//! the report, not an engine change.
+//! Every test asserts what its scenario must show — what it is billed on each ledger, worked out
+//! from the schedule; the limit that stops it; what the tracers make of it — before it compares
+//! or writes a golden, so a golden cannot pin output a relation rejects. Where a tracer shows
+//! something other than what the engine did, the shape is asserted by name with its reason, so a
+//! change on either side fails that assertion rather than moving a golden.
 
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::Path,
+};
 
 use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U256};
 use alloy_rpc_types_trace::geth::PreStateFrame;
@@ -48,7 +54,8 @@ use crate::{
         assert_keyless_struct_logs_miss_the_creation, assert_ledgers, assert_logs,
         assert_parent_does_not_resume, assert_prestate_covers_reads, assert_root_frame_settles,
         assert_root_gas_is_the_gas_limit, at_spec_prices, call_tx, create_tx, decode_stop,
-        eip3155_steps, eip3155_summary_gas_used, pin_tracer_views, step, Traced,
+        eip3155_steps, eip3155_summary_gas_used, goldens_dir, pin_tracer_views, step, Traced,
+        VIEWS,
     },
 };
 
@@ -56,6 +63,25 @@ const CALLER: Address = address!("0x0000000000000000000000000000000000400000");
 const PAYEE: Address = address!("0x0000000000000000000000000000000000400001");
 const CONTRACT: Address = address!("0x0000000000000000000000000000000000400002");
 const CHILD: Address = address!("0x0000000000000000000000000000000000400003");
+
+/// Every scenario, by the directory its views are pinned under.
+const SCENARIOS: [&str; 15] = [
+    "create",
+    "data_size_body_stop",
+    "data_size_stop_spans_frames",
+    "deposit",
+    "detention_stop_spans_frames",
+    "eth_transfer",
+    "frame_budget_child_revert",
+    "identity_precompile",
+    "keyless_refused",
+    "keyless_success",
+    "nested_inner_revert",
+    "precompile_child",
+    "reservoir_sstore",
+    "sstore_new_slot",
+    "timestamp_detention",
+];
 
 /// Room for the small programs these scenarios run, below the execution cap.
 const TX_GAS: u64 = 5_000_000;
@@ -77,6 +103,7 @@ fn pin(name: &str, traced: &Traced, expected: Ledgers) {
 /// gas had spilled onto its regular gas: the failure gives it back after the tracer read the
 /// frame (see `assert_root_frame_settles`).
 fn pin_given_back(name: &str, traced: &Traced, expected: Ledgers, given_back: u64) {
+    assert!(SCENARIOS.contains(&name), "{name} is not listed in SCENARIOS");
     assert_ledgers(traced, expected);
     assert_root_frame_settles(traced, given_back);
     assert_eip3155_agrees(traced);
@@ -99,6 +126,25 @@ fn call_regular(carries_value: bool) -> u64 {
 /// `SSTORE`.
 fn sstore_regular() -> u64 {
     2 * VERYLOW + gas::sstore_fresh_cold()
+}
+
+/// The golden directories are exactly the scenarios, each holding exactly its views: a scenario
+/// renamed or removed leaves no stale golden behind.
+#[test]
+fn test_goldens_are_exactly_the_scenarios() {
+    let names = |dir: &Path| -> BTreeSet<String> {
+        fs::read_dir(dir)
+            .unwrap_or_else(|err| panic!("read {}: {err}", dir.display()))
+            .map(|entry| entry.expect("a directory entry").file_name().into_string().unwrap())
+            .collect()
+    };
+    let dir = goldens_dir();
+    let scenarios: BTreeSet<String> = SCENARIOS.iter().map(|name| name.to_string()).collect();
+    assert_eq!(names(&dir), scenarios, "the golden directories are the scenarios");
+    let views: BTreeSet<String> = VIEWS.iter().map(|view| view.to_string()).collect();
+    for scenario in &scenarios {
+        assert_eq!(names(&dir.join(scenario)), views, "the views pinned for {scenario}");
+    }
 }
 
 /// Ordinary ETH transfer. The 7708 transfer log is what `call_with_log` pins.

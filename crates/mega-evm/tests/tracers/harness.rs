@@ -254,8 +254,13 @@ pub(crate) fn update_goldens() -> bool {
     matches!(std::env::var(UPDATE_GOLDENS), Ok(value) if value == "1")
 }
 
+/// The directory the goldens are pinned under.
+pub(crate) fn goldens_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(GOLDENS_DIR)
+}
+
 fn golden_path(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join(GOLDENS_DIR).join(name)
+    goldens_dir().join(name)
 }
 
 /// Serializes `value` as pretty JSON with a trailing newline and compares it byte-for-byte
@@ -283,6 +288,16 @@ pub(crate) fn assert_golden_text(name: &str, text: &str) {
 }
 
 /// Pins every tracer view of `traced` under `scenario/`.
+/// The files a scenario's directory holds, one per view [`pin_tracer_views`] pins.
+pub(crate) const VIEWS: [&str; 6] = [
+    "call.json",
+    "call_with_log.json",
+    "prestate.json",
+    "prestate_diff.json",
+    "struct_logs.json",
+    "eip3155.jsonl",
+];
+
 pub(crate) fn pin_tracer_views(scenario: &str, traced: &Traced) {
     assert_golden(&format!("{scenario}/call.json"), &traced.call_frame(false));
     assert_golden(&format!("{scenario}/call_with_log.json"), &traced.call_frame(true));
