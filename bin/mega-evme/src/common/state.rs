@@ -227,6 +227,14 @@ impl PreStateArgs {
             let mut prestate =
                 EvmState::with_capacity_and_hasher(loaded_prestate.len(), Default::default());
             for (address, account_state) in loaded_prestate {
+                // An entry marked as self-destructed describes an address the dumping run
+                // erased from the state. Loading it as an account would resurrect balance,
+                // nonce, code, and storage that the commit deleted, so the address is
+                // treated as absent from the file.
+                if account_state.is_selfdestructed() {
+                    debug!(address = %address, "Skipping self-destructed account in prestate");
+                    continue;
+                }
                 let account = account_state.into_account()?;
                 prestate.insert(address, account);
             }
@@ -326,7 +334,9 @@ impl StateDumpArgs {
         trace!(evm_state = ?evm_state, "Serializing EVM state");
         let account_states: BTreeMap<_, _> = evm_state
             .iter()
-            .map(|(address, account)| (address, AccountState::from_account(account.clone())))
+            .filter_map(|(address, account)| {
+                DumpedAccount::from_account(account.clone()).map(|dumped| (address, dumped))
+            })
             .collect();
         let state_json = serde_json::to_string_pretty(&account_states)
             .map_err(|e| EvmeError::ExecutionError(format!("Failed to serialize state: {}", e)))?;
@@ -356,6 +366,46 @@ impl StateDumpArgs {
     }
 }
 
+/// One account entry of a serialized state dump.
+///
+/// An account that survives the transaction is written as its full [`AccountState`].
+/// An account destroyed by `SELFDESTRUCT` no longer exists once the state is committed —
+/// its balance, nonce, code, and storage are all gone — so it is written as the bare
+/// marker `{"selfdestructed": true}` instead of the account it used to be.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(untagged)]
+pub enum DumpedAccount {
+    /// An account present in the post-execution state.
+    Live(AccountState),
+    /// An address erased from the state by `SELFDESTRUCT` during the transaction.
+    SelfDestructed {
+        /// Always `true`, marking the address as erased by `SELFDESTRUCT`.
+        selfdestructed: bool,
+    },
+}
+
+impl DumpedAccount {
+    /// Classifies a post-execution account for the state dump.
+    ///
+    /// `None` omits the address entirely: the run only ever observed it as
+    /// nonexistent and it still holds no balance, nonce, or code, so there is no
+    /// account to describe on either side of the commit — printing it as an
+    /// existing empty account would let a round-tripped prestate answer
+    /// `EXTCODEHASH` with the empty-code hash where the chain answers zero.
+    /// The self-destruct check runs first: an account created and destroyed in
+    /// one transaction also started as nonexistent, and it is reported as its
+    /// marker, not omitted.
+    pub fn from_account(account: Account) -> Option<Self> {
+        if account.is_selfdestructed() {
+            return Some(Self::SelfDestructed { selfdestructed: true });
+        }
+        if account.is_loaded_as_not_existing() && account.info.is_empty() {
+            return None;
+        }
+        Some(Self::Live(AccountState::from_account(account)))
+    }
+}
+
 /// Account state information
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -373,9 +423,21 @@ pub struct AccountState {
     pub code_hash: Option<B256>,
     /// Storage slots (sorted by key for deterministic output)
     pub storage: Option<BTreeMap<U256, U256>>,
+    /// Marks an address that `SELFDESTRUCT` erased from the state.
+    ///
+    /// Never written for a live account, and read back as "this address does not exist":
+    /// a prestate load skips such an entry instead of reconstructing an account from the
+    /// remaining fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selfdestructed: Option<bool>,
 }
 
 impl AccountState {
+    /// Whether this entry marks an address erased by `SELFDESTRUCT`.
+    pub fn is_selfdestructed(&self) -> bool {
+        self.selfdestructed.unwrap_or(false)
+    }
+
     /// Creates a new [`AccountState`] from [`Account`].
     ///
     /// When `AccountInfo.code` is `Some`, `code_hash` is recomputed from the actual
@@ -405,6 +467,7 @@ impl AccountState {
             code,
             code_hash: Some(code_hash),
             storage: Some(storage),
+            selfdestructed: None,
         }
     }
 
@@ -452,6 +515,25 @@ where
     Empty(EmptyDB),
     /// Forked state from RPC
     Forked(Box<CacheDB<WrapDatabaseAsync<AlloyDB<N, P>>>>),
+}
+
+/// Normalizes an account fetched over RPC, mapping the all-zero answer to "does not exist".
+///
+/// JSON-RPC cannot express account non-existence: `eth_getBalance`, `eth_getTransactionCount`,
+/// and `eth_getCode` all answer `0`/`0`/empty for an account that was never created, so the RPC
+/// backend materializes it as an *existing* empty account. That flips every consumer of
+/// existence, most visibly the EIP-7702 per-authorization refund: a brand-new authority is
+/// judged "already in the trie" and the replay refunds 12,500 gas per authorization that the
+/// chain did not.
+///
+/// Mapping all-zero back to `None` is safe because an existing-but-empty account cannot occur
+/// on `MegaETH`: EIP-161 (Spurious Dragon) removes empty accounts on touch and forbids creating
+/// them, every chain this tool replays activated it from genesis, and the genesis allocs carry
+/// balance or code. The one shape this cannot distinguish — an account with zero
+/// balance/nonce/code that still holds storage — also cannot exist post-EIP-161, since storage
+/// is only reachable through code and contracts have a non-empty code hash or nonce.
+fn normalize_rpc_account(account: Option<AccountInfo>) -> Option<AccountInfo> {
+    account.filter(|info| !info.is_empty())
 }
 
 /// State database that can be backed by either [`EmptyDB`] or [`AlloyDB`] (forked from RPC)
@@ -645,9 +727,9 @@ where
                 Ok(account)
             }
             EvmeBackend::Forked(db) => {
-                let account = db.basic(address).map_err(|e| {
+                let account = normalize_rpc_account(db.basic(address).map_err(|e| {
                     EvmeError::RpcError(format!("Failed to fetch account {}: {:?}", address, e))
-                })?;
+                })?);
                 trace!(address = %address, account = ?account, "Loaded account basic from forked state");
                 Ok(account)
             }
@@ -766,9 +848,9 @@ where
                 Ok(account)
             }
             EvmeBackend::Forked(db) => {
-                let account = db.basic_ref(address).map_err(|e| {
+                let account = normalize_rpc_account(db.basic_ref(address).map_err(|e| {
                     EvmeError::RpcError(format!("Failed to fetch account {}: {:?}", address, e))
-                })?;
+                })?);
                 trace!(address = %address, account = ?account, "Loaded account basic from forked state");
                 Ok(account)
             }
@@ -862,5 +944,190 @@ where
                 Ok(hash)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::address;
+
+    const LIVE: Address = address!("0x00000000000000000000000000000000000000aa");
+    const DESTROYED: Address = address!("0x00000000000000000000000000000000000000bb");
+
+    /// A contract account holding `code` and a single storage slot.
+    fn contract_account(balance: u64, nonce: u64, code: &[u8]) -> Account {
+        let bytecode = Bytecode::new_raw(Bytes::from(code.to_vec()));
+        let info = AccountInfo::new(U256::from(balance), nonce, bytecode.hash_slow(), bytecode);
+        Account::from(info).with_storage(std::iter::once((
+            U256::from(1),
+            EvmStorageSlot::new(U256::from(0x42), TransactionId::ZERO),
+        )))
+    }
+
+    fn dump_args() -> StateDumpArgs {
+        StateDumpArgs { dump: true, dump_output_file: None }
+    }
+
+    /// A live account is serialized in full, byte for byte as before the
+    /// self-destruct marker existed: every field present, none skipped.
+    #[test]
+    fn test_serialize_evm_state_live_account_is_written_in_full() {
+        let mut state = EvmState::default();
+        state.insert(LIVE, contract_account(7, 3, &[0x60, 0x00]));
+
+        let json = dump_args().serialize_evm_state(&state).expect("serialize");
+
+        assert_eq!(
+            json,
+            r#"{
+  "0x00000000000000000000000000000000000000aa": {
+    "balance": "0x7",
+    "nonce": "0x3",
+    "code": "0x6000",
+    "codeHash": "0x07ad118d6cc8642c86c03827f276d8b791a65e5c99a3845faf186be720a1455d",
+    "storage": {
+      "0x1": "0x42"
+    }
+  }
+}"#
+        );
+    }
+
+    /// An address the run only observed as nonexistent — and that still holds
+    /// no balance, nonce, or code — is omitted: no account exists on either
+    /// side of the commit, so there is nothing to describe.
+    #[test]
+    fn test_serialize_evm_state_omits_a_never_existing_empty_account() {
+        let mut state = EvmState::default();
+        let mut ghost = Account::new_not_existing(TransactionId::ZERO);
+        ghost.mark_touch();
+        state.insert(DESTROYED, ghost);
+        state.insert(LIVE, contract_account(7, 3, &[0x60, 0x00]));
+
+        let json = dump_args().serialize_evm_state(&state).expect("serialize");
+
+        assert!(
+            !json.contains("0x00000000000000000000000000000000000000bb"),
+            "ghost printed: {json}"
+        );
+        assert!(
+            json.contains("0x00000000000000000000000000000000000000aa"),
+            "live dropped: {json}"
+        );
+    }
+
+    /// An account that started as nonexistent but gained substance during the
+    /// transaction (a funded fresh address) exists after the commit and is
+    /// written in full.
+    #[test]
+    fn test_serialize_evm_state_keeps_a_funded_fresh_account() {
+        let mut state = EvmState::default();
+        let mut funded = Account::new_not_existing(TransactionId::ZERO);
+        funded.mark_touch();
+        funded.info.balance = U256::from(5);
+        state.insert(LIVE, funded);
+
+        let json = dump_args().serialize_evm_state(&state).expect("serialize");
+
+        assert!(
+            json.contains("0x00000000000000000000000000000000000000aa") &&
+                json.contains("\"balance\": \"0x5\""),
+            "funded fresh account must be written in full: {json}"
+        );
+    }
+
+    /// The self-destruct marker outranks the omission rule: an account created
+    /// and destroyed in one transaction also started as nonexistent, and it is
+    /// reported as its marker rather than silently dropped.
+    #[test]
+    fn test_serialize_evm_state_selfdestruct_marker_outranks_omission() {
+        let mut state = EvmState::default();
+        let mut account = Account::new_not_existing(TransactionId::ZERO);
+        account.mark_touch();
+        account.mark_selfdestruct();
+        state.insert(DESTROYED, account);
+
+        let json = dump_args().serialize_evm_state(&state).expect("serialize");
+
+        assert!(
+            json.contains("\"selfdestructed\": true"),
+            "the marker must win over omission: {json}"
+        );
+    }
+
+    /// An account destroyed by `SELFDESTRUCT` is reduced to the marker: none of
+    /// the state the commit erases (code, storage, balance, nonce) is printed.
+    #[test]
+    fn test_serialize_evm_state_selfdestructed_account_is_marker_only() {
+        let mut state = EvmState::default();
+        state.insert(LIVE, contract_account(7, 3, &[0x60, 0x00]));
+        state.insert(DESTROYED, contract_account(0, 1, &[0x33, 0xff]).with_selfdestruct_mark());
+
+        let json = dump_args().serialize_evm_state(&state).expect("serialize");
+        let parsed: BTreeMap<Address, serde_json::Value> =
+            serde_json::from_str(&json).expect("valid JSON");
+
+        assert_eq!(
+            parsed[&DESTROYED],
+            serde_json::json!({ "selfdestructed": true }),
+            "destroyed account must carry the marker and nothing else",
+        );
+        let live = &parsed[&LIVE];
+        assert_eq!(live["code"], "0x6000", "live account keeps its code");
+        assert_eq!(live["storage"]["0x1"], "0x42", "live account keeps its storage");
+        assert!(live.get("selfdestructed").is_none(), "live account carries no marker");
+    }
+
+    /// The marker round-trips: an entry a dump marked as destroyed loads as if
+    /// the address were absent from the file, while its neighbours load normally.
+    #[test]
+    fn test_load_prestate_skips_selfdestructed_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("prestate.json");
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{
+                  "{LIVE}": {{
+                    "balance": "0x7",
+                    "nonce": "0x3",
+                    "code": "0x6000",
+                    "storage": {{ "0x1": "0x42" }}
+                  }},
+                  "{DESTROYED}": {{ "selfdestructed": true }}
+                }}"#
+            ),
+        )
+        .expect("write prestate");
+
+        let args = PreStateArgs::parse_from(["mega-evme", "--prestate", path.to_str().unwrap()]);
+        let prestate = args.load_prestate(&Address::ZERO).expect("load prestate");
+
+        assert!(!prestate.contains_key(&DESTROYED), "destroyed address must not be loaded");
+        let live = prestate.get(&LIVE).expect("live account loaded");
+        assert_eq!(live.info.nonce, 3);
+        assert_eq!(
+            live.storage.get(&U256::from(1)).map(|s| s.present_value),
+            Some(U256::from(0x42))
+        );
+    }
+
+    /// Only the marker's `true` value means "erased". An entry that spells the
+    /// field out as `false` is an ordinary account and is loaded as written.
+    #[test]
+    fn test_load_prestate_keeps_entry_marked_not_selfdestructed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("prestate.json");
+        std::fs::write(
+            &path,
+            format!(r#"{{ "{LIVE}": {{ "nonce": "0x3", "selfdestructed": false }} }}"#),
+        )
+        .expect("write prestate");
+
+        let args = PreStateArgs::parse_from(["mega-evme", "--prestate", path.to_str().unwrap()]);
+        let prestate = args.load_prestate(&Address::ZERO).expect("load prestate");
+
+        assert_eq!(prestate.get(&LIVE).expect("account loaded").info.nonce, 3);
     }
 }

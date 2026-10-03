@@ -70,7 +70,7 @@ Each group has its own reference page with the full flag table.
 | Chain / spec      | Spec version, chain ID                                               | [Chain and Spec](../configuration/chain-and-spec.md)                            |
 | Block environment | Block number, timestamp, coinbase, basefee, gas limit, prevrandao    | [Block Environment](../configuration/block-environment.md)                      |
 | SALT buckets      | Per-bucket capacity overrides for dynamic gas pricing                | [SALT Buckets](../configuration/salt-buckets.md)                                |
-| RPC cache / retry | Cache size, cache dir, retry and rate-limit                          | [RPC Cache and Retry](../configuration/state-management.md#rpc-cache-and-retry) |
+| RPC cache / retry | Cache entry ceiling, cache dir, retry and rate-limit                 | [RPC Cache and Retry](../configuration/state-management.md#rpc-cache-and-retry) |
 | Tracing           | Opcode, call, and pre-state tracers with output options              | [Tracing Overview](../tracing/overview.md)                                      |
 | Output            | JSON output mode                                                     | See [JSON output](#json-output) below                                           |
 
@@ -204,13 +204,16 @@ RPC Options:
                                          [aliases: --rpc-url] [compat alias: --fork.rpc]
       --rpc.capture-file <PATH>          (replay command only) capture to fixture; not usable as a run/tx offline path
       --rpc.replay-file <PATH>           (replay command only) serve from fixture; not usable as a run/tx offline path
-      --rpc.cache-size <N>               In-memory RPC LRU cache size; 0 disables [default: 10000]
+      --rpc.cache-max-entries <N>        In-memory RPC LRU max entries; 0 = effectively unlimited, capped at 1,048,576 entries (an eviction threshold, not an allocation) [default: 0]
       --rpc.cache-dir <DIR>              Per-chain RPC cache directory (default: platform cache dir)
       --rpc.no-cache-file                Disable on-disk cache persistence
       --rpc.clear-cache                  Delete the current chain's cache file before loading
       --rpc.max-retries <N>              Max transport retries; 0 disables [default: 5]
       --rpc.backoff-ms <MS>              Fixed retry sleep in ms [default: 1000]
-      --rpc.rate-limit <CU/S>            Retry-layer compute-units-per-second budget [default: 660]
+      --rpc.cu-per-sec <COMPUTE_UNITS_PER_SEC>
+                                         Compute-unit budget (CU/s) for the retry layer's rate-limit accounting (NOT requests/s) [default: 660]
+                                         [alias: --rpc.rate-limit]
+      --rpc.request-timeout <SECS>       Total per-HTTP-request timeout (connect + response); 0 disables [default: 30]
 
 Chain Options:
       --spec <SPEC>                Spec [default: Rex7]

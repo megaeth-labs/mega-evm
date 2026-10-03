@@ -3,7 +3,7 @@
   "args": [
     "run",
     "0x604260005260206000f3",
-    "--rpc.cache-size", "100",
+    "--rpc.cache-max-entries", "100",
     "--rpc.max-retries", "3",
     "--rpc.backoff-ms", "500",
     "--rpc.rate-limit", "660"

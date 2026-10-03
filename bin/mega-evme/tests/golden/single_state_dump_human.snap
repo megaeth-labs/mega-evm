@@ -1,0 +1,15 @@
+# mega-evme replay equivalence baseline
+# case:    single_state_dump_human
+# capture: replay_offline.cache.json
+# argv:    replay --rpc.replay-file <CAPTURE> --dump 0x41d34e7e13dfe0f85da9d407e2b2c381955d8c7eed428b17dc82327b2616b000
+
+== exit code ==
+0
+
+== stdout (digest) ==
+bytes: 50774
+lines: 73
+keccak256: 0xbb757d7e37a48cd2b34556d85ed7fe26af127a41f000740b1557f7e6982af6de
+
+== stderr ==
+(empty)
