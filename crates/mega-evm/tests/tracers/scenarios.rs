@@ -10,6 +10,7 @@ use alloy_rpc_types_trace::geth::PreStateFrame;
 use alloy_sol_types::SolCall;
 use mega_evm::{
     constants::TX_GAS_LIMIT_CAP,
+    satin_precompiles,
     system::{
         keyless::{
             decode_error_result, IKeylessDeploy, KeylessDeployError, KEYLESS_DEPLOY_ADDRESS,
@@ -20,14 +21,18 @@ use mega_evm::{
         ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE, SEQUENCER_REGISTRY_ADDRESS,
         SEQUENCER_REGISTRY_CODE,
     },
-    test_utils::{op_transaction, BytecodeBuilder, MemoryDatabase},
+    test_utils::{op_transaction, transfer_log, BytecodeBuilder, MemoryDatabase},
     tx_body_history_bytes, EvmTxRuntimeLimits, LimitKind, MegaTransaction,
     FRAME_DATA_SHARE_DENOMINATOR, FRAME_DATA_SHARE_NUMERATOR, LOG_BASE_SIZE, TX_BODY_SIZE,
 };
 use revm::{
-    bytecode::opcode::{CODECOPY, JUMP, JUMPDEST, LOG0, LOG1, POP, PUSH0, RETURN, TIMESTAMP},
+    bytecode::opcode::{
+        CODECOPY, GAS as GAS_OP, JUMP, JUMPDEST, LOG0, LOG1, POP, PUSH0, RETURN, STATICCALL,
+        TIMESTAMP,
+    },
     context::{result::ExecutionResult, TxEnv},
     context_interface::cfg::gas::BASE,
+    precompile::kzg_point_evaluation as kzg,
 };
 
 use crate::{
@@ -35,7 +40,7 @@ use crate::{
     harness::{
         assert_call_gas_matches_receipt, assert_detention_step_reads_as_out_of_gas,
         assert_every_frame_stops, assert_keyless_steps,
-        assert_keyless_struct_logs_miss_the_creation, assert_parent_does_not_resume,
+        assert_keyless_struct_logs_miss_the_creation, assert_logs, assert_parent_does_not_resume,
         assert_prestate_covers_reads, assert_root_gas_is_the_gas_limit, at_spec_prices, call_tx,
         create_tx, decode_stop, eip3155_steps, pin_tracer_views, step, Traced,
     },
@@ -75,6 +80,7 @@ fn test_eth_transfer_emits_7708_log() {
         EvmTxRuntimeLimits::no_limits(),
     );
     assert!(traced.outcome.result.is_success(), "{:?}", traced.outcome.result);
+    assert_logs(&traced.call_frame(true).logs, &[transfer_log(CALLER, PAYEE, U256::from(1))]);
     pin("eth_transfer", &traced);
 }
 
@@ -491,40 +497,109 @@ fn test_reservoir_pays_state_gas() {
     pin("reservoir_sstore", &traced);
 }
 
-/// A call to the identity precompile.
+/// A transaction to the identity precompile: its own frame is the precompile, which runs no
+/// instruction and echoes its input.
 #[test]
 fn test_identity_precompile() {
     let precompile = Address::with_last_byte(4);
+    let input = Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef]);
     let traced = Traced::run(
         funded(),
-        call_tx(
-            CALLER,
-            precompile,
-            Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef]),
-            U256::ZERO,
-            TX_GAS,
-        ),
+        call_tx(CALLER, precompile, input.clone(), U256::ZERO, TX_GAS),
         EvmTxRuntimeLimits::no_limits(),
     );
-    assert!(traced.outcome.result.is_success(), "{:?}", traced.outcome.result);
+    let ExecutionResult::Success { output, .. } = &traced.outcome.result else {
+        panic!("the precompile succeeds: {:?}", traced.outcome.result);
+    };
+    assert_eq!(output.data(), &input, "identity echoes its input");
     pin("identity_precompile", &traced);
 }
 
-/// An OP deposit that calls a contract which stops.
+/// The c-kzg test vector `verify_kzg_proof_case_correct_proof_4_4`, as the precompile takes it:
+/// `versioned_hash ++ z ++ y ++ commitment ++ proof`.
+fn kzg_input() -> Vec<u8> {
+    let commitment = hex!(
+        "8f59a8d2a1a625a17f3fea0fe5eb8c896db3764f3185481bc22f91b4aaffcca2\
+         5f26936857bc3a7c2539ea8ec3a952b7"
+    );
+    let mut input = kzg::kzg_to_versioned_hash(&commitment).to_vec();
+    input.extend(hex!("73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000000"));
+    input.extend(hex!("1522a4a7f34e1ea350ae07c29c96c7e79655aa926122e95fe69fcbd932ca49e9"));
+    input.extend(commitment);
+    input.extend(hex!(
+        "a62ad71d14c5719385c0686f1871430475bf3a00f0aa3f7b8dd99a9abc216074\
+         4faf0070725e00b60ad9a026a15b1a8c"
+    ));
+    input
+}
+
+/// A contract that `STATICCALL`s the KZG point evaluation precompile, the one Satin reprices: the
+/// call tracer shows the precompile as a child frame that spent the Satin price.
+#[test]
+fn test_precompile_child_frame() {
+    let input = kzg_input();
+    let len = u8::try_from(input.len()).expect("192 bytes");
+    let code = BytecodeBuilder::default()
+        .mstore(0, &input)
+        .append_many([PUSH0, PUSH0])
+        .push_number(len)
+        .append(PUSH0)
+        .push_address(kzg::ADDRESS)
+        .append_many([GAS_OP, STATICCALL, POP])
+        .stop()
+        .build();
+    let traced = Traced::run(
+        funded().account_code(CONTRACT, code),
+        call_tx(CALLER, CONTRACT, Bytes::new(), U256::ZERO, TX_GAS),
+        EvmTxRuntimeLimits::no_limits(),
+    );
+    assert!(traced.outcome.result.is_success(), "{:?}", traced.outcome.result);
+    let price = satin_precompiles()
+        .get(&kzg::ADDRESS)
+        .and_then(|precompile| precompile.required_gas(&input))
+        .expect("the Satin table prices KZG");
+    let root = traced.call_frame(false);
+    let [child] = root.calls.as_slice() else { panic!("one child frame: {root:?}") };
+    assert_eq!(child.typ, "STATICCALL");
+    assert_eq!(child.to, Some(kzg::ADDRESS));
+    assert_eq!(child.error, None, "the proof verifies");
+    assert_eq!(child.gas_used, U256::from(price), "the child spent the Satin price");
+    let answer = child.output.as_ref().expect("the evaluation's answer");
+    assert_eq!(answer.as_ref(), &kzg::RETURN_VALUE[..], "the evaluation's answer");
+    pin("precompile_child", &traced);
+}
+
+/// A deposit that mints and carries value to a contract which stops. The value is logged; the
+/// mint is not. A deposit pays no history gas.
 #[test]
 fn test_deposit_transaction() {
+    let mint = 1_000_u128;
+    let value = U256::from(7);
     let mut tx = op_transaction(TxEnv {
         caller: CALLER,
         kind: TxKind::Call(CONTRACT),
+        value,
         gas_limit: TX_GAS,
         ..Default::default()
     });
     tx.deposit.source_hash = B256::repeat_byte(0x42);
+    tx.deposit.mint = Some(mint);
     let traced = Traced::run(
         funded().account_code(CONTRACT, BytecodeBuilder::default().stop().build()),
         mega_evm::alloy_op_evm::OpTx(tx),
         EvmTxRuntimeLimits::no_limits(),
     );
     assert!(traced.outcome.result.is_success(), "{:?}", traced.outcome.result);
+    let history = (traced.outcome.gas.history, traced.outcome.gas.history_bytes);
+    assert_eq!(history, (0, 0), "a deposit pays no history");
+    let root = traced.call_frame(true);
+    assert_logs(&root.logs, &[transfer_log(CALLER, CONTRACT, value)]);
+    let PreStateFrame::Diff(diff) = traced.prestate(true) else { panic!("the diff mode") };
+    let before = diff.pre[&CALLER].balance.expect("the caller's balance");
+    assert_eq!(
+        diff.post[&CALLER].balance,
+        Some(before + U256::from(mint) - value),
+        "the caller holds its balance, plus the mint, less the value"
+    );
     pin("deposit", &traced);
 }

@@ -1,12 +1,12 @@
 {
   "failed": false,
-  "gas": 15000,
+  "gas": 21000,
   "returnValue": "0x",
   "structLogs": [
     {
       "pc": 0,
       "op": "STOP",
-      "gas": 4985000,
+      "gas": 4979000,
       "gasCost": 0,
       "depth": 1,
       "stack": [],

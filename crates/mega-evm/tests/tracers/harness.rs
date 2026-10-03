@@ -12,9 +12,9 @@ use std::{
     rc::Rc,
 };
 
-use alloy_primitives::{Address, Bytes, B256};
+use alloy_primitives::{Address, Bytes, Log, B256};
 use alloy_rpc_types_trace::geth::{
-    AccountState, CallConfig, CallFrame, DefaultFrame, GethDebugTracingOptions,
+    AccountState, CallConfig, CallFrame, CallLogFrame, DefaultFrame, GethDebugTracingOptions,
     GethDefaultTracingOptions, GethTrace, PreStateConfig, PreStateFrame, PreStateMode, StructLog,
 };
 use alloy_sol_types::SolError;
@@ -207,6 +207,25 @@ impl Traced {
     pub(crate) fn gas_limit(&self) -> u64 {
         self.tx.0.base.gas_limit
     }
+}
+
+/// The call tracer's `logs` are exactly `expected`, in order.
+pub(crate) fn assert_logs(logs: &[CallLogFrame], expected: &[Log]) {
+    let got: Vec<_> = logs
+        .iter()
+        .map(|log| {
+            (
+                log.address,
+                log.topics.clone().unwrap_or_default(),
+                log.data.clone().unwrap_or_default(),
+            )
+        })
+        .collect();
+    let expected: Vec<_> = expected
+        .iter()
+        .map(|log| (Some(log.address), log.topics().to_vec(), log.data.data.clone()))
+        .collect();
+    assert_eq!(got, expected, "the call tracer's logs");
 }
 
 /// The struct-log step of the first `op` at `depth` in the node's opcode trace.
