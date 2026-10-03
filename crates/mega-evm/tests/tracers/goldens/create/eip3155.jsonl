@@ -1,0 +1,4 @@
+{"pc":0,"depth":1,"opName":"PUSH0","op":95,"gas":"0x48a6c6","reservoir":"0x0","stateGas":"0x0","gasCost":"0x2","stack":[],"returnData":"0x","refund":"0x0","memSize":"0x0"}
+{"pc":1,"depth":1,"opName":"PUSH0","op":95,"gas":"0x48a6c4","reservoir":"0x0","stateGas":"0x0","gasCost":"0x2","stack":["0x0"],"returnData":"0x","refund":"0x0","memSize":"0x0"}
+{"pc":2,"depth":1,"opName":"RETURN","op":243,"gas":"0x48a6c2","reservoir":"0x0","stateGas":"0x0","gasCost":"0x0","stack":["0x0","0x0"],"returnData":"0x","refund":"0x0","memSize":"0x0","error":"Return"}
+{"stateRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","output":"0x","gasUsed":"0x3a47e","pass":true,"fork":"Osaka"}

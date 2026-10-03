@@ -1,0 +1,14 @@
+{"pc":0,"depth":1,"opName":"PUSH0","op":95,"gas":"0x4ba618","reservoir":"0x0","stateGas":"0x0","gasCost":"0x2","stack":[],"returnData":"0x","refund":"0x0","memSize":"0x0"}
+{"pc":1,"depth":1,"opName":"PUSH0","op":95,"gas":"0x4ba616","reservoir":"0x0","stateGas":"0x0","gasCost":"0x2","stack":["0x0"],"returnData":"0x","refund":"0x0","memSize":"0x0"}
+{"pc":2,"depth":1,"opName":"PUSH0","op":95,"gas":"0x4ba614","reservoir":"0x0","stateGas":"0x0","gasCost":"0x2","stack":["0x0","0x0"],"returnData":"0x","refund":"0x0","memSize":"0x0"}
+{"pc":3,"depth":1,"opName":"PUSH0","op":95,"gas":"0x4ba612","reservoir":"0x0","stateGas":"0x0","gasCost":"0x2","stack":["0x0","0x0","0x0"],"returnData":"0x","refund":"0x0","memSize":"0x0"}
+{"pc":4,"depth":1,"opName":"PUSH0","op":95,"gas":"0x4ba610","reservoir":"0x0","stateGas":"0x0","gasCost":"0x2","stack":["0x0","0x0","0x0","0x0"],"returnData":"0x","refund":"0x0","memSize":"0x0"}
+{"pc":5,"depth":1,"opName":"PUSH20","op":115,"gas":"0x4ba60e","reservoir":"0x0","stateGas":"0x0","gasCost":"0x3","stack":["0x0","0x0","0x0","0x0","0x0"],"returnData":"0x","refund":"0x0","memSize":"0x0"}
+{"pc":26,"depth":1,"opName":"GAS","op":90,"gas":"0x4ba60b","reservoir":"0x0","stateGas":"0x0","gasCost":"0x2","stack":["0x0","0x0","0x0","0x0","0x0","0x400003"],"returnData":"0x","refund":"0x0","memSize":"0x0"}
+{"pc":27,"depth":1,"opName":"CALL","op":241,"gas":"0x4ba609","reservoir":"0x0","stateGas":"0x0","gasCost":"0x4a779a","stack":["0x0","0x0","0x0","0x0","0x0","0x400003","0x4ba609"],"returnData":"0x","refund":"0x0","memSize":"0x0"}
+{"pc":0,"depth":2,"opName":"PUSH0","op":95,"gas":"0x4a6d72","reservoir":"0x0","stateGas":"0x0","gasCost":"0x2","stack":[],"returnData":"0x","refund":"0x0","memSize":"0x0"}
+{"pc":1,"depth":2,"opName":"PUSH0","op":95,"gas":"0x4a6d70","reservoir":"0x0","stateGas":"0x0","gasCost":"0x2","stack":["0x0"],"returnData":"0x","refund":"0x0","memSize":"0x0"}
+{"pc":2,"depth":2,"opName":"REVERT","op":253,"gas":"0x4a6d6e","reservoir":"0x0","stateGas":"0x0","gasCost":"0x0","stack":["0x0","0x0"],"returnData":"0x","refund":"0x0","memSize":"0x0","error":"Revert"}
+{"pc":28,"depth":1,"opName":"POP","op":80,"gas":"0x4b9bdd","reservoir":"0x0","stateGas":"0x0","gasCost":"0x2","stack":["0x0"],"returnData":"0x","refund":"0x0","memSize":"0x0"}
+{"pc":29,"depth":1,"opName":"STOP","op":0,"gas":"0x4b9bdb","reservoir":"0x0","stateGas":"0x0","gasCost":"0x0","stack":[],"returnData":"0x","refund":"0x0","memSize":"0x0","error":"Stop"}
+{"stateRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","output":"0x","gasUsed":"0xaf65","pass":true,"fork":"Osaka"}

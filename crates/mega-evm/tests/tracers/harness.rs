@@ -4,9 +4,12 @@
 //! path only compares, and never writes.
 
 use std::{
+    cell::RefCell,
     collections::BTreeSet,
     fs,
+    io::{self, Write},
     path::{Path, PathBuf},
+    rc::Rc,
 };
 
 use alloy_primitives::{Address, Bytes};
@@ -21,6 +24,7 @@ use mega_evm::{
 };
 use revm::{
     context::{BlockEnv, TxEnv},
+    inspector::inspectors::TracerEip3155,
     primitives::U256,
 };
 use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
@@ -76,6 +80,21 @@ pub(crate) fn create_tx(caller: Address, init_code: Bytes, gas_limit: u64) -> Me
     }))
 }
 
+/// A writer the EIP-3155 tracer writes into and the test reads back.
+#[derive(Clone, Debug, Default)]
+struct SharedBuf(Rc<RefCell<Vec<u8>>>);
+
+impl Write for SharedBuf {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.borrow_mut().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// One Satin-engine execution under a tracer that records steps, logs and state diffs.
 #[derive(Debug)]
 pub(crate) struct Traced {
@@ -85,6 +104,10 @@ pub(crate) struct Traced {
     pub inspector: TracingInspector,
     /// The pre-state database the prestate tracer reads.
     pub pre_db: MemoryDatabase,
+    /// The transaction, kept to run it again under another tracer.
+    tx: MegaTransaction,
+    /// The runtime limits it ran under.
+    limits: EvmTxRuntimeLimits,
 }
 
 impl Traced {
@@ -94,8 +117,23 @@ impl Traced {
         let inspector = TracingInspector::new(TracingInspectorConfig::all());
         let mut evm =
             MegaEvm::new(context(db).with_tx_runtime_limits(limits)).with_inspector(inspector);
-        let outcome = evm.execute_transaction(tx).expect("the transaction is valid");
-        Self { outcome, inspector: evm.inspector().clone(), pre_db }
+        let outcome = evm.execute_transaction(tx.clone()).expect("the transaction is valid");
+        Self { outcome, inspector: evm.inspector().clone(), pre_db, tx, limits }
+    }
+
+    /// The EIP-3155 trace: one JSON line per step, then the summary line.
+    ///
+    /// The transaction runs again, on a fresh EVM over the same pre-state, under the revm fork's
+    /// `TracerEip3155`, which is the tracer the state-test runner runs Satin under.
+    pub(crate) fn eip3155(&self) -> String {
+        let buf = SharedBuf::default();
+        let mut evm =
+            MegaEvm::new(context(self.pre_db.clone()).with_tx_runtime_limits(self.limits))
+                .with_inspector(TracerEip3155::new(Box::new(buf.clone())));
+        let outcome = evm.execute_transaction(self.tx.clone()).expect("the transaction is valid");
+        assert_eq!(outcome.result, self.outcome.result, "the EIP-3155 run executed differently");
+        let bytes = buf.0.borrow().clone();
+        String::from_utf8(bytes).expect("EIP-3155 output is UTF-8")
     }
 
     /// Receipt gas: the three ledgers after the refund, at least the EIP-7623 floor.
@@ -165,18 +203,24 @@ fn golden_path(name: &str) -> PathBuf {
 /// with the pinned file `name`. Rewrites the file when `UPDATE_GOLDENS=1`.
 pub(crate) fn assert_golden(name: &str, value: &impl Serialize) {
     let json = format!("{}\n", serde_json::to_string_pretty(value).expect("json"));
+    assert_golden_text(name, &json);
+}
+
+/// Compares `text` byte-for-byte with the pinned file `name`. Rewrites the file when
+/// `UPDATE_GOLDENS=1`.
+pub(crate) fn assert_golden_text(name: &str, text: &str) {
     let path = golden_path(name);
     if update_goldens() {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).expect("create goldens dir");
         }
-        fs::write(&path, &json).unwrap_or_else(|err| panic!("write {}: {err}", path.display()));
+        fs::write(&path, text).unwrap_or_else(|err| panic!("write {}: {err}", path.display()));
         return;
     }
     let expected = fs::read_to_string(&path).unwrap_or_else(|err| {
         panic!("missing golden {} ({err}); rerun with UPDATE_GOLDENS=1 to pin it", path.display())
     });
-    assert_eq!(expected, json, "golden mismatch for {name}");
+    assert_eq!(expected, text, "golden mismatch for {name}");
 }
 
 /// Pins every tracer view of `traced` under `scenario/`.
@@ -186,6 +230,7 @@ pub(crate) fn pin_tracer_views(scenario: &str, traced: &Traced) {
     assert_golden(&format!("{scenario}/prestate.json"), &traced.prestate(false));
     assert_golden(&format!("{scenario}/prestate_diff.json"), &traced.prestate(true));
     assert_golden(&format!("{scenario}/struct_logs.json"), &traced.struct_logs());
+    assert_golden_text(&format!("{scenario}/eip3155.jsonl"), &traced.eip3155());
 }
 
 /// callTracer top-level `gasUsed` versus the receipt gas ledger. See [`Traced::receipt_gas`].

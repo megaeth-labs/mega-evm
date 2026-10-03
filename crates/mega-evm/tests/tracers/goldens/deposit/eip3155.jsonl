@@ -1,0 +1,2 @@
+{"pc":0,"depth":1,"opName":"STOP","op":0,"gas":"0x4c10a8","reservoir":"0x0","stateGas":"0x0","gasCost":"0x0","stack":[],"returnData":"0x","refund":"0x0","memSize":"0x0","error":"Stop"}
+{"stateRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","output":"0x","gasUsed":"0x3a98","pass":true,"fork":"Osaka"}

@@ -6,10 +6,9 @@
 //! keeps the goldens independent of CLI argument parsing and of the legacy 1.7.1 leg `mega-evme`
 //! still links.
 //!
-//! Default: compare pretty JSON byte-for-byte with `tests/tracers/goldens/<scenario>/`.
+//! Default: compare pretty JSON, and the EIP-3155 trace as JSON lines, byte-for-byte with
+//! `tests/tracers/goldens/<scenario>/`.
 //! Rewrite: `UPDATE_GOLDENS=1 cargo test -p mega-evm --test tracers`.
-//!
-//! EIP-3155 is skipped: see `scenarios::test_eip3155_api_is_absent`.
 
 mod harness;
 mod scenarios;

@@ -291,13 +291,3 @@ fn test_deposit_transaction() {
     assert!(traced.outcome.result.is_success(), "{:?}", traced.outcome.result);
     pin("deposit", &traced);
 }
-
-/// EIP-3155 is not exposed by the pinned `revm-inspectors` 0.40.1, nor by the revm 40.0.3 fork
-/// as a tracer/summary API the engine can hook. This test exists so the gap stays visible.
-#[test]
-fn test_eip3155_api_is_absent() {
-    // revm-inspectors 0.40.1 ships call/prestate/struct-log/js/mux tracers, not EIP-3155.
-    // The megaeth-labs/revm tag v40.0.3-mega.4 has no inspector that emits EIP-3155 JSONL
-    // records or a summary. Skip rather than invent a format.
-    let _ = stringify!(revm_inspectors);
-}
