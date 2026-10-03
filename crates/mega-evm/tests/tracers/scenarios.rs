@@ -6,6 +6,7 @@
 //! the report, not an engine change.
 
 use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_rpc_types_trace::geth::PreStateFrame;
 use alloy_sol_types::SolCall;
 use mega_evm::{
     constants::TX_GAS_LIMIT_CAP,
@@ -24,18 +25,20 @@ use mega_evm::{
     FRAME_DATA_SHARE_DENOMINATOR, FRAME_DATA_SHARE_NUMERATOR, LOG_BASE_SIZE, TX_BODY_SIZE,
 };
 use revm::{
-    bytecode::opcode::{
-        CALL, CODECOPY, GAS as GAS_OP, JUMP, JUMPDEST, LOG0, POP, PUSH0, RETURN, REVERT, TIMESTAMP,
-    },
+    bytecode::opcode::{CODECOPY, JUMP, JUMPDEST, LOG0, LOG1, POP, PUSH0, RETURN, TIMESTAMP},
     context::{result::ExecutionResult, TxEnv},
     context_interface::cfg::gas::BASE,
 };
 
-use crate::harness::{
-    assert_call_gas_matches_receipt, assert_detention_step_reads_as_out_of_gas,
-    assert_every_frame_stops, assert_keyless_steps, assert_keyless_struct_logs_miss_the_creation,
-    assert_parent_does_not_resume, assert_prestate_covers_reads, assert_root_gas_is_the_gas_limit,
-    at_spec_prices, call_tx, create_tx, decode_stop, pin_tracer_views, Traced,
+use crate::{
+    gas,
+    harness::{
+        assert_call_gas_matches_receipt, assert_detention_step_reads_as_out_of_gas,
+        assert_every_frame_stops, assert_keyless_steps,
+        assert_keyless_struct_logs_miss_the_creation, assert_parent_does_not_resume,
+        assert_prestate_covers_reads, assert_root_gas_is_the_gas_limit, at_spec_prices, call_tx,
+        create_tx, decode_stop, eip3155_steps, pin_tracer_views, step, Traced,
+    },
 };
 
 const CALLER: Address = address!("0x0000000000000000000000000000000000400000");
@@ -85,42 +88,80 @@ fn test_sstore_new_slot_charges_state_gas() {
         EvmTxRuntimeLimits::no_limits(),
     );
     assert!(traced.outcome.result.is_success(), "{:?}", traced.outcome.result);
-    assert!(traced.outcome.gas.state > 0, "a fresh slot costs state gas");
+    assert_eq!(traced.outcome.gas.state, gas::slot_state(), "a fresh slot costs state gas");
+    // Below the execution cap there is no reservoir: the slot's state gas and its record's
+    // history spill onto regular gas, so the opcode tracer shows them in the step's cost.
+    assert_eq!(traced.outcome.gas.reservoir_remaining, 0, "no reservoir below the cap");
+    let sstore = step(&traced, "SSTORE", 1);
+    let spilled = gas::slot_state() + gas::records(1);
+    assert_eq!(sstore.gas_cost, gas::sstore_fresh_cold() + spilled, "the SSTORE step's cost");
     pin("sstore_new_slot", &traced);
 }
 
-/// A top-level CREATE that deploys empty runtime code.
+/// A creation transaction that deposits a non-empty runtime: the deposit is charged its hashing,
+/// state and history gas, and the code is in the post-state the diff tracer reports.
 #[test]
-fn test_create_deploys_empty_runtime() {
-    let init = Bytes::from_static(&[PUSH0, PUSH0, RETURN]);
-    let traced =
-        Traced::run(funded(), create_tx(CALLER, init, TX_GAS), EvmTxRuntimeLimits::no_limits());
+fn test_create_deploys_runtime_code() {
+    let traced = Traced::run(
+        funded(),
+        create_tx(CALLER, deploying_runtime(), TX_GAS),
+        EvmTxRuntimeLimits::no_limits(),
+    );
     assert!(traced.outcome.result.is_success(), "{:?}", traced.outcome.result);
+    let created = CALLER.create(0);
+    let code = traced.outcome.state[&created].info.code.as_ref().expect("the code is in the state");
+    assert_eq!(code.original_bytes(), runtime(), "the created account holds the runtime");
+    let PreStateFrame::Diff(diff) = traced.prestate(true) else { panic!("the diff mode") };
+    assert_eq!(diff.post[&created].code.as_ref(), Some(&runtime()), "the diff shows the code");
     pin("create", &traced);
 }
 
-/// Nested call whose inner frame reverts.
+/// A value call whose callee writes a fresh slot and emits a log, then reverts; the caller then
+/// emits a log of its own. Everything the callee was charged on the state and history ledgers is
+/// given back: the slot's state gas, its record, its log, and the two records of the value
+/// transfer its start made. Its logs, the EIP-7708 transfer log of the value included, are
+/// discarded with it.
 #[test]
 fn test_nested_call_inner_reverts() {
-    let child = Bytes::from_static(&[PUSH0, PUSH0, REVERT]);
+    let child = BytecodeBuilder::default()
+        .sstore(U256::from(1), U256::from(1))
+        .push_number(0x42_u8)
+        .append_many([PUSH0, PUSH0, LOG1])
+        .revert()
+        .build();
     let parent = BytecodeBuilder::default()
-        .append_many([PUSH0, PUSH0, PUSH0, PUSH0, PUSH0])
-        .push_address(CHILD)
-        .append(GAS_OP)
-        .append(CALL)
-        .append(POP)
+        .call(CHILD, U256::from(1))
+        .append_many([POP, PUSH0, PUSH0, LOG0])
         .stop()
         .build();
     let traced = Traced::run(
-        funded().account_code(CONTRACT, parent).account_code(CHILD, child),
+        funded()
+            .account_code(CONTRACT, parent)
+            .account_balance(CONTRACT, U256::from(1))
+            .account_code(CHILD, child),
         call_tx(CALLER, CONTRACT, Bytes::new(), U256::ZERO, TX_GAS),
         EvmTxRuntimeLimits::no_limits(),
     );
-    assert!(
-        traced.outcome.result.is_success(),
-        "the outer frame succeeds: {:?}",
-        traced.outcome.result
+    assert!(traced.outcome.result.is_success(), "the caller succeeds: {:?}", traced.outcome.result);
+    // The callee's charge was made: below the execution cap its slot's state gas and the slot's
+    // record spilled onto its regular gas, which the opcode tracer shows in the step's cost.
+    let sstore = step(&traced, "SSTORE", 2);
+    let spilled = gas::slot_state() + gas::records(1);
+    assert_eq!(sstore.gas_cost, gas::sstore_fresh_cold() + spilled, "the callee's SSTORE step");
+    // And given back: no state gas stands, and the history the transaction keeps is its body
+    // and the caller's log alone.
+    assert_eq!(traced.outcome.gas.state, 0, "the callee's slot is given back");
+    assert_eq!(
+        traced.outcome.gas.history,
+        gas::body(0) + gas::history(LOG_BASE_SIZE),
+        "the callee's records and log are given back"
     );
+    let root = traced.call_frame(true);
+    let [callee] = root.calls.as_slice() else { panic!("one callee: {root:?}") };
+    assert_eq!(callee.error.as_deref(), Some("execution reverted"));
+    assert!(callee.logs.is_empty(), "the callee's logs are discarded");
+    assert_eq!(root.logs.len(), 1, "the caller's log alone, no transfer log");
+    assert_eq!(root.logs[0].address, Some(CONTRACT));
     pin("nested_inner_revert", &traced);
 }
 
@@ -419,14 +460,34 @@ fn test_detention_stop_spans_frames() {
 #[test]
 fn test_reservoir_pays_state_gas() {
     let code = BytecodeBuilder::default().sstore(U256::from(1), U256::from(1)).stop().build();
-    let gas_limit = TX_GAS_LIMIT_CAP + 50_000_000;
+    let reservoir = 50_000_000;
+    let gas_limit = TX_GAS_LIMIT_CAP + reservoir;
     let traced = Traced::run(
         funded().account_code(CONTRACT, code),
         call_tx(CALLER, CONTRACT, Bytes::new(), U256::ZERO, gas_limit),
         EvmTxRuntimeLimits::no_limits(),
     );
     assert!(traced.outcome.result.is_success(), "{:?}", traced.outcome.result);
-    assert!(traced.outcome.gas.state > 0);
+    assert_eq!(traced.outcome.gas.state, gas::slot_state());
+    // The reservoir paid the body's history before the first frame, then the slot's state gas
+    // and its record's history at the `SSTORE`; what is left goes back to the sender.
+    let slot = gas::slot_state() + gas::records(1);
+    assert_eq!(
+        traced.outcome.gas.reservoir_remaining,
+        reservoir - gas::body(0) - slot,
+        "the reservoir left"
+    );
+    // The opcode tracer shows only the regular part of the `SSTORE`: the rest came out of the
+    // reservoir, which only the EIP-3155 trace shows.
+    assert_eq!(step(&traced, "SSTORE", 1).gas_cost, gas::sstore_fresh_cold(), "the regular part");
+    let steps = eip3155_steps(&traced);
+    let at = |op: &str| {
+        let line = steps.iter().find(|line| line["opName"] == op).expect("the step");
+        u64::from_str_radix(line["reservoir"].as_str().unwrap().trim_start_matches("0x"), 16)
+            .unwrap()
+    };
+    assert_eq!(at("PUSH32"), reservoir - gas::body(0), "the reservoir when the frame starts");
+    assert_eq!(at("STOP"), at("SSTORE") - slot, "the reservoir the SSTORE drew");
     pin("reservoir_sstore", &traced);
 }
 

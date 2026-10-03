@@ -13,5 +13,6 @@
 //! `tests/tracers/goldens/<scenario>/`.
 //! Rewrite: `UPDATE_GOLDENS=1 cargo test -p mega-evm --test tracers`.
 
+mod gas;
 mod harness;
 mod scenarios;

@@ -1,36 +1,81 @@
 {
   "failed": false,
-  "gas": 238718,
-  "returnValue": "0x",
+  "gas": 244728,
+  "returnValue": "0x5f5ff3",
   "structLogs": [
     {
       "pc": 0,
-      "op": "PUSH0",
-      "gas": 4761286,
-      "gasCost": 2,
+      "op": "PUSH1",
+      "gas": 4760154,
+      "gasCost": 3,
       "depth": 1,
       "stack": [],
       "refund": 0
     },
     {
-      "pc": 1,
+      "pc": 2,
+      "op": "PUSH2",
+      "gas": 4760151,
+      "gasCost": 3,
+      "depth": 1,
+      "stack": [
+        "0x3"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 5,
       "op": "PUSH0",
-      "gas": 4761284,
+      "gas": 4760148,
       "gasCost": 2,
       "depth": 1,
       "stack": [
+        "0x3",
+        "0xb"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 6,
+      "op": "CODECOPY",
+      "gas": 4760146,
+      "gasCost": 9,
+      "depth": 1,
+      "stack": [
+        "0x3",
+        "0xb",
         "0x0"
       ],
       "refund": 0
     },
     {
-      "pc": 2,
+      "pc": 7,
+      "op": "PUSH1",
+      "gas": 4760137,
+      "gasCost": 3,
+      "depth": 1,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 9,
+      "op": "PUSH0",
+      "gas": 4760134,
+      "gasCost": 2,
+      "depth": 1,
+      "stack": [
+        "0x3"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 10,
       "op": "RETURN",
-      "gas": 4761282,
+      "gas": 4760132,
       "gasCost": 0,
       "depth": 1,
       "stack": [
-        "0x0",
+        "0x3",
         "0x0"
       ],
       "refund": 0

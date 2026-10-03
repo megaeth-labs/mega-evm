@@ -1,6 +1,6 @@
 {
   "failed": false,
-  "gas": 44901,
+  "gas": 77660,
   "returnValue": "0x",
   "structLogs": [
     {
@@ -50,9 +50,9 @@
     },
     {
       "pc": 4,
-      "op": "PUSH0",
+      "op": "PUSH32",
       "gas": 4957712,
-      "gasCost": 2,
+      "gasCost": 3,
       "depth": 1,
       "stack": [
         "0x0",
@@ -63,9 +63,9 @@
       "refund": 0
     },
     {
-      "pc": 5,
+      "pc": 37,
       "op": "PUSH20",
-      "gas": 4957710,
+      "gas": 4957709,
       "gasCost": 3,
       "depth": 1,
       "stack": [
@@ -73,14 +73,14 @@
         "0x0",
         "0x0",
         "0x0",
-        "0x0"
+        "0x1"
       ],
       "refund": 0
     },
     {
-      "pc": 26,
+      "pc": 58,
       "op": "GAS",
-      "gas": 4957707,
+      "gas": 4957706,
       "gasCost": 2,
       "depth": 1,
       "stack": [
@@ -88,41 +88,118 @@
         "0x0",
         "0x0",
         "0x0",
-        "0x0",
+        "0x1",
         "0x400003"
       ],
       "refund": 0
     },
     {
-      "pc": 27,
+      "pc": 59,
       "op": "CALL",
-      "gas": 4957705,
-      "gasCost": 4880282,
+      "gas": 4957704,
+      "gasCost": 4887462,
       "depth": 1,
       "stack": [
         "0x0",
         "0x0",
         "0x0",
         "0x0",
-        "0x0",
+        "0x1",
         "0x400003",
-        "0x4ba609"
+        "0x4ba608"
       ],
       "refund": 0
     },
     {
       "pc": 0,
+      "op": "PUSH32",
+      "gas": 4871122,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 33,
+      "op": "PUSH32",
+      "gas": 4871119,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [
+        "0x1"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 66,
+      "op": "SSTORE",
+      "gas": 4871116,
+      "gasCost": 123540,
+      "depth": 2,
+      "stack": [
+        "0x1",
+        "0x1"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 67,
+      "op": "PUSH1",
+      "gas": 4747576,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 69,
       "op": "PUSH0",
-      "gas": 4877682,
+      "gas": 4747573,
+      "gasCost": 2,
+      "depth": 2,
+      "stack": [
+        "0x42"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 70,
+      "op": "PUSH0",
+      "gas": 4747571,
+      "gasCost": 2,
+      "depth": 2,
+      "stack": [
+        "0x42",
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 71,
+      "op": "LOG1",
+      "gas": 4747569,
+      "gasCost": 750,
+      "depth": 2,
+      "stack": [
+        "0x42",
+        "0x0",
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 72,
+      "op": "PUSH0",
+      "gas": 4746819,
       "gasCost": 2,
       "depth": 2,
       "stack": [],
       "refund": 0
     },
     {
-      "pc": 1,
+      "pc": 73,
       "op": "PUSH0",
-      "gas": 4877680,
+      "gas": 4746817,
       "gasCost": 2,
       "depth": 2,
       "stack": [
@@ -131,9 +208,9 @@
       "refund": 0
     },
     {
-      "pc": 2,
+      "pc": 74,
       "op": "REVERT",
-      "gas": 4877678,
+      "gas": 4746815,
       "gasCost": 0,
       "depth": 2,
       "stack": [
@@ -143,9 +220,9 @@
       "refund": 0
     },
     {
-      "pc": 28,
+      "pc": 60,
       "op": "POP",
-      "gas": 4955101,
+      "gas": 4925537,
       "gasCost": 2,
       "depth": 1,
       "stack": [
@@ -154,9 +231,41 @@
       "refund": 0
     },
     {
-      "pc": 29,
+      "pc": 61,
+      "op": "PUSH0",
+      "gas": 4925535,
+      "gasCost": 2,
+      "depth": 1,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 62,
+      "op": "PUSH0",
+      "gas": 4925533,
+      "gasCost": 2,
+      "depth": 1,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 63,
+      "op": "LOG0",
+      "gas": 4925531,
+      "gasCost": 3191,
+      "depth": 1,
+      "stack": [
+        "0x0",
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 64,
       "op": "STOP",
-      "gas": 4955099,
+      "gas": 4922340,
       "gasCost": 0,
       "depth": 1,
       "stack": [],

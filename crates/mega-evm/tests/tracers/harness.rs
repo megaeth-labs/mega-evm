@@ -15,7 +15,7 @@ use std::{
 use alloy_primitives::{Address, Bytes, B256};
 use alloy_rpc_types_trace::geth::{
     AccountState, CallConfig, CallFrame, DefaultFrame, GethDebugTracingOptions,
-    GethDefaultTracingOptions, GethTrace, PreStateConfig, PreStateFrame, PreStateMode,
+    GethDefaultTracingOptions, GethTrace, PreStateConfig, PreStateFrame, PreStateMode, StructLog,
 };
 use alloy_sol_types::SolError;
 use mega_evm::{
@@ -207,6 +207,26 @@ impl Traced {
     pub(crate) fn gas_limit(&self) -> u64 {
         self.tx.0.base.gas_limit
     }
+}
+
+/// The struct-log step of the first `op` at `depth` in the node's opcode trace.
+pub(crate) fn step(traced: &Traced, op: &str, depth: u64) -> StructLog {
+    traced
+        .struct_logs()
+        .struct_logs
+        .into_iter()
+        .find(|log| log.op == op && log.depth == depth)
+        .unwrap_or_else(|| panic!("no {op} step at depth {depth}"))
+}
+
+/// The op lines of the EIP-3155 trace, without the summary.
+pub(crate) fn eip3155_steps(traced: &Traced) -> Vec<serde_json::Value> {
+    traced
+        .eip3155()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("a JSON line"))
+        .filter(|line| line.get("opName").is_some())
+        .collect()
 }
 
 /// Whether this process should rewrite goldens.

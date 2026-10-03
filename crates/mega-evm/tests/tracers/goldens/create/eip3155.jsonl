@@ -1,4 +1,8 @@
-{"pc":0,"depth":1,"opName":"PUSH0","op":95,"gas":"0x48a6c6","reservoir":"0x0","stateGas":"0x0","gasCost":"0x2","stack":[],"returnData":"0x","refund":"0x0","memSize":"0x0"}
-{"pc":1,"depth":1,"opName":"PUSH0","op":95,"gas":"0x48a6c4","reservoir":"0x0","stateGas":"0x0","gasCost":"0x2","stack":["0x0"],"returnData":"0x","refund":"0x0","memSize":"0x0"}
-{"pc":2,"depth":1,"opName":"RETURN","op":243,"gas":"0x48a6c2","reservoir":"0x0","stateGas":"0x0","gasCost":"0x0","stack":["0x0","0x0"],"returnData":"0x","refund":"0x0","memSize":"0x0","error":"Return"}
-{"stateRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","output":"0x","gasUsed":"0x3a47e","pass":true,"fork":"Osaka"}
+{"pc":0,"depth":1,"opName":"PUSH1","op":96,"gas":"0x48a25a","reservoir":"0x0","stateGas":"0x0","gasCost":"0x3","stack":[],"returnData":"0x","refund":"0x0","memSize":"0x0"}
+{"pc":2,"depth":1,"opName":"PUSH2","op":97,"gas":"0x48a257","reservoir":"0x0","stateGas":"0x0","gasCost":"0x3","stack":["0x3"],"returnData":"0x","refund":"0x0","memSize":"0x0"}
+{"pc":5,"depth":1,"opName":"PUSH0","op":95,"gas":"0x48a254","reservoir":"0x0","stateGas":"0x0","gasCost":"0x2","stack":["0x3","0xb"],"returnData":"0x","refund":"0x0","memSize":"0x0"}
+{"pc":6,"depth":1,"opName":"CODECOPY","op":57,"gas":"0x48a252","reservoir":"0x0","stateGas":"0x0","gasCost":"0x9","stack":["0x3","0xb","0x0"],"returnData":"0x","refund":"0x0","memSize":"0x0"}
+{"pc":7,"depth":1,"opName":"PUSH1","op":96,"gas":"0x48a249","reservoir":"0x0","stateGas":"0x0","gasCost":"0x3","stack":[],"returnData":"0x","refund":"0x0","memSize":"0x20"}
+{"pc":9,"depth":1,"opName":"PUSH0","op":95,"gas":"0x48a246","reservoir":"0x0","stateGas":"0x0","gasCost":"0x2","stack":["0x3"],"returnData":"0x","refund":"0x0","memSize":"0x20"}
+{"pc":10,"depth":1,"opName":"RETURN","op":243,"gas":"0x48a244","reservoir":"0x0","stateGas":"0x0","gasCost":"0x0","stack":["0x3","0x0"],"returnData":"0x","refund":"0x0","memSize":"0x20","error":"Return"}
+{"stateRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","output":"0x5f5ff3","gasUsed":"0x3a8fc","pass":true,"fork":"Osaka"}
