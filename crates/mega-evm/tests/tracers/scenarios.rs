@@ -226,10 +226,8 @@ fn test_create_deploys_runtime_code() {
     };
     // The EIP-3155 summary reads the frame's gas after its last step, the `RETURN`; the deposit is
     // charged after it, in `return_create`.
-    let deposit = gas::deposit_regular(len) +
-        satin_gas_params().code_deposit_state_gas(len) +
-        gas::history(len as u64);
-    assert_eq!(eip3155_summary_gas_used(&traced) + deposit, expected.receipt(), "EIP-3155 summary");
+    let summary = eip3155_summary_gas_used(&traced);
+    assert_eq!(summary + gas::deposit(len), expected.receipt(), "EIP-3155 summary");
     pin("create", &traced, expected);
 }
 
@@ -466,6 +464,11 @@ fn test_keyless_deploy_succeeds() {
         state: gas::account_state() + gas::created_state(len),
         history: gas::body(calldata.len()) + gas::records(2) + gas::history(len as u64),
     };
+    // The EIP-3155 summary reads the creation's gas after its last step, the `RETURN`, two frames
+    // away from the receipt: the deposit is charged after it, in `return_create`, and the call
+    // frame returns what is left of the creation's gas, spending nothing more.
+    let summary = eip3155_summary_gas_used(&traced);
+    assert_eq!(summary + gas::deposit(len), expected.receipt(), "EIP-3155 summary");
     pin("keyless_success", &traced, expected);
 }
 

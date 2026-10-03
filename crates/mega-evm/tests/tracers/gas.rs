@@ -125,6 +125,12 @@ pub(crate) fn deposit_regular(len: usize) -> u64 {
         entry(GasId::keccak256_per_word()) * words(len as u64)
 }
 
+/// Everything a creation's deposit of `len` bytes costs, which `return_create` charges after the
+/// creation's last step: its regular part, the code's state gas and its history gas.
+pub(crate) fn deposit(len: usize) -> u64 {
+    deposit_regular(len) + satin_gas_params().code_deposit_state_gas(len) + history(len as u64)
+}
+
 /// The state gas of a created account and `len` bytes of code deposited in it.
 pub(crate) fn created_state(len: usize) -> u64 {
     entry(GasId::create_state_gas()) + satin_gas_params().code_deposit_state_gas(len)
