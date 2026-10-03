@@ -32,7 +32,7 @@ use op_alloy_rpc_types::Transaction;
 
 use crate::{
     common::{
-        op_receipt_to_tx_receipt, parse_bucket_capacity, print_execution_summary,
+        create_address, op_receipt_to_tx_receipt, parse_bucket_capacity, print_execution_summary,
         print_execution_trace, print_receipt, BuildProviderOutput, EvmeExternalEnvs, EvmeOutcome,
         ExecutionSummary, ExternalEnvSnapshot, OpTxReceipt, OverriddenTx, RpcArgs, RpcCacheStore,
         TracerType, TxOverrideArgs,
@@ -1305,15 +1305,13 @@ impl Cmd {
 
         let from = ctx.target_tx.inner.inner.signer();
         let to = ctx.target_tx.inner.inner.to();
-        let contract_address = (to.is_none() && receipt_envelope.is_success())
-            .then(|| from.create(pre_execution_nonce));
         let receipt = op_receipt_to_tx_receipt(
             &receipt_envelope,
             ctx.block.number(),
             ctx.block.header.timestamp(),
             from,
             to,
-            contract_address,
+            create_address(from, to.into(), pre_execution_nonce),
             ctx.target_tx.inner.effective_gas_price.unwrap_or(0),
             gas_used,
             Some(ctx.target_tx.inner.inner.tx_hash()),

@@ -72,7 +72,7 @@ use op_alloy_rpc_types::Transaction;
 use tracing::info;
 
 use crate::{
-    common::{op_receipt_to_tx_receipt, EvmeExternalEnvs, OpTxReceipt},
+    common::{create_address, op_receipt_to_tx_receipt, EvmeExternalEnvs, OpTxReceipt},
     EvmeState,
 };
 
@@ -317,13 +317,14 @@ pub(super) struct HarvestedTarget<D> {
     pub(super) exec_result: ExecutionResult<MegaHaltReason>,
     /// Wall-clock time the execution took.
     pub(super) exec_time: Duration,
-    /// Nonce the target's signer held before it executed — the one the created
-    /// contract address above was derived from, reported so a driver does not
-    /// have to read it back from a database the target has since committed to.
+    /// Nonce the target's signer held before it executed — the one the
+    /// receipt's `contractAddress` was derived from, reported so a driver does
+    /// not have to read it back from a database the target has since committed
+    /// to.
     pub(super) pre_execution_nonce: u64,
-    /// Address a successful contract creation deployed to.
-    pub(super) contract_address: Option<Address>,
-    /// Receipt built from the block's own receipt for this target.
+    /// Receipt built from the block's own receipt for this target. Its
+    /// `contractAddress` is the target's [`create_address`], set for a failed
+    /// creation too.
     pub(super) receipt: OpTxReceipt,
     /// Whatever the driver's [`TargetLifecycle`] produced for this target,
     /// redeemable only against the run's [`CleanRun`] proof.
@@ -576,8 +577,6 @@ where
                     });
                     continue;
                 };
-                let contract_address = (target.to.is_none() && envelope.is_success())
-                    .then(|| target.from.create(target.pre_execution_nonce));
                 // Block-global log index: cumulative log count of all committed
                 // receipts that precede this target in the block.
                 //
@@ -603,7 +602,7 @@ where
                     identity.timestamp,
                     target.from,
                     target.to,
-                    contract_address,
+                    create_address(target.from, target.to.into(), target.pre_execution_nonce),
                     target.effective_gas_price,
                     target.gas_used,
                     Some(target.tx_hash),
@@ -617,7 +616,6 @@ where
                     exec_result: target.exec_result,
                     exec_time: target.exec_time,
                     pre_execution_nonce: target.pre_execution_nonce,
-                    contract_address,
                     receipt,
                     draft: PendingDraft(target.draft),
                 })));

@@ -103,6 +103,7 @@ Batch mode additionally accepts [`--dump-fixture-dir`](#--dump-fixture-dir-dir) 
 With `--json`, batch mode writes NDJSON: exactly one compact, single-line JSON object per requested transaction, in processing order (ascending block, then transaction index).
 
 A transaction that executed is reported as its `tx_hash`, `block_number`, and `tx_index`, followed by the same fields the single-transaction JSON output carries (`success`, `gas_used`, `logs_count`, and the optional `output` / `contract_address` / `revert_reason` / `halt_reason`) and its `receipt`.
+In every replay mode a creation's `receipt.contractAddress` is the address it targeted whether or not it deployed, as the on-chain receipt reports it, while `contract_address` appears only for a creation that actually deployed.
 Both shapes below are expanded for readability; on the wire each object occupies exactly one line.
 
 ```json
