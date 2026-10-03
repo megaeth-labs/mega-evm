@@ -40,6 +40,10 @@ fn sender_balance_key() -> String {
     cache_key("eth_getBalance", &format!("[\"{FROM}\",\"0xf\"]"))
 }
 
+fn sender_code_key() -> String {
+    cache_key("eth_getCode", &format!("[\"{FROM}\",\"0xf\"]"))
+}
+
 fn rpc_result(result: Value) -> String {
     json!({"jsonrpc": "2.0", "result": result}).to_string()
 }
@@ -130,6 +134,10 @@ fn sample() -> Value {
             {
                 "key": sender_balance_key(),
                 "value": rpc_result(json!("0x1234"))
+            },
+            {
+                "key": sender_code_key(),
+                "value": rpc_result(json!("0x"))
             },
             {
                 "key": OTHER_KEY,
@@ -561,6 +569,11 @@ fn cases() -> Vec<Case> {
             mutation: Mutation::Rewrite(vec![sender_balance_key()]),
         },
         Case {
+            op: "set_account_code",
+            apply: |env| env.set_account_code(FROM, 0xf, "0x00"),
+            mutation: Mutation::Rewrite(vec![sender_code_key()]),
+        },
+        Case {
             op: "zero_transaction_gas",
             apply: |env| env.zero_transaction_gas(TX),
             mutation: rewrite(&[TX_KEY]),
@@ -619,6 +632,15 @@ fn cases() -> Vec<Case> {
             mutation: rewrite(&[RECEIPT_KEY]),
         },
         Case {
+            op: "rewrite_receipt_of",
+            apply: |env| {
+                env.rewrite_receipt_of(TX, |result| {
+                    result["cumulativeGasUsed"] = Value::String("0x2".into());
+                })
+            },
+            mutation: rewrite(&[RECEIPT_KEY]),
+        },
+        Case {
             op: "null_receipt",
             apply: |env| env.null_receipt(),
             mutation: rewrite(&[RECEIPT_KEY]),
@@ -671,6 +693,11 @@ fn cases() -> Vec<Case> {
         Case {
             op: "remove_from_block_body",
             apply: |env| env.remove_from_block_body(BLOCK, &[TX]),
+            mutation: rewrite(&[BLOCK_KEY]),
+        },
+        Case {
+            op: "empty_block_body",
+            apply: |env| env.empty_block_body(BLOCK),
             mutation: rewrite(&[BLOCK_KEY]),
         },
         Case {

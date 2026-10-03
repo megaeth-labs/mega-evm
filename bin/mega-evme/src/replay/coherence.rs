@@ -15,14 +15,18 @@
 //!
 //! Every [`Incoherence`] describes the *endpoint* contradicting itself (a reorg
 //! landing between two calls, a load-balanced endpoint serving divergent views,
-//! or a served block header that does not hash to the hash it is served under,
-//! or that answers a numbered fetch from another height), never a definitive
-//! answer about the target. Both drivers therefore report all of them as
-//! infrastructure failures.
+//! a served block header that does not hash to the hash it is served under, or
+//! that answers a numbered fetch from another height, or a served block body or
+//! set of receipts the header does not commit to), never a definitive answer
+//! about the target. Both drivers therefore report all of them as infrastructure
+//! failures.
 
-use alloy_primitives::B256;
+use alloy_primitives::{logs_bloom, Bloom, Bytes, Log, B256};
 use alloy_rpc_types_eth::Header;
 use core::fmt;
+use op_alloy_consensus::OpReceiptEnvelope;
+
+use super::header::{receipts_root, transactions_root};
 
 /// Where the endpoint placed a target, as read from its `(block_number,
 /// block_hash)` pair.
@@ -88,6 +92,13 @@ pub(super) enum Incoherence {
         /// Height the served header claims.
         served: u64,
     },
+    /// A served receipt's logs bloom is not the bloom of the logs it carries.
+    UnauthenticReceiptBloom {
+        /// Transaction the receipt was served for.
+        tx_hash: B256,
+        /// How many logs the receipt carries.
+        logs: usize,
+    },
     /// The target was resolved into the genesis block, which has no parent to
     /// fork the pre-state from.
     GenesisPlacement,
@@ -107,6 +118,47 @@ pub(super) enum Incoherence {
         fetched: B256,
         /// Hash the target's own lookup reported as its inclusion.
         reported: B256,
+    },
+    /// The transactions served for a block body do not rebuild the transactions
+    /// root its header commits to.
+    UncommittedBody {
+        /// Height of the block whose body was served.
+        number: u64,
+        /// Hash of that block.
+        block_hash: B256,
+        /// Transactions root the served body rebuilds to.
+        served: B256,
+        /// Transactions root the block's header commits to.
+        committed: B256,
+    },
+    /// The receipts served for every transaction of a block do not rebuild the
+    /// receipts root its header commits to.
+    UncommittedReceipts {
+        /// Height of the block whose receipts were fetched.
+        number: u64,
+        /// Hash of that block.
+        block_hash: B256,
+        /// Receipts root the served receipts rebuild to.
+        served: B256,
+        /// Receipts root the block's header commits to.
+        committed: B256,
+    },
+    /// A served receipt's `gasUsed` is not its share of the block's cumulative
+    /// gas: the rise in cumulative gas from the receipt before it (from zero for
+    /// the first one).
+    InconsistentReceiptGas {
+        /// Height of the block whose receipts were fetched.
+        number: u64,
+        /// Hash of that block.
+        block_hash: B256,
+        /// Transaction the receipt was served for.
+        tx_hash: B256,
+        /// The `gasUsed` the receipt reports.
+        served: u64,
+        /// Cumulative gas of the block before this transaction.
+        cumulative_before: u64,
+        /// Cumulative gas of the block up to and including this transaction.
+        cumulative_after: u64,
     },
     /// The block body does not list a target the endpoint placed in it.
     AbsentFromBody {
@@ -160,6 +212,15 @@ impl fmt::Display for Incoherence {
                  or a tampered capture); the block environment it describes is not the one the run \
                  asked for"
             ),
+            // The bloom is a function of the logs beside it, so a receipt can be
+            // checked against itself without asking anything further.
+            Self::UnauthenticReceiptBloom { tx_hash, logs } => write!(
+                f,
+                "the on-chain receipt served for transaction {tx_hash} carries a logs bloom that \
+                 is not the bloom of its own {logs} log(s): the endpoint served an inconsistent \
+                 receipt (a corrupted backend, or a tampered capture); the transaction is \
+                 unverified"
+            ),
             Self::GenesisPlacement => write!(
                 f,
                 "endpoint resolved the target into block 0, which has no parent block \
@@ -178,6 +239,44 @@ impl fmt::Display for Incoherence {
                  resolved as included in {reported}: the endpoint served divergent views of \
                  this block (reorg in progress, or a load-balanced endpoint); retry once the \
                  chain settles"
+            ),
+            // The header hash does not cover the body listing, so an authentic
+            // header can sit beside a listing the endpoint changed; the
+            // transactions root is what ties the two together.
+            Self::UncommittedBody { number, block_hash, served, committed } => write!(
+                f,
+                "the transactions served for block {number} ({block_hash}) rebuild transactions \
+                 root {served}, but its header commits to {committed}: the endpoint served a \
+                 block body the header does not commit to (an inconsistent backend, or a \
+                 tampered capture); the block is unverified"
+            ),
+            // Each receipt was checked against the question it answers (its
+            // transaction and inclusion); the root is what ties the set to the
+            // block, so a set that does not rebuild it is not the block's.
+            Self::UncommittedReceipts { number, block_hash, served, committed } => write!(
+                f,
+                "the on-chain receipts served for block {number} ({block_hash}) rebuild receipts \
+                 root {served}, but its header commits to {committed}: the endpoint served \
+                 receipts the block does not commit to (an inconsistent backend, or a tampered \
+                 capture); every receipt of the block is unverified"
+            ),
+            // The receipts root covers each receipt's cumulative gas but not the
+            // RPC `gasUsed` beside it, so the two are checked against each other.
+            Self::InconsistentReceiptGas {
+                number,
+                block_hash,
+                tx_hash,
+                served,
+                cumulative_before,
+                cumulative_after,
+            } => write!(
+                f,
+                "the on-chain receipt served for transaction {tx_hash} of block {number} \
+                 ({block_hash}) reports gasUsed {served}, but the block's committed cumulative \
+                 gas goes from {cumulative_before} to {cumulative_after} at it: the endpoint \
+                 served a gasUsed that contradicts the receipts the header commits to (an \
+                 inconsistent backend, or a tampered capture); every receipt of the block is \
+                 unverified"
             ),
             Self::AbsentFromBody { number, block_hash, tx_hash, claim } => {
                 let expectation = match claim {
@@ -264,6 +363,23 @@ pub(super) fn authenticate_block_header(
     Ok(())
 }
 
+/// Require that a served receipt's logs bloom is the bloom of its own logs.
+///
+/// The bloom is a consensus field of the receipt, but it is derived from the
+/// logs: a receipt whose bloom says something its logs do not is not a receipt
+/// any execution produced. Checking it at admission is what lets a comparison
+/// of the logs stand for a comparison of the bloom too.
+pub(super) fn require_receipt_bloom(
+    tx_hash: B256,
+    served: Bloom,
+    logs: &[Log],
+) -> Result<(), Incoherence> {
+    if logs_bloom(logs) != served {
+        return Err(Incoherence::UnauthenticReceiptBloom { tx_hash, logs: logs.len() });
+    }
+    Ok(())
+}
+
 /// Require that the block a target was resolved into has a parent to fork from.
 ///
 /// An endpoint resolving a target into block 0 contradicts itself: genesis has
@@ -313,6 +429,86 @@ pub(super) fn require_inclusion_anchor(
     Ok(())
 }
 
+/// Require that the body served for a block is the one its header commits to.
+///
+/// `transactions` are the EIP-2718 encodings of every transaction the body
+/// lists, in body order, each already authenticated against its body-listed
+/// hash. Those checks prove each transaction is the one its hash names; only the
+/// header's `transactionsRoot` ties the listing itself to the block, since the
+/// header hash does not cover it. A listing with a transaction left out, added,
+/// or reordered under an authentic header is caught here, and it is the endpoint
+/// contradicting itself rather than a replay that diverged: the root depends on
+/// what was served, never on what executed.
+pub(super) fn require_committed_body(
+    number: u64,
+    block_hash: B256,
+    committed: B256,
+    transactions: &[Bytes],
+) -> Result<(), Incoherence> {
+    let served = transactions_root(transactions);
+    if served != committed {
+        return Err(Incoherence::UncommittedBody { number, block_hash, served, committed });
+    }
+    Ok(())
+}
+
+/// Require that the receipts served for a whole block body are the ones its
+/// header commits to.
+///
+/// `receipts` are the consensus receipts the endpoint served for every
+/// transaction of the body, in body order, each already checked to describe its
+/// transaction and this block. Those checks answer each receipt's own question;
+/// only the header's `receiptsRoot` ties the set to the block, so a receipt
+/// rewritten under a valid identity passes them and is caught here. A caller
+/// holding receipts for only part of the body cannot rebuild the root and does
+/// not ask.
+pub(super) fn require_committed_receipts(
+    number: u64,
+    block_hash: B256,
+    committed: B256,
+    receipts: &[OpReceiptEnvelope],
+) -> Result<(), Incoherence> {
+    let served = receipts_root(receipts);
+    if served != committed {
+        return Err(Incoherence::UncommittedReceipts { number, block_hash, served, committed });
+    }
+    Ok(())
+}
+
+/// Require that every served receipt's `gasUsed` is its share of the block's
+/// cumulative gas.
+///
+/// `receipts` are `(transaction, served gasUsed, cumulative gas)` for every
+/// transaction of the body, in body order, whose receipts already rebuilt the
+/// header's receipts root ([`require_committed_receipts`]). That root covers
+/// the cumulative gas but not the RPC `gasUsed` field beside it, so a receipt
+/// whose `gasUsed` alone was rewritten still authenticates; comparing the replay
+/// against it would report a gas divergence the chain never had. On `MegaETH` a
+/// receipt's `gasUsed` is exactly the rise in cumulative gas over the receipt
+/// before it (over zero for the first), so any other value is the endpoint
+/// contradicting the receipts it served.
+pub(super) fn require_receipt_gas(
+    number: u64,
+    block_hash: B256,
+    receipts: &[(B256, u64, u64)],
+) -> Result<(), Incoherence> {
+    let mut cumulative_before = 0;
+    for &(tx_hash, served, cumulative_after) in receipts {
+        if cumulative_after.checked_sub(cumulative_before) != Some(served) {
+            return Err(Incoherence::InconsistentReceiptGas {
+                number,
+                block_hash,
+                tx_hash,
+                served,
+                cumulative_before,
+                cumulative_after,
+            });
+        }
+        cumulative_before = cumulative_after;
+    }
+    Ok(())
+}
+
 /// Require that the block body lists a target the endpoint placed in this block.
 ///
 /// A body that does not list the target contradicts the placement it was queued
@@ -335,10 +531,12 @@ pub(super) const fn require_body_membership(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::Address;
 
     /// Distinct, recognizable hashes for the message assertions.
     const HASH_A: B256 = B256::repeat_byte(0xaa);
     const HASH_B: B256 = B256::repeat_byte(0xbb);
+    const HASH_C: B256 = B256::repeat_byte(0xcc);
 
     /// Height [`sealed_header`] claims, and therefore the height a fetch has to
     /// have asked for to accept it.
@@ -405,6 +603,7 @@ mod tests {
     fn test_incoherence_messages_are_pinned() {
         let a = HASH_A.to_string();
         let b = HASH_B.to_string();
+        let c = HASH_C.to_string();
         for (incoherence, expected) in [
             (
                 Incoherence::UnanchoredView { number: 22_945_844 },
@@ -441,6 +640,15 @@ mod tests {
                     .to_string(),
             ),
             (
+                Incoherence::UnauthenticReceiptBloom { tx_hash: HASH_A, logs: 2 },
+                format!(
+                    "the on-chain receipt served for transaction {a} carries a logs bloom that is \
+                     not the bloom of its own 2 log(s): the endpoint served an inconsistent \
+                     receipt (a corrupted backend, or a tampered capture); the transaction is \
+                     unverified"
+                ),
+            ),
+            (
                 Incoherence::GenesisPlacement,
                 "endpoint resolved the target into block 0, which has no parent block to fork \
                  from: contradictory endpoint data"
@@ -460,6 +668,51 @@ mod tests {
                     "block 12 has hash {a}, but the target transaction was resolved as included \
                      in {b}: the endpoint served divergent views of this block (reorg in \
                      progress, or a load-balanced endpoint); retry once the chain settles"
+                ),
+            ),
+            (
+                Incoherence::UncommittedBody {
+                    number: 12,
+                    block_hash: HASH_A,
+                    served: HASH_B,
+                    committed: HASH_C,
+                },
+                format!(
+                    "the transactions served for block 12 ({a}) rebuild transactions root {b}, \
+                     but its header commits to {c}: the endpoint served a block body the header \
+                     does not commit to (an inconsistent backend, or a tampered capture); the \
+                     block is unverified"
+                ),
+            ),
+            (
+                Incoherence::UncommittedReceipts {
+                    number: 12,
+                    block_hash: HASH_A,
+                    served: HASH_B,
+                    committed: HASH_C,
+                },
+                format!(
+                    "the on-chain receipts served for block 12 ({a}) rebuild receipts root {b}, \
+                     but its header commits to {c}: the endpoint served receipts the block does \
+                     not commit to (an inconsistent backend, or a tampered capture); every \
+                     receipt of the block is unverified"
+                ),
+            ),
+            (
+                Incoherence::InconsistentReceiptGas {
+                    number: 12,
+                    block_hash: HASH_A,
+                    tx_hash: HASH_B,
+                    served: 21_001,
+                    cumulative_before: 40_000,
+                    cumulative_after: 61_000,
+                },
+                format!(
+                    "the on-chain receipt served for transaction {b} of block 12 ({a}) reports \
+                     gasUsed 21001, but the block's committed cumulative gas goes from 40000 to \
+                     61000 at it: the endpoint served a gasUsed that contradicts the receipts the \
+                     header commits to (an inconsistent backend, or a tampered capture); every \
+                     receipt of the block is unverified"
                 ),
             ),
             (
@@ -591,11 +844,119 @@ mod tests {
     }
 
     /// Genesis is the only height without a parent to fork from.
+    /// A receipt is admitted exactly when its bloom is the bloom of its logs.
+    #[test]
+    fn test_require_receipt_bloom_accepts_only_the_bloom_of_the_logs() {
+        let log = Log::new_unchecked(Address::repeat_byte(0xaa), vec![HASH_B], Default::default());
+        let logs = [log];
+
+        assert_eq!(require_receipt_bloom(HASH_A, logs_bloom(&logs), &logs), Ok(()));
+        assert_eq!(require_receipt_bloom(HASH_A, Bloom::ZERO, &[]), Ok(()));
+        for (served, logs) in [(Bloom::ZERO, &logs[..]), (Bloom::repeat_byte(0xff), &[][..])] {
+            assert_eq!(
+                require_receipt_bloom(HASH_A, served, logs),
+                Err(Incoherence::UnauthenticReceiptBloom { tx_hash: HASH_A, logs: logs.len() }),
+            );
+        }
+    }
+
     #[test]
     fn test_require_forkable_block_rejects_only_genesis() {
         assert_eq!(require_forkable_block(0), Err(Incoherence::GenesisPlacement));
         assert_eq!(require_forkable_block(1), Ok(()));
         assert_eq!(require_forkable_block(u64::MAX), Ok(()));
+    }
+
+    /// The served body authenticates exactly when it rebuilds the root the
+    /// header commits to: a transaction left out, or two swapped, breaks it, and
+    /// the verdict carries both roots.
+    #[test]
+    fn test_require_committed_body_accepts_only_the_committed_body() {
+        let body = [Bytes::from_static(&[0x7e, 0x01]), Bytes::from_static(&[0x02, 0xc0])];
+        let committed = transactions_root(&body);
+
+        assert_eq!(require_committed_body(7, HASH_A, committed, &body), Ok(()));
+        for served in [vec![body[0].clone()], vec![body[1].clone(), body[0].clone()], vec![]] {
+            assert_eq!(
+                require_committed_body(7, HASH_A, committed, &served),
+                Err(Incoherence::UncommittedBody {
+                    number: 7,
+                    block_hash: HASH_A,
+                    served: transactions_root(&served),
+                    committed,
+                }),
+                "{served:?}"
+            );
+        }
+    }
+
+    /// A receipt with the given status and cumulative gas, as a block commits to
+    /// it.
+    fn committed_receipt(status: bool, cumulative_gas_used: u64) -> OpReceiptEnvelope {
+        let receipt = alloy_consensus::Receipt {
+            status: alloy_consensus::Eip658Value::Eip658(status),
+            cumulative_gas_used,
+            logs: vec![],
+        };
+        OpReceiptEnvelope::Eip1559(receipt.with_bloom())
+    }
+
+    /// The served receipts authenticate exactly when they rebuild the root the
+    /// header commits to; a single rewritten field of a single receipt breaks
+    /// it, and the verdict carries both roots.
+    #[test]
+    fn test_require_committed_receipts_accepts_only_the_committed_set() {
+        let receipts = [committed_receipt(true, 21_000), committed_receipt(true, 42_000)];
+        let committed = receipts_root(&receipts);
+
+        assert_eq!(require_committed_receipts(7, HASH_A, committed, &receipts), Ok(()));
+
+        let tampered = [committed_receipt(true, 21_000), committed_receipt(false, 42_000)];
+        assert_eq!(
+            require_committed_receipts(7, HASH_A, committed, &tampered),
+            Err(Incoherence::UncommittedReceipts {
+                number: 7,
+                block_hash: HASH_A,
+                served: receipts_root(&tampered),
+                committed,
+            }),
+        );
+
+        let reordered = [receipts[1].clone(), receipts[0].clone()];
+        assert!(
+            require_committed_receipts(7, HASH_A, committed, &reordered).is_err(),
+            "the root commits to the body order"
+        );
+    }
+
+    /// Each served `gasUsed` must be its receipt's rise in cumulative gas, the
+    /// first one's over zero; a forged value anywhere, or cumulative gas that
+    /// falls, is named with the receipt it is found at.
+    #[test]
+    fn test_require_receipt_gas_accepts_only_the_cumulative_deltas() {
+        let honest = [(HASH_A, 40_000, 40_000), (HASH_B, 21_000, 61_000), (HASH_C, 0, 61_000)];
+        assert_eq!(require_receipt_gas(7, HASH_A, &honest), Ok(()));
+        assert_eq!(require_receipt_gas(7, HASH_A, &[]), Ok(()));
+
+        let first_forged = [(HASH_A, 39_999, 40_000), (HASH_B, 21_000, 61_000)];
+        assert_eq!(
+            require_receipt_gas(7, HASH_C, &first_forged),
+            Err(Incoherence::InconsistentReceiptGas {
+                number: 7,
+                block_hash: HASH_C,
+                tx_hash: HASH_A,
+                served: 39_999,
+                cumulative_before: 0,
+                cumulative_after: 40_000,
+            }),
+        );
+        let later_forged = [(HASH_A, 40_000, 40_000), (HASH_B, 1, 61_000)];
+        assert!(matches!(
+            require_receipt_gas(7, HASH_C, &later_forged),
+            Err(Incoherence::InconsistentReceiptGas { tx_hash, served: 1, .. }) if tx_hash == HASH_B
+        ));
+        let falling = [(HASH_A, 40_000, 40_000), (HASH_B, 0, 39_000)];
+        assert!(require_receipt_gas(7, HASH_C, &falling).is_err(), "cumulative gas cannot fall");
     }
 
     /// Linkage, anchoring, and membership accept agreement and reject anything

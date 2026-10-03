@@ -11,8 +11,8 @@ use mega_evm::{
 use tracing::{debug, info, trace, warn};
 
 use crate::common::{
-    load_hex, op_receipt_to_tx_receipt, print_execution_summary, print_execution_trace,
-    print_receipt, DecodedRawTx, EvmeError, EvmeOutcome, ExecutionSummary,
+    create_address, load_hex, op_receipt_to_tx_receipt, print_execution_summary,
+    print_execution_trace, print_receipt, DecodedRawTx, EvmeError, EvmeOutcome, ExecutionSummary,
 };
 
 use super::Result;
@@ -142,7 +142,6 @@ impl Cmd {
         let tx_type = MegaTxType::try_from(tx.base.tx_type)
             .map_err(|_| EvmeError::UnsupportedTxType(tx.base.tx_type))?;
         let sender = tx.base.caller;
-        let is_create = tx.base.kind == TxKind::Create;
         let receiver = match tx.base.kind {
             TxKind::Call(addr) => Some(addr),
             TxKind::Create => None,
@@ -152,9 +151,9 @@ impl Cmd {
         // Create transaction receipt
         let op_receipt = outcome.to_op_receipt(tx_type, outcome.pre_execution_nonce);
 
-        // Determine contract address for CREATE transactions
-        let contract_address = (is_create && op_receipt.is_success())
-            .then(|| sender.create(outcome.pre_execution_nonce));
+        // Reported for a failed creation too, as an execution client's receipt does; the
+        // summary names it as a deployed contract only on success.
+        let create_address = create_address(sender, tx.base.kind, outcome.pre_execution_nonce);
 
         let receipt = op_receipt_to_tx_receipt(
             &op_receipt,
@@ -162,7 +161,7 @@ impl Cmd {
             self.env_args.block.block_timestamp,
             sender,
             receiver,
-            contract_address,
+            create_address,
             effective_gas_price,
             outcome.exec_result.tx_gas_used(),
             None,
@@ -172,7 +171,7 @@ impl Cmd {
         );
 
         if self.output_args.json {
-            let mut summary = ExecutionSummary::from_result(&outcome.exec_result, contract_address);
+            let mut summary = ExecutionSummary::from_result(&outcome.exec_result, create_address);
             summary.fill_trace_and_dump(outcome, &self.trace_args, &self.dump_args)?;
             summary.receipt =
                 Some(serde_json::to_value(&receipt).expect("failed to serialize receipt"));
@@ -182,7 +181,7 @@ impl Cmd {
             );
         } else {
             // Human-readable summary
-            print_execution_summary(&outcome.exec_result, contract_address, outcome.exec_time);
+            print_execution_summary(&outcome.exec_result, create_address, outcome.exec_time);
 
             print_receipt(&receipt);
 

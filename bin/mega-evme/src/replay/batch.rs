@@ -16,6 +16,11 @@
 //! exception: both fetch `eth_getTransactionReceipt` for *every* target of a
 //! block, including the non-targets a single-transaction capture never asked
 //! about. Offline, those come back as `rpc` entries and the run exits `3`.
+//!
+//! `--verify-block` (whole-block mode only) adds one verdict per block, after
+//! the block's target lines: once the kernel hands back the block it executed
+//! in full, the commitments it produces are compared against the block's
+//! authenticated header ([`super::header`]). It issues no extra RPC call.
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -26,7 +31,7 @@ use std::{
 
 use alloy_consensus::{transaction::Recovered, BlockHeader};
 use alloy_network::ReceiptResponse;
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Bytes, B256};
 use alloy_provider::Provider;
 use alloy_rpc_types_eth::Block;
 use mega_evm::{
@@ -34,6 +39,7 @@ use mega_evm::{
     revm::{context::result::ExecutionResult, inspector::NoOpInspector, DatabaseRef},
     MegaBlockExecutionCtx, MegaHaltReason, MegaHardforks, MegaSpecId, MegaTxEnvelope,
 };
+use op_alloy_consensus::OpReceiptEnvelope;
 use op_alloy_rpc_types::Transaction;
 use serde::Serialize;
 use state_test::types::MegaEnv;
@@ -42,7 +48,7 @@ use tracing::{debug, info, warn};
 use crate::{
     common::{
         print_execution_summary, print_receipt, BatchExitFloor, BatchFailureCounts,
-        EvmeExternalEnvs, ExecutionSummary, ExitCode, OpTxReceipt,
+        EvmeExternalEnvs, ExecutionSummary, ExitCode, OpTxReceipt, VerificationCounts,
     },
     replay::{get_hardfork_config, ReplayHardforks},
     ChainArgs,
@@ -51,7 +57,9 @@ use crate::{
 use super::{
     cmd::retrieve_block_env,
     coherence::{self, Incoherence, MembershipClaim, TargetPlacement},
-    fixture, kernel,
+    fixture,
+    header::{self, BlockSummary, BlockVerification},
+    kernel,
     verify::{self, ReceiptFacts, VerificationOutcome},
     ReplayError, Result,
 };
@@ -63,6 +71,9 @@ pub(super) struct ReportArgs {
     pub json: bool,
     /// Verify every target against its on-chain receipt.
     pub verify_receipt: bool,
+    /// Verify every replayed block against its header. Only set for a
+    /// whole-block run (`--block`), whose targets are the whole body.
+    pub verify_block: bool,
     /// When set, dump a self-validating fixture for every successful target into
     /// this directory as `<DIR>/<tx_hash>.json`.
     pub dump_fixture_dir: Option<PathBuf>,
@@ -231,7 +242,6 @@ struct ExecutedTx {
     block_number: u64,
     tx_index: u64,
     exec_result: ExecutionResult<MegaHaltReason>,
-    contract_address: Option<Address>,
     exec_time: Duration,
     receipt: OpTxReceipt,
     /// On-chain receipt verdict, present iff `--verify-receipt` was given.
@@ -245,6 +255,63 @@ struct FailedTx {
     tx_hash: B256,
     kind: BatchErrorKind,
     message: String,
+}
+
+/// One block's verdict against its header, present iff `--verify-block` was
+/// given.
+struct BlockReport {
+    /// Number of the verified block.
+    number: u64,
+    /// Hash of the verified block: the authenticated header's own hash. Always
+    /// known in whole-block mode, whose block is fetched before any job runs.
+    hash: Option<B256>,
+    /// The verdict.
+    verification: BlockVerification,
+    /// Whether the verdict went unanswered because the endpoint contradicted
+    /// itself about the block — a body the header does not commit to, or a
+    /// parent that does not link to it. No target line carries that failure, so
+    /// the block itself is counted, as rpc-class. An unavailable verdict that is
+    /// not unanswered (the block did not execute in full) is counted through
+    /// its targets' own lines instead.
+    unanswered: bool,
+}
+
+impl BlockReport {
+    /// The verdict for a block that never reached execution. Its targets'
+    /// failure lines say why and carry the class that decides the exit.
+    fn not_executed(number: u64, hash: Option<B256>) -> Self {
+        Self {
+            number,
+            hash,
+            verification: BlockVerification::unavailable(
+                "the block did not execute; its transactions' errors say why",
+            ),
+            unanswered: false,
+        }
+    }
+
+    /// A verdict the block itself could not be given because the endpoint
+    /// contradicted itself about it.
+    fn unanswered(block: &Block<Transaction>, message: String) -> Self {
+        warn!(block = block.header.number(), %message, "Block could not be verified");
+        Self {
+            number: block.header.number(),
+            hash: Some(block.hash()),
+            verification: BlockVerification::unavailable(message),
+            unanswered: true,
+        }
+    }
+
+    /// A verdict reached about the block, compared or not, that no endpoint
+    /// contradiction is behind.
+    fn answered(block: &Block<Transaction>, verification: BlockVerification) -> Self {
+        Self {
+            number: block.header.number(),
+            hash: Some(block.hash()),
+            verification,
+            unanswered: false,
+        }
+    }
 }
 
 /// Running tally of a batch run's per-target outcomes.
@@ -265,7 +332,10 @@ struct BatchTally {
     replayed: usize,
     /// Targets compared against an on-chain receipt.
     verified: usize,
-    /// Failed and mismatched targets, by class (reported targets only).
+    /// Blocks compared against their header.
+    blocks_verified: usize,
+    /// Failed and mismatched targets, by class (reported targets only), plus
+    /// the blocks that did not reproduce their header.
     counts: BatchFailureCounts,
     /// Run-level exit floor from a non-target abort not carried by any target.
     exit_floor: BatchExitFloor,
@@ -346,6 +416,28 @@ impl BatchTally {
         }
     }
 
+    /// Count one block's verdict against its header.
+    ///
+    /// A mismatch is a divergence finding like a receipt mismatch. A verdict
+    /// the endpoint left unanswered — a body the header does not commit to — is
+    /// an rpc-class failure of the block, which no target line carries. Any
+    /// other unavailable verdict is not counted: it only arises when the block
+    /// did not execute in full, and the targets' own lines (or the run's exit
+    /// floor) already carry the failure that stopped it.
+    fn record_block(&mut self, report: &BlockReport) {
+        if report.unanswered {
+            self.counts.blocks_unverified += 1;
+            return;
+        }
+        if report.verification.is_unavailable() {
+            return;
+        }
+        self.blocks_verified += 1;
+        if !report.verification.matched {
+            self.counts.blocks_mismatched += 1;
+        }
+    }
+
     /// Record a mid-block abort whose root-cause class is not already carried by
     /// a per-target failure entry.
     ///
@@ -385,20 +477,26 @@ impl BatchTally {
     /// written does, as an execution-class failure of its target.
     ///
     /// A non-target abort floor alone also fails the run (with empty target
-    /// failure counters) so the exit still reflects the root cause.
+    /// failure counters) so the exit still reflects the root cause, and so does
+    /// a block that could not be verified.
     fn into_error(self) -> Option<ReplayError> {
-        if self.failed() > 0 || self.exit_floor != BatchExitFloor::None {
+        if self.failed() > 0 ||
+            self.counts.blocks_unverified > 0 ||
+            self.exit_floor != BatchExitFloor::None
+        {
             return Some(ReplayError::BatchFailed(BatchFailureCounts {
                 total: self.reported,
                 exit_floor: self.exit_floor,
                 ..self.counts
             }));
         }
-        if self.counts.mismatched > 0 {
-            return Some(ReplayError::VerificationMismatch {
-                mismatched: self.counts.mismatched,
-                total: self.verified,
-            });
+        if self.counts.mismatched > 0 || self.counts.blocks_mismatched > 0 {
+            return Some(ReplayError::VerificationMismatch(VerificationCounts {
+                receipts_mismatched: self.counts.mismatched,
+                receipts_total: self.verified,
+                blocks_mismatched: self.counts.blocks_mismatched,
+                blocks_total: self.blocks_verified,
+            }));
         }
         None
     }
@@ -542,6 +640,19 @@ struct BatchResultLine<'a> {
     fixture: Option<&'a FixtureReport>,
 }
 
+/// NDJSON line carrying one block's verdict against its header.
+///
+/// It has no `tx_hash`, which is how a consumer tells it from a target line,
+/// and its verdict sits under `block_verification` rather than `verification`
+/// so a filter over the target lines' verdicts never matches it.
+#[derive(Serialize)]
+struct BatchBlockLine<'a> {
+    block_number: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    block_hash: Option<B256>,
+    block_verification: &'a BlockVerification,
+}
+
 /// NDJSON line for a target that produced an infrastructure error.
 #[derive(Serialize)]
 struct BatchErrorLine<'a> {
@@ -566,7 +677,8 @@ struct BatchErrorBody<'a> {
 /// `--verify-receipt`, a run in which every target replayed but some diverged
 /// from its on-chain receipt fails with [`ReplayError::VerificationMismatch`]
 /// instead — a distinct variant, so a divergence is never confused with a
-/// target that could not be replayed.
+/// target that could not be replayed. A block that did not reproduce its
+/// header under `--verify-block` counts as the same kind of divergence.
 pub(super) async fn run<P>(
     provider: &P,
     chain_id: u64,
@@ -597,11 +709,15 @@ where
             let block = fetch_block(provider, *number).await?;
             let targets: Vec<B256> = block.transactions.hashes().collect();
             info!(block = number, tx_count = targets.len(), "Batch replay of a whole block");
-            if targets.is_empty() {
+            if targets.is_empty() && !report.verify_block {
                 // Nothing failed, so this is a clean exit — but a silent one is
                 // indistinguishable from a run that produced no output for a bad
                 // reason, so say why stdout is empty. No job is queued: with no
                 // targets to report, forking the parent state would buy nothing.
+                //
+                // `--verify-block` still queues the block: an empty listing is a
+                // claim about the block like any other, and the header has to
+                // commit to it before the run can pass.
                 eprintln!("Block {number} contains no transactions; nothing to replay");
                 vec![]
             } else {
@@ -635,6 +751,10 @@ where
     };
 
     for job in jobs {
+        let number = job.number;
+        // Whole-block mode fetched the block before queuing the job, so its
+        // authenticated hash is known even when the block never executes.
+        let pinned_hash = job.block.as_ref().map(Block::hash);
         let outcome = replay_block(provider, chain_id, job, external_envs.clone(), &report).await;
         for entry in outcome.entries {
             if let BatchEntry::Executed(tx) = &entry {
@@ -652,6 +772,12 @@ where
         if let Some(kind) = outcome.uncounted_abort {
             tally.record_uncounted_abort(kind);
         }
+        if report.verify_block {
+            let block =
+                outcome.block.unwrap_or_else(|| BlockReport::not_executed(number, pinned_hash));
+            tally.record_block(&block);
+            emit_block(&block, report.json);
+        }
     }
 
     info!(
@@ -665,6 +791,14 @@ where
             verified = tally.verified,
             mismatched = tally.counts.mismatched,
             "On-chain receipt verification finished",
+        );
+    }
+    if report.verify_block {
+        info!(
+            verified = tally.blocks_verified,
+            mismatched = tally.counts.blocks_mismatched,
+            unverified = tally.counts.blocks_unverified,
+            "Block verification finished",
         );
     }
     if report.dump_fixture_dir.is_some() {
@@ -724,7 +858,7 @@ where
                 Err(message) => {
                     failures.push(FailedTx { tx_hash: *hash, kind: BatchErrorKind::Rpc, message })
                 }
-                Ok(()) => match coherence::classify_placement(tx.block_number, tx.block_hash) {
+                Ok(_) => match coherence::classify_placement(tx.block_number, tx.block_hash) {
                     Ok(TargetPlacement::Mined { number, inclusion_hash }) => {
                         grouped
                             .entry(number)
@@ -758,6 +892,9 @@ struct BlockReplayOutcome {
     /// Present when the aborting transaction is not a target: swept targets stay
     /// `rpc`, and this class is tallied so the run exit reflects the abort.
     uncounted_abort: Option<BatchErrorKind>,
+    /// The block's verdict against its header, present when `--verify-block`
+    /// was given and the block reached execution.
+    block: Option<BlockReport>,
 }
 
 impl BlockReplayOutcome {
@@ -773,7 +910,17 @@ impl BlockReplayOutcome {
         block_tx_order: Option<&[B256]>,
         uncounted_abort: Option<BatchErrorKind>,
     ) -> Self {
-        Self { entries: order_block_entries(entries, job_targets, block_tx_order), uncounted_abort }
+        Self {
+            entries: order_block_entries(entries, job_targets, block_tx_order),
+            uncounted_abort,
+            block: None,
+        }
+    }
+
+    /// Attach the block's verdict against its header.
+    fn with_block(mut self, block: Option<BlockReport>) -> Self {
+        self.block = block;
+        self
     }
 }
 
@@ -836,6 +983,7 @@ where
 {
     let BlockJob { number, block, targets: job_targets } = job;
     let verify_receipt = report.verify_receipt;
+    let verify_block = report.verify_block;
     let dump_dir = report.dump_fixture_dir.as_deref();
     let overwrite = report.overwrite;
     let target_hashes = || job_targets.iter().map(|t| t.hash);
@@ -868,6 +1016,14 @@ where
     };
     // Body order for the documented ascending `(block, tx_index)` stream.
     let block_tx_order: Vec<B256> = block.transactions.hashes().collect();
+
+    // A whole-block run over an empty listing has nothing to execute, but the
+    // listing is still a claim the header has to commit to.
+    if verify_block && block_tx_order.is_empty() {
+        let report = verify_empty_block(provider, &block).await;
+        return BlockReplayOutcome::ordered(Vec::new(), &job_targets, None, None)
+            .with_block(Some(report));
+    }
 
     // Per-target inclusion and membership guards. `--tx-file` resolved each
     // target through `eth_getTransactionByHash`, which reported the block it
@@ -968,7 +1124,7 @@ where
     // each feature below.
     let need_receipts = verify_receipt || dump_dir.is_some();
     let onchain_receipts = if need_receipts {
-        fetch_target_receipts(provider, &targets, block.hash()).await
+        fetch_target_receipts(provider, &targets, &block).await
     } else {
         BTreeMap::new()
     };
@@ -1059,6 +1215,7 @@ where
             fork_block: parent_block.header.number(),
             identity: kernel::BlockIdentity { number, timestamp, hash: block.hash() },
             tx_hashes: &tx_hashes,
+            body_len: block_tx_order.len(),
             targets: &target_set,
         },
         &mut hook,
@@ -1085,10 +1242,20 @@ where
         }
     };
 
+    // Judged before the harvest consumes the run: the verdict reads the whole
+    // block the kernel handed back, or why it could not.
+    let (block_report, block_floor) = if verify_block {
+        let (report, floor) = verify_executed_block(&block, &loop_outcome, &finish);
+        (Some(report), floor)
+    } else {
+        (None, None)
+    };
+
     // `entries` already holds any inclusion/membership failure recorded before
     // the block started; the harvested targets are appended to it here.
     match finish {
-        kernel::FinishOutcome::Harvested(harvest) => {
+        // The whole executed block was already judged above.
+        kernel::FinishOutcome::Harvested { targets: harvest, whole_block: _ } => {
             for harvested in harvest {
                 let target = match harvested {
                     kernel::TargetHarvest::Receipt(target) => target,
@@ -1148,7 +1315,6 @@ where
                     block_number: number,
                     tx_index: target.tx_index,
                     exec_result: target.exec_result,
-                    contract_address: target.contract_address,
                     exec_time: target.exec_time,
                     receipt: target.receipt,
                     verification,
@@ -1245,7 +1411,102 @@ where
         }
     }
 
-    BlockReplayOutcome::ordered(entries, &job_targets, Some(&block_tx_order), uncounted_abort)
+    BlockReplayOutcome::ordered(
+        entries,
+        &job_targets,
+        Some(&block_tx_order),
+        uncounted_abort.or(block_floor),
+    )
+    .with_block(block_report)
+}
+
+/// Judge a block the kernel ran against its header.
+///
+/// Only a block whose whole body executed and finished is judged
+/// ([`judge_block`]). When the walk aborted or the block could not be finished,
+/// the verdict is unavailable and nothing is counted for it: the targets'
+/// failure lines carry that cause. A walk that completed and finished without
+/// handing back the whole block cannot happen in whole-block mode, whose targets
+/// are the whole body; it is reported as an internal error, and the returned
+/// class floors the run's exit so it cannot pass as a clean run.
+fn verify_executed_block<D>(
+    block: &Block<Transaction>,
+    loop_outcome: &kernel::LoopOutcome,
+    finish: &kernel::FinishOutcome<D>,
+) -> (BlockReport, Option<BatchErrorKind>) {
+    let unavailable =
+        |message: String| BlockReport::answered(block, BlockVerification::unavailable(message));
+    match (loop_outcome, finish) {
+        (_, kernel::FinishOutcome::Harvested { whole_block: Some(whole), .. }) => {
+            (judge_block(block, &whole.transactions, &BlockSummary::of(whole)), None)
+        }
+        (kernel::LoopOutcome::Aborted { error, .. }, _) => {
+            (unavailable(format!("the block body did not execute in full: {error}")), None)
+        }
+        (_, kernel::FinishOutcome::Failed { error, .. }) => {
+            (unavailable(format!("the block could not be finished: {error}")), None)
+        }
+        (kernel::LoopOutcome::Completed(_), kernel::FinishOutcome::Harvested { .. }) => (
+            unavailable(
+                "internal error: the replay completed the block body but did not hand back the \
+                 whole block"
+                    .to_string(),
+            ),
+            Some(BatchErrorKind::Execution),
+        ),
+    }
+}
+
+/// Judge a block against its header, given the transactions its body served
+/// and the execution commitments the replay produced for them.
+///
+/// The body comes first. Its transactions root depends only on what the
+/// endpoint served, never on execution, so a body the header does not commit to
+/// is the endpoint contradicting itself: the verdict goes unanswered (rpc-class)
+/// rather than reporting a divergence. Only for a body the header commits to are
+/// the execution outputs compared, where a difference is a mismatch.
+fn judge_block(
+    block: &Block<Transaction>,
+    transactions: &[Bytes],
+    summary: &BlockSummary,
+) -> BlockReport {
+    if let Err(incoherence) = coherence::require_committed_body(
+        block.header.number(),
+        block.hash(),
+        block.header.transactions_root(),
+        transactions,
+    ) {
+        return BlockReport::unanswered(block, incoherence.to_string());
+    }
+    let verification = header::compare(&block.header, summary);
+    if let Some(diff) = &verification.diff {
+        warn!(block = block.header.number(), ?diff, "Replayed block does not reproduce its header");
+    }
+    BlockReport::answered(block, verification)
+}
+
+/// Judge a block whose body lists no transaction.
+///
+/// Nothing executes, so the commitments are those of an empty body
+/// ([`BlockSummary::of_empty_body`]). The header is held to the same standard as
+/// for an executed block — authenticated (already, when it was fetched), linked
+/// to its parent, and committing to the served body — so an authentic header
+/// that commits to transactions the listing left out goes unanswered rather
+/// than passing.
+async fn verify_empty_block<P>(provider: &P, block: &Block<Transaction>) -> BlockReport
+where
+    P: Provider<op_alloy_network::Optimism>,
+{
+    let parent = match fetch_block(provider, block.header.number() - 1).await {
+        Ok(parent) => parent,
+        Err(e) => return BlockReport::unanswered(block, e.to_string()),
+    };
+    if let Err(incoherence) =
+        coherence::require_parent_linkage(parent.hash(), block.header.parent_hash())
+    {
+        return BlockReport::unanswered(block, incoherence.to_string());
+    }
+    judge_block(block, &[], &BlockSummary::of_empty_body())
 }
 
 /// Inputs for [`prepare_target_fixture`], grouped so the dump path stays a single
@@ -1432,21 +1693,37 @@ fn fixture_report_from_build_err(err: fixture::FixtureBuildError) -> FixtureRepo
 ///
 /// Each target maps either to the consensus facts its receipt reports, or to the
 /// message explaining why it could not be verified (the endpoint failed the
-/// call or pruned the receipt, or the receipt describes a different inclusion
-/// than the block being replayed).
+/// call or pruned the receipt, the receipt describes a different inclusion
+/// than the block being replayed, or the block's receipts do not rebuild the
+/// receipts root its header commits to).
+///
+/// When the targets cover the whole body and every receipt was admitted, the
+/// set is authenticated against the header's `receiptsRoot`
+/// ([`coherence::require_committed_receipts`]), and each receipt's served
+/// `gasUsed`, which that root does not cover, against its share of the
+/// committed cumulative gas ([`coherence::require_receipt_gas`]). A set that
+/// fails either is endpoint data no verdict may rest on, so every receipt of the
+/// block becomes unavailable — the same unanswered class as a receipt the
+/// endpoint could not serve — instead of being compared. A partial set cannot
+/// rebuild the root and is left as fetched.
 async fn fetch_target_receipts<P>(
     provider: &P,
     targets: &[B256],
-    block_hash: B256,
+    block: &Block<Transaction>,
 ) -> BTreeMap<B256, std::result::Result<ReceiptFacts, String>>
 where
     P: Provider<op_alloy_network::Optimism>,
 {
+    let block_hash = block.hash();
     let mut receipts = BTreeMap::new();
+    let mut consensus = HashMap::with_capacity(targets.len());
     for tx_hash in targets {
         let fetched = match verify::fetch_receipt(provider, *tx_hash).await {
             Ok(receipt) => match verify::check_inclusion(receipt.block_hash(), block_hash) {
-                Ok(()) => Ok(ReceiptFacts::from_receipt(&receipt.inner)),
+                Ok(()) => {
+                    consensus.insert(*tx_hash, verify::consensus_receipt(&receipt));
+                    Ok(ReceiptFacts::from_onchain(&receipt))
+                }
                 Err(message) => Err(message),
             },
             // The reported entry already carries the `rpc` kind, so the error's
@@ -1459,7 +1736,47 @@ where
         }
         receipts.insert(*tx_hash, fetched);
     }
+
+    let body: Vec<B256> = block.transactions.hashes().collect();
+    if let Some(ordered) = whole_body_receipts(&body, &mut consensus) {
+        let number = block.header.number();
+        let authentic = coherence::require_committed_receipts(
+            number,
+            block_hash,
+            block.header.receipts_root(),
+            &ordered,
+        )
+        .and_then(|()| {
+            // Every receipt of the body was admitted, so each has its facts.
+            let served_gas: Vec<(B256, u64, u64)> = body
+                .iter()
+                .filter_map(|hash| match receipts.get(hash) {
+                    Some(Ok(facts)) => Some((*hash, facts.gas_used, facts.cumulative_gas_used)),
+                    _ => None,
+                })
+                .collect();
+            coherence::require_receipt_gas(number, block_hash, &served_gas)
+        });
+        if let Err(incoherence) = authentic {
+            let message = incoherence.to_string();
+            warn!(block = number, %message, "On-chain receipts do not authenticate against the block");
+            for fetched in receipts.values_mut() {
+                *fetched = Err(message.clone());
+            }
+        }
+    }
     receipts
+}
+
+/// The admitted consensus receipts of every transaction of `body`, in body
+/// order, or `None` when any of them is missing — a body transaction that is not
+/// a target, or whose receipt was not admitted — so the set cannot rebuild the
+/// block's receipts root.
+fn whole_body_receipts(
+    body: &[B256],
+    consensus: &mut HashMap<B256, OpReceiptEnvelope>,
+) -> Option<Vec<OpReceiptEnvelope>> {
+    body.iter().map(|hash| consensus.remove(hash)).collect()
 }
 
 /// Fetch a block by number, using the same call shape as the single-transaction path.
@@ -1582,7 +1899,7 @@ fn emit(entry: &BatchEntry, json: bool) {
         let line = match entry {
             BatchEntry::Executed(tx) => {
                 let mut summary =
-                    ExecutionSummary::from_result(&tx.exec_result, tx.contract_address);
+                    ExecutionSummary::from_result(&tx.exec_result, tx.receipt.contract_address);
                 summary.receipt =
                     Some(serde_json::to_value(&tx.receipt).expect("failed to serialize receipt"));
                 summary.verification = tx.verification.as_ref().map(|verification| {
@@ -1612,7 +1929,7 @@ fn emit(entry: &BatchEntry, json: bool) {
                 "=== Transaction {} (block {}, index {}) ===",
                 tx.tx_hash, tx.block_number, tx.tx_index
             );
-            print_execution_summary(&tx.exec_result, tx.contract_address, tx.exec_time);
+            print_execution_summary(&tx.exec_result, tx.receipt.contract_address, tx.exec_time);
             print_receipt(&tx.receipt);
             if let Some(verification) = &tx.verification {
                 println!();
@@ -1629,6 +1946,25 @@ fn emit(entry: &BatchEntry, json: bool) {
             println!("Error ({}): {}", tx.kind.as_str(), tx.message);
         }
     }
+}
+
+/// Write one block's verdict to stdout, after the block's target entries.
+fn emit_block(report: &BlockReport, json: bool) {
+    if json {
+        let line = serde_json::to_string(&BatchBlockLine {
+            block_number: report.number,
+            block_hash: report.hash,
+            block_verification: &report.verification,
+        });
+        println!("{}", line.expect("failed to serialize output"));
+        return;
+    }
+    println!();
+    match report.hash {
+        Some(hash) => println!("=== Block {} ({hash}) ===", report.number),
+        None => println!("=== Block {} ===", report.number),
+    }
+    println!("{}", report.verification.verdict_line());
 }
 
 /// Parse the newline-separated transaction hash list behind `--tx-file`.
@@ -2016,8 +2352,135 @@ mod tests {
     fn test_batch_tally_mismatch_only_reports_the_verification_error() {
         let err = tally(&[], 4, 2).into_error().expect("run failed");
         assert!(
-            matches!(err, ReplayError::VerificationMismatch { mismatched: 2, total: 4 }),
+            matches!(
+                err,
+                ReplayError::VerificationMismatch(counts)
+                    if counts == VerificationCounts::receipts(2, 4)
+            ),
             "unexpected error: {err:?}"
+        );
+    }
+
+    /// A block verdict as a run would have reported it.
+    fn block_verdict(matched: bool) -> BlockReport {
+        let diff = header::BlockDiff {
+            gas_used: Some(verify::Mismatch { onchain: 1, replay: 2 }),
+            ..Default::default()
+        };
+        block_report(
+            BlockVerification { matched, diff: (!matched).then_some(diff), error: None },
+            false,
+        )
+    }
+
+    /// A block report carrying `verification`.
+    fn block_report(verification: BlockVerification, unanswered: bool) -> BlockReport {
+        BlockReport { number: 1, hash: Some(B256::ZERO), verification, unanswered }
+    }
+
+    /// A block that did not reproduce its header is a divergence: alone it
+    /// fails the run as a block-only mismatch (exit 2).
+    #[test]
+    fn test_batch_tally_block_mismatch_alone_exits_two() {
+        let mut tally = tally(&[], 3, 0);
+        tally.record_block(&block_verdict(false));
+
+        assert_eq!(tally.blocks_verified, 1);
+        assert_eq!(tally.counts.blocks_mismatched, 1);
+        let err = tally.into_error().expect("run failed");
+        assert_eq!(ExitCode::from_evme_error(&err), ExitCode::VerificationMismatch);
+        assert_eq!(
+            err.to_string(),
+            "Block verification mismatch: 1 of 1 verified block(s) did not reproduce the block \
+             header"
+        );
+    }
+
+    /// Receipt and block divergences are counted side by side and both named.
+    #[test]
+    fn test_batch_tally_counts_receipt_and_block_mismatches_together() {
+        let mut tally = tally(&[], 23, 10);
+        tally.record_block(&block_verdict(false));
+
+        let err = tally.into_error().expect("run failed");
+        let ReplayError::VerificationMismatch(counts) = err else {
+            panic!("a divergence-only run fails as a mismatch: {err:?}");
+        };
+        assert_eq!(
+            counts,
+            VerificationCounts {
+                receipts_mismatched: 10,
+                receipts_total: 23,
+                blocks_mismatched: 1,
+                blocks_total: 1,
+            }
+        );
+    }
+
+    /// A matching block adds nothing to fail on, and an unavailable verdict is
+    /// not counted at all: the block's own target failures decide the exit.
+    #[test]
+    fn test_batch_tally_matching_and_unavailable_block_verdicts_add_no_failure() {
+        let mut clean = tally(&[], 3, 0);
+        clean.record_block(&block_verdict(true));
+        assert_eq!(clean.blocks_verified, 1);
+        assert!(clean.into_error().is_none(), "a matching block passes");
+
+        // One target replayed, one swept behind an abort.
+        let mut aborted = tally(&[BatchErrorKind::Rpc], 1, 0);
+        aborted.record_block(&block_report(
+            BlockVerification::unavailable("the block body did not execute"),
+            false,
+        ));
+        assert_eq!(aborted.blocks_verified, 0, "an unavailable verdict was never compared");
+        assert_eq!(aborted.counts.blocks_mismatched, 0);
+        let err = aborted.into_error().expect("the swept target fails the run");
+        assert_eq!(ExitCode::from_evme_error(&err), ExitCode::RpcFailure);
+    }
+
+    /// A block the endpoint contradicted itself about is counted as an
+    /// unanswered block: it fails the run as rpc-class even when every target
+    /// came out clean, and never counts as verified or mismatched.
+    #[test]
+    fn test_batch_tally_unanswered_block_fails_as_rpc() {
+        let mut tally = tally(&[], 22, 0);
+        tally.record_block(&block_report(
+            BlockVerification::unavailable(
+                "the endpoint served a body the header does not commit to",
+            ),
+            true,
+        ));
+
+        assert_eq!(tally.blocks_verified, 0);
+        assert_eq!(tally.counts.blocks_mismatched, 0);
+        assert_eq!(tally.counts.blocks_unverified, 1);
+        let err = tally.into_error().expect("an unanswered block fails the run");
+        assert_eq!(ExitCode::from_evme_error(&err), ExitCode::RpcFailure);
+        assert_eq!(
+            err.to_string(),
+            "1 block(s) could not be verified against the block header",
+            "the message names the block, not a target count"
+        );
+    }
+
+    /// A block mismatch never outranks an infrastructure failure: the run fails
+    /// with the class counts, which still name the mismatched block.
+    #[test]
+    fn test_batch_tally_block_mismatch_ranks_below_infrastructure_failures() {
+        let mut tally = tally(&[BatchErrorKind::Rpc], 2, 0);
+        tally.record_block(&block_verdict(false));
+
+        let err = tally.into_error().expect("run failed");
+        let ReplayError::BatchFailed(counts) = &err else {
+            panic!("an infrastructure failure aggregates: {err:?}");
+        };
+        assert_eq!(counts.blocks_mismatched, 1);
+        assert_eq!(ExitCode::from_evme_error(&err), ExitCode::RpcFailure);
+        assert!(
+            counts
+                .to_string()
+                .ends_with("; 1 replayed block(s) did not reproduce the block header"),
+            "unexpected message: {counts}"
         );
     }
 

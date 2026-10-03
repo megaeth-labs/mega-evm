@@ -98,22 +98,14 @@ pub enum EvmeError {
     #[error("Unsupported transaction type: {0}")]
     UnsupportedTxType(u8),
 
-    /// A `replay --verify-receipt` run found at least one local replay that did
-    /// not reproduce the on-chain receipt.
+    /// A `replay --verify-receipt` / `--verify-block` run found at least one
+    /// replay that did not reproduce the on-chain receipt or the block header.
     ///
     /// Distinct from the infrastructure error variants so a verification
     /// mismatch can be told apart from a target that could not be replayed or
     /// verified at all.
-    #[error(
-        "Receipt verification mismatch: {mismatched} of {total} verified transaction(s) did \
-         not reproduce the on-chain receipt"
-    )]
-    VerificationMismatch {
-        /// Number of verified transactions whose replay diverged.
-        mismatched: usize,
-        /// Number of transactions that were verified.
-        total: usize,
-    },
+    #[error("{0}")]
+    VerificationMismatch(VerificationCounts),
 
     /// A batch replay in which at least one target did not come out clean.
     ///
@@ -134,6 +126,72 @@ pub enum EvmeError {
     /// Other error
     #[error("Other error: {0}")]
     Other(String),
+}
+
+/// What a verifying replay compared, and how much of it diverged.
+///
+/// Receipts and blocks are separate dimensions: a run may verify either or
+/// both, and the message names each one that diverged.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VerificationCounts {
+    /// Verified transactions whose replay did not reproduce the on-chain receipt.
+    pub receipts_mismatched: usize,
+    /// Transactions compared against their on-chain receipt.
+    pub receipts_total: usize,
+    /// Verified blocks whose replay did not reproduce the block header.
+    pub blocks_mismatched: usize,
+    /// Blocks compared against their header.
+    pub blocks_total: usize,
+}
+
+impl VerificationCounts {
+    /// Counts of a run that verified receipts only.
+    pub const fn receipts(mismatched: usize, total: usize) -> Self {
+        Self {
+            receipts_mismatched: mismatched,
+            receipts_total: total,
+            blocks_mismatched: 0,
+            blocks_total: 0,
+        }
+    }
+
+    /// Counts of a run that verified blocks only.
+    pub const fn blocks(mismatched: usize, total: usize) -> Self {
+        Self {
+            receipts_mismatched: 0,
+            receipts_total: 0,
+            blocks_mismatched: mismatched,
+            blocks_total: total,
+        }
+    }
+}
+
+impl core::fmt::Display for VerificationCounts {
+    /// Names every dimension that diverged. A receipt-only finding keeps the
+    /// message receipt verification has always printed.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let receipts = (self.receipts_mismatched > 0).then(|| {
+            format!(
+                "{} of {} verified transaction(s) did not reproduce the on-chain receipt",
+                self.receipts_mismatched, self.receipts_total
+            )
+        });
+        let blocks = (self.blocks_mismatched > 0).then(|| {
+            format!(
+                "{} of {} verified block(s) did not reproduce the block header",
+                self.blocks_mismatched, self.blocks_total
+            )
+        });
+        match (receipts, blocks) {
+            (Some(receipts), None) => write!(f, "Receipt verification mismatch: {receipts}"),
+            (None, Some(blocks)) => write!(f, "Block verification mismatch: {blocks}"),
+            (Some(receipts), Some(blocks)) => {
+                write!(f, "Verification mismatch: {receipts}; {blocks}")
+            }
+            // Never constructed: a run only reports a mismatch it counted.
+            (None, None) => write!(f, "Verification mismatch: nothing diverged"),
+        }
+    }
 }
 
 /// Exit-code floor contributed by a non-target mid-block abort.
@@ -161,8 +219,9 @@ pub enum BatchExitFloor {
 /// lines or parsing an error message.
 ///
 /// [`Self::execution`], [`Self::rpc`], [`Self::mismatched`], and [`Self::total`]
-/// count only reported targets. [`Self::exit_floor`] is consulted solely for
-/// exit ranking when a non-target abort's class is not carried by any target.
+/// count only reported targets, and [`Self::blocks_mismatched`] only verified
+/// blocks. [`Self::exit_floor`] is consulted solely for exit ranking when a
+/// non-target abort's class is not carried by any target.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BatchFailureCounts {
     /// Targets that failed for an execution, setup, or definitive-answer reason
@@ -173,6 +232,13 @@ pub struct BatchFailureCounts {
     pub rpc: usize,
     /// Targets that replayed but did not reproduce their on-chain receipt.
     pub mismatched: usize,
+    /// Blocks whose replay did not reproduce their header (`--verify-block`).
+    pub blocks_mismatched: usize,
+    /// Blocks whose verdict could not be rendered because the endpoint
+    /// contradicted itself about the block (`--verify-block`): a body the header
+    /// does not commit to, or a parent that does not link to it. Ranked with the
+    /// rpc failures: the question went unanswered.
+    pub blocks_unverified: usize,
     /// Targets the run reported on.
     pub total: usize,
     /// Non-target abort class that floors the run exit without being a target
@@ -183,20 +249,42 @@ pub struct BatchFailureCounts {
 impl core::fmt::Display for BatchFailureCounts {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         // Totals stay per-target: a non-target abort floor must not print
-        // "3 of 2 target transaction(s) failed".
-        write!(
-            f,
-            "{} of {} target transaction(s) failed ({} execution, {} rpc)",
-            self.execution + self.rpc,
-            self.total,
-            self.execution,
-            self.rpc,
-        )?;
+        // "3 of 2 target transaction(s) failed". A run whose only failure is a
+        // block it could not verify names the block first rather than leading
+        // with "0 of N target transaction(s) failed".
+        let lead_with_targets = self.execution + self.rpc > 0 || self.blocks_unverified == 0;
+        if lead_with_targets {
+            write!(
+                f,
+                "{} of {} target transaction(s) failed ({} execution, {} rpc)",
+                self.execution + self.rpc,
+                self.total,
+                self.execution,
+                self.rpc,
+            )?;
+        }
+        if self.blocks_unverified > 0 {
+            if lead_with_targets {
+                write!(f, "; ")?;
+            }
+            write!(
+                f,
+                "{} block(s) could not be verified against the block header",
+                self.blocks_unverified,
+            )?;
+        }
         if self.mismatched > 0 {
             write!(
                 f,
                 "; {} replayed transaction(s) did not reproduce the on-chain receipt",
                 self.mismatched,
+            )?;
+        }
+        if self.blocks_mismatched > 0 {
+            write!(
+                f,
+                "; {} replayed block(s) did not reproduce the block header",
+                self.blocks_mismatched,
             )?;
         }
         Ok(())
@@ -217,3 +305,81 @@ impl From<EvmDatabaseError<Self>> for EvmeError {
 
 /// Result type for the mega-evme command
 pub type Result<T> = std::result::Result<T, EvmeError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A receipt-only finding keeps the message receipt verification has always
+    /// printed, word for word.
+    #[test]
+    fn test_verification_counts_receipt_only_message_is_unchanged() {
+        assert_eq!(
+            EvmeError::VerificationMismatch(VerificationCounts::receipts(1, 3)).to_string(),
+            "Receipt verification mismatch: 1 of 3 verified transaction(s) did not reproduce \
+             the on-chain receipt"
+        );
+    }
+
+    /// A block-only finding names the blocks alone, even when the run verified
+    /// receipts that all matched.
+    #[test]
+    fn test_verification_counts_block_only_message() {
+        let expected = "Block verification mismatch: 1 of 2 verified block(s) did not \
+                        reproduce the block header";
+        assert_eq!(VerificationCounts::blocks(1, 2).to_string(), expected);
+        let receipts_matched =
+            VerificationCounts { receipts_total: 23, ..VerificationCounts::blocks(1, 2) };
+        assert_eq!(receipts_matched.to_string(), expected);
+    }
+
+    /// When both dimensions diverged, the message names both.
+    #[test]
+    fn test_verification_counts_names_both_dimensions() {
+        let counts = VerificationCounts {
+            receipts_mismatched: 10,
+            receipts_total: 23,
+            blocks_mismatched: 1,
+            blocks_total: 1,
+        };
+        assert_eq!(
+            counts.to_string(),
+            "Verification mismatch: 10 of 23 verified transaction(s) did not reproduce the \
+             on-chain receipt; 1 of 1 verified block(s) did not reproduce the block header"
+        );
+    }
+
+    /// A block that could not be verified is named after the target counts, or
+    /// leads the message when no target failed.
+    #[test]
+    fn test_batch_failure_counts_name_unverified_blocks() {
+        let alone = BatchFailureCounts { blocks_unverified: 1, total: 23, ..Default::default() };
+        assert_eq!(alone.to_string(), "1 block(s) could not be verified against the block header");
+
+        let with_targets =
+            BatchFailureCounts { rpc: 23, blocks_unverified: 1, total: 23, ..Default::default() };
+        assert_eq!(
+            with_targets.to_string(),
+            "23 of 23 target transaction(s) failed (0 execution, 23 rpc); 1 block(s) could not \
+             be verified against the block header"
+        );
+    }
+
+    /// The batch summary names mismatched blocks after the target counts.
+    #[test]
+    fn test_batch_failure_counts_name_mismatched_blocks() {
+        let counts = BatchFailureCounts {
+            rpc: 1,
+            mismatched: 2,
+            blocks_mismatched: 1,
+            total: 3,
+            ..Default::default()
+        };
+        assert_eq!(
+            counts.to_string(),
+            "1 of 3 target transaction(s) failed (0 execution, 1 rpc); 2 replayed \
+             transaction(s) did not reproduce the on-chain receipt; 1 replayed block(s) did not \
+             reproduce the block header"
+        );
+    }
+}

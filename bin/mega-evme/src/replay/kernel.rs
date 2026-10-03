@@ -41,6 +41,12 @@
 //!    both a draft and the proof means the block ran to a clean finish — which is the condition a
 //!    driver must not publish an artifact without.
 //!
+//! A run that executed and committed every transaction of the block body and
+//! finished it also hands back the block itself ([`WholeBlock`]): the body it
+//! executed and what the block executor produced for it. A driver that compares
+//! the replayed block against the block the chain sealed reads it there; a run
+//! that stopped anywhere short of the whole body has none.
+//!
 //! Either hook may fail. A failure aborts the block body exactly like a failed
 //! fetch or a rejected transaction: the walk stops, the block is still finished,
 //! and the abort is attributed to the target the driver was working on.
@@ -51,8 +57,8 @@ use std::{
 };
 
 use alloy_consensus::Transaction as _;
-use alloy_eips::Encodable2718;
-use alloy_primitives::{Address, B256};
+use alloy_eips::{eip7685::Requests, Encodable2718};
+use alloy_primitives::{Address, Bytes, B256};
 use alloy_provider::Provider;
 use mega_evm::{
     alloy_evm::{block::BlockExecutor, Evm, EvmEnv, IntoTxEnv, RecoveredTx},
@@ -68,11 +74,12 @@ use mega_evm::{
     MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaContext, MegaEvmFactory, MegaHaltReason,
     MegaHardforks, MegaSpecId, MegaTransaction, MegaTransactionExt, MegaTxEnvelope,
 };
+use op_alloy_consensus::OpReceiptEnvelope;
 use op_alloy_rpc_types::Transaction;
 use tracing::info;
 
 use crate::{
-    common::{op_receipt_to_tx_receipt, EvmeExternalEnvs, OpTxReceipt},
+    common::{create_address, op_receipt_to_tx_receipt, EvmeExternalEnvs, OpTxReceipt},
     EvmeState,
 };
 
@@ -116,7 +123,15 @@ pub(super) struct MinedBlockRun<'a, H, I> {
     /// Identity stamped onto the harvested receipts.
     pub(super) identity: BlockIdentity,
     /// The block body, in body order: every transaction the kernel may execute.
+    ///
+    /// A driver may hand over only the body up to its last target, since the
+    /// walk never goes past it; [`Self::body_len`] still states the whole
+    /// body's length.
     pub(super) tx_hashes: &'a [B256],
+    /// How many transactions the block body lists. A run produces a
+    /// [`WholeBlock`] only when it committed this many, which a walk over a
+    /// prefix of the body never does.
+    pub(super) body_len: usize,
     /// Hashes whose results the driver wants reported. The kernel stops once the
     /// last of them has committed.
     pub(super) targets: &'a HashSet<B256>,
@@ -281,9 +296,15 @@ impl<D> PendingDraft<D> {
 
 /// The block's terminal state.
 pub(super) enum FinishOutcome<D> {
-    /// The block finished. One harvest per target that committed, in commit
-    /// order.
-    Harvested(Vec<TargetHarvest<D>>),
+    /// The block finished.
+    Harvested {
+        /// One harvest per target that committed, in commit order.
+        targets: Vec<TargetHarvest<D>>,
+        /// The block the run executed, present iff the walk completed without
+        /// an abort and committed every transaction of the body: only then is
+        /// the finished block the one the body describes.
+        whole_block: Option<WholeBlock>,
+    },
     /// `finish()` failed, so no target of the block has a receipt and every
     /// draft is dropped unpublished.
     Failed {
@@ -292,6 +313,26 @@ pub(super) enum FinishOutcome<D> {
         /// Targets that had executed, in commit order.
         executed: Vec<B256>,
     },
+}
+
+/// A block the run executed in full, as the block executor finished it.
+///
+/// Carries what a block header commits to about execution, in the raw form the
+/// executor produced it, so a driver can rebuild those commitments without the
+/// kernel deciding which of them matter.
+pub(super) struct WholeBlock {
+    /// EIP-2718 encodings of the body's transactions, in body order. Each is
+    /// the encoding the transaction authenticated against its body-listed hash.
+    pub(super) transactions: Vec<Bytes>,
+    /// The receipts the block executor produced, one per transaction, in body
+    /// order.
+    pub(super) receipts: Vec<OpReceiptEnvelope>,
+    /// Gas the block used, as the block executor accounted it.
+    pub(super) gas_used: u64,
+    /// Blob gas the block used, as the block executor accounted it.
+    pub(super) blob_gas_used: u64,
+    /// EIP-7685 requests the block executor produced.
+    pub(super) requests: Requests,
 }
 
 /// One target's share of a finished block.
@@ -317,13 +358,14 @@ pub(super) struct HarvestedTarget<D> {
     pub(super) exec_result: ExecutionResult<MegaHaltReason>,
     /// Wall-clock time the execution took.
     pub(super) exec_time: Duration,
-    /// Nonce the target's signer held before it executed — the one the created
-    /// contract address above was derived from, reported so a driver does not
-    /// have to read it back from a database the target has since committed to.
+    /// Nonce the target's signer held before it executed — the one the
+    /// receipt's `contractAddress` was derived from, reported so a driver does
+    /// not have to read it back from a database the target has since committed
+    /// to.
     pub(super) pre_execution_nonce: u64,
-    /// Address a successful contract creation deployed to.
-    pub(super) contract_address: Option<Address>,
-    /// Receipt built from the block's own receipt for this target.
+    /// Receipt built from the block's own receipt for this target. Its
+    /// `contractAddress` is the target's [`create_address`], set for a failed
+    /// creation too.
     pub(super) receipt: OpTxReceipt,
     /// Whatever the driver's [`TargetLifecycle`] produced for this target,
     /// redeemable only against the run's [`CleanRun`] proof.
@@ -390,6 +432,7 @@ where
         fork_block,
         identity,
         tx_hashes,
+        body_len,
         targets,
     } = run;
 
@@ -431,6 +474,9 @@ where
         .max();
     let mut pending: Vec<PendingTarget<K::Draft>> = Vec::new();
     let mut committed = 0usize;
+    // The authenticated EIP-2718 encoding of every transaction walked, in body
+    // order, for the [`WholeBlock`] a complete run hands back.
+    let mut transactions: Vec<Bytes> = Vec::with_capacity(tx_hashes.len());
 
     // Run the block's transactions in order. Any failure aborts the block: the
     // executor state no longer matches the chain, so the remaining targets
@@ -472,9 +518,10 @@ where
             // a transaction it claimed to include. Executing it instead would
             // advance the block state on the wrong transaction, or report
             // another transaction's outcome under a target hash.
-            verify::authenticate_transaction(&tx, *tx_hash).map_err(|message| {
+            let encoded = verify::authenticate_transaction(&tx, *tx_hash).map_err(|message| {
                 ReplayError::BlockBodyTransactionFetch { tx_hash: *tx_hash, message }
             })?;
+            transactions.push(encoded);
 
             if !targets.contains(tx_hash) {
                 // Not reported on, so it only has to move the state the way the
@@ -556,6 +603,10 @@ where
         }
     }
 
+    // Only a walk that executed and committed the whole body produced the
+    // block the body describes.
+    let whole_body = aborted.is_none() && committed == body_len;
+
     // Finish the block even when it aborted midway: targets that already ran
     // still have a receipt worth reporting.
     let finish = match block_executor.finish() {
@@ -576,8 +627,6 @@ where
                     });
                     continue;
                 };
-                let contract_address = (target.to.is_none() && envelope.is_success())
-                    .then(|| target.from.create(target.pre_execution_nonce));
                 // Block-global log index: cumulative log count of all committed
                 // receipts that precede this target in the block.
                 //
@@ -603,7 +652,7 @@ where
                     identity.timestamp,
                     target.from,
                     target.to,
-                    contract_address,
+                    create_address(target.from, target.to.into(), target.pre_execution_nonce),
                     target.effective_gas_price,
                     target.gas_used,
                     Some(target.tx_hash),
@@ -617,12 +666,18 @@ where
                     exec_result: target.exec_result,
                     exec_time: target.exec_time,
                     pre_execution_nonce: target.pre_execution_nonce,
-                    contract_address,
                     receipt,
                     draft: PendingDraft(target.draft),
                 })));
             }
-            FinishOutcome::Harvested(harvested)
+            let whole_block = whole_body.then(|| WholeBlock {
+                transactions,
+                receipts,
+                gas_used: block_result.gas_used,
+                blob_gas_used: block_result.blob_gas_used,
+                requests: block_result.requests,
+            });
+            FinishOutcome::Harvested { targets: harvested, whole_block }
         }
         // The block itself failed to finish, so no target of it has a receipt
         // and every draft is dropped without being published.

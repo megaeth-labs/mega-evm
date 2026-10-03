@@ -207,9 +207,22 @@ fn test_verify_receipt_reports_a_status_mismatch() {
 }
 
 /// A log divergence is reported under `logs`.
+///
+/// The forged receipt carries the bloom of its forged logs: a receipt whose
+/// bloom contradicts its logs is refused at admission, so only a
+/// self-consistent receipt reaches the comparison.
 #[test]
 fn test_verify_receipt_reports_a_log_mismatch() {
+    let log = alloy_primitives::Log::new_unchecked(
+        alloy_primitives::address!("0x00000000000000000000000000000000000000aa"),
+        vec![alloy_primitives::b256!(
+            "0x000000000000000000000000000000000000000000000000000000000000000a"
+        )],
+        alloy_primitives::bytes!("deadbeef"),
+    );
+    let bloom = alloy_primitives::logs_bloom([&log]);
     let path = DoctoredEnvelope::with_receipt(cache(), "logs", |receipt| {
+        receipt["logsBloom"] = serde_json::json!(bloom);
         receipt["logs"] = serde_json::json!([{
             "address": "0x00000000000000000000000000000000000000aa",
             "topics": ["0x000000000000000000000000000000000000000000000000000000000000000a"],
@@ -487,6 +500,64 @@ fn test_batch_verify_receipt_for_another_transaction_keeps_result_and_is_rpc() {
         "an unverifiable target must not fail as a mismatch:\n{}",
         run.stderr
     );
+}
+
+/// A logs bloom with every bit set: the bloom of no receipt's logs.
+fn forged_bloom() -> serde_json::Value {
+    format!("0x{}", "f".repeat(512)).into()
+}
+
+/// A receipt whose bloom is not the bloom of its own logs is refused at
+/// admission: the single-transaction run fails as an infrastructure error
+/// (exit 3) rather than matching on logs that the forged bloom contradicts.
+#[test]
+fn test_verify_receipt_with_a_forged_bloom_is_an_infrastructure_error() {
+    let path = DoctoredEnvelope::with_receipt(cache(), "forged_bloom", |receipt| {
+        receipt["logsBloom"] = forged_bloom();
+    });
+
+    let run = replay(&path, &["--verify-receipt", "--json", TX]);
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(run.code(), 3, "an inconsistent receipt exits 3.\nstderr: {}", run.stderr);
+    let err = run.error_object();
+    assert_eq!(err["error"]["kind"].as_str(), Some("rpc-failure"));
+    let message = err["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains(&format!("the on-chain receipt served for transaction {TX}")) &&
+            message.contains("is not the bloom of its own"),
+        "the message names the inconsistency: {message}"
+    );
+    assert!(!run.stdout.contains("MATCH"), "no verdict is rendered: {}", run.stdout);
+}
+
+/// The same receipt in a `--tx-file` run that covers only part of its block:
+/// the target keeps its result line, its verification carries the admission
+/// failure, and the run exits 3.
+#[test]
+fn test_batch_verify_receipt_with_a_forged_bloom_keeps_result_and_is_rpc() {
+    let path = DoctoredEnvelope::with_receipt(cache(), "batch_forged_bloom", |receipt| {
+        receipt["logsBloom"] = forged_bloom();
+    });
+    let list = tx_file("batch_forged_bloom");
+
+    let run = replay(&path, &["--tx-file", list.to_str().unwrap(), "--verify-receipt", "--json"]);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&list);
+
+    assert_eq!(run.code(), 3, "an inconsistent receipt exits 3.\nstderr: {}", run.stderr);
+    let lines = run.ndjson();
+    assert_eq!(lines.len(), 1, "one line per requested transaction");
+    assert!(lines[0].get("error").is_none(), "the target keeps its result line: {}", lines[0]);
+    assert!(lines[0]["verification"].get("match").is_none(), "{}", lines[0]);
+    assert!(
+        lines[0]["verification"]["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("is not the bloom of its own")),
+        "{}",
+        lines[0]
+    );
+    assert_eq!(run.error_object()["error"]["kind"].as_str(), Some("rpc-failure"));
 }
 
 /// A receipt with a null `blockHash` cannot be anchored to the replayed block:

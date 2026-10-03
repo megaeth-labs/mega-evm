@@ -84,12 +84,12 @@ These flags apply to all commands.
 
 Every command reports its outcome through the same set of exit codes, so a pipeline can branch on the process status without parsing output.
 
-| Code | Class                   | Meaning                                                                                                                                                      |
-| ---- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `0`  | success                 | The command completed; with [`--verify-receipt`](commands/replay.md#receipt-verification), every verification matched.                                       |
-| `1`  | `execution-error`       | Execution or internal error: an EVM or setup failure, bad input (including a usage error), or a definitive negative answer such as an unknown transaction.   |
-| `2`  | `verification-mismatch` | The run completed, but at least one replay did not reproduce its on-chain receipt.                                                                           |
-| `3`  | `rpc-failure`           | An RPC or transport call failed — endpoint unreachable, transport error, or an offline replay file that holds no response for a request the run had to make. |
+| Code | Class                   | Meaning                                                                                                                                                                             |
+| ---- | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `0`  | success                 | The command completed; with [`--verify-receipt`](commands/replay.md#receipt-verification) or [`--verify-block`](commands/replay.md#block-verification), every verification matched. |
+| `1`  | `execution-error`       | Execution or internal error: an EVM or setup failure, bad input (including a usage error), or a definitive negative answer such as an unknown transaction.                          |
+| `2`  | `verification-mismatch` | The run completed, but at least one replay did not reproduce its on-chain receipt or its block header.                                                                              |
+| `3`  | `rpc-failure`           | An RPC or transport call failed — endpoint unreachable, transport error, or an offline replay file that holds no response for a request the run had to make.                        |
 
 Codes `1` and `3` separate the two ways a question can go wrong: `1` means the tool answered, and the answer is negative; `3` means the question went unanswered, so retrying against a healthy endpoint may still produce a result.
 A state read that fails while the EVM is executing — an offline replay file without the response, or an endpoint that dies mid-transaction — belongs to `3` as well, even though it surfaces as a block execution error.
@@ -100,6 +100,7 @@ Only a hash or block height the caller supplied directly stays in `1` when it re
 Authentication covers what a recomputable hash can prove: every fetched transaction body and block header is rehashed and compared against the identity it was requested under.
 Two inputs stay trusted because replay cannot recompute their commitment: the block body listing — the header's transactions root commits it, but rebuilding that root would need the trailing transaction bodies the walk deliberately never fetches once the last target has run — and state reads, which carry no proof at all.
 `--verify-receipt` is the cross-check for both: a forged listing or forged state changes the execution, and the divergence surfaces against the on-chain receipt as long as the receipts themselves are honestly served.
+`--verify-block` closes the listing gap for a whole block: it executes every listed transaction and rebuilds the transactions root, so a forged listing — one with a transaction left out, added, reordered, or emptied — surfaces as an RPC failure (`3`) rather than as a divergence, without trusting any served receipt.
 Two paths cannot be classified that way: a read that fails inside the pre-block system calls (EIP-4788 beacon root, EIP-2935 block hashes) or inside the sandboxed execution of the keyless-deploy system contract has its cause rendered into a message by the layer that raises it, so `mega-evme` cannot tell it from an execution failure and reports `1`.
 
 A batch run (`--tx-file` / `--block`) reports every target on its own line and then exits once for the run as a whole, ranking the failure classes it saw: any execution or internal failure exits `1`, otherwise any RPC failure exits `3`, otherwise any verification mismatch exits `2`.

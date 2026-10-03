@@ -61,6 +61,7 @@ tracing-subscriber = { workspace = true, features = ["fmt", "env-filter", "std",
 [dev-dependencies]
 mega-evme = { path = ".", features = ["test-utils"] }
 rstest.workspace = true
+sha2.workspace = true
 wiremock.workspace = true
 
 [features]

@@ -1,0 +1,10 @@
+{
+  "description": "CREATE mode whose init code REVERTs deploys nothing, so the summary names no contract address",
+  "args": ["run", "--create", "true", "0x5f5ffd"],
+  "expected": {
+    "success": false,
+    "gas_used": 92534,
+    "logs_count": 0,
+    "revert_reason": "(empty)"
+  }
+}
