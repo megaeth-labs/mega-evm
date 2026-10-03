@@ -15,14 +15,16 @@
 //!
 //! Every [`Incoherence`] describes the *endpoint* contradicting itself (a reorg
 //! landing between two calls, a load-balanced endpoint serving divergent views,
-//! or a served block header that does not hash to the hash it is served under,
-//! or that answers a numbered fetch from another height), never a definitive
-//! answer about the target. Both drivers therefore report all of them as
-//! infrastructure failures.
+//! a served block header that does not hash to the hash it is served under, or
+//! that answers a numbered fetch from another height, or a served block body the
+//! header does not commit to), never a definitive answer about the target. Both
+//! drivers therefore report all of them as infrastructure failures.
 
-use alloy_primitives::{logs_bloom, Bloom, Log, B256};
+use alloy_primitives::{logs_bloom, Bloom, Bytes, Log, B256};
 use alloy_rpc_types_eth::Header;
 use core::fmt;
+
+use super::header::transactions_root;
 
 /// Where the endpoint placed a target, as read from its `(block_number,
 /// block_hash)` pair.
@@ -115,6 +117,18 @@ pub(super) enum Incoherence {
         /// Hash the target's own lookup reported as its inclusion.
         reported: B256,
     },
+    /// The transactions served for a block body do not rebuild the transactions
+    /// root its header commits to.
+    UncommittedBody {
+        /// Height of the block whose body was served.
+        number: u64,
+        /// Hash of that block.
+        block_hash: B256,
+        /// Transactions root the served body rebuilds to.
+        served: B256,
+        /// Transactions root the block's header commits to.
+        committed: B256,
+    },
     /// The block body does not list a target the endpoint placed in it.
     AbsentFromBody {
         /// Height of the block that was expected to list the target.
@@ -194,6 +208,16 @@ impl fmt::Display for Incoherence {
                  resolved as included in {reported}: the endpoint served divergent views of \
                  this block (reorg in progress, or a load-balanced endpoint); retry once the \
                  chain settles"
+            ),
+            // The header hash does not cover the body listing, so an authentic
+            // header can sit beside a listing the endpoint changed; the
+            // transactions root is what ties the two together.
+            Self::UncommittedBody { number, block_hash, served, committed } => write!(
+                f,
+                "the transactions served for block {number} ({block_hash}) rebuild transactions \
+                 root {served}, but its header commits to {committed}: the endpoint served a \
+                 block body the header does not commit to (an inconsistent backend, or a \
+                 tampered capture); the block is unverified"
             ),
             Self::AbsentFromBody { number, block_hash, tx_hash, claim } => {
                 let expectation = match claim {
@@ -346,6 +370,29 @@ pub(super) fn require_inclusion_anchor(
     Ok(())
 }
 
+/// Require that the body served for a block is the one its header commits to.
+///
+/// `transactions` are the EIP-2718 encodings of every transaction the body
+/// lists, in body order, each already authenticated against its body-listed
+/// hash. Those checks prove each transaction is the one its hash names; only the
+/// header's `transactionsRoot` ties the listing itself to the block, since the
+/// header hash does not cover it. A listing with a transaction left out, added,
+/// or reordered under an authentic header is caught here, and it is the endpoint
+/// contradicting itself rather than a replay that diverged: the root depends on
+/// what was served, never on what executed.
+pub(super) fn require_committed_body(
+    number: u64,
+    block_hash: B256,
+    committed: B256,
+    transactions: &[Bytes],
+) -> Result<(), Incoherence> {
+    let served = transactions_root(transactions);
+    if served != committed {
+        return Err(Incoherence::UncommittedBody { number, block_hash, served, committed });
+    }
+    Ok(())
+}
+
 /// Require that the block body lists a target the endpoint placed in this block.
 ///
 /// A body that does not list the target contradicts the placement it was queued
@@ -373,6 +420,7 @@ mod tests {
     /// Distinct, recognizable hashes for the message assertions.
     const HASH_A: B256 = B256::repeat_byte(0xaa);
     const HASH_B: B256 = B256::repeat_byte(0xbb);
+    const HASH_C: B256 = B256::repeat_byte(0xcc);
 
     /// Height [`sealed_header`] claims, and therefore the height a fetch has to
     /// have asked for to accept it.
@@ -439,6 +487,7 @@ mod tests {
     fn test_incoherence_messages_are_pinned() {
         let a = HASH_A.to_string();
         let b = HASH_B.to_string();
+        let c = HASH_C.to_string();
         for (incoherence, expected) in [
             (
                 Incoherence::UnanchoredView { number: 22_945_844 },
@@ -503,6 +552,20 @@ mod tests {
                     "block 12 has hash {a}, but the target transaction was resolved as included \
                      in {b}: the endpoint served divergent views of this block (reorg in \
                      progress, or a load-balanced endpoint); retry once the chain settles"
+                ),
+            ),
+            (
+                Incoherence::UncommittedBody {
+                    number: 12,
+                    block_hash: HASH_A,
+                    served: HASH_B,
+                    committed: HASH_C,
+                },
+                format!(
+                    "the transactions served for block 12 ({a}) rebuild transactions root {b}, \
+                     but its header commits to {c}: the endpoint served a block body the header \
+                     does not commit to (an inconsistent backend, or a tampered capture); the \
+                     block is unverified"
                 ),
             ),
             (
@@ -655,6 +718,29 @@ mod tests {
         assert_eq!(require_forkable_block(0), Err(Incoherence::GenesisPlacement));
         assert_eq!(require_forkable_block(1), Ok(()));
         assert_eq!(require_forkable_block(u64::MAX), Ok(()));
+    }
+
+    /// The served body authenticates exactly when it rebuilds the root the
+    /// header commits to: a transaction left out, or two swapped, breaks it, and
+    /// the verdict carries both roots.
+    #[test]
+    fn test_require_committed_body_accepts_only_the_committed_body() {
+        let body = [Bytes::from_static(&[0x7e, 0x01]), Bytes::from_static(&[0x02, 0xc0])];
+        let committed = transactions_root(&body);
+
+        assert_eq!(require_committed_body(7, HASH_A, committed, &body), Ok(()));
+        for served in [vec![body[0].clone()], vec![body[1].clone(), body[0].clone()], vec![]] {
+            assert_eq!(
+                require_committed_body(7, HASH_A, committed, &served),
+                Err(Incoherence::UncommittedBody {
+                    number: 7,
+                    block_hash: HASH_A,
+                    served: transactions_root(&served),
+                    committed,
+                }),
+                "{served:?}"
+            );
+        }
     }
 
     /// Linkage, anchoring, and membership accept agreement and reject anything

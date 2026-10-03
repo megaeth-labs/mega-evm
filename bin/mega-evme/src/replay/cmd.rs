@@ -35,7 +35,7 @@ use crate::{
         create_address, op_receipt_to_tx_receipt, parse_bucket_capacity, print_execution_summary,
         print_execution_trace, print_receipt, BuildProviderOutput, EvmeExternalEnvs, EvmeOutcome,
         ExecutionSummary, ExternalEnvSnapshot, OpTxReceipt, OverriddenTx, RpcArgs, RpcCacheStore,
-        TracerType, TxOverrideArgs,
+        TracerType, TxOverrideArgs, VerificationCounts,
     },
     replay::{get_hardfork_config, ReplayHardforks},
     run, ChainArgs, EvmeState,
@@ -154,6 +154,21 @@ pub struct Cmd {
     /// single-transaction and batch mode.
     #[arg(long = "verify-receipt")]
     pub verify_receipt: bool,
+
+    /// Verify the replayed block against its header.
+    ///
+    /// Once every transaction of the block has executed, the served body must
+    /// rebuild the transactions root of the block's authenticated header; if it
+    /// does not, the endpoint served a body the header does not commit to and
+    /// the run exits `3`. For a committed body, the replayed block's receipts
+    /// root, logs bloom, gas used, blob gas used, and EIP-7685 requests are
+    /// compared against the header, and a mismatch makes the run exit `2`, like
+    /// a receipt mismatch. One verdict is reported for the block, even when its
+    /// listing is empty. The state root and the withdrawals root are not
+    /// compared. Only valid with `--block <N>`; independent of
+    /// `--verify-receipt`.
+    #[arg(long = "verify-block")]
+    pub verify_block: bool,
 }
 
 /// Resolved provider and associated metadata from `--rpc` / `--rpc.capture-file` /
@@ -459,6 +474,13 @@ impl Cmd {
 
     /// Reject batch-only flags in single-transaction mode.
     fn validate_single_args(&self) -> Result<()> {
+        if self.verify_block {
+            return Err(ReplayError::Other(
+                "--verify-block needs a whole-block replay (--block <N>): a single-transaction \
+                 replay stops at its target and never executes the block its header describes"
+                    .to_string(),
+            ));
+        }
         if self.dump_fixture_dir.is_some() {
             return Err(ReplayError::Other(
                 "--dump-fixture-dir is only supported by batch replay (--tx-file / --block); \
@@ -534,6 +556,14 @@ impl Cmd {
                 "state dump options (--dump / --dump.output) are not supported by {MODE}"
             )));
         }
+        if self.verify_block && self.tx_file.is_some() {
+            return Err(ReplayError::Other(
+                "--verify-block is only supported with --block <N>: a --tx-file replay stops at \
+                 each block's last listed target, so it does not execute the block its header \
+                 describes"
+                    .to_string(),
+            ));
+        }
 
         Ok(())
     }
@@ -601,6 +631,7 @@ impl Cmd {
             batch::ReportArgs {
                 json: self.output_args.json,
                 verify_receipt: self.verify_receipt,
+                verify_block: self.verify_block,
                 dump_fixture_dir: self.dump_fixture_dir.clone(),
                 overwrite: self.overwrite,
             },
@@ -647,7 +678,7 @@ impl Cmd {
             info!(path = %path.display(), "Wrote self-validating fixture");
         }
         if mismatched {
-            return Err(ReplayError::VerificationMismatch { mismatched: 1, total: 1 });
+            return Err(ReplayError::VerificationMismatch(VerificationCounts::receipts(1, 1)));
         }
         Ok(())
     }
@@ -1667,6 +1698,46 @@ mod tests {
     #[test]
     fn test_verify_receipt_defaults_to_off() {
         assert!(!parse(&[TX]).expect("parse").verify_receipt);
+    }
+
+    /// `--verify-block` needs the whole block executed, which a
+    /// single-transaction replay never does, so it is rejected up front.
+    #[test]
+    fn test_verify_block_rejected_in_single_transaction_mode() {
+        let cmd = parse(&["--verify-block", TX]).expect("parse");
+        let message = cmd.validate().expect_err("single-tx must reject --verify-block").to_string();
+        assert!(
+            message.contains("--verify-block") && message.contains("--block <N>"),
+            "unexpected rejection: {message}"
+        );
+    }
+
+    /// A `--tx-file` replay stops at each block's last listed target, so it is
+    /// rejected too, before the list is even read.
+    #[test]
+    fn test_verify_block_rejected_with_a_tx_file() {
+        let cmd = parse(&["--tx-file", "/nonexistent/list.txt", "--verify-block"]).expect("parse");
+        let message = cmd.validate().expect_err("--tx-file must reject --verify-block").to_string();
+        assert!(
+            message.contains("--verify-block") && message.contains("--tx-file"),
+            "unexpected rejection: {message}"
+        );
+    }
+
+    /// `--block` takes `--verify-block`, alone or beside `--verify-receipt`; the
+    /// flag defaults to off.
+    #[test]
+    fn test_verify_block_accepted_with_block() {
+        assert!(!parse(&["--block", "1"]).expect("parse").verify_block);
+        for extra in [vec!["--verify-block"], vec!["--verify-block", "--verify-receipt", "--json"]]
+        {
+            let mut argv = vec!["--block", "1"];
+            argv.extend_from_slice(&extra);
+            let cmd = parse(&argv).expect("parse");
+            assert!(cmd.verify_block, "the flag must be recorded for {extra:?}");
+            cmd.validate()
+                .unwrap_or_else(|e| panic!("--verify-block must be accepted for {extra:?}: {e}"));
+        }
     }
 
     /// `--dump-fixture-dir` is batch-only; single-transaction mode keeps

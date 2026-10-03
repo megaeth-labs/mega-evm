@@ -8,6 +8,7 @@ mod cmd;
 mod coherence;
 mod fixture;
 mod hardforks;
+mod header;
 mod kernel;
 mod verify;
 

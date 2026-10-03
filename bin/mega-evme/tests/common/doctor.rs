@@ -57,6 +57,7 @@ pub(crate) const PUBLIC_MUTATING_OPS: &[&str] = &[
     "null_transaction",
     "drop_transaction",
     "drain_sender_balance",
+    "set_account_code",
     "zero_transaction_gas",
     "reassign_transaction_sender",
     "set_transaction_field",
@@ -75,6 +76,7 @@ pub(crate) const PUBLIC_MUTATING_OPS: &[&str] = &[
     "set_block_hash",
     "answer_block_with",
     "remove_from_block_body",
+    "empty_block_body",
     "remove_from_listing_block",
     "keep_only_transactions_and_block",
     "drop_entry",
@@ -272,6 +274,27 @@ impl DoctoredEnvelope {
         );
         self.rewrite_at(idx, |response| {
             response["result"] = Value::String("0x0".into());
+        });
+        self
+    }
+
+    /// Replaces the unique `eth_getCode` answer for `address` at block `number`
+    /// with `code`.
+    ///
+    /// The block body and every transaction stay byte-identical, so the replay
+    /// authenticates everything it fetches and executes the rewritten code:
+    /// this is how an honest-looking execution divergence (a different gas
+    /// charge, different logs) is manufactured.
+    #[must_use]
+    pub(crate) fn set_account_code(mut self, address: &str, number: u64, code: &str) -> Self {
+        let params = format!("[\"{address}\",\"0x{number:x}\"]");
+        let key = cache_key("eth_getCode", &params);
+        let idx = self.find_one(
+            |entry| entry["key"].as_str() == Some(key.as_str()),
+            &format!("eth_getCode answer for {address} at block {number}"),
+        );
+        self.rewrite_at(idx, |response| {
+            response["result"] = Value::String(code.to_string());
         });
         self
     }
@@ -550,6 +573,24 @@ impl DoctoredEnvelope {
         self.rewrite_result_at(idx, |result| {
             let txs = result["transactions"].as_array_mut().expect("block transactions");
             txs.retain(|tx| !tx.as_str().is_some_and(|h| tx_hashes.contains(&h)));
+        });
+        self
+    }
+
+    /// Empties the transaction listing of the unique block body at `number`,
+    /// leaving its header — and so its served `hash` — untouched.
+    ///
+    /// The header hash does not cover the listing, so the block still
+    /// authenticates while claiming to hold no transaction.
+    #[must_use]
+    pub(crate) fn empty_block_body(mut self, number: u64) -> Self {
+        let idx = self.block_with_transactions_index(number);
+        self.rewrite_result_at(idx, |result| {
+            assert!(
+                result.get("transactions").is_some_and(Value::is_array),
+                "the captured block must list its transactions"
+            );
+            result["transactions"] = Value::Array(Vec::new());
         });
         self
     }

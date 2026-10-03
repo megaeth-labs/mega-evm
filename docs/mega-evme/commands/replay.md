@@ -141,6 +141,7 @@ A final one-line summary (transactions replayed, transactions failed, elapsed ti
 
 With [`--verify-receipt`](#receipt-verification), each result line additionally carries a `verification` object.
 With [`--dump-fixture-dir`](#--dump-fixture-dir-dir), each result line additionally carries a `fixture` object (`path`, `skipped`, or `error`).
+With [`--verify-block`](#block-verification), the block's lines are followed by one block line carrying the block's verdict.
 
 ### Exit Status
 
@@ -320,6 +321,121 @@ mega-evme replay --rpc https://mainnet.megaeth.com/rpc \
 
 mega-evme replay --rpc.replay-file ./corpus.cache.json \
   --tx-file ./corpus.txt --verify-receipt --json
+```
+
+## Block Verification
+
+Receipt verification checks each transaction against the receipt an endpoint serves for it.
+Block verification checks the replayed block as a whole against the commitments its header carries, so a whole-block replay can be judged by the header alone, without trusting the served receipts.
+
+### `--verify-block`
+
+Verify the replayed block against its header.
+Only valid with [`--block <N>`](#--block-n): a single-transaction replay stops at its target and a `--tx-file` replay stops at each block's last listed target, so neither executes the block its header describes.
+Both are rejected before anything is fetched, with exit `1`.
+The flag is independent of [`--verify-receipt`](#receipt-verification): either can be given alone, or both together.
+
+Once every transaction of the block has executed and the block has been finished, the served body is checked first.
+The ordered trie over the EIP-2718 encodings of the transactions the replay executed — each the encoding that was authenticated against its body-listed hash, in listing order — must rebuild the header's transactions root.
+That root depends only on what the endpoint served, never on execution, so a body that does not rebuild it is not a divergence of the replay: the endpoint served a body the header does not commit to (a listing with a transaction left out, added, or reordered under an authentic header, whose hash does not cover the listing).
+The verdict is then the error shape, and the block counts as an RPC failure.
+
+Only for a body the header commits to are the execution commitments the replayed block produces compared against the header:
+
+- **Receipts root** — the ordered trie over the EIP-2718 encodings of the receipts the replay produced.
+- **Logs bloom** — the union of those receipts' blooms.
+- **Gas used** and **blob gas used** — as the block executor accounted them.
+- **Requests hash** — the EIP-7685 commitment: a header that carries a `requestsHash` must carry the hash of the requests the replay produced, and a header without one must come from a block that produced none.
+
+The header compared against is the one the replay already authenticated: its hash is recomputed from its own fields before anything reads it, and it links to the parent block the state was forked from.
+A match therefore shows that the replay reproduces the execution outputs committed to by a header that is self-consistent and linked to its parent.
+Whether that header is the canonical one is not something the replay can establish on its own: the caller establishes it by pinning the block hash the run reports against a source it trusts.
+
+The state root and the withdrawals root are not compared.
+`MegaETH` commits to its state in a SALT trie rather than a Merkle-Patricia trie, and a replay over forked RPC state — online or from a capture — holds no proofs to rebuild either root from.
+
+Block verification issues no RPC call of its own, so a capture recorded by a plain `--block` run verifies offline.
+
+An empty listing is still a claim about the block, so `--verify-block` does not let it pass silently: where a plain `--block` run reports that the block holds no transactions and exits `0`, a verifying run emits a block line for it.
+Nothing executes; the header must link to its parent and commit to the empty body, and the execution commitments are those of an empty body — the empty receipts root, an empty bloom, zero gas, zero blob gas, and no requests, since the block executor produces receipts, gas and requests only for transactions.
+On `MegaETH` every block starts with its L1 attributes deposit, so an empty listing under an authentic header is an RPC failure.
+
+### Output
+
+With `--json`, the block's target lines are followed by one block line (expanded here for readability; on the wire it occupies one line).
+It carries no `tx_hash`, which is how a consumer tells it from a target line, and its verdict sits under `block_verification` rather than `verification`, so a filter over the target lines' verdicts never matches it:
+
+```json
+{
+  "block_number": 22945844,
+  "block_hash": "0x538fe32bffb01f7902358c0c01fa7a7b0cf6d5df7495e010cf2c04418b6ea833",
+  "block_verification": { "match": true }
+}
+```
+
+The verdict has the same three shapes as a receipt verdict: `{"match": true}`, `{"match": false, "diff": {…}}`, or `{"error": "…"}` when the comparison could not run.
+A mismatch's `diff` holds only the commitments that disagreed, each as `{"onchain": …, "replay": …}`, where `onchain` is the header's value.
+The keys are `receipts_root`, `logs_bloom`, `gas_used`, `blob_gas_used`, and `requests_hash`; the last two are `null` on a side that lacks the field.
+
+```json
+{
+  "match": false,
+  "diff": {
+    "receipts_root": {
+      "onchain": "0xcc7e0ee1f5489f0b3466e4fa6218ffb0568e5bd67c580c52338c910d613613e0",
+      "replay": "0xba0364c45edf8ed17cb72b1d8c82e7e0039938eaf375a0d25fd3a86c6dfabb94"
+    },
+    "gas_used": { "onchain": 7734063, "replay": 7722641 }
+  }
+}
+```
+
+A replay that burns different gas than the chain moves both the block's gas used and its receipts root.
+A body the header does not commit to is never a mismatch; it carries the error shape, for example:
+
+```json
+{
+  "error": "the transactions served for block 22945844 (0x538fe32bffb01f7902358c0c01fa7a7b0cf6d5df7495e010cf2c04418b6ea833) rebuild transactions root 0xf9df8767780178545c6375d4cd145723f7d918548218b9dd1852c23e865751a3, but its header commits to 0x8d8fb86afe50f2c60201ec5e75433974037e3e4385bd7357548ec290a0fc731e: the endpoint served a block body the header does not commit to (an inconsistent backend, or a tampered capture); the block is unverified"
+}
+```
+
+Without `--json`, the verdict is printed under a block heading after the block's transactions:
+
+```
+=== Block 22945844 (0x538fe32bffb01f7902358c0c01fa7a7b0cf6d5df7495e010cf2c04418b6ea833) ===
+block verification: MATCH
+```
+
+The mismatch line names every commitment that disagreed, comma-separated (a bloom only as `logs_bloom differs`), and the failed line says why the comparison never ran.
+
+### Exit Status
+
+A block that does not reproduce its header is a verification mismatch, like a receipt mismatch: a run whose only findings are mismatches exits `2`, and an execution or RPC failure still takes precedence.
+The final message names every dimension that diverged, for example `Block verification mismatch: 1 of 1 verified block(s) did not reproduce the block header`, or both the receipts and the block when both were verified and both diverged.
+
+A block whose served body the header does not commit to — or, for an empty listing, whose parent the endpoint does not serve or link — is an RPC failure of the block itself, since no transaction line carries it: the run exits `3` (unless an execution failure outranks it), and its message names the block, for example `1 block(s) could not be verified against the block header`.
+
+When the block did not execute in full — a transaction aborted the walk, a setup step failed, or the block could not be finished — there is nothing to compare.
+The block line then carries the error shape and is not counted; the transactions' own lines carry the failure class that decides the exit.
+
+### Examples
+
+Verify a block against its header and its receipts, and keep only the block verdict:
+
+```bash
+mega-evme replay --rpc https://mainnet.megaeth.com/rpc \
+  --block 22945844 --verify-receipt --verify-block --json > results.ndjson
+
+jq -c 'select(.block_verification)' results.ndjson
+```
+
+Capture once online, then re-verify offline:
+
+```bash
+mega-evme replay --rpc https://mainnet.megaeth.com/rpc \
+  --rpc.capture-file ./block.cache.json --block 22945844 --verify-receipt --verify-block
+
+mega-evme replay --rpc.replay-file ./block.cache.json --block 22945844 --verify-receipt --verify-block
 ```
 
 ## RPC Cache File
@@ -537,6 +653,8 @@ Options marked _(single transaction only)_ are rejected in [batch mode](#batch-r
   See [Batch Replay](#batch-replay) above.
 - **Receipt verification** — Check every replayed transaction against its on-chain receipt via `--verify-receipt`.
   See [Receipt Verification](#receipt-verification) above.
+- **Block verification** _(`--block` only)_ — Check the replayed block against its header via `--verify-block`.
+  See [Block Verification](#block-verification) above.
 - **SALT buckets** — Configure SALT bucket capacity for dynamic storage gas pricing.
   See [SALT Buckets](../configuration/salt-buckets.md).
 - **State dump** _(single transaction only)_ — Dump or load pre/post-state snapshots.

@@ -303,7 +303,6 @@ pub(super) enum FinishOutcome<D> {
         /// The block the run executed, present iff the walk completed without
         /// an abort and committed every transaction of the body: only then is
         /// the finished block the one the body describes.
-        #[expect(dead_code, reason = "read once whole-block verification lands")]
         whole_block: Option<WholeBlock>,
     },
     /// `finish()` failed, so no target of the block has a receipt and every
@@ -321,7 +320,6 @@ pub(super) enum FinishOutcome<D> {
 /// Carries what a block header commits to about execution, in the raw form the
 /// executor produced it, so a driver can rebuild those commitments without the
 /// kernel deciding which of them matter.
-#[expect(dead_code, reason = "read once whole-block verification lands")]
 pub(super) struct WholeBlock {
     /// EIP-2718 encodings of the body's transactions, in body order. Each is
     /// the encoding the transaction authenticated against its body-listed hash.
