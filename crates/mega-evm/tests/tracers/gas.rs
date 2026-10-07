@@ -47,10 +47,13 @@ pub(crate) fn sstore_fresh_cold() -> u64 {
 /// The bytes in one EVM word.
 const WORD: u64 = 32;
 
-/// The ledgers a scenario's transaction is billed, worked out from the schedule.
+/// The ledgers a scenario's transaction is billed, worked out from the schedule, and the
+/// EIP-7623 floor its receipt cannot fall below.
 ///
-/// The receipt is their sum: no scenario earns a refund, and none falls to the EIP-7623 floor,
-/// which history gas outprices on the same bytes.
+/// No scenario earns a refund. The floor raises the receipt and nothing else: where the three
+/// ledgers sum to less, the receipt reports the floor, while each ledger still reports what was
+/// spent on it. At the spec's prices the floor never binds, history gas outpricing it on the same
+/// bytes; at a byte price low enough it does.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Ledgers {
     /// Regular gas: the intrinsic regular gas and what the frames ran.
@@ -59,12 +62,23 @@ pub(crate) struct Ledgers {
     pub(crate) state: u64,
     /// History gas the transaction kept, its body included.
     pub(crate) history: u64,
+    /// The EIP-7623 floor.
+    pub(crate) floor: u64,
 }
 
 impl Ledgers {
-    /// What the receipt reports.
-    pub(crate) const fn receipt(self) -> u64 {
+    /// The raw spend: the three ledgers' sum.
+    pub(crate) const fn spent(self) -> u64 {
         self.regular + self.state + self.history
+    }
+
+    /// What the receipt reports: the raw spend, at least the floor.
+    pub(crate) const fn receipt(self) -> u64 {
+        if self.spent() > self.floor {
+            self.spent()
+        } else {
+            self.floor
+        }
     }
 }
 
@@ -74,6 +88,34 @@ pub(crate) fn calldata(data: &[u8]) -> u64 {
     let multiplier = entry(GasId::tx_token_non_zero_byte_multiplier());
     let tokens: u64 = data.iter().map(|byte| if *byte == 0 { 1 } else { multiplier }).sum();
     tokens * entry(GasId::tx_token_cost())
+}
+
+/// The floor tokens of `data` (EIP-7623, as EIP-7976 amends it): the schedule's zero-byte
+/// multiplier per zero byte and its non-zero multiplier per non-zero byte.
+fn floor_tokens(data: &[u8]) -> u64 {
+    let zero = entry(GasId::tx_floor_token_zero_byte_multiplier());
+    let non_zero = entry(GasId::tx_token_non_zero_byte_multiplier());
+    data.iter().map(|byte| if *byte == 0 { zero } else { non_zero }).sum()
+}
+
+/// The EIP-7623 floor of a call to another account carrying `data`: under EIP-2780 the decomposed
+/// base the intrinsic gas starts from (the base, the recipient's access and the value's charge),
+/// plus the calldata's floor tokens at the floor's cost per token.
+pub(crate) fn call_floor(data: &[u8], carries_value: bool) -> u64 {
+    let value = if carries_value { eip2780::TX_VALUE_COST } else { 0 };
+    eip2780::TX_BASE_COST +
+        eip8038::COLD_ACCOUNT_ACCESS +
+        value +
+        floor_tokens(data) * entry(GasId::tx_floor_cost_per_token())
+}
+
+/// The EIP-7623 floor of a creation running `init_code`: the base and the creation's access, plus
+/// the init code's floor tokens at the floor's cost per token. EIP-3860's cost per word is not in
+/// it.
+pub(crate) fn create_floor(init_code: &[u8]) -> u64 {
+    eip2780::TX_BASE_COST +
+        entry(GasId::tx_create_access_cost()) +
+        floor_tokens(init_code) * entry(GasId::tx_floor_cost_per_token())
 }
 
 /// The EIP-2780 intrinsic regular gas of a call to another account carrying `data`: the base,

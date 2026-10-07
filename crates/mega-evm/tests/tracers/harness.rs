@@ -338,7 +338,8 @@ pub(crate) fn pin_tracer_views(scenario: &str, traced: &Traced) {
     assert_golden_text(&format!("{scenario}/eip3155.jsonl"), &traced.eip3155());
 }
 
-/// The transaction is billed `expected`, ledger by ledger, and its receipt is their sum.
+/// The transaction is billed `expected`, ledger by ledger, under the expected floor, and its
+/// receipt is their sum, at least the floor.
 pub(crate) fn assert_ledgers(traced: &Traced, expected: Ledgers) {
     let gas = &traced.outcome.gas;
     assert_eq!(
@@ -346,19 +347,24 @@ pub(crate) fn assert_ledgers(traced: &Traced, expected: Ledgers) {
         (expected.regular, expected.state, expected.history),
         "the ledgers (regular, state, history)"
     );
+    assert_eq!(gas.floor, expected.floor, "the EIP-7623 floor");
     assert_eq!(gas.gas_used, expected.receipt(), "the receipt's gas used");
 }
 
-/// The tracer's own figure for the transaction's frame, against the receipt.
+/// The tracer's own figure for the transaction's frame, against the ledgers.
 ///
 /// revm-inspectors records the regular gas the engine handed the transaction's frame as the root
 /// node's `gas_limit` and, when the frame ends, what the frame spent of it as `gas_used`
 /// (`Gas::total_gas_spent`: the limit less what is left, so state and history gas that spilled
 /// onto regular gas is in it, and what the reservoir paid is not). What the frame did not spend
-/// goes back to the sender with the reservoir left and the refund; everything else the
-/// transaction's gas limit bought is the receipt:
+/// and the reservoir left are the gas the transaction did not use; everything else its gas limit
+/// bought is its raw spend, the three ledgers' sum:
 ///
-/// `gas_limit = receipt + (root.gas_limit − root.gas_used) + given_back + reservoir left + refund`
+/// `gas_limit = (regular + state + history) + (root.gas_limit − root.gas_used) + given_back +
+/// reservoir left`
+///
+/// The refund and the EIP-7623 floor change only how much of that the receipt bills, so neither
+/// is in it.
 ///
 /// `given_back` is the state and history gas the frame spilled onto its regular gas and got back
 /// because it failed. revm gives a failed frame that gas back when the frame's result is merged
@@ -372,12 +378,12 @@ pub(crate) fn assert_root_frame_settles(traced: &Traced, given_back: u64) {
     let root = &traced.inspector.traces().nodes()[0].trace;
     let unspent = root.gas_limit - root.gas_used;
     let gas = &traced.outcome.gas;
-    let refund = traced.outcome.result.gas().final_refunded();
+    let spent = gas.regular + gas.state + gas.history;
     assert_eq!(
         traced.gas_limit(),
-        gas.gas_used + unspent + given_back + gas.reservoir_remaining + refund,
-        "the receipt, the root frame's unspent gas ({unspent}), what its failure gave back \
-         ({given_back}), the reservoir left and the refund do not make up the gas limit"
+        spent + unspent + given_back + gas.reservoir_remaining,
+        "the raw spend ({spent}), the root frame's unspent gas ({unspent}), what its failure gave \
+         back ({given_back}) and the reservoir left do not make up the gas limit"
     );
 }
 
@@ -424,12 +430,13 @@ fn quantity(value: &serde_json::Value) -> u64 {
 /// - Its summary's `gasUsed` is the transaction's gas limit less the regular gas the last executed
 ///   step left: the fork's `GasInspector` tracks nothing else, and starts from nothing when no
 ///   frame ran a step. Where that step is the transaction's own frame's, the frame is a call and it
-///   was not stopped by gas detention, whose crossing the tracer sees zeroed, it is the receipt
-///   plus the reservoir left and the refund: the reservoir is not regular gas, so the summary
-///   counts what is left of it as used. A creation is charged its deposit after its last step,
-///   which the creation and keyless scenarios assert by themselves. Where a child frame ran the
-///   last step, as in a stop that spans frames, the figure is that child's leftover read against
-///   the transaction's gas limit, and bears no relation to the receipt.
+///   was not stopped by gas detention, whose crossing the tracer sees zeroed, it is the raw spend,
+///   the three ledgers' sum, plus the reservoir left: the reservoir is not regular gas, so the
+///   summary counts what is left of it as used, and the refund and the EIP-7623 floor, which change
+///   only what the receipt bills, are not in it. A creation is charged its deposit after its last
+///   step, which the creation and keyless scenarios assert by themselves. Where a child frame ran
+///   the last step, as in a stop that spans frames, the figure is that child's leftover read
+///   against the transaction's gas limit, and bears no relation to the receipt.
 pub(crate) fn assert_eip3155_agrees(traced: &Traced) {
     let lines: Vec<serde_json::Value> = traced
         .eip3155()
@@ -466,11 +473,10 @@ pub(crate) fn assert_eip3155_agrees(traced: &Traced) {
     let is_call = traced.tx.0.base.kind.is_call();
     if steps.last().is_some_and(|(frame, _)| *frame == 0) && is_call && !detained {
         let gas = &traced.outcome.gas;
-        let refund = traced.outcome.result.gas().final_refunded();
         assert_eq!(
             gas_used,
-            gas.gas_used + gas.reservoir_remaining + refund,
-            "the summary's gasUsed is the receipt plus the reservoir left and the refund"
+            gas.regular + gas.state + gas.history + gas.reservoir_remaining,
+            "the summary's gasUsed is the raw spend plus the reservoir left"
         );
     }
 }

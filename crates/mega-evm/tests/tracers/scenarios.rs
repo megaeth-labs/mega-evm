@@ -164,6 +164,7 @@ fn test_eth_transfer_emits_7708_log() {
         regular: gas::call_intrinsic(&[], true),
         state: gas::account_state(),
         history: gas::body(0) + gas::records(1),
+        floor: gas::call_floor(&[], true),
     };
     pin("eth_transfer", &traced, expected);
 }
@@ -175,6 +176,7 @@ fn fresh_slot_ledgers() -> Ledgers {
         regular: gas::call_intrinsic(&[], false) + sstore_regular(),
         state: gas::slot_state(),
         history: gas::body(0) + gas::records(1),
+        floor: gas::call_floor(&[], false),
     }
 }
 
@@ -223,11 +225,12 @@ fn test_create_deploys_runtime_code() {
         regular: gas::create_intrinsic(&init) + deploying_runtime_regular(),
         state: gas::created_state(len),
         history: gas::body(init.len()) + gas::records(1) + gas::history(len as u64),
+        floor: gas::create_floor(&init),
     };
     // The EIP-3155 summary reads the frame's gas after its last step, the `RETURN`; the deposit is
     // charged after it, in `return_create`.
     let summary = eip3155_summary_gas_used(&traced);
-    assert_eq!(summary + gas::deposit(len), expected.receipt(), "EIP-3155 summary");
+    assert_eq!(summary + gas::deposit(len), expected.spent(), "EIP-3155 summary");
     pin("create", &traced, expected);
 }
 
@@ -298,6 +301,7 @@ fn test_nested_call_inner_reverts() {
             gas::entry(GasId::call_stipend()),
         state: 0,
         history: gas::body(0) + gas::history(LOG_BASE_SIZE),
+        floor: gas::call_floor(&[], false),
     };
     pin("nested_inner_revert", &traced, expected);
 }
@@ -463,12 +467,13 @@ fn test_keyless_deploy_succeeds() {
             deploying_runtime_regular(),
         state: gas::account_state() + gas::created_state(len),
         history: gas::body(calldata.len()) + gas::records(2) + gas::history(len as u64),
+        floor: gas::call_floor(&calldata, false),
     };
     // The EIP-3155 summary reads the creation's gas after its last step, the `RETURN`, two frames
     // away from the receipt: the deposit is charged after it, in `return_create`, and the call
     // frame returns what is left of the creation's gas, spending nothing more.
     let summary = eip3155_summary_gas_used(&traced);
-    assert_eq!(summary + gas::deposit(len), expected.receipt(), "EIP-3155 summary");
+    assert_eq!(summary + gas::deposit(len), expected.spent(), "EIP-3155 summary");
     pin("keyless_success", &traced, expected);
 }
 
@@ -497,6 +502,7 @@ fn test_keyless_deploy_refused() {
         regular: gas::call_intrinsic(&calldata, false) + KEYLESS_DEPLOY_OVERHEAD_GAS,
         state: 0,
         history: gas::body(calldata.len()),
+        floor: gas::call_floor(&calldata, false),
     };
     // The call frame paid the signer's account out of its regular gas before the refusal gave it
     // back.
@@ -550,6 +556,7 @@ fn test_data_size_limit_stops_the_body() {
         regular: gas::call_intrinsic(&calldata, false),
         state: 0,
         history: gas::body(calldata.len()),
+        floor: gas::call_floor(&calldata, false),
     };
     pin("data_size_body_stop", &traced, expected);
 }
@@ -577,6 +584,7 @@ fn test_data_size_limit_stop_spans_frames() {
         regular: gas::call_intrinsic(&[], false) + call_regular(false) + logging_regular(data_len),
         state: 0,
         history: gas::body(0),
+        floor: gas::call_floor(&[], false),
     };
     pin("data_size_stop_spans_frames", &traced, expected);
 }
@@ -627,6 +635,7 @@ fn test_frame_budget_reverts_the_child_alone() {
         regular: gas::call_intrinsic(&[], false) + parent + logging_regular(data_len),
         state: 0,
         history: gas::body(0) + gas::history(LOG_BASE_SIZE),
+        floor: gas::call_floor(&[], false),
     };
     pin("frame_budget_child_revert", &traced, expected);
 }
@@ -661,6 +670,7 @@ fn test_timestamp_detention_stop() {
         regular: gas::call_intrinsic(&[], false) + compute,
         state: 0,
         history: gas::body(0),
+        floor: gas::call_floor(&[], false),
     };
     pin("timestamp_detention", &traced, expected);
 }
@@ -697,6 +707,7 @@ fn test_detention_stop_spans_frames() {
         regular: gas::call_intrinsic(&[], false) + compute,
         state: 0,
         history: gas::body(0),
+        floor: gas::call_floor(&[], false),
     };
     pin("detention_stop_spans_frames", &traced, expected);
 }
@@ -760,6 +771,7 @@ fn test_identity_precompile() {
         regular: gas::call_intrinsic(&input, false) + price,
         state: 0,
         history: gas::body(input.len()),
+        floor: gas::call_floor(&input, false),
     };
     pin("identity_precompile", &traced, expected);
 }
@@ -825,6 +837,7 @@ fn test_precompile_child_frame() {
         regular: gas::call_intrinsic(&[], false) + stores + call + BASE,
         state: 0,
         history: gas::body(0),
+        floor: gas::call_floor(&[], false),
     };
     pin("precompile_child", &traced, expected);
 }
@@ -863,6 +876,11 @@ fn test_deposit_transaction() {
         "the caller holds its balance, plus the mint, less the value"
     );
     // A deposit pays its intrinsic gas and what it ran, here nothing, and no history.
-    let expected = Ledgers { regular: gas::call_intrinsic(&[], true), state: 0, history: 0 };
+    let expected = Ledgers {
+        regular: gas::call_intrinsic(&[], true),
+        state: 0,
+        history: 0,
+        floor: gas::call_floor(&[], true),
+    };
     pin("deposit", &traced, expected);
 }
