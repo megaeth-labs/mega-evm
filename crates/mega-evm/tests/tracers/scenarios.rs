@@ -83,8 +83,31 @@ const SCENARIOS: [&str; 15] = [
     "timestamp_detention",
 ];
 
-/// Room for the small programs these scenarios run, below the execution cap.
-const TX_GAS: u64 = 5_000_000;
+/// A margin every scenario's gas limit carries on top of what the scenario is billed and holds in
+/// passing ([`gas_limit`]). Nothing a scenario does may rely on it: what a scenario needs is in
+/// its bill and its `held`. It is there so that a derivation that falls a few charges short is
+/// reported by the assertion on the ledger it got wrong, not as an out-of-gas.
+const ROOM: u64 = 1_000_000;
+
+/// The gas limit of a scenario billed `expected` that must also hold `held` in passing, at the
+/// byte prices in effect, with [`ROOM`] on top.
+///
+/// The bill is the receipt, the EIP-7623 floor included: a gas limit below the floor is refused.
+/// What a scenario holds in passing is gas it is not billed: what it is charged and given back,
+/// the 64th a call keeps back from its forward ([`kept_back`]), and what a rule, a limit or an
+/// assertion needs it to hold without spending it.
+fn gas_limit(expected: Ledgers, held: u64) -> u64 {
+    ROOM + expected.receipt() + held
+}
+
+/// What a caller holds beyond `forwarded` for a forward of all but a 64th of its gas to still
+/// cover `forwarded`: a 63rd of it, rounded up.
+const fn kept_back(forwarded: u64) -> u64 {
+    forwarded.div_ceil(63)
+}
+
+/// The gas limit the keyless deployments are signed with, which the call's forward must cover.
+const SIGNED_GAS_LIMIT: u64 = 1_000_000;
 
 fn funded() -> MemoryDatabase {
     MemoryDatabase::default().account_balance(CALLER, U256::from(1_000_000_000_000_000_u64))
@@ -150,14 +173,6 @@ fn test_goldens_are_exactly_the_scenarios() {
 /// Ordinary ETH transfer. The 7708 transfer log is what `call_with_log` pins.
 #[test]
 fn test_eth_transfer_emits_7708_log() {
-    let traced = Traced::run(
-        funded(),
-        call_tx(CALLER, PAYEE, Bytes::new(), U256::from(1), TX_GAS),
-        EvmTxRuntimeLimits::no_limits(),
-    );
-    assert!(traced.outcome.result.is_success(), "{:?}", traced.outcome.result);
-    assert_logs(&traced.call_frame(true).logs, &[transfer_log(CALLER, PAYEE, U256::from(1))]);
-    assert_log_index_counts_discarded(&traced, &[0]);
     // The recipient does not exist: EIP-2780 charges the account the transfer adds, and the
     // transaction's own frame makes one record, the recipient's.
     let expected = Ledgers {
@@ -166,6 +181,14 @@ fn test_eth_transfer_emits_7708_log() {
         history: gas::body(0) + gas::records(1),
         floor: gas::call_floor(&[], true),
     };
+    let traced = Traced::run(
+        funded(),
+        call_tx(CALLER, PAYEE, Bytes::new(), U256::from(1), gas_limit(expected, 0)),
+        EvmTxRuntimeLimits::no_limits(),
+    );
+    assert!(traced.outcome.result.is_success(), "{:?}", traced.outcome.result);
+    assert_logs(&traced.call_frame(true).logs, &[transfer_log(CALLER, PAYEE, U256::from(1))]);
+    assert_log_index_counts_discarded(&traced, &[0]);
     pin("eth_transfer", &traced, expected);
 }
 
@@ -186,7 +209,7 @@ fn test_sstore_new_slot_charges_state_gas() {
     let code = BytecodeBuilder::default().sstore(U256::from(1), U256::from(1)).stop().build();
     let traced = Traced::run(
         funded().account_code(CONTRACT, code),
-        call_tx(CALLER, CONTRACT, Bytes::new(), U256::ZERO, TX_GAS),
+        call_tx(CALLER, CONTRACT, Bytes::new(), U256::ZERO, gas_limit(fresh_slot_ledgers(), 0)),
         EvmTxRuntimeLimits::no_limits(),
     );
     assert!(traced.outcome.result.is_success(), "{:?}", traced.outcome.result);
@@ -206,17 +229,6 @@ fn test_sstore_new_slot_charges_state_gas() {
 /// state and history gas, and the code is in the post-state the diff tracer reports.
 #[test]
 fn test_create_deploys_runtime_code() {
-    let traced = Traced::run(
-        funded(),
-        create_tx(CALLER, deploying_runtime(), TX_GAS),
-        EvmTxRuntimeLimits::no_limits(),
-    );
-    assert!(traced.outcome.result.is_success(), "{:?}", traced.outcome.result);
-    let created = CALLER.create(0);
-    let code = traced.outcome.state[&created].info.code.as_ref().expect("the code is in the state");
-    assert_eq!(code.original_bytes(), runtime(), "the created account holds the runtime");
-    let PreStateFrame::Diff(diff) = traced.prestate(true) else { panic!("the diff mode") };
-    assert_eq!(diff.post[&created].code.as_ref(), Some(&runtime()), "the diff shows the code");
     // The created account and its record, the init code, and the deposit: its hashing, the code's
     // state gas and its history.
     let init = deploying_runtime();
@@ -227,6 +239,17 @@ fn test_create_deploys_runtime_code() {
         history: gas::body(init.len()) + gas::records(1) + gas::history(len as u64),
         floor: gas::create_floor(&init),
     };
+    let traced = Traced::run(
+        funded(),
+        create_tx(CALLER, init, gas_limit(expected, 0)),
+        EvmTxRuntimeLimits::no_limits(),
+    );
+    assert!(traced.outcome.result.is_success(), "{:?}", traced.outcome.result);
+    let created = CALLER.create(0);
+    let code = traced.outcome.state[&created].info.code.as_ref().expect("the code is in the state");
+    assert_eq!(code.original_bytes(), runtime(), "the created account holds the runtime");
+    let PreStateFrame::Diff(diff) = traced.prestate(true) else { panic!("the diff mode") };
+    assert_eq!(diff.post[&created].code.as_ref(), Some(&runtime()), "the diff shows the code");
     // The EIP-3155 summary reads the frame's gas after its last step, the `RETURN`; the deposit is
     // charged after it, in `return_create`.
     let summary = eip3155_summary_gas_used(&traced);
@@ -252,19 +275,36 @@ fn test_nested_call_inner_reverts() {
         .append_many([POP, PUSH0, PUSH0, LOG0])
         .stop()
         .build();
+    // The callee ran on what the caller forwarded and the value's stipend, and handed back what it
+    // left, so the caller pays the callee's regular spend less the stipend; the callee's state and
+    // history gas came back with its revert.
+    let callee_regular = sstore_regular() + VERYLOW + 2 * BASE + gas::log(1, 0) + 2 * BASE;
+    let caller = call_regular(true) + BASE + 2 * BASE + gas::log(0, 0);
+    let expected = Ledgers {
+        regular: gas::call_intrinsic(&[], false) + caller + callee_regular -
+            gas::entry(GasId::call_stipend()),
+        state: 0,
+        history: gas::body(0) + gas::history(LOG_BASE_SIZE),
+        floor: gas::call_floor(&[], false),
+    };
+    // Held in passing: the value call forwards all but a 64th of what the caller has and pays its
+    // two records' history out of that 64th, so the caller holds 64 times that history; the
+    // callee pays its slot and the slot's record before its revert gives them back; and the
+    // forward must cover all the callee spends, which the 64th kept back does not reach.
+    let spilled = gas::slot_state() + gas::records(1);
+    let held = 64 * gas::records(2) + spilled + kept_back(callee_regular + spilled);
     let traced = Traced::run(
         funded()
             .account_code(CONTRACT, parent)
             .account_balance(CONTRACT, U256::from(1))
             .account_code(CHILD, child),
-        call_tx(CALLER, CONTRACT, Bytes::new(), U256::ZERO, TX_GAS),
+        call_tx(CALLER, CONTRACT, Bytes::new(), U256::ZERO, gas_limit(expected, held)),
         EvmTxRuntimeLimits::no_limits(),
     );
     assert!(traced.outcome.result.is_success(), "the caller succeeds: {:?}", traced.outcome.result);
     // The callee's charge was made: below the execution cap its slot's state gas and the slot's
     // record spilled onto its regular gas, which the opcode tracer shows in the step's cost.
     let sstore = step(&traced, "SSTORE", 2);
-    let spilled = gas::slot_state() + gas::records(1);
     assert_eq!(sstore.gas_cost, gas::sstore_fresh_cold() + spilled, "the callee's SSTORE step");
     // And given back: no state gas stands, and the history the transaction keeps is its body
     // and the caller's log alone.
@@ -280,7 +320,6 @@ fn test_nested_call_inner_reverts() {
     // The call tracer's `gasUsed` of the reverted callee counts the state and history gas its
     // revert gave back: revm gives a failed frame that gas back when its caller merges the
     // result, after the tracer read the frame.
-    let callee_regular = sstore_regular() + VERYLOW + 2 * BASE + gas::log(1, 0) + 2 * BASE;
     assert_eq!(
         callee.gas_used,
         U256::from(callee_regular + spilled),
@@ -292,17 +331,6 @@ fn test_nested_call_inner_reverts() {
     // The receipt keeps the caller's log alone, at index 0; before it the callee's transfer log
     // and its `LOG1` were emitted and discarded with the callee.
     assert_log_index_counts_discarded(&traced, &[2]);
-    // The callee ran on what the caller forwarded and the value's stipend, and handed back what it
-    // left, so the caller pays the callee's regular spend less the stipend; the callee's state and
-    // history gas came back with its revert.
-    let caller = call_regular(true) + BASE + 2 * BASE + gas::log(0, 0);
-    let expected = Ledgers {
-        regular: gas::call_intrinsic(&[], false) + caller + callee_regular -
-            gas::entry(GasId::call_stipend()),
-        state: 0,
-        history: gas::body(0) + gas::history(LOG_BASE_SIZE),
-        floor: gas::call_floor(&[], false),
-    };
     pin("nested_inner_revert", &traced, expected);
 }
 
@@ -328,7 +356,7 @@ impl Deployment {
         let tx = mega_evm::alloy_consensus::TxLegacy {
             nonce: 0,
             gas_price: 100_000_000_000,
-            gas_limit: 1_000_000,
+            gas_limit: SIGNED_GAS_LIMIT,
             to: TxKind::Create,
             value,
             input: init_code,
@@ -401,8 +429,8 @@ fn deploying_runtime() -> Bytes {
         .build()
 }
 
-fn keyless_tx(data: Bytes) -> MegaTransaction {
-    call_tx(CALLER, KEYLESS_DEPLOY_ADDRESS, data, U256::ZERO, TX_GAS)
+fn keyless_tx(data: Bytes, gas_limit: u64) -> MegaTransaction {
+    call_tx(CALLER, KEYLESS_DEPLOY_ADDRESS, data, U256::ZERO, gas_limit)
 }
 
 /// A `keylessDeploy` that deploys: the answer names the signer's first creation address and no
@@ -410,9 +438,27 @@ fn keyless_tx(data: Bytes) -> MegaTransaction {
 #[test]
 fn test_keyless_deploy_succeeds() {
     let deployment = Deployment::signed(U256::ZERO, deploying_runtime());
+    // The call's overhead, the `CREATE` opcode's regular gas, the signer's account (it was empty)
+    // and the created account, the creation's two records (the signer's nonce and the created
+    // account), and what the creation spent: its init code and its deposit.
+    let calldata = deployment.call_data();
+    let init = deploying_runtime();
+    let len = runtime().len();
+    let expected = Ledgers {
+        regular: gas::call_intrinsic(&calldata, false) +
+            KEYLESS_DEPLOY_OVERHEAD_GAS +
+            satin_gas_params().create_cost() +
+            satin_gas_params().initcode_cost(init.len()) +
+            deploying_runtime_regular(),
+        state: gas::account_state() + gas::created_state(len),
+        history: gas::body(calldata.len()) + gas::records(2) + gas::history(len as u64),
+        floor: gas::call_floor(&calldata, false),
+    };
+    // Held in passing: what the call forwards to the creation must still cover the signed gas
+    // limit.
     let traced = Traced::run(
         system_db(),
-        keyless_tx(deployment.call_data()),
+        keyless_tx(calldata, gas_limit(expected, SIGNED_GAS_LIMIT)),
         EvmTxRuntimeLimits::no_limits(),
     );
     let ExecutionResult::Success { output, .. } = &traced.outcome.result else {
@@ -430,7 +476,6 @@ fn test_keyless_deploy_succeeds() {
     // `gasUsed` is what the creation spent from both pools: its init code and its deposit, the
     // deposit's state and history gas included. Below the execution cap there is no reservoir,
     // so all of it drew the creation frame's regular gas, which the tracer measured.
-    let len = runtime().len();
     let creation_spend = deploying_runtime_regular() +
         satin_gas_params().code_deposit_state_gas(len) +
         gas::history(len as u64);
@@ -443,7 +488,7 @@ fn test_keyless_deploy_succeeds() {
     // records, which spilled onto its regular gas.
     let call_charges = KEYLESS_DEPLOY_OVERHEAD_GAS +
         satin_gas_params().create_cost() +
-        satin_gas_params().initcode_cost(deploying_runtime().len()) +
+        satin_gas_params().initcode_cost(init.len()) +
         gas::account_state() +
         gas::entry(GasId::create_state_gas()) +
         gas::records(2);
@@ -454,21 +499,6 @@ fn test_keyless_deploy_succeeds() {
     );
     assert_keyless_struct_logs_miss_the_creation(&traced);
     assert_keyless_steps(&traced, true);
-    // The call's overhead, the `CREATE` opcode's regular gas, the signer's account (it was empty)
-    // and the created account, the creation's two records (the signer's nonce and the created
-    // account), and what the creation spent: its init code and its deposit.
-    let calldata = deployment.call_data();
-    let init = deploying_runtime();
-    let expected = Ledgers {
-        regular: gas::call_intrinsic(&calldata, false) +
-            KEYLESS_DEPLOY_OVERHEAD_GAS +
-            satin_gas_params().create_cost() +
-            satin_gas_params().initcode_cost(init.len()) +
-            deploying_runtime_regular(),
-        state: gas::account_state() + gas::created_state(len),
-        history: gas::body(calldata.len()) + gas::records(2) + gas::history(len as u64),
-        floor: gas::call_floor(&calldata, false),
-    };
     // The EIP-3155 summary reads the creation's gas after its last step, the `RETURN`, two frames
     // away from the receipt: the deposit is charged after it, in `return_create`, and the call
     // frame returns what is left of the creation's gas, spending nothing more.
@@ -481,9 +511,22 @@ fn test_keyless_deploy_succeeds() {
 #[test]
 fn test_keyless_deploy_refused() {
     let deployment = Deployment::signed(U256::from(1), deploying_runtime());
+    // A refusal keeps the regular gas the call spent, the overhead, and gives back the signer's
+    // account it charged before the balance rule refused.
+    let calldata = deployment.call_data();
+    let expected = Ledgers {
+        regular: gas::call_intrinsic(&calldata, false) + KEYLESS_DEPLOY_OVERHEAD_GAS,
+        state: 0,
+        history: gas::body(calldata.len()),
+        floor: gas::call_floor(&calldata, false),
+    };
+    // Held in passing: the signer's account, until the refusal gives it back, and the signed gas
+    // limit, which what the call has left once it paid that account must still cover when the
+    // rules check the forward, before the balance rule.
+    let held = gas::account_state() + SIGNED_GAS_LIMIT;
     let traced = Traced::run(
         system_db(),
-        keyless_tx(deployment.call_data()),
+        keyless_tx(calldata, gas_limit(expected, held)),
         EvmTxRuntimeLimits::no_limits(),
     );
     let ExecutionResult::Revert { output, .. } = &traced.outcome.result else {
@@ -495,15 +538,6 @@ fn test_keyless_deploy_refused() {
         "the signer cannot fund the carried value"
     );
     assert_keyless_steps(&traced, false);
-    // A refusal keeps the regular gas the call spent, the overhead, and gives back the signer's
-    // account it charged before the balance rule refused.
-    let calldata = deployment.call_data();
-    let expected = Ledgers {
-        regular: gas::call_intrinsic(&calldata, false) + KEYLESS_DEPLOY_OVERHEAD_GAS,
-        state: 0,
-        history: gas::body(calldata.len()),
-        floor: gas::call_floor(&calldata, false),
-    };
     // The call frame paid the signer's account out of its regular gas before the refusal gave it
     // back.
     pin_given_back("keyless_refused", &traced, expected, gas::account_state());
@@ -544,13 +578,6 @@ fn test_data_size_limit_stops_the_body() {
     let limit = TX_BODY_SIZE;
     let calldata = [0x01];
     assert!(tx_body_history_bytes(calldata.len() as u64, 0, 0, 0) > limit, "the body crosses");
-    let traced = Traced::run(
-        funded().account_code(CONTRACT, BytecodeBuilder::default().stop().build()),
-        call_tx(CALLER, CONTRACT, Bytes::copy_from_slice(&calldata), U256::ZERO, TX_GAS),
-        EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit),
-    );
-    assert_every_frame_stops(&traced, LimitKind::DataSize, limit, 1);
-    assert!(traced.inspector.traces().nodes()[0].trace.steps.is_empty(), "no instruction ran");
     // The sender pays the intrinsic gas and the body's history, and nothing ran.
     let expected = Ledgers {
         regular: gas::call_intrinsic(&calldata, false),
@@ -558,6 +585,14 @@ fn test_data_size_limit_stops_the_body() {
         history: gas::body(calldata.len()),
         floor: gas::call_floor(&calldata, false),
     };
+    let data = Bytes::copy_from_slice(&calldata);
+    let traced = Traced::run(
+        funded().account_code(CONTRACT, BytecodeBuilder::default().stop().build()),
+        call_tx(CALLER, CONTRACT, data, U256::ZERO, gas_limit(expected, 0)),
+        EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit),
+    );
+    assert_every_frame_stops(&traced, LimitKind::DataSize, limit, 1);
+    assert!(traced.inspector.traces().nodes()[0].trace.steps.is_empty(), "no instruction ran");
     pin("data_size_body_stop", &traced, expected);
 }
 
@@ -571,13 +606,6 @@ fn test_data_size_limit_stop_spans_frames() {
     let data_len = 128;
     assert!(log0_size(data_len) > room, "the log crosses the transaction's limit");
     let limit = TX_BODY_SIZE + room;
-    let traced = Traced::run(
-        funded().account_code(CONTRACT, calling_child()).account_code(CHILD, logging(data_len)),
-        call_tx(CALLER, CONTRACT, Bytes::new(), U256::ZERO, TX_GAS),
-        EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit),
-    );
-    assert_every_frame_stops(&traced, LimitKind::DataSize, limit, 2);
-    assert_parent_does_not_resume(&traced);
     // The child's `LOG0` charged its regular gas before its record crossed the limit; its log was
     // never made, so it cost no history.
     let expected = Ledgers {
@@ -586,6 +614,16 @@ fn test_data_size_limit_stop_spans_frames() {
         history: gas::body(0),
         floor: gas::call_floor(&[], false),
     };
+    // Held in passing: the 64th the parent keeps back from a forward that must cover what the
+    // child spends.
+    let held = kept_back(logging_regular(data_len));
+    let traced = Traced::run(
+        funded().account_code(CONTRACT, calling_child()).account_code(CHILD, logging(data_len)),
+        call_tx(CALLER, CONTRACT, Bytes::new(), U256::ZERO, gas_limit(expected, held)),
+        EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit),
+    );
+    assert_every_frame_stops(&traced, LimitKind::DataSize, limit, 2);
+    assert_parent_does_not_resume(&traced);
     pin("data_size_stop_spans_frames", &traced, expected);
 }
 
@@ -604,9 +642,19 @@ fn test_frame_budget_reverts_the_child_alone() {
         .append_many([POP, PUSH0, PUSH0, LOG0])
         .stop()
         .build();
+    let parent_regular = call_regular(false) + BASE + 2 * BASE + gas::log(0, 0);
+    let expected = Ledgers {
+        regular: gas::call_intrinsic(&[], false) + parent_regular + logging_regular(data_len),
+        state: 0,
+        history: gas::body(0) + gas::history(LOG_BASE_SIZE),
+        floor: gas::call_floor(&[], false),
+    };
+    // Held in passing: the 64th the parent keeps back from a forward that must cover what the
+    // child spends.
+    let held = kept_back(logging_regular(data_len));
     let traced = Traced::run(
         funded().account_code(CONTRACT, parent).account_code(CHILD, logging(data_len)),
-        call_tx(CALLER, CONTRACT, Bytes::new(), U256::ZERO, TX_GAS),
+        call_tx(CALLER, CONTRACT, Bytes::new(), U256::ZERO, gas_limit(expected, held)),
         EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(TX_BODY_SIZE + room),
     );
     assert!(traced.outcome.result.is_success(), "{:?}", traced.outcome.result);
@@ -630,13 +678,6 @@ fn test_frame_budget_reverts_the_child_alone() {
         TX_BODY_SIZE + LOG_BASE_SIZE,
         "the transaction keeps its body and the parent's log"
     );
-    let parent = call_regular(false) + BASE + 2 * BASE + gas::log(0, 0);
-    let expected = Ledgers {
-        regular: gas::call_intrinsic(&[], false) + parent + logging_regular(data_len),
-        state: 0,
-        history: gas::body(0) + gas::history(LOG_BASE_SIZE),
-        floor: gas::call_floor(&[], false),
-    };
     pin("frame_budget_child_revert", &traced, expected);
 }
 
@@ -655,23 +696,28 @@ fn test_timestamp_detention_stop() {
         .build();
     // The compute at the read is the `TIMESTAMP` itself.
     let limit = BASE + cap;
-    let traced = Traced::run(
-        funded().account_code(CONTRACT, code),
-        call_tx(CALLER, CONTRACT, Bytes::new(), U256::ZERO, TX_GAS),
-        EvmTxRuntimeLimits::no_limits().with_block_env_access_compute_gas_limit(cap),
-    );
-    assert_every_frame_stops(&traced, LimitKind::ComputeGas, limit, 1);
-    assert_detention_step_reads_as_out_of_gas(&traced, "JUMP");
     // The transaction is billed its compute before the charge that crossed: the `TIMESTAMP`, the
     // `POP`, and the loop up to the limit.
     let compute = gas::compute_at_crossing(2 * BASE, limit, &[JUMPDEST_GAS, VERYLOW, MID]);
-    assert_compute_at_stop(&traced, compute);
     let expected = Ledgers {
         regular: gas::call_intrinsic(&[], false) + compute,
         state: 0,
         history: gas::body(0),
         floor: gas::call_floor(&[], false),
     };
+    // Held in passing: what the frame holds when it crosses. The charge that crosses, the
+    // `JUMP`'s: detention stops a charge the frame's whole gas covers, and one beyond it is an
+    // out-of-gas. On top of it the receipt, so the crossing step, which reads as spending the
+    // frame's whole gas, shows a cost the receipt cannot have billed.
+    let at_crossing = expected.receipt() + MID;
+    let traced = Traced::run(
+        funded().account_code(CONTRACT, code),
+        call_tx(CALLER, CONTRACT, Bytes::new(), U256::ZERO, gas_limit(expected, at_crossing)),
+        EvmTxRuntimeLimits::no_limits().with_block_env_access_compute_gas_limit(cap),
+    );
+    assert_every_frame_stops(&traced, LimitKind::ComputeGas, limit, 1);
+    assert_detention_step_reads_as_out_of_gas(&traced, "JUMP");
+    assert_compute_at_stop(&traced, compute);
     pin("timestamp_detention", &traced, expected);
 }
 
@@ -691,24 +737,31 @@ fn test_detention_stop_spans_frames() {
     let child = BytecodeBuilder::default().append(JUMPDEST).push_number(0_u8).append(JUMP).build();
     // The compute at the read: `PUSH0`, `POP` and the `TIMESTAMP` itself.
     let limit = 3 * BASE + cap;
-    let traced = Traced::run(
-        funded().account_code(CONTRACT, parent).account_code(CHILD, child),
-        call_tx(CALLER, CONTRACT, Bytes::new(), U256::ZERO, TX_GAS),
-        EvmTxRuntimeLimits::no_limits().with_block_env_access_compute_gas_limit(cap),
-    );
-    assert_every_frame_stops(&traced, LimitKind::ComputeGas, limit, 2);
-    assert_parent_does_not_resume(&traced);
-    assert_detention_step_reads_as_out_of_gas(&traced, "JUMP");
     // The parent's work up to and with its call, then the child's loop up to the limit.
     let before_loop = 3 * BASE + BASE + call_regular(false);
     let compute = gas::compute_at_crossing(before_loop, limit, &[JUMPDEST_GAS, VERYLOW, MID]);
-    assert_compute_at_stop(&traced, compute);
     let expected = Ledgers {
         regular: gas::call_intrinsic(&[], false) + compute,
         state: 0,
         history: gas::body(0),
         floor: gas::call_floor(&[], false),
     };
+    // Held in passing: what the child holds when it crosses. The charge that crosses, the child's
+    // `JUMP`: detention stops a charge the frame's whole gas covers, and one beyond it is an
+    // out-of-gas. On top of it the receipt, so the crossing step, which reads as spending the
+    // child's whole gas, shows a cost the receipt cannot have billed. And the 64th the parent keeps
+    // back from a forward that must cover the child's loop and all that.
+    let at_crossing = expected.receipt() + MID;
+    let held = at_crossing + kept_back(compute - before_loop + at_crossing);
+    let traced = Traced::run(
+        funded().account_code(CONTRACT, parent).account_code(CHILD, child),
+        call_tx(CALLER, CONTRACT, Bytes::new(), U256::ZERO, gas_limit(expected, held)),
+        EvmTxRuntimeLimits::no_limits().with_block_env_access_compute_gas_limit(cap),
+    );
+    assert_every_frame_stops(&traced, LimitKind::ComputeGas, limit, 2);
+    assert_parent_does_not_resume(&traced);
+    assert_detention_step_reads_as_out_of_gas(&traced, "JUMP");
+    assert_compute_at_stop(&traced, compute);
     pin("detention_stop_spans_frames", &traced, expected);
 }
 
@@ -716,18 +769,20 @@ fn test_detention_stop_spans_frames() {
 #[test]
 fn test_reservoir_pays_state_gas() {
     let code = BytecodeBuilder::default().sstore(U256::from(1), U256::from(1)).stop().build();
-    let reservoir = 50_000_000;
-    let gas_limit = TX_GAS_LIMIT_CAP + reservoir;
+    // The reservoir pays the body's history before the first frame, then the slot's state gas and
+    // its record's history at the `SSTORE`: it holds them at the prices in effect, with the margin
+    // on top. The regular gas below the execution cap pays the rest.
+    let slot = gas::slot_state() + gas::records(1);
+    let reservoir = ROOM + gas::body(0) + slot;
     let traced = Traced::run(
         funded().account_code(CONTRACT, code),
-        call_tx(CALLER, CONTRACT, Bytes::new(), U256::ZERO, gas_limit),
+        call_tx(CALLER, CONTRACT, Bytes::new(), U256::ZERO, TX_GAS_LIMIT_CAP + reservoir),
         EvmTxRuntimeLimits::no_limits(),
     );
     assert!(traced.outcome.result.is_success(), "{:?}", traced.outcome.result);
     assert_eq!(traced.outcome.gas.state, gas::slot_state());
     // The reservoir paid the body's history before the first frame, then the slot's state gas
     // and its record's history at the `SSTORE`; what is left goes back to the sender.
-    let slot = gas::slot_state() + gas::records(1);
     assert_eq!(
         traced.outcome.gas.reservoir_remaining,
         reservoir - gas::body(0) - slot,
@@ -754,15 +809,6 @@ fn test_reservoir_pays_state_gas() {
 fn test_identity_precompile() {
     let precompile = Address::with_last_byte(4);
     let input = Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef]);
-    let traced = Traced::run(
-        funded(),
-        call_tx(CALLER, precompile, input.clone(), U256::ZERO, TX_GAS),
-        EvmTxRuntimeLimits::no_limits(),
-    );
-    let ExecutionResult::Success { output, .. } = &traced.outcome.result else {
-        panic!("the precompile succeeds: {:?}", traced.outcome.result);
-    };
-    assert_eq!(output.data(), &input, "identity echoes its input");
     let price = satin_precompiles()
         .get(&precompile)
         .and_then(|identity| identity.required_gas(&input))
@@ -773,6 +819,15 @@ fn test_identity_precompile() {
         history: gas::body(input.len()),
         floor: gas::call_floor(&input, false),
     };
+    let traced = Traced::run(
+        funded(),
+        call_tx(CALLER, precompile, input.clone(), U256::ZERO, gas_limit(expected, 0)),
+        EvmTxRuntimeLimits::no_limits(),
+    );
+    let ExecutionResult::Success { output, .. } = &traced.outcome.result else {
+        panic!("the precompile succeeds: {:?}", traced.outcome.result);
+    };
+    assert_eq!(output.data(), &input, "identity echoes its input");
     pin("identity_precompile", &traced, expected);
 }
 
@@ -809,24 +864,10 @@ fn test_precompile_child_frame() {
         .append_many([GAS_OP, STATICCALL, POP])
         .stop()
         .build();
-    let traced = Traced::run(
-        funded().account_code(CONTRACT, code),
-        call_tx(CALLER, CONTRACT, Bytes::new(), U256::ZERO, TX_GAS),
-        EvmTxRuntimeLimits::no_limits(),
-    );
-    assert!(traced.outcome.result.is_success(), "{:?}", traced.outcome.result);
     let price = satin_precompiles()
         .get(&kzg::ADDRESS)
         .and_then(|precompile| precompile.required_gas(&input))
         .expect("the Satin table prices KZG");
-    let root = traced.call_frame(false);
-    let [child] = root.calls.as_slice() else { panic!("one child frame: {root:?}") };
-    assert_eq!(child.typ, "STATICCALL");
-    assert_eq!(child.to, Some(kzg::ADDRESS));
-    assert_eq!(child.error, None, "the proof verifies");
-    assert_eq!(child.gas_used, U256::from(price), "the child spent the Satin price");
-    let answer = child.output.as_ref().expect("the evaluation's answer");
-    assert_eq!(answer.as_ref(), &kzg::RETURN_VALUE[..], "the evaluation's answer");
     // Six words stored (a `PUSH32`, a `PUSH8` of the offset and an `MSTORE` each) and the memory
     // they take, the call's five pushes and `GAS`, the precompile's warm access and its price, and
     // the `POP`.
@@ -839,6 +880,22 @@ fn test_precompile_child_frame() {
         history: gas::body(0),
         floor: gas::call_floor(&[], false),
     };
+    // Held in passing: the 64th the contract keeps back from a forward that must cover the
+    // precompile's price.
+    let traced = Traced::run(
+        funded().account_code(CONTRACT, code),
+        call_tx(CALLER, CONTRACT, Bytes::new(), U256::ZERO, gas_limit(expected, kept_back(price))),
+        EvmTxRuntimeLimits::no_limits(),
+    );
+    assert!(traced.outcome.result.is_success(), "{:?}", traced.outcome.result);
+    let root = traced.call_frame(false);
+    let [child] = root.calls.as_slice() else { panic!("one child frame: {root:?}") };
+    assert_eq!(child.typ, "STATICCALL");
+    assert_eq!(child.to, Some(kzg::ADDRESS));
+    assert_eq!(child.error, None, "the proof verifies");
+    assert_eq!(child.gas_used, U256::from(price), "the child spent the Satin price");
+    let answer = child.output.as_ref().expect("the evaluation's answer");
+    assert_eq!(answer.as_ref(), &kzg::RETURN_VALUE[..], "the evaluation's answer");
     pin("precompile_child", &traced, expected);
 }
 
@@ -848,11 +905,18 @@ fn test_precompile_child_frame() {
 fn test_deposit_transaction() {
     let mint = 1_000_u128;
     let value = U256::from(7);
+    // A deposit pays its intrinsic gas and what it ran, here nothing, and no history.
+    let expected = Ledgers {
+        regular: gas::call_intrinsic(&[], true),
+        state: 0,
+        history: 0,
+        floor: gas::call_floor(&[], true),
+    };
     let mut tx = op_transaction(TxEnv {
         caller: CALLER,
         kind: TxKind::Call(CONTRACT),
         value,
-        gas_limit: TX_GAS,
+        gas_limit: gas_limit(expected, 0),
         ..Default::default()
     });
     tx.deposit.source_hash = B256::repeat_byte(0x42);
@@ -875,12 +939,5 @@ fn test_deposit_transaction() {
         Some(before + U256::from(mint) - value),
         "the caller holds its balance, plus the mint, less the value"
     );
-    // A deposit pays its intrinsic gas and what it ran, here nothing, and no history.
-    let expected = Ledgers {
-        regular: gas::call_intrinsic(&[], true),
-        state: 0,
-        history: 0,
-        floor: gas::call_floor(&[], true),
-    };
     pin("deposit", &traced, expected);
 }

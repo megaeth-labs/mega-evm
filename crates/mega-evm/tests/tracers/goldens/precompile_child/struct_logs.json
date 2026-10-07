@@ -6,7 +6,7 @@
     {
       "pc": 0,
       "op": "PUSH32",
-      "gas": 4957720,
+      "gas": 1101776,
       "gasCost": 3,
       "depth": 1,
       "stack": [],
@@ -15,7 +15,7 @@
     {
       "pc": 33,
       "op": "PUSH8",
-      "gas": 4957717,
+      "gas": 1101773,
       "gasCost": 3,
       "depth": 1,
       "stack": [
@@ -26,7 +26,7 @@
     {
       "pc": 42,
       "op": "MSTORE",
-      "gas": 4957714,
+      "gas": 1101770,
       "gasCost": 6,
       "depth": 1,
       "stack": [
@@ -38,7 +38,7 @@
     {
       "pc": 43,
       "op": "PUSH32",
-      "gas": 4957708,
+      "gas": 1101764,
       "gasCost": 3,
       "depth": 1,
       "stack": [],
@@ -47,7 +47,7 @@
     {
       "pc": 76,
       "op": "PUSH8",
-      "gas": 4957705,
+      "gas": 1101761,
       "gasCost": 3,
       "depth": 1,
       "stack": [
@@ -58,7 +58,7 @@
     {
       "pc": 85,
       "op": "MSTORE",
-      "gas": 4957702,
+      "gas": 1101758,
       "gasCost": 6,
       "depth": 1,
       "stack": [
@@ -70,7 +70,7 @@
     {
       "pc": 86,
       "op": "PUSH32",
-      "gas": 4957696,
+      "gas": 1101752,
       "gasCost": 3,
       "depth": 1,
       "stack": [],
@@ -79,7 +79,7 @@
     {
       "pc": 119,
       "op": "PUSH8",
-      "gas": 4957693,
+      "gas": 1101749,
       "gasCost": 3,
       "depth": 1,
       "stack": [
@@ -90,7 +90,7 @@
     {
       "pc": 128,
       "op": "MSTORE",
-      "gas": 4957690,
+      "gas": 1101746,
       "gasCost": 6,
       "depth": 1,
       "stack": [
@@ -102,7 +102,7 @@
     {
       "pc": 129,
       "op": "PUSH32",
-      "gas": 4957684,
+      "gas": 1101740,
       "gasCost": 3,
       "depth": 1,
       "stack": [],
@@ -111,7 +111,7 @@
     {
       "pc": 162,
       "op": "PUSH8",
-      "gas": 4957681,
+      "gas": 1101737,
       "gasCost": 3,
       "depth": 1,
       "stack": [
@@ -122,7 +122,7 @@
     {
       "pc": 171,
       "op": "MSTORE",
-      "gas": 4957678,
+      "gas": 1101734,
       "gasCost": 6,
       "depth": 1,
       "stack": [
@@ -134,7 +134,7 @@
     {
       "pc": 172,
       "op": "PUSH32",
-      "gas": 4957672,
+      "gas": 1101728,
       "gasCost": 3,
       "depth": 1,
       "stack": [],
@@ -143,7 +143,7 @@
     {
       "pc": 205,
       "op": "PUSH8",
-      "gas": 4957669,
+      "gas": 1101725,
       "gasCost": 3,
       "depth": 1,
       "stack": [
@@ -154,7 +154,7 @@
     {
       "pc": 214,
       "op": "MSTORE",
-      "gas": 4957666,
+      "gas": 1101722,
       "gasCost": 6,
       "depth": 1,
       "stack": [
@@ -166,7 +166,7 @@
     {
       "pc": 215,
       "op": "PUSH32",
-      "gas": 4957660,
+      "gas": 1101716,
       "gasCost": 3,
       "depth": 1,
       "stack": [],
@@ -175,7 +175,7 @@
     {
       "pc": 248,
       "op": "PUSH8",
-      "gas": 4957657,
+      "gas": 1101713,
       "gasCost": 3,
       "depth": 1,
       "stack": [
@@ -186,7 +186,7 @@
     {
       "pc": 257,
       "op": "MSTORE",
-      "gas": 4957654,
+      "gas": 1101710,
       "gasCost": 6,
       "depth": 1,
       "stack": [
@@ -198,7 +198,7 @@
     {
       "pc": 258,
       "op": "PUSH0",
-      "gas": 4957648,
+      "gas": 1101704,
       "gasCost": 2,
       "depth": 1,
       "stack": [],
@@ -207,7 +207,7 @@
     {
       "pc": 259,
       "op": "PUSH0",
-      "gas": 4957646,
+      "gas": 1101702,
       "gasCost": 2,
       "depth": 1,
       "stack": [
@@ -218,7 +218,7 @@
     {
       "pc": 260,
       "op": "PUSH1",
-      "gas": 4957644,
+      "gas": 1101700,
       "gasCost": 3,
       "depth": 1,
       "stack": [
@@ -230,7 +230,7 @@
     {
       "pc": 262,
       "op": "PUSH0",
-      "gas": 4957641,
+      "gas": 1101697,
       "gasCost": 2,
       "depth": 1,
       "stack": [
@@ -243,7 +243,7 @@
     {
       "pc": 263,
       "op": "PUSH20",
-      "gas": 4957639,
+      "gas": 1101695,
       "gasCost": 3,
       "depth": 1,
       "stack": [
@@ -257,7 +257,7 @@
     {
       "pc": 284,
       "op": "GAS",
-      "gas": 4957636,
+      "gas": 1101692,
       "gasCost": 2,
       "depth": 1,
       "stack": [
@@ -272,8 +272,8 @@
     {
       "pc": 285,
       "op": "STATICCALL",
-      "gas": 4957634,
-      "gasCost": 4880173,
+      "gas": 1101690,
+      "gasCost": 1084478,
       "depth": 1,
       "stack": [
         "0x0",
@@ -281,14 +281,14 @@
         "0xc0",
         "0x0",
         "0xa",
-        "0x4ba5c2"
+        "0x10cf7a"
       ],
       "refund": 0
     },
     {
       "pc": 286,
       "op": "POP",
-      "gas": 4857534,
+      "gas": 1001590,
       "gasCost": 2,
       "depth": 1,
       "stack": [
@@ -299,7 +299,7 @@
     {
       "pc": 287,
       "op": "STOP",
-      "gas": 4857532,
+      "gas": 1001588,
       "gasCost": 0,
       "depth": 1,
       "stack": [],

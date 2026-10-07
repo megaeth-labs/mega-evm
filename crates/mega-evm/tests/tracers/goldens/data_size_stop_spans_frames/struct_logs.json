@@ -6,7 +6,7 @@
     {
       "pc": 0,
       "op": "PUSH0",
-      "gas": 4957720,
+      "gas": 1004055,
       "gasCost": 2,
       "depth": 1,
       "stack": [],
@@ -15,7 +15,7 @@
     {
       "pc": 1,
       "op": "PUSH0",
-      "gas": 4957718,
+      "gas": 1004053,
       "gasCost": 2,
       "depth": 1,
       "stack": [
@@ -26,7 +26,7 @@
     {
       "pc": 2,
       "op": "PUSH0",
-      "gas": 4957716,
+      "gas": 1004051,
       "gasCost": 2,
       "depth": 1,
       "stack": [
@@ -38,7 +38,7 @@
     {
       "pc": 3,
       "op": "PUSH0",
-      "gas": 4957714,
+      "gas": 1004049,
       "gasCost": 2,
       "depth": 1,
       "stack": [
@@ -51,7 +51,7 @@
     {
       "pc": 4,
       "op": "PUSH32",
-      "gas": 4957712,
+      "gas": 1004047,
       "gasCost": 3,
       "depth": 1,
       "stack": [
@@ -65,7 +65,7 @@
     {
       "pc": 37,
       "op": "PUSH20",
-      "gas": 4957709,
+      "gas": 1004044,
       "gasCost": 3,
       "depth": 1,
       "stack": [
@@ -80,7 +80,7 @@
     {
       "pc": 58,
       "op": "GAS",
-      "gas": 4957706,
+      "gas": 1004041,
       "gasCost": 2,
       "depth": 1,
       "stack": [
@@ -96,8 +96,8 @@
     {
       "pc": 59,
       "op": "CALL",
-      "gas": 4957704,
-      "gasCost": 4880281,
+      "gas": 1004039,
+      "gasCost": 988392,
       "depth": 1,
       "stack": [
         "0x0",
@@ -106,14 +106,14 @@
         "0x0",
         "0x0",
         "0x400003",
-        "0x4ba608"
+        "0xf5207"
       ],
       "refund": 0
     },
     {
       "pc": 0,
       "op": "PUSH1",
-      "gas": 4877681,
+      "gas": 985792,
       "gasCost": 3,
       "depth": 2,
       "stack": [],
@@ -122,7 +122,7 @@
     {
       "pc": 2,
       "op": "PUSH0",
-      "gas": 4877678,
+      "gas": 985789,
       "gasCost": 2,
       "depth": 2,
       "stack": [
@@ -133,7 +133,7 @@
     {
       "pc": 3,
       "op": "LOG0",
-      "gas": 4877676,
+      "gas": 985787,
       "gasCost": 1411,
       "depth": 2,
       "stack": [

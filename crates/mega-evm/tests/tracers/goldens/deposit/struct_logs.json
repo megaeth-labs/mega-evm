@@ -6,7 +6,7 @@
     {
       "pc": 0,
       "op": "STOP",
-      "gas": 4979000,
+      "gas": 1000000,
       "gasCost": 0,
       "depth": 1,
       "stack": [],

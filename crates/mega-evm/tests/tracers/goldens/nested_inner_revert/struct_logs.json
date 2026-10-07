@@ -6,7 +6,7 @@
     {
       "pc": 0,
       "op": "PUSH0",
-      "gas": 4957720,
+      "gas": 1589354,
       "gasCost": 2,
       "depth": 1,
       "stack": [],
@@ -15,7 +15,7 @@
     {
       "pc": 1,
       "op": "PUSH0",
-      "gas": 4957718,
+      "gas": 1589352,
       "gasCost": 2,
       "depth": 1,
       "stack": [
@@ -26,7 +26,7 @@
     {
       "pc": 2,
       "op": "PUSH0",
-      "gas": 4957716,
+      "gas": 1589350,
       "gasCost": 2,
       "depth": 1,
       "stack": [
@@ -38,7 +38,7 @@
     {
       "pc": 3,
       "op": "PUSH0",
-      "gas": 4957714,
+      "gas": 1589348,
       "gasCost": 2,
       "depth": 1,
       "stack": [
@@ -51,7 +51,7 @@
     {
       "pc": 4,
       "op": "PUSH32",
-      "gas": 4957712,
+      "gas": 1589346,
       "gasCost": 3,
       "depth": 1,
       "stack": [
@@ -65,7 +65,7 @@
     {
       "pc": 37,
       "op": "PUSH20",
-      "gas": 4957709,
+      "gas": 1589343,
       "gasCost": 3,
       "depth": 1,
       "stack": [
@@ -80,7 +80,7 @@
     {
       "pc": 58,
       "op": "GAS",
-      "gas": 4957706,
+      "gas": 1589340,
       "gasCost": 2,
       "depth": 1,
       "stack": [
@@ -96,8 +96,8 @@
     {
       "pc": 59,
       "op": "CALL",
-      "gas": 4957704,
-      "gasCost": 4887462,
+      "gas": 1589338,
+      "gasCost": 1571726,
       "depth": 1,
       "stack": [
         "0x0",
@@ -106,14 +106,14 @@
         "0x0",
         "0x1",
         "0x400003",
-        "0x4ba608"
+        "0x18405a"
       ],
       "refund": 0
     },
     {
       "pc": 0,
       "op": "PUSH32",
-      "gas": 4871122,
+      "gas": 1555386,
       "gasCost": 3,
       "depth": 2,
       "stack": [],
@@ -122,7 +122,7 @@
     {
       "pc": 33,
       "op": "PUSH32",
-      "gas": 4871119,
+      "gas": 1555383,
       "gasCost": 3,
       "depth": 2,
       "stack": [
@@ -133,7 +133,7 @@
     {
       "pc": 66,
       "op": "SSTORE",
-      "gas": 4871116,
+      "gas": 1555380,
       "gasCost": 123540,
       "depth": 2,
       "stack": [
@@ -148,7 +148,7 @@
     {
       "pc": 67,
       "op": "PUSH1",
-      "gas": 4747576,
+      "gas": 1431840,
       "gasCost": 3,
       "depth": 2,
       "stack": [],
@@ -157,7 +157,7 @@
     {
       "pc": 69,
       "op": "PUSH0",
-      "gas": 4747573,
+      "gas": 1431837,
       "gasCost": 2,
       "depth": 2,
       "stack": [
@@ -168,7 +168,7 @@
     {
       "pc": 70,
       "op": "PUSH0",
-      "gas": 4747571,
+      "gas": 1431835,
       "gasCost": 2,
       "depth": 2,
       "stack": [
@@ -180,7 +180,7 @@
     {
       "pc": 71,
       "op": "LOG1",
-      "gas": 4747569,
+      "gas": 1431833,
       "gasCost": 750,
       "depth": 2,
       "stack": [
@@ -193,7 +193,7 @@
     {
       "pc": 72,
       "op": "PUSH0",
-      "gas": 4746819,
+      "gas": 1431083,
       "gasCost": 2,
       "depth": 2,
       "stack": [],
@@ -202,7 +202,7 @@
     {
       "pc": 73,
       "op": "PUSH0",
-      "gas": 4746817,
+      "gas": 1431081,
       "gasCost": 2,
       "depth": 2,
       "stack": [
@@ -213,7 +213,7 @@
     {
       "pc": 74,
       "op": "REVERT",
-      "gas": 4746815,
+      "gas": 1431079,
       "gasCost": 0,
       "depth": 2,
       "stack": [
@@ -225,7 +225,7 @@
     {
       "pc": 60,
       "op": "POP",
-      "gas": 4925537,
+      "gas": 1557171,
       "gasCost": 2,
       "depth": 1,
       "stack": [
@@ -236,7 +236,7 @@
     {
       "pc": 61,
       "op": "PUSH0",
-      "gas": 4925535,
+      "gas": 1557169,
       "gasCost": 2,
       "depth": 1,
       "stack": [],
@@ -245,7 +245,7 @@
     {
       "pc": 62,
       "op": "PUSH0",
-      "gas": 4925533,
+      "gas": 1557167,
       "gasCost": 2,
       "depth": 1,
       "stack": [
@@ -256,7 +256,7 @@
     {
       "pc": 63,
       "op": "LOG0",
-      "gas": 4925531,
+      "gas": 1557165,
       "gasCost": 3191,
       "depth": 1,
       "stack": [
@@ -268,7 +268,7 @@
     {
       "pc": 64,
       "op": "STOP",
-      "gas": 4922340,
+      "gas": 1553974,
       "gasCost": 0,
       "depth": 1,
       "stack": [],

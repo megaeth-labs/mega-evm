@@ -6,7 +6,7 @@
     {
       "pc": 0,
       "op": "PUSH1",
-      "gas": 4760154,
+      "gas": 1004882,
       "gasCost": 3,
       "depth": 1,
       "stack": [],
@@ -15,7 +15,7 @@
     {
       "pc": 2,
       "op": "PUSH2",
-      "gas": 4760151,
+      "gas": 1004879,
       "gasCost": 3,
       "depth": 1,
       "stack": [
@@ -26,7 +26,7 @@
     {
       "pc": 5,
       "op": "PUSH0",
-      "gas": 4760148,
+      "gas": 1004876,
       "gasCost": 2,
       "depth": 1,
       "stack": [
@@ -38,7 +38,7 @@
     {
       "pc": 6,
       "op": "CODECOPY",
-      "gas": 4760146,
+      "gas": 1004874,
       "gasCost": 9,
       "depth": 1,
       "stack": [
@@ -51,7 +51,7 @@
     {
       "pc": 7,
       "op": "PUSH1",
-      "gas": 4760137,
+      "gas": 1004865,
       "gasCost": 3,
       "depth": 1,
       "stack": [],
@@ -60,7 +60,7 @@
     {
       "pc": 9,
       "op": "PUSH0",
-      "gas": 4760134,
+      "gas": 1004862,
       "gasCost": 2,
       "depth": 1,
       "stack": [
@@ -71,7 +71,7 @@
     {
       "pc": 10,
       "op": "RETURN",
-      "gas": 4760132,
+      "gas": 1004860,
       "gasCost": 0,
       "depth": 1,
       "stack": [
