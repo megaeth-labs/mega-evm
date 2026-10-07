@@ -95,7 +95,7 @@ A test is skipped only for a class decided from its content before anything runs
 - `blob-transactions`: a block carries a blob transaction, or expects an exception only a blob transaction raises; an OP chain has no blob transactions;
 - `requests`: the test is an EIP-7002, EIP-7251 or EIP-7685 request test, or a block expects an exception about requests; an OP chain makes no requests and no post-block system call;
 - `header-or-body`: a block expects only `BlockException`s for its header or body — its gas limit, base fee, blob gas fields, size, encoding, withdrawals root or hash — a consensus check a node makes before execution; a `BlockException` outside the list is compared, so the executor must refuse the block;
-- `undecodable-invalid-transaction`: a block the fixture expects to be invalid carries a transaction an OP block cannot encode — an EIP-7702 transaction without a recipient, or a fee wider than 128 bits — the blocks the state-test gate skips as unbuildable;
+- `undecodable-invalid-transaction`: a block the fixture expects to be invalid carries a transaction an OP block cannot encode — an EIP-7702 transaction without a recipient, or a fee wider than 128 bits — the transactions the state-test gate skips as unbuildable;
 - `create-collision-with-storage`: the state-test gate's EIP-7610 files (`src/skips.rs`), whose collisions with storage revm cannot see.
 
 The EIP-2935 and EIP-4788 tests are not skipped: their system calls are made and compared like everything else.
