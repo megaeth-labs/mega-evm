@@ -25,11 +25,15 @@ alloy-trie = { workspace = true, features = ["std", "ethereum"] }
 
 # misc
 serde = { workspace = true, features = ["derive", "std"] }
-serde_json = { workspace = true, features = ["std"] }
+serde_json = { workspace = true, features = ["raw_value", "std"] }
 thiserror = { workspace = true, features = ["std"] }
 walkdir.workspace = true
 
 [dev-dependencies]
+# alloy
+alloy-eips.workspace = true
+
+# misc
 tempfile.workspace = true
 
 # Published as `mega-state-test`; the library keeps the `state_test` import name.

@@ -24,6 +24,15 @@ With the four entries taken back out of the table, every Osaka fixture passes.
 - `static/state_tests/stBadOpcode/undefinedOpcodeFirstByte.json`
   - `tests/static/state_tests/stBadOpcode/undefinedOpcodeFirstByteFiller.yml::undefinedOpcodeFirstByte[fork_Osaka-state_test-]` d=0 g=0 v=0: `state-root-mismatch`, state root `0xefc47fa41b70e7a1b1aa1ac3c0b04af29ccb2ed2f766fe42ff764e1f3b9fe0de`
 
+**Blockchain-test failures.** 3 tests of the pinned main release's `blockchain_tests`, each with the block it fails at and the gas used, receipts root and state root Satin produces for it; paths are relative to the release's `blockchain_tests` directory.
+
+- `frontier/opcodes/test_all_opcodes.json`
+  - `tests/frontier/opcodes/test_all_opcodes.py::test_all_opcodes[fork_Osaka-blockchain_test_from_state_test]`: block 0, gas used 8129268, receipts root `0xa8efe1faeb804a16183cc48903e6d13ed9c9786bfb146708b605feb6448bdd93`, state root `0x311f0607743b16ef7eb341125d364a002eaceb2f05ac936bbd0f839865d2711d`
+- `frontier/scenarios/test_scenarios.json`
+  - `tests/frontier/scenarios/test_scenarios.py::test_scenarios[fork_Osaka-blockchain_test-test_program_program_INVALID-debug]`: block 0, gas used 5386221, receipts root `0x55de3d2d9f2c2c5622556508e5cda2ddca148e43439eb16a46115b797792d3bf`, state root `0x50cc3c920ca4d635bb156978614d544911917dda2314da86c6ae47f86d8668ff`
+- `static/state_tests/stBadOpcode/undefinedOpcodeFirstByte.json`
+  - `tests/static/state_tests/stBadOpcode/undefinedOpcodeFirstByteFiller.yml::undefinedOpcodeFirstByte[fork_Osaka-blockchain_test_from_state_test-]`: block 0, gas used 3969244, receipts root `0x9a8f3b88fe2bb353fe86d44bd5be426458c3544f423b8e70f0dff0a06c9634bc`, state root `0xa1527ad75667d1f7455aa215c374f3c21c9fde318ec9fb652ee9c8fac11dc72b`
+
 ## `selfdestruct-burns-on-osaka`
 
 37 failed entries of the pinned Amsterdam fixtures.

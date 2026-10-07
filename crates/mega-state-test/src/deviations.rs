@@ -20,6 +20,7 @@ use revm::primitives::b256;
 use serde::Serialize;
 
 use crate::{
+    blockchain,
     runner::{Produced, TestId},
     Fork,
 };
@@ -38,6 +39,20 @@ pub struct Deviation {
     /// Every entry of the fork's pinned fixture release the rule fails, in path, name and index
     /// order.
     pub entries: &'static [Entry],
+    /// Every blockchain test of the pinned main release the rule fails, in path and name order.
+    /// Only an Osaka deviation lists any: the blockchain tests run are the Osaka ones.
+    pub blockchain_entries: &'static [BlockchainEntry],
+}
+
+/// A blockchain test a deviation explains, and what Satin produces for the block it fails at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct BlockchainEntry {
+    /// The fixture file, relative to the release's `blockchain_tests` directory.
+    pub path: &'static str,
+    /// The test's name within the file.
+    pub name: &'static str,
+    /// The block the test fails at, and what Satin produces for it.
+    pub produced: blockchain::Produced,
 }
 
 /// A fixture entry a deviation explains, and the hashes Satin produces for it.
@@ -63,6 +78,18 @@ impl Deviation {
         }
     }
 
+    /// Whether a failure of the blockchain test `id`, which produced `produced` at the block it
+    /// failed at, is this deviation's: the test is listed, with exactly that block and outcome.
+    pub fn explains_blockchain(
+        &self,
+        id: &blockchain::TestId,
+        produced: Option<blockchain::Produced>,
+    ) -> bool {
+        produced.is_some_and(|produced| {
+            self.blockchain_entries.iter().any(|entry| entry.produced == produced && entry.is(id))
+        })
+    }
+
     /// Whether a failure of the entry `id` of `fork`, which produced `produced`, is this
     /// deviation's: the entry is listed, with exactly those hashes.
     pub fn explains(&self, fork: Fork, id: &TestId, produced: Option<Produced>) -> bool {
@@ -72,14 +99,30 @@ impl Deviation {
     }
 }
 
+impl BlockchainEntry {
+    /// Whether `id` is this test: the same name, in a file whose path ends with this entry's path.
+    pub fn is(&self, id: &blockchain::TestId) -> bool {
+        id.name == self.name && path_ends_with(&id.path, self.path)
+    }
+}
+
+impl fmt::Display for BlockchainEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} :: {}", self.path, self.name)
+    }
+}
+
+/// Whether `path` ends with `suffix` on a path component boundary.
+fn path_ends_with(path: &str, suffix: &str) -> bool {
+    let path = path.replace('\\', "/");
+    path.strip_suffix(suffix).is_some_and(|dir| dir.is_empty() || dir.ends_with('/'))
+}
+
 impl Entry {
     /// Whether `id` is this entry: the same test and indices, in a file whose path ends with this
     /// entry's path.
     pub fn is(&self, id: &TestId) -> bool {
-        id.name == self.name && id.indexes == self.indexes && {
-            let path = id.path.replace('\\', "/");
-            path.strip_suffix(self.path).is_some_and(|dir| dir.is_empty() || dir.ends_with('/'))
-        }
+        id.name == self.name && id.indexes == self.indexes && path_ends_with(&id.path, self.path)
     }
 }
 
@@ -104,6 +147,50 @@ pub const AMSTERDAM_OPCODES_ON_OSAKA: Deviation = Deviation {
              opcode instead. With the four entries taken back out of the table, every Osaka \
              fixture passes.",
     fork: Fork::Osaka,
+    blockchain_entries: &[
+        BlockchainEntry {
+            path: "frontier/opcodes/test_all_opcodes.json",
+            name: "tests/frontier/opcodes/test_all_opcodes.py::test_all_opcodes[fork_Osaka-blockchain_test_from_state_test]",
+            produced: blockchain::Produced {
+                block: 0,
+                gas_used: 8_129_268,
+                receipts_root: b256!(
+                    "0xa8efe1faeb804a16183cc48903e6d13ed9c9786bfb146708b605feb6448bdd93"
+                ),
+                state_root: b256!(
+                    "0x311f0607743b16ef7eb341125d364a002eaceb2f05ac936bbd0f839865d2711d"
+                ),
+            },
+        },
+        BlockchainEntry {
+            path: "frontier/scenarios/test_scenarios.json",
+            name: "tests/frontier/scenarios/test_scenarios.py::test_scenarios[fork_Osaka-blockchain_test-test_program_program_INVALID-debug]",
+            produced: blockchain::Produced {
+                block: 0,
+                gas_used: 5_386_221,
+                receipts_root: b256!(
+                    "0x55de3d2d9f2c2c5622556508e5cda2ddca148e43439eb16a46115b797792d3bf"
+                ),
+                state_root: b256!(
+                    "0x50cc3c920ca4d635bb156978614d544911917dda2314da86c6ae47f86d8668ff"
+                ),
+            },
+        },
+        BlockchainEntry {
+            path: "static/state_tests/stBadOpcode/undefinedOpcodeFirstByte.json",
+            name: "tests/static/state_tests/stBadOpcode/undefinedOpcodeFirstByteFiller.yml::undefinedOpcodeFirstByte[fork_Osaka-blockchain_test_from_state_test-]",
+            produced: blockchain::Produced {
+                block: 0,
+                gas_used: 3_969_244,
+                receipts_root: b256!(
+                    "0x9a8f3b88fe2bb353fe86d44bd5be426458c3544f423b8e70f0dff0a06c9634bc"
+                ),
+                state_root: b256!(
+                    "0xa1527ad75667d1f7455aa215c374f3c21c9fde318ec9fb652ee9c8fac11dc72b"
+                ),
+            },
+        },
+    ],
     entries: &[
         Entry {
             path: "frontier/opcodes/test_all_opcodes.json",
@@ -140,6 +227,7 @@ pub const SELFDESTRUCT_BURNS_ON_OSAKA: Deviation = Deviation {
              listed for every one of these entries, and the fixtures' own on the Amsterdam spec. \
              Whether Satin takes EIP-8246 is a decision for its specification, not for this gate.",
     fork: Fork::Amsterdam,
+    blockchain_entries: &[],
     entries: &[
         Entry {
             path: "for_amsterdam/amsterdam/eip2780_reduce_intrinsic_tx_gas/top_frame_charges/initcode_selfdestruct_keeps_top_frame_state_charge.json",
@@ -511,6 +599,31 @@ pub fn render_markdown() -> String {
                 entry.produced.kind().name()
             ));
         }
+        if !deviation.blockchain_entries.is_empty() {
+            out.push_str(&format!(
+                "\n**Blockchain-test failures.** {} tests of the pinned main release's \
+                 `blockchain_tests`, each with the block it fails at and the gas used, receipts \
+                 root and state root Satin produces for it; paths are relative to the release's \
+                 `blockchain_tests` directory.\n\n",
+                deviation.blockchain_entries.len()
+            ));
+            let mut path = "";
+            for entry in deviation.blockchain_entries {
+                if entry.path != path {
+                    path = entry.path;
+                    out.push_str(&format!("- `{path}`\n"));
+                }
+                let produced = entry.produced;
+                out.push_str(&format!(
+                    "  - `{}`: block {}, gas used {}, receipts root `{}`, state root `{}`\n",
+                    entry.name,
+                    produced.block,
+                    produced.gas_used,
+                    produced.receipts_root,
+                    produced.state_root
+                ));
+            }
+        }
     }
     out
 }
@@ -565,6 +678,56 @@ mod tests {
             assert_eq!(deviation.listed(deviation.fork).len(), deviation.entries.len());
             for fork in Fork::ALL.into_iter().filter(|fork| *fork != deviation.fork) {
                 assert!(deviation.listed(fork).is_empty(), "{}", deviation.id);
+            }
+        }
+    }
+
+    /// Only an Osaka deviation lists blockchain tests, each complete, in path and name order, each
+    /// once across the registry; a listed test is explained only with what it lists, wherever the
+    /// release's `blockchain_tests` directory is.
+    #[test]
+    fn test_blockchain_entries() {
+        let mut all = BTreeSet::new();
+        for deviation in DEVIATIONS {
+            if deviation.fork != Fork::Osaka {
+                assert!(deviation.blockchain_entries.is_empty(), "{}", deviation.id);
+            }
+            let keys: Vec<_> =
+                deviation.blockchain_entries.iter().map(|e| (e.path, e.name)).collect();
+            assert!(
+                keys.windows(2).all(|pair| pair[0] < pair[1]),
+                "{}: out of order",
+                deviation.id
+            );
+            for entry in deviation.blockchain_entries {
+                assert!(all.insert((entry.path, entry.name)), "{entry} is listed twice");
+                assert!(
+                    !entry.name.is_empty() &&
+                        entry.path.ends_with(".json") &&
+                        !entry.path.starts_with('/') &&
+                        entry.path.split('/').all(|part| !part.is_empty() && part != ".."),
+                    "{}: {entry}",
+                    deviation.id
+                );
+                for dir in ["", "fixtures/main/blockchain_tests/", "/tmp/x/blockchain_tests/"] {
+                    let id = blockchain::TestId {
+                        path: format!("{dir}{}", entry.path),
+                        name: entry.name.into(),
+                    };
+                    assert!(deviation.explains_blockchain(&id, Some(entry.produced)), "{entry}");
+                    assert!(!deviation.explains_blockchain(&id, None), "{entry}");
+                    let mut other = entry.produced;
+                    other.gas_used += 1;
+                    assert!(!deviation.explains_blockchain(&id, Some(other)), "{entry}");
+                    let mut other = entry.produced;
+                    other.block += 1;
+                    assert!(!deviation.explains_blockchain(&id, Some(other)), "{entry}");
+                }
+                let elsewhere = blockchain::TestId {
+                    path: format!("x{}", entry.path),
+                    name: entry.name.into(),
+                };
+                assert!(!deviation.explains_blockchain(&elsewhere, Some(entry.produced)));
             }
         }
     }

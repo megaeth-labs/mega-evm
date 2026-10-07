@@ -3780,6 +3780,7 @@ dependencies = [
 name = "mega-state-test"
 version = "2.0.0-alpha.1"
 dependencies = [
+ "alloy-eips 2.1.1",
  "alloy-rlp",
  "alloy-trie",
  "mega-evm 2.0.0-alpha.1",

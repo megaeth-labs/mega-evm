@@ -14,10 +14,16 @@
 //!
 //! The fixture types are the revm fork's own ([`types`]), the ones its reference runner reads, so
 //! the two runners parse, skip and count the same population.
+//!
+//! The [`blockchain`] module runs the execution-spec blockchain tests — chains of blocks, many
+//! transactions to a block — through Satin's block executor in equivalence mode's configuration,
+//! and judges every block's gas used, logs bloom, receipts root and state root, and every block the
+//! fixture expects to be refused.
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
+pub mod blockchain;
 pub mod deviations;
 pub mod exceptions;
 mod fork;
