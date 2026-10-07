@@ -1,0 +1,5 @@
+{"pc":0,"depth":1,"opName":"PUSH32","op":127,"gas":"0x1124da","reservoir":"0x0","stateGas":"0x0","gasCost":"0x3","stack":[],"returnData":"0x","refund":"0x0","memSize":"0x0"}
+{"pc":33,"depth":1,"opName":"PUSH32","op":127,"gas":"0x1124d7","reservoir":"0x0","stateGas":"0x0","gasCost":"0x3","stack":["0x1"],"returnData":"0x","refund":"0x0","memSize":"0x0"}
+{"pc":66,"depth":1,"opName":"SSTORE","op":85,"gas":"0x1124d4","reservoir":"0x0","stateGas":"0x0","gasCost":"0x1e294","stack":["0x1","0x1"],"returnData":"0x","refund":"0x0","memSize":"0x0"}
+{"pc":67,"depth":1,"opName":"STOP","op":0,"gas":"0xf4240","reservoir":"0x0","stateGas":"0x17e80","gasCost":"0x0","stack":[],"returnData":"0x","refund":"0x0","memSize":"0x0","error":"Stop"}
+{"stateRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","output":"0x","gasUsed":"0x287c2","pass":true,"fork":"Osaka"}

@@ -3655,6 +3655,7 @@ dependencies = [
  "alloy-op-evm 0.32.0",
  "alloy-op-hardforks 0.5.0",
  "alloy-primitives",
+ "alloy-rpc-types-trace 2.1.1",
  "alloy-sol-types",
  "alloy-trie",
  "auto_impl",

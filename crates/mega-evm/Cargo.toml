@@ -39,6 +39,7 @@ serde = { workspace = true, features = ["alloc", "derive"] }
 
 [dev-dependencies]
 # alloy
+alloy-rpc-types-trace = { workspace = true }
 alloy-trie = { workspace = true, features = ["std", "ethereum"] }
 
 # CodSpeed drop-in: `codspeed-criterion-compat` re-exports criterion's API, so
@@ -48,6 +49,7 @@ alloy-trie = { workspace = true, features = ["std", "ethereum"] }
 criterion = { package = "codspeed-criterion-compat", version = "5.0.1", default-features = false, features = ["cargo_bench_support", "html_reports", "plotters"] }
 mega-evm = { path = ".", features = ["test-utils"] }
 proptest = { workspace = true, features = ["std"] }
+revm = { workspace = true, features = ["tracer"] }
 revm-inspectors = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
 
