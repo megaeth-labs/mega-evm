@@ -154,6 +154,9 @@ impl<ExtEnvFactory: ExternalEnvFactory + Clone> alloy_evm::EvmFactory
         let spec_id = *evm_env.spec_id();
         let block_number = evm_env.block_env.number.to();
         let runtime_limits = EvmTxRuntimeLimits::from_spec(spec_id);
+        // The handler reloads the L1 block info from state whenever `l2_block` is not the
+        // executing block number. `L1BlockInfo::default()` leaves `l2_block` unset, so the info is
+        // loaded for every block number, block 0 included.
         let ctx = MegaContext::new(db, spec_id)
             .with_external_envs(self.external_env_factory.external_envs(block_number))
             .with_tx(MegaTransaction::default())
@@ -482,5 +485,60 @@ mod tests {
         let _evm = factory.create_evm(crate::test_utils::MemoryDatabase::default(), evm_env);
 
         assert_eq!(SEEN_SPEC.load(Ordering::SeqCst), MegaSpecId::EQUIVALENCE as u8);
+    }
+
+    #[test]
+    fn test_non_deposit_tx_at_block_zero_loads_l1_block_info_from_state() {
+        use crate::MegaTransactionNew as _;
+        use alloy_evm::{Evm as _, EvmFactory as _};
+        use alloy_primitives::{address, Bytes, TxKind};
+        use op_revm::constants::{
+            L1_BLOCK_CONTRACT, OPERATOR_FEE_CONSTANT_OFFSET, OPERATOR_FEE_SCALARS_SLOT,
+        };
+        use revm::context::TxEnv;
+
+        const CALLER: alloy_primitives::Address =
+            address!("0x1000000000000000000000000000000000000001");
+        const CALLEE: alloy_primitives::Address =
+            address!("0x2000000000000000000000000000000000000002");
+        const OPERATOR_FEE_CONSTANT: u64 = 1_234;
+        let initial_balance = U256::from(1_000_000_000u64);
+
+        // Only the operator fee constant is set, so the tx's whole cost is that constant.
+        let mut operator_fee_scalars = [0u8; 32];
+        operator_fee_scalars[OPERATOR_FEE_CONSTANT_OFFSET..OPERATOR_FEE_CONSTANT_OFFSET + 8]
+            .copy_from_slice(&OPERATOR_FEE_CONSTANT.to_be_bytes());
+
+        for spec in [MegaSpecId::EQUIVALENCE, MegaSpecId::MINI_REX, MegaSpecId::REX6] {
+            let db = crate::test_utils::MemoryDatabase::default()
+                .account_balance(CALLER, initial_balance)
+                .account_storage(
+                    L1_BLOCK_CONTRACT,
+                    OPERATOR_FEE_SCALARS_SLOT,
+                    U256::from_be_bytes(operator_fee_scalars),
+                );
+            let mut evm_env = EvmEnv::<MegaSpecId>::default();
+            evm_env.cfg_env.spec = spec;
+            assert_eq!(evm_env.block_env.number, U256::ZERO);
+
+            let mut evm = MegaEvmFactory::new().create_evm(db, evm_env);
+            let mut tx = MegaTransaction::new(TxEnv {
+                caller: CALLER,
+                kind: TxKind::Call(CALLEE),
+                gas_limit: 100_000,
+                ..Default::default()
+            });
+            // op-revm charges no operator fee for an empty envelope, so give it one byte that
+            // does not mark a deposit.
+            tx.enveloped_tx = Some(Bytes::from_static(&[0x02]));
+
+            let result = evm.transact_raw(tx).expect("tx at block 0 executes");
+            assert!(result.result.is_success(), "{spec:?}: {:?}", result.result);
+            assert_eq!(
+                result.state[&CALLER].info.balance,
+                initial_balance - U256::from(OPERATOR_FEE_CONSTANT),
+                "{spec:?}: caller is charged the operator fee from the L1Block state"
+            );
+        }
     }
 }
