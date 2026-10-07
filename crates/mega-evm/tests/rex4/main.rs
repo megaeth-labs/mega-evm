@@ -1,9 +1,11 @@
 //! Tests for `Rex4` hardfork features.
 
 mod access_control;
+mod access_list_preload;
 mod beneficiary_detention;
 mod call_stipend_forwarding;
 mod create_safety;
+mod declined_reads;
 mod deployment;
 mod eip7702_delegation_cycle;
 mod first_frame_target_read;

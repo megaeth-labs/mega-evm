@@ -2,7 +2,7 @@ use core::cmp::min;
 
 use crate::{
     constants::{self},
-    ExternalEnvTypes, HostExt, JournalInspectTr, MegaContext, MegaSpecId,
+    ExternalEnvTypes, HostExt, JournalInspectTr, MegaContext, MegaSpecId, RevertedAccountRead,
 };
 use alloy_evm::Database;
 use alloy_primitives::{keccak256, Bytes, U256};
@@ -1490,7 +1490,7 @@ pub mod volatile_data_ext {
         // The body then read the operand and its delegate through the journal. An entry an
         // earlier inspection left resident is unaffected; an absent one — the operand of a
         // `REX5` CALLCODE, or any delegate from `REX5` — is loaded as that read loaded it.
-        if !host.recreate_reverted_account_read(to, true) {
+        if !host.recreate_reverted_account_read(to, RevertedAccountRead::AccountCodeAndDelegate) {
             return Err(InstructionResult::FatalExternalError);
         }
         mark_call_target_beneficiary(host, to);
@@ -1695,18 +1695,20 @@ pub mod volatile_data_ext {
                 }
             }
 
-            // `EXTCODECOPY` is the one member whose revm 40 body halts between its operand pop and
-            // its load: it validates its operands, charges the copy cost and expands memory
-            // first. The deployed schedule loaded the target — leaving its journal entry and, for
-            // the beneficiary, the access mark — right after the pop, so a halt on any of those
-            // steps left both behind there. The other members load, and the host marks, before
-            // anything they can halt on after the pop, so their raw target is not needed.
-            // Captured before the body pops it.
-            let target: Option<Address> = if opcode::$opcode == opcode::EXTCODECOPY {
-                context.interpreter.stack.inspect::<0>().map(|w| w.into_address())
-            } else {
-                None
-            };
+            // The deployed schedule read the target right after the pop and charged for it
+            // afterwards; revm 40 can halt ahead of that read on two paths, and on both the
+            // wrapper recreates what the read left behind. Captured before the body pops it.
+            //
+            // - `EXTCODECOPY` validates its operands, charges the copy cost and expands memory
+            //   before its load, so a halt on any of those steps left the target's journal entry
+            //   and, for the beneficiary, the access mark behind on the deployed schedule.
+            // - Every member declines a cold read the frame cannot afford and halts out of gas,
+            //   where the deployed read loaded the account first and ran out of gas on the charge.
+            //   The host marks the beneficiary before it declines, so only the read is missing.
+            //   A halt out of gas after the read has left the account resident already, so
+            //   recreating the read there changes nothing.
+            let target: Option<Address> =
+                context.interpreter.stack.inspect::<0>().map(|w| w.into_address());
 
             run_inner_instruction_or_abort!(
                 $original_fn,
@@ -1717,11 +1719,21 @@ pub mod volatile_data_ext {
                     // The wrapper still aborts here without applying the cap, as the deployed one
                     // did, so the mark caps the transaction only once a later tail applies it. A
                     // database error on the recreated read keeps this halt's own result.
-                    if let Some(target) =
-                        target.filter(|_| halt != InstructionResult::StackUnderflow)
-                    {
-                        let _ = context.host.recreate_reverted_account_read(target, false);
-                        if target == context.host.beneficiary_address() {
+                    let read_reached = if opcode::$opcode == opcode::EXTCODECOPY {
+                        halt != InstructionResult::StackUnderflow
+                    } else {
+                        halt == InstructionResult::OutOfGas
+                    };
+                    if let Some(target) = target.filter(|_| read_reached) {
+                        let read = if opcode::$opcode == opcode::BALANCE {
+                            RevertedAccountRead::Account
+                        } else {
+                            RevertedAccountRead::AccountAndCode
+                        };
+                        let _ = context.host.recreate_reverted_account_read(target, read);
+                        if opcode::$opcode == opcode::EXTCODECOPY &&
+                            target == context.host.beneficiary_address()
+                        {
                             context
                                 .host
                                 .volatile_data_tracker()
