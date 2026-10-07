@@ -3,6 +3,7 @@
 The execution-spec state-test runner of the Satin engine.
 It runs Ethereum's execution-spec state-test fixtures through `MegaEvm`; the `state-test` CLI (`crates/state-test`) is its front end.
 The library keeps the `state_test` import name.
+It also imports the execution-spec blockchain tests through Satin's block executor ([Blockchain tests](#blockchain-tests)).
 
 ## Two modes
 
@@ -56,6 +57,63 @@ cargo run --release -p state-test -- --mode satin --fork Osaka <main>/state_test
 
 `--expect-executed`, `--expect-skipped` and `--expect-deviations` turn a full run into the pinned gate CI runs (`.github/workflows/exec-spec-satin.yml`).
 `--json-outcome` prints one JSON line per test, a failure's produced hashes included, and `--trace` runs each test under an EIP-3155 tracer.
+
+## Blockchain tests
+
+`state-test btest` imports the execution-spec blockchain tests through Satin's block executor (`src/blockchain/`): the tests of the main release's `blockchain_tests` filled for Osaka, the release and the network the state-test gate's Osaka run uses.
+The devnet release's blockchain tests are not run, as the revm fork's own runner does not run them.
+A blockchain test is a chain: a pre-state, a genesis block, and blocks a node imports one after the other, several transactions to a block and several blocks to a test, some of which it must refuse.
+
+### How a block is imported
+
+Every block is decoded from its RLP, as a node receives it, and runs through `MegaBlockExecutor` on `MegaEvm` in equivalence mode's configuration — the neutral Osaka configuration, the fork's precompile set and static opcode prices — over a copy of the state the chain holds.
+The executor makes the EIP-2935 and EIP-4788 pre-block system calls and deploys Satin's system contracts before the transactions, as it does for every block; `BLOCKHASH` reads the hashes of the chain's own blocks.
+The executor requires the Satin fork's parameters, which the runner supplies with values that bind nothing on an Osaka fixture (`blockchain::chain_spec`): the loosest protocol limits a chain may carry, every limit unlimited and gas detention's caps far above the compute a transaction can spend under EIP-7825's cap, and placeholder `SequencerRegistry` roles that promote no fixture's transaction.
+
+### How a block is judged
+
+- A block the fixture expects to be valid must be accepted, and must produce the gas used, logs bloom, receipts root and state root its header carries.
+- A block the fixture expects to be invalid for a `TransactionException` must be refused for one of the exceptions it names (`src/exceptions.rs`), not for any error, and leaves the chain at the previous block.
+- Once every block is imported, the chain must end at the fixture's last block, holding the fixture's post-state.
+
+A receipt of an OP transaction that is not a deposit encodes as an Ethereum receipt, so the receipts root is Ethereum's.
+
+A Satin block adds accounts to the state an Ethereum block leaves, and the runner takes them out of the post-state before computing its root (`blockchain::SATIN_ACCOUNTS`):
+
+- the seven contracts the executor deploys before every block: the six `MegaETH` system contracts and the EIP-7997 factory, each taken out when it holds exactly what the deploy writes;
+- OP's base-fee vault, which holds the base fee Ethereum burns, taken out when it holds exactly the base fees of the blocks the chain accepted;
+- OP's L1-fee and operator-fee vaults, credited nothing under the neutral configuration, taken out when they hold nothing.
+
+An account on the list is taken out only when the fixture's pre-state does not hold it.
+Any other account that differs, and an account on the list that holds anything else, moves the root, and the block fails.
+
+### Skips
+
+A test is skipped only for a class decided from its content before anything runs, never from how it fares, and each class is counted apart:
+
+- `withdrawals`: a block carries withdrawals, which an OP chain does not process;
+- `blob-transactions`: a block carries a blob transaction, or expects an exception only a blob transaction raises; an OP chain has no blob transactions;
+- `requests`: the test is an EIP-7002, EIP-7251 or EIP-7685 request test, or a block expects an exception about requests; an OP chain makes no requests and no post-block system call;
+- `header-or-body`: a block expects only `BlockException`s for its header or body — its gas limit, base fee, blob gas fields, size, encoding, withdrawals root or hash — a consensus check a node makes before execution; a `BlockException` outside the list is compared, so the executor must refuse the block;
+- `undecodable-invalid-transaction`: a block the fixture expects to be invalid carries a transaction an OP block cannot encode — an EIP-7702 transaction without a recipient, or a fee wider than 128 bits — the blocks the state-test gate skips as unbuildable;
+- `create-collision-with-storage`: the state-test gate's EIP-7610 files (`src/skips.rs`), whose collisions with storage revm cannot see.
+
+The EIP-2935 and EIP-4788 tests are not skipped: their system calls are made and compared like everything else.
+
+### The gate
+
+A failure is explained only by a deviation the registry already has, which lists the test, the block it fails at and the gas used, receipts root and state root Satin produces there; any other failure fails the gate.
+`--expect-executed`, `--expect-skipped REASON=N` (every class) and `--expect-deviations` pin a full run, as `.github/workflows/exec-spec-satin.yml` does:
+
+```bash
+cargo run --release -p state-test -- btest <main>/blockchain_tests --expect-executed <N> \
+  --expect-skipped withdrawals=<N> ... --expect-deviations
+```
+
+### The legacy state tests
+
+The legacy `GeneralStateTests` are covered through the release's `static/state_tests`: the same tests re-filled for Osaka, which the state-test gate runs as state tests and this gate runs as blockchain tests.
+The `ethereum/legacytests` repository holds no Osaka entries, and Satin's neutral configuration exists for Osaka and Amsterdam only.
 
 ## Replaying from a witness
 
