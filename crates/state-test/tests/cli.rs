@@ -1,12 +1,20 @@
 //! The exit-code contract the CI gate relies on: equivalence mode exits non-zero on a failure no
 //! deviation explains and on a count that differs from its pin; Satin mode reports and exits zero
-//! unless a fixture could not be read.
+//! unless a fixture could not be read; `btest` exits non-zero as equivalence mode does.
 
 use std::{
     path::{Path, PathBuf},
     process::{Command, Output},
 };
 
+use mega_evm::{
+    alloy_consensus::{Block, BlockBody, Header, TxEnvelope, EMPTY_ROOT_HASH},
+    revm::{
+        database::PlainAccount,
+        primitives::{address, Bytes, B256, U256},
+        state::AccountInfo,
+    },
+};
 use serde_json::json;
 use state_test::{
     roots::{logs_hash, state_root},
@@ -148,4 +156,143 @@ fn test_bad_arguments_exit_non_zero() {
         let output = state_test(&["--mode", mode, "--fork", "Osaka"], dir.path());
         assert_eq!(output.status.code(), Some(1), "{mode}: an unreadable fixture");
     }
+}
+
+/// A blockchain fixture of one empty block on a pre-state of one funded account, with
+/// `edit` applied to the block's header. With no pre-block contract and no transaction the block
+/// changes nothing on Ethereum, so its expected roots are the pre-state's and the empty trie's,
+/// whichever engine imports it.
+fn blockchain_fixture(dir: &Path, name: &str, edit: impl FnOnce(&mut Header)) -> PathBuf {
+    let sender = address!("0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b");
+    let balance = U256::from(10).pow(U256::from(21));
+    let info = AccountInfo { balance, ..Default::default() };
+    let pre = PlainAccount { info, storage: Default::default() };
+    let root = state_root([(sender, &pre)]);
+    let genesis = Header { state_root: root, gas_limit: 30_000_000, ..Default::default() };
+    let mut header = Header {
+        parent_hash: genesis.hash_slow(),
+        number: 1,
+        timestamp: 12,
+        gas_limit: 30_000_000,
+        base_fee_per_gas: Some(7),
+        state_root: root,
+        receipts_root: EMPTY_ROOT_HASH,
+        transactions_root: EMPTY_ROOT_HASH,
+        withdrawals_root: Some(EMPTY_ROOT_HASH),
+        blob_gas_used: Some(0),
+        excess_blob_gas: Some(0),
+        parent_beacon_block_root: Some(B256::ZERO),
+        ..Default::default()
+    };
+    edit(&mut header);
+    let rlp = |header: &Header| {
+        let block = Block::<TxEnvelope> {
+            header: header.clone(),
+            body: BlockBody {
+                transactions: vec![],
+                ommers: vec![],
+                withdrawals: header.withdrawals_root.map(|_| Default::default()),
+            },
+        };
+        Bytes::from(alloy_rlp::encode(&block))
+    };
+    let test = json!({
+        "network": "Osaka",
+        "genesisRLP": rlp(&genesis),
+        "blocks": [{ "rlp": rlp(&header), "transactions": [], "withdrawals": [] }],
+        "pre": { sender.to_string(): { "balance": balance, "code": "0x", "nonce": "0x00", "storage": {} } },
+        "postState": { sender.to_string(): { "balance": balance, "code": "0x", "nonce": "0x00", "storage": {} } },
+        "lastblockhash": header.hash_slow(),
+        "config": { "chainid": "0x01", "blobSchedule": { "Osaka": { "baseFeeUpdateFraction": "0x4c6964" } } },
+    });
+    let path = dir.join(format!("{name}.json"));
+    std::fs::write(&path, serde_json::to_string(&json!({ "t": test })).unwrap()).unwrap();
+    path
+}
+
+fn btest(args: &[&str], path: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_state-test"))
+        .arg("btest")
+        .args(args)
+        .arg(path)
+        .output()
+        .expect("the binary runs")
+}
+
+#[test]
+fn test_btest_a_passing_run_exits_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = blockchain_fixture(dir.path(), "a", |_| {});
+    let summary = dir.path().join("summary.json");
+    let output = btest(
+        &[
+            "--expect-executed",
+            "1",
+            "--expect-skipped",
+            "withdrawals=0",
+            "--summary-json",
+            summary.to_str().unwrap(),
+        ],
+        &path,
+    );
+    assert!(output.status.success(), "{}", stdout(&output));
+    assert!(stdout(&output).contains("gate: passed"));
+    let summary: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(summary).unwrap()).unwrap();
+    assert_eq!(summary["suite"], "blockchain");
+    assert_eq!(summary["fork"], "Osaka");
+    assert_eq!(summary["summary"]["executed"], 1);
+    assert_eq!(summary["summary"]["passed"], 1);
+    assert_eq!(summary["summary"]["blocks"]["accepted"], 1);
+}
+
+#[test]
+fn test_btest_a_count_off_its_pin_exits_non_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = blockchain_fixture(dir.path(), "a", |_| {});
+    let output = btest(&["--expect-executed", "2"], &path);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stdout(&output).contains("gate: 1 tests executed, 2 pinned"), "{}", stdout(&output));
+
+    let output = btest(&["--expect-skipped", "header-or-body=1"], &path);
+    assert_eq!(output.status.code(), Some(1));
+    let out = stdout(&output);
+    assert!(out.contains("gate: 0 tests skipped for header-or-body, 1 pinned"), "{out}");
+
+    // Every registered deviation lists tests of the full release; one test runs none of them.
+    let output = btest(&["--expect-deviations"], &path);
+    assert_eq!(output.status.code(), Some(1));
+    let out = stdout(&output);
+    assert!(
+        out.contains(
+            "gate: deviation amsterdam-opcodes-on-osaka: 3 of the 3 blockchain tests it lists \
+             did not fail as listed"
+        ) && out.contains("unreproduced 3"),
+        "{out}"
+    );
+}
+
+#[test]
+fn test_btest_an_unattributed_failure_fails_the_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = blockchain_fixture(dir.path(), "a", |header| header.gas_used = 1);
+    let output = btest(&[], &path);
+    assert_eq!(output.status.code(), Some(1));
+    let out = stdout(&output);
+    assert!(out.contains("unattributed 1") && out.contains("gas-used-mismatch"), "{out}");
+}
+
+#[test]
+fn test_btest_bad_arguments_exit_non_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(btest(&[], &dir.path().join("missing")).status.code(), Some(1));
+    assert_eq!(btest(&[], dir.path()).status.code(), Some(1), "a directory with no fixtures");
+    let path = blockchain_fixture(dir.path(), "a", |_| {});
+    for pin in ["slow=1", "withdrawals", "withdrawals=x"] {
+        assert!(!btest(&["--expect-skipped", pin], &path).status.success(), "{pin}");
+    }
+    let twice = ["--expect-skipped", "withdrawals=0", "--expect-skipped", "withdrawals=0"];
+    assert_eq!(btest(&twice, &path).status.code(), Some(1));
+    std::fs::write(dir.path().join("broken.json"), "{").unwrap();
+    assert_eq!(btest(&[], dir.path()).status.code(), Some(1), "an unreadable fixture");
 }
