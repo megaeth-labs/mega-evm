@@ -41,6 +41,7 @@ import io
 import json
 import lzma
 import os
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -218,6 +219,8 @@ def main():
             failed.append(number)
             print(f"{number}: FAILED: {error} (reports in {work})", file=sys.stderr, flush=True)
             continue
+        # Only a failed block keeps its work directory, for its reports.
+        shutil.rmtree(work)
         previous = known.get(number, {})
         for kept in ("spec", "note"):
             if kept in previous:
