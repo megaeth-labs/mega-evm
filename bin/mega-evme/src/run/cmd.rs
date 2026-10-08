@@ -4,8 +4,8 @@ use tracing::{debug, info, trace};
 
 use super::{load_hex, Result, RunError};
 use crate::common::{
-    create_address, log_execution_result, pre_execution_nonce, print_execution_summary,
-    print_execution_trace, EvmeOutcome, ExecutionSummary,
+    create_address, log_execution_result, pre_execution_nonce, print_run_artifacts,
+    print_transaction_report, EvmeOutcome, ExecutionSummary,
 };
 
 /// Run arbitrary EVM bytecode
@@ -126,24 +126,19 @@ impl Cmd {
             create_address(self.tx_args.sender(), self.tx_args.kind(), outcome.pre_execution_nonce);
 
         if self.output_args.json {
-            let mut summary = ExecutionSummary::from_result(&outcome.exec_result, create_address);
+            let mut summary =
+                ExecutionSummary::of_transaction(&outcome.exec_result, create_address, None);
             summary.fill_trace_and_dump(outcome, &self.trace_args, &self.dump_args)?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&summary).expect("failed to serialize output")
-            );
+            summary.print_pretty();
         } else {
-            // Human-readable summary
-            print_execution_summary(&outcome.exec_result, create_address, outcome.exec_time);
-
-            print_execution_trace(
-                outcome.trace_data.as_deref(),
-                self.trace_args.trace_output_file.as_deref(),
-            )?;
-
-            if self.dump_args.dump {
-                self.dump_args.dump_evm_state(&outcome.state)?;
-            }
+            print_transaction_report(
+                &outcome.exec_result,
+                create_address,
+                outcome.exec_time,
+                None,
+                &[],
+            );
+            print_run_artifacts(outcome, &self.trace_args, &self.dump_args)?;
         }
 
         Ok(())

@@ -30,8 +30,8 @@ use op_alloy_rpc_types::Transaction;
 use crate::{
     common::{
         cfg_env, create_address, external_envs_from, log_execution_result,
-        op_receipt_to_tx_receipt, parse_spec, pre_execution_nonce, print_execution_summary,
-        print_execution_trace, print_receipt, BuildProviderOutput, EvmeExternalEnvs, EvmeOutcome,
+        op_receipt_to_tx_receipt, parse_spec, pre_execution_nonce, print_run_artifacts,
+        print_transaction_report, BuildProviderOutput, EvmeExternalEnvs, EvmeOutcome,
         ExecutionSummary, ExtEnvArgs, ExternalEnvSnapshot, OpTxReceipt, OutputArgs, OverriddenTx,
         RpcArgs, RpcCacheStore, StateDumpArgs, TraceArgs, TxOverrideArgs, VerificationCounts,
     },
@@ -1320,38 +1320,30 @@ impl Cmd {
     fn output_results(&self, result: &ReplayOutcome) -> Result<()> {
         trace!("Writing output results");
         if self.output_args.json {
-            let mut summary = ExecutionSummary::from_result(
+            let mut summary = ExecutionSummary::of_transaction(
                 &result.outcome.exec_result,
                 result.receipt.contract_address,
+                Some(&result.receipt),
             );
             summary.fill_trace_and_dump(&result.outcome, &self.trace_args, &self.dump_args)?;
-            summary.receipt =
-                Some(serde_json::to_value(&result.receipt).expect("failed to serialize receipt"));
             summary.verification = result.verification.as_ref().map(|verification| {
                 serde_json::to_value(verification).expect("failed to serialize verification")
             });
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&summary).expect("failed to serialize output")
-            );
+            summary.print_pretty();
         } else {
-            print_execution_summary(
+            let notes: Vec<String> = result
+                .verification
+                .iter()
+                .map(|verification| verification.verdict_line())
+                .collect();
+            print_transaction_report(
                 &result.outcome.exec_result,
                 result.receipt.contract_address,
                 result.outcome.exec_time,
+                Some(&result.receipt),
+                &notes,
             );
-            print_receipt(&result.receipt);
-            if let Some(verification) = &result.verification {
-                println!();
-                println!("{}", verification.verdict_line());
-            }
-            print_execution_trace(
-                result.outcome.trace_data.as_deref(),
-                self.trace_args.trace_output_file.as_deref(),
-            )?;
-            if self.dump_args.dump {
-                self.dump_args.dump_evm_state(&result.outcome.state)?;
-            }
+            print_run_artifacts(&result.outcome, &self.trace_args, &self.dump_args)?;
         }
         Ok(())
     }

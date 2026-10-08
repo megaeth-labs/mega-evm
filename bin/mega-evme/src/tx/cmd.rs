@@ -7,9 +7,8 @@ use tracing::{debug, info, trace, warn};
 
 use crate::common::{
     create_address, load_hex, log_execution_result, op_receipt_to_tx_receipt, pre_execution_nonce,
-    print_execution_summary, print_execution_trace, print_receipt, DecodedRawTx, EnvArgs,
-    EvmeError, EvmeOutcome, ExecutionSummary, OutputArgs, PreStateArgs, RpcArgs, StateDumpArgs,
-    TraceArgs, TxArgs,
+    print_run_artifacts, print_transaction_report, DecodedRawTx, EnvArgs, EvmeError, EvmeOutcome,
+    ExecutionSummary, OutputArgs, PreStateArgs, RpcArgs, StateDumpArgs, TraceArgs, TxArgs,
 };
 
 use super::Result;
@@ -150,28 +149,22 @@ impl Cmd {
         );
 
         if self.output_args.json {
-            let mut summary = ExecutionSummary::from_result(&outcome.exec_result, create_address);
-            summary.fill_trace_and_dump(outcome, &self.trace_args, &self.dump_args)?;
-            summary.receipt =
-                Some(serde_json::to_value(&receipt).expect("failed to serialize receipt"));
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&summary).expect("failed to serialize output")
+            let mut summary = ExecutionSummary::of_transaction(
+                &outcome.exec_result,
+                create_address,
+                Some(&receipt),
             );
+            summary.fill_trace_and_dump(outcome, &self.trace_args, &self.dump_args)?;
+            summary.print_pretty();
         } else {
-            // Human-readable summary
-            print_execution_summary(&outcome.exec_result, create_address, outcome.exec_time);
-
-            print_receipt(&receipt);
-
-            print_execution_trace(
-                outcome.trace_data.as_deref(),
-                self.trace_args.trace_output_file.as_deref(),
-            )?;
-
-            if self.dump_args.dump {
-                self.dump_args.dump_evm_state(&outcome.state)?;
-            }
+            print_transaction_report(
+                &outcome.exec_result,
+                create_address,
+                outcome.exec_time,
+                Some(&receipt),
+                &[],
+            );
+            print_run_artifacts(outcome, &self.trace_args, &self.dump_args)?;
         }
 
         Ok(())

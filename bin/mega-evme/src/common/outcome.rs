@@ -317,6 +317,44 @@ fn format_op_halt_reason(reason: &OpHaltReason) -> String {
     }
 }
 
+/// Print one transaction's human-readable report: the execution summary, the
+/// receipt when the command reports one, and then each note line, each after a
+/// blank line.
+///
+/// Notes carry what a command adds about the transaction — a verification
+/// verdict, a fixture outcome — and print in the order given, before any trace
+/// or state dump.
+pub fn print_transaction_report(
+    exec_result: &ExecutionResult<MegaHaltReason>,
+    create_address: Option<Address>,
+    exec_time: Duration,
+    receipt: Option<&OpTxReceipt>,
+    notes: &[String],
+) {
+    print_execution_summary(exec_result, create_address, exec_time);
+    if let Some(receipt) = receipt {
+        print_receipt(receipt);
+    }
+    for note in notes {
+        println!();
+        println!("{note}");
+    }
+}
+
+/// Print the artifacts a human-readable single-transaction run ends with: the
+/// trace (or the file it was written to) and the state dump.
+pub fn print_run_artifacts(
+    outcome: &EvmeOutcome,
+    trace_args: &TraceArgs,
+    dump_args: &StateDumpArgs,
+) -> Result<(), EvmeError> {
+    print_execution_trace(outcome.trace_data.as_deref(), trace_args.trace_output_file.as_deref())?;
+    if dump_args.dump {
+        dump_args.dump_evm_state(&outcome.state)?;
+    }
+    Ok(())
+}
+
 /// Print a receipt as pretty-printed JSON.
 pub fn print_receipt<T: serde::Serialize>(receipt: &T) {
     println!();
@@ -399,6 +437,28 @@ pub struct ExecutionSummary {
 }
 
 impl ExecutionSummary {
+    /// The summary of one transaction: its result, plus its receipt when the
+    /// command reports one.
+    ///
+    /// `create_address` is the transaction's [`create_address`], reported as
+    /// `contract_address` only when the creation deployed.
+    pub fn of_transaction(
+        exec_result: &ExecutionResult<MegaHaltReason>,
+        create_address: Option<Address>,
+        receipt: Option<&OpTxReceipt>,
+    ) -> Self {
+        let mut summary = Self::from_result(exec_result, create_address);
+        summary.receipt = receipt
+            .map(|receipt| serde_json::to_value(receipt).expect("failed to serialize receipt"));
+        summary
+    }
+
+    /// Print the summary as the one pretty-printed JSON object a
+    /// single-transaction run writes to stdout.
+    pub fn print_pretty(&self) {
+        println!("{}", serde_json::to_string_pretty(self).expect("failed to serialize output"));
+    }
+
     /// Fill trace and state dump fields from the execution outcome.
     ///
     /// When an output file is specified, data is written to that file.

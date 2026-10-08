@@ -46,8 +46,8 @@ use tracing::{debug, info, warn};
 
 use crate::{
     common::{
-        cfg_env, print_execution_summary, print_receipt, BatchExitFloor, BatchFailureCounts,
-        EvmeExternalEnvs, ExecutionSummary, ExitCode, OpTxReceipt, VerificationCounts,
+        cfg_env, print_transaction_report, BatchExitFloor, BatchFailureCounts, EvmeExternalEnvs,
+        ExecutionSummary, ExitCode, OpTxReceipt, VerificationCounts,
     },
     replay::{get_hardfork_config, ReplayHardforks},
 };
@@ -1908,10 +1908,11 @@ fn emit(entry: &BatchEntry, json: bool) {
     if json {
         let line = match entry {
             BatchEntry::Executed(tx) => {
-                let mut summary =
-                    ExecutionSummary::from_result(&tx.exec_result, tx.receipt.contract_address);
-                summary.receipt =
-                    Some(serde_json::to_value(&tx.receipt).expect("failed to serialize receipt"));
+                let mut summary = ExecutionSummary::of_transaction(
+                    &tx.exec_result,
+                    tx.receipt.contract_address,
+                    Some(&tx.receipt),
+                );
                 summary.verification = tx.verification.as_ref().map(|verification| {
                     serde_json::to_value(verification).expect("failed to serialize verification")
                 });
@@ -1939,16 +1940,19 @@ fn emit(entry: &BatchEntry, json: bool) {
                 "=== Transaction {} (block {}, index {}) ===",
                 tx.tx_hash, tx.block_number, tx.tx_index
             );
-            print_execution_summary(&tx.exec_result, tx.receipt.contract_address, tx.exec_time);
-            print_receipt(&tx.receipt);
-            if let Some(verification) = &tx.verification {
-                println!();
-                println!("{}", verification.verdict_line());
-            }
-            if let Some(fixture) = &tx.fixture {
-                println!();
-                println!("{}", fixture.human_line());
-            }
+            let notes: Vec<String> = tx
+                .verification
+                .iter()
+                .map(|verification| verification.verdict_line())
+                .chain(tx.fixture.iter().map(FixtureReport::human_line))
+                .collect();
+            print_transaction_report(
+                &tx.exec_result,
+                tx.receipt.contract_address,
+                tx.exec_time,
+                Some(&tx.receipt),
+                &notes,
+            );
         }
         BatchEntry::Failed(tx) => {
             println!();
