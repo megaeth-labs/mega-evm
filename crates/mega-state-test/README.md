@@ -89,7 +89,7 @@ Any other account that differs, and an account on the list that holds anything e
 
 ### Skips
 
-A test is skipped only for a class decided from its content before anything runs, never from how it fares, and each class is counted apart:
+A test is skipped only for a class decided from its content before anything runs, never from how it fares, and each class is counted apart; the printed summary and the JSON summary (`skip_reasons`) give each class's reason beside its count:
 
 - `withdrawals`: a block carries withdrawals, which an OP chain does not process;
 - `blob-transactions`: a block carries a blob transaction, or expects an exception only a blob transaction raises; an OP chain has no blob transactions;

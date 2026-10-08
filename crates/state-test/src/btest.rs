@@ -90,8 +90,12 @@ pub(crate) fn main(args: impl IntoIterator<Item = std::ffi::OsString>) -> ExitCo
     print_summary(&report, &summary);
 
     if let Some(path) = &cmd.summary_json {
-        let json =
-            serde_json::json!({ "suite": "blockchain", "fork": NETWORK, "summary": summary });
+        let json = serde_json::json!({
+            "suite": "blockchain",
+            "fork": NETWORK,
+            "summary": summary,
+            "skip_reasons": skip_reasons(),
+        });
         let json = serde_json::to_string_pretty(&json).expect("a summary serializes");
         if let Err(error) = std::fs::write(path, json + "\n") {
             eprintln!("error: writing {}: {error}", path.display());
@@ -112,6 +116,11 @@ pub(crate) fn main(args: impl IntoIterator<Item = std::ffi::OsString>) -> ExitCo
     }
 }
 
+/// Every skip class's reason, by its name.
+fn skip_reasons() -> BTreeMap<&'static str, &'static str> {
+    SkipReason::ALL.iter().map(|reason| (reason.name(), reason.reason())).collect()
+}
+
 fn print_summary(report: &Report, summary: &Summary) {
     println!("blockchain tests, {NETWORK} fixtures: {} files", summary.files);
     println!(
@@ -127,7 +136,7 @@ fn print_summary(report: &Report, summary: &Summary) {
         summary.blocks.accepted, summary.blocks.refused
     );
     for (reason, count) in &summary.skipped {
-        println!("  skipped  {:<34} {count}", reason.name());
+        println!("  skipped  {:<34} {count:<6} {}", reason.name(), reason.reason());
     }
     for (kind, count) in &summary.failed {
         println!("  failed   {:<34} {count}", kind.name());

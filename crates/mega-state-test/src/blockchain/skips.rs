@@ -68,6 +68,26 @@ impl SkipReason {
     }
 }
 
+impl SkipReason {
+    /// Why a test of this class is not executed, in one line, as the summary prints it.
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::Withdrawals => "an OP chain processes no withdrawals",
+            Self::BlobTransactions => "an OP chain has no blob transactions",
+            Self::Requests => {
+                "an OP chain makes no EIP-7685 requests and no post-block system call"
+            }
+            Self::HeaderOrBody => "a header or body check a node makes before execution",
+            Self::UndecodableInvalidTransaction => {
+                "a transaction an OP block cannot encode, in a block expected to be invalid"
+            }
+            Self::CreateCollisionWithStorage => {
+                "a collision with storage alone, which revm cannot see (EIP-7610)"
+            }
+        }
+    }
+}
+
 impl core::str::FromStr for SkipReason {
     type Err = String;
 
@@ -317,6 +337,15 @@ mod tests {
         {
             assert_eq!(skip_test(path, "t", &plain), None);
         }
+    }
+
+    /// Every class has a reason of its own to print.
+    #[test]
+    fn test_every_class_has_a_distinct_reason() {
+        let reasons: std::collections::BTreeSet<_> =
+            SkipReason::ALL.iter().map(|reason| reason.reason()).collect();
+        assert_eq!(reasons.len(), SkipReason::ALL.len());
+        assert!(reasons.iter().all(|reason| !reason.is_empty()));
     }
 
     #[test]

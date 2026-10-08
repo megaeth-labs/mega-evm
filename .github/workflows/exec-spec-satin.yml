@@ -360,7 +360,7 @@ jobs:
           # that executed tests and has no failure no deviation explains, no unread fixture and no
           # listed test that did not fail as listed: a run that tested nothing, or whose summary
           # changed shape, fails the gate rather than passing silently.
-          shape='.suite == "blockchain" and .fork == "Osaka"
+          shape='.suite == "blockchain" and .fork == "Osaka" and (.skip_reasons | type) == "object"
             and (.summary | (.executed | type) == "number" and (.passed | type) == "number"
               and (.unattributed | type) == "number" and (.file_failures | type) == "number"
               and (.skipped | type) == "object" and (.deviated | type) == "object"
@@ -382,6 +382,13 @@ jobs:
           else
             jq -r '.summary as $s | "| Osaka | \($s.executed) | \([$s.skipped[]] | add // 0) | \($s.passed) | \([$s.deviated[]] | add // 0) | \($s.unattributed) | \([$s.unreproduced[]] | add // 0) | \($s.blocks.accepted) | \($s.blocks.refused) |"' \
               blockchain-Osaka.json >> "$GITHUB_STEP_SUMMARY"
+            {
+              echo
+              echo "| Skipped for | Tests | Why |"
+              echo "|---|---:|---|"
+              jq -r '.summary.skipped as $s | .skip_reasons | to_entries[] | "| \(.key) | \($s[.key] // 0) | \(.value) |"' \
+                blockchain-Osaka.json
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
           exit "$status"
 

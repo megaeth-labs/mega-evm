@@ -17,6 +17,7 @@ use mega_evm::{
 };
 use serde_json::json;
 use state_test::{
+    blockchain::SkipReason,
     roots::{logs_hash, state_root},
     types::TestSuite,
 };
@@ -244,6 +245,12 @@ fn test_btest_a_passing_run_exits_zero() {
     assert_eq!(summary["summary"]["executed"], 1);
     assert_eq!(summary["summary"]["passed"], 1);
     assert_eq!(summary["summary"]["blocks"]["accepted"], 1);
+    // Every skip class is named with its reason, whether or not a test was skipped for it.
+    let reasons = summary["skip_reasons"].as_object().unwrap();
+    assert_eq!(reasons.len(), SkipReason::ALL.len());
+    for reason in SkipReason::ALL {
+        assert_eq!(reasons[reason.name()], reason.reason());
+    }
 }
 
 #[test]

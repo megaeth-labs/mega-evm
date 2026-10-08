@@ -20,6 +20,6 @@ state-test btest [options] <paths>...
 
 - It exits non-zero when a failure is not explained by a registered deviation, when a fixture file cannot be read, or when a count differs from the pin it is given.
 - `--expect-executed N` pins the tests executed, `--expect-skipped REASON=N` the tests skipped for one reason (repeated for each; once one is given, every reason not given is pinned at zero), and `--expect-deviations` requires every blockchain test a registered deviation lists to fail exactly as listed; CI passes all three.
-- `--summary-json FILE`, `--json-outcome` and `--threads` work as for the state tests.
+- `--summary-json FILE`, `--json-outcome` and `--threads` work as for the state tests; the summary gives each skip class's reason beside its count, and the JSON summary lists every class's reason under `skip_reasons`.
 
 What the two modes are, how a state test and a blockchain test are judged and the deviation registry are described in the `mega-state-test` crate's `README.md` and `DEVIATIONS.md`.
