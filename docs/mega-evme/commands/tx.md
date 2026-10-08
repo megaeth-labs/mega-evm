@@ -32,6 +32,7 @@ mega-evme tx 0x02f8... --input 0xdeadbeef
 The overrides are checked against the transaction they produce, with the same rules a flags-only transaction follows, before anything executes.
 The transaction's type is `--tx-type` when given and the decoded type otherwise, and only flags you pass are checked, so an omitted flag keeps the decoded value.
 `--source-hash` and `--mint` need a deposit, `--priority-fee` a type other than legacy or EIP-2930, `--auth` an EIP-7702 transaction, and `--access` an EIP-2930, EIP-1559, or EIP-7702 transaction; `--create` cannot be combined with `--receiver`.
+When `--tx-type` changes the type, the fields the transaction keeps from its decoded form are held to the same rules: a priority fee, an access list, or an authorization list the new type cannot carry is rejected rather than silently dropped.
 `--tx-type` also cannot turn the transaction into a deposit or a deposit into another type, since a deposit's fields come from the decoded transaction.
 
 If `RAW_TX` is omitted, `mega-evme` builds the transaction entirely from CLI flags.

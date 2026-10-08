@@ -42,6 +42,21 @@ const AUTH_UNSUPPORTED: &str = "--auth is only valid for EIP-7702 transactions (
 const ACCESS_UNSUPPORTED: &str =
     "--access is only valid for EIP-2930 (1), EIP-1559 (2), or EIP-7702 (4) transactions";
 
+/// Rejection for a raw transaction's priority fee under a `--tx-type` that has
+/// none.
+const INHERITED_PRIORITY_FEE_UNSUPPORTED: &str =
+    "the raw transaction's priority fee is not valid for legacy (0) or EIP-2930 (1) transactions";
+
+/// Rejection for a raw transaction's authorization list under a `--tx-type`
+/// that is not EIP-7702.
+const INHERITED_AUTH_UNSUPPORTED: &str =
+    "the raw transaction's authorization list is only valid for EIP-7702 transactions (--tx-type 4)";
+
+/// Rejection for a raw transaction's access list under a `--tx-type` that has
+/// none.
+const INHERITED_ACCESS_UNSUPPORTED: &str = "the raw transaction's access list is only valid for \
+     EIP-2930 (1), EIP-1559 (2), or EIP-7702 (4) transactions";
+
 /// Transaction configuration arguments
 #[derive(Args, Debug, Clone)]
 #[command(next_help_heading = "Transaction Options")]
@@ -476,11 +491,15 @@ impl DecodedRawTx {
     ///
     /// The rules are [`TxArgs::validate`]'s, applied to the effective
     /// transaction: its type is `--tx-type` when given and the decoded type
-    /// otherwise, and only flags that were actually given are checked — an
-    /// omitted flag keeps the decoded value rather than a CLI default.
-    /// `--tx-type` must also not move the transaction into or out of a deposit:
-    /// a deposit's fields come from the decoded transaction, so the change would
-    /// leave them silently missing or silently dropped.
+    /// otherwise, and an omitted flag keeps the decoded value rather than a CLI
+    /// default. A field the transaction keeps from its decoded form — its
+    /// priority fee, access list or authorization list — is checked too when
+    /// `--tx-type` changes the type, since the new type may not carry it and the
+    /// executed transaction would silently lose it; under its own type the
+    /// decoded transaction is consistent by construction. `--tx-type` must also
+    /// not move the transaction into or out of a deposit: a deposit's fields
+    /// come from the decoded transaction, so the change would leave them
+    /// silently missing or silently dropped.
     fn validate_overrides(&self, tx_args: &TxArgs) -> Result<()> {
         let decoded_type = self.tx.base.tx_type;
         let tx_type = match tx_args.tx_type {
@@ -499,21 +518,35 @@ impl DecodedRawTx {
         if !is_deposit && (tx_args.source_hash.is_some() || tx_args.mint.is_some()) {
             return Err(EvmeError::InvalidInput(DEPOSIT_FIELDS_ONLY.to_string()));
         }
-        if matches!(tx_type, MegaTxType::Legacy | MegaTxType::Eip2930) &&
-            tx_args.priority_fee.is_some()
-        {
-            return Err(EvmeError::InvalidInput(PRIORITY_FEE_UNSUPPORTED.to_string()));
+        // Inherited fields only need checking when the type changes.
+        let inherits = tx_args.tx_type.is_some();
+        let base = &self.tx.base;
+        if matches!(tx_type, MegaTxType::Legacy | MegaTxType::Eip2930) {
+            if tx_args.priority_fee.is_some() {
+                return Err(EvmeError::InvalidInput(PRIORITY_FEE_UNSUPPORTED.to_string()));
+            }
+            if inherits && base.gas_priority_fee.is_some() {
+                return Err(EvmeError::InvalidInput(INHERITED_PRIORITY_FEE_UNSUPPORTED.to_string()));
+            }
         }
         if tx_args.create() && tx_args.receiver.is_some() {
             return Err(EvmeError::InvalidInput(CREATE_WITH_RECEIVER.to_string()));
         }
-        if tx_type != MegaTxType::Eip7702 && !tx_args.auth.is_empty() {
-            return Err(EvmeError::InvalidInput(AUTH_UNSUPPORTED.to_string()));
+        if tx_type != MegaTxType::Eip7702 {
+            if !tx_args.auth.is_empty() {
+                return Err(EvmeError::InvalidInput(AUTH_UNSUPPORTED.to_string()));
+            }
+            if inherits && !base.authorization_list.is_empty() {
+                return Err(EvmeError::InvalidInput(INHERITED_AUTH_UNSUPPORTED.to_string()));
+            }
         }
-        if !tx_args.access.is_empty() &&
-            !matches!(tx_type, MegaTxType::Eip2930 | MegaTxType::Eip1559 | MegaTxType::Eip7702)
-        {
-            return Err(EvmeError::InvalidInput(ACCESS_UNSUPPORTED.to_string()));
+        if !matches!(tx_type, MegaTxType::Eip2930 | MegaTxType::Eip1559 | MegaTxType::Eip7702) {
+            if !tx_args.access.is_empty() {
+                return Err(EvmeError::InvalidInput(ACCESS_UNSUPPORTED.to_string()));
+            }
+            if inherits && !base.access_list.is_empty() {
+                return Err(EvmeError::InvalidInput(INHERITED_ACCESS_UNSUPPORTED.to_string()));
+            }
         }
         Ok(())
     }
@@ -1055,5 +1088,114 @@ mod tests {
             .expect("deposit fields are accepted on a deposit");
         assert_eq!(decoded.tx.deposit.source_hash, source_hash);
         assert_eq!(decoded.tx.deposit.mint, Some(9));
+    }
+
+    /// A signed EIP-2930 transaction carrying `access_list`.
+    fn eip2930_raw_bytes(access_list: AccessList) -> Bytes {
+        let tx = TxEip2930 {
+            chain_id: TYPED_CHAIN_ID,
+            nonce: 4,
+            gas_price: 30_000_000_000,
+            gas_limit: 50_000,
+            to: TxKind::Call(TYPED_TO),
+            value: U256::from(1),
+            access_list,
+            input: Bytes::new(),
+        };
+        let signature_hash = tx.signature_hash();
+        sign_and_encode_envelope(|sig| MegaTxEnvelope::Eip2930(tx.into_signed(sig)), signature_hash)
+    }
+
+    /// A signed EIP-1559 transaction, which always carries a priority fee.
+    fn eip1559_raw_bytes() -> Bytes {
+        let tx = TxEip1559 {
+            chain_id: TYPED_CHAIN_ID,
+            nonce: 7,
+            gas_limit: 80_000,
+            max_fee_per_gas: 40_000_000_000,
+            max_priority_fee_per_gas: 2_000_000_000,
+            to: TxKind::Call(TYPED_TO),
+            value: U256::from(2),
+            access_list: AccessList::default(),
+            input: Bytes::new(),
+        };
+        let signature_hash = tx.signature_hash();
+        sign_and_encode_envelope(|sig| MegaTxEnvelope::Eip1559(tx.into_signed(sig)), signature_hash)
+    }
+
+    /// A signed EIP-7702 transaction carrying one authorization.
+    fn eip7702_raw_bytes() -> Bytes {
+        let tx = TxEip7702 {
+            chain_id: TYPED_CHAIN_ID,
+            nonce: 11,
+            gas_limit: 120_000,
+            max_fee_per_gas: 50_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+            to: TYPED_TO,
+            value: U256::ZERO,
+            access_list: AccessList::default(),
+            authorization_list: vec![sample_signed_authorization()],
+            input: Bytes::new(),
+        };
+        let signature_hash = tx.signature_hash();
+        sign_and_encode_envelope(|sig| MegaTxEnvelope::Eip7702(tx.into_signed(sig)), signature_hash)
+    }
+
+    /// `--tx-type` cannot drop the authorization list an EIP-7702 transaction
+    /// carries.
+    #[test]
+    fn test_override_tx_env_rejects_an_inherited_authorization_list() {
+        let overrides = TxArgs { tx_type: Some(2), ..empty_tx_args() };
+        assert_eq!(
+            override_rejection(eip7702_raw_bytes(), overrides),
+            invalid_input(INHERITED_AUTH_UNSUPPORTED)
+        );
+    }
+
+    /// `--tx-type` cannot drop the access list an EIP-2930 transaction carries.
+    #[test]
+    fn test_override_tx_env_rejects_an_inherited_access_list() {
+        let overrides = TxArgs { tx_type: Some(0), ..empty_tx_args() };
+        assert_eq!(
+            override_rejection(eip2930_raw_bytes(sample_access_list()), overrides),
+            invalid_input(INHERITED_ACCESS_UNSUPPORTED)
+        );
+    }
+
+    /// `--tx-type` cannot drop the priority fee a fee-market transaction
+    /// carries, whether it names a legacy or an EIP-2930 type.
+    #[test]
+    fn test_override_tx_env_rejects_an_inherited_priority_fee() {
+        for tx_type in [0, 1] {
+            let overrides = TxArgs { tx_type: Some(tx_type), ..empty_tx_args() };
+            assert_eq!(
+                override_rejection(eip1559_raw_bytes(), overrides),
+                invalid_input(INHERITED_PRIORITY_FEE_UNSUPPORTED),
+                "--tx-type {tx_type}"
+            );
+        }
+    }
+
+    /// Fields the decoded transaction leaves empty do not stand in the way of a
+    /// type change, and a transaction under its own type is never rejected for
+    /// what it carries.
+    #[test]
+    fn test_override_tx_env_accepts_a_type_change_without_inherited_fields() {
+        for (raw, tx_type) in [
+            (eip2930_raw_bytes(AccessList::default()), Some(0)),
+            (eip155_raw_bytes(), Some(1)),
+            (eip7702_raw_bytes(), Some(4)),
+            (eip7702_raw_bytes(), None),
+            (eip2930_raw_bytes(sample_access_list()), None),
+            (eip1559_raw_bytes(), None),
+        ] {
+            let overrides = TxArgs { tx_type, ..empty_tx_args() };
+            let decoded = DecodedRawTx::from_raw(raw).expect("decode");
+            let decoded_type = decoded.tx.base.tx_type;
+            let overridden = decoded.override_tx_env(&overrides).unwrap_or_else(|e| {
+                panic!("type {decoded_type} with --tx-type {tx_type:?} must be accepted: {e}")
+            });
+            assert_eq!(overridden.tx.base.tx_type, tx_type.unwrap_or(decoded_type));
+        }
     }
 }
