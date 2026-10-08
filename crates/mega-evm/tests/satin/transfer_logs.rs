@@ -44,7 +44,8 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{
-        ADDRESS, CALL, DELEGATECALL, GAS, POP, PUSH0, PUSH1, REVERT, SELFDESTRUCT, STOP,
+        ADDRESS, CALL, CALLDATASIZE, DELEGATECALL, GAS, JUMPDEST, JUMPI, POP, PUSH0, PUSH1, REVERT,
+        SELFDESTRUCT, STOP,
     },
     context::{
         result::{ExecutionResult, Output},
@@ -584,9 +585,25 @@ fn test_no_transfer_log_where_no_value_moves_to_another_account() {
         }))
     };
     let actor = BytecodeBuilder::default;
+    // `ACTOR` calling itself once. Without calldata it calls `ACTOR` with `value` and one byte of
+    // calldata; the frame that call starts sees the byte and jumps past the call. The zero pushed
+    // first stands in, on that inner frame, for the flag the call leaves on the outer one, for the
+    // `POP` every actor ends with.
+    let self_call = BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0, PUSH1, 1, PUSH0])
+        .push_u256(value)
+        .push_address(ACTOR)
+        .append_many([GAS, CALL]);
+    // `PUSH0; CALLDATASIZE; PUSH1 end; JUMPI; POP` is six bytes, then the call, then `end`.
+    let end = u8::try_from(6 + self_call.len()).expect("the call ends before byte 256");
+    let calls_itself_once = BytecodeBuilder::default()
+        .append_many([PUSH0, CALLDATASIZE, PUSH1, end, JUMPI, POP])
+        .append_many(self_call.build_vec())
+        .append(JUMPDEST);
     let cases: [(&str, MemoryDatabase, MegaTransaction, u64, usize); 8] = [
         ("a CALLCODE", db(actor().callcode(RECEIVER, value)), call(ACTOR, 0), 1, 0),
-        ("a CALL to itself", db(actor().call(ACTOR, value)), call(ACTOR, 0), 1, 0),
+        // The move's sender and recipient are one account, recorded once.
+        ("a CALL to itself", db(calls_itself_once), call(ACTOR, 0), 1, 0),
         ("a zero-value CALL", db(actor().call(RECEIVER, U256::ZERO)), call(ACTOR, 0), 0, 0),
         ("a transaction's value to its sender", db(actor()), call(CALLER, VALUE), 0, 0),
         (

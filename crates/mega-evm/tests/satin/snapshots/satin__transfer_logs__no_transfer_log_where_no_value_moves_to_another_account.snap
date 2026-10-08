@@ -12,16 +12,16 @@ expression: "&outcomes"
       "logs": []
     },
     "gas": {
-      "regular": 1688509,
+      "regular": 21862,
       "state": 0,
       "history": 30800,
       "history_bytes": 350,
       "reservoir_remaining": 0,
       "floor": 15000,
-      "gas_used": 1719309
+      "gas_used": 52662
     },
     "result_gas": {
-      "total_gas_spent": 1719309,
+      "total_gas_spent": 52662,
       "state_gas_spent": 0,
       "refunded": 0,
       "floor_gas": 15000,
@@ -53,7 +53,7 @@ expression: "&outcomes"
       "0x0000000000000000000000000000000000d00002": {
         "balance": "0x2710",
         "nonce": 0,
-        "code_hash": "0xace7b04de36c84afd350b124b06b4d2c09f75fbcd7438358729add228ee79e53",
+        "code_hash": "0x1df7f47699e9644ebe066bda0631505766667234a071ec0373f14a3eca2600ca",
         "created": false,
         "selfdestructed": false,
         "storage": []
