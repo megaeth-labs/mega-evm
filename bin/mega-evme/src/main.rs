@@ -10,7 +10,10 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use mega_evme::{cmd::MainCmd, print_json_error, report_command_result, set_thread_panic_hook};
+use mega_evme::{
+    cmd::MainCmd, print_json_error, raw_argv_wants_json, report_command_result,
+    set_thread_panic_hook,
+};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -43,7 +46,7 @@ async fn main() -> ExitCode {
             // The parsed command does not exist yet, so the output mode is read
             // off the raw arguments: a `--json` run must end its stdout with the
             // structured error object even when it never got as far as running.
-            if wants_json_output() {
+            if raw_argv_wants_json() {
                 print_json_error(code, &parse_error_summary(&err));
             }
             return ExitCode::from(code);
@@ -54,11 +57,6 @@ async fn main() -> ExitCode {
     let json = cmd.json_output();
     let result = cmd.run().await;
     ExitCode::from(report_command_result(result, json))
-}
-
-/// Whether the raw arguments ask for machine-readable output.
-fn wants_json_output() -> bool {
-    std::env::args_os().any(|arg| arg == "--json")
 }
 
 /// One-line summary of an argument parsing failure.
