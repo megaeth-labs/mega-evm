@@ -2,8 +2,9 @@
 //! executor.
 //!
 //! `state-test btest <paths>` imports every Osaka test of the blockchain fixtures under `paths`
-//! and exits non-zero when a failure is not explained by a registered deviation, when a fixture
-//! file cannot be read, or when a count differs from the pin it is given. See the
+//! and exits non-zero when a test fails — a block differs from its header without the exact
+//! outcome a registered deviation lists for it, or a listed test does not deviate as listed —
+//! when a fixture file cannot be read, or when a count differs from the pin it is given. See the
 //! `mega-state-test` crate's `blockchain` module for how a test is judged.
 
 use std::{collections::BTreeMap, path::PathBuf, process::ExitCode};
@@ -44,7 +45,8 @@ pub(crate) struct Cmd {
     /// reason not given is pinned at zero. Repeat it for each reason.
     #[arg(long, value_name = "REASON=N", value_parser = parse_pin)]
     expect_skipped: Vec<(SkipReason, usize)>,
-    /// Fail unless every blockchain test a registered deviation lists fails exactly as listed.
+    /// Fail unless every blockchain test a registered deviation lists deviates exactly as listed:
+    /// every block matching its header or its listed outcome, and the chain ending as listed.
     #[arg(long)]
     expect_deviations: bool,
 }

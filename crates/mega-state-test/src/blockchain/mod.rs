@@ -408,7 +408,10 @@ impl Report {
             problems.push(format!("{} fixture files could not be read", summary.file_failures));
         }
         if summary.unattributed > 0 {
-            problems.push(format!("{} failed tests no deviation explains", summary.unattributed));
+            problems.push(format!(
+                "{} blockchain tests failed: no listed outcome explains them",
+                summary.unattributed
+            ));
         }
         if let Some(expected) = expected_executed.filter(|&n| n != summary.executed) {
             problems.push(format!("{} tests executed, {expected} pinned", summary.executed));

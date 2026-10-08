@@ -292,6 +292,18 @@ fn test_btest_an_unattributed_failure_fails_the_gate() {
     assert_eq!(output.status.code(), Some(1));
     let out = stdout(&output);
     assert!(out.contains("unattributed 1") && out.contains("gas-used-mismatch"), "{out}");
+    assert!(
+        out.contains("gate: 1 blockchain tests failed: no listed outcome explains them"),
+        "{out}"
+    );
+    // The help says what the deviation pin requires of a listed test.
+    let help = Command::new(env!("CARGO_BIN_EXE_state-test"))
+        .args(["btest", "--help"])
+        .output()
+        .expect("the binary runs");
+    let help = stdout(&help).split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(help.contains("deviates exactly as listed"), "{help}");
+    assert!(!help.contains("fails exactly as listed"), "{help}");
 }
 
 #[test]

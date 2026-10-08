@@ -360,9 +360,10 @@ jobs:
             echo "::error::the blockchain tests failed the gate"
           fi
           # The gate passes only on a summary in the expected shape, for the Osaka blockchain tests,
-          # that executed tests and has no failure no deviation explains, no unread fixture and no
-          # listed test that did not fail as listed: a run that tested nothing, or whose summary
-          # changed shape, fails the gate rather than passing silently.
+          # that executed tests and has no failed test (no block differing from its header without
+          # the exact outcome a registered deviation lists for it), no unread fixture and no listed
+          # test that did not deviate as listed: a run that tested nothing, or whose summary changed
+          # shape, fails the gate rather than passing silently.
           shape='.suite == "blockchain" and .fork == "Osaka" and (.skip_reasons | type) == "object"
             and (.summary | (.executed | type) == "number" and (.passed | type) == "number"
               and (.unattributed | type) == "number" and (.file_failures | type) == "number"
@@ -380,7 +381,7 @@ jobs:
             status=1
           elif ! jq -e '.summary | .unattributed == 0 and .file_failures == 0 and (.unreproduced | add // 0) == 0' \
             blockchain-Osaka.json > /dev/null; then
-            echo "::error::the blockchain tests have a failure no deviation explains, an unread fixture or an unreproduced deviation"
+            echo "::error::the blockchain tests have a failed test, an unread fixture or a listed test that did not deviate as listed"
             status=1
           else
             jq -r '.summary as $s | "| Osaka | \($s.executed) | \([$s.skipped[]] | add // 0) | \($s.passed) | \([$s.deviated[]] | add // 0) | \($s.unattributed) | \([$s.unreproduced[]] | add // 0) | \($s.blocks.matched + $s.blocks.refused) | \($s.blocks.deviated) |"' \
