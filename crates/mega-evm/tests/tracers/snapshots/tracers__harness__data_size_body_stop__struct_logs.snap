@@ -1,0 +1,10 @@
+---
+source: crates/mega-evm/tests/tracers/harness.rs
+expression: "&traced.struct_logs()"
+---
+{
+  "failed": true,
+  "gas": 42384,
+  "returnValue": "0x84b9026700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000136",
+  "structLogs": []
+}
