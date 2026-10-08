@@ -3,10 +3,12 @@
 //! Every charge is a byte count at the cost per history byte, and every assertion here writes the
 //! count out, so a repricing moves the numbers without rewriting the test.
 
+use std::collections::BTreeMap;
+
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
     constants::{COST_PER_HISTORY_BYTE, COST_PER_STATE_BYTE, TX_GAS_LIMIT_CAP},
-    test_utils::{BytecodeBuilder, MemoryDatabase},
+    test_utils::{BytecodeBuilder, MemoryDatabase, OutcomeView},
     LOG_BASE_SIZE, LOG_TOPIC_SIZE, TX_BASE_SIZE, TX_BODY_SIZE, TX_FIXED_WRITE_RECORDS,
     WRITE_RECORD_SIZE,
 };
@@ -61,6 +63,10 @@ fn test_deployed_code_pays_history_for_every_byte() {
     assert!(long.result.is_success(), "{:?}", long.result);
     assert_eq!(long.gas.history - short.gas.history, 32 * CPHB, "32 more bytes of history");
     assert_eq!(long.gas.state - short.gas.state, 32 * COST_PER_STATE_BYTE, "and of state");
+    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+        ("short", OutcomeView::new(&short)),
+        ("long", OutcomeView::new(&long)),
+    ]));
 }
 
 /// A deployment that reverts appends no code, so it pays no code-deposit history at all.
@@ -84,6 +90,10 @@ fn test_a_reverted_deployment_pays_no_code_deposit_history() {
         body(reverting().len() as u64),
         "the body alone: nothing was deployed, and the account's record went with the failure",
     );
+    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+        ("deployed", OutcomeView::new(&deployed)),
+        ("reverted", OutcomeView::new(&reverted)),
+    ]));
 }
 
 /* ---------- the transaction body ---------- */
@@ -102,6 +112,7 @@ fn test_every_transaction_pays_for_its_body() {
     assert_eq!(empty.gas.history, body(0));
     assert_eq!(empty.gas.history, 310 * 88, "310 bytes at the cost per history byte");
     assert_eq!(empty.gas.state, 0, "the body is history, not state");
+    crate::assert_sorted_json_snapshot!(&OutcomeView::new(&empty));
 }
 
 /// Calldata is part of the body, one history byte per byte, whatever the bytes are: a zero byte
@@ -123,6 +134,11 @@ fn test_calldata_costs_one_history_byte_per_byte() {
     assert_eq!(zeros.gas.history, body(100));
     assert_eq!(non_zeros.gas.history, zeros.gas.history, "the value of a byte is not its size");
     assert_eq!(longer.gas.history - zeros.gas.history, 100 * CPHB, "a hundred bytes more");
+    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+        ("zeros", OutcomeView::new(&zeros)),
+        ("non_zeros", OutcomeView::new(&non_zeros)),
+        ("longer", OutcomeView::new(&longer)),
+    ]));
 }
 
 /* ---------- the sites the Host stages ---------- */
@@ -174,6 +190,11 @@ fn test_a_log_pays_for_its_address_its_topics_and_its_data() {
         2 * LOG_TOPIC_SIZE * CPHB,
         "two topics more",
     );
+    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+        ("bare", OutcomeView::new(&bare)),
+        ("one_topic", OutcomeView::new(&one_topic)),
+        ("three_topics", OutcomeView::new(&three_topics)),
+    ]));
 }
 
 /// A log costs history on top of what the EVM itself charges for the opcode: the schedule's own
@@ -204,6 +225,10 @@ fn test_a_log_pays_history_on_top_of_the_schedules_price() {
         logging.gas.history - quiet.gas.history,
         (LOG_BASE_SIZE + LOG_TOPIC_SIZE + 32) * CPHB
     );
+    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+        ("quiet", OutcomeView::new(&quiet)),
+        ("logging", OutcomeView::new(&logging)),
+    ]));
 }
 
 /// A storage write leaves one write record, and the record is history: the first change of a slot
@@ -234,6 +259,12 @@ fn test_a_storage_write_pays_for_its_record_and_a_write_back_takes_it_back() {
     assert_eq!(three.gas.history, body(0) + 3 * WRITE_RECORD_SIZE * CPHB, "three slots, three");
     assert_eq!(rewritten.gas.history, one.gas.history, "a slot already changed records once");
     assert_eq!(restored.gas.history, body(0), "the write-back took the record's charge back");
+    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+        ("one", OutcomeView::new(&one)),
+        ("three", OutcomeView::new(&three)),
+        ("rewritten", OutcomeView::new(&rewritten)),
+        ("restored", OutcomeView::new(&restored)),
+    ]));
 }
 
 /// A frame that fails pays for nothing it appended: its logs and its write records go back with
@@ -263,6 +294,11 @@ fn test_a_failing_frame_gives_its_history_back() {
     assert!(kept.result.is_success() && reverted.result.is_success(), "the caller survives");
     assert_eq!(kept.gas.history - quiet.gas.history, (LOG_BASE_SIZE + LOG_TOPIC_SIZE + 32) * CPHB);
     assert_eq!(reverted.gas.history, quiet.gas.history, "the reverted frame's log is not paid for");
+    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+        ("quiet", OutcomeView::new(&quiet)),
+        ("kept", OutcomeView::new(&kept)),
+        ("reverted", OutcomeView::new(&reverted)),
+    ]));
 }
 
 /* ---------- a frame-start charge the caller cannot pay ---------- */
@@ -318,6 +354,10 @@ fn test_a_call_whose_caller_cannot_pay_its_records_starts_no_frame() {
     assert!(ample.result.is_success(), "{:?}", ample.result);
     assert_eq!(ample.usage.write_records, 2, "the caller's account and the recipient's");
     assert_eq!(ample.gas.history, body(0) + 2 * WRITE_RECORD_SIZE * CPHB);
+    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+        ("short", OutcomeView::new(&short)),
+        ("ample", OutcomeView::new(&ample)),
+    ]));
 }
 
 /// The same for a creation, whose start records the created account and the creator's nonce.
@@ -337,6 +377,10 @@ fn test_a_creation_whose_creator_cannot_pay_its_records_starts_no_frame() {
     assert!(ample.result.is_success(), "{:?}", ample.result);
     assert_eq!(ample.usage.write_records, 2, "the created account and the creator's nonce");
     assert_eq!(ample.gas.history, body(0) + 2 * WRITE_RECORD_SIZE * CPHB);
+    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+        ("short", OutcomeView::new(&short)),
+        ("ample", OutcomeView::new(&ample)),
+    ]));
 }
 
 /// Whether a write record is paid for may not depend on how much gas its frame's caller had
@@ -354,7 +398,10 @@ fn test_no_gas_limit_buys_a_write_record_for_nothing() {
     }
     let reservoirs = [1, body(0) / 2, body(0) + WRITE_RECORD_SIZE * CPHB, 1_000_000, 100_000_000];
     let above_the_cap = reservoirs.map(|reservoir| TX_GAS_LIMIT_CAP + reservoir);
-    for code in [transfers_everything_to(CONTRACT), creates_everything()] {
+    let mut outcomes: BTreeMap<&str, BTreeMap<u64, OutcomeView>> = BTreeMap::new();
+    for (site, code) in
+        [("a value call", transfers_everything_to(CONTRACT)), ("a creation", creates_everything())]
+    {
         for limit in [300_000, 400_000, 600_000, 800_000, 1_000_000, 5_000_000]
             .into_iter()
             .chain(above_the_cap)
@@ -379,8 +426,10 @@ fn test_no_gas_limit_buys_a_write_record_for_nothing() {
                 TX_BODY_SIZE + outcome.usage.write_records * WRITE_RECORD_SIZE,
                 "at a {limit} gas limit: and the bytes reported",
             );
+            outcomes.entry(site).or_default().insert(limit, OutcomeView::new(&outcome));
         }
     }
+    crate::assert_sorted_json_snapshot!(&outcomes);
 }
 
 /* ---------- the writes every transaction makes ---------- */
@@ -414,6 +463,10 @@ fn test_the_body_carries_the_writes_every_transaction_makes() {
     assert_eq!(free.gas.history, body(0), "the body, and the body alone");
     assert_eq!(paid.gas.history, free.gas.history, "the fee recipients are already in the body");
     assert_eq!(paid.usage.write_records, 0, "and none of them is recorded again");
+    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+        ("free", OutcomeView::new(&free)),
+        ("paid", OutcomeView::new(&paid)),
+    ]));
 }
 
 /// A deposit credits no fee recipient at all, and is exempt from history besides: it pays for
@@ -430,6 +483,7 @@ fn test_a_deposit_pays_for_none_of_the_bodys_writes() {
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
     assert_eq!(outcome.gas.history, 0);
     assert_eq!(outcome.usage.write_records, 0);
+    crate::assert_sorted_json_snapshot!(&OutcomeView::new(&outcome));
 }
 
 /// The body carries a bound on the fee recipients, not a count of them, so a beneficiary that is
@@ -456,4 +510,8 @@ fn test_a_beneficiary_that_is_a_fee_vault_changes_nothing() {
     assert_eq!(distinct.gas.history, body(0));
     assert_eq!(a_vault.gas.history, distinct.gas.history);
     assert_eq!(a_vault.usage.write_records, 0);
+    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+        ("distinct", OutcomeView::new(&distinct)),
+        ("a_vault", OutcomeView::new(&a_vault)),
+    ]));
 }
