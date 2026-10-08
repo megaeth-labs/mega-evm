@@ -14,13 +14,14 @@
 use std::collections::BTreeMap;
 
 use alloy_op_evm::OpTx;
-use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
+use alloy_primitives::{address, keccak256, Address, Bytes, TxKind, B256, U256};
 use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
     constants::{BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS, TX_GAS_LIMIT_CAP},
     system::{IMegaLimitControl, LIMIT_CONTROL_ADDRESS, ORACLE_CONTRACT_ADDRESS},
     test_utils::{
-        op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase, OutcomeView,
+        op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase, OutcomeSummary,
+        OutcomeView,
     },
     volatile_data_access_disabled_revert_data, write_record_history_gas, EvmTxRuntimeLimits,
     LimitCheck, LimitKind, MegaContext, MegaEvm, MegaLimitExceeded, MegaSpecId, MegaTransaction,
@@ -200,6 +201,65 @@ pub(crate) fn assert_stopped(run: &Run, intrinsic: u64, left: u64) -> u64 {
     assert_eq!(run.outcome.gas.state, 0, "a stop keeps no state");
     assert!(run.outcome.result.logs().is_empty(), "a stop keeps no log");
     limit
+}
+
+/* ---------- snapshots of many outcomes ---------- */
+
+/// The summary line of every view in `views`, by case: what a test with more outcomes than a
+/// reviewer can read whole snapshots instead of the views themselves.
+pub(crate) fn summaries(views: &BTreeMap<String, OutcomeView>) -> BTreeMap<String, OutcomeSummary> {
+    views.iter().map(|(case, view)| (case.clone(), view.summary())).collect()
+}
+
+/// A sweep of per-case lines too long to snapshot one by one: the distinct lines with how many
+/// cases produced each, a keccak256 over every case's line, keyed by its case and in case order,
+/// so that a change to any one case changes it, and the case count.
+///
+/// With `MEGA_SNAPSHOT_DUMP=<dir>` set, the keyed lines are also written to `<dir>/<name>.txt`,
+/// so a changed digest can be investigated.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct SweepDigest {
+    distinct: BTreeMap<String, usize>,
+    digest: B256,
+    count: usize,
+}
+
+pub(crate) fn sweep_digest(
+    name: &str,
+    cases: impl IntoIterator<Item = (String, String)>,
+) -> SweepDigest {
+    let mut distinct = BTreeMap::new();
+    let mut keyed = String::new();
+    let mut count = 0;
+    for (case, line) in cases {
+        *distinct.entry(line.clone()).or_insert(0) += 1;
+        keyed.push_str(&case);
+        keyed.push_str(": ");
+        keyed.push_str(&line);
+        keyed.push('\n');
+        count += 1;
+    }
+    if let Some(dir) = std::env::var_os("MEGA_SNAPSHOT_DUMP") {
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).expect("the dump directory can be made");
+        std::fs::write(dir.join(format!("{name}.txt")), &keyed).expect("the dump can be written");
+    }
+    SweepDigest { distinct, digest: keccak256(keyed.as_bytes()), count }
+}
+
+/// A transaction that wrote more slots than a snapshot can list: its summary line, and the slots
+/// of one account it changed as a sweep, each slot's line its original and present value.
+#[derive(Debug, serde::Serialize)]
+struct SlotSweep {
+    summary: OutcomeSummary,
+    slots: SweepDigest,
+}
+
+fn slot_sweep(name: &str, view: &OutcomeView, account: Address) -> SlotSweep {
+    let slots = view.accounts[&account].storage.iter().map(|slot| {
+        (format!("{:#x}", slot.slot), format!("{:#x} -> {:#x}", slot.original, slot.present))
+    });
+    SlotSweep { summary: view.summary(), slots: sweep_digest(name, slots) }
 }
 
 /* ---------- where a stop lands ---------- */
@@ -558,7 +618,7 @@ fn test_every_volatile_read_caps_the_transaction_from_where_it_read() {
             );
         }
     }
-    crate::assert_sorted_json_snapshot!(&views);
+    crate::assert_sorted_json_snapshot!(&summaries(&views));
 }
 
 /// The cap is relative: a transaction that spent more than the cap before it read may still
@@ -1486,7 +1546,7 @@ fn test_a_refused_read_reverts_the_frame_and_charges_its_static_gas() {
             views.insert(format!("{name}, gas limit {gas_limit}"), OutcomeView::new(&run.outcome));
         }
     }
-    crate::assert_sorted_json_snapshot!(&views);
+    crate::assert_sorted_json_snapshot!(&summaries(&views));
 }
 
 /// The refusal of a `SLOTNUM` names access type 12, one past the contract's enum; the others name
@@ -1677,7 +1737,7 @@ fn test_a_frames_return_hands_back_what_was_withheld() {
             assert_eq!(detained, plain, "{name}: nothing withheld stays behind");
         }
     }
-    crate::assert_sorted_json_snapshot!(&views);
+    crate::assert_sorted_json_snapshot!(&summaries(&views));
 }
 
 /// State and history gas are not compute, whether they come out of the reservoir or spill onto
@@ -1700,7 +1760,8 @@ fn test_state_and_history_gas_are_not_compute() {
         code = code.sstore(U256::from(slot), U256::from(1));
     }
     let code = code.stop().build();
-    let mut views = BTreeMap::new();
+    // Too many slots to list: each tier snapshots its summary line and the slots as a sweep.
+    let mut sweeps = BTreeMap::new();
     for gas_limit in TIERS {
         let run = execute(
             MemoryDatabase::default().account_code(CONTRACT, code.clone()),
@@ -1710,9 +1771,11 @@ fn test_state_and_history_gas_are_not_compute() {
         let gas = run.outcome.gas;
         assert!(gas.state + gas.history >= slots * spill, "{gas:?}");
         assert!(gas.regular < CAP, "{gas:?}");
-        views.insert(format!("gas limit {gas_limit}"), OutcomeView::new(&run.outcome));
+        let name = format!("state_and_history_gas_are_not_compute.{gas_limit}");
+        let view = OutcomeView::new(&run.outcome);
+        sweeps.insert(format!("gas limit {gas_limit}"), slot_sweep(&name, &view, CONTRACT));
     }
-    crate::assert_sorted_json_snapshot!(&views);
+    crate::assert_sorted_json_snapshot!(&sweeps);
 }
 
 /// State and history gas that spilled onto regular gas before the read are not compute either.

@@ -31,8 +31,8 @@ use revm::{bytecode::opcode::*, context::TxEnv, interpreter::InstructionResult};
 
 use crate::{
     detention::{
-        assert_stopped, context, intrinsic, memory_cost, op, run_on, spin, Calls, Charges, Run,
-        BENEFICIARY, CALLER, CAP, CHILD, CONTRACT, TIERS,
+        assert_stopped, context, intrinsic, memory_cost, op, run_on, spin, summaries, Calls,
+        Charges, Run, BENEFICIARY, CALLER, CAP, CHILD, CONTRACT, TIERS,
     },
     withheld_gas::{costly_modexp_input, intrinsic_with},
 };
@@ -290,7 +290,7 @@ fn test_a_value_call_to_a_precompile_after_a_read_keeps_the_log_it_counted() {
             OutcomeView::new(&detained.outcome),
         );
     }
-    crate::assert_sorted_json_snapshot!(&views);
+    crate::assert_sorted_json_snapshot!(&summaries(&views));
 }
 
 /* ---------- a value call its caller cannot fund ---------- */
@@ -342,7 +342,7 @@ fn test_a_value_call_its_caller_cannot_fund_after_a_read_runs_as_without_it() {
             }
         }
     }
-    crate::assert_sorted_json_snapshot!(&views);
+    crate::assert_sorted_json_snapshot!(&summaries(&views));
 }
 
 /* ---------- a SELFDESTRUCT ---------- */
@@ -443,7 +443,7 @@ fn test_a_selfdestructs_transfer_log_goes_with_the_frame_the_cap_stops() {
             OutcomeView::new(&stopped.outcome),
         );
     }
-    crate::assert_sorted_json_snapshot!(&views);
+    crate::assert_sorted_json_snapshot!(&summaries(&views));
 }
 
 /* ---------- every detained frame start ---------- */
@@ -627,5 +627,5 @@ fn test_every_detained_frame_start_keeps_the_log_it_counted() {
             }
         }
     }
-    crate::assert_sorted_json_snapshot!(&views);
+    crate::assert_sorted_json_snapshot!(&summaries(&views));
 }
