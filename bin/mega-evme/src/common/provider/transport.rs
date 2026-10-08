@@ -29,16 +29,11 @@ use alloy_json_rpc::{RequestPacket, ResponsePacket};
 use alloy_primitives::{keccak256, B256};
 use alloy_provider::transport::{TransportError, TransportErrorKind};
 use alloy_transport::TransportFut;
-use serde::{Deserialize, Serialize};
 
-use crate::common::{EvmeError, Result};
-
-/// A single entry in the transport-level cache.
-#[derive(Debug, Serialize, Deserialize)]
-struct TransportCacheEntry {
-    key: B256,
-    value: String,
-}
+use crate::{
+    cache::CacheKv,
+    common::{EvmeError, Result},
+};
 
 /// One cached response plus the bookkeeping eviction needs.
 #[derive(Debug)]
@@ -215,16 +210,16 @@ impl TransportCache {
     /// Serialize the entries to a JSON value for the envelope.
     /// Sorted by key for deterministic output (avoids noisy diffs on committed fixtures).
     pub(super) fn to_value(&self) -> serde_json::Value {
-        let mut entries: Vec<TransportCacheEntry> = self
+        let mut entries: Vec<CacheKv> = self
             .entries
             .read()
             .expect("cache lock poisoned")
             .slots
             .iter()
-            .map(|(key, slot)| TransportCacheEntry { key: *key, value: slot.value.clone() })
+            .map(|(key, slot)| CacheKv { key: *key, value: slot.value.clone() })
             .collect();
         entries.sort_by_key(|e| e.key);
-        serde_json::to_value(entries).expect("TransportCacheEntry is always serializable")
+        serde_json::to_value(entries).expect("CacheKv is always serializable")
     }
 
     /// Deserialize from the envelope's `cache` field.
@@ -242,7 +237,7 @@ impl TransportCache {
 }
 
 /// Decode the envelope's `cache` array into entries.
-fn parse_cache_entries(value: &serde_json::Value) -> Result<Vec<TransportCacheEntry>> {
+fn parse_cache_entries(value: &serde_json::Value) -> Result<Vec<CacheKv>> {
     serde_json::from_value(value.clone())
         .map_err(|e| EvmeError::RpcError(format!("Failed to parse transport cache entries: {e}")))
 }
