@@ -20,7 +20,10 @@ Every mechanism of the Satin spec is in place; the module table below says where
 cargo build --workspace
 
 # Test
-cargo test --workspace                    # all tests, as the debug CI job runs them
+cargo test --workspace                    # all tests
+# The debug CI job: the same run through cargo-insta, failing on a differing or unreferenced snapshot
+cargo insta test --workspace --check --unreferenced=reject --test-runner cargo-test --no-quiet --fail-fast
+cargo insta review                        # go through the .snap.new files a failing local run wrote
 cargo test --workspace --release --locked # the release CI job
 cargo test -p mega-evm                    # core crate only
 cargo test -p mega-evm -- test_name       # single test
@@ -453,6 +456,8 @@ Every later mechanism plugs into these; a change to one comes back to this layer
 - `block/` — tests of block execution: the Karst block rules, the block-level limits, the counters, the factory and the admission gate; under `block/witness/`, the witness-replay harness: a block executed on a recorder of every read, then again on a strict database and environments that serve exactly a witness — the record of every read, and the witness a node builds from the pre-block states, the included transactions' returned states and the exports — each replay held to the recording, one case per mechanism that reads and per read that gas or a limit skips.
 - `system/` — tests of the system contracts: the interceptor dispatch, what each contract answers, keyless deployment (`system/keyless/`) and the system-address transaction.
 - `fuzz/` — randomized tests: properties the engine must hold on any input, and the neutral differential against op-revm and revm's mainnet EVM (see Randomized tests below).
+- `shared/` — no target: `snapshot.rs` holds `assert_sorted_json_snapshot!`, which every target includes with `#[path = "../shared/snapshot.rs"] mod snapshot;`.
+  It has no `main.rs`, so Cargo builds nothing there; the snapshot files live in `snapshots/` beside the file that asserts.
 - `_pending/` — no test any more: its `README.md` records where each legacy test the test inventory kept went, ported into one of the targets above or retired, and why.
   It has no `main.rs`, so Cargo builds nothing there.
 - Unit tests live next to the code in `#[cfg(test)] mod tests`.
@@ -589,6 +594,12 @@ When the agent is requested to implement a new feature or bug fix, it should con
   A gas limit is regular room on top of what the scenario adds at the prices in effect (`satin_gas_params()`, `history_gas`), never a number that happened to cover it at the constants; a call or creation that forwards all but a 64th of its gas keeps 64 times the history of the records it pays for.
   A charge a scenario must not be able to pay is derived the same way — a gas limit one short of it — not a number that is short of it only while a byte is dear.
   A test that pins the spec's own numbers returns early at other prices (`runs_at_measurement_prices`); run `scripts/price_grid.sh --pr` before committing a test change.
+- **Snapshots are a net under explicit assertions.**
+  An insta snapshot (`crate::assert_sorted_json_snapshot!` of a `test_utils::OutcomeView`) is a net under a test's explicit assertions, never a replacement for them.
+  Every snapshot test also asserts the figures that matter with `assert_eq!`, each derived independently from the schedule and the named constants, and ends with one snapshot of the whole result.
+  Snapshot changes are reviewed with `cargo insta review`, one by one like code, and never blanket-accepted (`cargo insta accept`, `--accept`, `INSTA_UPDATE=always`).
+  Snapshot comparisons run at the spec's byte prices only: at other prices the macro skips the comparison and leaves a price-guard note.
+  The generated documents (`crates/mega-state-test/DEVIATIONS.md`, `crates/mega-evm/tests/satin/pricing-table.md`, `bin/mega-evme/tests/satin-differences.md`) stay rendered by their tests and checked against the file, not snapshotted.
 - **Keep the execution-spec gate honest.**
   A change that makes Satin's machinery differ from Ethereum's fixtures on purpose registers a deviation (its rule, its reason, the entries it fails with the hashes Satin produces for them) and regenerates `crates/mega-state-test/DEVIATIONS.md`; a failure that is a bug is fixed, never registered.
   A price or a limit `MegaETH` sets is not a deviation: equivalence mode takes it out, and a new pricing or limit dimension extends the neutral configuration, or the limits the runner installs, rather than the registry.
