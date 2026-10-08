@@ -17,9 +17,10 @@ use crate::common::{EvmeError, Result};
 
 pub(crate) use lock::{acquire_exclusive_lock, lock_sidecar_path};
 pub(crate) use merge::{
-    detect_shape, merge_cache_entries_capped, merge_envelope_for_persist,
-    reread_envelope_for_merge, write_bytes_atomic, write_envelope_atomic, CacheKv, CacheShape,
-    EnvelopeDoc, EnvelopeReread, ExternalEnvDoc, ENVELOPE_VERSION,
+    detect_shape, merge_cache_entries_capped, merge_envelope_for_persist, read_json_file,
+    reread_envelope_for_merge, unsupported_version_message, write_bytes_atomic,
+    write_envelope_atomic, CacheKv, CacheShape, EnvelopeDoc, EnvelopeReread, ExternalEnvDoc,
+    JsonFileError, ENVELOPE_VERSION,
 };
 
 use merge::{fold_output_envelope, load_cache_file, merge_envelopes_cli};

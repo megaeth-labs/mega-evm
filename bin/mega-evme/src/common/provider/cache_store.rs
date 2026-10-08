@@ -42,9 +42,9 @@ use super::transport::TransportCache;
 use crate::{
     cache::{
         acquire_exclusive_lock, detect_shape, lock_sidecar_path, merge_cache_entries_capped,
-        merge_envelope_for_persist, reread_envelope_for_merge, warn_user, write_bytes_atomic,
-        write_envelope_atomic, CacheKv, CacheShape, EnvelopeDoc, EnvelopeReread, ExternalEnvDoc,
-        ENVELOPE_VERSION,
+        merge_envelope_for_persist, read_json_file, reread_envelope_for_merge,
+        unsupported_version_message, warn_user, write_bytes_atomic, write_envelope_atomic, CacheKv,
+        CacheShape, EnvelopeDoc, EnvelopeReread, ExternalEnvDoc, JsonFileError, ENVELOPE_VERSION,
     },
     common::{EvmeError, Result},
 };
@@ -338,15 +338,12 @@ fn classify_online_cache_file(path: &Path, chain_id: u64) -> OnlineCacheFile {
     if !path.exists() {
         return OnlineCacheFile::Absent;
     }
-    let content = match fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(e) => {
+    let value = match read_json_file(path) {
+        Ok(value) => value,
+        Err(JsonFileError::Read(e)) => {
             return OnlineCacheFile::Foreign(format!("cannot be read ({e})"));
         }
-    };
-    let value: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(value) => value,
-        Err(e) => {
+        Err(JsonFileError::Parse(e)) => {
             return OnlineCacheFile::Stale(format!("is not valid JSON ({e})"));
         }
     };
@@ -583,10 +580,9 @@ impl CacheFileEnvelope {
             ))
         })?;
         if envelope.version != ENVELOPE_VERSION {
-            return Err(EvmeError::FixtureError(format!(
-                "Unsupported cache file version {} in '{}'; expected {ENVELOPE_VERSION}",
+            return Err(EvmeError::FixtureError(unsupported_version_message(
                 envelope.version,
-                path.display(),
+                path,
             )));
         }
         Ok(envelope)

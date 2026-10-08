@@ -184,60 +184,96 @@ pub(crate) enum EnvelopeReread {
     Hard(EvmeError),
 }
 
+/// Why a JSON file could not be read, by stage.
+#[derive(Debug)]
+pub(crate) enum JsonFileError {
+    /// The file could not be read.
+    Read(std::io::Error),
+    /// The content is not JSON.
+    Parse(serde_json::Error),
+}
+
+/// Read the file at `path` and parse it as JSON.
+///
+/// The first two stages every cache-file reader shares. Each caller maps a
+/// failure onto its own error type and policy.
+pub(crate) fn read_json_file(path: &Path) -> std::result::Result<serde_json::Value, JsonFileError> {
+    let content = fs::read_to_string(path).map_err(JsonFileError::Read)?;
+    serde_json::from_str(&content).map_err(JsonFileError::Parse)
+}
+
+/// Why an envelope file could not be read as an [`EnvelopeDoc`], by stage.
+///
+/// The stages and their order are shared by every reader of a whole envelope;
+/// what each stage means — a hard failure, a degradable one, which error type
+/// and which message — is the caller's policy.
+#[derive(Debug)]
+pub(crate) enum EnvelopeReadError {
+    /// The file could not be read or is not JSON.
+    File(JsonFileError),
+    /// Structured JSON in a shape neither writer produces; carries
+    /// [`detect_shape`]'s diagnostic.
+    Unrecognized(EvmeError),
+    /// The bare array a retired build wrote ([`CacheShape::Provider`]).
+    RetiredArray,
+    /// An envelope whose fields do not decode.
+    Decode(serde_json::Error),
+    /// An envelope of a version this build does not read.
+    Version(u32),
+}
+
+/// Read the envelope at `path`: read, parse, recognize the shape, decode, and
+/// check the version, in that order.
+pub(crate) fn read_envelope_doc(
+    path: &Path,
+) -> std::result::Result<EnvelopeDoc, EnvelopeReadError> {
+    let value = read_json_file(path).map_err(EnvelopeReadError::File)?;
+    match detect_shape(&value, path).map_err(EnvelopeReadError::Unrecognized)? {
+        CacheShape::Envelope => {}
+        CacheShape::Provider => return Err(EnvelopeReadError::RetiredArray),
+    }
+    let doc: EnvelopeDoc = serde_json::from_value(value).map_err(EnvelopeReadError::Decode)?;
+    if doc.version != ENVELOPE_VERSION {
+        return Err(EnvelopeReadError::Version(doc.version));
+    }
+    Ok(doc)
+}
+
+/// The diagnostic for an envelope of a version this build does not read.
+pub(crate) fn unsupported_version_message(version: u32, path: &Path) -> String {
+    format!(
+        "Unsupported cache file version {version} in '{}'; expected {ENVELOPE_VERSION}",
+        path.display()
+    )
+}
+
 /// Re-read an on-disk envelope for the lock-protected merge-on-persist path.
 ///
 /// Distinguishes hard identity failures from degradable corrupt content without
 /// substring-searching formatted messages.
 pub(crate) fn reread_envelope_for_merge(path: &Path) -> EnvelopeReread {
-    let content = match fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(e) => {
-            return EnvelopeReread::Degradable(format!(
-                "Failed to read envelope {}: {e}",
-                path.display()
-            ));
+    match read_envelope_doc(path) {
+        Ok(doc) => EnvelopeReread::Ok(doc),
+        Err(EnvelopeReadError::File(JsonFileError::Read(e))) => {
+            EnvelopeReread::Degradable(format!("Failed to read envelope {}: {e}", path.display()))
         }
-    };
-    let value: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(e) => {
-            return EnvelopeReread::Degradable(format!(
-                "Failed to parse envelope {}: {e}",
-                path.display()
-            ));
+        Err(EnvelopeReadError::File(JsonFileError::Parse(e))) => {
+            EnvelopeReread::Degradable(format!("Failed to parse envelope {}: {e}", path.display()))
         }
-    };
-    let shape = match detect_shape(&value, path) {
-        Ok(s) => s,
-        Err(e) => {
-            // Unrecognized shape is a hard identity/schema failure: the on-disk
-            // file is not a capture envelope this build can merge into.
-            return EnvelopeReread::Hard(EvmeError::FixtureError(e.to_string()));
+        // Unrecognized shape is a hard identity/schema failure: the on-disk
+        // file is not a capture envelope this build can merge into.
+        Err(EnvelopeReadError::Unrecognized(e)) => {
+            EnvelopeReread::Hard(EvmeError::FixtureError(e.to_string()))
         }
-    };
-    match shape {
-        CacheShape::Envelope => {
-            let doc: EnvelopeDoc = match serde_json::from_value(value) {
-                Ok(d) => d,
-                Err(e) => {
-                    return EnvelopeReread::Degradable(format!(
-                        "Failed to decode envelope {}: {e}",
-                        path.display()
-                    ));
-                }
-            };
-            if doc.version != ENVELOPE_VERSION {
-                return EnvelopeReread::Hard(EvmeError::FixtureError(format!(
-                    "Unsupported cache file version {} in '{}'; expected {ENVELOPE_VERSION}",
-                    doc.version,
-                    path.display(),
-                )));
-            }
-            EnvelopeReread::Ok(doc)
-        }
-        CacheShape::Provider => {
+        Err(EnvelopeReadError::RetiredArray) => {
             EnvelopeReread::Hard(EvmeError::FixtureError(retired_array_format_message(path)))
         }
+        Err(EnvelopeReadError::Decode(e)) => {
+            EnvelopeReread::Degradable(format!("Failed to decode envelope {}: {e}", path.display()))
+        }
+        Err(EnvelopeReadError::Version(version)) => EnvelopeReread::Hard(EvmeError::FixtureError(
+            unsupported_version_message(version, path),
+        )),
     }
 }
 
@@ -536,24 +572,23 @@ pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<(
 /// key their entries differently, so a union of the two would be a file no
 /// build can serve ([`retired_array_format_message`]).
 pub(crate) fn load_cache_file(path: &Path) -> Result<EnvelopeDoc> {
-    let content = fs::read_to_string(path)
-        .map_err(|e| EvmeError::InvalidInput(format!("Failed to read {}: {e}", path.display())))?;
-    let value: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| EvmeError::InvalidInput(format!("Failed to parse {}: {e}", path.display())))?;
-    if !matches!(detect_shape(&value, path), Ok(CacheShape::Envelope)) {
-        return Err(EvmeError::InvalidInput(retired_array_format_message(path)));
-    }
-    let doc: EnvelopeDoc = serde_json::from_value(value).map_err(|e| {
-        EvmeError::InvalidInput(format!("Failed to decode envelope {}: {e}", path.display()))
-    })?;
-    if doc.version != ENVELOPE_VERSION {
-        return Err(EvmeError::InvalidInput(format!(
-            "Unsupported cache file version {} in '{}'; expected {ENVELOPE_VERSION}",
-            doc.version,
-            path.display(),
-        )));
-    }
-    Ok(doc)
+    read_envelope_doc(path).map_err(|e| {
+        EvmeError::InvalidInput(match e {
+            EnvelopeReadError::File(JsonFileError::Read(e)) => {
+                format!("Failed to read {}: {e}", path.display())
+            }
+            EnvelopeReadError::File(JsonFileError::Parse(e)) => {
+                format!("Failed to parse {}: {e}", path.display())
+            }
+            EnvelopeReadError::Unrecognized(_) | EnvelopeReadError::RetiredArray => {
+                retired_array_format_message(path)
+            }
+            EnvelopeReadError::Decode(e) => {
+                format!("Failed to decode envelope {}: {e}", path.display())
+            }
+            EnvelopeReadError::Version(version) => unsupported_version_message(version, path),
+        })
+    })
 }
 
 #[cfg(test)]
@@ -620,6 +655,52 @@ mod tests {
         fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).expect("write");
 
         assert_eq!(load_cache_file(&path).expect("envelope loads"), doc);
+    }
+
+    /// Each stage of reading an envelope reports its own failure, in order:
+    /// read, parse, shape, decode, version.
+    #[test]
+    fn test_read_envelope_doc_reports_each_stage() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stage = |name: &str, content: Option<&str>| {
+            let path = dir.path().join(name);
+            if let Some(content) = content {
+                fs::write(&path, content).expect("write");
+            }
+            read_envelope_doc(&path)
+        };
+
+        assert!(matches!(
+            stage("absent.json", None),
+            Err(EnvelopeReadError::File(JsonFileError::Read(_)))
+        ));
+        assert!(matches!(
+            stage("corrupt.json", Some("{not json")),
+            Err(EnvelopeReadError::File(JsonFileError::Parse(_)))
+        ));
+        assert!(matches!(
+            stage("foreign.json", Some(r#"{"foo": 1}"#)),
+            Err(EnvelopeReadError::Unrecognized(_))
+        ));
+        assert!(matches!(stage("retired.json", Some("[]")), Err(EnvelopeReadError::RetiredArray)));
+        assert!(matches!(
+            stage("undecodable.json", Some(r#"{"version": 1, "chain_id": 1, "cache": 5}"#)),
+            Err(EnvelopeReadError::Decode(_))
+        ));
+        assert!(
+            matches!(
+                stage("future.json", Some(r#"{"version": 2, "chain_id": 1, "cache": 5}"#)),
+                Err(EnvelopeReadError::Decode(_))
+            ),
+            "an undecodable envelope fails before its version is read"
+        );
+        assert!(matches!(
+            stage("future.json", Some(r#"{"version": 2, "chain_id": 1, "cache": []}"#)),
+            Err(EnvelopeReadError::Version(2))
+        ));
+        let doc = stage("ok.json", Some(r#"{"version": 1, "chain_id": 1, "cache": []}"#))
+            .expect("a current envelope reads");
+        assert_eq!(doc.chain_id, 1);
     }
 
     #[test]
