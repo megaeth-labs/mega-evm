@@ -131,6 +131,23 @@ fn test_invalid_input_exits_one_with_a_json_error_object() {
     );
 }
 
+/// An unknown spec name is rejected by the one shared spec parser, with the
+/// same message whichever command and flag carried it.
+#[test]
+fn test_unknown_spec_name_is_rejected_alike_by_every_command() {
+    let from_run = run(&["run", "--spec", "Bogus", "0x00"]);
+    let from_replay = replay(&["--override.spec", "Bogus", TX_OK]);
+
+    for (flag, outcome) in [("run --spec", &from_run), ("replay --override.spec", &from_replay)] {
+        assert_eq!(outcome.code(), 1, "{flag} must exit 1.\nstderr: {}", outcome.stderr);
+        assert_eq!(
+            outcome.stderr.lines().filter(|line| line.starts_with("error: ")).collect::<Vec<_>>(),
+            ["error: Invalid input: Invalid spec name: UnknownHardfork"],
+            "{flag} must report the shared parser's message"
+        );
+    }
+}
+
 /// A rejected flag combination is bad input too, and still ends `--json` stdout
 /// with the error object rather than nothing at all.
 #[test]

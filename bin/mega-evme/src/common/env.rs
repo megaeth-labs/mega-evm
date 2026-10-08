@@ -39,14 +39,22 @@ pub struct ChainArgs {
 impl ChainArgs {
     /// Gets the spec ID from the spec name
     pub fn spec_id(&self) -> Result<MegaSpecId> {
-        MegaSpecId::from_str(&self.spec)
-            .map_err(|e| EvmeError::InvalidInput(format!("Invalid spec name: {:?}", e)))
+        parse_spec(&self.spec)
     }
 
     /// Creates [`CfgEnv`].
     pub fn create_cfg_env(&self) -> Result<CfgEnv<MegaSpecId>> {
         Ok(cfg_env(self.chain_id, self.spec_id()?))
     }
+}
+
+/// Parses a spec name (`Rex4`, `MiniRex`, …) into a [`MegaSpecId`].
+///
+/// The one spec parser every command uses, so an unknown name is rejected with
+/// the same message whichever flag carried it (`--spec`, `--override.spec`).
+pub fn parse_spec(name: &str) -> Result<MegaSpecId> {
+    MegaSpecId::from_str(name)
+        .map_err(|e| EvmeError::InvalidInput(format!("Invalid spec name: {:?}", e)))
 }
 
 /// Creates the [`CfgEnv`] for `chain_id` executing under `spec`.

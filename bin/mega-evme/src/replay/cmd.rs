@@ -1,7 +1,6 @@
 use std::{
     collections::HashSet,
     path::PathBuf,
-    str::FromStr,
     time::{Duration, Instant},
 };
 
@@ -31,7 +30,7 @@ use op_alloy_rpc_types::Transaction;
 
 use crate::{
     common::{
-        cfg_env, create_address, external_envs_from, op_receipt_to_tx_receipt,
+        cfg_env, create_address, external_envs_from, op_receipt_to_tx_receipt, parse_spec,
         print_execution_summary, print_execution_trace, print_receipt, BuildProviderOutput,
         EvmeExternalEnvs, EvmeOutcome, ExecutionSummary, ExtEnvArgs, ExternalEnvSnapshot,
         OpTxReceipt, OutputArgs, OverriddenTx, RpcArgs, RpcCacheStore, StateDumpArgs, TraceArgs,
@@ -491,13 +490,7 @@ impl Cmd {
 
     /// The spec forced by `--override.spec`, parsed.
     fn resolve_spec_override(&self) -> Result<Option<MegaSpecId>> {
-        self.spec_override
-            .as_deref()
-            .map(|spec| {
-                MegaSpecId::from_str(spec)
-                    .map_err(|e| ReplayError::Other(format!("Invalid spec: {e:?}")))
-            })
-            .transpose()
+        self.spec_override.as_deref().map(parse_spec).transpose()
     }
 
     /// Whether this invocation selects a batch of transactions.
