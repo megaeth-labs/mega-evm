@@ -79,7 +79,10 @@ use op_alloy_rpc_types::Transaction;
 use tracing::info;
 
 use crate::{
-    common::{create_address, op_receipt_to_tx_receipt, EvmeExternalEnvs, OpTxReceipt},
+    common::{
+        create_address, op_receipt_to_tx_receipt, pre_execution_nonce, EvmeExternalEnvs,
+        OpTxReceipt,
+    },
     EvmeState,
 };
 
@@ -541,12 +544,10 @@ where
             // nonce for its created-contract address is read for whoever signs
             // the transaction it handed back.
             let prepared = lifecycle.before_target(&tx, block_executor.inspector_mut())?;
-            let pre_execution_nonce = block_executor
-                .evm()
-                .db_ref()
-                .basic_ref(*RecoveredTx::signer(&prepared))?
-                .map(|acc| acc.nonce)
-                .unwrap_or(0);
+            let pre_execution_nonce = pre_execution_nonce(
+                block_executor.evm().db_ref(),
+                *RecoveredTx::signer(&prepared),
+            )?;
 
             let outcome = block_executor
                 .run_transaction(prepared)

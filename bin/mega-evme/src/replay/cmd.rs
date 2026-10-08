@@ -23,17 +23,17 @@ use mega_evm::{
 };
 use revm_inspectors::tracing::TracingInspector;
 use state_test::types::MegaEnv;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, trace};
 
 use op_alloy_rpc_types::Transaction;
 
 use crate::{
     common::{
-        cfg_env, create_address, external_envs_from, op_receipt_to_tx_receipt, parse_spec,
-        print_execution_summary, print_execution_trace, print_receipt, BuildProviderOutput,
-        EvmeExternalEnvs, EvmeOutcome, ExecutionSummary, ExtEnvArgs, ExternalEnvSnapshot,
-        OpTxReceipt, OutputArgs, OverriddenTx, RpcArgs, RpcCacheStore, StateDumpArgs, TraceArgs,
-        TxOverrideArgs, VerificationCounts,
+        cfg_env, create_address, external_envs_from, log_execution_result,
+        op_receipt_to_tx_receipt, parse_spec, pre_execution_nonce, print_execution_summary,
+        print_execution_trace, print_receipt, BuildProviderOutput, EvmeExternalEnvs, EvmeOutcome,
+        ExecutionSummary, ExtEnvArgs, ExternalEnvSnapshot, OpTxReceipt, OutputArgs, OverriddenTx,
+        RpcArgs, RpcCacheStore, StateDumpArgs, TraceArgs, TxOverrideArgs, VerificationCounts,
     },
     replay::{get_hardfork_config, ReplayHardforks},
     EvmeState,
@@ -325,7 +325,7 @@ impl kernel::TargetLifecycle for SingleTxLifecycle<'_> {
         DB::Error: core::fmt::Display,
     {
         trace!(tx_hash = %target.tx_hash, result = ?target.result_and_state.result, "Target transaction executed");
-        log_execution_result(&target.result_and_state.result);
+        log_execution_result!(target: "mega_evme::replay::cmd", &target.result_and_state.result);
 
         let trace_data = self.cmd.trace_args.is_tracing_enabled().then(|| {
             self.cmd.trace_args.generate_trace(inspector, target.result_and_state, target.db)
@@ -375,21 +375,6 @@ impl kernel::TargetLifecycle for SingleTxLifecycle<'_> {
         };
 
         Ok(TargetDraft { state: target.result_and_state.state.clone(), trace_data, fixture })
-    }
-}
-
-/// Announce how the target ended, at the level its outcome deserves.
-fn log_execution_result(exec_result: &ExecutionResult<MegaHaltReason>) {
-    match exec_result {
-        ExecutionResult::Success { .. } => {
-            info!(gas_used = exec_result.tx_gas_used(), "Execution succeeded")
-        }
-        ExecutionResult::Revert { .. } => {
-            warn!(gas_used = exec_result.tx_gas_used(), "Execution reverted")
-        }
-        ExecutionResult::Halt { reason, .. } => {
-            warn!(?reason, gas_used = exec_result.tx_gas_used(), "Execution halted")
-        }
     }
 }
 
@@ -1257,18 +1242,14 @@ impl Cmd {
             info!(overrides = ?self.tx_override_args, "Applying transaction overrides");
         }
         let wrapped_tx = self.tx_override_args.wrap(ctx.target_tx.as_recovered())?;
-        let pre_execution_nonce = block_executor
-            .evm()
-            .db_ref()
-            .basic_ref(wrapped_tx.inner().signer())?
-            .map(|acc| acc.nonce)
-            .unwrap_or(0);
+        let pre_execution_nonce =
+            pre_execution_nonce(block_executor.evm().db_ref(), wrapped_tx.inner().signer())?;
 
         block_executor.inspector_mut().fuse();
         let outcome =
             block_executor.run_transaction(wrapped_tx).map_err(ReplayError::BlockExecutionError)?;
         trace!(tx_hash = %ctx.target_tx.inner.inner.tx_hash(), ?outcome, "Target transaction executed");
-        log_execution_result(&outcome.inner.result);
+        log_execution_result!(target: "mega_evme::replay::cmd", &outcome.inner.result);
 
         // Read off the same moment the kernel hands its participants: the
         // target's outcome is known and the database still holds the state it

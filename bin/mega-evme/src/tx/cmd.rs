@@ -1,19 +1,15 @@
-use std::time::Instant;
-
 use clap::Parser;
 use mega_evm::{
-    revm::{
-        context::result::ExecutionResult, context_interface::transaction::Transaction as _,
-        primitives::TxKind, DatabaseRef,
-    },
+    revm::{context_interface::transaction::Transaction as _, primitives::TxKind},
     MegaTransaction, MegaTxType,
 };
 use tracing::{debug, info, trace, warn};
 
 use crate::common::{
-    create_address, load_hex, op_receipt_to_tx_receipt, print_execution_summary,
-    print_execution_trace, print_receipt, DecodedRawTx, EnvArgs, EvmeError, EvmeOutcome,
-    ExecutionSummary, OutputArgs, PreStateArgs, RpcArgs, StateDumpArgs, TraceArgs, TxArgs,
+    create_address, load_hex, log_execution_result, op_receipt_to_tx_receipt, pre_execution_nonce,
+    print_execution_summary, print_execution_trace, print_receipt, DecodedRawTx, EnvArgs,
+    EvmeError, EvmeOutcome, ExecutionSummary, OutputArgs, PreStateArgs, RpcArgs, StateDumpArgs,
+    TraceArgs, TxArgs,
 };
 
 use super::Result;
@@ -96,37 +92,19 @@ impl Cmd {
         state.deploy_system_contracts(spec);
         debug!(spec = ?spec, "System contracts deployed");
 
-        let pre_execution_nonce = state.basic_ref(sender)?.map(|acc| acc.nonce).unwrap_or(0);
+        let pre_execution_nonce = pre_execution_nonce(&state, sender)?;
         debug!(nonce = pre_execution_nonce, "Pre-execution nonce");
 
         // Step 3: Execute transaction
         info!("Executing transaction");
-        let evm_context = self.env_args.create_evm_context(&mut state)?;
-        let start = Instant::now();
-        let (exec_result, evm_state, trace_data) =
-            self.trace_args.execute_transaction(evm_context, tx.clone())?;
-        let exec_time = start.elapsed();
-
-        // Log execution result
-        match &exec_result {
-            ExecutionResult::Success { .. } => {
-                info!(gas_used = exec_result.tx_gas_used(), "Execution succeeded");
-            }
-            ExecutionResult::Revert { .. } => {
-                warn!(gas_used = exec_result.tx_gas_used(), "Execution reverted");
-            }
-            ExecutionResult::Halt { reason, .. } => {
-                warn!(?reason, gas_used = exec_result.tx_gas_used(), "Execution halted");
-            }
-        }
-
-        let outcome = EvmeOutcome {
+        let outcome = EvmeOutcome::execute(
+            &mut state,
+            &self.env_args,
+            &self.trace_args,
+            tx.clone(),
             pre_execution_nonce,
-            exec_result,
-            state: evm_state,
-            exec_time,
-            trace_data,
-        };
+        )?;
+        log_execution_result!(target: "mega_evme::tx::cmd", &outcome.exec_result);
 
         // Step 4: Output results (including state dump if requested)
         trace!("Writing output results");

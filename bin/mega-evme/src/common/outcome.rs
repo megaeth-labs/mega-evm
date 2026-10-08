@@ -1,8 +1,11 @@
 //! Execution outcome and output formatting for mega-evme commands
 
-use std::{path::Path, time::Duration};
+use std::{
+    path::Path,
+    time::{Duration, Instant},
+};
 
-use super::{EvmeError, StateDumpArgs, TraceArgs};
+use super::{EnvArgs, EvmeError, EvmeState, StateDumpArgs, TraceArgs};
 
 use alloy_consensus::{Eip658Value, Receipt};
 use alloy_primitives::{hex, Address, BlockHash, Bytes, TxHash, TxKind};
@@ -11,8 +14,8 @@ use alloy_sol_types::{Panic, Revert, SolError};
 use clap::Parser;
 use mega_evm::{
     op_revm::OpHaltReason,
-    revm::{context::result::ExecutionResult, state::EvmState},
-    MegaHaltReason, MegaTxType,
+    revm::{context::result::ExecutionResult, state::EvmState, DatabaseRef},
+    MegaHaltReason, MegaTransaction, MegaTxType,
 };
 use op_alloy_consensus::{OpDepositReceipt, OpReceiptEnvelope};
 use serde::Serialize;
@@ -36,6 +39,31 @@ pub struct EvmeOutcome {
 }
 
 impl EvmeOutcome {
+    /// Execute `tx` on `state` under the command-line environment, timing the
+    /// execution.
+    ///
+    /// This is the tail `run` and `tx` share once each has prepared its
+    /// transaction and read the sender's nonce: each command keeps its own
+    /// input-preparation order, so a failure, an RPC request or a cache read
+    /// happens where it always did.
+    pub fn execute<N, P>(
+        state: &mut EvmeState<N, P>,
+        env_args: &EnvArgs,
+        trace_args: &TraceArgs,
+        tx: MegaTransaction,
+        pre_execution_nonce: u64,
+    ) -> Result<Self, EvmeError>
+    where
+        N: alloy_network::Network,
+        P: alloy_provider::Provider<N> + std::fmt::Debug,
+    {
+        let evm_context = env_args.create_evm_context(state)?;
+        let start = Instant::now();
+        let (exec_result, state, trace_data) = trace_args.execute_transaction(evm_context, tx)?;
+        let exec_time = start.elapsed();
+        Ok(Self { pre_execution_nonce, exec_result, state, exec_time, trace_data })
+    }
+
     /// Convert the execution outcome to an OP receipt envelope.
     ///
     /// For deposit transactions (type 126), provide `deposit_nonce` and optionally
@@ -66,6 +94,52 @@ impl EvmeOutcome {
         }
     }
 }
+
+/// The nonce `signer` holds in `db`, or zero for an account that does not exist.
+///
+/// Read before a transaction executes, it is the nonce its created-contract
+/// address derives from ([`create_address`]).
+pub fn pre_execution_nonce<DB: DatabaseRef>(db: &DB, signer: Address) -> Result<u64, DB::Error> {
+    Ok(db.basic_ref(signer)?.map(|account| account.nonce).unwrap_or(0))
+}
+
+/// Announce how a transaction ended, at the level its outcome deserves.
+///
+/// A macro rather than a function so every line keeps the tracing target its
+/// caller names: each command has always logged these under its own module
+/// path, which `RUST_LOG` filters match and `-vvvv` output shows.
+macro_rules! log_execution_result {
+    (target: $target:literal, $result:expr) => {{
+        let result: &::mega_evm::revm::context::result::ExecutionResult<
+            ::mega_evm::MegaHaltReason,
+        > = $result;
+        match result {
+            ::mega_evm::revm::context::result::ExecutionResult::Success { .. } => {
+                ::tracing::info!(
+                    target: $target,
+                    gas_used = result.tx_gas_used(),
+                    "Execution succeeded"
+                )
+            }
+            ::mega_evm::revm::context::result::ExecutionResult::Revert { .. } => {
+                ::tracing::warn!(
+                    target: $target,
+                    gas_used = result.tx_gas_used(),
+                    "Execution reverted"
+                )
+            }
+            ::mega_evm::revm::context::result::ExecutionResult::Halt { reason, .. } => {
+                ::tracing::warn!(
+                    target: $target,
+                    ?reason,
+                    gas_used = result.tx_gas_used(),
+                    "Execution halted"
+                )
+            }
+        }
+    }};
+}
+pub(crate) use log_execution_result;
 
 /// The address a transaction's receipt reports as `contractAddress`: `sender.create(nonce)` for
 /// every contract creation, whether or not it deployed anything, and `None` for a call.
