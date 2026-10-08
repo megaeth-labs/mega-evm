@@ -169,9 +169,6 @@ impl RpcCacheStore {
 
     /// Seed a response into the in-memory transport cache, as a served RPC call
     /// would. Returns `false` for stores that hold no transport cache.
-    ///
-    /// The entry is persistable: seeding stands in for a response the cache
-    /// policy admitted, which is the only kind a test has reason to plant.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn put_cache_entry(&self, key: B256, value: String) -> bool {
         match &self.inner {
@@ -179,7 +176,7 @@ impl RpcCacheStore {
                 RpcCacheStoreInner::OnlineCache { cache, .. } |
                 RpcCacheStoreInner::FixtureCapture { cache, .. },
             ) => {
-                cache.put(key, value, true);
+                cache.put(key, value);
                 true
             }
             _ => false,
@@ -411,7 +408,7 @@ pub(super) fn load_online_cache(cache: &TransportCache, path: &Path, chain_id: u
         OnlineCacheFile::Ours(entries) => {
             let count = entries.len();
             for entry in entries {
-                cache.put(entry.key, entry.value, true);
+                cache.put(entry.key, entry.value);
             }
             debug!(path = %path.display(), entries = count, "Loaded RPC cache");
             Ok(())
@@ -697,7 +694,7 @@ mod tests {
     fn online_cache(max_entries: u32, entries: &[(B256, &str)]) -> TransportCache {
         let cache = TransportCache::with_max_entries(max_entries);
         for (key, value) in entries {
-            cache.put(*key, (*value).to_string(), true);
+            cache.put(*key, (*value).to_string());
         }
         cache
     }
@@ -759,7 +756,7 @@ mod tests {
             (0..20u8).map(|i| (B256::repeat_byte(i), format!(r#"{{"result":"{i}"}}"#))).collect();
         let sibling = TransportCache::with_max_entries(64);
         for (key, value) in &sibling_entries {
-            sibling.put(*key, value.clone(), true);
+            sibling.put(*key, value.clone());
         }
         assert!(save_online_cache_atomic(&sibling, &path, 1).expect("persist sibling"));
 
@@ -767,7 +764,7 @@ mod tests {
         let mine: Vec<B256> = (100..104u8).map(B256::repeat_byte).collect();
         let ours = TransportCache::with_max_entries(4);
         for key in &mine {
-            ours.put(*key, r#"{"result":"mine"}"#.to_string(), true);
+            ours.put(*key, r#"{"result":"mine"}"#.to_string());
         }
         assert!(save_online_cache_atomic(&ours, &path, 1).expect("persist ours"));
 

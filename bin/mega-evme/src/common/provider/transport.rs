@@ -12,11 +12,11 @@
 //!   fixture in memory. [`TransportCache::with_max_entries`] bounds the entry count and evicts the
 //!   least recently used entry on overflow. Neither form preallocates: a huge ceiling costs nothing
 //!   until that many responses are really cached.
-//! - **Policy.** [`CacheRole::decide`] answers "may this response be cached, and may it reach the
-//!   envelope?" for one role. Every row (JSON-RPC error, null result, chain-tip method, block-tag
-//!   params, pending transaction metadata) is stated once there and decided from the method name,
-//!   the literal params and the response body alone, so each row is unit-testable and the two roles
-//!   cannot drift apart by accident.
+//! - **Policy.** [`CacheRole::decide`] answers "may this response be cached?" for one role; a
+//!   cached response is also eligible for the envelope. Every row (JSON-RPC error, null result,
+//!   chain-tip method, block-tag params, pending transaction metadata) is stated once there and
+//!   decided from the method name, the literal params and the response body alone, so each row is
+//!   unit-testable and the two roles cannot drift apart by accident.
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -40,15 +40,11 @@ struct TransportCacheEntry {
     value: String,
 }
 
-/// One cached response plus the bookkeeping eviction and persistence need.
+/// One cached response plus the bookkeeping eviction needs.
 #[derive(Debug)]
 struct CacheSlot {
     /// Serialized JSON-RPC response.
     value: String,
-    /// Whether this entry may be written to the on-disk envelope. An entry that
-    /// is safe to reuse for the rest of the process but must not outlive it is
-    /// held with `false`.
-    persistable: bool,
     /// Recency stamp; the highest stamp is the most recently used entry.
     tick: u64,
 }
@@ -101,9 +97,9 @@ impl CacheEntries {
     }
 
     /// Insert or overwrite an entry, then evict down to the ceiling.
-    fn put(&mut self, key: B256, value: String, persistable: bool) {
+    fn put(&mut self, key: B256, value: String) {
         let tick = self.next_tick();
-        if let Some(previous) = self.slots.insert(key, CacheSlot { value, persistable, tick }) {
+        if let Some(previous) = self.slots.insert(key, CacheSlot { value, tick }) {
             self.recency.remove(&previous.tick);
         }
         self.recency.insert(tick, key);
@@ -111,9 +107,9 @@ impl CacheEntries {
     }
 
     /// Insert only when the key is absent, leaving an existing entry untouched.
-    fn put_if_absent(&mut self, key: B256, value: String, persistable: bool) {
+    fn put_if_absent(&mut self, key: B256, value: String) {
         if !self.slots.contains_key(&key) {
-            self.put(key, value, persistable);
+            self.put(key, value);
         }
     }
 
@@ -178,9 +174,9 @@ impl TransportCache {
         self.entries.write().expect("cache lock poisoned").get(key)
     }
 
-    /// Store a response. `persistable` decides whether it may reach the envelope.
-    pub(super) fn put(&self, key: B256, value: String, persistable: bool) {
-        self.entries.write().expect("cache lock poisoned").put(key, value, persistable);
+    /// Store a response.
+    pub(super) fn put(&self, key: B256, value: String) {
+        self.entries.write().expect("cache lock poisoned").put(key, value);
     }
 
     pub(super) fn len(&self) -> usize {
@@ -190,14 +186,11 @@ impl TransportCache {
     /// Merge entries from a serialized cache value. Existing entries are NOT
     /// overwritten — this preserves fresh responses (e.g. `eth_chainId`)
     /// that were fetched before the merge.
-    ///
-    /// Merged entries are persistable: they came from an envelope and must
-    /// survive the rewrite that follows.
     pub(super) fn merge(&self, value: &serde_json::Value) -> Result<()> {
         let entries = parse_cache_entries(value)?;
         let mut store = self.entries.write().expect("cache lock poisoned");
         for entry in entries {
-            store.put_if_absent(entry.key, entry.value, true);
+            store.put_if_absent(entry.key, entry.value);
         }
         Ok(())
     }
@@ -219,11 +212,8 @@ impl TransportCache {
         }))
     }
 
-    /// Serialize the persistable entries to a JSON value for the envelope.
+    /// Serialize the entries to a JSON value for the envelope.
     /// Sorted by key for deterministic output (avoids noisy diffs on committed fixtures).
-    ///
-    /// Entries the policy admitted for this process only are held back here —
-    /// they answer the run that fetched them and are never written to disk.
     pub(super) fn to_value(&self) -> serde_json::Value {
         let mut entries: Vec<TransportCacheEntry> = self
             .entries
@@ -231,7 +221,6 @@ impl TransportCache {
             .expect("cache lock poisoned")
             .slots
             .iter()
-            .filter(|(_, slot)| slot.persistable)
             .map(|(key, slot)| TransportCacheEntry { key: *key, value: slot.value.clone() })
             .collect();
         entries.sort_by_key(|e| e.key);
@@ -239,16 +228,13 @@ impl TransportCache {
     }
 
     /// Deserialize from the envelope's `cache` field.
-    ///
-    /// Loaded entries are persistable: replay never writes, and any other reader
-    /// of an envelope must be able to write back what it read.
     pub(super) fn from_value(value: &serde_json::Value) -> Result<Self> {
         let entries = parse_cache_entries(value)?;
         let cache = Self::new();
         {
             let mut store = cache.entries.write().expect("cache lock poisoned");
             for entry in entries {
-                store.put(entry.key, entry.value, true);
+                store.put(entry.key, entry.value);
             }
         }
         Ok(cache)
@@ -299,22 +285,8 @@ pub(super) enum CacheDecision {
     /// Not cached at all: the caller still gets the response, the cache never
     /// sees it, and the next identical request goes back to the endpoint.
     Skip(SkipReason),
-    /// Cached for this process only, never written to the envelope.
-    ///
-    /// Not produced by either role today. It is the shape of an answer that is
-    /// worth reusing while one run is in flight but must not become a fixture
-    /// entry, and the store and the envelope writer already honour it.
-    #[cfg_attr(not(test), allow(dead_code))]
-    MemoryOnly,
     /// Cached and eligible for the envelope.
     Persist,
-}
-
-impl CacheDecision {
-    /// Whether an entry admitted under this decision may reach the envelope.
-    fn persistable(self) -> bool {
-        matches!(self, Self::Persist)
-    }
 }
 
 /// Why a response was not cached. Carried by [`CacheDecision::Skip`] so the log
@@ -525,9 +497,9 @@ where
                         CacheDecision::Skip(reason) => {
                             tracing::warn!(method = %method, "{}", reason.message());
                         }
-                        decision => {
+                        CacheDecision::Persist => {
                             if let Ok(serialized) = serde_json::to_string(resp) {
-                                cache.put(key, serialized, decision.persistable());
+                                cache.put(key, serialized);
                             }
                         }
                     }
@@ -850,7 +822,7 @@ mod tests {
         assert_eq!(configured_capacity(&cache), None, "the default cache has no ceiling");
 
         for i in 0..1_000 {
-            cache.put(key(&format!("entry-{i}")), format!("value-{i}"), true);
+            cache.put(key(&format!("entry-{i}")), format!("value-{i}"));
         }
         assert_eq!(cache.len(), 1_000, "an unbounded cache keeps every entry");
         assert_eq!(cache.get(&key("entry-0")).as_deref(), Some("value-0"));
@@ -863,9 +835,9 @@ mod tests {
         let cache = TransportCache::with_max_entries(2);
         assert_eq!(configured_capacity(&cache), Some(2));
 
-        cache.put(key("a"), "A".to_string(), true);
-        cache.put(key("b"), "B".to_string(), true);
-        cache.put(key("c"), "C".to_string(), true);
+        cache.put(key("a"), "A".to_string());
+        cache.put(key("b"), "B".to_string());
+        cache.put(key("c"), "C".to_string());
 
         assert_eq!(cache.len(), 2, "the ceiling is exact, not approximate");
         assert_eq!(cache.get(&key("a")), None, "the oldest entry is the one evicted");
@@ -882,11 +854,11 @@ mod tests {
     #[test]
     fn test_transport_cache_get_promotes_the_entry() {
         let cache = TransportCache::with_max_entries(2);
-        cache.put(key("a"), "A".to_string(), true);
-        cache.put(key("b"), "B".to_string(), true);
+        cache.put(key("a"), "A".to_string());
+        cache.put(key("b"), "B".to_string());
 
         assert_eq!(cache.get(&key("a")).as_deref(), Some("A"), "read makes 'a' the most recent");
-        cache.put(key("c"), "C".to_string(), true);
+        cache.put(key("c"), "C".to_string());
 
         assert_eq!(cache.get(&key("a")).as_deref(), Some("A"), "the promoted entry survives");
         assert_eq!(cache.get(&key("b")), None, "the entry not read since insertion is evicted");
@@ -898,9 +870,9 @@ mod tests {
     #[test]
     fn test_transport_cache_overwriting_a_key_does_not_evict() {
         let cache = TransportCache::with_max_entries(2);
-        cache.put(key("a"), "A".to_string(), true);
-        cache.put(key("a"), "A2".to_string(), true);
-        cache.put(key("b"), "B".to_string(), true);
+        cache.put(key("a"), "A".to_string());
+        cache.put(key("a"), "A2".to_string());
+        cache.put(key("b"), "B".to_string());
 
         assert_eq!(cache.len(), 2);
         assert_eq!(cache.get(&key("a")).as_deref(), Some("A2"), "the newer value wins");
@@ -937,7 +909,7 @@ mod tests {
 
         for cache in [&huge, &unlimited, &small] {
             for i in 0..4 {
-                cache.put(key(&format!("entry-{i}")), format!("value-{i}"), true);
+                cache.put(key(&format!("entry-{i}")), format!("value-{i}"));
             }
             assert_eq!(cache.get(&key("entry-3")).as_deref(), Some("value-3"), "readable back");
         }
@@ -961,35 +933,10 @@ mod tests {
 
     // ── Persistence of individual entries ───────────────────────────────────
 
-    /// Only a `Persist` decision may reach the envelope; a memory-only entry is
-    /// admitted to the cache but held back from it.
-    #[test]
-    fn test_cache_decision_persistability() {
-        assert!(CacheDecision::Persist.persistable());
-        assert!(!CacheDecision::MemoryOnly.persistable());
-        assert!(!CacheDecision::Skip(SkipReason::NullResult).persistable());
-    }
-
-    /// A memory-only entry answers this process and never reaches the envelope.
-    #[test]
-    fn test_transport_cache_memory_only_entry_is_served_but_not_persisted() {
-        let cache = TransportCache::new();
-        cache.put(key("mem"), "in-memory".to_string(), false);
-        cache.put(key("disk"), "on-disk".to_string(), true);
-
-        assert_eq!(cache.get(&key("mem")).as_deref(), Some("in-memory"), "served from memory");
-        assert_eq!(cache.len(), 2, "both entries occupy the cache");
-
-        let entries = cache.to_value();
-        let entries = entries.as_array().expect("cache serializes to an array");
-        assert_eq!(entries.len(), 1, "only the persistable entry is written out");
-        assert_eq!(entries[0]["value"], "on-disk");
-    }
-
-    /// Entries that came from an envelope stay persistable, so loading and
+    /// Entries that came from an envelope are written back, so loading and
     /// writing back is lossless.
     #[test]
-    fn test_transport_cache_entries_from_an_envelope_stay_persistable() {
+    fn test_transport_cache_entries_from_an_envelope_are_written_back() {
         let seeded = serde_json::json!([
             {"key": key("a"), "value": "A"},
             {"key": key("b"), "value": "B"},
@@ -999,12 +946,12 @@ mod tests {
         assert_eq!(loaded.to_value(), seeded, "a load/save round trip is lossless");
 
         let merged = TransportCache::new();
-        merged.put(key("a"), "fresh".to_string(), true);
+        merged.put(key("a"), "fresh".to_string());
         merged.merge(&seeded).expect("merge");
         assert_eq!(merged.get(&key("a")).as_deref(), Some("fresh"), "merge keeps fresh entries");
         assert_eq!(merged.get(&key("b")).as_deref(), Some("B"));
         let entries = merged.to_value();
-        assert_eq!(entries.as_array().expect("array").len(), 2, "merged entries are persistable");
+        assert_eq!(entries.as_array().expect("array").len(), 2, "merged entries are written back");
     }
 
     /// A committed fixture survives a load/save round trip unchanged: same
