@@ -24,13 +24,12 @@ use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
 /// stored compressed.
 ///
 /// A fixture is either the file itself, or a `<name>.tar.xz` holding exactly
-/// that one file. `name` may name a file in a subdirectory
-/// (`corpus/<N>.cache.json`); its archive sits beside it and still holds only
-/// the file itself. Compression is worth it only where the raw file would bloat
-/// a pull-request diff — git already compresses blobs, so it buys little on its
-/// own, and a compressed blob cannot delta against its previous revision. A
-/// capture is JSON with long runs of repeated hex, which xz shrinks to about half
-/// of what gzip leaves.
+/// that one file. `name` may name a file in a subdirectory; its archive sits
+/// beside it and still holds only the file itself. Compression is worth it only
+/// where the raw file would bloat a pull-request diff — git already compresses
+/// blobs, so it buys little on its own, and a compressed blob cannot delta
+/// against its previous revision. A capture is JSON with long runs of repeated
+/// hex, which xz shrinks to about half of what gzip leaves.
 ///
 /// To (re)pack a capture, archive the one file and nothing else (macOS `tar`
 /// would otherwise add `._*` metadata members):
@@ -39,22 +38,9 @@ use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
 /// COPYFILE_DISABLE=1 tar --format ustar -cf - <name> | xz -9e > <name>.tar.xz
 /// ```
 ///
-/// An archive is extracted under [`extracted_root`], into a directory named by
-/// the keccak-256 of the archive's bytes, so the committed fixtures are never
-/// written to and:
-///
-/// - an extraction is reused by every later test binary and every later run for as long as its
-///   archive is unchanged, so the directory does not grow from run to run;
-/// - a changed archive (a recapture, or a branch switch) has a different digest, so an extraction
-///   of an earlier version is never served for it; that earlier extraction stays until `cargo
-///   clean`;
-/// - concurrent extractions — parallel tests, or test binaries running at once — each unpack into a
-///   private scratch directory and rename the file into place, which is atomic, so a reader sees
-///   either no file or a complete one, and two writers write the same bytes.
-///
-/// Extraction shells out to `tar -xJf` rather than linking a decompressor:
-/// every platform that runs these tests has one, and this is the only place
-/// that reads an archive.
+/// The archive is extracted by [`install_archive`], under a directory named by
+/// the keccak-256 of the archive's bytes; see there for why that is safe to
+/// share across runs and concurrent test binaries.
 pub(crate) fn fixture(name: &str) -> PathBuf {
     let dir = fixtures_dir();
     let plain = dir.join(name);
@@ -71,17 +57,70 @@ pub(crate) fn fixture(name: &str) -> PathBuf {
     );
     let member = plain.file_name().expect("a fixture names a file");
 
-    let bytes = std::fs::read(&archive)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", archive.display()));
-    let digest = alloy_primitives::keccak256(&bytes);
-    let root = extracted_root();
-    let extracted = root.join(format!("{digest:x}")).join(member);
+    let destination = extraction_dir(&archive);
+    let extracted = destination.join(member);
     if extracted.is_file() {
         return extracted;
     }
+    install_archive(&archive, &destination);
+    assert!(extracted.is_file(), "{} does not contain {name}", archive.display());
+    extracted
+}
 
+/// Resolve an archive in `tests/fixtures/` holding many fixtures, extracting
+/// all of its members, and return the directory they were extracted into.
+///
+/// `name` names the archive itself (`<dir>/<archive>.tar.xz`). Each member is
+/// then the file of that name in the returned directory. The extraction is the
+/// same as [`fixture`]'s, and so are its guarantees; the directory is returned
+/// only once every member is in place.
+pub(crate) fn fixture_archive(name: &str) -> PathBuf {
+    let archive = fixtures_dir().join(name);
+    assert!(
+        archive.is_file(),
+        "no fixture archive named {name}: {} does not exist",
+        archive.display()
+    );
+    let destination = extraction_dir(&archive);
+    if !destination.join(EXTRACTION_COMPLETE).is_file() {
+        install_archive(&archive, &destination);
+    }
+    destination
+}
+
+/// Marker [`install_archive`] writes into an extraction directory once every
+/// member of the archive is in place.
+const EXTRACTION_COMPLETE: &str = ".extraction-complete";
+
+/// Directory an archive is extracted into: under [`extracted_root`], named by
+/// the keccak-256 of the archive's bytes.
+fn extraction_dir(archive: &Path) -> PathBuf {
+    let bytes =
+        std::fs::read(archive).unwrap_or_else(|e| panic!("cannot read {}: {e}", archive.display()));
+    extracted_root().join(format!("{:x}", alloy_primitives::keccak256(&bytes)))
+}
+
+/// Extract every member of `archive` into `destination`, its
+/// [`extraction_dir`], and mark the directory complete.
+///
+/// Naming the directory by the archive's digest means:
+///
+/// - an extraction is reused by every later test binary and every later run for as long as its
+///   archive is unchanged, so the directory does not grow from run to run;
+/// - a changed archive (a recapture, or a branch switch) has a different digest, so an extraction
+///   of an earlier version is never served for it; that earlier extraction stays until `cargo
+///   clean`;
+/// - concurrent extractions — parallel tests, or test binaries running at once — each unpack into a
+///   private scratch directory and rename every file into place, which is atomic, so a reader sees
+///   either no file or a complete one, and two writers write the same bytes. The completion marker
+///   is renamed into place last, so a directory carrying it holds every member.
+///
+/// Extraction shells out to `tar -xJf` rather than linking a decompressor:
+/// every platform that runs these tests has one, and this is the only place
+/// that reads an archive.
+fn install_archive(archive: &Path, destination: &Path) {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
-    let scratch = root.join(format!(
+    let scratch = extracted_root().join(format!(
         ".extracting-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
@@ -89,21 +128,25 @@ pub(crate) fn fixture(name: &str) -> PathBuf {
     std::fs::create_dir_all(&scratch).expect("failed to create the extraction directory");
     let status = Command::new("tar")
         .arg("-xJf")
-        .arg(&archive)
+        .arg(archive)
         .arg("-C")
         .arg(&scratch)
         .status()
         .expect("failed to run tar");
     assert!(status.success(), "failed to extract {}", archive.display());
-    let unpacked = scratch.join(member);
-    assert!(unpacked.is_file(), "{} does not contain {name}", archive.display());
 
-    std::fs::create_dir_all(extracted.parent().expect("an extraction has a parent directory"))
-        .expect("failed to create the extraction directory");
-    std::fs::rename(&unpacked, &extracted)
-        .expect("failed to move the extracted fixture into place");
+    std::fs::create_dir_all(destination).expect("failed to create the extraction directory");
+    for entry in std::fs::read_dir(&scratch).expect("failed to read the extraction directory") {
+        let unpacked = entry.expect("failed to read an extracted member").path();
+        let member = unpacked.file_name().expect("an extracted member has a name");
+        std::fs::rename(&unpacked, destination.join(member))
+            .expect("failed to move an extracted fixture into place");
+    }
+    let marker = scratch.join(EXTRACTION_COMPLETE);
+    std::fs::write(&marker, b"").expect("failed to write the extraction marker");
+    std::fs::rename(&marker, destination.join(EXTRACTION_COMPLETE))
+        .expect("failed to mark the extraction complete");
     let _ = std::fs::remove_dir_all(&scratch);
-    extracted
 }
 
 /// Directory the committed fixtures live in.

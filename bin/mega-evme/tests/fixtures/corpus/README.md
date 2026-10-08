@@ -8,14 +8,16 @@ It runs in the normal test suite:
 cargo test -p mega-evme --test replay_corpus
 ```
 
-The blocks replay concurrently inside one test, which reports every failing block at the end rather than stopping at the first.
+The archive is extracted once per test binary, and the blocks then replay concurrently inside one test, which reports every failing block at the end rather than stopping at the first.
 
 ## Layout
 
-- `manifest.json` — the single source of truth: `chain_id`, the `salt` source of the captures, and one entry per block with its `number`, `hash`, `spec` (the spec the mainnet schedule assigns to the block's timestamp), `tx_count`, `archive`, the archive's `sha256`, and an optional `note` saying what a notable block covers.
-- `<N>.cache.json.tar.xz` — a tar holding exactly `<N>.cache.json`, the RPC capture of block `N`, compressed with `xz -9e`.
+- `corpus.tar.xz` — one archive holding every capture: the member `<N>.cache.json` is the RPC capture of block `N`.
+  Members are stored in block order with fixed metadata (mode `0644`, owner `0`, empty owner names, mtime `0`) in a ustar tar compressed with xz at preset `9` with the extreme flag, single-threaded.
+  Packing the same members therefore always yields the same bytes; one solid archive is less than half the size of one archive per block, because the captures share contract code and most of their JSON.
+- `manifest.json` — the single source of truth: `chain_id`, the `salt` source of the captures, the `archive` and its `sha256`, and one entry per block with its `number`, `hash`, `spec` (the spec the mainnet schedule assigns to the block's timestamp), `tx_count`, its `member` in the archive, that member's `sha256`, and an optional `note` saying what a notable block covers.
 
-The tests walk the manifest, never the directory: a consistency test requires the directory to hold exactly the archives the manifest lists, each matching its pinned digest, and the replay test checks each capture's served block hash and spec against the manifest.
+The tests walk the manifest, never the archive: a consistency test requires the archive to match its pinned digest and to hold exactly the manifest's members, in block order, each matching its own pinned digest, and the replay test checks each capture's served block hash and spec against the manifest.
 
 ## Where the data came from
 
@@ -50,10 +52,22 @@ RPC_URL=<endpoint> python3 scripts/replay_corpus_capture.py \
   --bin target/release/mega-evme --blocks <N> [<N> ...]
 ```
 
-The script starts from the block's existing capture, and `--rpc.capture-file` is incremental, so only the requests the current `mega-evme` makes and the capture lacks are fetched.
-When nothing new was needed the archive is left untouched; otherwise the script rewrites it and prints the block's manifest entry with the new digest, to be pasted into `manifest.json`.
+The script seeds each block's capture from its member of the archive, and `--rpc.capture-file` is incremental, so only the requests the current `mega-evme` makes and the capture lacks are fetched.
+When no selected block's capture changed, `corpus.tar.xz` and `manifest.json` are left untouched.
+Otherwise the script repacks the whole archive and updates `manifest.json` in place: the changed members' digests and the archive's digest.
 
-Recapture only the blocks that need it.
-Every archive written here is committed to the repository history for good, and that history cannot be rewritten, so a needless recapture costs its full size forever.
+To add a block, pin it with `--pin <N>:<HASH>`; its entry is inserted in block order with a `spec` placeholder (`?`), and the corpus test reports the spec the mainnet schedule assigns to it.
 
-To add a block, pin it with `--pin <N>:<HASH>`; its printed entry carries a `spec` placeholder, and the corpus test reports the spec the mainnet schedule assigns to it.
+Every recapture or addition rewrites the whole archive, about 4.3 MB, and that version is committed to the repository history for good, which cannot be rewritten.
+Recapture only the blocks that need it, and batch recaptures and additions into one change, so the history gains one archive rather than one per block.
+
+## Checking the packer
+
+`--check` repacks the committed archive's members with the script's packer and fails unless the result is byte-identical to the committed archive:
+
+```bash
+python3 scripts/replay_corpus_capture.py --check
+```
+
+It needs neither an endpoint nor a binary.
+The packer writes through the system's liblzma; the committed archive also matches what `xz -9e -T1` (XZ Utils 5.8) produces from the same tar, so a different liblzma that compresses differently shows up here rather than as an unexplained digest change in a recapture.

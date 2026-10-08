@@ -1,18 +1,20 @@
 //! Mainnet block corpus: every pinned block replays offline and reproduces both
 //! its receipts and its header.
 //!
-//! `tests/fixtures/corpus/manifest.json` pins each block by number and hash and
-//! names its compressed capture and that archive's SHA-256. The manifest is the
-//! single source of truth: the replay test walks its entries, never the
-//! directory, and the consistency test requires the directory to hold exactly
-//! the archives it lists, byte for byte.
+//! `tests/fixtures/corpus/corpus.tar.xz` holds one RPC capture per block, as the
+//! member `<N>.cache.json`. `tests/fixtures/corpus/manifest.json` pins each
+//! block by number and hash, names its member and that member's SHA-256, and
+//! pins the archive's own SHA-256. The manifest is the single source of truth:
+//! the replay test walks its entries, never the archive, and the consistency
+//! test requires the archive to hold exactly the members it lists, byte for
+//! byte.
 //!
 //! Each block is replayed with
 //! `mega-evme replay --rpc.replay-file <capture> --block N --verify-receipt --verify-block --json`,
 //! which must exit `0` with one matching receipt verdict per transaction and one
-//! matching block verdict naming the pinned hash. The blocks run concurrently
-//! inside one test, and every failing block is reported at the end rather than
-//! only the first.
+//! matching block verdict naming the pinned hash. The archive is extracted once,
+//! the blocks then run concurrently inside one test, and every failing block is
+//! reported at the end rather than only the first.
 //!
 //! The captures carry no SALT bucket capacities (the manifest's `salt` is
 //! `default-minimum`), so every bucket replays at the minimum size. See the
@@ -21,12 +23,11 @@
 mod common;
 
 use std::{
-    collections::BTreeSet,
     path::{Path, PathBuf},
     process::Command,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Mutex,
+        Mutex, OnceLock,
     },
 };
 
@@ -42,6 +43,10 @@ struct Manifest {
     chain_id: u64,
     /// Where the captures' SALT bucket capacities come from.
     salt: String,
+    /// File name of the archive holding every capture, in the corpus directory.
+    archive: String,
+    /// SHA-256 of that archive, lowercase hex.
+    sha256: String,
     /// The pinned blocks, in ascending order.
     blocks: Vec<Entry>,
 }
@@ -58,28 +63,30 @@ struct Entry {
     spec: String,
     /// Transactions the block body lists.
     tx_count: usize,
-    /// File name of the compressed capture in the corpus directory.
-    archive: String,
-    /// SHA-256 of that archive, lowercase hex.
+    /// Name of the block's capture in the archive.
+    member: String,
+    /// SHA-256 of that capture, lowercase hex.
     sha256: String,
     /// Why the block is in the corpus, for the blocks that cover a particular
     /// shape.
     note: Option<String>,
 }
 
-/// Directory the corpus lives in.
-fn corpus_dir() -> PathBuf {
-    common::fixtures_dir().join("corpus")
-}
-
-/// Files of the corpus directory that are not archives.
-const NON_ARCHIVES: [&str; 2] = ["README.md", "manifest.json"];
+/// Directory the corpus lives in, relative to the fixtures directory.
+const CORPUS: &str = "corpus";
 
 fn manifest() -> Manifest {
-    let path = corpus_dir().join("manifest.json");
+    let path = common::fixtures_dir().join(CORPUS).join("manifest.json");
     let raw = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
     serde_json::from_str(&raw).unwrap_or_else(|e| panic!("malformed {}: {e}", path.display()))
+}
+
+/// The directory the archive's captures are extracted into, extracted once per
+/// test binary.
+fn captures(manifest: &Manifest) -> &'static Path {
+    static CAPTURES: OnceLock<PathBuf> = OnceLock::new();
+    CAPTURES.get_or_init(|| common::fixture_archive(&format!("{CORPUS}/{}", manifest.archive)))
 }
 
 fn sha256_hex(path: &Path) -> String {
@@ -88,10 +95,26 @@ fn sha256_hex(path: &Path) -> String {
     Sha256::digest(&bytes).iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// The manifest and the directory agree one to one, every archive is the one
-/// the manifest pins, and the manifest describes mainnet blocks in order.
+/// The members the archive holds, in archive order.
+fn archive_members(archive: &Path) -> Vec<String> {
+    let output = Command::new("tar")
+        .arg("-tJf")
+        .arg(archive)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run tar on {}: {e}", archive.display()));
+    assert!(output.status.success(), "failed to list {}", archive.display());
+    String::from_utf8(output.stdout)
+        .expect("member names are utf-8")
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+/// The archive is the one the manifest pins, it holds exactly the manifest's
+/// members in block order, every member is the capture the manifest pins, and
+/// the manifest describes mainnet blocks in order.
 #[test]
-fn test_corpus_manifest_matches_the_archives() {
+fn test_corpus_manifest_matches_the_archive() {
     let manifest = manifest();
     assert_eq!(manifest.chain_id, MAINNET_CHAIN_ID, "the corpus is a mainnet corpus");
     assert_eq!(manifest.salt, "default-minimum", "the captures carry no bucket capacities");
@@ -103,26 +126,28 @@ fn test_corpus_manifest_matches_the_archives() {
     ordered.dedup();
     assert_eq!(numbers, ordered, "blocks are listed once each, in ascending order");
 
-    let listed: BTreeSet<String> =
-        manifest.blocks.iter().map(|entry| entry.archive.clone()).collect();
-    let present: BTreeSet<String> = std::fs::read_dir(corpus_dir())
-        .expect("the corpus directory exists")
-        .map(|entry| entry.expect("readable directory entry").file_name())
-        .map(|name| name.into_string().expect("utf-8 file name"))
-        .filter(|name| !NON_ARCHIVES.contains(&name.as_str()))
-        .collect();
+    let archive = common::fixtures_dir().join(CORPUS).join(&manifest.archive);
     assert_eq!(
-        present, listed,
-        "the corpus directory must hold exactly the archives the manifest lists"
+        sha256_hex(&archive),
+        manifest.sha256,
+        "{} does not match the digest the manifest pins",
+        manifest.archive
+    );
+    let listed: Vec<String> = manifest.blocks.iter().map(|entry| entry.member.clone()).collect();
+    assert_eq!(
+        archive_members(&archive),
+        listed,
+        "the archive must hold exactly the manifest's members, in block order"
     );
 
+    let captures = captures(&manifest);
     for entry in &manifest.blocks {
-        assert_eq!(entry.archive, format!("{}.cache.json.tar.xz", entry.number), "{entry:?}");
+        assert_eq!(entry.member, format!("{}.cache.json", entry.number), "{entry:?}");
         assert_eq!(
-            sha256_hex(&corpus_dir().join(&entry.archive)),
+            sha256_hex(&captures.join(&entry.member)),
             entry.sha256,
             "{} does not match the digest the manifest pins",
-            entry.archive
+            entry.member
         );
         assert!(entry.tx_count > 0, "every block starts with its L1 attributes deposit");
         assert!(
@@ -132,9 +157,10 @@ fn test_corpus_manifest_matches_the_archives() {
     }
 }
 
-/// Replay one block and return why it failed, if it did.
-fn check_block(entry: &Entry) -> Result<(), String> {
-    let capture = common::fixture(&format!("corpus/{}.cache.json", entry.number));
+/// Replay one block from its extracted capture and return why it failed, if it
+/// did.
+fn check_block(entry: &Entry, captures: &Path) -> Result<(), String> {
+    let capture = captures.join(&entry.member);
     check_capture(entry, &capture)?;
 
     let output = Command::new(env!("CARGO_BIN_EXE_mega-evme"))
@@ -227,6 +253,7 @@ fn check_capture(entry: &Entry, capture: &Path) -> Result<(), String> {
 #[test]
 fn test_corpus_blocks_reproduce_their_receipts_and_headers() {
     let manifest = manifest();
+    let captures = captures(&manifest);
     let next = AtomicUsize::new(0);
     let failures = Mutex::new(Vec::new());
     let workers = std::thread::available_parallelism().map_or(4, usize::from).min(16);
@@ -236,7 +263,7 @@ fn test_corpus_blocks_reproduce_their_receipts_and_headers() {
             scope.spawn(|| loop {
                 let index = next.fetch_add(1, Ordering::Relaxed);
                 let Some(entry) = manifest.blocks.get(index) else { break };
-                if let Err(reason) = check_block(entry) {
+                if let Err(reason) = check_block(entry, captures) {
                     failures.lock().expect("failure list").push((entry.number, reason));
                 }
             });

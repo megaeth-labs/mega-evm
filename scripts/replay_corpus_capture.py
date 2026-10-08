@@ -1,24 +1,31 @@
 #!/usr/bin/env python3
 """Capture pinned MegaETH mainnet blocks for the mega-evme replay corpus.
 
+The corpus is one archive, `corpus.tar.xz`, holding one RPC capture per block as
+the member `<N>.cache.json`, plus `manifest.json`, which pins every block and
+the digest of every member and of the archive itself.
+
 For every selected block this script:
 
 1. checks that the RPC endpoint serves the block under its pinned hash;
-2. replays the block online with `mega-evme replay --block N --verify-receipt
-   --verify-block`, recording every RPC response into `<N>.cache.json`
-   (`--rpc.capture-file`);
-3. replays it again offline from that capture alone (`--rpc.replay-file`), and
-   requires both runs to verify every receipt and the block itself;
-4. packs the capture as `<N>.cache.json.tar.xz` (a tar holding only that file,
-   compressed with xz at its highest preset) into the corpus directory;
-5. prints the block's manifest entry, ready to paste into `manifest.json`.
+2. seeds `<N>.cache.json` from the block's member of the archive, if it has one;
+3. replays the block online with `mega-evme replay --block N --verify-receipt
+   --verify-block`, recording every RPC response into that capture
+   (`--rpc.capture-file`, which is incremental: only the requests the seed lacks
+   are fetched);
+4. replays it again offline from the capture alone (`--rpc.replay-file`), and
+   requires both runs to verify every receipt and the block itself.
 
-Recapture only the blocks that need it: every archive written into the corpus
-directory is committed to the repository history for good. When an archive for
-the block already exists, its capture is extracted first and the online replay
-starts from it, so only the requests it lacks are fetched (`--rpc.capture-file`
-is incremental). When the replay needed nothing new, the existing archive is
-left untouched, so its digest — and the repository history — do not move.
+When any selected block's capture changed, or a block was pinned that the
+manifest does not list yet, the whole archive is repacked with the
+deterministic packer below and `manifest.json` is updated in place: the changed
+members' digests, the archive's digest, and new entries in block order with a
+`spec` placeholder (`cargo test -p mega-evme --test replay_corpus` reports the
+spec the mainnet schedule assigns to a new block). When nothing changed, both
+files are left untouched, so the repository history does not move.
+
+Every repack writes the whole archive into the repository history, so batch
+recaptures into one change and recapture only the blocks that need it.
 
 The captures carry no SALT bucket capacities, so every bucket replays at the
 minimum capacity, as the corpus manifest declares (`"salt": "default-minimum"`).
@@ -29,10 +36,10 @@ Usage (from the repository root, against a mainnet archive RPC endpoint):
     RPC_URL=<endpoint> python3 scripts/replay_corpus_capture.py \\
         --bin target/release/mega-evme --blocks 24829789
 
-Blocks are selected from the manifest by number; `--pin N:HASH` captures a block
-the manifest does not list yet. A new block's printed entry carries a `spec`
-placeholder: `cargo test -p mega-evme --test replay_corpus` reports the spec the
-mainnet schedule assigns to it.
+`--pin N:HASH` captures a block the manifest does not list yet. `--check`
+repacks the committed archive's members and fails unless the result is
+byte-identical to the committed archive, which is how the packer's determinism
+is verified; it needs neither an endpoint nor a binary.
 """
 
 import argparse
@@ -55,12 +62,64 @@ CORPUS = REPO / "bin" / "mega-evme" / "tests" / "fixtures" / "corpus"
 SPEC_PLACEHOLDER = "?"
 
 
-def sha256(path):
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def sha256(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def member_name(number):
+    return f"{number}.cache.json"
+
+
+def block_of(member):
+    return int(member.split(".", 1)[0])
+
+
+def pack(members):
+    """Pack `members` (name -> bytes) into the corpus archive's exact bytes.
+
+    The output is a function of the members alone: they are written in block
+    order, as ustar entries with fixed metadata (mode 0644, uid and gid 0, empty
+    owner names, mtime 0), and the tar is compressed with xz at preset 9 with the
+    extreme flag, single-threaded, with a CRC64 check.
+    """
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w", format=tarfile.USTAR_FORMAT) as tar:
+        for name in sorted(members, key=block_of):
+            data = members[name]
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            info.mtime = 0
+            info.mode = 0o644
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
+            info.type = tarfile.REGTYPE
+            tar.addfile(info, io.BytesIO(data))
+    return lzma.compress(
+        buffer.getvalue(),
+        format=lzma.FORMAT_XZ,
+        check=lzma.CHECK_CRC64,
+        preset=9 | lzma.PRESET_EXTREME,
+    )
+
+
+def read_members(archive):
+    """Read every member of `archive` (name -> bytes), refusing anything but
+    uniquely named regular files."""
+    members = {}
+    with tarfile.open(archive, "r:xz") as tar:
+        for info in tar.getmembers():
+            if not info.isfile():
+                raise RuntimeError(f"{archive.name}: {info.name} is not a regular file")
+            if info.name in members:
+                raise RuntimeError(f"{archive.name}: {info.name} appears twice")
+            members[info.name] = tar.extractfile(info).read()
+    return members
+
+
+def write_atomically(path, data):
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_bytes(data)
+    temporary.replace(path)
 
 
 def rpc(url, method, params):
@@ -109,41 +168,18 @@ def replay(command, report):
     return report.with_suffix(".ndjson")
 
 
-def pack(capture, archive):
-    """Write `archive` as an xz-compressed tar holding only `capture`."""
-    buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w", format=tarfile.USTAR_FORMAT) as tar:
-        info = tar.gettarinfo(str(capture), arcname=capture.name)
-        info.uid = info.gid = 0
-        info.uname = info.gname = "root"
-        info.mode = 0o644
-        with capture.open("rb") as handle:
-            tar.addfile(info, handle)
-    temporary = archive.with_name(archive.name + ".tmp")
-    temporary.write_bytes(lzma.compress(buffer.getvalue(), preset=9 | lzma.PRESET_EXTREME))
-    temporary.replace(archive)
-
-
-def capture_block(binary, url, out, number, block_hash, work):
+def capture_block(binary, url, number, block_hash, work, seed):
+    """Capture one block into `work`, starting from `seed` (its current member's
+    bytes, or None), and return the block's body length and its new capture."""
     header = rpc(url, "eth_getBlockByNumber", [hex(number), False])
     if not header or header.get("hash") != block_hash or int(header["number"], 16) != number:
         raise RuntimeError("the endpoint serves a different block at this height")
     tx_hashes = header["transactions"]
 
-    capture = work / f"{number}.cache.json"
-    archive = out / f"{number}.cache.json.tar.xz"
-    existing = None
-    if archive.exists():
+    capture = work / member_name(number)
+    if seed is not None:
         # Start from the existing capture so only missing requests are fetched.
-        with tarfile.open(archive, "r:xz") as tar:
-            members = tar.getnames()
-            if members != [capture.name]:
-                raise RuntimeError(f"{archive.name} holds {members}, not {capture.name}")
-            if hasattr(tarfile, "data_filter"):
-                tar.extractall(work, filter="data")
-            else:
-                tar.extractall(work)
-        existing = sha256(capture)
+        capture.write_bytes(seed)
 
     base = [
         str(binary), "replay", "--block", str(number),
@@ -155,46 +191,64 @@ def capture_block(binary, url, out, number, block_hash, work):
     for phase, command in (("online", online), ("offline", offline)):
         check_run(replay(command, work / phase), number, block_hash, tx_hashes)
 
-    envelope = json.loads(capture.read_text())
+    data = capture.read_bytes()
+    envelope = json.loads(data)
     if envelope.get("chain_id") != MAINNET_CHAIN_ID:
         raise RuntimeError(f"the capture is for chain {envelope.get('chain_id')}")
     if envelope.get("external_env", {}).get("bucket_capacities"):
         raise RuntimeError("the capture carries bucket capacities; the corpus uses none")
+    return len(tx_hashes), data
 
-    if existing == sha256(capture):
-        print(f"{number}: capture unchanged; keeping {archive.name}", flush=True)
-    else:
-        pack(capture, archive)
-    return {
-        "number": number,
-        "hash": block_hash,
-        "spec": SPEC_PLACEHOLDER,
-        "tx_count": len(tx_hashes),
-        "archive": archive.name,
-        "sha256": sha256(archive),
-    }
+
+def check(archive):
+    """Fail unless repacking the archive's members reproduces it byte for byte."""
+    committed = archive.read_bytes()
+    members = read_members(archive)
+    repacked = pack(members)
+    if repacked != committed:
+        print(
+            f"{archive.name}: repacking its {len(members)} member(s) gives {len(repacked)} "
+            f"bytes (sha256 {sha256(repacked)}), not the committed {len(committed)} bytes "
+            f"(sha256 {sha256(committed)})",
+            file=sys.stderr,
+        )
+        return 1
+    print(
+        f"{archive.name}: {len(members)} member(s) repack byte-identically "
+        f"({len(committed)} bytes, sha256 {sha256(committed)})"
+    )
+    return 0
 
 
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--bin", required=True, help="mega-evme binary to capture with")
+    parser.add_argument("--bin", help="mega-evme binary to capture with")
     parser.add_argument("--manifest", default=str(CORPUS / "manifest.json"))
-    parser.add_argument("--out", default=str(CORPUS), help="directory the archives go to")
+    parser.add_argument("--archive", default=str(CORPUS / "corpus.tar.xz"))
     parser.add_argument("--blocks", nargs="+", type=int, default=[],
                         help="manifest blocks to (re)capture")
     parser.add_argument("--pin", nargs="+", default=[], metavar="N:HASH",
                         help="blocks not in the manifest yet, pinned by number and hash")
+    parser.add_argument("--check", action="store_true",
+                        help="verify that repacking the archive reproduces it, and exit")
     args = parser.parse_args()
 
+    archive = Path(args.archive).resolve()
+    if args.check:
+        return check(archive)
+
+    if not args.bin:
+        parser.error("--bin is required to capture")
     url = os.environ.get("RPC_URL")
     if not url:
         parser.error("set RPC_URL to a mainnet archive endpoint")
     if int(rpc(url, "eth_chainId", []), 16) != MAINNET_CHAIN_ID:
         parser.error(f"RPC_URL is not MegaETH mainnet (chain {MAINNET_CHAIN_ID})")
 
-    manifest = json.loads(Path(args.manifest).read_text())
+    manifest_path = Path(args.manifest).resolve()
+    manifest = json.loads(manifest_path.read_text())
     known = {entry["number"]: entry for entry in manifest["blocks"]}
     selected = []
     for number in args.blocks:
@@ -203,30 +257,59 @@ def main():
         selected.append((number, known[number]["hash"]))
     for pin in args.pin:
         number, _, block_hash = pin.partition(":")
+        if int(number) in known:
+            parser.error(f"block {number} is already in the manifest; select it with --blocks")
         selected.append((int(number), block_hash.lower()))
     if not selected:
         parser.error("select blocks with --blocks and/or --pin")
 
     binary = Path(args.bin).resolve()
-    out = Path(args.out).resolve()
-    out.mkdir(parents=True, exist_ok=True)
+    members = read_members(archive)
+    changed = {}
     failed = []
     for number, block_hash in selected:
+        name = member_name(number)
         work = Path(tempfile.mkdtemp(prefix=f"corpus-{number}-"))
         try:
-            entry = capture_block(binary, url, out, number, block_hash, work)
+            tx_count, data = capture_block(
+                binary, url, number, block_hash, work, members.get(name)
+            )
         except Exception as error:  # Report every block, then fail once.
             failed.append(number)
             print(f"{number}: FAILED: {error} (reports in {work})", file=sys.stderr, flush=True)
             continue
         # Only a failed block keeps its work directory, for its reports.
         shutil.rmtree(work)
-        previous = known.get(number, {})
-        for kept in ("spec", "note"):
-            if kept in previous:
-                entry[kept] = previous[kept]
-        print(f"{number}: PASS; manifest entry:", flush=True)
-        print(json.dumps(entry, indent=2), flush=True)
+        if members.get(name) == data:
+            print(f"{number}: PASS; capture unchanged", flush=True)
+            continue
+        members[name] = data
+        changed[number] = (block_hash, tx_count, sha256(data))
+        print(f"{number}: PASS; capture {'changed' if number in known else 'added'}", flush=True)
+
+    if changed:
+        packed = pack(members)
+        write_atomically(archive, packed)
+        for number, (block_hash, tx_count, digest) in changed.items():
+            entry = known.get(number)
+            if entry is None:
+                entry = {
+                    "number": number,
+                    "hash": block_hash,
+                    "spec": SPEC_PLACEHOLDER,
+                    "tx_count": tx_count,
+                    "member": member_name(number),
+                    "sha256": digest,
+                }
+                known[number] = entry
+            entry["sha256"] = digest
+            print(f"{number}: manifest entry:\n{json.dumps(entry, indent=2)}", flush=True)
+        manifest["blocks"] = [known[number] for number in sorted(known)]
+        manifest["sha256"] = sha256(packed)
+        write_atomically(manifest_path, (json.dumps(manifest, indent=2) + "\n").encode())
+        print(f"rewrote {archive.name} ({len(packed)} bytes) and {manifest_path.name}")
+    else:
+        print(f"nothing changed; {archive.name} and {manifest_path.name} are untouched")
     print(f"captured {len(selected) - len(failed)}/{len(selected)}; failed: {failed}")
     return 1 if failed else 0
 
