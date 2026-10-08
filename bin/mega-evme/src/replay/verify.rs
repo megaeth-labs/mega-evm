@@ -640,10 +640,10 @@ pub(super) fn authenticate_transaction(
 /// Across a reorg, or against a load-balanced endpoint serving divergent views,
 /// the receipt can describe a different inclusion than the block the replay ran,
 /// which would compare the replay against the wrong on-chain execution. Returns
-/// the explanatory message so each mode can wrap it in the error shape it
-/// reports — a hard error in single-transaction mode, an `rpc` error entry in
+/// the explanatory message, which [`ReceiptEvidence::admit`] wraps as an RPC
+/// failure — a hard error in single-transaction mode, an `rpc` error entry in
 /// batch mode.
-pub(super) fn check_inclusion(
+fn check_inclusion(
     receipt_block_hash: Option<B256>,
     replayed_block_hash: B256,
 ) -> std::result::Result<(), String> {

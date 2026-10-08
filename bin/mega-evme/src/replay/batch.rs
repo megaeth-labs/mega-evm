@@ -30,7 +30,6 @@ use std::{
 };
 
 use alloy_consensus::{transaction::Recovered, BlockHeader};
-use alloy_network::ReceiptResponse;
 use alloy_primitives::{Bytes, B256};
 use alloy_provider::Provider;
 use alloy_rpc_types_eth::Block;
@@ -1700,17 +1699,13 @@ where
     let mut receipts = BTreeMap::new();
     let mut consensus = HashMap::with_capacity(targets.len());
     for tx_hash in targets {
-        let fetched = match verify::fetch_receipt(provider, *tx_hash).await {
-            Ok(receipt) => match verify::check_inclusion(receipt.block_hash(), block_hash) {
-                Ok(()) => {
-                    consensus.insert(
-                        *tx_hash,
-                        (verify::consensus_receipt(&receipt), receipt.inner.gas_used),
-                    );
-                    Ok(ReceiptFacts::from_onchain(&receipt))
-                }
-                Err(message) => Err(message),
-            },
+        let fetched = match verify::ReceiptEvidence::admit(provider, *tx_hash, block_hash).await {
+            Ok(evidence) => {
+                let receipt = evidence.receipt();
+                consensus
+                    .insert(*tx_hash, (verify::consensus_receipt(receipt), receipt.inner.gas_used));
+                Ok(ReceiptFacts::from_onchain(receipt))
+            }
             // The reported entry already carries the `rpc` kind, so the error's
             // own "RPC error" prefix would only repeat it.
             Err(ReplayError::RpcError(message)) => Err(message),
