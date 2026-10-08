@@ -41,6 +41,8 @@ UPDATE_SATIN_PRICING_TABLE=1 cargo test -p mega-evm --test satin
 cargo run --release -p state-test -- --fork Osaka <main-fixtures>/state_tests
 cargo run --release -p state-test -- --fork Amsterdam <devnet-fixtures>/state_tests
 cargo run --release -p state-test -- --mode satin --fork Osaka <main-fixtures>/state_tests  # the report
+# The blockchain tests through the block executor, with the pins the gate's job passes
+cargo run --release -p state-test -- btest <main-fixtures>/blockchain_tests --expect-deviations
 # The witness replay over the fixtures, as the gate's job runs it: every file (SAMPLE=0), per fork and mode,
 # the fixtures named by an absolute path (the test runs in the package's directory)
 MEGA_STATE_TEST_FIXTURES=$PWD/<main-fixtures>/state_tests MEGA_STATE_TEST_SAMPLE=0 MEGA_STATE_TEST_FORK=Osaka \
@@ -76,14 +78,14 @@ Git submodules are required — clone with `--recursive` or run `git submodule u
 
 ## Workspace Structure
 
-| Crate                   | Path                      | Member | Purpose                                                                     |
-| ----------------------- | ------------------------- | ------ | --------------------------------------------------------------------------- |
-| `mega-evm`              | `crates/mega-evm`         | yes    | The Satin engine                                                            |
-| `mega-system-contracts` | `crates/system-contracts` | yes    | Solidity system contracts with Rust bindings (Foundry-based)                |
-| `mega-state-test`       | `crates/mega-state-test`  | yes    | Execution-spec state-test runner on Satin: the equivalence gate, the report |
-| `state-test`            | `crates/state-test`       | yes    | The runner's CLI                                                            |
-| `mega-evme`             | `bin/mega-evme`           | yes    | EVM execution CLI: Satin in-tree, legacy specs on the released 1.7.1 CLI    |
-| `mega-t8n`              | `bin/mega-t8n`            | no     | State transition (t8n) tool; rejoins when ported to Satin                   |
+| Crate                   | Path                      | Member | Purpose                                                                                  |
+| ----------------------- | ------------------------- | ------ | ---------------------------------------------------------------------------------------- |
+| `mega-evm`              | `crates/mega-evm`         | yes    | The Satin engine                                                                         |
+| `mega-system-contracts` | `crates/system-contracts` | yes    | Solidity system contracts with Rust bindings (Foundry-based)                             |
+| `mega-state-test`       | `crates/mega-state-test`  | yes    | Execution-spec runner on Satin: the state-test gate and report, the blockchain-test gate |
+| `state-test`            | `crates/state-test`       | yes    | The runner's CLI                                                                         |
+| `mega-evme`             | `bin/mega-evme`           | yes    | EVM execution CLI: Satin in-tree, legacy specs on the released 1.7.1 CLI                 |
+| `mega-t8n`              | `bin/mega-t8n`            | no     | State transition (t8n) tool; rejoins when ported to Satin                                |
 
 `mega-evme` runs a command on the engine its spec names: `Satin` on the in-tree sources, a spec from `Equivalence` to `Rex6` on the released `mega-evme` 1.7.1 and `mega-evm` 1.7.1, which it links under the aliases `mega-evme-legacy` and `mega-evm-legacy` (its `legacy` feature, on by default).
 Because it links a package of its own name, select it by manifest path, not with `-p`: `cargo test --manifest-path bin/mega-evme/Cargo.toml`.
@@ -505,6 +507,11 @@ for s in $(seq 1 20); do MEGA_FUZZ_SEED=$s cargo test --release -p mega-evm --te
   - Equivalence mode is the gate: Satin's machinery — handler, frame lifecycle, Host, instruction table — priced as the fixture's fork prices it, through the neutral configuration (`MegaContext::with_neutral_cfg`, `test_utils::{neutral_cfg, neutralize_evm}`), which exists only behind `test-utils`, and held to no runtime limit (`EvmTxRuntimeLimits::no_limits()`, installed by the runner itself).
     Every failure must be explained by a deviation in `crates/mega-state-test/src/deviations.rs`, with its rule, its reason and the exact entries it explains, each with the hashes Satin produces, and every listed entry must fail exactly as listed; the executed and skipped counts are pinned in the workflow and equal the fork runner's.
   - Satin mode is a report: the same fixtures under Satin's own configuration, counted by outcome in the step summary; it never fails the job.
+  - The blockchain tests are a gate too (`state-test btest`, `crates/mega-state-test/src/blockchain/`): the main release's Osaka `blockchain_tests`, imported block by block through `MegaBlockExecutor` on `MegaEvm` in equivalence mode's configuration, with the Satin fork's parameters at the loosest a chain may carry (`ProtocolLimits::loosest()`, which binds nothing under EIP-7825's cap).
+    Every accepted block's gas used, logs bloom, receipts root and state root are held to its header, every block expecting a `TransactionException` must be refused for an exception it names, leaving the chain at the previous block, and the chain must end at the fixture's last block and post-state.
+    The state root takes out the accounts a Satin block adds — its seven predeploys and OP's three fee vaults (`SATIN_ACCOUNTS`) — only when the pre-state does not hold one and it holds exactly what Satin put there.
+    A test is skipped only for a class decided from its content: withdrawals, blob transactions, EIP-7685 requests, a header or body `BlockException` a node checks before execution, a transaction an OP block cannot encode, and the state-test gate's own storage-collision files; the executed tests and each class are pinned in the workflow.
+    A block that differs passes only when a deviation the registry already has lists that test and block with exactly the outcome Satin produces (gas used, logs bloom, receipts root, state root); the chain is imported on from Satin's state, every later block held to its header or its own listed outcome, and the summary counts blocks checked against Ethereum apart from blocks matched to a deviation.
 - **The witness replay** (`tests/block/witness/`, `crates/mega-state-test`'s `witness::check_replay`): a block, or a fixture's transaction, executed on a recorder of every read and replayed twice on a strict database and environments that serve exactly a witness and refuse everything else — once on the record of every database read, once on the witness a node builds from the pre-block states, the included transactions' returned states and the engine's exports (`WitnessRecord::from_channels`); every replay runs only the transactions the recorded block included and must agree with the recording on everything produced, the replay must read nothing its witness does not hold, and the executor's exported buckets and block hashes must be the side-channel reads the block made, a bucket only where the SALT environment answered it with a valid capacity.
   The channel replay is the check a validator's witness must pass; the database-level replay shows the block has no hidden input.
   A fixture entry the engine rejects has no returned state to build the channel witness from, and replays on the record alone.

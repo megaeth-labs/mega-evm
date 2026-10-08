@@ -28,4 +28,10 @@ clap = { workspace = true, features = ["default"] }
 serde_json = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
+mega-evm.workspace = true
+
+# alloy
+alloy-rlp = { workspace = true, features = ["std"] }
+
+# misc
 tempfile.workspace = true

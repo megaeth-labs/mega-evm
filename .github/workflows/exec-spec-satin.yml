@@ -16,6 +16,16 @@ name: Execution-spec tests on Satin
 #   exactly a witness (crates/mega-state-test/src/witness.rs). An entry the engine executes
 #   replays on the record of every read and on the witness a node builds from its channels; one
 #   it rejects, on the record alone. Any entry that fails to replay fails the job.
+# - the blockchain tests, a gate: the Osaka tests of the main release's `blockchain_tests`, imported
+#   block by block through Satin's block executor in equivalence mode's configuration (`state-test
+#   btest`). Every block's gas used, logs bloom, receipts root and state root are held to its
+#   header, and every block the fixture expects to be invalid must be refused for the exception it
+#   names. A block that differs passes only when a registered deviation lists that test and block
+#   with exactly the outcome Satin produces, and the chain is imported on from Satin's state, so
+#   every later block is held too; the summary counts the blocks checked against Ethereum apart
+#   from those matched to a deviation. A test passes, deviates as listed, is skipped for a class
+#   decided from its content, or fails; the executed and skipped counts are pinned below. The
+#   devnet release's blockchain tests are not run: the fork's runner skips them too.
 #
 # The fixture releases are the ones the revm fork's `scripts/run-tests.sh` names at the tag
 # Cargo.lock pins, so this gate and the fork runner's (exec-spec.yml) judge the same fixtures.
@@ -105,6 +115,12 @@ jobs:
       OSAKA_SKIPPED: "52"
       AMSTERDAM_EXECUTED: "15754"
       AMSTERDAM_SKIPPED: "72"
+      # The Osaka blockchain tests the blockchain gate executes, and those it skips by class. A
+      # change that moves the fixtures updates both, and the blockchain tests the deviations list.
+      BLOCKCHAIN_EXECUTED: "18713"
+      BLOCKCHAIN_SKIPPED: >-
+        withdrawals=62 blob-transactions=2540 requests=174 header-or-body=17
+        undecodable-invalid-transaction=2 create-collision-with-storage=50
     steps:
       - uses: actions/checkout@v4
         with:
@@ -165,13 +181,21 @@ jobs:
           grep -q '^    MAIN_TAR="fixtures_develop.tar.gz"$' "$script"
           main="$main_url/$main_version/fixtures_develop.tar.gz"
           devnet="$devnet_url/$devnet_version/$devnet_tar"
-          # The cache is keyed on the archives themselves: another name or host at the same
-          # version is another download.
-          archives=$(printf '%s\n%s\n' "$main" "$devnet" | sha256sum | cut -c1-16)
+          # The directories taken out of each archive: the state tests of both, and the blockchain
+          # tests of the main release.
+          main_dirs="state_tests blockchain_tests"
+          devnet_dirs="state_tests"
+          # The cache is keyed on the archives themselves, and on what is taken out of them:
+          # another name or host at the same version is another download, and a cache that holds
+          # other directories is another cache.
+          archives=$(printf '%s\n%s\n%s\n%s\n' "$main" "$devnet" "$main_dirs" "$devnet_dirs" \
+            | sha256sum | cut -c1-16)
           {
             echo "main=$main"
             echo "devnet=$devnet"
-            echo "key=eest-state-tests-$main_version-$devnet_version-$archives"
+            echo "main_dirs=$main_dirs"
+            echo "devnet_dirs=$devnet_dirs"
+            echo "key=eest-fixtures-$main_version-$devnet_version-$archives"
           } >> "$GITHUB_OUTPUT"
 
       - name: Restore the fixtures
@@ -186,18 +210,23 @@ jobs:
         env:
           MAIN_URL: ${{ steps.fixtures.outputs.main }}
           DEVNET_URL: ${{ steps.fixtures.outputs.devnet }}
+          MAIN_DIRS: ${{ steps.fixtures.outputs.main_dirs }}
+          DEVNET_DIRS: ${{ steps.fixtures.outputs.devnet_dirs }}
         run: |
           set -euo pipefail
+          # fetch NAME URL DIRS: the directories DIRS names, out of the archive at URL, under
+          # fixtures/NAME. The archive's top-level `fixtures/` directory is stripped, as the fork's
+          # runner strips it.
           fetch() {
+            local dir members=()
+            for dir in $3; do members+=("fixtures/$dir"); done
             mkdir -p "fixtures/$1"
             curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors "$2" -o "fixtures/$1.tar.gz"
-            # Only the state tests: the archive's top-level `fixtures/` directory is stripped, as
-            # the fork's runner strips it.
-            tar -xzf "fixtures/$1.tar.gz" --strip-components=1 -C "fixtures/$1" fixtures/state_tests
+            tar -xzf "fixtures/$1.tar.gz" --strip-components=1 -C "fixtures/$1" "${members[@]}"
             rm "fixtures/$1.tar.gz"
           }
-          fetch main "$MAIN_URL"
-          fetch devnet "$DEVNET_URL"
+          fetch main "$MAIN_URL" "$MAIN_DIRS"
+          fetch devnet "$DEVNET_URL" "$DEVNET_DIRS"
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
 
@@ -308,6 +337,63 @@ jobs:
               fi
             done
           done
+          exit "$status"
+
+      - name: Blockchain tests through the block executor, the gate
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          {
+            echo "### Blockchain tests"
+            echo
+            echo "| Fixtures | Executed | Skipped | Passed | Deviated | Unattributed | Unreproduced | Blocks checked against Ethereum | Blocks matched to a deviation |"
+            echo "|---|---:|---:|---:|---:|---:|---:|---:|---:|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          pins=()
+          for pin in $BLOCKCHAIN_SKIPPED; do pins+=(--expect-skipped "$pin"); done
+          rm -f blockchain-Osaka.json
+          status=0
+          target/release/state-test btest fixtures/main/blockchain_tests \
+            --expect-executed "$BLOCKCHAIN_EXECUTED" "${pins[@]}" --expect-deviations \
+            --summary-json blockchain-Osaka.json || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::error::the blockchain tests failed the gate"
+          fi
+          # The gate passes only on a summary in the expected shape, for the Osaka blockchain tests,
+          # that executed tests and has no failed test (no block differing from its header without
+          # the exact outcome a registered deviation lists for it), no unread fixture and no listed
+          # test that did not deviate as listed: a run that tested nothing, or whose summary changed
+          # shape, fails the gate rather than passing silently.
+          shape='.suite == "blockchain" and .fork == "Osaka" and (.skip_reasons | type) == "object"
+            and (.summary | (.executed | type) == "number" and (.passed | type) == "number"
+              and (.unattributed | type) == "number" and (.file_failures | type) == "number"
+              and (.skipped | type) == "object" and (.deviated | type) == "object"
+              and (.unreproduced | type) == "object" and (.blocks.matched | type) == "number"
+              and (.blocks.refused | type) == "number" and (.blocks.deviated | type) == "number")'
+          if [ ! -f blockchain-Osaka.json ]; then
+            echo "::error::the blockchain tests wrote no summary"
+            status=1
+          elif ! jq -e "$shape" blockchain-Osaka.json > /dev/null 2>&1; then
+            echo "::error::the blockchain tests' summary is not in the expected shape"
+            status=1
+          elif ! jq -e '.summary.executed > 0' blockchain-Osaka.json > /dev/null; then
+            echo "::error::the blockchain tests executed nothing"
+            status=1
+          elif ! jq -e '.summary | .unattributed == 0 and .file_failures == 0 and (.unreproduced | add // 0) == 0' \
+            blockchain-Osaka.json > /dev/null; then
+            echo "::error::the blockchain tests have a failed test, an unread fixture or a listed test that did not deviate as listed"
+            status=1
+          else
+            jq -r '.summary as $s | "| Osaka | \($s.executed) | \([$s.skipped[]] | add // 0) | \($s.passed) | \([$s.deviated[]] | add // 0) | \($s.unattributed) | \([$s.unreproduced[]] | add // 0) | \($s.blocks.matched + $s.blocks.refused) | \($s.blocks.deviated) |"' \
+              blockchain-Osaka.json >> "$GITHUB_STEP_SUMMARY"
+            {
+              echo
+              echo "| Skipped for | Tests | Why |"
+              echo "|---|---:|---|"
+              jq -r '.summary.skipped as $s | .skip_reasons | to_entries[] | "| \(.key) | \($s[.key] // 0) | \(.value) |"' \
+                blockchain-Osaka.json
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
           exit "$status"
 
   gate:

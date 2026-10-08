@@ -12,4 +12,14 @@ state-test [--mode equivalence|satin] --fork Osaka|Amsterdam [options] <paths>..
 - `--expect-executed N`, `--expect-skipped N` and `--expect-deviations` pin the counts of a full run; CI passes all three.
 - `--summary-json FILE` writes the counts as JSON, `--json-outcome` prints one JSON line per test on standard error, `--trace` runs every test under an EIP-3155 tracer and `--threads` sets the worker count.
 
-What the two modes are, how a test is judged and the deviation registry are described in the `mega-state-test` crate's `README.md` and `DEVIATIONS.md`.
+```bash
+state-test btest [options] <paths>...
+```
+
+`btest` imports the execution-spec blockchain tests through Satin's block executor: the Osaka tests of the main release's `blockchain_tests`.
+
+- It exits non-zero when a test fails — a block differs from its header without the exact outcome a registered deviation lists for it, or a listed test does not deviate as listed — when a fixture file cannot be read, or when a count differs from the pin it is given.
+- `--expect-executed N` pins the tests executed, `--expect-skipped REASON=N` the tests skipped for one reason (repeated for each; once one is given, every reason not given is pinned at zero), and `--expect-deviations` requires every blockchain test a registered deviation lists to deviate exactly as listed; CI passes all three.
+- `--summary-json FILE`, `--json-outcome` and `--threads` work as for the state tests; the summary gives each skip class's reason beside its count, and the JSON summary lists every class's reason under `skip_reasons`.
+
+What the two modes are, how a state test and a blockchain test are judged and the deviation registry are described in the `mega-state-test` crate's `README.md` and `DEVIATIONS.md`.
