@@ -188,21 +188,6 @@ impl EnvArgs {
         self.chain.spec_id()
     }
 
-    /// Creates [`CfgEnv`].
-    pub fn create_cfg_env(&self) -> Result<CfgEnv<MegaSpecId>> {
-        self.chain.create_cfg_env()
-    }
-
-    /// Creates [`BlockEnv`].
-    pub fn create_block_env(&self) -> Result<BlockEnv> {
-        self.block.create_block_env()
-    }
-
-    /// Creates [`EvmeExternalEnvs`].
-    pub fn create_external_envs(&self) -> Result<EvmeExternalEnvs> {
-        self.ext.create_external_envs()
-    }
-
     /// Creates a [`MegaContext`] with all environment configurations.
     ///
     /// The `system_address` defaults to `MEGA_SYSTEM_ADDRESS`. For `run`/`tx` modes this is
@@ -213,9 +198,9 @@ impl EnvArgs {
         &self,
         db: DB,
     ) -> Result<MegaContext<DB, EvmeExternalEnvs>> {
-        let cfg = self.create_cfg_env()?;
-        let block = self.create_block_env()?;
-        let external_envs = self.create_external_envs()?;
+        let cfg = self.chain.create_cfg_env()?;
+        let block = self.block.create_block_env()?;
+        let external_envs = self.ext.create_external_envs()?;
 
         Ok(MegaContext::new(db, cfg.spec)
             .with_cfg(cfg)

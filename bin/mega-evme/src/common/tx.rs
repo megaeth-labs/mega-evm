@@ -323,7 +323,7 @@ impl TxArgs {
     /// Loads input data from `--input` or `--inputfile` arguments.
     /// Parses authorization list from `--auth` for EIP-7702 transactions.
     /// Parses access list from `--access` for EIP-2930/EIP-1559/EIP-7702 transactions.
-    pub fn create_tx_env(&self, chain_id: u64) -> Result<TxEnv> {
+    fn create_tx_env(&self, chain_id: u64) -> Result<TxEnv> {
         self.validate()?;
 
         let data = load_hex(self.input.clone(), self.inputfile.clone())?.unwrap_or_default();

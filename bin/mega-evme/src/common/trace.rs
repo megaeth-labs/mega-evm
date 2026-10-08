@@ -123,7 +123,7 @@ impl TraceArgs {
     }
 
     /// Creates [`GethDefaultTracingOptions`] from CLI arguments
-    pub fn create_geth_options(&self) -> GethDefaultTracingOptions {
+    fn create_geth_options(&self) -> GethDefaultTracingOptions {
         GethDefaultTracingOptions {
             disable_storage: Some(self.trace_opcode_disable_storage),
             disable_memory: Some(self.trace_opcode_disable_memory),
@@ -134,7 +134,7 @@ impl TraceArgs {
     }
 
     /// Creates [`CallConfig`] from CLI arguments
-    pub fn create_call_config(&self) -> CallConfig {
+    fn create_call_config(&self) -> CallConfig {
         CallConfig {
             only_top_call: Some(self.trace_call_only_top_call),
             with_log: Some(self.trace_call_with_log),
@@ -142,7 +142,7 @@ impl TraceArgs {
     }
 
     /// Creates [`PreStateConfig`] from CLI arguments
-    pub fn create_prestate_config(&self) -> PreStateConfig {
+    fn create_prestate_config(&self) -> PreStateConfig {
         PreStateConfig {
             diff_mode: Some(self.trace_prestate_diff_mode),
             disable_code: Some(self.trace_prestate_disable_code),

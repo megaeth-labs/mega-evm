@@ -83,7 +83,7 @@ impl ExternalEnvDoc {
 }
 
 /// Deduplicate by bucket id (last-wins), then sort by bucket id.
-pub(crate) fn canonicalize_bucket_capacities(caps: &[(u32, u64)]) -> Vec<(u32, u64)> {
+fn canonicalize_bucket_capacities(caps: &[(u32, u64)]) -> Vec<(u32, u64)> {
     let mut map = BTreeMap::new();
     for &(id, capacity) in caps {
         map.insert(id, capacity);

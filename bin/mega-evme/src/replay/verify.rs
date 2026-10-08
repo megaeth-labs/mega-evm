@@ -546,7 +546,7 @@ impl ReceiptEvidence {
 /// share their consensus facts — and the dump path would anchor a fixture to it.
 /// Returns the explanatory message so each mode can wrap it in the error shape it
 /// reports.
-pub(super) fn check_transaction_identity(
+fn check_transaction_identity(
     receipt_tx_hash: B256,
     requested_tx_hash: B256,
 ) -> std::result::Result<(), String> {

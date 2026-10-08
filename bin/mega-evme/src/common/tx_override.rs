@@ -81,18 +81,18 @@ impl TxOverrideArgs {
 /// (required by block executor's `run_transaction`). The input override is stored
 /// in a thread-local (`INPUT_OVERRIDE`) since `Bytes` is not `Copy`.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct TxOverrides {
+struct TxOverrides {
     /// Override for gas limit.
-    pub gas_limit: Option<u64>,
+    gas_limit: Option<u64>,
     /// Override for value.
-    pub value: Option<U256>,
+    value: Option<U256>,
     /// Whether input data should be overridden (actual data in thread-local).
-    pub has_input_override: bool,
+    has_input_override: bool,
 }
 
 impl TxOverrides {
     /// Apply overrides to a [`MegaTransaction`].
-    pub fn apply(&self, tx: &mut MegaTransaction) {
+    fn apply(&self, tx: &mut MegaTransaction) {
         if let Some(gas_limit) = self.gas_limit {
             tx.base.gas_limit = gas_limit;
         }
