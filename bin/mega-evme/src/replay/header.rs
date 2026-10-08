@@ -36,7 +36,10 @@ use alloy_primitives::{Bloom, Bytes, B256};
 use op_alloy_consensus::OpReceiptEnvelope;
 use serde::Serialize;
 
-use super::{kernel::WholeBlock, verify::Mismatch};
+use super::{
+    kernel::WholeBlock,
+    verify::{display_optional, mismatch, DiffReport, Mismatch, Verdict},
+};
 
 /// The execution commitments a replayed block produced, in the form its header
 /// carries them.
@@ -72,7 +75,7 @@ impl BlockSummary {
     }
 
     /// Summarize a block from what the block executor produced for it.
-    pub(super) fn new(
+    fn new(
         receipts: &[OpReceiptEnvelope],
         gas_used: u64,
         blob_gas_used: u64,
@@ -108,77 +111,11 @@ fn logs_bloom(receipts: &[OpReceiptEnvelope]) -> Bloom {
     })
 }
 
-/// The verdict for one verified block.
-///
-/// Three shapes on the wire, mirroring the per-transaction receipt verdict:
-/// - compared and equal: `{"match": true}`
-/// - compared and diverged: `{"match": false, "diff": …}`
-/// - comparison could not run: `{"error": "…"}` — the block body did not execute in full, or the
-///   endpoint served a body the header does not commit to, so there is nothing to compare.
-///
-/// Serialize is hand-written so an unavailable verdict never emits a false
-/// `match` that a consumer would read as a divergence.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct BlockVerification {
-    /// Whether the replay reproduced every compared commitment.
-    ///
-    /// Meaningless when [`Self::error`] is set; the wire shape omits `match`.
-    pub matched: bool,
-    /// The mismatched commitments; absent on a match or when the comparison
-    /// never ran.
-    pub diff: Option<BlockDiff>,
-    /// Why the comparison could not run.
-    pub error: Option<String>,
-}
-
-impl BlockVerification {
-    /// A completed comparison.
-    const fn compared(diff: Option<BlockDiff>) -> Self {
-        Self { matched: diff.is_none(), diff, error: None }
-    }
-
-    /// The comparison could not run.
-    pub(super) fn unavailable(message: impl Into<String>) -> Self {
-        Self { matched: false, diff: None, error: Some(message.into()) }
-    }
-
-    /// Whether this verdict is an unavailable comparison.
-    pub(super) const fn is_unavailable(&self) -> bool {
-        self.error.is_some()
-    }
-
-    /// The one-line human verdict printed for a verified block.
-    pub(super) fn verdict_line(&self) -> String {
-        if let Some(error) = &self.error {
-            format!("block verification: FAILED ({error})")
-        } else if let Some(diff) = &self.diff {
-            format!("block verification: MISMATCH ({})", diff.describe())
-        } else {
-            "block verification: MATCH".to_string()
-        }
-    }
-}
-
-impl Serialize for BlockVerification {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeMap;
-        if let Some(error) = &self.error {
-            let mut map = serializer.serialize_map(Some(1))?;
-            map.serialize_entry("error", error)?;
-            return map.end();
-        }
-        let fields = 1 + usize::from(self.diff.is_some());
-        let mut map = serializer.serialize_map(Some(fields))?;
-        map.serialize_entry("match", &self.matched)?;
-        if let Some(diff) = &self.diff {
-            map.serialize_entry("diff", diff)?;
-        }
-        map.end()
-    }
-}
+/// The verdict for one verified block, in the same three wire shapes as a
+/// receipt verdict ([`Verdict`]). The comparison could not run when the block
+/// body did not execute in full, or when the endpoint served a body the header
+/// does not commit to.
+pub(super) type BlockVerification = Verdict<BlockDiff>;
 
 /// The commitments the replay did not reproduce. Commitments that agree are
 /// absent. `onchain` is the header's value, `replay` the replayed block's.
@@ -212,9 +149,11 @@ impl BlockDiff {
             self.blob_gas_used.is_none() &&
             self.requests_hash.is_none()
     }
+}
 
-    /// Render every mismatched commitment as one comma-separated line.
-    ///
+impl DiffReport for BlockDiff {
+    const LABEL: &'static str = "block verification";
+
     /// A bloom is 256 bytes, so the line only names it; the JSON diff carries
     /// both values.
     fn describe(&self) -> String {
@@ -246,11 +185,6 @@ impl BlockDiff {
     }
 }
 
-/// Render an optional header field for the human verdict line.
-fn display_optional<T: core::fmt::Display>(value: Option<&T>) -> String {
-    value.map_or_else(|| "none".to_string(), ToString::to_string)
-}
-
 /// Compare the replayed block's execution outputs against the header of the
 /// block.
 ///
@@ -263,33 +197,21 @@ fn display_optional<T: core::fmt::Display>(value: Option<&T>) -> String {
 /// encoding is only its type byte carries no data and is left out of the hash
 /// by the same rule, so it does not count as produced.
 pub(super) fn compare<H: BlockHeader>(header: &H, summary: &BlockSummary) -> BlockVerification {
-    let mut diff = BlockDiff::default();
-
-    if header.receipts_root() != summary.receipts_root {
-        diff.receipts_root =
-            Some(Mismatch { onchain: header.receipts_root(), replay: summary.receipts_root });
-    }
-    if header.logs_bloom() != summary.logs_bloom {
-        diff.logs_bloom =
-            Some(Mismatch { onchain: header.logs_bloom(), replay: summary.logs_bloom });
-    }
-    if header.gas_used() != summary.gas_used {
-        diff.gas_used = Some(Mismatch { onchain: header.gas_used(), replay: summary.gas_used });
-    }
-    if header.blob_gas_used() != Some(summary.blob_gas_used) {
-        diff.blob_gas_used =
-            Some(Mismatch { onchain: header.blob_gas_used(), replay: Some(summary.blob_gas_used) });
-    }
     let replay_requests_hash = summary.requests.requests_hash();
     let requests_agree = match header.requests_hash() {
         Some(onchain) => onchain == replay_requests_hash,
         None => summary.requests.iter().all(|request| request.len() <= 1),
     };
-    if !requests_agree {
-        diff.requests_hash =
-            Some(Mismatch { onchain: header.requests_hash(), replay: Some(replay_requests_hash) });
-    }
-
+    let diff = BlockDiff {
+        receipts_root: mismatch(header.receipts_root(), summary.receipts_root),
+        logs_bloom: mismatch(header.logs_bloom(), summary.logs_bloom),
+        gas_used: mismatch(header.gas_used(), summary.gas_used),
+        blob_gas_used: mismatch(header.blob_gas_used(), Some(summary.blob_gas_used)),
+        requests_hash: (!requests_agree).then(|| Mismatch {
+            onchain: header.requests_hash(),
+            replay: Some(replay_requests_hash),
+        }),
+    };
     BlockVerification::compared((!diff.is_empty()).then_some(diff))
 }
 

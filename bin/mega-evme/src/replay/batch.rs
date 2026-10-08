@@ -2020,7 +2020,10 @@ mod tests {
 
     /// A verification verdict as a run would have reported it.
     fn verdict(matched: bool) -> VerificationOutcome {
-        VerificationOutcome::compared(matched, None)
+        VerificationOutcome::compared((!matched).then(|| verify::VerificationDiff {
+            gas_used: Some(verify::Mismatch { onchain: 1, replay: 2 }),
+            ..Default::default()
+        }))
     }
 
     /// Build a tally from the outcomes a run would have reported: `failures`
@@ -2367,10 +2370,7 @@ mod tests {
             gas_used: Some(verify::Mismatch { onchain: 1, replay: 2 }),
             ..Default::default()
         };
-        block_report(
-            BlockVerification { matched, diff: (!matched).then_some(diff), error: None },
-            false,
-        )
+        block_report(BlockVerification::compared((!matched).then_some(diff)), false)
     }
 
     /// A block report carrying `verification`.

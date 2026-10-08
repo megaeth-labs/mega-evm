@@ -98,60 +98,74 @@ pub(super) fn consensus_receipt(receipt: &OpTransactionReceipt) -> OpReceiptEnve
     onchain_envelope(receipt).map_logs(|log| log.inner)
 }
 
-/// The verdict for one verified transaction.
+/// The verdict of one verification: of a transaction against its on-chain
+/// receipt, or of a block against its header.
 ///
 /// Three shapes on the wire:
 /// - compared and equal: `{"match": true}`
 /// - compared and diverged: `{"match": false, "diff": …}`
-/// - receipt question unanswered: `{"error": "…"}` — the target still replayed; only the comparison
-///   could not run (transport, pruned, reorg).
+/// - the comparison could not run: `{"error": "…"}` — the receipt question went unanswered
+///   (transport, pruned, reorg), or the block did not execute in full.
 ///
-/// Serialize is hand-written so an unavailable outcome never emits a false
+/// Serialize is hand-written so an unavailable verdict never emits a false
 /// `match` that a consumer would read as a divergence.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct VerificationOutcome {
-    /// Whether the local replay reproduced the on-chain receipt.
+pub(super) struct Verdict<D> {
+    /// Whether the replay reproduced every compared dimension.
     ///
     /// Meaningless when [`Self::error`] is set (kept for a simple bool check
     /// on the compared path); the wire shape omits `match` in that case.
     pub matched: bool,
     /// The mismatched dimensions; absent when the replay matched or when the
     /// comparison never ran.
-    pub diff: Option<VerificationDiff>,
-    /// Why the on-chain receipt could not be compared, when the target still
-    /// produced a local result. Mutually exclusive with a real match/diff.
+    pub diff: Option<D>,
+    /// Why the comparison could not run. Mutually exclusive with a real
+    /// match/diff.
     pub error: Option<String>,
 }
 
-impl VerificationOutcome {
-    /// A completed comparison against an on-chain receipt.
-    pub(super) fn compared(matched: bool, diff: Option<VerificationDiff>) -> Self {
-        Self { matched, diff, error: None }
+/// What a [`Verdict`]'s diff contributes to the human verdict line.
+pub(super) trait DiffReport: Serialize {
+    /// Label the human verdict line starts with.
+    const LABEL: &'static str;
+
+    /// Render every mismatched dimension as one comma-separated line.
+    fn describe(&self) -> String;
+}
+
+/// The verdict for one verified transaction.
+pub(super) type VerificationOutcome = Verdict<VerificationDiff>;
+
+impl<D: DiffReport> Verdict<D> {
+    /// A completed comparison: a match when nothing diverged.
+    pub(super) fn compared(diff: Option<D>) -> Self {
+        Self { matched: diff.is_none(), diff, error: None }
     }
 
-    /// The target replayed, but the on-chain receipt question went unanswered.
+    /// The comparison could not run.
     pub(super) fn unavailable(message: impl Into<String>) -> Self {
         Self { matched: false, diff: None, error: Some(message.into()) }
     }
 
-    /// Whether this outcome is an unanswered receipt fetch, not a comparison.
+    /// Whether this verdict is an unavailable comparison.
     pub(super) const fn is_unavailable(&self) -> bool {
         self.error.is_some()
     }
 
-    /// The one-line human verdict printed for a verified transaction.
+    /// The one-line human verdict.
     pub(super) fn verdict_line(&self) -> String {
+        let label = D::LABEL;
         if let Some(error) = &self.error {
-            format!("verification: FAILED ({error})")
+            format!("{label}: FAILED ({error})")
         } else if let Some(diff) = &self.diff {
-            format!("verification: MISMATCH ({})", diff.describe())
+            format!("{label}: MISMATCH ({})", diff.describe())
         } else {
-            "verification: MATCH".to_string()
+            format!("{label}: MATCH")
         }
     }
 }
 
-impl Serialize for VerificationOutcome {
+impl<D: Serialize> Serialize for Verdict<D> {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -211,8 +225,11 @@ impl VerificationDiff {
             self.deposit_receipt_version.is_none() &&
             self.logs.is_none()
     }
+}
 
-    /// Render every mismatched dimension as one comma-separated line.
+impl DiffReport for VerificationDiff {
+    const LABEL: &'static str = "verification";
+
     fn describe(&self) -> String {
         let mut parts = Vec::new();
         if let Some(m) = &self.status {
@@ -231,15 +248,15 @@ impl VerificationDiff {
         if let Some(m) = &self.deposit_nonce {
             parts.push(format!(
                 "deposit_nonce: onchain {} vs replay {}",
-                display_optional(m.onchain),
-                display_optional(m.replay)
+                display_optional(m.onchain.as_ref()),
+                display_optional(m.replay.as_ref())
             ));
         }
         if let Some(m) = &self.deposit_receipt_version {
             parts.push(format!(
                 "deposit_receipt_version: onchain {} vs replay {}",
-                display_optional(m.onchain),
-                display_optional(m.replay)
+                display_optional(m.onchain.as_ref()),
+                display_optional(m.replay.as_ref())
             ));
         }
         if let Some(logs) = &self.logs {
@@ -260,18 +277,24 @@ impl VerificationDiff {
     }
 }
 
-/// Render an optional deposit field for the human verdict line.
-fn display_optional(value: Option<u64>) -> String {
-    value.map_or_else(|| "none".to_string(), |value| value.to_string())
+/// Render an optional field (a deposit field, a header field) for the human
+/// verdict line: its value, or `none` for a side that lacks it.
+pub(super) fn display_optional<T: fmt::Display>(value: Option<&T>) -> String {
+    value.map_or_else(|| "none".to_string(), ToString::to_string)
 }
 
 /// One dimension's two values.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(super) struct Mismatch<T> {
-    /// The value the on-chain receipt reports.
+    /// The value the on-chain side reports.
     pub onchain: T,
     /// The value the local replay produced.
     pub replay: T,
+}
+
+/// The two values of one dimension, when they differ.
+pub(super) fn mismatch<T: PartialEq>(onchain: T, replay: T) -> Option<Mismatch<T>> {
+    (onchain != replay).then_some(Mismatch { onchain, replay })
 }
 
 /// How the emitted logs differ.
@@ -365,50 +388,26 @@ impl fmt::Display for LogFieldValue {
 
 /// Compare the on-chain receipt against the local replay's receipt.
 pub(super) fn compare(onchain: &ReceiptFacts, replay: &ReceiptFacts) -> VerificationOutcome {
-    let mut diff = VerificationDiff::default();
-
-    if onchain.status != replay.status {
-        diff.status = Some(Mismatch { onchain: onchain.status, replay: replay.status });
-    }
-    if onchain.gas_used != replay.gas_used {
-        diff.gas_used = Some(Mismatch { onchain: onchain.gas_used, replay: replay.gas_used });
-    }
-    if onchain.cumulative_gas_used != replay.cumulative_gas_used {
-        diff.cumulative_gas_used = Some(Mismatch {
-            onchain: onchain.cumulative_gas_used,
-            replay: replay.cumulative_gas_used,
-        });
-    }
-    if onchain.tx_type != replay.tx_type {
-        diff.tx_type = Some(Mismatch { onchain: onchain.tx_type, replay: replay.tx_type });
-    }
-    if onchain.deposit_nonce != replay.deposit_nonce {
-        diff.deposit_nonce =
-            Some(Mismatch { onchain: onchain.deposit_nonce, replay: replay.deposit_nonce });
-    }
-    if onchain.deposit_receipt_version != replay.deposit_receipt_version {
-        diff.deposit_receipt_version = Some(Mismatch {
-            onchain: onchain.deposit_receipt_version,
-            replay: replay.deposit_receipt_version,
-        });
-    }
     let logs = compare_logs(&onchain.logs, &replay.logs);
-    if !logs.is_empty() {
-        diff.logs = Some(logs);
-    }
-
-    if diff.is_empty() {
-        VerificationOutcome::compared(true, None)
-    } else {
-        VerificationOutcome::compared(false, Some(diff))
-    }
+    let diff = VerificationDiff {
+        status: mismatch(onchain.status, replay.status),
+        gas_used: mismatch(onchain.gas_used, replay.gas_used),
+        cumulative_gas_used: mismatch(onchain.cumulative_gas_used, replay.cumulative_gas_used),
+        tx_type: mismatch(onchain.tx_type, replay.tx_type),
+        deposit_nonce: mismatch(onchain.deposit_nonce, replay.deposit_nonce),
+        deposit_receipt_version: mismatch(
+            onchain.deposit_receipt_version,
+            replay.deposit_receipt_version,
+        ),
+        logs: (!logs.is_empty()).then_some(logs),
+    };
+    VerificationOutcome::compared((!diff.is_empty()).then_some(diff))
 }
 
 /// Compare two log lists: their length, and the contents of the logs both sides
 /// emitted.
 fn compare_logs(onchain: &[Log], replay: &[Log]) -> LogsDiff {
-    let count = (onchain.len() != replay.len())
-        .then_some(Mismatch { onchain: onchain.len(), replay: replay.len() });
+    let count = mismatch(onchain.len(), replay.len());
     // Only the logs both sides emitted can be compared field by field; a length
     // difference is already reported by `count`.
     let first_mismatch = onchain
