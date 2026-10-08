@@ -1212,8 +1212,49 @@ where
 
     // `entries` already holds any inclusion/membership failure recorded before
     // the block started; the harvested targets are appended to it here.
+    harvest_entries(&mut entries, finish, &loop_outcome, &onchain_receipts, verify_receipt, number);
+
+    // Any active target that produced no entry sat behind an abort (or is a
+    // residual not-in-body case for `--block`, which has no inclusion claim).
+    // They are appended in block transaction-index order, keeping the run's
+    // ascending (block, index) order; a target the block does not contain has
+    // no index and keeps its input position among the active set.
+    let uncounted_abort = attribute_unreported(
+        &mut entries,
+        &loop_outcome,
+        &tx_hashes,
+        &target_set,
+        &targets,
+        number,
+        fetched,
+    );
+
+    BlockReplayOutcome::ordered(
+        entries,
+        &job_targets,
+        Some(&block_tx_order),
+        uncounted_abort.or(block_floor),
+    )
+    .with_block(block_report)
+}
+
+/// Append one entry per target the finished block reports on.
+///
+/// A target that executed keeps its result line, its receipt verdict and its
+/// fixture report. Its fixture is written here, and only when the walk
+/// completed; an aborted walk's drafts are reported as discarded. A block that
+/// failed to finish leaves every target that executed a failure entry instead,
+/// and no fixture is written or replaced.
+fn harvest_entries(
+    entries: &mut Vec<BatchEntry>,
+    finish: kernel::FinishOutcome<Option<DeferredFixture>>,
+    loop_outcome: &kernel::LoopOutcome,
+    onchain_receipts: &BTreeMap<B256, std::result::Result<ReceiptFacts, String>>,
+    verify_receipt: bool,
+    number: u64,
+) {
     match finish {
-        // The whole executed block was already judged above.
+        // The whole executed block is judged by the caller.
         kernel::FinishOutcome::Harvested { targets: harvest, whole_block: _ } => {
             for harvested in harvest {
                 let target = match harvested {
@@ -1261,7 +1302,7 @@ where
                 // and an aborted run has none to hand out. Keep the execution
                 // result; only the fixture field fails, and it inherits the
                 // abort's class so a transient RPC abort exits 3.
-                let fixture = match &loop_outcome {
+                let fixture = match loop_outcome {
                     kernel::LoopOutcome::Completed(clean) => {
                         target.draft.redeem(clean).map(materialize_deferred_fixture)
                     }
@@ -1291,12 +1332,25 @@ where
             }
         }
     }
+}
 
-    // Any active target that produced no entry sat behind an abort (or is a
-    // residual not-in-body case for `--block`, which has no inclusion claim).
-    // They are appended in block transaction-index order, keeping the run's
-    // ascending (block, index) order; a target the block does not contain has
-    // no index and keeps its input position among the active set.
+/// Append an entry for every active target the run left without one, and
+/// return the abort's class when no reported entry carries it.
+///
+/// After a completed walk such a target was absent from the body it was queued
+/// against. After an abort, the target that raised it keeps the abort's own
+/// class and every other one is swept up as unanswered; when the aborting
+/// transaction is not a reported target, its class is returned so the run's
+/// exit still reflects the root cause.
+fn attribute_unreported(
+    entries: &mut Vec<BatchEntry>,
+    loop_outcome: &kernel::LoopOutcome,
+    tx_hashes: &[B256],
+    target_set: &HashSet<B256>,
+    targets: &[B256],
+    number: u64,
+    fetched: B256,
+) -> Option<BatchErrorKind> {
     let reported: HashSet<B256> = entries.iter().map(BatchEntry::tx_hash).collect();
     let block_txs: HashSet<B256> = tx_hashes.iter().copied().collect();
     let unreported = tx_hashes
@@ -1306,7 +1360,7 @@ where
         .filter(|hash| !reported.contains(*hash));
 
     let mut uncounted_abort = None;
-    match &loop_outcome {
+    match loop_outcome {
         kernel::LoopOutcome::Completed(_) => {
             // Active targets are already filtered for inclusion agreement; a
             // remaining absence from the body is still an endpoint
@@ -1369,14 +1423,7 @@ where
             }
         }
     }
-
-    BlockReplayOutcome::ordered(
-        entries,
-        &job_targets,
-        Some(&block_tx_order),
-        uncounted_abort.or(block_floor),
-    )
-    .with_block(block_report)
+    uncounted_abort
 }
 
 /// Judge a block the kernel ran against its header.
