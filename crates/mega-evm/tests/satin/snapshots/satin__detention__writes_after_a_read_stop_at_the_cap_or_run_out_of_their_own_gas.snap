@@ -1,6 +1,6 @@
 ---
 source: crates/mega-evm/tests/satin/detention.rs
-expression: "&BTreeMap::from([(\"with a reservoir\",\nOutcomeView::new(&with_a_reservoir.outcome)),\n(\"without a reservoir\", OutcomeView::new(&run.outcome)),])"
+expression: "&by_case([(\"with a reservoir\", OutcomeView::new(&with_a_reservoir.outcome)),\n(\"without a reservoir\", OutcomeView::new(&run.outcome)),])"
 ---
 {
   "with a reservoir": {

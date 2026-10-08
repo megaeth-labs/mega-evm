@@ -1,6 +1,6 @@
 ---
 source: crates/mega-evm/tests/satin/strategic_stop.rs
-expression: "&BTreeMap::from([(\"plain\", OutcomeView::new(&plain)),\n(\"kept\", OutcomeView::new(&kept)), (\"stopped\", OutcomeView::new(&stopped)),])"
+expression: "&by_case([(\"plain\", OutcomeView::new(&plain)),\n(\"kept\", OutcomeView::new(&kept)), (\"stopped\", OutcomeView::new(&stopped)),])"
 ---
 {
   "kept": {

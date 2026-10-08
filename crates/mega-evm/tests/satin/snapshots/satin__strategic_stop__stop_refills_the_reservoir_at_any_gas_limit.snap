@@ -1,6 +1,6 @@
 ---
 source: crates/mega-evm/tests/satin/strategic_stop.rs
-expression: "&BTreeMap::from([(\"below the execution cap\", OutcomeView::new(&small)),\n(\"with a reservoir\", OutcomeView::new(&large)),])"
+expression: "&by_case([(\"below the execution cap\", OutcomeView::new(&small)),\n(\"with a reservoir\", OutcomeView::new(&large)),])"
 ---
 {
   "below the execution cap": {

@@ -1,6 +1,6 @@
 ---
 source: crates/mega-evm/tests/satin/strategic_stop.rs
-expression: "&BTreeMap::from([(\"plain\", OutcomeView::new(&plain)),\n(\"inspected\", OutcomeView::new(&inspected)),\n(\"heavy callers\", OutcomeView::new(&result)),\n(\"light callers\", OutcomeView::new(&light_result)),])"
+expression: "&by_case([(\"plain\", OutcomeView::new(&plain)),\n(\"inspected\", OutcomeView::new(&inspected)),\n(\"heavy callers\", OutcomeView::new(&result)),\n(\"light callers\", OutcomeView::new(&light_result)),])"
 ---
 {
   "heavy callers": {

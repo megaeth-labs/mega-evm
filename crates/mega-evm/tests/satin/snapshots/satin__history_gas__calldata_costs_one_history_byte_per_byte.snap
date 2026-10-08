@@ -1,6 +1,6 @@
 ---
 source: crates/mega-evm/tests/satin/history_gas.rs
-expression: "&BTreeMap::from([(\"zeros\", OutcomeView::new(&zeros)),\n(\"non_zeros\", OutcomeView::new(&non_zeros)),\n(\"longer\", OutcomeView::new(&longer)),])"
+expression: "&by_case([(\"zeros\", OutcomeView::new(&zeros)),\n(\"non_zeros\", OutcomeView::new(&non_zeros)),\n(\"longer\", OutcomeView::new(&longer)),])"
 ---
 {
   "longer": {

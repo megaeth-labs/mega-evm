@@ -17,7 +17,10 @@ use revm::{
     context_interface::cfg::GasId,
 };
 
-use crate::common::{call, call_with_data, create, execute, runs_at_measurement_prices};
+use crate::{
+    cases::{by_case, InsertCase},
+    common::{call, call_with_data, create, execute, runs_at_measurement_prices},
+};
 
 const CALLER: Address = address!("0000000000000000000000000000000000200000");
 const CALLEE: Address = address!("0000000000000000000000000000000000200001");
@@ -63,7 +66,7 @@ fn test_deployed_code_pays_history_for_every_byte() {
     assert!(long.result.is_success(), "{:?}", long.result);
     assert_eq!(long.gas.history - short.gas.history, 32 * CPHB, "32 more bytes of history");
     assert_eq!(long.gas.state - short.gas.state, 32 * COST_PER_STATE_BYTE, "and of state");
-    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+    crate::assert_sorted_json_snapshot!(&by_case([
         ("short", OutcomeView::new(&short)),
         ("long", OutcomeView::new(&long)),
     ]));
@@ -90,7 +93,7 @@ fn test_a_reverted_deployment_pays_no_code_deposit_history() {
         body(reverting().len() as u64),
         "the body alone: nothing was deployed, and the account's record went with the failure",
     );
-    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+    crate::assert_sorted_json_snapshot!(&by_case([
         ("deployed", OutcomeView::new(&deployed)),
         ("reverted", OutcomeView::new(&reverted)),
     ]));
@@ -134,7 +137,7 @@ fn test_calldata_costs_one_history_byte_per_byte() {
     assert_eq!(zeros.gas.history, body(100));
     assert_eq!(non_zeros.gas.history, zeros.gas.history, "the value of a byte is not its size");
     assert_eq!(longer.gas.history - zeros.gas.history, 100 * CPHB, "a hundred bytes more");
-    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+    crate::assert_sorted_json_snapshot!(&by_case([
         ("zeros", OutcomeView::new(&zeros)),
         ("non_zeros", OutcomeView::new(&non_zeros)),
         ("longer", OutcomeView::new(&longer)),
@@ -190,7 +193,7 @@ fn test_a_log_pays_for_its_address_its_topics_and_its_data() {
         2 * LOG_TOPIC_SIZE * CPHB,
         "two topics more",
     );
-    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+    crate::assert_sorted_json_snapshot!(&by_case([
         ("bare", OutcomeView::new(&bare)),
         ("one_topic", OutcomeView::new(&one_topic)),
         ("three_topics", OutcomeView::new(&three_topics)),
@@ -225,7 +228,7 @@ fn test_a_log_pays_history_on_top_of_the_schedules_price() {
         logging.gas.history - quiet.gas.history,
         (LOG_BASE_SIZE + LOG_TOPIC_SIZE + 32) * CPHB
     );
-    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+    crate::assert_sorted_json_snapshot!(&by_case([
         ("quiet", OutcomeView::new(&quiet)),
         ("logging", OutcomeView::new(&logging)),
     ]));
@@ -259,7 +262,7 @@ fn test_a_storage_write_pays_for_its_record_and_a_write_back_takes_it_back() {
     assert_eq!(three.gas.history, body(0) + 3 * WRITE_RECORD_SIZE * CPHB, "three slots, three");
     assert_eq!(rewritten.gas.history, one.gas.history, "a slot already changed records once");
     assert_eq!(restored.gas.history, body(0), "the write-back took the record's charge back");
-    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+    crate::assert_sorted_json_snapshot!(&by_case([
         ("one", OutcomeView::new(&one)),
         ("three", OutcomeView::new(&three)),
         ("rewritten", OutcomeView::new(&rewritten)),
@@ -294,7 +297,7 @@ fn test_a_failing_frame_gives_its_history_back() {
     assert!(kept.result.is_success() && reverted.result.is_success(), "the caller survives");
     assert_eq!(kept.gas.history - quiet.gas.history, (LOG_BASE_SIZE + LOG_TOPIC_SIZE + 32) * CPHB);
     assert_eq!(reverted.gas.history, quiet.gas.history, "the reverted frame's log is not paid for");
-    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+    crate::assert_sorted_json_snapshot!(&by_case([
         ("quiet", OutcomeView::new(&quiet)),
         ("kept", OutcomeView::new(&kept)),
         ("reverted", OutcomeView::new(&reverted)),
@@ -354,7 +357,7 @@ fn test_a_call_whose_caller_cannot_pay_its_records_starts_no_frame() {
     assert!(ample.result.is_success(), "{:?}", ample.result);
     assert_eq!(ample.usage.write_records, 2, "the caller's account and the recipient's");
     assert_eq!(ample.gas.history, body(0) + 2 * WRITE_RECORD_SIZE * CPHB);
-    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+    crate::assert_sorted_json_snapshot!(&by_case([
         ("short", OutcomeView::new(&short)),
         ("ample", OutcomeView::new(&ample)),
     ]));
@@ -377,7 +380,7 @@ fn test_a_creation_whose_creator_cannot_pay_its_records_starts_no_frame() {
     assert!(ample.result.is_success(), "{:?}", ample.result);
     assert_eq!(ample.usage.write_records, 2, "the created account and the creator's nonce");
     assert_eq!(ample.gas.history, body(0) + 2 * WRITE_RECORD_SIZE * CPHB);
-    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+    crate::assert_sorted_json_snapshot!(&by_case([
         ("short", OutcomeView::new(&short)),
         ("ample", OutcomeView::new(&ample)),
     ]));
@@ -426,7 +429,10 @@ fn test_no_gas_limit_buys_a_write_record_for_nothing() {
                 TX_BODY_SIZE + outcome.usage.write_records * WRITE_RECORD_SIZE,
                 "at a {limit} gas limit: and the bytes reported",
             );
-            outcomes.entry(site).or_default().insert(limit, OutcomeView::new(&outcome).summary());
+            outcomes
+                .entry(site)
+                .or_default()
+                .insert_case(limit, OutcomeView::new(&outcome).summary());
         }
     }
     crate::assert_sorted_json_snapshot!(&outcomes);
@@ -463,7 +469,7 @@ fn test_the_body_carries_the_writes_every_transaction_makes() {
     assert_eq!(free.gas.history, body(0), "the body, and the body alone");
     assert_eq!(paid.gas.history, free.gas.history, "the fee recipients are already in the body");
     assert_eq!(paid.usage.write_records, 0, "and none of them is recorded again");
-    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+    crate::assert_sorted_json_snapshot!(&by_case([
         ("free", OutcomeView::new(&free)),
         ("paid", OutcomeView::new(&paid)),
     ]));
@@ -510,7 +516,7 @@ fn test_a_beneficiary_that_is_a_fee_vault_changes_nothing() {
     assert_eq!(distinct.gas.history, body(0));
     assert_eq!(a_vault.gas.history, distinct.gas.history);
     assert_eq!(a_vault.usage.write_records, 0);
-    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+    crate::assert_sorted_json_snapshot!(&by_case([
         ("distinct", OutcomeView::new(&distinct)),
         ("a_vault", OutcomeView::new(&a_vault)),
     ]));

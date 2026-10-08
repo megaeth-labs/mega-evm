@@ -32,7 +32,10 @@ use revm::{
     Database,
 };
 
-use crate::common::{call, context, create, runs_at_measurement_prices};
+use crate::{
+    cases::{by_case, InsertCase},
+    common::{call, context, create, runs_at_measurement_prices},
+};
 
 const CALLER: Address = address!("0000000000000000000000000000000000800000");
 const CALLEE: Address = address!("0000000000000000000000000000000000800001");
@@ -142,7 +145,7 @@ fn test_the_floor_is_sixty_four_gas_for_every_calldata_byte() {
             Ok(EMPTY_CALL + FLOOR_PER_BYTE * len),
             "{len} bytes"
         );
-        outcomes.insert(len, view(funded(), with_calldata(len as usize, 0x42)));
+        outcomes.insert_case(len, view(funded(), with_calldata(len as usize, 0x42)));
     }
     crate::assert_sorted_json_snapshot!(&outcomes);
 }
@@ -166,7 +169,7 @@ fn test_a_zero_calldata_byte_costs_the_same_as_a_non_zero_one() {
         bill(16),
         "only the intrinsic token rate, four against sixteen, tells them apart",
     );
-    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+    crate::assert_sorted_json_snapshot!(&by_case([
         ("zeros", OutcomeView::new(&zeros.outcome)),
         ("non_zeros", OutcomeView::new(&non_zeros.outcome)),
     ]));
@@ -191,7 +194,7 @@ fn test_the_calldata_floor_never_binds_once_history_is_charged() {
             "{len} bytes: the intrinsic charge and the body, both above the floor",
         );
         assert!(charged.gas_used > charged.floor, "{len} bytes: the floor does not bind");
-        outcomes.insert(len, OutcomeView::new(&charged.outcome));
+        outcomes.insert_case(len, OutcomeView::new(&charged.outcome));
     }
     crate::assert_sorted_json_snapshot!(&outcomes);
 }
@@ -250,7 +253,7 @@ fn test_access_list_bytes_are_counted_in_the_floor_at_sixty_four_each() {
             Ok((EMPTY_CALL + 2_400 + 1_900 * keys + body_history(20 + 32 * keys)).max(floor)),
             "{keys} keys: the intrinsic charge and the entry's bytes of history"
         );
-        outcomes.insert(keys, view(funded(), with_access_list(keys as usize)));
+        outcomes.insert_case(keys, view(funded(), with_access_list(keys as usize)));
     }
     crate::assert_sorted_json_snapshot!(&outcomes);
 }

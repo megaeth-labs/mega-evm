@@ -32,7 +32,10 @@ use revm::{
     inspector::NoOpInspector,
 };
 
-use crate::common::{context, runs_at_measurement_prices};
+use crate::{
+    cases::{by_case, InsertCase},
+    common::{context, runs_at_measurement_prices},
+};
 
 const CALLER: Address = address!("0000000000000000000000000000000000400000");
 const CONTRACT: Address = address!("0000000000000000000000000000000000400001");
@@ -196,7 +199,7 @@ fn test_the_exempt_schedule_prices_a_deposited_byte_at_zero() {
             .expect("the transaction is valid");
         assert!(outcome.result.is_success(), "{:?}", outcome.result);
         let history = outcome.gas.history;
-        outcomes.insert(name, OutcomeView::new(&outcome));
+        outcomes.insert_case(name, OutcomeView::new(&outcome));
         history
     };
     let thirty_two = deployed("thirty_two", program());
@@ -208,7 +211,8 @@ fn test_the_exempt_schedule_prices_a_deposited_byte_at_zero() {
         "a user transaction pays a history byte per deployed byte",
     );
     assert_eq!(ledgers(deposit(call_from(CALLER, CONTRACT))).0, 0, "a deposit pays none of it");
-    outcomes.insert("deposit", OutcomeView::new(&ledgers(deposit(call_from(CALLER, CONTRACT))).2));
+    outcomes
+        .insert_case("deposit", OutcomeView::new(&ledgers(deposit(call_from(CALLER, CONTRACT))).2));
     crate::assert_sorted_json_snapshot!(&outcomes);
 }
 
@@ -307,7 +311,7 @@ fn test_an_exempt_transaction_reports_no_history_bytes() {
             let outcome = MegaEvm::new(context(db()))
                 .execute_transaction(tx)
                 .expect("the transaction is valid");
-            outcomes.insert(format!("{name} at {gas_limit}"), OutcomeView::new(&outcome));
+            outcomes.insert_case(format!("{name} at {gas_limit}"), OutcomeView::new(&outcome));
             let gas = outcome.gas;
             if gas_limit > TX_GAS_LIMIT_CAP {
                 assert_eq!(
@@ -345,7 +349,8 @@ fn test_an_exempt_transaction_reports_no_history_bytes() {
     let result = Evm::transact_system_call(&mut evm, CALLER, CONTRACT, Bytes::new())
         .expect("the system call runs");
     assert_eq!(evm.ctx().additional_limit().history_bytes(), 0, "a system call");
-    outcomes.insert("a system call".into(), OutcomeView::new(&system_call_outcome(&evm, result)));
+    outcomes
+        .insert_case("a system call".into(), OutcomeView::new(&system_call_outcome(&evm, result)));
     crate::assert_sorted_json_snapshot!(&outcomes);
 }
 
@@ -368,7 +373,7 @@ fn test_the_exemption_does_not_outlive_its_transaction() {
     assert!(paying.result.is_success(), "{:?}", paying.result);
     assert!(paying.gas.history > 0, "the next transaction pays for its own bytes");
     assert_eq!(paying.gas.history, PROGRAM_HISTORY_BYTES * COST_PER_HISTORY_BYTE, "all of them");
-    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+    crate::assert_sorted_json_snapshot!(&by_case([
         ("exempt", OutcomeView::new(&exempt)),
         ("paying", OutcomeView::new(&paying)),
     ]));

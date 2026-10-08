@@ -1,6 +1,6 @@
 ---
 source: crates/mega-evm/tests/satin/stops.rs
-expression: "&BTreeMap::from([(\"detained\", OutcomeView::new(&detained)),\n(\"undetained\", OutcomeView::new(&undetained)),])"
+expression: "&by_case([(\"detained\", OutcomeView::new(&detained)),\n(\"undetained\", OutcomeView::new(&undetained)),])"
 ---
 {
   "detained": {

@@ -1,6 +1,6 @@
 ---
 source: crates/mega-evm/tests/satin/strategic_stop.rs
-expression: "&BTreeMap::from([(\"stopped before the first frame\",\nOutcomeView::new(&result)),\n(\"the transfer that goes through\", OutcomeView::new(&transfer)),])"
+expression: "&by_case([(\"stopped before the first frame\", OutcomeView::new(&result)),\n(\"the transfer that goes through\", OutcomeView::new(&transfer)),])"
 ---
 {
   "stopped before the first frame": {

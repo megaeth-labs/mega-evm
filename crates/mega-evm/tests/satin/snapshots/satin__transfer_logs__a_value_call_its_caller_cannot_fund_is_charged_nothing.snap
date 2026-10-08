@@ -1,6 +1,6 @@
 ---
 source: crates/mega-evm/tests/satin/transfer_logs.rs
-expression: "&BTreeMap::from([(\"refused\", OutcomeView::new(&refused)),\n(\"funded\", OutcomeView::new(&funded)),])"
+expression: "&by_case([(\"refused\", OutcomeView::new(&refused)),\n(\"funded\", OutcomeView::new(&funded)),])"
 ---
 {
   "funded": {

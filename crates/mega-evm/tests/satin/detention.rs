@@ -37,6 +37,8 @@ use revm::{
     Database, Inspector,
 };
 
+use crate::cases::{by_case, InsertCase};
+
 pub(crate) const CALLER: Address = address!("0000000000000000000000000000000000d00000");
 pub(crate) const CONTRACT: Address = address!("0000000000000000000000000000000000d00001");
 pub(crate) const CHILD: Address = address!("0000000000000000000000000000000000d00002");
@@ -613,7 +615,7 @@ fn test_every_volatile_read_caps_the_transaction_from_where_it_read() {
                 read.name
             );
             assert_eq!(run.accessed, read.access, "{}", read.name);
-            views.insert(
+            views.insert_case(
                 format!("{}, gas limit {gas_limit}", read.name),
                 OutcomeView::new(&run.outcome),
             );
@@ -638,7 +640,10 @@ fn test_the_cap_counts_from_a_spend_larger_than_itself() {
         let limit = assert_stopped(&run, intrinsic(gas_limit), left);
         assert!(limit - CAP > u64::from(before) * WORK_ROUND, "{limit}");
         assert!(limit - CAP > CAP);
-        views.insert(format!("spins on, gas limit {gas_limit}"), OutcomeView::new(&run.outcome));
+        views.insert_case(
+            format!("spins on, gas limit {gas_limit}"),
+            OutcomeView::new(&run.outcome),
+        );
 
         let code = op(work(BytecodeBuilder::default(), before), TIMESTAMP).stop().build();
         let run = execute(
@@ -647,7 +652,7 @@ fn test_the_cap_counts_from_a_spend_larger_than_itself() {
         );
         assert!(run.outcome.result.is_success(), "{:?}", run.outcome.result);
         assert_eq!(run.limit, Some(limit), "the same read at the same compute");
-        views.insert(
+        views.insert_case(
             format!("stops after the read, gas limit {gas_limit}"),
             OutcomeView::new(&run.outcome),
         );
@@ -675,7 +680,7 @@ fn test_without_a_read_nothing_is_capped() {
         assert_eq!(run.limit, None);
         assert_eq!(run.outcome.limit_exceeded, None);
         assert_eq!(run.accessed, VolatileDataAccess::empty());
-        views.insert(format!("gas limit {gas_limit}"), OutcomeView::new(&run.outcome));
+        views.insert_case(format!("gas limit {gas_limit}"), OutcomeView::new(&run.outcome));
     }
     crate::assert_sorted_json_snapshot!(&views);
 }
@@ -703,7 +708,7 @@ fn test_a_transaction_touching_the_beneficiary_is_detained_from_the_start() {
         let run_sender = execute(db, tx(BENEFICIARY, CONTRACT, gas_limit));
         // A sender's intrinsic gas is the same whoever it is.
         assert_eq!(assert_stopped(&run_sender, intrinsic, left), CAP, "the sender");
-        views.insert(
+        views.insert_case(
             format!("the sender, gas limit {gas_limit}"),
             OutcomeView::new(&run_sender.outcome),
         );
@@ -712,7 +717,7 @@ fn test_a_transaction_touching_the_beneficiary_is_detained_from_the_start() {
         let db = MemoryDatabase::default().account_code(BENEFICIARY, spinner.clone());
         let run_recipient = execute(db, tx(CALLER, BENEFICIARY, gas_limit));
         assert_eq!(assert_stopped(&run_recipient, intrinsic, left), CAP, "the recipient");
-        views.insert(
+        views.insert_case(
             format!("the recipient, gas limit {gas_limit}"),
             OutcomeView::new(&run_recipient.outcome),
         );
@@ -736,7 +741,7 @@ fn test_a_transaction_touching_the_beneficiary_is_detained_from_the_start() {
         assert_eq!(run_authority.limit, Some(CAP), "the authority");
         assert!(matches!(run_authority.outcome.result, ExecutionResult::Revert { .. }));
         assert_eq!(run_authority.accessed, VolatileDataAccess::BENEFICIARY_BALANCE);
-        views.insert(
+        views.insert_case(
             format!("an applied authority, gas limit {gas_limit}"),
             OutcomeView::new(&run_authority.outcome),
         );
@@ -884,7 +889,7 @@ fn test_the_most_restrictive_limit_binds_whatever_the_order() {
             assert!(limit < CAP + 100_000, "the first read set the limit: {limit}");
             assert_eq!(run.accessed, VolatileDataAccess::TIMESTAMP | VolatileDataAccess::ORACLE);
             let first = if block_env_first { "the block environment" } else { "the Oracle" };
-            views.insert(
+            views.insert_case(
                 format!("{first} first, gas limit {gas_limit}"),
                 OutcomeView::new(&run.outcome),
             );
@@ -918,7 +923,7 @@ fn test_a_callers_limits_set_the_caps() {
         let run = run_under(limits, spin(op(BytecodeBuilder::default(), TIMESTAMP)));
         let left = Charges::default().then(&[2]).spin(0).left(1_000_000);
         assert_eq!(assert_stopped(&run, intrinsic, left), 2 + 1_000_000);
-        views.insert(
+        views.insert_case(
             format!("TIMESTAMP under a cap of 1,000,000, gas limit {gas_limit}"),
             OutcomeView::new(&run.outcome),
         );
@@ -932,7 +937,7 @@ fn test_a_callers_limits_set_the_caps() {
         let limit = assert_stopped(&run, intrinsic, left);
         assert!((2_000_000..2_100_000).contains(&limit), "the Oracle's own cap: {limit}");
         assert_eq!(run.accessed, VolatileDataAccess::ORACLE);
-        views.insert(
+        views.insert_case(
             format!("the Oracle under a cap of 2,000,000, gas limit {gas_limit}"),
             OutcomeView::new(&run.outcome),
         );
@@ -949,7 +954,7 @@ fn test_a_callers_limits_set_the_caps() {
             "{:?}",
             run.outcome.result
         );
-        views.insert(
+        views.insert_case(
             format!("TIMESTAMP under no limits, gas limit {gas_limit}"),
             OutcomeView::new(&run.outcome),
         );
@@ -981,19 +986,22 @@ fn test_the_default_limits_detain() {
         let run = run_under(limits, &timestamp);
         assert!(run.detains);
         assert_eq!(run.limit, Some(2 + BLOCK_ENV_ACCESS_COMPUTE_GAS), "TIMESTAMP was the first");
-        views.insert(format!("{name}: TIMESTAMP"), OutcomeView::new(&run.outcome));
+        views.insert_case(format!("{name}: TIMESTAMP"), OutcomeView::new(&run.outcome));
         let run = run_under(limits, &reads_oracle);
         let limit = run.limit.unwrap();
         assert!(
             (ORACLE_ACCESS_COMPUTE_GAS..ORACLE_ACCESS_COMPUTE_GAS + 100_000).contains(&limit),
             "{limit}"
         );
-        views.insert(format!("{name}: the Oracle"), OutcomeView::new(&run.outcome));
+        views.insert_case(format!("{name}: the Oracle"), OutcomeView::new(&run.outcome));
 
         let run = run_under(EvmTxRuntimeLimits::no_limits(), &timestamp);
         assert!(!run.detains);
         assert_eq!(run.limit, None);
-        views.insert(format!("{name}: TIMESTAMP under no limits"), OutcomeView::new(&run.outcome));
+        views.insert_case(
+            format!("{name}: TIMESTAMP under no limits"),
+            OutcomeView::new(&run.outcome),
+        );
     }
     crate::assert_sorted_json_snapshot!(&views);
 }
@@ -1017,7 +1025,7 @@ fn test_spending_exactly_the_cap_completes() {
         );
         assert!(run.outcome.result.is_success(), "{:?}", run.outcome.result);
         assert_eq!(run.outcome.gas.regular, intrinsic(gas_limit) + spent);
-        views.insert(
+        views.insert_case(
             format!("exactly the cap, gas limit {gas_limit}"),
             OutcomeView::new(&run.outcome),
         );
@@ -1031,7 +1039,7 @@ fn test_spending_exactly_the_cap_completes() {
         );
         let left = Charges::default().then(&[2]).burn(more).left(CAP);
         assert_stopped(&run, intrinsic(gas_limit), left);
-        views.insert(
+        views.insert_case(
             format!("one round more, gas limit {gas_limit}"),
             OutcomeView::new(&run.outcome),
         );
@@ -1062,7 +1070,7 @@ fn test_a_stipend_is_not_compute() {
         // Either way the reading frame's `POP` and its loop come after the read.
         let left = Charges::default().then(&[2]).spin(0).left(CAP);
         assert_stopped(&run, intrinsic(gas_limit), left);
-        views.insert(
+        views.insert_case(
             format!("a value-carrying child, gas limit {gas_limit}"),
             OutcomeView::new(&run.outcome),
         );
@@ -1075,7 +1083,7 @@ fn test_a_stipend_is_not_compute() {
         let run = execute(db, valued);
         let limit = assert_stopped(&run, intrinsic_of_a_value_call(gas_limit), left);
         assert_eq!(limit, CAP + 2, "TIMESTAMP was the first opcode");
-        views.insert(
+        views.insert_case(
             format!("a transaction carrying value, gas limit {gas_limit}"),
             OutcomeView::new(&run.outcome),
         );
@@ -1106,7 +1114,7 @@ fn test_a_call_that_reads_counts_from_what_its_caller_paid() {
             let run = execute(db, tx(CALLER, CONTRACT, gas_limit));
             assert!(run.outcome.result.is_success(), "value {value}: {:?}", run.outcome.result);
             assert_eq!(run.limit, Some(compute + CAP), "value {value}");
-            views.insert(
+            views.insert_case(
                 format!("value {value}, gas limit {gas_limit}"),
                 OutcomeView::new(&run.outcome),
             );
@@ -1144,7 +1152,7 @@ fn test_a_childs_read_caps_its_caller() {
         let left = Charges::default().then(&[2]).work(500, 0).then(&[2]).spin(0).left(CAP);
         let limit = assert_stopped(&run, intrinsic, left);
         assert!(limit < CAP + 100_000, "the child read near the start: {limit}");
-        views.insert(format!("gas limit {gas_limit}"), OutcomeView::new(&run.outcome));
+        views.insert_case(format!("gas limit {gas_limit}"), OutcomeView::new(&run.outcome));
     }
     crate::assert_sorted_json_snapshot!(&views);
 }
@@ -1182,7 +1190,7 @@ fn test_no_caller_resumes_after_the_stop() {
         // A caller that resumed would fail its first charge on the withheld part, before its
         // write, and report the same stop on the same bill: only its step shows it ran.
         assert_eq!(evm.inspector().last_frame, Some(CHILD), "the child ran the last step");
-        views.insert(format!("gas limit {gas_limit}"), OutcomeView::new(&run.outcome));
+        views.insert_case(format!("gas limit {gas_limit}"), OutcomeView::new(&run.outcome));
     }
     crate::assert_sorted_json_snapshot!(&views);
 }
@@ -1209,7 +1217,7 @@ fn test_the_stop_bills_the_same_above_and_below_the_execution_cap() {
             let reservoir = gas_limit.saturating_sub(TX_GAS_LIMIT_CAP).saturating_sub(body_history);
             assert_eq!(run.outcome.gas.reservoir_remaining, reservoir, "the reservoir came back");
             let gas = run.outcome.gas;
-            views.insert(format!("gas limit {gas_limit}"), OutcomeView::new(&run.outcome));
+            views.insert_case(format!("gas limit {gas_limit}"), OutcomeView::new(&run.outcome));
             (gas.gas_used, gas.regular, gas.state, gas.history)
         })
         .collect();
@@ -1234,8 +1242,7 @@ fn test_running_out_of_the_frames_own_gas_still_halts() {
     assert_eq!(run.outcome.result.gas().tx_gas_used(), 1_000_000, "a halt burns the gas");
     assert_eq!(run.outcome.limit_exceeded, None);
     assert!(run.limit.is_some(), "the read still set a limit");
-    let mut views =
-        BTreeMap::from([("less than the cap".to_owned(), OutcomeView::new(&run.outcome))]);
+    let mut views = by_case([("less than the cap".to_owned(), OutcomeView::new(&run.outcome))]);
 
     // A child given less than the limit leaves halts on its own, and its caller resumes.
     let child = spin(BytecodeBuilder::default());
@@ -1257,7 +1264,7 @@ fn test_running_out_of_the_frames_own_gas_still_halts() {
         let slot = run.outcome.state[&CONTRACT].storage.get(&U256::ZERO).unwrap();
         assert_eq!(slot.present_value, U256::ZERO, "the call failed: the child halted");
         assert!(slot.is_changed() || slot.original_value.is_zero());
-        views.insert(
+        views.insert_case(
             format!("a child given less than the limit leaves, gas limit {gas_limit}"),
             OutcomeView::new(&run.outcome),
         );
@@ -1300,7 +1307,7 @@ fn test_writes_after_a_read_stop_at_the_cap_or_run_out_of_their_own_gas() {
     assert!(matches!(run.outcome.result, ExecutionResult::Halt { .. }), "{:?}", run.outcome.result);
     assert_eq!(run.outcome.limit_exceeded, None);
     assert_eq!(run.outcome.result.gas().tx_gas_used(), gas_limit, "a halt burns the gas");
-    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+    crate::assert_sorted_json_snapshot!(&by_case([
         ("with a reservoir", OutcomeView::new(&with_a_reservoir.outcome)),
         ("without a reservoir", OutcomeView::new(&run.outcome)),
     ]));
@@ -1356,7 +1363,10 @@ fn test_a_failed_load_caps_nothing() {
             assert!(run.outcome.gas.regular > CAP, "{callee}: the caller computed past the cap");
             assert_eq!(run.limit, None, "{callee}");
             assert_eq!(run.accessed, VolatileDataAccess::empty(), "{callee}");
-            views.insert(format!("{name}, gas limit {gas_limit}"), OutcomeView::new(&run.outcome));
+            views.insert_case(
+                format!("{name}, gas limit {gas_limit}"),
+                OutcomeView::new(&run.outcome),
+            );
         }
     }
     crate::assert_sorted_json_snapshot!(&views);
@@ -1392,7 +1402,7 @@ fn test_an_inspectors_reads_are_not_the_transactions() {
         assert_eq!(run.limit, None, "disabled {disabled}");
         assert_eq!(run.accessed, VolatileDataAccess::empty(), "disabled {disabled}");
         assert!(run.detains, "a user's transaction is detained when it reads");
-        views.insert(
+        views.insert_case(
             format!("volatile access disabled: {disabled}"),
             OutcomeView::new(&run.outcome),
         );
@@ -1544,7 +1554,10 @@ fn test_a_refused_read_reverts_the_frame_and_charges_its_static_gas() {
                 assert_eq!(run.accessed, VolatileDataAccess::empty(), "{name}");
                 assert_eq!(run.limit, None, "{name}");
             }
-            views.insert(format!("{name}, gas limit {gas_limit}"), OutcomeView::new(&run.outcome));
+            views.insert_case(
+                format!("{name}, gas limit {gas_limit}"),
+                OutcomeView::new(&run.outcome),
+            );
         }
     }
     crate::assert_sorted_json_snapshot!(&summaries(&views));
@@ -1614,7 +1627,7 @@ fn test_the_switch_is_scoped_to_its_subtree() {
         other => panic!("{other:?}"),
     }
     assert_eq!(run.outcome.limit_exceeded, None, "a refusal is the frame's revert, not a stop");
-    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+    crate::assert_sorted_json_snapshot!(&by_case([
         ("off from the child", OutcomeView::new(&off_from_the_child.outcome)),
         ("off from the top", OutcomeView::new(&run.outcome)),
     ]));
@@ -1662,7 +1675,10 @@ fn test_an_interceptors_answer_does_not_lift_the_cap() {
         // memory of one word.
         let left = Charges::default().then(&[2_631, 2, 3, 3, 3, 100, 22_000]).spin(1).left(CAP);
         assert_stopped(&run, intrinsic, left);
-        views.insert(format!("the loop, gas limit {gas_limit}"), OutcomeView::new(&run.outcome));
+        views.insert_case(
+            format!("the loop, gas limit {gas_limit}"),
+            OutcomeView::new(&run.outcome),
+        );
 
         // The answer and the gas the caller holds after the call, read without the loop, after
         // the read and after a push in its place.
@@ -1691,7 +1707,7 @@ fn test_an_interceptors_answer_does_not_lift_the_cap() {
             assert!(run.outcome.result.is_success(), "{:?}", run.outcome.result);
             let output = run.outcome.result.output().unwrap().clone();
             let after = if first == TIMESTAMP { "the read" } else { "a push" };
-            views.insert(
+            views.insert_case(
                 format!("the answer after {after}, gas limit {gas_limit}"),
                 OutcomeView::new(&run.outcome),
             );
@@ -1726,7 +1742,7 @@ fn test_a_frames_return_hands_back_what_was_withheld() {
                 let run = execute(db, tx(CALLER, CONTRACT, gas_limit));
                 assert!(run.outcome.result.is_success(), "{name}: {:?}", run.outcome.result);
                 let column = if read == TIMESTAMP { "detained" } else { "plain" };
-                views.insert(
+                views.insert_case(
                     format!("{name}, {column}, gas limit {gas_limit}"),
                     OutcomeView::new(&run.outcome),
                 );
@@ -1774,7 +1790,7 @@ fn test_state_and_history_gas_are_not_compute() {
         assert!(gas.regular < CAP, "{gas:?}");
         let name = format!("state_and_history_gas_are_not_compute.{gas_limit}");
         let view = OutcomeView::new(&run.outcome);
-        sweeps.insert(format!("gas limit {gas_limit}"), slot_sweep(&name, &view, CONTRACT));
+        sweeps.insert_case(format!("gas limit {gas_limit}"), slot_sweep(&name, &view, CONTRACT));
     }
     crate::assert_sorted_json_snapshot!(&sweeps);
 }
@@ -1800,7 +1816,7 @@ fn test_gas_spilled_before_the_read_is_not_compute() {
         let limit = assert_stopped(&run, intrinsic(gas_limit), left);
         // Two pushes and a fresh slot's 22,100 of regular gas, a hundred times, then TIMESTAMP.
         assert_eq!(limit - CAP, 100 * (3 + 3 + 22_100) + 2, "{gas_limit}");
-        views.insert(format!("gas limit {gas_limit}"), OutcomeView::new(&run.outcome));
+        views.insert_case(format!("gas limit {gas_limit}"), OutcomeView::new(&run.outcome));
     }
     crate::assert_sorted_json_snapshot!(&views);
 }
@@ -1879,7 +1895,7 @@ fn test_the_most_compute_a_transaction_can_spend_bounds_the_caps() {
     let cap = MAX_TX_COMPUTE_GAS - 10_000;
     let run = run_under(cap, spinner);
     assert_eq!(assert_stopped(&run, intrinsic, Charges::default().spin(0).left(cap)), cap);
-    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+    crate::assert_sorted_json_snapshot!(&by_case([
         ("GAS under a cap at the most compute", OutcomeView::new(&answers.outcome)),
         ("a loop under a cap at the most compute", OutcomeView::new(&halts.outcome)),
         ("a loop under a cap 10,000 below the most compute", OutcomeView::new(&run.outcome)),

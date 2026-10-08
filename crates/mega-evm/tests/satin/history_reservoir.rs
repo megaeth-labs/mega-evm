@@ -32,7 +32,10 @@ use mega_evm::{
 };
 use revm::bytecode::opcode::{CALL, CREATE, GAS, POP, PUSH0, PUSH1, REVERT, STOP};
 
-use crate::common::{call, execute, runs_at_measurement_prices};
+use crate::{
+    cases::by_case,
+    common::{call, execute, runs_at_measurement_prices},
+};
 
 const CALLER: Address = address!("0000000000000000000000000000000000700000");
 const CALLEE: Address = address!("0000000000000000000000000000000000700001");
@@ -136,7 +139,7 @@ fn views(
     above: &MegaTransactionOutcome,
     below: &MegaTransactionOutcome,
 ) -> BTreeMap<&'static str, OutcomeView> {
-    BTreeMap::from([
+    by_case([
         ("above the cap", OutcomeView::new(above)),
         ("below the cap", OutcomeView::new(below)),
     ])

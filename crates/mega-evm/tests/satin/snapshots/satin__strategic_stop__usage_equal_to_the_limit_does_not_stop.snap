@@ -1,6 +1,6 @@
 ---
 source: crates/mega-evm/tests/satin/strategic_stop.rs
-expression: "&BTreeMap::from([(\"usage at the limit\", OutcomeView::new(&at_the_limit)),\n(\"usage at the frame budget\", OutcomeView::new(&at_the_budget)),\n(\"one byte over the limit\", OutcomeView::new(&result)),])"
+expression: "&by_case([(\"usage at the limit\", OutcomeView::new(&at_the_limit)),\n(\"usage at the frame budget\", OutcomeView::new(&at_the_budget)),\n(\"one byte over the limit\", OutcomeView::new(&result)),])"
 ---
 {
   "one byte over the limit": {

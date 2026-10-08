@@ -1,6 +1,6 @@
 ---
 source: crates/mega-evm/tests/satin/transfer_logs.rs
-expression: "&BTreeMap::from([(\"alone\", OutcomeView::new(&alone)),\n(\"first\", OutcomeView::new(&first)), (\"next\", OutcomeView::new(&next)),])"
+expression: "&by_case([(\"alone\", OutcomeView::new(&alone)),\n(\"first\", OutcomeView::new(&first)), (\"next\", OutcomeView::new(&next)),])"
 ---
 {
   "alone": {

@@ -1,6 +1,6 @@
 ---
 source: crates/mega-evm/tests/satin/intrinsic.rs
-expression: "&BTreeMap::from([(\"zeros\", OutcomeView::new(&zeros.outcome)),\n(\"non_zeros\", OutcomeView::new(&non_zeros.outcome)),])"
+expression: "&by_case([(\"zeros\", OutcomeView::new(&zeros.outcome)),\n(\"non_zeros\", OutcomeView::new(&non_zeros.outcome)),])"
 ---
 {
   "non_zeros": {

@@ -1,6 +1,6 @@
 ---
 source: crates/mega-evm/tests/satin/detention.rs
-expression: "&BTreeMap::from([(\"GAS under a cap at the most compute\",\nOutcomeView::new(&answers.outcome)),\n(\"a loop under a cap at the most compute\", OutcomeView::new(&halts.outcome)),\n(\"a loop under a cap 10,000 below the most compute\",\nOutcomeView::new(&run.outcome)),])"
+expression: "&by_case([(\"GAS under a cap at the most compute\",\nOutcomeView::new(&answers.outcome)),\n(\"a loop under a cap at the most compute\", OutcomeView::new(&halts.outcome)),\n(\"a loop under a cap 10,000 below the most compute\",\nOutcomeView::new(&run.outcome)),])"
 ---
 {
   "GAS under a cap at the most compute": {

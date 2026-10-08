@@ -27,7 +27,10 @@ use revm::{
     Database, Inspector,
 };
 
-use crate::common::{call, context, history, runs_at_measurement_prices, slot_state_gas};
+use crate::{
+    cases::{by_case, InsertCase},
+    common::{call, context, history, runs_at_measurement_prices, slot_state_gas},
+};
 
 const CALLER: Address = address!("0000000000000000000000000000000000200000");
 const A: Address = address!("00000000000000000000000000000000000000A0");
@@ -202,7 +205,7 @@ fn test_cap_crossed_at_depth_three_stops_the_transaction() {
                 "every frame returned the stop, the deepest first"
             );
         }
-        views.insert(format!("inspected: {inspect}"), OutcomeView::new(&result));
+        views.insert_case(format!("inspected: {inspect}"), OutcomeView::new(&result));
     }
     crate::assert_sorted_json_snapshot!(&views);
 }
@@ -272,7 +275,7 @@ fn test_stop_bills_only_what_ran() {
         light_result.result.gas().tx_gas_used(),
         "the code after the calls never ran"
     );
-    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+    crate::assert_sorted_json_snapshot!(&by_case([
         ("plain", OutcomeView::new(&plain)),
         ("inspected", OutcomeView::new(&inspected)),
         ("heavy callers", OutcomeView::new(&result)),
@@ -299,7 +302,7 @@ fn test_stop_refills_the_reservoir_at_any_gas_limit() {
     );
     assert_eq!(small_gas.tx_gas_used(), large_gas.tx_gas_used());
     assert_eq!(small_gas.total_gas_spent(), large_gas.total_gas_spent());
-    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+    crate::assert_sorted_json_snapshot!(&by_case([
         ("below the execution cap", OutcomeView::new(&small)),
         ("with a reservoir", OutcomeView::new(&large)),
     ]));
@@ -396,7 +399,7 @@ fn test_cap_crossed_before_the_first_frame_reverts_without_running() {
             mega_evm::WRITE_RECORD_SIZE * mega_evm::constants::COST_PER_HISTORY_BYTE,
         "the transfer that goes through creates the recipient, and keeps its write record"
     );
-    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+    crate::assert_sorted_json_snapshot!(&by_case([
         ("stopped before the first frame", OutcomeView::new(&result)),
         ("the transfer that goes through", OutcomeView::new(&transfer)),
     ]));
@@ -472,7 +475,7 @@ fn test_the_latch_does_not_outlive_its_transaction() {
     // it succeeded.
     let mut succeeds = |evm: &mut MegaEvm<MemoryDatabase, Probe>, name: &str, to: Address| {
         let outcome = evm.execute_transaction(call(CALLER, to, U256::ZERO, GAS_LIMIT)).unwrap();
-        views.insert(name.to_owned(), OutcomeView::new(&outcome));
+        views.insert_case(name.to_owned(), OutcomeView::new(&outcome));
         outcome.result.is_success()
     };
 
@@ -523,7 +526,7 @@ fn test_create_transaction_stopped_before_its_first_frame_bumps_the_nonce() {
         result.result.gas().reservoir_remaining(),
         1_000_000_000 - TX_GAS_LIMIT_CAP - create_body_history(init_code.len() as u64),
     );
-    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+    crate::assert_sorted_json_snapshot!(&by_case([
         ("below the execution cap", OutcomeView::new(&below)),
         ("with a reservoir", OutcomeView::new(&result)),
     ]));
@@ -545,7 +548,7 @@ fn test_usage_equal_to_the_limit_does_not_stop() {
     let at_the_budget = result;
     let (result, _) = run(db(), cap(119), call(CALLER, A, U256::ZERO, GAS_LIMIT));
     assert_stopped(&result.result, LimitKind::DataSize, mega_evm::TX_BODY_SIZE + 119);
-    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+    crate::assert_sorted_json_snapshot!(&by_case([
         ("usage at the limit", OutcomeView::new(&at_the_limit)),
         ("usage at the frame budget", OutcomeView::new(&at_the_budget)),
         ("one byte over the limit", OutcomeView::new(&result)),
@@ -632,7 +635,7 @@ fn test_stop_refills_the_state_gas_drawn_from_the_reservoir() {
     assert_stopped(&stopped.result, LimitKind::DataSize, mega_evm::TX_BODY_SIZE + 180);
     assert_eq!(stopped.gas.reservoir_remaining, reservoir, "refilled by the stop");
     assert_eq!(stopped.gas.state, 0);
-    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+    crate::assert_sorted_json_snapshot!(&by_case([
         ("plain", OutcomeView::new(&plain)),
         ("kept", OutcomeView::new(&kept)),
         ("stopped", OutcomeView::new(&stopped)),
@@ -664,7 +667,7 @@ fn test_outcome_reports_history_gas() {
     let stopped = execute_with(chain(), cap(180), charger(), GAS_LIMIT);
     assert_stopped(&stopped.result, LimitKind::DataSize, mega_evm::TX_BODY_SIZE + 180);
     assert_eq!(stopped.gas.history, body_history());
-    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+    crate::assert_sorted_json_snapshot!(&by_case([
         ("plain", OutcomeView::new(&plain)),
         ("kept", OutcomeView::new(&kept)),
         ("stopped", OutcomeView::new(&stopped)),

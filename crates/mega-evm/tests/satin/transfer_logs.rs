@@ -55,7 +55,10 @@ use revm::{
     Database, Inspector,
 };
 
-use crate::common::{account_state_gas, context};
+use crate::{
+    cases::{by_case, InsertCase},
+    common::{account_state_gas, context},
+};
 
 const CALLER: Address = address!("0000000000000000000000000000000000d00000");
 /// The contract a nested site's transaction calls: it calls [`ACTOR`] and returns what that
@@ -388,7 +391,7 @@ fn test_each_site_counts_its_transfer_log() {
             assert_eq!(outcome.gas.history_bytes, history_bytes, "{case}: no history bytes");
             assert_eq!(outcome.gas.history, history_gas(history_bytes).unwrap(), "{case}");
             assert_reservoir_paid(&case, gas_limit, &outcome);
-            outcomes.insert(case, OutcomeView::new(&outcome).summary());
+            outcomes.insert_case(case, OutcomeView::new(&outcome).summary());
         }
     }
     crate::assert_sorted_json_snapshot!(&outcomes);
@@ -447,10 +450,14 @@ fn test_each_site_stops_one_byte_short_of_its_frame_budget() {
                     Variant::TakenBack => unreachable!(),
                 }
                 assert_reservoir_paid(&case, gas_limit, &over);
-                outcomes
-                    .insert(format!("{case}: at the budget"), OutcomeView::new(&fits).summary());
-                outcomes
-                    .insert(format!("{case}: one byte short"), OutcomeView::new(&over).summary());
+                outcomes.insert_case(
+                    format!("{case}: at the budget"),
+                    OutcomeView::new(&fits).summary(),
+                );
+                outcomes.insert_case(
+                    format!("{case}: one byte short"),
+                    OutcomeView::new(&over).summary(),
+                );
             }
         }
     }
@@ -506,10 +513,12 @@ fn test_each_site_stops_one_byte_short_of_the_transaction_limit() {
                 if site.depth() == 0 {
                     let (fits, _, _) = run(0);
                     assert!(fits.result.is_success(), "{case}: at the limit: {:?}", fits.result);
-                    outcomes
-                        .insert(format!("{case}: at the limit"), OutcomeView::new(&fits).summary());
+                    outcomes.insert_case(
+                        format!("{case}: at the limit"),
+                        OutcomeView::new(&fits).summary(),
+                    );
                 }
-                outcomes.insert(
+                outcomes.insert_case(
                     format!("{case}: one byte short"),
                     OutcomeView::new(&outcome).summary(),
                 );
@@ -542,7 +551,7 @@ fn test_a_failure_takes_each_sites_transfer_log_back() {
             }
             assert_eq!(balance(&outcome, site.recipient()), U256::ZERO, "{case}");
             assert_reservoir_paid(&case, gas_limit, &outcome);
-            outcomes.insert(case, OutcomeView::new(&outcome).summary());
+            outcomes.insert_case(case, OutcomeView::new(&outcome).summary());
         }
     }
     crate::assert_sorted_json_snapshot!(&outcomes);
@@ -638,7 +647,7 @@ fn test_no_transfer_log_where_no_value_moves_to_another_account() {
             },
             "{name}",
         );
-        outcomes.insert(name, OutcomeView::new(&outcome));
+        outcomes.insert_case(name, OutcomeView::new(&outcome));
     }
     let burned = execute(
         db(actor().create(value, &burner)),
@@ -711,12 +720,13 @@ fn test_a_value_call_its_caller_cannot_fund_runs_as_without_a_limit() {
             assert_eq!(limited.result, free.result, "{name} under {limits:?}");
             assert_eq!(limited.usage, free.usage, "{name} under {limits:?}");
             assert_eq!(limited.gas, free.gas, "{name} under {limits:?}");
-            outcomes.insert(
+            outcomes.insert_case(
                 format!("{name}, unfunded, under {under}"),
                 OutcomeView::new(&limited).summary(),
             );
         }
-        outcomes.insert(format!("{name}, unfunded, no limit"), OutcomeView::new(&free).summary());
+        outcomes
+            .insert_case(format!("{name}, unfunded, no limit"), OutcomeView::new(&free).summary());
 
         let stopped = execute(db(VALUE, &actor), tx.clone(), tx_limit);
         assert_eq!(
@@ -729,7 +739,7 @@ fn test_a_value_call_its_caller_cannot_fund_runs_as_without_a_limit() {
             }),
             "{name}: funded to the last wei, the move is counted",
         );
-        outcomes.insert(
+        outcomes.insert_case(
             format!("{name}, funded, under the transaction limit"),
             OutcomeView::new(&stopped).summary(),
         );
@@ -740,7 +750,7 @@ fn test_a_value_call_its_caller_cannot_fund_runs_as_without_a_limit() {
             Some(&Bytes::from(stop.abi_encode())),
             "{name}: funded to the last wei, the move is stopped at its frame's budget",
         );
-        outcomes.insert(
+        outcomes.insert_case(
             format!("{name}, funded, under the frame budget"),
             OutcomeView::new(&stopped).summary(),
         );
@@ -799,7 +809,7 @@ fn test_a_value_call_its_caller_cannot_fund_is_charged_nothing() {
         "and paid the body's history alone"
     );
     assert_eq!(funded.gas.gas_used, gas_limit, "the funded call's halt used the whole gas limit");
-    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+    crate::assert_sorted_json_snapshot!(&by_case([
         ("refused", OutcomeView::new(&refused)),
         ("funded", OutcomeView::new(&funded)),
     ]));
@@ -868,7 +878,7 @@ fn test_a_start_answered_before_its_init_leaves_no_refusal_for_the_next() {
         Some(&Bytes::from(IMegaAccessControl::NonZeroTransfer::SELECTOR.to_vec())),
         "the system contract answers the call, not revm"
     );
-    let mut outcomes = BTreeMap::from([("the answered call", OutcomeView::new(&answer))]);
+    let mut outcomes = by_case([("the answered call", OutcomeView::new(&answer))]);
 
     let cases = [
         ("alone", delegate_to_writer(BytecodeBuilder::default())),
@@ -886,7 +896,7 @@ fn test_a_start_answered_before_its_init_leaves_no_refusal_for_the_next() {
         );
         assert_eq!(outcome.limit_exceeded, None, "{name}: a frame budget latches nothing");
         assert_eq!(outcome.usage, LimitUsage { data_size: body, write_records: 0 }, "{name}");
-        outcomes.insert(name, OutcomeView::new(&outcome));
+        outcomes.insert_case(name, OutcomeView::new(&outcome));
     }
     crate::assert_sorted_json_snapshot!(&outcomes);
 }
@@ -927,7 +937,7 @@ fn test_an_answer_a_transaction_leaves_is_not_taken_by_the_next() {
     );
     assert_eq!(next.usage, alone.usage);
     assert_eq!(next.result, alone.result);
-    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+    crate::assert_sorted_json_snapshot!(&by_case([
         ("alone", OutcomeView::new(&alone)),
         ("first", OutcomeView::new(&first)),
         ("next", OutcomeView::new(&next)),
@@ -1044,7 +1054,7 @@ fn test_a_creation_onto_an_occupied_address_is_counted_before_revm_refuses_it() 
         }),
     );
     assert!(!stopped.result.is_success(), "the stop reverts the transaction");
-    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+    crate::assert_sorted_json_snapshot!(&by_case([
         ("free", OutcomeView::new(&free)),
         ("stopped", OutcomeView::new(&stopped)),
     ]));
@@ -1093,7 +1103,7 @@ fn test_a_deposits_value_is_logged_and_its_mint_is_not() {
     );
     assert!(stopped.result.logs().is_empty());
     assert_eq!(balance(&stopped, DEPOSITOR), U256::from(1_000), "the mint stays, the value not");
-    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+    crate::assert_sorted_json_snapshot!(&by_case([
         ("valued", OutcomeView::new(&outcome)),
         ("minted", OutcomeView::new(&minted)),
         ("stopped", OutcomeView::new(&stopped)),
@@ -1127,8 +1137,8 @@ fn test_a_deposit_its_depositor_cannot_fund_fails_as_without_a_limit() {
         assert_eq!(limited.limit_exceeded, None, "{kind:?}");
         assert_eq!(limited.result, free.result, "{kind:?}");
         assert_eq!(limited.usage, free.usage, "{kind:?}");
-        outcomes.insert(format!("{name}, no limit"), OutcomeView::new(&free));
-        outcomes.insert(format!("{name}, under the limit"), OutcomeView::new(&limited));
+        outcomes.insert_case(format!("{name}, no limit"), OutcomeView::new(&free));
+        outcomes.insert_case(format!("{name}, under the limit"), OutcomeView::new(&limited));
     }
     crate::assert_sorted_json_snapshot!(&outcomes);
 }
@@ -1165,7 +1175,7 @@ fn test_a_creation_whose_nonce_cannot_be_bumped_keeps_nothing() {
         assert!(created_nothing(&outcome), "{limits:?}: {:?}", outcome.result);
         assert_eq!(outcome.limit_exceeded, None, "{limits:?}");
         assert_eq!(outcome.usage, LimitUsage { data_size: body, write_records: 0 }, "{limits:?}");
-        outcomes.insert(name, OutcomeView::new(&outcome));
+        outcomes.insert_case(name, OutcomeView::new(&outcome));
     }
 
     let db = MemoryDatabase::default()
@@ -1189,7 +1199,7 @@ fn test_a_creation_whose_nonce_cannot_be_bumped_keeps_nothing() {
     assert_eq!(outcome.usage, LimitUsage { data_size: body, write_records: 0 });
     assert_eq!(outcome.gas.history_bytes, body, "its body alone");
     assert_eq!(outcome.gas.history, history_gas(body).unwrap(), "and the history of its body");
-    outcomes.insert("a creation with the nonce check off", OutcomeView::new(&outcome));
+    outcomes.insert_case("a creation with the nonce check off", OutcomeView::new(&outcome));
     crate::assert_sorted_json_snapshot!(&outcomes);
 }
 
@@ -1220,7 +1230,7 @@ fn test_a_system_transactions_value_is_logged_and_no_limit_stops_it() {
 
     let tx = system(VALUE);
     let body = transaction_body_bytes(&tx);
-    let mut outcomes = BTreeMap::from([("valueless", OutcomeView::new(&quiet))]);
+    let mut outcomes = by_case([("valueless", OutcomeView::new(&quiet))]);
     for (name, limits) in [
         ("with value, no limit", EvmTxRuntimeLimits::no_limits()),
         (
@@ -1245,7 +1255,7 @@ fn test_a_system_transactions_value_is_logged_and_no_limit_stops_it() {
             },
             "counted all the same",
         );
-        outcomes.insert(name, OutcomeView::new(&outcome));
+        outcomes.insert_case(name, OutcomeView::new(&outcome));
     }
     crate::assert_sorted_json_snapshot!(&outcomes);
 }

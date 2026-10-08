@@ -1,6 +1,6 @@
 ---
 source: crates/mega-evm/tests/satin/failed_deposit.rs
-expression: "&BTreeMap::from([(\"a system deposit\", failed),\n(\"a user deposit\", OutcomeView::new(&outcome)),])"
+expression: "&by_case([(\"a system deposit\", failed),\n(\"a user deposit\", OutcomeView::new(&outcome)),])"
 ---
 {
   "a system deposit": {

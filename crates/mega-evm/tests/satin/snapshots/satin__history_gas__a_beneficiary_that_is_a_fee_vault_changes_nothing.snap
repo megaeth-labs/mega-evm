@@ -1,6 +1,6 @@
 ---
 source: crates/mega-evm/tests/satin/history_gas.rs
-expression: "&BTreeMap::from([(\"distinct\", OutcomeView::new(&distinct)),\n(\"a_vault\", OutcomeView::new(&a_vault)),])"
+expression: "&by_case([(\"distinct\", OutcomeView::new(&distinct)),\n(\"a_vault\", OutcomeView::new(&a_vault)),])"
 ---
 {
   "a_vault": {

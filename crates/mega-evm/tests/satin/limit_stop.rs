@@ -18,7 +18,10 @@ use revm::{
     context::result::ExecutionResult,
 };
 
-use crate::common::{call, context};
+use crate::{
+    cases::InsertCase,
+    common::{call, context},
+};
 
 const CALLER: Address = address!("0000000000000000000000000000000000570000");
 const A: Address = address!("0000000000000000000000000000000000570001");
@@ -58,7 +61,7 @@ fn test_a_contract_reverting_with_a_stops_bytes_is_no_stop() {
         assert_eq!(decode_mega_limit_exceeded(output), Some((kind, 7)), "{kind:?}: it decodes");
         assert_eq!(outcome.limit_exceeded, None, "{kind:?}");
         assert_eq!(outcome.limit_stop(), None, "{kind:?}: and it is no stop");
-        views.insert(format!("{kind:?}"), OutcomeView::new(&outcome));
+        views.insert_case(format!("{kind:?}"), OutcomeView::new(&outcome));
     }
     crate::assert_sorted_json_snapshot!(&views);
 }

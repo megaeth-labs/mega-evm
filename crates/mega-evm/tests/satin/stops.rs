@@ -54,6 +54,7 @@ use revm::{
 };
 
 use crate::{
+    cases::{by_case, InsertCase},
     common::{body_history, call, call_with_data, create, state_is_free},
     detention::{context, summaries, work, Charges, BENEFICIARY},
     withheld_gas::{priced, Runs, PRICED},
@@ -281,7 +282,7 @@ fn assert_cell(
         (0, intrinsic.gas.history, intrinsic.gas.reservoir_remaining),
         "{row}: a revert keeps nothing but the body",
     );
-    views.insert(format!("{row}, twin"), OutcomeView::new(&twin));
+    views.insert_case(format!("{row}, twin"), OutcomeView::new(&twin));
     // The regular gas the frames spent up to the crossing: for the compute limit, up to the read.
     let before_crossing = twin.gas.regular - intrinsic.gas.regular - TWIN_REVERT * frames;
 
@@ -351,7 +352,7 @@ fn assert_cell(
             LimitUsage { data_size: TX_BODY_SIZE, write_records: 0 },
             "{cell}: the body stays"
         );
-        views.insert(cell, OutcomeView::new(outcome));
+        views.insert_case(cell, OutcomeView::new(outcome));
     }
     // No instruction ran after the crossing: the bill above has no marker's write in it, and under
     // the inspector none ran at all. Every frame returned the stop, and the rewrites into successes
@@ -448,9 +449,9 @@ fn test_an_inspector_cannot_turn_a_stop_into_a_halt() {
                     assert_eq!(halted.limit_exceeded, plain.limit_exceeded, "{case}");
                     assert_eq!(halted.gas, plain.gas, "{case}");
                     assert_eq!(halted.usage, plain.usage, "{case}");
-                    views.insert(case, OutcomeView::new(&halted));
+                    views.insert_case(case, OutcomeView::new(&halted));
                 }
-                views.insert(
+                views.insert_case(
                     format!("{limit:?} at depth {crossing}, gas limit {gas_limit}, plain"),
                     OutcomeView::new(&plain),
                 );
@@ -618,8 +619,8 @@ fn test_a_revived_creation_reports_the_stop() {
                     }
                 };
                 assert_eq!(rewriter.ended, ended, "{case}: its creator returned the stop");
-                views.insert(format!("{case}, plain"), OutcomeView::new(&plain));
-                views.insert(format!("{case}, revived"), OutcomeView::new(&revived));
+                views.insert_case(format!("{case}, plain"), OutcomeView::new(&plain));
+                views.insert_case(format!("{case}, revived"), OutcomeView::new(&revived));
             }
         }
     }
@@ -722,8 +723,8 @@ fn test_a_callee_that_reads_the_timestamp_does_not_make_its_callers_burn_their_g
                     "{case}: the reservoir comes back"
                 );
                 assert!(outcome.result.logs().is_empty(), "{case}");
-                views.insert(format!("{case}, recorded"), OutcomeView::new(&recorded));
-                views.insert(case, OutcomeView::new(&outcome));
+                views.insert_case(format!("{case}, recorded"), OutcomeView::new(&recorded));
+                views.insert_case(case, OutcomeView::new(&outcome));
                 (outcome.gas.gas_used, outcome.gas.regular, outcome.gas.state, outcome.gas.history)
             })
             .collect();
@@ -864,7 +865,7 @@ fn test_a_frame_budget_crossed_three_calls_down_reverts_that_frame_alone() {
             assert!(!d_kept, "{case}: D kept a write");
             let loggers: Vec<_> = outcome.result.logs().iter().map(|log| log.address).collect();
             assert_eq!(loggers, [A, B, C], "{case}: D's log went with its frame");
-            views.insert(case, OutcomeView::new(&outcome));
+            views.insert_case(case, OutcomeView::new(&outcome));
         }
     }
     crate::assert_sorted_json_snapshot!(&summaries(&views));
@@ -936,8 +937,8 @@ fn test_a_halt_three_calls_down_burns_its_frames_gas_and_its_caller_resumes() {
                 (small_gas.state, small_gas.history, small_gas.reservoir_remaining),
                 "{case}: only regular gas burns"
             );
-            views.insert(format!("{case}, forwarded {small}"), OutcomeView::new(&small_run));
-            views.insert(format!("{case}, forwarded {large}"), OutcomeView::new(&large_run));
+            views.insert_case(format!("{case}, forwarded {small}"), OutcomeView::new(&small_run));
+            views.insert_case(format!("{case}, forwarded {large}"), OutcomeView::new(&large_run));
         }
     }
     crate::assert_sorted_json_snapshot!(&summaries(&views));
@@ -967,8 +968,10 @@ fn test_the_transactions_own_frame_that_halts_burns_its_regular_gas() {
         assert_eq!(outcome.limit_exceeded, None);
         assert_eq!(outcome.gas.reservoir_remaining, reservoir, "gas limit {gas_limit}");
         assert_eq!(outcome.gas.gas_used + reservoir, gas_limit, "the regular gas burned");
-        views
-            .insert(format!("a spinning frame, gas limit {gas_limit}"), OutcomeView::new(&outcome));
+        views.insert_case(
+            format!("a spinning frame, gas limit {gas_limit}"),
+            OutcomeView::new(&outcome),
+        );
     }
 
     // ECRECOVER below the cap, given one gas less than its price.
@@ -980,7 +983,7 @@ fn test_the_transactions_own_frame_that_halts_burns_its_regular_gas() {
     let paid = precompile_tx(ECRECOVER, Vec::new(), BELOW);
     assert!(paid.result.is_success(), "{:?}", paid.result);
     let before_frame = paid.gas.gas_used - 3_000;
-    views.insert("ECRECOVER paid its price".into(), OutcomeView::new(&paid));
+    views.insert_case("ECRECOVER paid its price".into(), OutcomeView::new(&paid));
     let short = precompile_tx(ECRECOVER, Vec::new(), before_frame + 2_999);
     let modexp_input = crate::withheld_gas::costly_modexp_input(512, 0);
     let past_the_cap = precompile_tx(MODEXP, modexp_input, ABOVE);
@@ -1005,7 +1008,7 @@ fn test_the_transactions_own_frame_that_halts_burns_its_regular_gas() {
             gas_limit,
             "the regular gas burned, the reservoir back"
         );
-        views.insert(name.into(), OutcomeView::new(&outcome));
+        views.insert_case(name.into(), OutcomeView::new(&outcome));
     }
     crate::assert_sorted_json_snapshot!(&views);
 }
@@ -1085,7 +1088,7 @@ fn assert_detention_stop(
     assert_eq!(outcome.gas.gas_used, intrinsic.gas.gas_used + used);
     assert_eq!(outcome.gas.reservoir_remaining, intrinsic.gas.reservoir_remaining);
     assert!(outcome.result.logs().is_empty());
-    let views = BTreeMap::from([
+    let views = by_case([
         ("plain".to_owned(), OutcomeView::new(&outcome)),
         ("recorded".to_owned(), OutcomeView::new(&recorded)),
     ]);
@@ -1294,7 +1297,7 @@ fn test_detained_gas_is_restored() {
         "what it ran and its body's history: {}",
         detained.gas.gas_used
     );
-    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+    crate::assert_sorted_json_snapshot!(&by_case([
         ("detained", OutcomeView::new(&detained)),
         ("undetained", OutcomeView::new(&undetained)),
     ]));
@@ -1414,7 +1417,7 @@ fn test_check_limit_priority_data_size_before_kv_update() {
             }),
             "data size {data_size}"
         );
-        views.insert(format!("data size {data_size}"), OutcomeView::new(&outcome));
+        views.insert_case(format!("data size {data_size}"), OutcomeView::new(&outcome));
     }
     crate::assert_sorted_json_snapshot!(&views);
 }
@@ -1450,7 +1453,7 @@ fn test_detention_plus_intrinsic_data_size_overflow() {
     );
     assert_eq!(stopped.limit_exceeded, Some(stop));
     assert_eq!(stopped.gas, within_limits.gas, "the intrinsic gas alone, the reservoir back");
-    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+    crate::assert_sorted_json_snapshot!(&by_case([
         ("within the limits", OutcomeView::new(&within_limits)),
         ("stopped", OutcomeView::new(&stopped)),
     ]));
@@ -1536,7 +1539,7 @@ fn test_a_call_revived_past_its_budget_hands_its_caller_nothing() {
     assert!(plain.result.is_success(), "{:?}", plain.result);
     assert_eq!((&outcome.result, &outcome.state), (&plain.result, &plain.state));
     assert_eq!((outcome.gas, outcome.usage), (plain.gas, plain.usage));
-    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+    crate::assert_sorted_json_snapshot!(&by_case([
         ("plain", OutcomeView::new(&plain)),
         ("rewritten", OutcomeView::new(&outcome)),
     ]));
@@ -1759,7 +1762,7 @@ fn assert_answered_cell(
             "{row}: the twin reverts: {:?}",
             twin.result
         );
-        views.insert(format!("{row}, twin"), OutcomeView::new(&twin));
+        views.insert_case(format!("{row}, twin"), OutcomeView::new(&twin));
         twin.gas.regular - intrinsic.gas.regular - TWIN_REVERT * 3
     };
 
@@ -1798,7 +1801,7 @@ fn assert_answered_cell(
             let allowance = CAP - to_the_answer(answered);
             assert_eq!(run.ran_on, [(allowance, false)], "{cell}: run on the allowance");
         }
-        views.insert(cell, OutcomeView::new(outcome));
+        views.insert_case(cell, OutcomeView::new(outcome));
     }
     assert_eq!(rewritten.outcome.result, plain.outcome.result, "{row}");
     assert_eq!(rewritten.outcome.gas, plain.outcome.gas, "{row}");

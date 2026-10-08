@@ -1,6 +1,6 @@
 ---
 source: crates/mega-evm/tests/satin/deposit_charge.rs
-expression: "&BTreeMap::from([(\"above the cap\", above), (\"below the cap\", below),])"
+expression: "&by_case([(\"above the cap\", above), (\"below the cap\", below),])"
 ---
 {
   "above the cap": {

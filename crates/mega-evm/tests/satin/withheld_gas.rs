@@ -53,6 +53,7 @@ use revm::{
 };
 
 use crate::{
+    cases::InsertCase,
     common::history,
     detention::{
         assert_stopped, burn, context, execute, fresh_write_spill, intrinsic, memory_cost, op,
@@ -112,8 +113,8 @@ fn assert_as_without_read(detained: &Run, plain: &Run, case: &str) {
 
 /// Puts the views of a detained run and of its plain twin into `views` under `case`.
 fn view_pair(views: &mut BTreeMap<String, OutcomeView>, case: &str, detained: &Run, plain: &Run) {
-    views.insert(format!("{case}, detained"), OutcomeView::new(&detained.outcome));
-    views.insert(format!("{case}, plain"), OutcomeView::new(&plain.outcome));
+    views.insert_case(format!("{case}, detained"), OutcomeView::new(&detained.outcome));
+    views.insert_case(format!("{case}, plain"), OutcomeView::new(&plain.outcome));
 }
 
 /// What `CONTRACT` holds in slot `index` after the transaction, if it wrote it.
@@ -696,7 +697,10 @@ fn test_the_stop_reports_its_compute_whatever_a_callee_burned() {
                 (4_990_000..=5_000_000).contains(&burned),
                 "{name}: the callee burned {burned}"
             );
-            views.insert(format!("{name}, gas limit {gas_limit}"), OutcomeView::new(&run.outcome));
+            views.insert_case(
+                format!("{name}, gas limit {gas_limit}"),
+                OutcomeView::new(&run.outcome),
+            );
         }
     }
     crate::assert_sorted_json_snapshot!(&views);
@@ -733,7 +737,7 @@ fn test_a_halt_burns_what_its_frame_had_when_it_halted() {
             Charges::default().then(&[2, 2, 2, 2, 2, 2, 3, 3, 2_600, callee, 2]).spin(0).left(CAP);
         let burned = run.outcome.gas.regular - intrinsic(gas_limit) - (limit - left);
         assert_eq!(burned, 5_000_000 - call.spent, "the callee burned what it had at the halt");
-        views.insert(format!("gas limit {gas_limit}"), OutcomeView::new(&run.outcome));
+        views.insert_case(format!("gas limit {gas_limit}"), OutcomeView::new(&run.outcome));
     }
     crate::assert_sorted_json_snapshot!(&views);
 }
@@ -939,11 +943,11 @@ fn test_a_call_that_reads_the_beneficiary_costs_what_a_warm_account_costs() {
                         plain.outcome.result.gas().tx_gas_used(),
                         "{case}"
                     );
-                    views.insert(
+                    views.insert_case(
                         format!("{case}, gas limit {gas_limit}, the beneficiary"),
                         OutcomeView::new(&read.outcome),
                     );
-                    views.insert(
+                    views.insert_case(
                         format!("{case}, gas limit {gas_limit}, a warm account"),
                         OutcomeView::new(&plain.outcome),
                     );
@@ -1127,7 +1131,7 @@ fn test_a_precompile_runs_on_the_allowance() {
         stopped(&past, CAP + 1);
         assert_eq!(past.ran_on, [(allowance, false)], "run on the allowance, computing nothing");
         assert_eq!(past.spent, 0, "the stop gives the precompile its whole forward back");
-        views.insert(
+        views.insert_case(
             format!("priced past every allowance, gas limit {gas_limit}"),
             OutcomeView::new(&past.run.outcome),
         );
@@ -1283,7 +1287,7 @@ fn test_a_precompile_priced_past_the_cap_computes_nothing() {
         assert_eq!(plain.spent, price);
         let intrinsic = plain.run.outcome.gas.regular - price;
         let exponent = format!("an exponent of {exponent_len} bytes");
-        views.insert(
+        views.insert_case(
             format!("{exponent}: a transaction to the replaced modexp"),
             OutcomeView::new(&plain.run.outcome),
         );
@@ -1298,7 +1302,7 @@ fn test_a_precompile_priced_past_the_cap_computes_nothing() {
             let allowance = CAP - charges_to_the_precompile(input.len(), None).total();
             assert_stopped(&called.run, intrinsic_with(&input, gas_limit), allowance);
             assert_eq!(called.ran_on, [(allowance, false)], "run on the allowance");
-            views.insert(
+            views.insert_case(
                 format!("{exponent}: the replaced modexp called, gas limit {gas_limit}"),
                 OutcomeView::new(&called.run.outcome),
             );
@@ -1339,7 +1343,7 @@ fn test_a_precompile_priced_past_the_cap_computes_nothing() {
             assert_eq!(sent.ran_on, [(CAP, false)], "run on the cap, computing nothing");
             assert_eq!(sent.spent, 0, "the stop gives the precompile its whole forward back");
             assert_stopped(&sent.run, intrinsic, CAP);
-            views.insert(
+            views.insert_case(
                 format!(
                     "{exponent}: a transaction from the beneficiary to the replaced modexp, gas \
                      limit {gas_limit}"
@@ -1400,7 +1404,7 @@ fn test_a_replaced_precompile_is_not_priced_from_the_built_in_set() {
         let allowance = CAP - charges_to_the_precompile(input.len(), Some(short)).total();
         assert_stopped(&replaced.run, intrinsic_with(&input, gas_limit), allowance);
         assert_eq!(replaced.ran_on, [(allowance, false)], "run on the allowance");
-        views.insert(
+        views.insert_case(
             format!("the replaced modexp, gas limit {gas_limit}"),
             OutcomeView::new(&replaced.run.outcome),
         );
@@ -1483,7 +1487,7 @@ fn test_a_nodes_own_precompile_keeps_the_clamp_a_priced_wrapper_does_not() {
         let allowance = 100_000 - charges_to_the_precompile(32, Some(120_000)).total();
         assert_stopped(&own, intrinsic_with(&own_input, gas_limit), allowance);
         assert_eq!(*runs.lock().unwrap(), [(allowance, false)], "run on the allowance");
-        views.insert(
+        views.insert_case(
             format!("a node's own precompile, gas limit {gas_limit}"),
             OutcomeView::new(&own.outcome),
         );
@@ -1707,11 +1711,11 @@ fn test_a_keyless_calls_charges_are_held_to_what_the_limit_leaves() {
             let inspected = run(caller, value, data, cap, true);
             assert_eq!(inspected.outcome.result, plain.outcome.result, "{caller} under {cap}");
             assert_eq!(inspected.outcome.gas, plain.outcome.gas, "{caller} under {cap}");
-            views.insert(
+            views.insert_case(
                 format!("{case}, plain, gas limit {gas_limit}"),
                 OutcomeView::new(&plain.outcome),
             );
-            views.insert(
+            views.insert_case(
                 format!("{case}, inspected, gas limit {gas_limit}"),
                 OutcomeView::new(&inspected.outcome),
             );
@@ -1857,11 +1861,11 @@ fn test_a_refused_keyless_calls_spilled_state_gas_is_not_compute() {
         assert_eq!(detained.outcome.result, refused.outcome.result, "refused as without the read");
         assert_eq!(detained.outcome.gas, refused.outcome.gas);
         assert_eq!(detained.outcome.limit_exceeded, None);
-        views.insert(
+        views.insert_case(
             format!("from another sender under the spec's cap, gas limit {gas_limit}"),
             OutcomeView::new(&refused.outcome),
         );
-        views.insert(
+        views.insert_case(
             format!("from the beneficiary under the overhead and 1,000, gas limit {gas_limit}"),
             OutcomeView::new(&detained.outcome),
         );
@@ -1963,7 +1967,7 @@ fn test_an_answer_past_the_allowance_with_a_spill_is_billed_nothing_of_it() {
             );
             assert_eq!(run.outcome.gas.regular, intrinsic, "{gas_limit}, history {history}");
             let spill = if history { "history" } else { "state" };
-            views.insert(
+            views.insert_case(
                 format!("a {spill} gas spill, gas limit {gas_limit}"),
                 OutcomeView::new(&run.outcome),
             );

@@ -1,6 +1,6 @@
 ---
 source: crates/mega-evm/tests/satin/transfer_logs.rs
-expression: "&BTreeMap::from([(\"free\", OutcomeView::new(&free)),\n(\"stopped\", OutcomeView::new(&stopped)),])"
+expression: "&by_case([(\"free\", OutcomeView::new(&free)),\n(\"stopped\", OutcomeView::new(&stopped)),])"
 ---
 {
   "free": {

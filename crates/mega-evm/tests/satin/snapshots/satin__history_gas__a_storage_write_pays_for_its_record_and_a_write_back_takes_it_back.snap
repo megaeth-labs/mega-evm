@@ -1,6 +1,6 @@
 ---
 source: crates/mega-evm/tests/satin/history_gas.rs
-expression: "&BTreeMap::from([(\"one\", OutcomeView::new(&one)),\n(\"three\", OutcomeView::new(&three)),\n(\"rewritten\", OutcomeView::new(&rewritten)),\n(\"restored\", OutcomeView::new(&restored)),])"
+expression: "&by_case([(\"one\", OutcomeView::new(&one)),\n(\"three\", OutcomeView::new(&three)),\n(\"rewritten\", OutcomeView::new(&rewritten)),\n(\"restored\", OutcomeView::new(&restored)),])"
 ---
 {
   "one": {

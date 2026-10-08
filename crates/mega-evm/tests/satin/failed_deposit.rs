@@ -7,7 +7,6 @@
 //! machine as they have for any other transaction that halts.
 
 use core::convert::Infallible;
-use std::collections::BTreeMap;
 
 use alloy_op_evm::OpTx;
 use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
@@ -26,7 +25,10 @@ use revm::{
     context::{result::ExecutionResult, TxEnv},
 };
 
-use crate::common::{block, call, context};
+use crate::{
+    cases::by_case,
+    common::{block, call, context},
+};
 
 const CALLER: Address = address!("0000000000000000000000000000000000f00000");
 const CALLEE: Address = address!("0000000000000000000000000000000000f00001");
@@ -89,7 +91,7 @@ fn test_a_failed_deposit_reports_the_halt_and_not_the_stop_its_body_latched() {
         }),
         "the body crossed the data-size limit",
     );
-    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+    crate::assert_sorted_json_snapshot!(&by_case([
         ("a system deposit", failed),
         ("a user deposit", OutcomeView::new(&outcome)),
     ]));
@@ -179,7 +181,7 @@ fn test_a_failed_deposit_keeps_the_hints_it_forwarded() {
     );
     assert_eq!(hints, 1);
     assert_eq!(outcome.usage, kept, "an ordinary transaction that halts keeps the same bytes");
-    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+    crate::assert_sorted_json_snapshot!(&by_case([
         ("a deposit", failed),
         ("an ordinary transaction", OutcomeView::new(&outcome)),
     ]));

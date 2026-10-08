@@ -1,6 +1,6 @@
 ---
 source: crates/mega-evm/tests/satin/stops.rs
-expression: "&BTreeMap::from([(\"within the limits\", OutcomeView::new(&within_limits)),\n(\"stopped\", OutcomeView::new(&stopped)),])"
+expression: "&by_case([(\"within the limits\", OutcomeView::new(&within_limits)),\n(\"stopped\", OutcomeView::new(&stopped)),])"
 ---
 {
   "stopped": {

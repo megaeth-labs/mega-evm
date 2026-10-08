@@ -38,7 +38,10 @@ use revm::{
     Database, Inspector,
 };
 
-use crate::common::{call, context, history_is_free, state_is_free};
+use crate::{
+    cases::by_case,
+    common::{call, context, history_is_free, state_is_free},
+};
 
 const CALLER: Address = address!("0000000000000000000000000000000000a00000");
 /// Calls `B` with a chosen gas, keeps what `B` answers in slot 1, then writes slot 0.
@@ -249,7 +252,7 @@ fn views(
     stopped: &MegaTransactionOutcome,
     ran_out: &MegaTransactionOutcome,
 ) -> BTreeMap<&'static str, OutcomeView> {
-    BTreeMap::from([
+    by_case([
         ("no limit, one gas short", OutcomeView::new(short)),
         ("under the limit, exactly enough", OutcomeView::new(stopped)),
         ("under the limit, one gas short", OutcomeView::new(ran_out)),
@@ -384,7 +387,7 @@ fn test_a_creation_that_cannot_pay_its_history_runs_out_of_gas_under_the_state_g
 fn test_a_creation_that_cannot_pay_for_its_code_runs_out_of_gas_under_the_data_size_limit() {
     let above = assert_data_size_limit_stands_aside(Setup::Satin(ABOVE_CAP));
     let below = assert_data_size_limit_stands_aside(Setup::Satin(BELOW_CAP));
-    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+    crate::assert_sorted_json_snapshot!(&by_case([
         ("above the cap", above),
         ("below the cap", below),
     ]));

@@ -1,6 +1,6 @@
 ---
 source: crates/mega-evm/tests/satin/history_exemption.rs
-expression: "&BTreeMap::from([(\"exempt\", OutcomeView::new(&exempt)),\n(\"paying\", OutcomeView::new(&paying)),])"
+expression: "&by_case([(\"exempt\", OutcomeView::new(&exempt)),\n(\"paying\", OutcomeView::new(&paying)),])"
 ---
 {
   "exempt": {

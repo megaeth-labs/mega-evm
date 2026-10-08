@@ -1,6 +1,6 @@
 ---
 source: crates/mega-evm/tests/satin/stops.rs
-expression: "&BTreeMap::from([(\"plain\", OutcomeView::new(&plain)),\n(\"rewritten\", OutcomeView::new(&outcome)),])"
+expression: "&by_case([(\"plain\", OutcomeView::new(&plain)),\n(\"rewritten\", OutcomeView::new(&outcome)),])"
 ---
 {
   "plain": {

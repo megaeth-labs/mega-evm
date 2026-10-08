@@ -1,6 +1,6 @@
 ---
 source: crates/mega-evm/tests/satin/detention.rs
-expression: "&BTreeMap::from([(\"off from the child\",\nOutcomeView::new(&off_from_the_child.outcome)),\n(\"off from the top\", OutcomeView::new(&run.outcome)),])"
+expression: "&by_case([(\"off from the child\",\nOutcomeView::new(&off_from_the_child.outcome)),\n(\"off from the top\", OutcomeView::new(&run.outcome)),])"
 ---
 {
   "off from the child": {

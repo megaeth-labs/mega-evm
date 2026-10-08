@@ -1,6 +1,6 @@
 ---
 source: crates/mega-evm/tests/satin/history_gas.rs
-expression: "&BTreeMap::from([(\"free\", OutcomeView::new(&free)),\n(\"paid\", OutcomeView::new(&paid)),])"
+expression: "&by_case([(\"free\", OutcomeView::new(&free)),\n(\"paid\", OutcomeView::new(&paid)),])"
 ---
 {
   "free": {
