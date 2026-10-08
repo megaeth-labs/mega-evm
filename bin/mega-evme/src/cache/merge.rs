@@ -542,26 +542,75 @@ pub(crate) fn write_envelope_atomic(path: &Path, doc: &EnvelopeDoc) -> Result<()
     })
 }
 
-/// Temp-file + rename write.
-pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+/// Whether an atomic write may replace a file already at its destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WriteMode {
+    /// Replace whatever is at the destination.
+    Replace,
+    /// Refuse to replace an existing file: the rename itself fails, so a file
+    /// that appears concurrently is never clobbered either.
+    NoClobber,
+}
+
+/// The stage of an atomic write that failed.
+///
+/// Typed by stage so each caller keeps its own diagnostic for every one.
+#[derive(Debug)]
+pub(crate) enum AtomicWriteError {
+    /// The temporary file could not be created in `dir`.
+    Create {
+        /// Directory the temporary file was to be created in.
+        dir: PathBuf,
+        /// Why it could not be.
+        source: std::io::Error,
+    },
+    /// Writing the bytes failed.
+    Write(std::io::Error),
+    /// Flushing the bytes failed.
+    Flush(std::io::Error),
+    /// Syncing the file to disk failed.
+    Sync(std::io::Error),
+    /// The temporary file could not be renamed into place; under
+    /// [`WriteMode::NoClobber`], also because the destination exists.
+    Persist(std::io::Error),
+}
+
+/// Write `bytes` to `path` through a temporary file in the same directory,
+/// synced to disk and then renamed into place.
+pub(crate) fn write_atomic(
+    path: &Path,
+    bytes: &[u8],
+    mode: WriteMode,
+) -> std::result::Result<(), AtomicWriteError> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(|e| {
-        std::io::Error::other(format!("failed to create temp file in {}: {e}", dir.display()))
-    })?;
-    tmp.write_all(bytes)?;
-    tmp.flush()?;
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)
+        .map_err(|source| AtomicWriteError::Create { dir: dir.to_path_buf(), source })?;
+    tmp.write_all(bytes).map_err(AtomicWriteError::Write)?;
+    tmp.flush().map_err(AtomicWriteError::Flush)?;
     // flush() only clears the userspace buffer. Without sync_all() a crash
     // between write and rename can publish a truncated file under the target
     // name — the rename is atomic, the contents are not.
-    tmp.as_file().sync_all()?;
-    tmp.persist(path).map_err(|e| {
-        std::io::Error::other(format!(
-            "failed to rename temp file into {}: {}",
+    tmp.as_file().sync_all().map_err(AtomicWriteError::Sync)?;
+    let persisted = match mode {
+        WriteMode::Replace => tmp.persist(path),
+        WriteMode::NoClobber => tmp.persist_noclobber(path),
+    };
+    persisted.map(drop).map_err(|e| AtomicWriteError::Persist(e.error))
+}
+
+/// Temp-file + rename write that replaces the destination.
+pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic(path, bytes, WriteMode::Replace).map_err(|e| match e {
+        AtomicWriteError::Create { dir, source } => std::io::Error::other(format!(
+            "failed to create temp file in {}: {source}",
+            dir.display()
+        )),
+        AtomicWriteError::Write(e) | AtomicWriteError::Flush(e) | AtomicWriteError::Sync(e) => e,
+        AtomicWriteError::Persist(e) => std::io::Error::other(format!(
+            "failed to rename temp file into {}: {e}",
             path.display(),
-            e.error,
-        ))
-    })?;
-    Ok(())
+        )),
+    })
 }
 
 /// Load a `cache merge` input, which must be an envelope.
@@ -655,6 +704,36 @@ mod tests {
         fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).expect("write");
 
         assert_eq!(load_cache_file(&path).expect("envelope loads"), doc);
+    }
+
+    /// `NoClobber` leaves an existing file alone and reports the rename stage;
+    /// `Replace` replaces it; a missing directory fails at creation.
+    #[test]
+    fn test_write_atomic_modes_and_stages() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("file.json");
+        fs::write(&path, "old").expect("write");
+
+        assert!(matches!(
+            write_atomic(&path, b"new", WriteMode::NoClobber),
+            Err(AtomicWriteError::Persist(_))
+        ));
+        assert_eq!(fs::read_to_string(&path).expect("read"), "old");
+
+        write_atomic(&path, b"new", WriteMode::Replace).expect("replace");
+        assert_eq!(fs::read_to_string(&path).expect("read"), "new");
+
+        let fresh = dir.path().join("fresh.json");
+        write_atomic(&fresh, b"fresh", WriteMode::NoClobber).expect("a new file is written");
+        assert_eq!(fs::read_to_string(&fresh).expect("read"), "fresh");
+
+        let missing = dir.path().join("missing").join("file.json");
+        match write_atomic(&missing, b"", WriteMode::Replace) {
+            Err(AtomicWriteError::Create { dir: at, .. }) => {
+                assert_eq!(at, dir.path().join("missing"));
+            }
+            other => panic!("a missing directory fails at creation: {other:?}"),
+        }
     }
 
     /// Each stage of reading an envelope reports its own failure, in order:

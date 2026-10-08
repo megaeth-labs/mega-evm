@@ -38,7 +38,10 @@ use state_test::{
 };
 
 use super::{ReplayError, Result};
-use crate::common::EvmeExternalEnvs;
+use crate::{
+    cache::{write_atomic, AtomicWriteError, WriteMode},
+    common::EvmeExternalEnvs,
+};
 
 /// Why [`build_draft`] refused to produce a fixture.
 ///
@@ -377,51 +380,32 @@ pub(crate) fn finalize_and_write(
     let json = serde_json::to_string_pretty(&suite)
         .map_err(|e| ReplayError::Other(format!("failed to serialize fixture: {e}")))?;
 
-    // Unique temp file in the target directory, then persist (or noclobber-persist)
-    // into `path`. A fixed sibling name would race two concurrent dumps; a unique
-    // name plus noclobber makes `--overwrite=false` safe at materialization time.
-    let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
-    let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(|e| {
-        ReplayError::Other(format!("failed to create temp fixture file in {}: {e}", dir.display()))
-    })?;
-    use std::io::Write;
-    tmp.write_all(json.as_bytes())
-        .map_err(|e| ReplayError::Other(format!("failed to write fixture temp file: {e}")))?;
-    tmp.flush()
-        .map_err(|e| ReplayError::Other(format!("failed to flush fixture temp file: {e}")))?;
-    // flush() only clears the userspace buffer; the rename below is atomic but
-    // the contents are not. A benchmark corpus that a crash left holding a
-    // truncated fixture would fail in a way that looks like a replay bug.
-    tmp.as_file()
-        .sync_all()
-        .map_err(|e| ReplayError::Other(format!("failed to sync fixture temp file: {e}")))?;
-    if overwrite {
-        tmp.persist(path).map_err(|e| {
-            ReplayError::Other(format!(
-                "failed to persist fixture to {}: {}",
-                path.display(),
-                e.error
-            ))
-        })?;
-    } else {
-        tmp.persist_noclobber(path).map_err(|e| {
-            // Target already present (or appeared between prep and publish): same
-            // refused-overwrite path the prep-time existence check uses.
-            if path.exists() {
-                ReplayError::Other(format!(
-                    "fixture already exists at {} (pass --overwrite to replace)",
-                    path.display()
-                ))
-            } else {
-                ReplayError::Other(format!(
-                    "failed to persist fixture to {}: {}",
-                    path.display(),
-                    e.error
-                ))
+    // Unique temp file in the target directory, synced and then renamed (or
+    // noclobber-renamed) into `path`. A fixed sibling name would race two
+    // concurrent dumps; a unique name plus noclobber makes `--overwrite=false`
+    // safe at materialization time. The sync matters too: a benchmark corpus that
+    // a crash left holding a truncated fixture would fail in a way that looks
+    // like a replay bug.
+    let mode = if overwrite { WriteMode::Replace } else { WriteMode::NoClobber };
+    write_atomic(path, json.as_bytes(), mode).map_err(|e| {
+        ReplayError::Other(match e {
+            AtomicWriteError::Create { dir, source } => {
+                format!("failed to create temp fixture file in {}: {source}", dir.display())
             }
-        })?;
-    }
-    Ok(())
+            AtomicWriteError::Write(e) => format!("failed to write fixture temp file: {e}"),
+            AtomicWriteError::Flush(e) => format!("failed to flush fixture temp file: {e}"),
+            AtomicWriteError::Sync(e) => format!("failed to sync fixture temp file: {e}"),
+            // Target already present (or appeared between prep and publish):
+            // same refused-overwrite path the prep-time existence check uses.
+            AtomicWriteError::Persist(_) if !overwrite && path.exists() => format!(
+                "fixture already exists at {} (pass --overwrite to replace)",
+                path.display()
+            ),
+            AtomicWriteError::Persist(e) => {
+                format!("failed to persist fixture to {}: {e}", path.display())
+            }
+        })
+    })
 }
 
 /// Read the pre-execution values of every account in the target transaction's
