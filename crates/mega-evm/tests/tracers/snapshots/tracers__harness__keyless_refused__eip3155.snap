@@ -1,0 +1,5 @@
+---
+source: crates/mega-evm/tests/tracers/harness.rs
+expression: trace
+---
+{"stateRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","output":"0xf4d678b8","gasUsed":"0x23d454","pass":false,"fork":"Osaka"}

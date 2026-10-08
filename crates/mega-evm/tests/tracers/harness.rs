@@ -1,14 +1,17 @@
-//! Run `MegaEvm` under `revm-inspectors` tracers and compare JSON against pinned goldens.
+//! Run `MegaEvm` under `revm-inspectors` tracers and compare their output with insta snapshots.
 //!
-//! Set `UPDATE_GOLDENS=1` to rewrite the files under `tests/tracers/goldens/`. The default
-//! path only compares, and never writes.
+//! The JSON views are sorted JSON snapshots and the EIP-3155 trace is a string snapshot, one file
+//! per scenario and view, under `tests/tracers/snapshots/`. A mismatch fails the test. Outside CI,
+//! insta also writes the new value beside the old one as a `.snap.new` file.
+//!
+//! Review a change with `cargo insta review`, which accepts or rejects each snapshot on its own.
+//! Where `cargo-insta` is not installed, `INSTA_UPDATE=always cargo test -p mega-evm --test
+//! tracers` rewrites them. The comparisons run only at the spec's byte prices.
 
 use std::{
     cell::RefCell,
     collections::BTreeSet,
-    fs,
     io::{self, Write},
-    path::{Path, PathBuf},
     rc::Rc,
 };
 
@@ -37,15 +40,11 @@ use revm_inspectors::tracing::{
     types::{CallTraceNode, CallTraceStep, TraceMemberOrder},
     DebugInspector, TracingInspector, TracingInspectorConfig,
 };
-use serde::Serialize;
 
 use crate::gas::Ledgers;
 
-/// Directory that holds the pinned JSON files, relative to this crate's manifest.
-const GOLDENS_DIR: &str = "tests/tracers/goldens";
-
-/// Environment variable that rewrites goldens instead of comparing them.
-const UPDATE_GOLDENS: &str = "UPDATE_GOLDENS";
+/// The note the snapshot comparison leaves when the byte prices are not the spec's.
+const SNAPSHOT_PRICE_GUARD: &str = "insta snapshots are pinned at the spec's byte prices";
 
 /// A block with room for any transaction these tests run.
 pub(crate) fn block() -> BlockEnv {
@@ -253,8 +252,8 @@ pub(crate) fn assert_log_index_counts_discarded(traced: &Traced, discarded_befor
             Some(receipt_index as u64 + discarded),
             "known shape: the call tracer's log index ({:?}) is the receipt's ({receipt_index}) \
              plus the {discarded} log(s) a failed frame discarded before it; a tracer that numbers \
-             kept logs only makes them equal: require the receipt's index here and regenerate the \
-             goldens with UPDATE_GOLDENS=1",
+             kept logs only makes them equal: require the receipt's index here and review the \
+             snapshots with `cargo insta review`",
             log.index,
         );
     }
@@ -280,62 +279,34 @@ pub(crate) fn eip3155_steps(traced: &Traced) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// Whether this process should rewrite goldens.
-pub(crate) fn update_goldens() -> bool {
-    matches!(std::env::var(UPDATE_GOLDENS), Ok(value) if value == "1")
-}
-
-/// The directory the goldens are pinned under.
-pub(crate) fn goldens_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join(GOLDENS_DIR)
-}
-
-fn golden_path(name: &str) -> PathBuf {
-    goldens_dir().join(name)
-}
-
-/// Serializes `value` as pretty JSON with a trailing newline and compares it byte-for-byte
-/// with the pinned file `name`. Rewrites the file when `UPDATE_GOLDENS=1`.
-pub(crate) fn assert_golden(name: &str, value: &impl Serialize) {
-    let json = format!("{}\n", serde_json::to_string_pretty(value).expect("json"));
-    assert_golden_text(name, &json);
-}
-
-/// Compares `text` byte-for-byte with the pinned file `name`. Rewrites the file when
-/// `UPDATE_GOLDENS=1`.
-pub(crate) fn assert_golden_text(name: &str, text: &str) {
-    let path = golden_path(name);
-    if update_goldens() {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("create goldens dir");
-        }
-        fs::write(&path, text).unwrap_or_else(|err| panic!("write {}: {err}", path.display()));
-        return;
+/// The EIP-3155 trace as a string snapshot. The JSON views go through the shared sorted-JSON
+/// snapshot, which carries the same price guard; this one repeats it, with the same note, because
+/// a line-oriented trace is not JSON.
+fn assert_eip3155_snapshot(name: &str, trace: &str) {
+    if mega_evm::active_satin_prices().is_constants() {
+        insta::assert_snapshot!(name, trace);
+    } else {
+        mega_evm::test_utils::note_price_guard(SNAPSHOT_PRICE_GUARD);
     }
-    let expected = fs::read_to_string(&path).unwrap_or_else(|err| {
-        panic!("missing golden {} ({err}); rerun with UPDATE_GOLDENS=1 to pin it", path.display())
-    });
-    assert_eq!(expected, text, "golden mismatch for {name}");
 }
 
-/// The files a scenario's directory holds, one per view [`pin_tracer_views`] pins.
-pub(crate) const VIEWS: [&str; 6] = [
-    "call.json",
-    "call_with_log.json",
-    "prestate.json",
-    "prestate_diff.json",
-    "struct_logs.json",
-    "eip3155.jsonl",
-];
-
-/// Pins every tracer view of `traced` under `scenario/`.
+/// Pins every tracer view of `traced` under `scenario`'s name: one snapshot per view.
+///
+/// The five JSON views are sorted JSON snapshots. The EIP-3155 trace is a string snapshot of its
+/// JSON lines. Both comparisons run only at the spec's byte prices.
 pub(crate) fn pin_tracer_views(scenario: &str, traced: &Traced) {
-    assert_golden(&format!("{scenario}/call.json"), &traced.call_frame(false));
-    assert_golden(&format!("{scenario}/call_with_log.json"), &traced.call_frame(true));
-    assert_golden(&format!("{scenario}/prestate.json"), &traced.prestate(false));
-    assert_golden(&format!("{scenario}/prestate_diff.json"), &traced.prestate(true));
-    assert_golden(&format!("{scenario}/struct_logs.json"), &traced.struct_logs());
-    assert_golden_text(&format!("{scenario}/eip3155.jsonl"), &traced.eip3155());
+    crate::assert_sorted_json_snapshot!(format!("{scenario}__call"), &traced.call_frame(false));
+    crate::assert_sorted_json_snapshot!(
+        format!("{scenario}__call_with_log"),
+        &traced.call_frame(true)
+    );
+    crate::assert_sorted_json_snapshot!(format!("{scenario}__prestate"), &traced.prestate(false));
+    crate::assert_sorted_json_snapshot!(
+        format!("{scenario}__prestate_diff"),
+        &traced.prestate(true)
+    );
+    crate::assert_sorted_json_snapshot!(format!("{scenario}__struct_logs"), &traced.struct_logs());
+    assert_eip3155_snapshot(&format!("{scenario}__eip3155"), &traced.eip3155());
 }
 
 /// The transaction is billed `expected`, ledger by ledger, under the expected floor, and its
@@ -641,8 +612,8 @@ pub(crate) fn assert_detention_step_reads_as_out_of_gas(traced: &Traced, crossin
         error,
         Some("Some(OutOfGas)"),
         "revm-inspectors renders a step's error as the Debug of an Option; a tracer that prints \
-         the status alone makes this fail: update the expected string and regenerate the \
-         detention goldens with UPDATE_GOLDENS=1"
+         the status alone makes this fail: update the expected string and review the detention \
+         snapshots with `cargo insta review`"
     );
     assert!(last.gas_cost > traced.outcome.gas.gas_used, "{shape}: the receipt bills none of it");
     let eip3155 = traced.eip3155();
@@ -677,15 +648,6 @@ pub(crate) fn assert_keyless_steps(traced: &Traced, expect_create: bool) {
     }
 }
 
-/// Spec byte prices are in effect. Measurement builds skip the exact JSON comparison.
-pub(crate) fn at_spec_prices() -> bool {
-    if mega_evm::active_satin_prices().is_constants() {
-        return true;
-    }
-    mega_evm::test_utils::note_price_guard("tracer goldens are pinned at the spec's byte prices");
-    false
-}
-
 /// Known limitation: the opcode tracer a node runs shows no step of a keyless deployment, though
 /// the creation ran its init code.
 ///
@@ -697,7 +659,7 @@ pub(crate) fn at_spec_prices() -> bool {
 ///
 /// A change on either side — the engine giving the call frame a step that leads to its child, or
 /// the builder walking a frame's children without one — makes this fail; that is the moment to
-/// require the creation's steps in the struct logs instead and regenerate the keyless goldens.
+/// require the creation's steps in the struct logs instead and review the keyless snapshots.
 pub(crate) fn assert_keyless_struct_logs_miss_the_creation(traced: &Traced) {
     let nodes = traced.inspector.traces().nodes();
     let creation_steps = nodes[1].trace.steps.len();
@@ -707,7 +669,7 @@ pub(crate) fn assert_keyless_struct_logs_miss_the_creation(traced: &Traced) {
         "known limitation lifted on the engine's side: the keyless call frame now runs \
          {call_steps} step(s), which may lead the struct-log builder to its creation; require the \
          creation's steps in the struct logs here instead of their absence, update \
-         `assert_keyless_steps`, and regenerate the keyless goldens with UPDATE_GOLDENS=1"
+         `assert_keyless_steps`, and review the keyless snapshots with `cargo insta review`"
     );
     assert!(creation_steps > 0, "the inspector recorded the creation's steps");
     let eip3155_steps = traced.eip3155().lines().filter(|line| line.contains("\"opName\"")).count();
@@ -717,8 +679,8 @@ pub(crate) fn assert_keyless_struct_logs_miss_the_creation(traced: &Traced) {
         struct_logs.is_empty(),
         "known limitation lifted: the struct logs of a keyless deployment now show {} step(s) of \
          its creation (the inspector recorded {creation_steps}); require them in \
-         `assert_keyless_struct_logs_miss_the_creation` instead of their absence, and regenerate \
-         the keyless goldens with UPDATE_GOLDENS=1",
+         `assert_keyless_struct_logs_miss_the_creation` instead of their absence, and review the \
+         keyless snapshots with `cargo insta review`",
         struct_logs.len()
     );
 }

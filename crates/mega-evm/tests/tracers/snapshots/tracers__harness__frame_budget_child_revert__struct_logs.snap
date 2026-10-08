@@ -1,0 +1,202 @@
+---
+source: crates/mega-evm/tests/tracers/harness.rs
+expression: "&traced.struct_logs()"
+---
+{
+  "failed": false,
+  "gas": 49819,
+  "returnValue": "0x",
+  "structLogs": [
+    {
+      "pc": 0,
+      "op": "PUSH0",
+      "gas": 1007567,
+      "gasCost": 2,
+      "depth": 1,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 1,
+      "op": "PUSH0",
+      "gas": 1007565,
+      "gasCost": 2,
+      "depth": 1,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 2,
+      "op": "PUSH0",
+      "gas": 1007563,
+      "gasCost": 2,
+      "depth": 1,
+      "stack": [
+        "0x0",
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "PUSH0",
+      "gas": 1007561,
+      "gasCost": 2,
+      "depth": 1,
+      "stack": [
+        "0x0",
+        "0x0",
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 4,
+      "op": "PUSH32",
+      "gas": 1007559,
+      "gasCost": 3,
+      "depth": 1,
+      "stack": [
+        "0x0",
+        "0x0",
+        "0x0",
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 37,
+      "op": "PUSH20",
+      "gas": 1007556,
+      "gasCost": 3,
+      "depth": 1,
+      "stack": [
+        "0x0",
+        "0x0",
+        "0x0",
+        "0x0",
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 58,
+      "op": "GAS",
+      "gas": 1007553,
+      "gasCost": 2,
+      "depth": 1,
+      "stack": [
+        "0x0",
+        "0x0",
+        "0x0",
+        "0x0",
+        "0x0",
+        "0x400003"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 59,
+      "op": "CALL",
+      "gas": 1007551,
+      "gasCost": 991849,
+      "depth": 1,
+      "stack": [
+        "0x0",
+        "0x0",
+        "0x0",
+        "0x0",
+        "0x0",
+        "0x400003",
+        "0xf5fbf"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 0,
+      "op": "PUSH1",
+      "gas": 989249,
+      "gasCost": 3,
+      "depth": 2,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 2,
+      "op": "PUSH0",
+      "gas": 989246,
+      "gasCost": 2,
+      "depth": 2,
+      "stack": [
+        "0xa6"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 3,
+      "op": "LOG0",
+      "gas": 989244,
+      "gasCost": 1721,
+      "depth": 2,
+      "stack": [
+        "0xa6",
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 60,
+      "op": "POP",
+      "gas": 1003225,
+      "gasCost": 2,
+      "depth": 1,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 61,
+      "op": "PUSH0",
+      "gas": 1003223,
+      "gasCost": 2,
+      "depth": 1,
+      "stack": [],
+      "refund": 0
+    },
+    {
+      "pc": 62,
+      "op": "PUSH0",
+      "gas": 1003221,
+      "gasCost": 2,
+      "depth": 1,
+      "stack": [
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 63,
+      "op": "LOG0",
+      "gas": 1003219,
+      "gasCost": 3191,
+      "depth": 1,
+      "stack": [
+        "0x0",
+        "0x0"
+      ],
+      "refund": 0
+    },
+    {
+      "pc": 64,
+      "op": "STOP",
+      "gas": 1000028,
+      "gasCost": 0,
+      "depth": 1,
+      "stack": [],
+      "refund": 0
+    }
+  ]
+}
