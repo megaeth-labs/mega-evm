@@ -31,7 +31,7 @@ use op_alloy_rpc_types::Transaction;
 
 use crate::{
     common::{
-        cfg_env, create_address, op_receipt_to_tx_receipt, parse_bucket_capacity,
+        cfg_env, create_address, external_envs_from, op_receipt_to_tx_receipt,
         print_execution_summary,
         print_execution_trace, print_receipt, BuildProviderOutput, EvmeExternalEnvs, EvmeOutcome,
         ExecutionSummary, ExternalEnvSnapshot, OpTxReceipt, OverriddenTx, RpcArgs, RpcCacheStore,
@@ -897,26 +897,21 @@ impl Cmd {
         pctx: &ProviderContext,
     ) -> Result<(EvmeExternalEnvs, Option<ExternalEnvSnapshot>)> {
         if self.rpc_args.replay_file.is_some() {
-            let mut envs = EvmeExternalEnvs::new();
-            if let Some(snapshot) = &pctx.external_env {
-                debug!(
-                    bucket_count = snapshot.bucket_capacities.len(),
-                    "Using bucket capacities from replay envelope",
-                );
-                for &(bucket_id, capacity) in &snapshot.bucket_capacities {
-                    envs = envs.with_bucket_capacity(bucket_id, capacity);
+            let capacities = match &pctx.external_env {
+                Some(snapshot) => {
+                    debug!(
+                        bucket_count = snapshot.bucket_capacities.len(),
+                        "Using bucket capacities from replay envelope",
+                    );
+                    snapshot.bucket_capacities.as_slice()
                 }
-            }
-            return Ok((envs, None));
+                None => &[],
+            };
+            return Ok((external_envs_from(capacities), None));
         }
 
         // Online / capture: parse bucket capacities once.
-        let parsed: Vec<(u32, u64)> = self
-            .ext_args
-            .bucket_capacity
-            .iter()
-            .map(|s| parse_bucket_capacity(s))
-            .collect::<std::result::Result<_, _>>()?;
+        let parsed = self.ext_args.parsed_bucket_capacities()?;
 
         // Determine the effective capacities: CLI values take precedence,
         // then the previous envelope's values (refresh without --bucket-capacity),
@@ -929,10 +924,7 @@ impl Cmd {
             vec![]
         };
 
-        let mut envs = EvmeExternalEnvs::new();
-        for &(id, cap) in &effective {
-            envs = envs.with_bucket_capacity(id, cap);
-        }
+        let envs = external_envs_from(&effective);
         debug!(
             bucket_count = effective.len(),
             from_cli = !self.ext_args.bucket_capacity.is_empty(),
@@ -1021,15 +1013,7 @@ impl Cmd {
         // hardfork config, which self-validation alone cannot catch.
         let fixture_inputs = match (self.dump_fixture.is_some(), receipt_evidence.as_ref()) {
             (true, Some(evidence)) => {
-                // Sort the accessed buckets/oracle slots so the dumped fixture is
-                // byte-reproducible: these come from hash-map iteration, whose order
-                // is otherwise non-deterministic across runs (noisy diffs, and an
-                // online dump would not byte-match an offline re-dump).
-                let mut bucket_capacities = external_envs.bucket_capacities();
-                bucket_capacities.sort_unstable();
-                let mut oracle_storage = external_envs.oracle_storage();
-                oracle_storage.sort_unstable();
-                let mega_env = MegaEnv { bucket_capacities, oracle_storage };
+                let mega_env = fixture::mega_env_snapshot(&external_envs);
                 // The same anchor the batch dump builds: gas, status, and the
                 // logs root of the receipt's consensus logs.
                 let anchor = fixture::anchor_from_receipt_facts(

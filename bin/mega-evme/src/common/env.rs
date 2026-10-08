@@ -143,19 +143,27 @@ pub struct ExtEnvArgs {
 }
 
 impl ExtEnvArgs {
+    /// Parses every `--bucket-capacity` value, in command-line order.
+    pub fn parsed_bucket_capacities(&self) -> Result<Vec<(u32, u64)>> {
+        self.bucket_capacity.iter().map(|s| parse_bucket_capacity(s)).collect()
+    }
+
     /// Creates [`EvmeExternalEnvs`].
     pub fn create_external_envs(&self) -> Result<EvmeExternalEnvs> {
-        let mut external_envs = EvmeExternalEnvs::new();
-
-        // Parse and configure bucket capacities
-        for bucket_capacity_str in &self.bucket_capacity {
-            let (bucket_id, capacity) = parse_bucket_capacity(bucket_capacity_str)?;
-            external_envs = external_envs.with_bucket_capacity(bucket_id, capacity);
-        }
+        let external_envs = external_envs_from(&self.parsed_bucket_capacities()?);
         debug!(external_envs = ?external_envs, "Evm EvmeExternalEnvs created");
 
         Ok(external_envs)
     }
+}
+
+/// Creates [`EvmeExternalEnvs`] holding the given `(bucket_id, capacity)` pairs.
+///
+/// Pairs are applied in order, so a later pair for the same bucket wins.
+pub fn external_envs_from(bucket_capacities: &[(u32, u64)]) -> EvmeExternalEnvs {
+    bucket_capacities.iter().fold(EvmeExternalEnvs::new(), |envs, &(bucket_id, capacity)| {
+        envs.with_bucket_capacity(bucket_id, capacity)
+    })
 }
 
 /// Environment configuration arguments (chain config, block env, SALT bucket capacity)

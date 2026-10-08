@@ -1126,14 +1126,11 @@ where
         BTreeMap::new()
     };
 
-    // Sorted once so every fixture of this block is byte-reproducible for the
-    // same megaEnv (hash-map iteration order is otherwise non-deterministic).
-    let fixture_dump = dump_dir.map(|dir| {
-        let mut bucket_capacities = external_envs.bucket_capacities();
-        bucket_capacities.sort_unstable();
-        let mut oracle_storage = external_envs.oracle_storage();
-        oracle_storage.sort_unstable();
-        FixtureDumpEnv { dir, overwrite, mega_env: MegaEnv { bucket_capacities, oracle_storage } }
+    // Snapshotted once, so every fixture of this block records the same megaEnv.
+    let fixture_dump = dump_dir.map(|dir| FixtureDumpEnv {
+        dir,
+        overwrite,
+        mega_env: fixture::mega_env_snapshot(&external_envs),
     });
 
     let hardforks = get_hardfork_config(chain_id);

@@ -38,6 +38,7 @@ use state_test::{
 };
 
 use super::{ReplayError, Result};
+use crate::common::EvmeExternalEnvs;
 
 /// Why [`build_draft`] refused to produce a fixture.
 ///
@@ -168,6 +169,20 @@ pub(crate) fn anchor_from_receipt_facts(facts: &super::verify::ReceiptFacts) -> 
         success: facts.status,
         logs_root: state_test::utils::log_rlp_hash(&facts.logs),
     }
+}
+
+/// Snapshot the `MegaETH` external environment a fixture records.
+///
+/// The accessed buckets and oracle slots are sorted so a dumped fixture is
+/// byte-reproducible: they come from hash-map iteration, whose order is
+/// otherwise non-deterministic across runs (noisy diffs, and an online dump
+/// would not byte-match an offline re-dump).
+pub(crate) fn mega_env_snapshot(external_envs: &EvmeExternalEnvs) -> MegaEnv {
+    let mut bucket_capacities = external_envs.bucket_capacities();
+    bucket_capacities.sort_unstable();
+    let mut oracle_storage = external_envs.oracle_storage();
+    oracle_storage.sort_unstable();
+    MegaEnv { bucket_capacities, oracle_storage }
 }
 
 /// A fixture built from a replay, awaiting its `post` expectation.
