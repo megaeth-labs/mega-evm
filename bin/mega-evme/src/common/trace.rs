@@ -10,7 +10,7 @@ use clap::{Parser, ValueEnum};
 use mega_evm::{
     revm::{
         context::{
-            result::{ExecutionResult, ResultAndState},
+            result::{EVMError, ExecutionResult, ResultAndState},
             ContextTr,
         },
         database::DatabaseRef,
@@ -248,9 +248,7 @@ impl TraceArgs {
             let mut inspector = self.create_inspector();
             let mut evm = MegaEvm::new(evm_context).with_inspector(&mut inspector);
 
-            let result_and_state = evm
-                .inspect_tx(tx)
-                .map_err(|e| EvmeError::ExecutionError(format!("EVM execution failed: {:?}", e)))?;
+            let result_and_state = evm.inspect_tx(tx).map_err(execution_failure)?;
             trace!(result_and_state = ?result_and_state, "Evm execution result and state");
 
             // Generate trace string based on tracer type
@@ -262,12 +260,44 @@ impl TraceArgs {
             info!("Evm executing without tracing");
             // Execute without tracing
             let mut evm = MegaEvm::new(evm_context);
-            let result_and_state = evm
-                .transact(tx)
-                .map_err(|e| EvmeError::ExecutionError(format!("EVM execution failed: {:?}", e)))?;
+            let result_and_state = evm.transact(tx).map_err(execution_failure)?;
             trace!(result_and_state = ?result_and_state, "Evm execution result and state");
 
             Ok((result_and_state.result, result_and_state.state, None))
+        }
+    }
+}
+
+/// The failure a run reports for an EVM execution that did not complete.
+///
+/// A failed database read is that read's own failure — against a fork, an RPC
+/// question the endpoint left unanswered — so it keeps its own class. Anything
+/// else the EVM rejected is an execution error.
+fn execution_failure<T: std::fmt::Debug>(error: EVMError<EvmeError, T>) -> EvmeError {
+    match error {
+        EVMError::Database(cause) => cause,
+        other => EvmeError::ExecutionError(format!("EVM execution failed: {other:?}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A failed database read keeps its class; any other EVM failure keeps the
+    /// execution-error text it always had.
+    #[test]
+    fn test_execution_failure_keeps_a_database_cause() {
+        let rpc = EvmeError::RpcError("Failed to fetch storage".to_string());
+        match execution_failure::<()>(EVMError::Database(rpc)) {
+            EvmeError::RpcError(message) => assert_eq!(message, "Failed to fetch storage"),
+            other => panic!("a database cause must propagate: {other:?}"),
+        }
+        match execution_failure::<()>(EVMError::Custom("boom".to_string())) {
+            EvmeError::ExecutionError(message) => {
+                assert_eq!(message, "EVM execution failed: Custom(\"boom\")")
+            }
+            other => panic!("any other failure is an execution error: {other:?}"),
         }
     }
 }

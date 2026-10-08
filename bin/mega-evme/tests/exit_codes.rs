@@ -703,3 +703,84 @@ fn test_overwrite_without_dump_fixture_dir_is_a_usage_error() {
         with_single_dump.stderr
     );
 }
+
+/// Code that reads storage slot 0 (`PUSH1 0; SLOAD`).
+const SLOAD_CODE: &str = "0x600054";
+
+/// A `run` or `tx` against a fork whose endpoint answers every account read but
+/// fails every storage read: setup succeeds, and the first storage read happens
+/// while the transaction executes.
+async fn storage_failing_fork() -> common::MockRpcServer {
+    let server = common::MockRpcServer::start().await;
+    server.respond_eth_chain_id(4326, 1).await;
+    server.respond_method_result("eth_getBalance", "0x0", 2).await;
+    server.respond_method_result("eth_getTransactionCount", "0x0", 2).await;
+    server.respond_method_result("eth_getCode", "0x", 2).await;
+    server.respond_jsonrpc_error(-32000, "storage unavailable", 3).await;
+    server
+}
+
+/// A storage read that fails while a forked `run` or `tx` executes is the
+/// endpoint leaving a question unanswered, so the run exits 3 with the read's
+/// own error rather than 1 as an execution failure — traced or not.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_execution_time_storage_read_failure_is_an_rpc_failure() {
+    let receiver = "0x00000000000000000000000000000000000000aa";
+    let code = alloy_primitives::hex::decode(SLOAD_CODE).expect("hex code");
+    let prestate = std::env::temp_dir()
+        .join(format!("mega_evme_exit_storage_prestate_{}.json", std::process::id()));
+    std::fs::write(
+        &prestate,
+        serde_json::json!({
+            receiver: {
+                "balance": "0x0",
+                "nonce": "0x0",
+                "code": SLOAD_CODE,
+                "codeHash": alloy_primitives::keccak256(&code),
+                "storage": {},
+            }
+        })
+        .to_string(),
+    )
+    .expect("write prestate");
+    let prestate = prestate.to_str().expect("utf-8 path").to_string();
+
+    for tracing in [false, true] {
+        let server = storage_failing_fork().await;
+        let uri = server.uri();
+        let fork = [
+            "--fork",
+            "--fork.block",
+            "1",
+            "--rpc",
+            uri.as_str(),
+            "--rpc.no-cache-file",
+            "--rpc.max-retries",
+            "0",
+            "--rpc.backoff-ms",
+            "1",
+        ];
+        let commands: [Vec<&str>; 2] = [
+            vec!["run", SLOAD_CODE],
+            vec!["tx", "--receiver", receiver, "--prestate", prestate.as_str()],
+        ];
+        for mut args in commands {
+            args.extend_from_slice(&fork);
+            if tracing {
+                args.push("--trace");
+            }
+            let run = run(&args);
+            assert_eq!(
+                run.code(),
+                3,
+                "{args:?}: a failed storage read exits 3.\nstderr: {}",
+                run.stderr
+            );
+            assert!(
+                run.stderr.starts_with("error: RPC error: Failed to fetch storage for "),
+                "{args:?}: the read's own error is reported.\nstderr: {}",
+                run.stderr
+            );
+        }
+    }
+}
