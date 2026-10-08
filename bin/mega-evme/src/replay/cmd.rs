@@ -27,7 +27,6 @@ use revm_inspectors::tracing::TracingInspector;
 use state_test::types::MegaEnv;
 use tracing::{debug, error, info, trace, warn};
 
-use alloy_network::ReceiptResponse;
 use op_alloy_rpc_types::Transaction;
 
 use crate::{
@@ -1033,17 +1032,11 @@ impl Cmd {
                 let mut oracle_storage = external_envs.oracle_storage();
                 oracle_storage.sort_unstable();
                 let mega_env = MegaEnv { bucket_capacities, oracle_storage };
-                let receipt = evidence.receipt();
-                // RLP-hash the receipt's logs with the same helper the state-test
-                // runner uses for `logsRoot`, so the dump can check the replay's logs
-                // against the chain (the rich RPC logs' `inner` is the consensus log).
-                let receipt_logs: Vec<_> =
-                    receipt.inner.logs().iter().map(|log| log.inner.clone()).collect();
-                let anchor = fixture::OnchainAnchor {
-                    gas_used: receipt.gas_used(),
-                    success: receipt.inner.status(),
-                    logs_root: state_test::utils::log_rlp_hash(&receipt_logs),
-                };
+                // The same anchor the batch dump builds: gas, status, and the
+                // logs root of the receipt's consensus logs.
+                let anchor = fixture::anchor_from_receipt_facts(
+                    &verify::ReceiptFacts::from_onchain(evidence.receipt()),
+                );
                 Some((mega_env, anchor))
             }
             _ => None,
