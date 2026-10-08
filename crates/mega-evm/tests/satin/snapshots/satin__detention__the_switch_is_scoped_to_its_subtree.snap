@@ -34,14 +34,7 @@ expression: "&BTreeMap::from([(\"off from the child\",\nOutcomeView::new(&off_fr
     "limit_stop": null,
     "oracle_reads": [],
     "accounts": {
-      "0x0000000000000000000000000000000000bef000": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
+      "0x0000000000000000000000000000000000bef000": "unchanged",
       "0x0000000000000000000000000000000000d00000": {
         "balance": "0x0",
         "nonce": 1,
@@ -50,46 +43,11 @@ expression: "&BTreeMap::from([(\"off from the child\",\nOutcomeView::new(&off_fr
         "selfdestructed": false,
         "storage": []
       },
-      "0x0000000000000000000000000000000000d00001": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc7434b278e04ed4fa98caab670455ad415265f4c52fff43f06cfc77c551db0e0",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
-      "0x0000000000000000000000000000000000d00002": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xa4bfdb3b7261b22f33be6d0e0176ef4ec5b783cf38cdd828b654c3c5ebed6c32",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
-      "0x4200000000000000000000000000000000000019": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
-      "0x420000000000000000000000000000000000001a": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
-      "0x420000000000000000000000000000000000001b": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      }
+      "0x0000000000000000000000000000000000d00001": "unchanged",
+      "0x0000000000000000000000000000000000d00002": "unchanged",
+      "0x4200000000000000000000000000000000000019": "unchanged",
+      "0x420000000000000000000000000000000000001a": "unchanged",
+      "0x420000000000000000000000000000000000001b": "unchanged"
     }
   },
   "off from the top": {
@@ -123,14 +81,7 @@ expression: "&BTreeMap::from([(\"off from the child\",\nOutcomeView::new(&off_fr
     "limit_stop": null,
     "oracle_reads": [],
     "accounts": {
-      "0x0000000000000000000000000000000000bef000": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
+      "0x0000000000000000000000000000000000bef000": "unchanged",
       "0x0000000000000000000000000000000000d00000": {
         "balance": "0x0",
         "nonce": 1,
@@ -139,30 +90,9 @@ expression: "&BTreeMap::from([(\"off from the child\",\nOutcomeView::new(&off_fr
         "selfdestructed": false,
         "storage": []
       },
-      "0x4200000000000000000000000000000000000019": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
-      "0x420000000000000000000000000000000000001a": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
-      "0x420000000000000000000000000000000000001b": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      }
+      "0x4200000000000000000000000000000000000019": "unchanged",
+      "0x420000000000000000000000000000000000001a": "unchanged",
+      "0x420000000000000000000000000000000000001b": "unchanged"
     }
   }
 }

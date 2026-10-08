@@ -34,14 +34,7 @@ expression: "&views"
     "limit_stop": null,
     "oracle_reads": [],
     "accounts": {
-      "0x0000000000000000000000000000000000bef000": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
+      "0x0000000000000000000000000000000000bef000": "unchanged",
       "0x0000000000000000000000000000000000d00000": {
         "balance": "0x0",
         "nonce": 1,
@@ -50,38 +43,10 @@ expression: "&views"
         "selfdestructed": false,
         "storage": []
       },
-      "0x0000000000000000000000000000000000d00001": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc7e55c2ebf20358b089f252b9b2b07bc8174e7d24ed009c4cf78899aba7e0658",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
-      "0x4200000000000000000000000000000000000019": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
-      "0x420000000000000000000000000000000000001a": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
-      "0x420000000000000000000000000000000000001b": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      }
+      "0x0000000000000000000000000000000000d00001": "unchanged",
+      "0x4200000000000000000000000000000000000019": "unchanged",
+      "0x420000000000000000000000000000000000001a": "unchanged",
+      "0x420000000000000000000000000000000000001b": "unchanged"
     }
   },
   "volatile access disabled: true": {
@@ -115,14 +80,7 @@ expression: "&views"
     "limit_stop": null,
     "oracle_reads": [],
     "accounts": {
-      "0x0000000000000000000000000000000000bef000": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
+      "0x0000000000000000000000000000000000bef000": "unchanged",
       "0x0000000000000000000000000000000000d00000": {
         "balance": "0x0",
         "nonce": 1,
@@ -131,38 +89,10 @@ expression: "&views"
         "selfdestructed": false,
         "storage": []
       },
-      "0x0000000000000000000000000000000000d00001": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc7e55c2ebf20358b089f252b9b2b07bc8174e7d24ed009c4cf78899aba7e0658",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
-      "0x4200000000000000000000000000000000000019": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
-      "0x420000000000000000000000000000000000001a": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
-      "0x420000000000000000000000000000000000001b": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      }
+      "0x0000000000000000000000000000000000d00001": "unchanged",
+      "0x4200000000000000000000000000000000000019": "unchanged",
+      "0x420000000000000000000000000000000000001a": "unchanged",
+      "0x420000000000000000000000000000000000001b": "unchanged"
     }
   }
 }

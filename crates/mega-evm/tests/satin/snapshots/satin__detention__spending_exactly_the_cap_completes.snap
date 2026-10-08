@@ -34,14 +34,7 @@ expression: "&views"
     "limit_stop": null,
     "oracle_reads": [],
     "accounts": {
-      "0x0000000000000000000000000000000000bef000": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
+      "0x0000000000000000000000000000000000bef000": "unchanged",
       "0x0000000000000000000000000000000000d00000": {
         "balance": "0x0",
         "nonce": 1,
@@ -50,38 +43,10 @@ expression: "&views"
         "selfdestructed": false,
         "storage": []
       },
-      "0x0000000000000000000000000000000000d00001": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xe3688a6a6ec668fd1abbec8e8e40dae6cc6d56f3a72c1f296614579b1b3a5eaa",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
-      "0x4200000000000000000000000000000000000019": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
-      "0x420000000000000000000000000000000000001a": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
-      "0x420000000000000000000000000000000000001b": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      }
+      "0x0000000000000000000000000000000000d00001": "unchanged",
+      "0x4200000000000000000000000000000000000019": "unchanged",
+      "0x420000000000000000000000000000000000001a": "unchanged",
+      "0x420000000000000000000000000000000000001b": "unchanged"
     }
   },
   "exactly the cap, gas limit 300000000": {
@@ -115,14 +80,7 @@ expression: "&views"
     "limit_stop": null,
     "oracle_reads": [],
     "accounts": {
-      "0x0000000000000000000000000000000000bef000": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
+      "0x0000000000000000000000000000000000bef000": "unchanged",
       "0x0000000000000000000000000000000000d00000": {
         "balance": "0x0",
         "nonce": 1,
@@ -131,38 +89,10 @@ expression: "&views"
         "selfdestructed": false,
         "storage": []
       },
-      "0x0000000000000000000000000000000000d00001": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xe3688a6a6ec668fd1abbec8e8e40dae6cc6d56f3a72c1f296614579b1b3a5eaa",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
-      "0x4200000000000000000000000000000000000019": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
-      "0x420000000000000000000000000000000000001a": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
-      "0x420000000000000000000000000000000000001b": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      }
+      "0x0000000000000000000000000000000000d00001": "unchanged",
+      "0x4200000000000000000000000000000000000019": "unchanged",
+      "0x420000000000000000000000000000000000001a": "unchanged",
+      "0x420000000000000000000000000000000000001b": "unchanged"
     }
   },
   "one round more, gas limit 100000000": {
@@ -200,14 +130,7 @@ expression: "&views"
     },
     "oracle_reads": [],
     "accounts": {
-      "0x0000000000000000000000000000000000bef000": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
+      "0x0000000000000000000000000000000000bef000": "unchanged",
       "0x0000000000000000000000000000000000d00000": {
         "balance": "0x0",
         "nonce": 1,
@@ -216,30 +139,9 @@ expression: "&views"
         "selfdestructed": false,
         "storage": []
       },
-      "0x4200000000000000000000000000000000000019": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
-      "0x420000000000000000000000000000000000001a": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
-      "0x420000000000000000000000000000000000001b": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      }
+      "0x4200000000000000000000000000000000000019": "unchanged",
+      "0x420000000000000000000000000000000000001a": "unchanged",
+      "0x420000000000000000000000000000000000001b": "unchanged"
     }
   },
   "one round more, gas limit 300000000": {
@@ -277,14 +179,7 @@ expression: "&views"
     },
     "oracle_reads": [],
     "accounts": {
-      "0x0000000000000000000000000000000000bef000": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
+      "0x0000000000000000000000000000000000bef000": "unchanged",
       "0x0000000000000000000000000000000000d00000": {
         "balance": "0x0",
         "nonce": 1,
@@ -293,30 +188,9 @@ expression: "&views"
         "selfdestructed": false,
         "storage": []
       },
-      "0x4200000000000000000000000000000000000019": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
-      "0x420000000000000000000000000000000000001a": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
-      "0x420000000000000000000000000000000000001b": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      }
+      "0x4200000000000000000000000000000000000019": "unchanged",
+      "0x420000000000000000000000000000000000001a": "unchanged",
+      "0x420000000000000000000000000000000000001b": "unchanged"
     }
   }
 }

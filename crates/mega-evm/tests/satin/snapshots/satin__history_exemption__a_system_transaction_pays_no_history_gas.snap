@@ -47,14 +47,7 @@ expression: "&OutcomeView::new(&outcome)"
         }
       ]
     },
-    "0x6342000000000000000000000000000000000006": {
-      "balance": "0x0",
-      "nonce": 0,
-      "code_hash": "0xabd7e8f1c8f0f9ca0346df585b65d9791a7e9ba5c431cc4eda5d2c2f1f5e9c43",
-      "created": false,
-      "selfdestructed": false,
-      "storage": []
-    },
+    "0x6342000000000000000000000000000000000006": "unchanged",
     "0xa887dcb9d5f39ef79272801d05abdf707cfbbd1d": {
       "balance": "0x0",
       "nonce": 1,

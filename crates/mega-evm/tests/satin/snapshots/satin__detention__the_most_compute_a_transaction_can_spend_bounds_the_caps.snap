@@ -34,14 +34,7 @@ expression: "&BTreeMap::from([(\"GAS under a cap at the most compute\",\nOutcome
     "limit_stop": null,
     "oracle_reads": [],
     "accounts": {
-      "0x0000000000000000000000000000000000bef000": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0x26dd295b186a8a2331b5e4e2852efce01bbbd29b1715fceec147598a0b7cfa43",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
+      "0x0000000000000000000000000000000000bef000": "unchanged",
       "0x0000000000000000000000000000000000d00003": {
         "balance": "0x1000000000000000",
         "nonce": 1,
@@ -50,30 +43,9 @@ expression: "&BTreeMap::from([(\"GAS under a cap at the most compute\",\nOutcome
         "selfdestructed": false,
         "storage": []
       },
-      "0x4200000000000000000000000000000000000019": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
-      "0x420000000000000000000000000000000000001a": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
-      "0x420000000000000000000000000000000000001b": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      }
+      "0x4200000000000000000000000000000000000019": "unchanged",
+      "0x420000000000000000000000000000000000001a": "unchanged",
+      "0x420000000000000000000000000000000000001b": "unchanged"
     }
   },
   "a loop under a cap 10,000 below the most compute": {
@@ -111,14 +83,7 @@ expression: "&BTreeMap::from([(\"GAS under a cap at the most compute\",\nOutcome
     },
     "oracle_reads": [],
     "accounts": {
-      "0x0000000000000000000000000000000000bef000": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0x1f34c42b12d7f03ae855136d811b0574dc27c4c009de66ae66fb8cece13c873a",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
+      "0x0000000000000000000000000000000000bef000": "unchanged",
       "0x0000000000000000000000000000000000d00003": {
         "balance": "0x1000000000000000",
         "nonce": 1,
@@ -127,30 +92,9 @@ expression: "&BTreeMap::from([(\"GAS under a cap at the most compute\",\nOutcome
         "selfdestructed": false,
         "storage": []
       },
-      "0x4200000000000000000000000000000000000019": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
-      "0x420000000000000000000000000000000000001a": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
-      "0x420000000000000000000000000000000000001b": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      }
+      "0x4200000000000000000000000000000000000019": "unchanged",
+      "0x420000000000000000000000000000000000001a": "unchanged",
+      "0x420000000000000000000000000000000000001b": "unchanged"
     }
   },
   "a loop under a cap at the most compute": {
@@ -184,14 +128,7 @@ expression: "&BTreeMap::from([(\"GAS under a cap at the most compute\",\nOutcome
     "limit_stop": null,
     "oracle_reads": [],
     "accounts": {
-      "0x0000000000000000000000000000000000bef000": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0x1f34c42b12d7f03ae855136d811b0574dc27c4c009de66ae66fb8cece13c873a",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
+      "0x0000000000000000000000000000000000bef000": "unchanged",
       "0x0000000000000000000000000000000000d00003": {
         "balance": "0x1000000000000000",
         "nonce": 1,
@@ -200,30 +137,9 @@ expression: "&BTreeMap::from([(\"GAS under a cap at the most compute\",\nOutcome
         "selfdestructed": false,
         "storage": []
       },
-      "0x4200000000000000000000000000000000000019": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
-      "0x420000000000000000000000000000000000001a": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
-      "0x420000000000000000000000000000000000001b": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      }
+      "0x4200000000000000000000000000000000000019": "unchanged",
+      "0x420000000000000000000000000000000000001a": "unchanged",
+      "0x420000000000000000000000000000000000001b": "unchanged"
     }
   }
 }

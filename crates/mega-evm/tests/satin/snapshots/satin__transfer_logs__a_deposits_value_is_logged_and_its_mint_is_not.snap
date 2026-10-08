@@ -34,14 +34,7 @@ expression: "&BTreeMap::from([(\"valued\", OutcomeView::new(&outcome)),\n(\"mint
     "limit_stop": null,
     "oracle_reads": [],
     "accounts": {
-      "0x0000000000000000000000000000000000d00003": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xbc36789e7a1e281436464229828f817d6612f7b477d66591ff96a9e064bcc98a",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
+      "0x0000000000000000000000000000000000d00003": "unchanged",
       "0x0000000000000000000000000000000000d000de": {
         "balance": "0x3e8",
         "nonce": 1,

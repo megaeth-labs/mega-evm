@@ -33,14 +33,7 @@ expression: "&view(funded(), with_calldata(1, 0x42))"
   "limit_stop": null,
   "oracle_reads": [],
   "accounts": {
-    "0x0000000000000000000000000000000000000000": {
-      "balance": "0x0",
-      "nonce": 0,
-      "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-      "created": false,
-      "selfdestructed": false,
-      "storage": []
-    },
+    "0x0000000000000000000000000000000000000000": "unchanged",
     "0x0000000000000000000000000000000000800000": {
       "balance": "0xde0b6b3a7640000",
       "nonce": 1,
@@ -49,37 +42,9 @@ expression: "&view(funded(), with_calldata(1, 0x42))"
       "selfdestructed": false,
       "storage": []
     },
-    "0x0000000000000000000000000000000000800001": {
-      "balance": "0x1",
-      "nonce": 0,
-      "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-      "created": false,
-      "selfdestructed": false,
-      "storage": []
-    },
-    "0x4200000000000000000000000000000000000019": {
-      "balance": "0x0",
-      "nonce": 0,
-      "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-      "created": false,
-      "selfdestructed": false,
-      "storage": []
-    },
-    "0x420000000000000000000000000000000000001a": {
-      "balance": "0x0",
-      "nonce": 0,
-      "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-      "created": false,
-      "selfdestructed": false,
-      "storage": []
-    },
-    "0x420000000000000000000000000000000000001b": {
-      "balance": "0x0",
-      "nonce": 0,
-      "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-      "created": false,
-      "selfdestructed": false,
-      "storage": []
-    }
+    "0x0000000000000000000000000000000000800001": "unchanged",
+    "0x4200000000000000000000000000000000000019": "unchanged",
+    "0x420000000000000000000000000000000000001a": "unchanged",
+    "0x420000000000000000000000000000000000001b": "unchanged"
   }
 }

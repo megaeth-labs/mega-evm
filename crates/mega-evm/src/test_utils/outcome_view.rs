@@ -4,7 +4,9 @@
 //! every part of it serializes. [`OutcomeView`] copies what a reviewer of a snapshot needs to
 //! see — the result, every gas figure, the usage counted, the limit stop, the oracle reads and the
 //! touched accounts — into plain fields that serialize the same way on every run: maps are
-//! [`BTreeMap`]s and lists are in a fixed order.
+//! [`BTreeMap`]s and lists are in a fixed order. A touched account the transaction left as it
+//! found it is one word, so the accounts every transaction touches take a line each
+//! ([`AccountEntry`]).
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
@@ -37,8 +39,9 @@ pub struct OutcomeView {
     pub limit_stop: Option<LimitStopView>,
     /// The reads of the Oracle's storage through the oracle service, in order.
     pub oracle_reads: Vec<OracleReadView>,
-    /// The accounts the transaction touched, by address.
-    pub accounts: BTreeMap<Address, AccountView>,
+    /// The accounts the transaction touched, by address: in full where it changed them, one word
+    /// where it did not ([`AccountEntry`]).
+    pub accounts: BTreeMap<Address, AccountEntry>,
 }
 
 impl OutcomeView {
@@ -59,7 +62,7 @@ impl OutcomeView {
                 .state
                 .iter()
                 .filter(|(_, account)| account.is_touched())
-                .map(|(address, account)| (*address, AccountView::new(account)))
+                .map(|(address, account)| (*address, AccountEntry::new(account)))
                 .collect(),
         }
     }
@@ -342,7 +345,58 @@ pub struct OracleReadView {
     pub answer: Option<U256>,
 }
 
-/// A touched account as the transaction left it.
+/// A touched account in the view: in full where the transaction changed it, and the one word
+/// `"unchanged"` where it did not, so the accounts a transaction touches without changing them —
+/// the fee vaults a free transaction credits nothing, an empty account a call reaches — take a
+/// line each.
+///
+/// An account is unchanged when its balance, nonce and code hash are the ones it had when the
+/// transaction loaded it, none of its slots changed, and the transaction neither created nor
+/// destroyed it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AccountEntry {
+    /// The transaction left the account as it found it.
+    Unchanged,
+    /// The transaction changed the account, which is shown as it left it.
+    Changed(AccountView),
+}
+
+impl AccountEntry {
+    fn new(account: &Account) -> Self {
+        let view = AccountView::new(account);
+        let original = account.original_info();
+        let unchanged = view.balance == original.balance &&
+            view.nonce == original.nonce &&
+            view.code_hash == original.code_hash &&
+            view.storage.is_empty() &&
+            !view.created &&
+            !view.selfdestructed;
+        if unchanged {
+            Self::Unchanged
+        } else {
+            Self::Changed(view)
+        }
+    }
+
+    /// The account as the transaction left it, if the transaction changed it.
+    pub const fn changed(&self) -> Option<&AccountView> {
+        match self {
+            Self::Unchanged => None,
+            Self::Changed(view) => Some(view),
+        }
+    }
+}
+
+impl Serialize for AccountEntry {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Unchanged => serializer.serialize_str("unchanged"),
+            Self::Changed(view) => view.serialize(serializer),
+        }
+    }
+}
+
+/// A touched account the transaction changed, as it left it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct AccountView {
     /// Its balance.
@@ -571,12 +625,18 @@ mod tests {
         let view = OutcomeView::new(&outcome());
         assert!(!view.accounts.contains_key(&LOADED), "an account only loaded is not shown");
         assert_eq!(view.accounts.len(), 2 + usize::from(FILLER));
-        let slots: Vec<U256> = view.accounts[&CONTRACT].storage.iter().map(|s| s.slot).collect();
+        assert_eq!(
+            view.accounts[&filler(0)],
+            AccountEntry::Unchanged,
+            "a touched account left as it was found is one word"
+        );
+        let contract = view.accounts[&CONTRACT].changed().expect("the contract changed");
+        let slots: Vec<U256> = contract.storage.iter().map(|s| s.slot).collect();
         let mut expected = Vec::from([U256::from(2), U256::from(10)]);
         expected.extend((0..FILLER).map(|i| U256::from(100 + u64::from(i))));
         assert_eq!(slots, expected, "the slot read and left alone is not shown");
         assert_eq!(
-            view.accounts[&CONTRACT].storage[1],
+            contract.storage[1],
             SlotView { slot: U256::from(10), original: U256::from(5), present: U256::ZERO }
         );
         assert_eq!(view.result.kind, ResultKind::Success);
@@ -588,6 +648,60 @@ mod tests {
         let mut within = outcome();
         within.limit_exceeded = Some(LimitCheck::WithinLimit);
         assert_eq!(OutcomeView::new(&within).limit_stop, None, "a check that passed is no stop");
+    }
+
+    /// A touched account whose balance, nonce and code hash are the ones it was loaded with, with
+    /// no changed slot, neither created nor destroyed, is the one word `"unchanged"`; a change to
+    /// any of those shows it in full.
+    #[test]
+    fn test_an_account_left_as_it_was_found_is_one_word() {
+        let entry = |change: fn(&mut Account)| {
+            let mut account = Account::default();
+            account.info.balance = U256::from(5);
+            account.info.nonce = 2;
+            account.info.code_hash = B256::repeat_byte(0xcc);
+            *account.original_info_mut() = account.info.clone();
+            account.storage.insert(U256::from(1), slot(3, 3));
+            account.mark_touch();
+            change(&mut account);
+            AccountEntry::new(&account)
+        };
+        let unchanged = entry(|_| {});
+        assert_eq!(
+            unchanged,
+            AccountEntry::Unchanged,
+            "a slot read and left alone changes nothing"
+        );
+        assert_eq!(serde_json::to_string(&unchanged).unwrap(), r#""unchanged""#);
+        assert_eq!(unchanged.changed(), None);
+        assert_eq!(
+            AccountEntry::new(&{
+                let mut account = Account::default();
+                account.mark_touch();
+                account
+            }),
+            AccountEntry::Unchanged,
+            "an empty account touched and left empty",
+        );
+
+        type Change = fn(&mut Account);
+        let changes: &[(&str, Change)] = &[
+            ("balance", |a| a.info.balance += U256::from(1)),
+            ("nonce", |a| a.info.nonce += 1),
+            ("code hash", |a| a.info.code_hash = B256::repeat_byte(0xdd)),
+            ("slot", |a| a.storage.get_mut(&U256::from(1)).unwrap().present_value = U256::ZERO),
+            ("created", |a| a.mark_created()),
+            ("selfdestructed", |a| a.mark_selfdestruct()),
+        ];
+        for (name, change) in changes {
+            let changed = entry(*change);
+            let view = changed.changed().unwrap_or_else(|| panic!("{name}: shown in full"));
+            assert_eq!(
+                serde_json::to_value(&changed).unwrap(),
+                serde_json::to_value(view).unwrap(),
+                "{name}: serializes as the account",
+            );
+        }
     }
 
     /// A revert's reason is its output decoded as a limit stop or a Solidity error, and nothing
@@ -704,6 +818,10 @@ mod tests {
             ("account: selfdestructed", |o| account_mut(o, CONTRACT).mark_selfdestruct()),
             ("account: touched", |o| account_mut(o, LOADED).mark_touch()),
             ("account: untouched", |o| account_mut(o, SENDER).unmark_touch()),
+            ("account: as it was loaded", |o| {
+                let sender = account_mut(o, SENDER);
+                *sender.original_info_mut() = sender.info.clone();
+            }),
             ("slot: original", |o| {
                 account_mut(o, CONTRACT).storage.get_mut(&U256::from(2)).unwrap().original_value =
                     U256::from(1);

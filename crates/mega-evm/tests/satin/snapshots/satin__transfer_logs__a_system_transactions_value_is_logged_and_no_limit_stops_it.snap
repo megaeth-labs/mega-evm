@@ -34,14 +34,7 @@ expression: "&outcomes"
     "limit_stop": null,
     "oracle_reads": [],
     "accounts": {
-      "0x6342000000000000000000000000000000000001": {
-        "balance": "0x0",
-        "nonce": 0,
-        "code_hash": "0xbc36789e7a1e281436464229828f817d6612f7b477d66591ff96a9e064bcc98a",
-        "created": false,
-        "selfdestructed": false,
-        "storage": []
-      },
+      "0x6342000000000000000000000000000000000001": "unchanged",
       "0xa887dcb9d5f39ef79272801d05abdf707cfbbd1d": {
         "balance": "0x3e8",
         "nonce": 1,

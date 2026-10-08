@@ -256,7 +256,8 @@ struct SlotSweep {
 }
 
 fn slot_sweep(name: &str, view: &OutcomeView, account: Address) -> SlotSweep {
-    let slots = view.accounts[&account].storage.iter().map(|slot| {
+    let changed = view.accounts[&account].changed().expect("the transaction changed the account");
+    let slots = changed.storage.iter().map(|slot| {
         (format!("{:#x}", slot.slot), format!("{:#x} -> {:#x}", slot.original, slot.present))
     });
     SlotSweep { summary: view.summary(), slots: sweep_digest(name, slots) }
