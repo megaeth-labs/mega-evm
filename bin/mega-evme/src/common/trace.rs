@@ -97,6 +97,25 @@ impl TraceArgs {
         self.trace
     }
 
+    /// Whether any trace option was set on the command line.
+    ///
+    /// `--tracer` carries a default, so it counts as set only when it names a
+    /// non-default tracer.
+    pub fn any_set(&self) -> bool {
+        self.trace ||
+            self.trace_output_file.is_some() ||
+            !matches!(self.tracer, TracerType::Opcode) ||
+            self.trace_opcode_disable_memory ||
+            self.trace_opcode_disable_stack ||
+            self.trace_opcode_disable_storage ||
+            self.trace_opcode_enable_return_data ||
+            self.trace_call_only_top_call ||
+            self.trace_call_with_log ||
+            self.trace_prestate_diff_mode ||
+            self.trace_prestate_disable_code ||
+            self.trace_prestate_disable_storage
+    }
+
     /// Creates a [`TracingInspector`] configured for full tracing
     pub fn create_inspector(&self) -> TracingInspector {
         let config = TracingInspectorConfig::all();

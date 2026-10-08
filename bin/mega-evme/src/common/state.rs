@@ -329,6 +329,11 @@ pub struct StateDumpArgs {
 }
 
 impl StateDumpArgs {
+    /// Whether any state dump option was set on the command line.
+    pub fn any_set(&self) -> bool {
+        self.dump || self.dump_output_file.is_some()
+    }
+
     /// Serializes [`EvmState`] as JSON string with deterministic key ordering.
     pub fn serialize_evm_state(&self, evm_state: &EvmState) -> Result<String> {
         trace!(evm_state = ?evm_state, "Serializing EVM state");

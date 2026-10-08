@@ -32,10 +32,9 @@ use op_alloy_rpc_types::Transaction;
 use crate::{
     common::{
         cfg_env, create_address, external_envs_from, op_receipt_to_tx_receipt,
-        print_execution_summary,
-        print_execution_trace, print_receipt, BuildProviderOutput, EvmeExternalEnvs, EvmeOutcome,
-        ExecutionSummary, ExternalEnvSnapshot, OpTxReceipt, OverriddenTx, RpcArgs, RpcCacheStore,
-        TracerType, TxOverrideArgs, VerificationCounts,
+        print_execution_summary, print_execution_trace, print_receipt, BuildProviderOutput,
+        EvmeExternalEnvs, EvmeOutcome, ExecutionSummary, ExternalEnvSnapshot, OpTxReceipt,
+        OverriddenTx, RpcArgs, RpcCacheStore, TxOverrideArgs, VerificationCounts,
     },
     replay::{get_hardfork_config, ReplayHardforks},
     run, EvmeState,
@@ -543,13 +542,13 @@ impl Cmd {
                  auto-detected from its timestamp"
             )));
         }
-        if has_trace_args(&self.trace_args) {
+        if self.trace_args.any_set() {
             return Err(ReplayError::Other(format!(
                 "trace options (--trace / --trace.output / --tracer / --trace.*) are not \
                  supported by {MODE}"
             )));
         }
-        if has_dump_args(&self.dump_args) {
+        if self.dump_args.any_set() {
             return Err(ReplayError::Other(format!(
                 "state dump options (--dump / --dump.output) are not supported by {MODE}"
             )));
@@ -1435,30 +1434,6 @@ where
         })?;
     coherence::authenticate_block_header(&block.header, number).map_err(incoherent_endpoint)?;
     Ok(block)
-}
-
-/// Whether any trace option was set on the command line.
-///
-/// `--tracer` carries a default, so it counts as set only when it names a
-/// non-default tracer.
-fn has_trace_args(args: &run::TraceArgs) -> bool {
-    args.trace ||
-        args.trace_output_file.is_some() ||
-        !matches!(args.tracer, TracerType::Opcode) ||
-        args.trace_opcode_disable_memory ||
-        args.trace_opcode_disable_stack ||
-        args.trace_opcode_disable_storage ||
-        args.trace_opcode_enable_return_data ||
-        args.trace_call_only_top_call ||
-        args.trace_call_with_log ||
-        args.trace_prestate_diff_mode ||
-        args.trace_prestate_disable_code ||
-        args.trace_prestate_disable_storage
-}
-
-/// Whether any state dump option was set on the command line.
-fn has_dump_args(args: &run::StateDumpArgs) -> bool {
-    args.dump || args.dump_output_file.is_some()
 }
 
 /// Build a [`BlockEnv`] from the RPC block header.
