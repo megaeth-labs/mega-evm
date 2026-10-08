@@ -47,6 +47,7 @@ alloy-trie = { workspace = true, features = ["std", "ethereum"] }
 # it behaves exactly like criterion; under `cargo codspeed` it runs each bench
 # once under valgrind and reports layout-insensitive instruction counts.
 criterion = { package = "codspeed-criterion-compat", version = "5.0.1", default-features = false, features = ["cargo_bench_support", "html_reports", "plotters"] }
+insta.workspace = true
 mega-evm = { path = ".", features = ["test-utils"] }
 proptest = { workspace = true, features = ["std"] }
 revm = { workspace = true, features = ["tracer"] }
