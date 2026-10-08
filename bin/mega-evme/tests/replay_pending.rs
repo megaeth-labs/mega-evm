@@ -19,12 +19,10 @@
 //! its state reads at the parent height while a pending replay reads them at the
 //! latest one.
 
-use std::process::Command;
-
 use serde_json::{json, Value};
 
 mod common;
-use common::MockRpcServer;
+use common::{MockRpcServer, Run};
 
 /// `MegaETH` mainnet, whose published schedule the replayed block runs under.
 const CHAIN_ID: u64 = 4326;
@@ -213,44 +211,6 @@ async fn mock_chain_serving(tx: Value) -> MockRpcServer {
     server
 }
 
-/// Outcome of one `mega-evme replay` invocation.
-struct Run {
-    code: Option<i32>,
-    stdout: String,
-    stderr: String,
-}
-
-impl Run {
-    /// The single `--json` summary the run printed.
-    fn summary(&self) -> Value {
-        let mut values = common::json_values(&self.stdout);
-        if values.last().is_some_and(common::is_run_error) {
-            values.pop();
-        }
-        assert_eq!(
-            values.len(),
-            1,
-            "expected one summary on stdout:\n{}\nstderr:\n{}",
-            self.stdout,
-            self.stderr,
-        );
-        values.pop().expect("checked above")
-    }
-
-    /// The structured error object a failing `--json` run ends with.
-    fn error_object(&self) -> Value {
-        let values = common::json_values(&self.stdout);
-        let last = values.last().unwrap_or_else(|| {
-            panic!("a failing --json run must not leave stdout empty:\nstderr:\n{}", self.stderr)
-        });
-        assert!(
-            common::is_run_error(last),
-            "the last stdout value must be the error object, got: {last}"
-        );
-        last.clone()
-    }
-}
-
 /// Replay the mock's pending transaction.
 fn replay(server: &MockRpcServer) -> Run {
     replay_with(server, &[])
@@ -258,18 +218,7 @@ fn replay(server: &MockRpcServer) -> Run {
 
 /// Replay the mock's pending transaction with `extra` flags.
 fn replay_with(server: &MockRpcServer, extra: &[&str]) -> Run {
-    let (tx_hash, _) = tx_identity();
-    let output = Command::new(env!("CARGO_BIN_EXE_mega-evme"))
-        .args(["replay", &tx_hash, "--rpc", &server.uri()])
-        .args(["--rpc.no-cache-file", "--rpc.max-retries", "0", "--rpc.backoff-ms", "1", "--json"])
-        .args(extra)
-        .output()
-        .expect("failed to run mega-evme");
-    Run {
-        code: output.status.code(),
-        stdout: String::from_utf8(output.stdout).expect("stdout is utf-8"),
-        stderr: String::from_utf8(output.stderr).expect("stderr is utf-8"),
-    }
+    common::replay_online(&server.uri(), &tx_identity().0, extra)
 }
 
 /// A pending replay fetches the latest block exactly once and fills both the

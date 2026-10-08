@@ -18,12 +18,12 @@
 //! capture cannot show it at all: identical requests are served from the same
 //! keyed entry, so one fetch and two fetches look the same there.
 
-use std::{path::Path, process::Command};
+use std::path::Path;
 
 use serde_json::{json, Value};
 
 mod common;
-use common::MockRpcServer;
+use common::{MockRpcServer, Run};
 
 /// `MegaETH` mainnet, whose published schedule the replayed block runs under.
 const CHAIN_ID: u64 = 4326;
@@ -244,28 +244,17 @@ async fn pending_chain() -> MockRpcServer {
     mock_chain_serving(tx_json(Value::Null, Value::Null)).await
 }
 
-/// Outcome of one `mega-evme replay` invocation.
-struct Run {
-    code: Option<i32>,
-    stdout: String,
-    stderr: String,
-}
-
 /// Replay the mock's target through the on-disk cache at `cache_dir`.
 fn replay(server: &MockRpcServer, cache_dir: &Path, extra: &[&str]) -> Run {
     let (tx_hash, _) = tx_identity();
-    let output = Command::new(env!("CARGO_BIN_EXE_mega-evme"))
+    common::mega_evme()
         .args(["replay", &tx_hash, "--rpc", &server.uri()])
         .args(["--rpc.cache-dir", cache_dir.to_str().expect("utf-8 cache dir")])
         .args(["--rpc.max-retries", "0", "--rpc.backoff-ms", "1", "--json"])
         .args(extra)
         .output()
-        .expect("failed to run mega-evme");
-    Run {
-        code: output.status.code(),
-        stdout: String::from_utf8(output.stdout).expect("stdout is utf-8"),
-        stderr: String::from_utf8(output.stderr).expect("stderr is utf-8"),
-    }
+        .expect("failed to run mega-evme")
+        .into()
 }
 
 /// Per-method request counts, for the methods these tests reason about.

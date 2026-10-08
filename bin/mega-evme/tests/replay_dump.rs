@@ -10,14 +10,14 @@
 
 use std::{
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::Output,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 mod common;
 
-use common::doctor::DoctoredEnvelope;
+use common::{doctor::DoctoredEnvelope, mega_evme};
 
 /// Offline RPC capture (includes the on-chain receipt needed by the fidelity
 /// gate). Name of the committed offline capture, resolved through the shared fixture
@@ -31,10 +31,6 @@ fn cache() -> PathBuf {
 
 /// The transaction captured in `CACHE` (a 75,514-gas Rex5 mainnet call).
 const TX: &str = "0x41d34e7e13dfe0f85da9d407e2b2c381955d8c7eed428b17dc82327b2616b000";
-
-fn mega_evme() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_mega-evme"))
-}
 
 /// A temp path unique to this process and this test.
 fn temp_path(name: &str) -> PathBuf {

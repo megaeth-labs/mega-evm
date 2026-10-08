@@ -6,11 +6,9 @@
 //! validation paths need no provider at all. The mismatch class (exit 2) is
 //! covered by `replay_verify.rs`, which doctors a copy of the same capture.
 
-use std::process::{Command, Output};
-
 mod common;
 
-use common::doctor::DoctoredEnvelope;
+use common::{doctor::DoctoredEnvelope, Run};
 
 /// Offline RPC capture used as the replay file.
 /// Name of the committed offline capture, resolved through the shared fixture
@@ -56,51 +54,8 @@ const PRE_BLOCK_HISTORY_STORAGE_READ: &str =
 const PRE_BLOCK_BEACON_ROOT_STORAGE_READ: &str =
     "0x49e3c5174c528b49897a0556c762d4fb88e1ad5e6aa8f8795ddbc37aa6c278f0";
 
-/// Outcome of one `mega-evme` invocation.
-struct Run {
-    code: Option<i32>,
-    stdout: String,
-    stderr: String,
-}
-
-impl Run {
-    /// The process exit code the run ended with.
-    fn code(&self) -> i32 {
-        self.code.expect("mega-evme was killed by a signal")
-    }
-
-    /// The structured error object a failing `--json` run ends with.
-    fn error_object(&self) -> serde_json::Value {
-        let values = common::json_values(&self.stdout);
-        let last = values
-            .last()
-            .unwrap_or_else(|| panic!("a failing --json run must not leave stdout empty"));
-        assert!(
-            common::is_run_error(last),
-            "the last stdout value must be the error object, got: {last}"
-        );
-        last.clone()
-    }
-
-    /// How many failure reports stderr carries.
-    ///
-    /// Counted by the report prefix: a message may itself span lines (an RPC
-    /// error appends a re-capture hint), and only the report opens one.
-    fn error_lines(&self) -> usize {
-        self.stderr.lines().filter(|line| line.starts_with("error: ")).count()
-    }
-}
-
 fn run(args: &[&str]) -> Run {
-    let output: Output = Command::new(env!("CARGO_BIN_EXE_mega-evme"))
-        .args(args)
-        .output()
-        .expect("failed to run mega-evme");
-    Run {
-        code: output.status.code(),
-        stdout: String::from_utf8(output.stdout).expect("stdout is utf-8"),
-        stderr: String::from_utf8(output.stderr).expect("stderr is utf-8"),
-    }
+    common::mega_evme().args(args).output().expect("failed to run mega-evme").into()
 }
 
 /// Run `replay` against the committed offline capture.
@@ -616,14 +571,14 @@ fn test_help_in_json_mode_prints_no_error_object() {
 fn test_closed_stdout_during_json_batch_exits_one() {
     use std::{
         io::{BufRead, BufReader, Read},
-        process::{Command, Stdio},
+        process::Stdio,
         thread,
     };
 
     // Multi-target offline batch: many NDJSON lines, so dropping the pipe after
     // the first line still leaves further writes that hit the broken pipe.
     let envelope = common::fixture("replay_batch_blocks.cache.json");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_mega-evme"))
+    let mut child = common::mega_evme()
         .args([
             "replay",
             "--rpc.replay-file",
@@ -686,7 +641,7 @@ fn test_closed_stdout_during_json_batch_exits_one() {
 /// `test-utils` gate as the fixture pre-state inject), not via invalid input.
 #[test]
 fn test_panic_under_json_prints_execution_error_envelope() {
-    let output = Command::new(env!("CARGO_BIN_EXE_mega-evme"))
+    let output = common::mega_evme()
         .args(["--json"])
         .env("MEGA_EVME_INJECT_PANIC", "1")
         .env("RUST_BACKTRACE", "0")

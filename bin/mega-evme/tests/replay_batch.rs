@@ -27,11 +27,9 @@
 //! The endpoint must serve state at those blocks; a pruning node fails every
 //! target with "state at block #N is pruned".
 
-use std::process::Command;
-
 mod common;
 
-use common::doctor::DoctoredEnvelope;
+use common::{doctor::DoctoredEnvelope, mega_evme};
 
 /// Block fully covered by the envelope, and its transaction count.
 const BLOCK: u64 = 22_945_844;
@@ -74,10 +72,6 @@ fn envelope() -> String {
 
 /// Name of the committed capture, stored compressed alongside the other fixtures.
 const ENVELOPE_NAME: &str = "replay_batch_blocks.cache.json";
-
-fn mega_evme() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_mega-evme"))
-}
 
 /// Run `replay` offline and return its stdout, asserting the exit status.
 fn replay(args: &[&str], expect_success: bool) -> String {

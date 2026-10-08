@@ -13,12 +13,10 @@
 //! `SequencerRegistry` account, for one), and an offline capture answers a miss
 //! with a hard error rather than the state the forced world needs.
 
-use std::process::Command;
-
 use serde_json::{json, Value};
 
 mod common;
-use common::MockRpcServer;
+use common::{MockRpcServer, Run};
 
 /// `MegaETH` mainnet: the chain whose published schedule carries the Rex5
 /// `SequencerRegistry` parameters that a Rex5+ override needs.
@@ -97,43 +95,18 @@ const VERSION_2_0_0: &str = concat!(
 /// the counterpart to mainnet for the parameter-availability cases below.
 const UNKNOWN_CHAIN_ID: u64 = 0xdead_beef;
 
-/// Outcome of one `mega-evme replay` invocation.
-struct Run {
-    code: Option<i32>,
-    stdout: String,
-    stderr: String,
-}
-
-impl Run {
-    /// The single `--json` summary the run printed.
-    fn summary(&self) -> Value {
-        let mut values = common::json_values(&self.stdout);
-        if values.last().is_some_and(common::is_run_error) {
-            values.pop();
-        }
-        assert_eq!(
-            values.len(),
-            1,
-            "expected one summary on stdout:\n{}\nstderr:\n{}",
-            self.stdout,
-            self.stderr,
-        );
-        values.pop().expect("checked above")
-    }
-
-    /// The hex return data of a successful run, or `None` when the call
-    /// returned nothing (an account with no code answers empty).
-    fn output(&self) -> Option<String> {
-        let summary = self.summary();
-        assert_eq!(
-            summary["success"],
-            json!(true),
-            "the replay must succeed:\n{}\nstderr:\n{}",
-            self.stdout,
-            self.stderr,
-        );
-        summary["output"].as_str().map(str::to_string)
-    }
+/// The hex return data of a successful run, or `None` when the call returned
+/// nothing (an account with no code answers empty).
+fn return_data(run: &Run) -> Option<String> {
+    let summary = run.summary();
+    assert_eq!(
+        summary["success"],
+        json!(true),
+        "the replay must succeed:\n{}\nstderr:\n{}",
+        run.stdout,
+        run.stderr,
+    );
+    summary["output"].as_str().map(str::to_string)
 }
 
 /// A block header the RPC backend and the replay accept, sealed under the hash
@@ -287,17 +260,7 @@ async fn mock_chain_with_id(chain_id: u64, to: &str, input: &str, timestamp: u64
 
 /// Replay the mock's transaction, optionally with extra flags.
 fn replay(chain: &MockChain, args: &[&str]) -> Run {
-    let output = Command::new(env!("CARGO_BIN_EXE_mega-evme"))
-        .args(["replay", &chain.tx_hash, "--rpc", &chain.server.uri()])
-        .args(["--rpc.no-cache-file", "--rpc.max-retries", "0", "--rpc.backoff-ms", "1", "--json"])
-        .args(args)
-        .output()
-        .expect("failed to run mega-evme");
-    Run {
-        code: output.status.code(),
-        stdout: String::from_utf8(output.stdout).expect("stdout is utf-8"),
-        stderr: String::from_utf8(output.stderr).expect("stderr is utf-8"),
-    }
+    common::replay_online(&chain.server.uri(), &chain.tx_hash, args)
 }
 
 /// Without an override the block executes where it sits in the chain's
@@ -309,7 +272,11 @@ async fn test_without_override_predeploys_follow_the_block_timestamp() {
     let run = replay(&server, &[]);
 
     assert_eq!(run.code, Some(0), "stdout:\n{}\nstderr:\n{}", run.stdout, run.stderr);
-    assert_eq!(run.output(), None, "a MiniRex-era block must not carry the Rex5 SequencerRegistry",);
+    assert_eq!(
+        return_data(&run),
+        None,
+        "a MiniRex-era block must not carry the Rex5 SequencerRegistry",
+    );
 }
 
 /// Forcing Rex5 on a MiniRex-era block installs the Rex5 predeploys, including
@@ -328,7 +295,7 @@ async fn test_override_installs_the_forced_spec_predeploys() {
     );
     assert_eq!(run.code, Some(0), "stdout:\n{}\nstderr:\n{}", run.stdout, run.stderr);
     assert_eq!(
-        run.output().as_deref(),
+        return_data(&run).as_deref(),
         Some(VERSION_1_0_0),
         "the forced spec's registry version must answer the call",
     );
@@ -344,7 +311,11 @@ async fn test_override_to_an_older_spec_withholds_later_predeploys() {
     let run = replay(&server, &["--override.spec", "MiniRex"]);
 
     assert_eq!(run.code, Some(0), "stdout:\n{}\nstderr:\n{}", run.stdout, run.stderr);
-    assert_eq!(run.output(), None, "MegaLimitControl must not answer in a forced MiniRex world");
+    assert_eq!(
+        return_data(&run),
+        None,
+        "MegaLimitControl must not answer in a forced MiniRex world"
+    );
 }
 
 /// The block-level resource limits follow the override too. `MegaLimitControl`
@@ -359,7 +330,8 @@ async fn test_override_switches_the_block_limits() {
     let run = replay(&server, &["--override.spec", "Rex5"]);
 
     assert_eq!(run.code, Some(0), "stdout:\n{}\nstderr:\n{}", run.stdout, run.stderr);
-    let output = run.output().expect("MegaLimitControl must answer under the forced Rex5 world");
+    let output =
+        return_data(&run).expect("MegaLimitControl must answer under the forced Rex5 world");
     let remaining = decode_remaining_compute_gas(&output);
 
     let forced_budget = compute_gas_budget(mega_evm::MegaSpecId::REX5);
@@ -390,7 +362,7 @@ async fn test_override_downgrade_switches_the_predeploy_version() {
 
     let historical = replay(&server, &[]);
     assert_eq!(
-        historical.output().as_deref(),
+        return_data(&historical).as_deref(),
         Some(VERSION_2_0_0),
         "a chain with no published schedule runs the latest spec",
     );
@@ -398,7 +370,7 @@ async fn test_override_downgrade_switches_the_predeploy_version() {
     let forced = replay(&server, &["--override.spec", "Rex5"]);
     assert_eq!(forced.code, Some(0), "stdout:\n{}\nstderr:\n{}", forced.stdout, forced.stderr);
     assert_eq!(
-        forced.output().as_deref(),
+        return_data(&forced).as_deref(),
         Some(VERSION_1_0_0),
         "the forced Rex5 world must deploy the Rex5 registry version",
     );
@@ -423,7 +395,7 @@ async fn test_override_needs_the_chain_params_of_every_fork_it_activates() {
 
     if configured {
         assert_eq!(run.code, Some(0), "stdout:\n{}\nstderr:\n{}", run.stdout, run.stderr);
-        assert_eq!(run.output().as_deref(), Some(VERSION_2_0_0));
+        assert_eq!(return_data(&run).as_deref(), Some(VERSION_2_0_0));
     } else {
         assert_eq!(
             run.code,

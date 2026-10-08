@@ -12,7 +12,7 @@ pub(crate) mod doctor;
 
 use std::{
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Output},
     sync::atomic::{AtomicUsize, Ordering},
 };
 
@@ -485,6 +485,97 @@ impl MockRpcServer {
             .mount(&self.server)
             .await;
     }
+}
+
+/// The `mega-evme` binary under test, ready for arguments.
+pub(crate) fn mega_evme() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_mega-evme"))
+}
+
+/// Outcome of one `mega-evme` invocation.
+pub(crate) struct Run {
+    /// Process exit code, `None` when a signal killed it.
+    pub(crate) code: Option<i32>,
+    /// Everything the run printed on stdout.
+    pub(crate) stdout: String,
+    /// Everything the run printed on stderr.
+    pub(crate) stderr: String,
+}
+
+impl From<Output> for Run {
+    fn from(output: Output) -> Self {
+        Self {
+            code: output.status.code(),
+            stdout: String::from_utf8(output.stdout).expect("stdout is utf-8"),
+            stderr: String::from_utf8(output.stderr).expect("stderr is utf-8"),
+        }
+    }
+}
+
+impl Run {
+    /// The process exit code the run ended with.
+    pub(crate) fn code(&self) -> i32 {
+        self.code.expect("mega-evme was killed by a signal")
+    }
+
+    /// Whether the run exited 0.
+    pub(crate) fn success(&self) -> bool {
+        self.code == Some(0)
+    }
+
+    /// The results printed on stdout, without the structured error object a
+    /// failing `--json` run ends with: one value per NDJSON line of a batch
+    /// run, or the one summary of a single-transaction run.
+    pub(crate) fn results(&self) -> Vec<serde_json::Value> {
+        let mut values = json_values(&self.stdout);
+        if values.last().is_some_and(is_run_error) {
+            values.pop();
+        }
+        values
+    }
+
+    /// The one `--json` summary a single-transaction run printed.
+    pub(crate) fn summary(&self) -> serde_json::Value {
+        let mut results = self.results();
+        assert_eq!(
+            results.len(),
+            1,
+            "expected one summary on stdout:\n{}\nstderr:\n{}",
+            self.stdout,
+            self.stderr,
+        );
+        results.pop().expect("checked above")
+    }
+
+    /// The structured error object a failing `--json` run ends with.
+    pub(crate) fn error_object(&self) -> serde_json::Value {
+        let values = json_values(&self.stdout);
+        let last = values.last().unwrap_or_else(|| {
+            panic!("a failing --json run must not leave stdout empty:\nstderr:\n{}", self.stderr)
+        });
+        assert!(is_run_error(last), "the last stdout value must be the error object, got: {last}");
+        last.clone()
+    }
+
+    /// How many failure reports stderr carries.
+    ///
+    /// Counted by the report prefix: a message may itself span lines (an RPC
+    /// error appends a re-capture hint), and only the report opens one.
+    pub(crate) fn error_lines(&self) -> usize {
+        self.stderr.lines().filter(|line| line.starts_with("error: ")).count()
+    }
+}
+
+/// Replay `tx_hash` online against the endpoint at `uri` in `--json` mode,
+/// without a cache file, retries or backoff, adding `extra` flags.
+pub(crate) fn replay_online(uri: &str, tx_hash: &str, extra: &[&str]) -> Run {
+    mega_evme()
+        .args(["replay", tx_hash, "--rpc", uri])
+        .args(["--rpc.no-cache-file", "--rpc.max-retries", "0", "--rpc.backoff-ms", "1", "--json"])
+        .args(extra)
+        .output()
+        .expect("failed to run mega-evme")
+        .into()
 }
 
 /// Parse every top-level JSON value a run printed on stdout.

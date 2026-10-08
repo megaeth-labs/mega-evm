@@ -20,12 +20,10 @@
 //! consumers read one and the same admitted receipt is a property of the
 //! evidence type they share, not something an endpoint can observe.
 
-use std::process::Command;
-
 use serde_json::{json, Value};
 
 mod common;
-use common::MockRpcServer;
+use common::{MockRpcServer, Run};
 
 /// `MegaETH` mainnet, whose published schedule the replayed block runs under.
 const CHAIN_ID: u64 = 4326;
@@ -236,45 +234,9 @@ async fn mock_chain() -> MockRpcServer {
     server
 }
 
-/// Outcome of one `mega-evme replay` invocation.
-struct Run {
-    code: Option<i32>,
-    stdout: String,
-    stderr: String,
-}
-
-impl Run {
-    /// The single `--json` summary the run printed.
-    fn summary(&self) -> Value {
-        let mut values = common::json_values(&self.stdout);
-        if values.last().is_some_and(common::is_run_error) {
-            values.pop();
-        }
-        assert_eq!(
-            values.len(),
-            1,
-            "expected one summary on stdout:\n{}\nstderr:\n{}",
-            self.stdout,
-            self.stderr,
-        );
-        values.pop().expect("checked above")
-    }
-}
-
 /// Replay the mock's mined transaction with the given extra flags.
 fn replay(server: &MockRpcServer, extra: &[&str]) -> Run {
-    let (tx_hash, _) = tx_identity();
-    let output = Command::new(env!("CARGO_BIN_EXE_mega-evme"))
-        .args(["replay", &tx_hash, "--rpc", &server.uri()])
-        .args(["--rpc.no-cache-file", "--rpc.max-retries", "0", "--rpc.backoff-ms", "1", "--json"])
-        .args(extra)
-        .output()
-        .expect("failed to run mega-evme");
-    Run {
-        code: output.status.code(),
-        stdout: String::from_utf8(output.stdout).expect("stdout is utf-8"),
-        stderr: String::from_utf8(output.stderr).expect("stderr is utf-8"),
-    }
+    common::replay_online(&server.uri(), &tx_identity().0, extra)
 }
 
 /// Dumping a fixture and verifying the receipt in the same run fetches the
