@@ -39,8 +39,10 @@ use mega_evm::{
 };
 use serde_json::{json, Value};
 use state_test::{
-    blockchain::{run, Config, FailureKind, Outcome, Produced, Report, SkipReason},
-    deviations::{BlockchainEntry, Deviation, DEVIATIONS},
+    blockchain::{
+        run, Blocks, Config, Differing, FailureKind, Outcome, Produced, Report, SkipReason,
+    },
+    deviations::{BlockchainEntry, Cause, ChainEnd, Deviation, ListedBlock, DEVIATIONS},
     roots::state_root,
     Fork,
 };
@@ -353,11 +355,68 @@ fn decoded(test: &Value, index: usize) -> Block<TxEnvelope> {
     alloy_rlp::Decodable::decode(&mut rlp.as_ref()).unwrap()
 }
 
-/// Replaces the block at `index` of `test` with one whose header `edit` changed.
+/// Replaces the block at `index` of `test` with one whose header `edit` changed, and the
+/// fixture's last block hash with the new header's when the block was the last.
 fn edit_header(test: &mut Value, index: usize, edit: impl FnOnce(&mut Header)) {
     let mut block = decoded(test, index);
+    let was_last = json!(block.header.hash_slow()) == test["lastblockhash"];
     edit(&mut block.header);
+    if was_last {
+        test["lastblockhash"] = json!(block.header.hash_slow());
+    }
     test["blocks"][index]["rlp"] = json!(rlp(block.header, block.body.transactions));
+}
+
+/// What Satin produces for the block at `index` of `test`, which is Ethereum's, as its header
+/// says before any edit.
+fn produced(test: &Value, index: usize) -> Produced {
+    let header = decoded(test, index).header;
+    Produced {
+        block: index,
+        gas_used: header.gas_used,
+        logs_bloom_hash: keccak256(header.logs_bloom),
+        receipts_root: header.receipts_root,
+        state_root: header.state_root,
+    }
+}
+
+/// A registry of one deviation, `listed`, listing the test `t` of `a.json` with `blocks` and
+/// `end`.
+fn registry(blocks: Vec<ListedBlock>, end: ChainEnd) -> &'static [Deviation] {
+    let entry = BlockchainEntry { path: "a.json", name: "t", blocks: blocks.leak(), end };
+    Box::leak(Box::new([Deviation {
+        id: "listed",
+        rule: "the rule",
+        reason: "the reason",
+        fork: Fork::Osaka,
+        entries: &[],
+        blockchain_entries: vec![entry].leak(),
+    }]))
+}
+
+/// Runs `test`, as `t` of `a.json`, against `registry`.
+fn run_listed(test: &Value, registry: &'static [Deviation]) -> Report {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(dir.path(), "a.json", json!({ "t": test }));
+    run(&[path], config(registry))
+}
+
+/// A chain of two blocks of calls, filled from Ethereum. Neither reads a block hash, so a header
+/// edited in one block changes nothing the other produces.
+fn two_blocks() -> Value {
+    chain(&[
+        BlockSpec::valid(vec![Tx::call(CONTRACT)]),
+        BlockSpec::valid(vec![Tx { gas_limit: 100_001, ..Tx::call(CONTRACT) }]),
+    ])
+}
+
+/// [`two_blocks`] with block 0's header claiming another state root, so that block 0 differs from
+/// its header in its state root alone while Satin's state stays Ethereum's.
+fn first_block_differs() -> (Value, ListedBlock) {
+    let mut test = two_blocks();
+    let listed = ListedBlock { produced: produced(&test, 0), cause: Cause::Rule };
+    edit_header(&mut test, 0, |h| h.state_root = B256::repeat_byte(1));
+    (test, listed)
 }
 
 /// Two blocks of calls filled from Ethereum pass on Satin's block executor: the pre-block system
@@ -376,7 +435,8 @@ fn test_a_chain_filled_from_ethereum_passes() {
     let report = run_one(test);
     assert_eq!(outcome(&report), &Outcome::Passed, "{report:?}");
     let summary = report.summary();
-    assert_eq!((summary.executed, summary.passed, summary.blocks.accepted), (1, 1, 2));
+    assert_eq!((summary.executed, summary.passed), (1, 1));
+    assert_eq!(summary.blocks, Blocks { matched: 2, refused: 0, deviated: 0 });
     assert!(report
         .gate(Some(1), Some(&BTreeMap::new()), true)
         .iter()
@@ -397,7 +457,7 @@ fn test_a_refused_block_leaves_the_chain_at_the_previous_block() {
     ]);
     let report = run_one(test);
     assert_eq!(outcome(&report), &Outcome::Passed, "{report:?}");
-    assert_eq!(report.summary().blocks, state_test::blockchain::Blocks { accepted: 1, refused: 1 });
+    assert_eq!(report.summary().blocks, Blocks { matched: 1, refused: 1, deviated: 0 });
 }
 
 /// A refusal for another reason than the one named, and a refusal of a block the fixture expects
@@ -431,7 +491,7 @@ fn test_an_accepted_block_that_should_be_refused_fails() {
 type HeaderEdit = fn(&mut Header);
 
 /// Each of the four header fields an accepted block is held to fails the test when the header
-/// says otherwise, and the failure carries what Satin produced.
+/// says otherwise, and the failure carries what Satin produced, the bloom's hash included.
 #[test]
 fn test_every_header_comparison_can_fail() {
     let clean = chain(&[BlockSpec::valid(vec![Tx::call(CONTRACT)])]);
@@ -449,15 +509,15 @@ fn test_every_header_comparison_can_fail() {
         let Outcome::Failed(failure) = outcome(&report) else { panic!("{kind:?} passed") };
         assert_eq!(failure.kind, kind);
         assert_eq!(failure.block, Some(0));
-        assert_eq!(
-            failure.produced,
-            Some(Produced {
-                block: 0,
-                gas_used: header.gas_used,
-                receipts_root: header.receipts_root,
-                state_root: header.state_root,
-            })
-        );
+        let produced = Produced {
+            block: 0,
+            gas_used: header.gas_used,
+            logs_bloom_hash: keccak256(header.logs_bloom),
+            receipts_root: header.receipts_root,
+            state_root: header.state_root,
+        };
+        let state_root_only = kind == FailureKind::StateRootMismatch;
+        assert_eq!(failure.differing, [Differing { produced, state_root_only, listed: false }]);
     }
 }
 
@@ -514,42 +574,94 @@ fn test_skips_and_other_networks() {
     assert_eq!(problems, ["1 tests skipped for withdrawals, 0 pinned"]);
 }
 
-/// A failure is a deviation's only when the deviation lists the test with exactly what it
-/// produced; a listed test that passes, or fails otherwise, is unreproduced.
+/// A block a deviation lists with exactly the outcome Satin produces passes, and the chain goes on
+/// from Satin's own state: the next block is held to its header, and the chain ends on the
+/// fixture's state, whose post-state is compared.
 #[test]
-fn test_attribution_by_exact_outcome() {
-    let mut test = chain(&[BlockSpec::valid(vec![Tx::call(CONTRACT)])]);
-    let header = decoded(&test, 0).header;
-    edit_header(&mut test, 0, |h| h.state_root = B256::repeat_byte(1));
-    let produced = Produced {
-        block: 0,
-        gas_used: header.gas_used,
-        receipts_root: header.receipts_root,
-        state_root: header.state_root,
-    };
-    let registry = |produced: Produced| -> &'static [Deviation] {
-        let entries = vec![BlockchainEntry { path: "a.json", name: "t", produced }];
-        Box::leak(Box::new([Deviation {
-            id: "listed",
-            rule: "the rule",
-            reason: "the reason",
-            fork: Fork::Osaka,
-            entries: &[],
-            blockchain_entries: entries.leak(),
-        }]))
-    };
-    let dir = tempfile::tempdir().unwrap();
-    let path = write(dir.path(), "a.json", json!({ "t": test }));
-
-    let report = run(std::slice::from_ref(&path), config(registry(produced)));
+fn test_a_listed_block_deviates_and_the_chain_goes_on() {
+    let (test, listed) = first_block_differs();
+    let report = run_listed(&test, registry(vec![listed], ChainEnd::FixtureState));
+    assert_eq!(outcome(&report), &Outcome::Deviated { deviation: "listed" }, "{report:?}");
+    assert_eq!(report.results[0].blocks, Blocks { matched: 1, refused: 0, deviated: 1 });
     let summary = report.summary();
-    assert_eq!((summary.unattributed, summary.deviated.get("listed").copied()), (0, Some(1)));
-    assert!(report.gate(None, None, true).is_empty(), "{:?}", report.gate(None, None, true));
+    assert_eq!((summary.passed, summary.deviated_total(), summary.unattributed), (0, 1, 0));
+    assert_eq!(summary.blocks.checked(), 1, "the listed block is not counted as checked");
+    assert!(report.gate(Some(1), None, true).is_empty(), "{:?}", report.gate(Some(1), None, true));
+}
 
-    let other = Produced { gas_used: produced.gas_used + 1, ..produced };
-    let report = run(&[path], config(registry(other)));
+/// A block after a listed one that differs from its header and is not listed fails the test, and
+/// the gate: a listed block exempts nothing after it.
+#[test]
+fn test_an_unlisted_difference_after_a_listed_block_fails() {
+    let (mut test, listed) = first_block_differs();
+    edit_header(&mut test, 1, |h| h.gas_used += 1);
+    let report = run_listed(&test, registry(vec![listed], ChainEnd::FixtureState));
+    let Outcome::Failed(failure) = outcome(&report) else { panic!("{report:?}") };
+    assert_eq!((failure.kind, failure.block), (FailureKind::GasUsedMismatch, Some(1)));
+    let listed_flags: Vec<_> = failure.differing.iter().map(|d| d.listed).collect();
+    assert_eq!(listed_flags, [true, false]);
     let summary = report.summary();
-    assert_eq!(summary.unattributed, 1);
-    assert_eq!(summary.unreproduced.get("listed").copied(), Some(1));
-    assert_eq!(report.gate(None, None, true).len(), 3);
+    assert_eq!((summary.unattributed, summary.unreproduced.get("listed").copied()), (1, Some(1)));
+    assert!(!report.gate(None, None, false).is_empty());
+}
+
+/// An outcome that differs from the listed one in the block's aggregated logs bloom alone fails
+/// unattributed: the bloom is part of the fingerprint.
+#[test]
+fn test_a_bloom_only_difference_from_the_listed_outcome_fails() {
+    let (test, mut listed) = first_block_differs();
+    listed.produced.logs_bloom_hash = keccak256(Bloom::repeat_byte(1));
+    let report = run_listed(&test, registry(vec![listed], ChainEnd::FixtureState));
+    let Outcome::Failed(failure) = outcome(&report) else { panic!("{report:?}") };
+    assert_eq!((failure.kind, failure.block), (FailureKind::StateRootMismatch, Some(0)));
+    assert!(failure.detail.contains("its deviation lists another outcome"), "{}", failure.detail);
+    assert_eq!(report.summary().unattributed, 1);
+    assert!(!report.gate(None, None, true).is_empty());
+}
+
+/// A listed test must deviate exactly as listed: a listed block that matches its header, a cause
+/// that does not hold, and a chain that ends otherwise than its entry says, each fail it.
+#[test]
+fn test_a_listed_test_must_deviate_as_listed() {
+    // A listed block that matches its header.
+    let test = two_blocks();
+    let listed = ListedBlock { produced: produced(&test, 0), cause: Cause::Rule };
+    let report = run_listed(&test, registry(vec![listed], ChainEnd::FixtureState));
+    let Outcome::Failed(failure) = outcome(&report) else { panic!("{report:?}") };
+    assert_eq!((failure.kind, failure.block), (FailureKind::NotAsListed, Some(0)));
+
+    // Block 1 differs from its header in its state root alone, the state block 0 left: listed so,
+    // with the chain ending on that state, the test deviates as listed.
+    let (mut test, first) = first_block_differs();
+    let second = ListedBlock { produced: produced(&test, 1), cause: Cause::StateLeftBy(0) };
+    edit_header(&mut test, 1, |h| h.state_root = B256::repeat_byte(2));
+    let end = ChainEnd::DeviatedState("the state block 0 left");
+    let report = run_listed(&test, registry(vec![first, second], end));
+    assert_eq!(outcome(&report), &Outcome::Deviated { deviation: "listed" }, "{report:?}");
+    assert_eq!(report.results[0].blocks, Blocks { matched: 0, refused: 0, deviated: 2 });
+
+    // The same chain, whose entry says it ends on the fixture's state.
+    let report = run_listed(&test, registry(vec![first, second], ChainEnd::FixtureState));
+    let Outcome::Failed(failure) = outcome(&report) else { panic!("{report:?}") };
+    assert_eq!((failure.kind, failure.block), (FailureKind::NotAsListed, None));
+
+    // A cause naming a block that is not an earlier listed one does not hold.
+    let wrong = ListedBlock { cause: Cause::StateLeftBy(1), ..second };
+    let report = run_listed(&test, registry(vec![first, wrong], end));
+    let Outcome::Failed(failure) = outcome(&report) else { panic!("{report:?}") };
+    assert_eq!((failure.kind, failure.block), (FailureKind::StateRootMismatch, Some(1)));
+
+    // A block that differs in more than its state root is not one whose state alone was left.
+    let (mut test, first) = first_block_differs();
+    let second = ListedBlock { produced: produced(&test, 1), cause: Cause::StateLeftBy(0) };
+    edit_header(&mut test, 1, |h| h.gas_used += 1);
+    let report = run_listed(&test, registry(vec![first, second], ChainEnd::FixtureState));
+    let Outcome::Failed(failure) = outcome(&report) else { panic!("{report:?}") };
+    assert_eq!((failure.kind, failure.block), (FailureKind::GasUsedMismatch, Some(1)));
+
+    // A chain that ends on the fixture's state, whose entry says it ends on a listed block's.
+    let (test, first) = first_block_differs();
+    let report = run_listed(&test, registry(vec![first], end));
+    let Outcome::Failed(failure) = outcome(&report) else { panic!("{report:?}") };
+    assert_eq!((failure.kind, failure.block), (FailureKind::NotAsListed, None));
 }

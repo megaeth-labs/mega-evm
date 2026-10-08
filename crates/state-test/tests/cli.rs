@@ -244,7 +244,12 @@ fn test_btest_a_passing_run_exits_zero() {
     assert_eq!(summary["fork"], "Osaka");
     assert_eq!(summary["summary"]["executed"], 1);
     assert_eq!(summary["summary"]["passed"], 1);
-    assert_eq!(summary["summary"]["blocks"]["accepted"], 1);
+    assert_eq!(summary["summary"]["blocks"]["matched"], 1);
+    assert_eq!(summary["summary"]["blocks"]["deviated"], 0);
+    assert!(stdout(&output).contains(
+        "blocks checked against Ethereum 1 (matched 1, refused as expected 0)  matched to a \
+         deviation 0"
+    ));
     // Every skip class is named with its reason, whether or not a test was skipped for it.
     let reasons = summary["skip_reasons"].as_object().unwrap();
     assert_eq!(reasons.len(), SkipReason::ALL.len());
@@ -273,7 +278,7 @@ fn test_btest_a_count_off_its_pin_exits_non_zero() {
     assert!(
         out.contains(
             "gate: deviation amsterdam-opcodes-on-osaka: 3 of the 3 blockchain tests it lists \
-             did not fail as listed"
+             did not deviate as listed"
         ) && out.contains("unreproduced 3"),
         "{out}"
     );

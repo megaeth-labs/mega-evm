@@ -15,11 +15,18 @@
 //! - once every block is imported, the chain's head must be the fixture's last block and its state
 //!   the fixture's post-state.
 //!
-//! Each test is passed, skipped for a [reason](SkipReason) decided from its content before
-//! anything runs, or failed at its first block that does not match. A failure is explained only by
-//! a [deviation](crate::deviations) the state-test registry already has, which lists the test with
-//! what Satin produces for the block it fails at; any other failure is unattributed, and
-//! [`Report::gate`] fails on one.
+//! A [deviation](crate::deviations) the state-test registry already has may list a test, block by
+//! block: an accepted block whose outcome is not its header's passes only when the test's entry
+//! lists that block with exactly the outcome Satin produces — its gas used, logs bloom, receipts
+//! root and state root — and the chain is imported on from Satin's own state, so every later block
+//! is held to its header or to its own listed outcome in turn. The chain's head is always
+//! compared; its post-state is compared when the chain ends on a state its last header
+//! describes, and otherwise only when the entry says why it is not.
+//!
+//! Each test is passed, deviated (every block matching its header or its listed outcome, and the
+//! chain ending as listed), skipped for a [reason](SkipReason) decided from its content before
+//! anything runs, or failed; [`Report::gate`] fails on a failed test. The summary counts the
+//! blocks checked against Ethereum apart from the blocks matched to a deviation.
 //!
 //! The devnet release's blockchain tests are not run: the revm fork's own runner skips them too.
 
@@ -40,7 +47,10 @@ use std::{
 
 pub use chain::{chain_spec, registry_config, Added, SatinAccount, FORK, SATIN_ACCOUNTS};
 pub use fixture::NETWORK;
-use mega_evm::{alloy_consensus::Header, revm::primitives::B256};
+use mega_evm::{
+    alloy_consensus::Header,
+    revm::primitives::{keccak256, B256},
+};
 use serde::Serialize;
 pub use skips::SkipReason;
 
@@ -49,7 +59,7 @@ use self::{
     fixture::{decode_block, Network, Suite, Test},
 };
 use crate::{
-    deviations::{BlockchainEntry, Deviation},
+    deviations::{self, BlockchainEntry, Cause, ChainEnd, Deviation},
     exceptions::{check_names, Mismatch},
 };
 
@@ -60,7 +70,7 @@ pub struct Config {
     pub threads: usize,
     /// Print one JSON line per test to standard error.
     pub json_outcome: bool,
-    /// The registry failures are attributed to:
+    /// The registry whose entries explain blocks that differ:
     /// [`deviations::DEVIATIONS`](crate::deviations::DEVIATIONS) for the gate.
     pub deviations: &'static [Deviation],
 }
@@ -103,6 +113,10 @@ pub enum FailureKind {
     /// Once every block is imported, the chain's head is not the fixture's last block, or its
     /// state is not the fixture's post-state.
     PostStateMismatch,
+    /// The test is listed by a deviation, and does not deviate as listed: a listed block matched
+    /// its header or produced another outcome, a block names a cause that does not hold, or the
+    /// chain does not end as listed.
+    NotAsListed,
     /// The fixture could not be read, parsed or decoded.
     Fixture,
     /// Running the test panicked.
@@ -111,7 +125,7 @@ pub enum FailureKind {
 
 impl FailureKind {
     /// Every kind, in the order a block's comparisons are made.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::UnexpectedException,
         Self::MissingException,
         Self::WrongException,
@@ -121,6 +135,7 @@ impl FailureKind {
         Self::ReceiptsRootMismatch,
         Self::StateRootMismatch,
         Self::PostStateMismatch,
+        Self::NotAsListed,
         Self::Fixture,
         Self::Panic,
     ];
@@ -137,21 +152,26 @@ impl FailureKind {
             Self::ReceiptsRootMismatch => "receipts-root-mismatch",
             Self::StateRootMismatch => "state-root-mismatch",
             Self::PostStateMismatch => "post-state-mismatch",
+            Self::NotAsListed => "not-as-listed",
             Self::Fixture => "fixture",
             Self::Panic => "panic",
         }
     }
 }
 
-/// What Satin produced for an accepted block that does not match its header: the block, and the
-/// gas used, receipts root and state root it produced. The receipts root commits to every
-/// receipt's bloom, so the logs bloom adds nothing to say which outcome this is.
+/// What Satin produces for an accepted block: the block, and the gas used, logs bloom, receipts
+/// root and state root it produced — every field a block is held to.
+///
+/// The bloom is kept as its keccak hash, which pins its 256 bytes in 32: the receipts root commits
+/// to each receipt's bloom, not to the block's, which the runner aggregates on its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct Produced {
     /// The block's index among the test's blocks.
     pub block: usize,
     /// The gas the block used.
     pub gas_used: u64,
+    /// The keccak hash of the block's logs bloom.
+    pub logs_bloom_hash: B256,
     /// The root of the block's receipts.
     pub receipts_root: B256,
     /// The root of the state the block left, the accounts Satin added taken out.
@@ -162,10 +182,21 @@ impl fmt::Display for Produced {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "block {}: gas used {}, receipts root {}, state root {}",
-            self.block, self.gas_used, self.receipts_root, self.state_root
+            "block {}: gas used {}, logs bloom hash {}, receipts root {}, state root {}",
+            self.block, self.gas_used, self.logs_bloom_hash, self.receipts_root, self.state_root
         )
     }
+}
+
+/// An accepted block whose outcome is not its header's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct Differing {
+    /// What Satin produced for it.
+    pub produced: Produced,
+    /// Whether its state root is the only field that differs from its header.
+    pub state_root_only: bool,
+    /// Whether the test's entry lists the block with exactly this outcome, and its cause holds.
+    pub listed: bool,
 }
 
 /// A failed test.
@@ -175,18 +206,16 @@ pub struct Failure {
     pub kind: FailureKind,
     /// The index of the block it failed at, when it failed at one.
     pub block: Option<usize>,
-    /// What Satin produced for the block, when the block was accepted and does not match its
-    /// header.
-    pub produced: Option<Produced>,
     /// What was expected and what happened.
     pub detail: String,
-    /// The deviation that explains it, if one does.
-    pub deviation: Option<&'static str>,
+    /// Every accepted block the test imported whose outcome is not its header's, listed or not:
+    /// what an entry for the test lists.
+    pub differing: Vec<Differing>,
 }
 
 impl Failure {
     fn new(kind: FailureKind, block: Option<usize>, detail: impl Into<String>) -> Self {
-        Self { kind, block, produced: None, detail: detail.into(), deviation: None }
+        Self { kind, block, detail: detail.into(), differing: Vec::new() }
     }
 }
 
@@ -194,24 +223,40 @@ impl Failure {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "outcome", rename_all = "kebab-case")]
 pub enum Outcome {
-    /// It was imported and matched its fixture.
+    /// It was imported, and every block and the chain's end matched its fixture.
     Passed,
+    /// It was imported, every block matched its header or the outcome its deviation lists for it,
+    /// and the chain ended as listed.
+    Deviated {
+        /// The deviation that lists it.
+        deviation: &'static str,
+    },
     /// It was not executed.
     Skipped {
         /// Why not.
         reason: SkipReason,
     },
-    /// It was imported, or failed to be, and did not match its fixture.
+    /// It was imported, or failed to be, and did not match its fixture or its listed outcome.
     Failed(Failure),
 }
 
-/// The blocks of a test the runner imported and judged.
+/// The blocks of a test the runner imported, by how each was judged.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct Blocks {
-    /// Blocks the executor accepted and that matched their headers.
-    pub accepted: usize,
-    /// Blocks the executor refused for an exception the fixture names.
+    /// Blocks the executor accepted that matched their headers: checked against Ethereum.
+    pub matched: usize,
+    /// Blocks the executor refused for an exception the fixture names: checked against Ethereum.
     pub refused: usize,
+    /// Blocks the executor accepted whose outcome is not their header's and is exactly the one a
+    /// deviation lists: matched to a deviation, not to Ethereum.
+    pub deviated: usize,
+}
+
+impl Blocks {
+    /// The blocks checked against Ethereum: matched or refused as the fixture expects.
+    pub const fn checked(&self) -> usize {
+        self.matched + self.refused
+    }
 }
 
 /// A test and what happened to it.
@@ -221,14 +266,14 @@ pub struct TestResult {
     pub id: TestId,
     /// What happened to it.
     pub outcome: Outcome,
-    /// The blocks it imported as the fixture expects, up to a failure.
+    /// The blocks it imported, up to a failure that stopped it.
     pub blocks: Blocks,
 }
 
 /// Every test a run was given, and what happened to each.
 #[derive(Debug, Serialize)]
 pub struct Report {
-    /// The registry failures were attributed to.
+    /// The registry the run held differing blocks to.
     #[serde(skip)]
     pub deviations: &'static [Deviation],
     /// The fixture files the run found.
@@ -246,23 +291,24 @@ pub struct Summary {
     pub files: usize,
     /// The tests the files define for Osaka: executed and skipped.
     pub defined: usize,
-    /// The tests that executed.
+    /// The tests that executed: passed, deviated or failed.
     pub executed: usize,
-    /// The tests that executed and matched their fixture.
+    /// The tests that executed and matched their fixture in every block and at the chain's end.
     pub passed: usize,
     /// The tests that were not executed, by reason.
     pub skipped: BTreeMap<SkipReason, usize>,
     /// The tests that failed, by kind.
     pub failed: BTreeMap<FailureKind, usize>,
-    /// The failed tests a deviation explains, by deviation.
+    /// The tests a deviation lists that deviated exactly as listed, by deviation.
     pub deviated: BTreeMap<&'static str, usize>,
-    /// The failed tests no deviation explains.
+    /// The failed tests: no listed outcome explains them.
     pub unattributed: usize,
-    /// The tests a deviation lists that did not fail as listed, by deviation.
+    /// The tests a deviation lists that did not deviate as listed, by deviation.
     pub unreproduced: BTreeMap<&'static str, usize>,
     /// The fixture files that could not be read or parsed.
     pub file_failures: usize,
-    /// The blocks the executed tests imported as their fixtures expect: accepted, and refused.
+    /// The blocks the executed tests imported: checked against Ethereum (matched or refused) and
+    /// matched to a deviation, counted apart.
     pub blocks: Blocks,
 }
 
@@ -276,6 +322,11 @@ impl Summary {
     pub fn failed_total(&self) -> usize {
         self.failed.values().sum()
     }
+
+    /// The tests that deviated as listed.
+    pub fn deviated_total(&self) -> usize {
+        self.deviated.values().sum()
+    }
 }
 
 impl Report {
@@ -288,21 +339,23 @@ impl Report {
         };
         for result in &self.results {
             summary.defined += 1;
-            summary.blocks.accepted += result.blocks.accepted;
+            summary.blocks.matched += result.blocks.matched;
             summary.blocks.refused += result.blocks.refused;
+            summary.blocks.deviated += result.blocks.deviated;
             match &result.outcome {
                 Outcome::Passed => {
                     summary.executed += 1;
                     summary.passed += 1;
                 }
+                Outcome::Deviated { deviation } => {
+                    summary.executed += 1;
+                    *summary.deviated.entry(deviation).or_default() += 1;
+                }
                 Outcome::Skipped { reason } => *summary.skipped.entry(*reason).or_default() += 1,
                 Outcome::Failed(failure) => {
                     summary.executed += 1;
+                    summary.unattributed += 1;
                     *summary.failed.entry(failure.kind).or_default() += 1;
-                    match failure.deviation {
-                        Some(id) => *summary.deviated.entry(id).or_default() += 1,
-                        None => summary.unattributed += 1,
-                    }
                 }
             }
         }
@@ -312,16 +365,17 @@ impl Report {
         summary
     }
 
-    /// The failed tests no deviation explains.
+    /// The failed tests: no listed outcome explains them.
     pub fn unattributed(&self) -> impl Iterator<Item = (&TestId, &Failure)> {
         self.results.iter().filter_map(|result| match &result.outcome {
-            Outcome::Failed(failure) if failure.deviation.is_none() => Some((&result.id, failure)),
+            Outcome::Failed(failure) => Some((&result.id, failure)),
             _ => None,
         })
     }
 
-    /// The tests the registry lists that did not fail as listed: exactly one result of the run
-    /// is the test's, and its deviation explains it, which it does only for what it lists.
+    /// The tests the registry lists that did not deviate as listed: a test is reproduced when
+    /// exactly one result of the run is the test's and it deviated under the deviation that lists
+    /// it.
     pub fn unreproduced(&self) -> impl Iterator<Item = Unreproduced<'_>> {
         self.deviations.iter().flat_map(move |deviation| {
             deviation.blockchain_entries.iter().filter_map(move |entry| {
@@ -329,21 +383,19 @@ impl Report {
                     self.results.iter().filter(|result| entry.is(&result.id)).collect();
                 let reproduced = matches!(
                     seen.as_slice(),
-                    [TestResult { outcome: Outcome::Failed(failure), .. }]
-                        if failure.deviation == Some(deviation.id)
+                    [TestResult { outcome: Outcome::Deviated { deviation: id }, .. }]
+                        if *id == deviation.id
                 );
                 (!reproduced).then_some(Unreproduced { deviation, entry, seen })
             })
         })
     }
 
-    /// What the gate finds wrong with this run: a fixture file that could not be read, an
-    /// unattributed failure, and, for each count given, a count that differs from it. Empty when
-    /// the gate passes.
+    /// What the gate finds wrong with this run: a fixture file that could not be read, a failed
+    /// test, and, for each count given, a count that differs from it. Empty when the gate passes.
     ///
     /// `expected_skipped` pins every class: a class it does not name is pinned at zero. With
-    /// `check_deviations`, every test a registered deviation lists must fail exactly as listed,
-    /// and each deviation explains as many failures as it lists.
+    /// `check_deviations`, every test a registered deviation lists must deviate exactly as listed.
     pub fn gate(
         &self,
         expected_executed: Option<usize>,
@@ -380,14 +432,7 @@ impl Report {
                 if unreproduced > 0 {
                     problems.push(format!(
                         "deviation {}: {unreproduced} of the {listed} blockchain tests it lists \
-                         did not fail as listed",
-                        deviation.id
-                    ));
-                }
-                let explained = summary.deviated.get(deviation.id).copied().unwrap_or(0);
-                if explained != listed {
-                    problems.push(format!(
-                        "deviation {} explains {explained} failed blockchain tests, {listed} listed",
+                         did not deviate as listed",
                         deviation.id
                     ));
                 }
@@ -397,7 +442,7 @@ impl Report {
     }
 }
 
-/// A test a deviation lists that did not fail as listed.
+/// A test a deviation lists that did not deviate as listed.
 #[derive(Debug)]
 pub struct Unreproduced<'a> {
     /// The deviation.
@@ -453,37 +498,24 @@ pub fn run_file(path: &Path, config: Config) -> Result<Vec<TestResult>, Failure>
         }
         let id = TestId { path: path_str.clone(), name: name.clone() };
         let (outcome, blocks) = match serde_json::from_str::<Test>(raw.get()) {
-            Ok(test) => catch_unwind(AssertUnwindSafe(|| run_test(&path_str, name, &test)))
-                .unwrap_or_else(|panic| {
-                    let failure = Failure::new(FailureKind::Panic, None, panic_message(&panic));
-                    (Outcome::Failed(failure), Blocks::default())
-                }),
+            Ok(test) => catch_unwind(AssertUnwindSafe(|| {
+                run_test(&id, &test, deviations::blockchain_entry(config.deviations, &id))
+            }))
+            .unwrap_or_else(|panic| {
+                let failure = Failure::new(FailureKind::Panic, None, panic_message(&panic));
+                (Outcome::Failed(failure), Blocks::default())
+            }),
             Err(error) => {
                 let failure = Failure::new(FailureKind::Fixture, None, format!("parse: {error}"));
                 (Outcome::Failed(failure), Blocks::default())
             }
         };
-        let outcome = attribute(config.deviations, &id, outcome);
         if config.json_outcome {
             print_outcome(&id, &outcome);
         }
         results.push(TestResult { id, outcome, blocks });
     }
     Ok(results)
-}
-
-/// Names the deviation that explains a failure of the test `id`.
-fn attribute(registry: &'static [Deviation], id: &TestId, outcome: Outcome) -> Outcome {
-    match outcome {
-        Outcome::Failed(mut failure) => {
-            failure.deviation = registry
-                .iter()
-                .find(|deviation| deviation.explains_blockchain(id, failure.produced))
-                .map(|deviation| deviation.id);
-            Outcome::Failed(failure)
-        }
-        outcome => outcome,
-    }
 }
 
 fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
@@ -499,66 +531,136 @@ fn print_outcome(id: &TestId, outcome: &Outcome) {
     eprintln!("{line}");
 }
 
-/// Imports the test named `name`, in the fixture file at `path`, and judges it against its
-/// fixture, unless it is skipped.
-fn run_test(path: &str, name: &str, test: &Test) -> (Outcome, Blocks) {
-    if let Some(reason) = skips::skip_test(path, name, test) {
+/// Imports the test `id` and judges it against its fixture and the entry `listed`, the deviation
+/// that lists it and its entry for it, unless it is skipped.
+fn run_test(
+    id: &TestId,
+    test: &Test,
+    listed: Option<(&'static Deviation, &'static BlockchainEntry)>,
+) -> (Outcome, Blocks) {
+    if let Some(reason) = skips::skip_test(&id.path, &id.name, test) {
         return (Outcome::Skipped { reason }, Blocks::default());
     }
     let mut blocks = Blocks::default();
-    let outcome = match import_test(test, &mut blocks) {
-        Ok(()) => Outcome::Passed,
+    let outcome = match import_test(test, listed.map(|(_, entry)| entry), &mut blocks) {
+        Ok(()) => match listed {
+            Some((deviation, _)) => Outcome::Deviated { deviation: deviation.id },
+            None => Outcome::Passed,
+        },
         Err(failure) => Outcome::Failed(failure),
     };
     (outcome, blocks)
 }
 
-/// Holds what the executor produced for the accepted block at `index` to its header: the gas
-/// used, the logs bloom, the receipts root and the state root. A mismatch is the first of them
-/// that differs, and its detail names every one that does.
-fn compare(index: usize, header: &Header, output: &BlockOutput) -> Result<(), Failure> {
-    let mismatches = [
-        (
-            FailureKind::GasUsedMismatch,
-            output.gas_used != header.gas_used,
-            format!("gas used {}, header {}", output.gas_used, header.gas_used),
-        ),
-        (
-            FailureKind::LogsBloomMismatch,
-            output.logs_bloom != header.logs_bloom,
-            format!("logs bloom {}, header {}", output.logs_bloom, header.logs_bloom),
-        ),
-        (
-            FailureKind::ReceiptsRootMismatch,
-            output.receipts_root != header.receipts_root,
-            format!("receipts root {}, header {}", output.receipts_root, header.receipts_root),
-        ),
-        (
-            FailureKind::StateRootMismatch,
-            output.state_root != header.state_root,
-            format!("state root {}, header {}", output.state_root, header.state_root),
-        ),
-    ];
-    let failed: Vec<_> = mismatches.iter().filter(|(_, differs, _)| *differs).collect();
-    let Some((kind, _, _)) = failed.first() else { return Ok(()) };
-    let details: Vec<_> = failed.iter().map(|(_, _, detail)| detail.as_str()).collect();
-    Err(Failure {
-        kind: *kind,
-        block: Some(index),
-        produced: Some(Produced {
-            block: index,
-            gas_used: output.gas_used,
-            receipts_root: output.receipts_root,
-            state_root: output.state_root,
-        }),
-        detail: format!("block {index}: {}", details.join("; ")),
-        deviation: None,
-    })
+/// The fields of an accepted block's outcome that differ from its header.
+#[derive(Clone, Copy, Debug)]
+struct Differences {
+    gas_used: bool,
+    logs_bloom: bool,
+    receipts_root: bool,
+    state_root: bool,
 }
 
-/// Imports every block of `test`, counting in `blocks` those imported as the fixture expects, and
-/// checks where the chain ends.
-fn import_test(test: &Test, blocks: &mut Blocks) -> Result<(), Failure> {
+impl Differences {
+    fn of(header: &Header, output: &BlockOutput) -> Self {
+        Self {
+            gas_used: output.gas_used != header.gas_used,
+            logs_bloom: output.logs_bloom != header.logs_bloom,
+            receipts_root: output.receipts_root != header.receipts_root,
+            state_root: output.state_root != header.state_root,
+        }
+    }
+
+    const fn any(self) -> bool {
+        self.gas_used || self.logs_bloom || self.receipts_root || self.state_root
+    }
+
+    /// Whether the block ran as on Ethereum and left another state: only its state root differs.
+    const fn state_root_only(self) -> bool {
+        self.state_root && !self.gas_used && !self.logs_bloom && !self.receipts_root
+    }
+
+    /// The first field that differs, in the order a block is compared, as a failure.
+    const fn kind(self) -> FailureKind {
+        if self.gas_used {
+            FailureKind::GasUsedMismatch
+        } else if self.logs_bloom {
+            FailureKind::LogsBloomMismatch
+        } else if self.receipts_root {
+            FailureKind::ReceiptsRootMismatch
+        } else {
+            FailureKind::StateRootMismatch
+        }
+    }
+
+    /// Every field that differs, with what the executor produced and what the header says.
+    fn detail(self, header: &Header, output: &BlockOutput) -> String {
+        let mut details = Vec::new();
+        if self.gas_used {
+            details.push(format!("gas used {}, header {}", output.gas_used, header.gas_used));
+        }
+        if self.logs_bloom {
+            details.push(format!("logs bloom {}, header {}", output.logs_bloom, header.logs_bloom));
+        }
+        if self.receipts_root {
+            details.push(format!(
+                "receipts root {}, header {}",
+                output.receipts_root, header.receipts_root
+            ));
+        }
+        if self.state_root {
+            details.push(format!("state root {}, header {}", output.state_root, header.state_root));
+        }
+        details.join("; ")
+    }
+}
+
+/// What Satin produced for the accepted block at `index`.
+fn produced(index: usize, output: &BlockOutput) -> Produced {
+    Produced {
+        block: index,
+        gas_used: output.gas_used,
+        logs_bloom_hash: keccak256(output.logs_bloom),
+        receipts_root: output.receipts_root,
+        state_root: output.state_root,
+    }
+}
+
+/// Whether the cause `entry` gives for its block at `index`, which differs from its header in
+/// `differences`, holds: the deviation's rule may act in any block, and a block whose state an
+/// earlier listed block left must otherwise run as on Ethereum.
+fn cause_holds(
+    cause: Cause,
+    index: usize,
+    differences: Differences,
+    entry: &BlockchainEntry,
+) -> bool {
+    match cause {
+        Cause::Rule => true,
+        Cause::StateLeftBy(earlier) => {
+            earlier < index && entry.block(earlier).is_some() && differences.state_root_only()
+        }
+    }
+}
+
+/// `failure`, carrying the blocks that differed before it.
+fn with_differing(mut failure: Failure, differing: &[Differing]) -> Failure {
+    failure.differing = differing.to_vec();
+    failure
+}
+
+/// Imports every block of `test`, counting in `blocks` how each was judged, and checks where the
+/// chain ends.
+///
+/// An accepted block that differs from its header passes only when `entry` lists it with exactly
+/// the outcome Satin produced and a cause that holds; the chain is imported on from Satin's own
+/// state either way, so a failure names every block that differs, not only the first. A refusal
+/// the fixture does not expect, or a block it expects refused that is accepted, stops the test.
+fn import_test(
+    test: &Test,
+    entry: Option<&'static BlockchainEntry>,
+    blocks: &mut Blocks,
+) -> Result<(), Failure> {
     let fixture = |detail: String| Failure::new(FailureKind::Fixture, None, detail);
     let chain_id = u64::try_from(test.config.chainid)
         .map_err(|_| fixture(format!("chain id {} does not fit a u64", test.config.chainid)))?;
@@ -584,69 +686,152 @@ fn import_test(test: &Test, blocks: &mut Blocks) -> Result<(), Failure> {
         )));
     }
 
+    let mut differing = Vec::new();
+    let mut unlisted = None;
+    // Whether the chain holds the state its last accepted block's header describes.
+    let mut on_fixture_state = true;
     for (index, block) in test.blocks.iter().enumerate() {
         let decoded = decode_block(&block.rlp).map_err(|error| {
-            Failure::new(FailureKind::Fixture, Some(index), format!("block {index}: {error}"))
+            let failure =
+                Failure::new(FailureKind::Fixture, Some(index), format!("block {index}: {error}"));
+            with_differing(failure, &differing)
         })?;
         let header = &decoded.header;
-        let imported = chain.import(&decoded);
-        match (&block.expect_exception, imported) {
+        match (&block.expect_exception, chain.import(&decoded)) {
             (None, Ok(output)) => {
-                compare(index, header, &output)?;
-                blocks.accepted += 1;
+                let differences = Differences::of(header, &output);
+                on_fixture_state = !differences.state_root;
+                if !differences.any() {
+                    blocks.matched += 1;
+                    continue;
+                }
+                let produced = produced(index, &output);
+                let listed_block = entry.and_then(|entry| Some((entry, entry.block(index)?)));
+                let listed = listed_block.is_some_and(|(entry, listed)| {
+                    listed.produced == produced &&
+                        cause_holds(listed.cause, index, differences, entry)
+                });
+                differing.push(Differing {
+                    produced,
+                    state_root_only: differences.state_root_only(),
+                    listed,
+                });
+                if listed {
+                    blocks.deviated += 1;
+                } else if unlisted.is_none() {
+                    let note = if listed_block.is_some() {
+                        "; its deviation lists another outcome or a cause that does not hold"
+                    } else {
+                        ""
+                    };
+                    let detail =
+                        format!("block {index}: {}{note}", differences.detail(header, &output));
+                    unlisted = Some(Failure::new(differences.kind(), Some(index), detail));
+                }
             }
             (None, Err(refusal)) => {
-                return Err(Failure::new(
+                let failure = Failure::new(
                     FailureKind::UnexpectedException,
                     Some(index),
                     format!("block {index} refused: {}", refusal.detail),
-                ))
+                );
+                return Err(with_differing(failure, &differing));
             }
             (Some(expected), Ok(_)) => {
-                return Err(Failure::new(
+                let failure = Failure::new(
                     FailureKind::MissingException,
                     Some(index),
                     format!("block {index}: expected {expected}, the executor accepted it"),
-                ))
+                );
+                return Err(with_differing(failure, &differing));
             }
-            (Some(expected), Err(refusal)) => match check_names(expected, refusal.names) {
-                Ok(()) => blocks.refused += 1,
-                Err(Mismatch::Wrong { got }) => {
-                    return Err(Failure::new(
+            (Some(expected), Err(refusal)) => {
+                let failure = match check_names(expected, refusal.names) {
+                    Ok(()) => {
+                        blocks.refused += 1;
+                        continue;
+                    }
+                    Err(Mismatch::Wrong { got }) => Failure::new(
                         FailureKind::WrongException,
                         Some(index),
                         format!(
                             "block {index}: expected {expected}, refused as {got:?}: {}",
                             refusal.detail
                         ),
-                    ))
-                }
-                Err(Mismatch::Unnamed) => {
-                    return Err(Failure::new(
+                    ),
+                    Err(Mismatch::Unnamed) => Failure::new(
                         FailureKind::UnnamedException,
                         Some(index),
                         format!("block {index}: expected {expected}, refused: {}", refusal.detail),
-                    ))
-                }
-            },
+                    ),
+                };
+                return Err(with_differing(failure, &differing));
+            }
+        }
+    }
+    if let Some(failure) = unlisted {
+        return Err(with_differing(failure, &differing));
+    }
+
+    // Every block the entry lists deviated as listed.
+    let not_as_listed = |block, detail: String| {
+        with_differing(Failure::new(FailureKind::NotAsListed, block, detail), &differing)
+    };
+    for listed in entry.map_or(&[][..], |entry| entry.blocks) {
+        let index = listed.produced.block;
+        if !differing.iter().any(|block| block.listed && block.produced.block == index) {
+            return Err(not_as_listed(
+                Some(index),
+                format!("block {index} is listed, and the run did not produce its listed outcome"),
+            ));
         }
     }
 
-    // The chain ends at the fixture's last valid block, holding the fixture's post-state.
-    let end = |detail: String| Failure::new(FailureKind::PostStateMismatch, None, detail);
+    // The chain ends at the fixture's last valid block, holding the fixture's post-state, unless
+    // its entry says why that state is not the fixture's.
     if chain.head != test.lastblockhash {
-        return Err(end(format!(
+        let detail = format!(
             "the chain ends at block {}, the fixture's last block is {}",
             chain.head, test.lastblockhash
-        )));
+        );
+        return Err(with_differing(
+            Failure::new(FailureKind::PostStateMismatch, None, detail),
+            &differing,
+        ));
     }
-    let post_root = chain::fixture_state_root(&test.post_state)
-        .map_err(|error| fixture(format!("post-state: {error}")))?;
-    let root = chain.state_root();
-    if root != post_root {
-        return Err(end(format!(
-            "the chain ends with state root {root}, the fixture's post-state has {post_root}"
-        )));
+    match (on_fixture_state, entry.map(|entry| entry.end)) {
+        (true, None | Some(ChainEnd::FixtureState)) => {
+            let post_root = chain::fixture_state_root(&test.post_state)
+                .map_err(|error| fixture(format!("post-state: {error}")))?;
+            let root = chain.state_root();
+            if root != post_root {
+                let detail = format!(
+                    "the chain ends with state root {root}, the fixture's post-state has \
+                     {post_root}"
+                );
+                return Err(with_differing(
+                    Failure::new(FailureKind::PostStateMismatch, None, detail),
+                    &differing,
+                ));
+            }
+        }
+        (false, Some(ChainEnd::DeviatedState(_))) => {}
+        (true, Some(ChainEnd::DeviatedState(_))) => {
+            return Err(not_as_listed(
+                None,
+                "the entry says the chain ends on a state a listed block left, and it ends on \
+                 the state its last header describes"
+                    .into(),
+            ))
+        }
+        (false, None | Some(ChainEnd::FixtureState)) => {
+            return Err(not_as_listed(
+                None,
+                "the chain ends on a state a listed block left, and its entry gives no reason \
+                 the post-state is not compared"
+                    .into(),
+            ))
+        }
     }
     Ok(())
 }

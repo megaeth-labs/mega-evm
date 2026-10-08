@@ -44,15 +44,57 @@ pub struct Deviation {
     pub blockchain_entries: &'static [BlockchainEntry],
 }
 
-/// A blockchain test a deviation explains, and what Satin produces for the block it fails at.
+/// A blockchain test a deviation explains: every block of it whose outcome is not its header's,
+/// with the outcome Satin produces for it, and how the chain ends.
+///
+/// The runner imports the whole chain, every listed block on Satin's own post-state, and holds
+/// every block to its header or to its listed outcome exactly; a block that differs and is not
+/// listed fails the test, as does a listed block that does not produce its listed outcome.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct BlockchainEntry {
     /// The fixture file, relative to the release's `blockchain_tests` directory.
     pub path: &'static str,
     /// The test's name within the file.
     pub name: &'static str,
-    /// The block the test fails at, and what Satin produces for it.
+    /// Every block whose outcome is not its header's, in block order.
+    pub blocks: &'static [ListedBlock],
+    /// How the chain ends, and so whether its post-state is compared.
+    pub end: ChainEnd,
+}
+
+/// A block of a listed blockchain test whose outcome is not its header's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct ListedBlock {
+    /// What Satin produces for the block; its index is the block's.
     pub produced: blockchain::Produced,
+    /// Why the block differs.
+    pub cause: Cause,
+}
+
+/// Why a listed block's outcome is not its header's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Cause {
+    /// The deviation's rule acts in this block.
+    Rule,
+    /// The block runs as on Ethereum — its gas used, logs bloom and receipts root are its
+    /// header's — and its state root differs only by the state the listed block it names left
+    /// behind. The runner holds the claim: a block listed so whose own outcome differs, or that
+    /// names a block that is not an earlier listed one, fails the test.
+    StateLeftBy(usize),
+}
+
+/// How a listed blockchain test's chain ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ChainEnd {
+    /// The chain ends on a state its last block's header describes: its head and its post-state
+    /// are compared with the fixture's.
+    FixtureState,
+    /// The chain ends on a state a listed block left, which the fixture's post-state does not
+    /// describe: its head is compared with the fixture's and its post-state is not, for the
+    /// reason given.
+    DeviatedState(&'static str),
 }
 
 /// A fixture entry a deviation explains, and the hashes Satin produces for it.
@@ -78,16 +120,9 @@ impl Deviation {
         }
     }
 
-    /// Whether a failure of the blockchain test `id`, which produced `produced` at the block it
-    /// failed at, is this deviation's: the test is listed, with exactly that block and outcome.
-    pub fn explains_blockchain(
-        &self,
-        id: &blockchain::TestId,
-        produced: Option<blockchain::Produced>,
-    ) -> bool {
-        produced.is_some_and(|produced| {
-            self.blockchain_entries.iter().any(|entry| entry.produced == produced && entry.is(id))
-        })
+    /// The blockchain test `id`, as this deviation lists it, if it does.
+    pub fn blockchain_entry(&self, id: &blockchain::TestId) -> Option<&'static BlockchainEntry> {
+        self.blockchain_entries.iter().find(|entry| entry.is(id))
     }
 
     /// Whether a failure of the entry `id` of `fork`, which produced `produced`, is this
@@ -104,6 +139,24 @@ impl BlockchainEntry {
     pub fn is(&self, id: &blockchain::TestId) -> bool {
         id.name == self.name && path_ends_with(&id.path, self.path)
     }
+}
+
+impl BlockchainEntry {
+    /// The listed block at `index`, if the entry lists it.
+    pub fn block(&self, index: usize) -> Option<&'static ListedBlock> {
+        self.blocks.iter().find(|block| block.produced.block == index)
+    }
+}
+
+/// The deviation in `registry` that lists the blockchain test `id`, and its entry for it.
+///
+/// No test is listed by two deviations (a test checks it on the registry), so the first is the
+/// one.
+pub fn blockchain_entry(
+    registry: &'static [Deviation],
+    id: &blockchain::TestId,
+) -> Option<(&'static Deviation, &'static BlockchainEntry)> {
+    registry.iter().find_map(|deviation| deviation.blockchain_entry(id).map(|e| (deviation, e)))
 }
 
 impl fmt::Display for BlockchainEntry {
@@ -151,45 +204,655 @@ pub const AMSTERDAM_OPCODES_ON_OSAKA: Deviation = Deviation {
         BlockchainEntry {
             path: "frontier/opcodes/test_all_opcodes.json",
             name: "tests/frontier/opcodes/test_all_opcodes.py::test_all_opcodes[fork_Osaka-blockchain_test_from_state_test]",
-            produced: blockchain::Produced {
-                block: 0,
-                gas_used: 8_129_268,
-                receipts_root: b256!(
-                    "0xa8efe1faeb804a16183cc48903e6d13ed9c9786bfb146708b605feb6448bdd93"
-                ),
-                state_root: b256!(
-                    "0x311f0607743b16ef7eb341125d364a002eaceb2f05ac936bbd0f839865d2711d"
-                ),
-            },
+            blocks: &[
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 0,
+                        gas_used: 8_129_268,
+                        logs_bloom_hash: b256!(
+                            "0xbe67c3e27ea8993a93e1784dfad43146e9c48f71d7d56dfd86d6c1041920b232"
+                        ),
+                        receipts_root: b256!(
+                            "0xa8efe1faeb804a16183cc48903e6d13ed9c9786bfb146708b605feb6448bdd93"
+                        ),
+                        state_root: b256!(
+                            "0x311f0607743b16ef7eb341125d364a002eaceb2f05ac936bbd0f839865d2711d"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+            ],
+            end: ChainEnd::DeviatedState(
+                "its one block runs the four opcodes Osaka halts on, so the chain ends on the state they leave",
+            ),
         },
         BlockchainEntry {
             path: "frontier/scenarios/test_scenarios.json",
             name: "tests/frontier/scenarios/test_scenarios.py::test_scenarios[fork_Osaka-blockchain_test-test_program_program_INVALID-debug]",
-            produced: blockchain::Produced {
-                block: 0,
-                gas_used: 5_386_221,
-                receipts_root: b256!(
-                    "0x55de3d2d9f2c2c5622556508e5cda2ddca148e43439eb16a46115b797792d3bf"
-                ),
-                state_root: b256!(
-                    "0x50cc3c920ca4d635bb156978614d544911917dda2314da86c6ae47f86d8668ff"
-                ),
-            },
+            blocks: &[
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 0,
+                        gas_used: 5_386_221,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0x55de3d2d9f2c2c5622556508e5cda2ddca148e43439eb16a46115b797792d3bf"
+                        ),
+                        state_root: b256!(
+                            "0x50cc3c920ca4d635bb156978614d544911917dda2314da86c6ae47f86d8668ff"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 1,
+                        gas_used: 5_386_221,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0x55de3d2d9f2c2c5622556508e5cda2ddca148e43439eb16a46115b797792d3bf"
+                        ),
+                        state_root: b256!(
+                            "0x7a432172471d48e4eabea2f6f7843ae1dc13ba9db35ebb90ea7b71e2797381b8"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 2,
+                        gas_used: 5_386_224,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0xc8a1e306c05c6c22dcc04fb01dd3e84c3ba16088eccf053cfa10c07d1d604c89"
+                        ),
+                        state_root: b256!(
+                            "0x6492319287311df06e117d1bf0167868072f0ec0522a168cbae279e88f6edeb5"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 3,
+                        gas_used: 5_386_224,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0xc8a1e306c05c6c22dcc04fb01dd3e84c3ba16088eccf053cfa10c07d1d604c89"
+                        ),
+                        state_root: b256!(
+                            "0x8b428b568632e6056542468c6fc7ed031c32db3a7b7286b04285b6e735c30a53"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 4,
+                        gas_used: 5_376_889,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0x44b3958d3a4da284d93cd9413fdd02affc4fa0d2c2ae0dd4e08c98a38d7a6504"
+                        ),
+                        state_root: b256!(
+                            "0xfa2a2f0e8f686cc0f5d1bf7d01f6048c17795b0d6f8c319816742ada3d5353ed"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 5,
+                        gas_used: 5_386_221,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0x55de3d2d9f2c2c5622556508e5cda2ddca148e43439eb16a46115b797792d3bf"
+                        ),
+                        state_root: b256!(
+                            "0xd76637032c7aba3c937f7fbe047a1bc277dccd78377e63681570ebeb239ab721"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 6,
+                        gas_used: 5_386_221,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0x55de3d2d9f2c2c5622556508e5cda2ddca148e43439eb16a46115b797792d3bf"
+                        ),
+                        state_root: b256!(
+                            "0xc4217d76247c681511a0c3e6b7bb5712fc08c8e08f8d666992cb24d40ab3b7e5"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 7,
+                        gas_used: 5_392_924,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0x20e47a185042afce840b786dcbf99dea66b1488180e2cce569511d133fcb4344"
+                        ),
+                        state_root: b256!(
+                            "0x150535f0c70945d4025bbd207f255412568187ff74ec5c4f068a6c3159a1b215"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 8,
+                        gas_used: 5_392_924,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0x20e47a185042afce840b786dcbf99dea66b1488180e2cce569511d133fcb4344"
+                        ),
+                        state_root: b256!(
+                            "0xca8b4f50f5ee3e3b992db528da9cf18d3495161478583903f26d7c58590c434b"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 9,
+                        gas_used: 5_376_889,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0x44b3958d3a4da284d93cd9413fdd02affc4fa0d2c2ae0dd4e08c98a38d7a6504"
+                        ),
+                        state_root: b256!(
+                            "0x32c1d16829c873e7f9762e026d6d9e7f007aedf4b96c60a7a774d70cf68652ab"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 10,
+                        gas_used: 5_392_924,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0x20e47a185042afce840b786dcbf99dea66b1488180e2cce569511d133fcb4344"
+                        ),
+                        state_root: b256!(
+                            "0x3c04b7a4296b76ee622d099c6a7e5195cf9884f4e005a452dc24f431fe8679ca"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 11,
+                        gas_used: 5_392_924,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0x20e47a185042afce840b786dcbf99dea66b1488180e2cce569511d133fcb4344"
+                        ),
+                        state_root: b256!(
+                            "0x3c2819d923e552d459a255be2e68e04210cac0b31ca3fb45bce60b5ff9cfdfcd"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 12,
+                        gas_used: 5_399_627,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0x5532612bb2ec2b05606828aafab98443ddeede215ae17df462f7b6859e9fff26"
+                        ),
+                        state_root: b256!(
+                            "0x8646405e196a3332ee3bb75af4cb1ba7f0c51c646c1f74fe88193f9971d27019"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 13,
+                        gas_used: 5_399_627,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0x5532612bb2ec2b05606828aafab98443ddeede215ae17df462f7b6859e9fff26"
+                        ),
+                        state_root: b256!(
+                            "0xc95eee62b72c78d47f25497acb8715f3ed6c6b1ef1cf48fc5810bef03c87d26e"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 14,
+                        gas_used: 5_383_592,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0x1b4b33d4f2db7ecb0071a2ed95938ca5bf97df8c4c259c1b1542ee79cfad93b4"
+                        ),
+                        state_root: b256!(
+                            "0x4f98fc50f394e6a3264df2c21dc77d9d0f0134b741f1faf42654ed1e9b3e2ea9"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 15,
+                        gas_used: 5_392_924,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0x20e47a185042afce840b786dcbf99dea66b1488180e2cce569511d133fcb4344"
+                        ),
+                        state_root: b256!(
+                            "0x1ee283e5862adf81f60e3cef87613b7f7dc02b3eef325e2246a212e24ad439bc"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 16,
+                        gas_used: 5_392_924,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0x20e47a185042afce840b786dcbf99dea66b1488180e2cce569511d133fcb4344"
+                        ),
+                        state_root: b256!(
+                            "0xf72728582c1345a0b218adf1baa60e68cfa6d1bb9f16fb3d9c83be03d277f9b4"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 17,
+                        gas_used: 5_399_627,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0x5532612bb2ec2b05606828aafab98443ddeede215ae17df462f7b6859e9fff26"
+                        ),
+                        state_root: b256!(
+                            "0xc9b1b1e13a3ae1a8640ca3204c1bcb5b82dcc01a75135105ad2ad43629708305"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 18,
+                        gas_used: 5_399_627,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0x5532612bb2ec2b05606828aafab98443ddeede215ae17df462f7b6859e9fff26"
+                        ),
+                        state_root: b256!(
+                            "0xe5521ec635fa43963276146cd72c55fcd3119123c1fdbab42667de6c76b6b86b"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 19,
+                        gas_used: 5_383_592,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0x1b4b33d4f2db7ecb0071a2ed95938ca5bf97df8c4c259c1b1542ee79cfad93b4"
+                        ),
+                        state_root: b256!(
+                            "0x7ca5f100fa3a11694d1fb64a2c57359f2bc60aa9f492413dd47c93936d2efb10"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 20,
+                        gas_used: 5_412_989,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0xa22daee9f564b06c805a9b32ba0f6b26e267388fe3bd24de782c7a8e3bd3200c"
+                        ),
+                        state_root: b256!(
+                            "0xd70438c04dd69c9d1c2450a8f719e89c530aa86da49e4f1de4806b6d5219113a"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 21,
+                        gas_used: 5_412_974,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0x02e92ec835e38ac88ac8bb94790955bf8aadc3d53b34733e4fa77fd18bda5f82"
+                        ),
+                        state_root: b256!(
+                            "0x7e69c5919cf9e7a663ccc53d78b3dd11128f65809862a53a58d12c12dfec4d50"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 22,
+                        gas_used: 5_425_218,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0xae1970250c7686623887a6629c3b89de2107591e74db05483e6cfa549d83721d"
+                        ),
+                        state_root: b256!(
+                            "0x3d2e7d5f919008960dc9043f0aff0fcd960c6324d07900feb6be5d7829c9e25d"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 23,
+                        gas_used: 5_425_218,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0xae1970250c7686623887a6629c3b89de2107591e74db05483e6cfa549d83721d"
+                        ),
+                        state_root: b256!(
+                            "0xc76d312ba2294d1e2a2e4744c47948d97e23effc4f884f6afe2d92c56971d00c"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 24,
+                        gas_used: 5_431_921,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0x80d1b6b1cc4c436be347448203fe33fb20a10269a969d4d7584607e81e20a523"
+                        ),
+                        state_root: b256!(
+                            "0x9795b537f1c4a81c45ecbd68cd6a768f1edf4851c1af2f58dd36df2ce990a60c"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 25,
+                        gas_used: 5_431_921,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0x80d1b6b1cc4c436be347448203fe33fb20a10269a969d4d7584607e81e20a523"
+                        ),
+                        state_root: b256!(
+                            "0xd520334239c6aca8938bcc6000730ab1d092abb057e8a9e9d48bec67d09b561d"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 26,
+                        gas_used: 5_425_197,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0x4592127747c3ae6dcf115d65b2cce745607a8318fe7f8e664e0555193ffb7e56"
+                        ),
+                        state_root: b256!(
+                            "0x68bd60a5015b88c0b8e7e185f8be77cfdb27cd5589f1f215d98b7678bc414d76"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 27,
+                        gas_used: 5_425_197,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0x4592127747c3ae6dcf115d65b2cce745607a8318fe7f8e664e0555193ffb7e56"
+                        ),
+                        state_root: b256!(
+                            "0x7dd74978b8093b1e70baf3100ae39040303bcda411a13beec70e22ee72a29833"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 28,
+                        gas_used: 5_431_900,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0x95c628e38ba7c4cfe057b1f25eabf4839e440366a6ac77af656eb6e613363a1d"
+                        ),
+                        state_root: b256!(
+                            "0x757f6d279391869cc5645519509c639664976d262443f14c260ea0dd6555a9bc"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 29,
+                        gas_used: 5_431_900,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0x95c628e38ba7c4cfe057b1f25eabf4839e440366a6ac77af656eb6e613363a1d"
+                        ),
+                        state_root: b256!(
+                            "0x112f123f5e1e6bb8b62435629d05b78b41241e7cad87f164fdfc5251514fdaab"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 30,
+                        gas_used: 5_354_342,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0x77d8bb582b975327486b5eaf11eefab2c24f4d7eea18a068393a0bf07fe4a12f"
+                        ),
+                        state_root: b256!(
+                            "0xdd0f896ef11e7b76ca47798934817924b7ff6d4f69a6332dc58479a91bed4bae"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 31,
+                        gas_used: 6_996_648,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0x11e83acea62ae5fa281bbc0e08cbb0e8096b6639aa23b482e09be96b634478d1"
+                        ),
+                        state_root: b256!(
+                            "0x62884511e634038fe0d74ba175861b715288e3f0f22ef2d833e90308b3d692e7"
+                        ),
+                    },
+                    cause: Cause::StateLeftBy(30),
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 32,
+                        gas_used: 5_374_242,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0x49e5cee7b540b0aa0c1da72b0f14ce1c6f0462b9a5d912dc2d07f025d9703c47"
+                        ),
+                        state_root: b256!(
+                            "0x50aa0f67eadbc50b215297d51f9963dab59f8820c0f5175eb236bc6a58eab823"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 33,
+                        gas_used: 10_692_884,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0x11f8bdf99c03a9e5a4434febe2b60a3d448beea5a90859e9aeaf64f1a7f39aa9"
+                        ),
+                        state_root: b256!(
+                            "0x42f64807cbdc63fd10bff15150e7d7a6a49d74706107891f9ef43c3b81573473"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 34,
+                        gas_used: 10_742_872,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0xb46d2b23868948b3dca1ee22d01e7555454b3299a9b46938b0468425524b6d62"
+                        ),
+                        state_root: b256!(
+                            "0x6124ecf0c28fafaf690def9ad816ed272a9111021599e3ffb0dcf12174de6682"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 35,
+                        gas_used: 10_692_890,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0xc23d5fbdb417f4a15b3c25cb25d1aa377be4e3534f218c075e24a27fcffc6e41"
+                        ),
+                        state_root: b256!(
+                            "0xf9001fb3d1ba34652291e969f128d8ad39018e0addaae5b73c84184e4add58b8"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 36,
+                        gas_used: 10_692_890,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0xc23d5fbdb417f4a15b3c25cb25d1aa377be4e3534f218c075e24a27fcffc6e41"
+                        ),
+                        state_root: b256!(
+                            "0xba79f738e1ded0240a5c87b6ee54daa4e0352b497af0ae1886df1234dbfd47e3"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+            ],
+            end: ChainEnd::DeviatedState(
+                "every block runs the program's four opcodes Osaka halts on or carries the state they left, so the chain ends on that state",
+            ),
         },
         BlockchainEntry {
             path: "static/state_tests/stBadOpcode/undefinedOpcodeFirstByte.json",
             name: "tests/static/state_tests/stBadOpcode/undefinedOpcodeFirstByteFiller.yml::undefinedOpcodeFirstByte[fork_Osaka-blockchain_test_from_state_test-]",
-            produced: blockchain::Produced {
-                block: 0,
-                gas_used: 3_969_244,
-                receipts_root: b256!(
-                    "0x9a8f3b88fe2bb353fe86d44bd5be426458c3544f423b8e70f0dff0a06c9634bc"
-                ),
-                state_root: b256!(
-                    "0xa1527ad75667d1f7455aa215c374f3c21c9fde318ec9fb652ee9c8fac11dc72b"
-                ),
-            },
+            blocks: &[
+                ListedBlock {
+                    produced: blockchain::Produced {
+                        block: 0,
+                        gas_used: 3_969_244,
+                        logs_bloom_hash: b256!(
+                            "0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5"
+                        ),
+                        receipts_root: b256!(
+                            "0x9a8f3b88fe2bb353fe86d44bd5be426458c3544f423b8e70f0dff0a06c9634bc"
+                        ),
+                        state_root: b256!(
+                            "0xa1527ad75667d1f7455aa215c374f3c21c9fde318ec9fb652ee9c8fac11dc72b"
+                        ),
+                    },
+                    cause: Cause::Rule,
+                },
+            ],
+            end: ChainEnd::DeviatedState(
+                "its one block runs the four opcodes Osaka halts on, so the chain ends on the state they leave",
+            ),
         },
+
     ],
     entries: &[
         Entry {
@@ -601,27 +1264,44 @@ pub fn render_markdown() -> String {
         }
         if !deviation.blockchain_entries.is_empty() {
             out.push_str(&format!(
-                "\n**Blockchain-test failures.** {} tests of the pinned main release's \
-                 `blockchain_tests`, each with the block it fails at and the gas used, receipts \
-                 root and state root Satin produces for it; paths are relative to the release's \
-                 `blockchain_tests` directory.\n\n",
+                "\n**Blockchain tests.** {} tests of the pinned main release's `blockchain_tests`, \
+                 each with every block whose outcome is not its header's — the gas used, the keccak \
+                 hash of the logs bloom, the receipts root and the state root Satin produces for it, \
+                 and why it differs — and how the chain ends; every other block of the test matches \
+                 its header, and paths are relative to the release's `blockchain_tests` \
+                 directory.\n\n",
                 deviation.blockchain_entries.len()
             ));
-            let mut path = "";
             for entry in deviation.blockchain_entries {
-                if entry.path != path {
-                    path = entry.path;
-                    out.push_str(&format!("- `{path}`\n"));
+                out.push_str(&format!("- `{}`\n  - `{}`\n", entry.path, entry.name));
+                for listed in entry.blocks {
+                    let produced = listed.produced;
+                    let cause = match listed.cause {
+                        Cause::Rule => "the rule acts".to_string(),
+                        Cause::StateLeftBy(block) => format!("the state block {block} left"),
+                    };
+                    out.push_str(&format!(
+                        "    - block {} ({cause}): gas used {}, logs bloom hash `{}`, receipts \
+                         root `{}`, state root `{}`\n",
+                        produced.block,
+                        produced.gas_used,
+                        produced.logs_bloom_hash,
+                        produced.receipts_root,
+                        produced.state_root
+                    ));
                 }
-                let produced = entry.produced;
-                out.push_str(&format!(
-                    "  - `{}`: block {}, gas used {}, receipts root `{}`, state root `{}`\n",
-                    entry.name,
-                    produced.block,
-                    produced.gas_used,
-                    produced.receipts_root,
-                    produced.state_root
-                ));
+                let end = match entry.end {
+                    ChainEnd::FixtureState => {
+                        "the chain ends on its last header's state; its head and post-state are \
+                         compared"
+                            .to_string()
+                    }
+                    ChainEnd::DeviatedState(reason) => format!(
+                        "the chain ends on a state a listed block left; its head is compared and \
+                         its post-state is not: {reason}"
+                    ),
+                };
+                out.push_str(&format!("    - End: {end}.\n"));
             }
         }
     }
@@ -683,8 +1363,8 @@ mod tests {
     }
 
     /// Only an Osaka deviation lists blockchain tests, each complete, in path and name order, each
-    /// once across the registry; a listed test is explained only with what it lists, wherever the
-    /// release's `blockchain_tests` directory is.
+    /// once across the registry, its blocks in order and its causes naming earlier listed blocks;
+    /// an entry is the test's wherever the release's `blockchain_tests` directory is.
     #[test]
     fn test_blockchain_entries() {
         let mut all = BTreeSet::new();
@@ -709,25 +1389,41 @@ mod tests {
                     "{}: {entry}",
                     deviation.id
                 );
+                // Blocks are listed once each, in block order, and a block whose state an earlier
+                // block left names a listed block before it.
+                assert!(!entry.blocks.is_empty(), "{entry}: lists no block");
+                let indexes: Vec<_> = entry.blocks.iter().map(|b| b.produced.block).collect();
+                assert!(indexes.windows(2).all(|pair| pair[0] < pair[1]), "{entry}: block order");
+                for listed in entry.blocks {
+                    assert_eq!(entry.block(listed.produced.block), Some(listed));
+                    if let Cause::StateLeftBy(earlier) = listed.cause {
+                        assert!(earlier < listed.produced.block, "{entry}: a later block named");
+                        assert!(entry.block(earlier).is_some(), "{entry}: an unlisted block named");
+                    }
+                }
+                if let ChainEnd::DeviatedState(reason) = entry.end {
+                    assert!(!reason.is_empty(), "{entry}: an end without a reason");
+                }
+                // The entry is the test's wherever the release's directory is, and nowhere else.
                 for dir in ["", "fixtures/main/blockchain_tests/", "/tmp/x/blockchain_tests/"] {
                     let id = blockchain::TestId {
                         path: format!("{dir}{}", entry.path),
                         name: entry.name.into(),
                     };
-                    assert!(deviation.explains_blockchain(&id, Some(entry.produced)), "{entry}");
-                    assert!(!deviation.explains_blockchain(&id, None), "{entry}");
-                    let mut other = entry.produced;
-                    other.gas_used += 1;
-                    assert!(!deviation.explains_blockchain(&id, Some(other)), "{entry}");
-                    let mut other = entry.produced;
-                    other.block += 1;
-                    assert!(!deviation.explains_blockchain(&id, Some(other)), "{entry}");
+                    assert_eq!(deviation.blockchain_entry(&id), Some(entry));
+                    let (found, _) = blockchain_entry(DEVIATIONS, &id).expect("listed");
+                    assert_eq!(found.id, deviation.id);
                 }
                 let elsewhere = blockchain::TestId {
                     path: format!("x{}", entry.path),
                     name: entry.name.into(),
                 };
-                assert!(!deviation.explains_blockchain(&elsewhere, Some(entry.produced)));
+                assert!(blockchain_entry(DEVIATIONS, &elsewhere).is_none());
+                let renamed = blockchain::TestId {
+                    path: entry.path.into(),
+                    name: format!("{}x", entry.name),
+                };
+                assert!(blockchain_entry(DEVIATIONS, &renamed).is_none());
             }
         }
     }

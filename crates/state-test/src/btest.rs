@@ -124,16 +124,22 @@ fn skip_reasons() -> BTreeMap<&'static str, &'static str> {
 fn print_summary(report: &Report, summary: &Summary) {
     println!("blockchain tests, {NETWORK} fixtures: {} files", summary.files);
     println!(
-        "  defined {}  executed {}  passed {}  failed {}  skipped {}",
+        "  defined {}  executed {}  passed {}  deviated {}  failed {}  skipped {}",
         summary.defined,
         summary.executed,
         summary.passed,
+        summary.deviated_total(),
         summary.failed_total(),
         summary.skipped_total()
     );
+    let blocks = summary.blocks;
     println!(
-        "  blocks accepted {}  refused as expected {}",
-        summary.blocks.accepted, summary.blocks.refused
+        "  blocks checked against Ethereum {} (matched {}, refused as expected {})  matched to a \
+         deviation {}",
+        blocks.checked(),
+        blocks.matched,
+        blocks.refused,
+        blocks.deviated
     );
     for (reason, count) in &summary.skipped {
         println!("  skipped  {:<34} {count:<6} {}", reason.name(), reason.reason());
@@ -144,8 +150,8 @@ fn print_summary(report: &Report, summary: &Summary) {
     for deviation in report.deviations {
         let listed = deviation.blockchain_entries.len();
         if listed > 0 {
-            let explained = summary.deviated.get(deviation.id).copied().unwrap_or(0);
-            println!("  deviated {:<34} {explained} (listed {listed})", deviation.id);
+            let deviated = summary.deviated.get(deviation.id).copied().unwrap_or(0);
+            println!("  deviated {:<34} {deviated} (listed {listed})", deviation.id);
         }
     }
     println!("  unattributed {}", summary.unattributed);
@@ -159,10 +165,10 @@ fn print_summary(report: &Report, summary: &Summary) {
     println!("  unreproduced {unreproduced}");
     for entry in report.unreproduced().take(LISTED_FAILURES) {
         println!(
-            "    {}\n      {} lists {}; {}",
+            "    {}\n      {} lists {} blocks; {}",
             entry.entry,
             entry.deviation.id,
-            entry.entry.produced,
+            entry.entry.blocks.len(),
             seen(&entry.seen)
         );
     }
@@ -180,6 +186,7 @@ fn seen(results: &[&TestResult]) -> String {
         [] => "the run did not execute it".into(),
         [result] => match &result.outcome {
             Outcome::Passed => "it passed".into(),
+            Outcome::Deviated { deviation } => format!("it deviated under {deviation}"),
             Outcome::Skipped { reason } => format!("it was skipped: {}", reason.name()),
             Outcome::Failed(failure) => {
                 format!("it failed: {}: {}", failure.kind.name(), failure.detail)
