@@ -24,6 +24,24 @@ use super::{load_hex, parse_ether_value, EvmeError, Result};
 /// Default sender address (Hardhat account #0).
 pub const DEFAULT_SENDER: Address = address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
 
+/// Rejection for deposit-only flags on a transaction that is not a deposit.
+const DEPOSIT_FIELDS_ONLY: &str =
+    "--source-hash and --mint are only valid for deposit transactions (--tx-type 126)";
+
+/// Rejection for a priority fee on a transaction type that has none.
+const PRIORITY_FEE_UNSUPPORTED: &str =
+    "--priority-fee is not valid for legacy (0) or EIP-2930 (1) transactions";
+
+/// Rejection for a creation that also names a receiver.
+const CREATE_WITH_RECEIVER: &str = "--receiver must not be set when --create is specified";
+
+/// Rejection for an authorization list on a transaction that is not EIP-7702.
+const AUTH_UNSUPPORTED: &str = "--auth is only valid for EIP-7702 transactions (--tx-type 4)";
+
+/// Rejection for an access list on a transaction type that has none.
+const ACCESS_UNSUPPORTED: &str =
+    "--access is only valid for EIP-2930 (1), EIP-1559 (2), or EIP-7702 (4) transactions";
+
 /// Transaction configuration arguments
 #[derive(Args, Debug, Clone)]
 #[command(next_help_heading = "Transaction Options")]
@@ -105,10 +123,7 @@ impl TxArgs {
 
         // 1. source_hash and mint should only be set when tx_type is deposit
         if tx_type != MegaTxType::Deposit && (self.source_hash.is_some() || self.mint.is_some()) {
-            return Err(EvmeError::InvalidInput(
-                "--source-hash and --mint are only valid for deposit transactions (--tx-type 126)"
-                    .to_string(),
-            ));
+            return Err(EvmeError::InvalidInput(DEPOSIT_FIELDS_ONLY.to_string()));
         }
         if tx_type == MegaTxType::Deposit && self.source_hash.is_none() {
             return Err(EvmeError::InvalidInput(
@@ -120,24 +135,17 @@ impl TxArgs {
         if matches!(tx_type, MegaTxType::Legacy | MegaTxType::Eip2930) &&
             self.priority_fee.is_some()
         {
-            return Err(EvmeError::InvalidInput(
-                "--priority-fee is not valid for legacy (0) or EIP-2930 (1) transactions"
-                    .to_string(),
-            ));
+            return Err(EvmeError::InvalidInput(PRIORITY_FEE_UNSUPPORTED.to_string()));
         }
 
         // 3. receiver must exist when create is false, must not exist when create is true
         if self.create() && self.receiver.is_some() {
-            return Err(EvmeError::InvalidInput(
-                "--receiver must not be set when --create is specified".to_string(),
-            ));
+            return Err(EvmeError::InvalidInput(CREATE_WITH_RECEIVER.to_string()));
         }
 
         // 4. auth should only be set when tx_type is EIP-7702
         if tx_type != MegaTxType::Eip7702 && !self.auth.is_empty() {
-            return Err(EvmeError::InvalidInput(
-                "--auth is only valid for EIP-7702 transactions (--tx-type 4)".to_string(),
-            ));
+            return Err(EvmeError::InvalidInput(AUTH_UNSUPPORTED.to_string()));
         }
 
         // 5. access should only be set when tx_type supports access lists (EIP-2930, EIP-1559,
@@ -145,10 +153,7 @@ impl TxArgs {
         if !self.access.is_empty() &&
             !matches!(tx_type, MegaTxType::Eip2930 | MegaTxType::Eip1559 | MegaTxType::Eip7702)
         {
-            return Err(EvmeError::InvalidInput(
-                "--access is only valid for EIP-2930 (1), EIP-1559 (2), or EIP-7702 (4) transactions"
-                    .to_string(),
-            ));
+            return Err(EvmeError::InvalidInput(ACCESS_UNSUPPORTED.to_string()));
         }
 
         Ok(())
@@ -405,8 +410,11 @@ impl DecodedRawTx {
     /// Applies explicitly-set [`TxArgs`] fields as overrides to the decoded transaction.
     ///
     /// Only fields that were explicitly provided via CLI flags are overridden;
-    /// `None` / empty fields in `tx_args` leave the base value unchanged.
+    /// `None` / empty fields in `tx_args` leave the base value unchanged. The
+    /// overrides are first checked against the transaction they would produce
+    /// ([`Self::validate_overrides`]).
     pub fn override_tx_env(mut self, tx_args: &TxArgs) -> Result<Self> {
+        self.validate_overrides(tx_args)?;
         let was_deposit = self.tx.base.tx_type == MegaTxType::Deposit as u8;
 
         if let Some(tx_type) = tx_args.tx_type {
@@ -461,6 +469,53 @@ impl DecodedRawTx {
             }
         }
         Ok(self)
+    }
+
+    /// Check the explicit overrides in `tx_args` against the transaction they
+    /// would produce.
+    ///
+    /// The rules are [`TxArgs::validate`]'s, applied to the effective
+    /// transaction: its type is `--tx-type` when given and the decoded type
+    /// otherwise, and only flags that were actually given are checked — an
+    /// omitted flag keeps the decoded value rather than a CLI default.
+    /// `--tx-type` must also not move the transaction into or out of a deposit:
+    /// a deposit's fields come from the decoded transaction, so the change would
+    /// leave them silently missing or silently dropped.
+    fn validate_overrides(&self, tx_args: &TxArgs) -> Result<()> {
+        let decoded_type = self.tx.base.tx_type;
+        let tx_type = match tx_args.tx_type {
+            Some(_) => tx_args.mega_tx_type()?,
+            None => MegaTxType::try_from(decoded_type)
+                .map_err(|_| EvmeError::UnsupportedTxType(decoded_type))?,
+        };
+        let is_deposit = tx_type == MegaTxType::Deposit;
+        if is_deposit != (decoded_type == MegaTxType::Deposit as u8) {
+            return Err(EvmeError::InvalidInput(format!(
+                "--tx-type cannot change whether the raw transaction is a deposit (tx-type 126): \
+                 it decodes as type {decoded_type}, and a deposit's fields come from the decoded \
+                 transaction"
+            )));
+        }
+        if !is_deposit && (tx_args.source_hash.is_some() || tx_args.mint.is_some()) {
+            return Err(EvmeError::InvalidInput(DEPOSIT_FIELDS_ONLY.to_string()));
+        }
+        if matches!(tx_type, MegaTxType::Legacy | MegaTxType::Eip2930) &&
+            tx_args.priority_fee.is_some()
+        {
+            return Err(EvmeError::InvalidInput(PRIORITY_FEE_UNSUPPORTED.to_string()));
+        }
+        if tx_args.create() && tx_args.receiver.is_some() {
+            return Err(EvmeError::InvalidInput(CREATE_WITH_RECEIVER.to_string()));
+        }
+        if tx_type != MegaTxType::Eip7702 && !tx_args.auth.is_empty() {
+            return Err(EvmeError::InvalidInput(AUTH_UNSUPPORTED.to_string()));
+        }
+        if !tx_args.access.is_empty() &&
+            !matches!(tx_type, MegaTxType::Eip2930 | MegaTxType::Eip1559 | MegaTxType::Eip7702)
+        {
+            return Err(EvmeError::InvalidInput(ACCESS_UNSUPPORTED.to_string()));
+        }
+        Ok(())
     }
 
     /// Converts the decoded raw transaction into a [`MegaTransaction`].
@@ -862,5 +917,143 @@ mod tests {
         assert_eq!(base.value, U256::from(2) * U256::from(10u64).pow(U256::from(18u64)));
         assert_eq!(base.caller, EIP155_SIGNER, "unset flags must keep decoded values");
         assert_eq!(base.nonce, 9, "unset flags must keep decoded values");
+    }
+
+    /// A raw deposit transaction.
+    fn deposit_raw_bytes() -> Bytes {
+        let deposit = TxDeposit {
+            source_hash: b256!("1111111111111111111111111111111111111111111111111111111111111111"),
+            from: address!("00000000000000000000000000000000000000aa"),
+            to: TxKind::Call(address!("00000000000000000000000000000000000000bb")),
+            mint: 5,
+            value: U256::from(7),
+            gas_limit: 100_000,
+            is_system_transaction: false,
+            input: Bytes::new(),
+        };
+        Bytes::from(
+            MegaTxEnvelope::Deposit(Sealed::new_unchecked(deposit, B256::ZERO)).encoded_2718(),
+        )
+    }
+
+    /// The rejection `overrides` meet on top of the decoded `raw` transaction.
+    fn override_rejection(raw: Bytes, overrides: TxArgs) -> String {
+        DecodedRawTx::from_raw(raw)
+            .expect("decode")
+            .override_tx_env(&overrides)
+            .expect_err("the overrides must be rejected")
+            .to_string()
+    }
+
+    /// The message an `InvalidInput` rejection carries.
+    fn invalid_input(message: &str) -> String {
+        EvmeError::InvalidInput(message.to_string()).to_string()
+    }
+
+    /// `--source-hash` and `--mint` on a raw transaction that is not a deposit
+    /// would be silently ignored, so they are rejected.
+    #[test]
+    fn test_override_tx_env_rejects_deposit_fields_on_a_non_deposit() {
+        for overrides in [
+            TxArgs { source_hash: Some(B256::ZERO), ..empty_tx_args() },
+            TxArgs { mint: Some(1), ..empty_tx_args() },
+        ] {
+            assert_eq!(
+                override_rejection(eip155_raw_bytes(), overrides),
+                invalid_input(DEPOSIT_FIELDS_ONLY)
+            );
+        }
+    }
+
+    /// `--tx-type` cannot turn a raw transaction into a deposit, or a deposit
+    /// into another type: the deposit's fields come from the decoded
+    /// transaction.
+    #[test]
+    fn test_override_tx_env_rejects_changing_whether_it_is_a_deposit() {
+        for (raw, tx_type) in [(eip155_raw_bytes(), 126), (deposit_raw_bytes(), 2)] {
+            let message =
+                override_rejection(raw, TxArgs { tx_type: Some(tx_type), ..empty_tx_args() });
+            assert!(message.contains("whether the raw transaction is a deposit"), "{message}");
+        }
+    }
+
+    /// A priority fee on a transaction that is, or is overridden to, a type
+    /// without one is rejected.
+    #[test]
+    fn test_override_tx_env_rejects_a_priority_fee_the_type_cannot_carry() {
+        for tx_type in [None, Some(1)] {
+            let overrides = TxArgs { tx_type, priority_fee: Some(1), ..empty_tx_args() };
+            assert_eq!(
+                override_rejection(eip155_raw_bytes(), overrides),
+                invalid_input(PRIORITY_FEE_UNSUPPORTED)
+            );
+        }
+    }
+
+    /// A creation that also names a receiver is contradictory.
+    #[test]
+    fn test_override_tx_env_rejects_create_with_receiver() {
+        let overrides = TxArgs { create: Some(true), receiver: Some(TYPED_TO), ..empty_tx_args() };
+        assert_eq!(
+            override_rejection(eip155_raw_bytes(), overrides),
+            invalid_input(CREATE_WITH_RECEIVER)
+        );
+    }
+
+    /// An authorization list needs an EIP-7702 transaction.
+    #[test]
+    fn test_override_tx_env_rejects_auth_on_a_non_eip7702_transaction() {
+        let overrides =
+            TxArgs { auth: vec![format!("{ACCESS_ADDR}:1->{AUTH_DELEGATION}")], ..empty_tx_args() };
+        assert_eq!(
+            override_rejection(eip155_raw_bytes(), overrides),
+            invalid_input(AUTH_UNSUPPORTED)
+        );
+    }
+
+    /// An access list needs a type that carries one.
+    #[test]
+    fn test_override_tx_env_rejects_access_on_a_legacy_transaction() {
+        let overrides = TxArgs { access: vec![ACCESS_ADDR.to_string()], ..empty_tx_args() };
+        assert_eq!(
+            override_rejection(eip155_raw_bytes(), overrides),
+            invalid_input(ACCESS_UNSUPPORTED)
+        );
+    }
+
+    /// An explicit `--tx-type` must name a type the CLI supports.
+    #[test]
+    fn test_override_tx_env_rejects_an_unsupported_tx_type() {
+        let message =
+            override_rejection(eip155_raw_bytes(), TxArgs { tx_type: Some(3), ..empty_tx_args() });
+        assert_eq!(message, EvmeError::UnsupportedTxType(3).to_string());
+    }
+
+    /// Overrides the effective transaction supports are applied, judged by the
+    /// effective type rather than CLI defaults.
+    #[test]
+    fn test_override_tx_env_accepts_overrides_the_effective_type_supports() {
+        let fee_market = TxArgs {
+            tx_type: Some(2),
+            priority_fee: Some(1),
+            access: vec![ACCESS_ADDR.to_string()],
+            ..empty_tx_args()
+        };
+        let decoded = DecodedRawTx::from_raw(eip155_raw_bytes())
+            .expect("decode")
+            .override_tx_env(&fee_market)
+            .expect("a fee-market override is accepted");
+        assert_eq!(decoded.tx.base.tx_type, 2);
+        assert_eq!(decoded.tx.base.gas_priority_fee, Some(1));
+
+        let source_hash = b256!("3333333333333333333333333333333333333333333333333333333333333333");
+        let deposit_fields =
+            TxArgs { source_hash: Some(source_hash), mint: Some(9), ..empty_tx_args() };
+        let decoded = DecodedRawTx::from_raw(deposit_raw_bytes())
+            .expect("decode")
+            .override_tx_env(&deposit_fields)
+            .expect("deposit fields are accepted on a deposit");
+        assert_eq!(decoded.tx.deposit.source_hash, source_hash);
+        assert_eq!(decoded.tx.deposit.mint, Some(9));
     }
 }
