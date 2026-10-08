@@ -13,3 +13,5 @@ mod prices;
 mod properties;
 mod regressions;
 mod render;
+#[path = "../shared/snapshot.rs"]
+mod snapshot;

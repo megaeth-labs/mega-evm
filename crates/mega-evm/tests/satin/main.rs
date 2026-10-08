@@ -36,6 +36,8 @@ mod salt_deposit;
 mod salt_failure;
 mod salt_refund;
 mod schedule;
+#[path = "../shared/snapshot.rs"]
+mod snapshot;
 mod spec_numbers;
 mod state;
 mod state_gas_limit;

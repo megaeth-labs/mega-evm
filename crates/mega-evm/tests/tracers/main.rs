@@ -24,3 +24,5 @@
 mod gas;
 mod harness;
 mod scenarios;
+#[path = "../shared/snapshot.rs"]
+mod snapshot;
