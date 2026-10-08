@@ -4,22 +4,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-use alloy_consensus::{transaction::Recovered, BlockHeader, Transaction as _};
+use alloy_consensus::{transaction::Recovered, BlockHeader};
 use alloy_primitives::B256;
 use alloy_provider::Provider;
 use alloy_rpc_types_eth::Block;
 use clap::{ArgGroup, Parser};
 use mega_evm::{
-    alloy_evm::{block::BlockExecutor, Evm, EvmEnv},
-    alloy_op_evm::block::OpAlloyReceiptBuilder,
-    revm::{
-        context::{result::ExecutionResult, ContextTr},
-        database::{states::bundle_state::BundleRetention, StateBuilder},
-        state::EvmState,
-        DatabaseRef,
-    },
-    MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory, MegaHaltReason, MegaHardforks,
-    MegaSpecId, MegaTxEnvelope,
+    alloy_evm::EvmEnv,
+    revm::{context::result::ExecutionResult, state::EvmState, DatabaseRef},
+    MegaBlockExecutionCtx, MegaHaltReason, MegaHardforks, MegaSpecId, MegaTxEnvelope,
 };
 use revm_inspectors::tracing::TracingInspector;
 use state_test::types::MegaEnv;
@@ -29,14 +22,12 @@ use op_alloy_rpc_types::Transaction;
 
 use crate::{
     common::{
-        cfg_env, create_address, external_envs_from, log_execution_result,
-        op_receipt_to_tx_receipt, parse_spec, pre_execution_nonce, print_run_artifacts,
+        cfg_env, external_envs_from, log_execution_result, parse_spec, print_run_artifacts,
         print_transaction_report, BuildProviderOutput, EvmeExternalEnvs, EvmeOutcome,
         ExecutionSummary, ExtEnvArgs, ExternalEnvSnapshot, OpTxReceipt, OutputArgs, OverriddenTx,
         RpcArgs, RpcCacheStore, StateDumpArgs, TraceArgs, TxOverrideArgs, VerificationCounts,
     },
     replay::{get_hardfork_config, ReplayHardforks},
-    EvmeState,
 };
 
 use super::{
@@ -207,11 +198,11 @@ enum ReplayMode {
 }
 
 /// The execution world a replay runs in, resolved from the fetched block before
-/// either walk starts.
+/// the walk starts.
 ///
-/// Both shapes of a single-transaction replay — a mined target walked through
-/// the shared kernel, a pending one executed alone — run under exactly this,
-/// which is why it is resolved once rather than by each of them.
+/// Both shapes of a single-transaction replay — a mined target walked behind
+/// the transactions that precede it, a pending one walked alone — run under
+/// exactly this.
 struct BlockSetup<'a> {
     /// Hardfork schedule, already carrying any `--override.spec`.
     hardforks: ReplayHardforks<'a>,
@@ -228,9 +219,9 @@ struct BlockSetup<'a> {
 /// What replaying the target produced, before it is dressed as a
 /// [`ReplayOutcome`].
 ///
-/// The two walks below fill this in and nothing else: everything downstream —
-/// the on-chain comparison, the printed summary, the fixture write — reads the
-/// same fields regardless of which walk produced them.
+/// The walk fills this in and nothing else: everything downstream — the
+/// on-chain comparison, the printed summary, the fixture write — reads the same
+/// fields whether the target was mined or pending.
 struct ExecutedTarget {
     /// Nonce the sender held before the target executed.
     pre_execution_nonce: u64,
@@ -1028,11 +1019,7 @@ impl Cmd {
             block_ctx,
         };
 
-        let executed = if ctx.target_tx.block_number.is_none() {
-            self.execute_pending(provider, ctx, setup).await?
-        } else {
-            self.execute_mined(provider, ctx, setup, fixture_inputs).await?
-        };
+        let executed = self.execute_target(provider, ctx, setup, fixture_inputs).await?;
 
         let verification = onchain_receipt.as_ref().map(|onchain| {
             verify::compare(
@@ -1058,14 +1045,17 @@ impl Cmd {
         })
     }
 
-    /// Replay a mined target through the shared mined-block kernel.
+    /// Replay the target through the shared block kernel.
     ///
-    /// The transactions of the block ahead of the target are what the kernel
-    /// walks; the target is the one transaction it reports. Everything this path
-    /// needs from the pre-commit moment — the trace, the state diff, the fixture
-    /// draft — is produced by [`SingleTxLifecycle`] and comes back as one draft,
-    /// redeemable only once the block ran to a clean finish.
-    async fn execute_mined<P>(
+    /// A mined target is walked behind the transactions of its block that
+    /// precede it; the target is the one transaction the kernel reports. A
+    /// pending target is walked alone: the one block it fetched fills both the
+    /// fork and the environment role, so there is no preceding transaction to
+    /// execute. Everything this path needs from the pre-commit moment — the
+    /// trace, the state diff, the fixture draft — is produced by
+    /// [`SingleTxLifecycle`] and comes back as one draft, redeemable only once
+    /// the block ran to a clean finish.
+    async fn execute_target<P>(
         &self,
         provider: &P,
         ctx: &ReplayContext,
@@ -1075,22 +1065,35 @@ impl Cmd {
     where
         P: Provider<op_alloy_network::Optimism> + Clone + std::fmt::Debug + 'static,
     {
-        // The kernel walks the body in order and stops once the last requested
-        // target has committed. It is handed the body *up to and including* the
-        // target rather than the whole body, which keeps the walk exactly the
-        // preceding-then-target sequence this path has always executed: the
-        // membership guard resolved the target's position from the first
-        // occurrence of its hash, and a body that (incoherently) listed that hash
-        // twice would otherwise make the kernel run the target a second time.
-        let body: Vec<kernel::BodyEntry<'_>> = ctx
-            .preceding_tx_hashes
-            .iter()
-            .chain(core::iter::once(&ctx.tx_hash))
-            .copied()
-            .map(kernel::BodyEntry::Listed)
-            .collect();
+        let (body, body_len) = if ctx.target_tx.block_number.is_some() {
+            // The kernel walks the body in order and stops once the last
+            // requested target has committed. It is handed the body *up to and
+            // including* the target rather than the whole body, which keeps the
+            // walk exactly the preceding-then-target sequence this path has
+            // always executed: the membership guard resolved the target's
+            // position from the first occurrence of its hash, and a body that
+            // (incoherently) listed that hash twice would otherwise make the
+            // kernel run the target a second time.
+            let body: Vec<kernel::BodyEntry<'_>> = ctx
+                .preceding_tx_hashes
+                .iter()
+                .chain(core::iter::once(&ctx.tx_hash))
+                .copied()
+                .map(kernel::BodyEntry::Listed)
+                .collect();
+            info!(
+                preceding_count = ctx.preceding_tx_hashes.len(),
+                "Executing preceding transactions",
+            );
+            (body, ctx.block.transactions.len())
+        } else {
+            // A pending target is the whole body of the block built here. It is
+            // handed over as the transaction the endpoint already served: its
+            // pending metadata is exactly what the online cache refuses to keep,
+            // so looking it up again would ask the endpoint a second time.
+            (vec![kernel::BodyEntry::Served { tx_hash: ctx.tx_hash, tx: &ctx.target_tx }], 1)
+        };
         let targets: HashSet<B256> = core::iter::once(ctx.tx_hash).collect();
-        info!(preceding_count = ctx.preceding_tx_hashes.len(), "Executing preceding transactions",);
 
         let mut lifecycle = SingleTxLifecycle {
             cmd: self,
@@ -1121,7 +1124,7 @@ impl Cmd {
                     hash: ctx.block.hash(),
                 },
                 body: &body,
-                body_len: ctx.block.transactions.len(),
+                body_len,
                 targets: &targets,
             },
             &mut lifecycle,
@@ -1181,143 +1184,6 @@ impl Cmd {
             trace_data,
             receipt: target.receipt,
             fixture,
-        })
-    }
-
-    /// Replay a pending target: one transaction, executed alone on top of the
-    /// latest block.
-    ///
-    /// This path stays off the shared kernel deliberately. Its defining property
-    /// is that the one block it fetched fills both roles — the state it forks
-    /// from and the environment it runs under — so there is no block body to
-    /// walk and no preceding transaction to execute. Routing it through the
-    /// kernel would make the kernel re-ask `eth_getTransactionByHash` for the
-    /// target, and a pending transaction's metadata is exactly what the online
-    /// cache refuses to keep: one lookup would become two against the endpoint.
-    ///
-    /// Both features that would need the pre-commit moment for more than a trace
-    /// are refused for a pending target before execution starts — `--dump-fixture`
-    /// and `--verify-receipt` each need the on-chain receipt, which does not
-    /// exist yet — so what is left here is a single transaction, executed and
-    /// reported.
-    async fn execute_pending<P>(
-        &self,
-        provider: &P,
-        ctx: &ReplayContext,
-        setup: BlockSetup<'_>,
-    ) -> Result<ExecutedTarget>
-    where
-        P: Provider<op_alloy_network::Optimism> + Clone + std::fmt::Debug,
-    {
-        let BlockSetup { hardforks, external_envs, evm_env, block_ctx, executed_spec: _ } = setup;
-
-        info!(fork_block = ctx.parent_block.header.number(), "Forking state from parent block",);
-        let mut database = EvmeState::new_forked(
-            provider.clone(),
-            Some(ctx.parent_block.header.number()),
-            Default::default(),
-            Default::default(),
-        )
-        .await?;
-
-        let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
-        let block_executor_factory =
-            MegaBlockExecutorFactory::new(hardforks, evm_factory, OpAlloyReceiptBuilder::default());
-
-        let start = Instant::now();
-        let mut inspector = self.trace_args.create_inspector();
-        let mut state =
-            StateBuilder::new().with_database(&mut database).with_bundle_update().build();
-        let mut block_executor = block_executor_factory.create_executor_with_inspector(
-            &mut state,
-            block_ctx,
-            evm_env,
-            &mut inspector,
-        );
-
-        block_executor.apply_pre_execution_changes().map_err(ReplayError::BlockExecutionError)?;
-
-        // Nothing ran ahead of the target, so this only holds whatever the
-        // pre-execution changes recorded. Cleared anyway, so that what the target
-        // is credited with reading is its own reads and nothing else.
-        block_executor.clear_accessed_block_hashes();
-
-        info!("Executing target transaction");
-        if self.tx_override_args.has_overrides() {
-            info!(overrides = ?self.tx_override_args, "Applying transaction overrides");
-        }
-        let wrapped_tx = self.tx_override_args.wrap(ctx.target_tx.as_recovered())?;
-        let pre_execution_nonce =
-            pre_execution_nonce(block_executor.evm().db_ref(), wrapped_tx.inner().signer())?;
-
-        block_executor.inspector_mut().fuse();
-        let outcome =
-            block_executor.run_transaction(wrapped_tx).map_err(ReplayError::BlockExecutionError)?;
-        trace!(tx_hash = %ctx.target_tx.inner.inner.tx_hash(), ?outcome, "Target transaction executed");
-        log_execution_result!(target: "mega_evme::replay::cmd", &outcome.inner.result);
-
-        // Read off the same moment the kernel hands its participants: the
-        // target's outcome is known and the database still holds the state it
-        // ran against. The outcome carries the pair the tracer needs, so it is
-        // borrowed rather than rebuilt from copies of its halves.
-        let trace_data = self.trace_args.is_tracing_enabled().then(|| {
-            self.trace_args.generate_trace(
-                block_executor.inspector(),
-                &outcome.inner.result_and_state,
-                block_executor.evm().db_ref(),
-            )
-        });
-        let exec_result = outcome.inner.result.clone();
-        let evm_state = outcome.inner.state.clone();
-
-        let gas_used = block_executor
-            .commit_transaction_outcome(outcome)
-            .map_err(ReplayError::BlockExecutionError)?;
-        let exec_time = start.elapsed();
-
-        let (evm, block_result) =
-            block_executor.finish().map_err(ReplayError::BlockExecutionError)?;
-        let (db, _) = evm.finish();
-        db.merge_transitions(BundleRetention::Reverts);
-        let receipt_envelope = block_result.receipts.last().unwrap().clone();
-        trace!(?receipt_envelope, "Receipt envelope obtained");
-
-        // Block-global log index: the chain numbers logs across the receipts of
-        // the block *body*, and the body of the block built here is the target
-        // alone, so nothing precedes it. Stated rather than folded over the
-        // other receipts: such a fold would count a receipt produced before the
-        // first transaction, which is not part of that numbering — the reading
-        // the kernel's harvest window takes for the same question.
-        let first_log_index: u64 = 0;
-
-        let from = ctx.target_tx.inner.inner.signer();
-        let to = ctx.target_tx.inner.inner.to();
-        let receipt = op_receipt_to_tx_receipt(
-            &receipt_envelope,
-            ctx.block.number(),
-            ctx.block.header.timestamp(),
-            from,
-            to,
-            create_address(from, to.into(), pre_execution_nonce),
-            ctx.target_tx.inner.effective_gas_price.unwrap_or(0),
-            gas_used,
-            Some(ctx.target_tx.inner.inner.tx_hash()),
-            Some(ctx.block.hash()),
-            // Index in the replayed block: the target is the only transaction
-            // in it. A pending target has no position in a mined body, which is
-            // why `fetch_replay_context` collects no preceding hashes for it.
-            0,
-            first_log_index,
-        );
-
-        Ok(ExecutedTarget {
-            pre_execution_nonce,
-            exec_result,
-            state: evm_state,
-            exec_time,
-            trace_data,
-            receipt,
-            fixture: None,
         })
     }
 

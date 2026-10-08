@@ -1,4 +1,4 @@
-//! Mined-block execution kernel shared by the replay drivers.
+//! Block execution kernel shared by the replay drivers.
 //!
 //! Replaying a mined transaction always means the same thing: fork the parent
 //! block's state, walk the block body in order, and stop once every requested
@@ -12,11 +12,12 @@
 //! publish a fixture. The kernel takes the pieces those decisions produced,
 //! executes, and hands back what it observed.
 //!
-//! Replaying a *pending* transaction is the one shape that stays off this path
-//! ([`super::cmd::Cmd::execute_pending`]). It has no block body to walk, and the
-//! block it does have fills both the fork and the environment role from a single
-//! fetch — walking it here would re-ask the endpoint for the target, whose
-//! pending metadata is exactly what the online cache refuses to keep.
+//! A *pending* transaction runs through here too, as a one-transaction body on
+//! top of the latest block, which fills both the fork and the environment role.
+//! Its driver hands the target over as a [`BodyEntry::Served`] transaction
+//! rather than a listed hash: the target's pending metadata is exactly what the
+//! online cache refuses to keep, so looking it up again would ask the endpoint a
+//! second time.
 //!
 //! # Lifecycle
 //!
@@ -113,10 +114,6 @@ pub(super) enum BodyEntry<'a> {
     Listed(B256),
     /// A transaction the driver already fetched, under the hash it was
     /// requested by. The kernel executes it without asking the endpoint again.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "no driver hands the kernel a served transaction yet")
-    )]
     Served {
         /// Hash the transaction was requested by.
         tx_hash: B256,
@@ -153,7 +150,8 @@ pub(super) struct MinedBlockRun<'a, H, I> {
     /// when the driver's [`TargetLifecycle::INSPECT`] says so, and is handed
     /// back to the driver at both lifecycle points.
     pub(super) inspector: I,
-    /// Number of the parent block the state is forked from.
+    /// Number of the block the state is forked from: a mined block's parent, or
+    /// the latest block a pending target runs on top of.
     pub(super) fork_block: u64,
     /// Identity stamped onto the harvested receipts.
     pub(super) identity: BlockIdentity,

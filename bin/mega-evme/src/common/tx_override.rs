@@ -117,13 +117,6 @@ pub struct OverriddenTx<T: Copy> {
     overrides: TxOverrides,
 }
 
-impl<T: Copy> OverriddenTx<T> {
-    /// Get a reference to the inner transaction.
-    pub fn inner(&self) -> &T {
-        &self.inner
-    }
-}
-
 // Implement IntoTxEnv - this is where we apply the overrides
 impl<T: IntoTxEnv<MegaTransaction> + Copy> IntoTxEnv<MegaTransaction> for OverriddenTx<T> {
     fn into_tx_env(self) -> MegaTransaction {
