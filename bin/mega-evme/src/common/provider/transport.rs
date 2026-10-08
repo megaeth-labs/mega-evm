@@ -237,9 +237,14 @@ impl TransportCache {
 }
 
 /// Decode the envelope's `cache` array into entries.
+///
+/// The array comes from a local file, so an entry list that does not decode is
+/// a broken artifact rather than an unanswered RPC question: it is reported as
+/// a fixture error, before any request is made.
 fn parse_cache_entries(value: &serde_json::Value) -> Result<Vec<CacheKv>> {
-    serde_json::from_value(value.clone())
-        .map_err(|e| EvmeError::RpcError(format!("Failed to parse transport cache entries: {e}")))
+    serde_json::from_value(value.clone()).map_err(|e| {
+        EvmeError::FixtureError(format!("Failed to parse transport cache entries: {e}"))
+    })
 }
 
 /// Compute a deterministic cache key from an RPC method and params.

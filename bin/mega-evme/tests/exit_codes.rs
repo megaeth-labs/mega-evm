@@ -784,3 +784,41 @@ async fn test_execution_time_storage_read_failure_is_an_rpc_failure() {
         }
     }
 }
+
+/// A local envelope whose `cache` is not a list of entries is a broken
+/// artifact, not an unanswered RPC question: the run exits 1 before it makes a
+/// single request. A well-formed envelope that merely lacks a response still
+/// exits 3 on the miss.
+#[test]
+fn test_malformed_envelope_cache_is_a_fixture_error_not_an_rpc_failure() {
+    let mut envelope: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(cache()).expect("read the capture"))
+            .expect("the capture is JSON");
+    envelope["cache"] = serde_json::json!({});
+    let malformed = std::env::temp_dir()
+        .join(format!("mega_evme_exit_malformed_cache_{}.json", std::process::id()));
+    std::fs::write(&malformed, envelope.to_string()).expect("write the malformed envelope");
+
+    let run = run(&[
+        "replay",
+        "--rpc.replay-file",
+        malformed.to_str().expect("utf-8 path"),
+        "--json",
+        TX_OK,
+    ]);
+    let _ = std::fs::remove_file(&malformed);
+
+    assert_eq!(run.code(), 1, "a malformed envelope exits 1.\nstderr: {}", run.stderr);
+    let error = run.error_object();
+    assert_eq!(error["error"]["kind"].as_str(), Some("execution-error"));
+    assert!(
+        error["error"]["message"].as_str().is_some_and(
+            |m| m.starts_with("Fixture error: Failed to parse transport cache entries")
+        ),
+        "the message must name the broken artifact: {error}"
+    );
+
+    let miss = replay(&["--json", UNANSWERABLE_TX]);
+    assert_eq!(miss.code(), 3, "a cache miss still exits 3.\nstderr: {}", miss.stderr);
+    assert_eq!(miss.error_object()["error"]["kind"].as_str(), Some("rpc-failure"));
+}
