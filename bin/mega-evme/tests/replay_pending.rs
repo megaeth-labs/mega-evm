@@ -22,16 +22,13 @@
 use serde_json::{json, Value};
 
 mod common;
-use common::{MockRpcServer, Run};
-
-/// `MegaETH` mainnet, whose published schedule the replayed block runs under.
-const CHAIN_ID: u64 = 4326;
+use common::{
+    mock_chain::{self as chain, pending_tx_json, tx_identity, tx_json, CHAIN_ID, RECIPIENT},
+    MockRpcServer, Run,
+};
 
 /// Height the endpoint reports as `latest`, and the only block it serves.
-const LATEST: u64 = 18_172_461;
-
-/// A mainnet timestamp inside the `MiniRex` window.
-const TIMESTAMP: u64 = 1_764_000_000;
+const LATEST: u64 = chain::BLOCK;
 
 /// `parentHash` of the block the endpoint serves first for `LATEST`.
 const PARENT_HASH: &str = "0xd482d481e9d11dd116ef6c41bf95ca608f159206c8f07900b1b53936d196ccb3";
@@ -51,120 +48,11 @@ fn latest_hash() -> String {
     common::block_hash_of(&block_json(PARENT_HASH))
 }
 
-/// Signature of the pending transaction: a fixed, well-formed secp256k1 pair.
-///
-/// The replay authenticates every served transaction — its hash is recomputed
-/// from the encoding and its sender re-derived from the signature — so the mock
-/// cannot serve invented `hash`/`from` constants; [`tx_identity`] computes the
-/// authentic pair. The sender is whatever address this signature recovers to,
-/// funded like every other account by the mock's blanket balance.
-const SIG_R: &str = "0xa19f0f1f52e2951452711b4f4aa5d177442c9a56abeb609b803fe2412ed24946";
-const SIG_S: &str = "0x7af21777b2e7d91c745d0077ba2726ee1bb75ccf00039a6218d64fdced768491";
-
-/// Recipient of the pending transaction: an account with no code, so the call
-/// succeeds without depending on any contract the mock does not serve.
-const RECIPIENT: &str = "0x681e908b8ab57c49c74d770f369754ccc3e1ae09";
-
-/// The authentic identity of the pending transaction: `(hash, from)`.
-///
-/// Builds the same consensus object the replay will deserialize from
-/// [`tx_json`], hashes its encoding, and recovers its signer — the two values
-/// the replay authenticates the served answer against.
-fn tx_identity() -> (String, String) {
-    use mega_evm::{
-        alloy_consensus::{transaction::SignerRecoverable, SignableTransaction, TxEip1559},
-        op_alloy_consensus::OpTxEnvelope,
-    };
-
-    let tx = TxEip1559 {
-        chain_id: CHAIN_ID,
-        nonce: 0,
-        gas_limit: 0x249f0,
-        max_fee_per_gas: 0x200b20,
-        max_priority_fee_per_gas: 0x186a0,
-        to: alloy_primitives::TxKind::Call(RECIPIENT.parse().expect("`to` is an address")),
-        value: alloy_primitives::U256::ZERO,
-        access_list: Default::default(),
-        input: alloy_primitives::Bytes::new(),
-    };
-    let signature = alloy_primitives::Signature::new(
-        SIG_R.parse().expect("r is a hex word"),
-        SIG_S.parse().expect("s is a hex word"),
-        false,
-    );
-    let signed = tx.into_signed(signature);
-    let hash = format!("{:#x}", signed.hash());
-    let from = OpTxEnvelope::Eip1559(signed).recover_signer().expect("signature recovers");
-    (hash, format!("{from:#x}"))
-}
-
-/// A block header the RPC backend and the replay accept, sealed under the hash
-/// its own consensus fields produce. The two views the endpoint serves for
-/// `LATEST` differ only in the chain they descend from.
+/// The block the endpoint serves for `LATEST`, descending from `parent_hash`.
+/// The two views the endpoint serves for `LATEST` differ only in the chain they
+/// descend from.
 fn block_json(parent_hash: &str) -> Value {
-    common::sealed_block(json!({
-        "parentHash": parent_hash,
-        "number": format!("0x{LATEST:x}"),
-        "timestamp": format!("0x{TIMESTAMP:x}"),
-        "gasLimit": "0x2540be400",
-        "gasUsed": "0x0",
-        "baseFeePerGas": "0xf4240",
-        "blobGasUsed": "0x0",
-        "excessBlobGas": "0x0",
-        "difficulty": "0x0",
-        "extraData": "0x00000000fa00000001",
-        "logsBloom": format!("0x{}", "0".repeat(512)),
-        "miner": "0x4200000000000000000000000000000000000011",
-        "mixHash": "0x5cd8791a477b467456670744425e11d5bd91fd54575d6d3bf80d761ab39d957f",
-        "nonce": "0x0000000000000000",
-        "parentBeaconBlockRoot":
-            "0x67123956bf748ccfcfa68f03531dd12c1c647f9f31cc91935ce4271fa7399e24",
-        "receiptsRoot": "0x16fe124682128dd43a5da7f2cee0a3bf076deaf12682d19c656914bbea4615e3",
-        "requestsHash": "0xe3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
-        "size": "0x43e7",
-        "stateRoot": "0xa342aba318978654abcf7f09f9494ed271e2136040b628edacb6d384e9074416",
-        "transactionsRoot": "0x2f3c5d0b0c4c8d34dd4e1c8bb4b4a4b6d6a2a3d3b8f6a9a2c1d0e9f8a7b6c5d4",
-        "withdrawalsRoot": "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
-        "uncles": [],
-        "withdrawals": [],
-        "transactions": [],
-    }))
-}
-
-/// The replayed transaction, carrying the `(blockNumber, blockHash)` pair the
-/// endpoint reports for it. Everything else is the same transaction, so a test
-/// varies only the metadata the classification reads.
-fn tx_json(block_number: Value, block_hash: Value) -> Value {
-    let (hash, from) = tx_identity();
-    json!({
-        "type": "0x2",
-        "chainId": format!("0x{CHAIN_ID:x}"),
-        "nonce": "0x0",
-        "gas": "0x249f0",
-        "maxFeePerGas": "0x200b20",
-        "maxPriorityFeePerGas": "0x186a0",
-        "gasPrice": "0x10c8e0",
-        "to": RECIPIENT,
-        "value": "0x0",
-        "accessList": [],
-        "input": "0x",
-        "r": SIG_R,
-        "s": SIG_S,
-        "yParity": "0x0",
-        "v": "0x0",
-        "hash": hash,
-        "from": from,
-        "blockHash": block_hash,
-        "blockNumber": block_number,
-        "transactionIndex": Value::Null,
-    })
-}
-
-/// The replayed transaction, reported as pending: no block number and no
-/// inclusion hash.
-fn pending_tx_json() -> Value {
-    tx_json(Value::Null, Value::Null)
+    chain::block_json(LATEST, parent_hash, json!([]))
 }
 
 /// A mock endpoint holding one pending transaction, whose `latest` height is
@@ -198,16 +86,7 @@ async fn mock_chain_serving(tx: Value) -> MockRpcServer {
         .respond_method_json("eth_getBlockByNumber", block_json(REPLACEMENT_PARENT_HASH), 3)
         .await;
     server.respond_method_json("eth_getTransactionByHash", tx, 3).await;
-    server.respond_method_result("eth_getBalance", "0xde0b6b3a7640000", 4).await;
-    server.respond_method_result("eth_getTransactionCount", "0x0", 4).await;
-    server.respond_method_result("eth_getCode", "0x", 4).await;
-    server
-        .respond_method_result(
-            "eth_getStorageAt",
-            "0x0000000000000000000000000000000000000000000000000000000000000000",
-            4,
-        )
-        .await;
+    chain::respond_account_reads(&server, 4).await;
     server
 }
 

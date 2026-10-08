@@ -9,6 +9,7 @@
 #![allow(dead_code)] // Each test binary uses a different subset of helpers.
 
 pub(crate) mod doctor;
+pub(crate) mod mock_chain;
 
 use std::{
     path::{Path, PathBuf},
