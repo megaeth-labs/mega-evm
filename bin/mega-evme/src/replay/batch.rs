@@ -601,22 +601,7 @@ impl kernel::TargetLifecycle for FixtureDraftHook<'_> {
         DB::Error: core::fmt::Display,
     {
         let Some(dump) = self.dump.as_ref() else { return Ok(None) };
-        Ok(Some(prepare_target_fixture(
-            target.db,
-            DumpFixtureArgs {
-                accessed_block_hash_count: target.accessed_block_hash_count,
-                exec_result: &target.result_and_state.result,
-                evm_state: &target.result_and_state.state,
-                chain_id: self.chain_id,
-                executed_spec: self.executed_spec,
-                block: self.block,
-                target_tx: target.tx,
-                mega_env: dump.mega_env.clone(),
-                onchain: self.onchain_receipts.get(&target.tx_hash),
-                dir: dump.dir,
-                overwrite: dump.overwrite,
-            },
-        )))
+        Ok(Some(self.prepare_fixture(dump, &target)))
     }
 }
 
@@ -1482,127 +1467,112 @@ where
     judge_block(block, &[], &BlockSummary::of_empty_body())
 }
 
-/// Inputs for [`prepare_target_fixture`], grouped so the dump path stays a single
-/// call site without a long positional argument list.
-struct DumpFixtureArgs<'a> {
-    accessed_block_hash_count: usize,
-    exec_result: &'a ExecutionResult<MegaHaltReason>,
-    evm_state: &'a mega_evm::revm::state::EvmState,
-    chain_id: u64,
-    executed_spec: MegaSpecId,
-    block: &'a Block<Transaction>,
-    target_tx: &'a Transaction,
-    mega_env: MegaEnv,
-    onchain: Option<&'a std::result::Result<ReceiptFacts, String>>,
-    dir: &'a Path,
-    overwrite: bool,
-}
+impl FixtureDraftHook<'_> {
+    /// Prepare a fixture for one successfully executed target against pre-commit state.
+    ///
+    /// Genuine skips (fidelity mismatch, BLOCKHASH, unsupported transaction shapes)
+    /// become a final [`FixtureReport::skipped`] and never fail the run.
+    /// An unanswered on-chain receipt (transport, pruned/null, divergent inclusion,
+    /// or offline envelope lacking it) becomes a rpc-class fixture error so the run
+    /// exits 3 while the target keeps its execution result line.
+    /// Database and other construction failures become a fixture error (execution-class).
+    /// A successfully built draft is carried as [`DeferredFixture::Ready`] and only
+    /// written by [`materialize_deferred_fixture`] after `finish()` succeeds.
+    ///
+    /// `target.db` must reflect the pre-target-commit state (preceding txs
+    /// committed, target not yet), matching the single-transaction dump.
+    fn prepare_fixture<DB>(
+        &self,
+        dump: &FixtureDumpEnv<'_>,
+        target: &kernel::TargetExecution<'_, DB>,
+    ) -> DeferredFixture
+    where
+        DB: DatabaseRef,
+        DB::Error: core::fmt::Display,
+    {
+        let accessed_block_hash_count = target.accessed_block_hash_count;
+        let exec_result = &target.result_and_state.result;
+        let chain_id = self.chain_id;
+        let target_tx = target.tx;
 
-/// Prepare a fixture for one successfully executed target against pre-commit state.
-///
-/// Genuine skips (fidelity mismatch, BLOCKHASH, unsupported transaction shapes)
-/// become a final [`FixtureReport::skipped`] and never fail the run.
-/// An unanswered on-chain receipt (transport, pruned/null, divergent inclusion,
-/// or offline envelope lacking it) becomes a rpc-class fixture error so the run
-/// exits 3 while the target keeps its execution result line.
-/// Database and other construction failures become a fixture error (execution-class).
-/// A successfully built draft is carried as [`DeferredFixture::Ready`] and only
-/// written by [`materialize_deferred_fixture`] after `finish()` succeeds.
-///
-/// `db` must reflect the pre-target-commit state (preceding txs committed, target
-/// not yet), matching the single-transaction dump.
-fn prepare_target_fixture<DB>(db: &DB, args: DumpFixtureArgs<'_>) -> DeferredFixture
-where
-    DB: DatabaseRef,
-    DB::Error: core::fmt::Display,
-{
-    let DumpFixtureArgs {
-        accessed_block_hash_count,
-        exec_result,
-        evm_state,
-        chain_id,
-        executed_spec,
-        block,
-        target_tx,
-        mega_env,
-        onchain,
-        dir,
-        overwrite,
-    } = args;
+        // Fidelity gate needs the on-chain receipt. When the receipt question went
+        // unanswered the dump fails as rpc (not a fidelity-gate skip): the run was
+        // asked to write a fixture and could not obtain the receipt it needs. Genuine
+        // gate skips (BLOCKHASH, unsupported shape, fidelity mismatch) stay skips.
+        let facts = match self.onchain_receipts.get(&target.tx_hash) {
+            Some(Ok(facts)) => facts,
+            Some(Err(message)) => {
+                return DeferredFixture::Report(FixtureReport::rpc_error(message.clone()));
+            }
+            None => {
+                return DeferredFixture::Report(FixtureReport::rpc_error(
+                    "no on-chain receipt was fetched for this transaction",
+                ));
+            }
+        };
 
-    // Fidelity gate needs the on-chain receipt. When the receipt question went
-    // unanswered the dump fails as rpc (not a fidelity-gate skip): the run was
-    // asked to write a fixture and could not obtain the receipt it needs. Genuine
-    // gate skips (BLOCKHASH, unsupported shape, fidelity mismatch) stay skips.
-    let facts = match onchain {
-        Some(Ok(facts)) => facts,
-        Some(Err(message)) => {
-            return DeferredFixture::Report(FixtureReport::rpc_error(message.clone()));
-        }
-        None => {
-            return DeferredFixture::Report(FixtureReport::rpc_error(
-                "no on-chain receipt was fetched for this transaction",
-            ));
-        }
-    };
-
-    if accessed_block_hash_count > 0 {
-        return DeferredFixture::Report(FixtureReport::skipped(format!(
-            "transaction reads block hashes (BLOCKHASH): {accessed_block_hash_count} block \
-             hash(es) were accessed and the fixture cannot faithfully reproduce them"
-        )));
-    }
-
-    // The fidelity gate runs before the transaction's shape is checked, so a
-    // replay that diverged is reported as the divergence it is.
-    let anchor = fixture::anchor_from_receipt_facts(facts);
-    let reproduced = match fixture::check_fidelity(exec_result, &anchor, chain_id) {
-        Ok(reproduced) => reproduced,
-        Err(reason) => {
+        if accessed_block_hash_count > 0 {
             return DeferredFixture::Report(FixtureReport::skipped(format!(
-                "fidelity gate failed: {reason}"
+                "transaction reads block hashes (BLOCKHASH): {accessed_block_hash_count} block \
+                 hash(es) were accessed and the fixture cannot faithfully reproduce them"
             )));
         }
-    };
-    let dumpable = match fixture::check_dumpable(target_tx) {
-        Ok(dumpable) => dumpable,
-        Err(reason) => return DeferredFixture::Report(FixtureReport::skipped(reason)),
-    };
 
-    let draft = match fixture::build_draft(
-        db,
-        evm_state,
-        chain_id,
-        executed_spec,
-        block,
-        dumpable,
-        fixture::FixtureInputs { mega_env, result: exec_result, reproduced },
-    ) {
-        Ok(draft) => draft,
-        Err(e) => return DeferredFixture::Report(fixture_report_from_build_err(e)),
-    };
+        // The fidelity gate runs before the transaction's shape is checked, so a
+        // replay that diverged is reported as the divergence it is.
+        let anchor = fixture::anchor_from_receipt_facts(facts);
+        let reproduced = match fixture::check_fidelity(exec_result, &anchor, chain_id) {
+            Ok(reproduced) => reproduced,
+            Err(reason) => {
+                return DeferredFixture::Report(FixtureReport::skipped(format!(
+                    "fidelity gate failed: {reason}"
+                )));
+            }
+        };
+        let dumpable = match fixture::check_dumpable(target_tx) {
+            Ok(dumpable) => dumpable,
+            Err(reason) => return DeferredFixture::Report(FixtureReport::skipped(reason)),
+        };
 
-    // The fixture is filed under the transaction's own hash. `tx_hash()` returns
-    // the cached hash an RPC deserialization seeds from the response's `hash`
-    // field, so this name would be the endpoint's to choose — and under
-    // `--overwrite`, an unrelated target's file to replace. It is a verified
-    // value here because no transaction reaches execution without passing
-    // `verify::authenticate_transaction`, which refuses a served `hash` field
-    // that does not match the value the served body hashes to.
-    let tx_hash = target_tx.inner.inner.tx_hash();
-    let path = dir.join(format!("{tx_hash:#x}.json"));
-    // Fast-path courtesy: refuse overwrite before carrying a ready draft so the
-    // harvest path never confuses a finish failure with an overwrite refusal.
-    // Correctness against a concurrent creator is still enforced at materialize
-    // time via noclobber persist.
-    if path.exists() && !overwrite {
-        return DeferredFixture::Report(FixtureReport::error(format!(
-            "fixture already exists at {} (pass --overwrite to replace)",
-            path.display()
-        )));
+        let draft = match fixture::build_draft(
+            target.db,
+            &target.result_and_state.state,
+            chain_id,
+            self.executed_spec,
+            self.block,
+            dumpable,
+            fixture::FixtureInputs {
+                mega_env: dump.mega_env.clone(),
+                result: exec_result,
+                reproduced,
+            },
+        ) {
+            Ok(draft) => draft,
+            Err(e) => return DeferredFixture::Report(fixture_report_from_build_err(e)),
+        };
+
+        // The fixture is filed under the transaction's own hash. `tx_hash()` returns
+        // the cached hash an RPC deserialization seeds from the response's `hash`
+        // field, so this name would be the endpoint's to choose — and under
+        // `--overwrite`, an unrelated target's file to replace. It is a verified
+        // value here because no transaction reaches execution without passing
+        // `verify::authenticate_transaction`, which refuses a served `hash` field
+        // that does not match the value the served body hashes to.
+        let tx_hash = target_tx.inner.inner.tx_hash();
+        let path = dump.dir.join(format!("{tx_hash:#x}.json"));
+        // Fast-path courtesy: refuse overwrite before carrying a ready draft so the
+        // harvest path never confuses a finish failure with an overwrite refusal.
+        // Correctness against a concurrent creator is still enforced at materialize
+        // time via noclobber persist.
+        if path.exists() && !dump.overwrite {
+            return DeferredFixture::Report(FixtureReport::error(format!(
+                "fixture already exists at {} (pass --overwrite to replace)",
+                path.display()
+            )));
+        }
+
+        DeferredFixture::Ready { draft: Box::new(draft), path, overwrite: dump.overwrite }
     }
-
-    DeferredFixture::Ready { draft: Box::new(draft), path, overwrite }
 }
 
 /// Finalize a deferred fixture after the block `finish()` succeeded.
@@ -2647,32 +2617,42 @@ mod tests {
             output: mega_evm::revm::context::result::Output::Call(Bytes::new()),
         };
         let tx = deposit_transaction();
+        let tx_hash = B256::repeat_byte(0x7e);
         let block = Block::<Transaction>::default();
         let dir = std::env::temp_dir();
+        let dump = FixtureDumpEnv { dir: &dir, overwrite: false, mega_env: MegaEnv::default() };
+        let result_and_state = mega_evm::revm::context::result::ResultAndState {
+            result: result.clone(),
+            state: Default::default(),
+        };
         let skip_reason = |onchain_gas: u64| {
-            let onchain = Ok(ReceiptFacts {
-                status: true,
-                gas_used: onchain_gas,
-                cumulative_gas_used: onchain_gas,
-                tx_type: 0x7e,
-                deposit_nonce: None,
-                deposit_receipt_version: None,
-                logs: Vec::new(),
-            });
-            let report = prepare_target_fixture(
-                &mega_evm::revm::database::EmptyDB::default(),
-                DumpFixtureArgs {
+            let onchain_receipts = BTreeMap::from([(
+                tx_hash,
+                Ok(ReceiptFacts {
+                    status: true,
+                    gas_used: onchain_gas,
+                    cumulative_gas_used: onchain_gas,
+                    tx_type: 0x7e,
+                    deposit_nonce: None,
+                    deposit_receipt_version: None,
+                    logs: Vec::new(),
+                }),
+            )]);
+            let hook = FixtureDraftHook {
+                dump: None,
+                chain_id: 4326,
+                executed_spec: MegaSpecId::REX6,
+                block: &block,
+                onchain_receipts: &onchain_receipts,
+            };
+            let report = hook.prepare_fixture(
+                &dump,
+                &kernel::TargetExecution {
+                    db: &mega_evm::revm::database::EmptyDB::default(),
+                    tx_hash,
+                    tx: &tx,
                     accessed_block_hash_count: 0,
-                    exec_result: &result,
-                    evm_state: &Default::default(),
-                    chain_id: 4326,
-                    executed_spec: MegaSpecId::REX6,
-                    block: &block,
-                    target_tx: &tx,
-                    mega_env: MegaEnv::default(),
-                    onchain: Some(&onchain),
-                    dir: &dir,
-                    overwrite: false,
+                    result_and_state: &result_and_state,
                 },
             );
             match report {
