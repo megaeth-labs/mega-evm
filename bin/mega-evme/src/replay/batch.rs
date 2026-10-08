@@ -36,7 +36,7 @@ use alloy_rpc_types_eth::Block;
 use mega_evm::{
     alloy_evm::EvmEnv,
     revm::{context::result::ExecutionResult, inspector::NoOpInspector, DatabaseRef},
-    MegaBlockExecutionCtx, MegaHaltReason, MegaHardforks, MegaSpecId, MegaTxEnvelope,
+    MegaHaltReason, MegaHardforks, MegaSpecId, MegaTxEnvelope,
 };
 use op_alloy_consensus::OpReceiptEnvelope;
 use op_alloy_rpc_types::Transaction;
@@ -53,13 +53,12 @@ use crate::{
 };
 
 use super::{
-    cmd::retrieve_block_env,
     coherence::{self, Incoherence, MembershipClaim, TargetPlacement},
     fixture,
     header::{self, BlockSummary, BlockVerification},
     kernel,
     verify::{self, ReceiptFacts, VerificationOutcome},
-    ReplayError, Result,
+    world, ReplayError, Result,
 };
 
 /// How a batch run reports its targets.
@@ -1138,7 +1137,7 @@ where
     debug!(block = number, chain_id, spec = %spec, "Block configuration");
 
     let cfg = cfg_env(chain_id, spec);
-    let block_env = match retrieve_block_env(&block) {
+    let block_env = match world::retrieve_block_env(&block) {
         Ok(env) => env,
         Err(e) => {
             return BlockReplayOutcome::ordered(
@@ -1154,25 +1153,18 @@ where
 
     // A batch replays the chain's own schedule, so a block older than its first hardfork fails
     // here for want of limits to execute under.
-    let block_limits = match ReplayHardforks::Chain(&hardforks)
-        .block_limits(timestamp, block.header.gas_limit())
-    {
-        Ok(limits) => limits,
-        Err(message) => {
-            return BlockReplayOutcome::ordered(
-                fail_remaining(&targets, entries, BatchErrorKind::Execution, &message),
-                &job_targets,
-                Some(&block_tx_order),
-                None,
-            );
-        }
-    };
-    let block_ctx = MegaBlockExecutionCtx::new(
-        parent_block.hash(),
-        block.header.parent_beacon_block_root(),
-        block.header.extra_data().clone(),
-        block_limits,
-    );
+    let block_ctx =
+        match world::block_ctx(&ReplayHardforks::Chain(&hardforks), &block, parent_block.hash()) {
+            Ok(block_ctx) => block_ctx,
+            Err(message) => {
+                return BlockReplayOutcome::ordered(
+                    fail_remaining(&targets, entries, BatchErrorKind::Execution, &message),
+                    &job_targets,
+                    Some(&block_tx_order),
+                    None,
+                );
+            }
+        };
 
     let target_set: HashSet<B256> = targets.iter().copied().collect();
     // Prefer the already-collected body order so stream ordering and the kernel
