@@ -1082,8 +1082,13 @@ impl Cmd {
         // membership guard resolved the target's position from the first
         // occurrence of its hash, and a body that (incoherently) listed that hash
         // twice would otherwise make the kernel run the target a second time.
-        let mut tx_hashes = ctx.preceding_tx_hashes.clone();
-        tx_hashes.push(ctx.tx_hash);
+        let body: Vec<kernel::BodyEntry<'_>> = ctx
+            .preceding_tx_hashes
+            .iter()
+            .chain(core::iter::once(&ctx.tx_hash))
+            .copied()
+            .map(kernel::BodyEntry::Listed)
+            .collect();
         let targets: HashSet<B256> = core::iter::once(ctx.tx_hash).collect();
         info!(preceding_count = ctx.preceding_tx_hashes.len(), "Executing preceding transactions",);
 
@@ -1115,7 +1120,7 @@ impl Cmd {
                     timestamp: ctx.block.header.timestamp(),
                     hash: ctx.block.hash(),
                 },
-                tx_hashes: &tx_hashes,
+                body: &body,
                 body_len: ctx.block.transactions.len(),
                 targets: &targets,
             },

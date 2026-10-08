@@ -1154,7 +1154,8 @@ where
     let target_set: HashSet<B256> = targets.iter().copied().collect();
     // Prefer the already-collected body order so stream ordering and the kernel
     // walk the same sequence.
-    let tx_hashes = block_tx_order.clone();
+    let body: Vec<kernel::BodyEntry<'_>> =
+        block_tx_order.iter().copied().map(kernel::BodyEntry::Listed).collect();
 
     let mut hook = FixtureDraftHook {
         dump: fixture_dump,
@@ -1173,7 +1174,7 @@ where
             inspector: NoOpInspector,
             fork_block: parent_block.header.number(),
             identity: kernel::BlockIdentity { number, timestamp, hash: block.hash() },
-            tx_hashes: &tx_hashes,
+            body: &body,
             body_len: block_tx_order.len(),
             targets: &target_set,
         },
@@ -1222,7 +1223,7 @@ where
     let uncounted_abort = attribute_unreported(
         &mut entries,
         &loop_outcome,
-        &tx_hashes,
+        &block_tx_order,
         &target_set,
         &targets,
         number,
