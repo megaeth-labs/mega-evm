@@ -47,11 +47,10 @@ use tracing::{debug, info, warn};
 
 use crate::{
     common::{
-        print_execution_summary, print_receipt, BatchExitFloor, BatchFailureCounts,
+        cfg_env, print_execution_summary, print_receipt, BatchExitFloor, BatchFailureCounts,
         EvmeExternalEnvs, ExecutionSummary, ExitCode, OpTxReceipt, VerificationCounts,
     },
     replay::{get_hardfork_config, ReplayHardforks},
-    ChainArgs,
 };
 
 use super::{
@@ -1140,20 +1139,9 @@ where
     let hardforks = get_hardfork_config(chain_id);
     let timestamp = block.header.timestamp();
     let spec = hardforks.spec_id(timestamp);
-    let chain_args = ChainArgs { chain_id, spec: spec.to_string() };
     debug!(block = number, chain_id, spec = %spec, "Block configuration");
 
-    let cfg_env = match chain_args.create_cfg_env() {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            return BlockReplayOutcome::ordered(
-                fail_remaining(&targets, entries, BatchErrorKind::Execution, &e.to_string()),
-                &job_targets,
-                Some(&block_tx_order),
-                None,
-            );
-        }
-    };
+    let cfg = cfg_env(chain_id, spec);
     let block_env = match retrieve_block_env(&block) {
         Ok(env) => env,
         Err(e) => {
@@ -1165,8 +1153,8 @@ where
             );
         }
     };
-    let executed_spec = cfg_env.spec;
-    let evm_env = EvmEnv::new(cfg_env, block_env);
+    let executed_spec = cfg.spec;
+    let evm_env = EvmEnv::new(cfg, block_env);
 
     // A batch replays the chain's own schedule, so a block older than its first hardfork fails
     // here for want of limits to execute under.

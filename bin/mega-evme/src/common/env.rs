@@ -45,12 +45,21 @@ impl ChainArgs {
 
     /// Creates [`CfgEnv`].
     pub fn create_cfg_env(&self) -> Result<CfgEnv<MegaSpecId>> {
-        let mut cfg = CfgEnv::default();
-        cfg.chain_id = self.chain_id;
-        cfg.set_spec_and_mainnet_gas_params(self.spec_id()?);
-        debug!(cfg = ?cfg, "Evm CfgEnv created");
-        Ok(cfg)
+        Ok(cfg_env(self.chain_id, self.spec_id()?))
     }
+}
+
+/// Creates the [`CfgEnv`] for `chain_id` executing under `spec`.
+///
+/// Infallible: the spec is already resolved. Commands that start from a spec
+/// name parse it first ([`ChainArgs::create_cfg_env`]); replay resolves the spec
+/// from its hardfork schedule and calls this directly.
+pub fn cfg_env(chain_id: u64, spec: MegaSpecId) -> CfgEnv<MegaSpecId> {
+    let mut cfg = CfgEnv::default();
+    cfg.chain_id = chain_id;
+    cfg.set_spec_and_mainnet_gas_params(spec);
+    debug!(cfg = ?cfg, "Evm CfgEnv created");
+    cfg
 }
 
 /// Block environment configuration arguments

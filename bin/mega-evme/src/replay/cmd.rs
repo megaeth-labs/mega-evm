@@ -31,13 +31,14 @@ use op_alloy_rpc_types::Transaction;
 
 use crate::{
     common::{
-        create_address, op_receipt_to_tx_receipt, parse_bucket_capacity, print_execution_summary,
+        cfg_env, create_address, op_receipt_to_tx_receipt, parse_bucket_capacity,
+        print_execution_summary,
         print_execution_trace, print_receipt, BuildProviderOutput, EvmeExternalEnvs, EvmeOutcome,
         ExecutionSummary, ExternalEnvSnapshot, OpTxReceipt, OverriddenTx, RpcArgs, RpcCacheStore,
         TracerType, TxOverrideArgs, VerificationCounts,
     },
     replay::{get_hardfork_config, ReplayHardforks},
-    run, ChainArgs, EvmeState,
+    run, EvmeState,
 };
 
 use super::{
@@ -974,12 +975,11 @@ impl Cmd {
         }
         let hardforks = ReplayHardforks::resolve(&chain_hardforks, spec_override);
         let spec = hardforks.spec_id(ctx.block.header.timestamp());
-        let chain_args = ChainArgs { chain_id: ctx.chain_id, spec: spec.to_string() };
         debug!(chain_id = ctx.chain_id, spec = %spec, "Chain configuration");
 
         let block_env = retrieve_block_env(&ctx.block)?;
         trace!(?block_env, "Block environment built");
-        let evm_env = EvmEnv::new(chain_args.create_cfg_env()?, block_env);
+        let evm_env = EvmEnv::new(cfg_env(ctx.chain_id, spec), block_env);
 
         // A pending transaction has no receipt yet, so the fidelity gate cannot
         // run; fail clearly here, ahead of the receipt lookup, where the missing
