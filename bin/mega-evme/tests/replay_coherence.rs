@@ -369,12 +369,7 @@ fn run_single(case: &Case) -> Reported {
 /// Drive the batch path over a one-entry `--tx-file` and read back the target's
 /// NDJSON entry.
 fn run_batch(case: &Case) -> Reported {
-    let list = std::env::temp_dir().join(format!(
-        "mega_evme_coherence_{}_{}.txt",
-        case.name,
-        std::process::id()
-    ));
-    std::fs::write(&list, format!("{TARGET}\n")).expect("write tx list");
+    let list = common::tx_file(&format!("coherence_{}", case.name), &[TARGET]);
     let (stdout, stderr, exit) =
         replay(&case.envelope, &["--tx-file", list.to_str().expect("path is utf-8"), "--json"]);
     let _ = std::fs::remove_file(&list);
