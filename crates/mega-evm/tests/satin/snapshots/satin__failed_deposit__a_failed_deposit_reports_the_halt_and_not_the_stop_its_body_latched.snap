@@ -1,0 +1,92 @@
+---
+source: crates/mega-evm/tests/satin/failed_deposit.rs
+expression: "&BTreeMap::from([(\"a system deposit\", failed),\n(\"a user deposit\", OutcomeView::new(&outcome)),])"
+---
+{
+  "a system deposit": {
+    "result": {
+      "kind": "halt",
+      "reason": "FailedDeposit",
+      "output": null,
+      "created": null,
+      "logs": []
+    },
+    "gas": {
+      "regular": 100000,
+      "state": 0,
+      "history": 0,
+      "history_bytes": 0,
+      "reservoir_remaining": 0,
+      "floor": 0,
+      "gas_used": 100000
+    },
+    "result_gas": {
+      "total_gas_spent": 100000,
+      "state_gas_spent": 0,
+      "refunded": 0,
+      "floor_gas": 0,
+      "reservoir_remaining": 0
+    },
+    "usage": {
+      "data_size": 311,
+      "write_records": 0
+    },
+    "limit_stop": null,
+    "oracle_reads": [],
+    "accounts": {
+      "0x0000000000000000000000000000000000f00000": {
+        "balance": "0x1",
+        "nonce": 1,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      }
+    }
+  },
+  "a user deposit": {
+    "result": {
+      "kind": "revert",
+      "reason": "MegaLimitExceeded(DataSize, 310)",
+      "output": "0x84b9026700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000136",
+      "created": null,
+      "logs": []
+    },
+    "gas": {
+      "regular": 15016,
+      "state": 0,
+      "history": 0,
+      "history_bytes": 0,
+      "reservoir_remaining": 0,
+      "floor": 15064,
+      "gas_used": 15064
+    },
+    "result_gas": {
+      "total_gas_spent": 15016,
+      "state_gas_spent": 0,
+      "refunded": 0,
+      "floor_gas": 15064,
+      "reservoir_remaining": 0
+    },
+    "usage": {
+      "data_size": 311,
+      "write_records": 0
+    },
+    "limit_stop": {
+      "kind": "DataSize",
+      "limit": 310,
+      "used": 311
+    },
+    "oracle_reads": [],
+    "accounts": {
+      "0x0000000000000000000000000000000000f00000": {
+        "balance": "0x1",
+        "nonce": 1,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      }
+    }
+  }
+}
