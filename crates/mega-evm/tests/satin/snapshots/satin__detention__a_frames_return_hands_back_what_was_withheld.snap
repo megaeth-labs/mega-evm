@@ -1,0 +1,18 @@
+---
+source: crates/mega-evm/tests/satin/detention.rs
+expression: "&summaries(&views)"
+---
+{
+  "halt, detained, gas limit 100000000": "success Stop; stop -; regular 98410924 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 98438204; data_size 310 write_records 0; logs 0 accounts 6",
+  "halt, detained, gas limit 300000000": "success Stop; stop -; regular 196875278 state 0 history 27280 history_bytes 310 reservoir_remaining 99972720 floor 15000 gas_used 196902558; data_size 310 write_records 0; logs 0 accounts 6",
+  "halt, plain, gas limit 100000000": "success Stop; stop -; regular 98410924 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 98438204; data_size 310 write_records 0; logs 0 accounts 6",
+  "halt, plain, gas limit 300000000": "success Stop; stop -; regular 196875278 state 0 history 27280 history_bytes 310 reservoir_remaining 99972720 floor 15000 gas_used 196902558; data_size 310 write_records 0; logs 0 accounts 6",
+  "revert, detained, gas limit 100000000": "success Stop; stop -; regular 178150 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 205430; data_size 310 write_records 0; logs 0 accounts 6",
+  "revert, detained, gas limit 300000000": "success Stop; stop -; regular 178150 state 0 history 27280 history_bytes 310 reservoir_remaining 99972720 floor 15000 gas_used 205430; data_size 310 write_records 0; logs 0 accounts 6",
+  "revert, plain, gas limit 100000000": "success Stop; stop -; regular 178150 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 205430; data_size 310 write_records 0; logs 0 accounts 6",
+  "revert, plain, gas limit 300000000": "success Stop; stop -; regular 178150 state 0 history 27280 history_bytes 310 reservoir_remaining 99972720 floor 15000 gas_used 205430; data_size 310 write_records 0; logs 0 accounts 6",
+  "success, detained, gas limit 100000000": "success Stop; stop -; regular 178146 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 205426; data_size 310 write_records 0; logs 0 accounts 7",
+  "success, detained, gas limit 300000000": "success Stop; stop -; regular 178146 state 0 history 27280 history_bytes 310 reservoir_remaining 99972720 floor 15000 gas_used 205426; data_size 310 write_records 0; logs 0 accounts 7",
+  "success, plain, gas limit 100000000": "success Stop; stop -; regular 178146 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 205426; data_size 310 write_records 0; logs 0 accounts 7",
+  "success, plain, gas limit 300000000": "success Stop; stop -; regular 178146 state 0 history 27280 history_bytes 310 reservoir_remaining 99972720 floor 15000 gas_used 205426; data_size 310 write_records 0; logs 0 accounts 7"
+}

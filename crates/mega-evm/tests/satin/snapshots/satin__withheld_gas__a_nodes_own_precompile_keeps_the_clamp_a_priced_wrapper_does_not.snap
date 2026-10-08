@@ -1,0 +1,16 @@
+---
+source: crates/mega-evm/tests/satin/withheld_gas.rs
+expression: "&summaries(&views)"
+---
+{
+  "a node's own precompile, gas limit 100000000": "revert MegaLimitExceeded(ComputeGas, 100002); stop ComputeGas limit 100002 used 133; regular 15297 state 0 history 30096 history_bytes 342 reservoir_remaining 0 floor 17048 gas_used 45393; data_size 342 write_records 0; logs 0 accounts 5",
+  "a node's own precompile, gas limit 300000000": "revert MegaLimitExceeded(ComputeGas, 100002); stop ComputeGas limit 100002 used 133; regular 15297 state 0 history 30096 history_bytes 342 reservoir_remaining 99969904 floor 17048 gas_used 45393; data_size 342 write_records 0; logs 0 accounts 5",
+  "the BN254 pairing, gas limit 100000000, detained": "success Stop; stop -; regular 139742 state 0 history 77968 history_bytes 886 reservoir_remaining 0 floor 51864 gas_used 217710; data_size 886 write_records 0; logs 0 accounts 6",
+  "the BN254 pairing, gas limit 100000000, plain": "success Stop; stop -; regular 139742 state 0 history 77968 history_bytes 886 reservoir_remaining 0 floor 51864 gas_used 217710; data_size 886 write_records 0; logs 0 accounts 6",
+  "the BN254 pairing, gas limit 300000000, detained": "success Stop; stop -; regular 139742 state 0 history 77968 history_bytes 886 reservoir_remaining 99922032 floor 51864 gas_used 217710; data_size 886 write_records 0; logs 0 accounts 6",
+  "the BN254 pairing, gas limit 300000000, plain": "success Stop; stop -; regular 139742 state 0 history 77968 history_bytes 886 reservoir_remaining 99922032 floor 51864 gas_used 217710; data_size 886 write_records 0; logs 0 accounts 6",
+  "the KZG point evaluation, gas limit 100000000, detained": "success Stop; stop -; regular 98134 state 0 history 44176 history_bytes 502 reservoir_remaining 0 floor 27288 gas_used 142310; data_size 502 write_records 0; logs 0 accounts 6",
+  "the KZG point evaluation, gas limit 100000000, plain": "success Stop; stop -; regular 98134 state 0 history 44176 history_bytes 502 reservoir_remaining 0 floor 27288 gas_used 142310; data_size 502 write_records 0; logs 0 accounts 6",
+  "the KZG point evaluation, gas limit 300000000, detained": "success Stop; stop -; regular 98134 state 0 history 44176 history_bytes 502 reservoir_remaining 99955824 floor 27288 gas_used 142310; data_size 502 write_records 0; logs 0 accounts 6",
+  "the KZG point evaluation, gas limit 300000000, plain": "success Stop; stop -; regular 98134 state 0 history 44176 history_bytes 502 reservoir_remaining 99955824 floor 27288 gas_used 142310; data_size 502 write_records 0; logs 0 accounts 6"
+}

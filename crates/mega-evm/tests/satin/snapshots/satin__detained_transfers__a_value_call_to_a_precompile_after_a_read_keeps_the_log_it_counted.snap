@@ -1,0 +1,18 @@
+---
+source: crates/mega-evm/tests/satin/detained_transfers.rs
+expression: "&summaries(&views)"
+---
+{
+  "a transaction to modexp from another sender, gas limit 100000000": "success Return; stop -; regular 25171900 state 183600 history 135080 history_bytes 1535 reservoir_remaining 0 floor 96840 gas_used 25490580; data_size 1695 write_records 1; logs 1 accounts 6",
+  "a transaction to modexp from another sender, gas limit 300000000": "success Return; stop -; regular 25171900 state 183600 history 135080 history_bytes 1535 reservoir_remaining 99681320 floor 96840 gas_used 25490580; data_size 1695 write_records 1; logs 1 accounts 6",
+  "a transaction to modexp from the beneficiary, gas limit 100000000": "revert MegaLimitExceeded(ComputeGas, 20000000); stop ComputeGas limit 20000000 used 0; regular 38844 state 0 history 131560 history_bytes 1495 reservoir_remaining 0 floor 96840 gas_used 170404; data_size 1495 write_records 0; logs 0 accounts 4",
+  "a transaction to modexp from the beneficiary, gas limit 300000000": "revert MegaLimitExceeded(ComputeGas, 20000000); stop ComputeGas limit 20000000 used 0; regular 38844 state 0 history 131560 history_bytes 1495 reservoir_remaining 99868440 floor 96840 gas_used 170404; data_size 1495 write_records 0; logs 0 accounts 4",
+  "priced past the allowance, gas limit 100000000, detained": "revert MegaLimitExceeded(ComputeGas, 20000002); stop ComputeGas limit 20000002 used 32059; regular 64903 state 0 history 131560 history_bytes 1495 reservoir_remaining 0 floor 90840 gas_used 196463; data_size 1495 write_records 0; logs 0 accounts 5",
+  "priced past the allowance, gas limit 100000000, plain": "success Stop; stop -; regular 25220062 state 281520 history 142120 history_bytes 1615 reservoir_remaining 0 floor 90840 gas_used 25643702; data_size 1775 write_records 3; logs 1 accounts 7",
+  "priced past the allowance, gas limit 300000000, detained": "revert MegaLimitExceeded(ComputeGas, 20000002); stop ComputeGas limit 20000002 used 32059; regular 64903 state 0 history 131560 history_bytes 1495 reservoir_remaining 99868440 floor 90840 gas_used 196463; data_size 1495 write_records 0; logs 0 accounts 5",
+  "priced past the allowance, gas limit 300000000, plain": "success Stop; stop -; regular 25220062 state 281520 history 142120 history_bytes 1615 reservoir_remaining 99576360 floor 90840 gas_used 25643702; data_size 1775 write_records 3; logs 1 accounts 7",
+  "priced within the allowance, gas limit 100000000, detained": "success Stop; stop -; regular 8442462 state 281520 history 142120 history_bytes 1615 reservoir_remaining 0 floor 90840 gas_used 8866102; data_size 1775 write_records 3; logs 1 accounts 7",
+  "priced within the allowance, gas limit 100000000, plain": "success Stop; stop -; regular 8442462 state 281520 history 142120 history_bytes 1615 reservoir_remaining 0 floor 90840 gas_used 8866102; data_size 1775 write_records 3; logs 1 accounts 7",
+  "priced within the allowance, gas limit 300000000, detained": "success Stop; stop -; regular 8442462 state 281520 history 142120 history_bytes 1615 reservoir_remaining 99576360 floor 90840 gas_used 8866102; data_size 1775 write_records 3; logs 1 accounts 7",
+  "priced within the allowance, gas limit 300000000, plain": "success Stop; stop -; regular 8442462 state 281520 history 142120 history_bytes 1615 reservoir_remaining 99576360 floor 90840 gas_used 8866102; data_size 1775 write_records 3; logs 1 accounts 7"
+}

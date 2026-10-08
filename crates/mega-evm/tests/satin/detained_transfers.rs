@@ -16,10 +16,14 @@
 //! Each case runs with a read of the block's timestamp first, and with `PUSH0`, which costs the
 //! same two gas and reads nothing, in its place.
 
+use std::collections::BTreeMap;
+
 use alloy_op_evm::OpTx;
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
-    test_utils::{is_transfer_log, op_transaction, transfer_log, BytecodeBuilder, MemoryDatabase},
+    test_utils::{
+        is_transfer_log, op_transaction, transfer_log, BytecodeBuilder, MemoryDatabase, OutcomeView,
+    },
     transaction_body_bytes, EvmTxRuntimeLimits, LimitUsage, MegaEvm, MegaTransaction,
     TRANSFER_LOG_SIZE, WRITE_RECORD_SIZE,
 };
@@ -27,8 +31,8 @@ use revm::{bytecode::opcode::*, context::TxEnv, interpreter::InstructionResult};
 
 use crate::{
     detention::{
-        assert_stopped, context, intrinsic, memory_cost, op, run_on, spin, Calls, Charges, Run,
-        BENEFICIARY, CALLER, CAP, CHILD, CONTRACT, TIERS,
+        assert_stopped, context, intrinsic, memory_cost, op, run_on, spin, summaries, Calls,
+        Charges, Run, BENEFICIARY, CALLER, CAP, CHILD, CONTRACT, TIERS,
     },
     withheld_gas::{costly_modexp_input, intrinsic_with},
 };
@@ -186,6 +190,12 @@ fn balance(run: &Run, address: Address) -> U256 {
     run.outcome.state.get(&address).map(|account| account.info.balance).unwrap_or_default()
 }
 
+/// Puts the views of a detained run and of its plain twin into `views` under `case`.
+fn view_pair(views: &mut BTreeMap<String, OutcomeView>, case: &str, detained: &Run, plain: &Run) {
+    views.insert(format!("{case}, detained"), OutcomeView::new(&detained.outcome));
+    views.insert(format!("{case}, plain"), OutcomeView::new(&plain.outcome));
+}
+
 /* ---------- a value call to a precompile ---------- */
 
 /// A value `CALL` to modexp after a read, with all the gas: the call counts its transfer log
@@ -203,6 +213,7 @@ fn balance(run: &Run, address: Address) -> U256 {
 #[test]
 fn test_a_value_call_to_a_precompile_after_a_read_keeps_the_log_it_counted() {
     let (within, above) = (costly_modexp_input(32, 32), costly_modexp_input(64, 0));
+    let mut views = BTreeMap::new();
     for gas_limit in TIERS {
         let exec = |first, input: &[u8]| {
             let db = accounts(calls_with_value(first, MODEXP, None), VALUE);
@@ -219,6 +230,12 @@ fn test_a_value_call_to_a_precompile_after_a_read_keeps_the_log_it_counted() {
         assert_eq!(logs, [transfer_log(CONTRACT, MODEXP, U256::from(VALUE))]);
         assert_eq!(detained.outcome.usage.write_records, 3, "the two ends and the status");
         assert_eq!(balance(&detained, MODEXP), U256::from(VALUE));
+        view_pair(
+            &mut views,
+            &format!("priced within the allowance, gas limit {gas_limit}"),
+            &detained,
+            &plain,
+        );
 
         let ((detained, calls), body) = exec(TIMESTAMP, &above);
         let ((plain, _), _) = exec(PUSH0, &above);
@@ -235,6 +252,12 @@ fn test_a_value_call_to_a_precompile_after_a_read_keeps_the_log_it_counted() {
         assert!(plain.outcome.result.is_success());
         let logs = assert_counts_its_transfer_logs(&plain, body, "without the read");
         assert_eq!(logs, [transfer_log(CONTRACT, MODEXP, U256::from(VALUE))]);
+        view_pair(
+            &mut views,
+            &format!("priced past the allowance, gas limit {gas_limit}"),
+            &detained,
+            &plain,
+        );
 
         // The transaction's own frame: its value is counted with its start, before revm runs the
         // precompile on the cap.
@@ -258,7 +281,16 @@ fn test_a_value_call_to_a_precompile_after_a_read_keeps_the_log_it_counted() {
         assert_stopped(&detained, plain.outcome.gas.regular - price, left);
         assert_eq!(detained.outcome.usage, LimitUsage { data_size: body, write_records: 0 });
         assert_eq!(balance(&detained, MODEXP), U256::ZERO, "the transaction's value did not move");
+        views.insert(
+            format!("a transaction to modexp from another sender, gas limit {gas_limit}"),
+            OutcomeView::new(&plain.outcome),
+        );
+        views.insert(
+            format!("a transaction to modexp from the beneficiary, gas limit {gas_limit}"),
+            OutcomeView::new(&detained.outcome),
+        );
     }
+    crate::assert_sorted_json_snapshot!(&summaries(&views));
 }
 
 /* ---------- a value call its caller cannot fund ---------- */
@@ -277,6 +309,7 @@ fn test_a_value_call_its_caller_cannot_fund_after_a_read_runs_as_without_it() {
         ("a precompile forwarded more than the allowance", MODEXP, None),
         ("a precompile forwarded less than the allowance", IDENTITY, Some(100_000)),
     ];
+    let mut views = BTreeMap::new();
     for gas_limit in TIERS {
         for (case, to, gas) in cases {
             for inspected in [false, true] {
@@ -300,9 +333,16 @@ fn test_a_value_call_its_caller_cannot_fund_after_a_read_runs_as_without_it() {
                     assert_eq!(call.0, InstructionResult::OutOfFunds, "{case}");
                     assert_eq!((call.1, twin.1), (0, 0), "{case}: the forward came back");
                 }
+                view_pair(
+                    &mut views,
+                    &format!("{case}, inspected: {inspected}, gas limit {gas_limit}"),
+                    &detained,
+                    &plain,
+                );
             }
         }
     }
+    crate::assert_sorted_json_snapshot!(&summaries(&views));
 }
 
 /* ---------- a SELFDESTRUCT ---------- */
@@ -329,6 +369,7 @@ fn test_a_selfdestructs_transfer_log_goes_with_the_frame_the_cap_stops() {
     let own = |first| BytecodeBuilder::default().append_many([first, POP]).selfdestruct(RECEIVER);
     let calls_destructor =
         |first| crate::detention::call(op(BytecodeBuilder::default(), first), CALL, DESTRUCTOR);
+    let mut views = BTreeMap::new();
     for gas_limit in TIERS {
         let tx = tx_to(CALLER, CONTRACT, &[], 0, gas_limit);
         let body = transaction_body_bytes(&tx);
@@ -345,6 +386,12 @@ fn test_a_selfdestructs_transfer_log_goes_with_the_frame_the_cap_stops() {
         let logs = assert_counts_its_transfer_logs(&detained, body, "a destruction the cap pays");
         assert_eq!(logs, [transfer_log(CONTRACT, RECEIVER, U256::from(VALUE))]);
         assert_eq!(detained.outcome.usage.write_records, 1, "the beneficiary's record");
+        view_pair(
+            &mut views,
+            &format!("own frame under a cap that pays the destruction, gas limit {gas_limit}"),
+            &detained,
+            &plain,
+        );
         for cap in [DESTRUCT_AFTER_READ - 1, DESTRUCT_AFTER_READ - 2_600 - 1] {
             let stopped = run_own(TIMESTAMP, cap);
             let left = Charges::default().then(&[2, 3, 5_000, 2_600]).left(cap);
@@ -352,6 +399,10 @@ fn test_a_selfdestructs_transfer_log_goes_with_the_frame_the_cap_stops() {
             assert_eq!(stopped.limit, Some(2 + cap));
             assert_eq!(stopped.outcome.usage, LimitUsage { data_size: body, write_records: 0 });
             assert_eq!(balance(&stopped, RECEIVER), U256::ZERO, "under {cap}, nothing moved");
+            views.insert(
+                format!("own frame under a cap of {cap}, gas limit {gas_limit}"),
+                OutcomeView::new(&stopped.outcome),
+            );
         }
 
         // In a child, whose caller the cap stops afterwards.
@@ -365,6 +416,12 @@ fn test_a_selfdestructs_transfer_log_goes_with_the_frame_the_cap_stops() {
         assert_as_without_read(&detained, &plain, "a child's destruction");
         let logs = assert_counts_its_transfer_logs(&detained, body, "a child's destruction");
         assert_eq!(logs, [transfer_log(DESTRUCTOR, RECEIVER, U256::from(VALUE))]);
+        view_pair(
+            &mut views,
+            &format!("a child's destruction, gas limit {gas_limit}"),
+            &detained,
+            &plain,
+        );
         let stopped = run_tx(
             accounts(spin(calls_destructor(TIMESTAMP)), 0),
             tx.clone(),
@@ -381,7 +438,12 @@ fn test_a_selfdestructs_transfer_log_goes_with_the_frame_the_cap_stops() {
         assert_stopped(&stopped, intrinsic(gas_limit), left);
         assert_eq!(stopped.outcome.usage, LimitUsage { data_size: body, write_records: 0 });
         assert_eq!(balance(&stopped, RECEIVER), U256::ZERO, "the child's move was taken back");
+        views.insert(
+            format!("a child's destruction the cap then stops, gas limit {gas_limit}"),
+            OutcomeView::new(&stopped.outcome),
+        );
     }
+    crate::assert_sorted_json_snapshot!(&summaries(&views));
 }
 
 /* ---------- every detained frame start ---------- */
@@ -536,6 +598,7 @@ fn test_every_detained_frame_start_keeps_the_log_it_counted() {
             stops: None,
         },
     ];
+    let mut views = BTreeMap::new();
     for gas_limit in TIERS {
         for start in &starts {
             let input = (start.input)();
@@ -554,12 +617,15 @@ fn test_every_detained_frame_start_keeps_the_log_it_counted() {
                     let left = charges(input.len() as u64).left(CAP);
                     assert_stopped(&detained, intrinsic_with(&input, gas_limit), left);
                     assert_eq!(detained.outcome.usage.write_records, 0, "{case}");
+                    views.insert(format!("{case}, detained"), OutcomeView::new(&detained.outcome));
                 } else {
                     let plain = exec(PUSH0);
                     assert_counts_its_transfer_logs(&plain, body, &case);
                     assert_as_without_read(&detained, &plain, &case);
+                    view_pair(&mut views, &case, &detained, &plain);
                 }
             }
         }
     }
+    crate::assert_sorted_json_snapshot!(&summaries(&views));
 }

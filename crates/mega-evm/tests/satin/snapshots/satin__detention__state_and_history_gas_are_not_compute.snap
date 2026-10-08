@@ -1,0 +1,26 @@
+---
+source: crates/mega-evm/tests/satin/detention.rs
+expression: "&sweeps"
+---
+{
+  "gas limit 100000000": {
+    "summary": "success Stop; stop -; regular 17721910 state 78433920 history 2846800 history_bytes 32350 reservoir_remaining 0 floor 15000 gas_used 99002630; data_size 32350 write_records 801; logs 0 accounts 6",
+    "slots": {
+      "distinct": {
+        "0x0 -> 0x1": 801
+      },
+      "digest": "0x3a27e74fbb5af5349c58064b6bf73ef79a0a94e475af4d50b7d396eaa3d5181c",
+      "count": 801
+    }
+  },
+  "gas limit 300000000": {
+    "summary": "success Stop; stop -; regular 17721910 state 78433920 history 2846800 history_bytes 32350 reservoir_remaining 18719280 floor 15000 gas_used 99002630; data_size 32350 write_records 801; logs 0 accounts 6",
+    "slots": {
+      "distinct": {
+        "0x0 -> 0x1": 801
+      },
+      "digest": "0x3a27e74fbb5af5349c58064b6bf73ef79a0a94e475af4d50b7d396eaa3d5181c",
+      "count": 801
+    }
+  }
+}

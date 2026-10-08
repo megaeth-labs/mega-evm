@@ -5,10 +5,12 @@
 //! stop. The outcome's `limit_exceeded` decides, and a revert carrying a stop's bytes without it is
 //! no stop.
 
+use std::collections::BTreeMap;
+
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
     decode_mega_limit_exceeded,
-    test_utils::{BytecodeBuilder, MemoryDatabase},
+    test_utils::{BytecodeBuilder, MemoryDatabase, OutcomeView},
     EvmTxRuntimeLimits, LimitCheck, LimitKind, MegaEvm, MegaTransactionOutcome,
 };
 use revm::{
@@ -43,6 +45,7 @@ fn reverted_with(outcome: &MegaTransactionOutcome) -> &Bytes {
 fn test_a_contract_reverting_with_a_stops_bytes_is_no_stop() {
     let kinds =
         [LimitKind::DataSize, LimitKind::KVUpdate, LimitKind::ComputeGas, LimitKind::StateGrowth];
+    let mut views = BTreeMap::new();
     for kind in kinds {
         let data =
             LimitCheck::ExceedsLimit { kind, limit: 7, used: 8, frame_local: false }.revert_data();
@@ -55,7 +58,9 @@ fn test_a_contract_reverting_with_a_stops_bytes_is_no_stop() {
         assert_eq!(decode_mega_limit_exceeded(output), Some((kind, 7)), "{kind:?}: it decodes");
         assert_eq!(outcome.limit_exceeded, None, "{kind:?}");
         assert_eq!(outcome.limit_stop(), None, "{kind:?}: and it is no stop");
+        views.insert(format!("{kind:?}"), OutcomeView::new(&outcome));
     }
+    crate::assert_sorted_json_snapshot!(&views);
 }
 
 /// A frame its data-size budget stopped reverts alone with a stop's bytes, and its caller runs
@@ -81,4 +86,5 @@ fn test_a_frame_budget_re_raised_by_its_caller_is_no_stop() {
     );
     assert_eq!(outcome.limit_exceeded, None);
     assert_eq!(outcome.limit_stop(), None);
+    crate::assert_sorted_json_snapshot!(&OutcomeView::new(&outcome));
 }

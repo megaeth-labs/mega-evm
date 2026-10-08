@@ -1,0 +1,22 @@
+---
+source: crates/mega-evm/tests/satin/withheld_gas.rs
+expression: "&summaries(&views)"
+---
+{
+  "forwarded short of its price past the allowance, gas limit 100000000, detained": "revert MegaLimitExceeded(ComputeGas, 20000002); stop ComputeGas limit 20000002 used 357; regular 33201 state 0 history 131560 history_bytes 1495 reservoir_remaining 0 floor 90840 gas_used 164761; data_size 1495 write_records 0; logs 0 accounts 5",
+  "forwarded short of its price past the allowance, gas limit 100000000, plain": "success Stop; stop -; regular 25168459 state 0 history 131560 history_bytes 1495 reservoir_remaining 0 floor 90840 gas_used 25300019; data_size 1495 write_records 0; logs 0 accounts 6",
+  "forwarded short of its price past the allowance, gas limit 300000000, detained": "revert MegaLimitExceeded(ComputeGas, 20000002); stop ComputeGas limit 20000002 used 357; regular 33201 state 0 history 131560 history_bytes 1495 reservoir_remaining 99868440 floor 90840 gas_used 164761; data_size 1495 write_records 0; logs 0 accounts 5",
+  "forwarded short of its price past the allowance, gas limit 300000000, plain": "success Stop; stop -; regular 25168459 state 0 history 131560 history_bytes 1495 reservoir_remaining 99868440 floor 90840 gas_used 25300019; data_size 1495 write_records 0; logs 0 accounts 6",
+  "forwarded short of its price within the allowance, gas limit 100000000, detained": "success Stop; stop -; regular 8390859 state 0 history 131560 history_bytes 1495 reservoir_remaining 0 floor 90840 gas_used 8522419; data_size 1495 write_records 0; logs 0 accounts 6",
+  "forwarded short of its price within the allowance, gas limit 100000000, plain": "success Stop; stop -; regular 8390859 state 0 history 131560 history_bytes 1495 reservoir_remaining 0 floor 90840 gas_used 8522419; data_size 1495 write_records 0; logs 0 accounts 6",
+  "forwarded short of its price within the allowance, gas limit 300000000, detained": "success Stop; stop -; regular 8390859 state 0 history 131560 history_bytes 1495 reservoir_remaining 99868440 floor 90840 gas_used 8522419; data_size 1495 write_records 0; logs 0 accounts 6",
+  "forwarded short of its price within the allowance, gas limit 300000000, plain": "success Stop; stop -; regular 8390859 state 0 history 131560 history_bytes 1495 reservoir_remaining 99868440 floor 90840 gas_used 8522419; data_size 1495 write_records 0; logs 0 accounts 6",
+  "priced past the allowance, gas limit 100000000, detained": "revert MegaLimitExceeded(ComputeGas, 20000002); stop ComputeGas limit 20000002 used 356; regular 33200 state 0 history 131560 history_bytes 1495 reservoir_remaining 0 floor 90840 gas_used 164760; data_size 1495 write_records 0; logs 0 accounts 5",
+  "priced past the allowance, gas limit 100000000, plain": "success Stop; stop -; regular 25188359 state 97920 history 135080 history_bytes 1535 reservoir_remaining 0 floor 90840 gas_used 25421359; data_size 1535 write_records 1; logs 0 accounts 7",
+  "priced past the allowance, gas limit 300000000, detained": "revert MegaLimitExceeded(ComputeGas, 20000002); stop ComputeGas limit 20000002 used 356; regular 33200 state 0 history 131560 history_bytes 1495 reservoir_remaining 99868440 floor 90840 gas_used 164760; data_size 1495 write_records 0; logs 0 accounts 5",
+  "priced past the allowance, gas limit 300000000, plain": "success Stop; stop -; regular 25188359 state 97920 history 135080 history_bytes 1535 reservoir_remaining 99767000 floor 90840 gas_used 25421359; data_size 1535 write_records 1; logs 0 accounts 7",
+  "priced within the allowance, gas limit 100000000, detained": "success Stop; stop -; regular 8410759 state 97920 history 135080 history_bytes 1535 reservoir_remaining 0 floor 90840 gas_used 8643759; data_size 1535 write_records 1; logs 0 accounts 7",
+  "priced within the allowance, gas limit 100000000, plain": "success Stop; stop -; regular 8410759 state 97920 history 135080 history_bytes 1535 reservoir_remaining 0 floor 90840 gas_used 8643759; data_size 1535 write_records 1; logs 0 accounts 7",
+  "priced within the allowance, gas limit 300000000, detained": "success Stop; stop -; regular 8410759 state 97920 history 135080 history_bytes 1535 reservoir_remaining 99767000 floor 90840 gas_used 8643759; data_size 1535 write_records 1; logs 0 accounts 7",
+  "priced within the allowance, gas limit 300000000, plain": "success Stop; stop -; regular 8410759 state 97920 history 135080 history_bytes 1535 reservoir_remaining 99767000 floor 90840 gas_used 8643759; data_size 1535 write_records 1; logs 0 accounts 7"
+}

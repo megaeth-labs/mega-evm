@@ -1,0 +1,22 @@
+---
+source: crates/mega-evm/tests/satin/detention.rs
+expression: "&summaries(&views)"
+---
+{
+  "BALANCE, gas limit 100000000": "success Stop; stop -; regular 17720 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 45000; data_size 310 write_records 0; logs 0 accounts 6",
+  "BALANCE, gas limit 300000000": "success Stop; stop -; regular 17720 state 0 history 27280 history_bytes 310 reservoir_remaining 99972720 floor 15000 gas_used 45000; data_size 310 write_records 0; logs 0 accounts 6",
+  "BLOCKHASH, gas limit 100000000": "success Stop; stop -; regular 17640 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 44920; data_size 310 write_records 0; logs 0 accounts 6",
+  "BLOCKHASH, gas limit 300000000": "success Stop; stop -; regular 17640 state 0 history 27280 history_bytes 310 reservoir_remaining 99972720 floor 15000 gas_used 44920; data_size 310 write_records 0; logs 0 accounts 6",
+  "CALL with value, gas limit 100000000": "success Stop; stop -; regular 17734 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 45014; data_size 310 write_records 0; logs 0 accounts 6",
+  "CALL with value, gas limit 300000000": "success Stop; stop -; regular 17734 state 0 history 27280 history_bytes 310 reservoir_remaining 99972720 floor 15000 gas_used 45014; data_size 310 write_records 0; logs 0 accounts 6",
+  "EXTCODECOPY, gas limit 100000000": "success Stop; stop -; regular 17727 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 45007; data_size 310 write_records 0; logs 0 accounts 6",
+  "EXTCODECOPY, gas limit 300000000": "success Stop; stop -; regular 17727 state 0 history 27280 history_bytes 310 reservoir_remaining 99972720 floor 15000 gas_used 45007; data_size 310 write_records 0; logs 0 accounts 6",
+  "SELFBALANCE of the beneficiary's own frame, gas limit 100000000": "success Stop; stop -; regular 15122 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 42402; data_size 310 write_records 0; logs 0 accounts 6",
+  "SELFBALANCE of the beneficiary's own frame, gas limit 300000000": "success Stop; stop -; regular 15122 state 0 history 27280 history_bytes 310 reservoir_remaining 99972720 floor 15000 gas_used 42402; data_size 310 write_records 0; logs 0 accounts 6",
+  "SELFDESTRUCT, gas limit 100000000": "success Stop; stop -; regular 22620 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 49900; data_size 310 write_records 0; logs 0 accounts 6",
+  "SELFDESTRUCT, gas limit 300000000": "success Stop; stop -; regular 22620 state 0 history 27280 history_bytes 310 reservoir_remaining 99972720 floor 15000 gas_used 49900; data_size 310 write_records 0; logs 0 accounts 6",
+  "SLOTNUM, gas limit 100000000": "success Stop; stop -; regular 17619 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 44899; data_size 310 write_records 0; logs 0 accounts 6",
+  "SLOTNUM, gas limit 300000000": "success Stop; stop -; regular 17619 state 0 history 27280 history_bytes 310 reservoir_remaining 99972720 floor 15000 gas_used 44899; data_size 310 write_records 0; logs 0 accounts 6",
+  "TIMESTAMP, gas limit 100000000": "success Stop; stop -; regular 17619 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 44899; data_size 310 write_records 0; logs 0 accounts 6",
+  "TIMESTAMP, gas limit 300000000": "success Stop; stop -; regular 17619 state 0 history 27280 history_bytes 310 reservoir_remaining 99972720 floor 15000 gas_used 44899; data_size 310 write_records 0; logs 0 accounts 6"
+}
