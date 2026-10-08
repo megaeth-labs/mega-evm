@@ -1,0 +1,273 @@
+---
+source: crates/mega-evm/tests/satin/deposit_charge.rs
+expression: "&outcomes"
+---
+{
+  "no limit, one gas short": {
+    "result": {
+      "kind": "success",
+      "reason": "Stop",
+      "output": "0x",
+      "created": null,
+      "logs": []
+    },
+    "gas": {
+      "regular": 80265,
+      "state": 97920,
+      "history": 34320,
+      "history_bytes": 390,
+      "reservoir_remaining": 99867760,
+      "floor": 15000,
+      "gas_used": 212505
+    },
+    "result_gas": {
+      "total_gas_spent": 212505,
+      "state_gas_spent": 97920,
+      "refunded": 0,
+      "floor_gas": 15000,
+      "reservoir_remaining": 99867760
+    },
+    "usage": {
+      "data_size": 390,
+      "write_records": 2
+    },
+    "limit_stop": null,
+    "oracle_reads": [],
+    "accounts": {
+      "0x0000000000000000000000000000000000000000": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x0000000000000000000000000000000000a00000": {
+        "balance": "0xde0b6b3a7640000",
+        "nonce": 1,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x0000000000000000000000000000000000a00001": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0x0f2de178de0b8516cb5d2f66dfa54827971d1010f212dba540f7a897dc7541ee",
+        "created": false,
+        "selfdestructed": false,
+        "storage": [
+          {
+            "slot": "0x0",
+            "original": "0x0",
+            "present": "0x1"
+          }
+        ]
+      },
+      "0x0000000000000000000000000000000000a00002": {
+        "balance": "0x0",
+        "nonce": 1,
+        "code_hash": "0x687c912324a875368144ef3b99a25e1a605c81522a231d9cabd9123f8bf4222d",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x4200000000000000000000000000000000000019": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x420000000000000000000000000000000000001a": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x420000000000000000000000000000000000001b": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      }
+    }
+  },
+  "under the limit, exactly enough": {
+    "result": {
+      "kind": "revert",
+      "reason": "MegaLimitExceeded(StateGrowth, 9583919)",
+      "output": "0x84b9026700000000000000000000000000000000000000000000000000000000000000030000000000000000000000000000000000000000000000000000000000923d2f",
+      "created": null,
+      "logs": []
+    },
+    "gas": {
+      "regular": 54784,
+      "state": 0,
+      "history": 27280,
+      "history_bytes": 310,
+      "reservoir_remaining": 99972720,
+      "floor": 15000,
+      "gas_used": 82064
+    },
+    "result_gas": {
+      "total_gas_spent": 82064,
+      "state_gas_spent": 0,
+      "refunded": 0,
+      "floor_gas": 15000,
+      "reservoir_remaining": 99972720
+    },
+    "usage": {
+      "data_size": 310,
+      "write_records": 0
+    },
+    "limit_stop": {
+      "kind": "StateGrowth",
+      "limit": 9583919,
+      "used": 9583920
+    },
+    "oracle_reads": [],
+    "accounts": {
+      "0x0000000000000000000000000000000000000000": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x0000000000000000000000000000000000a00000": {
+        "balance": "0xde0b6b3a7640000",
+        "nonce": 1,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x4200000000000000000000000000000000000019": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x420000000000000000000000000000000000001a": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x420000000000000000000000000000000000001b": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      }
+    }
+  },
+  "under the limit, one gas short": {
+    "result": {
+      "kind": "success",
+      "reason": "Stop",
+      "output": "0x",
+      "created": null,
+      "logs": []
+    },
+    "gas": {
+      "regular": 80265,
+      "state": 97920,
+      "history": 34320,
+      "history_bytes": 390,
+      "reservoir_remaining": 99867760,
+      "floor": 15000,
+      "gas_used": 212505
+    },
+    "result_gas": {
+      "total_gas_spent": 212505,
+      "state_gas_spent": 97920,
+      "refunded": 0,
+      "floor_gas": 15000,
+      "reservoir_remaining": 99867760
+    },
+    "usage": {
+      "data_size": 390,
+      "write_records": 2
+    },
+    "limit_stop": null,
+    "oracle_reads": [],
+    "accounts": {
+      "0x0000000000000000000000000000000000000000": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x0000000000000000000000000000000000a00000": {
+        "balance": "0xde0b6b3a7640000",
+        "nonce": 1,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x0000000000000000000000000000000000a00001": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0x0f2de178de0b8516cb5d2f66dfa54827971d1010f212dba540f7a897dc7541ee",
+        "created": false,
+        "selfdestructed": false,
+        "storage": [
+          {
+            "slot": "0x0",
+            "original": "0x0",
+            "present": "0x1"
+          }
+        ]
+      },
+      "0x0000000000000000000000000000000000a00002": {
+        "balance": "0x0",
+        "nonce": 1,
+        "code_hash": "0x687c912324a875368144ef3b99a25e1a605c81522a231d9cabd9123f8bf4222d",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x4200000000000000000000000000000000000019": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x420000000000000000000000000000000000001a": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x420000000000000000000000000000000000001b": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      }
+    }
+  }
+}

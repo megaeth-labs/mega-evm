@@ -1,0 +1,16 @@
+---
+source: crates/mega-evm/tests/satin/transfer_logs.rs
+expression: "&outcomes"
+---
+{
+  "a CALL, funded, under the frame budget": "success Return; stop -; regular 24349 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 51629; data_size 310 write_records 0; logs 0 accounts 6",
+  "a CALL, funded, under the transaction limit": "revert MegaLimitExceeded(DataSize, 549); stop DataSize limit 549 used 550; regular 24316 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 51596; data_size 310 write_records 0; logs 0 accounts 5",
+  "a CALL, unfunded, no limit": "success Return; stop -; regular 24331 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 51611; data_size 310 write_records 0; logs 0 accounts 6",
+  "a CALL, unfunded, under the frame budget": "success Return; stop -; regular 24331 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 51611; data_size 310 write_records 0; logs 0 accounts 6",
+  "a CALL, unfunded, under the transaction limit": "success Return; stop -; regular 24331 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 51611; data_size 310 write_records 0; logs 0 accounts 6",
+  "a CALLCODE, funded, under the frame budget": "success Return; stop -; regular 24349 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 51629; data_size 310 write_records 0; logs 0 accounts 6",
+  "a CALLCODE, funded, under the transaction limit": "revert MegaLimitExceeded(DataSize, 349); stop DataSize limit 349 used 350; regular 24316 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 51596; data_size 310 write_records 0; logs 0 accounts 5",
+  "a CALLCODE, unfunded, no limit": "success Return; stop -; regular 24331 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 51611; data_size 310 write_records 0; logs 0 accounts 6",
+  "a CALLCODE, unfunded, under the frame budget": "success Return; stop -; regular 24331 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 51611; data_size 310 write_records 0; logs 0 accounts 6",
+  "a CALLCODE, unfunded, under the transaction limit": "success Return; stop -; regular 24331 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 51611; data_size 310 write_records 0; logs 0 accounts 6"
+}

@@ -1,0 +1,22 @@
+---
+source: crates/mega-evm/tests/satin/transfer_logs.rs
+expression: "&outcomes"
+---
+{
+  "Call at 20000000": "success Return; stop -; regular 26962 state 0 history 34320 history_bytes 390 reservoir_remaining 0 floor 15000 gas_used 61282; data_size 550 write_records 2; logs 1 accounts 8",
+  "Call at 300000000": "success Return; stop -; regular 26962 state 0 history 34320 history_bytes 390 reservoir_remaining 99965680 floor 15000 gas_used 61282; data_size 550 write_records 2; logs 1 accounts 8",
+  "CallToPrecompile at 20000000": "success Return; stop -; regular 49477 state 183600 history 34320 history_bytes 390 reservoir_remaining 0 floor 15000 gas_used 267397; data_size 550 write_records 2; logs 1 accounts 8",
+  "CallToPrecompile at 300000000": "success Return; stop -; regular 49477 state 183600 history 34320 history_bytes 390 reservoir_remaining 99782080 floor 15000 gas_used 267397; data_size 550 write_records 2; logs 1 accounts 8",
+  "CallWithoutCode at 20000000": "success Return; stop -; regular 51962 state 183600 history 34320 history_bytes 390 reservoir_remaining 0 floor 15000 gas_used 269882; data_size 550 write_records 2; logs 1 accounts 8",
+  "CallWithoutCode at 300000000": "success Return; stop -; regular 51962 state 183600 history 34320 history_bytes 390 reservoir_remaining 99782080 floor 15000 gas_used 269882; data_size 550 write_records 2; logs 1 accounts 8",
+  "Create at 20000000": "success Return; stop -; regular 49655 state 183600 history 34320 history_bytes 390 reservoir_remaining 0 floor 15000 gas_used 267575; data_size 550 write_records 2; logs 1 accounts 8",
+  "Create at 300000000": "success Return; stop -; regular 49655 state 183600 history 34320 history_bytes 390 reservoir_remaining 99782080 floor 15000 gas_used 267575; data_size 550 write_records 2; logs 1 accounts 8",
+  "Create2 at 20000000": "success Return; stop -; regular 49658 state 183600 history 34320 history_bytes 390 reservoir_remaining 0 floor 15000 gas_used 267578; data_size 550 write_records 2; logs 1 accounts 8",
+  "Create2 at 300000000": "success Return; stop -; regular 49658 state 183600 history 34320 history_bytes 390 reservoir_remaining 99782080 floor 15000 gas_used 267578; data_size 550 write_records 2; logs 1 accounts 8",
+  "SelfDestruct at 20000000": "success Return; stop -; regular 27865 state 0 history 30800 history_bytes 350 reservoir_remaining 0 floor 15000 gas_used 58665; data_size 510 write_records 1; logs 1 accounts 9",
+  "SelfDestruct at 300000000": "success Return; stop -; regular 27865 state 0 history 30800 history_bytes 350 reservoir_remaining 99969200 floor 15000 gas_used 58665; data_size 510 write_records 1; logs 1 accounts 9",
+  "TxEndowment at 20000000": "success Return; stop -; regular 24000 state 183600 history 30800 history_bytes 350 reservoir_remaining 0 floor 24000 gas_used 238400; data_size 510 write_records 1; logs 1 accounts 6",
+  "TxEndowment at 300000000": "success Return; stop -; regular 24000 state 183600 history 30800 history_bytes 350 reservoir_remaining 99785600 floor 24000 gas_used 238400; data_size 510 write_records 1; logs 1 accounts 6",
+  "TxValue at 20000000": "success Stop; stop -; regular 21000 state 0 history 30800 history_bytes 350 reservoir_remaining 0 floor 21000 gas_used 51800; data_size 510 write_records 1; logs 1 accounts 6",
+  "TxValue at 300000000": "success Stop; stop -; regular 21000 state 0 history 30800 history_bytes 350 reservoir_remaining 99969200 floor 21000 gas_used 51800; data_size 510 write_records 1; logs 1 accounts 6"
+}

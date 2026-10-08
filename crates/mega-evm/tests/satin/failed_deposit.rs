@@ -7,15 +7,19 @@
 //! machine as they have for any other transaction that halts.
 
 use core::convert::Infallible;
+use std::collections::BTreeMap;
 
 use alloy_op_evm::OpTx;
 use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
     system::{IOracle, ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE},
-    test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, ExternalEnvs, LimitUsage, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    MegaTransaction, MegaTransactionOutcome, TestExternalEnvs, TX_BODY_SIZE,
+    test_utils::{
+        op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase, OutcomeView,
+    },
+    EvmTxRuntimeLimits, ExternalEnvs, LimitCheck, LimitKind, LimitUsage, MegaContext, MegaEvm,
+    MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionOutcome, TestExternalEnvs,
+    TX_BODY_SIZE,
 };
 use revm::{
     bytecode::opcode::{CALL, INVALID, POP},
@@ -67,6 +71,7 @@ fn test_a_failed_deposit_reports_the_halt_and_not_the_stop_its_body_latched() {
     assert_eq!(outcome.limit_exceeded, None, "the halt is what the deposit reports");
     assert_eq!(outcome.usage, LimitUsage { data_size: body, write_records: 0 });
     assert_eq!(outcome.state[&CALLER].info.nonce, 1, "a failed deposit bumps its sender's nonce");
+    let failed = OutcomeView::new(&outcome);
 
     // The same body from a user deposit, which op-revm admits, is the stop.
     let db = MemoryDatabase::default().account_balance(CALLER, U256::from(1));
@@ -74,6 +79,20 @@ fn test_a_failed_deposit_reports_the_halt_and_not_the_stop_its_body_latched() {
     let outcome = evm.execute_transaction(deposit(Bytes::from_static(&[0xab]), false)).unwrap();
     assert!(matches!(outcome.result, ExecutionResult::Revert { .. }), "{:?}", outcome.result);
     assert!(outcome.limit_exceeded.is_some(), "the body's stop is reported");
+    assert_eq!(
+        outcome.limit_exceeded,
+        Some(LimitCheck::ExceedsLimit {
+            kind: LimitKind::DataSize,
+            limit: TX_BODY_SIZE,
+            used: body,
+            frame_local: false,
+        }),
+        "the body crossed the data-size limit",
+    );
+    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+        ("a system deposit", failed),
+        ("a user deposit", OutcomeView::new(&outcome)),
+    ]));
 }
 
 /// Runs `tx` against a callee that sends the Oracle a hint of `payload` and then halts on
@@ -143,6 +162,7 @@ fn test_a_failed_deposit_keeps_the_hints_it_forwarded() {
     assert_eq!(hints, 1, "the hint reached the oracle service before the halt");
     assert_eq!(outcome.limit_exceeded, None);
     assert_eq!(outcome.usage, kept, "the body and the forwarded hint stay counted");
+    let failed = OutcomeView::new(&outcome);
 
     let ordinary = call(CALLER, CALLEE, U256::ZERO, 1_000_000);
     assert_eq!(
@@ -159,4 +179,8 @@ fn test_a_failed_deposit_keeps_the_hints_it_forwarded() {
     );
     assert_eq!(hints, 1);
     assert_eq!(outcome.usage, kept, "an ordinary transaction that halts keeps the same bytes");
+    crate::assert_sorted_json_snapshot!(&BTreeMap::from([
+        ("a deposit", failed),
+        ("an ordinary transaction", OutcomeView::new(&outcome)),
+    ]));
 }

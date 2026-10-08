@@ -20,12 +20,14 @@
 //! charges history from outside the frame the charge belongs to: a value call, a nested creation,
 //! a child that reverts, and a call an interceptor answers without a frame.
 
+use std::collections::BTreeMap;
+
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
     constants::{ACCOUNT_STATE_GAS, COST_PER_HISTORY_BYTE, TX_GAS_LIMIT_CAP},
     system::{IMegaAccessControl, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE},
-    test_utils::{BytecodeBuilder, MemoryDatabase},
+    test_utils::{BytecodeBuilder, MemoryDatabase, OutcomeView},
     LimitUsage, MegaTransactionOutcome, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 use revm::bytecode::opcode::{CALL, CREATE, GAS, POP, PUSH0, PUSH1, REVERT, STOP};
@@ -105,12 +107,13 @@ fn calls_a_refusing_interceptor() -> Bytes {
 /// ledgers: above the cap the reservoir pays what regular gas pays below it, and the reservoir
 /// left over is the gas limit above the cap less the state and history the ledgers report.
 ///
-/// Returns the above-the-cap outcome, for a case that has more to say about it.
+/// Returns the two outcomes, above the cap and below it: the first for a case that has more to say
+/// about it, both for the case's snapshot.
 #[track_caller]
 fn assert_the_reservoir_pays_what_regular_gas_pays(
     name: &str,
     db: impl Fn() -> MemoryDatabase,
-) -> MegaTransactionOutcome {
+) -> (MegaTransactionOutcome, MegaTransactionOutcome) {
     let above = execute(db(), call(CALLER, CALLEE, U256::ZERO, ABOVE_CAP));
     let below = execute(db(), call(CALLER, CALLEE, U256::ZERO, BELOW_CAP));
 
@@ -125,7 +128,18 @@ fn assert_the_reservoir_pays_what_regular_gas_pays(
         ABOVE_CAP - TX_GAS_LIMIT_CAP - above.gas.state - above.gas.history,
         "{name}: the reservoir paid exactly the state and the history the ledgers report",
     );
-    above
+    (above, below)
+}
+
+/// The snapshot of a case's two outcomes, above the execution cap and below it.
+fn views(
+    above: &MegaTransactionOutcome,
+    below: &MegaTransactionOutcome,
+) -> BTreeMap<&'static str, OutcomeView> {
+    BTreeMap::from([
+        ("above the cap", OutcomeView::new(above)),
+        ("below the cap", OutcomeView::new(below)),
+    ])
 }
 
 /// A value `CALL` charges its caller for two write records. Above the cap the reservoir pays
@@ -137,7 +151,7 @@ fn test_a_value_call_pays_its_records_out_of_the_reservoir() {
         return;
     }
     let code = transfers_to(CONTRACT);
-    let outcome = assert_the_reservoir_pays_what_regular_gas_pays("a value call", || {
+    let (outcome, below) = assert_the_reservoir_pays_what_regular_gas_pays("a value call", || {
         funded().account_code(CALLEE, code.clone())
     });
 
@@ -145,6 +159,7 @@ fn test_a_value_call_pays_its_records_out_of_the_reservoir() {
     assert_eq!(outcome.usage.write_records, 2, "the caller's account and the recipient's");
     assert_eq!(outcome.gas.history, BODY + 2 * RECORD);
     assert_eq!(outcome.gas.state, ACCOUNT_STATE_GAS, "the recipient is a new account");
+    crate::assert_sorted_json_snapshot!(&views(&outcome, &below));
 }
 
 /// A nested creation charges its creator for the created account and for its own nonce, and the
@@ -155,13 +170,15 @@ fn test_a_nested_creation_pays_its_records_out_of_the_reservoir() {
         return;
     }
     let code = creates();
-    let outcome = assert_the_reservoir_pays_what_regular_gas_pays("a nested creation", || {
-        funded().account_code(CALLEE, code.clone())
-    });
+    let (outcome, below) =
+        assert_the_reservoir_pays_what_regular_gas_pays("a nested creation", || {
+            funded().account_code(CALLEE, code.clone())
+        });
 
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
     assert_eq!(outcome.usage.write_records, 2, "the created account and the creator's nonce");
     assert_eq!(outcome.gas.history, BODY + 2 * RECORD);
+    crate::assert_sorted_json_snapshot!(&views(&outcome, &below));
 }
 
 /// A child that reverts keeps none of the records its caller paid for, so the charge goes back to
@@ -172,7 +189,7 @@ fn test_a_reverting_child_gives_its_records_back_to_the_reservoir() {
         return;
     }
     let code = transfers_to(CONTRACT);
-    let outcome =
+    let (outcome, below) =
         assert_the_reservoir_pays_what_regular_gas_pays("a value call whose child reverts", || {
             funded()
                 .account_code(CALLEE, code.clone())
@@ -191,6 +208,7 @@ fn test_a_reverting_child_gives_its_records_back_to_the_reservoir() {
         RESERVOIR - BODY,
         "the transfer's records cost the reservoir nothing in the end",
     );
+    crate::assert_sorted_json_snapshot!(&views(&outcome, &below));
 }
 
 /// A value call a system contract's interceptor refuses never starts a frame: its lane is empty
@@ -203,7 +221,7 @@ fn test_an_intercepted_value_call_gives_its_records_back_once() {
         return;
     }
     let code = calls_a_refusing_interceptor();
-    let outcome = assert_the_reservoir_pays_what_regular_gas_pays(
+    let (outcome, below) = assert_the_reservoir_pays_what_regular_gas_pays(
         "a value call an interceptor refuses",
         || {
             funded()
@@ -225,4 +243,5 @@ fn test_an_intercepted_value_call_gives_its_records_back_once() {
         RESERVOIR - BODY,
         "the refused call's records cost the reservoir nothing in the end",
     );
+    crate::assert_sorted_json_snapshot!(&views(&outcome, &below));
 }

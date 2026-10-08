@@ -1,0 +1,67 @@
+---
+source: crates/mega-evm/tests/satin/history_exemption.rs
+expression: "&OutcomeView::new(&outcome)"
+---
+{
+  "result": {
+    "kind": "success",
+    "reason": "Stop",
+    "output": "0x",
+    "created": null,
+    "logs": []
+  },
+  "gas": {
+    "regular": 43375,
+    "state": 281520,
+    "history": 0,
+    "history_bytes": 0,
+    "reservoir_remaining": 0,
+    "floor": 19352,
+    "gas_used": 324895
+  },
+  "result_gas": {
+    "total_gas_spent": 324895,
+    "state_gas_spent": 281520,
+    "refunded": 0,
+    "floor_gas": 19352,
+    "reservoir_remaining": 0
+  },
+  "usage": {
+    "data_size": 418,
+    "write_records": 1
+  },
+  "limit_stop": null,
+  "oracle_reads": [],
+  "accounts": {
+    "0x6342000000000000000000000000000000000001": {
+      "balance": "0x0",
+      "nonce": 0,
+      "code_hash": "0x71a65239db8d0f1bb765fad36e34f57600420d103a4401ef7555bd50b229dc55",
+      "created": false,
+      "selfdestructed": false,
+      "storage": [
+        {
+          "slot": "0x7",
+          "original": "0x0",
+          "present": "0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+        }
+      ]
+    },
+    "0x6342000000000000000000000000000000000006": {
+      "balance": "0x0",
+      "nonce": 0,
+      "code_hash": "0xabd7e8f1c8f0f9ca0346df585b65d9791a7e9ba5c431cc4eda5d2c2f1f5e9c43",
+      "created": false,
+      "selfdestructed": false,
+      "storage": []
+    },
+    "0xa887dcb9d5f39ef79272801d05abdf707cfbbd1d": {
+      "balance": "0x0",
+      "nonce": 1,
+      "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+      "created": false,
+      "selfdestructed": false,
+      "storage": []
+    }
+  }
+}
