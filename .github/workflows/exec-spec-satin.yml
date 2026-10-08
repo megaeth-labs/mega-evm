@@ -20,9 +20,12 @@ name: Execution-spec tests on Satin
 #   block by block through Satin's block executor in equivalence mode's configuration (`state-test
 #   btest`). Every block's gas used, logs bloom, receipts root and state root are held to its
 #   header, and every block the fixture expects to be invalid must be refused for the exception it
-#   names. A test passes, is skipped for a class decided from its content, or fails on a registered
-#   deviation; the executed and skipped counts are pinned below. The devnet release's blockchain
-#   tests are not run: the fork's runner skips them too.
+#   names. A block that differs passes only when a registered deviation lists that test and block
+#   with exactly the outcome Satin produces, and the chain is imported on from Satin's state, so
+#   every later block is held too; the summary counts the blocks checked against Ethereum apart
+#   from those matched to a deviation. A test passes, deviates as listed, is skipped for a class
+#   decided from its content, or fails; the executed and skipped counts are pinned below. The
+#   devnet release's blockchain tests are not run: the fork's runner skips them too.
 #
 # The fixture releases are the ones the revm fork's `scripts/run-tests.sh` names at the tag
 # Cargo.lock pins, so this gate and the fork runner's (exec-spec.yml) judge the same fixtures.
@@ -343,7 +346,7 @@ jobs:
           {
             echo "### Blockchain tests"
             echo
-            echo "| Fixtures | Executed | Skipped | Passed | Deviated | Unattributed | Unreproduced | Blocks accepted | Blocks refused |"
+            echo "| Fixtures | Executed | Skipped | Passed | Deviated | Unattributed | Unreproduced | Blocks checked against Ethereum | Blocks matched to a deviation |"
             echo "|---|---:|---:|---:|---:|---:|---:|---:|---:|"
           } >> "$GITHUB_STEP_SUMMARY"
           pins=()
@@ -364,8 +367,8 @@ jobs:
             and (.summary | (.executed | type) == "number" and (.passed | type) == "number"
               and (.unattributed | type) == "number" and (.file_failures | type) == "number"
               and (.skipped | type) == "object" and (.deviated | type) == "object"
-              and (.unreproduced | type) == "object" and (.blocks.accepted | type) == "number"
-              and (.blocks.refused | type) == "number")'
+              and (.unreproduced | type) == "object" and (.blocks.matched | type) == "number"
+              and (.blocks.refused | type) == "number" and (.blocks.deviated | type) == "number")'
           if [ ! -f blockchain-Osaka.json ]; then
             echo "::error::the blockchain tests wrote no summary"
             status=1
@@ -380,7 +383,7 @@ jobs:
             echo "::error::the blockchain tests have a failure no deviation explains, an unread fixture or an unreproduced deviation"
             status=1
           else
-            jq -r '.summary as $s | "| Osaka | \($s.executed) | \([$s.skipped[]] | add // 0) | \($s.passed) | \([$s.deviated[]] | add // 0) | \($s.unattributed) | \([$s.unreproduced[]] | add // 0) | \($s.blocks.accepted) | \($s.blocks.refused) |"' \
+            jq -r '.summary as $s | "| Osaka | \($s.executed) | \([$s.skipped[]] | add // 0) | \($s.passed) | \([$s.deviated[]] | add // 0) | \($s.unattributed) | \([$s.unreproduced[]] | add // 0) | \($s.blocks.matched + $s.blocks.refused) | \($s.blocks.deviated) |"' \
               blockchain-Osaka.json >> "$GITHUB_STEP_SUMMARY"
             {
               echo
