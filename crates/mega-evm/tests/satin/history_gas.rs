@@ -398,7 +398,7 @@ fn test_no_gas_limit_buys_a_write_record_for_nothing() {
     }
     let reservoirs = [1, body(0) / 2, body(0) + WRITE_RECORD_SIZE * CPHB, 1_000_000, 100_000_000];
     let above_the_cap = reservoirs.map(|reservoir| TX_GAS_LIMIT_CAP + reservoir);
-    let mut outcomes: BTreeMap<&str, BTreeMap<u64, OutcomeView>> = BTreeMap::new();
+    let mut outcomes: BTreeMap<&str, BTreeMap<u64, _>> = BTreeMap::new();
     for (site, code) in
         [("a value call", transfers_everything_to(CONTRACT)), ("a creation", creates_everything())]
     {
@@ -426,7 +426,7 @@ fn test_no_gas_limit_buys_a_write_record_for_nothing() {
                 TX_BODY_SIZE + outcome.usage.write_records * WRITE_RECORD_SIZE,
                 "at a {limit} gas limit: and the bytes reported",
             );
-            outcomes.entry(site).or_default().insert(limit, OutcomeView::new(&outcome));
+            outcomes.entry(site).or_default().insert(limit, OutcomeView::new(&outcome).summary());
         }
     }
     crate::assert_sorted_json_snapshot!(&outcomes);

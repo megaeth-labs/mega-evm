@@ -387,7 +387,7 @@ fn test_each_site_counts_its_transfer_log() {
             assert_eq!(outcome.gas.history_bytes, history_bytes, "{case}: no history bytes");
             assert_eq!(outcome.gas.history, history_gas(history_bytes).unwrap(), "{case}");
             assert_reservoir_paid(&case, gas_limit, &outcome);
-            outcomes.insert(case, OutcomeView::new(&outcome));
+            outcomes.insert(case, OutcomeView::new(&outcome).summary());
         }
     }
     crate::assert_sorted_json_snapshot!(&outcomes);
@@ -446,8 +446,10 @@ fn test_each_site_stops_one_byte_short_of_its_frame_budget() {
                     Variant::TakenBack => unreachable!(),
                 }
                 assert_reservoir_paid(&case, gas_limit, &over);
-                outcomes.insert(format!("{case}: at the budget"), OutcomeView::new(&fits));
-                outcomes.insert(format!("{case}: one byte short"), OutcomeView::new(&over));
+                outcomes
+                    .insert(format!("{case}: at the budget"), OutcomeView::new(&fits).summary());
+                outcomes
+                    .insert(format!("{case}: one byte short"), OutcomeView::new(&over).summary());
             }
         }
     }
@@ -503,9 +505,13 @@ fn test_each_site_stops_one_byte_short_of_the_transaction_limit() {
                 if site.depth() == 0 {
                     let (fits, _, _) = run(0);
                     assert!(fits.result.is_success(), "{case}: at the limit: {:?}", fits.result);
-                    outcomes.insert(format!("{case}: at the limit"), OutcomeView::new(&fits));
+                    outcomes
+                        .insert(format!("{case}: at the limit"), OutcomeView::new(&fits).summary());
                 }
-                outcomes.insert(format!("{case}: one byte short"), OutcomeView::new(&outcome));
+                outcomes.insert(
+                    format!("{case}: one byte short"),
+                    OutcomeView::new(&outcome).summary(),
+                );
             }
         }
     }
@@ -535,7 +541,7 @@ fn test_a_failure_takes_each_sites_transfer_log_back() {
             }
             assert_eq!(balance(&outcome, site.recipient()), U256::ZERO, "{case}");
             assert_reservoir_paid(&case, gas_limit, &outcome);
-            outcomes.insert(case, OutcomeView::new(&outcome));
+            outcomes.insert(case, OutcomeView::new(&outcome).summary());
         }
     }
     crate::assert_sorted_json_snapshot!(&outcomes);
@@ -688,9 +694,12 @@ fn test_a_value_call_its_caller_cannot_fund_runs_as_without_a_limit() {
             assert_eq!(limited.result, free.result, "{name} under {limits:?}");
             assert_eq!(limited.usage, free.usage, "{name} under {limits:?}");
             assert_eq!(limited.gas, free.gas, "{name} under {limits:?}");
-            outcomes.insert(format!("{name}, unfunded, under {under}"), OutcomeView::new(&limited));
+            outcomes.insert(
+                format!("{name}, unfunded, under {under}"),
+                OutcomeView::new(&limited).summary(),
+            );
         }
-        outcomes.insert(format!("{name}, unfunded, no limit"), OutcomeView::new(&free));
+        outcomes.insert(format!("{name}, unfunded, no limit"), OutcomeView::new(&free).summary());
 
         let stopped = execute(db(VALUE, &actor), tx.clone(), tx_limit);
         assert_eq!(
@@ -705,7 +714,7 @@ fn test_a_value_call_its_caller_cannot_fund_runs_as_without_a_limit() {
         );
         outcomes.insert(
             format!("{name}, funded, under the transaction limit"),
-            OutcomeView::new(&stopped),
+            OutcomeView::new(&stopped).summary(),
         );
         let stopped = execute(db(VALUE, &actor), tx.clone(), frame_budget);
         let stop = MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit: bytes - 1 };
@@ -714,8 +723,10 @@ fn test_a_value_call_its_caller_cannot_fund_runs_as_without_a_limit() {
             Some(&Bytes::from(stop.abi_encode())),
             "{name}: funded to the last wei, the move is stopped at its frame's budget",
         );
-        outcomes
-            .insert(format!("{name}, funded, under the frame budget"), OutcomeView::new(&stopped));
+        outcomes.insert(
+            format!("{name}, funded, under the frame budget"),
+            OutcomeView::new(&stopped).summary(),
+        );
     }
     crate::assert_sorted_json_snapshot!(&outcomes);
 }
