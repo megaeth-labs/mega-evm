@@ -1121,11 +1121,14 @@ impl Cmd {
             block: &ctx.block,
         };
 
-        // Timed across the whole walk, which is what this path has always
-        // reported: replaying one transaction faithfully means executing the
-        // block ahead of it, so that work is part of what the summary times. The
-        // kernel's own per-target timing is left to the batch driver, whose
-        // report is per target.
+        // Timed across the whole kernel run — state fork, walk and block finish.
+        // A mined target has always been timed this way: replaying one
+        // transaction faithfully means executing the block ahead of it, so that
+        // work is part of what the summary times. A pending target, which used
+        // to be timed from executor setup to its commit, now shares the window
+        // and so also counts the fork and the finish. The kernel's own
+        // per-target timing is left to the batch driver, whose report is per
+        // target.
         let start = Instant::now();
         let run = kernel::execute_until_targets(
             provider,
