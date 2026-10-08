@@ -112,19 +112,11 @@ fn replay(args: &[&str]) -> Run {
     run(&argv)
 }
 
-/// Write a `--tx-file` holding `contents`, and return its path.
-fn tx_file(name: &str, contents: &str) -> std::path::PathBuf {
-    let path =
-        std::env::temp_dir().join(format!("mega_evme_exit_{name}_{}.txt", std::process::id()));
-    std::fs::write(&path, contents).expect("write tx list");
-    path
-}
-
 /// Bad input is an execution-class failure: exit 1, with the structured object
 /// as the last stdout line.
 #[test]
 fn test_invalid_input_exits_one_with_a_json_error_object() {
-    let list = tx_file("bad_hash", "not-a-hash\n");
+    let list = common::tx_file("exit_bad_hash", &["not-a-hash"]);
 
     let run = replay(&["--tx-file", list.to_str().unwrap(), "--json"]);
     let _ = std::fs::remove_file(&list);
@@ -184,7 +176,7 @@ fn test_state_read_failure_during_execution_is_an_rpc_failure() {
         "the failure must be the block error carrying the missed read: {error}"
     );
 
-    let list = tx_file("state_read", &format!("{TX_OK}\n"));
+    let list = common::tx_file("exit_state_read", &[TX_OK]);
     let batch = run(&["replay", "--rpc.replay-file", cache, "--tx-file", list.to_str().unwrap()]);
     let _ = std::fs::remove_file(&list);
     let _ = std::fs::remove_file(&path);
@@ -228,7 +220,7 @@ fn test_pre_block_blockhash_system_call_cache_miss_is_an_rpc_failure() {
         "the message must name the stringified pre-block path and the miss: {error}"
     );
 
-    let list = tx_file("pre_block_2935", &format!("{TX_OK}\n"));
+    let list = common::tx_file("exit_pre_block_2935", &[TX_OK]);
     let batch = run(&["replay", "--rpc.replay-file", cache, "--tx-file", list.to_str().unwrap()]);
     let _ = std::fs::remove_file(&list);
     let _ = std::fs::remove_file(&path);
@@ -418,7 +410,7 @@ fn test_mined_target_without_an_inclusion_hash_is_an_rpc_failure() {
 /// the stream sees every target before the run-level verdict.
 #[test]
 fn test_batch_error_object_follows_the_per_target_lines() {
-    let list = tx_file("batch_miss", &format!("{UNANSWERABLE_TX}\n"));
+    let list = common::tx_file("exit_batch_miss", &[UNANSWERABLE_TX]);
 
     let run = replay(&["--tx-file", list.to_str().unwrap(), "--json"]);
     let _ = std::fs::remove_file(&list);
@@ -439,7 +431,7 @@ fn test_batch_error_object_follows_the_per_target_lines() {
 /// untouched.
 #[test]
 fn test_human_failure_prints_exactly_one_error_line() {
-    let list = tx_file("human", "not-a-hash\n");
+    let list = common::tx_file("exit_human", &["not-a-hash"]);
 
     let run = replay(&["--tx-file", list.to_str().unwrap()]);
     let _ = std::fs::remove_file(&list);

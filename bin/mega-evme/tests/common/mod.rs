@@ -57,12 +57,7 @@ pub(crate) fn fixture(name: &str) -> PathBuf {
     );
     let member = plain.file_name().expect("a fixture names a file");
 
-    let destination = extraction_dir(&archive);
-    let extracted = destination.join(member);
-    if extracted.is_file() {
-        return extracted;
-    }
-    install_archive(&archive, &destination);
+    let extracted = extracted(&archive).join(member);
     assert!(extracted.is_file(), "{} does not contain {name}", archive.display());
     extracted
 }
@@ -81,9 +76,15 @@ pub(crate) fn fixture_archive(name: &str) -> PathBuf {
         "no fixture archive named {name}: {} does not exist",
         archive.display()
     );
-    let destination = extraction_dir(&archive);
+    extracted(&archive)
+}
+
+/// The directory `archive` is extracted into, extracting it first unless an
+/// earlier extraction already completed there.
+fn extracted(archive: &Path) -> PathBuf {
+    let destination = extraction_dir(archive);
     if !destination.join(EXTRACTION_COMPLETE).is_file() {
-        install_archive(&archive, &destination);
+        install_archive(archive, &destination);
     }
     destination
 }
@@ -161,6 +162,65 @@ pub(crate) fn fixtures_dir() -> PathBuf {
 /// test that normalizes the paths a run prints can name it.
 pub(crate) fn extracted_root() -> PathBuf {
     Path::new(env!("CARGO_TARGET_TMPDIR")).join("mega-evme-fixtures")
+}
+
+/// Block of `replay_batch_blocks.cache.json` whose index-13 transaction calls
+/// [`GAS_DIVERGENCE_CALLEE`].
+pub(crate) const GAS_DIVERGENCE_BLOCK: u64 = 22_945_844;
+
+/// Index in [`GAS_DIVERGENCE_BLOCK`] of the transaction that calls
+/// [`GAS_DIVERGENCE_CALLEE`].
+pub(crate) const GAS_DIVERGENCE_TX_INDEX: u64 = 13;
+
+/// A contract only the index-13 transaction of [`GAS_DIVERGENCE_BLOCK`] calls.
+pub(crate) const GAS_DIVERGENCE_CALLEE: &str = "0x681e908b8ab57c49c74d770f369754ccc3e1ae09";
+
+/// Make the index-13 transaction of [`GAS_DIVERGENCE_BLOCK`] burn different gas
+/// than it did on chain, by replacing [`GAS_DIVERGENCE_CALLEE`]'s code at the
+/// parent block with a bare `STOP`.
+///
+/// Every fetched object still authenticates, so the replay executes the block
+/// and only that transaction's gas moves — an execution divergence rather than
+/// an endpoint fault.
+pub(crate) fn diverge_gas(envelope: doctor::DoctoredEnvelope) -> doctor::DoctoredEnvelope {
+    envelope.set_account_code(GAS_DIVERGENCE_CALLEE, GAS_DIVERGENCE_BLOCK - 1, "0x00")
+}
+
+/// Write a `--tx-file` listing `hashes`, one per line, and return its path.
+///
+/// The path is process-unique and derived from `name`, so concurrent test
+/// binaries and tests do not share a list.
+pub(crate) fn tx_file(name: &str, hashes: &[&str]) -> PathBuf {
+    let path = std::env::temp_dir().join(format!("mega_evme_{name}_{}.txt", std::process::id()));
+    let body: String = hashes.iter().map(|hash| format!("{hash}\n")).collect();
+    std::fs::write(&path, body).expect("write tx list");
+    path
+}
+
+/// Whether a value a batch run printed is a block line
+/// (`{"block_number", "block_hash", "block_verification"}`) rather than a
+/// transaction line.
+pub(crate) fn is_block_line(value: &serde_json::Value) -> bool {
+    value.get("block_verification").is_some()
+}
+
+/// Split the values a `--verify-block` run printed into its transaction lines
+/// and its block lines, each in printed order.
+pub(crate) fn split_block_lines(
+    values: Vec<serde_json::Value>,
+) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+    values.into_iter().partition(|value| !is_block_line(value))
+}
+
+/// Split the values a single-block `--verify-block` run printed into its
+/// transaction lines and its one block line, which must come last.
+pub(crate) fn split_one_block(
+    values: Vec<serde_json::Value>,
+) -> (Vec<serde_json::Value>, serde_json::Value) {
+    assert!(values.last().is_some_and(is_block_line), "the block line comes last: {values:?}");
+    let (txs, mut blocks) = split_block_lines(values);
+    assert_eq!(blocks.len(), 1, "exactly one block line per block: {blocks:?}");
+    (txs, blocks.pop().expect("checked above"))
 }
 
 /// The authentic hash of a served block header: the hash its own consensus

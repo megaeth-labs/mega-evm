@@ -110,10 +110,7 @@ fn cache() -> PathBuf {
 
 /// Write a `--tx-file` holding the single captured transaction.
 fn tx_file(name: &str) -> PathBuf {
-    let path =
-        std::env::temp_dir().join(format!("mega_evme_verify_{name}_{}.txt", std::process::id()));
-    std::fs::write(&path, format!("{TX}\n")).expect("write tx list");
-    path
+    common::tx_file(&format!("verify_{name}"), &[TX])
 }
 
 /// A faithful replay reproduces the on-chain receipt, reports a match, and exits 0.

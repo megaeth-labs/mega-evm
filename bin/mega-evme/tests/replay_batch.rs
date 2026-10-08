@@ -1580,35 +1580,10 @@ fn test_replay_tx_file_unauthentic_pending_answer_is_rpc_not_pending() {
 /// block with an empty body.
 const EMPTY_ROOT: &str = "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421";
 
-/// Callee of `BLOCK`'s index-13 transaction, a contract no other transaction of
-/// the block calls. Rewriting its code at the parent block changes how much gas
-/// that one transaction burns while every fetched object still authenticates.
-const GAS_DIVERGENCE_CALLEE: &str = "0x681e908b8ab57c49c74d770f369754ccc3e1ae09";
-const GAS_DIVERGENCE_TX_INDEX: u64 = 13;
-
-/// Split a `--verify-block` NDJSON stream into target lines and block lines.
-fn split_block_lines(
-    lines: Vec<serde_json::Value>,
-) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
-    lines.into_iter().partition(|line| line.get("block_verification").is_none())
-}
-
-/// The one block line of a `--verify-block` run, which must be its last line.
-fn only_block_line(lines: &[serde_json::Value]) -> &serde_json::Value {
-    let block_lines: Vec<&serde_json::Value> =
-        lines.iter().filter(|line| line.get("block_verification").is_some()).collect();
-    assert_eq!(block_lines.len(), 1, "exactly one block line per block: {lines:?}");
-    let last = lines.last().expect("the run printed lines");
-    assert!(last.get("block_verification").is_some(), "the block line comes last: {last}");
-    last
-}
-
 /// A copy of the capture in which `BLOCK`'s index-13 transaction burns different
-/// gas than it did on chain.
+/// gas than it did on chain ([`common::diverge_gas`]).
 fn gas_divergence_envelope(name: &str) -> std::path::PathBuf {
-    DoctoredEnvelope::load(envelope())
-        .set_account_code(GAS_DIVERGENCE_CALLEE, BLOCK - 1, "0x00")
-        .write_to_temp(name)
+    common::diverge_gas(DoctoredEnvelope::load(envelope())).write_to_temp(name)
 }
 
 /// Read a `0x`-prefixed hex quantity out of a JSON value.
@@ -1636,7 +1611,7 @@ fn test_replay_block_verify_block_matches_both_captured_blocks() {
 
         assert_eq!(code, Some(0), "block {block} must verify cleanly: {stdout}");
         assert_eq!(lines.len(), tx_count + 1, "one line per target plus the block line");
-        let block_line = only_block_line(&lines);
+        let (txs, block_line) = common::split_one_block(lines);
         assert_eq!(block_line["block_number"].as_u64(), Some(block), "{block_line}");
         assert!(block_line.get("tx_hash").is_none(), "a block line has no tx_hash: {block_line}");
         assert!(
@@ -1645,7 +1620,7 @@ fn test_replay_block_verify_block_matches_both_captured_blocks() {
         );
         assert_eq!(block_line["block_verification"], serde_json::json!({ "match": true }));
         let hash = block_line["block_hash"].as_str().expect("the block line names its hash");
-        for line in &lines[..tx_count] {
+        for line in &txs {
             assert_eq!(line["verification"], serde_json::json!({ "match": true }), "{line}");
             assert_eq!(line["receipt"]["blockHash"].as_str(), Some(hash), "{line}");
         }
@@ -1680,15 +1655,14 @@ fn test_replay_block_gas_divergence_fails_receipt_and_block_verification() {
     let _ = std::fs::remove_file(&path);
     let error = run_error(&stdout);
     let lines = ndjson(&stdout);
-    let block_line = only_block_line(&lines).clone();
-    let (targets, _) = split_block_lines(lines);
+    let (targets, block_line) = common::split_one_block(lines);
 
     assert_eq!(code, Some(2), "a gas divergence is a verification mismatch: {stdout}");
     assert_eq!(targets.len(), BLOCK_TX_COUNT);
     for line in &targets {
         let index = line["tx_index"].as_u64().expect("transaction index");
         let verification = &line["verification"];
-        if index < GAS_DIVERGENCE_TX_INDEX {
+        if index < common::GAS_DIVERGENCE_TX_INDEX {
             assert_eq!(verification, &serde_json::json!({ "match": true }), "{line}");
             continue;
         }
@@ -1696,7 +1670,7 @@ fn test_replay_block_gas_divergence_fails_receipt_and_block_verification() {
         assert!(verification["diff"]["cumulative_gas_used"].is_object(), "{line}");
         assert_eq!(
             verification["diff"]["gas_used"].is_object(),
-            index == GAS_DIVERGENCE_TX_INDEX,
+            index == common::GAS_DIVERGENCE_TX_INDEX,
             "only the diverging transaction's own gas differs: {line}"
         );
     }
@@ -1711,7 +1685,7 @@ fn test_replay_block_gas_divergence_fails_receipt_and_block_verification() {
     assert_eq!(diff["gas_used"]["replay"].as_u64(), Some(replayed), "{diff}");
 
     assert_eq!(error["error"]["kind"].as_str(), Some("verification-mismatch"));
-    let mismatched = BLOCK_TX_COUNT as u64 - GAS_DIVERGENCE_TX_INDEX;
+    let mismatched = BLOCK_TX_COUNT as u64 - common::GAS_DIVERGENCE_TX_INDEX;
     assert_eq!(
         error["error"]["message"].as_str(),
         Some(
@@ -1744,7 +1718,8 @@ fn test_replay_block_gas_divergence_fails_block_verification_alone() {
         lines.iter().all(|line| line.get("verification").is_none()),
         "no receipt was verified: {stdout}"
     );
-    assert_eq!(only_block_line(&lines)["block_verification"]["match"].as_bool(), Some(false));
+    let (_, block) = common::split_one_block(lines);
+    assert_eq!(block["block_verification"]["match"].as_bool(), Some(false));
     assert_eq!(
         run_error(&stdout)["error"]["message"].as_str(),
         Some(
@@ -1770,7 +1745,8 @@ fn test_replay_block_verify_block_after_an_abort_is_unavailable() {
     let lines = ndjson(&stdout);
 
     assert_eq!(code, Some(1), "the executor abort decides the exit: {stdout}");
-    let verdict = &only_block_line(&lines)["block_verification"];
+    let (_, block) = common::split_one_block(lines);
+    let verdict = &block["block_verification"];
     assert!(verdict.get("match").is_none(), "an unavailable verdict carries no match: {verdict}");
     assert!(
         verdict["error"]
@@ -1815,8 +1791,8 @@ fn test_replay_block_forged_body_listing_is_unverified() {
         assert_eq!(code, Some(3), "a body the header does not commit to is unanswered: {stdout}");
         let error = run_error(&stdout);
         let lines = ndjson(&stdout);
-        let verdict = only_block_line(&lines)["block_verification"].clone();
-        let (targets, _) = split_block_lines(lines);
+        let (targets, block_line) = common::split_one_block(lines);
+        let verdict = &block_line["block_verification"];
 
         assert_eq!(targets.len(), BLOCK_TX_COUNT - 1, "only the listed transactions replay");
         for line in &targets {
@@ -1875,7 +1851,7 @@ fn test_replay_block_emptied_listing_of_a_committed_body_is_unverified() {
     assert_eq!(code, Some(3), "an emptied listing must not pass: {stdout}\n{stderr}");
     let lines = ndjson(&stdout);
     assert_eq!(lines.len(), 1, "the block line is the only line: {stdout}");
-    let block = only_block_line(&lines);
+    let (_, block) = common::split_one_block(lines);
     assert_eq!(block["block_number"].as_u64(), Some(BLOCK), "{block}");
     let message = block["block_verification"]["error"].as_str().unwrap_or_default();
     assert!(
@@ -1908,7 +1884,8 @@ fn test_replay_block_empty_listing_without_its_parent_is_unverified() {
     let lines = ndjson(&stdout);
 
     assert_eq!(code, Some(3), "{stdout}");
-    let verdict = &only_block_line(&lines)["block_verification"];
+    let (_, block) = common::split_one_block(lines);
+    let verdict = &block["block_verification"];
     assert!(verdict.get("match").is_none(), "{verdict}");
     assert!(
         verdict["error"].as_str().is_some_and(|m| m.contains(&format!("{}", BLOCK - 1))),
@@ -1951,11 +1928,15 @@ fn test_replay_block_honestly_empty_block_gets_a_real_verdict() {
     assert_eq!(matched_code, Some(0), "{matched}");
     let lines = ndjson(&matched);
     assert_eq!(lines.len(), 1, "{matched}");
-    assert_eq!(only_block_line(&lines)["block_verification"], serde_json::json!({ "match": true }));
+    assert_eq!(
+        common::split_one_block(lines).1["block_verification"],
+        serde_json::json!({ "match": true })
+    );
 
     assert_eq!(diverged_code, Some(2), "{diverged}");
     let lines = ndjson(&diverged);
-    let diff = &only_block_line(&lines)["block_verification"]["diff"];
+    let (_, block) = common::split_one_block(lines);
+    let diff = &block["block_verification"]["diff"];
     for key in ["receipts_root", "logs_bloom", "gas_used"] {
         assert!(diff[key].is_object(), "an empty body moves {key}: {diff}");
     }
@@ -2013,8 +1994,7 @@ fn test_replay_block_uncommitted_receipts_are_unverified_not_mismatched() {
     let _ = std::fs::remove_file(&path);
     let error = run_error(&stdout);
     let lines = ndjson(&stdout);
-    let block_line = only_block_line(&lines).clone();
-    let (targets, _) = split_block_lines(lines);
+    let (targets, block_line) = common::split_one_block(lines);
 
     assert_eq!(code, Some(3), "unauthentic endpoint data is unanswered, not a mismatch: {stdout}");
     assert_eq!(targets.len(), BLOCK_TX_COUNT, "every target still replayed");
@@ -2053,8 +2033,7 @@ fn test_replay_block_forged_receipt_gas_used_is_unverified_not_mismatched() {
     let _ = std::fs::remove_file(&path);
     let error = run_error(&stdout);
     let lines = ndjson(&stdout);
-    let block_line = only_block_line(&lines).clone();
-    let (targets, _) = split_block_lines(lines);
+    let (targets, block_line) = common::split_one_block(lines);
 
     assert_eq!(code, Some(3), "a forged gasUsed is unanswered, not a mismatch: {stdout}");
     assert_eq!(targets.len(), BLOCK_TX_COUNT, "every target still replayed");
@@ -2084,9 +2063,7 @@ fn test_replay_tx_file_partial_receipts_are_compared_as_served() {
             receipt["status"] = serde_json::Value::String("0x0".into());
         })
         .write_to_temp("partial_uncommitted_receipts");
-    let list =
-        std::env::temp_dir().join(format!("mega_evme_partial_receipts_{}.txt", std::process::id()));
-    std::fs::write(&list, format!("{tampered}\n")).expect("write tx list");
+    let list = common::tx_file("partial_receipts", &[tampered]);
 
     let (stdout, code) = replay_envelope_with_code(
         &path,

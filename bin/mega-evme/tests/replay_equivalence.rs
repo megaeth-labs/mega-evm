@@ -900,19 +900,10 @@ fn doctor_receipt_gas_used(source: &Path, scratch: &Path) -> PathBuf {
     })
 }
 
-/// Callee of [`BLOCK`]'s index-13 transaction, which no other transaction of the
-/// block calls.
-const GAS_DIVERGENCE_CALLEE: &str = "0x681e908b8ab57c49c74d770f369754ccc3e1ae09";
-
-/// Replace that callee's code at the parent block with a bare `STOP`.
-///
-/// Every fetched object still authenticates, so the replay executes the block
-/// and only the index-13 transaction's gas moves — an execution divergence
-/// rather than an endpoint fault.
+/// Make [`BLOCK`]'s index-13 transaction burn different gas than it did on
+/// chain ([`common::diverge_gas`]).
 fn doctor_gas_divergence(source: &Path, scratch: &Path) -> PathBuf {
-    write_doctored_capture(source, scratch, "gas_divergence", |envelope| {
-        envelope.set_account_code(GAS_DIVERGENCE_CALLEE, BLOCK - 1, "0x00")
-    })
+    write_doctored_capture(source, scratch, "gas_divergence", common::diverge_gas)
 }
 
 /// Null the served receipt: the endpoint answers, and answers "no receipt".
@@ -1253,8 +1244,7 @@ fn check_json_stream(case: &str, row: &Row, exit: i32, stdout: &str) {
     // carries `block_verification` instead of a transaction hash.
     let error_lines =
         values.iter().filter(|value| !is_run_error(value) && value.get("error").is_some()).count();
-    let block_lines =
-        values.iter().filter(|value| value.get("block_verification").is_some()).count();
+    let block_lines = values.iter().filter(|value| common::is_block_line(value)).count();
     if let Some(expected) = row.expect.error_lines {
         assert_eq!(
             error_lines, expected,

@@ -181,8 +181,8 @@ fn check_block(entry: &Entry, captures: &Path) -> Result<(), String> {
         .lines()
         .map(|line| serde_json::from_str(line).map_err(|e| format!("not NDJSON ({e}): {line}")))
         .collect::<Result<_, _>>()?;
-    let (blocks, txs): (Vec<_>, Vec<_>) =
-        lines.iter().partition(|line| line.get("block_verification").is_some());
+    let block_comes_last = lines.last().is_some_and(common::is_block_line);
+    let (txs, blocks) = common::split_block_lines(lines);
     if txs.len() != entry.tx_count {
         return Err(format!("{} transaction lines, expected {}", txs.len(), entry.tx_count));
     }
@@ -198,7 +198,7 @@ fn check_block(entry: &Entry, captures: &Path) -> Result<(), String> {
     let [block] = blocks.as_slice() else {
         return Err(format!("{} block lines, expected exactly one", blocks.len()));
     };
-    if lines.last() != Some(*block) {
+    if !block_comes_last {
         return Err("the block line must follow every transaction line".to_string());
     }
     if block["block_hash"].as_str() != Some(entry.hash.as_str()) ||

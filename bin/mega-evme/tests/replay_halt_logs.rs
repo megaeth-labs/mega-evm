@@ -38,11 +38,10 @@ fn cache() -> PathBuf {
     common::fixture(CACHE)
 }
 
-fn replay(tx: &str, args: &[&str]) -> (bool, String, String) {
+fn replay(args: &[&str]) -> (bool, String, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_mega-evme"))
         .args(["replay", "--rpc.replay-file", cache().to_str().expect("cache path is utf-8")])
         .args(args)
-        .arg(tx)
         .output()
         .expect("failed to run mega-evme");
     (
@@ -57,7 +56,7 @@ fn replay(tx: &str, args: &[&str]) -> (bool, String, String) {
 #[test]
 fn test_halted_mainnet_creates_reproduce_their_onchain_receipts() {
     for tx in TXS {
-        let (success, stdout, stderr) = replay(tx, &["--verify-receipt", "--json"]);
+        let (success, stdout, stderr) = replay(&["--verify-receipt", "--json", tx]);
 
         assert!(success, "{tx} must verify against its on-chain receipt.\nstderr: {stderr}");
         let result = common::json_values(&stdout)
@@ -81,7 +80,7 @@ fn test_halted_mainnet_creates_reproduce_their_onchain_receipts() {
 #[test]
 fn test_halted_mainnet_creates_report_failure_with_no_logs() {
     for tx in TXS {
-        let (success, stdout, stderr) = replay(tx, &["--json"]);
+        let (success, stdout, stderr) = replay(&["--json", tx]);
 
         assert!(success, "{tx} must replay.\nstderr: {stderr}");
         let result = common::json_values(&stdout)
@@ -109,7 +108,7 @@ fn test_halted_mainnet_creates_report_the_onchain_contract_address() {
         (TXS[2], "0xa190ae4c4f01740a4ac1e15d4e26a9991cfaeaab"),
     ];
     for (tx, expected) in ONCHAIN_CONTRACT_ADDRESSES {
-        let (success, stdout, stderr) = replay(tx, &["--json"]);
+        let (success, stdout, stderr) = replay(&["--json", tx]);
 
         assert!(success, "{tx} must replay.\nstderr: {stderr}");
         let result = common::json_values(&stdout)
@@ -138,18 +137,11 @@ fn test_halted_create_block_reproduces_its_header() {
     const BLOCK: u64 = 3_452_027;
     const BODY_LEN: usize = 22;
 
-    let output = Command::new(env!("CARGO_BIN_EXE_mega-evme"))
-        .args(["replay", "--rpc.replay-file", cache().to_str().expect("cache path is utf-8")])
-        .args(["--block", &BLOCK.to_string(), "--verify-block", "--json"])
-        .output()
-        .expect("failed to run mega-evme");
-    let stdout = String::from_utf8(output.stdout).expect("stdout is utf-8");
-    let stderr = String::from_utf8(output.stderr).expect("stderr is utf-8");
-    assert!(output.status.success(), "block {BLOCK} must replay in full.\nstderr: {stderr}");
+    let (success, stdout, stderr) =
+        replay(&["--block", &BLOCK.to_string(), "--verify-block", "--json"]);
+    assert!(success, "block {BLOCK} must replay in full.\nstderr: {stderr}");
 
-    let lines = common::json_values(&stdout);
-    let (blocks, txs): (Vec<_>, Vec<_>) =
-        lines.iter().partition(|line| line.get("block_verification").is_some());
+    let (txs, block) = common::split_one_block(common::json_values(&stdout));
     assert_eq!(txs.len(), BODY_LEN, "every body transaction must replay: {stdout}");
     assert!(
         txs.iter().all(|line| line.get("error").is_none()),
@@ -160,9 +152,6 @@ fn test_halted_create_block_reproduces_its_header() {
         serde_json::json!(TXS[0]),
         "the halted CREATE is the last transaction of the block",
     );
-    let [block] = blocks.as_slice() else {
-        panic!("expected exactly one block verdict, got {blocks:?}");
-    };
     assert_eq!(block["block_number"], serde_json::json!(BLOCK));
     assert_eq!(
         block["block_verification"],
