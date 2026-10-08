@@ -306,7 +306,7 @@ impl ExitCode {
         if counts.execution > 0 || matches!(counts.exit_floor, BatchExitFloor::Execution) {
             Self::ExecutionError
         } else if counts.rpc > 0 ||
-            counts.blocks_unverified > 0 ||
+            counts.blocks_unanswered > 0 ||
             matches!(counts.exit_floor, BatchExitFloor::Rpc)
         {
             Self::RpcFailure
@@ -697,10 +697,10 @@ mod tests {
         assert_eq!(ExitCode::from_batch_failures(&with_rpc), ExitCode::RpcFailure);
 
         let unverified =
-            BatchFailureCounts { blocks_unverified: 1, total: 2, ..Default::default() };
+            BatchFailureCounts { blocks_unanswered: 1, total: 2, ..Default::default() };
         assert_eq!(ExitCode::from_batch_failures(&unverified), ExitCode::RpcFailure);
         let unverified_and_mismatched = BatchFailureCounts {
-            blocks_unverified: 1,
+            blocks_unanswered: 1,
             mismatched: 1,
             total: 2,
             ..Default::default()
@@ -777,7 +777,7 @@ mod tests {
             rpc: 2,
             mismatched: 0,
             blocks_mismatched: 0,
-            blocks_unverified: 0,
+            blocks_unanswered: 0,
             total: 2,
             exit_floor: BatchExitFloor::Execution,
         };
@@ -799,7 +799,7 @@ mod tests {
             rpc: 0,
             mismatched: 1,
             blocks_mismatched: 0,
-            blocks_unverified: 0,
+            blocks_unanswered: 0,
             total: 1,
             exit_floor: BatchExitFloor::Rpc,
         };

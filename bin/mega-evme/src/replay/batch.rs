@@ -264,7 +264,7 @@ struct BlockReport {
     number: u64,
     /// Hash of the verified block: the authenticated header's own hash. Always
     /// known in whole-block mode, whose block is fetched before any job runs.
-    hash: Option<B256>,
+    hash: B256,
     /// The verdict.
     verification: BlockVerification,
     /// Whether the verdict went unanswered because the endpoint contradicted
@@ -279,7 +279,7 @@ struct BlockReport {
 impl BlockReport {
     /// The verdict for a block that never reached execution. Its targets'
     /// failure lines say why and carry the class that decides the exit.
-    fn not_executed(number: u64, hash: Option<B256>) -> Self {
+    fn not_executed(number: u64, hash: B256) -> Self {
         Self {
             number,
             hash,
@@ -296,7 +296,7 @@ impl BlockReport {
         warn!(block = block.header.number(), %message, "Block could not be verified");
         Self {
             number: block.header.number(),
-            hash: Some(block.hash()),
+            hash: block.hash(),
             verification: BlockVerification::unavailable(message),
             unanswered: true,
         }
@@ -305,12 +305,7 @@ impl BlockReport {
     /// A verdict reached about the block, compared or not, that no endpoint
     /// contradiction is behind.
     fn answered(block: &Block<Transaction>, verification: BlockVerification) -> Self {
-        Self {
-            number: block.header.number(),
-            hash: Some(block.hash()),
-            verification,
-            unanswered: false,
-        }
+        Self { number: block.header.number(), hash: block.hash(), verification, unanswered: false }
     }
 }
 
@@ -426,7 +421,7 @@ impl BatchTally {
     /// floor) already carry the failure that stopped it.
     fn record_block(&mut self, report: &BlockReport) {
         if report.unanswered {
-            self.counts.blocks_unverified += 1;
+            self.counts.blocks_unanswered += 1;
             return;
         }
         if report.verification.is_unavailable() {
@@ -481,7 +476,7 @@ impl BatchTally {
     /// a block that could not be verified.
     fn into_error(self) -> Option<ReplayError> {
         if self.failed() > 0 ||
-            self.counts.blocks_unverified > 0 ||
+            self.counts.blocks_unanswered > 0 ||
             self.exit_floor != BatchExitFloor::None
         {
             return Some(ReplayError::BatchFailed(BatchFailureCounts {
@@ -648,8 +643,7 @@ struct BatchResultLine<'a> {
 #[derive(Serialize)]
 struct BatchBlockLine<'a> {
     block_number: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    block_hash: Option<B256>,
+    block_hash: B256,
     block_verification: &'a BlockVerification,
 }
 
@@ -773,8 +767,12 @@ where
             tally.record_uncounted_abort(kind);
         }
         if report.verify_block {
-            let block =
-                outcome.block.unwrap_or_else(|| BlockReport::not_executed(number, pinned_hash));
+            let block = outcome.block.unwrap_or_else(|| {
+                let hash = pinned_hash.expect(
+                    "--verify-block is only accepted with --block, whose job carries its block",
+                );
+                BlockReport::not_executed(number, hash)
+            });
             tally.record_block(&block);
             emit_block(&block, report.json);
         }
@@ -797,7 +795,7 @@ where
         info!(
             verified = tally.blocks_verified,
             mismatched = tally.counts.blocks_mismatched,
-            unverified = tally.counts.blocks_unverified,
+            unanswered = tally.counts.blocks_unanswered,
             "Block verification finished",
         );
     }
@@ -1721,7 +1719,10 @@ where
         let fetched = match verify::fetch_receipt(provider, *tx_hash).await {
             Ok(receipt) => match verify::check_inclusion(receipt.block_hash(), block_hash) {
                 Ok(()) => {
-                    consensus.insert(*tx_hash, verify::consensus_receipt(&receipt));
+                    consensus.insert(
+                        *tx_hash,
+                        (verify::consensus_receipt(&receipt), receipt.inner.gas_used),
+                    );
                     Ok(ReceiptFacts::from_onchain(&receipt))
                 }
                 Err(message) => Err(message),
@@ -1740,24 +1741,9 @@ where
     let body: Vec<B256> = block.transactions.hashes().collect();
     if let Some(ordered) = whole_body_receipts(&body, &mut consensus) {
         let number = block.header.number();
-        let authentic = coherence::require_committed_receipts(
-            number,
-            block_hash,
-            block.header.receipts_root(),
-            &ordered,
-        )
-        .and_then(|()| {
-            // Every receipt of the body was admitted, so each has its facts.
-            let served_gas: Vec<(B256, u64, u64)> = body
-                .iter()
-                .filter_map(|hash| match receipts.get(hash) {
-                    Some(Ok(facts)) => Some((*hash, facts.gas_used, facts.cumulative_gas_used)),
-                    _ => None,
-                })
-                .collect();
-            coherence::require_receipt_gas(number, block_hash, &served_gas)
-        });
-        if let Err(incoherence) = authentic {
+        if let Err(incoherence) =
+            authenticate_whole_body(number, block_hash, block.header.receipts_root(), &ordered)
+        {
             let message = incoherence.to_string();
             warn!(block = number, %message, "On-chain receipts do not authenticate against the block");
             for fetched in receipts.values_mut() {
@@ -1768,15 +1754,42 @@ where
     receipts
 }
 
-/// The admitted consensus receipts of every transaction of `body`, in body
-/// order, or `None` when any of them is missing — a body transaction that is not
-/// a target, or whose receipt was not admitted — so the set cannot rebuild the
+/// One admitted receipt of a whole body: its transaction, its consensus
+/// receipt, and the `gasUsed` the endpoint served beside it.
+type BodyReceipt = (B256, OpReceiptEnvelope, u64);
+
+/// The admitted receipts of every transaction of `body`, in body order, or
+/// `None` when any of them is missing — a body transaction that is not a
+/// target, or whose receipt was not admitted — so the set cannot rebuild the
 /// block's receipts root.
 fn whole_body_receipts(
     body: &[B256],
-    consensus: &mut HashMap<B256, OpReceiptEnvelope>,
-) -> Option<Vec<OpReceiptEnvelope>> {
-    body.iter().map(|hash| consensus.remove(hash)).collect()
+    consensus: &mut HashMap<B256, (OpReceiptEnvelope, u64)>,
+) -> Option<Vec<BodyReceipt>> {
+    body.iter()
+        .map(|hash| consensus.remove(hash).map(|(envelope, gas_used)| (*hash, envelope, gas_used)))
+        .collect()
+}
+
+/// Authenticate the receipts served for a whole body, given in body order:
+/// their consensus receipts must rebuild the header's receipts root
+/// ([`coherence::require_committed_receipts`]), and each served `gasUsed`,
+/// which that root does not cover, must be its share of the committed
+/// cumulative gas ([`coherence::require_receipt_gas`]).
+fn authenticate_whole_body(
+    number: u64,
+    block_hash: B256,
+    receipts_root: B256,
+    ordered: &[BodyReceipt],
+) -> std::result::Result<(), Incoherence> {
+    let envelopes: Vec<OpReceiptEnvelope> =
+        ordered.iter().map(|(_, envelope, _)| envelope.clone()).collect();
+    coherence::require_committed_receipts(number, block_hash, receipts_root, &envelopes)?;
+    let served_gas: Vec<(B256, u64, u64)> = ordered
+        .iter()
+        .map(|(hash, envelope, gas_used)| (*hash, *gas_used, envelope.cumulative_gas_used()))
+        .collect();
+    coherence::require_receipt_gas(number, block_hash, &served_gas)
 }
 
 /// Fetch a block by number, using the same call shape as the single-transaction path.
@@ -1960,10 +1973,7 @@ fn emit_block(report: &BlockReport, json: bool) {
         return;
     }
     println!();
-    match report.hash {
-        Some(hash) => println!("=== Block {} ({hash}) ===", report.number),
-        None => println!("=== Block {} ===", report.number),
-    }
+    println!("=== Block {} ({}) ===", report.number, report.hash);
     println!("{}", report.verification.verdict_line());
 }
 
@@ -2350,6 +2360,59 @@ mod tests {
         assert_eq!(ExitCode::from_batch_failures(&counts), ExitCode::RpcFailure);
     }
 
+    /// A whole body's receipt with the given cumulative gas, as a block commits
+    /// to it, beside the `gasUsed` the endpoint served for it.
+    fn body_receipt(byte: u8, cumulative_gas_used: u64, served_gas_used: u64) -> BodyReceipt {
+        let receipt = alloy_consensus::Receipt {
+            status: alloy_consensus::Eip658Value::Eip658(true),
+            cumulative_gas_used,
+            logs: vec![],
+        };
+        (B256::repeat_byte(byte), OpReceiptEnvelope::Eip1559(receipt.with_bloom()), served_gas_used)
+    }
+
+    /// The root the header would commit to for these receipts.
+    fn committed_root(receipts: &[BodyReceipt]) -> B256 {
+        let envelopes: Vec<OpReceiptEnvelope> =
+            receipts.iter().map(|(_, envelope, _)| envelope.clone()).collect();
+        header::receipts_root(&envelopes)
+    }
+
+    /// An honest whole body authenticates: its receipts rebuild the root and
+    /// every served `gasUsed` is its rise in cumulative gas.
+    #[test]
+    fn test_authenticate_whole_body_accepts_an_honest_body() {
+        let body = [body_receipt(1, 40_000, 40_000), body_receipt(2, 61_000, 21_000)];
+
+        assert_eq!(authenticate_whole_body(7, B256::ZERO, committed_root(&body), &body), Ok(()));
+    }
+
+    /// A served `gasUsed` the receipts root does not cover is still checked, and
+    /// named at the receipt that carries it.
+    #[test]
+    fn test_authenticate_whole_body_rejects_a_forged_gas_used() {
+        let body = [body_receipt(1, 40_000, 40_000), body_receipt(2, 61_000, 1)];
+
+        assert!(matches!(
+            authenticate_whole_body(7, B256::ZERO, committed_root(&body), &body),
+            Err(Incoherence::InconsistentReceiptGas { tx_hash, served: 1, .. })
+                if tx_hash == B256::repeat_byte(2)
+        ));
+    }
+
+    /// The receipts root is checked first: a set the header does not commit to
+    /// is reported as such, whatever its `gasUsed` fields say.
+    #[test]
+    fn test_authenticate_whole_body_checks_the_root_first() {
+        let committed = [body_receipt(1, 40_000, 40_000), body_receipt(2, 61_000, 21_000)];
+        let served = [body_receipt(1, 40_000, 40_000), body_receipt(2, 62_000, 1)];
+
+        assert!(matches!(
+            authenticate_whole_body(7, B256::ZERO, committed_root(&committed), &served),
+            Err(Incoherence::UncommittedReceipts { .. })
+        ));
+    }
+
     /// A run whose only finding is divergence fails as the mismatch it is.
     #[test]
     fn test_batch_tally_mismatch_only_reports_the_verification_error() {
@@ -2375,7 +2438,7 @@ mod tests {
 
     /// A block report carrying `verification`.
     fn block_report(verification: BlockVerification, unanswered: bool) -> BlockReport {
-        BlockReport { number: 1, hash: Some(B256::ZERO), verification, unanswered }
+        BlockReport { number: 1, hash: B256::ZERO, verification, unanswered }
     }
 
     /// A block that did not reproduce its header is a divergence: alone it
@@ -2453,7 +2516,7 @@ mod tests {
 
         assert_eq!(tally.blocks_verified, 0);
         assert_eq!(tally.counts.blocks_mismatched, 0);
-        assert_eq!(tally.counts.blocks_unverified, 1);
+        assert_eq!(tally.counts.blocks_unanswered, 1);
         let err = tally.into_error().expect("an unanswered block fails the run");
         assert_eq!(ExitCode::from_evme_error(&err), ExitCode::RpcFailure);
         assert_eq!(

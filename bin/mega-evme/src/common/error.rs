@@ -132,7 +132,7 @@ pub enum EvmeError {
 ///
 /// Receipts and blocks are separate dimensions: a run may verify either or
 /// both, and the message names each one that diverged.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VerificationCounts {
     /// Verified transactions whose replay did not reproduce the on-chain receipt.
     pub receipts_mismatched: usize,
@@ -154,9 +154,12 @@ impl VerificationCounts {
             blocks_total: 0,
         }
     }
+}
 
+#[cfg(test)]
+impl VerificationCounts {
     /// Counts of a run that verified blocks only.
-    pub const fn blocks(mismatched: usize, total: usize) -> Self {
+    pub(crate) const fn blocks(mismatched: usize, total: usize) -> Self {
         Self {
             receipts_mismatched: 0,
             receipts_total: 0,
@@ -238,7 +241,7 @@ pub struct BatchFailureCounts {
     /// contradicted itself about the block (`--verify-block`): a body the header
     /// does not commit to, or a parent that does not link to it. Ranked with the
     /// rpc failures: the question went unanswered.
-    pub blocks_unverified: usize,
+    pub blocks_unanswered: usize,
     /// Targets the run reported on.
     pub total: usize,
     /// Non-target abort class that floors the run exit without being a target
@@ -248,46 +251,39 @@ pub struct BatchFailureCounts {
 
 impl core::fmt::Display for BatchFailureCounts {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut parts = Vec::new();
         // Totals stay per-target: a non-target abort floor must not print
         // "3 of 2 target transaction(s) failed". A run whose only failure is a
-        // block it could not verify names the block first rather than leading
-        // with "0 of N target transaction(s) failed".
-        let lead_with_targets = self.execution + self.rpc > 0 || self.blocks_unverified == 0;
-        if lead_with_targets {
-            write!(
-                f,
+        // block it could not verify names the block rather than leading with
+        // "0 of N target transaction(s) failed".
+        if self.execution + self.rpc > 0 || self.blocks_unanswered == 0 {
+            parts.push(format!(
                 "{} of {} target transaction(s) failed ({} execution, {} rpc)",
                 self.execution + self.rpc,
                 self.total,
                 self.execution,
                 self.rpc,
-            )?;
+            ));
         }
-        if self.blocks_unverified > 0 {
-            if lead_with_targets {
-                write!(f, "; ")?;
-            }
-            write!(
-                f,
+        if self.blocks_unanswered > 0 {
+            parts.push(format!(
                 "{} block(s) could not be verified against the block header",
-                self.blocks_unverified,
-            )?;
+                self.blocks_unanswered,
+            ));
         }
         if self.mismatched > 0 {
-            write!(
-                f,
-                "; {} replayed transaction(s) did not reproduce the on-chain receipt",
+            parts.push(format!(
+                "{} replayed transaction(s) did not reproduce the on-chain receipt",
                 self.mismatched,
-            )?;
+            ));
         }
         if self.blocks_mismatched > 0 {
-            write!(
-                f,
-                "; {} replayed block(s) did not reproduce the block header",
+            parts.push(format!(
+                "{} replayed block(s) did not reproduce the block header",
                 self.blocks_mismatched,
-            )?;
+            ));
         }
-        Ok(())
+        write!(f, "{}", parts.join("; "))
     }
 }
 
@@ -353,11 +349,11 @@ mod tests {
     /// leads the message when no target failed.
     #[test]
     fn test_batch_failure_counts_name_unverified_blocks() {
-        let alone = BatchFailureCounts { blocks_unverified: 1, total: 23, ..Default::default() };
+        let alone = BatchFailureCounts { blocks_unanswered: 1, total: 23, ..Default::default() };
         assert_eq!(alone.to_string(), "1 block(s) could not be verified against the block header");
 
         let with_targets =
-            BatchFailureCounts { rpc: 23, blocks_unverified: 1, total: 23, ..Default::default() };
+            BatchFailureCounts { rpc: 23, blocks_unanswered: 1, total: 23, ..Default::default() };
         assert_eq!(
             with_targets.to_string(),
             "23 of 23 target transaction(s) failed (0 execution, 23 rpc); 1 block(s) could not \
