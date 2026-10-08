@@ -253,10 +253,16 @@ impl Run {
 
 /// Replay the mock's pending transaction.
 fn replay(server: &MockRpcServer) -> Run {
+    replay_with(server, &[])
+}
+
+/// Replay the mock's pending transaction with `extra` flags.
+fn replay_with(server: &MockRpcServer, extra: &[&str]) -> Run {
     let (tx_hash, _) = tx_identity();
     let output = Command::new(env!("CARGO_BIN_EXE_mega-evme"))
         .args(["replay", &tx_hash, "--rpc", &server.uri()])
         .args(["--rpc.no-cache-file", "--rpc.max-retries", "0", "--rpc.backoff-ms", "1", "--json"])
+        .args(extra)
         .output()
         .expect("failed to run mega-evme");
     Run {
@@ -426,5 +432,81 @@ async fn test_mined_target_without_an_inclusion_hash_is_rejected_before_any_fetc
     assert!(
         message.contains(&LATEST.to_string()),
         "the message must name the block number the lookup reported: {error}"
+    );
+}
+
+/// A pending replay asks the endpoint for the target once.
+///
+/// The online cache never keeps pending metadata, so every lookup of the target
+/// reaches the endpoint; the one the run resolves the target with is the only
+/// one it makes, and the execution reuses that answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_pending_replay_looks_the_target_up_once() {
+    let server = mock_chain().await;
+
+    let run = replay(&server);
+
+    assert_eq!(run.code, Some(0), "stdout:\n{}\nstderr:\n{}", run.stdout, run.stderr);
+    assert_eq!(
+        server.received_method_count("eth_getTransactionByHash").await,
+        1,
+        "the target must be looked up exactly once:\n{}",
+        run.stdout,
+    );
+}
+
+/// A pending replay traces its target like a mined one does.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_pending_replay_traces_the_target() {
+    let server = mock_chain().await;
+
+    let run = replay_with(&server, &["--trace", "--tracer", "call"]);
+
+    assert_eq!(run.code, Some(0), "stdout:\n{}\nstderr:\n{}", run.stdout, run.stderr);
+    let summary = run.summary();
+    let trace = &summary["trace"];
+    assert_eq!(trace["type"].as_str(), Some("CALL"), "the trace must be a call frame: {summary}");
+    assert_eq!(
+        trace["to"].as_str().map(str::to_lowercase),
+        Some(RECIPIENT.to_lowercase()),
+        "the trace must describe the target's call: {summary}",
+    );
+    assert_eq!(
+        trace["from"].as_str().map(str::to_lowercase),
+        Some(tx_identity().1),
+        "the trace must describe the target's sender: {summary}",
+    );
+}
+
+/// A pending replay executes its target as the transaction overrides rewrite
+/// it.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_pending_replay_applies_transaction_overrides() {
+    // One endpoint per run: each answers its first `latest` fetch with the same
+    // block.
+    let plain = replay_with(&mock_chain().await, &["--dump"]);
+    let overridden = replay_with(&mock_chain().await, &["--dump", "--override.value", "7"]);
+
+    for run in [&plain, &overridden] {
+        assert_eq!(run.code, Some(0), "stdout:\n{}\nstderr:\n{}", run.stdout, run.stderr);
+    }
+    let balance = |run: &Run| {
+        let summary = run.summary();
+        let state = summary["state"].as_object().expect("--dump inlines the state").clone();
+        let recipient = state
+            .iter()
+            .find(|(address, _)| address.eq_ignore_ascii_case(RECIPIENT))
+            .map(|(_, account)| account.clone())
+            .unwrap_or_else(|| panic!("the recipient must be in the state dump: {summary}"));
+        alloy_primitives::U256::from_str_radix(
+            recipient["balance"].as_str().expect("a hex balance").trim_start_matches("0x"),
+            16,
+        )
+        .expect("a hex balance")
+    };
+    assert_eq!(
+        balance(&overridden),
+        balance(&plain) + alloy_primitives::U256::from(7),
+        "the value override must reach the executed transaction"
     );
 }
