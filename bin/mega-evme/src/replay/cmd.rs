@@ -354,18 +354,21 @@ impl kernel::TargetLifecycle for SingleTxLifecycle<'_> {
                         target.accessed_block_hash_count
                     )));
                 }
+                // The transaction's shape is refused before the fidelity gate
+                // runs, so a deposit or set-code target is rejected for what it
+                // is, whatever its replay did.
+                let dumpable = fixture::check_dumpable(target.tx).map_err(ReplayError::Other)?;
+                let result = &target.result_and_state.result;
+                let reproduced = fixture::check_fidelity(result, &anchor, self.chain_id)
+                    .map_err(ReplayError::Other)?;
                 Some(fixture::build_draft(
                     target.db,
                     &target.result_and_state.state,
                     self.chain_id,
                     self.executed_spec,
                     self.block,
-                    target.tx,
-                    fixture::FixtureInputs {
-                        mega_env,
-                        result: &target.result_and_state.result,
-                        anchor,
-                    },
+                    dumpable,
+                    fixture::FixtureInputs { mega_env, result, reproduced },
                 )?)
             }
             None => None,

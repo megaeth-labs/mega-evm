@@ -1553,12 +1553,21 @@ where
         )));
     }
 
+    // The fidelity gate runs before the transaction's shape is checked, so a
+    // replay that diverged is reported as the divergence it is.
     let anchor = fixture::anchor_from_receipt_facts(facts);
-    if let Err(reason) = fixture::check_fidelity(exec_result, &anchor, chain_id) {
-        return DeferredFixture::Report(FixtureReport::skipped(format!(
-            "fidelity gate failed: {reason}"
-        )));
-    }
+    let reproduced = match fixture::check_fidelity(exec_result, &anchor, chain_id) {
+        Ok(reproduced) => reproduced,
+        Err(reason) => {
+            return DeferredFixture::Report(FixtureReport::skipped(format!(
+                "fidelity gate failed: {reason}"
+            )));
+        }
+    };
+    let dumpable = match fixture::check_dumpable(target_tx) {
+        Ok(dumpable) => dumpable,
+        Err(reason) => return DeferredFixture::Report(FixtureReport::skipped(reason)),
+    };
 
     let draft = match fixture::build_draft(
         db,
@@ -1566,8 +1575,8 @@ where
         chain_id,
         executed_spec,
         block,
-        target_tx,
-        fixture::FixtureInputs { mega_env, result: exec_result, anchor },
+        dumpable,
+        fixture::FixtureInputs { mega_env, result: exec_result, reproduced },
     ) {
         Ok(draft) => draft,
         Err(e) => return DeferredFixture::Report(fixture_report_from_build_err(e)),
@@ -2581,18 +2590,18 @@ mod tests {
     ///
     /// Which builder rejection lands in which variant is decided inside
     /// `build_draft` and pinned by the integration tests that drive the real
-    /// builder (deposit skip, injected pre-state failure); this test only pins
-    /// the variant-to-report mapping, which no rewording can move.
+    /// builder (injected pre-state failure); this test only pins the
+    /// variant-to-report mapping, which no rewording can move.
     #[test]
     fn test_fixture_build_err_classifies_skips_vs_construction_errors() {
         let unsupported = fixture_report_from_build_err(fixture::FixtureBuildError::Unsupported(
-            "--dump-fixture does not support deposit transactions".into(),
+            "--dump-fixture: spec REX7 has no fixture mapping".into(),
         ));
         assert!(unsupported.skipped.is_some(), "unsupported shape is a skip: {unsupported:?}");
         assert!(unsupported.error.is_none());
         assert_eq!(
             unsupported.skipped.as_deref(),
-            Some("--dump-fixture does not support deposit transactions"),
+            Some("--dump-fixture: spec REX7 has no fixture mapping"),
             "the builder's reason is reported verbatim"
         );
 
@@ -2608,6 +2617,74 @@ mod tests {
             "construction failure is a fixture error: {construction:?}"
         );
         assert!(construction.skipped.is_none());
+    }
+
+    /// A deposit transaction served by the endpoint, as a block body lists one.
+    fn deposit_transaction() -> Transaction {
+        let envelope = op_alloy_consensus::OpTxEnvelope::Deposit(alloy_primitives::Sealed::new(
+            op_alloy_consensus::TxDeposit::default(),
+        ));
+        let inner = alloy_rpc_types_eth::Transaction {
+            inner: Recovered::new_unchecked(envelope, alloy_primitives::Address::ZERO),
+            block_hash: None,
+            block_number: None,
+            block_timestamp: None,
+            transaction_index: None,
+            effective_gas_price: None,
+        };
+        Transaction { inner, deposit_nonce: None, deposit_receipt_version: None }
+    }
+
+    /// Batch dump runs the fidelity gate before the shape check: a deposit
+    /// whose replay diverged from its receipt is skipped as the divergence, and
+    /// one whose replay is faithful is skipped as the unsupported shape.
+    #[test]
+    fn test_fixture_fidelity_gate_ranks_before_the_shape_check() {
+        let result: ExecutionResult<MegaHaltReason> = ExecutionResult::Success {
+            reason: mega_evm::revm::context::result::SuccessReason::Return,
+            gas: Default::default(),
+            logs: Vec::new(),
+            output: mega_evm::revm::context::result::Output::Call(Bytes::new()),
+        };
+        let tx = deposit_transaction();
+        let block = Block::<Transaction>::default();
+        let dir = std::env::temp_dir();
+        let skip_reason = |onchain_gas: u64| {
+            let onchain = Ok(ReceiptFacts {
+                status: true,
+                gas_used: onchain_gas,
+                cumulative_gas_used: onchain_gas,
+                tx_type: 0x7e,
+                deposit_nonce: None,
+                deposit_receipt_version: None,
+                logs: Vec::new(),
+            });
+            let report = prepare_target_fixture(
+                &mega_evm::revm::database::EmptyDB::default(),
+                DumpFixtureArgs {
+                    accessed_block_hash_count: 0,
+                    exec_result: &result,
+                    evm_state: &Default::default(),
+                    chain_id: 4326,
+                    executed_spec: MegaSpecId::REX6,
+                    block: &block,
+                    target_tx: &tx,
+                    mega_env: MegaEnv::default(),
+                    onchain: Some(&onchain),
+                    dir: &dir,
+                    overwrite: false,
+                },
+            );
+            match report {
+                DeferredFixture::Report(report) => report.skipped.expect("a skip"),
+                DeferredFixture::Ready { .. } => panic!("a deposit is never dumped"),
+            }
+        };
+
+        let diverged = skip_reason(result.tx_gas_used() + 1);
+        assert!(diverged.starts_with("fidelity gate failed: "), "skip={diverged}");
+        let faithful = skip_reason(result.tx_gas_used());
+        assert!(faithful.contains("deposit"), "skip={faithful}");
     }
 
     /// A pre-decided fixture report is never rewritten by materialization, so a
