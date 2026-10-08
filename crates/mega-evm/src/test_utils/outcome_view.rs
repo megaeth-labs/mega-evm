@@ -71,6 +71,86 @@ impl From<&MegaTransactionOutcome> for OutcomeView {
     }
 }
 
+impl OutcomeView {
+    /// The outcome in one line ([`OutcomeSummary`]).
+    pub fn summary(&self) -> OutcomeSummary {
+        OutcomeSummary {
+            kind: self.result.kind,
+            reason: self.result.reason.clone(),
+            limit_stop: self.limit_stop.clone(),
+            gas: self.gas,
+            usage: self.usage,
+            logs: self.result.logs.len(),
+            accounts: self.accounts.len(),
+        }
+    }
+}
+
+/// A transaction's outcome in one line, for a test that snapshots more outcomes than a reviewer
+/// can read whole: how it ended — its kind, its reason and the limit that stopped it — every
+/// figure of [`MegaGasUsage`], the counts of [`LimitUsage`], and how many logs and touched
+/// accounts it has. The logs and the accounts themselves are the full view's ([`OutcomeView`]).
+///
+/// It serializes as that line, so a snapshot of many cases holds one line a case, and a change to
+/// a case shows as a change to its line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutcomeSummary {
+    /// How the transaction ended.
+    pub kind: ResultKind,
+    /// Why, as [`ResultView::reason`] has it.
+    pub reason: Option<String>,
+    /// The transaction-level limit that stopped the transaction, if one did.
+    pub limit_stop: Option<LimitStopView>,
+    /// The gas by ledger.
+    pub gas: LedgerView,
+    /// The data-size bytes and write records the transaction kept.
+    pub usage: UsageView,
+    /// How many logs the result carries.
+    pub logs: usize,
+    /// How many accounts the transaction touched.
+    pub accounts: usize,
+}
+
+impl core::fmt::Display for OutcomeSummary {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let Self { kind, reason, limit_stop, gas, usage, logs, accounts } = self;
+        let kind = match kind {
+            ResultKind::Success => "success",
+            ResultKind::Revert => "revert",
+            ResultKind::Halt => "halt",
+        };
+        write!(f, "{kind} {}; stop ", reason.as_deref().unwrap_or("-"))?;
+        match limit_stop {
+            Some(LimitStopView { kind, limit, used }) => {
+                write!(f, "{kind} limit {limit} used {used}")?;
+            }
+            None => f.write_str("-")?,
+        }
+        let LedgerView {
+            regular,
+            state,
+            history,
+            history_bytes,
+            reservoir_remaining,
+            floor,
+            gas_used,
+        } = gas;
+        let UsageView { data_size, write_records } = usage;
+        write!(
+            f,
+            "; regular {regular} state {state} history {history} history_bytes {history_bytes} \
+             reservoir_remaining {reservoir_remaining} floor {floor} gas_used {gas_used}; \
+             data_size {data_size} write_records {write_records}; logs {logs} accounts {accounts}"
+        )
+    }
+}
+
+impl Serialize for OutcomeSummary {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
 /// How a transaction ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -650,6 +730,112 @@ mod tests {
             if let Some(twin) = seen.insert(json, name) {
                 panic!("{name} serializes like {twin}");
             }
+        }
+    }
+
+    fn summary_json(outcome: &MegaTransactionOutcome) -> String {
+        serde_json::to_string(&OutcomeView::new(outcome).summary()).unwrap()
+    }
+
+    /// The summary is one line of the view's figures, the same every time it is built and
+    /// whatever order the state's map hands its accounts out in.
+    #[test]
+    fn test_the_summary_is_one_deterministic_line() {
+        let forward = outcome();
+        let mut reversed_accounts = accounts();
+        reversed_accounts.reverse();
+        let reversed = outcome_with(reversed_accounts);
+        assert_eq!(summary_json(&forward), summary_json(&reversed));
+        assert_eq!(summary_json(&forward), summary_json(&forward));
+
+        let line = OutcomeView::new(&forward).summary().to_string();
+        assert_eq!(
+            line,
+            "success Stop; stop DataSize limit 200 used 300; regular 50000 state 30000 \
+             history 10000 history_bytes 125 reservoir_remaining 5000 floor 21000 gas_used 86000; \
+             data_size 300 write_records 3; logs 1 accounts 18"
+        );
+        assert_eq!(summary_json(&forward), format!("\"{line}\""), "it serializes as the line");
+
+        let mut stopless = outcome();
+        stopless.limit_exceeded = None;
+        stopless.result = halt(HaltReason::OutOfGas(OutOfGasError::Basic));
+        assert!(
+            OutcomeView::new(&stopless)
+                .summary()
+                .to_string()
+                .starts_with("halt Base(OutOfGas(Basic)); stop -; regular 50000"),
+            "no stop is a dash"
+        );
+    }
+
+    /// Every field the summary holds moves it: each variant changes one of them, and no two of
+    /// them, nor any of them and the outcome, serialize alike. What it leaves to the full view —
+    /// the logs' contents, the accounts' state — does not move it.
+    #[test]
+    fn test_every_field_moves_the_summary() {
+        type Change = fn(&mut MegaTransactionOutcome);
+        let changes: &[(&str, Change)] = &[
+            ("result: revert", |o| o.result = revert(Bytes::from_static(&[0x01]))),
+            ("result: halt", |o| o.result = halt(HaltReason::OutOfGas(OutOfGasError::Basic))),
+            ("result: halt reason", |o| o.result = halt(HaltReason::CallTooDeep)),
+            ("result: success reason", |o| {
+                if let ExecutionResult::Success { reason, .. } = &mut o.result {
+                    *reason = SuccessReason::Return;
+                }
+            }),
+            ("logs: another", |o| logs_mut(o).push(log())),
+            ("logs: none", |o| logs_mut(o).clear()),
+            ("gas: regular", |o| o.gas.regular += 1),
+            ("gas: state", |o| o.gas.state += 1),
+            ("gas: history", |o| o.gas.history += 1),
+            ("gas: history bytes", |o| o.gas.history_bytes += 1),
+            ("gas: reservoir remaining", |o| o.gas.reservoir_remaining += 1),
+            ("gas: floor", |o| o.gas.floor += 1),
+            ("gas: gas used", |o| o.gas.gas_used += 1),
+            ("usage: data size", |o| o.usage.data_size += 1),
+            ("usage: write records", |o| o.usage.write_records += 1),
+            ("limit stop: none", |o| o.limit_exceeded = None),
+            ("limit stop: kind", |o| {
+                if let Some(LimitCheck::ExceedsLimit { kind, .. }) = &mut o.limit_exceeded {
+                    *kind = LimitKind::KVUpdate;
+                }
+            }),
+            ("limit stop: limit", |o| {
+                if let Some(LimitCheck::ExceedsLimit { limit, .. }) = &mut o.limit_exceeded {
+                    *limit += 1;
+                }
+            }),
+            ("limit stop: used", |o| {
+                if let Some(LimitCheck::ExceedsLimit { used, .. }) = &mut o.limit_exceeded {
+                    *used += 1;
+                }
+            }),
+            ("accounts: one more touched", |o| account_mut(o, LOADED).mark_touch()),
+            ("accounts: one fewer touched", |o| account_mut(o, SENDER).unmark_touch()),
+        ];
+        let mut seen = BTreeMap::from([(summary_json(&outcome()), "the outcome")]);
+        for (name, change) in changes {
+            let mut changed = outcome();
+            change(&mut changed);
+            if let Some(twin) = seen.insert(summary_json(&changed), name) {
+                panic!("{name} summarizes like {twin}");
+            }
+        }
+
+        let left_to_the_view: &[(&str, Change)] = &[
+            ("log: data", |o| {
+                let log = &mut logs_mut(o)[0];
+                log.data =
+                    LogData::new_unchecked(log.topics().to_vec(), Bytes::from_static(&[0xab]));
+            }),
+            ("account: balance", |o| account_mut(o, SENDER).info.balance += U256::from(1)),
+            ("oracle read: answer", |o| o.oracle_reads[0].answer = None),
+        ];
+        for (name, change) in left_to_the_view {
+            let mut changed = outcome();
+            change(&mut changed);
+            assert_eq!(summary_json(&changed), summary_json(&outcome()), "{name}");
         }
     }
 }
