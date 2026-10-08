@@ -1,4 +1,4 @@
-use std::{str::FromStr, time::Instant};
+use std::time::Instant;
 
 use alloy_consensus::{BlockHeader, Transaction as _};
 use alloy_primitives::{B256, U256};
@@ -9,27 +9,28 @@ use mega_evm::{
     alloy_evm::{block::BlockExecutor, Evm, EvmEnv},
     alloy_op_evm::block::OpAlloyReceiptBuilder,
     revm::{
-        context::{result::ExecutionResult, BlockEnv, ContextTr},
+        context::{result::ExecutionResult, BlockEnv, CfgEnv},
         database::{states::bundle_state::BundleRetention, StateBuilder},
         primitives::eip4844,
         DatabaseRef,
     },
-    BlockLimits, EvmTxRuntimeLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory,
-    MegaEvmFactory, MegaHardforks, MegaSpecId,
+    BlockLimits, DeclaredObserver, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory,
+    MegaHardforks, MegaSpecId,
 };
 use tracing::{debug, info, trace, warn};
 
-use alloy_network::ReceiptResponse;
 use op_alloy_rpc_types::Transaction;
 
 use crate::{
     common::{
-        op_receipt_to_tx_receipt, parse_bucket_capacity, print_execution_summary,
-        print_execution_trace, print_receipt, BuildProviderOutput, EvmeExternalEnvs, EvmeOutcome,
-        ExecutionSummary, ExternalEnvSnapshot, OpTxReceipt, RpcCacheStore, TxOverrideArgs,
+        op_receipt_to_tx_receipt, parse_bucket_capacity, parse_limits_override,
+        print_execution_summary, print_execution_trace, print_receipt, print_satin_report,
+        satin_schedule, BuildProviderOutput, EvmeExternalEnvs, EvmeOutcome, ExecutionSummary,
+        ExternalEnvSnapshot, LimitsOverride, OpTxReceipt, RpcCacheStore, SatinReport,
+        TxOverrideArgs,
     },
-    replay::get_hardfork_config,
-    run, ChainArgs, EvmeState,
+    engine::Engine,
+    run, EvmeState,
 };
 
 use super::{ReplayError, Result};
@@ -38,8 +39,12 @@ use super::{ReplayError, Result};
 #[derive(Parser, Debug)]
 pub struct Cmd {
     /// Transaction hash to replay
-    #[arg(value_name = "TX_HASH")]
-    pub tx_hash: B256,
+    #[arg(value_name = "TX_HASH", required_unless_present = "block")]
+    pub tx_hash: Option<B256>,
+
+    /// Block replay configuration (`--block`)
+    #[command(flatten)]
+    pub block_args: crate::block::BlockArgs,
 
     /// RPC configuration
     #[command(flatten)]
@@ -57,9 +62,18 @@ pub struct Cmd {
     #[command(flatten)]
     pub trace_args: run::TraceArgs,
 
-    /// Override the spec to use (default: auto-detect from chain ID and block timestamp)
+    /// Override the spec to use (default: auto-detect from chain ID and block timestamp).
+    /// `Satin` replays on the Satin engine, a legacy spec on the legacy engine
     #[arg(long = "override.spec", value_name = "SPEC")]
     pub spec_override: Option<String>,
+
+    /// Satin only: replay under these protocol limits instead of the chain's, a counterfactual. A
+    /// JSON object in the shape a chain configuration carries `ProtocolLimits` in (camelCase,
+    /// per-transaction limits under `txRuntimeLimits`), inline or in a file; the fields it names
+    /// replace the chain's, every other stays. Refused when it names an unknown field or a value
+    /// no chain may carry, and for a block that runs on the legacy engine
+    #[arg(long = "override.limits", value_name = "JSON|FILE", value_parser = parse_limits_override)]
+    pub limits_override: Option<LimitsOverride>,
 
     /// Transaction override configuration
     #[command(flatten)]
@@ -78,7 +92,8 @@ pub struct Cmd {
     /// runner. Re-running the file through `state-test` self-validates the
     /// replay, and `state-test --bench` benchmarks it. The dump is rejected
     /// unless the local replay reproduces the on-chain receipt's gas and success
-    /// status. Incompatible with transaction overrides and `--override.spec`.
+    /// status. Incompatible with transaction overrides and `--override.spec`. Legacy specs
+    /// only: no state-test runner prices a transaction as Satin does.
     #[arg(long = "dump-fixture", value_name = "FILE")]
     pub dump_fixture: Option<std::path::PathBuf>,
 }
@@ -98,8 +113,6 @@ pub(super) struct ReplayOutcome {
     pub outcome: EvmeOutcome,
     /// The transaction receipt
     pub receipt: OpTxReceipt,
-    /// Self-validating fixture draft, present iff `--dump-fixture` was given.
-    pub fixture: Option<super::fixture::FixtureDraft>,
 }
 
 /// Intermediate context fetched from RPC before execution.
@@ -112,38 +125,97 @@ struct ReplayContext {
 }
 
 impl Cmd {
-    /// Replay a historical transaction.
+    /// The engine the replayed transaction runs on: the one `--override.spec` names, otherwise
+    /// the one its chain ran, or runs, its block on.
+    ///
+    /// Without an override this reads the chain id, and, only on a chain that switches engines
+    /// at a scheduled timestamp, the timestamp of the block the replay runs the transaction in,
+    /// from the source the replay itself reads, through a provider that persists nothing: the
+    /// transaction's block, or for a pending transaction the latest block, whose environment and
+    /// schedule the replay runs it in.
+    pub async fn engine(&self) -> Result<Engine> {
+        let tx_hash = self.tx_hash();
+        if let Some(spec) = &self.spec_override {
+            return Engine::of_spec(spec);
+        }
+        let (provider, chain_id) = self.rpc_args.build_lookup_provider().await?;
+        if let Some(engine) = Engine::of_chain(chain_id) {
+            return Ok(engine);
+        }
+        let tx = provider
+            .get_transaction_by_hash(tx_hash)
+            .await
+            .map_err(|e| ReplayError::RpcError(format!("Failed to fetch transaction: {e}")))?
+            .ok_or(ReplayError::TransactionNotFound(tx_hash))?;
+        let transport = |e| ReplayError::RpcError(format!("RPC transport error: {e}"));
+        let number = match tx.block_number {
+            Some(number) => number,
+            None => provider.get_block_number().await.map_err(transport)?,
+        };
+        let timestamp = provider
+            .get_block_by_number(number.into())
+            .await
+            .map_err(transport)?
+            .ok_or(ReplayError::BlockNotFound(number))?
+            .header
+            .timestamp();
+        Ok(Engine::of_block(chain_id, timestamp))
+    }
+
+    /// Whether this replays whole blocks (`--block`), which runs here for both engines.
+    pub fn replays_blocks(&self) -> bool {
+        self.block_args.block.is_some()
+    }
+
+    /// The transaction to replay; present unless `--block` is.
+    fn tx_hash(&self) -> B256 {
+        self.tx_hash.expect("clap requires TX_HASH unless --block is given")
+    }
+
+    /// Replay a historical transaction on the Satin engine, or whole blocks on either engine.
     pub async fn run(&self) -> Result<()> {
-        // Pure input validation — reject before any network/state work. A dumped
-        // fixture must represent the on-chain transaction, so it can neither apply
-        // transaction overrides nor force a spec: both would make the recorded
-        // execution a what-if, not the on-chain one.
+        if let Some(range) = self.block_args.block {
+            let bucket_capacities = self
+                .ext_args
+                .bucket_capacity
+                .iter()
+                .map(|s| parse_bucket_capacity(s))
+                .collect::<Result<Vec<_>>>()?;
+            let summary = crate::block::replay_blocks(
+                range,
+                &self.block_args,
+                &self.rpc_args,
+                &bucket_capacities,
+                self.spec_override.as_deref(),
+                self.limits_override.as_ref(),
+                self.output_args.json,
+            )
+            .await?;
+            let code = summary.exit_code(self.block_args.verify);
+            if code != 0 {
+                std::process::exit(code);
+            }
+            return Ok(());
+        }
+
+        // A dumped fixture is re-executed by a state-test runner that prices the transaction as
+        // the chain does; no such runner exists for Satin, so the dump is refused before any
+        // network or state work. On a legacy spec the dump is the 1.7.1 tool's, unchanged.
         if self.dump_fixture.is_some() {
-            if self.tx_override_args.has_overrides() {
-                return Err(ReplayError::Other(
-                    "--dump-fixture cannot be combined with transaction overrides (the \
-                     isolated execution would not represent the on-chain transaction)"
-                        .to_string(),
-                ));
-            }
-            if self.spec_override.is_some() {
-                return Err(ReplayError::Other(
-                    "--dump-fixture cannot be combined with --override.spec (the fixture \
-                     must record the spec auto-detected for the on-chain block, not a \
-                     manually forced one)"
-                        .to_string(),
-                ));
-            }
+            return Err(ReplayError::Other(
+                "--dump-fixture is not available on Satin: no state-test runner prices a \
+                 transaction as Satin does; it is available on the legacy specs"
+                    .to_string(),
+            ));
         }
 
         let mut pctx = self.resolve_provider().await?;
         let rctx = self.fetch_replay_context(&pctx.provider, pctx.chain_id).await?;
         let (external_envs, env_snapshot) = self.resolve_external_envs(&pctx)?;
 
-        // Execute, report, and (for --dump-fixture) finalize/write — but defer
-        // error propagation until the cache store has persisted: in capture mode
-        // an execution or dump-gate failure is exactly the case you'd want to
-        // debug offline, so the captured RPC responses must not be discarded.
+        // Execute and report, but defer error propagation until the cache store has persisted:
+        // in capture mode an execution failure is exactly the case you'd want to debug
+        // offline, so the captured RPC responses must not be discarded.
         let run_result = self.execute_and_report(&pctx.provider, &rctx, external_envs).await;
 
         // Hand the effective external-env snapshot to the store before the final
@@ -168,11 +240,10 @@ impl Cmd {
         }
     }
 
-    /// Execute the replay, print the results, and (for `--dump-fixture`)
-    /// finalize and write the fixture.
+    /// Execute the replay and print the results.
     ///
     /// Split out of [`Self::run`] so the caller can persist the RPC cache store
-    /// regardless of which of these steps fails.
+    /// regardless of whether this step fails.
     async fn execute_and_report<P>(
         &self,
         provider: &P,
@@ -183,14 +254,7 @@ impl Cmd {
         P: Provider<op_alloy_network::Optimism> + Clone + std::fmt::Debug,
     {
         let result = self.execute(provider, rctx, external_envs).await?;
-        self.output_results(&result)?;
-        // Write the self-validating fixture (re-executes the isolated unit through
-        // state-test and cross-checks it against the replay before writing).
-        if let (Some(path), Some(draft)) = (&self.dump_fixture, result.fixture) {
-            super::fixture::finalize_and_write(draft, path)?;
-            info!(path = %path.display(), "Wrote self-validating fixture");
-        }
-        Ok(())
+        self.output_results(&result)
     }
 
     /// Select the right provider based on `--rpc`, `--rpc.capture-file`, and
@@ -229,12 +293,13 @@ impl Cmd {
     where
         P: Provider<op_alloy_network::Optimism>,
     {
-        info!(tx_hash = %self.tx_hash, "Fetching transaction");
+        let tx_hash = self.tx_hash();
+        info!(%tx_hash, "Fetching transaction");
         let target_tx = provider
-            .get_transaction_by_hash(self.tx_hash)
+            .get_transaction_by_hash(tx_hash)
             .await
             .map_err(|e| ReplayError::RpcError(format!("Failed to fetch transaction: {e}")))?
-            .ok_or_else(|| ReplayError::TransactionNotFound(self.tx_hash))?;
+            .ok_or_else(|| ReplayError::TransactionNotFound(tx_hash))?;
         debug!(block_number = ?target_tx.block_number, "Transaction found");
 
         let (state_base_block, block_number, is_pending) = if let Some(n) = target_tx.block_number {
@@ -267,7 +332,7 @@ impl Cmd {
         let mut preceding_tx_hashes = vec![];
         if !is_pending {
             for hash in block.transactions.hashes() {
-                if hash == self.tx_hash {
+                if hash == tx_hash {
                     break;
                 }
                 preceding_tx_hashes.push(hash);
@@ -340,7 +405,8 @@ impl Cmd {
         Ok((envs, snapshot))
     }
 
-    /// Execute the target transaction (with preceding transactions) and return the outcome.
+    /// Execute the target transaction (with preceding transactions) on Satin and return the
+    /// outcome.
     async fn execute<P>(
         &self,
         provider: &P,
@@ -350,10 +416,9 @@ impl Cmd {
     where
         P: Provider<op_alloy_network::Optimism> + Clone + std::fmt::Debug,
     {
-        let hardforks = get_hardfork_config(ctx.chain_id);
-        let spec = hardforks.spec_id(ctx.block.header.timestamp());
-        let chain_args = ChainArgs { chain_id: ctx.chain_id, spec: spec.to_string() };
-        debug!(chain_id = ctx.chain_id, spec = %spec, "Chain configuration");
+        let timestamp = ctx.block.header.timestamp();
+        let hardforks = satin_schedule(ctx.chain_id, timestamp, self.limits_override.as_ref())?;
+        debug!(chain_id = ctx.chain_id, spec = %MegaSpecId::SATIN, "Chain configuration");
 
         info!(fork_block = ctx.parent_block.header.number(), "Forking state from parent block",);
         let mut database = EvmeState::new_forked(
@@ -366,117 +431,36 @@ impl Cmd {
 
         let block_env = retrieve_block_env(&ctx.block)?;
         trace!(?block_env, "Block environment built");
-        let mut evm_env = EvmEnv::new(chain_args.create_cfg_env()?, block_env);
+        let mut cfg_env = CfgEnv::new_with_spec(MegaSpecId::SATIN);
+        cfg_env.chain_id = ctx.chain_id;
+        let evm_env = EvmEnv::new(cfg_env, block_env);
 
-        // For `--dump-fixture`, snapshot the two inputs a fixture
-        // needs before the external env is moved into the factory: the effective
-        // MegaETH external environment, and the on-chain receipt gas used as the
-        // fidelity anchor. They live or die together (kept in one `Option`), so the
-        // fixture builder never has to assume one without the other.
-        //
-        // The receipt is fetched here (before the executor borrows the database) so
-        // it is captured by `--rpc.capture-file`. A fixture/benchmark is only
-        // meaningful if the local replay reproduces the receipt's gas and success
-        // status — a mismatch means a wrong spec or hardfork config, which
-        // self-validation alone cannot catch.
-        let fixture_inputs = if self.dump_fixture.is_some() {
-            // A pending transaction has no receipt yet, so the fidelity gate cannot
-            // run; fail clearly instead of surfacing the receipt lookup's confusing
-            // `TransactionNotFound`.
-            if ctx.target_tx.block_number.is_none() {
-                return Err(ReplayError::Other(
-                    "--dump-fixture does not support pending transactions: the fidelity \
-                     gate needs the on-chain receipt, which does not exist yet"
-                        .to_string(),
-                ));
-            }
-            // Sort the accessed buckets/oracle slots so the dumped fixture is
-            // byte-reproducible: these come from hash-map iteration, whose order
-            // is otherwise non-deterministic across runs (noisy diffs, and an
-            // online dump would not byte-match an offline re-dump).
-            let mut bucket_capacities = external_envs.bucket_capacities();
-            bucket_capacities.sort_unstable();
-            let mut oracle_storage = external_envs.oracle_storage();
-            oracle_storage.sort_unstable();
-            let mega_env = state_test::types::MegaEnv { bucket_capacities, oracle_storage };
-            let receipt = provider
-                .get_transaction_receipt(self.tx_hash)
-                .await
-                .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?
-                .ok_or(ReplayError::TransactionNotFound(self.tx_hash))?;
-            // Anchor the receipt to the replayed block: across a reorg or a
-            // load-balanced endpoint serving divergent views, the receipt can
-            // describe a different inclusion than the block fetched earlier,
-            // and the fidelity gate would then compare the replay against the
-            // wrong on-chain execution.
-            if let Some(receipt_block_hash) = receipt.block_hash() {
-                let replayed_block_hash = ctx.block.hash();
-                if receipt_block_hash != replayed_block_hash {
-                    return Err(ReplayError::Other(format!(
-                        "receipt block hash {receipt_block_hash} != replayed block hash \
-                         {replayed_block_hash}: the receipt describes a different inclusion \
-                         than the fetched block (reorg in progress, or a load-balanced \
-                         endpoint serving divergent views); retry the dump once the chain \
-                         settles"
-                    )));
-                }
-            }
-            // RLP-hash the receipt's logs with the same helper the state-test
-            // runner uses for `logsRoot`, so the dump can check the replay's logs
-            // against the chain (the rich RPC logs' `inner` is the consensus log).
-            let receipt_logs: Vec<_> =
-                receipt.inner.logs().iter().map(|log| log.inner.clone()).collect();
-            let anchor = super::fixture::OnchainAnchor {
-                gas_used: receipt.gas_used(),
-                success: receipt.inner.status(),
-                logs_root: state_test::utils::log_rlp_hash(&receipt_logs),
-            };
-            Some((mega_env, anchor))
-        } else {
-            None
-        };
-
-        let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
+        let evm_factory = MegaEvmFactory::new()
+            .with_schedule(hardforks.clone())
+            .with_external_env_factory(external_envs);
         let block_executor_factory = MegaBlockExecutorFactory::new(
+            OpAlloyReceiptBuilder::default(),
             &hardforks,
             evm_factory,
-            OpAlloyReceiptBuilder::default(),
         );
-        let mut block_limits = BlockLimits::from_hardfork_and_block_gas_limit(
-            hardforks.hardfork(ctx.block.header.timestamp()).ok_or(ReplayError::Other(format!(
-                "No `MegaHardfork` active at block timestamp: {}",
-                ctx.block.header.timestamp()
-            )))?,
-            ctx.block.header.gas_limit(),
-        );
-
-        if let Some(spec_override) = &self.spec_override {
-            info!(spec_override = %spec_override, "Overriding EVM spec");
-            let spec = MegaSpecId::from_str(spec_override)
-                .map_err(|e| ReplayError::Other(format!("Invalid spec: {e:?}")))?;
-            evm_env.cfg_env.spec = spec;
-            block_limits = block_limits.with_tx_runtime_limits(EvmTxRuntimeLimits::from_spec(spec));
-        }
-
-        // The spec the target transaction will execute under (after any override),
-        // captured before `evm_env` is moved into the executor.
-        let executed_spec = evm_env.cfg_env.spec;
-
+        // The block is held to the protocol limits its schedule carries, with no building
+        // policy, as a validator holds it; the block's gas limit comes from its header.
         let block_ctx = MegaBlockExecutionCtx::new(
             ctx.parent_block.hash(),
             ctx.block.header.parent_beacon_block_root(),
             ctx.block.header.extra_data().clone(),
-            block_limits,
+            BlockLimits::default(),
         );
 
         let start = Instant::now();
-        let mut inspector = self.trace_args.create_inspector();
+        // The tracer reads and writes nothing back, so block execution admits it declared.
+        let mut inspector = DeclaredObserver::new(self.trace_args.create_inspector());
         let mut state =
             StateBuilder::new().with_database(&mut database).with_bundle_update().build();
-        let mut block_executor = block_executor_factory.create_executor_with_inspector(
+        let mut block_executor = block_executor_factory.create_executor_with_trusted_inspector(
             &mut state,
-            block_ctx,
             evm_env,
+            block_ctx,
             &mut inspector,
         );
 
@@ -502,12 +486,7 @@ impl Cmd {
                 .map_err(|e| ReplayError::Other(format!("Block execution error: {e}")))?;
         }
 
-        // Clear block hash reads accumulated by the preceding transactions so the
-        // fixture gate below sees only the target transaction's BLOCKHASH reads.
-        block_executor.clear_accessed_block_hashes();
-
-        // Execute target transaction. Override-incompatibility with
-        // --dump-fixture is validated up front in `run()`.
+        // Execute target transaction.
         info!("Executing target transaction");
         if self.tx_override_args.has_overrides() {
             info!(overrides = ?self.tx_override_args, "Applying transaction overrides");
@@ -515,24 +494,33 @@ impl Cmd {
         let wrapped_tx = self.tx_override_args.wrap(ctx.target_tx.as_recovered())?;
         let pre_execution_nonce = block_executor
             .evm()
-            .db_ref()
+            .db()
             .basic_ref(wrapped_tx.inner().signer())?
             .map(|acc| acc.nonce)
             .unwrap_or(0);
 
-        block_executor.inspector_mut().fuse();
+        // The trace covers the target transaction only.
+        block_executor.evm_mut().inspector_mut().0.fuse();
         let outcome = block_executor
             .run_transaction(wrapped_tx)
             .map_err(|e| ReplayError::Other(format!("Block execution error: {e}")))?;
         trace!(tx_hash = %ctx.target_tx.inner.inner.tx_hash(), ?outcome, "Target transaction executed");
+        let mut satin = SatinReport::of(&outcome.inner);
+        if self.limits_override.is_some() {
+            satin.limits_override = hardforks.protocol_limits(timestamp).map(Box::new);
+        }
         let exec_result = outcome.inner.result.clone();
         let evm_state = outcome.inner.state.clone();
 
         match &exec_result {
-            ExecutionResult::Success { gas_used, .. } => info!(gas_used, "Execution succeeded"),
-            ExecutionResult::Revert { gas_used, .. } => warn!(gas_used, "Execution reverted"),
-            ExecutionResult::Halt { reason, gas_used } => {
-                warn!(?reason, gas_used, "Execution halted")
+            ExecutionResult::Success { .. } => {
+                info!(gas_used = exec_result.tx_gas_used(), "Execution succeeded")
+            }
+            ExecutionResult::Revert { .. } => {
+                warn!(gas_used = exec_result.tx_gas_used(), "Execution reverted")
+            }
+            ExecutionResult::Halt { reason, .. } => {
+                warn!(?reason, gas_used = exec_result.tx_gas_used(), "Execution halted")
             }
         }
 
@@ -543,48 +531,16 @@ impl Cmd {
 
         let trace_data = self.trace_args.is_tracing_enabled().then(|| {
             self.trace_args.generate_trace(
-                block_executor.inspector(),
+                &block_executor.inspector().0,
                 &result_and_state,
-                block_executor.evm().db_ref(),
+                block_executor.evm().db(),
             )
         });
 
-        // Build the self-validating fixture draft while the database still reflects
-        // the pre-target-transaction state (preceding txs committed, target not yet).
-        let fixture = match fixture_inputs {
-            Some((mega_env, anchor)) => {
-                // A dumped fixture cannot faithfully reproduce BLOCKHASH: the
-                // state-test runner does not seed block hashes, so the isolated
-                // re-execution would read default hashes instead of the ones this
-                // replay observed. The access record is cleared after the preceding
-                // transactions, so it holds exactly the target transaction's reads;
-                // if the target read any block hash, refuse to dump rather than
-                // write a fixture that self-validates against the wrong roots.
-                let accessed_block_hashes = block_executor.get_accessed_block_hashes();
-                if !accessed_block_hashes.is_empty() {
-                    return Err(ReplayError::Other(format!(
-                        "--dump-fixture does not support transactions that read block \
-                         hashes (BLOCKHASH): {} block hash(es) were accessed and the \
-                         fixture cannot faithfully reproduce them",
-                        accessed_block_hashes.len()
-                    )));
-                }
-                Some(super::fixture::build_draft(
-                    block_executor.evm().db_ref(),
-                    &evm_state,
-                    ctx.chain_id,
-                    executed_spec,
-                    &ctx.block,
-                    &ctx.target_tx,
-                    super::fixture::FixtureInputs { mega_env, result: &exec_result, anchor },
-                )?)
-            }
-            None => None,
-        };
-
-        let gas_used = block_executor
+        let gas_output = block_executor
             .commit_transaction_outcome(outcome)
             .map_err(|e| ReplayError::Other(format!("Block execution error: {e}")))?;
+        let gas_used = gas_output.tx_gas_used();
         let duration = start.elapsed();
 
         let (evm, block_result) = block_executor
@@ -620,9 +576,9 @@ impl Cmd {
                 state: evm_state,
                 exec_time: duration,
                 trace_data,
+                satin,
             },
             receipt,
-            fixture,
         })
     }
 
@@ -637,6 +593,7 @@ impl Cmd {
             summary.fill_trace_and_dump(&result.outcome, &self.trace_args, &self.dump_args)?;
             summary.receipt =
                 Some(serde_json::to_value(&result.receipt).expect("failed to serialize receipt"));
+            summary.satin = Some(result.outcome.satin.clone());
             println!(
                 "{}",
                 serde_json::to_string_pretty(&summary).expect("failed to serialize output")
@@ -647,6 +604,7 @@ impl Cmd {
                 result.receipt.contract_address,
                 result.outcome.exec_time,
             );
+            print_satin_report(&result.outcome.satin);
             print_receipt(&result.receipt);
             print_execution_trace(
                 result.outcome.trace_data.as_deref(),
@@ -675,6 +633,7 @@ fn retrieve_block_env(block: &Block<Transaction>) -> Result<BlockEnv> {
         difficulty: block.header.difficulty(),
         prevrandao: block.header.mix_hash(),
         blob_excess_gas_and_price: None,
+        slot_num: 0,
     };
 
     let excess_blob_gas = block.header.excess_blob_gas().ok_or_else(|| {

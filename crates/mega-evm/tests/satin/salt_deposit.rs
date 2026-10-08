@@ -28,9 +28,12 @@ use revm::{
     context_interface::cfg::GasId,
 };
 
-use crate::salt::{
-    account_bucket, crowded_account, db, entry, minimal_envs, run, try_run, SaltEnvs, CALLER,
-    GAS_LIMIT,
+use crate::{
+    common::state_is_free,
+    salt::{
+        account_bucket, crowded_account, db, entry, minimal_envs, run, try_run, SaltEnvs, CALLER,
+        GAS_LIMIT,
+    },
 };
 
 /// The sender's own nonce. The contract deploys at `CALLER.create(STATE_NONCE)`.
@@ -103,6 +106,10 @@ fn failing_account(envs: SaltEnvs, account: Address) -> SaltEnvs {
 /// envelope nonce derives is never priced, never written and never read.
 #[test]
 fn test_a_deposit_creation_is_priced_where_it_deploys() {
+    // A charge that costs nothing costs nothing at any capacity, and the engine asks for none.
+    if state_is_free() {
+        return;
+    }
     let (deployed, envelope) = candidates();
     let envs = crowded_account(minimal_envs(), deployed, M);
 
@@ -129,6 +136,10 @@ fn test_a_deposit_creation_is_priced_where_it_deploys() {
 /// base price, and that bucket's capacity is never asked for.
 #[test]
 fn test_crowding_the_envelope_nonce_s_address_changes_no_price() {
+    // A charge that costs nothing costs nothing at any capacity, and the engine asks for none.
+    if state_is_free() {
+        return;
+    }
     let (deployed, envelope) = candidates();
     let envs = crowded_account(minimal_envs(), envelope, M);
 
@@ -144,6 +155,10 @@ fn test_crowding_the_envelope_nonce_s_address_changes_no_price() {
 /// the SALT environment gave, like any other charge that cannot be priced.
 #[test]
 fn test_an_unpriceable_deposit_creation_fails_with_its_cause() {
+    // A charge that costs nothing costs nothing at any capacity, and the engine asks for none.
+    if state_is_free() {
+        return;
+    }
     let (deployed, _) = candidates();
     let envs = failing_account(minimal_envs(), deployed);
 
@@ -159,6 +174,10 @@ fn test_an_unpriceable_deposit_creation_fails_with_its_cause() {
 /// bucket nothing is charged in is a bucket nothing asks about.
 #[test]
 fn test_a_failure_at_the_envelope_nonce_s_address_is_never_asked_for() {
+    // A charge that costs nothing costs nothing at any capacity, and the engine asks for none.
+    if state_is_free() {
+        return;
+    }
     let (deployed, envelope) = candidates();
     let envs = failing_account(minimal_envs(), envelope);
 
@@ -175,6 +194,10 @@ fn test_a_failure_at_the_envelope_nonce_s_address_is_never_asked_for() {
 /// eight times the minimum, and one capacity read priced both halves.
 #[test]
 fn test_a_reverting_deposit_creation_gives_the_charge_back_where_it_was_made() {
+    // A charge that costs nothing costs nothing at any capacity, and the engine asks for none.
+    if state_is_free() {
+        return;
+    }
     let (deployed, envelope) = candidates();
     let envs = crowded_account(minimal_envs(), deployed, M);
 
@@ -201,6 +224,10 @@ fn test_a_reverting_deposit_creation_gives_the_charge_back_where_it_was_made() {
 /// suite, and the site it is charged at did not move.
 #[test]
 fn test_at_equal_nonces_a_deposit_and_an_ordinary_creation_agree() {
+    // A charge that costs nothing costs nothing at any capacity, and the engine asks for none.
+    if state_is_free() {
+        return;
+    }
     // Both nonces are `STATE_NONCE` here, so the two candidate addresses of the tests above
     // are this one address, and no arrangement of buckets can tell them apart.
     let deployed = CALLER.create(STATE_NONCE);

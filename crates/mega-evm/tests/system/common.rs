@@ -134,3 +134,35 @@ pub(crate) fn revert_data(result: &ResultAndState<MegaHaltReason>) -> Bytes {
         other => panic!("the transaction did not revert: {other:?}"),
     }
 }
+
+/// Whether a state byte costs nothing at the prices in effect: every state-gas entry of the
+/// schedule is zero.
+///
+/// Only a measurement build arranges that, with `MEGA_SATIN_CPSB` at 0 or at a price every entry
+/// rounds to nothing. A test whose scenario is state gas — a limit to cross with it, a bucket to
+/// scale it, a charge that cannot be paid — has nothing to run then, and returns early, leaving a
+/// note (`note_price_guard`), which the byte-price grid counts.
+pub(crate) fn state_is_free() -> bool {
+    let params = mega_evm::satin_gas_params();
+    if !mega_evm::STATE_GAS_REPRICED.iter().all(|&(id, _)| params.get(id()) == 0) {
+        return false;
+    }
+    mega_evm::test_utils::note_price_guard("MEGA_SATIN_CPSB prices a state byte at nothing");
+    true
+}
+
+/// The state gas one new account costs at the byte prices in effect, in the minimum bucket.
+pub(crate) fn account_state_gas() -> u64 {
+    mega_evm::satin_gas_params().get(revm::context_interface::cfg::GasId::new_account_state_gas())
+}
+
+/// The history gas `bytes` bytes cost at the byte prices in effect.
+pub(crate) fn history(bytes: u64) -> u64 {
+    mega_evm::history_gas(bytes).expect("the bytes have a price")
+}
+
+/// The history gas the body of a transaction carrying `calldata_len` bytes of calldata, and no
+/// access list or authorization, pays at the byte prices in effect.
+pub(crate) fn body_history(calldata_len: u64) -> u64 {
+    history(mega_evm::tx_body_history_bytes(calldata_len, 0, 0, 0))
+}

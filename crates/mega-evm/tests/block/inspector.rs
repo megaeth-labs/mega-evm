@@ -35,7 +35,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::common::{self, system_tx, user_tx};
+use crate::common::{self, empty_call_gas, system_tx, user_tx};
 
 /// A declared observer reaches a block: its type says it writes nothing back, so what the block
 /// executes is what the chain executes.
@@ -54,7 +54,7 @@ fn test_a_declared_observer_reaches_block_execution() {
     assert!(executor.evm().is_inspecting(), "the inspector runs");
     assert!(!executor.evm().has_rewriting_inspector(), "and is admitted");
     executor.apply_pre_execution_changes().expect("a declared observer is admitted");
-    executor.execute_transaction(&user_tx(0, 100_000)).expect("the transaction executes");
+    executor.execute_transaction(&user_tx(0, empty_call_gas())).expect("the transaction executes");
 
     let (_, result) = executor.finish_with_counters().expect("the block finishes");
     assert_eq!(result.receipts().len(), 1);
@@ -128,12 +128,15 @@ fn test_enabling_a_rewriting_inspector_after_the_block_started_is_refused() {
 
     // The one transaction that ran before the inspector was enabled is admitted.
     let outcome = executor
-        .execute_transaction_without_commit(&user_tx(0, 100_000))
+        .execute_transaction_without_commit(&user_tx(0, empty_call_gas()))
         .expect("the block is still clean");
 
     executor.evm_mut().set_inspector_enabled(true);
 
-    assert!(is_refused(executor.execute_transaction(&user_tx(1, 100_000))), "no transaction runs");
+    assert!(
+        is_refused(executor.execute_transaction(&user_tx(1, empty_call_gas()))),
+        "no transaction runs"
+    );
     assert!(is_refused(executor.commit_transaction_outcome(outcome)), "nothing commits");
     assert!(executor.receipts().is_empty(), "the block packed nothing");
     assert!(is_refused(executor.finish_with_counters()), "and the block does not finish");
@@ -154,14 +157,17 @@ fn test_the_unchecked_commit_commits_what_ran_under_the_gate() {
     let mut executor = factory.create_executor(evm, common::unlimited_ctx());
     executor.apply_pre_execution_changes().expect("a disabled inspector rewrites nothing");
     let outcome = executor
-        .execute_transaction_without_commit(&user_tx(0, 100_000))
+        .execute_transaction_without_commit(&user_tx(0, empty_call_gas()))
         .expect("the block is still clean");
 
     executor.evm_mut().set_inspector_enabled(true);
 
     executor.commit_transaction(outcome);
     assert_eq!(executor.receipts().len(), 1, "the outcome that ran under the gate is committed");
-    assert!(is_refused(executor.execute_transaction(&user_tx(1, 100_000))), "nothing runs after");
+    assert!(
+        is_refused(executor.execute_transaction(&user_tx(1, empty_call_gas()))),
+        "nothing runs after"
+    );
     assert_eq!(executor.receipts().len(), 1);
 }
 
@@ -178,7 +184,7 @@ fn test_a_rewriting_inspector_is_refused_without_the_pre_execution_changes() {
     let mut executor = factory.create_executor(evm, common::unlimited_ctx());
 
     assert!(
-        is_refused(executor.execute_transaction_without_commit(&user_tx(0, 100_000))),
+        is_refused(executor.execute_transaction_without_commit(&user_tx(0, empty_call_gas()))),
         "skipping the setup is not a way past the gate"
     );
     assert!(is_refused(executor.finish_with_counters()), "and neither is finishing the block");

@@ -64,6 +64,10 @@ This is the single most important correctness concern in mega-evm.
 - A test that asserts one of the spec's own byte-price numbers must return early when the process runs at other prices (`runs_at_measurement_prices`).
   A measurement build fixes other prices through the `satin-price-override` feature, and a test without the guard fails there on a price the developer asked for.
   Flag a new state-gas assertion that lacks it: the failure only shows in the configuration nobody watches.
+- Every other test holds at a byte price of nothing and at any price from one gas per byte up to the grid's dearest point, and the byte-price grid job checks it.
+  Below one gas per byte the schedule's entries round to nothing one at a time, and past the grid a fixed-size scenario outgrows any transaction below the execution cap; no test is held there.
+  A gas limit is its regular room on top of what the scenario adds at the prices in effect, read off the schedule and `history_gas`, not a number that happened to cover it at the constants; a call or creation that forwards all but a 64th of its gas keeps 64 times the history of the records it pays for.
+  A case whose scenario is state or history gas — a limit to cross, a bucket to scale, a charge that cannot be paid — returns early where that byte costs nothing (`state_is_free`, `history_is_free` in each test target's `common.rs`), and its other assertions still run.
 - **Benchmark methodology.**
   A perf-comparison PR must pin comparable hardforks on both arms.
   Missing the required explicit hardfork pin can silently bench the wrong fork when a shared bench subject defaults to a different one.
@@ -104,6 +108,17 @@ These checks guard every change to the Satin engine.
   `crates/mega-state-test/DEVIATIONS.md` is rendered from the registry, and a test keeps the two equal.
 - Neither workflow is a required check; `execution-spec gate on Satin` is the job a branch rule would require.
 
+### Byte-price grid
+
+- `.github/workflows/price-grid.yml` runs the `mega-evm` suite at byte prices other than the constants, through `scripts/price_grid.sh`: a cost per state byte and a cost per history byte per point, each run with `--no-fail-fast`.
+- On a pull request it runs five points: both bytes free (0 / 0), both at one gas (1 / 1), the cheapest and the dearest pair under consideration (312.5 / 20 and 5000 / 300), and a point past every candidate (10000 / 1000).
+  Between them they have failed every test the whole grid failed; 1 / 1 is where a premise that a charge cannot be paid, true only while a byte is dear, breaks.
+- Nightly and on dispatch it runs the whole grid: CPSB 0, 1, 312.5, 700, 1530, 2000, 5000 and 10000 by CPHB 0, 1, 20, 50, 88, 100, 200, 300 and 1000, and 0.001 on both.
+- It is not a required check.
+  A failure is a test that assumes a price, a scenario that does not scale with it, or an engine defect; the first two are fixed in the test, the third is not hidden behind a guard.
+- Each point reports how many tests a price guard held back (`guarded`, from `note_price_guard`; the tests are listed in the point's `.guards` file beside its log): every point passes the same number of tests, and this column tells a point at which tests returned early from one at which they ran.
+- Locally, `scripts/price_grid.sh --pr`, `--full`, or the points named (`scripts/price_grid.sh 312.5/20 5000/300`); each point's log is under `target/price-grid/`.
+
 ### Instruction counts (CodSpeed)
 
 - The bench set is `transact` (`MegaEvm` next to op-revm's `OpEvm`, from an empty transaction to 64-deep calls and loops of storage writes and logs), `corpus` (the JSON scenarios under `benches/scenarios` through `MegaEvm`, a bench input rather than a conformance suite), `factory` (EVM construction through `MegaEvmFactory`) and `block` (a block through `MegaBlockExecutor`), all in `crates/mega-evm/benches`.
@@ -136,12 +151,13 @@ These checks guard every change to the Satin engine.
 
 ### Scheduled workflows
 
-- GitHub fires a `schedule` trigger only from the default branch's copy of a workflow, so the schedules in `satin`'s copies (nightly mutation, weekly benchmark, replay-bench, doc-audit, the weekly execution-spec run) stay inert until `satin` is the default branch.
+- GitHub fires a `schedule` trigger only from the default branch's copy of a workflow, so the schedules in `satin`'s copies (nightly mutation, weekly benchmark, replay-bench, doc-audit, the weekly execution-spec run, the nightly byte-price grid) stay inert until `satin` is the default branch.
 - Run them on `satin` by hand: `gh workflow run <workflow>.yml --ref satin` runs `satin`'s copy of the workflow on `satin`'s head, so none of them needs a `ref` input.
   - `mutation.yml`: the whole-crate cargo-mutants run, the spec-gate sweep and suppression hygiene.
   - `benchmark.yml`: the Satin bench set on `satin`'s head, without a baseline (`-f aa_check=true` measures the noise floor).
   - `exec-spec.yml`: the execution-spec fixtures at the pinned fork tag.
   - `doc-audit.yml`: the documentation audit of `satin`'s docs.
+  - `price-grid.yml`: the whole byte-price grid.
   - `replay-bench.yml`: nothing yet; its bench job is disabled on `satin` until the replay corpus, which is keyed by the legacy Rex5 spec, and a bench mode of the state-test tool exist for Satin.
 
 ## Dev tools and test infrastructure

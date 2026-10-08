@@ -8,7 +8,7 @@
 use alloy_evm::{Evm, EvmError, InvalidTxError};
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    constants::{MAX_CONTRACT_SIZE, MAX_INITCODE_SIZE},
+    constants::{MAX_CONTRACT_SIZE, MAX_INITCODE_SIZE, TX_GAS_LIMIT_CAP},
     test_utils::{right_pad_bytes, BytecodeBuilder, MemoryDatabase},
     MegaEvm, MegaHaltReason, MegaTransaction,
 };
@@ -18,14 +18,22 @@ use revm::{
     primitives::{eip170, eip3860},
 };
 
-use crate::common::{call, context, create};
+use crate::common::{call, context, create, history};
 
 const CALLER: Address = address!("0000000000000000000000000000000000100000");
 const FACTORY: Address = address!("0000000000000000000000000000000000100001");
 
-/// Room for the state gas a megabyte of deployed code draws, all of it above the execution cap so
-/// it comes out of the reservoir.
-const GAS_LIMIT: u64 = 4_000_000_000;
+/// Room for everything a creation here draws, all of it above the execution cap so it comes out of
+/// the reservoir: the state gas of the largest deployable code, the history of that code and of a
+/// body carrying twice the largest init code, and a billion more, at the byte prices in effect.
+fn gas_limit() -> u64 {
+    TX_GAS_LIMIT_CAP +
+        MAX_CONTRACT_SIZE as u64 *
+            mega_evm::satin_gas_params()
+                .get(revm::context_interface::cfg::GasId::code_deposit_state_gas()) +
+        history((MAX_CONTRACT_SIZE + 2 * MAX_INITCODE_SIZE) as u64) +
+        1_000_000_000
+}
 
 /// Runs `tx` from `CALLER` and returns its result, or the validation error that rejected it.
 fn run(tx: MegaTransaction, db: MemoryDatabase) -> Result<ExecutionResult<MegaHaltReason>, String> {
@@ -45,7 +53,7 @@ fn run(tx: MegaTransaction, db: MemoryDatabase) -> Result<ExecutionResult<MegaHa
 /// Runs `init_code` as a creation transaction from `CALLER`.
 fn deploy(init_code: Bytes) -> Result<ExecutionResult<MegaHaltReason>, String> {
     let db = MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18)));
-    run(create(CALLER, init_code, GAS_LIMIT), db)
+    run(create(CALLER, init_code, gas_limit()), db)
 }
 
 /// Init code of `size` bytes that does nothing.
@@ -169,7 +177,7 @@ fn create_through_factory(size: usize) -> bool {
         .account_balance(CALLER, U256::from(10u64.pow(18)))
         .account_code(FACTORY, factory_creating(size));
     let result =
-        run(call(CALLER, FACTORY, U256::ZERO, GAS_LIMIT), db).expect("the transaction is valid");
+        run(call(CALLER, FACTORY, U256::ZERO, gas_limit()), db).expect("the transaction is valid");
     match result {
         ExecutionResult::Success { .. } => true,
         ExecutionResult::Halt {

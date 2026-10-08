@@ -1,5 +1,5 @@
 ---
-description: Fetch and re-execute an on-chain transaction with optional overrides and tracing.
+description: Fetch and re-execute an on-chain transaction, or whole blocks compared with the chain, with optional overrides and tracing.
 ---
 
 # replay
@@ -8,10 +8,13 @@ Re-execute a historical transaction locally using an RPC endpoint or a previousl
 In online mode, `mega-evme` fetches the transaction, block environment, and pre-state from the RPC and re-executes locally.
 In offline mode (`--rpc.replay-file`), all data is served from a local fixture captured by an earlier run — no network access is required.
 
+With `--block`, `replay` re-executes whole blocks instead and compares every receipt with the chain's; see [Replaying Whole Blocks](#replaying-whole-blocks).
+
 ## Usage
 
 ```
 mega-evme replay [OPTIONS] <TX_HASH>
+mega-evme replay --block <N[..M]> [OPTIONS]
 ```
 
 ## Arguments
@@ -112,6 +115,7 @@ It then additionally cross-checks the isolated execution against the full replay
 One channel stays open by construction: the isolated run's sender balance is shifted by the zeroed L1 fee, so a contract that stores a balance-derived value bakes that shifted value into `post` (and the sender's final balance in `post` likewise differs from the chain).
 The fixture still self-validates and reproduces gas exactly; only such balance-derived state values differ.
 
+`--dump-fixture` is available on the legacy specs, where it is the 1.7.1 tool's dump: the fixture is re-executed by a state-test runner that prices the transaction as the chain did, and no such runner exists for Satin, so on Satin the dump is refused.
 `--dump-fixture` cannot be combined with transaction overrides or `--override.spec` (a forced spec would record a what-if, not the on-chain transaction), and deposit transactions are not supported.
 A target transaction that reads a block hash via `BLOCKHASH` is also rejected: fixtures carry no historical block hashes, so the isolated re-execution could not reproduce the values the replay observed.
 Block hash reads by preceding transactions in the same block do not matter — only the target transaction's reads are checked.
@@ -143,25 +147,106 @@ state-test --bench /tmp/tx.json
 
 ## Spec Auto-Detection
 
-The EVM spec controls which opcodes, gas rules, and MegaETH-specific behaviors are active during execution.
+The EVM spec controls which opcodes, gas rules, and MegaETH-specific behaviors are active during execution, and which of the two engines runs it (see [Engines](../configuration/chain-and-spec.md#engines)).
 `replay` auto-detects the spec from the chain ID and the block timestamp of the replayed transaction.
 Hardcoded hardfork configs exist for:
 
 - **Chain 6343** — MegaETH testnet v2
 - **Chain 4326** — MegaETH mainnet
 
-For any other chain, `replay` enables every hardfork up to a pinned spec at genesis — currently `Rex6`.
-That pin does not follow the newest spec automatically: introducing a spec leaves unrecognized chains where they are, so a replay of history they already produced keeps its meaning.
-Use `--override.spec` below to replay such a chain under a different spec.
+On these chains a block runs on Satin from the timestamp the chain's schedule activates it, and on the legacy engine before it, which resolves the legacy spec from the chain's legacy schedule.
+Neither chain schedules Satin yet, so every block of theirs replays on the legacy engine, exactly as the 1.7.1 tool replayed it.
+To pick the engine, a transaction replay without `--override.spec` first reads the chain ID over RPC (one `eth_chainId` request, or the replay file's), and on a chain that schedules Satin also the timestamp of the block the transaction runs in; a legacy replay then makes the 1.7.1 tool's own requests.
+
+Any other chain runs Satin from genesis, the rung the Satin engine pins for an unrecognized chain.
+The 1.7.1 tool ran such a chain through `Rex7`, the legacy line's unstable spec, which Satin supersedes.
+Use `--override.spec` below to replay a chain that runs a legacy spec.
 
 ### `--override.spec <SPEC>`
 
 Override the auto-detected spec.
 Useful when you want to test how the transaction would behave under a different spec, or when replaying against a chain that isn't recognized.
+`--override.spec Satin` replays the transaction as it would run on Satin: a counterfactual, on the same forked state.
 
 ```
 mega-evme replay --override.spec Rex2 <TX_HASH>
+mega-evme replay --override.spec Satin <TX_HASH>
 ```
+
+A Satin replay needs a state whose system contracts are at the versions Satin deploys, which MegaETH mainnet and testnet reach at `Rex6`.
+On an older block Satin's own deploy check refuses to overwrite them, and the replay fails with an error naming the contract.
+
+### `--override.limits <JSON|FILE>`
+
+Replay on Satin under other protocol limits than the chain's, a counterfactual: the fields the JSON object names replace the chain's, and every other stays.
+Without it, a Satin replay of a block its chain does not run on Satin runs on Satin's default limits.
+The object's shape, the defaults and what is refused are in [Protocol limits](../configuration/chain-and-spec.md#protocol-limits).
+It applies to both the transaction replay and the block replay; a replay that runs on the legacy engine is refused with it, and so is a legacy block of a block replay.
+The limits a replay ran under are reported: a transaction replay's in its `satin.limits_override`, a block's in the `satin.limits_override` of its block record, and in text mode as `limits overridden` on the block's line.
+
+```
+mega-evme replay --override.spec Satin --override.limits '{"txRuntimeLimits":{"txDataSizeLimit":100000}}' <TX_HASH>
+mega-evme replay --block 26400001 --rpc <URL> --block-cache ./blocks --override.spec Satin --override.limits limits.json
+```
+
+## Replaying Whole Blocks
+
+`--block <N>` replays block `N`, and `--block <N>..<M>` blocks `N` through `M`.
+Each block runs on the engine its spec names: the one `--override.spec` forces, or the one the chain's schedule gives at the block's timestamp.
+Every transaction of the block runs in order after the block's pre-block changes, as a node runs the block, and every receipt is compared with the chain's: status, gas used, cumulative gas used, and every log's address, topics and data; the replayed receipts root is compared with the header's.
+The state the block leaves is not compared with the header's state root, so a difference that leaves every receipt as it was (a storage write that emits no log) passes.
+
+A block's inputs are the block with its transactions, the chain's receipts, and the state its parent left for everything the block reads, built from a `prestateTracer` trace of the block.
+A read the trace does not cover (what only a pre-block system call reads, or a path a counterfactual takes that the chain did not) is read from the parent block over RPC.
+
+| Flag                  | Description                                                                                                                                                |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--block <N[..M]>`    | The blocks to replay; conflicts with `TX_HASH`, tracing, state dump, fixture dump, transaction overrides and the RPC cache file                            |
+| `--block-cache <DIR>` | Read a block from `DIR` when it is there; write a block fetched over `--rpc` to it, with what its replay read beyond the trace, so the next run is offline |
+| `--verify`            | Exit with code 2 when a block differs from the chain                                                                                                       |
+| `--rpc <URL>`         | Fetch what the cache lacks: `eth_getBlockByNumber`, `eth_getBlockReceipts`, `debug_traceBlockByNumber` and the parent block's state                        |
+| `--json`              | Print one JSON record per transaction and per block instead of a line per block                                                                            |
+
+The endpoint needs the `debug` namespace and historical state at the parent block: an archive node.
+Without `--rpc`, a read the cache does not hold fails its block with an error naming the read.
+
+The cache layout is `blocks/<N / 10000>/<N>.json.zst`, one zstd-compressed JSON file per block, and `codes/<hh>/<hash>.bin`, contract code shared between blocks.
+
+### Records
+
+With `--json`, every transaction prints a record with `kind: "tx"` and every block one with `kind: "block"`:
+
+| Field (transaction)                       | Description                                                                                             |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `block`, `index`, `hash`                  | Where the transaction is                                                                                |
+| `engine`, `spec`                          | What it ran on: `legacy` or `satin`, and the spec                                                       |
+| `status`                                  | `success`, `revert`, `halt`, or `refused` when the engine did not include it                            |
+| `gas_used`, `cumulative_gas_used`, `logs` | As replayed                                                                                             |
+| `reason`                                  | Why it reverted, halted or was refused                                                                  |
+| `chain`                                   | The chain's `status` (`success` or `failure`), `gas_used`, `cumulative_gas_used` and `logs`             |
+| `differs`                                 | The fields that differ from the chain's: `refused`, `status`, `gas_used`, `cumulative_gas_used`, `logs` |
+| `satin`                                   | On Satin only: the [Satin output](../configuration/chain-and-spec.md#satin-output) object               |
+
+| Field (block)                                     | Description                                                                  |
+| ------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `block`, `hash`, `engine`, `spec`, `transactions` | The block and what it ran on                                                 |
+| `refused`, `differing`                            | Transactions refused, and transactions that differ from the chain            |
+| `gas_used`, `chain_gas_used`                      | The block's gas, as replayed and as recorded                                 |
+| `receipts_root`, `chain_receipts_root`            | The replayed receipts root and the header's                                  |
+| `matches_chain`                                   | Every transaction and the receipts root match the chain                      |
+| `rpc_reads`                                       | Reads the cached pre-state did not hold, served by the parent block over RPC |
+| `satin`                                           | On Satin only: the sum of the transactions' `satin` objects                  |
+
+A block that could not be replayed prints `{ "kind": "block", "block": N, "error": "..." }` and the run goes on to the next block.
+
+The exit code is 0, 1 when a block could not be replayed, or 2 when `--verify` is given and a block differs from the chain.
+
+### The Satin counterfactual
+
+`--override.spec Satin` runs every block as it would run on Satin: every transaction as signed, on the state its parent block left, under Satin's default protocol limits, or those `--override.limits` gives, with no building policy of a block builder applied.
+A transaction the Satin engine refuses (it cannot pay for its gas, or a block budget is full) is reported `refused` and left out, and the block goes on.
+A transaction signed with a gas limit sized for legacy costs can run out of gas on Satin: that is the counterfactual's answer, not a tool fault.
+Satin's pre-block changes deploy the EIP-7997 factory at `0x4e59b44847b379578588920cA78FbF26c0B4956C`, which no legacy spec reads, so a block cached from a legacy replay does not hold it; the first Satin replay of the block reads it over RPC and adds it to the cache.
 
 ## Transaction Overrides
 
@@ -232,6 +317,26 @@ mega-evme replay --rpc https://mainnet.megaeth.com/rpc --override.input 0xdeadbe
 
 ```bash
 mega-evme replay --rpc https://mainnet.megaeth.com/rpc --override.spec Rex2 0xabc123...
+```
+
+**Replay a transaction on Satin**
+
+```bash
+mega-evme replay --rpc https://mainnet.megaeth.com/rpc --override.spec Satin --json 0xabc123...
+```
+
+**Check a range of blocks against the chain, recording them for offline runs**
+
+```bash
+mega-evme replay --block 26400000..26400199 \
+  --rpc https://mainnet.megaeth.com/rpc --block-cache ./blocks --verify
+```
+
+**Replay the recorded blocks on Satin; once a Satin run has cached them, later runs can drop `--rpc`**
+
+```bash
+mega-evme replay --block 26400000..26400199 --block-cache ./blocks \
+  --rpc https://mainnet.megaeth.com/rpc --override.spec Satin --json > satin.ndjson
 ```
 
 ## See Also

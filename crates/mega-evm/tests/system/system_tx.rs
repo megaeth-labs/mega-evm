@@ -25,7 +25,9 @@ use revm::{
     DatabaseCommit,
 };
 
-use crate::common::{block, context, system_db, CALLER, GAS_LIMIT};
+use crate::common::{
+    account_state_gas, block, body_history, context, state_is_free, system_db, CALLER, GAS_LIMIT,
+};
 
 /// The chain the tests run on.
 const CHAIN_ID: u64 = 4326;
@@ -263,7 +265,7 @@ fn test_another_shape_from_the_system_address_is_an_ordinary_transaction() {
         assert!(outcome.result.is_success(), "{shape}: {:?}", outcome.result);
         assert!(!evm.ctx().is_system_originated(), "{shape}");
         assert!(outcome.state[&MEGA_SYSTEM_ADDRESS].info.balance < U256::from(FUNDS), "{shape}");
-        assert!(outcome.gas.history > 0, "{shape} pays history");
+        assert!(outcome.gas.history >= body_history(0), "{shape} pays history");
     }
 }
 
@@ -557,7 +559,7 @@ fn test_a_deposit_creates_its_caller_and_pays_for_it_once() {
             tx
         });
     let one_account = reference.gas.state;
-    assert!(one_account > 0, "a fresh recipient costs state gas");
+    assert_eq!(one_account, account_state_gas(), "a fresh recipient costs state gas");
 
     // A system transaction whose sender does not exist yet creates it, for the same charge.
     let created = run_outcome(chain_db(), system_tx(0, B256::with_last_byte(0x77)));
@@ -587,7 +589,11 @@ fn test_a_deposit_with_an_existing_caller_pays_nothing_extra() {
         run_outcome(existing, system_tx(0, B256::with_last_byte(0x88))).gas.state,
         run_outcome(fresh, system_tx(0, B256::with_last_byte(0x88))).gas.state,
     );
-    assert!(fresh > existing, "{fresh} is not above {existing}");
+    assert_eq!(
+        fresh,
+        existing + account_state_gas(),
+        "{fresh} is not one account above {existing}"
+    );
 }
 
 /// A deposit whose recipient is its own caller pays for that one account once: by the time the
@@ -625,15 +631,30 @@ fn test_a_deposit_that_creates_two_accounts_pays_for_both() {
     assert_eq!(two, one * 2, "two accounts created, two charges");
 }
 
+/// A deposit from `sender`, an account that does not exist, to the Oracle, whose gas limit is one
+/// short of its intrinsic gas and the account it creates for its caller, at the byte prices in
+/// effect.
+fn deposit_one_short_of_its_caller(sender: Address) -> MegaTransaction {
+    let deposit = || deposit_tx(sender, TxKind::Call(ORACLE_CONTRACT_ADDRESS), U256::ZERO, 0);
+    // A transaction without calldata has its intrinsic gas as its floor; run with its caller in
+    // place, the deposit creates no account.
+    let intrinsic =
+        run_outcome(chain_db().account_balance(sender, U256::from(1)), deposit()).gas.floor;
+    let mut tx = deposit();
+    tx.0.base.gas_limit = intrinsic + account_state_gas() - 1;
+    tx
+}
+
 /// A deposit that cannot pay for the account it creates for its caller is an out-of-gas halt,
 /// as a transaction that runs out in its runtime phase is.
 #[test]
 fn test_a_deposit_that_cannot_pay_for_its_caller_halts() {
+    // An account that costs nothing is one any deposit can pay for.
+    if state_is_free() {
+        return;
+    }
     let sender = address!("0x00000000000000000000000000000000000f0006");
-    let mut tx = deposit_tx(sender, TxKind::Call(ORACLE_CONTRACT_ADDRESS), U256::ZERO, 0);
-    tx.0.base.gas_limit = 30_000;
-
-    let outcome = run_outcome(chain_db(), tx);
+    let outcome = run_outcome(chain_db(), deposit_one_short_of_its_caller(sender));
     assert!(
         matches!(outcome.result, ExecutionResult::Halt { .. }),
         "{:?} is not a halt",
@@ -646,14 +667,16 @@ fn test_a_deposit_that_cannot_pay_for_its_caller_halts() {
 /// out-of-gas halt, and the halt is not a data-size stop.
 #[test]
 fn test_a_deposit_over_the_data_size_limit_that_cannot_pay_for_its_caller_halts() {
+    // An account that costs nothing is one any deposit can pay for.
+    if state_is_free() {
+        return;
+    }
     let sender = address!("0x00000000000000000000000000000000000f0008");
-    let mut tx = deposit_tx(sender, TxKind::Call(ORACLE_CONTRACT_ADDRESS), U256::ZERO, 0);
-    tx.0.base.gas_limit = 30_000;
     let limits =
         EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(mega_evm::TX_BODY_SIZE - 1);
 
     let outcome = MegaEvm::new(chain_context(chain_db()).with_tx_runtime_limits(limits))
-        .execute_transaction(tx)
+        .execute_transaction(deposit_one_short_of_its_caller(sender))
         .expect("the deposit is included");
     assert!(
         matches!(outcome.result, ExecutionResult::Halt { .. }),
@@ -758,8 +781,9 @@ fn test_a_deposit_that_creates_a_contract_pays_for_its_caller_too() {
 
     assert!(fresh.result.is_success(), "{:?}", fresh.result);
     assert!(existing.result.is_success(), "{:?}", existing.result);
-    assert!(
-        fresh.gas.state > existing.gas.state,
+    assert_eq!(
+        fresh.gas.state,
+        existing.gas.state + account_state_gas(),
         "the created caller costs state gas on top of the created contract",
     );
 }

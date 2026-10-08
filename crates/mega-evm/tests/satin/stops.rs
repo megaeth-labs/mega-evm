@@ -52,7 +52,7 @@ use revm::{
 };
 
 use crate::{
-    common::{call, call_with_data, create},
+    common::{body_history, call, call_with_data, create, state_is_free},
     detention::{context, work, Charges, BENEFICIARY},
     withheld_gas::{priced, Runs, PRICED},
 };
@@ -98,6 +98,12 @@ enum Limit {
 
 impl Limit {
     const ALL: [Self; 4] = [Self::DataSize, Self::KvUpdates, Self::StateGas, Self::Compute];
+
+    /// Whether a transaction can cross this limit at the byte prices in effect: where a state byte
+    /// is free no transaction adds state gas, and the state-gas limit has nothing to hold.
+    fn crossable(self) -> bool {
+        !(self == Self::StateGas && state_is_free())
+    }
 
     const fn kind(self) -> LimitKind {
         match self {
@@ -364,7 +370,7 @@ fn assert_cell(limit: Limit, crossing: usize, gas_limit: u64, slot: u64) {
 #[test]
 fn test_every_limit_stops_the_transaction_at_every_depth_and_tier() {
     let slot = one_slot();
-    for limit in Limit::ALL {
+    for limit in Limit::ALL.into_iter().filter(|limit| limit.crossable()) {
         for crossing in [0, 3] {
             for gas_limit in TIERS {
                 assert_cell(limit, crossing, gas_limit, slot);
@@ -400,7 +406,7 @@ fn test_an_inspector_cannot_turn_a_stop_into_a_halt() {
         InstructionResult::PrecompileOOG,
         InstructionResult::InvalidFEOpcode,
     ];
-    for limit in Limit::ALL {
+    for limit in Limit::ALL.into_iter().filter(|limit| limit.crossable()) {
         for crossing in [0, 3] {
             for gas_limit in TIERS {
                 let (configured, _) = limits_of(limit, crossing, slot);
@@ -542,7 +548,7 @@ fn test_a_revived_creation_reports_the_stop() {
         (Creation::NestedStart, [Limit::DataSize, Limit::KvUpdates, Limit::StateGas].as_slice()),
     ];
     for (creation, limits) in cases {
-        for &limit in limits {
+        for &limit in limits.iter().filter(|limit| limit.crossable()) {
             for gas_limit in TIERS {
                 let case = format!("{creation:?}, {limit:?}, gas limit {gas_limit}");
                 let configured = creation_limits(creation, limit, gas_limit);
@@ -1217,7 +1223,11 @@ fn test_detained_gas_is_restored() {
             .unwrap();
     assert!(detained.result.is_success(), "{:?}", detained.result);
     assert_eq!(detained.gas, undetained.gas, "the withheld gas was never spent");
-    assert!(detained.gas.gas_used < 50_000, "{}", detained.gas.gas_used);
+    assert!(
+        detained.gas.gas_used < 50_000 + body_history(0),
+        "what it ran and its body's history: {}",
+        detained.gas.gas_used
+    );
 }
 
 /// A body over the transaction's data-size limit stops the transaction before its first frame: a
@@ -1268,7 +1278,11 @@ fn test_data_limit_exceed_in_nested_call() {
         outcome.result
     );
     assert_eq!(outcome.limit_exceeded, Some(stop));
-    assert!(outcome.gas.gas_used < 200_000, "the stop burns nothing: {}", outcome.gas.gas_used);
+    assert!(
+        outcome.gas.gas_used < 200_000 + body_history(0),
+        "the stop burns nothing: {}",
+        outcome.gas.gas_used
+    );
 }
 
 /// A value transfer to a contract that writes a slot, under a limit one byte above the body: the
@@ -1723,6 +1737,11 @@ fn assert_answered_cell(answered: Answered, gas_limit: u64) {
 #[test]
 fn test_an_answer_three_calls_down_stops_the_transaction_at_either_tier() {
     for answered in [Answered::PastTheAllowance, Answered::Precompile, Answered::NewAccount] {
+        // A new account that adds no state gas, where a state byte is free, crosses no state-gas
+        // limit.
+        if answered == Answered::NewAccount && state_is_free() {
+            continue;
+        }
         for gas_limit in TIERS {
             assert_answered_cell(answered, gas_limit);
         }

@@ -39,10 +39,13 @@ use revm::{
     },
 };
 
-use crate::salt::{
-    account_bucket, authorization_tx, call_contract, capacity, create_with, crowded_account,
-    crowded_slot, db, entry, minimal_envs, run, salt_context, selfdestruct_to, slot_bucket,
-    try_run, tx, SaltEnvs, AUTHORITY, CALLER, CONTRACT, EMPTY, GAS_LIMIT,
+use crate::{
+    common::{history, state_is_free},
+    salt::{
+        account_bucket, authorization_tx, call_contract, capacity, create_with, crowded_account,
+        crowded_slot, db, entry, minimal_envs, run, salt_context, selfdestruct_to, slot_bucket,
+        try_run, tx, tx_with_gas, SaltEnvs, AUTHORITY, CALLER, CONTRACT, EMPTY, GAS_LIMIT,
+    },
 };
 
 /// The contract a probe's inner frame runs in.
@@ -50,6 +53,13 @@ const SUB: Address = alloy_primitives::address!("0000000000000000000000000000000
 
 /// The slot every probe that writes storage uses.
 const SLOT: u64 = 7;
+
+/// The gas a probe's inner call forwards: 2,000,000 on top of `unit` of state gas at the largest
+/// multiplier the probes crowd a bucket to, so the inner frame can pay for what it adds at every
+/// multiplier and byte price.
+fn inner_gas(unit: u64) -> u64 {
+    2_000_000 + 8 * unit
+}
 
 /// Runs `probe` at each multiplier and returns the state gas it netted, requiring the regular
 /// ledger to be the same at all of them.
@@ -75,6 +85,10 @@ fn net_state_at(
 /// is — and the bucket is read once for both.
 #[test]
 fn test_a_slot_written_and_restored_nets_nothing_at_every_multiplier() {
+    // A charge that costs nothing costs nothing at any capacity, and the engine asks for none.
+    if state_is_free() {
+        return;
+    }
     let code = || {
         BytecodeBuilder::default()
             .sstore(U256::from(SLOT), U256::from(1))
@@ -152,6 +166,7 @@ fn test_a_failed_value_call_gives_its_new_account_charge_back() {
 /// frame wrote a slot in a crowded bucket and reverted.
 #[test]
 fn test_a_charge_in_a_reverting_inner_frame_comes_back_whole() {
+    let forwarded = inner_gas(entry(GasId::sstore_set_state_gas()));
     let probe = || {
         let sub = BytecodeBuilder::default()
             .sstore(U256::from(SLOT), U256::from(1))
@@ -164,7 +179,7 @@ fn test_a_charge_in_a_reverting_inner_frame_comes_back_whole() {
             .push_number(0u64)
             .push_number(0u64)
             .push_address(SUB)
-            .push_number(2_000_000u64)
+            .push_number(forwarded)
             .append(CALL)
             .stop()
             .build();
@@ -182,6 +197,7 @@ fn test_a_charge_in_a_reverting_inner_frame_comes_back_whole() {
 /// pays the crowded price, so the arms above are not passing because nothing was charged.
 #[test]
 fn test_a_charge_an_inner_frame_keeps_scales_with_its_bucket() {
+    let forwarded = inner_gas(entry(GasId::sstore_set_state_gas()));
     let probe = || {
         let sub = BytecodeBuilder::default().sstore(U256::from(SLOT), U256::from(1)).stop().build();
         let code = BytecodeBuilder::default()
@@ -191,7 +207,7 @@ fn test_a_charge_an_inner_frame_keeps_scales_with_its_bucket() {
             .push_number(0u64)
             .push_number(0u64)
             .push_address(SUB)
-            .push_number(2_000_000u64)
+            .push_number(forwarded)
             .append(CALL)
             .stop()
             .build();
@@ -210,6 +226,7 @@ fn test_a_charge_an_inner_frame_keeps_scales_with_its_bucket() {
 /// one reverted, and the beneficiary was never created after all.
 #[test]
 fn test_a_selfdestruct_whose_caller_reverts_gives_its_charge_back() {
+    let forwarded = inner_gas(entry(GasId::new_account_state_gas()));
     let probe = |outer_reverts: bool| {
         move || {
             let sub = selfdestruct_to(EMPTY).build();
@@ -220,7 +237,7 @@ fn test_a_selfdestruct_whose_caller_reverts_gives_its_charge_back() {
                 .push_number(0u64)
                 .push_number(0u64)
                 .push_address(SUB)
-                .push_number(2_000_000u64)
+                .push_number(forwarded)
                 .append(CALL);
             code = if outer_reverts { code.revert_with_data([0xaa]) } else { code.stop() };
             let db = db(code.build())
@@ -413,6 +430,10 @@ fn test_the_refund_classes_side_by_side() {
 /// the refill, so the two cannot disagree even if the environment's answer would.
 #[test]
 fn test_the_capacity_behind_a_charge_and_its_refill_is_read_once() {
+    // A charge that costs nothing costs nothing at any capacity, and the engine asks for none.
+    if state_is_free() {
+        return;
+    }
     let bucket = slot_bucket(CONTRACT, U256::from(SLOT));
     let envs = minimal_envs().with_bucket_capacity(bucket, capacity(8));
     let code = BytecodeBuilder::default()
@@ -438,8 +459,10 @@ const SYNTHETIC_TARGET: Address = address!("0000000000000000000000000000000000c0
 const FORWARDED: u64 = 9_000;
 
 /// The caller's own regular gas limit in those probes, wide enough for a crowded charge to spill
-/// onto it in full.
-const CALLER_LIMIT: u64 = 5_000_000;
+/// onto it in full: 5,000,000 on top of a new account at the crowded price.
+fn caller_limit() -> u64 {
+    5_000_000 + entry(GasId::new_account_state_gas()) * SYNTHETIC_MULTIPLIER
+}
 
 /// The capacity the synthetic-settlement probes crowd their site to.
 const SYNTHETIC_MULTIPLIER: u64 = 8;
@@ -464,7 +487,7 @@ fn settle_a_synthetic_failure(
     let mut ctx = salt_context(db(Bytes::new()), envs.clone());
     let price = ctx.state_gas_charge(charge).expect("the bucket is readable");
 
-    let mut caller = GasTracker::new(CALLER_LIMIT, CALLER_LIMIT - FORWARDED, reservoir);
+    let mut caller = GasTracker::new(caller_limit(), caller_limit() - FORWARDED, reservoir);
     assert!(caller.record_state_cost(price), "the caller can pay the crowded charge");
     let spilled = caller.state_gas_spilled();
 
@@ -520,7 +543,7 @@ fn charged_create_input(reservoir: u64) -> FrameInput {
 /// alike.
 fn assert_restores_both_pools(site: &str, envs: &SaltEnvs, reservoir: u64, settled: &Settled) {
     let caller = &settled.caller;
-    assert_eq!(caller.remaining(), CALLER_LIMIT, "{site}: the regular pool comes back whole");
+    assert_eq!(caller.remaining(), caller_limit(), "{site}: the regular pool comes back whole");
     assert_eq!(caller.reservoir(), reservoir, "{site}: and the reservoir is where it started");
     assert_eq!(caller.state_gas_spent(), 0, "{site}: the state ledger nets zero");
     assert_eq!(caller.state_gas_spilled(), 0, "{site}: nothing is left spilled");
@@ -535,6 +558,10 @@ fn assert_restores_both_pools(site: &str, envs: &SaltEnvs, reservoir: u64, settl
 /// charge, both when the reservoir paid for it and when it spilled onto regular gas.
 #[test]
 fn test_a_synthetic_call_failure_refunds_the_crowded_upfront_charge() {
+    // A charge that costs nothing costs nothing at any capacity, and the engine asks for none.
+    if state_is_free() {
+        return;
+    }
     let crowded = entry(GasId::new_account_state_gas()) * SYNTHETIC_MULTIPLIER;
     let charge = StateGasCharge::one(
         GasId::new_account_state_gas(),
@@ -543,10 +570,10 @@ fn test_a_synthetic_call_failure_refunds_the_crowded_upfront_charge() {
 
     // The reservoir covers the whole charge.
     let envs = crowded_account(minimal_envs(), SYNTHETIC_TARGET, SYNTHETIC_MULTIPLIER);
-    let settled = settle_a_synthetic_failure(&envs, CALLER_LIMIT, charge, charged_call_input);
+    let settled = settle_a_synthetic_failure(&envs, caller_limit(), charge, charged_call_input);
     assert_eq!(settled.price, crowded, "the charge was priced at the crowded bucket");
     assert_eq!(settled.spilled, 0, "and the reservoir paid for all of it");
-    assert_restores_both_pools("a call from the reservoir", &envs, CALLER_LIMIT, &settled);
+    assert_restores_both_pools("a call from the reservoir", &envs, caller_limit(), &settled);
 
     // The reservoir covers part of it and the rest spills onto regular gas.
     let reservoir = crowded / 4;
@@ -561,15 +588,19 @@ fn test_a_synthetic_call_failure_refunds_the_crowded_upfront_charge() {
 /// address the frame would have deployed to.
 #[test]
 fn test_a_synthetic_creation_failure_refunds_the_crowded_upfront_charge() {
+    // A charge that costs nothing costs nothing at any capacity, and the engine asks for none.
+    if state_is_free() {
+        return;
+    }
     let crowded = entry(GasId::create_state_gas()) * SYNTHETIC_MULTIPLIER;
     let charge =
         StateGasCharge::one(GasId::create_state_gas(), StateGasSite::account(SYNTHETIC_TARGET));
 
     let envs = crowded_account(minimal_envs(), SYNTHETIC_TARGET, SYNTHETIC_MULTIPLIER);
-    let settled = settle_a_synthetic_failure(&envs, CALLER_LIMIT, charge, charged_create_input);
+    let settled = settle_a_synthetic_failure(&envs, caller_limit(), charge, charged_create_input);
     assert_eq!(settled.price, crowded, "the charge was priced at the crowded bucket");
     assert_eq!(settled.spilled, 0);
-    assert_restores_both_pools("a creation from the reservoir", &envs, CALLER_LIMIT, &settled);
+    assert_restores_both_pools("a creation from the reservoir", &envs, caller_limit(), &settled);
 
     let reservoir = crowded / 4;
     let envs = crowded_account(minimal_envs(), SYNTHETIC_TARGET, SYNTHETIC_MULTIPLIER);
@@ -582,8 +613,8 @@ fn test_a_synthetic_creation_failure_refunds_the_crowded_upfront_charge() {
 /* A deposit charge that is made and then rolled back. */
 
 /// How many bytes of runtime code the creation below deploys when its deposit is meant to fail.
-/// At the crowded price a byte costs `code_deposit_state_gas x 8`, so this many bytes is far
-/// beyond what the transaction brought.
+/// At the crowded price a byte costs `code_deposit_state_gas x 8` and its history; at the spec's
+/// prices this many bytes is far beyond what [`GAS_LIMIT`] brings.
 const UNAFFORDABLE_CODE: u64 = 20_000;
 
 /// How many it deploys when the deposit is meant to go through.
@@ -607,14 +638,34 @@ fn creation_depositing(deployed: u64) -> MemoryDatabase {
 /// the transaction settles and reports what it kept.
 #[test]
 fn test_a_creation_that_cannot_pay_its_code_deposit_keeps_no_state_gas() {
+    // A charge that costs nothing costs nothing at any capacity, and the engine asks for none.
+    if state_is_free() {
+        return;
+    }
     let created = CONTRACT.create(0);
     let crowd = |envs| {
         let envs = crowded_account(envs, created, SYNTHETIC_MULTIPLIER);
         crowded_slot(envs, created, U256::from(SLOT), SYNTHETIC_MULTIPLIER)
     };
 
+    // What the program spends with nothing to deposit, and at least what the deposit costs: its
+    // state gas at the crowded price and its history.
+    let without_the_deposit =
+        run(creation_depositing(0), crowd(minimal_envs()), call_contract()).gas.gas_used;
+    let deposit = entry(GasId::code_deposit_state_gas()) * SYNTHETIC_MULTIPLIER * UNAFFORDABLE_CODE +
+        history(UNAFFORDABLE_CODE);
+    // A deposit that costs less than the rest of the transaction leaves no gas limit at which the
+    // creation runs its init code and then cannot pay for the deposit.
+    if deposit < without_the_deposit {
+        return;
+    }
+    // The deposit's price on top of the rest, below the execution cap as every probe here runs:
+    // forwarded 63/64 of it, the creation runs its init code and falls short of the deposit.
+    let gas_limit = (without_the_deposit + deposit).min(GAS_LIMIT);
+
     let envs = crowd(minimal_envs());
-    let outcome = run(creation_depositing(UNAFFORDABLE_CODE), envs.clone(), call_contract());
+    let call = tx_with_gas(TxKind::Call(CONTRACT), Bytes::new(), U256::ZERO, gas_limit);
+    let outcome = run(creation_depositing(UNAFFORDABLE_CODE), envs.clone(), call);
     assert_eq!(outcome.gas.state, 0, "the failed creation kept neither charge");
     assert_eq!(
         envs.bucket_queries(slot_bucket(created, U256::from(SLOT))),

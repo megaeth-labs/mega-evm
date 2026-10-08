@@ -333,7 +333,13 @@ fn test_a_refund_does_not_lower_the_compute_figure() {
     for gas_limit in GAS_LIMITS {
         let cleared = writes(0, gas_limit);
         let overwritten = writes(2, gas_limit);
-        assert_eq!(overwritten.gas_used - cleared.gas_used, SSTORE_CLEARS_SCHEDULE);
+        // EIP-3529 caps the refund at a fifth of what the transaction spent, which the two spend
+        // alike before it; the history the transaction pays lifts the cap past the refund at the
+        // spec's prices.
+        let cap = overwritten.gas_used /
+            mega_evm::satin_gas_params()
+                .get(revm::context_interface::cfg::GasId::max_refund_quotient());
+        assert_eq!(overwritten.gas_used - cleared.gas_used, SSTORE_CLEARS_SCHEDULE.min(cap));
         assert_eq!(cleared.regular, overwritten.regular, "the refund is not taken off compute");
         assert_eq!(cleared.block_execution_gas(), overwritten.block_execution_gas());
     }

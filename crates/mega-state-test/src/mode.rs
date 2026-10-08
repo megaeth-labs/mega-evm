@@ -33,7 +33,9 @@ pub enum Mode {
     Equivalence,
     /// Satin's own configuration, whatever the fixture's fork: its schedule, EIP-8037 and
     /// EIP-2780, its execution cap and code-size limits, history gas and its precompile set.
-    /// The fixture's chain id and blob limit are kept.
+    /// The fixture's chain id and blob limit are kept. Its runtime limits are a bare context's —
+    /// gas detention at the spec's caps and nothing else — not the protocol's defaults, so the
+    /// transaction data-size limit is not held.
     Satin,
 }
 

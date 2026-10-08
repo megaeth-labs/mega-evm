@@ -23,8 +23,8 @@ use mega_evm::{
     constants::SLOT_STATE_GAS,
     pre_block_call_gas_limit,
     test_utils::{BytecodeBuilder, ErrorInjectingDatabase, MemoryDatabase},
-    BlockLimits, EvmTxRuntimeLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory,
-    MegaHardforkConfig, MegaSpecId, PreBlockStateSource,
+    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardforkConfig,
+    MegaSpecId, PreBlockStateSource, ProtocolLimits,
 };
 use revm::{
     bytecode::opcode::{CALLDATALOAD, MLOAD, SSTORE},
@@ -181,26 +181,19 @@ fn test_the_pre_block_calls_record_the_parent_hash_and_the_beacon_root() {
     );
 }
 
-/// The pre-block calls are the protocol's own work, held to no per-transaction limit: under
-/// limits their bodies, their writes and their state gas each cross, both calls still record.
+/// The pre-block calls are the protocol's own work, held to no per-transaction limit: under the
+/// smallest limits a chain may carry, which their bodies, their writes and their state gas cross,
+/// both calls still record.
 #[test]
 fn test_the_pre_block_calls_are_held_to_no_limit() {
-    let limits = EvmTxRuntimeLimits::no_limits()
-        .with_tx_data_size_limit(0)
-        .with_frame_data_size_limit(0)
-        .with_tx_kv_update_limit(0)
-        .with_frame_kv_update_limit(0)
-        .with_tx_state_gas_limit(0);
-    let ctx = MegaBlockExecutionCtx::new(
-        PARENT_HASH,
-        Some(PARENT_BEACON_ROOT),
-        Bytes::new(),
-        BlockLimits::no_limits().with_tx_runtime_limits(limits),
-    );
-    assert_eq!(
-        pre_block_calls(common::chain_spec(), BLOCK_NUMBER, ctx),
-        (PARENT_HASH, PARENT_BEACON_ROOT)
-    );
+    let limits = common::loosest_tx()
+        .with_tx_data_size_limit(mega_evm::TX_BODY_SIZE)
+        .with_frame_data_size_limit(1)
+        .with_tx_kv_update_limit(1)
+        .with_frame_kv_update_limit(1)
+        .with_tx_state_gas_limit(1);
+    let spec = common::chain_spec_with(ProtocolLimits::loosest().with_tx_runtime_limits(limits));
+    assert_eq!(pre_block_calls(spec, BLOCK_NUMBER, ctx()), (PARENT_HASH, PARENT_BEACON_ROOT));
 }
 
 /// A chain that has not reached Prague makes no block hashes call; the beacon root call is

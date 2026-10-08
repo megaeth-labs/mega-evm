@@ -1,5 +1,10 @@
 //! Transaction configuration for mega-evme
 
+use alloy_eips::{
+    eip2930::{AccessList, AccessListItem},
+    eip7702::{Authorization, RecoveredAuthority, RecoveredAuthorization, SignedAuthorization},
+    Decodable2718, Encodable2718, Typed2718 as _,
+};
 use alloy_primitives::{address, Address, Bytes, Signature, B256, U256};
 use clap::Args;
 use mega_evm::{
@@ -7,15 +12,14 @@ use mega_evm::{
         transaction::SignerRecoverable, Sealed, Signed, Transaction as _, TxEip1559, TxEip2930,
         TxEip7702, TxLegacy,
     },
-    alloy_eips::{
-        eip2930::{AccessList, AccessListItem},
-        eip7702::{Authorization, RecoveredAuthority, RecoveredAuthorization, SignedAuthorization},
-        Decodable2718, Encodable2718, Typed2718 as _,
-    },
+    alloy_op_evm::OpTx,
     op_alloy_consensus::{OpTxEnvelope, TxDeposit},
-    op_revm::transaction::deposit::DepositTransactionParts,
-    revm::{context::tx::TxEnv, primitives::TxKind},
-    Either, MegaTransaction, MegaTxEnvelope, MegaTxType,
+    op_revm::{transaction::deposit::DepositTransactionParts, OpTransaction},
+    revm::{
+        context::{either::Either, tx::TxEnv},
+        primitives::TxKind,
+    },
+    MegaTransaction, MegaTxEnvelope, MegaTxType,
 };
 use tracing::{debug, trace};
 
@@ -348,7 +352,7 @@ impl TxArgs {
     pub fn create_tx(&self, chain_id: u64) -> Result<MegaTransaction> {
         let tx_env = self.create_tx_env(chain_id)?;
         let envelope = create_fake_envelope(&tx_env)?;
-        let mut tx = MegaTransaction::new(tx_env);
+        let mut tx = OpTx(OpTransaction::new(tx_env));
         tx.enveloped_tx = Some(Bytes::from(envelope.encoded_2718()));
 
         // Set deposit fields if this is a deposit transaction (type 126)
@@ -397,14 +401,14 @@ impl DecodedRawTx {
         });
 
         let decoded_chain_id = envelope.chain_id();
-        let (gas_price, gas_priority_fee) = match envelope {
+        let (gas_price, gas_priority_fee) = match &envelope {
             OpTxEnvelope::Legacy(_) | OpTxEnvelope::Eip2930(_) => {
                 (envelope.gas_price().unwrap_or(0), None)
             }
             OpTxEnvelope::Eip1559(_) | OpTxEnvelope::Eip7702(_) => {
                 (envelope.max_fee_per_gas(), envelope.max_priority_fee_per_gas())
             }
-            OpTxEnvelope::Deposit(_) => (0, None),
+            OpTxEnvelope::Deposit(_) | OpTxEnvelope::PostExec(_) => (0, None),
         };
 
         let authorization_list = envelope
@@ -493,7 +497,7 @@ impl DecodedRawTx {
     ///
     /// Uses the stored raw bytes for `enveloped_tx` (used in L1 fee calculation).
     pub fn into_tx(self) -> MegaTransaction {
-        let mut tx = MegaTransaction::new(self.tx_env);
+        let mut tx = OpTx(OpTransaction::new(self.tx_env));
         tx.enveloped_tx = Some(self.raw_bytes);
         if let Some((source_hash, mint, is_system_transaction)) = self.deposit {
             tx.deposit = DepositTransactionParts { source_hash, mint, is_system_transaction };
@@ -605,5 +609,6 @@ fn create_fake_envelope(tx_env: &TxEnv) -> Result<MegaTxEnvelope> {
             };
             Ok(MegaTxEnvelope::Deposit(Sealed::new_unchecked(tx, B256::ZERO)))
         }
+        MegaTxType::PostExec => Err(EvmeError::UnsupportedTxType(tx_env.tx_type)),
     }
 }

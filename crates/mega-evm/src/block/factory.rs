@@ -16,8 +16,9 @@ use crate::{
 
 /// Creates the block executors a node drives.
 ///
-/// It holds what every block of the chain shares — the hardfork schedule, the EVM factory and
-/// the receipt builder — and each block adds its own [`MegaBlockExecutionCtx`].
+/// It holds what every block of the chain shares — the hardfork schedule, with the limits the
+/// protocol holds a block to, the EVM factory and the receipt builder — and each block adds its
+/// own [`MegaBlockExecutionCtx`].
 #[derive(Clone, Debug, Default)]
 pub struct MegaBlockExecutorFactory<R, Spec, EvmF> {
     receipt_builder: R,
@@ -27,6 +28,11 @@ pub struct MegaBlockExecutorFactory<R, Spec, EvmF> {
 
 impl<R, Spec, EvmF> MegaBlockExecutorFactory<R, Spec, EvmF> {
     /// Creates a factory over a receipt builder, a hardfork schedule and an EVM factory.
+    ///
+    /// The executors hold every block to the limits `spec` carries, whatever the EVM they run on
+    /// was created with. A node gives the EVM factory the same schedule
+    /// ([`MegaEvmFactory::with_schedule`]), so the EVMs it creates outside block execution run
+    /// under the same limits.
     pub const fn new(receipt_builder: R, spec: Spec, evm_factory: EvmF) -> Self {
         Self { receipt_builder, spec, evm_factory }
     }
@@ -101,9 +107,9 @@ where
 
     /// Creates an executor over an EVM the caller built.
     ///
-    /// The block's transaction-level limits are installed by
-    /// [`MegaBlockExecutor::new`], so an EVM the caller built without them still runs the block's
-    /// transactions under them.
+    /// The chain's limits at the block's timestamp are installed by [`MegaBlockExecutor::new`],
+    /// from the factory's schedule, so an EVM the caller built without them, or with others,
+    /// still runs the block's transactions under them.
     ///
     /// alloy-evm asks for an executor for every `I: Inspector`, so this route cannot refuse a
     /// rewriting inspector by its type; the executor checks the EVM at every entry point instead.
