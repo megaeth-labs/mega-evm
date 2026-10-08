@@ -3,8 +3,6 @@
 //! This module provides the ability to override transaction fields when replaying
 //! transactions from RPC.
 
-use std::cell::RefCell;
-
 use alloy_eips::{Encodable2718, Typed2718};
 use alloy_primitives::{Address, Bytes, TxHash, U256};
 use clap::Args;
@@ -14,11 +12,6 @@ use mega_evm::{
 };
 
 use super::{load_hex, parse_ether_value, Result};
-
-// Thread-local storage for input override (Bytes is not Copy, so we can't store it in TxOverrides)
-thread_local! {
-    static INPUT_OVERRIDE: RefCell<Option<Bytes>> = const { RefCell::new(None) };
-}
 
 /// Transaction override arguments for the replay command.
 #[derive(Args, Debug, Clone, Default)]
@@ -52,45 +45,43 @@ impl TxOverrideArgs {
             self.input_file.is_some()
     }
 
-    /// Wraps a transaction with overrides.
-    pub fn wrap<T: Copy>(&self, tx: T) -> Result<OverriddenTx<T>> {
-        // Parse and store input override in thread-local if present
-        let has_input_override =
-            if let Some(bytes) = load_hex(self.input.clone(), self.input_file.clone())? {
-                INPUT_OVERRIDE.with(|cell| cell.borrow_mut().replace(bytes));
-                true
-            } else {
-                INPUT_OVERRIDE.with(|cell| cell.borrow_mut().take());
-                false
-            };
-
-        Ok(OverriddenTx {
-            inner: tx,
-            overrides: TxOverrides {
-                gas_limit: self.gas_limit,
-                value: self.value.as_deref().map(parse_ether_value).transpose()?,
-                has_input_override,
-            },
+    /// Parse the overrides: read the input override (from `--override.input`
+    /// or `--override.input-file`) and the value override.
+    pub fn parse(&self) -> Result<TxOverrides> {
+        // The input is read first, so a run with two bad overrides reports the
+        // input's failure.
+        let input = load_hex(self.input.clone(), self.input_file.clone())?;
+        Ok(TxOverrides {
+            gas_limit: self.gas_limit,
+            value: self.value.as_deref().map(parse_ether_value).transpose()?,
+            input,
         })
     }
 }
 
 /// Parsed transaction overrides.
 ///
-/// All fields must be `Copy` because `OverriddenTx<T>` must implement `Copy`
-/// (required by block executor's `run_transaction`). The input override is stored
-/// in a thread-local (`INPUT_OVERRIDE`) since `Bytes` is not `Copy`.
-#[derive(Debug, Clone, Copy, Default)]
-struct TxOverrides {
+/// Owns every override, the input bytes included, so each set of overrides is
+/// independent of any other: the [`OverriddenTx`] wrappers it hands out borrow
+/// it, which is what lets them stay `Copy` (as the block executor's
+/// `run_transaction` requires) while carrying non-`Copy` input.
+#[derive(Debug, Clone, Default)]
+pub struct TxOverrides {
     /// Override for gas limit.
     gas_limit: Option<u64>,
     /// Override for value.
     value: Option<U256>,
-    /// Whether input data should be overridden (actual data in thread-local).
-    has_input_override: bool,
+    /// Override for input data.
+    input: Option<Bytes>,
 }
 
 impl TxOverrides {
+    /// Wraps a transaction so it converts to a [`MegaTransaction`] with these
+    /// overrides applied.
+    pub const fn wrap<T: Copy>(&self, tx: T) -> OverriddenTx<'_, T> {
+        OverriddenTx { inner: tx, overrides: self }
+    }
+
     /// Apply overrides to a [`MegaTransaction`].
     fn apply(&self, tx: &mut MegaTransaction) {
         if let Some(gas_limit) = self.gas_limit {
@@ -99,10 +90,8 @@ impl TxOverrides {
         if let Some(value) = self.value {
             tx.base.value = value;
         }
-        if self.has_input_override {
-            if let Some(input) = INPUT_OVERRIDE.with(|cell| cell.borrow().clone()) {
-                tx.base.data = input;
-            }
+        if let Some(input) = &self.input {
+            tx.base.data = input.clone();
         }
     }
 }
@@ -112,13 +101,13 @@ impl TxOverrides {
 /// This wrapper implements all the required traits by delegating to the inner
 /// transaction, but intercepts `IntoTxEnv` to apply overrides.
 #[derive(Debug, Clone, Copy)]
-pub struct OverriddenTx<T: Copy> {
+pub struct OverriddenTx<'a, T: Copy> {
     inner: T,
-    overrides: TxOverrides,
+    overrides: &'a TxOverrides,
 }
 
 // Implement IntoTxEnv - this is where we apply the overrides
-impl<T: IntoTxEnv<MegaTransaction> + Copy> IntoTxEnv<MegaTransaction> for OverriddenTx<T> {
+impl<T: IntoTxEnv<MegaTransaction> + Copy> IntoTxEnv<MegaTransaction> for OverriddenTx<'_, T> {
     fn into_tx_env(self) -> MegaTransaction {
         let mut tx = self.inner.into_tx_env();
         self.overrides.apply(&mut tx);
@@ -127,7 +116,7 @@ impl<T: IntoTxEnv<MegaTransaction> + Copy> IntoTxEnv<MegaTransaction> for Overri
 }
 
 // Delegate RecoveredTx to inner
-impl<Tx, T: RecoveredTx<Tx> + Copy> RecoveredTx<Tx> for OverriddenTx<T> {
+impl<Tx, T: RecoveredTx<Tx> + Copy> RecoveredTx<Tx> for OverriddenTx<'_, T> {
     fn tx(&self) -> &Tx {
         self.inner.tx()
     }
@@ -138,7 +127,7 @@ impl<Tx, T: RecoveredTx<Tx> + Copy> RecoveredTx<Tx> for OverriddenTx<T> {
 }
 
 // Delegate Typed2718 to inner (required as the `Encodable2718` supertrait below).
-impl<T: Typed2718 + Copy> Typed2718 for OverriddenTx<T> {
+impl<T: Typed2718 + Copy> Typed2718 for OverriddenTx<'_, T> {
     fn ty(&self) -> u8 {
         self.inner.ty()
     }
@@ -147,7 +136,7 @@ impl<T: Typed2718 + Copy> Typed2718 for OverriddenTx<T> {
 // Delegate Encodable2718 to inner. Overrides only affect the `TxEnv` produced by `IntoTxEnv`, not
 // the EIP-2718 encoding, so the encoded size reflects the original transaction — matching the
 // `tx_size`/`da_size` the executor charged before override support existed.
-impl<T: Encodable2718 + Copy> Encodable2718 for OverriddenTx<T> {
+impl<T: Encodable2718 + Copy> Encodable2718 for OverriddenTx<'_, T> {
     fn type_flag(&self) -> Option<u8> {
         self.inner.type_flag()
     }
@@ -164,8 +153,77 @@ impl<T: Encodable2718 + Copy> Encodable2718 for OverriddenTx<T> {
 // Delegate MegaTransactionExt to inner so `OverriddenTx` is accepted by `run_transaction`.
 // `tx_size`/`estimated_da_size` fall back to the trait defaults (recomputed from the delegated
 // encoding above); only `tx_hash` needs explicit forwarding.
-impl<T: MegaTransactionExt + Copy> MegaTransactionExt for OverriddenTx<T> {
+impl<T: MegaTransactionExt + Copy> MegaTransactionExt for OverriddenTx<'_, T> {
     fn tx_hash(&self) -> TxHash {
         self.inner.tx_hash()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy_consensus::{transaction::Recovered, Signed, TxLegacy};
+    use alloy_primitives::{Signature, B256};
+    use mega_evm::MegaTxEnvelope;
+
+    use super::*;
+
+    /// A legacy call carrying `input`, as the endpoint would serve it.
+    fn envelope(input: &[u8]) -> MegaTxEnvelope {
+        MegaTxEnvelope::Legacy(Signed::new_unchecked(
+            TxLegacy {
+                gas_limit: 21_000,
+                input: Bytes::copy_from_slice(input),
+                ..Default::default()
+            },
+            Signature::new(U256::ONE, U256::ONE, false),
+            B256::ZERO,
+        ))
+    }
+
+    /// Overrides parsed from `input` alone.
+    fn input_override(input: Option<&str>) -> TxOverrides {
+        TxOverrideArgs { input: input.map(str::to_string), ..Default::default() }
+            .parse()
+            .expect("the overrides parse")
+    }
+
+    /// Each wrapper carries its own overrides: wrappers made from different
+    /// override sets, held at once and converted in any order, each apply their
+    /// own input, and a wrapper without an input override keeps the original.
+    #[test]
+    fn test_interleaved_wrappers_keep_their_own_overrides() {
+        let tx = envelope(&[0x01]);
+        let recovered = Recovered::new_unchecked(&tx, Address::ZERO);
+        let first = input_override(Some("0xaa"));
+        let second = input_override(Some("0xbb"));
+        let none = input_override(None);
+
+        let wrapped_first = first.wrap(recovered);
+        let wrapped_second = second.wrap(recovered);
+        let wrapped_none = none.wrap(recovered);
+
+        assert_eq!(wrapped_none.into_tx_env().base.data, Bytes::from_static(&[0x01]));
+        assert_eq!(wrapped_first.into_tx_env().base.data, Bytes::from_static(&[0xaa]));
+        assert_eq!(wrapped_second.into_tx_env().base.data, Bytes::from_static(&[0xbb]));
+        assert_eq!(wrapped_first.into_tx_env().base.data, Bytes::from_static(&[0xaa]));
+    }
+
+    /// Gas limit and value overrides apply alongside the input.
+    #[test]
+    fn test_overrides_apply_every_field() {
+        let tx = envelope(&[0x01]);
+        let overrides = TxOverrideArgs {
+            gas_limit: Some(50_000),
+            value: Some("7".to_string()),
+            input: Some("0xcc".to_string()),
+            input_file: None,
+        }
+        .parse()
+        .expect("the overrides parse");
+
+        let converted = overrides.wrap(Recovered::new_unchecked(&tx, Address::ZERO)).into_tx_env();
+        assert_eq!(converted.base.gas_limit, 50_000);
+        assert_eq!(converted.base.value, U256::from(7));
+        assert_eq!(converted.base.data, Bytes::from_static(&[0xcc]));
     }
 }

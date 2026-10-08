@@ -1,4 +1,5 @@
 use std::{
+    cell::OnceCell,
     collections::HashSet,
     path::PathBuf,
     time::{Duration, Instant},
@@ -25,7 +26,8 @@ use crate::{
         cfg_env, external_envs_from, log_execution_result, parse_spec, print_run_artifacts,
         print_transaction_report, BuildProviderOutput, EvmeExternalEnvs, EvmeOutcome,
         ExecutionSummary, ExtEnvArgs, ExternalEnvSnapshot, OpTxReceipt, OutputArgs, OverriddenTx,
-        RpcArgs, RpcCacheStore, StateDumpArgs, TraceArgs, TxOverrideArgs, VerificationCounts,
+        RpcArgs, RpcCacheStore, StateDumpArgs, TraceArgs, TxOverrideArgs, TxOverrides,
+        VerificationCounts,
     },
     replay::{get_hardfork_config, ReplayHardforks},
 };
@@ -262,6 +264,10 @@ struct TargetDraft {
 struct SingleTxLifecycle<'a> {
     /// The invocation, for the override, trace and dump flags.
     cmd: &'a Cmd,
+    /// The parsed transaction overrides, filled when the target is reached —
+    /// the moment they have always been read — and borrowed by the wrapper the
+    /// target executes as.
+    overrides: &'a OnceCell<TxOverrides>,
     /// Fixture inputs, present iff `--dump-fixture` was given. Taken by the one
     /// target this driver ever runs.
     fixture_inputs: Option<(MegaEnv, fixture::OnchainAnchor)>,
@@ -273,7 +279,7 @@ struct SingleTxLifecycle<'a> {
     block: &'a Block<Transaction>,
 }
 
-impl kernel::TargetLifecycle for SingleTxLifecycle<'_> {
+impl<'a> kernel::TargetLifecycle for SingleTxLifecycle<'a> {
     /// A single-transaction replay may be asked for a trace, so it always brings
     /// a real tracer rather than a place-holder.
     type Inspector = TracingInspector;
@@ -285,7 +291,7 @@ impl kernel::TargetLifecycle for SingleTxLifecycle<'_> {
     /// The target runs as `--override.*` rewrote it. With no override set the
     /// wrapper carries none and delegates every field, so the wrapping itself is
     /// unconditional and costs nothing.
-    type Tx<'tx> = OverriddenTx<Recovered<&'tx MegaTxEnvelope>>;
+    type Tx<'tx> = OverriddenTx<'a, Recovered<&'tx MegaTxEnvelope>>;
     type Draft = TargetDraft;
 
     /// Apply the transaction overrides and arm the inspector for the target.
@@ -298,7 +304,17 @@ impl kernel::TargetLifecycle for SingleTxLifecycle<'_> {
         if self.cmd.tx_override_args.has_overrides() {
             info!(overrides = ?self.cmd.tx_override_args, "Applying transaction overrides");
         }
-        let wrapped_tx = self.cmd.tx_override_args.wrap(tx.as_recovered())?;
+        // Read when the target is reached, as the overrides always have been.
+        // This driver reports one target, so they are read once.
+        let slot: &'a OnceCell<TxOverrides> = self.overrides;
+        let overrides = match slot.get() {
+            Some(overrides) => overrides,
+            None => {
+                let parsed = self.cmd.tx_override_args.parse()?;
+                slot.get_or_init(|| parsed)
+            }
+        };
+        let wrapped_tx = overrides.wrap(tx.as_recovered());
         // Drop whatever the preceding transactions of the block recorded: the
         // trace describes the target, so the tracer starts here.
         inspector.fuse();
@@ -1095,8 +1111,10 @@ impl Cmd {
         };
         let targets: HashSet<B256> = core::iter::once(ctx.tx_hash).collect();
 
+        let overrides = OnceCell::new();
         let mut lifecycle = SingleTxLifecycle {
             cmd: self,
+            overrides: &overrides,
             fixture_inputs,
             chain_id: ctx.chain_id,
             executed_spec: setup.executed_spec,
