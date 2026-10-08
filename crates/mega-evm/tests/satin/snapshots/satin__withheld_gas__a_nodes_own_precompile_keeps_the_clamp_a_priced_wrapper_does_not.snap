@@ -1,0 +1,808 @@
+---
+source: crates/mega-evm/tests/satin/withheld_gas.rs
+expression: "&views"
+---
+{
+  "a node's own precompile, gas limit 100000000": {
+    "result": {
+      "kind": "revert",
+      "reason": "MegaLimitExceeded(ComputeGas, 100002)",
+      "output": "0x84b90267000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000186a2",
+      "created": null,
+      "logs": []
+    },
+    "gas": {
+      "regular": 15297,
+      "state": 0,
+      "history": 30096,
+      "history_bytes": 342,
+      "reservoir_remaining": 0,
+      "floor": 17048,
+      "gas_used": 45393
+    },
+    "result_gas": {
+      "total_gas_spent": 45393,
+      "state_gas_spent": 0,
+      "refunded": 0,
+      "floor_gas": 17048,
+      "reservoir_remaining": 0
+    },
+    "usage": {
+      "data_size": 342,
+      "write_records": 0
+    },
+    "limit_stop": {
+      "kind": "ComputeGas",
+      "limit": 100002,
+      "used": 133
+    },
+    "oracle_reads": [],
+    "accounts": {
+      "0x0000000000000000000000000000000000bef000": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x0000000000000000000000000000000000d00000": {
+        "balance": "0x0",
+        "nonce": 1,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x4200000000000000000000000000000000000019": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x420000000000000000000000000000000000001a": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x420000000000000000000000000000000000001b": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      }
+    }
+  },
+  "a node's own precompile, gas limit 300000000": {
+    "result": {
+      "kind": "revert",
+      "reason": "MegaLimitExceeded(ComputeGas, 100002)",
+      "output": "0x84b90267000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000186a2",
+      "created": null,
+      "logs": []
+    },
+    "gas": {
+      "regular": 15297,
+      "state": 0,
+      "history": 30096,
+      "history_bytes": 342,
+      "reservoir_remaining": 99969904,
+      "floor": 17048,
+      "gas_used": 45393
+    },
+    "result_gas": {
+      "total_gas_spent": 45393,
+      "state_gas_spent": 0,
+      "refunded": 0,
+      "floor_gas": 17048,
+      "reservoir_remaining": 99969904
+    },
+    "usage": {
+      "data_size": 342,
+      "write_records": 0
+    },
+    "limit_stop": {
+      "kind": "ComputeGas",
+      "limit": 100002,
+      "used": 133
+    },
+    "oracle_reads": [],
+    "accounts": {
+      "0x0000000000000000000000000000000000bef000": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x0000000000000000000000000000000000d00000": {
+        "balance": "0x0",
+        "nonce": 1,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x4200000000000000000000000000000000000019": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x420000000000000000000000000000000000001a": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x420000000000000000000000000000000000001b": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      }
+    }
+  },
+  "the BN254 pairing, gas limit 100000000, detained": {
+    "result": {
+      "kind": "success",
+      "reason": "Stop",
+      "output": "0x",
+      "created": null,
+      "logs": []
+    },
+    "gas": {
+      "regular": 139742,
+      "state": 0,
+      "history": 77968,
+      "history_bytes": 886,
+      "reservoir_remaining": 0,
+      "floor": 51864,
+      "gas_used": 217710
+    },
+    "result_gas": {
+      "total_gas_spent": 217710,
+      "state_gas_spent": 0,
+      "refunded": 0,
+      "floor_gas": 51864,
+      "reservoir_remaining": 0
+    },
+    "usage": {
+      "data_size": 886,
+      "write_records": 0
+    },
+    "limit_stop": null,
+    "oracle_reads": [],
+    "accounts": {
+      "0x0000000000000000000000000000000000bef000": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x0000000000000000000000000000000000d00000": {
+        "balance": "0x0",
+        "nonce": 1,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x0000000000000000000000000000000000d00001": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0x0f889ee400493ad8f1d3b73ae141eb8d614f16d9f6e0893642d0f3bee5146bc4",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x4200000000000000000000000000000000000019": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x420000000000000000000000000000000000001a": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x420000000000000000000000000000000000001b": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      }
+    }
+  },
+  "the BN254 pairing, gas limit 100000000, plain": {
+    "result": {
+      "kind": "success",
+      "reason": "Stop",
+      "output": "0x",
+      "created": null,
+      "logs": []
+    },
+    "gas": {
+      "regular": 139742,
+      "state": 0,
+      "history": 77968,
+      "history_bytes": 886,
+      "reservoir_remaining": 0,
+      "floor": 51864,
+      "gas_used": 217710
+    },
+    "result_gas": {
+      "total_gas_spent": 217710,
+      "state_gas_spent": 0,
+      "refunded": 0,
+      "floor_gas": 51864,
+      "reservoir_remaining": 0
+    },
+    "usage": {
+      "data_size": 886,
+      "write_records": 0
+    },
+    "limit_stop": null,
+    "oracle_reads": [],
+    "accounts": {
+      "0x0000000000000000000000000000000000bef000": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x0000000000000000000000000000000000d00000": {
+        "balance": "0x0",
+        "nonce": 1,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x0000000000000000000000000000000000d00001": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0x035218e60d7b705fa6dc10a2156a45650665484bd6942b5254b902381c2acc1c",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x4200000000000000000000000000000000000019": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x420000000000000000000000000000000000001a": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x420000000000000000000000000000000000001b": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      }
+    }
+  },
+  "the BN254 pairing, gas limit 300000000, detained": {
+    "result": {
+      "kind": "success",
+      "reason": "Stop",
+      "output": "0x",
+      "created": null,
+      "logs": []
+    },
+    "gas": {
+      "regular": 139742,
+      "state": 0,
+      "history": 77968,
+      "history_bytes": 886,
+      "reservoir_remaining": 99922032,
+      "floor": 51864,
+      "gas_used": 217710
+    },
+    "result_gas": {
+      "total_gas_spent": 217710,
+      "state_gas_spent": 0,
+      "refunded": 0,
+      "floor_gas": 51864,
+      "reservoir_remaining": 99922032
+    },
+    "usage": {
+      "data_size": 886,
+      "write_records": 0
+    },
+    "limit_stop": null,
+    "oracle_reads": [],
+    "accounts": {
+      "0x0000000000000000000000000000000000bef000": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x0000000000000000000000000000000000d00000": {
+        "balance": "0x0",
+        "nonce": 1,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x0000000000000000000000000000000000d00001": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0x0f889ee400493ad8f1d3b73ae141eb8d614f16d9f6e0893642d0f3bee5146bc4",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x4200000000000000000000000000000000000019": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x420000000000000000000000000000000000001a": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x420000000000000000000000000000000000001b": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      }
+    }
+  },
+  "the BN254 pairing, gas limit 300000000, plain": {
+    "result": {
+      "kind": "success",
+      "reason": "Stop",
+      "output": "0x",
+      "created": null,
+      "logs": []
+    },
+    "gas": {
+      "regular": 139742,
+      "state": 0,
+      "history": 77968,
+      "history_bytes": 886,
+      "reservoir_remaining": 99922032,
+      "floor": 51864,
+      "gas_used": 217710
+    },
+    "result_gas": {
+      "total_gas_spent": 217710,
+      "state_gas_spent": 0,
+      "refunded": 0,
+      "floor_gas": 51864,
+      "reservoir_remaining": 99922032
+    },
+    "usage": {
+      "data_size": 886,
+      "write_records": 0
+    },
+    "limit_stop": null,
+    "oracle_reads": [],
+    "accounts": {
+      "0x0000000000000000000000000000000000bef000": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x0000000000000000000000000000000000d00000": {
+        "balance": "0x0",
+        "nonce": 1,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x0000000000000000000000000000000000d00001": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0x035218e60d7b705fa6dc10a2156a45650665484bd6942b5254b902381c2acc1c",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x4200000000000000000000000000000000000019": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x420000000000000000000000000000000000001a": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x420000000000000000000000000000000000001b": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      }
+    }
+  },
+  "the KZG point evaluation, gas limit 100000000, detained": {
+    "result": {
+      "kind": "success",
+      "reason": "Stop",
+      "output": "0x",
+      "created": null,
+      "logs": []
+    },
+    "gas": {
+      "regular": 98134,
+      "state": 0,
+      "history": 44176,
+      "history_bytes": 502,
+      "reservoir_remaining": 0,
+      "floor": 27288,
+      "gas_used": 142310
+    },
+    "result_gas": {
+      "total_gas_spent": 142310,
+      "state_gas_spent": 0,
+      "refunded": 0,
+      "floor_gas": 27288,
+      "reservoir_remaining": 0
+    },
+    "usage": {
+      "data_size": 502,
+      "write_records": 0
+    },
+    "limit_stop": null,
+    "oracle_reads": [],
+    "accounts": {
+      "0x0000000000000000000000000000000000bef000": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x0000000000000000000000000000000000d00000": {
+        "balance": "0x0",
+        "nonce": 1,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x0000000000000000000000000000000000d00001": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xf9898983f0c1fc1afaa904c78c37450d8b00680d4c4d76ff35a738c6e09334d1",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x4200000000000000000000000000000000000019": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x420000000000000000000000000000000000001a": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x420000000000000000000000000000000000001b": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      }
+    }
+  },
+  "the KZG point evaluation, gas limit 100000000, plain": {
+    "result": {
+      "kind": "success",
+      "reason": "Stop",
+      "output": "0x",
+      "created": null,
+      "logs": []
+    },
+    "gas": {
+      "regular": 98134,
+      "state": 0,
+      "history": 44176,
+      "history_bytes": 502,
+      "reservoir_remaining": 0,
+      "floor": 27288,
+      "gas_used": 142310
+    },
+    "result_gas": {
+      "total_gas_spent": 142310,
+      "state_gas_spent": 0,
+      "refunded": 0,
+      "floor_gas": 27288,
+      "reservoir_remaining": 0
+    },
+    "usage": {
+      "data_size": 502,
+      "write_records": 0
+    },
+    "limit_stop": null,
+    "oracle_reads": [],
+    "accounts": {
+      "0x0000000000000000000000000000000000bef000": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x0000000000000000000000000000000000d00000": {
+        "balance": "0x0",
+        "nonce": 1,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x0000000000000000000000000000000000d00001": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xdf401cadc5b9b857ab31ada5dace0c076e46314147dabf54d5c5f3d0c9876ebd",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x4200000000000000000000000000000000000019": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x420000000000000000000000000000000000001a": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x420000000000000000000000000000000000001b": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      }
+    }
+  },
+  "the KZG point evaluation, gas limit 300000000, detained": {
+    "result": {
+      "kind": "success",
+      "reason": "Stop",
+      "output": "0x",
+      "created": null,
+      "logs": []
+    },
+    "gas": {
+      "regular": 98134,
+      "state": 0,
+      "history": 44176,
+      "history_bytes": 502,
+      "reservoir_remaining": 99955824,
+      "floor": 27288,
+      "gas_used": 142310
+    },
+    "result_gas": {
+      "total_gas_spent": 142310,
+      "state_gas_spent": 0,
+      "refunded": 0,
+      "floor_gas": 27288,
+      "reservoir_remaining": 99955824
+    },
+    "usage": {
+      "data_size": 502,
+      "write_records": 0
+    },
+    "limit_stop": null,
+    "oracle_reads": [],
+    "accounts": {
+      "0x0000000000000000000000000000000000bef000": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x0000000000000000000000000000000000d00000": {
+        "balance": "0x0",
+        "nonce": 1,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x0000000000000000000000000000000000d00001": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xf9898983f0c1fc1afaa904c78c37450d8b00680d4c4d76ff35a738c6e09334d1",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x4200000000000000000000000000000000000019": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x420000000000000000000000000000000000001a": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x420000000000000000000000000000000000001b": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      }
+    }
+  },
+  "the KZG point evaluation, gas limit 300000000, plain": {
+    "result": {
+      "kind": "success",
+      "reason": "Stop",
+      "output": "0x",
+      "created": null,
+      "logs": []
+    },
+    "gas": {
+      "regular": 98134,
+      "state": 0,
+      "history": 44176,
+      "history_bytes": 502,
+      "reservoir_remaining": 99955824,
+      "floor": 27288,
+      "gas_used": 142310
+    },
+    "result_gas": {
+      "total_gas_spent": 142310,
+      "state_gas_spent": 0,
+      "refunded": 0,
+      "floor_gas": 27288,
+      "reservoir_remaining": 99955824
+    },
+    "usage": {
+      "data_size": 502,
+      "write_records": 0
+    },
+    "limit_stop": null,
+    "oracle_reads": [],
+    "accounts": {
+      "0x0000000000000000000000000000000000bef000": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x0000000000000000000000000000000000d00000": {
+        "balance": "0x0",
+        "nonce": 1,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x0000000000000000000000000000000000d00001": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xdf401cadc5b9b857ab31ada5dace0c076e46314147dabf54d5c5f3d0c9876ebd",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x4200000000000000000000000000000000000019": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x420000000000000000000000000000000000001a": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x420000000000000000000000000000000000001b": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      }
+    }
+  }
+}
