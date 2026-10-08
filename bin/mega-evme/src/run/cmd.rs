@@ -9,9 +9,6 @@ use crate::common::{
     create_address, print_execution_summary, print_execution_trace, EvmeOutcome, ExecutionSummary,
 };
 
-// Re-export TracerType from common module
-pub use crate::common::TracerType;
-
 /// Run arbitrary EVM bytecode
 #[derive(Parser, Debug)]
 pub struct Cmd {

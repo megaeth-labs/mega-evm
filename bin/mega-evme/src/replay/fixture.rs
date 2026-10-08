@@ -56,15 +56,6 @@ pub(crate) enum FixtureBuildError {
     Construction(ReplayError),
 }
 
-impl Display for FixtureBuildError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Unsupported(reason) => f.write_str(reason),
-            Self::Construction(err) => write!(f, "{err}"),
-        }
-    }
-}
-
 impl From<FixtureBuildError> for ReplayError {
     fn from(err: FixtureBuildError) -> Self {
         match err {

@@ -229,7 +229,6 @@ impl ExitCode {
     /// Map a top-level command error onto its class.
     pub fn from_command_error(err: &Error) -> Self {
         match err {
-            Error::Custom(_) => Self::ExecutionError,
             Error::Evme(err) => Self::from_evme_error(err),
         }
     }
@@ -722,13 +721,9 @@ mod tests {
         );
     }
 
-    /// The top-level wrapper adds no class of its own beyond the internal one.
+    /// The top-level wrapper adds no class of its own.
     #[test]
     fn test_command_error_classes() {
-        assert_eq!(
-            ExitCode::from_command_error(&Error::Custom("bad state")),
-            ExitCode::ExecutionError
-        );
         assert_eq!(
             ExitCode::from_command_error(&Error::Evme(EvmeError::RpcError("down".to_string()))),
             ExitCode::RpcFailure
