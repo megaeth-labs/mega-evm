@@ -27,7 +27,7 @@ The fixture types are the revm fork's own (`revm::statetest_types`, the `test-ty
 - Every failure is a `FailureKind`; equivalence mode names the deviation that explains it, and one it does not name is unattributed.
 - A deviation lists the exact entries it explains — file, test, data, gas and value indices — with the hashes Satin produces; a failure is its only with those hashes, and `--expect-deviations` requires every listed entry to fail exactly as listed.
 - Skips mirror the reference runner's, so the executed and skipped counts equal the ones `.github/workflows/exec-spec.yml` pins for it.
-- A blockchain test is skipped only for a class decided from its content (`src/blockchain/skips.rs`); its failures are explained only by deviations the registry already has, each listing the test with what Satin produces at the block it fails at.
+- A blockchain test is skipped only for a class decided from its content (`src/blockchain/skips.rs`); a block that differs passes only when a deviation the registry already has lists that test and block with exactly the outcome Satin produces, and the chain is imported on from Satin's state, so a listed block exempts no later one.
 - An account is taken out of a blockchain test's state root only by `SATIN_ACCOUNTS`, only when the pre-state does not hold it and it holds exactly what Satin put there.
 
 ## ANTI-PATTERNS
@@ -41,5 +41,5 @@ The fixture types are the revm fork's own (`revm::statetest_types`, the `test-ty
 - Change what a mode configures: `src/mode.rs`, and `mega-evm`'s `src/test_utils/neutral.rs`.
 - Change how a test is judged: `src/runner.rs::check`, `src/exceptions.rs`.
 - Change how a blockchain test is judged: `src/blockchain/mod.rs`; its skips: `src/blockchain/skips.rs`; what is taken out of its state root: `src/blockchain/chain.rs`.
-- Add a blockchain test to a deviation: its `blockchain_entries`, taken from a `state-test btest --json-outcome` run.
+- Add a blockchain test to a deviation: its `blockchain_entries`, every differing block taken from a `state-test btest --json-outcome` run (a failure's `differing` lists them all, the chain imported to its end), then `UPDATE_DEVIATIONS=1 cargo test -p mega-state-test --lib deviations`.
 - Change the pinned executed and skipped counts: `.github/workflows/exec-spec-satin.yml`.

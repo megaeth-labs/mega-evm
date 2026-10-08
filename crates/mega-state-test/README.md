@@ -102,7 +102,10 @@ The EIP-2935 and EIP-4788 tests are not skipped: their system calls are made and
 
 ### The gate
 
-A failure is explained only by a deviation the registry already has, which lists the test, the block it fails at and the gas used, receipts root and state root Satin produces there; any other failure fails the gate.
+A deviation the registry already has may list a test block by block: every block whose outcome is not its header's, with the outcome Satin produces for it — its gas used, the keccak hash of its logs bloom, its receipts root and its state root — and why it differs: the deviation's rule acts in it, or it runs as on Ethereum and differs only in the state an earlier listed block left.
+A block that differs passes only when its test's entry lists that block with exactly that outcome; the chain is imported on from Satin's own state, so every later block is held to its header or to its own listed outcome in turn, and a block that differs and is not listed fails the test.
+The chain's head is always compared, and its post-state too when the chain ends on a state its last header describes; when it ends on a state a listed block left, the entry must say so and why.
+A listed test that does not deviate exactly as listed fails, and the summary counts the blocks checked against Ethereum — matched or refused as the fixture expects — apart from the blocks matched to a deviation.
 `--expect-executed`, `--expect-skipped REASON=N` (every class) and `--expect-deviations` pin a full run, as `.github/workflows/exec-spec-satin.yml` does:
 
 ```bash
