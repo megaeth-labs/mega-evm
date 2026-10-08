@@ -240,9 +240,7 @@ impl fmt::Display for Incoherence {
                  this block (reorg in progress, or a load-balanced endpoint); retry once the \
                  chain settles"
             ),
-            // The header hash does not cover the body listing, so an authentic
-            // header can sit beside a listing the endpoint changed; the
-            // transactions root is what ties the two together.
+            // See `require_committed_body` for why this is the endpoint's fault.
             Self::UncommittedBody { number, block_hash, served, committed } => write!(
                 f,
                 "the transactions served for block {number} ({block_hash}) rebuild transactions \

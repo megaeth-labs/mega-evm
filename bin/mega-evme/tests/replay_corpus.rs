@@ -16,9 +16,8 @@
 //! the blocks then run concurrently inside one test, and every failing block is
 //! reported at the end rather than only the first.
 //!
-//! The captures carry no SALT bucket capacities (the manifest's `salt` is
-//! `default-minimum`), so every bucket replays at the minimum size. See the
-//! corpus README for how the blocks were chosen and how to recapture one.
+//! See the corpus README for how the blocks were chosen, the SALT bucket
+//! capacities they replay with, and how to recapture one.
 
 mod common;
 

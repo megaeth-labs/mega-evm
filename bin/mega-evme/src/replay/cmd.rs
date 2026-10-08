@@ -156,16 +156,14 @@ pub struct Cmd {
 
     /// Verify the replayed block against its header.
     ///
-    /// Once every transaction of the block has executed, the served body must
-    /// rebuild the transactions root of the block's authenticated header; if it
-    /// does not, the endpoint served a body the header does not commit to and
-    /// the run exits `3`. For a committed body, the replayed block's receipts
-    /// root, logs bloom, gas used, blob gas used, and EIP-7685 requests are
-    /// compared against the header, and a mismatch makes the run exit `2`, like
-    /// a receipt mismatch. One verdict is reported for the block, even when its
-    /// listing is empty. The state root and the withdrawals root are not
-    /// compared. Only valid with `--block <N>`; independent of
-    /// `--verify-receipt`.
+    /// Once every transaction of the block has executed, a served body that does
+    /// not rebuild the header's transactions root exits `3`. For a committed
+    /// body, the replayed block's receipts root, logs bloom, gas used, blob gas
+    /// used, and EIP-7685 requests are compared against the header, and a
+    /// mismatch exits `2`, like a receipt mismatch. One verdict is reported for
+    /// the block, even when its listing is empty. The state root and the
+    /// withdrawals root are not compared. Only valid with `--block <N>`;
+    /// independent of `--verify-receipt`.
     #[arg(long = "verify-block")]
     pub verify_block: bool,
 }

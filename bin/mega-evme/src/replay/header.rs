@@ -5,13 +5,10 @@
 //! execution outputs as the block's header: the receipts root, the logs bloom,
 //! the gas used, the blob gas used, and the EIP-7685 requests.
 //!
-//! The header's transactions root is not one of them. It depends only on what
-//! the endpoint served — every transaction is authenticated against its hash,
-//! and their order is the body listing — never on execution, so a body the
-//! header does not commit to is the endpoint contradicting itself rather than a
-//! replay that diverged. The batch driver checks it first, through
-//! [`super::coherence::require_committed_body`] over [`transactions_root`], and
-//! compares the execution outputs only for a body the header commits to.
+//! The header's transactions root is not one of them: it is checked first, as
+//! endpoint coherence ([`super::coherence::require_committed_body`] over
+//! [`transactions_root`]), and the execution outputs are compared only for a
+//! body the header commits to.
 //!
 //! The header compared against is the one the replay already authenticated: its
 //! hash is recomputed from its own fields before anything reads it, and it links

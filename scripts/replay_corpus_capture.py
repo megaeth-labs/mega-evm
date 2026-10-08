@@ -27,8 +27,7 @@ files are left untouched, so the repository history does not move.
 Every repack writes the whole archive into the repository history, so batch
 recaptures into one change and recapture only the blocks that need it.
 
-The captures carry no SALT bucket capacities, so every bucket replays at the
-minimum capacity, as the corpus manifest declares (`"salt": "default-minimum"`).
+See the corpus README for the SALT bucket capacities the captures replay with.
 
 Usage (from the repository root, against a mainnet archive RPC endpoint):
 
@@ -225,8 +224,8 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("--bin", help="mega-evme binary to capture with")
-    parser.add_argument("--manifest", default=str(CORPUS / "manifest.json"))
-    parser.add_argument("--archive", default=str(CORPUS / "corpus.tar.xz"))
+    parser.add_argument("--manifest", default=str(CORPUS / "manifest.json"),
+                        help="corpus manifest; it names the archive beside it")
     parser.add_argument("--blocks", nargs="+", type=int, default=[],
                         help="manifest blocks to (re)capture")
     parser.add_argument("--pin", nargs="+", default=[], metavar="N:HASH",
@@ -235,7 +234,9 @@ def main():
                         help="verify that repacking the archive reproduces it, and exit")
     args = parser.parse_args()
 
-    archive = Path(args.archive).resolve()
+    manifest_path = Path(args.manifest).resolve()
+    manifest = json.loads(manifest_path.read_text())
+    archive = manifest_path.parent / manifest["archive"]
     if args.check:
         return check(archive)
 
@@ -247,8 +248,6 @@ def main():
     if int(rpc(url, "eth_chainId", []), 16) != MAINNET_CHAIN_ID:
         parser.error(f"RPC_URL is not MegaETH mainnet (chain {MAINNET_CHAIN_ID})")
 
-    manifest_path = Path(args.manifest).resolve()
-    manifest = json.loads(manifest_path.read_text())
     known = {entry["number"]: entry for entry in manifest["blocks"]}
     selected = []
     for number in args.blocks:
@@ -299,7 +298,6 @@ def main():
                     "spec": SPEC_PLACEHOLDER,
                     "tx_count": tx_count,
                     "member": member_name(number),
-                    "sha256": digest,
                 }
                 known[number] = entry
             entry["sha256"] = digest

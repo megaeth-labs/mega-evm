@@ -1,6 +1,6 @@
 # Mainnet replay corpus
 
-84 `MegaETH` mainnet blocks (chain `4326`), each pinned by number and hash and stored with an offline RPC capture of everything replaying it needs.
+The `MegaETH` mainnet blocks (chain `4326`) `manifest.json` lists, each pinned by number and hash and stored with an offline RPC capture of everything replaying it needs.
 `tests/replay_corpus.rs` replays every block with `mega-evme replay --rpc.replay-file <capture> --block N --verify-receipt --verify-block` and requires every receipt verdict and the block verdict to match.
 It runs in the normal test suite:
 
@@ -27,7 +27,7 @@ The block was then replayed again offline from the capture alone, and both runs 
 
 ## What the corpus covers
 
-Between them the 84 blocks cover:
+Between them the blocks cover:
 
 - every spec rung mainnet has executed: `MiniRex`, the `MiniRex1` and `MiniRex2` alias rungs, `Rex`, and `Rex1` through `Rex6`;
 - the `Rex2`, `Rex5` and `Rex6` activation blocks, the first block each of those specs executed;
@@ -58,7 +58,7 @@ Otherwise the script repacks the whole archive and updates `manifest.json` in pl
 
 To add a block, pin it with `--pin <N>:<HASH>`; its entry is inserted in block order with a `spec` placeholder (`?`), and the corpus test reports the spec the mainnet schedule assigns to it.
 
-Every recapture or addition rewrites the whole archive, about 4.3 MB, and that version is committed to the repository history for good, which cannot be rewritten.
+Every recapture or addition rewrites the whole archive, a few megabytes, and that version is committed to the repository history for good, which cannot be rewritten.
 Recapture only the blocks that need it, and batch recaptures and additions into one change, so the history gains one archive rather than one per block.
 
 ## Checking the packer

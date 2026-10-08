@@ -24,9 +24,8 @@ use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
 /// stored compressed.
 ///
 /// A fixture is either the file itself, or a `<name>.tar.xz` holding exactly
-/// that one file. `name` may name a file in a subdirectory; its archive sits
-/// beside it and still holds only the file itself. Compression is worth it only
-/// where the raw file would bloat a pull-request diff — git already compresses
+/// that one file. Compression is worth it only where the raw file would bloat a
+/// pull-request diff — git already compresses
 /// blobs, so it buys little on its own, and a compressed blob cannot delta
 /// against its previous revision. A capture is JSON with long runs of repeated
 /// hex, which xz shrinks to about half of what gzip leaves.

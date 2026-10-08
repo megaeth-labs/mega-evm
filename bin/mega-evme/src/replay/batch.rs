@@ -1458,11 +1458,10 @@ fn verify_executed_block<D>(
 /// Judge a block against its header, given the transactions its body served
 /// and the execution commitments the replay produced for them.
 ///
-/// The body comes first. Its transactions root depends only on what the
-/// endpoint served, never on execution, so a body the header does not commit to
-/// is the endpoint contradicting itself: the verdict goes unanswered (rpc-class)
-/// rather than reporting a divergence. Only for a body the header commits to are
-/// the execution outputs compared, where a difference is a mismatch.
+/// The body comes first: a body the header does not commit to is the endpoint
+/// contradicting itself ([`coherence::require_committed_body`]), so the verdict
+/// goes unanswered (rpc-class). Only for a body the header commits to are the
+/// execution outputs compared, where a difference is a mismatch.
 fn judge_block(
     block: &Block<Transaction>,
     transactions: &[Bytes],
