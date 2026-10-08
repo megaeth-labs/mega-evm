@@ -33,11 +33,12 @@ use crate::{
     common::{
         cfg_env, create_address, external_envs_from, op_receipt_to_tx_receipt,
         print_execution_summary, print_execution_trace, print_receipt, BuildProviderOutput,
-        EvmeExternalEnvs, EvmeOutcome, ExecutionSummary, ExternalEnvSnapshot, OpTxReceipt,
-        OverriddenTx, RpcArgs, RpcCacheStore, TxOverrideArgs, VerificationCounts,
+        EvmeExternalEnvs, EvmeOutcome, ExecutionSummary, ExtEnvArgs, ExternalEnvSnapshot,
+        OpTxReceipt, OutputArgs, OverriddenTx, RpcArgs, RpcCacheStore, StateDumpArgs, TraceArgs,
+        TxOverrideArgs, VerificationCounts,
     },
     replay::{get_hardfork_config, ReplayHardforks},
-    run, EvmeState,
+    EvmeState,
 };
 
 use super::{
@@ -76,19 +77,19 @@ pub struct Cmd {
 
     /// RPC configuration
     #[command(flatten)]
-    pub rpc_args: super::RpcArgs,
+    pub rpc_args: RpcArgs,
 
     /// External environment configuration (bucket capacities)
     #[command(flatten)]
-    pub ext_args: run::ExtEnvArgs,
+    pub ext_args: ExtEnvArgs,
 
     /// State dump configuration
     #[command(flatten)]
-    pub dump_args: run::StateDumpArgs,
+    pub dump_args: StateDumpArgs,
 
     /// Trace configuration
     #[command(flatten)]
-    pub trace_args: run::TraceArgs,
+    pub trace_args: TraceArgs,
 
     /// Override the spec to use (default: auto-detect from chain ID and block timestamp)
     #[arg(long = "override.spec", value_name = "SPEC")]
@@ -100,7 +101,7 @@ pub struct Cmd {
 
     /// Output format configuration
     #[command(flatten)]
-    pub output_args: run::OutputArgs,
+    pub output_args: OutputArgs,
 
     /// Dump a self-validating EEST state-test fixture for the replayed
     /// transaction to the given file.

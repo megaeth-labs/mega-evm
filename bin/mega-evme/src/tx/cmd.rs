@@ -12,7 +12,8 @@ use tracing::{debug, info, trace, warn};
 
 use crate::common::{
     create_address, load_hex, op_receipt_to_tx_receipt, print_execution_summary,
-    print_execution_trace, print_receipt, DecodedRawTx, EvmeError, EvmeOutcome, ExecutionSummary,
+    print_execution_trace, print_receipt, DecodedRawTx, EnvArgs, EvmeError, EvmeOutcome,
+    ExecutionSummary, OutputArgs, PreStateArgs, RpcArgs, StateDumpArgs, TraceArgs, TxArgs,
 };
 
 use super::Result;
@@ -28,31 +29,31 @@ pub struct Cmd {
     // Shared argument groups
     /// Transaction configuration
     #[command(flatten)]
-    pub tx_args: crate::run::TxArgs,
+    pub tx_args: TxArgs,
 
     /// Pre-execution state configuration
     #[command(flatten)]
-    pub prestate_args: crate::run::PreStateArgs,
+    pub prestate_args: PreStateArgs,
 
     /// RPC configuration (used when --fork is enabled)
     #[command(flatten)]
-    pub rpc_args: crate::run::RpcArgs,
+    pub rpc_args: RpcArgs,
 
     /// Environment configuration
     #[command(flatten)]
-    pub env_args: crate::run::EnvArgs,
+    pub env_args: EnvArgs,
 
     /// State dump configuration
     #[command(flatten)]
-    pub dump_args: crate::run::StateDumpArgs,
+    pub dump_args: StateDumpArgs,
 
     /// Trace configuration
     #[command(flatten)]
-    pub trace_args: crate::run::TraceArgs,
+    pub trace_args: TraceArgs,
 
     /// Output format configuration
     #[command(flatten)]
-    pub output_args: crate::run::OutputArgs,
+    pub output_args: OutputArgs,
 }
 
 impl Cmd {

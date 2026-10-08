@@ -13,7 +13,7 @@ CLI toolbox for direct MegaEVM execution (`run`, `tx`, `replay`, `cache`) with o
 - `src/cache/`: cache-file merge utilities (the single envelope JSON shape every cache file uses) backing the `cache merge` subcommand and the lock-protected merge-on-persist, plus the sidecar advisory lock every cache-file writer takes.
 
 ## KEY PATTERNS
-- Shared argument groups are flattened from `run` argument structs into sibling commands.
+- Shared argument groups live in `src/common/` and every command flattens them from there; `run` re-exports them for library compatibility only.
 - Command handlers follow staged flow: parse inputs → build state/env → execute → print summary/receipt/trace.
 - Replay uses block executor flow, including pre-execution system calls and preceding transactions.
 - Logging is structured via tracing macros, with explicit progress milestones.
