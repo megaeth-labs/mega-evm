@@ -1,0 +1,148 @@
+---
+source: crates/mega-evm/tests/satin/stops.rs
+expression: "&BTreeMap::from([(\"within the limits\", OutcomeView::new(&within_limits)),\n(\"stopped\", OutcomeView::new(&stopped)),])"
+---
+{
+  "stopped": {
+    "result": {
+      "kind": "revert",
+      "reason": "MegaLimitExceeded(DataSize, 100)",
+      "output": "0x84b9026700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000064",
+      "created": null,
+      "logs": []
+    },
+    "gas": {
+      "regular": 15000,
+      "state": 0,
+      "history": 27280,
+      "history_bytes": 310,
+      "reservoir_remaining": 799972720,
+      "floor": 15000,
+      "gas_used": 42280
+    },
+    "result_gas": {
+      "total_gas_spent": 42280,
+      "state_gas_spent": 0,
+      "refunded": 0,
+      "floor_gas": 15000,
+      "reservoir_remaining": 799972720
+    },
+    "usage": {
+      "data_size": 310,
+      "write_records": 0
+    },
+    "limit_stop": {
+      "kind": "DataSize",
+      "limit": 100,
+      "used": 310
+    },
+    "oracle_reads": [],
+    "accounts": {
+      "0x0000000000000000000000000000000000bef000": {
+        "balance": "0x0",
+        "nonce": 1,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x4200000000000000000000000000000000000019": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x420000000000000000000000000000000000001a": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x420000000000000000000000000000000000001b": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      }
+    }
+  },
+  "within the limits": {
+    "result": {
+      "kind": "success",
+      "reason": "Stop",
+      "output": "0x",
+      "created": null,
+      "logs": []
+    },
+    "gas": {
+      "regular": 15000,
+      "state": 0,
+      "history": 27280,
+      "history_bytes": 310,
+      "reservoir_remaining": 799972720,
+      "floor": 15000,
+      "gas_used": 42280
+    },
+    "result_gas": {
+      "total_gas_spent": 42280,
+      "state_gas_spent": 0,
+      "refunded": 0,
+      "floor_gas": 15000,
+      "reservoir_remaining": 799972720
+    },
+    "usage": {
+      "data_size": 310,
+      "write_records": 0
+    },
+    "limit_stop": null,
+    "oracle_reads": [],
+    "accounts": {
+      "0x0000000000000000000000000000000000500001": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xbc36789e7a1e281436464229828f817d6612f7b477d66591ff96a9e064bcc98a",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x0000000000000000000000000000000000bef000": {
+        "balance": "0x0",
+        "nonce": 1,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x4200000000000000000000000000000000000019": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x420000000000000000000000000000000000001a": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      },
+      "0x420000000000000000000000000000000000001b": {
+        "balance": "0x0",
+        "nonce": 0,
+        "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "created": false,
+        "selfdestructed": false,
+        "storage": []
+      }
+    }
+  }
+}
