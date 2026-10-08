@@ -98,7 +98,7 @@ pub struct BlockEnvArgs {
     )]
     pub block_prevrandao: B256,
 
-    /// Excess blob gas for EIP-4844. Required for Cancun and later forks.
+    /// Excess blob gas for EIP-4844, from which the blob base fee is derived
     #[arg(long = "block.blobexcessgas", visible_aliases = ["block.blob-excess-gas"], default_value = "0")]
     pub block_blob_excess_gas: Option<u64>,
 }
