@@ -94,8 +94,10 @@ fn test_a_rotation_and_a_system_transaction_replay() {
 
 /// A system transaction in a block with nothing due reads the live address out of the witness:
 /// the registry's account and its one slot are in the record and in the transaction's own state,
-/// and the registry's code is not: no read the block made loaded it, so a witness need not carry
-/// it.
+/// and the registry's code is not among the block's reads: the slot is read without it, so no
+/// load the block made asked for it. That is what execution loads, not what a witness holds: a
+/// witness holds the code the chain held for every account the block loads, the registry's
+/// included, and this test asserts only the loads.
 ///
 /// Rule [S17.4]. Expected values `independent`: the registry's code hash is computed here from the
 /// bytecode the test put in the chain.
