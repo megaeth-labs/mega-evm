@@ -25,7 +25,7 @@ use mega_evm::{
     },
     volatile_data_access_disabled_revert_data, write_record_history_gas, EvmTxRuntimeLimits,
     LimitCheck, LimitKind, MegaContext, MegaEvm, MegaLimitExceeded, MegaSpecId, MegaTransaction,
-    MegaTransactionOutcome, ProtocolLimits, VolatileDataAccess,
+    MegaTransactionOutcome, OracleRead, ProtocolLimits, VolatileDataAccess,
 };
 use revm::{
     bytecode::opcode::*,
@@ -573,6 +573,14 @@ fn test_every_volatile_read_caps_the_transaction_from_where_it_read() {
                 read.name
             );
             assert_eq!(run.accessed, read.access, "{}", read.name);
+            // Only a read of the Oracle's storage goes through the oracle service: its slot zero,
+            // which the service, absent from this context, does not answer.
+            let oracle_reads: &[OracleRead] = if read.access == VolatileDataAccess::ORACLE {
+                &[OracleRead { slot: U256::ZERO, answer: None }]
+            } else {
+                &[]
+            };
+            assert_eq!(run.outcome.oracle_reads, oracle_reads, "{}: the oracle reads", read.name);
             views.insert_case(
                 format!("{}, gas limit {gas_limit}", read.name),
                 OutcomeView::new(&run.outcome),
