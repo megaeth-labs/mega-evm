@@ -224,7 +224,7 @@ RPC Options:
       --rpc.request-timeout <SECS>       Total per-HTTP-request timeout (connect + response); 0 disables [default: 30]
 
 Chain Options:
-      --spec <SPEC>                Spec [default: Rex7]
+      --spec <SPEC>                Spec [default: Rex6]
       --chain-id <CHAIN_ID>       Chain ID [default: 6342] [aliases: --chainid]
 
 Block Options:

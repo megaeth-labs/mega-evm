@@ -53,7 +53,7 @@ MegaETH uses a spec system to version its verifiable behavior at each stage of t
 Each newer behavior-introducing spec includes all previous behaviors:
 
 ```
-EQUIVALENCE → MINI_REX → MINI_REX_1 → MINI_REX_2 → REX → REX1 → REX2 → REX3 → REX4 → REX5 → REX6 → REX7
+EQUIVALENCE → MINI_REX → MINI_REX_1 → MINI_REX_2 → REX → REX1 → REX2 → REX3 → REX4 → REX5 → REX6
 ```
 
 `MINI_REX_1` and `MINI_REX_2` are [alias rungs](hardfork-spec.md#alias-specs-behavior-vs-position) with no behavior of their own: they execute `EQUIVALENCE` and `MINI_REX` behavior respectively, expressing a rollback while the spec ladder keeps climbing.
@@ -74,7 +74,6 @@ Contracts deployed under a given spec will continue to behave identically, regar
 - **REX4** — Per-call-frame resource budgets, relative gas detention, [storage gas stipend](glossary.md#storage-gas-stipend), MegaAccessControl and MegaLimitControl system contracts.
 - **REX5** — SequencerRegistry system contract, Oracle v2.0.0 with dynamic system address, caller-account update deduplication, storage-gas-stipend separated-allowance model, value-transfer CALL/CALLCODE parent compute-gas attribution, CREATE code-deposit compute-gas atomicity, EIP-2935/EIP-4788 pre-block gas floor with fail-closed block rejection, CREATE2 empty-initcode short-circuit, KeylessDeploy trailing-bytes rejection and empty-code log forwarding.
 - **REX6** — Unified per-opcode gas metering order, consolidated EIP-7702 authorization accounting, CREATE-frame accounting corrections, KeylessDeploy sandbox hardening, post-execution fee-reward accounting, system-originated transaction metering exemption, extended beneficiary detention coverage, and SequencerRegistry v2.0.0 rotation hardening.
-- **REX7** — The **unstable** spec, currently open for development. No behavioral change over REX6 yet.
 
 See [Hardforks and Specs](hardfork-spec.md) for full details.
 

@@ -55,16 +55,17 @@ Git submodules are required — clone with `--recursive` or run `git submodule u
 
 ### Spec System (`MegaSpecId`)
 
-Progression: `EQUIVALENCE` → `MINI_REX` → `MINI_REX_1` → `MINI_REX_2` → `REX` → `REX1` → `REX2` → `REX3` → `REX4` → `REX5` → `REX6` → `REX7` (`MINI_REX_1`/`MINI_REX_2` are alias rungs executing `EQUIVALENCE` and `MINI_REX` behavior respectively)
+Progression: `EQUIVALENCE` → `MINI_REX` → `MINI_REX_1` → `MINI_REX_2` → `REX` → `REX1` → `REX2` → `REX3` → `REX4` → `REX5` → `REX6` (`MINI_REX_1`/`MINI_REX_2` are alias rungs executing `EQUIVALENCE` and `MINI_REX` behavior respectively)
 
 - **Spec** defines EVM behavior (what the EVM does).
   Defined in `crates/mega-evm/src/evm/spec.rs`.
   The code base **MUST** maintain **backward-compatibility**, which means the semantics (i.e., EVM behaviors) must remain the same for existing specs.
   The only exception for this is the **unstable** spec that is under active development (if exists, must be the latest one).
-  - _`REX7` is the current unstable spec under active development._
+  - _There is currently no unstable spec: every spec, through `REX6`, is frozen._
+    New EVM behavior requires introducing a new spec.
     When a new spec is introduced, this line should be updated to indicate the unstable spec.
   - Frozen and activated are separate properties.
-    `REX6` is frozen and activated on both networks (see `block/chain.rs`); `REX7` has no activation timestamp yet.
+    `REX6` is frozen and activated on both networks (see `block/chain.rs`).
     Freezing forbids further semantic change; scheduling is a later, separate decision made in the node chainspecs and mirrored here in `block/chain.rs` for replay tooling.
   - Specifications of each behavior-introducing spec can be found in the upgrade pages under `docs/spec/upgrades/`; alias rungs have no page of their own and are recorded in the upgrade overview and `docs/spec/hardfork-spec.md`.
 - **Hardfork** (`MegaHardfork`) defines network upgrade events (when specs activate).
@@ -81,7 +82,7 @@ Progression: `EQUIVALENCE` → `MINI_REX` → `MINI_REX_1` → `MINI_REX_2` → 
 - **`block/`** — Block execution: executor, factory, hardfork-to-spec mapping, limit enforcement, and the canonical per-chain hardfork schedules.
   This module defines how a block in MegaETH block should be executed.
   `block/chain.rs` is the single source of truth for the mainnet/testnet chain IDs and activation-timestamp schedules (`hardfork_schedule(chain_id)`, `MAINNET_CHAIN_ID`, `TESTNET_CHAIN_ID`, `mainnet_hardforks()`, `testnet_hardforks()`); look there to find or change when a fork activates on a given chain.
-  Its unknown-chain fallback pins a named spec rather than following the latest one, so introducing a spec does not move chains that run from genesis; advancing that pin is a deliberate edit made when a spec is sealed.
+  Its unknown-chain fallback pins a named spec (currently `REX6`) rather than following the latest one, so introducing a spec does not move chains that run from genesis; advancing that pin is a deliberate edit made when a spec is sealed.
   Forks map 1:1 onto an ascending spec ladder, so the resolved `spec_id` is monotone; rollbacks are alias specs (`MINI_REX_1`, `MINI_REX_2`) whose `behavior()` projects to an earlier spec.
   One value, two projections that must not be confused: `is_enabled` compares behavior and gates EVM semantics (rolls back in alias windows); `reaches` compares ladder position and gates one-way chain setup such as predeploys and pre-block rules (never rolls back).
   The `is_<fork>_active_at_timestamp` predicates are position projections for behavior-introducing forks and raw event queries for alias forks, and `MegaHardforks::validate_schedule` is the load-time check that a published schedule climbs the ladder without gaps.
@@ -310,7 +311,7 @@ When the agent is requested to implement a new feature or bug fix, it should con
   New `#[test]` functions should be named with a `test_` prefix for consistency with this repository and upstream revm style.
   If editing nearby tests in the same module, align names to the same `test_` style when reasonable.
 - **Do NOT modify behavior for existing stable specs.**
-  All specs through `REX6` are frozen; `REX7` is the unstable spec under active development.
+  There is currently no unstable spec: every spec, through `REX6`, is frozen.
   A spec being frozen is independent of whether any network has scheduled it — a frozen spec is off-limits to behavior changes whether or not a timestamp has been published.
   New EVM behavior, gas cost changes, or opcode modifications for stable specs **must** introduce a new spec and be gated with `spec.is_enabled(MegaSpecId::NEW_SPEC)`.
   Never change what an existing stable spec does.

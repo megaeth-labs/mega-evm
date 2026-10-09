@@ -20,7 +20,7 @@ Chain-specific configuration is not synthesized along with it: a fork whose para
 
 | Flag              | Default | Aliases     | Description         |
 | ----------------- | ------- | ----------- | ------------------- |
-| `--spec <SPEC>`   | `Rex7`  | —           | MegaETH spec to use |
+| `--spec <SPEC>`   | `Rex6`  | —           | MegaETH spec to use |
 | `--chain-id <ID>` | `6342`  | `--chainid` | Chain ID            |
 
 ## Available Specs
@@ -40,7 +40,6 @@ Spec names are case-sensitive.
 | `Rex4`        | Per-call-frame resource budgets, relative gas detention, storage gas stipend                                                  |
 | `Rex5`        | SequencerRegistry, dynamic system address (Oracle v2.0.0), storage-gas-stipend separated allowance, resource-accounting fixes |
 | `Rex6`        | Unified gas-metering order, consolidated EIP-7702 accounting, system-tx metering exemption                                    |
-| `Rex7`        | No behavioral change over `Rex6` yet (**unstable**)                                                                           |
 
 ## Examples
 
