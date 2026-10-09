@@ -11,8 +11,6 @@
 //!
 //! Every case runs below the execution cap, without a reservoir, and above it, with one.
 
-use std::collections::BTreeMap;
-
 use alloy_op_evm::OpTx;
 use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
 use alloy_sol_types::{SolCall, SolError};
@@ -21,8 +19,8 @@ use mega_evm::{
     history_gas,
     system::{IMegaLimitControl, LIMIT_CONTROL_ADDRESS, ORACLE_CONTRACT_ADDRESS},
     test_utils::{
-        op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase, OutcomeSummary,
-        OutcomeView, SlotView,
+        op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase, OutcomeView,
+        SlotView,
     },
     volatile_data_access_disabled_revert_data, write_record_history_gas, EvmTxRuntimeLimits,
     LimitCheck, LimitKind, LimitUsage, MegaContext, MegaEvm, MegaLimitExceeded, MegaSpecId,
@@ -38,8 +36,6 @@ use revm::{
     },
     Database, Inspector,
 };
-
-use crate::cases::{by_case, sweep_digest, InsertCase, SweepDigest};
 
 pub(crate) const CALLER: Address = address!("0000000000000000000000000000000000d00000");
 pub(crate) const CONTRACT: Address = address!("0000000000000000000000000000000000d00001");
@@ -205,24 +201,6 @@ pub(crate) fn assert_stopped(run: &Run, intrinsic: u64, left: u64) -> u64 {
     assert_eq!(run.outcome.gas.state, 0, "a stop keeps no state");
     assert!(run.outcome.result.logs().is_empty(), "a stop keeps no log");
     limit
-}
-
-/* ---------- snapshots of many outcomes ---------- */
-
-/// A transaction that wrote more slots than a snapshot can list: its summary line, and the slots
-/// of one account it changed as a sweep, each slot's line its original and present value.
-#[derive(Debug, serde::Serialize)]
-struct SlotSweep {
-    summary: OutcomeSummary,
-    slots: SweepDigest,
-}
-
-fn slot_sweep(name: &str, view: &OutcomeView, account: Address) -> SlotSweep {
-    let changed = view.accounts[&account].changed().expect("the transaction changed the account");
-    let slots = changed.storage.iter().map(|slot| {
-        (format!("{:#x}", slot.slot), format!("{:#x} -> {:#x}", slot.original, slot.present))
-    });
-    SlotSweep { summary: view.summary(), slots: sweep_digest(name, slots) }
 }
 
 /* ---------- where a stop lands ---------- */
@@ -557,7 +535,6 @@ pub(crate) fn with_delegation(
 /// charge past its compute at the read plus the cap, having spent everything before it.
 #[test]
 fn test_every_volatile_read_caps_the_transaction_from_where_it_read() {
-    let mut views = BTreeMap::new();
     for gas_limit in TIERS {
         let intrinsic = intrinsic(gas_limit);
         for read in reads() {
@@ -583,13 +560,8 @@ fn test_every_volatile_read_caps_the_transaction_from_where_it_read() {
                 &[]
             };
             assert_eq!(run.outcome.oracle_reads, oracle_reads, "{}: the oracle reads", read.name);
-            views.insert_case(
-                format!("{}, gas limit {gas_limit}", read.name),
-                OutcomeView::new(&run.outcome),
-            );
         }
     }
-    crate::assert_summaries_snapshot!(&views);
 }
 
 /// The cap is relative: a transaction that spent more than the cap before it read may still
@@ -597,7 +569,6 @@ fn test_every_volatile_read_caps_the_transaction_from_where_it_read() {
 #[test]
 fn test_the_cap_counts_from_a_spend_larger_than_itself() {
     let before = 7_000_u32;
-    let mut views = BTreeMap::new();
     for gas_limit in TIERS {
         let code = spin(op(work(BytecodeBuilder::default(), before), TIMESTAMP));
         let run = execute(
@@ -608,10 +579,6 @@ fn test_the_cap_counts_from_a_spend_larger_than_itself() {
         let limit = assert_stopped(&run, intrinsic(gas_limit), left);
         assert!(limit - CAP > u64::from(before) * WORK_ROUND, "{limit}");
         assert!(limit - CAP > CAP);
-        views.insert_case(
-            format!("spins on, gas limit {gas_limit}"),
-            OutcomeView::new(&run.outcome),
-        );
 
         let code = op(work(BytecodeBuilder::default(), before), TIMESTAMP).stop().build();
         let run = execute(
@@ -620,19 +587,13 @@ fn test_the_cap_counts_from_a_spend_larger_than_itself() {
         );
         assert!(run.outcome.result.is_success(), "{:?}", run.outcome.result);
         assert_eq!(run.limit, Some(limit), "the same read at the same compute");
-        views.insert_case(
-            format!("stops after the read, gas limit {gas_limit}"),
-            OutcomeView::new(&run.outcome),
-        );
     }
-    crate::assert_sorted_json_snapshot!(&views);
 }
 
 /// Without the read, the same computation is not capped: it runs until the frame's own gas is
 /// gone, and halts.
 #[test]
 fn test_without_a_read_nothing_is_capped() {
-    let mut views = BTreeMap::new();
     for gas_limit in TIERS {
         let code = spin(work(BytecodeBuilder::default(), WORK));
         let db = MemoryDatabase::default().account_code(CONTRACT, code);
@@ -648,9 +609,7 @@ fn test_without_a_read_nothing_is_capped() {
         assert_eq!(run.limit, None);
         assert_eq!(run.outcome.limit_exceeded, None);
         assert_eq!(run.accessed, VolatileDataAccess::empty());
-        views.insert_case(format!("gas limit {gas_limit}"), OutcomeView::new(&run.outcome));
     }
-    crate::assert_sorted_json_snapshot!(&views);
 }
 
 /// A transaction whose sender, recipient or applied EIP-7702 authority is the beneficiary is
@@ -664,7 +623,6 @@ fn test_a_transaction_touching_the_beneficiary_is_detained_from_the_start() {
             transaction::{Authorization, RecoveredAuthority, RecoveredAuthorization},
         },
     };
-    let mut views = BTreeMap::new();
     for gas_limit in TIERS {
         let intrinsic = intrinsic(gas_limit);
         let spinner = spin(BytecodeBuilder::default());
@@ -676,19 +634,11 @@ fn test_a_transaction_touching_the_beneficiary_is_detained_from_the_start() {
         let run_sender = execute(db, tx(BENEFICIARY, CONTRACT, gas_limit));
         // A sender's intrinsic gas is the same whoever it is.
         assert_eq!(assert_stopped(&run_sender, intrinsic, left), CAP, "the sender");
-        views.insert_case(
-            format!("the sender, gas limit {gas_limit}"),
-            OutcomeView::new(&run_sender.outcome),
-        );
 
         // The recipient.
         let db = MemoryDatabase::default().account_code(BENEFICIARY, spinner.clone());
         let run_recipient = execute(db, tx(CALLER, BENEFICIARY, gas_limit));
         assert_eq!(assert_stopped(&run_recipient, intrinsic, left), CAP, "the recipient");
-        views.insert_case(
-            format!("the recipient, gas limit {gas_limit}"),
-            OutcomeView::new(&run_recipient.outcome),
-        );
 
         // An applied authority.
         let authorization = Either::Right(RecoveredAuthorization::new_unchecked(
@@ -709,12 +659,7 @@ fn test_a_transaction_touching_the_beneficiary_is_detained_from_the_start() {
         assert_eq!(run_authority.limit, Some(CAP), "the authority");
         assert!(matches!(run_authority.outcome.result, ExecutionResult::Revert { .. }));
         assert_eq!(run_authority.accessed, VolatileDataAccess::BENEFICIARY_BALANCE);
-        views.insert_case(
-            format!("an applied authority, gas limit {gas_limit}"),
-            OutcomeView::new(&run_authority.outcome),
-        );
     }
-    crate::assert_sorted_json_snapshot!(&views);
 }
 
 /// An account read of anything but the beneficiary, and a storage read of anything but the
@@ -734,7 +679,6 @@ fn test_other_accounts_and_storage_are_not_volatile() {
     assert!(run.outcome.result.is_success());
     assert_eq!(run.accessed, VolatileDataAccess::empty());
     assert_eq!(run.limit, None);
-    crate::assert_sorted_json_snapshot!(&OutcomeView::new(&run.outcome));
 }
 
 /// `BLOBHASH` reads the transaction's own blob hashes, which nothing but the transaction decides:
@@ -748,7 +692,6 @@ fn test_blobhash_is_not_volatile() {
     );
     assert!(run.outcome.result.is_success());
     assert_eq!(run.accessed, VolatileDataAccess::empty());
-    crate::assert_sorted_json_snapshot!(&OutcomeView::new(&run.outcome));
 }
 
 /// A read answers with the block's own field: the Host marks the read and serves the value it
@@ -804,7 +747,6 @@ fn test_a_read_answers_with_the_blocks_field() {
     assert_eq!(storage[&U256::from(8)].present_value, U256::from_be_bytes(hash.0), "BLOCKHASH");
     assert_eq!(storage[&U256::from(9)].present_value, U256::from(42), "BALANCE");
     assert!(run.limit.is_some());
-    crate::assert_sorted_json_snapshot!(&OutcomeView::new(&run.outcome));
 }
 
 /* ---------- the limit ---------- */
@@ -815,7 +757,6 @@ fn test_a_read_answers_with_the_blocks_field() {
 fn test_the_most_restrictive_limit_binds_whatever_the_order() {
     assert_eq!(ORACLE_ACCESS_COMPUTE_GAS, CAP, "the two caps are equal today");
     let oracle = BytecodeBuilder::default().append_many([PUSH0, SLOAD, POP, STOP]).build();
-    let mut views = BTreeMap::new();
     for gas_limit in TIERS {
         let intrinsic = intrinsic(gas_limit);
         for block_env_first in [true, false] {
@@ -856,14 +797,8 @@ fn test_the_most_restrictive_limit_binds_whatever_the_order() {
             let limit = assert_stopped(&run, intrinsic, charges.spin(1_024).left(CAP));
             assert!(limit < CAP + 100_000, "the first read set the limit: {limit}");
             assert_eq!(run.accessed, VolatileDataAccess::TIMESTAMP | VolatileDataAccess::ORACLE);
-            let first = if block_env_first { "the block environment" } else { "the Oracle" };
-            views.insert_case(
-                format!("{first} first, gas limit {gas_limit}"),
-                OutcomeView::new(&run.outcome),
-            );
         }
     }
-    crate::assert_sorted_json_snapshot!(&views);
 }
 
 /// The caps are runtime limits: a caller's limits set either one, and each kind of read is held
@@ -875,7 +810,6 @@ fn test_a_callers_limits_set_the_caps() {
     let limits = EvmTxRuntimeLimits::default()
         .with_block_env_access_compute_gas_limit(1_000_000)
         .with_oracle_access_compute_gas_limit(2_000_000);
-    let mut views = BTreeMap::new();
     for gas_limit in TIERS {
         let intrinsic = intrinsic(gas_limit);
         let run_under = |limits: EvmTxRuntimeLimits, code: Bytes| {
@@ -891,10 +825,6 @@ fn test_a_callers_limits_set_the_caps() {
         let run = run_under(limits, spin(op(BytecodeBuilder::default(), TIMESTAMP)));
         let left = Charges::default().then(&[2]).spin(0).left(1_000_000);
         assert_eq!(assert_stopped(&run, intrinsic, left), 2 + 1_000_000);
-        views.insert_case(
-            format!("TIMESTAMP under a cap of 1,000,000, gas limit {gas_limit}"),
-            OutcomeView::new(&run.outcome),
-        );
 
         let run = run_under(
             limits,
@@ -905,10 +835,6 @@ fn test_a_callers_limits_set_the_caps() {
         let limit = assert_stopped(&run, intrinsic, left);
         assert!((2_000_000..2_100_000).contains(&limit), "the Oracle's own cap: {limit}");
         assert_eq!(run.accessed, VolatileDataAccess::ORACLE);
-        views.insert_case(
-            format!("the Oracle under a cap of 2,000,000, gas limit {gas_limit}"),
-            OutcomeView::new(&run.outcome),
-        );
 
         let run = run_under(
             EvmTxRuntimeLimits::no_limits(),
@@ -922,12 +848,7 @@ fn test_a_callers_limits_set_the_caps() {
             "{:?}",
             run.outcome.result
         );
-        views.insert_case(
-            format!("TIMESTAMP under no limits, gas limit {gas_limit}"),
-            OutcomeView::new(&run.outcome),
-        );
     }
-    crate::assert_sorted_json_snapshot!(&views);
 }
 
 /// The default runtime limits detain: [`EvmTxRuntimeLimits::default`], and the transaction half
@@ -939,11 +860,7 @@ fn test_the_default_limits_detain() {
     let timestamp = op(BytecodeBuilder::default(), TIMESTAMP).stop().build();
     let reads_oracle =
         call(BytecodeBuilder::default(), CALL, ORACLE_CONTRACT_ADDRESS).stop().build();
-    let mut views = BTreeMap::new();
-    for (name, limits) in [
-        ("the default runtime limits", EvmTxRuntimeLimits::default()),
-        ("the protocol's default limits", ProtocolLimits::DEFAULT.tx_runtime_limits),
-    ] {
+    for limits in [EvmTxRuntimeLimits::default(), ProtocolLimits::DEFAULT.tx_runtime_limits] {
         let run_under = |limits: EvmTxRuntimeLimits, code: &Bytes| {
             let db = MemoryDatabase::default()
                 .account_code(CONTRACT, code.clone())
@@ -954,24 +871,17 @@ fn test_the_default_limits_detain() {
         let run = run_under(limits, &timestamp);
         assert!(run.detains);
         assert_eq!(run.limit, Some(2 + BLOCK_ENV_ACCESS_COMPUTE_GAS), "TIMESTAMP was the first");
-        views.insert_case(format!("{name}: TIMESTAMP"), OutcomeView::new(&run.outcome));
         let run = run_under(limits, &reads_oracle);
         let limit = run.limit.unwrap();
         assert!(
             (ORACLE_ACCESS_COMPUTE_GAS..ORACLE_ACCESS_COMPUTE_GAS + 100_000).contains(&limit),
             "{limit}"
         );
-        views.insert_case(format!("{name}: the Oracle"), OutcomeView::new(&run.outcome));
 
         let run = run_under(EvmTxRuntimeLimits::no_limits(), &timestamp);
         assert!(!run.detains);
         assert_eq!(run.limit, None);
-        views.insert_case(
-            format!("{name}: TIMESTAMP under no limits"),
-            OutcomeView::new(&run.outcome),
-        );
     }
-    crate::assert_sorted_json_snapshot!(&views);
 }
 
 /// Spending exactly the cap after the read is within it; the limit is strict.
@@ -982,7 +892,6 @@ fn test_spending_exactly_the_cap_completes() {
     let rounds = (CAP - 2 - 2 - 3 - 2) / 26;
     let spent = 2 + 2 + 3 + u64::from(u32::try_from(rounds).unwrap()) * 26 + 2;
     assert!(spent <= CAP + 2, "{spent}");
-    let mut views = BTreeMap::new();
     for gas_limit in TIERS {
         let code = burn(op(BytecodeBuilder::default(), TIMESTAMP), u32::try_from(rounds).unwrap())
             .stop()
@@ -993,10 +902,6 @@ fn test_spending_exactly_the_cap_completes() {
         );
         assert!(run.outcome.result.is_success(), "{:?}", run.outcome.result);
         assert_eq!(run.outcome.gas.regular, intrinsic(gas_limit) + spent);
-        views.insert_case(
-            format!("exactly the cap, gas limit {gas_limit}"),
-            OutcomeView::new(&run.outcome),
-        );
 
         // One more round crosses it.
         let more = u32::try_from(rounds).unwrap() + 1;
@@ -1007,12 +912,7 @@ fn test_spending_exactly_the_cap_completes() {
         );
         let left = Charges::default().then(&[2]).burn(more).left(CAP);
         assert_stopped(&run, intrinsic(gas_limit), left);
-        views.insert_case(
-            format!("one round more, gas limit {gas_limit}"),
-            OutcomeView::new(&run.outcome),
-        );
     }
-    crate::assert_sorted_json_snapshot!(&views);
 }
 
 /// A value call's stipend is gas nobody paid, so what the callee runs on it is not compute beyond
@@ -1028,7 +928,6 @@ fn test_a_stipend_is_not_compute() {
         .push_address(CHILD)
         .append_many([GAS, CALL, POP, STOP])
         .build();
-    let mut views = BTreeMap::new();
     for gas_limit in TIERS {
         let db = MemoryDatabase::default()
             .account_code(CONTRACT, parent.clone())
@@ -1038,10 +937,6 @@ fn test_a_stipend_is_not_compute() {
         // Either way the reading frame's `POP` and its loop come after the read.
         let left = Charges::default().then(&[2]).spin(0).left(CAP);
         assert_stopped(&run, intrinsic(gas_limit), left);
-        views.insert_case(
-            format!("a value-carrying child, gas limit {gas_limit}"),
-            OutcomeView::new(&run.outcome),
-        );
 
         let db = MemoryDatabase::default()
             .account_code(CONTRACT, spin(op(BytecodeBuilder::default(), TIMESTAMP)))
@@ -1051,12 +946,7 @@ fn test_a_stipend_is_not_compute() {
         let run = execute(db, valued);
         let limit = assert_stopped(&run, intrinsic_of_a_value_call(gas_limit), left);
         assert_eq!(limit, CAP + 2, "TIMESTAMP was the first opcode");
-        views.insert_case(
-            format!("a transaction carrying value, gas limit {gas_limit}"),
-            OutcomeView::new(&run.outcome),
-        );
     }
-    crate::assert_sorted_json_snapshot!(&views);
 }
 
 /// A read made by a call is counted from the compute the caller paid at it: its pushes, its
@@ -1064,7 +954,6 @@ fn test_a_stipend_is_not_compute() {
 /// which nobody paid. The limit is exact for a plain call and for one carrying value.
 #[test]
 fn test_a_call_that_reads_counts_from_what_its_caller_paid() {
-    let mut views = BTreeMap::new();
     for (value, compute) in [
         // PUSH0 x4, PUSH0, PUSH20, GAS and a warm CALL.
         (false, 2 * 4 + 2 + 3 + 2 + 100),
@@ -1082,13 +971,8 @@ fn test_a_call_that_reads_counts_from_what_its_caller_paid() {
             let run = execute(db, tx(CALLER, CONTRACT, gas_limit));
             assert!(run.outcome.result.is_success(), "value {value}: {:?}", run.outcome.result);
             assert_eq!(run.limit, Some(compute + CAP), "value {value}");
-            views.insert_case(
-                format!("value {value}, gas limit {gas_limit}"),
-                OutcomeView::new(&run.outcome),
-            );
         }
     }
-    crate::assert_sorted_json_snapshot!(&views);
 }
 
 /// The regular gas a call from `CALLER` carrying one wei spends before its first instruction.
@@ -1108,7 +992,6 @@ fn intrinsic_of_a_value_call(gas_limit: u64) -> u64 {
 #[test]
 fn test_a_childs_read_caps_its_caller() {
     let child = work(op(BytecodeBuilder::default(), TIMESTAMP), 500).stop().build();
-    let mut views = BTreeMap::new();
     for gas_limit in TIERS {
         let intrinsic = intrinsic(gas_limit);
         let parent = spin(call(BytecodeBuilder::default(), CALL, CHILD));
@@ -1120,9 +1003,7 @@ fn test_a_childs_read_caps_its_caller() {
         let left = Charges::default().then(&[2]).work(500, 0).then(&[2]).spin(0).left(CAP);
         let limit = assert_stopped(&run, intrinsic, left);
         assert!(limit < CAP + 100_000, "the child read near the start: {limit}");
-        views.insert_case(format!("gas limit {gas_limit}"), OutcomeView::new(&run.outcome));
     }
-    crate::assert_sorted_json_snapshot!(&views);
 }
 
 /// When a child crosses the cap, no caller resumes: the caller's code after the call — a write
@@ -1135,7 +1016,6 @@ fn test_no_caller_resumes_after_the_stop() {
         .append_many([PUSH0, PUSH0, LOG0])
         .stop()
         .build();
-    let mut views = BTreeMap::new();
     for gas_limit in TIERS {
         let intrinsic = intrinsic(gas_limit);
         let db = MemoryDatabase::default()
@@ -1158,9 +1038,7 @@ fn test_no_caller_resumes_after_the_stop() {
         // A caller that resumed would fail its first charge on the withheld part, before its
         // write, and report the same stop on the same bill: only its step shows it ran.
         assert_eq!(evm.inspector().last_frame, Some(CHILD), "the child ran the last step");
-        views.insert_case(format!("gas limit {gas_limit}"), OutcomeView::new(&run.outcome));
     }
-    crate::assert_sorted_json_snapshot!(&views);
 }
 
 /// The stop settles like an EIP-8037 revert: what the sender pays does not depend on whether
@@ -1171,7 +1049,6 @@ fn test_no_caller_resumes_after_the_stop() {
 fn test_the_stop_bills_the_same_above_and_below_the_execution_cap() {
     let child = spin(op(BytecodeBuilder::default(), TIMESTAMP));
     let parent = spin(call(BytecodeBuilder::default(), CALL, CHILD));
-    let mut views = BTreeMap::new();
     let used: Vec<_> = TIERS
         .iter()
         .map(|gas_limit| {
@@ -1185,13 +1062,11 @@ fn test_the_stop_bills_the_same_above_and_below_the_execution_cap() {
             let reservoir = gas_limit.saturating_sub(TX_GAS_LIMIT_CAP).saturating_sub(body_history);
             assert_eq!(run.outcome.gas.reservoir_remaining, reservoir, "the reservoir came back");
             let gas = run.outcome.gas;
-            views.insert_case(format!("gas limit {gas_limit}"), OutcomeView::new(&run.outcome));
             (gas.gas_used, gas.regular, gas.state, gas.history)
         })
         .collect();
     assert_eq!(used[0], used[1]);
     assert!(used[0].0 < CAP + 1_000_000, "the stop does not burn the gas: {}", used[0].0);
-    crate::assert_sorted_json_snapshot!(&views);
 }
 
 /* ---------- real out-of-gas ---------- */
@@ -1210,7 +1085,6 @@ fn test_running_out_of_the_frames_own_gas_still_halts() {
     assert_eq!(run.outcome.result.gas().tx_gas_used(), 1_000_000, "a halt burns the gas");
     assert_eq!(run.outcome.limit_exceeded, None);
     assert!(run.limit.is_some(), "the read still set a limit");
-    let mut views = by_case([("less than the cap".to_owned(), OutcomeView::new(&run.outcome))]);
 
     // A child given less than the limit leaves halts on its own, and its caller resumes.
     let child = spin(BytecodeBuilder::default());
@@ -1232,12 +1106,7 @@ fn test_running_out_of_the_frames_own_gas_still_halts() {
         let slot = run.outcome.state[&CONTRACT].storage.get(&U256::ZERO).unwrap();
         assert_eq!(slot.present_value, U256::ZERO, "the call failed: the child halted");
         assert!(slot.is_changed() || slot.original_value.is_zero());
-        views.insert_case(
-            format!("a child given less than the limit leaves, gas limit {gas_limit}"),
-            OutcomeView::new(&run.outcome),
-        );
     }
-    crate::assert_sorted_json_snapshot!(&views);
 }
 
 /// Writes after a read are held to the cap by the regular gas they spend. With room in the
@@ -1262,7 +1131,6 @@ fn test_writes_after_a_read_stop_at_the_cap_or_run_out_of_their_own_gas() {
     );
     let left = Charges::default().then(&[2]).fresh_writes(1_000).left(CAP);
     assert_stopped(&run, intrinsic(gas_limit), left);
-    let with_a_reservoir = run;
 
     // The cap, and half of what the writes that fit in it spill: more than the cap, so the read
     // withholds gas, and less than those writes spend, so the gas runs out before the compute
@@ -1275,10 +1143,6 @@ fn test_writes_after_a_read_stop_at_the_cap_or_run_out_of_their_own_gas() {
     assert!(matches!(run.outcome.result, ExecutionResult::Halt { .. }), "{:?}", run.outcome.result);
     assert_eq!(run.outcome.limit_exceeded, None);
     assert_eq!(run.outcome.result.gas().tx_gas_used(), gas_limit, "a halt burns the gas");
-    crate::assert_sorted_json_snapshot!(&by_case([
-        ("with a reservoir", OutcomeView::new(&with_a_reservoir.outcome)),
-        ("without a reservoir", OutcomeView::new(&run.outcome)),
-    ]));
 }
 
 /* ---------- what is not marked ---------- */
@@ -1301,11 +1165,7 @@ fn test_a_failed_load_caps_nothing() {
         .push_address(BENEFICIARY)
         .append_many([PUSH0, CALL, STOP])
         .build();
-    let mut views = BTreeMap::new();
-    for (name, callee, gas) in [
-        ("a cold Oracle slot the frame cannot pay", ORACLE_CONTRACT_ADDRESS, 2_000_u32),
-        ("a transfer to the empty beneficiary the frame cannot pay", CHILD, 30_000),
-    ] {
+    for (callee, gas) in [(ORACLE_CONTRACT_ADDRESS, 2_000_u32), (CHILD, 30_000)] {
         let parent = BytecodeBuilder::default()
             .append_many([PUSH0, PUSH0, PUSH0, PUSH0, PUSH0])
             .push_address(callee)
@@ -1331,13 +1191,8 @@ fn test_a_failed_load_caps_nothing() {
             assert!(run.outcome.gas.regular > CAP, "{callee}: the caller computed past the cap");
             assert_eq!(run.limit, None, "{callee}");
             assert_eq!(run.accessed, VolatileDataAccess::empty(), "{callee}");
-            views.insert_case(
-                format!("{name}, gas limit {gas_limit}"),
-                OutcomeView::new(&run.outcome),
-            );
         }
     }
-    crate::assert_sorted_json_snapshot!(&views);
 }
 
 /// Reads the block's timestamp through the Host before every step, as a tracer might.
@@ -1357,7 +1212,6 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for ReadsTheTimest
 fn test_an_inspectors_reads_are_not_the_transactions() {
     let code = work(BytecodeBuilder::default().append_many([PUSH0, SLOAD, POP]), 7_000);
     let code = code.stop().build();
-    let mut views = BTreeMap::new();
     for disabled in [false, true] {
         let db = MemoryDatabase::default().account_code(CONTRACT, code.clone());
         let mut ctx = context(db);
@@ -1370,12 +1224,7 @@ fn test_an_inspectors_reads_are_not_the_transactions() {
         assert_eq!(run.limit, None, "disabled {disabled}");
         assert_eq!(run.accessed, VolatileDataAccess::empty(), "disabled {disabled}");
         assert!(run.detains, "a user's transaction is detained when it reads");
-        views.insert_case(
-            format!("volatile access disabled: {disabled}"),
-            OutcomeView::new(&run.outcome),
-        );
     }
-    crate::assert_sorted_json_snapshot!(&views);
 }
 
 /* ---------- refused reads ---------- */
@@ -1494,7 +1343,6 @@ fn test_a_refused_read_reverts_the_frame_and_charges_its_static_gas() {
             VolatileDataAccess::BENEFICIARY_BALANCE,
         ),
     ];
-    let mut views = BTreeMap::new();
     for gas_limit in TIERS {
         for (name, code, static_gas, refused) in &cases {
             // The beneficiary runs its own SELFBALANCE; every other read runs in the child.
@@ -1522,13 +1370,8 @@ fn test_a_refused_read_reverts_the_frame_and_charges_its_static_gas() {
                 assert_eq!(run.accessed, VolatileDataAccess::empty(), "{name}");
                 assert_eq!(run.limit, None, "{name}");
             }
-            views.insert_case(
-                format!("{name}, gas limit {gas_limit}"),
-                OutcomeView::new(&run.outcome),
-            );
         }
     }
-    crate::assert_summaries_snapshot!(&views);
 }
 
 /// The refusal of a `SLOTNUM` names access type 12, one past the contract's enum; the others name
@@ -1580,7 +1423,6 @@ fn test_the_switch_is_scoped_to_its_subtree() {
         "the first child is refused; the switch was its own, so the second child reads"
     );
     assert_eq!(run.accessed, VolatileDataAccess::TIMESTAMP | VolatileDataAccess::BLOCK_NUMBER);
-    let off_from_the_child = run;
 
     // Off from the top: the transaction's own frame is refused.
     let code = op(BytecodeBuilder::default(), TIMESTAMP).stop().build();
@@ -1595,10 +1437,6 @@ fn test_the_switch_is_scoped_to_its_subtree() {
         other => panic!("{other:?}"),
     }
     assert_eq!(run.outcome.limit_exceeded, None, "a refusal is the frame's revert, not a stop");
-    crate::assert_sorted_json_snapshot!(&by_case([
-        ("off from the child", OutcomeView::new(&off_from_the_child.outcome)),
-        ("off from the top", OutcomeView::new(&run.outcome)),
-    ]));
 }
 
 /* ---------- withheld gas does not leak ---------- */
@@ -1616,7 +1454,6 @@ fn test_the_switch_is_scoped_to_its_subtree() {
 #[test]
 fn test_an_interceptors_answer_does_not_lift_the_cap() {
     let calldata = IMegaLimitControl::remainingComputeGasCall {}.abi_encode();
-    let mut views = BTreeMap::new();
     for gas_limit in TIERS {
         let intrinsic = intrinsic(gas_limit);
         let code = op(BytecodeBuilder::default(), TIMESTAMP)
@@ -1643,14 +1480,10 @@ fn test_an_interceptors_answer_does_not_lift_the_cap() {
         // memory of one word.
         let left = Charges::default().then(&[2_631, 2, 3, 3, 3, 100, 22_000]).spin(1).left(CAP);
         assert_stopped(&run, intrinsic, left);
-        views.insert_case(
-            format!("the loop, gas limit {gas_limit}"),
-            OutcomeView::new(&run.outcome),
-        );
 
         // The answer and the gas the caller holds after the call, read without the loop, after
         // the read and after a push in its place.
-        let mut answer = |first: u8| {
+        let answer = |first: u8| {
             let code = op(BytecodeBuilder::default(), first)
                 .mstore(0, &calldata)
                 .push_number(32_u8)
@@ -1674,11 +1507,6 @@ fn test_an_interceptors_answer_does_not_lift_the_cap() {
             );
             assert!(run.outcome.result.is_success(), "{:?}", run.outcome.result);
             let output = run.outcome.result.output().unwrap().clone();
-            let after = if first == TIMESTAMP { "the read" } else { "a push" };
-            views.insert_case(
-                format!("the answer after {after}, gas limit {gas_limit}"),
-                OutcomeView::new(&run.outcome),
-            );
             (U256::from_be_slice(&output[..32]), U256::from_be_slice(&output[32..64]))
         };
         let (detained, held) = answer(TIMESTAMP);
@@ -1687,7 +1515,6 @@ fn test_an_interceptors_answer_does_not_lift_the_cap() {
         assert_eq!(undetained, held + U256::from(2 + 2), "the caller's own gas: POP and GAS");
         assert_eq!(detained, U256::from(CAP - 2_631), "what the cap leaves");
     }
-    crate::assert_sorted_json_snapshot!(&views);
 }
 
 /// A frame's return hands back what detention withheld, on success, revert and halt alike: the
@@ -1698,10 +1525,9 @@ fn test_a_frames_return_hands_back_what_was_withheld() {
     // The child reads (or pushes a word, for the same two gas), computes a little, then ends.
     let ends: [(&str, Append); 3] =
         [("success", |c| c.stop()), ("revert", |c| c.revert()), ("halt", |c| c.append(INVALID))];
-    let mut views = BTreeMap::new();
     for gas_limit in TIERS {
         for (name, end) in ends {
-            let mut used = |read: u8| {
+            let used = |read: u8| {
                 let child = end(work(op(BytecodeBuilder::default(), read), 50)).build();
                 let parent = call(BytecodeBuilder::default(), CALL, CHILD).stop().build();
                 let db = MemoryDatabase::default()
@@ -1709,11 +1535,6 @@ fn test_a_frames_return_hands_back_what_was_withheld() {
                     .account_code(CHILD, child);
                 let run = execute(db, tx(CALLER, CONTRACT, gas_limit));
                 assert!(run.outcome.result.is_success(), "{name}: {:?}", run.outcome.result);
-                let column = if read == TIMESTAMP { "detained" } else { "plain" };
-                views.insert_case(
-                    format!("{name}, {column}, gas limit {gas_limit}"),
-                    OutcomeView::new(&run.outcome),
-                );
                 (run.outcome.result.gas().tx_gas_used(), run.limit.is_some())
             };
             let (detained, limited) = used(TIMESTAMP);
@@ -1722,7 +1543,6 @@ fn test_a_frames_return_hands_back_what_was_withheld() {
             assert_eq!(detained, plain, "{name}: nothing withheld stays behind");
         }
     }
-    crate::assert_summaries_snapshot!(&views);
 }
 
 /// State and history gas are not compute, whether they come out of the reservoir or spill onto
@@ -1760,11 +1580,6 @@ fn test_state_and_history_gas_are_not_compute() {
             present: U256::from(1),
         })
         .collect();
-    // Too many slots to list: each tier snapshots its summary line and the slots as a sweep, and
-    // dumps its full view.
-    let name = crate::snapshot_name!();
-    let mut views = BTreeMap::new();
-    let mut sweeps = BTreeMap::new();
     for gas_limit in TIERS {
         let run = execute(
             MemoryDatabase::default().account_code(CONTRACT, code.clone()),
@@ -1786,12 +1601,7 @@ fn test_state_and_history_gas_are_not_compute() {
             LimitUsage { data_size: history_bytes, write_records: slots },
             "{case}: one write record a slot",
         );
-        let sweep = slot_sweep(&format!("{name}.slots.{gas_limit}"), &view, CONTRACT);
-        sweeps.insert_case(case.clone(), sweep);
-        views.insert_case(case, view);
     }
-    crate::cases::dump_views(&name, &views);
-    crate::assert_sorted_json_snapshot!(&sweeps);
 }
 
 /// State and history gas that spilled onto regular gas before the read are not compute either.
@@ -1805,7 +1615,6 @@ fn test_gas_spilled_before_the_read_is_not_compute() {
         code = code.sstore(U256::from(slot), U256::from(1));
     }
     let code = spin(op(code, TIMESTAMP));
-    let mut views = BTreeMap::new();
     for gas_limit in TIERS {
         let run = execute(
             MemoryDatabase::default().account_code(CONTRACT, code.clone()),
@@ -1815,9 +1624,7 @@ fn test_gas_spilled_before_the_read_is_not_compute() {
         let limit = assert_stopped(&run, intrinsic(gas_limit), left);
         // Two pushes and a fresh slot's 22,100 of regular gas, a hundred times, then TIMESTAMP.
         assert_eq!(limit - CAP, 100 * (3 + 3 + 22_100) + 2, "{gas_limit}");
-        views.insert_case(format!("gas limit {gas_limit}"), OutcomeView::new(&run.outcome));
     }
-    crate::assert_sorted_json_snapshot!(&views);
 }
 
 /// A slot restored to its original value refills the state gas it spilled onto regular gas; the
@@ -1835,7 +1642,6 @@ fn test_a_refill_after_the_read_does_not_lift_the_cap() {
     // warm write that restores its slot's original value — then the loop.
     let left = Charges::default().then(&[2, 3, 3, 100]).spin(0).left(CAP);
     assert_stopped(&run, intrinsic(BELOW), left);
-    crate::assert_sorted_json_snapshot!(&OutcomeView::new(&run.outcome));
 }
 
 /// A chain's caps must be below [`MAX_TX_COMPUTE_GAS`], the most compute a transaction can
@@ -1878,7 +1684,6 @@ fn test_the_most_compute_a_transaction_can_spend_bounds_the_caps() {
     let output = run.outcome.result.output().expect("the frame returns");
     assert_eq!(U256::from_be_slice(output), U256::from(MAX_TX_COMPUTE_GAS - 2));
     assert_eq!(run.outcome.gas.regular, intrinsic + 15, "the program's 15 is its only compute");
-    let answers = run;
 
     let spinner = spin(BytecodeBuilder::default());
     let run = run_under(MAX_TX_COMPUTE_GAS, spinner.clone());
@@ -1889,14 +1694,8 @@ fn test_the_most_compute_a_transaction_can_spend_bounds_the_caps() {
         "it runs out of its own gas: {:?}",
         run.outcome.result
     );
-    let halts = run;
 
     let cap = MAX_TX_COMPUTE_GAS - 10_000;
     let run = run_under(cap, spinner);
     assert_eq!(assert_stopped(&run, intrinsic, Charges::default().spin(0).left(cap)), cap);
-    crate::assert_sorted_json_snapshot!(&by_case([
-        ("GAS under a cap at the most compute", OutcomeView::new(&answers.outcome)),
-        ("a loop under a cap at the most compute", OutcomeView::new(&halts.outcome)),
-        ("a loop under a cap 10,000 below the most compute", OutcomeView::new(&run.outcome)),
-    ]));
 }

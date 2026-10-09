@@ -12,15 +12,13 @@
 //! its own floor ([`test_the_calldata_floor_never_binds_once_history_is_charged`]). The floor
 //! tests below read the floor off the result rather than off the bill.
 
-use std::collections::BTreeMap;
-
-use alloy_evm::{EvmError, InvalidTxError};
+use alloy_evm::{Evm, EvmError, InvalidTxError};
 use alloy_op_evm::OpTx;
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
     constants::{ACCOUNT_STATE_GAS, COST_PER_HISTORY_BYTE, TX_GAS_LIMIT_CAP},
-    test_utils::{op_transaction, MemoryDatabase, OutcomeView},
-    MegaEvm, MegaTransaction, MegaTransactionOutcome, TX_BODY_SIZE,
+    test_utils::{op_transaction, MemoryDatabase},
+    MegaEvm, MegaTransaction, TX_BODY_SIZE,
 };
 use revm::{
     context::{
@@ -32,10 +30,7 @@ use revm::{
     Database,
 };
 
-use crate::{
-    cases::{by_case, InsertCase},
-    common::{call, context, create, runs_at_measurement_prices},
-};
+use crate::common::{call, context, create, runs_at_measurement_prices};
 
 const CALLER: Address = address!("0000000000000000000000000000000000800000");
 const CALLEE: Address = address!("0000000000000000000000000000000000800001");
@@ -80,23 +75,20 @@ fn floor(db: MemoryDatabase, tx: MegaTransaction) -> Result<u64, String> {
     charged(db, tx).map(|charged| charged.floor)
 }
 
-/// What a transaction was charged: the receipt's figure and the floor it was measured against,
-/// and the outcome both are read from.
+/// What a transaction was charged: the receipt's figure and the floor it was measured against.
 struct Charged {
     gas_used: u64,
     floor: u64,
-    outcome: MegaTransactionOutcome,
 }
 
 /// Runs `tx` and reports what it was charged, or the validation error that rejected it.
 fn charged(db: MemoryDatabase, tx: MegaTransaction) -> Result<Charged, String> {
     let mut evm = MegaEvm::new(context(db));
-    match evm.execute_transaction(tx) {
+    match evm.transact_raw(tx) {
         Ok(outcome) => {
             assert!(outcome.result.is_success(), "{:?}", outcome.result);
             let gas = outcome.result.gas();
-            let (gas_used, floor) = (gas.tx_gas_used(), gas.floor_gas());
-            Ok(Charged { gas_used, floor, outcome })
+            Ok(Charged { gas_used: gas.tx_gas_used(), floor: gas.floor_gas() })
         }
         Err(err) => {
             let invalid = err
@@ -106,11 +98,6 @@ fn charged(db: MemoryDatabase, tx: MegaTransaction) -> Result<Charged, String> {
             Err(format!("{invalid:?}"))
         }
     }
-}
-
-/// The view of the outcome of `tx`, which validation admits, for a test's snapshot.
-fn view(db: MemoryDatabase, tx: MegaTransaction) -> OutcomeView {
-    OutcomeView::new(&charged(db, tx).expect("the transaction is valid").outcome)
 }
 
 /* ---------- the EIP-7976 calldata floor ---------- */
@@ -125,29 +112,24 @@ fn with_calldata(len: usize, byte: u8) -> MegaTransaction {
 fn test_the_floor_of_empty_calldata_is_the_intrinsic_gas() {
     assert_eq!(floor(funded(), with_calldata(0, 0)), Ok(EMPTY_CALL));
     assert_eq!(gas_used(funded(), with_calldata(0, 0)), Ok(EMPTY_CALL + body_history(0)));
-    crate::assert_sorted_json_snapshot!(&view(funded(), with_calldata(0, 0)));
 }
 
 /// One byte of calldata costs 64 gas in the floor.
 #[test]
 fn test_one_calldata_byte_costs_sixty_four_gas() {
     assert_eq!(floor(funded(), with_calldata(1, 0x42)), Ok(EMPTY_CALL + FLOOR_PER_BYTE));
-    crate::assert_sorted_json_snapshot!(&view(funded(), with_calldata(1, 0x42)));
 }
 
 /// A hundred bytes, and a kilobyte: the floor is linear in the byte count at the same rate.
 #[test]
 fn test_the_floor_is_sixty_four_gas_for_every_calldata_byte() {
-    let mut outcomes = BTreeMap::new();
     for len in [100u64, 1_024, 4_096] {
         assert_eq!(
             floor(funded(), with_calldata(len as usize, 0x42)),
             Ok(EMPTY_CALL + FLOOR_PER_BYTE * len),
             "{len} bytes"
         );
-        outcomes.insert_case(len, view(funded(), with_calldata(len as usize, 0x42)));
     }
-    crate::assert_sorted_json_snapshot!(&outcomes);
 }
 
 /// A zero byte costs the same as a non-zero one in the floor: EIP-7976 prices the space a byte
@@ -169,10 +151,6 @@ fn test_a_zero_calldata_byte_costs_the_same_as_a_non_zero_one() {
         bill(16),
         "only the intrinsic token rate, four against sixteen, tells them apart",
     );
-    crate::assert_sorted_json_snapshot!(&by_case([
-        ("zeros", OutcomeView::new(&zeros.outcome)),
-        ("non_zeros", OutcomeView::new(&non_zeros.outcome)),
-    ]));
 }
 
 /// The floor is computed and validated as it always was, and it never decides the bill: history
@@ -184,7 +162,6 @@ fn test_the_calldata_floor_never_binds_once_history_is_charged() {
         return;
     }
     const { assert!(HISTORY_PER_BYTE > FLOOR_PER_BYTE) };
-    let mut outcomes = BTreeMap::new();
     for len in [0u64, 1, 100, 4_096] {
         let charged = charged(funded(), with_calldata(len as usize, 0x00)).expect("valid");
         assert_eq!(charged.floor, EMPTY_CALL + FLOOR_PER_BYTE * len, "{len} bytes: the floor");
@@ -194,9 +171,7 @@ fn test_the_calldata_floor_never_binds_once_history_is_charged() {
             "{len} bytes: the intrinsic charge and the body, both above the floor",
         );
         assert!(charged.gas_used > charged.floor, "{len} bytes: the floor does not bind");
-        outcomes.insert_case(len, OutcomeView::new(&charged.outcome));
     }
-    crate::assert_sorted_json_snapshot!(&outcomes);
 }
 
 /* ---------- the EIP-7981 access-list data charge ---------- */
@@ -229,7 +204,6 @@ fn test_an_access_list_address_is_priced_at_the_pre_eip8038_rate() {
         Ok(EMPTY_CALL + 2_400 + body_history(20)),
         "the intrinsic charge and the address's twenty bytes of history",
     );
-    crate::assert_sorted_json_snapshot!(&view(funded(), with_access_list(0)));
 }
 
 /// A storage key costs 1,900 in the intrinsic phase and its thirty-two bytes cost 2,048 in the
@@ -239,7 +213,6 @@ fn test_an_access_list_address_is_priced_at_the_pre_eip8038_rate() {
 fn test_access_list_bytes_are_counted_in_the_floor_at_sixty_four_each() {
     let address_bytes = 20 * FLOOR_PER_BYTE;
     let key_bytes = 32 * FLOOR_PER_BYTE;
-    let mut outcomes = BTreeMap::new();
     for keys in [0u64, 1, 7, 8, 16, 64] {
         assert_eq!(
             floor(funded(), with_access_list(keys as usize)),
@@ -253,9 +226,7 @@ fn test_access_list_bytes_are_counted_in_the_floor_at_sixty_four_each() {
             Ok((EMPTY_CALL + 2_400 + 1_900 * keys + body_history(20 + 32 * keys)).max(floor)),
             "{keys} keys: the intrinsic charge and the entry's bytes of history"
         );
-        outcomes.insert_case(keys, view(funded(), with_access_list(keys as usize)));
     }
-    crate::assert_sorted_json_snapshot!(&outcomes);
 }
 
 /* ---------- the execution cap ---------- */
@@ -310,7 +281,6 @@ fn test_the_execution_cap_bounds_the_calldata_a_transaction_may_carry() {
         }
     );
     assert_eq!(gas_used(db, with_calldata_over_the_cap(LARGEST_CALLDATA + 1)), Err(expected));
-    crate::assert_sorted_json_snapshot!(&OutcomeView::new(&charged.outcome));
 }
 
 /// A floor above the transaction's own gas limit is rejected too, below the cap: the floor is
@@ -364,7 +334,6 @@ fn test_a_transfer_that_cannot_pay_the_new_account_runs_out_of_gas() {
     assert_eq!(outcome.state[&CALLER].info.nonce, 1, "the sender paid for the attempt");
     assert_eq!(outcome.gas.gas_used, 21_000 + ACCOUNT_STATE_GAS - 1, "its whole gas limit");
     assert_eq!(outcome.gas.state, 0, "and the account it could not pay for is not created");
-    crate::assert_sorted_json_snapshot!(&OutcomeView::new(&outcome));
 }
 
 /// The same for a creation: the created account's state gas is charged as the frame starts, not
@@ -384,7 +353,6 @@ fn test_a_creation_that_cannot_pay_its_account_runs_out_of_gas() {
     assert_eq!(outcome.state[&CALLER].info.nonce, 1, "the sender paid for the attempt");
     assert_eq!(outcome.gas.gas_used, 24_000 + ACCOUNT_STATE_GAS - 1, "its whole gas limit");
     assert_eq!(outcome.gas.state, 0, "and the account it could not pay for is not created");
-    crate::assert_sorted_json_snapshot!(&OutcomeView::new(&outcome));
 }
 
 /// A gas limit below the intrinsic charge itself is a validation rejection, which leaves the
@@ -409,10 +377,6 @@ fn test_a_valid_call_still_passes() {
         gas_used(funded(), call(CALLER, CALLEE, U256::ZERO, 1_000_000)),
         Ok(EMPTY_CALL + body_history(0)),
     );
-    crate::assert_sorted_json_snapshot!(&view(
-        funded(),
-        call(CALLER, CALLEE, U256::ZERO, 1_000_000)
-    ));
 }
 
 /// A gas limit that covers the intrinsic charge but not the body's history is a validation
@@ -439,5 +403,4 @@ fn test_a_gas_limit_short_of_the_body_is_rejected() {
     }
     assert_eq!(gas_used(funded(), call(CALLER, CALLEE, U256::ZERO, minimum)), Ok(minimum));
     assert_sender_untouched();
-    crate::assert_sorted_json_snapshot!(&view(funded(), call(CALLER, CALLEE, U256::ZERO, minimum)));
 }

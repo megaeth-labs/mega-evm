@@ -1,6 +1,5 @@
 //! Tests of the Satin engine.
 
-mod cases;
 mod common;
 mod compute_gas;
 mod contract_size;

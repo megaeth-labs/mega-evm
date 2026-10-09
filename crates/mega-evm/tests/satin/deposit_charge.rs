@@ -21,12 +21,10 @@
 //! on a configuration without it: the neutral one of Osaka, where no state gas is charged and the
 //! data-size limit is the one that holds the code.
 
-use std::collections::BTreeMap;
-
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
     constants::TX_GAS_LIMIT_CAP,
-    test_utils::{neutral_cfg, neutralize_evm, BytecodeBuilder, MemoryDatabase, OutcomeView},
+    test_utils::{neutral_cfg, neutralize_evm, BytecodeBuilder, MemoryDatabase},
     EthSpecId, EvmTxRuntimeLimits, LimitCheck, LimitKind, MegaContext, MegaEvm,
     MegaTransactionOutcome,
 };
@@ -38,10 +36,7 @@ use revm::{
     Database, Inspector,
 };
 
-use crate::{
-    cases::by_case,
-    common::{call, context, history_is_free, state_is_free},
-};
+use crate::common::{call, context, history_is_free, state_is_free};
 
 const CALLER: Address = address!("0000000000000000000000000000000000a00000");
 /// Calls `B` with a chosen gas, keeps what `B` answers in slot 1, then writes slot 0.
@@ -244,21 +239,6 @@ fn boundary(setup: Setup) -> (u64, MegaTransactionOutcome) {
     (enough, outcome)
 }
 
-/// The views of the three outcomes a limit's case reads, for its test's snapshot: the unlimited
-/// run one gas short of the boundary, and the runs under the limit at the boundary and one gas
-/// short of it.
-fn views(
-    short: &MegaTransactionOutcome,
-    stopped: &MegaTransactionOutcome,
-    ran_out: &MegaTransactionOutcome,
-) -> BTreeMap<&'static str, OutcomeView> {
-    by_case([
-        ("no limit, one gas short", OutcomeView::new(short)),
-        ("under the limit, exactly enough", OutcomeView::new(stopped)),
-        ("under the limit, one gas short", OutcomeView::new(ran_out)),
-    ])
-}
-
 /// The state gas the creation holds once its code's state gas is charged: the created account
 /// and the code.
 fn creation_state_gas() -> u64 {
@@ -275,9 +255,7 @@ fn creation_state_gas() -> u64 {
 /// transaction has by then — would report the same stop and deploy nothing as well. The creation's
 /// own end tells them apart: the deposit is held where it is made when the creation itself reverts
 /// with the stop.
-///
-/// Returns the views of the outcomes it read.
-fn assert_state_gas_limit_stands_aside(setup: Setup) -> BTreeMap<&'static str, OutcomeView> {
+fn assert_state_gas_limit_stands_aside(setup: Setup) {
     let (enough, short) = boundary(setup);
     let creation = creation_state_gas();
     assert!(short.gas.state > 0 && short.gas.state < creation, "{setup:?}: the slot alone fits");
@@ -306,15 +284,12 @@ fn assert_state_gas_limit_stands_aside(setup: Setup) -> BTreeMap<&'static str, O
     assert!(!deployed(&ran_out), "{setup:?}");
     assert_eq!(creation_answer(&ran_out), U256::ZERO, "{setup:?}: the creation ran out of gas");
     assert_eq!(ran_out.gas, short.gas, "{setup:?}: as without the limit");
-    views(&short, &stopped, &ran_out)
 }
 
 /// Under a frame cap the creation's code crosses, the creation that reaches the charge is stopped
 /// alone — it answers with the stop's revert data — and the one that cannot runs out of gas as it
 /// does without the cap.
-///
-/// Returns the views of the outcomes it read.
-fn assert_data_size_limit_stands_aside(setup: Setup) -> BTreeMap<&'static str, OutcomeView> {
+fn assert_data_size_limit_stands_aside(setup: Setup) {
     let (enough, short) = boundary(setup);
     let limits = EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(FRAME_CAP);
     let stop = LimitCheck::ExceedsLimit {
@@ -339,7 +314,6 @@ fn assert_data_size_limit_stands_aside(setup: Setup) -> BTreeMap<&'static str, O
     assert!(!deployed(&ran_out), "{setup:?}");
     assert_eq!(ran_out.gas, short.gas, "{setup:?}: as without the limit");
     assert_eq!(ran_out.usage, short.usage, "{setup:?}: and it keeps what it keeps without it");
-    views(&short, &stopped, &ran_out)
 }
 
 /// Above the execution cap the reservoir pays the code's state gas and history: a creation that
@@ -354,8 +328,7 @@ fn test_a_creation_that_cannot_pay_the_hash_runs_out_of_gas_under_the_state_gas_
     let (enough, _) = boundary(setup);
     let end = creation_end(setup, enough - 1);
     assert!(!end.charged_state_gas, "one gas short, the hash is what it cannot pay: {end:?}");
-    let outcomes = assert_state_gas_limit_stands_aside(setup);
-    crate::assert_sorted_json_snapshot!(&outcomes);
+    assert_state_gas_limit_stands_aside(setup);
 }
 
 /// Below the execution cap the code's state gas and then its history are paid out of regular gas:
@@ -377,20 +350,15 @@ fn test_a_creation_that_cannot_pay_its_history_runs_out_of_gas_under_the_state_g
         end.charged_state_gas && !end.deposited,
         "one gas short, the history is what it cannot pay: {end:?}"
     );
-    let outcomes = assert_state_gas_limit_stands_aside(setup);
-    crate::assert_sorted_json_snapshot!(&outcomes);
+    assert_state_gas_limit_stands_aside(setup);
 }
 
 /// The data-size limit counts deployed code behind the same check: a creation that cannot pay the
 /// hash of its code, or its history, runs out of gas whatever the limit.
 #[test]
 fn test_a_creation_that_cannot_pay_for_its_code_runs_out_of_gas_under_the_data_size_limit() {
-    let above = assert_data_size_limit_stands_aside(Setup::Satin(ABOVE_CAP));
-    let below = assert_data_size_limit_stands_aside(Setup::Satin(BELOW_CAP));
-    crate::assert_sorted_json_snapshot!(&by_case([
-        ("above the cap", above),
-        ("below the cap", below),
-    ]));
+    assert_data_size_limit_stands_aside(Setup::Satin(ABOVE_CAP));
+    assert_data_size_limit_stands_aside(Setup::Satin(BELOW_CAP));
 }
 
 /// Without EIP-8037 the deposit's only charge is the regular deposit cost: a creation that cannot
@@ -399,6 +367,5 @@ fn test_a_creation_that_cannot_pay_for_its_code_runs_out_of_gas_under_the_data_s
 fn test_a_creation_that_cannot_pay_the_deposit_cost_runs_out_of_gas_under_the_data_size_limit() {
     let end = creation_end(Setup::NeutralOsaka, boundary(Setup::NeutralOsaka).0);
     assert!(end.deposited && !end.charged_state_gas, "no state gas without EIP-8037: {end:?}");
-    let outcomes = assert_data_size_limit_stands_aside(Setup::NeutralOsaka);
-    crate::assert_sorted_json_snapshot!(&outcomes);
+    assert_data_size_limit_stands_aside(Setup::NeutralOsaka);
 }

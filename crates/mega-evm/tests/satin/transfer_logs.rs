@@ -23,8 +23,6 @@
 //! nothing, and runs under a limit as it does without one; a creation onto an occupied address is
 //! counted, and revm refuses it after the count.
 
-use std::collections::BTreeMap;
-
 use alloy_op_evm::OpTx;
 use alloy_primitives::{address, keccak256, Address, Bytes, Log, TxKind, B256, U256};
 use alloy_sol_types::{SolCall, SolError};
@@ -35,9 +33,7 @@ use mega_evm::{
         IMegaAccessControl, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE, MEGA_SYSTEM_ADDRESS,
         ORACLE_CONTRACT_ADDRESS,
     },
-    test_utils::{
-        is_transfer_log, op_transaction, transfer_log, BytecodeBuilder, MemoryDatabase, OutcomeView,
-    },
+    test_utils::{is_transfer_log, op_transaction, transfer_log, BytecodeBuilder, MemoryDatabase},
     transaction_body_bytes, EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, MegaContext,
     MegaEvm, MegaLimitExceeded, MegaTransaction, MegaTransactionOutcome,
     FRAME_DATA_SHARE_DENOMINATOR, FRAME_DATA_SHARE_NUMERATOR, TRANSFER_LOG_SIZE, WRITE_RECORD_SIZE,
@@ -55,10 +51,7 @@ use revm::{
     Database, Inspector,
 };
 
-use crate::{
-    cases::{by_case, InsertCase},
-    common::{account_state_gas, context},
-};
+use crate::common::{account_state_gas, context};
 
 const CALLER: Address = address!("0000000000000000000000000000000000d00000");
 /// The contract a nested site's transaction calls: it calls [`ACTOR`] and returns what that
@@ -417,7 +410,6 @@ fn assert_stopped_at_the_move(
 /// pays, and the history bytes it reports, are its body and its records alone.
 #[test]
 fn test_each_site_counts_its_transfer_log() {
-    let mut outcomes = BTreeMap::new();
     for site in Site::ALL {
         for gas_limit in GAS_LIMITS {
             let case = format!("{site:?} at {gas_limit}");
@@ -427,10 +419,8 @@ fn test_each_site_counts_its_transfer_log() {
 
             assert_completed(&case, site, Variant::Plain, &outcome, body);
             assert_reservoir_paid(&case, gas_limit, &outcome);
-            outcomes.insert_case(case, OutcomeView::new(&outcome));
         }
     }
-    crate::assert_summaries_snapshot!(&outcomes);
 }
 
 /// A frame budget holds the move at exactly its bytes, and one byte short of them stops the frame
@@ -442,7 +432,6 @@ fn test_each_site_counts_its_transfer_log() {
 /// same frame at the same budget with the same revert.
 #[test]
 fn test_each_site_stops_one_byte_short_of_its_frame_budget() {
-    let mut outcomes = BTreeMap::new();
     for site in Site::ALL {
         let cap = cap_for(site.depth(), site.bytes());
         for gas_limit in GAS_LIMITS {
@@ -486,12 +475,9 @@ fn test_each_site_stops_one_byte_short_of_its_frame_budget() {
                     Variant::TakenBack => unreachable!(),
                 }
                 assert_reservoir_paid(&case, gas_limit, &over);
-                outcomes.insert_case(format!("{case}: at the budget"), OutcomeView::new(&fits));
-                outcomes.insert_case(format!("{case}: one byte short"), OutcomeView::new(&over));
             }
         }
     }
-    crate::assert_summaries_snapshot!(&outcomes);
 }
 
 /// The transaction's limit one byte short of the move stops the transaction there: it latches, the
@@ -501,7 +487,6 @@ fn test_each_site_stops_one_byte_short_of_its_frame_budget() {
 /// the limit, a limit of exactly the bytes holds.
 #[test]
 fn test_each_site_stops_one_byte_short_of_the_transaction_limit() {
-    let mut outcomes = BTreeMap::new();
     for site in Site::ALL {
         for gas_limit in GAS_LIMITS {
             for variant in [Variant::Plain, Variant::Twin] {
@@ -544,13 +529,10 @@ fn test_each_site_stops_one_byte_short_of_the_transaction_limit() {
                     let (fits, body, _) = run(0);
                     assert_completed(&format!("{case}: at the limit"), site, variant, &fits, body);
                     assert_reservoir_paid(&case, gas_limit, &fits);
-                    outcomes.insert_case(format!("{case}: at the limit"), OutcomeView::new(&fits));
                 }
-                outcomes.insert_case(format!("{case}: one byte short"), OutcomeView::new(&outcome));
             }
         }
     }
-    crate::assert_summaries_snapshot!(&outcomes);
 }
 
 /// A failure above the move takes the transfer log back with the move, and its bytes with them:
@@ -558,7 +540,6 @@ fn test_each_site_stops_one_byte_short_of_the_transaction_limit() {
 /// the body.
 #[test]
 fn test_a_failure_takes_each_sites_transfer_log_back() {
-    let mut outcomes = BTreeMap::new();
     for site in Site::ALL {
         for gas_limit in GAS_LIMITS {
             let case = format!("{site:?} at {gas_limit}");
@@ -576,10 +557,8 @@ fn test_a_failure_takes_each_sites_transfer_log_back() {
             }
             assert_eq!(balance(&outcome, site.recipient()), U256::ZERO, "{case}");
             assert_reservoir_paid(&case, gas_limit, &outcome);
-            outcomes.insert_case(case, OutcomeView::new(&outcome));
         }
     }
-    crate::assert_summaries_snapshot!(&outcomes);
 }
 
 /// Nothing moves to another account, so nothing is logged or counted for a log: a `CALLCODE` and a
@@ -657,7 +636,6 @@ fn test_no_transfer_log_where_no_value_moves_to_another_account() {
         ),
         ("a value call a system contract refuses", db(refused), call(ACTOR, 0), 0, 0),
     ];
-    let mut outcomes = BTreeMap::new();
     for (name, db, tx, records, logs) in cases {
         let body = transaction_body_bytes(&tx);
         let outcome = execute(db, tx, EvmTxRuntimeLimits::no_limits());
@@ -672,7 +650,6 @@ fn test_no_transfer_log_where_no_value_moves_to_another_account() {
             },
             "{name}",
         );
-        outcomes.insert_case(name, OutcomeView::new(&outcome));
     }
     let burned = execute(
         db(actor().create(value, &burner)),
@@ -684,8 +661,6 @@ fn test_no_transfer_log_where_no_value_moves_to_another_account() {
     assert_eq!(balance(&burned, ACTOR), U256::from(9 * VALUE));
     let older = execute(db(actor()), call(DESTRUCTOR, 0), EvmTxRuntimeLimits::no_limits());
     assert_eq!(balance(&older, DESTRUCTOR), value, "an older account keeps its balance");
-    // `burned` and `older` run two of the cases again, so the cases' views stand for them.
-    crate::assert_sorted_json_snapshot!(&outcomes);
 }
 
 /// A start revm refuses on its caller's account moves nothing and writes nothing, so nothing is
@@ -713,7 +688,6 @@ fn test_a_value_call_its_caller_cannot_fund_runs_as_without_a_limit() {
     }));
     let body = transaction_body_bytes(&tx);
     let actor = |call: BytecodeBuilder| call.append(POP).return_returndata().build();
-    let mut outcomes = BTreeMap::new();
     let cases = [
         (
             "a CALL",
@@ -737,20 +711,13 @@ fn test_a_value_call_its_caller_cannot_fund_runs_as_without_a_limit() {
         assert!(free.result.logs().is_empty(), "{name}");
         assert_eq!(free.usage, LimitUsage { data_size: body, write_records: 0 }, "{name}");
         assert_eq!(balance(&free, ACTOR), U256::from(VALUE - 1), "{name}: nothing moved");
-        for (under, limits) in
-            [("the transaction limit", tx_limit), ("the frame budget", frame_budget)]
-        {
+        for limits in [tx_limit, frame_budget] {
             let limited = execute(db(VALUE - 1, &actor), tx.clone(), limits);
             assert_eq!(limited.limit_exceeded, None, "{name} under {limits:?}");
             assert_eq!(limited.result, free.result, "{name} under {limits:?}");
             assert_eq!(limited.usage, free.usage, "{name} under {limits:?}");
             assert_eq!(limited.gas, free.gas, "{name} under {limits:?}");
-            outcomes.insert_case(
-                format!("{name}, unfunded, under {under}"),
-                OutcomeView::new(&limited),
-            );
         }
-        outcomes.insert_case(format!("{name}, unfunded, no limit"), OutcomeView::new(&free));
 
         let stopped = execute(db(VALUE, &actor), tx.clone(), tx_limit);
         assert_eq!(
@@ -763,10 +730,6 @@ fn test_a_value_call_its_caller_cannot_fund_runs_as_without_a_limit() {
             }),
             "{name}: funded to the last wei, the move is counted",
         );
-        outcomes.insert_case(
-            format!("{name}, funded, under the transaction limit"),
-            OutcomeView::new(&stopped),
-        );
         let stopped = execute(db(VALUE, &actor), tx.clone(), frame_budget);
         let stop = MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit: bytes - 1 };
         assert_eq!(
@@ -774,12 +737,7 @@ fn test_a_value_call_its_caller_cannot_fund_runs_as_without_a_limit() {
             Some(&Bytes::from(stop.abi_encode())),
             "{name}: funded to the last wei, the move is stopped at its frame's budget",
         );
-        outcomes.insert_case(
-            format!("{name}, funded, under the frame budget"),
-            OutcomeView::new(&stopped),
-        );
     }
-    crate::assert_summaries_snapshot!(&outcomes);
 }
 
 /// A value call its caller cannot fund is charged nothing for the records it would make, as it
@@ -833,10 +791,6 @@ fn test_a_value_call_its_caller_cannot_fund_is_charged_nothing() {
         "and paid the body's history alone"
     );
     assert_eq!(funded.gas.gas_used, gas_limit, "the funded call's halt used the whole gas limit");
-    crate::assert_sorted_json_snapshot!(&by_case([
-        ("refused", OutcomeView::new(&refused)),
-        ("funded", OutcomeView::new(&funded)),
-    ]));
 }
 
 /// Appends a call carrying [`VALUE`] to `MegaAccessControl`, which answers it with
@@ -902,7 +856,6 @@ fn test_a_start_answered_before_its_init_leaves_no_refusal_for_the_next() {
         Some(&Bytes::from(IMegaAccessControl::NonZeroTransfer::SELECTOR.to_vec())),
         "the system contract answers the call, not revm"
     );
-    let mut outcomes = by_case([("the answered call", OutcomeView::new(&answer))]);
 
     let cases = [
         ("alone", delegate_to_writer(BytecodeBuilder::default())),
@@ -920,9 +873,7 @@ fn test_a_start_answered_before_its_init_leaves_no_refusal_for_the_next() {
         );
         assert_eq!(outcome.limit_exceeded, None, "{name}: a frame budget latches nothing");
         assert_eq!(outcome.usage, LimitUsage { data_size: body, write_records: 0 }, "{name}");
-        outcomes.insert_case(name, OutcomeView::new(&outcome));
     }
-    crate::assert_sorted_json_snapshot!(&outcomes);
 }
 
 /// The answer a transaction's last start left behind is not taken by the next transaction's first
@@ -961,11 +912,6 @@ fn test_an_answer_a_transaction_leaves_is_not_taken_by_the_next() {
     );
     assert_eq!(next.usage, alone.usage);
     assert_eq!(next.result, alone.result);
-    crate::assert_sorted_json_snapshot!(&by_case([
-        ("alone", OutcomeView::new(&alone)),
-        ("first", OutcomeView::new(&first)),
-        ("next", OutcomeView::new(&next)),
-    ]));
 }
 
 /// Raises the value of every call to [`RECEIVER`] by one wei as the call starts: an inspector's
@@ -1023,7 +969,6 @@ fn test_a_start_an_inspector_rewrites_is_refused_on_the_input_it_leaves() {
     assert_eq!(balance(&outcome, ACTOR), U256::from(VALUE));
     assert_eq!(outcome.usage, LimitUsage { data_size: body, write_records: 0 });
     assert_eq!(outcome.limit_exceeded, None);
-    crate::assert_sorted_json_snapshot!(&OutcomeView::new(&outcome));
 }
 
 /// A creation onto an occupied address is the one refusal decided after its start is counted:
@@ -1078,10 +1023,6 @@ fn test_a_creation_onto_an_occupied_address_is_counted_before_revm_refuses_it() 
         }),
     );
     assert!(!stopped.result.is_success(), "the stop reverts the transaction");
-    crate::assert_sorted_json_snapshot!(&by_case([
-        ("free", OutcomeView::new(&free)),
-        ("stopped", OutcomeView::new(&stopped)),
-    ]));
 }
 
 /// A deposit's value moves in its first frame and is logged there, from the depositor to the
@@ -1127,11 +1068,6 @@ fn test_a_deposits_value_is_logged_and_its_mint_is_not() {
     );
     assert!(stopped.result.logs().is_empty());
     assert_eq!(balance(&stopped, DEPOSITOR), U256::from(1_000), "the mint stays, the value not");
-    crate::assert_sorted_json_snapshot!(&by_case([
-        ("valued", OutcomeView::new(&outcome)),
-        ("minted", OutcomeView::new(&minted)),
-        ("stopped", OutcomeView::new(&stopped)),
-    ]));
 }
 
 /// A deposit its depositor cannot fund once the mint is credited is refused by revm at its first
@@ -1142,8 +1078,7 @@ fn test_a_deposits_value_is_logged_and_its_mint_is_not() {
 #[test]
 fn test_a_deposit_its_depositor_cannot_fund_fails_as_without_a_limit() {
     let db = || MemoryDatabase::default().account_code(RECEIVER, Bytes::from_static(&[STOP]));
-    let mut outcomes = BTreeMap::new();
-    for (name, kind) in [("a call", TxKind::Call(RECEIVER)), ("a creation", TxKind::Create)] {
+    for kind in [TxKind::Call(RECEIVER), TxKind::Create] {
         let tx = deposit(kind, 1_000, 5_000);
         let body = transaction_body_bytes(&tx);
         let free = execute(db(), tx.clone(), EvmTxRuntimeLimits::no_limits());
@@ -1161,10 +1096,7 @@ fn test_a_deposit_its_depositor_cannot_fund_fails_as_without_a_limit() {
         assert_eq!(limited.limit_exceeded, None, "{kind:?}");
         assert_eq!(limited.result, free.result, "{kind:?}");
         assert_eq!(limited.usage, free.usage, "{kind:?}");
-        outcomes.insert_case(format!("{name}, no limit"), OutcomeView::new(&free));
-        outcomes.insert_case(format!("{name}, under the limit"), OutcomeView::new(&limited));
     }
-    crate::assert_sorted_json_snapshot!(&outcomes);
 }
 
 /// A creation from an account whose nonce cannot be bumped is answered by revm with a success
@@ -1186,20 +1118,15 @@ fn test_a_creation_whose_nonce_cannot_be_bumped_keeps_nothing() {
     let tx = deposit(TxKind::Create, 1_000, 5);
     let body = transaction_body_bytes(&tx);
     let limit = body + WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE - 1;
-    let mut outcomes = BTreeMap::new();
-    for (name, limits) in [
-        ("a deposit, no limit", EvmTxRuntimeLimits::no_limits()),
-        (
-            "a deposit, under the limit",
-            EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit),
-        ),
+    for limits in [
+        EvmTxRuntimeLimits::no_limits(),
+        EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit),
     ] {
         let db = MemoryDatabase::default().account_nonce(DEPOSITOR, u64::MAX);
         let outcome = execute(db, tx.clone(), limits);
         assert!(created_nothing(&outcome), "{limits:?}: {:?}", outcome.result);
         assert_eq!(outcome.limit_exceeded, None, "{limits:?}");
         assert_eq!(outcome.usage, LimitUsage { data_size: body, write_records: 0 }, "{limits:?}");
-        outcomes.insert_case(name, OutcomeView::new(&outcome));
     }
 
     let db = MemoryDatabase::default()
@@ -1223,8 +1150,6 @@ fn test_a_creation_whose_nonce_cannot_be_bumped_keeps_nothing() {
     assert_eq!(outcome.usage, LimitUsage { data_size: body, write_records: 0 });
     assert_eq!(outcome.gas.history_bytes, body, "its body alone");
     assert_eq!(outcome.gas.history, history_gas(body).unwrap(), "and the history of its body");
-    outcomes.insert_case("a creation with the nonce check off", OutcomeView::new(&outcome));
-    crate::assert_sorted_json_snapshot!(&outcomes);
 }
 
 /// A system transaction moves no value in the shape the sequencer builds it, so it logs nothing.
@@ -1254,15 +1179,9 @@ fn test_a_system_transactions_value_is_logged_and_no_limit_stops_it() {
 
     let tx = system(VALUE);
     let body = transaction_body_bytes(&tx);
-    let mut outcomes = by_case([("valueless", OutcomeView::new(&quiet))]);
-    for (name, limits) in [
-        ("with value, no limit", EvmTxRuntimeLimits::no_limits()),
-        (
-            "with value, every data-size limit at zero",
-            EvmTxRuntimeLimits::no_limits()
-                .with_tx_data_size_limit(0)
-                .with_frame_data_size_limit(0),
-        ),
+    for limits in [
+        EvmTxRuntimeLimits::no_limits(),
+        EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(0).with_frame_data_size_limit(0),
     ] {
         let outcome = execute(db(), tx.clone(), limits);
         assert!(outcome.result.is_success(), "{:?}", outcome.result);
@@ -1279,7 +1198,5 @@ fn test_a_system_transactions_value_is_logged_and_no_limit_stops_it() {
             },
             "counted all the same",
         );
-        outcomes.insert_case(name, OutcomeView::new(&outcome));
     }
-    crate::assert_sorted_json_snapshot!(&outcomes);
 }

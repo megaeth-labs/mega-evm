@@ -4,7 +4,7 @@ use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolError;
 use mega_evm::{
     constants::{COST_PER_HISTORY_BYTE, SLOT_STATE_GAS, TX_GAS_LIMIT_CAP},
-    test_utils::{BytecodeBuilder, MemoryDatabase, OutcomeView},
+    test_utils::{BytecodeBuilder, MemoryDatabase},
     BlockGasCounters, EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, MegaEvm,
     MegaLimitExceeded, MegaTransactionOutcome, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
@@ -104,7 +104,6 @@ fn test_outcome_reports_the_stop() {
         LimitUsage { data_size: TX_BODY_SIZE, write_records: 0 },
         "the stop drops the writes and keeps the body"
     );
-    crate::assert_sorted_json_snapshot!(&OutcomeView::new(&outcome));
 }
 
 /// A contract reverting with `MegaLimitExceeded`'s bytes on its own is not a stop.

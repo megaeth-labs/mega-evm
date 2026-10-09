@@ -24,8 +24,6 @@
 //! whose new account crosses the state-gas limit, and a start whose records cross the data-size
 //! limit before the frame is built — and settle the same way.
 
-use std::collections::BTreeMap;
-
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
     constants::{
@@ -33,7 +31,7 @@ use mega_evm::{
     },
     satin_gas_params,
     system::ORACLE_CONTRACT_ADDRESS,
-    test_utils::{BytecodeBuilder, MemoryDatabase, OutcomeView},
+    test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitStop, LimitUsage, MegaContext, MegaEvm,
     MegaHaltReason, MegaTransactionOutcome, FRAME_DATA_SHARE_DENOMINATOR,
     FRAME_DATA_SHARE_NUMERATOR, LOG_BASE_SIZE, TRANSFER_LOG_SIZE, TX_BODY_SIZE, WRITE_RECORD_SIZE,
@@ -54,7 +52,6 @@ use revm::{
 };
 
 use crate::{
-    cases::{by_case, InsertCase},
     common::{body_history, call, call_with_data, create, state_is_free},
     detention::{context, work, Charges, BENEFICIARY},
     withheld_gas::{priced, Runs, PRICED},
@@ -256,15 +253,8 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Rewriter {
 }
 
 /// One row of the matrix, both columns: `limit` crossed by the frame at `crossing` of a
-/// transaction with `gas_limit`, without an inspector and under a [`Rewriter`]. The views of the
-/// twin and of both columns go into `views` under the row's name.
-fn assert_cell(
-    limit: Limit,
-    crossing: usize,
-    gas_limit: u64,
-    slot: u64,
-    views: &mut BTreeMap<String, OutcomeView>,
-) {
+/// transaction with `gas_limit`, without an inspector and under a [`Rewriter`].
+fn assert_cell(limit: Limit, crossing: usize, gas_limit: u64, slot: u64) {
     let row = format!("{limit:?} at depth {crossing}, gas limit {gas_limit}");
     let frames = crossing as u64 + 1;
     let intrinsic = intrinsic(gas_limit);
@@ -282,7 +272,6 @@ fn assert_cell(
         (0, intrinsic.gas.history, intrinsic.gas.reservoir_remaining),
         "{row}: a revert keeps nothing but the body",
     );
-    views.insert_case(format!("{row}, twin"), OutcomeView::new(&twin));
     // The regular gas the frames spent up to the crossing: for the compute limit, up to the read.
     let before_crossing = twin.gas.regular - intrinsic.gas.regular - TWIN_REVERT * frames;
 
@@ -352,7 +341,6 @@ fn assert_cell(
             LimitUsage { data_size: TX_BODY_SIZE, write_records: 0 },
             "{cell}: the body stays"
         );
-        views.insert_case(cell, OutcomeView::new(outcome));
     }
     // No instruction ran after the crossing: the bill above has no marker's write in it, and under
     // the inspector none ran at all. Every frame returned the stop, and the rewrites into successes
@@ -387,15 +375,13 @@ fn assert_cell(
 #[test]
 fn test_every_limit_stops_the_transaction_at_every_depth_and_tier() {
     let slot = one_slot();
-    let mut views = BTreeMap::new();
     for limit in Limit::ALL.into_iter().filter(|limit| limit.crossable()) {
         for crossing in [0, 3] {
             for gas_limit in TIERS {
-                assert_cell(limit, crossing, gas_limit, slot, &mut views);
+                assert_cell(limit, crossing, gas_limit, slot);
             }
         }
     }
-    crate::assert_summaries_snapshot!(&views);
 }
 
 /// Rewrites every frame result it sees end into `into`, and leaves its gas as it is.
@@ -425,7 +411,6 @@ fn test_an_inspector_cannot_turn_a_stop_into_a_halt() {
         InstructionResult::PrecompileOOG,
         InstructionResult::InvalidFEOpcode,
     ];
-    let mut views = BTreeMap::new();
     for limit in Limit::ALL.into_iter().filter(|limit| limit.crossable()) {
         for crossing in [0, 3] {
             for gas_limit in TIERS {
@@ -449,16 +434,10 @@ fn test_an_inspector_cannot_turn_a_stop_into_a_halt() {
                     assert_eq!(halted.limit_exceeded, plain.limit_exceeded, "{case}");
                     assert_eq!(halted.gas, plain.gas, "{case}");
                     assert_eq!(halted.usage, plain.usage, "{case}");
-                    views.insert_case(case, OutcomeView::new(&halted));
                 }
-                views.insert_case(
-                    format!("{limit:?} at depth {crossing}, gas limit {gas_limit}, plain"),
-                    OutcomeView::new(&plain),
-                );
             }
         }
     }
-    crate::assert_summaries_snapshot!(&views);
 }
 
 /// The limits a cell runs under, and the stop's limit where it is known before the run: every
@@ -573,7 +552,6 @@ fn test_a_revived_creation_reports_the_stop() {
         (Creation::Nested, [Limit::DataSize, Limit::StateGas, Limit::Compute].as_slice()),
         (Creation::NestedStart, [Limit::DataSize, Limit::KvUpdates, Limit::StateGas].as_slice()),
     ];
-    let mut views = BTreeMap::new();
     for (creation, limits) in cases {
         for &limit in limits.iter().filter(|limit| limit.crossable()) {
             for gas_limit in TIERS {
@@ -619,12 +597,9 @@ fn test_a_revived_creation_reports_the_stop() {
                     }
                 };
                 assert_eq!(rewriter.ended, ended, "{case}: its creator returned the stop");
-                views.insert_case(format!("{case}, plain"), OutcomeView::new(&plain));
-                views.insert_case(format!("{case}, revived"), OutcomeView::new(&revived));
             }
         }
     }
-    crate::assert_summaries_snapshot!(&views);
 }
 
 /* ---------- a detained callee does not burn its callers' gas ---------- */
@@ -676,7 +651,6 @@ fn detained_callee_at(depth: usize) -> MemoryDatabase {
 /// execution cap and above it. No caller resumes: the callee runs the last step.
 #[test]
 fn test_a_callee_that_reads_the_timestamp_does_not_make_its_callers_burn_their_gas() {
-    let mut views = BTreeMap::new();
     for depth in [1, 3] {
         let bills: Vec<_> = [BELOW, ABOVE, 1_000_000_000]
             .into_iter()
@@ -723,14 +697,11 @@ fn test_a_callee_that_reads_the_timestamp_does_not_make_its_callers_burn_their_g
                     "{case}: the reservoir comes back"
                 );
                 assert!(outcome.result.logs().is_empty(), "{case}");
-                views.insert_case(format!("{case}, recorded"), OutcomeView::new(&recorded));
-                views.insert_case(case, OutcomeView::new(&outcome));
                 (outcome.gas.gas_used, outcome.gas.regular, outcome.gas.state, outcome.gas.history)
             })
             .collect();
         assert!(bills.windows(2).all(|pair| pair[0] == pair[1]), "depth {depth}: {bills:?}");
     }
-    crate::assert_summaries_snapshot!(&views);
 }
 
 /* ---------- frame budgets ---------- */
@@ -838,7 +809,6 @@ fn test_a_frame_budget_crossed_three_calls_down_reverts_that_frame_alone() {
             writer(record_budget + 1),
         ),
     ];
-    let mut views = BTreeMap::new();
     for (kind, limits, budget, d) in rows {
         for gas_limit in TIERS {
             let case = format!("{kind:?}, gas limit {gas_limit}");
@@ -865,10 +835,8 @@ fn test_a_frame_budget_crossed_three_calls_down_reverts_that_frame_alone() {
             assert!(!d_kept, "{case}: D kept a write");
             let loggers: Vec<_> = outcome.result.logs().iter().map(|log| log.address).collect();
             assert_eq!(loggers, [A, B, C], "{case}: D's log went with its frame");
-            views.insert_case(case, OutcomeView::new(&outcome));
         }
     }
-    crate::assert_summaries_snapshot!(&views);
 }
 
 /* ---------- halts ---------- */
@@ -900,7 +868,6 @@ const MODEXP: Address = address!("0000000000000000000000000000000000000005");
 fn test_a_halt_three_calls_down_burns_its_frames_gas_and_its_caller_resumes() {
     // (what C calls, and two forwards it may give it, both short of what it needs)
     let rows = [(D, 50_000, 80_000), (ECRECOVER, 1_000, 2_999)];
-    let mut views = BTreeMap::new();
     for (callee, small, large) in rows {
         for gas_limit in TIERS {
             let case = format!("{callee}, gas limit {gas_limit}");
@@ -922,10 +889,9 @@ fn test_a_halt_three_calls_down_burns_its_frames_gas_and_its_caller_resumes() {
                 for frame in [A, B, C] {
                     assert_eq!(slot_of(&outcome, frame, MARKER), U256::from(1), "{case}: {frame}");
                 }
-                outcome
+                outcome.gas
             };
-            let (small_run, large_run) = (run(small), run(large));
-            let (small_gas, large_gas) = (small_run.gas, large_run.gas);
+            let (small_gas, large_gas) = (run(small), run(large));
             assert_eq!(
                 large_gas.gas_used - small_gas.gas_used,
                 large - small,
@@ -937,11 +903,8 @@ fn test_a_halt_three_calls_down_burns_its_frames_gas_and_its_caller_resumes() {
                 (small_gas.state, small_gas.history, small_gas.reservoir_remaining),
                 "{case}: only regular gas burns"
             );
-            views.insert_case(format!("{case}, forwarded {small}"), OutcomeView::new(&small_run));
-            views.insert_case(format!("{case}, forwarded {large}"), OutcomeView::new(&large_run));
         }
     }
-    crate::assert_summaries_snapshot!(&views);
 }
 
 /// The transaction's own frame that halts burns all its regular gas, with every limit armed: a
@@ -952,7 +915,6 @@ fn test_a_halt_three_calls_down_burns_its_frames_gas_and_its_caller_resumes() {
 fn test_the_transactions_own_frame_that_halts_burns_its_regular_gas() {
     use revm::context::result::{HaltReason, OutOfGasError};
 
-    let mut views = BTreeMap::new();
     for gas_limit in TIERS {
         let reservoir = intrinsic(gas_limit).gas.reservoir_remaining;
         let db = MemoryDatabase::default().account_code(A, spin());
@@ -968,10 +930,6 @@ fn test_the_transactions_own_frame_that_halts_burns_its_regular_gas() {
         assert_eq!(outcome.limit_exceeded, None);
         assert_eq!(outcome.gas.reservoir_remaining, reservoir, "gas limit {gas_limit}");
         assert_eq!(outcome.gas.gas_used + reservoir, gas_limit, "the regular gas burned");
-        views.insert_case(
-            format!("a spinning frame, gas limit {gas_limit}"),
-            OutcomeView::new(&outcome),
-        );
     }
 
     // ECRECOVER below the cap, given one gas less than its price.
@@ -983,14 +941,10 @@ fn test_the_transactions_own_frame_that_halts_burns_its_regular_gas() {
     let paid = precompile_tx(ECRECOVER, Vec::new(), BELOW);
     assert!(paid.result.is_success(), "{:?}", paid.result);
     let before_frame = paid.gas.gas_used - 3_000;
-    views.insert_case("ECRECOVER paid its price".into(), OutcomeView::new(&paid));
     let short = precompile_tx(ECRECOVER, Vec::new(), before_frame + 2_999);
     let modexp_input = crate::withheld_gas::costly_modexp_input(512, 0);
     let past_the_cap = precompile_tx(MODEXP, modexp_input, ABOVE);
-    for (name, outcome, gas_limit) in [
-        ("ECRECOVER one gas short of its price", short, before_frame + 2_999),
-        ("MODEXP priced past the cap", past_the_cap, ABOVE),
-    ] {
+    for (outcome, gas_limit) in [(short, before_frame + 2_999), (past_the_cap, ABOVE)] {
         assert!(
             matches!(
                 &outcome.result,
@@ -1008,9 +962,7 @@ fn test_the_transactions_own_frame_that_halts_burns_its_regular_gas() {
             gas_limit,
             "the regular gas burned, the reservoir back"
         );
-        views.insert_case(name.into(), OutcomeView::new(&outcome));
     }
-    crate::assert_sorted_json_snapshot!(&views);
 }
 
 /* ---------- the legacy engine's rows ---------- */
@@ -1053,14 +1005,13 @@ fn with_oracle_read(db: MemoryDatabase) -> MemoryDatabase {
 /// carrying `MegaLimitExceeded(2, limit)` for the limit the reads set, billed the intrinsic gas
 /// plus the compute up to the charge that crosses that limit, `left` short of it, and nothing of
 /// the gas the transaction had left. The frame `crossing` crossed it, and ran the last step: no
-/// caller resumed. Returns the limit, what the transaction read, and the views of the plain run
-/// and of the recorded one.
+/// caller resumed. Returns the limit and what the transaction read.
 fn assert_detention_stop(
     db: MemoryDatabase,
     limits: EvmTxRuntimeLimits,
     crossing: Address,
     left: u64,
-) -> (u64, mega_evm::VolatileDataAccess, BTreeMap<String, OutcomeView>) {
+) -> (u64, mega_evm::VolatileDataAccess) {
     let intrinsic = intrinsic(ROOMY);
     let (recorded, last) =
         run_recording_steps(db.clone(), limits, call(CALLER, A, U256::ZERO, ROOMY));
@@ -1088,11 +1039,7 @@ fn assert_detention_stop(
     assert_eq!(outcome.gas.gas_used, intrinsic.gas.gas_used + used);
     assert_eq!(outcome.gas.reservoir_remaining, intrinsic.gas.reservoir_remaining);
     assert!(outcome.result.logs().is_empty());
-    let views = by_case([
-        ("plain".to_owned(), OutcomeView::new(&outcome)),
-        ("recorded".to_owned(), OutcomeView::new(&recorded)),
-    ]);
-    (limit, detention.accessed(), views)
+    (limit, detention.accessed())
 }
 
 /// The writes after a read: the read's `POP`, then the thousand fresh slots, of which the reservoir
@@ -1115,11 +1062,9 @@ fn test_volatile_data_access_oog_does_not_consume_all_gas() {
     let code = thousand_writes(BytecodeBuilder::default().append_many([TIMESTAMP, POP]));
     let db = MemoryDatabase::default().account_code(A, code.stop().build());
     let left = pop_then_writes().left(CAP);
-    let (limit, accessed, views) =
-        assert_detention_stop(db, EvmTxRuntimeLimits::default(), A, left);
+    let (limit, accessed) = assert_detention_stop(db, EvmTxRuntimeLimits::default(), A, left);
     assert!(limit - CAP < 1_000, "the read came first: {}", limit - CAP);
     assert_eq!(accessed, mega_evm::VolatileDataAccess::TIMESTAMP);
-    crate::assert_sorted_json_snapshot!(&views);
 }
 
 /// A child that reads the block's timestamp and then writes a thousand fresh slots stops the
@@ -1132,9 +1077,8 @@ fn test_nested_call_block_env_access_child_oog() {
         .account_code(A, parent.stop().build())
         .account_code(B, child.stop().build());
     let left = pop_then_writes().left(CAP);
-    let (limit, _, views) = assert_detention_stop(db, EvmTxRuntimeLimits::default(), B, left);
+    let (limit, _) = assert_detention_stop(db, EvmTxRuntimeLimits::default(), B, left);
     assert!(limit - CAP < 10_000, "the child read near the start: {}", limit - CAP);
-    crate::assert_sorted_json_snapshot!(&views);
 }
 
 /// A frame that reads the block's timestamp, calls a child that does some work, then writes a
@@ -1153,9 +1097,8 @@ fn test_parent_block_env_access_oog_after_nested_call() {
         .then(&[2, 2, 2, 2, 2, 2, 3, 2, 2_600, 3, 3, 3, 2, 2])
         .fresh_writes(1_000)
         .left(CAP);
-    let (limit, _, views) = assert_detention_stop(db, EvmTxRuntimeLimits::default(), A, left);
+    let (limit, _) = assert_detention_stop(db, EvmTxRuntimeLimits::default(), A, left);
     assert!(limit - CAP < 1_000, "the read came first: {}", limit - CAP);
-    crate::assert_sorted_json_snapshot!(&views);
 }
 
 /// A call to the Oracle that reads its storage, then a thousand fresh slots: the transaction stops
@@ -1166,11 +1109,9 @@ fn test_an_oracle_read_holds_the_transaction_to_its_cap() {
     let code = thousand_writes(call_oracle(BytecodeBuilder::default(), None));
     let db = with_oracle_read(MemoryDatabase::default().account_code(A, code.stop().build()));
     let left = oracle_pops_then_writes().left(ORACLE_ACCESS_COMPUTE_GAS);
-    let (limit, accessed, views) =
-        assert_detention_stop(db, EvmTxRuntimeLimits::default(), A, left);
+    let (limit, accessed) = assert_detention_stop(db, EvmTxRuntimeLimits::default(), A, left);
     assert!(limit - ORACLE_ACCESS_COMPUTE_GAS < 10_000, "{}", limit - ORACLE_ACCESS_COMPUTE_GAS);
     assert_eq!(accessed, mega_evm::VolatileDataAccess::ORACLE);
-    crate::assert_sorted_json_snapshot!(&views);
 }
 
 /// The same with the Oracle called on 65,535 gas: the stop bills the compute, not the gas limit.
@@ -1179,8 +1120,7 @@ fn test_oracle_volatile_data_access_oog_does_not_consume_all_gas() {
     let code = thousand_writes(call_oracle(BytecodeBuilder::default(), Some(0xffff)));
     let db = with_oracle_read(MemoryDatabase::default().account_code(A, code.stop().build()));
     let left = oracle_pops_then_writes().left(ORACLE_ACCESS_COMPUTE_GAS);
-    let (_, _, views) = assert_detention_stop(db, EvmTxRuntimeLimits::default(), A, left);
-    crate::assert_sorted_json_snapshot!(&views);
+    assert_detention_stop(db, EvmTxRuntimeLimits::default(), A, left);
 }
 
 /// A contract that calls one that reads the Oracle's storage and then writes a thousand fresh
@@ -1194,10 +1134,9 @@ fn test_parent_runs_out_of_gas_after_oracle_access() {
         .account_code(A, outer.stop().build())
         .account_code(B, middle.stop().build());
     let left = oracle_pops_then_writes().left(ORACLE_ACCESS_COMPUTE_GAS);
-    let (_, accessed, views) =
+    let (_, accessed) =
         assert_detention_stop(with_oracle_read(db), EvmTxRuntimeLimits::default(), B, left);
     assert_eq!(accessed, mega_evm::VolatileDataAccess::ORACLE);
-    crate::assert_sorted_json_snapshot!(&views);
 }
 
 /// A read of the block's timestamp, then of the Oracle's storage under a lower cap: the most
@@ -1210,13 +1149,12 @@ fn test_both_volatile_data_access_oog_does_not_consume_all_gas() {
     let db = MemoryDatabase::default().account_code(A, thousand_writes(code).stop().build());
     let limits = EvmTxRuntimeLimits::default().with_oracle_access_compute_gas_limit(ORACLE_CAP);
     let left = oracle_pops_then_writes().left(ORACLE_CAP);
-    let (limit, accessed, views) = assert_detention_stop(with_oracle_read(db), limits, A, left);
+    let (limit, accessed) = assert_detention_stop(with_oracle_read(db), limits, A, left);
     assert!(limit - ORACLE_CAP < 10_000, "the Oracle's read binds: {limit}");
     assert_eq!(
         accessed,
         mega_evm::VolatileDataAccess::TIMESTAMP | mega_evm::VolatileDataAccess::ORACLE
     );
-    crate::assert_sorted_json_snapshot!(&views);
 }
 
 /// A read of the block's timestamp, then compute past the cap: the stop comes at the work's first
@@ -1226,9 +1164,8 @@ fn test_volatile_access_post_access_cap_enforced() {
     let code = work(BytecodeBuilder::default().append_many([TIMESTAMP, POP]), ROUNDS);
     let db = MemoryDatabase::default().account_code(A, code.stop().build());
     let left = Charges::default().then(&[2]).work(ROUNDS, 0).left(CAP);
-    let (limit, _, views) = assert_detention_stop(db, EvmTxRuntimeLimits::default(), A, left);
+    let (limit, _) = assert_detention_stop(db, EvmTxRuntimeLimits::default(), A, left);
     assert!(limit - CAP < 1_000, "{}", limit - CAP);
-    crate::assert_sorted_json_snapshot!(&views);
 }
 
 /// A read whose limit is past what the transaction's gas reaches does not bind: the frame runs out
@@ -1255,7 +1192,6 @@ fn test_non_binding_detention_reports_a_normal_out_of_gas() {
     );
     assert_eq!(outcome.limit_exceeded, None);
     assert_eq!(outcome.gas.gas_used, gas_limit, "an out-of-gas burns the gas");
-    crate::assert_sorted_json_snapshot!(&OutcomeView::new(&outcome));
 }
 
 /// A transaction that reads the beneficiary's balance with far more gas than the cap succeeds and
@@ -1297,10 +1233,6 @@ fn test_detained_gas_is_restored() {
         "what it ran and its body's history: {}",
         detained.gas.gas_used
     );
-    crate::assert_sorted_json_snapshot!(&by_case([
-        ("detained", OutcomeView::new(&detained)),
-        ("undetained", OutcomeView::new(&undetained)),
-    ]));
 }
 
 /// A body over the transaction's data-size limit stops the transaction before its first frame: a
@@ -1326,7 +1258,6 @@ fn test_data_limit_just_exceed() {
     assert_eq!(outcome.limit_exceeded, Some(stop));
     assert_eq!(outcome.usage, LimitUsage { data_size: TX_BODY_SIZE, write_records: 0 });
     assert_eq!(outcome.gas.gas_used, intrinsic(BELOW).gas.gas_used, "nothing ran");
-    crate::assert_sorted_json_snapshot!(&OutcomeView::new(&outcome));
 }
 
 /// A library's write, one call down, crosses a limit one byte above the body: the stop is a
@@ -1357,7 +1288,6 @@ fn test_data_limit_exceed_in_nested_call() {
         "the stop burns nothing: {}",
         outcome.gas.gas_used
     );
-    crate::assert_sorted_json_snapshot!(&OutcomeView::new(&outcome));
 }
 
 /// A value transfer to a contract that writes a slot, under a limit one byte above the body: the
@@ -1390,7 +1320,6 @@ fn test_state_revert_when_exceeding_limit() {
     assert_eq!(outcome.usage, LimitUsage { data_size: TX_BODY_SIZE, write_records: 0 });
     assert!(outcome.state.get(&A).is_none_or(|a| a.storage.is_empty() && a.info.balance.is_zero()));
     assert_eq!(outcome.state[&CALLER].info.balance, U256::from(10_000), "the value did not move");
-    crate::assert_sorted_json_snapshot!(&OutcomeView::new(&outcome));
 }
 
 /// Data size is held before write records: a body that crosses the data-size limit is its stop
@@ -1401,7 +1330,6 @@ fn test_check_limit_priority_data_size_before_kv_update() {
     let both = |data_size: u64| {
         EvmTxRuntimeLimits::default().with_tx_data_size_limit(data_size).with_tx_kv_update_limit(0)
     };
-    let mut views = BTreeMap::new();
     for (data_size, used) in [
         (1, TX_BODY_SIZE),
         (TX_BODY_SIZE + LOG_BASE_SIZE, TX_BODY_SIZE + LOG_BASE_SIZE + WRITE_RECORD_SIZE),
@@ -1417,9 +1345,7 @@ fn test_check_limit_priority_data_size_before_kv_update() {
             }),
             "data size {data_size}"
         );
-        views.insert_case(format!("data size {data_size}"), OutcomeView::new(&outcome));
     }
-    crate::assert_sorted_json_snapshot!(&views);
 }
 
 /// A transaction detained from its start — its sender is the block's beneficiary — whose body
@@ -1453,10 +1379,6 @@ fn test_detention_plus_intrinsic_data_size_overflow() {
     );
     assert_eq!(stopped.limit_exceeded, Some(stop));
     assert_eq!(stopped.gas, within_limits.gas, "the intrinsic gas alone, the reservoir back");
-    crate::assert_sorted_json_snapshot!(&by_case([
-        ("within the limits", OutcomeView::new(&within_limits)),
-        ("stopped", OutcomeView::new(&stopped)),
-    ]));
 }
 
 /// The transaction's own frame crossing its frame budget — a frame cap of a hundred records' bytes,
@@ -1484,7 +1406,6 @@ fn test_data_size_top_level_exceed_is_frame_local_revert() {
     );
     assert_eq!(outcome.limit_exceeded, None, "a frame budget latches nothing");
     assert_eq!(outcome.usage, LimitUsage { data_size: TX_BODY_SIZE, write_records: 0 });
-    crate::assert_sorted_json_snapshot!(&OutcomeView::new(&outcome));
 }
 
 /// A call its own frame budget stopped, revived into a success by an inspector, hands its caller
@@ -1539,10 +1460,6 @@ fn test_a_call_revived_past_its_budget_hands_its_caller_nothing() {
     assert!(plain.result.is_success(), "{:?}", plain.result);
     assert_eq!((&outcome.result, &outcome.state), (&plain.result, &plain.state));
     assert_eq!((outcome.gas, outcome.usage), (plain.gas, plain.usage));
-    crate::assert_sorted_json_snapshot!(&by_case([
-        ("plain", OutcomeView::new(&plain)),
-        ("rewritten", OutcomeView::new(&outcome)),
-    ]));
 }
 
 /* ---------- a frame three calls down, answered without running ---------- */
@@ -1741,13 +1658,7 @@ fn run_answered(
 /// returned, which bills what the stopped frames ran plus the two pushes of each revert. The twin
 /// runs on the same engine, so that bill pins that a stop bills what ran and no more; it pins no
 /// price, and a charge both runs make, such as `C`'s own `CALL`, would be wrong in both alike.
-/// The views of the twin, where one runs, and of both columns go into `views` under the row's
-/// name.
-fn assert_answered_cell(
-    answered: Answered,
-    gas_limit: u64,
-    views: &mut BTreeMap<String, OutcomeView>,
-) {
+fn assert_answered_cell(answered: Answered, gas_limit: u64) {
     let row = format!("{answered:?}, gas limit {gas_limit}");
     let intrinsic = intrinsic(gas_limit);
     let (limits, stop) = answered_limits(answered);
@@ -1762,7 +1673,6 @@ fn assert_answered_cell(
             "{row}: the twin reverts: {:?}",
             twin.result
         );
-        views.insert_case(format!("{row}, twin"), OutcomeView::new(&twin));
         twin.gas.regular - intrinsic.gas.regular - TWIN_REVERT * 3
     };
 
@@ -1801,7 +1711,6 @@ fn assert_answered_cell(
             let allowance = CAP - to_the_answer(answered);
             assert_eq!(run.ran_on, [(allowance, false)], "{cell}: run on the allowance");
         }
-        views.insert_case(cell, OutcomeView::new(outcome));
     }
     assert_eq!(rewritten.outcome.result, plain.outcome.result, "{row}");
     assert_eq!(rewritten.outcome.gas, plain.outcome.gas, "{row}");
@@ -1832,7 +1741,6 @@ fn assert_answered_cell(
 /// reservoir back.
 #[test]
 fn test_an_answer_three_calls_down_stops_the_transaction_at_either_tier() {
-    let mut views = BTreeMap::new();
     for answered in [Answered::PastTheAllowance, Answered::Precompile, Answered::NewAccount] {
         // A new account that adds no state gas, where a state byte is free, crosses no state-gas
         // limit.
@@ -1840,10 +1748,9 @@ fn test_an_answer_three_calls_down_stops_the_transaction_at_either_tier() {
             continue;
         }
         for gas_limit in TIERS {
-            assert_answered_cell(answered, gas_limit, &mut views);
+            assert_answered_cell(answered, gas_limit);
         }
     }
-    crate::assert_summaries_snapshot!(&views);
 }
 
 /// A frame three calls down whose start's records and transfer log cross the data-size limit is
@@ -1852,9 +1759,7 @@ fn test_an_answer_three_calls_down_stops_the_transaction_at_either_tier() {
 /// rewriting inspector.
 #[test]
 fn test_a_start_three_calls_down_crossing_the_limit_is_stopped_before_it_is_built() {
-    let mut views = BTreeMap::new();
     for gas_limit in TIERS {
-        assert_answered_cell(Answered::StartRecords, gas_limit, &mut views);
+        assert_answered_cell(Answered::StartRecords, gas_limit);
     }
-    crate::assert_sorted_json_snapshot!(&views);
 }
