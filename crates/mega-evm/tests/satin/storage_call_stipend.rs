@@ -24,7 +24,9 @@ use mega_evm::{
     constants::COST_PER_HISTORY_BYTE,
     storage_call_stipend,
     system::{IMegaAccessControl, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE},
-    test_utils::{is_transfer_log, transfer_log, BytecodeBuilder, MemoryDatabase},
+    test_utils::{
+        is_transfer_log, note_price_guard, transfer_log, BytecodeBuilder, MemoryDatabase,
+    },
     EvmTxRuntimeLimits, LimitKind, MegaEvm, MegaTransaction, MegaTransactionOutcome,
     STORAGE_CALL_STIPEND_BYTES, TRANSFER_LOG_SIZE, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
@@ -33,7 +35,9 @@ use revm::bytecode::opcode::{
     POP, PUSH0, PUSH1, PUSH2, SSTORE, STATICCALL, STOP, SUB, SWAP1,
 };
 
-use crate::common::{call, context, runs_at_measurement_prices};
+use crate::common::{
+    body_history, call, context, history, runs_at_measurement_prices, slot_state_gas, state_is_free,
+};
 
 const CALLER: Address = address!("0000000000000000000000000000000000500000");
 const SENDER: Address = address!("0000000000000000000000000000000000500001");
@@ -210,36 +214,68 @@ const fn countdown_gas(n: u64) -> u64 {
     3 + 26 * n
 }
 
-/// The history gas one write record costs at the spec's price: 40 bytes at 88 gas a byte.
-const RECORD_HISTORY: u64 = 3_520;
+/// The history gas of one write record at the prices in effect, by hand: its 40 bytes at the cost
+/// per history byte, 3,520 gas at the spec's price.
+fn record_history() -> u64 {
+    history(WRITE_RECORD_SIZE)
+}
 
-/// The allowance at the spec's price: 160 bytes at 88 gas a byte.
-const ALLOWANCE: u64 = 14_080;
+/// The allowance at the prices in effect, by hand: the spec's 160 bytes at the cost per history
+/// byte, 14,080 gas at the spec's price.
+fn allowance() -> u64 {
+    history(160)
+}
+
+/// Whether the allowance is worth more than a write record at the prices in effect, which each of
+/// the three tests below needs to see the leak it guards against: an allowance of nothing has
+/// nothing to leak, a record whose history is nothing has no charge the allowance could pay, and
+/// a leaked allowance that a record outweighs could not carry a hook past that record. The 160
+/// bytes are four records' 40, so any price of a gas or more a byte holds it; a history byte
+/// priced at nothing, or at a fraction of a gas that rounds a record to nothing, does not, and the
+/// test returns early with a note.
+fn the_allowance_outweighs_a_record() -> bool {
+    if record_history() > 0 && allowance() > record_history() {
+        return true;
+    }
+    note_price_guard("the allowance is worth no more than a write record at these prices");
+    false
+}
 
 /// The allowance cannot pay for computation: a hook given one gas less than its computation costs
-/// runs out of gas, though the 14,080 of allowance beside it would cover that gas many times over,
-/// and given exactly the cost it completes. An allowance that entered the frame's gas, or that
-/// computation could fall back on, would carry the short hook through.
+/// runs out of gas, though the allowance beside it would cover that gas many times over, and given
+/// exactly the cost it completes. An allowance that entered the frame's gas, or that computation
+/// could fall back on, would carry the short hook through.
 ///
 /// Rule [S8.4]. Expected values `independent`: the hook's cost is summed by hand from the opcode
-/// prices, the allowance and a record's history from the spec's 160 and 40 bytes at 88 gas a byte,
-/// and the exact run is the control that the sum is the hook's whole cost.
+/// prices, which no byte price moves, and the exact run is the control that the sum is the hook's
+/// whole cost; the allowance and a record's history are the spec's 160 and 40 bytes at the cost
+/// per history byte in effect (`constants`), and at the spec's prices 14,080 and 3,520, written
+/// out.
 #[test]
 fn test_the_allowance_cannot_be_spent_on_computation() {
-    if runs_at_measurement_prices() {
+    if !the_allowance_outweighs_a_record() {
         return;
     }
-    assert_eq!(storage_call_stipend(), ALLOWANCE);
+    assert_eq!(storage_call_stipend(), allowance(), "the allowance the engine grants");
     let turns: u16 = 200;
     let cost = countdown_gas(u64::from(turns));
 
     let short = run_hook(countdown(turns), cost - 1, U256::ZERO);
     assert!(!transfer_succeeded(&short), "one gas short of the computation is out of gas");
-    assert_eq!(short.gas.history, body(), "the failed hook's transfer records came back");
+    assert_eq!(short.gas.history, body_history(0), "the failed hook's transfer records came back");
 
     let exact = run_hook(countdown(turns), cost, U256::ZERO);
     assert!(transfer_succeeded(&exact), "the computation's own cost is enough");
-    assert_eq!(exact.gas.history, body() + 2 * RECORD_HISTORY, "the transfer's two records");
+    assert_eq!(
+        exact.gas.history,
+        body_history(0) + 2 * record_history(),
+        "the transfer's two records"
+    );
+
+    if runs_at_measurement_prices() {
+        return;
+    }
+    assert_eq!((allowance(), record_history()), (14_080, 3_520), "160 and 40 bytes at 88 gas");
 }
 
 /// The hook's `SSTORE(0, 2)`: `PUSH1 2; PUSH0; SSTORE; STOP`.
@@ -249,51 +285,62 @@ fn writes_slot_zero() -> Bytes {
 
 /// The allowance cannot pay a write record: a hook that changes a slot it already holds, given the
 /// write's regular gas and one gas less than its record's history, runs out of gas and keeps no
-/// write, though the allowance beside it would cover the record's 3,520 four times over. Given the
-/// record in full it keeps the write.
+/// write, though the allowance beside it would cover the record four times over. Given the record
+/// in full it keeps the write.
 ///
 /// The slot is not fresh, so the write charges no state gas: the record's history is the only
 /// charge past the regular gas, and the only one the allowance could have paid.
 ///
 /// Rule [S8.3]. Expected values `independent`: the write's regular gas is the schedule's table by
 /// hand — `PUSH1` 3, `PUSH0` 2, and an `SSTORE` that resets a cold slot, 100 static, 2,800 for the
-/// reset and 2,100 for the cold load — and the record's history 40 bytes at 88 gas a byte.
+/// reset and 2,100 for the cold load — which no byte price moves; the record's history is 40
+/// bytes at the cost per history byte in effect (`constants`), 3,520 at 88 gas a byte, written
+/// out.
 #[test]
 fn test_the_allowance_cannot_be_spent_on_a_write_record() {
+    if !the_allowance_outweighs_a_record() {
+        return;
+    }
+    let record = record_history();
+    assert_eq!(mega_evm::write_record_history_gas(1), Some(record), "the record the engine prices");
+    let regular = 3 + 2 + 100 + 2_800 + 2_100;
+
+    let short = run_hook(writes_slot_zero(), regular + record - 1, U256::from(1));
+    assert!(!transfer_succeeded(&short), "one gas short of the record is out of gas");
+    assert_eq!(short.usage.write_records, 0, "the hook kept no write");
+    assert_eq!(short.gas.history, body_history(0), "and the transfer's records came back with it");
+
+    let exact = run_hook(writes_slot_zero(), regular + record, U256::from(1));
+    assert!(transfer_succeeded(&exact), "the record paid from the hook's own gas");
+    assert_eq!(exact.usage.write_records, 3, "the transfer's two accounts and the slot");
+    assert_eq!(exact.gas.history, body_history(0) + 3 * record);
+
     if runs_at_measurement_prices() {
         return;
     }
-    assert_eq!(mega_evm::write_record_history_gas(1), Some(RECORD_HISTORY));
-    let regular = 3 + 2 + 100 + 2_800 + 2_100;
-
-    let short = run_hook(writes_slot_zero(), regular + RECORD_HISTORY - 1, U256::from(1));
-    assert!(!transfer_succeeded(&short), "one gas short of the record is out of gas");
-    assert_eq!(short.usage.write_records, 0, "the hook kept no write");
-    assert_eq!(short.gas.history, body(), "and the transfer's records came back with it");
-
-    let exact = run_hook(writes_slot_zero(), regular + RECORD_HISTORY, U256::from(1));
-    assert!(transfer_succeeded(&exact), "the record paid from the hook's own gas");
-    assert_eq!(exact.usage.write_records, 3, "the transfer's two accounts and the slot");
-    assert_eq!(exact.gas.history, body() + 3 * RECORD_HISTORY);
+    assert_eq!(record, 3_520, "40 bytes at 88 gas");
 }
 
 /// The allowance cannot pay state gas either: a hook that fills a fresh slot, given the write's
 /// regular gas and one gas less than the slot's state gas, runs out of gas and keeps no write.
-/// An allowance that paid the state gas would carry it through: drawn first, its 14,080 would leave
-/// the hook more than the record's 3,520 to pay from its own gas. Given the state gas and the
-/// record in full it keeps the write.
+/// An allowance that paid the state gas would carry it through: drawn first, it would leave the
+/// hook more than the record's history to pay from its own gas. Given the state gas and the record
+/// in full it keeps the write.
 ///
 /// Rule [S8.5]. Expected values `independent`: the write's regular gas is the schedule's table by
 /// hand — `PUSH1` 3, `PUSH0` 2, and an `SSTORE` that fills a cold fresh slot, 100 static, 19,900
-/// for the fresh slot and 2,100 for the cold load — the slot's state gas is the spec's 97,920 at
-/// the minimum bucket, and the record's history 40 bytes at 88 gas a byte.
+/// for the fresh slot and 2,100 for the cold load — which no byte price moves; the slot's state
+/// gas at the minimum bucket is the schedule's entry and the record's history 40 bytes at the cost
+/// per history byte, both at the prices in effect (`constants`), and at the spec's prices 97,920
+/// and 3,520, written out.
 #[test]
 fn test_the_allowance_cannot_be_spent_on_state() {
-    if runs_at_measurement_prices() {
+    // A slot that costs no state gas has no state charge the allowance could pay.
+    if state_is_free() || !the_allowance_outweighs_a_record() {
         return;
     }
-    let state = 97_920;
-    assert_eq!(crate::common::slot_state_gas(), state);
+    let state = slot_state_gas();
+    let record = record_history();
     let regular = 3 + 2 + 100 + 19_900 + 2_100;
 
     let short = run_hook(writes_slot_zero(), regular + state - 1, U256::ZERO);
@@ -301,10 +348,15 @@ fn test_the_allowance_cannot_be_spent_on_state() {
     assert_eq!(short.usage.write_records, 0, "the hook kept no write");
     assert_eq!(short.gas.state, 0, "and no state gas");
 
-    let exact = run_hook(writes_slot_zero(), regular + state + RECORD_HISTORY, U256::ZERO);
+    let exact = run_hook(writes_slot_zero(), regular + state + record, U256::ZERO);
     assert!(transfer_succeeded(&exact), "the slot paid from the hook's own gas");
     assert_eq!(exact.gas.state, state);
     assert_eq!(exact.usage.write_records, 3, "the transfer's two accounts and the slot");
+
+    if runs_at_measurement_prices() {
+        return;
+    }
+    assert_eq!((state, record), (97_920, 3_520), "64 bytes at 1,530 gas, 40 bytes at 88 gas");
 }
 
 /* ---------- who is granted one ---------- */
