@@ -52,7 +52,7 @@ use revm::{
 };
 
 use crate::{
-    common::{body_history, call, call_with_data, create, state_is_free},
+    common::{body_history, call, call_with_data, create, slot_state_gas, state_is_free},
     detention::{context, work, Charges, BENEFICIARY},
     withheld_gas::{priced, Runs, PRICED},
 };
@@ -182,15 +182,6 @@ fn intrinsic(gas_limit: u64) -> MegaTransactionOutcome {
     let reservoir = gas_limit.saturating_sub(TX_GAS_LIMIT_CAP).saturating_sub(outcome.gas.history);
     assert_eq!(outcome.gas.reservoir_remaining, reservoir);
     outcome
-}
-
-/// The state gas of one fresh slot of `A`, at the price the engine runs.
-fn one_slot() -> u64 {
-    let code = BytecodeBuilder::default().sstore(U256::from(1), U256::from(1)).stop().build();
-    let db = MemoryDatabase::default().account_code(A, code);
-    let outcome = execute(db, EvmTxRuntimeLimits::no_limits(), BELOW);
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    outcome.gas.state
 }
 
 /// Runs a call from `CALLER` to `A` under `limits`.
@@ -372,9 +363,13 @@ fn assert_cell(limit: Limit, crossing: usize, gas_limit: u64, slot: u64) {
 /// Every transaction-level limit, crossed by the transaction's own frame and by a frame three calls
 /// below it, stops the transaction the same way — below the execution cap and above it, with and
 /// without an inspector that rewrites every frame result into a success.
+///
+/// Rules: [S10.40], [S11.1], [S11.2], [S11.3], [S11.4], [S11.6], [S11.7], [S11.8]. Independence:
+/// constants for every limit and the stop it reports — the state-gas limit is the schedule's
+/// fresh slot — and engine-derived for the bill, which a twin run sets.
 #[test]
 fn test_every_limit_stops_the_transaction_at_every_depth_and_tier() {
-    let slot = one_slot();
+    let slot = slot_state_gas();
     for limit in Limit::ALL.into_iter().filter(|limit| limit.crossable()) {
         for crossing in [0, 3] {
             for gas_limit in TIERS {
@@ -403,9 +398,12 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Halter {
 /// An inspector that rewrites every frame result into a halt cannot turn a stop into a halt either:
 /// under the latch every result is the stop, whatever produced it, so the transaction reports the
 /// stop and bills what ran, as it does without the inspector, rather than burning its gas.
+///
+/// Rules: [S11.1], [S11.6]. Independence: engine-derived — the run without the inspector is the
+/// expectation; the state-gas limit is the schedule's fresh slot.
 #[test]
 fn test_an_inspector_cannot_turn_a_stop_into_a_halt() {
-    let slot = one_slot();
+    let slot = slot_state_gas();
     let halts = [
         InstructionResult::OutOfGas,
         InstructionResult::PrecompileOOG,

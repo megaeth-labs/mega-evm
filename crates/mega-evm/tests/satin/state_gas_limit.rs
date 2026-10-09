@@ -8,11 +8,12 @@
 //! transaction with a revert carrying `MegaLimitExceeded(3, limit)`, wherever on the call stack
 //! it happens: there are no frame budgets.
 //!
-//! The figures are read off the engine rather than written out: each case first runs without a
-//! limit, and the state gas it reports is what the limit is set against. Where a state byte costs
-//! nothing, which only a measurement build arranges, no transaction adds state gas and the limit
-//! has nothing to hold, so the cases that need a crossing, or an upfront charge to give back,
-//! return early.
+//! The figures are the schedule's state-gas entries — a fresh slot, a new account, a created
+//! account, a byte of deployed code, a delegation indicator — at the minimum bucket, where the test
+//! database puts every state, and no figure is read off a run. They move with the byte prices a
+//! measurement build sets. Where a state byte costs nothing, which only a measurement build
+//! arranges, no transaction adds state gas and the limit has nothing to hold, so the cases that
+//! need a crossing, or an upfront charge to give back, return early.
 
 use alloy_primitives::{address, Address, Bytes, B256, U256};
 use mega_evm::{
@@ -123,64 +124,85 @@ fn then_create(builder: BytecodeBuilder, init: &Bytes, create2: bool) -> Bytecod
         .append(POP)
 }
 
-/// The state gas `tx` holds when it runs without a limit.
-fn state_gas_of(db: &MemoryDatabase, tx: &MegaTransaction) -> u64 {
-    let outcome = run_under(db.clone(), tx.clone(), u64::MAX);
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    outcome.gas.state
+/// The schedule's state gas for the account a creation adds.
+fn created_account_state_gas() -> u64 {
+    crate::salt::entry(revm::context_interface::cfg::GasId::create_state_gas())
 }
 
-/// The state gas one fresh slot of `A` costs.
-fn one_slot() -> u64 {
-    let db = funded().account_code(A, write_slots(BytecodeBuilder::default(), 0, 1).stop().build());
-    state_gas_of(&db, &call(CALLER, A, U256::ZERO, BELOW_CAP))
+/// The schedule's state gas for a creation that deposits `len` bytes of code: the created account
+/// and the code.
+fn deployment_state_gas(len: u64) -> u64 {
+    use revm::context_interface::cfg::GasId;
+    created_account_state_gas() + len * crate::salt::entry(GasId::code_deposit_state_gas())
 }
 
-/// One case per site state gas is charged at: the transaction, and the state it holds.
-fn sites(gas_limit: u64) -> Vec<(&'static str, MemoryDatabase, MegaTransaction)> {
+/// One case per site state gas is charged at: the transaction, and the state gas it holds, from
+/// the schedule.
+fn sites(gas_limit: u64) -> Vec<(&'static str, MemoryDatabase, MegaTransaction, u64)> {
     let to_a = |code: BytecodeBuilder| funded().account_code(A, code.stop().build());
     let a = || call(CALLER, A, U256::ZERO, gas_limit);
     let deployed = constructor_returning(32);
+    let (account, delegation) = account_and_delegation();
     vec![
-        ("a fresh slot", to_a(write_slots(BytecodeBuilder::default(), 0, 1)), a()),
+        (
+            "a fresh slot",
+            to_a(write_slots(BytecodeBuilder::default(), 0, 1)),
+            a(),
+            slot_state_gas(),
+        ),
         (
             "a value call that creates its recipient",
             to_a(then_call(BytecodeBuilder::default(), EMPTY, 1)),
             a(),
+            account,
         ),
         (
             "a nested creation",
             to_a(then_create(BytecodeBuilder::default(), &Bytes::new(), false)),
             a(),
+            created_account_state_gas(),
         ),
         (
             "a nested CREATE2 that deposits code",
             to_a(then_create(BytecodeBuilder::default(), &deployed, true)),
             a(),
+            deployment_state_gas(32),
         ),
         (
             "a nested creation that deposits code",
             to_a(then_create(BytecodeBuilder::default(), &deployed, false)),
             a(),
+            deployment_state_gas(32),
         ),
         (
             "a destruction that creates its beneficiary",
             to_a(BytecodeBuilder::default().push_address(EMPTY).append(SELFDESTRUCT)),
             a(),
+            account,
         ),
-        ("a value transaction that creates its recipient", funded(), {
-            call(CALLER, EMPTY, U256::from(1), gas_limit)
-        }),
-        ("a creation transaction", funded(), create(CALLER, Bytes::new(), gas_limit)),
+        (
+            "a value transaction that creates its recipient",
+            funded(),
+            call(CALLER, EMPTY, U256::from(1), gas_limit),
+            account,
+        ),
+        (
+            "a creation transaction",
+            funded(),
+            create(CALLER, Bytes::new(), gas_limit),
+            created_account_state_gas(),
+        ),
         (
             "a creation transaction that deposits code",
             funded(),
             create(CALLER, deployed.clone(), gas_limit),
+            deployment_state_gas(32),
         ),
         (
             "an authority the transaction creates",
             funded().account_code(A, Bytes::from_static(&[STOP])),
             authorizing_call(CALLER, A, U256::ZERO, gas_limit, DELEGATE, &[(AUTHORITY_1, 0)]),
+            account + delegation,
         ),
     ]
 }
@@ -190,16 +212,17 @@ fn sites(gas_limit: u64) -> Vec<(&'static str, MemoryDatabase, MegaTransaction)>
 /// At every site, a limit equal to the state gas a transaction holds lets it through with that
 /// state gas, and one below it stops it at the charge that crosses — the last one it makes — with
 /// the figure it reports. The stop keeps none of it, below and above the execution cap alike.
+///
+/// Rules: [S10.36], [S10.41]. Independence: constants — what each site holds is the schedule's
+/// entries, not a run's figure.
 #[test]
 fn test_every_site_is_held_to_the_limit_at_the_state_gas_it_reports() {
     if state_is_free() {
         return;
     }
     for gas_limit in [BELOW_CAP, ABOVE_CAP] {
-        for (name, db, tx) in sites(gas_limit) {
+        for (name, db, tx, held) in sites(gas_limit) {
             let name = format!("{name}, gas limit {gas_limit}");
-            let held = state_gas_of(&db, &tx);
-            assert!(held > 0, "{name}");
 
             let fits = run_under(db.clone(), tx.clone(), held);
             assert!(fits.result.is_success(), "{name}: {:?}", fits.result);
@@ -223,29 +246,44 @@ fn test_every_site_is_held_to_the_limit_at_the_state_gas_it_reports() {
 /// A crossing stops the transaction at the charge that crossed: nothing after it runs. Each case
 /// crosses at its site and would then burn what its frame has left in a call to a contract that
 /// halts; the stop spends none of it.
+///
+/// Rules: [S10.36]. Independence: constants — what each site holds is the schedule's entries.
 #[test]
 fn test_the_crossing_charge_is_where_the_transaction_stops() {
     if state_is_free() {
         return;
     }
     let deployed = constructor_returning(32);
-    let cases: [(&str, BytecodeBuilder); 5] = [
-        ("a fresh slot", write_slots(BytecodeBuilder::default(), 0, 1)),
+    let cases: [(&str, BytecodeBuilder, u64); 5] = [
+        ("a fresh slot", write_slots(BytecodeBuilder::default(), 0, 1), slot_state_gas()),
         (
             "a value call that creates its recipient",
             then_call(BytecodeBuilder::default(), EMPTY, 1),
+            account_state_gas(),
         ),
-        ("a nested creation", then_create(BytecodeBuilder::default(), &Bytes::new(), false)),
-        ("deployed code", then_create(BytecodeBuilder::default(), &deployed, false)),
-        ("a nested CREATE2", then_create(BytecodeBuilder::default(), &Bytes::new(), true)),
+        (
+            "a nested creation",
+            then_create(BytecodeBuilder::default(), &Bytes::new(), false),
+            created_account_state_gas(),
+        ),
+        (
+            "deployed code",
+            then_create(BytecodeBuilder::default(), &deployed, false),
+            deployment_state_gas(32),
+        ),
+        (
+            "a nested CREATE2",
+            then_create(BytecodeBuilder::default(), &Bytes::new(), true),
+            created_account_state_gas(),
+        ),
     ];
-    for (name, site) in cases {
+    for (name, site, held) in cases {
         let db = funded().account_code(A, then_call(site, BURNER, 0).stop().build());
         let tx = call(CALLER, A, U256::ZERO, BELOW_CAP);
         let burned = run_under(db.clone(), tx.clone(), u64::MAX);
         assert!(burned.gas.regular > BELOW_CAP / 2, "{name}: the burner burns: {:?}", burned.gas);
+        assert_eq!(burned.gas.state, held, "{name}: the site's state gas");
 
-        let held = burned.gas.state;
         let stopped = run_under(db, tx, held - 1);
         assert_state_stopped(name, &stopped, held - 1, held);
         assert!(stopped.gas.regular < 1_000_000, "{name}: nothing burned: {:?}", stopped.gas);
@@ -255,12 +293,16 @@ fn test_the_crossing_charge_is_where_the_transaction_stops() {
 
 /// Deployed code whose state gas crosses the limit is not left deployed, whether the creation is
 /// the transaction's own or a nested one: the limit is held before `return_create` commits it.
+///
+/// Rules: [S10.44]. Independence: constants — the created account and its code, from the
+/// schedule.
 #[test]
 fn test_deployed_code_that_crosses_is_not_left_deployed() {
     if state_is_free() {
         return;
     }
     let deployed = constructor_returning(32);
+    let held = deployment_state_gas(32);
     let nested = funded()
         .account_code(A, then_create(BytecodeBuilder::default(), &deployed, false).stop().build());
     let cases = [
@@ -273,7 +315,6 @@ fn test_deployed_code_that_crosses_is_not_left_deployed() {
         ("a nested creation", nested, call(CALLER, A, U256::ZERO, BELOW_CAP), A.create(0)),
     ];
     for (name, db, tx, created) in cases {
-        let held = state_gas_of(&db, &tx);
         let kept = run_under(db.clone(), tx.clone(), held);
         assert_eq!(
             kept.state[&created].info.code.as_ref().map(|code| code.original_bytes().len()),
@@ -292,17 +333,13 @@ fn test_deployed_code_that_crosses_is_not_left_deployed() {
 
 /// A creation whose init code reverts deposits nothing, whatever its revert data: the limit holds
 /// the account the creation would have added and the caller goes on.
+///
+/// Rules: [S10.35]. Independence: constants — the limit is the schedule's created account.
 #[test]
 fn test_a_reverting_creation_is_not_held_for_its_revert_data() {
     let reverting =
         BytecodeBuilder::default().push_number(32_u8).push_number(0_u8).append(REVERT).build();
-    let account = state_gas_of(
-        &funded().account_code(
-            A,
-            then_create(BytecodeBuilder::default(), &Bytes::new(), false).stop().build(),
-        ),
-        &call(CALLER, A, U256::ZERO, BELOW_CAP),
-    );
+    let account = created_account_state_gas();
     let db = funded()
         .account_code(A, then_create(BytecodeBuilder::default(), &reverting, false).stop().build());
     let outcome = run_under(db, call(CALLER, A, U256::ZERO, BELOW_CAP), account);
@@ -312,14 +349,6 @@ fn test_a_reverting_creation_is_not_held_for_its_revert_data() {
 }
 
 /* ---------- a frame's upfront charge, held once revm has decided the frame ---------- */
-
-/// The state gas one account a creation or a value transfer adds costs.
-fn one_account() -> u64 {
-    state_gas_of(
-        &funded().account_code(A, then_call(BytecodeBuilder::default(), EMPTY, 1).stop().build()),
-        &call(CALLER, A, U256::ZERO, BELOW_CAP),
-    )
-}
 
 /// Appends a `CALL` or `CALLCODE` to `target` with all the gas and `value`, dropping its success
 /// flag.
@@ -364,52 +393,62 @@ fn then_create_with(builder: BytecodeBuilder, create2: bool, value: u64) -> Byte
 /// destination with nothing at it, which cannot collide. A frame past the call-stack limit is
 /// refused with the charge made too; no transaction reaches that depth under the execution cap,
 /// and the unit tests of the frame lifecycle pin it.
+///
+/// Rules: [S10.43]. Independence: constants — the slot and the account a refused frame would
+/// have added are the schedule's entries.
 #[test]
 fn test_a_frame_revm_refuses_is_not_held_for_its_upfront_charge() {
     if state_is_free() {
         return;
     }
-    let account = one_account();
+    let (account, created) = (account_state_gas(), created_account_state_gas());
     let empty_init = Bytes::new();
     let taken = |address: Address| funded().account_nonce(address, 1);
-    let cases: [(&str, MemoryDatabase, BytecodeBuilder); 6] = [
+    // (case, database, the site, the state gas of the account its frame would add)
+    let cases: [(&str, MemoryDatabase, BytecodeBuilder, u64); 6] = [
         (
             "a CALL its caller cannot fund",
             funded(),
             then_call_with(BytecodeBuilder::default(), CALL, EMPTY, 2_000),
+            account,
         ),
         (
             "a CALLCODE its caller cannot fund",
             funded(),
             then_call_with(BytecodeBuilder::default(), CALLCODE, EMPTY, 2_000),
+            account,
         ),
         (
             "a CREATE its caller cannot fund",
             funded(),
             then_create_with(BytecodeBuilder::default(), false, 2_000),
+            created,
         ),
         (
             "a CREATE2 its caller cannot fund",
             funded(),
             then_create_with(BytecodeBuilder::default(), true, 2_000),
+            created,
         ),
         (
             "a CREATE whose address is taken",
             taken(A.create(0)),
             then_create_with(BytecodeBuilder::default(), false, 0),
+            created,
         ),
         (
             "a CREATE2 whose address is taken",
             taken(A.create2_from_code(B256::ZERO, &empty_init)),
             then_create_with(BytecodeBuilder::default(), true, 0),
+            created,
         ),
     ];
-    for (name, db, site) in cases {
+    for (name, db, site, account) in cases {
         let db = db.account_code(A, write_slots(site, 0, 1).stop().build());
         let tx = call(CALLER, A, U256::ZERO, BELOW_CAP);
         let free = run_under(db.clone(), tx.clone(), u64::MAX);
         assert!(free.result.is_success(), "{name}: {:?}", free.result);
-        assert_eq!(free.gas.state, one_slot(), "{name}: the slot alone");
+        assert_eq!(free.gas.state, slot_state_gas(), "{name}: the slot alone");
 
         for limit in [free.gas.state, account - 1] {
             let limited = run_under(db.clone(), tx.clone(), limit);
@@ -447,22 +486,34 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for CallsToEmpty {
 /// rewritten to the stop at once, so an inspector sees the answer the caller gets. The stop keeps
 /// none of what the frame's start wrote: no value moved, no account created, and the history of
 /// its records given back.
+///
+/// Rules: [S10.42], [S11.19]. Independence: constants — the account each frame adds is the
+/// schedule's entry.
 #[test]
 fn test_a_frame_revm_decides_is_held_for_its_upfront_charge() {
     if state_is_free() {
         return;
     }
-    let account = one_account();
+    let account = account_state_gas();
     let body = mega_evm::history_gas(TX_BODY_SIZE).expect("a body has a price");
-    let cases: [(&str, BytecodeBuilder); 3] = [
+    let cases: [(&str, BytecodeBuilder, u64); 3] = [
         (
             "a value CALL that creates its recipient",
             then_call(BytecodeBuilder::default(), EMPTY, 1),
+            account,
         ),
-        ("a CREATE", then_create_with(BytecodeBuilder::default(), false, 0)),
-        ("a CREATE2", then_create_with(BytecodeBuilder::default(), true, 0)),
+        (
+            "a CREATE",
+            then_create_with(BytecodeBuilder::default(), false, 0),
+            created_account_state_gas(),
+        ),
+        (
+            "a CREATE2",
+            then_create_with(BytecodeBuilder::default(), true, 0),
+            created_account_state_gas(),
+        ),
     ];
-    for (name, site) in cases {
+    for (name, site, account) in cases {
         let db = funded().account_code(A, site.stop().build());
         let stopped = run_under(db.clone(), call(CALLER, A, U256::ZERO, BELOW_CAP), account - 1);
         assert_state_stopped(name, &stopped, account - 1, account);
@@ -487,12 +538,15 @@ fn test_a_frame_revm_decides_is_held_for_its_upfront_charge() {
 /// gas after revm has decided it. A value call whose records and transfer log cross the data-size
 /// limit is answered with that stop, adds no account, and gives its upfront charge back: the
 /// state-gas limit that charge would have crossed is not.
+///
+/// Rules: [S10.49], [S10.50]. Independence: constants — the limit the upfront charge would have
+/// crossed is the schedule's new account.
 #[test]
 fn test_a_frame_start_whose_records_cross_is_stopped_for_its_records() {
     if state_is_free() {
         return;
     }
-    let account = one_account();
+    let account = account_state_gas();
     let limit = TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE + mega_evm::TRANSFER_LOG_SIZE - 1;
     let db =
         funded().account_code(A, then_call(BytecodeBuilder::default(), EMPTY, 1).stop().build());
@@ -535,6 +589,9 @@ fn one_wei_to(to: Address, data: &[u8]) -> MegaTransaction {
 /// revm answers with a failure — a value transfer to a precompile that rejects its input — adds no
 /// account, and its charge comes back, so no limit holds it: the transaction halts exactly as it
 /// does without a limit, and nothing moves.
+///
+/// Rules: [S10.43]. Independence: independent at a limit of nothing; constants at one account
+/// less one gas, the schedule's new account.
 #[test]
 fn test_a_first_frame_revm_answers_with_a_failure_is_not_held_for_its_upfront_charge() {
     // Where a state byte is free the start is charged nothing for the account, and there is no
@@ -542,7 +599,7 @@ fn test_a_first_frame_revm_answers_with_a_failure_is_not_held_for_its_upfront_ch
     if state_is_free() {
         return;
     }
-    let account = one_account();
+    let account = account_state_gas();
     let tx = one_wei_to(BN254_PAIRING, &[1]);
     let free = run_under(funded(), tx.clone(), u64::MAX);
     assert!(free.result.is_halt(), "the pairing rejects a one-byte input: {:?}", free.result);
@@ -566,6 +623,9 @@ fn test_a_first_frame_revm_answers_with_a_failure_is_not_held_for_its_upfront_ch
 /// record and the transfer log not counted, the record's history given back — and bills what ran,
 /// as a stop below the first frame does: a precompile answered with a success ran, and its price
 /// stays spent. A creation transaction keeps its creator's nonce bump, so it cannot be replayed.
+///
+/// Rules: [S10.42], [S11.19]. Independence: constants — the account each start adds is the
+/// schedule's entry.
 #[test]
 fn test_a_first_frame_revm_decides_is_held_for_its_upfront_charge() {
     // Where a state byte is free the start is charged nothing for the account, and there is no
@@ -573,19 +633,28 @@ fn test_a_first_frame_revm_decides_is_held_for_its_upfront_charge() {
     if state_is_free() {
         return;
     }
-    let account = one_account();
+    let account = account_state_gas();
     let word = [7_u8; 32];
+    // (case, the transaction, the account its start adds, its calldata's length, that account's
+    // state gas)
     let cases = [
-        ("a value transfer to an account with no code", one_wei_to(EMPTY, &[]), EMPTY, 0),
+        ("a value transfer to an account with no code", one_wei_to(EMPTY, &[]), EMPTY, 0, account),
         (
             "a value transfer to a precompile that answers",
             one_wei_to(IDENTITY, &word),
             IDENTITY,
             32,
+            account,
         ),
-        ("a creation transaction", create(CALLER, Bytes::new(), BELOW_CAP), CALLER.create(0), 0),
+        (
+            "a creation transaction",
+            create(CALLER, Bytes::new(), BELOW_CAP),
+            CALLER.create(0),
+            0,
+            created_account_state_gas(),
+        ),
     ];
-    for (name, tx, added, calldata) in cases {
+    for (name, tx, added, calldata, account) in cases {
         let free = run_under(funded(), tx.clone(), u64::MAX);
         assert!(free.result.is_success(), "{name}: {:?}", free.result);
         assert_eq!(free.gas.state, account, "{name}: the account EIP-2780 charged");
@@ -614,6 +683,9 @@ fn test_a_first_frame_revm_decides_is_held_for_its_upfront_charge() {
 /// revm builds the frame, its upfront state gas after revm has decided it. A value transfer whose
 /// record and transfer log cross the data-size limit is stopped for them and adds no account, so
 /// the state-gas limit its upfront charge would have crossed is not what stops it.
+///
+/// Rules: [S10.49]. Independence: constants — the limit the upfront charge would have crossed is
+/// the schedule's new account.
 #[test]
 fn test_a_first_frame_start_whose_records_cross_is_stopped_for_its_records() {
     // Where a state byte is free the start is charged nothing for the account, and there is no
@@ -621,7 +693,7 @@ fn test_a_first_frame_start_whose_records_cross_is_stopped_for_its_records() {
     if state_is_free() {
         return;
     }
-    let account = one_account();
+    let account = account_state_gas();
     let limit = TX_BODY_SIZE + WRITE_RECORD_SIZE + mega_evm::TRANSFER_LOG_SIZE - 1;
     let outcome = MegaEvm::new(
         context(funded()).with_tx_runtime_limits(
@@ -667,6 +739,9 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for AnswersEmpty {
 /// A first frame an inspector answers in place of running never started: it adds no account, and
 /// its upfront charge comes back whatever the answer. So no limit holds that charge, and the
 /// transaction keeps the inspector's answer.
+///
+/// Rules: [S10.42]. Independence: constants — the limit the upfront charge would cross is the
+/// schedule's new account.
 #[test]
 fn test_a_first_frame_an_inspector_answers_is_not_held_for_its_upfront_charge() {
     // Where a state byte is free the start is charged nothing for the account, and there is no
@@ -674,7 +749,7 @@ fn test_a_first_frame_an_inspector_answers_is_not_held_for_its_upfront_charge() 
     if state_is_free() {
         return;
     }
-    let account = one_account();
+    let account = account_state_gas();
     let mut evm = MegaEvm::new(context(funded()).with_tx_runtime_limits(
         EvmTxRuntimeLimits::no_limits().with_tx_state_gas_limit(account - 1),
     ))
@@ -691,12 +766,14 @@ fn test_a_first_frame_an_inspector_answers_is_not_held_for_its_upfront_charge() 
 /// A child's crossing stops the whole transaction: there is no frame budget to revert it alone.
 /// What its callers hold counts: `A`, `B` and `C` each write one slot, and a limit one gas short
 /// of three slots is crossed in `C`, with the three slots as the figure.
+///
+/// Rules: [S10.4], [S10.35]. Independence: constants — the slot is the schedule's entry.
 #[test]
 fn test_a_childs_crossing_latches_the_transaction() {
     if state_is_free() {
         return;
     }
-    let slot = one_slot();
+    let slot = slot_state_gas();
     let db = funded()
         .account_code(
             A,
@@ -722,17 +799,20 @@ fn test_a_childs_crossing_latches_the_transaction() {
 
 /// What was charged before the first frame and what the frames charge add up: an authority the
 /// transaction creates and a slot its frame writes cross a limit neither crosses alone.
+///
+/// Rules: [S10.35], [S10.38]. Independence: constants — the authority's account and delegation
+/// and the slot are the schedule's entries.
 #[test]
 fn test_charges_before_the_first_frame_and_in_it_add_up() {
     if state_is_free() {
         return;
     }
-    let slot = one_slot();
+    let slot = slot_state_gas();
+    let (account, delegation) = account_and_delegation();
+    let authority = account + delegation;
+    let held = authority + slot;
     let db = funded().account_code(A, write_slots(BytecodeBuilder::default(), 0, 1).stop().build());
     let tx = authorizing_call(CALLER, A, U256::ZERO, BELOW_CAP, DELEGATE, &[(AUTHORITY_1, 0)]);
-    let held = state_gas_of(&db, &tx);
-    let authority = held - slot;
-    assert!(authority > slot, "an authority costs an account and its delegation");
 
     let stopped = run_under(db, tx, held - 1);
     assert_state_stopped("the slot after the authority", &stopped, held - 1, held);
@@ -747,6 +827,10 @@ fn test_charges_before_the_first_frame_and_in_it_add_up() {
 /// admitted authority keeps its nonce, its delegation, its state gas, its write record and the
 /// history that record cost, as it does when its frame does nothing; the value the first frame
 /// carried and that frame's own record come back with the frame.
+///
+/// Rules: [S11.8], [S11.14]. Independence: constants — the authority's state gas and the slot are
+/// the schedule's entries; what the authority keeps is also compared with a run whose frame does
+/// nothing.
 #[test]
 fn test_a_stop_keeps_what_was_applied_before_the_first_frame() {
     if state_is_free() {
@@ -755,12 +839,14 @@ fn test_a_stop_keeps_what_was_applied_before_the_first_frame() {
     let delegation = |outcome: &MegaTransactionOutcome| {
         outcome.state[&AUTHORITY_1].info.code.as_ref().map(|code| code.original_bytes())
     };
+    let (account, delegation_state_gas) = account_and_delegation();
+    let authority = account + delegation_state_gas;
+    let held = authority + slot_state_gas();
     for value in [U256::ZERO, U256::from(1)] {
         let writes =
             funded().account_code(A, write_slots(BytecodeBuilder::default(), 0, 1).stop().build());
         let idle = funded().account_code(A, BytecodeBuilder::default().stop().build());
         let tx = authorizing_call(CALLER, A, value, BELOW_CAP, DELEGATE, &[(AUTHORITY_1, 0)]);
-        let held = state_gas_of(&writes, &tx);
         let stopped = run_under(writes, tx.clone(), held - 1);
         assert_state_stopped("the slot after the authority", &stopped, held - 1, held);
         let applied = run_under(idle, tx, u64::MAX);
@@ -769,6 +855,7 @@ fn test_a_stop_keeps_what_was_applied_before_the_first_frame() {
         assert_eq!(stopped.state[&AUTHORITY_1].info.nonce, 1, "value {value}");
         assert!(delegation(&stopped).is_some_and(|code| !code.is_empty()), "value {value}");
         assert_eq!(delegation(&stopped), delegation(&applied), "value {value}");
+        assert_eq!(stopped.gas.state, authority, "value {value}: the authority's state gas");
         assert_eq!(stopped.gas.state, applied.gas.state, "value {value}");
         assert_eq!(stopped.usage.write_records, 1, "value {value}: the authority's record alone");
         assert_eq!(
@@ -791,6 +878,9 @@ fn test_a_stop_keeps_what_was_applied_before_the_first_frame() {
 
 /// A deposit-like transaction's caller, created before the first frame, outlives a stop with the
 /// deposit's mint and the state gas charged for the account.
+///
+/// Rules: [S10.39], [S11.13]. Independence: constants — the caller's account and the slot are the
+/// schedule's entries.
 #[test]
 fn test_a_stopped_deposit_keeps_the_caller_it_created() {
     if state_is_free() {
@@ -805,7 +895,7 @@ fn test_a_stopped_deposit_keeps_the_caller_it_created() {
         (funded().account_code(A, code), tx)
     };
     let (writes, tx) = deposit(write_slots(BytecodeBuilder::default(), 0, 1).stop().build());
-    let held = state_gas_of(&writes, &tx);
+    let held = account_state_gas() + slot_state_gas();
     let stopped = run_under(writes, tx, held - 1);
     assert_state_stopped("the slot after the caller", &stopped, held - 1, held);
     let (idle, tx) = deposit(BytecodeBuilder::default().stop().build());
@@ -815,7 +905,7 @@ fn test_a_stopped_deposit_keeps_the_caller_it_created() {
     let caller = &stopped.state[&fresh].info;
     assert_eq!((caller.balance, caller.nonce), (U256::from(5), 1), "the mint and the nonce stay");
     assert_eq!(stopped.gas.state, created.gas.state, "the caller's state gas stays with it");
-    assert_eq!(stopped.gas.state, one_account());
+    assert_eq!(stopped.gas.state, account_state_gas(), "the caller's account");
 }
 
 /// A stop reports as used the state gas held where the limit was crossed. Before the first frame
@@ -824,6 +914,8 @@ fn test_a_stopped_deposit_keeps_the_caller_it_created() {
 /// So a deposit that creates its caller and sends value to an account that does not exist
 /// reports the caller alone when the caller crosses the limit, and both accounts when only both
 /// do.
+///
+/// Rules: [S10.39]. Independence: constants — each account is the schedule's entry.
 #[test]
 fn test_a_stop_reports_the_state_gas_held_where_it_crossed() {
     if state_is_free() {
@@ -837,7 +929,7 @@ fn test_a_stop_reports_the_state_gas_held_where_it_crossed() {
         tx.0.base.gas_price = 0;
         tx
     };
-    let account = one_account();
+    let account = account_state_gas();
     let caller_alone = run_under(funded(), deposit(), account - 1);
     assert_state_stopped("the created caller", &caller_alone, account - 1, account);
     let both = run_under(funded(), deposit(), 2 * account - 1);
@@ -860,9 +952,12 @@ fn test_a_stop_reports_the_state_gas_held_where_it_crossed() {
 /// so do a failed child's writes, a creation that failed, and a slot a delegate writes back
 /// before writing another. Each case holds two slots' worth of charges over its run, and fits a
 /// limit of one.
+///
+/// Rules: [S10.35]. Independence: constants — the slot and the created account are the
+/// schedule's entries.
 #[test]
 fn test_what_is_given_back_gives_its_room_back() {
-    let slot = one_slot();
+    let slot = slot_state_gas();
     let reverting = Bytes::from_static(&[PUSH0, PUSH0, REVERT]);
     let restores_then_writes = BytecodeBuilder::default()
         .sstore(U256::ZERO, U256::ZERO)
@@ -923,13 +1018,7 @@ fn test_what_is_given_back_gives_its_room_back() {
 
     // A creation that fails gives its account back to its creator, which then has room for a
     // slot under a limit of one account.
-    let account = state_gas_of(
-        &funded().account_code(
-            A,
-            then_create(BytecodeBuilder::default(), &Bytes::new(), false).stop().build(),
-        ),
-        &call(CALLER, A, U256::ZERO, BELOW_CAP),
-    );
+    let account = created_account_state_gas();
     let db = funded().account_code(
         A,
         then_create(BytecodeBuilder::default(), &reverting, false)
@@ -947,6 +1036,8 @@ fn test_what_is_given_back_gives_its_room_back() {
 /// The limit is on state gas, so it counts state at the price SALT sets for it: a slot in a bucket
 /// twice the minimum costs two slots of the limit, and a limit of two minimal slots admits two
 /// slots in minimal buckets but crosses on the second when the first is in the crowded one.
+///
+/// Rules: [S10.45]. Independence: constants — the slot is the schedule's entry.
 #[test]
 fn test_a_crowded_bucket_reaches_the_limit_sooner() {
     if state_is_free() {
@@ -954,7 +1045,7 @@ fn test_a_crowded_bucket_reaches_the_limit_sooner() {
     }
     use crate::salt::{crowded_slot, minimal_envs, salt_context};
 
-    let slot = one_slot();
+    let slot = slot_state_gas();
     let db =
         || funded().account_code(A, write_slots(BytecodeBuilder::default(), 0, 2).stop().build());
     let run = |envs| {
@@ -1352,12 +1443,14 @@ fn test_a_destruction_grows_state_only_when_it_creates_its_beneficiary() {
 
 /// Three fresh slots fit a limit of three slots' state gas exactly; a fourth crosses it, on the
 /// fourth `SSTORE`, and none of the four is kept.
+///
+/// Rules: [S10.40]. Independence: constants — the slot is the schedule's entry.
 #[test]
 fn test_fresh_slots_fit_a_limit_of_their_state_gas_and_one_more_stops() {
     if state_is_free() {
         return;
     }
-    let slot = one_slot();
+    let slot = slot_state_gas();
     let run = |slots| {
         run_under(
             funded()
@@ -1488,12 +1581,14 @@ fn test_a_state_charge_the_frame_cannot_pay_runs_out_of_gas_whatever_the_limit()
 
 /// A fresh slot is charged its state gas inside `SSTORE`, before its record is counted, so a slot
 /// that crosses the state-gas and data-size limits at once is the state-gas limit's stop.
+///
+/// Rules: [S10.40], [S10.46]. Independence: constants — the slot is the schedule's entry.
 #[test]
 fn test_a_slot_crossing_both_limits_reports_the_state_gas() {
     if state_is_free() {
         return;
     }
-    let slot = one_slot();
+    let slot = slot_state_gas();
     let db = funded().account_code(A, write_slots(BytecodeBuilder::default(), 0, 1).stop().build());
     let outcome = MegaEvm::new(
         context(db).with_tx_runtime_limits(
@@ -1508,9 +1603,12 @@ fn test_a_slot_crossing_both_limits_reports_the_state_gas() {
 }
 
 /// Each transaction the same EVM runs is held to the limit from zero.
+///
+/// No rule: an implementation contract, the per-transaction reset of the held state gas on a
+/// reused EVM. Independence: constants — the slot is the schedule's entry.
 #[test]
 fn test_each_transaction_is_held_to_the_limit_from_zero() {
-    let slot = one_slot();
+    let slot = slot_state_gas();
     let db = funded().account_code(A, write_slots(BytecodeBuilder::default(), 0, 2).stop().build());
     let mut evm =
         MegaEvm::new(context(db).with_tx_runtime_limits(
