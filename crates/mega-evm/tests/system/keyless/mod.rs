@@ -27,8 +27,8 @@ use mega_evm::{
         decode_error_result, IKeylessDeploy, KeylessDeployError, KEYLESS_DEPLOY_ADDRESS,
     },
     test_utils::MemoryDatabase,
-    write_record_history_gas, BucketId, EvmTxRuntimeLimits, ExternalEnvs, MegaContext, MegaEvm,
-    MegaSpecId, MegaTransactionOutcome, SaltEnv, TestExternalEnvs, MIN_BUCKET_SIZE,
+    BucketId, EvmTxRuntimeLimits, ExternalEnvs, MegaContext, MegaEvm, MegaSpecId,
+    MegaTransactionOutcome, SaltEnv, TestExternalEnvs, MIN_BUCKET_SIZE,
 };
 use revm::{
     bytecode::opcode::{CODECOPY, PUSH0, RETURN},
@@ -265,14 +265,14 @@ pub(crate) fn create_regular(len: usize) -> u64 {
     satin_gas_params().create_cost() + satin_gas_params().initcode_cost(len)
 }
 
-/// The history gas of one write record.
+/// The history gas of one write record, `WRITE_RECORD_SIZE` bytes, by hand.
 pub(crate) fn record() -> u64 {
-    write_record_history_gas(1).expect("a record has a price")
+    history(mega_evm::WRITE_RECORD_SIZE)
 }
 
-/// The history gas of `bytes` bytes.
+/// The history gas of `bytes` bytes, by hand.
 pub(crate) fn history(bytes: u64) -> u64 {
-    mega_evm::history_gas(bytes).expect("a byte count has a price")
+    crate::common::history(bytes)
 }
 
 /// A Satin context over `db` reading `envs`.

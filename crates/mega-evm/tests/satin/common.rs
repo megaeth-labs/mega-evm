@@ -175,13 +175,24 @@ pub(crate) fn account_state_gas() -> u64 {
     mega_evm::satin_gas_params().get(revm::context_interface::cfg::GasId::new_account_state_gas())
 }
 
-/// The history gas `bytes` bytes cost at the byte prices in effect.
+/// The history gas `bytes` bytes cost at the byte prices in effect, by hand rather than through
+/// the engine's pricing: the bytes times `COST_PER_HISTORY_BYTE`, 88 gas, at the spec's price.
+///
+/// A measurement build may price a history byte with a fraction of a gas, kept in thousandths of
+/// a gas; the charge for the bytes is then rounded to the nearest gas, halves up.
 pub(crate) fn history(bytes: u64) -> u64 {
-    mega_evm::history_gas(bytes).expect("the bytes have a price")
+    use mega_evm::constants::COST_PER_HISTORY_BYTE;
+    let milli_gas = mega_evm::active_satin_prices().cphb.milli_gas();
+    if milli_gas == COST_PER_HISTORY_BYTE * 1_000 {
+        return bytes * COST_PER_HISTORY_BYTE;
+    }
+    let milli_gas = u128::from(bytes) * u128::from(milli_gas);
+    u64::try_from((milli_gas + 500) / 1_000).expect("the history of the bytes fits a u64")
 }
 
 /// The history gas the body of a transaction carrying `calldata_len` bytes of calldata, and no
-/// access list or authorization, pays at the byte prices in effect.
+/// access list or authorization, pays at the byte prices in effect, by hand: `TX_BODY_SIZE`, 310
+/// bytes, and one byte per byte of calldata.
 pub(crate) fn body_history(calldata_len: u64) -> u64 {
-    history(mega_evm::tx_body_history_bytes(calldata_len, 0, 0, 0))
+    history(mega_evm::TX_BODY_SIZE + calldata_len)
 }
