@@ -451,6 +451,7 @@ fn test_a_replayed_activation_block_refuses_its_user_transactions() {
     assert_eq!(run.code, 1, "{}", run.stdout);
     let error = run.records()[0]["error"].as_str().unwrap().to_string();
     assert!(error.contains("depends on its parent's timestamp"), "{error}");
+    assert!(error.contains("replay it once with '--rpc'"), "it says how to recover: {error}");
 }
 
 /// What a [`recorded_chain`] answers for the parent block's header.

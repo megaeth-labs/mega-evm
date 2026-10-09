@@ -166,7 +166,8 @@ pub(super) fn needs_parent_timestamp(
 /// Without the parent's timestamp the answer is known only where no parent could change it: no
 /// fork the schedule activates after timestamp 0 is active at the block, so the block admits every
 /// transaction whatever its parent's timestamp. Any other block is refused, since the tool cannot
-/// tell whether a fork activates in it.
+/// tell whether a fork activates in it, and the refusal says how to recover: one replay with an
+/// RPC endpoint writes the timestamp to the block cache.
 fn admits_only_deposits(
     hardforks: &MegaHardforkConfig,
     number: u64,
@@ -179,7 +180,8 @@ fn admits_only_deposits(
         None => Err(EvmeError::Other(format!(
             "block {number}: a fork its schedule activates is active at its timestamp, and \
              whether the fork activates in this block depends on its parent's timestamp, which \
-             the block cache does not hold; replay it with '--rpc' to fetch it"
+             the block cache does not hold; replay it once with '--rpc', which fetches the \
+             timestamp and writes it to the block cache, and it then replays offline"
         ))),
     }
 }
@@ -223,6 +225,7 @@ mod tests {
                 .to_string();
             assert!(error.contains("block 7: "), "{error}");
             assert!(error.contains("parent's timestamp"), "{error}");
+            assert!(error.contains("replay it once with '--rpc'"), "the way back: {error}");
         }
     }
 }
