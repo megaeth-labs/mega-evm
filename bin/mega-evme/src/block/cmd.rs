@@ -128,9 +128,21 @@ pub async fn replay_blocks(
     for number in range.from..=range.to {
         summary.blocks += 1;
         let outcome = async {
-            let inputs = source.load(number, &mut codes).await?;
+            let mut inputs = source.load(number, &mut codes).await?;
             let engine = forced_engine
                 .unwrap_or_else(|| Engine::of_block(inputs.chain_id, inputs.header.timestamp));
+            // The parent's timestamp is fetched only for a Satin block whose schedule makes the
+            // activation-block rule depend on it, so every other block replays from the cache.
+            if engine == Engine::Satin &&
+                inputs.parent_timestamp.is_none() &&
+                satin::needs_parent_timestamp(
+                    inputs.chain_id,
+                    inputs.header.timestamp,
+                    limits_override,
+                )?
+            {
+                source.complete_parent_timestamp(&mut inputs).await?;
+            }
             let fallback =
                 source.provider().and_then(|p| ParentStateRpc::new(p.clone(), number - 1));
             let mut state =

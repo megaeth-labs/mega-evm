@@ -190,7 +190,7 @@ fn test_the_overhead_does_not_change_the_satin_rows() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_a_block_fetched_over_rpc_is_cached_and_replays_offline() {
     let number = BLOCKS[2];
-    let server = recorded_chain(number, None).await;
+    let server = recorded_chain(number, Parent::Block).await;
     let cache = tempfile::tempdir().unwrap();
     let uri = server.uri();
 
@@ -453,10 +453,20 @@ fn test_a_replayed_activation_block_refuses_its_user_transactions() {
     assert!(error.contains("depends on its parent's timestamp"), "{error}");
 }
 
+/// What a [`recorded_chain`] answers for the parent block's header.
+enum Parent {
+    /// The recorded block's own header, at the block's own timestamp.
+    Block,
+    /// A header at this timestamp.
+    At(u64),
+    /// No block: the endpoint does not have the parent.
+    Missing,
+}
+
 /// A mock of the chain serving the recorded `number` block, its receipts, its pre-state as a
-/// trace, and the reads Satin's pre-block changes make beyond it; the parent block's header,
-/// when `parent_timestamp` is given, carries that timestamp, and is otherwise the block's own.
-async fn recorded_chain(number: u64, parent_timestamp: Option<u64>) -> wiremock::MockServer {
+/// trace, and the reads Satin's pre-block changes make beyond it; the parent block's header is
+/// what `parent` says.
+async fn recorded_chain(number: u64, parent: Parent) -> wiremock::MockServer {
     use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
 
     let recorded = read_block(fixtures(), number);
@@ -488,10 +498,17 @@ async fn recorded_chain(number: u64, parent_timestamp: Option<u64>) -> wiremock:
                 )
             })
     };
-    if let Some(parent_timestamp) = parent_timestamp {
-        let mut parent = recorded.block.clone();
-        parent["number"] = format!("0x{:x}", number - 1).into();
-        parent["timestamp"] = format!("0x{parent_timestamp:x}").into();
+    let parent = match parent {
+        Parent::Block => None,
+        Parent::At(timestamp) => {
+            let mut header = recorded.block.clone();
+            header["number"] = format!("0x{:x}", number - 1).into();
+            header["timestamp"] = format!("0x{timestamp:x}").into();
+            Some(header)
+        }
+        Parent::Missing => Some(Value::Null),
+    };
+    if let Some(parent) = parent {
         Mock::given(matchers::method("POST"))
             .and(matchers::body_string_contains("\"eth_getBlockByNumber\""))
             .and(matchers::body_string_contains(format!("\"0x{:x}\"", number - 1)))
@@ -530,7 +547,7 @@ async fn test_a_block_fetched_over_rpc_keeps_its_parents_timestamp() {
     let number = BLOCKS[2];
     let recorded = read_block(fixtures(), number);
     let timestamp = timestamp_of(&recorded);
-    let server = recorded_chain(number, Some(timestamp - 1)).await;
+    let server = recorded_chain(number, Parent::At(timestamp - 1)).await;
     let uri = server.uri();
     let cache = tempfile::tempdir().unwrap();
     let dir = tempfile::tempdir().unwrap();
@@ -554,4 +571,53 @@ async fn test_a_block_fetched_over_rpc_keeps_its_parents_timestamp() {
     let run = replay(number, cache.path(), &["--genesis", &genesis]);
     assert_eq!(run.code, 0, "{}", run.stderr);
     assert_refused_as_activation_block(&recorded, &run.records());
+}
+
+/// How many times `server` was asked for the header of block `number`'s parent.
+async fn parent_requests(server: &wiremock::MockServer, number: u64) -> usize {
+    let tag = format!("\"0x{:x}\"", number - 1);
+    server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|request| {
+            let body = String::from_utf8_lossy(&request.body);
+            body.contains("\"eth_getBlockByNumber\"") && body.contains(&tag)
+        })
+        .count()
+}
+
+/// [S1] A cached block asks for its parent's header only when the activation-block rule needs
+/// the parent's timestamp. With the recorded entries, written before the cache kept it, and an
+/// endpoint that does not have the parent, the legacy replay matches the chain and the Satin
+/// counterfactual, whose schedule activates every fork at genesis, runs: neither asks for the
+/// parent. Under a genesis file that activates Satin at the block's timestamp the answer depends
+/// on the parent, which the endpoint does not have, and the block fails naming it.
+///
+/// Expected values: independent.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_cached_block_asks_for_its_parent_only_when_the_rule_needs_it() {
+    let number = BLOCKS[2];
+    let server = recorded_chain(number, Parent::Missing).await;
+    let uri = server.uri();
+    let cache = cache_copy();
+    assert_eq!(read_block(cache.path(), number).parent_timestamp, None, "an entry without it");
+
+    let run = replay(number, cache.path(), &["--rpc", &uri, "--verify"]);
+    assert_eq!(run.code, 0, "{}{}", run.stderr, run.stdout);
+    assert_eq!(blocks_of(&run.records())[0]["matches_chain"], true, "the legacy replay");
+    let run = replay(number, cache.path(), &["--rpc", &uri, "--override.spec", "Satin"]);
+    assert_eq!(run.code, 0, "{}{}", run.stderr, run.stdout);
+    assert_eq!(blocks_of(&run.records())[0]["refused"], 0, "the Satin counterfactual");
+    assert_eq!(parent_requests(&server, number).await, 0, "neither asked for the parent");
+
+    let dir = tempfile::tempdir().unwrap();
+    let timestamp = timestamp_of(&read_block(cache.path(), number));
+    let genesis = satin_genesis(dir.path(), mega_evm::MAINNET_CHAIN_ID, timestamp);
+    let run = replay(number, cache.path(), &["--rpc", &uri, "--genesis", &genesis]);
+    assert_eq!(run.code, 1, "{}", run.stdout);
+    let error = run.records()[0]["error"].as_str().unwrap().to_string();
+    assert!(error.contains(&format!("Block not found: {}", number - 1)), "{error}");
+    assert_eq!(parent_requests(&server, number).await, 1, "the rule asked for it once");
 }

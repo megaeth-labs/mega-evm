@@ -41,7 +41,8 @@ pub struct CachedBlock {
     pub prestate: BlockPrestate,
     /// The parent block's timestamp, which decides whether a fork activates in the block.
     ///
-    /// Absent from an entry written before the cache kept it.
+    /// Kept once a replay of the block on Satin needed it; absent otherwise, and from an entry
+    /// written before the cache kept it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_timestamp: Option<u64>,
 }
@@ -147,7 +148,8 @@ pub struct BlockInputs {
     pub receipts: Vec<ChainReceipt>,
     /// The part of the parent block's state the block reads.
     pub prestate: BlockPrestate,
-    /// The parent block's timestamp, when the cache or the RPC gave it.
+    /// The parent block's timestamp, when the cache holds it or a Satin replay of the block
+    /// fetched it ([`BlockSource::complete_parent_timestamp`]).
     pub parent_timestamp: Option<u64>,
     /// Whether the block cache holds these inputs as they are: false for inputs fetched over RPC,
     /// wholly or in part, which the replay writes to the cache.
@@ -319,22 +321,13 @@ impl BlockSource {
                         )));
                     }
                 }
-                // An entry written before the cache kept the parent's timestamp gets it over RPC
-                // when there is one, and is written back with it.
-                let (parent_timestamp, from_cache) = match cached.parent_timestamp {
-                    Some(timestamp) => (Some(timestamp), true),
-                    None => {
-                        let fetched = self.parent_timestamp(number).await?;
-                        (fetched, fetched.is_none())
-                    }
-                };
                 return BlockInputs::from_responses(
                     cached.chain_id,
                     cached.block,
                     cached.receipts,
                     cached.prestate,
-                    parent_timestamp,
-                    from_cache,
+                    cached.parent_timestamp,
+                    true,
                 );
             }
         }
@@ -359,8 +352,25 @@ impl BlockSource {
             request("debug_traceBlockByNumber", json!([tag, { "tracer": "prestateTracer" }]))
                 .await?;
         let prestate = BlockPrestate::from_block_trace(trace, codes)?;
-        let parent_timestamp = self.parent_timestamp(number).await?;
-        BlockInputs::from_responses(chain_id, block, receipts, prestate, parent_timestamp, false)
+        BlockInputs::from_responses(chain_id, block, receipts, prestate, None, false)
+    }
+
+    /// Fetches the parent block's timestamp `inputs` lack, over RPC, and marks the inputs to be
+    /// written back to the cache with it; without a provider, leaves them as they are.
+    ///
+    /// Only a block that runs on Satin under a schedule that makes the answer depend on it needs
+    /// the timestamp ([`needs_parent_timestamp`](super::satin::needs_parent_timestamp)), so the
+    /// caller asks for it then and only then: a block another engine runs, or one no parent could
+    /// make an activation block, replays from what the cache holds.
+    pub async fn complete_parent_timestamp(&self, inputs: &mut BlockInputs) -> Result<()> {
+        if inputs.parent_timestamp.is_some() {
+            return Ok(());
+        }
+        if let Some(timestamp) = self.parent_timestamp(inputs.header.number).await? {
+            inputs.parent_timestamp = Some(timestamp);
+            inputs.from_cache = false;
+        }
+        Ok(())
     }
 
     /// The timestamp of block `number`'s parent, over RPC; `None` without a provider, or for

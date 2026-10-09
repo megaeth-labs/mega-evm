@@ -146,6 +146,19 @@ pub(super) fn execute(
     result
 }
 
+/// Whether running the block of chain `chain_id` at `timestamp` on Satin, under the schedule
+/// [`satin_schedule`] gives it with `limits_override`, needs its parent's timestamp: a fork that
+/// schedule activates after timestamp 0 is active at the block, so whether the fork activates in
+/// this block depends on when its parent came ([`admits_only_deposits`]).
+pub(super) fn needs_parent_timestamp(
+    chain_id: u64,
+    timestamp: u64,
+    limits_override: Option<&LimitsOverride>,
+) -> Result<bool> {
+    let hardforks = satin_schedule(chain_id, timestamp, limits_override)?;
+    Ok(hardforks.admits_only_deposits(0, timestamp))
+}
+
 /// Whether block `number`, at `timestamp`, admits only deposits under `hardforks`, as a node works
 /// it out: a fork the schedule activates is active at the block's timestamp and not at its
 /// parent's ([`MegaHardforks::admits_only_deposits`]).
