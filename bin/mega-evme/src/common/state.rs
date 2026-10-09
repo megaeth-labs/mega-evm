@@ -229,10 +229,14 @@ impl PreStateArgs {
             for (address, account_state) in loaded_prestate {
                 // An entry marked as self-destructed describes an address the dumping run
                 // erased from the state. Loading it as an account would resurrect balance,
-                // nonce, code, and storage that the commit deleted, so the address is
-                // treated as absent from the file.
+                // nonce, code, and storage that the commit deleted, and leaving it out would
+                // let a forked backend serve them again, so it is kept as an erased entry
+                // that reads as nonexistent with empty storage.
                 if account_state.is_selfdestructed() {
-                    debug!(address = %address, "Skipping self-destructed account in prestate");
+                    debug!(address = %address, "Loading self-destructed account in prestate as erased");
+                    let mut erased = Account::default();
+                    erased.mark_selfdestruct();
+                    prestate.insert(address, erased);
                     continue;
                 }
                 let account = account_state.into_account()?;
@@ -576,6 +580,31 @@ where
         Self { backend: EvmeBackend::Empty(EmptyDB::default()), prestate, code_map, block_hashes }
     }
 
+    /// The prestate's answer for `address`, if it has one.
+    ///
+    /// An address the prestate marks as erased reads as nonexistent until an
+    /// override gives it a balance, nonce, or code.
+    fn prestate_basic(&self, address: &Address) -> Option<Option<AccountInfo>> {
+        let account = self.prestate.get(address)?;
+        if account.is_selfdestructed() && account.info.is_empty() {
+            return Some(None);
+        }
+        Some(Some(account.info.clone()))
+    }
+
+    /// The prestate's answer for a storage slot, if it has one.
+    ///
+    /// An address the prestate marks as erased holds no storage beyond the
+    /// slots written over it, so its other slots read as zero instead of being
+    /// read from the backend.
+    fn prestate_storage(&self, address: &Address, index: &U256) -> Option<U256> {
+        let account = self.prestate.get(address)?;
+        match account.storage.get(index) {
+            Some(slot) => Some(slot.present_value),
+            None => account.is_selfdestructed().then_some(U256::ZERO),
+        }
+    }
+
     /// Set the balance for an account.
     pub fn set_account_balance(&mut self, address: Address, balance: U256) {
         self.prestate.entry(address).or_default().info.balance = balance;
@@ -674,9 +703,9 @@ where
 
     fn basic(&mut self, address: Address) -> std::result::Result<Option<AccountInfo>, Self::Error> {
         // Check prestate overrides first
-        if let Some(account) = self.prestate.get(&address) {
+        if let Some(account) = self.prestate_basic(&address) {
             trace!(address = %address, account = ?account, "Loaded account basic from prestate");
-            return Ok(Some(account.info.clone()));
+            return Ok(account);
         }
 
         // Query backend database
@@ -728,11 +757,9 @@ where
 
     fn storage(&mut self, address: Address, index: U256) -> std::result::Result<U256, Self::Error> {
         // Check storage overrides first
-        if let Some(account) = self.prestate.get(&address) {
-            if let Some(slot) = account.storage.get(&index) {
-                trace!(address = %address, index = %index, slot = %slot.present_value, "Loaded storage from prestate");
-                return Ok(slot.present_value);
-            }
+        if let Some(value) = self.prestate_storage(&address, &index) {
+            trace!(address = %address, index = %index, slot = %value, "Loaded storage from prestate");
+            return Ok(value);
         }
 
         // Query backend database
@@ -795,9 +822,9 @@ where
 
     fn basic_ref(&self, address: Address) -> std::result::Result<Option<AccountInfo>, Self::Error> {
         // Check prestate overrides first
-        if let Some(account) = self.prestate.get(&address) {
+        if let Some(account) = self.prestate_basic(&address) {
             trace!(address = %address, account = ?account, "Loaded account basic from prestate");
-            return Ok(Some(account.info.clone()));
+            return Ok(account);
         }
 
         // Query backend database
@@ -849,11 +876,9 @@ where
 
     fn storage_ref(&self, address: Address, index: U256) -> std::result::Result<U256, Self::Error> {
         // Check storage overrides first
-        if let Some(account) = self.prestate.get(&address) {
-            if let Some(slot) = account.storage.get(&index) {
-                trace!(address = %address, index = %index, slot = %slot.present_value, "Loaded storage from prestate");
-                return Ok(slot.present_value);
-            }
+        if let Some(value) = self.prestate_storage(&address, &index) {
+            trace!(address = %address, index = %index, slot = %value, "Loaded storage from prestate");
+            return Ok(value);
         }
 
         // Query backend database
@@ -1039,10 +1064,10 @@ mod tests {
         assert!(live.get("selfdestructed").is_none(), "live account carries no marker");
     }
 
-    /// The marker round-trips: an entry a dump marked as destroyed loads as if
-    /// the address were absent from the file, while its neighbours load normally.
+    /// The marker round-trips: an entry a dump marked as destroyed loads as an
+    /// erased address with nothing of its own, while its neighbours load normally.
     #[test]
-    fn test_load_prestate_skips_selfdestructed_entry() {
+    fn test_load_prestate_keeps_selfdestructed_entry_as_erased() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("prestate.json");
         std::fs::write(
@@ -1064,7 +1089,10 @@ mod tests {
         let args = PreStateArgs::parse_from(["mega-evme", "--prestate", path.to_str().unwrap()]);
         let prestate = args.load_prestate(&Address::ZERO).expect("load prestate");
 
-        assert!(!prestate.contains_key(&DESTROYED), "destroyed address must not be loaded");
+        let destroyed = prestate.get(&DESTROYED).expect("destroyed address kept as erased");
+        assert!(destroyed.is_selfdestructed(), "destroyed address is marked erased");
+        assert!(destroyed.info.is_empty(), "destroyed address carries no account fields");
+        assert!(destroyed.storage.is_empty(), "destroyed address carries no storage");
         let live = prestate.get(&LIVE).expect("live account loaded");
         assert_eq!(live.info.nonce, 3);
         assert_eq!(

@@ -1201,3 +1201,76 @@ fn test_replay_receipt_inner_log_metadata_matches_outer_receipt() {
         assert!(log["logIndex"].is_string(), "batch log {i} must carry logIndex: {log}");
     }
 }
+
+/// The replayed receipt's effective gas price follows from the signed fee caps
+/// and the block's base fee, so an endpoint that leaves out the optional
+/// `gasPrice` metadata yields the same price, in single and batch mode alike.
+#[test]
+fn test_replay_receipt_derives_the_effective_gas_price() {
+    // Base fee 0xf4240 + tip 0x186a0 stays under the 0x200b20 fee cap.
+    let expected = serde_json::json!("0x10c8e0");
+    let stripped = DoctoredEnvelope::load(cache())
+        .set_transaction_field(TX, "gasPrice", serde_json::Value::Null)
+        .write_to_temp("no_gas_price");
+    let list = tx_file("no_gas_price");
+
+    for source in [cache(), stripped.clone()] {
+        let single = replay(&source, &["--json", TX]);
+        assert!(single.success(), "single replay must succeed.\nstderr: {}", single.stderr);
+        assert_eq!(
+            single.summary()["receipt"]["effectiveGasPrice"],
+            expected,
+            "single, {source:?}"
+        );
+
+        let batch = replay(&source, &["--tx-file", list.to_str().expect("utf-8"), "--json"]);
+        assert!(batch.success(), "batch replay must succeed.\nstderr: {}", batch.stderr);
+        let lines = batch.results();
+        assert_eq!(lines.len(), 1, "one batch line:\n{}", batch.stdout);
+        assert_eq!(
+            lines[0]["receipt"]["effectiveGasPrice"], expected,
+            "batch, {source:?}: {}",
+            lines[0]
+        );
+    }
+    let _ = std::fs::remove_file(&stripped);
+    let _ = std::fs::remove_file(&list);
+}
+
+/// With both `--verify-receipt` and `--dump-fixture`, a replay that diverges from
+/// the chain still prints its result and verdict: the fixture is refused because
+/// of the same divergence, the run exits with the mismatch code, and no file is
+/// written.
+#[test]
+fn test_verify_and_dump_report_the_mismatch_when_the_fixture_is_refused() {
+    let path = DoctoredEnvelope::with_receipt(cache(), "verify_dump_gas", |receipt| {
+        receipt["gasUsed"] = "0x1".into()
+    });
+    let out = std::env::temp_dir()
+        .join(format!("mega_evme_verify_dump_refused_{}.json", std::process::id()));
+    let _ = std::fs::remove_file(&out);
+
+    let run = replay(
+        &path,
+        &["--verify-receipt", "--dump-fixture", out.to_str().expect("utf-8"), "--json", TX],
+    );
+    let _ = std::fs::remove_file(&path);
+    let written = out.exists();
+    let _ = std::fs::remove_file(&out);
+
+    assert_eq!(run.code(), 2, "the mismatch decides the exit code.\nstderr: {}", run.stderr);
+    assert_eq!(
+        run.summary()["verification"],
+        serde_json::json!({
+            "match": false,
+            "diff": { "gas_used": { "onchain": 1, "replay": GAS_USED } },
+        })
+    );
+    assert_eq!(run.error_object()["error"]["kind"].as_str(), Some("verification-mismatch"));
+    assert!(!written, "a refused fixture must not be written");
+    assert!(
+        run.stderr.contains("fixture"),
+        "the refused fixture must be reported on stderr, got:\n{}",
+        run.stderr
+    );
+}

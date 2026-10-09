@@ -211,6 +211,8 @@ An address that `SELFDESTRUCT` erased has no state left to describe — balance,
 ```
 
 Loading a file that contains such an entry treats the address as absent rather than seeding an account for it, which is exactly the world the destroying transaction committed.
+In fork mode the address stays absent too: its account and storage are not read back from the fork block.
+A `--balance` override recreates the account with that balance, and any storage slot not set with `--storage` reads as zero.
 A dump therefore stays safe to feed straight back into `--prestate`.
 Only the value `true` carries this meaning; an entry that spells the field out as `false` is an ordinary account and is loaded as written.
 

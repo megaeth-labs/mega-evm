@@ -399,8 +399,56 @@ fn classify_online_cache_file(path: &Path, chain_id: u64) -> OnlineCacheFile {
 /// file name already separates chains, so disagreement inside means the file was
 /// swapped or the directory is shared across chains, and silently continuing
 /// would hide it (the persist that follows swallows its own errors).
+///
+/// Removal is decided under the lock a persist replaces the file under: a
+/// sibling process may write a usable file between the first look and the
+/// removal, so the file is classified again once the lock is held, and only a
+/// file still unusable is removed.
 pub(super) fn load_online_cache(cache: &TransportCache, path: &Path, chain_id: u64) -> Result<()> {
+    load_online_cache_locking(cache, path, chain_id, acquire_exclusive_lock)
+}
+
+/// [`load_online_cache`], taking the lock through `lock`, which runs in the
+/// window between the first look at the file and the decision to remove it.
+fn load_online_cache_locking<G>(
+    cache: &TransportCache,
+    path: &Path,
+    chain_id: u64,
+    lock: impl FnOnce(&Path) -> std::io::Result<G>,
+) -> Result<()> {
     match classify_online_cache_file(path, chain_id) {
+        OnlineCacheFile::Stale(reason) => {
+            let _guard = match lock(path) {
+                Ok(guard) => guard,
+                Err(e) => {
+                    warn_user(format_args!(
+                        "Ignoring the RPC cache at '{}': it {reason}, and locking it to \
+                         remove it failed ({e}). Starting with an empty cache",
+                        path.display(),
+                    ));
+                    return Ok(());
+                }
+            };
+            adopt_online_cache_file(
+                cache,
+                path,
+                chain_id,
+                classify_online_cache_file(path, chain_id),
+            )
+        }
+        file => adopt_online_cache_file(cache, path, chain_id, file),
+    }
+}
+
+/// Act on a classified online cache file: adopt its entries, leave it alone,
+/// remove it, or fail. An unusable file reaches here only with the lock held.
+fn adopt_online_cache_file(
+    cache: &TransportCache,
+    path: &Path,
+    chain_id: u64,
+    file: OnlineCacheFile,
+) -> Result<()> {
+    match file {
         OnlineCacheFile::Absent => Ok(()),
         OnlineCacheFile::Ours(entries) => {
             let count = entries.len();
@@ -950,6 +998,31 @@ mod tests {
         load_online_cache(&cache, &path, 7).expect("an unsupported version must not fail the run");
         assert_eq!(cache.len(), 0);
         assert!(!path.exists(), "the unusable file is removed");
+    }
+
+    /// Removing an unusable file is decided under the lock a sibling persists
+    /// under: a usable file a sibling writes between this run's first look and
+    /// its lock is adopted, not deleted.
+    #[test]
+    fn test_online_cache_load_adopts_a_file_a_sibling_wrote_before_the_lock() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rpc-cache-7.json");
+        fs::write(&path, r#"{"version":99,"kind":"cache","chain_id":7,"cache":[]}"#).expect("seed");
+        let key = B256::repeat_byte(0xab);
+        let sibling_file = dir.path().join("sibling.json");
+        assert!(save_online_cache_atomic(&online_cache(16, &[(key, "sibling")]), &sibling_file, 7)
+            .expect("sibling cache"));
+
+        let cache = TransportCache::with_max_entries(16);
+        load_online_cache_locking(&cache, &path, 7, |target| {
+            // The sibling's persist lands after the unusable file was seen.
+            fs::rename(&sibling_file, target)?;
+            acquire_exclusive_lock(target)
+        })
+        .expect("load");
+
+        assert_eq!(cache.get(&key).as_deref(), Some("sibling"), "the sibling's file is adopted");
+        assert_eq!(on_disk_entries(&path).len(), 1, "the sibling's file is kept");
     }
 
     /// An unrecognized shape is left alone: it is not ours to delete, and its

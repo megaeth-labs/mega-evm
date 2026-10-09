@@ -22,6 +22,7 @@ use tracing::{debug, error, info, trace};
 use op_alloy_rpc_types::Transaction;
 
 use crate::{
+    cache::warn_user,
     common::{
         cfg_env, external_envs_from, log_execution_result, parse_spec, print_run_artifacts,
         print_transaction_report, BuildProviderOutput, EvmeExternalEnvs, EvmeOutcome,
@@ -175,8 +176,9 @@ pub(super) struct ReplayOutcome {
     pub outcome: EvmeOutcome,
     /// The transaction receipt
     pub receipt: OpTxReceipt,
-    /// Self-validating fixture draft, present iff `--dump-fixture` was given.
-    pub fixture: Option<super::fixture::FixtureDraft>,
+    /// Self-validating fixture draft, present iff `--dump-fixture` was given,
+    /// or the reason the target could not be dumped.
+    pub fixture: Option<Result<super::fixture::FixtureDraft>>,
     /// On-chain receipt verdict, present iff `--verify-receipt` was given.
     pub verification: Option<VerificationOutcome>,
 }
@@ -237,8 +239,9 @@ struct ExecutedTarget {
     trace_data: Option<String>,
     /// Receipt built from the finished block's own receipt for the target.
     receipt: OpTxReceipt,
-    /// Self-validating fixture draft, present iff `--dump-fixture` was given.
-    fixture: Option<fixture::FixtureDraft>,
+    /// Self-validating fixture draft, present iff `--dump-fixture` was given,
+    /// or the reason the target could not be dumped.
+    fixture: Option<Result<fixture::FixtureDraft>>,
 }
 
 /// What the single-transaction driver takes from the target's pre-commit moment.
@@ -251,8 +254,10 @@ struct TargetDraft {
     state: EvmState,
     /// Rendered trace, present iff tracing was enabled.
     trace_data: Option<String>,
-    /// Fixture draft, present iff `--dump-fixture` was given.
-    fixture: Option<fixture::FixtureDraft>,
+    /// Fixture draft, present iff `--dump-fixture` was given, or the reason the
+    /// target could not be dumped. A refusal is carried rather than raised so the
+    /// block still finishes and the result and receipt verdict are still reported.
+    fixture: Option<Result<fixture::FixtureDraft>>,
 }
 
 /// The single-transaction driver's participation in the kernel's block run.
@@ -342,44 +347,40 @@ impl<'a> kernel::TargetLifecycle for SingleTxLifecycle<'a> {
         // reflects the pre-target-transaction state (preceding txs committed,
         // target not yet). Taken rather than borrowed: this driver reports one
         // target, so the inputs are consumed by it.
-        let fixture = match self.fixture_inputs.take() {
-            Some((mega_env, anchor)) => {
-                // A dumped fixture cannot faithfully reproduce BLOCKHASH: the
-                // state-test runner does not seed block hashes, so the isolated
-                // re-execution would read default hashes instead of the ones this
-                // replay observed. The access record is cleared before every
-                // transaction, so it holds exactly the target transaction's
-                // reads; if the target read any block hash, refuse to dump rather
-                // than write a fixture that self-validates against the wrong
-                // roots. Failing here aborts the block, which is what this path
-                // has always done — it refused before the target committed.
-                if target.accessed_block_hash_count != 0 {
-                    return Err(ReplayError::Other(format!(
-                        "--dump-fixture does not support transactions that read block \
-                         hashes (BLOCKHASH): {} block hash(es) were accessed and the \
-                         fixture cannot faithfully reproduce them",
-                        target.accessed_block_hash_count
-                    )));
-                }
-                // The transaction's shape is refused before the fidelity gate
-                // runs, so a deposit or set-code target is rejected for what it
-                // is, whatever its replay did.
-                let dumpable = fixture::check_dumpable(target.tx).map_err(ReplayError::Other)?;
-                let result = &target.result_and_state.result;
-                let reproduced = fixture::check_fidelity(result, &anchor, self.chain_id)
-                    .map_err(ReplayError::Other)?;
-                Some(fixture::build_draft(
-                    target.db,
-                    &target.result_and_state.state,
-                    self.chain_id,
-                    self.executed_spec,
-                    self.block,
-                    dumpable,
-                    fixture::FixtureInputs { mega_env, result, reproduced },
-                )?)
+        let fixture = self.fixture_inputs.take().map(|(mega_env, anchor)| {
+            // A dumped fixture cannot faithfully reproduce BLOCKHASH: the
+            // state-test runner does not seed block hashes, so the isolated
+            // re-execution would read default hashes instead of the ones this
+            // replay observed. The access record is cleared before every
+            // transaction, so it holds exactly the target transaction's reads; if
+            // the target read any block hash, refuse to dump rather than write a
+            // fixture that self-validates against the wrong roots.
+            if target.accessed_block_hash_count != 0 {
+                return Err(ReplayError::Other(format!(
+                    "--dump-fixture does not support transactions that read block \
+                     hashes (BLOCKHASH): {} block hash(es) were accessed and the \
+                     fixture cannot faithfully reproduce them",
+                    target.accessed_block_hash_count
+                )));
             }
-            None => None,
-        };
+            // The transaction's shape is refused before the fidelity gate runs,
+            // so a deposit or set-code target is rejected for what it is, whatever
+            // its replay did.
+            let dumpable = fixture::check_dumpable(target.tx).map_err(ReplayError::Other)?;
+            let result = &target.result_and_state.result;
+            let reproduced = fixture::check_fidelity(result, &anchor, self.chain_id)
+                .map_err(ReplayError::Other)?;
+            fixture::build_draft(
+                target.db,
+                &target.result_and_state.state,
+                self.chain_id,
+                self.executed_spec,
+                self.block,
+                dumpable,
+                fixture::FixtureInputs { mega_env, result, reproduced },
+            )
+            .map_err(ReplayError::from)
+        });
 
         Ok(TargetDraft { state: target.result_and_state.state.clone(), trace_data, fixture })
     }
@@ -654,13 +655,23 @@ impl Cmd {
         // verification never costs the user the output it was derived from.
         let mismatched = result.verification.as_ref().is_some_and(|v| !v.matched);
         self.output_results(&result)?;
-        // Write the self-validating fixture (re-executes the isolated unit through
-        // state-test and cross-checks it against the replay before writing).
-        if let (Some(path), Some(draft)) = (&self.dump_fixture, result.fixture) {
-            // Single-file `--dump-fixture` always replaces the destination path
-            // (there is no `--overwrite` gate on this form).
-            super::fixture::finalize_and_write(draft, path, true)?;
-            info!(path = %path.display(), "Wrote self-validating fixture");
+        match (&self.dump_fixture, result.fixture) {
+            // Write the self-validating fixture (re-executes the isolated unit
+            // through state-test and cross-checks it against the replay before
+            // writing). Single-file `--dump-fixture` always replaces the
+            // destination path (there is no `--overwrite` gate on this form).
+            (Some(path), Some(Ok(draft))) => {
+                super::fixture::finalize_and_write(draft, path, true)?;
+                info!(path = %path.display(), "Wrote self-validating fixture");
+            }
+            // A refused fixture fails the run, unless the receipt verdict already
+            // does: the mismatch is the finding, and the refusal is reported
+            // beside it.
+            (_, Some(Err(refusal))) if mismatched => {
+                warn_user(format_args!("Not writing the fixture: {refusal}"));
+            }
+            (_, Some(Err(refusal))) => return Err(refusal),
+            _ => {}
         }
         if mismatched {
             return Err(ReplayError::VerificationMismatch(VerificationCounts::receipts(1, 1)));
