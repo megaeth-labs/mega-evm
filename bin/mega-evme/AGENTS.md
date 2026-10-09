@@ -13,7 +13,8 @@ CLI toolbox for direct MegaEVM execution (`run`, `tx`, `replay`, `cache`) with o
 - `src/cache/`: cache-file merge utilities (the single envelope JSON shape every cache file uses) backing the `cache merge` subcommand and the lock-protected merge-on-persist, plus the sidecar advisory lock every cache-file writer takes.
 
 ## KEY PATTERNS
-- Shared argument groups are flattened from `run` argument structs into sibling commands.
+- Shared argument groups live in `src/common/` and every command flattens them from there; `run` keeps re-exporting their types so existing `run::` import paths stay valid.
+- The `mega_evme` library exists for this crate's binary and tests; it is published only so `cargo install` works, no crate depends on it, and it makes no API-stability promise beyond those `run::` paths, so helpers, method signatures and visibility may change freely.
 - Command handlers follow staged flow: parse inputs → build state/env → execute → print summary/receipt/trace.
 - Replay uses block executor flow, including pre-execution system calls and preceding transactions.
 - Logging is structured via tracing macros, with explicit progress milestones.
@@ -31,11 +32,14 @@ CLI toolbox for direct MegaEVM execution (`run`, `tx`, `replay`, `cache`) with o
 - Add a new shared CLI option family: `src/common/*` and flatten into command structs.
 - Change state-forking or prestate merge semantics: `src/common/state.rs`.
 - Change replay hardfork/spec selection: `src/replay/{cmd.rs,hardforks.rs}`.
-- Change how a replay target's endpoint answers are judged coherent (metadata shape, genesis placement, parent linkage, inclusion anchor, block-body membership): `src/replay/coherence.rs` — the single source of those verdicts and their wording, shared by both replay drivers, which adapt them into their own failure shapes.
-- Change how a mined block is executed (state fork, body walk, per-target isolation, early stop, receipt harvest): `src/replay/kernel.rs` — the shared execution kernel both replay drivers run their mined targets through. Fetching, coherence guards, entry assembly and error adaptation stay with the driver.
-- Change how a pending target is replayed: `src/replay/cmd.rs`, `execute_pending` — deliberately off the kernel, because its one block fills both the fork and the environment role and its metadata is exactly what the online cache refuses to keep.
+- Change how a replayed block's environment and block-level execution context are built from its header: `src/replay/world.rs`, shared by both replay drivers.
+- Change how a replay target's endpoint answers are judged coherent (metadata shape, genesis placement, parent linkage, inclusion anchor, block-body membership, a whole block's served body against its transactions root, a whole block's served receipts against its receipts root and their `gasUsed` against its cumulative gas, a receipt's bloom against its logs): `src/replay/coherence.rs` — the single source of those verdicts and their wording, shared by both replay drivers, which adapt them into their own failure shapes.
+- Change how a block is executed (state fork, body walk, per-target isolation, early stop, receipt harvest, the whole executed block it hands back): `src/replay/kernel.rs` — the shared execution kernel both replay drivers run every target through. Fetching, coherence guards, entry assembly and error adaptation stay with the driver.
+- Change how a replayed block is judged against its header (`--verify-block`: the compared commitments, the verdict and its wire shapes): `src/replay/header.rs` — a pure comparison over the whole block the kernel hands back. The batch driver (`src/replay/batch.rs`) emits the block line and counts the verdict; the exit ranking lives in `src/common/exit.rs`.
+- Change how a pending target is replayed: `src/replay/cmd.rs`, `execute_target` — it runs through the kernel as a one-transaction body on top of the latest block, which fills both the fork and the environment role, and its target is handed over as `BodyEntry::Served` because its metadata is exactly what the online cache refuses to keep.
 - Change what a `replay` refactor is allowed to change: `tests/replay_equivalence.rs` — the committed argv matrix and its goldens are the standing behavior gate for both drivers, covering tracing, state dumps, overrides and the body-abort paths; rows whose payload is too large to read are pinned by digest.
 - Change receipt/summary formatting: `src/common/outcome.rs` and printer helpers.
+- Add or recapture a block of the mainnet replay corpus: `tests/fixtures/corpus/` — `manifest.json` is the single source of truth `tests/replay_corpus.rs` walks, `README.md` the recapture discipline, and `scripts/replay_corpus_capture.py` the capture tool. The corpus is one archive, `corpus.tar.xz`, and every recapture or addition rewrites all of it into the history for good: recapture only the blocks that need it, batch them into one change, and verify the packer with `scripts/replay_corpus_capture.py --check`.
 - Change cache merge behavior (CLI or merge-on-persist): `src/cache/{mod.rs,merge.rs}`.
-- Change how cache files are locked against concurrent writers: `src/cache/lock.rs` — the one place a cache-file write may acquire its lock, and every caller must fail closed when it cannot.
+- Change how cache files are locked against concurrent writers: `src/cache/lock.rs` — the one place a cache-file write may acquire its lock, and every caller must fail closed when it cannot. Every writer locks and replaces the canonical file behind the path it was given (`canonical_target`) while its messages keep naming the given path.
 - Change process exit classification: `src/common/exit.rs` — the single exit site for command results.

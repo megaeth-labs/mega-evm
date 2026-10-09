@@ -14,101 +14,158 @@
 
 use core::fmt;
 
-use alloy_consensus::TxReceipt;
 use alloy_network::ReceiptResponse;
 use alloy_primitives::{keccak256, Address, Bytes, Log, B256};
 use alloy_provider::Provider;
-use alloy_rpc_types_eth::{Log as RpcLog, TransactionReceipt};
+use alloy_rpc_types_eth::Log as RpcLog;
 use mega_evm::{alloy_consensus::transaction::SignerRecoverable, alloy_eips::Encodable2718};
+use op_alloy_consensus::OpReceiptEnvelope;
 use op_alloy_rpc_types::{OpTransactionReceipt, Transaction};
 use serde::Serialize;
 
-use super::{ReplayError, Result};
+use crate::common::OpTxReceipt;
+
+use super::{coherence, ReplayError, Result};
 
 /// The consensus facts compared between the on-chain receipt and the receipt
 /// the local replay produced.
+///
+/// Every field of the consensus receipt encoding is covered — the envelope type,
+/// the status, the block-cumulative gas, the logs, and a deposit receipt's nonce
+/// and version — so a matching receipt is the one the block's `receiptsRoot`
+/// commits to, plus the transaction's own gas used. The bloom is covered through
+/// the logs: an on-chain receipt is only admitted when its bloom is the bloom of
+/// its own logs ([`fetch_receipt`]), and the replay's bloom is built from its
+/// logs, so equal logs mean equal blooms. The RPC-only fields
+/// (`contractAddress`, `effectiveGasPrice`, the L1 fee fields) are not part of
+/// the consensus encoding and are not compared.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ReceiptFacts {
     /// Whether the transaction succeeded.
     pub status: bool,
     /// Gas the transaction used.
     pub gas_used: u64,
+    /// Gas the block had used up to and including this transaction.
+    pub cumulative_gas_used: u64,
+    /// EIP-2718 type of the receipt envelope.
+    pub tx_type: u8,
+    /// Deposit nonce of a deposit receipt; `None` for any other type.
+    pub deposit_nonce: Option<u64>,
+    /// Deposit receipt version of a deposit receipt; `None` for any other type.
+    pub deposit_receipt_version: Option<u64>,
     /// The consensus logs the transaction emitted, in order.
     pub logs: Vec<Log>,
 }
 
 impl ReceiptFacts {
+    /// Extract the compared facts from the receipt the local replay built.
+    pub(super) fn from_receipt(receipt: &OpTxReceipt) -> Self {
+        Self::from_envelope(&receipt.inner, receipt.gas_used)
+    }
+
+    /// Extract the compared facts from an on-chain RPC receipt.
+    pub(super) fn from_onchain(receipt: &OpTransactionReceipt) -> Self {
+        Self::from_envelope(&onchain_envelope(receipt), receipt.inner.gas_used)
+    }
+
     /// Extract the compared facts from a receipt envelope.
     ///
     /// Both sides go through this one accessor set — the on-chain side is the
-    /// RPC receipt's inner envelope, the local side the envelope the replay
-    /// built — so neither side can be read with different semantics.
-    pub(super) fn from_receipt<T>(receipt: &TransactionReceipt<T>) -> Self
-    where
-        T: TxReceipt<Log = RpcLog>,
-    {
+    /// RPC receipt's envelope, the local side the envelope the replay built —
+    /// so neither side can be read with different semantics.
+    fn from_envelope(envelope: &OpReceiptEnvelope<RpcLog>, gas_used: u64) -> Self {
         Self {
-            status: receipt.inner.status(),
-            gas_used: receipt.gas_used,
-            logs: receipt.logs().iter().map(|log| log.inner.clone()).collect(),
+            status: envelope.status(),
+            gas_used,
+            cumulative_gas_used: envelope.cumulative_gas_used(),
+            tx_type: envelope.tx_type() as u8,
+            deposit_nonce: envelope.deposit_nonce(),
+            deposit_receipt_version: envelope.deposit_receipt_version(),
+            logs: envelope.logs().iter().map(|log| log.inner.clone()).collect(),
         }
     }
 }
 
-/// The verdict for one verified transaction.
+/// The receipt envelope an on-chain RPC receipt carries, with its RPC logs.
+fn onchain_envelope(receipt: &OpTransactionReceipt) -> OpReceiptEnvelope<RpcLog> {
+    receipt.inner.inner.clone().into()
+}
+
+/// The consensus receipt an on-chain RPC receipt describes, as the block's
+/// `receiptsRoot` commits to it: the served envelope (bloom included) with its
+/// logs stripped to their consensus fields.
+pub(super) fn consensus_receipt(receipt: &OpTransactionReceipt) -> OpReceiptEnvelope {
+    onchain_envelope(receipt).map_logs(|log| log.inner)
+}
+
+/// The verdict of one verification: of a transaction against its on-chain
+/// receipt, or of a block against its header.
 ///
 /// Three shapes on the wire:
 /// - compared and equal: `{"match": true}`
 /// - compared and diverged: `{"match": false, "diff": …}`
-/// - receipt question unanswered: `{"error": "…"}` — the target still replayed; only the comparison
-///   could not run (transport, pruned, reorg).
+/// - the comparison could not run: `{"error": "…"}` — the receipt question went unanswered
+///   (transport, pruned, reorg), or the block did not execute in full.
 ///
-/// Serialize is hand-written so an unavailable outcome never emits a false
+/// Serialize is hand-written so an unavailable verdict never emits a false
 /// `match` that a consumer would read as a divergence.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct VerificationOutcome {
-    /// Whether the local replay reproduced the on-chain receipt.
+pub(super) struct Verdict<D> {
+    /// Whether the replay reproduced every compared dimension.
     ///
     /// Meaningless when [`Self::error`] is set (kept for a simple bool check
     /// on the compared path); the wire shape omits `match` in that case.
     pub matched: bool,
     /// The mismatched dimensions; absent when the replay matched or when the
     /// comparison never ran.
-    pub diff: Option<VerificationDiff>,
-    /// Why the on-chain receipt could not be compared, when the target still
-    /// produced a local result. Mutually exclusive with a real match/diff.
+    pub diff: Option<D>,
+    /// Why the comparison could not run. Mutually exclusive with a real
+    /// match/diff.
     pub error: Option<String>,
 }
 
-impl VerificationOutcome {
-    /// A completed comparison against an on-chain receipt.
-    pub(super) fn compared(matched: bool, diff: Option<VerificationDiff>) -> Self {
-        Self { matched, diff, error: None }
+/// What a [`Verdict`]'s diff contributes to the human verdict line.
+pub(super) trait DiffReport: Serialize {
+    /// Label the human verdict line starts with.
+    const LABEL: &'static str;
+
+    /// Render every mismatched dimension as one comma-separated line.
+    fn describe(&self) -> String;
+}
+
+/// The verdict for one verified transaction.
+pub(super) type VerificationOutcome = Verdict<VerificationDiff>;
+
+impl<D: DiffReport> Verdict<D> {
+    /// A completed comparison: a match when nothing diverged.
+    pub(super) fn compared(diff: Option<D>) -> Self {
+        Self { matched: diff.is_none(), diff, error: None }
     }
 
-    /// The target replayed, but the on-chain receipt question went unanswered.
+    /// The comparison could not run.
     pub(super) fn unavailable(message: impl Into<String>) -> Self {
         Self { matched: false, diff: None, error: Some(message.into()) }
     }
 
-    /// Whether this outcome is an unanswered receipt fetch, not a comparison.
+    /// Whether this verdict is an unavailable comparison.
     pub(super) const fn is_unavailable(&self) -> bool {
         self.error.is_some()
     }
 
-    /// The one-line human verdict printed for a verified transaction.
+    /// The one-line human verdict.
     pub(super) fn verdict_line(&self) -> String {
+        let label = D::LABEL;
         if let Some(error) = &self.error {
-            format!("verification: FAILED ({error})")
+            format!("{label}: FAILED ({error})")
         } else if let Some(diff) = &self.diff {
-            format!("verification: MISMATCH ({})", diff.describe())
+            format!("{label}: MISMATCH ({})", diff.describe())
         } else {
-            "verification: MATCH".to_string()
+            format!("{label}: MATCH")
         }
     }
 }
 
-impl Serialize for VerificationOutcome {
+impl<D: Serialize> Serialize for Verdict<D> {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -139,6 +196,19 @@ pub(super) struct VerificationDiff {
     /// Present when the gas used differs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gas_used: Option<Mismatch<u64>>,
+    /// Present when the block-cumulative gas at this transaction differs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cumulative_gas_used: Option<Mismatch<u64>>,
+    /// Present when the receipt envelope types differ.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_type: Option<Mismatch<u8>>,
+    /// Present when the deposit nonces differ (`null` on a non-deposit side).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deposit_nonce: Option<Mismatch<Option<u64>>>,
+    /// Present when the deposit receipt versions differ (`null` on a
+    /// non-deposit side).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deposit_receipt_version: Option<Mismatch<Option<u64>>>,
     /// Present when the emitted logs differ.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logs: Option<LogsDiff>,
@@ -147,10 +217,19 @@ pub(super) struct VerificationDiff {
 impl VerificationDiff {
     /// Whether every compared dimension agreed.
     fn is_empty(&self) -> bool {
-        self.status.is_none() && self.gas_used.is_none() && self.logs.is_none()
+        self.status.is_none() &&
+            self.gas_used.is_none() &&
+            self.cumulative_gas_used.is_none() &&
+            self.tx_type.is_none() &&
+            self.deposit_nonce.is_none() &&
+            self.deposit_receipt_version.is_none() &&
+            self.logs.is_none()
     }
+}
 
-    /// Render every mismatched dimension as one comma-separated line.
+impl DiffReport for VerificationDiff {
+    const LABEL: &'static str = "verification";
+
     fn describe(&self) -> String {
         let mut parts = Vec::new();
         if let Some(m) = &self.status {
@@ -158,6 +237,27 @@ impl VerificationDiff {
         }
         if let Some(m) = &self.gas_used {
             parts.push(format!("gas_used: onchain {} vs replay {}", m.onchain, m.replay));
+        }
+        if let Some(m) = &self.cumulative_gas_used {
+            parts
+                .push(format!("cumulative_gas_used: onchain {} vs replay {}", m.onchain, m.replay));
+        }
+        if let Some(m) = &self.tx_type {
+            parts.push(format!("tx_type: onchain {} vs replay {}", m.onchain, m.replay));
+        }
+        if let Some(m) = &self.deposit_nonce {
+            parts.push(format!(
+                "deposit_nonce: onchain {} vs replay {}",
+                display_optional(m.onchain.as_ref()),
+                display_optional(m.replay.as_ref())
+            ));
+        }
+        if let Some(m) = &self.deposit_receipt_version {
+            parts.push(format!(
+                "deposit_receipt_version: onchain {} vs replay {}",
+                display_optional(m.onchain.as_ref()),
+                display_optional(m.replay.as_ref())
+            ));
         }
         if let Some(logs) = &self.logs {
             if let Some(m) = &logs.count {
@@ -177,13 +277,24 @@ impl VerificationDiff {
     }
 }
 
+/// Render an optional field (a deposit field, a header field) for the human
+/// verdict line: its value, or `none` for a side that lacks it.
+pub(super) fn display_optional<T: fmt::Display>(value: Option<&T>) -> String {
+    value.map_or_else(|| "none".to_string(), ToString::to_string)
+}
+
 /// One dimension's two values.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(super) struct Mismatch<T> {
-    /// The value the on-chain receipt reports.
+    /// The value the on-chain side reports.
     pub onchain: T,
     /// The value the local replay produced.
     pub replay: T,
+}
+
+/// The two values of one dimension, when they differ.
+pub(super) fn mismatch<T: PartialEq>(onchain: T, replay: T) -> Option<Mismatch<T>> {
+    (onchain != replay).then_some(Mismatch { onchain, replay })
 }
 
 /// How the emitted logs differ.
@@ -277,31 +388,26 @@ impl fmt::Display for LogFieldValue {
 
 /// Compare the on-chain receipt against the local replay's receipt.
 pub(super) fn compare(onchain: &ReceiptFacts, replay: &ReceiptFacts) -> VerificationOutcome {
-    let mut diff = VerificationDiff::default();
-
-    if onchain.status != replay.status {
-        diff.status = Some(Mismatch { onchain: onchain.status, replay: replay.status });
-    }
-    if onchain.gas_used != replay.gas_used {
-        diff.gas_used = Some(Mismatch { onchain: onchain.gas_used, replay: replay.gas_used });
-    }
     let logs = compare_logs(&onchain.logs, &replay.logs);
-    if !logs.is_empty() {
-        diff.logs = Some(logs);
-    }
-
-    if diff.is_empty() {
-        VerificationOutcome::compared(true, None)
-    } else {
-        VerificationOutcome::compared(false, Some(diff))
-    }
+    let diff = VerificationDiff {
+        status: mismatch(onchain.status, replay.status),
+        gas_used: mismatch(onchain.gas_used, replay.gas_used),
+        cumulative_gas_used: mismatch(onchain.cumulative_gas_used, replay.cumulative_gas_used),
+        tx_type: mismatch(onchain.tx_type, replay.tx_type),
+        deposit_nonce: mismatch(onchain.deposit_nonce, replay.deposit_nonce),
+        deposit_receipt_version: mismatch(
+            onchain.deposit_receipt_version,
+            replay.deposit_receipt_version,
+        ),
+        logs: (!logs.is_empty()).then_some(logs),
+    };
+    VerificationOutcome::compared((!diff.is_empty()).then_some(diff))
 }
 
 /// Compare two log lists: their length, and the contents of the logs both sides
 /// emitted.
 fn compare_logs(onchain: &[Log], replay: &[Log]) -> LogsDiff {
-    let count = (onchain.len() != replay.len())
-        .then_some(Mismatch { onchain: onchain.len(), replay: replay.len() });
+    let count = mismatch(onchain.len(), replay.len());
     // Only the logs both sides emitted can be compared field by field; a length
     // difference is already reported by `count`.
     let first_mismatch = onchain
@@ -352,7 +458,10 @@ fn compare_log(index: usize, onchain: &Log, replay: &Log) -> Option<LogFieldMism
 /// so the target is reported as unverified rather than as a mismatch. So is a
 /// receipt that describes a different transaction than the one requested: the
 /// identity check runs here, at the one seam every mode fetches through, so no
-/// caller can compare against or anchor to a receipt it never asked for.
+/// caller can compare against or anchor to a receipt it never asked for. And so
+/// is a receipt whose logs bloom is not the bloom of its own logs, checked here
+/// for the same reason: a receipt that contradicts itself describes no
+/// execution, and its logs could otherwise match while its bloom is forged.
 pub(super) async fn fetch_receipt<P>(provider: &P, tx_hash: B256) -> Result<OpTransactionReceipt>
 where
     P: Provider<op_alloy_network::Optimism>,
@@ -369,6 +478,10 @@ where
         })?;
     check_transaction_identity(receipt.inner.transaction_hash, tx_hash)
         .map_err(ReplayError::RpcError)?;
+    let envelope = onchain_envelope(&receipt);
+    let logs: Vec<Log> = envelope.logs().iter().map(|log| log.inner.clone()).collect();
+    coherence::require_receipt_bloom(tx_hash, *envelope.logs_bloom(), &logs)
+        .map_err(|incoherence| ReplayError::RpcError(incoherence.to_string()))?;
     Ok(receipt)
 }
 
@@ -433,7 +546,7 @@ impl ReceiptEvidence {
 /// share their consensus facts — and the dump path would anchor a fixture to it.
 /// Returns the explanatory message so each mode can wrap it in the error shape it
 /// reports.
-pub(super) fn check_transaction_identity(
+fn check_transaction_identity(
     receipt_tx_hash: B256,
     requested_tx_hash: B256,
 ) -> std::result::Result<(), String> {
@@ -473,15 +586,20 @@ pub(super) fn check_transaction_identity(
 /// Because the check runs here, at the one seam every fetched transaction is
 /// admitted through, `tx_hash()` on an authenticated transaction is a verified
 /// value and no consumer has to recompute it.
+///
+/// Returns the EIP-2718 encoding the hash was recomputed from, so a caller that
+/// needs the authenticated bytes (the transactions root of an executed block)
+/// does not encode the transaction a second time.
 pub(super) fn authenticate_transaction(
     tx: &Transaction,
     requested_tx_hash: B256,
-) -> std::result::Result<(), String> {
+) -> std::result::Result<Bytes, String> {
     let envelope = tx.inner.inner.inner();
     // Hash the consensus encoding directly: `trie_hash()`/`tx_hash()` return
     // the envelope's *cached* hash, which an RPC deserialization seeds from the
     // response's own `hash` field — the very value being authenticated.
-    let computed = keccak256(envelope.encoded_2718());
+    let encoded = envelope.encoded_2718();
+    let computed = keccak256(&encoded);
     if computed != requested_tx_hash {
         return Err(format!(
             "the served transaction hashes to {computed}, but transaction {requested_tx_hash} \
@@ -514,7 +632,7 @@ pub(super) fn authenticate_transaction(
              inconsistent transaction (a corrupted backend, or a tampered capture)"
         ));
     }
-    Ok(())
+    Ok(encoded.into())
 }
 
 /// Check that a fetched receipt describes the block the replay executed.
@@ -522,10 +640,10 @@ pub(super) fn authenticate_transaction(
 /// Across a reorg, or against a load-balanced endpoint serving divergent views,
 /// the receipt can describe a different inclusion than the block the replay ran,
 /// which would compare the replay against the wrong on-chain execution. Returns
-/// the explanatory message so each mode can wrap it in the error shape it
-/// reports — a hard error in single-transaction mode, an `rpc` error entry in
+/// the explanatory message, which [`ReceiptEvidence::admit`] wraps as an RPC
+/// failure — a hard error in single-transaction mode, an `rpc` error entry in
 /// batch mode.
-pub(super) fn check_inclusion(
+fn check_inclusion(
     receipt_block_hash: Option<B256>,
     replayed_block_hash: B256,
 ) -> std::result::Result<(), String> {
@@ -572,9 +690,52 @@ mod tests {
         }
     }
 
-    /// A successful 21,000-gas receipt emitting the given logs.
+    /// A successful 21,000-gas EIP-1559 receipt emitting the given logs, second
+    /// in its block.
     fn facts(logs: Vec<Log>) -> ReceiptFacts {
-        ReceiptFacts { status: true, gas_used: 21_000, logs }
+        ReceiptFacts {
+            status: true,
+            gas_used: 21_000,
+            cumulative_gas_used: 42_000,
+            tx_type: 2,
+            deposit_nonce: None,
+            deposit_receipt_version: None,
+            logs,
+        }
+    }
+
+    /// A deposit receipt's facts: type `0x7e` with its nonce and version.
+    fn deposit_facts(deposit_nonce: Option<u64>, version: Option<u64>) -> ReceiptFacts {
+        ReceiptFacts {
+            tx_type: 0x7e,
+            deposit_nonce,
+            deposit_receipt_version: version,
+            ..facts(vec![])
+        }
+    }
+
+    /// An on-chain RPC receipt as an endpoint serves it: a successful base with
+    /// `fields` merged over it.
+    fn onchain_receipt(fields: serde_json::Value) -> OpTransactionReceipt {
+        let mut receipt = serde_json::json!({
+            "status": "0x1",
+            "cumulativeGasUsed": "0xb",
+            "logs": [],
+            "logsBloom": format!("0x{}", "0".repeat(512)),
+            "transactionHash": b256!("0x1111111111111111111111111111111111111111111111111111111111111111"),
+            "transactionIndex": "0x0",
+            "blockHash": b256!("0x2222222222222222222222222222222222222222222222222222222222222222"),
+            "blockNumber": "0x1",
+            "gasUsed": "0xa",
+            "effectiveGasPrice": "0x0",
+            "from": ADDR_A,
+            "to": ADDR_B,
+            "contractAddress": null
+        });
+        for (key, value) in fields.as_object().expect("fields are an object") {
+            receipt[key] = value.clone();
+        }
+        serde_json::from_value(receipt).expect("a well-formed receipt")
     }
 
     /// The `diff` of an outcome that must be a mismatch.
@@ -796,6 +957,7 @@ mod tests {
             status: false,
             gas_used: 30_000,
             logs: vec![log(ADDR_B, &[TOPIC_A], data("0x")), log(ADDR_A, &[], data("0x"))],
+            ..facts(vec![])
         };
 
         let outcome = compare(&onchain, &replay);
@@ -812,6 +974,192 @@ mod tests {
                  gas_used: onchain 21000 vs replay 30000, logs_count: onchain 1 vs replay 2, \
                  logs[0].address: onchain {ADDR_A} vs replay {ADDR_B})"
             )
+        );
+    }
+
+    /// The block-cumulative gas is compared even when the transaction's own gas
+    /// agrees: a preceding transaction that used different gas shifts it.
+    #[test]
+    fn test_compare_reports_cumulative_gas_delta() {
+        let onchain = facts(vec![]);
+        let replay = ReceiptFacts { cumulative_gas_used: 43_000, ..facts(vec![]) };
+
+        let outcome = compare(&onchain, &replay);
+
+        let diff = diff_of(&outcome);
+        assert!(diff.gas_used.is_none(), "own gas agreed, so it must be absent: {diff:?}");
+        assert_eq!(diff.cumulative_gas_used, Some(Mismatch { onchain: 42_000, replay: 43_000 }));
+        assert_eq!(
+            json(&outcome),
+            serde_json::json!({
+                "match": false,
+                "diff": { "cumulative_gas_used": { "onchain": 42_000, "replay": 43_000 } }
+            })
+        );
+        assert_eq!(
+            outcome.verdict_line(),
+            "verification: MISMATCH (cumulative_gas_used: onchain 42000 vs replay 43000)"
+        );
+    }
+
+    #[test]
+    fn test_compare_reports_tx_type_delta() {
+        let onchain = facts(vec![]);
+        let replay = ReceiptFacts { tx_type: 0, ..facts(vec![]) };
+
+        let outcome = compare(&onchain, &replay);
+
+        assert_eq!(diff_of(&outcome).tx_type, Some(Mismatch { onchain: 2, replay: 0 }));
+        assert_eq!(
+            json(&outcome),
+            serde_json::json!({
+                "match": false,
+                "diff": { "tx_type": { "onchain": 2, "replay": 0 } }
+            })
+        );
+        assert_eq!(
+            outcome.verdict_line(),
+            "verification: MISMATCH (tx_type: onchain 2 vs replay 0)"
+        );
+    }
+
+    #[test]
+    fn test_compare_equal_deposit_receipts_match() {
+        let outcome = compare(&deposit_facts(Some(7), Some(1)), &deposit_facts(Some(7), Some(1)));
+
+        assert!(outcome.matched, "{outcome:?}");
+    }
+
+    #[test]
+    fn test_compare_reports_deposit_nonce_and_version_deltas() {
+        let onchain = deposit_facts(Some(7), Some(1));
+        let replay = deposit_facts(Some(8), None);
+
+        let outcome = compare(&onchain, &replay);
+
+        let diff = diff_of(&outcome);
+        assert_eq!(diff.deposit_nonce, Some(Mismatch { onchain: Some(7), replay: Some(8) }));
+        assert_eq!(diff.deposit_receipt_version, Some(Mismatch { onchain: Some(1), replay: None }));
+        assert_eq!(
+            json(&outcome)["diff"],
+            serde_json::json!({
+                "deposit_nonce": { "onchain": 7, "replay": 8 },
+                "deposit_receipt_version": { "onchain": 1, "replay": null }
+            })
+        );
+        assert_eq!(
+            outcome.verdict_line(),
+            "verification: MISMATCH (deposit_nonce: onchain 7 vs replay 8, \
+             deposit_receipt_version: onchain 1 vs replay none)"
+        );
+    }
+
+    /// A deposit receipt compared against a non-deposit one reports the type and
+    /// both deposit fields, the non-deposit side as `none`.
+    #[test]
+    fn test_compare_reports_a_deposit_against_a_non_deposit() {
+        let onchain = deposit_facts(Some(3), Some(1));
+        let replay = facts(vec![]);
+
+        let outcome = compare(&onchain, &replay);
+
+        let diff = diff_of(&outcome);
+        assert_eq!(diff.tx_type, Some(Mismatch { onchain: 0x7e, replay: 2 }));
+        assert_eq!(diff.deposit_nonce, Some(Mismatch { onchain: Some(3), replay: None }));
+        assert_eq!(diff.deposit_receipt_version, Some(Mismatch { onchain: Some(1), replay: None }));
+        assert_eq!(
+            outcome.verdict_line(),
+            "verification: MISMATCH (tx_type: onchain 126 vs replay 2, deposit_nonce: onchain 3 \
+             vs replay none, deposit_receipt_version: onchain 1 vs replay none)"
+        );
+    }
+
+    /// An on-chain deposit receipt is read with its envelope type, cumulative
+    /// gas, nonce and version — the fields its consensus encoding commits to.
+    #[test]
+    fn test_from_onchain_reads_the_deposit_receipt_fields() {
+        let receipt = onchain_receipt(serde_json::json!({
+            "type": "0x7e",
+            "depositNonce": "0x5",
+            "depositReceiptVersion": "0x1"
+        }));
+
+        assert_eq!(
+            ReceiptFacts::from_onchain(&receipt),
+            ReceiptFacts {
+                status: true,
+                gas_used: 10,
+                cumulative_gas_used: 11,
+                tx_type: 0x7e,
+                deposit_nonce: Some(5),
+                deposit_receipt_version: Some(1),
+                logs: vec![],
+            }
+        );
+    }
+
+    /// A non-deposit on-chain receipt carries no deposit fields.
+    #[test]
+    fn test_from_onchain_reads_a_non_deposit_receipt() {
+        let receipt = onchain_receipt(serde_json::json!({ "type": "0x2", "status": "0x0" }));
+
+        assert_eq!(
+            ReceiptFacts::from_onchain(&receipt),
+            ReceiptFacts {
+                status: false,
+                gas_used: 10,
+                cumulative_gas_used: 11,
+                tx_type: 2,
+                deposit_nonce: None,
+                deposit_receipt_version: None,
+                logs: vec![],
+            }
+        );
+    }
+
+    /// The local receipt is read through the same envelope accessors: the type,
+    /// the cumulative gas and the deposit fields come from the envelope the
+    /// replay built, the transaction's own gas from the receipt beside it.
+    #[test]
+    fn test_from_receipt_reads_the_local_deposit_envelope() {
+        let envelope = OpReceiptEnvelope::Deposit(
+            op_alloy_consensus::OpDepositReceipt {
+                inner: alloy_consensus::Receipt {
+                    status: alloy_consensus::Eip658Value::Eip658(true),
+                    cumulative_gas_used: 77,
+                    logs: vec![log(ADDR_A, &[TOPIC_B], data("0x01"))],
+                },
+                deposit_nonce: Some(9),
+                deposit_receipt_version: Some(1),
+            }
+            .with_bloom(),
+        );
+        let receipt = crate::common::op_receipt_to_tx_receipt(
+            &envelope,
+            1,
+            0,
+            ADDR_A,
+            Some(ADDR_B),
+            None,
+            0,
+            55,
+            None,
+            None,
+            0,
+            0,
+        );
+
+        assert_eq!(
+            ReceiptFacts::from_receipt(&receipt),
+            ReceiptFacts {
+                status: true,
+                gas_used: 55,
+                cumulative_gas_used: 77,
+                tx_type: 0x7e,
+                deposit_nonce: Some(9),
+                deposit_receipt_version: Some(1),
+                logs: vec![log(ADDR_A, &[TOPIC_B], data("0x01"))],
+            }
         );
     }
 

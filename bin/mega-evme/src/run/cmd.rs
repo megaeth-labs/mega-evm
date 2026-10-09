@@ -1,16 +1,12 @@
-use std::time::Instant;
-
 use clap::Parser;
-use mega_evm::revm::{context::result::ExecutionResult, state::Bytecode, DatabaseRef};
-use tracing::{debug, info, trace, warn};
+use mega_evm::revm::state::Bytecode;
+use tracing::{debug, info, trace};
 
 use super::{load_hex, Result, RunError};
 use crate::common::{
-    print_execution_summary, print_execution_trace, EvmeOutcome, ExecutionSummary,
+    create_address, log_execution_result, pre_execution_nonce, print_run_artifacts,
+    print_transaction_report, EvmeOutcome, ExecutionSummary,
 };
-
-// Re-export TracerType from common module
-pub use crate::common::TracerType;
 
 /// Run arbitrary EVM bytecode
 #[derive(Parser, Debug)]
@@ -77,7 +73,7 @@ impl Cmd {
         state.deploy_system_contracts(spec);
         debug!(spec = ?spec, "System contracts deployed");
 
-        let pre_execution_nonce = state.basic_ref(sender)?.map(|acc| acc.nonce).unwrap_or(0);
+        let pre_execution_nonce = pre_execution_nonce(&state, sender)?;
         debug!(nonce = pre_execution_nonce, "Pre-execution nonce");
 
         // Run-specific: If not in create mode, set the code at the receiver address
@@ -104,33 +100,14 @@ impl Cmd {
             tx.base.data = [code.as_ref(), tx.base.data.as_ref()].concat().into();
         }
 
-        // Create EVM context and execute transaction
-        let evm_context = self.env_args.create_evm_context(&mut state)?;
-        let start = Instant::now();
-        let (exec_result, evm_state, trace_data) =
-            self.trace_args.execute_transaction(evm_context, tx)?;
-        let exec_time = start.elapsed();
-
-        // Log execution result
-        match &exec_result {
-            ExecutionResult::Success { .. } => {
-                info!(gas_used = exec_result.tx_gas_used(), "Execution succeeded");
-            }
-            ExecutionResult::Revert { .. } => {
-                warn!(gas_used = exec_result.tx_gas_used(), "Execution reverted");
-            }
-            ExecutionResult::Halt { reason, .. } => {
-                warn!(?reason, gas_used = exec_result.tx_gas_used(), "Execution halted");
-            }
-        }
-
-        let outcome = EvmeOutcome {
+        let outcome = EvmeOutcome::execute(
+            &mut state,
+            &self.env_args,
+            &self.trace_args,
+            tx,
             pre_execution_nonce,
-            exec_result,
-            state: evm_state,
-            exec_time,
-            trace_data,
-        };
+        )?;
+        log_execution_result!(target: "mega_evme::run::cmd", &outcome.exec_result);
 
         // Step 4: Output results (including state dump if requested)
         trace!("Writing output results");
@@ -144,29 +121,24 @@ impl Cmd {
 
     /// Output execution results
     fn output_results(&self, outcome: &EvmeOutcome) -> Result<()> {
-        // Determine contract address for CREATE transactions
-        let contract_address = (self.tx_args.create() && outcome.exec_result.is_success())
-            .then(|| self.tx_args.sender().create(outcome.pre_execution_nonce));
+        // `run` emits no receipt; the summary names this address only if the creation deployed.
+        let create_address =
+            create_address(self.tx_args.sender(), self.tx_args.kind(), outcome.pre_execution_nonce);
 
         if self.output_args.json {
-            let mut summary = ExecutionSummary::from_result(&outcome.exec_result, contract_address);
+            let mut summary =
+                ExecutionSummary::of_transaction(&outcome.exec_result, create_address, None);
             summary.fill_trace_and_dump(outcome, &self.trace_args, &self.dump_args)?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&summary).expect("failed to serialize output")
-            );
+            summary.print_pretty();
         } else {
-            // Human-readable summary
-            print_execution_summary(&outcome.exec_result, contract_address, outcome.exec_time);
-
-            print_execution_trace(
-                outcome.trace_data.as_deref(),
-                self.trace_args.trace_output_file.as_deref(),
-            )?;
-
-            if self.dump_args.dump {
-                self.dump_args.dump_evm_state(&outcome.state)?;
-            }
+            print_transaction_report(
+                &outcome.exec_result,
+                create_address,
+                outcome.exec_time,
+                None,
+                &[],
+            );
+            print_run_artifacts(outcome, &self.trace_args, &self.dump_args)?;
         }
 
         Ok(())

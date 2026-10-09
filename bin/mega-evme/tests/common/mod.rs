@@ -9,10 +9,11 @@
 #![allow(dead_code)] // Each test binary uses a different subset of helpers.
 
 pub(crate) mod doctor;
+pub(crate) mod mock_chain;
 
 use std::{
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Output},
     sync::atomic::{AtomicUsize, Ordering},
 };
 
@@ -24,13 +25,11 @@ use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
 /// stored compressed.
 ///
 /// A fixture is either the file itself, or a `<name>.tar.xz` holding exactly
-/// that one file. `name` may name a file in a subdirectory
-/// (`corpus/<N>.cache.json`); its archive sits beside it and still holds only
-/// the file itself. Compression is worth it only where the raw file would bloat
-/// a pull-request diff — git already compresses blobs, so it buys little on its
-/// own, and a compressed blob cannot delta against its previous revision. A
-/// capture is JSON with long runs of repeated hex, which xz shrinks to about half
-/// of what gzip leaves.
+/// that one file. Compression is worth it only where the raw file would bloat a
+/// pull-request diff — git already compresses
+/// blobs, so it buys little on its own, and a compressed blob cannot delta
+/// against its previous revision. A capture is JSON with long runs of repeated
+/// hex, which xz shrinks to about half of what gzip leaves.
 ///
 /// To (re)pack a capture, archive the one file and nothing else (macOS `tar`
 /// would otherwise add `._*` metadata members):
@@ -39,22 +38,9 @@ use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
 /// COPYFILE_DISABLE=1 tar --format ustar -cf - <name> | xz -9e > <name>.tar.xz
 /// ```
 ///
-/// An archive is extracted under [`extracted_root`], into a directory named by
-/// the keccak-256 of the archive's bytes, so the committed fixtures are never
-/// written to and:
-///
-/// - an extraction is reused by every later test binary and every later run for as long as its
-///   archive is unchanged, so the directory does not grow from run to run;
-/// - a changed archive (a recapture, or a branch switch) has a different digest, so an extraction
-///   of an earlier version is never served for it; that earlier extraction stays until `cargo
-///   clean`;
-/// - concurrent extractions — parallel tests, or test binaries running at once — each unpack into a
-///   private scratch directory and rename the file into place, which is atomic, so a reader sees
-///   either no file or a complete one, and two writers write the same bytes.
-///
-/// Extraction shells out to `tar -xJf` rather than linking a decompressor:
-/// every platform that runs these tests has one, and this is the only place
-/// that reads an archive.
+/// The archive is extracted by [`install_archive`], under a directory named by
+/// the keccak-256 of the archive's bytes; see there for why that is safe to
+/// share across runs and concurrent test binaries.
 pub(crate) fn fixture(name: &str) -> PathBuf {
     let dir = fixtures_dir();
     let plain = dir.join(name);
@@ -71,17 +57,71 @@ pub(crate) fn fixture(name: &str) -> PathBuf {
     );
     let member = plain.file_name().expect("a fixture names a file");
 
-    let bytes = std::fs::read(&archive)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", archive.display()));
-    let digest = alloy_primitives::keccak256(&bytes);
-    let root = extracted_root();
-    let extracted = root.join(format!("{digest:x}")).join(member);
-    if extracted.is_file() {
-        return extracted;
-    }
+    let extracted = extracted(&archive).join(member);
+    assert!(extracted.is_file(), "{} does not contain {name}", archive.display());
+    extracted
+}
 
+/// Resolve an archive in `tests/fixtures/` holding many fixtures, extracting
+/// all of its members, and return the directory they were extracted into.
+///
+/// `name` names the archive itself (`<dir>/<archive>.tar.xz`). Each member is
+/// then the file of that name in the returned directory. The extraction is the
+/// same as [`fixture`]'s, and so are its guarantees; the directory is returned
+/// only once every member is in place.
+pub(crate) fn fixture_archive(name: &str) -> PathBuf {
+    let archive = fixtures_dir().join(name);
+    assert!(
+        archive.is_file(),
+        "no fixture archive named {name}: {} does not exist",
+        archive.display()
+    );
+    extracted(&archive)
+}
+
+/// The directory `archive` is extracted into, extracting it first unless an
+/// earlier extraction already completed there.
+fn extracted(archive: &Path) -> PathBuf {
+    let destination = extraction_dir(archive);
+    if !destination.join(EXTRACTION_COMPLETE).is_file() {
+        install_archive(archive, &destination);
+    }
+    destination
+}
+
+/// Marker [`install_archive`] writes into an extraction directory once every
+/// member of the archive is in place.
+const EXTRACTION_COMPLETE: &str = ".extraction-complete";
+
+/// Directory an archive is extracted into: under [`extracted_root`], named by
+/// the keccak-256 of the archive's bytes.
+fn extraction_dir(archive: &Path) -> PathBuf {
+    let bytes =
+        std::fs::read(archive).unwrap_or_else(|e| panic!("cannot read {}: {e}", archive.display()));
+    extracted_root().join(format!("{:x}", alloy_primitives::keccak256(&bytes)))
+}
+
+/// Extract every member of `archive` into `destination`, its
+/// [`extraction_dir`], and mark the directory complete.
+///
+/// Naming the directory by the archive's digest means:
+///
+/// - an extraction is reused by every later test binary and every later run for as long as its
+///   archive is unchanged, so the directory does not grow from run to run;
+/// - a changed archive (a recapture, or a branch switch) has a different digest, so an extraction
+///   of an earlier version is never served for it; that earlier extraction stays until `cargo
+///   clean`;
+/// - concurrent extractions — parallel tests, or test binaries running at once — each unpack into a
+///   private scratch directory and rename every file into place, which is atomic, so a reader sees
+///   either no file or a complete one, and two writers write the same bytes. The completion marker
+///   is renamed into place last, so a directory carrying it holds every member.
+///
+/// Extraction shells out to `tar -xJf` rather than linking a decompressor:
+/// every platform that runs these tests has one, and this is the only place
+/// that reads an archive.
+fn install_archive(archive: &Path, destination: &Path) {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
-    let scratch = root.join(format!(
+    let scratch = extracted_root().join(format!(
         ".extracting-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
@@ -89,21 +129,25 @@ pub(crate) fn fixture(name: &str) -> PathBuf {
     std::fs::create_dir_all(&scratch).expect("failed to create the extraction directory");
     let status = Command::new("tar")
         .arg("-xJf")
-        .arg(&archive)
+        .arg(archive)
         .arg("-C")
         .arg(&scratch)
         .status()
         .expect("failed to run tar");
     assert!(status.success(), "failed to extract {}", archive.display());
-    let unpacked = scratch.join(member);
-    assert!(unpacked.is_file(), "{} does not contain {name}", archive.display());
 
-    std::fs::create_dir_all(extracted.parent().expect("an extraction has a parent directory"))
-        .expect("failed to create the extraction directory");
-    std::fs::rename(&unpacked, &extracted)
-        .expect("failed to move the extracted fixture into place");
+    std::fs::create_dir_all(destination).expect("failed to create the extraction directory");
+    for entry in std::fs::read_dir(&scratch).expect("failed to read the extraction directory") {
+        let unpacked = entry.expect("failed to read an extracted member").path();
+        let member = unpacked.file_name().expect("an extracted member has a name");
+        std::fs::rename(&unpacked, destination.join(member))
+            .expect("failed to move an extracted fixture into place");
+    }
+    let marker = scratch.join(EXTRACTION_COMPLETE);
+    std::fs::write(&marker, b"").expect("failed to write the extraction marker");
+    std::fs::rename(&marker, destination.join(EXTRACTION_COMPLETE))
+        .expect("failed to mark the extraction complete");
     let _ = std::fs::remove_dir_all(&scratch);
-    extracted
 }
 
 /// Directory the committed fixtures live in.
@@ -118,6 +162,65 @@ pub(crate) fn fixtures_dir() -> PathBuf {
 /// test that normalizes the paths a run prints can name it.
 pub(crate) fn extracted_root() -> PathBuf {
     Path::new(env!("CARGO_TARGET_TMPDIR")).join("mega-evme-fixtures")
+}
+
+/// Block of `replay_batch_blocks.cache.json` whose index-13 transaction calls
+/// [`GAS_DIVERGENCE_CALLEE`].
+pub(crate) const GAS_DIVERGENCE_BLOCK: u64 = 22_945_844;
+
+/// Index in [`GAS_DIVERGENCE_BLOCK`] of the transaction that calls
+/// [`GAS_DIVERGENCE_CALLEE`].
+pub(crate) const GAS_DIVERGENCE_TX_INDEX: u64 = 13;
+
+/// A contract only the index-13 transaction of [`GAS_DIVERGENCE_BLOCK`] calls.
+pub(crate) const GAS_DIVERGENCE_CALLEE: &str = "0x681e908b8ab57c49c74d770f369754ccc3e1ae09";
+
+/// Make the index-13 transaction of [`GAS_DIVERGENCE_BLOCK`] burn different gas
+/// than it did on chain, by replacing [`GAS_DIVERGENCE_CALLEE`]'s code at the
+/// parent block with a bare `STOP`.
+///
+/// Every fetched object still authenticates, so the replay executes the block
+/// and only that transaction's gas moves — an execution divergence rather than
+/// an endpoint fault.
+pub(crate) fn diverge_gas(envelope: doctor::DoctoredEnvelope) -> doctor::DoctoredEnvelope {
+    envelope.set_account_code(GAS_DIVERGENCE_CALLEE, GAS_DIVERGENCE_BLOCK - 1, "0x00")
+}
+
+/// Write a `--tx-file` listing `hashes`, one per line, and return its path.
+///
+/// The path is process-unique and derived from `name`, so concurrent test
+/// binaries and tests do not share a list.
+pub(crate) fn tx_file(name: &str, hashes: &[&str]) -> PathBuf {
+    let path = std::env::temp_dir().join(format!("mega_evme_{name}_{}.txt", std::process::id()));
+    let body: String = hashes.iter().map(|hash| format!("{hash}\n")).collect();
+    std::fs::write(&path, body).expect("write tx list");
+    path
+}
+
+/// Whether a value a batch run printed is a block line
+/// (`{"block_number", "block_hash", "block_verification"}`) rather than a
+/// transaction line.
+pub(crate) fn is_block_line(value: &serde_json::Value) -> bool {
+    value.get("block_verification").is_some()
+}
+
+/// Split the values a `--verify-block` run printed into its transaction lines
+/// and its block lines, each in printed order.
+pub(crate) fn split_block_lines(
+    values: Vec<serde_json::Value>,
+) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+    values.into_iter().partition(|value| !is_block_line(value))
+}
+
+/// Split the values a single-block `--verify-block` run printed into its
+/// transaction lines and its one block line, which must come last.
+pub(crate) fn split_one_block(
+    values: Vec<serde_json::Value>,
+) -> (Vec<serde_json::Value>, serde_json::Value) {
+    assert!(values.last().is_some_and(is_block_line), "the block line comes last: {values:?}");
+    let (txs, mut blocks) = split_block_lines(values);
+    assert_eq!(blocks.len(), 1, "exactly one block line per block: {blocks:?}");
+    (txs, blocks.pop().expect("checked above"))
 }
 
 /// The authentic hash of a served block header: the hash its own consensus
@@ -383,6 +486,97 @@ impl MockRpcServer {
             .mount(&self.server)
             .await;
     }
+}
+
+/// The `mega-evme` binary under test, ready for arguments.
+pub(crate) fn mega_evme() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_mega-evme"))
+}
+
+/// Outcome of one `mega-evme` invocation.
+pub(crate) struct Run {
+    /// Process exit code, `None` when a signal killed it.
+    pub(crate) code: Option<i32>,
+    /// Everything the run printed on stdout.
+    pub(crate) stdout: String,
+    /// Everything the run printed on stderr.
+    pub(crate) stderr: String,
+}
+
+impl From<Output> for Run {
+    fn from(output: Output) -> Self {
+        Self {
+            code: output.status.code(),
+            stdout: String::from_utf8(output.stdout).expect("stdout is utf-8"),
+            stderr: String::from_utf8(output.stderr).expect("stderr is utf-8"),
+        }
+    }
+}
+
+impl Run {
+    /// The process exit code the run ended with.
+    pub(crate) fn code(&self) -> i32 {
+        self.code.expect("mega-evme was killed by a signal")
+    }
+
+    /// Whether the run exited 0.
+    pub(crate) fn success(&self) -> bool {
+        self.code == Some(0)
+    }
+
+    /// The results printed on stdout, without the structured error object a
+    /// failing `--json` run ends with: one value per NDJSON line of a batch
+    /// run, or the one summary of a single-transaction run.
+    pub(crate) fn results(&self) -> Vec<serde_json::Value> {
+        let mut values = json_values(&self.stdout);
+        if values.last().is_some_and(is_run_error) {
+            values.pop();
+        }
+        values
+    }
+
+    /// The one `--json` summary a single-transaction run printed.
+    pub(crate) fn summary(&self) -> serde_json::Value {
+        let mut results = self.results();
+        assert_eq!(
+            results.len(),
+            1,
+            "expected one summary on stdout:\n{}\nstderr:\n{}",
+            self.stdout,
+            self.stderr,
+        );
+        results.pop().expect("checked above")
+    }
+
+    /// The structured error object a failing `--json` run ends with.
+    pub(crate) fn error_object(&self) -> serde_json::Value {
+        let values = json_values(&self.stdout);
+        let last = values.last().unwrap_or_else(|| {
+            panic!("a failing --json run must not leave stdout empty:\nstderr:\n{}", self.stderr)
+        });
+        assert!(is_run_error(last), "the last stdout value must be the error object, got: {last}");
+        last.clone()
+    }
+
+    /// How many failure reports stderr carries.
+    ///
+    /// Counted by the report prefix: a message may itself span lines (an RPC
+    /// error appends a re-capture hint), and only the report opens one.
+    pub(crate) fn error_lines(&self) -> usize {
+        self.stderr.lines().filter(|line| line.starts_with("error: ")).count()
+    }
+}
+
+/// Replay `tx_hash` online against the endpoint at `uri` in `--json` mode,
+/// without a cache file, retries or backoff, adding `extra` flags.
+pub(crate) fn replay_online(uri: &str, tx_hash: &str, extra: &[&str]) -> Run {
+    mega_evme()
+        .args(["replay", tx_hash, "--rpc", uri])
+        .args(["--rpc.no-cache-file", "--rpc.max-retries", "0", "--rpc.backoff-ms", "1", "--json"])
+        .args(extra)
+        .output()
+        .expect("failed to run mega-evme")
+        .into()
 }
 
 /// Parse every top-level JSON value a run printed on stdout.

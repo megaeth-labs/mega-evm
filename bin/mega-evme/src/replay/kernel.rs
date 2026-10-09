@@ -1,4 +1,4 @@
-//! Mined-block execution kernel shared by the replay drivers.
+//! Block execution kernel shared by the replay drivers.
 //!
 //! Replaying a mined transaction always means the same thing: fork the parent
 //! block's state, walk the block body in order, and stop once every requested
@@ -12,11 +12,12 @@
 //! publish a fixture. The kernel takes the pieces those decisions produced,
 //! executes, and hands back what it observed.
 //!
-//! Replaying a *pending* transaction is the one shape that stays off this path
-//! ([`super::cmd::Cmd::execute_pending`]). It has no block body to walk, and the
-//! block it does have fills both the fork and the environment role from a single
-//! fetch — walking it here would re-ask the endpoint for the target, whose
-//! pending metadata is exactly what the online cache refuses to keep.
+//! A *pending* transaction runs through here too, as a one-transaction body on
+//! top of the latest block, which fills both the fork and the environment role.
+//! Its driver hands the target over as a [`BodyEntry::Served`] transaction
+//! rather than a listed hash: the target's pending metadata is exactly what the
+//! online cache refuses to keep, so looking it up again would ask the endpoint a
+//! second time.
 //!
 //! # Lifecycle
 //!
@@ -41,6 +42,12 @@
 //!    both a draft and the proof means the block ran to a clean finish — which is the condition a
 //!    driver must not publish an artifact without.
 //!
+//! A run that executed and committed every transaction of the block body and
+//! finished it also hands back the block itself ([`WholeBlock`]): the body it
+//! executed and what the block executor produced for it. A driver that compares
+//! the replayed block against the block the chain sealed reads it there; a run
+//! that stopped anywhere short of the whole body has none.
+//!
 //! Either hook may fail. A failure aborts the block body exactly like a failed
 //! fetch or a rejected transaction: the walk stops, the block is still finished,
 //! and the abort is attributed to the target the driver was working on.
@@ -51,8 +58,8 @@ use std::{
 };
 
 use alloy_consensus::Transaction as _;
-use alloy_eips::Encodable2718;
-use alloy_primitives::{Address, B256};
+use alloy_eips::{eip7685::Requests, Encodable2718};
+use alloy_primitives::{Address, Bytes, B256};
 use alloy_provider::Provider;
 use mega_evm::{
     alloy_evm::{block::BlockExecutor, Evm, EvmEnv, IntoTxEnv, RecoveredTx},
@@ -68,11 +75,15 @@ use mega_evm::{
     MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaContext, MegaEvmFactory, MegaHaltReason,
     MegaHardforks, MegaSpecId, MegaTransaction, MegaTransactionExt, MegaTxEnvelope,
 };
+use op_alloy_consensus::OpReceiptEnvelope;
 use op_alloy_rpc_types::Transaction;
 use tracing::info;
 
 use crate::{
-    common::{op_receipt_to_tx_receipt, EvmeExternalEnvs, OpTxReceipt},
+    common::{
+        create_address, op_receipt_to_tx_receipt, pre_execution_nonce, EvmeExternalEnvs,
+        OpTxReceipt,
+    },
     EvmeState,
 };
 
@@ -90,6 +101,34 @@ pub(super) struct BlockIdentity {
     pub(super) timestamp: u64,
     /// Hash of the block, stamped onto every harvested receipt and its logs.
     pub(super) hash: B256,
+}
+
+/// One transaction of the body the kernel walks.
+///
+/// Every entry is authenticated against its hash before it executes; the two
+/// forms differ only in where the transaction comes from.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum BodyEntry<'a> {
+    /// A hash the block body listed. The kernel fetches the transaction from
+    /// the endpoint.
+    Listed(B256),
+    /// A transaction the driver already fetched, under the hash it was
+    /// requested by. The kernel executes it without asking the endpoint again.
+    Served {
+        /// Hash the transaction was requested by.
+        tx_hash: B256,
+        /// The transaction the endpoint served for it.
+        tx: &'a Transaction,
+    },
+}
+
+impl BodyEntry<'_> {
+    /// Hash the entry stands for, which targets, reports and aborts name.
+    pub(super) const fn tx_hash(&self) -> B256 {
+        match self {
+            Self::Listed(tx_hash) | Self::Served { tx_hash, .. } => *tx_hash,
+        }
+    }
 }
 
 /// Everything the kernel needs to fork the parent state and run one mined block.
@@ -111,12 +150,21 @@ pub(super) struct MinedBlockRun<'a, H, I> {
     /// when the driver's [`TargetLifecycle::INSPECT`] says so, and is handed
     /// back to the driver at both lifecycle points.
     pub(super) inspector: I,
-    /// Number of the parent block the state is forked from.
+    /// Number of the block the state is forked from: a mined block's parent, or
+    /// the latest block a pending target runs on top of.
     pub(super) fork_block: u64,
     /// Identity stamped onto the harvested receipts.
     pub(super) identity: BlockIdentity,
     /// The block body, in body order: every transaction the kernel may execute.
-    pub(super) tx_hashes: &'a [B256],
+    ///
+    /// A driver may hand over only the body up to its last target, since the
+    /// walk never goes past it; [`Self::body_len`] still states the whole
+    /// body's length.
+    pub(super) body: &'a [BodyEntry<'a>],
+    /// How many transactions the block body lists. A run produces a
+    /// [`WholeBlock`] only when it committed this many, which a walk over a
+    /// prefix of the body never does.
+    pub(super) body_len: usize,
     /// Hashes whose results the driver wants reported. The kernel stops once the
     /// last of them has committed.
     pub(super) targets: &'a HashSet<B256>,
@@ -281,9 +329,15 @@ impl<D> PendingDraft<D> {
 
 /// The block's terminal state.
 pub(super) enum FinishOutcome<D> {
-    /// The block finished. One harvest per target that committed, in commit
-    /// order.
-    Harvested(Vec<TargetHarvest<D>>),
+    /// The block finished.
+    Harvested {
+        /// One harvest per target that committed, in commit order.
+        targets: Vec<TargetHarvest<D>>,
+        /// The block the run executed, present iff the walk completed without
+        /// an abort and committed every transaction of the body: only then is
+        /// the finished block the one the body describes.
+        whole_block: Option<WholeBlock>,
+    },
     /// `finish()` failed, so no target of the block has a receipt and every
     /// draft is dropped unpublished.
     Failed {
@@ -292,6 +346,26 @@ pub(super) enum FinishOutcome<D> {
         /// Targets that had executed, in commit order.
         executed: Vec<B256>,
     },
+}
+
+/// A block the run executed in full, as the block executor finished it.
+///
+/// Carries what a block header commits to about execution, in the raw form the
+/// executor produced it, so a driver can rebuild those commitments without the
+/// kernel deciding which of them matter.
+pub(super) struct WholeBlock {
+    /// EIP-2718 encodings of the body's transactions, in body order. Each is
+    /// the encoding the transaction authenticated against its body-listed hash.
+    pub(super) transactions: Vec<Bytes>,
+    /// The receipts the block executor produced, one per transaction, in body
+    /// order.
+    pub(super) receipts: Vec<OpReceiptEnvelope>,
+    /// Gas the block used, as the block executor accounted it.
+    pub(super) gas_used: u64,
+    /// Blob gas the block used, as the block executor accounted it.
+    pub(super) blob_gas_used: u64,
+    /// EIP-7685 requests the block executor produced.
+    pub(super) requests: Requests,
 }
 
 /// One target's share of a finished block.
@@ -317,13 +391,14 @@ pub(super) struct HarvestedTarget<D> {
     pub(super) exec_result: ExecutionResult<MegaHaltReason>,
     /// Wall-clock time the execution took.
     pub(super) exec_time: Duration,
-    /// Nonce the target's signer held before it executed — the one the created
-    /// contract address above was derived from, reported so a driver does not
-    /// have to read it back from a database the target has since committed to.
+    /// Nonce the target's signer held before it executed — the one the
+    /// receipt's `contractAddress` was derived from, reported so a driver does
+    /// not have to read it back from a database the target has since committed
+    /// to.
     pub(super) pre_execution_nonce: u64,
-    /// Address a successful contract creation deployed to.
-    pub(super) contract_address: Option<Address>,
-    /// Receipt built from the block's own receipt for this target.
+    /// Receipt built from the block's own receipt for this target. Its
+    /// `contractAddress` is the target's [`create_address`], set for a failed
+    /// creation too.
     pub(super) receipt: OpTxReceipt,
     /// Whatever the driver's [`TargetLifecycle`] produced for this target,
     /// redeemable only against the run's [`CleanRun`] proof.
@@ -389,7 +464,8 @@ where
         inspector,
         fork_block,
         identity,
-        tx_hashes,
+        body,
+        body_len,
         targets,
     } = run;
 
@@ -428,14 +504,17 @@ where
     // committed we can stop — later non-targets are not needed for receipts or
     // fixtures, and requiring them would force incomplete offline captures to
     // abort after a successful dump target.
-    let last_target_index = tx_hashes
+    let last_target_index = body
         .iter()
         .enumerate()
-        .filter(|(_, hash)| targets.contains(*hash))
+        .filter(|(_, entry)| targets.contains(&entry.tx_hash()))
         .map(|(i, _)| i)
         .max();
     let mut pending: Vec<PendingTarget<K::Draft>> = Vec::new();
     let mut committed = 0usize;
+    // The authenticated EIP-2718 encoding of every transaction walked, in body
+    // order, for the [`WholeBlock`] a complete run hands back.
+    let mut transactions: Vec<Bytes> = Vec::with_capacity(body.len());
 
     // Run the block's transactions in order. Any failure aborts the block: the
     // executor state no longer matches the chain, so the remaining targets
@@ -443,7 +522,8 @@ where
     // iteration that raised it, so the transaction it is attributed to is the
     // one being walked rather than one recovered from the error afterwards.
     let mut aborted: Option<(B256, ReplayError)> = None;
-    for (tx_index, tx_hash) in tx_hashes.iter().enumerate() {
+    for (tx_index, entry) in body.iter().enumerate() {
+        let tx_hash = entry.tx_hash();
         let step: Result<()> = async {
             // Isolate BLOCKHASH reads per transaction so a fixture dump sees only
             // the target's own accesses.
@@ -459,29 +539,40 @@ where
             // rhythm without changing what a dump refuses.
             block_executor.clear_accessed_block_hashes();
 
-            // Every hash here came from the block body this endpoint already
-            // served. `Ok(None)` therefore means the endpoint is inconsistent
-            // (reorg or load-balanced divergent views), not that the hash is
-            // unknown — that definitive answer only applies to a user-supplied
-            // target lookup on the single-transaction path.
-            let tx = provider
-                .get_transaction_by_hash(*tx_hash)
-                .await
-                .map_err(|e| ReplayError::BlockBodyTransactionFetch {
-                    tx_hash: *tx_hash,
-                    message: e.to_string(),
-                })?
-                .ok_or(ReplayError::BlockBodyTransactionNull(*tx_hash))?;
+            let fetched;
+            let tx = match entry {
+                // Every hash here came from the block body this endpoint
+                // already served. `Ok(None)` therefore means the endpoint is
+                // inconsistent (reorg or load-balanced divergent views), not
+                // that the hash is unknown — that definitive answer only
+                // applies to a user-supplied target lookup on the
+                // single-transaction path.
+                BodyEntry::Listed(_) => {
+                    fetched = provider
+                        .get_transaction_by_hash(tx_hash)
+                        .await
+                        .map_err(|e| ReplayError::BlockBodyTransactionFetch {
+                            tx_hash,
+                            message: e.to_string(),
+                        })?
+                        .ok_or(ReplayError::BlockBodyTransactionNull(tx_hash))?;
+                    &fetched
+                }
+                BodyEntry::Served { tx, .. } => *tx,
+            };
             // A served object that fails authentication is the same class as a
             // null answer on a body-listed hash: the endpoint failed to deliver
             // a transaction it claimed to include. Executing it instead would
             // advance the block state on the wrong transaction, or report
-            // another transaction's outcome under a target hash.
-            verify::authenticate_transaction(&tx, *tx_hash).map_err(|message| {
-                ReplayError::BlockBodyTransactionFetch { tx_hash: *tx_hash, message }
-            })?;
+            // another transaction's outcome under a target hash. A transaction
+            // the driver already holds is checked too — the check is local, and
+            // it keeps every transaction this kernel executes authenticated
+            // against the hash it reports under.
+            let encoded = verify::authenticate_transaction(tx, tx_hash)
+                .map_err(|message| ReplayError::BlockBodyTransactionFetch { tx_hash, message })?;
+            transactions.push(encoded);
 
-            if !targets.contains(tx_hash) {
+            if !targets.contains(&tx_hash) {
                 // Not reported on, so it only has to move the state the way the
                 // chain did: it executes exactly as it was mined.
                 let outcome = block_executor
@@ -498,13 +589,11 @@ where
             // The driver decides what this target actually runs as, and the
             // nonce for its created-contract address is read for whoever signs
             // the transaction it handed back.
-            let prepared = lifecycle.before_target(&tx, block_executor.inspector_mut())?;
-            let pre_execution_nonce = block_executor
-                .evm()
-                .db_ref()
-                .basic_ref(*RecoveredTx::signer(&prepared))?
-                .map(|acc| acc.nonce)
-                .unwrap_or(0);
+            let prepared = lifecycle.before_target(tx, block_executor.inspector_mut())?;
+            let pre_execution_nonce = pre_execution_nonce(
+                block_executor.evm().db_ref(),
+                *RecoveredTx::signer(&prepared),
+            )?;
 
             let outcome = block_executor
                 .run_transaction(prepared)
@@ -518,8 +607,8 @@ where
             let draft = lifecycle.on_target_executed(
                 TargetExecution {
                     db: block_executor.evm().db_ref(),
-                    tx_hash: *tx_hash,
-                    tx: &tx,
+                    tx_hash,
+                    tx,
                     accessed_block_hash_count: accessed_block_hashes.len(),
                     result_and_state: &outcome.inner.result_and_state,
                 },
@@ -534,7 +623,7 @@ where
             committed += 1;
 
             pending.push(PendingTarget {
-                tx_hash: *tx_hash,
+                tx_hash,
                 tx_index: tx_index as u64,
                 commit_index,
                 exec_result,
@@ -551,7 +640,7 @@ where
         .await;
 
         if let Err(error) = step {
-            aborted = Some((*tx_hash, error));
+            aborted = Some((tx_hash, error));
             break;
         }
         // Stop once every requested target that can run has committed: trailing
@@ -560,6 +649,10 @@ where
             break;
         }
     }
+
+    // Only a walk that executed and committed the whole body produced the
+    // block the body describes.
+    let whole_body = aborted.is_none() && committed == body_len;
 
     // Finish the block even when it aborted midway: targets that already ran
     // still have a receipt worth reporting.
@@ -581,8 +674,6 @@ where
                     });
                     continue;
                 };
-                let contract_address = (target.to.is_none() && envelope.is_success())
-                    .then(|| target.from.create(target.pre_execution_nonce));
                 // Block-global log index: cumulative log count of all committed
                 // receipts that precede this target in the block.
                 //
@@ -608,7 +699,7 @@ where
                     identity.timestamp,
                     target.from,
                     target.to,
-                    contract_address,
+                    create_address(target.from, target.to.into(), target.pre_execution_nonce),
                     target.effective_gas_price,
                     target.gas_used,
                     Some(target.tx_hash),
@@ -622,12 +713,18 @@ where
                     exec_result: target.exec_result,
                     exec_time: target.exec_time,
                     pre_execution_nonce: target.pre_execution_nonce,
-                    contract_address,
                     receipt,
                     draft: PendingDraft(target.draft),
                 })));
             }
-            FinishOutcome::Harvested(harvested)
+            let whole_block = whole_body.then(|| WholeBlock {
+                transactions,
+                receipts,
+                gas_used: block_result.gas_used,
+                blob_gas_used: block_result.blob_gas_used,
+                requests: block_result.requests,
+            });
+            FinishOutcome::Harvested { targets: harvested, whole_block }
         }
         // The block itself failed to finish, so no target of it has a receipt
         // and every draft is dropped without being published.
@@ -643,4 +740,263 @@ where
     };
 
     Ok(BlockRun { loop_outcome, finish })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use alloy_consensus::{transaction::Recovered, BlockHeader};
+    use alloy_primitives::b256;
+    use alloy_rpc_types_eth::Block;
+    use clap::Parser;
+    use mega_evm::revm::inspector::NoOpInspector;
+
+    use super::*;
+    use crate::{
+        common::{cfg_env, OpProvider, RpcArgs},
+        replay::{get_hardfork_config, world, ReplayHardforks},
+    };
+
+    /// The transaction the committed offline capture can replay.
+    const TARGET: B256 =
+        b256!("0x41d34e7e13dfe0f85da9d407e2b2c381955d8c7eed428b17dc82327b2616b000");
+
+    /// The block [`TARGET`] was mined in.
+    const BLOCK: u64 = 18_172_461;
+
+    /// The committed offline capture that answers [`TARGET`]'s replay.
+    fn capture() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/replay_offline.cache.json")
+    }
+
+    /// A copy of the capture that no longer answers the lookup of [`TARGET`].
+    fn capture_without_the_target_lookup() -> tempfile::NamedTempFile {
+        let mut envelope: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(capture()).expect("read the capture"))
+                .expect("the capture is JSON");
+        let target = format!("{TARGET:#x}");
+        let entries = envelope["cache"].as_array_mut().expect("the capture holds a cache array");
+        let before = entries.len();
+        entries.retain(|entry| {
+            let response: serde_json::Value =
+                serde_json::from_str(entry["value"].as_str().expect("a cached response"))
+                    .expect("a cached response is JSON");
+            let result = &response["result"];
+            !(result["hash"].as_str() == Some(target.as_str()) &&
+                result.get("blockNumber").is_some())
+        });
+        assert_eq!(entries.len(), before - 1, "the capture answers the target lookup once");
+        let file = tempfile::NamedTempFile::new().expect("create a temporary capture");
+        std::fs::write(file.path(), serde_json::to_vec(&envelope).expect("serialize"))
+            .expect("write the temporary capture");
+        file
+    }
+
+    /// An offline provider answering from `path`.
+    async fn offline_provider(path: &Path) -> OpProvider {
+        let args = RpcArgs::parse_from([
+            "mega-evme",
+            "--rpc.replay-file",
+            path.to_str().expect("utf-8 path"),
+        ]);
+        args.build_replay_provider().await.expect("the capture loads").provider
+    }
+
+    /// A driver that only wants the target's receipt.
+    struct ReceiptsOnly;
+
+    impl TargetLifecycle for ReceiptsOnly {
+        type Inspector = NoOpInspector;
+        const INSPECT: bool = false;
+        type Tx<'tx> = Recovered<&'tx MegaTxEnvelope>;
+        type Draft = ();
+
+        fn before_target<'tx>(
+            &mut self,
+            tx: &'tx Transaction,
+            _inspector: &mut NoOpInspector,
+        ) -> Result<Self::Tx<'tx>> {
+            Ok(tx.as_recovered())
+        }
+
+        fn on_target_executed<DB>(
+            &mut self,
+            _target: TargetExecution<'_, DB>,
+            _inspector: &NoOpInspector,
+        ) -> Result<()>
+        where
+            DB: DatabaseRef,
+            DB::Error: core::fmt::Display,
+        {
+            Ok(())
+        }
+    }
+
+    /// The block [`TARGET`] belongs to and its parent, as `provider` serves them.
+    async fn target_block(provider: &OpProvider) -> (Block<Transaction>, Block<Transaction>) {
+        let fetch = |number: u64| async move {
+            provider
+                .get_block_by_number(number.into())
+                .await
+                .expect("the capture answers the block")
+                .expect("the block exists")
+        };
+        (fetch(BLOCK).await, fetch(BLOCK - 1).await)
+    }
+
+    /// Walk [`TARGET`]'s block up to the target, handing the target over as
+    /// `target` and every preceding transaction as listed.
+    async fn run_target(
+        provider: &OpProvider,
+        block: &Block<Transaction>,
+        parent: &Block<Transaction>,
+        target: BodyEntry<'_>,
+    ) -> BlockRun<()> {
+        let mut body: Vec<BodyEntry<'_>> = block
+            .transactions
+            .hashes()
+            .take_while(|hash| *hash != TARGET)
+            .map(BodyEntry::Listed)
+            .collect();
+        body.push(target);
+        let targets: HashSet<B256> = HashSet::from([TARGET]);
+
+        let chain_id = 4326;
+        let chain = get_hardfork_config(chain_id);
+        let hardforks = ReplayHardforks::Chain(&chain);
+        let spec = hardforks.spec_id(block.header.timestamp());
+        let block_env = world::retrieve_block_env(block).expect("the header builds a block env");
+        let run = execute_until_targets(
+            provider,
+            MinedBlockRun {
+                hardforks,
+                external_envs: EvmeExternalEnvs::new(),
+                block_ctx: world::block_ctx(&hardforks, block, parent.hash())
+                    .expect("a fork is active"),
+                evm_env: EvmEnv::new(cfg_env(chain_id, spec), block_env),
+                inspector: NoOpInspector,
+                fork_block: BLOCK - 1,
+                identity: BlockIdentity {
+                    number: BLOCK,
+                    timestamp: block.header.timestamp(),
+                    hash: block.hash(),
+                },
+                body: &body,
+                body_len: block.transactions.len(),
+                targets: &targets,
+            },
+            &mut ReceiptsOnly,
+        )
+        .await;
+        let Ok(run) = run else { panic!("the block must set up") };
+        run
+    }
+
+    /// The one target's harvest of a run that completed and finished.
+    fn harvested(run: BlockRun<()>) -> HarvestedTarget<()> {
+        assert!(matches!(run.loop_outcome, LoopOutcome::Completed(_)), "the walk must complete");
+        let FinishOutcome::Harvested { mut targets, .. } = run.finish else {
+            panic!("the block must finish")
+        };
+        assert_eq!(targets.len(), 1, "one target, one harvest");
+        match targets.pop() {
+            Some(TargetHarvest::Receipt(target)) => *target,
+            _ => panic!("the target must have a receipt"),
+        }
+    }
+
+    /// A target handed over as served executes exactly as the same target
+    /// fetched from its listed hash: same result, same receipt.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_served_target_executes_like_its_listed_form() {
+        let provider = offline_provider(&capture()).await;
+        let (block, parent) = target_block(&provider).await;
+        let tx = provider
+            .get_transaction_by_hash(TARGET)
+            .await
+            .expect("the capture answers the target")
+            .expect("the target exists");
+
+        let listed =
+            harvested(run_target(&provider, &block, &parent, BodyEntry::Listed(TARGET)).await);
+        let served = harvested(
+            run_target(&provider, &block, &parent, BodyEntry::Served { tx_hash: TARGET, tx: &tx })
+                .await,
+        );
+
+        assert_eq!(served.tx_hash, listed.tx_hash);
+        assert_eq!(served.tx_index, listed.tx_index);
+        assert_eq!(served.exec_result, listed.exec_result);
+        assert_eq!(served.pre_execution_nonce, listed.pre_execution_nonce);
+        assert_eq!(served.receipt, listed.receipt);
+    }
+
+    /// A served target is not looked up again: against an endpoint that no
+    /// longer answers the lookup, the listed form aborts on it while the served
+    /// form executes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_served_target_is_not_looked_up_again() {
+        let tx = offline_provider(&capture())
+            .await
+            .get_transaction_by_hash(TARGET)
+            .await
+            .expect("the capture answers the target")
+            .expect("the target exists");
+        let doctored = capture_without_the_target_lookup();
+        let provider = offline_provider(doctored.path()).await;
+        let (block, parent) = target_block(&provider).await;
+
+        let listed = run_target(&provider, &block, &parent, BodyEntry::Listed(TARGET)).await;
+        match listed.loop_outcome {
+            LoopOutcome::Aborted {
+                error: ReplayError::BlockBodyTransactionFetch { .. },
+                tx_hash,
+            } => {
+                assert_eq!(tx_hash, TARGET, "the abort is the target's own");
+            }
+            LoopOutcome::Aborted { error, .. } => panic!("unexpected abort: {error}"),
+            LoopOutcome::Completed(_) => panic!("the listed target must be looked up"),
+        }
+
+        let served =
+            run_target(&provider, &block, &parent, BodyEntry::Served { tx_hash: TARGET, tx: &tx })
+                .await;
+        assert_eq!(harvested(served).tx_hash, TARGET);
+    }
+
+    /// A served transaction is still authenticated against the hash it is
+    /// reported under, so a driver cannot have one transaction executed in
+    /// another's name.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_served_target_is_authenticated_against_its_hash() {
+        let provider = offline_provider(&capture()).await;
+        let (block, parent) = target_block(&provider).await;
+        let other = block.transactions.hashes().next().expect("the block has a transaction");
+        assert_ne!(other, TARGET, "the target is not the block's first transaction");
+        let impostor = provider
+            .get_transaction_by_hash(other)
+            .await
+            .expect("the capture answers the transaction")
+            .expect("the transaction exists");
+
+        let run = run_target(
+            &provider,
+            &block,
+            &parent,
+            BodyEntry::Served { tx_hash: TARGET, tx: &impostor },
+        )
+        .await;
+        match run.loop_outcome {
+            LoopOutcome::Aborted {
+                error: ReplayError::BlockBodyTransactionFetch { tx_hash, message },
+                ..
+            } => {
+                assert_eq!(tx_hash, TARGET);
+                assert!(message.contains("different transaction"), "message={message}");
+            }
+            LoopOutcome::Aborted { error, .. } => panic!("unexpected abort: {error}"),
+            LoopOutcome::Completed(_) => panic!("an impostor must not execute"),
+        }
+    }
 }

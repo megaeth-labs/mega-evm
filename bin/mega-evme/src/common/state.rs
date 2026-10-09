@@ -333,6 +333,11 @@ pub struct StateDumpArgs {
 }
 
 impl StateDumpArgs {
+    /// Whether any state dump option was set on the command line.
+    pub fn any_set(&self) -> bool {
+        self.dump || self.dump_output_file.is_some()
+    }
+
     /// Serializes [`EvmState`] as JSON string with deterministic key ordering.
     pub fn serialize_evm_state(&self, evm_state: &EvmState) -> Result<String> {
         trace!(evm_state = ?evm_state, "Serializing EVM state");
@@ -600,60 +605,15 @@ where
         }
     }
 
-    /// Inserts an account override
-    /// This will override the existing account if it exists.
-    pub fn insert_account(&mut self, address: Address, account: Account) {
-        // Add code to code_map if present
-        if let Some(ref code) = account.info.code {
-            self.code_map.insert(account.info.code_hash, code.clone());
-        }
-        self.prestate.insert(address, account);
-    }
-
-    /// Inserts storage overrides for an account
-    pub fn insert_storage(&mut self, address: Address, storage: HashMap<U256, EvmStorageSlot>) {
-        self.prestate.entry(address).or_default().storage.extend(storage);
-    }
-
-    /// Inserts an account with storage.
-    /// This will override the existing account if it exists.
-    pub fn insert_account_with_storage(
-        &mut self,
-        address: Address,
-        info: AccountInfo,
-        storage: HashMap<U256, EvmStorageSlot>,
-    ) {
-        // Add code to code_map if present
-        if let Some(ref code) = info.code {
-            self.code_map.insert(info.code_hash, code.clone());
-        }
-        let account = Account::from(info).with_storage(storage.into_iter());
-        self.prestate.insert(address, account);
-    }
-
     /// Set the balance for an account.
     pub fn set_account_balance(&mut self, address: Address, balance: U256) {
         self.prestate.entry(address).or_default().info.balance = balance;
-    }
-
-    /// Set the nonce for an account.
-    pub fn set_account_nonce(&mut self, address: Address, nonce: u64) {
-        self.prestate.entry(address).or_default().info.nonce = nonce;
     }
 
     /// Set the code for an account.
     pub fn set_account_code(&mut self, address: Address, code: Bytecode) {
         self.code_map.insert(code.hash_slow(), code.clone());
         self.prestate.entry(address).or_default().info.set_code(code);
-    }
-
-    /// Set the storage for an account.
-    pub fn set_account_storage(&mut self, address: Address, storage: HashMap<U256, U256>) {
-        self.prestate.entry(address).or_default().storage.extend(
-            storage
-                .into_iter()
-                .map(|(slot, value)| (slot, EvmStorageSlot::new(value, TransactionId::ZERO))),
-        );
     }
 
     /// Deploys system contracts based on the given spec.

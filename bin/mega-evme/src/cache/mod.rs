@@ -15,11 +15,12 @@ use clap::{Parser, Subcommand};
 
 use crate::common::{EvmeError, Result};
 
-pub(crate) use lock::{acquire_exclusive_lock, lock_sidecar_path};
+pub(crate) use lock::{acquire_exclusive_lock, canonical_target, lock_sidecar_path};
 pub(crate) use merge::{
-    detect_shape, merge_cache_entries_capped, merge_envelope_for_persist,
-    reread_envelope_for_merge, write_bytes_atomic, write_envelope_atomic, CacheKv, CacheShape,
-    EnvelopeDoc, EnvelopeReread, ExternalEnvDoc, ENVELOPE_VERSION,
+    detect_shape, merge_cache_entries_capped, merge_envelope_for_persist, read_json_file,
+    reread_envelope_for_merge, unsupported_version_message, write_atomic, write_bytes_atomic,
+    write_envelope_atomic, AtomicWriteError, CacheKv, CacheShape, EnvelopeDoc, EnvelopeReread,
+    ExternalEnvDoc, JsonFileError, WriteMode, ENVELOPE_VERSION,
 };
 
 use merge::{fold_output_envelope, load_cache_file, merge_envelopes_cli};
@@ -143,19 +144,7 @@ fn file_identity(path: &Path) -> Option<FileIdentity> {
             return Some(FileIdentity::Node { device: metadata.dev(), inode: metadata.ino() });
         }
     }
-    resolve_for_identity(path).map(FileIdentity::Unborn)
-}
-
-/// Canonical path of `path`, falling back to its canonical directory plus file
-/// name when the file itself does not exist.
-fn resolve_for_identity(path: &Path) -> Option<PathBuf> {
-    if let Ok(canonical) = path.canonicalize() {
-        return Some(canonical);
-    }
-    let name = path.file_name()?;
-    let dir = path.parent().filter(|parent| !parent.as_os_str().is_empty());
-    let dir = dir.unwrap_or_else(|| Path::new("."));
-    Some(dir.canonicalize().ok()?.join(name))
+    lock::resolve_target(path).map(FileIdentity::Unborn)
 }
 
 impl MergeArgs {
@@ -532,6 +521,54 @@ mod tests {
 
         let merged: EnvelopeDoc = serde_json::from_str(&fs::read_to_string(&out).unwrap()).unwrap();
         assert_eq!(merged.cache, vec![kv(1, "from-output"), kv(2, "from-new")]);
+    }
+
+    /// An output named through a symlink is the file the symlink points to: the
+    /// merge locks that file's sidecar and replaces that file, and the symlink
+    /// stays in place pointing at the merged result.
+    #[cfg(unix)]
+    #[test]
+    fn test_cache_merge_through_a_symlinked_output_updates_its_target() {
+        let dir = tempdir().unwrap();
+        let out = dir.path().join("out.json");
+        let link = dir.path().join("link.json");
+        let new = dir.path().join("new.json");
+
+        write(
+            &out,
+            &serde_json::to_string_pretty(&EnvelopeDoc {
+                version: 1,
+                chain_id: 4326,
+                cache: vec![kv(1, "from-output")],
+                external_env: None,
+            })
+            .unwrap(),
+        );
+        write(
+            &new,
+            &serde_json::to_string_pretty(&EnvelopeDoc {
+                version: 1,
+                chain_id: 4326,
+                cache: vec![kv(2, "from-new")],
+                external_env: None,
+            })
+            .unwrap(),
+        );
+        std::os::unix::fs::symlink(&out, &link).expect("symlink the output");
+
+        MergeArgs { inputs: vec![new], output: link.clone() }.run().expect("merge");
+
+        assert!(
+            link.symlink_metadata().expect("the link").file_type().is_symlink(),
+            "the symlink stays in place"
+        );
+        let merged: EnvelopeDoc = serde_json::from_str(&fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(merged.cache, vec![kv(1, "from-output"), kv(2, "from-new")]);
+        assert!(
+            lock_sidecar_path(&canonical_target(&out)).exists(),
+            "the target's own sidecar is locked"
+        );
+        assert!(!lock_sidecar_path(&link).exists(), "no sidecar is taken beside the link");
     }
 
     /// A hard link to the output is the output too, and canonicalizing cannot

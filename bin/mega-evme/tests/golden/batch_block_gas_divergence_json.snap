@@ -1,0 +1,15 @@
+# mega-evme replay equivalence baseline
+# case:    batch_block_gas_divergence_json
+# capture: replay_batch_blocks.cache.json
+# argv:    replay --rpc.replay-file <CAPTURE> --block 22945844 --verify-receipt --verify-block --json
+
+== exit code ==
+2
+
+== stdout (digest) ==
+bytes: 114822
+lines: 25
+keccak256: 0xd96ce9a44e064c32051d0537d34a100973ba8320bf6ad8fef7ac6d5b0f87c4f5
+
+== stderr ==
+error: Verification mismatch: 10 of 23 verified transaction(s) did not reproduce the on-chain receipt; 1 of 1 verified block(s) did not reproduce the block header

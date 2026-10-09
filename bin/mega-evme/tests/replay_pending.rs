@@ -19,21 +19,16 @@
 //! its state reads at the parent height while a pending replay reads them at the
 //! latest one.
 
-use std::process::Command;
-
 use serde_json::{json, Value};
 
 mod common;
-use common::MockRpcServer;
-
-/// `MegaETH` mainnet, whose published schedule the replayed block runs under.
-const CHAIN_ID: u64 = 4326;
+use common::{
+    mock_chain::{self as chain, pending_tx_json, tx_identity, tx_json, CHAIN_ID, RECIPIENT},
+    MockRpcServer, Run,
+};
 
 /// Height the endpoint reports as `latest`, and the only block it serves.
-const LATEST: u64 = 18_172_461;
-
-/// A mainnet timestamp inside the `MiniRex` window.
-const TIMESTAMP: u64 = 1_764_000_000;
+const LATEST: u64 = chain::BLOCK;
 
 /// `parentHash` of the block the endpoint serves first for `LATEST`.
 const PARENT_HASH: &str = "0xd482d481e9d11dd116ef6c41bf95ca608f159206c8f07900b1b53936d196ccb3";
@@ -53,120 +48,11 @@ fn latest_hash() -> String {
     common::block_hash_of(&block_json(PARENT_HASH))
 }
 
-/// Signature of the pending transaction: a fixed, well-formed secp256k1 pair.
-///
-/// The replay authenticates every served transaction — its hash is recomputed
-/// from the encoding and its sender re-derived from the signature — so the mock
-/// cannot serve invented `hash`/`from` constants; [`tx_identity`] computes the
-/// authentic pair. The sender is whatever address this signature recovers to,
-/// funded like every other account by the mock's blanket balance.
-const SIG_R: &str = "0xa19f0f1f52e2951452711b4f4aa5d177442c9a56abeb609b803fe2412ed24946";
-const SIG_S: &str = "0x7af21777b2e7d91c745d0077ba2726ee1bb75ccf00039a6218d64fdced768491";
-
-/// Recipient of the pending transaction: an account with no code, so the call
-/// succeeds without depending on any contract the mock does not serve.
-const RECIPIENT: &str = "0x681e908b8ab57c49c74d770f369754ccc3e1ae09";
-
-/// The authentic identity of the pending transaction: `(hash, from)`.
-///
-/// Builds the same consensus object the replay will deserialize from
-/// [`tx_json`], hashes its encoding, and recovers its signer — the two values
-/// the replay authenticates the served answer against.
-fn tx_identity() -> (String, String) {
-    use mega_evm::{
-        alloy_consensus::{transaction::SignerRecoverable, SignableTransaction, TxEip1559},
-        op_alloy_consensus::OpTxEnvelope,
-    };
-
-    let tx = TxEip1559 {
-        chain_id: CHAIN_ID,
-        nonce: 0,
-        gas_limit: 0x249f0,
-        max_fee_per_gas: 0x200b20,
-        max_priority_fee_per_gas: 0x186a0,
-        to: alloy_primitives::TxKind::Call(RECIPIENT.parse().expect("`to` is an address")),
-        value: alloy_primitives::U256::ZERO,
-        access_list: Default::default(),
-        input: alloy_primitives::Bytes::new(),
-    };
-    let signature = alloy_primitives::Signature::new(
-        SIG_R.parse().expect("r is a hex word"),
-        SIG_S.parse().expect("s is a hex word"),
-        false,
-    );
-    let signed = tx.into_signed(signature);
-    let hash = format!("{:#x}", signed.hash());
-    let from = OpTxEnvelope::Eip1559(signed).recover_signer().expect("signature recovers");
-    (hash, format!("{from:#x}"))
-}
-
-/// A block header the RPC backend and the replay accept, sealed under the hash
-/// its own consensus fields produce. The two views the endpoint serves for
-/// `LATEST` differ only in the chain they descend from.
+/// The block the endpoint serves for `LATEST`, descending from `parent_hash`.
+/// The two views the endpoint serves for `LATEST` differ only in the chain they
+/// descend from.
 fn block_json(parent_hash: &str) -> Value {
-    common::sealed_block(json!({
-        "parentHash": parent_hash,
-        "number": format!("0x{LATEST:x}"),
-        "timestamp": format!("0x{TIMESTAMP:x}"),
-        "gasLimit": "0x2540be400",
-        "gasUsed": "0x0",
-        "baseFeePerGas": "0xf4240",
-        "blobGasUsed": "0x0",
-        "excessBlobGas": "0x0",
-        "difficulty": "0x0",
-        "extraData": "0x00000000fa00000001",
-        "logsBloom": format!("0x{}", "0".repeat(512)),
-        "miner": "0x4200000000000000000000000000000000000011",
-        "mixHash": "0x5cd8791a477b467456670744425e11d5bd91fd54575d6d3bf80d761ab39d957f",
-        "nonce": "0x0000000000000000",
-        "parentBeaconBlockRoot":
-            "0x67123956bf748ccfcfa68f03531dd12c1c647f9f31cc91935ce4271fa7399e24",
-        "receiptsRoot": "0x16fe124682128dd43a5da7f2cee0a3bf076deaf12682d19c656914bbea4615e3",
-        "requestsHash": "0xe3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
-        "size": "0x43e7",
-        "stateRoot": "0xa342aba318978654abcf7f09f9494ed271e2136040b628edacb6d384e9074416",
-        "transactionsRoot": "0x2f3c5d0b0c4c8d34dd4e1c8bb4b4a4b6d6a2a3d3b8f6a9a2c1d0e9f8a7b6c5d4",
-        "withdrawalsRoot": "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
-        "uncles": [],
-        "withdrawals": [],
-        "transactions": [],
-    }))
-}
-
-/// The replayed transaction, carrying the `(blockNumber, blockHash)` pair the
-/// endpoint reports for it. Everything else is the same transaction, so a test
-/// varies only the metadata the classification reads.
-fn tx_json(block_number: Value, block_hash: Value) -> Value {
-    let (hash, from) = tx_identity();
-    json!({
-        "type": "0x2",
-        "chainId": format!("0x{CHAIN_ID:x}"),
-        "nonce": "0x0",
-        "gas": "0x249f0",
-        "maxFeePerGas": "0x200b20",
-        "maxPriorityFeePerGas": "0x186a0",
-        "gasPrice": "0x10c8e0",
-        "to": RECIPIENT,
-        "value": "0x0",
-        "accessList": [],
-        "input": "0x",
-        "r": SIG_R,
-        "s": SIG_S,
-        "yParity": "0x0",
-        "v": "0x0",
-        "hash": hash,
-        "from": from,
-        "blockHash": block_hash,
-        "blockNumber": block_number,
-        "transactionIndex": Value::Null,
-    })
-}
-
-/// The replayed transaction, reported as pending: no block number and no
-/// inclusion hash.
-fn pending_tx_json() -> Value {
-    tx_json(Value::Null, Value::Null)
+    chain::block_json(LATEST, parent_hash, json!([]))
 }
 
 /// A mock endpoint holding one pending transaction, whose `latest` height is
@@ -200,70 +86,18 @@ async fn mock_chain_serving(tx: Value) -> MockRpcServer {
         .respond_method_json("eth_getBlockByNumber", block_json(REPLACEMENT_PARENT_HASH), 3)
         .await;
     server.respond_method_json("eth_getTransactionByHash", tx, 3).await;
-    server.respond_method_result("eth_getBalance", "0xde0b6b3a7640000", 4).await;
-    server.respond_method_result("eth_getTransactionCount", "0x0", 4).await;
-    server.respond_method_result("eth_getCode", "0x", 4).await;
+    chain::respond_account_reads(&server, 4).await;
     server
-        .respond_method_result(
-            "eth_getStorageAt",
-            "0x0000000000000000000000000000000000000000000000000000000000000000",
-            4,
-        )
-        .await;
-    server
-}
-
-/// Outcome of one `mega-evme replay` invocation.
-struct Run {
-    code: Option<i32>,
-    stdout: String,
-    stderr: String,
-}
-
-impl Run {
-    /// The single `--json` summary the run printed.
-    fn summary(&self) -> Value {
-        let mut values = common::json_values(&self.stdout);
-        if values.last().is_some_and(common::is_run_error) {
-            values.pop();
-        }
-        assert_eq!(
-            values.len(),
-            1,
-            "expected one summary on stdout:\n{}\nstderr:\n{}",
-            self.stdout,
-            self.stderr,
-        );
-        values.pop().expect("checked above")
-    }
-
-    /// The structured error object a failing `--json` run ends with.
-    fn error_object(&self) -> Value {
-        let values = common::json_values(&self.stdout);
-        let last = values.last().unwrap_or_else(|| {
-            panic!("a failing --json run must not leave stdout empty:\nstderr:\n{}", self.stderr)
-        });
-        assert!(
-            common::is_run_error(last),
-            "the last stdout value must be the error object, got: {last}"
-        );
-        last.clone()
-    }
 }
 
 /// Replay the mock's pending transaction.
 fn replay(server: &MockRpcServer) -> Run {
-    let (tx_hash, _) = tx_identity();
-    let output = Command::new(env!("CARGO_BIN_EXE_mega-evme"))
-        .args(["replay", &tx_hash, "--rpc", &server.uri()])
-        .args(["--rpc.no-cache-file", "--rpc.max-retries", "0", "--rpc.backoff-ms", "1", "--json"])
-        .output()
-        .expect("failed to run mega-evme");
-    Run {
-        code: output.status.code(),
-        stdout: String::from_utf8(output.stdout).expect("stdout is utf-8"),
-        stderr: String::from_utf8(output.stderr).expect("stderr is utf-8"),
-    }
+    replay_with(server, &[])
+}
+
+/// Replay the mock's pending transaction with `extra` flags.
+fn replay_with(server: &MockRpcServer, extra: &[&str]) -> Run {
+    common::replay_online(&server.uri(), &tx_identity().0, extra)
 }
 
 /// A pending replay fetches the latest block exactly once and fills both the
@@ -426,5 +260,81 @@ async fn test_mined_target_without_an_inclusion_hash_is_rejected_before_any_fetc
     assert!(
         message.contains(&LATEST.to_string()),
         "the message must name the block number the lookup reported: {error}"
+    );
+}
+
+/// A pending replay asks the endpoint for the target once.
+///
+/// The online cache never keeps pending metadata, so every lookup of the target
+/// reaches the endpoint; the one the run resolves the target with is the only
+/// one it makes, and the execution reuses that answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_pending_replay_looks_the_target_up_once() {
+    let server = mock_chain().await;
+
+    let run = replay(&server);
+
+    assert_eq!(run.code, Some(0), "stdout:\n{}\nstderr:\n{}", run.stdout, run.stderr);
+    assert_eq!(
+        server.received_method_count("eth_getTransactionByHash").await,
+        1,
+        "the target must be looked up exactly once:\n{}",
+        run.stdout,
+    );
+}
+
+/// A pending replay traces its target like a mined one does.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_pending_replay_traces_the_target() {
+    let server = mock_chain().await;
+
+    let run = replay_with(&server, &["--trace", "--tracer", "call"]);
+
+    assert_eq!(run.code, Some(0), "stdout:\n{}\nstderr:\n{}", run.stdout, run.stderr);
+    let summary = run.summary();
+    let trace = &summary["trace"];
+    assert_eq!(trace["type"].as_str(), Some("CALL"), "the trace must be a call frame: {summary}");
+    assert_eq!(
+        trace["to"].as_str().map(str::to_lowercase),
+        Some(RECIPIENT.to_lowercase()),
+        "the trace must describe the target's call: {summary}",
+    );
+    assert_eq!(
+        trace["from"].as_str().map(str::to_lowercase),
+        Some(tx_identity().1),
+        "the trace must describe the target's sender: {summary}",
+    );
+}
+
+/// A pending replay executes its target as the transaction overrides rewrite
+/// it.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_pending_replay_applies_transaction_overrides() {
+    // One endpoint per run: each answers its first `latest` fetch with the same
+    // block.
+    let plain = replay_with(&mock_chain().await, &["--dump"]);
+    let overridden = replay_with(&mock_chain().await, &["--dump", "--override.value", "7"]);
+
+    for run in [&plain, &overridden] {
+        assert_eq!(run.code, Some(0), "stdout:\n{}\nstderr:\n{}", run.stdout, run.stderr);
+    }
+    let balance = |run: &Run| {
+        let summary = run.summary();
+        let state = summary["state"].as_object().expect("--dump inlines the state").clone();
+        let recipient = state
+            .iter()
+            .find(|(address, _)| address.eq_ignore_ascii_case(RECIPIENT))
+            .map(|(_, account)| account.clone())
+            .unwrap_or_else(|| panic!("the recipient must be in the state dump: {summary}"));
+        alloy_primitives::U256::from_str_radix(
+            recipient["balance"].as_str().expect("a hex balance").trim_start_matches("0x"),
+            16,
+        )
+        .expect("a hex balance")
+    };
+    assert_eq!(
+        balance(&overridden),
+        balance(&plain) + alloy_primitives::U256::from(7),
+        "the value override must reach the executed transaction"
     );
 }

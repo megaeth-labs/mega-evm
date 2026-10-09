@@ -43,6 +43,7 @@ An input that names the output itself is the one exception: it is excluded from 
 The merge therefore uses the same protocol that clean-exit persist uses (see [State Management](../configuration/state-management.md#concurrent-cache-dir-sharing)):
 
 1. Take the exclusive advisory lock on the output's sidecar (`<output>.lock`), blocking until it is free.
+   The sidecar belongs to the file the output path names, so an output reached through a symlink, or through a symlinked directory, is locked and replaced as that file, and the symlink stays in place.
 2. Under that lock, read whatever the output file holds now and fold it into the union as one more input.
 3. Write via temp file + atomic rename, then release the lock.
 

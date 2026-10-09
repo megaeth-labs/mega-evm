@@ -9,9 +9,9 @@
 //!
 //! | Code | Class                   | Meaning                                                                                                                                              |
 //! | ---- | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-//! | `0`  | success                 | The command completed; with `--verify-receipt`, every verification matched.                                                                          |
+//! | `0`  | success                 | The command completed; with `--verify-receipt` / `--verify-block`, every verification matched.                                                       |
 //! | `1`  | `execution-error`       | Execution or internal error: an EVM/setup failure, bad input, or a definitive negative answer such as an unknown transaction or block.                |
-//! | `2`  | `verification-mismatch` | The run completed, but at least one replay did not reproduce its on-chain receipt.                                                                    |
+//! | `2`  | `verification-mismatch` | The run completed, but at least one replay did not reproduce its on-chain receipt or its block header.                                                |
 //! | `3`  | `rpc-failure`           | An RPC/transport call failed (endpoint unreachable, transport error, offline replay cache miss): the question went unanswered rather than answered no. |
 //!
 //! A batch run reports every target individually and then fails once with the
@@ -198,7 +198,8 @@ pub enum ExitCode {
     Success = 0,
     /// Execution or internal error, bad input, or a definitive negative answer.
     ExecutionError = 1,
-    /// The run completed but at least one receipt verification mismatched.
+    /// The run completed but at least one receipt or block verification
+    /// mismatched.
     VerificationMismatch = 2,
     /// An RPC or transport call failed, so the question went unanswered.
     RpcFailure = 3,
@@ -228,7 +229,6 @@ impl ExitCode {
     /// Map a top-level command error onto its class.
     pub fn from_command_error(err: &Error) -> Self {
         match err {
-            Error::Custom(_) => Self::ExecutionError,
             Error::Evme(err) => Self::from_evme_error(err),
         }
     }
@@ -277,7 +277,7 @@ impl ExitCode {
             EvmeError::CodeHashMismatch { .. } |
             EvmeError::Other(_) => Self::ExecutionError,
             // The run completed; the replay diverged from the chain.
-            EvmeError::VerificationMismatch { .. } => Self::VerificationMismatch,
+            EvmeError::VerificationMismatch(_) => Self::VerificationMismatch,
             EvmeError::BatchFailed(counts) => Self::from_batch_failures(counts),
         }
     }
@@ -285,8 +285,9 @@ impl ExitCode {
     /// Resolve the class of a batch run from its failure counts.
     ///
     /// Precedence: an execution/internal failure outranks an RPC failure, which
-    /// outranks a mismatch. A target that never replayed was also never
-    /// verified, so reporting such a run as a mismatch would overstate what it
+    /// outranks a mismatch. A block whose verdict went unanswered because the
+    /// endpoint contradicted itself about it ranks as an RPC failure. A target that never replayed
+    /// was also never verified, so reporting such a run as a mismatch would overstate what it
     /// found.
     ///
     /// [`BatchFailureCounts::exit_floor`] ranks with the same precedence when a
@@ -303,9 +304,12 @@ impl ExitCode {
 
         if counts.execution > 0 || matches!(counts.exit_floor, BatchExitFloor::Execution) {
             Self::ExecutionError
-        } else if counts.rpc > 0 || matches!(counts.exit_floor, BatchExitFloor::Rpc) {
+        } else if counts.rpc > 0 ||
+            counts.blocks_unanswered > 0 ||
+            matches!(counts.exit_floor, BatchExitFloor::Rpc)
+        {
             Self::RpcFailure
-        } else if counts.mismatched > 0 {
+        } else if counts.mismatched > 0 || counts.blocks_mismatched > 0 {
             Self::VerificationMismatch
         } else {
             Self::ExecutionError
@@ -387,6 +391,7 @@ pub fn print_json_error(code: ExitCode, message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::VerificationCounts;
     use alloy_primitives::B256;
     use mega_evm::alloy_evm::block::BlockValidationError;
 
@@ -656,20 +661,69 @@ mod tests {
         assert_eq!(ExitCode::from_evme_error(&err), ExitCode::RpcFailure);
     }
 
-    /// A completed run whose replay diverged from the chain exits 2.
+    /// A completed run whose replay diverged from the chain exits 2, whichever
+    /// dimension diverged.
     #[test]
     fn test_verification_mismatch_maps_to_two() {
-        let err = EvmeError::VerificationMismatch { mismatched: 1, total: 3 };
-        assert_eq!(ExitCode::from_evme_error(&err), ExitCode::VerificationMismatch);
+        for counts in [
+            VerificationCounts::receipts(1, 3),
+            VerificationCounts::blocks(1, 1),
+            VerificationCounts {
+                receipts_mismatched: 2,
+                receipts_total: 23,
+                blocks_mismatched: 1,
+                blocks_total: 1,
+            },
+        ] {
+            let err = EvmeError::VerificationMismatch(counts);
+            assert_eq!(
+                ExitCode::from_evme_error(&err),
+                ExitCode::VerificationMismatch,
+                "{counts:?}"
+            );
+        }
     }
 
-    /// The top-level wrapper adds no class of its own beyond the internal one.
+    /// A batch whose only finding is a block that did not reproduce its header
+    /// exits 2, and a block mismatch never outranks an infrastructure failure.
+    #[test]
+    fn test_batch_block_mismatch_ranks_like_a_receipt_mismatch() {
+        let block_only = BatchFailureCounts { blocks_mismatched: 1, ..Default::default() };
+        assert_eq!(ExitCode::from_batch_failures(&block_only), ExitCode::VerificationMismatch);
+
+        let with_rpc =
+            BatchFailureCounts { rpc: 1, blocks_mismatched: 1, total: 1, ..Default::default() };
+        assert_eq!(ExitCode::from_batch_failures(&with_rpc), ExitCode::RpcFailure);
+
+        let unverified =
+            BatchFailureCounts { blocks_unanswered: 1, total: 2, ..Default::default() };
+        assert_eq!(ExitCode::from_batch_failures(&unverified), ExitCode::RpcFailure);
+        let unverified_and_mismatched = BatchFailureCounts {
+            blocks_unanswered: 1,
+            mismatched: 1,
+            total: 2,
+            ..Default::default()
+        };
+        assert_eq!(ExitCode::from_batch_failures(&unverified_and_mismatched), ExitCode::RpcFailure);
+
+        let with_execution = BatchFailureCounts {
+            execution: 1,
+            rpc: 1,
+            blocks_mismatched: 1,
+            total: 2,
+            ..Default::default()
+        };
+        assert_eq!(ExitCode::from_batch_failures(&with_execution), ExitCode::ExecutionError);
+        assert_eq!(
+            with_execution.to_string(),
+            "2 of 2 target transaction(s) failed (1 execution, 1 rpc); 1 replayed block(s) did \
+             not reproduce the block header"
+        );
+    }
+
+    /// The top-level wrapper adds no class of its own.
     #[test]
     fn test_command_error_classes() {
-        assert_eq!(
-            ExitCode::from_command_error(&Error::Custom("bad state")),
-            ExitCode::ExecutionError
-        );
         assert_eq!(
             ExitCode::from_command_error(&Error::Evme(EvmeError::RpcError("down".to_string()))),
             ExitCode::RpcFailure
@@ -717,6 +771,8 @@ mod tests {
             execution: 0,
             rpc: 2,
             mismatched: 0,
+            blocks_mismatched: 0,
+            blocks_unanswered: 0,
             total: 2,
             exit_floor: BatchExitFloor::Execution,
         };
@@ -737,6 +793,8 @@ mod tests {
             execution: 0,
             rpc: 0,
             mismatched: 1,
+            blocks_mismatched: 0,
+            blocks_unanswered: 0,
             total: 1,
             exit_floor: BatchExitFloor::Rpc,
         };

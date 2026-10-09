@@ -246,6 +246,9 @@ struct Expect {
     /// Values a `--json` run must print that report a per-target failure
     /// instead of a result (`{"tx_hash":…,"error":{…}}`).
     error_lines: Option<usize>,
+    /// Values a `--json` run must print that report a block's verdict against
+    /// its header (`{"block_number":…,"block_verification":{…}}`).
+    block_lines: Option<usize>,
     /// Whether the row's single-file destination — a dumped fixture, a written
     /// trace, a written state dump — must exist afterwards.
     file_written: Option<bool>,
@@ -339,6 +342,12 @@ impl Row {
     /// Declare how many per-target error values a `--json` run must print.
     fn error_lines(mut self, count: usize) -> Self {
         self.expect.error_lines = Some(count);
+        self
+    }
+
+    /// Declare how many block verdicts a `--json` run of this row must print.
+    fn block_lines(mut self, count: usize) -> Self {
+        self.expect.block_lines = Some(count);
         self
     }
 
@@ -737,6 +746,35 @@ fn row_batch_block_verify(_scratch: &Path) -> Row {
         .error_lines(0)
 }
 
+/// Verify a whole block against both its on-chain receipts and its header.
+///
+/// The one row that reaches the block verdict: a line after the block's 23
+/// target lines, judged against the commitments the header carries. The 23
+/// target payloads are digested; the exit code and stderr stay verbatim.
+fn row_batch_block_verify_block(_scratch: &Path) -> Row {
+    Row::new(CAPTURE_BLOCKS, &["--block", &BLOCK.to_string(), "--verify-receipt", "--verify-block"])
+        .digested()
+        .result_lines(BLOCK_TX_COUNT)
+        .error_lines(0)
+        .block_lines(1)
+}
+
+/// Verify a whole block whose index-13 transaction burns different gas than it
+/// did on chain.
+///
+/// Both verdicts diverge — the receipts from index 13 on, and the block's gas
+/// used and receipts root — and the run exits `2` with a message naming both
+/// dimensions, which stderr pins verbatim.
+fn row_batch_block_gas_divergence(_scratch: &Path) -> Row {
+    Row::new(CAPTURE_BLOCKS, &["--block", &BLOCK.to_string(), "--verify-receipt", "--verify-block"])
+        .doctored(doctor_gas_divergence)
+        .digested()
+        .exits(2)
+        .result_lines(BLOCK_TX_COUNT)
+        .error_lines(0)
+        .block_lines(1)
+}
+
 /// Replay a target subset spanning both blocks of the capture.
 fn row_batch_tx_file(scratch: &Path) -> Row {
     Row::new(CAPTURE_BLOCKS, &[])
@@ -860,6 +898,12 @@ fn doctor_receipt_gas_used(source: &Path, scratch: &Path) -> PathBuf {
             receipt["gasUsed"] = serde_json::Value::String("0x1".into());
         })
     })
+}
+
+/// Make [`BLOCK`]'s index-13 transaction burn different gas than it did on
+/// chain ([`common::diverge_gas`]).
+fn doctor_gas_divergence(source: &Path, scratch: &Path) -> PathBuf {
+    write_doctored_capture(source, scratch, "gas_divergence", common::diverge_gas)
 }
 
 /// Null the served receipt: the endpoint answers, and answers "no receipt".
@@ -1196,18 +1240,26 @@ fn check_json_stream(case: &str, row: &Row, exit: i32, stdout: &str) {
     }
 
     // A per-target failure carries its transaction hash alongside `error`; a
-    // result line carries no top-level `error` at all.
+    // result line carries no top-level `error` at all, and a block verdict
+    // carries `block_verification` instead of a transaction hash.
     let error_lines =
         values.iter().filter(|value| !is_run_error(value) && value.get("error").is_some()).count();
+    let block_lines = values.iter().filter(|value| common::is_block_line(value)).count();
     if let Some(expected) = row.expect.error_lines {
         assert_eq!(
             error_lines, expected,
             "{case}: the row declares {expected} target error line(s)"
         );
     }
+    assert_eq!(
+        block_lines,
+        row.expect.block_lines.unwrap_or(0),
+        "{case}: the row declares {} block verdict line(s)",
+        row.expect.block_lines.unwrap_or(0),
+    );
     if let Some(expected) = row.expect.result_lines {
         assert_eq!(
-            values.len() - run_errors - error_lines,
+            values.len() - run_errors - error_lines - block_lines,
             expected,
             "{case}: the row declares {expected} target result line(s)",
         );
@@ -1475,6 +1527,8 @@ matrix! {
     single_preceding_null: row_single_preceding_null,
     batch_block: row_batch_block,
     batch_block_verify: row_batch_block_verify,
+    batch_block_verify_block: row_batch_block_verify_block,
+    batch_block_gas_divergence: row_batch_block_gas_divergence,
     batch_tx_file: row_batch_tx_file,
     batch_tx_file_verify: row_batch_tx_file_verify,
     batch_mixed_failures: row_batch_mixed_failures,

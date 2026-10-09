@@ -16,6 +16,15 @@
 //! exception: both fetch `eth_getTransactionReceipt` for *every* target of a
 //! block, including the non-targets a single-transaction capture never asked
 //! about. Offline, those come back as `rpc` entries and the run exits `3`.
+//!
+//! `--verify-block` (whole-block mode only) adds one verdict per block, after
+//! the block's target lines. The served body is authenticated against the
+//! header's transactions root before the block runs, and a body the header does
+//! not commit to is reported without executing. Once the kernel hands back the
+//! block it executed in full, the commitments it produces are compared against
+//! the block's authenticated header ([`super::header`]). It issues no extra RPC
+//! call: the body's transactions are fetched before the block runs, each once,
+//! instead of while it runs.
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -25,15 +34,15 @@ use std::{
 };
 
 use alloy_consensus::{transaction::Recovered, BlockHeader};
-use alloy_network::ReceiptResponse;
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Bytes, B256};
 use alloy_provider::Provider;
 use alloy_rpc_types_eth::Block;
 use mega_evm::{
     alloy_evm::EvmEnv,
     revm::{context::result::ExecutionResult, inspector::NoOpInspector, DatabaseRef},
-    MegaBlockExecutionCtx, MegaHaltReason, MegaHardforks, MegaSpecId, MegaTxEnvelope,
+    MegaHaltReason, MegaHardforks, MegaSpecId, MegaTxEnvelope,
 };
+use op_alloy_consensus::OpReceiptEnvelope;
 use op_alloy_rpc_types::Transaction;
 use serde::Serialize;
 use state_test::types::MegaEnv;
@@ -41,19 +50,19 @@ use tracing::{debug, info, warn};
 
 use crate::{
     common::{
-        print_execution_summary, print_receipt, BatchExitFloor, BatchFailureCounts,
-        EvmeExternalEnvs, ExecutionSummary, ExitCode, OpTxReceipt,
+        cfg_env, print_transaction_report, BatchExitFloor, BatchFailureCounts, EvmeExternalEnvs,
+        ExecutionSummary, ExitCode, OpTxReceipt, VerificationCounts,
     },
     replay::{get_hardfork_config, ReplayHardforks},
-    ChainArgs,
 };
 
 use super::{
-    cmd::retrieve_block_env,
     coherence::{self, Incoherence, MembershipClaim, TargetPlacement},
-    fixture, kernel,
+    fixture,
+    header::{self, BlockSummary, BlockVerification},
+    kernel,
     verify::{self, ReceiptFacts, VerificationOutcome},
-    ReplayError, Result,
+    world, ReplayError, Result,
 };
 
 /// How a batch run reports its targets.
@@ -63,6 +72,9 @@ pub(super) struct ReportArgs {
     pub json: bool,
     /// Verify every target against its on-chain receipt.
     pub verify_receipt: bool,
+    /// Verify every replayed block against its header. Only set for a
+    /// whole-block run (`--block`), whose targets are the whole body.
+    pub verify_block: bool,
     /// When set, dump a self-validating fixture for every successful target into
     /// this directory as `<DIR>/<tx_hash>.json`.
     pub dump_fixture_dir: Option<PathBuf>,
@@ -231,7 +243,6 @@ struct ExecutedTx {
     block_number: u64,
     tx_index: u64,
     exec_result: ExecutionResult<MegaHaltReason>,
-    contract_address: Option<Address>,
     exec_time: Duration,
     receipt: OpTxReceipt,
     /// On-chain receipt verdict, present iff `--verify-receipt` was given.
@@ -245,6 +256,58 @@ struct FailedTx {
     tx_hash: B256,
     kind: BatchErrorKind,
     message: String,
+}
+
+/// One block's verdict against its header, present iff `--verify-block` was
+/// given.
+struct BlockReport {
+    /// Number of the verified block.
+    number: u64,
+    /// Hash of the verified block: the authenticated header's own hash. Always
+    /// known in whole-block mode, whose block is fetched before any job runs.
+    hash: B256,
+    /// The verdict.
+    verification: BlockVerification,
+    /// Whether the verdict went unanswered because the endpoint contradicted
+    /// itself about the block — a body the header does not commit to, or a
+    /// parent that does not link to it. No target line carries that failure, so
+    /// the block itself is counted, as rpc-class. An unavailable verdict that is
+    /// not unanswered (the block did not execute in full) is counted through
+    /// its targets' own lines instead.
+    unanswered: bool,
+}
+
+impl BlockReport {
+    /// The verdict for a block that never reached execution. Its targets'
+    /// failure lines say why and carry the class that decides the exit.
+    fn not_executed(number: u64, hash: B256) -> Self {
+        Self {
+            number,
+            hash,
+            verification: BlockVerification::unavailable(
+                "the block did not execute; its transactions' errors say why",
+            ),
+            unanswered: false,
+        }
+    }
+
+    /// A verdict the block itself could not be given because the endpoint
+    /// contradicted itself about it.
+    fn unanswered(block: &Block<Transaction>, message: String) -> Self {
+        warn!(block = block.header.number(), %message, "Block could not be verified");
+        Self {
+            number: block.header.number(),
+            hash: block.hash(),
+            verification: BlockVerification::unavailable(message),
+            unanswered: true,
+        }
+    }
+
+    /// A verdict reached about the block, compared or not, that no endpoint
+    /// contradiction is behind.
+    fn answered(block: &Block<Transaction>, verification: BlockVerification) -> Self {
+        Self { number: block.header.number(), hash: block.hash(), verification, unanswered: false }
+    }
 }
 
 /// Running tally of a batch run's per-target outcomes.
@@ -265,7 +328,10 @@ struct BatchTally {
     replayed: usize,
     /// Targets compared against an on-chain receipt.
     verified: usize,
-    /// Failed and mismatched targets, by class (reported targets only).
+    /// Blocks compared against their header.
+    blocks_verified: usize,
+    /// Failed and mismatched targets, by class (reported targets only), plus
+    /// the blocks that did not reproduce their header.
     counts: BatchFailureCounts,
     /// Run-level exit floor from a non-target abort not carried by any target.
     exit_floor: BatchExitFloor,
@@ -346,6 +412,28 @@ impl BatchTally {
         }
     }
 
+    /// Count one block's verdict against its header.
+    ///
+    /// A mismatch is a divergence finding like a receipt mismatch. A verdict
+    /// the endpoint left unanswered — a body the header does not commit to — is
+    /// an rpc-class failure of the block, which no target line carries. Any
+    /// other unavailable verdict is not counted: it only arises when the block
+    /// did not execute in full, and the targets' own lines (or the run's exit
+    /// floor) already carry the failure that stopped it.
+    fn record_block(&mut self, report: &BlockReport) {
+        if report.unanswered {
+            self.counts.blocks_unanswered += 1;
+            return;
+        }
+        if report.verification.is_unavailable() {
+            return;
+        }
+        self.blocks_verified += 1;
+        if !report.verification.matched {
+            self.counts.blocks_mismatched += 1;
+        }
+    }
+
     /// Record a mid-block abort whose root-cause class is not already carried by
     /// a per-target failure entry.
     ///
@@ -385,20 +473,26 @@ impl BatchTally {
     /// written does, as an execution-class failure of its target.
     ///
     /// A non-target abort floor alone also fails the run (with empty target
-    /// failure counters) so the exit still reflects the root cause.
+    /// failure counters) so the exit still reflects the root cause, and so does
+    /// a block that could not be verified.
     fn into_error(self) -> Option<ReplayError> {
-        if self.failed() > 0 || self.exit_floor != BatchExitFloor::None {
+        if self.failed() > 0 ||
+            self.counts.blocks_unanswered > 0 ||
+            self.exit_floor != BatchExitFloor::None
+        {
             return Some(ReplayError::BatchFailed(BatchFailureCounts {
                 total: self.reported,
                 exit_floor: self.exit_floor,
                 ..self.counts
             }));
         }
-        if self.counts.mismatched > 0 {
-            return Some(ReplayError::VerificationMismatch {
-                mismatched: self.counts.mismatched,
-                total: self.verified,
-            });
+        if self.counts.mismatched > 0 || self.counts.blocks_mismatched > 0 {
+            return Some(ReplayError::VerificationMismatch(VerificationCounts {
+                receipts_mismatched: self.counts.mismatched,
+                receipts_total: self.verified,
+                blocks_mismatched: self.counts.blocks_mismatched,
+                blocks_total: self.blocks_verified,
+            }));
         }
         None
     }
@@ -511,22 +605,7 @@ impl kernel::TargetLifecycle for FixtureDraftHook<'_> {
         DB::Error: core::fmt::Display,
     {
         let Some(dump) = self.dump.as_ref() else { return Ok(None) };
-        Ok(Some(prepare_target_fixture(
-            target.db,
-            DumpFixtureArgs {
-                accessed_block_hash_count: target.accessed_block_hash_count,
-                exec_result: &target.result_and_state.result,
-                evm_state: &target.result_and_state.state,
-                chain_id: self.chain_id,
-                executed_spec: self.executed_spec,
-                block: self.block,
-                target_tx: target.tx,
-                mega_env: dump.mega_env.clone(),
-                onchain: self.onchain_receipts.get(&target.tx_hash),
-                dir: dump.dir,
-                overwrite: dump.overwrite,
-            },
-        )))
+        Ok(Some(self.prepare_fixture(dump, &target)))
     }
 }
 
@@ -540,6 +619,18 @@ struct BatchResultLine<'a> {
     summary: &'a ExecutionSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
     fixture: Option<&'a FixtureReport>,
+}
+
+/// NDJSON line carrying one block's verdict against its header.
+///
+/// It has no `tx_hash`, which is how a consumer tells it from a target line,
+/// and its verdict sits under `block_verification` rather than `verification`
+/// so a filter over the target lines' verdicts never matches it.
+#[derive(Serialize)]
+struct BatchBlockLine<'a> {
+    block_number: u64,
+    block_hash: B256,
+    block_verification: &'a BlockVerification,
 }
 
 /// NDJSON line for a target that produced an infrastructure error.
@@ -566,7 +657,8 @@ struct BatchErrorBody<'a> {
 /// `--verify-receipt`, a run in which every target replayed but some diverged
 /// from its on-chain receipt fails with [`ReplayError::VerificationMismatch`]
 /// instead — a distinct variant, so a divergence is never confused with a
-/// target that could not be replayed.
+/// target that could not be replayed. A block that did not reproduce its
+/// header under `--verify-block` counts as the same kind of divergence.
 pub(super) async fn run<P>(
     provider: &P,
     chain_id: u64,
@@ -597,11 +689,15 @@ where
             let block = fetch_block(provider, *number).await?;
             let targets: Vec<B256> = block.transactions.hashes().collect();
             info!(block = number, tx_count = targets.len(), "Batch replay of a whole block");
-            if targets.is_empty() {
+            if targets.is_empty() && !report.verify_block {
                 // Nothing failed, so this is a clean exit — but a silent one is
                 // indistinguishable from a run that produced no output for a bad
                 // reason, so say why stdout is empty. No job is queued: with no
                 // targets to report, forking the parent state would buy nothing.
+                //
+                // `--verify-block` still queues the block: an empty listing is a
+                // claim about the block like any other, and the header has to
+                // commit to it before the run can pass.
                 eprintln!("Block {number} contains no transactions; nothing to replay");
                 vec![]
             } else {
@@ -635,6 +731,10 @@ where
     };
 
     for job in jobs {
+        let number = job.number;
+        // Whole-block mode fetched the block before queuing the job, so its
+        // authenticated hash is known even when the block never executes.
+        let pinned_hash = job.block.as_ref().map(Block::hash);
         let outcome = replay_block(provider, chain_id, job, external_envs.clone(), &report).await;
         for entry in outcome.entries {
             if let BatchEntry::Executed(tx) = &entry {
@@ -652,6 +752,16 @@ where
         if let Some(kind) = outcome.uncounted_abort {
             tally.record_uncounted_abort(kind);
         }
+        if report.verify_block {
+            let block = outcome.block.unwrap_or_else(|| {
+                let hash = pinned_hash.expect(
+                    "--verify-block is only accepted with --block, whose job carries its block",
+                );
+                BlockReport::not_executed(number, hash)
+            });
+            tally.record_block(&block);
+            emit_block(&block, report.json);
+        }
     }
 
     info!(
@@ -665,6 +775,14 @@ where
             verified = tally.verified,
             mismatched = tally.counts.mismatched,
             "On-chain receipt verification finished",
+        );
+    }
+    if report.verify_block {
+        info!(
+            verified = tally.blocks_verified,
+            mismatched = tally.counts.blocks_mismatched,
+            unanswered = tally.counts.blocks_unanswered,
+            "Block verification finished",
         );
     }
     if report.dump_fixture_dir.is_some() {
@@ -724,7 +842,7 @@ where
                 Err(message) => {
                     failures.push(FailedTx { tx_hash: *hash, kind: BatchErrorKind::Rpc, message })
                 }
-                Ok(()) => match coherence::classify_placement(tx.block_number, tx.block_hash) {
+                Ok(_) => match coherence::classify_placement(tx.block_number, tx.block_hash) {
                     Ok(TargetPlacement::Mined { number, inclusion_hash }) => {
                         grouped
                             .entry(number)
@@ -758,6 +876,9 @@ struct BlockReplayOutcome {
     /// Present when the aborting transaction is not a target: swept targets stay
     /// `rpc`, and this class is tallied so the run exit reflects the abort.
     uncounted_abort: Option<BatchErrorKind>,
+    /// The block's verdict against its header, present when `--verify-block`
+    /// was given and the block reached execution.
+    block: Option<BlockReport>,
 }
 
 impl BlockReplayOutcome {
@@ -773,7 +894,17 @@ impl BlockReplayOutcome {
         block_tx_order: Option<&[B256]>,
         uncounted_abort: Option<BatchErrorKind>,
     ) -> Self {
-        Self { entries: order_block_entries(entries, job_targets, block_tx_order), uncounted_abort }
+        Self {
+            entries: order_block_entries(entries, job_targets, block_tx_order),
+            uncounted_abort,
+            block: None,
+        }
+    }
+
+    /// Attach the block's verdict against its header.
+    fn with_block(mut self, block: Option<BlockReport>) -> Self {
+        self.block = block;
+        self
     }
 }
 
@@ -836,6 +967,7 @@ where
 {
     let BlockJob { number, block, targets: job_targets } = job;
     let verify_receipt = report.verify_receipt;
+    let verify_block = report.verify_block;
     let dump_dir = report.dump_fixture_dir.as_deref();
     let overwrite = report.overwrite;
     let target_hashes = || job_targets.iter().map(|t| t.hash);
@@ -868,6 +1000,14 @@ where
     };
     // Body order for the documented ascending `(block, tx_index)` stream.
     let block_tx_order: Vec<B256> = block.transactions.hashes().collect();
+
+    // A whole-block run over an empty listing has nothing to execute, but the
+    // listing is still a claim the header has to commit to.
+    if verify_block && block_tx_order.is_empty() {
+        let report = verify_empty_block(provider, &block).await;
+        return BlockReplayOutcome::ordered(Vec::new(), &job_targets, None, None)
+            .with_block(Some(report));
+    }
 
     // Per-target inclusion and membership guards. `--tx-file` resolved each
     // target through `eth_getTransactionByHash`, which reported the block it
@@ -961,6 +1101,32 @@ where
         );
     }
 
+    // Under `--verify-block` the served body is authenticated before anything
+    // executes. A forged listing can make execution abort — a transaction left
+    // out leaves the next one from its sender with a nonce gap — and an abort
+    // would otherwise hide the forgery behind an execution failure. A body the
+    // header does not commit to is the endpoint's failure: nothing is executed,
+    // and every target goes unanswered with the block. The transactions fetched
+    // here are handed to the kernel, so each is still fetched once; without the
+    // flag the kernel fetches the body itself, as it always has.
+    let served = if verify_block {
+        match fetch_served_body(provider, &block, &block_tx_order).await {
+            ServedBody::Committed(transactions) | ServedBody::Prefix(transactions) => transactions,
+            ServedBody::Uncommitted(incoherence) => {
+                let message = incoherence.to_string();
+                return BlockReplayOutcome::ordered(
+                    fail_remaining(&targets, entries, BatchErrorKind::Rpc, &message),
+                    &job_targets,
+                    Some(&block_tx_order),
+                    None,
+                )
+                .with_block(Some(BlockReport::unanswered(&block, message)));
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
     // Fetch the on-chain receipts before the block runs. Needed for
     // `--verify-receipt` (mismatch vs unverified) and for `--dump-fixture-dir`
     // (fidelity gate). A receipt that cannot be fetched, or that describes a
@@ -968,39 +1134,25 @@ where
     // each feature below.
     let need_receipts = verify_receipt || dump_dir.is_some();
     let onchain_receipts = if need_receipts {
-        fetch_target_receipts(provider, &targets, block.hash()).await
+        fetch_target_receipts(provider, &targets, &block).await
     } else {
         BTreeMap::new()
     };
 
-    // Sorted once so every fixture of this block is byte-reproducible for the
-    // same megaEnv (hash-map iteration order is otherwise non-deterministic).
-    let fixture_dump = dump_dir.map(|dir| {
-        let mut bucket_capacities = external_envs.bucket_capacities();
-        bucket_capacities.sort_unstable();
-        let mut oracle_storage = external_envs.oracle_storage();
-        oracle_storage.sort_unstable();
-        FixtureDumpEnv { dir, overwrite, mega_env: MegaEnv { bucket_capacities, oracle_storage } }
+    // Snapshotted once, so every fixture of this block records the same megaEnv.
+    let fixture_dump = dump_dir.map(|dir| FixtureDumpEnv {
+        dir,
+        overwrite,
+        mega_env: fixture::mega_env_snapshot(&external_envs),
     });
 
     let hardforks = get_hardfork_config(chain_id);
     let timestamp = block.header.timestamp();
     let spec = hardforks.spec_id(timestamp);
-    let chain_args = ChainArgs { chain_id, spec: spec.to_string() };
     debug!(block = number, chain_id, spec = %spec, "Block configuration");
 
-    let cfg_env = match chain_args.create_cfg_env() {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            return BlockReplayOutcome::ordered(
-                fail_remaining(&targets, entries, BatchErrorKind::Execution, &e.to_string()),
-                &job_targets,
-                Some(&block_tx_order),
-                None,
-            );
-        }
-    };
-    let block_env = match retrieve_block_env(&block) {
+    let cfg = cfg_env(chain_id, spec);
+    let block_env = match world::retrieve_block_env(&block) {
         Ok(env) => env,
         Err(e) => {
             return BlockReplayOutcome::ordered(
@@ -1011,35 +1163,35 @@ where
             );
         }
     };
-    let executed_spec = cfg_env.spec;
-    let evm_env = EvmEnv::new(cfg_env, block_env);
+    let executed_spec = cfg.spec;
+    let evm_env = EvmEnv::new(cfg, block_env);
 
     // A batch replays the chain's own schedule, so a block older than its first hardfork fails
     // here for want of limits to execute under.
-    let block_limits = match ReplayHardforks::Chain(&hardforks)
-        .block_limits(timestamp, block.header.gas_limit())
-    {
-        Ok(limits) => limits,
-        Err(message) => {
-            return BlockReplayOutcome::ordered(
-                fail_remaining(&targets, entries, BatchErrorKind::Execution, &message),
-                &job_targets,
-                Some(&block_tx_order),
-                None,
-            );
-        }
-    };
-    let block_ctx = MegaBlockExecutionCtx::new(
-        parent_block.hash(),
-        block.header.parent_beacon_block_root(),
-        block.header.extra_data().clone(),
-        block_limits,
-    );
+    let block_ctx =
+        match world::block_ctx(&ReplayHardforks::Chain(&hardforks), &block, parent_block.hash()) {
+            Ok(block_ctx) => block_ctx,
+            Err(message) => {
+                return BlockReplayOutcome::ordered(
+                    fail_remaining(&targets, entries, BatchErrorKind::Execution, &message),
+                    &job_targets,
+                    Some(&block_tx_order),
+                    None,
+                );
+            }
+        };
 
     let target_set: HashSet<B256> = targets.iter().copied().collect();
     // Prefer the already-collected body order so stream ordering and the kernel
     // walk the same sequence.
-    let tx_hashes = block_tx_order.clone();
+    let body: Vec<kernel::BodyEntry<'_>> = block_tx_order
+        .iter()
+        .enumerate()
+        .map(|(index, tx_hash)| match served.get(index) {
+            Some(tx) => kernel::BodyEntry::Served { tx_hash: *tx_hash, tx },
+            None => kernel::BodyEntry::Listed(*tx_hash),
+        })
+        .collect();
 
     let mut hook = FixtureDraftHook {
         dump: fixture_dump,
@@ -1058,7 +1210,8 @@ where
             inspector: NoOpInspector,
             fork_block: parent_block.header.number(),
             identity: kernel::BlockIdentity { number, timestamp, hash: block.hash() },
-            tx_hashes: &tx_hashes,
+            body: &body,
+            body_len: block_tx_order.len(),
             targets: &target_set,
         },
         &mut hook,
@@ -1085,10 +1238,61 @@ where
         }
     };
 
+    // Judged before the harvest consumes the run: the verdict reads the whole
+    // block the kernel handed back, or why it could not.
+    let (block_report, block_floor) = if verify_block {
+        let (report, floor) = verify_executed_block(&block, &loop_outcome, &finish);
+        (Some(report), floor)
+    } else {
+        (None, None)
+    };
+
     // `entries` already holds any inclusion/membership failure recorded before
     // the block started; the harvested targets are appended to it here.
+    harvest_entries(&mut entries, finish, &loop_outcome, &onchain_receipts, verify_receipt, number);
+
+    // Any active target that produced no entry sat behind an abort (or is a
+    // residual not-in-body case for `--block`, which has no inclusion claim).
+    // They are appended in block transaction-index order, keeping the run's
+    // ascending (block, index) order; a target the block does not contain has
+    // no index and keeps its input position among the active set.
+    let uncounted_abort = attribute_unreported(
+        &mut entries,
+        &loop_outcome,
+        &block_tx_order,
+        &target_set,
+        &targets,
+        number,
+        fetched,
+    );
+
+    BlockReplayOutcome::ordered(
+        entries,
+        &job_targets,
+        Some(&block_tx_order),
+        uncounted_abort.or(block_floor),
+    )
+    .with_block(block_report)
+}
+
+/// Append one entry per target the finished block reports on.
+///
+/// A target that executed keeps its result line, its receipt verdict and its
+/// fixture report. Its fixture is written here, and only when the walk
+/// completed; an aborted walk's drafts are reported as discarded. A block that
+/// failed to finish leaves every target that executed a failure entry instead,
+/// and no fixture is written or replaced.
+fn harvest_entries(
+    entries: &mut Vec<BatchEntry>,
+    finish: kernel::FinishOutcome<Option<DeferredFixture>>,
+    loop_outcome: &kernel::LoopOutcome,
+    onchain_receipts: &BTreeMap<B256, std::result::Result<ReceiptFacts, String>>,
+    verify_receipt: bool,
+    number: u64,
+) {
     match finish {
-        kernel::FinishOutcome::Harvested(harvest) => {
+        // The whole executed block is judged by the caller.
+        kernel::FinishOutcome::Harvested { targets: harvest, whole_block: _ } => {
             for harvested in harvest {
                 let target = match harvested {
                     kernel::TargetHarvest::Receipt(target) => target,
@@ -1135,7 +1339,7 @@ where
                 // and an aborted run has none to hand out. Keep the execution
                 // result; only the fixture field fails, and it inherits the
                 // abort's class so a transient RPC abort exits 3.
-                let fixture = match &loop_outcome {
+                let fixture = match loop_outcome {
                     kernel::LoopOutcome::Completed(clean) => {
                         target.draft.redeem(clean).map(materialize_deferred_fixture)
                     }
@@ -1148,7 +1352,6 @@ where
                     block_number: number,
                     tx_index: target.tx_index,
                     exec_result: target.exec_result,
-                    contract_address: target.contract_address,
                     exec_time: target.exec_time,
                     receipt: target.receipt,
                     verification,
@@ -1166,12 +1369,25 @@ where
             }
         }
     }
+}
 
-    // Any active target that produced no entry sat behind an abort (or is a
-    // residual not-in-body case for `--block`, which has no inclusion claim).
-    // They are appended in block transaction-index order, keeping the run's
-    // ascending (block, index) order; a target the block does not contain has
-    // no index and keeps its input position among the active set.
+/// Append an entry for every active target the run left without one, and
+/// return the abort's class when no reported entry carries it.
+///
+/// After a completed walk such a target was absent from the body it was queued
+/// against. After an abort, the target that raised it keeps the abort's own
+/// class and every other one is swept up as unanswered; when the aborting
+/// transaction is not a reported target, its class is returned so the run's
+/// exit still reflects the root cause.
+fn attribute_unreported(
+    entries: &mut Vec<BatchEntry>,
+    loop_outcome: &kernel::LoopOutcome,
+    tx_hashes: &[B256],
+    target_set: &HashSet<B256>,
+    targets: &[B256],
+    number: u64,
+    fetched: B256,
+) -> Option<BatchErrorKind> {
     let reported: HashSet<B256> = entries.iter().map(BatchEntry::tx_hash).collect();
     let block_txs: HashSet<B256> = tx_hashes.iter().copied().collect();
     let unreported = tx_hashes
@@ -1181,7 +1397,7 @@ where
         .filter(|hash| !reported.contains(*hash));
 
     let mut uncounted_abort = None;
-    match &loop_outcome {
+    match loop_outcome {
         kernel::LoopOutcome::Completed(_) => {
             // Active targets are already filtered for inclusion agreement; a
             // remaining absence from the body is still an endpoint
@@ -1244,122 +1460,250 @@ where
             }
         }
     }
-
-    BlockReplayOutcome::ordered(entries, &job_targets, Some(&block_tx_order), uncounted_abort)
+    uncounted_abort
 }
 
-/// Inputs for [`prepare_target_fixture`], grouped so the dump path stays a single
-/// call site without a long positional argument list.
-struct DumpFixtureArgs<'a> {
-    accessed_block_hash_count: usize,
-    exec_result: &'a ExecutionResult<MegaHaltReason>,
-    evm_state: &'a mega_evm::revm::state::EvmState,
-    chain_id: u64,
-    executed_spec: MegaSpecId,
-    block: &'a Block<Transaction>,
-    target_tx: &'a Transaction,
-    mega_env: MegaEnv,
-    onchain: Option<&'a std::result::Result<ReceiptFacts, String>>,
-    dir: &'a Path,
-    overwrite: bool,
+/// Judge a block the kernel ran against its header.
+///
+/// Only a block whose whole body executed and finished is judged
+/// ([`judge_block`]). When the walk aborted or the block could not be finished,
+/// the verdict is unavailable and nothing is counted for it: the targets'
+/// failure lines carry that cause. A walk that completed and finished without
+/// handing back the whole block cannot happen in whole-block mode, whose targets
+/// are the whole body; it is reported as an internal error, and the returned
+/// class floors the run's exit so it cannot pass as a clean run.
+fn verify_executed_block<D>(
+    block: &Block<Transaction>,
+    loop_outcome: &kernel::LoopOutcome,
+    finish: &kernel::FinishOutcome<D>,
+) -> (BlockReport, Option<BatchErrorKind>) {
+    let unavailable =
+        |message: String| BlockReport::answered(block, BlockVerification::unavailable(message));
+    match (loop_outcome, finish) {
+        (_, kernel::FinishOutcome::Harvested { whole_block: Some(whole), .. }) => {
+            (judge_block(block, &whole.transactions, &BlockSummary::of(whole)), None)
+        }
+        (kernel::LoopOutcome::Aborted { error, .. }, _) => {
+            (unavailable(format!("the block body did not execute in full: {error}")), None)
+        }
+        (_, kernel::FinishOutcome::Failed { error, .. }) => {
+            (unavailable(format!("the block could not be finished: {error}")), None)
+        }
+        (kernel::LoopOutcome::Completed(_), kernel::FinishOutcome::Harvested { .. }) => (
+            unavailable(
+                "internal error: the replay completed the block body but did not hand back the \
+                 whole block"
+                    .to_string(),
+            ),
+            Some(BatchErrorKind::Execution),
+        ),
+    }
 }
 
-/// Prepare a fixture for one successfully executed target against pre-commit state.
+/// Judge a block against its header, given the transactions its body served
+/// and the execution commitments the replay produced for them.
 ///
-/// Genuine skips (fidelity mismatch, BLOCKHASH, unsupported transaction shapes)
-/// become a final [`FixtureReport::skipped`] and never fail the run.
-/// An unanswered on-chain receipt (transport, pruned/null, divergent inclusion,
-/// or offline envelope lacking it) becomes a rpc-class fixture error so the run
-/// exits 3 while the target keeps its execution result line.
-/// Database and other construction failures become a fixture error (execution-class).
-/// A successfully built draft is carried as [`DeferredFixture::Ready`] and only
-/// written by [`materialize_deferred_fixture`] after `finish()` succeeds.
-///
-/// `db` must reflect the pre-target-commit state (preceding txs committed, target
-/// not yet), matching the single-transaction dump.
-fn prepare_target_fixture<DB>(db: &DB, args: DumpFixtureArgs<'_>) -> DeferredFixture
-where
-    DB: DatabaseRef,
-    DB::Error: core::fmt::Display,
-{
-    let DumpFixtureArgs {
-        accessed_block_hash_count,
-        exec_result,
-        evm_state,
-        chain_id,
-        executed_spec,
-        block,
-        target_tx,
-        mega_env,
-        onchain,
-        dir,
-        overwrite,
-    } = args;
-
-    // Fidelity gate needs the on-chain receipt. When the receipt question went
-    // unanswered the dump fails as rpc (not a fidelity-gate skip): the run was
-    // asked to write a fixture and could not obtain the receipt it needs. Genuine
-    // gate skips (BLOCKHASH, unsupported shape, fidelity mismatch) stay skips.
-    let facts = match onchain {
-        Some(Ok(facts)) => facts,
-        Some(Err(message)) => {
-            return DeferredFixture::Report(FixtureReport::rpc_error(message.clone()));
-        }
-        None => {
-            return DeferredFixture::Report(FixtureReport::rpc_error(
-                "no on-chain receipt was fetched for this transaction",
-            ));
-        }
-    };
-
-    if accessed_block_hash_count > 0 {
-        return DeferredFixture::Report(FixtureReport::skipped(format!(
-            "transaction reads block hashes (BLOCKHASH): {accessed_block_hash_count} block \
-             hash(es) were accessed and the fixture cannot faithfully reproduce them"
-        )));
-    }
-
-    let anchor = fixture::anchor_from_receipt_facts(facts);
-    if let Err(reason) = fixture::check_fidelity(exec_result, &anchor, chain_id) {
-        return DeferredFixture::Report(FixtureReport::skipped(format!(
-            "fidelity gate failed: {reason}"
-        )));
-    }
-
-    let draft = match fixture::build_draft(
-        db,
-        evm_state,
-        chain_id,
-        executed_spec,
-        block,
-        target_tx,
-        fixture::FixtureInputs { mega_env, result: exec_result, anchor },
+/// The body comes first: a body the header does not commit to is the endpoint
+/// contradicting itself ([`coherence::require_committed_body`]), so the verdict
+/// goes unanswered (rpc-class). Only for a body the header commits to are the
+/// execution outputs compared, where a difference is a mismatch.
+fn judge_block(
+    block: &Block<Transaction>,
+    transactions: &[Bytes],
+    summary: &BlockSummary,
+) -> BlockReport {
+    if let Err(incoherence) = coherence::require_committed_body(
+        block.header.number(),
+        block.hash(),
+        block.header.transactions_root(),
+        transactions,
     ) {
-        Ok(draft) => draft,
-        Err(e) => return DeferredFixture::Report(fixture_report_from_build_err(e)),
-    };
-
-    // The fixture is filed under the transaction's own hash. `tx_hash()` returns
-    // the cached hash an RPC deserialization seeds from the response's `hash`
-    // field, so this name would be the endpoint's to choose — and under
-    // `--overwrite`, an unrelated target's file to replace. It is a verified
-    // value here because no transaction reaches execution without passing
-    // `verify::authenticate_transaction`, which refuses a served `hash` field
-    // that does not match the value the served body hashes to.
-    let tx_hash = target_tx.inner.inner.tx_hash();
-    let path = dir.join(format!("{tx_hash:#x}.json"));
-    // Fast-path courtesy: refuse overwrite before carrying a ready draft so the
-    // harvest path never confuses a finish failure with an overwrite refusal.
-    // Correctness against a concurrent creator is still enforced at materialize
-    // time via noclobber persist.
-    if path.exists() && !overwrite {
-        return DeferredFixture::Report(FixtureReport::error(format!(
-            "fixture already exists at {} (pass --overwrite to replace)",
-            path.display()
-        )));
+        return BlockReport::unanswered(block, incoherence.to_string());
     }
+    let verification = header::compare(&block.header, summary);
+    if let Some(diff) = &verification.diff {
+        warn!(block = block.header.number(), ?diff, "Replayed block does not reproduce its header");
+    }
+    BlockReport::answered(block, verification)
+}
 
-    DeferredFixture::Ready { draft: Box::new(draft), path, overwrite }
+/// The body transactions a `--verify-block` run fetches before executing.
+enum ServedBody {
+    /// Every listed transaction, each authenticated against its listed hash,
+    /// and together they rebuild the header's transactions root.
+    Committed(Vec<Transaction>),
+    /// Every listed transaction, each authenticated, but the body does not
+    /// rebuild the header's transactions root.
+    Uncommitted(Incoherence),
+    /// The transactions fetched and authenticated before one could not be.
+    /// Without the whole body the root cannot be rebuilt, so the block executes
+    /// as it would without the check: the kernel looks the rest up itself and
+    /// meets the same failure, attributed to the transaction that raised it.
+    Prefix(Vec<Transaction>),
+}
+
+/// Fetch every transaction `body` lists, authenticate each against its listed
+/// hash, and check that the encodings rebuild `block`'s transactions root.
+///
+/// Fetching stops at the first transaction that cannot be fetched or
+/// authenticated; that failure is left for the kernel to meet and report.
+async fn fetch_served_body<P>(provider: &P, block: &Block<Transaction>, body: &[B256]) -> ServedBody
+where
+    P: Provider<op_alloy_network::Optimism>,
+{
+    let mut transactions = Vec::with_capacity(body.len());
+    let mut encoded = Vec::with_capacity(body.len());
+    for tx_hash in body {
+        let Ok(Some(tx)) = provider.get_transaction_by_hash(*tx_hash).await else {
+            return ServedBody::Prefix(transactions);
+        };
+        let Ok(encoding) = verify::authenticate_transaction(&tx, *tx_hash) else {
+            return ServedBody::Prefix(transactions);
+        };
+        encoded.push(encoding);
+        transactions.push(tx);
+    }
+    match coherence::require_committed_body(
+        block.header.number(),
+        block.hash(),
+        block.header.transactions_root(),
+        &encoded,
+    ) {
+        Ok(()) => ServedBody::Committed(transactions),
+        Err(incoherence) => ServedBody::Uncommitted(incoherence),
+    }
+}
+
+/// Judge a block whose body lists no transaction.
+///
+/// Nothing executes, so the commitments are those of an empty body
+/// ([`BlockSummary::of_empty_body`]). The header is held to the same standard as
+/// for an executed block — authenticated (already, when it was fetched), linked
+/// to its parent, and committing to the served body — so an authentic header
+/// that commits to transactions the listing left out goes unanswered rather
+/// than passing.
+async fn verify_empty_block<P>(provider: &P, block: &Block<Transaction>) -> BlockReport
+where
+    P: Provider<op_alloy_network::Optimism>,
+{
+    let parent = match fetch_block(provider, block.header.number() - 1).await {
+        Ok(parent) => parent,
+        Err(e) => return BlockReport::unanswered(block, e.to_string()),
+    };
+    if let Err(incoherence) =
+        coherence::require_parent_linkage(parent.hash(), block.header.parent_hash())
+    {
+        return BlockReport::unanswered(block, incoherence.to_string());
+    }
+    judge_block(block, &[], &BlockSummary::of_empty_body())
+}
+
+impl FixtureDraftHook<'_> {
+    /// Prepare a fixture for one successfully executed target against pre-commit state.
+    ///
+    /// Genuine skips (fidelity mismatch, BLOCKHASH, unsupported transaction shapes)
+    /// become a final [`FixtureReport::skipped`] and never fail the run.
+    /// An unanswered on-chain receipt (transport, pruned/null, divergent inclusion,
+    /// or offline envelope lacking it) becomes a rpc-class fixture error so the run
+    /// exits 3 while the target keeps its execution result line.
+    /// Database and other construction failures become a fixture error (execution-class).
+    /// A successfully built draft is carried as [`DeferredFixture::Ready`] and only
+    /// written by [`materialize_deferred_fixture`] after `finish()` succeeds.
+    ///
+    /// `target.db` must reflect the pre-target-commit state (preceding txs
+    /// committed, target not yet), matching the single-transaction dump.
+    fn prepare_fixture<DB>(
+        &self,
+        dump: &FixtureDumpEnv<'_>,
+        target: &kernel::TargetExecution<'_, DB>,
+    ) -> DeferredFixture
+    where
+        DB: DatabaseRef,
+        DB::Error: core::fmt::Display,
+    {
+        let accessed_block_hash_count = target.accessed_block_hash_count;
+        let exec_result = &target.result_and_state.result;
+        let chain_id = self.chain_id;
+        let target_tx = target.tx;
+
+        // Fidelity gate needs the on-chain receipt. When the receipt question went
+        // unanswered the dump fails as rpc (not a fidelity-gate skip): the run was
+        // asked to write a fixture and could not obtain the receipt it needs. Genuine
+        // gate skips (BLOCKHASH, unsupported shape, fidelity mismatch) stay skips.
+        let facts = match self.onchain_receipts.get(&target.tx_hash) {
+            Some(Ok(facts)) => facts,
+            Some(Err(message)) => {
+                return DeferredFixture::Report(FixtureReport::rpc_error(message.clone()));
+            }
+            None => {
+                return DeferredFixture::Report(FixtureReport::rpc_error(
+                    "no on-chain receipt was fetched for this transaction",
+                ));
+            }
+        };
+
+        if accessed_block_hash_count > 0 {
+            return DeferredFixture::Report(FixtureReport::skipped(format!(
+                "transaction reads block hashes (BLOCKHASH): {accessed_block_hash_count} block \
+                 hash(es) were accessed and the fixture cannot faithfully reproduce them"
+            )));
+        }
+
+        // The fidelity gate runs before the transaction's shape is checked, so a
+        // replay that diverged is reported as the divergence it is.
+        let anchor = fixture::anchor_from_receipt_facts(facts);
+        let reproduced = match fixture::check_fidelity(exec_result, &anchor, chain_id) {
+            Ok(reproduced) => reproduced,
+            Err(reason) => {
+                return DeferredFixture::Report(FixtureReport::skipped(format!(
+                    "fidelity gate failed: {reason}"
+                )));
+            }
+        };
+        let dumpable = match fixture::check_dumpable(target_tx) {
+            Ok(dumpable) => dumpable,
+            Err(reason) => return DeferredFixture::Report(FixtureReport::skipped(reason)),
+        };
+
+        let draft = match fixture::build_draft(
+            target.db,
+            &target.result_and_state.state,
+            chain_id,
+            self.executed_spec,
+            self.block,
+            dumpable,
+            fixture::FixtureInputs {
+                mega_env: dump.mega_env.clone(),
+                result: exec_result,
+                reproduced,
+            },
+        ) {
+            Ok(draft) => draft,
+            Err(e) => return DeferredFixture::Report(fixture_report_from_build_err(e)),
+        };
+
+        // The fixture is filed under the transaction's own hash. `tx_hash()` returns
+        // the cached hash an RPC deserialization seeds from the response's `hash`
+        // field, so this name would be the endpoint's to choose — and under
+        // `--overwrite`, an unrelated target's file to replace. It is a verified
+        // value here because no transaction reaches execution without passing
+        // `verify::authenticate_transaction`, which refuses a served `hash` field
+        // that does not match the value the served body hashes to.
+        let tx_hash = target_tx.inner.inner.tx_hash();
+        let path = dump.dir.join(format!("{tx_hash:#x}.json"));
+        // Fast-path courtesy: refuse overwrite before carrying a ready draft so the
+        // harvest path never confuses a finish failure with an overwrite refusal.
+        // Correctness against a concurrent creator is still enforced at materialize
+        // time via noclobber persist.
+        if path.exists() && !dump.overwrite {
+            return DeferredFixture::Report(FixtureReport::error(format!(
+                "fixture already exists at {} (pass --overwrite to replace)",
+                path.display()
+            )));
+        }
+
+        DeferredFixture::Ready { draft: Box::new(draft), path, overwrite: dump.overwrite }
+    }
 }
 
 /// Finalize a deferred fixture after the block `finish()` succeeded.
@@ -1432,23 +1776,38 @@ fn fixture_report_from_build_err(err: fixture::FixtureBuildError) -> FixtureRepo
 ///
 /// Each target maps either to the consensus facts its receipt reports, or to the
 /// message explaining why it could not be verified (the endpoint failed the
-/// call or pruned the receipt, or the receipt describes a different inclusion
-/// than the block being replayed).
+/// call or pruned the receipt, the receipt describes a different inclusion
+/// than the block being replayed, or the block's receipts do not rebuild the
+/// receipts root its header commits to).
+///
+/// When the targets cover the whole body and every receipt was admitted, the
+/// set is authenticated against the header's `receiptsRoot`
+/// ([`coherence::require_committed_receipts`]), and each receipt's served
+/// `gasUsed`, which that root does not cover, against its share of the
+/// committed cumulative gas ([`coherence::require_receipt_gas`]). A set that
+/// fails either is endpoint data no verdict may rest on, so every receipt of the
+/// block becomes unavailable — the same unanswered class as a receipt the
+/// endpoint could not serve — instead of being compared. A partial set cannot
+/// rebuild the root and is left as fetched.
 async fn fetch_target_receipts<P>(
     provider: &P,
     targets: &[B256],
-    block_hash: B256,
+    block: &Block<Transaction>,
 ) -> BTreeMap<B256, std::result::Result<ReceiptFacts, String>>
 where
     P: Provider<op_alloy_network::Optimism>,
 {
+    let block_hash = block.hash();
     let mut receipts = BTreeMap::new();
+    let mut consensus = HashMap::with_capacity(targets.len());
     for tx_hash in targets {
-        let fetched = match verify::fetch_receipt(provider, *tx_hash).await {
-            Ok(receipt) => match verify::check_inclusion(receipt.block_hash(), block_hash) {
-                Ok(()) => Ok(ReceiptFacts::from_receipt(&receipt.inner)),
-                Err(message) => Err(message),
-            },
+        let fetched = match verify::ReceiptEvidence::admit(provider, *tx_hash, block_hash).await {
+            Ok(evidence) => {
+                let receipt = evidence.receipt();
+                consensus
+                    .insert(*tx_hash, (verify::consensus_receipt(receipt), receipt.inner.gas_used));
+                Ok(ReceiptFacts::from_onchain(receipt))
+            }
             // The reported entry already carries the `rpc` kind, so the error's
             // own "RPC error" prefix would only repeat it.
             Err(ReplayError::RpcError(message)) => Err(message),
@@ -1459,7 +1818,59 @@ where
         }
         receipts.insert(*tx_hash, fetched);
     }
+
+    let body: Vec<B256> = block.transactions.hashes().collect();
+    if let Some(ordered) = whole_body_receipts(&body, &mut consensus) {
+        let number = block.header.number();
+        if let Err(incoherence) =
+            authenticate_whole_body(number, block_hash, block.header.receipts_root(), &ordered)
+        {
+            let message = incoherence.to_string();
+            warn!(block = number, %message, "On-chain receipts do not authenticate against the block");
+            for fetched in receipts.values_mut() {
+                *fetched = Err(message.clone());
+            }
+        }
+    }
     receipts
+}
+
+/// One admitted receipt of a whole body: its transaction, its consensus
+/// receipt, and the `gasUsed` the endpoint served beside it.
+type BodyReceipt = (B256, OpReceiptEnvelope, u64);
+
+/// The admitted receipts of every transaction of `body`, in body order, or
+/// `None` when any of them is missing — a body transaction that is not a
+/// target, or whose receipt was not admitted — so the set cannot rebuild the
+/// block's receipts root.
+fn whole_body_receipts(
+    body: &[B256],
+    consensus: &mut HashMap<B256, (OpReceiptEnvelope, u64)>,
+) -> Option<Vec<BodyReceipt>> {
+    body.iter()
+        .map(|hash| consensus.remove(hash).map(|(envelope, gas_used)| (*hash, envelope, gas_used)))
+        .collect()
+}
+
+/// Authenticate the receipts served for a whole body, given in body order:
+/// their consensus receipts must rebuild the header's receipts root
+/// ([`coherence::require_committed_receipts`]), and each served `gasUsed`,
+/// which that root does not cover, must be its share of the committed
+/// cumulative gas ([`coherence::require_receipt_gas`]).
+fn authenticate_whole_body(
+    number: u64,
+    block_hash: B256,
+    receipts_root: B256,
+    ordered: &[BodyReceipt],
+) -> std::result::Result<(), Incoherence> {
+    let envelopes: Vec<OpReceiptEnvelope> =
+        ordered.iter().map(|(_, envelope, _)| envelope.clone()).collect();
+    coherence::require_committed_receipts(number, block_hash, receipts_root, &envelopes)?;
+    let served_gas: Vec<(B256, u64, u64)> = ordered
+        .iter()
+        .map(|(hash, envelope, gas_used)| (*hash, *gas_used, envelope.cumulative_gas_used()))
+        .collect();
+    coherence::require_receipt_gas(number, block_hash, &served_gas)
 }
 
 /// Fetch a block by number, using the same call shape as the single-transaction path.
@@ -1581,10 +1992,11 @@ fn emit(entry: &BatchEntry, json: bool) {
     if json {
         let line = match entry {
             BatchEntry::Executed(tx) => {
-                let mut summary =
-                    ExecutionSummary::from_result(&tx.exec_result, tx.contract_address);
-                summary.receipt =
-                    Some(serde_json::to_value(&tx.receipt).expect("failed to serialize receipt"));
+                let mut summary = ExecutionSummary::of_transaction(
+                    &tx.exec_result,
+                    tx.receipt.contract_address,
+                    Some(&tx.receipt),
+                );
                 summary.verification = tx.verification.as_ref().map(|verification| {
                     serde_json::to_value(verification).expect("failed to serialize verification")
                 });
@@ -1612,16 +2024,19 @@ fn emit(entry: &BatchEntry, json: bool) {
                 "=== Transaction {} (block {}, index {}) ===",
                 tx.tx_hash, tx.block_number, tx.tx_index
             );
-            print_execution_summary(&tx.exec_result, tx.contract_address, tx.exec_time);
-            print_receipt(&tx.receipt);
-            if let Some(verification) = &tx.verification {
-                println!();
-                println!("{}", verification.verdict_line());
-            }
-            if let Some(fixture) = &tx.fixture {
-                println!();
-                println!("{}", fixture.human_line());
-            }
+            let notes: Vec<String> = tx
+                .verification
+                .iter()
+                .map(|verification| verification.verdict_line())
+                .chain(tx.fixture.iter().map(FixtureReport::human_line))
+                .collect();
+            print_transaction_report(
+                &tx.exec_result,
+                tx.receipt.contract_address,
+                tx.exec_time,
+                Some(&tx.receipt),
+                &notes,
+            );
         }
         BatchEntry::Failed(tx) => {
             println!();
@@ -1629,6 +2044,22 @@ fn emit(entry: &BatchEntry, json: bool) {
             println!("Error ({}): {}", tx.kind.as_str(), tx.message);
         }
     }
+}
+
+/// Write one block's verdict to stdout, after the block's target entries.
+fn emit_block(report: &BlockReport, json: bool) {
+    if json {
+        let line = serde_json::to_string(&BatchBlockLine {
+            block_number: report.number,
+            block_hash: report.hash,
+            block_verification: &report.verification,
+        });
+        println!("{}", line.expect("failed to serialize output"));
+        return;
+    }
+    println!();
+    println!("=== Block {} ({}) ===", report.number, report.hash);
+    println!("{}", report.verification.verdict_line());
 }
 
 /// Parse the newline-separated transaction hash list behind `--tx-file`.
@@ -1684,7 +2115,10 @@ mod tests {
 
     /// A verification verdict as a run would have reported it.
     fn verdict(matched: bool) -> VerificationOutcome {
-        VerificationOutcome::compared(matched, None)
+        VerificationOutcome::compared((!matched).then(|| verify::VerificationDiff {
+            gas_used: Some(verify::Mismatch { onchain: 1, replay: 2 }),
+            ..Default::default()
+        }))
     }
 
     /// Build a tally from the outcomes a run would have reported: `failures`
@@ -2011,13 +2445,190 @@ mod tests {
         assert_eq!(ExitCode::from_batch_failures(&counts), ExitCode::RpcFailure);
     }
 
+    /// A whole body's receipt with the given cumulative gas, as a block commits
+    /// to it, beside the `gasUsed` the endpoint served for it.
+    fn body_receipt(byte: u8, cumulative_gas_used: u64, served_gas_used: u64) -> BodyReceipt {
+        let receipt = alloy_consensus::Receipt {
+            status: alloy_consensus::Eip658Value::Eip658(true),
+            cumulative_gas_used,
+            logs: vec![],
+        };
+        (B256::repeat_byte(byte), OpReceiptEnvelope::Eip1559(receipt.with_bloom()), served_gas_used)
+    }
+
+    /// The root the header would commit to for these receipts.
+    fn committed_root(receipts: &[BodyReceipt]) -> B256 {
+        let envelopes: Vec<OpReceiptEnvelope> =
+            receipts.iter().map(|(_, envelope, _)| envelope.clone()).collect();
+        header::receipts_root(&envelopes)
+    }
+
+    /// An honest whole body authenticates: its receipts rebuild the root and
+    /// every served `gasUsed` is its rise in cumulative gas.
+    #[test]
+    fn test_authenticate_whole_body_accepts_an_honest_body() {
+        let body = [body_receipt(1, 40_000, 40_000), body_receipt(2, 61_000, 21_000)];
+
+        assert_eq!(authenticate_whole_body(7, B256::ZERO, committed_root(&body), &body), Ok(()));
+    }
+
+    /// A served `gasUsed` the receipts root does not cover is still checked, and
+    /// named at the receipt that carries it.
+    #[test]
+    fn test_authenticate_whole_body_rejects_a_forged_gas_used() {
+        let body = [body_receipt(1, 40_000, 40_000), body_receipt(2, 61_000, 1)];
+
+        assert!(matches!(
+            authenticate_whole_body(7, B256::ZERO, committed_root(&body), &body),
+            Err(Incoherence::InconsistentReceiptGas { tx_hash, served: 1, .. })
+                if tx_hash == B256::repeat_byte(2)
+        ));
+    }
+
+    /// The receipts root is checked first: a set the header does not commit to
+    /// is reported as such, whatever its `gasUsed` fields say.
+    #[test]
+    fn test_authenticate_whole_body_checks_the_root_first() {
+        let committed = [body_receipt(1, 40_000, 40_000), body_receipt(2, 61_000, 21_000)];
+        let served = [body_receipt(1, 40_000, 40_000), body_receipt(2, 62_000, 1)];
+
+        assert!(matches!(
+            authenticate_whole_body(7, B256::ZERO, committed_root(&committed), &served),
+            Err(Incoherence::UncommittedReceipts { .. })
+        ));
+    }
+
     /// A run whose only finding is divergence fails as the mismatch it is.
     #[test]
     fn test_batch_tally_mismatch_only_reports_the_verification_error() {
         let err = tally(&[], 4, 2).into_error().expect("run failed");
         assert!(
-            matches!(err, ReplayError::VerificationMismatch { mismatched: 2, total: 4 }),
+            matches!(
+                err,
+                ReplayError::VerificationMismatch(counts)
+                    if counts == VerificationCounts::receipts(2, 4)
+            ),
             "unexpected error: {err:?}"
+        );
+    }
+
+    /// A block verdict as a run would have reported it.
+    fn block_verdict(matched: bool) -> BlockReport {
+        let diff = header::BlockDiff {
+            gas_used: Some(verify::Mismatch { onchain: 1, replay: 2 }),
+            ..Default::default()
+        };
+        block_report(BlockVerification::compared((!matched).then_some(diff)), false)
+    }
+
+    /// A block report carrying `verification`.
+    fn block_report(verification: BlockVerification, unanswered: bool) -> BlockReport {
+        BlockReport { number: 1, hash: B256::ZERO, verification, unanswered }
+    }
+
+    /// A block that did not reproduce its header is a divergence: alone it
+    /// fails the run as a block-only mismatch (exit 2).
+    #[test]
+    fn test_batch_tally_block_mismatch_alone_exits_two() {
+        let mut tally = tally(&[], 3, 0);
+        tally.record_block(&block_verdict(false));
+
+        assert_eq!(tally.blocks_verified, 1);
+        assert_eq!(tally.counts.blocks_mismatched, 1);
+        let err = tally.into_error().expect("run failed");
+        assert_eq!(ExitCode::from_evme_error(&err), ExitCode::VerificationMismatch);
+        assert_eq!(
+            err.to_string(),
+            "Block verification mismatch: 1 of 1 verified block(s) did not reproduce the block \
+             header"
+        );
+    }
+
+    /// Receipt and block divergences are counted side by side and both named.
+    #[test]
+    fn test_batch_tally_counts_receipt_and_block_mismatches_together() {
+        let mut tally = tally(&[], 23, 10);
+        tally.record_block(&block_verdict(false));
+
+        let err = tally.into_error().expect("run failed");
+        let ReplayError::VerificationMismatch(counts) = err else {
+            panic!("a divergence-only run fails as a mismatch: {err:?}");
+        };
+        assert_eq!(
+            counts,
+            VerificationCounts {
+                receipts_mismatched: 10,
+                receipts_total: 23,
+                blocks_mismatched: 1,
+                blocks_total: 1,
+            }
+        );
+    }
+
+    /// A matching block adds nothing to fail on, and an unavailable verdict is
+    /// not counted at all: the block's own target failures decide the exit.
+    #[test]
+    fn test_batch_tally_matching_and_unavailable_block_verdicts_add_no_failure() {
+        let mut clean = tally(&[], 3, 0);
+        clean.record_block(&block_verdict(true));
+        assert_eq!(clean.blocks_verified, 1);
+        assert!(clean.into_error().is_none(), "a matching block passes");
+
+        // One target replayed, one swept behind an abort.
+        let mut aborted = tally(&[BatchErrorKind::Rpc], 1, 0);
+        aborted.record_block(&block_report(
+            BlockVerification::unavailable("the block body did not execute"),
+            false,
+        ));
+        assert_eq!(aborted.blocks_verified, 0, "an unavailable verdict was never compared");
+        assert_eq!(aborted.counts.blocks_mismatched, 0);
+        let err = aborted.into_error().expect("the swept target fails the run");
+        assert_eq!(ExitCode::from_evme_error(&err), ExitCode::RpcFailure);
+    }
+
+    /// A block the endpoint contradicted itself about is counted as an
+    /// unanswered block: it fails the run as rpc-class even when every target
+    /// came out clean, and never counts as verified or mismatched.
+    #[test]
+    fn test_batch_tally_unanswered_block_fails_as_rpc() {
+        let mut tally = tally(&[], 22, 0);
+        tally.record_block(&block_report(
+            BlockVerification::unavailable(
+                "the endpoint served a body the header does not commit to",
+            ),
+            true,
+        ));
+
+        assert_eq!(tally.blocks_verified, 0);
+        assert_eq!(tally.counts.blocks_mismatched, 0);
+        assert_eq!(tally.counts.blocks_unanswered, 1);
+        let err = tally.into_error().expect("an unanswered block fails the run");
+        assert_eq!(ExitCode::from_evme_error(&err), ExitCode::RpcFailure);
+        assert_eq!(
+            err.to_string(),
+            "1 block(s) could not be verified against the block header",
+            "the message names the block, not a target count"
+        );
+    }
+
+    /// A block mismatch never outranks an infrastructure failure: the run fails
+    /// with the class counts, which still name the mismatched block.
+    #[test]
+    fn test_batch_tally_block_mismatch_ranks_below_infrastructure_failures() {
+        let mut tally = tally(&[BatchErrorKind::Rpc], 2, 0);
+        tally.record_block(&block_verdict(false));
+
+        let err = tally.into_error().expect("run failed");
+        let ReplayError::BatchFailed(counts) = &err else {
+            panic!("an infrastructure failure aggregates: {err:?}");
+        };
+        assert_eq!(counts.blocks_mismatched, 1);
+        assert_eq!(ExitCode::from_evme_error(&err), ExitCode::RpcFailure);
+        assert!(
+            counts
+                .to_string()
+                .ends_with("; 1 replayed block(s) did not reproduce the block header"),
+            "unexpected message: {counts}"
         );
     }
 
@@ -2084,18 +2695,18 @@ mod tests {
     ///
     /// Which builder rejection lands in which variant is decided inside
     /// `build_draft` and pinned by the integration tests that drive the real
-    /// builder (deposit skip, injected pre-state failure); this test only pins
-    /// the variant-to-report mapping, which no rewording can move.
+    /// builder (injected pre-state failure); this test only pins the
+    /// variant-to-report mapping, which no rewording can move.
     #[test]
     fn test_fixture_build_err_classifies_skips_vs_construction_errors() {
         let unsupported = fixture_report_from_build_err(fixture::FixtureBuildError::Unsupported(
-            "--dump-fixture does not support deposit transactions".into(),
+            "--dump-fixture: spec REX7 has no fixture mapping".into(),
         ));
         assert!(unsupported.skipped.is_some(), "unsupported shape is a skip: {unsupported:?}");
         assert!(unsupported.error.is_none());
         assert_eq!(
             unsupported.skipped.as_deref(),
-            Some("--dump-fixture does not support deposit transactions"),
+            Some("--dump-fixture: spec REX7 has no fixture mapping"),
             "the builder's reason is reported verbatim"
         );
 
@@ -2111,6 +2722,84 @@ mod tests {
             "construction failure is a fixture error: {construction:?}"
         );
         assert!(construction.skipped.is_none());
+    }
+
+    /// A deposit transaction served by the endpoint, as a block body lists one.
+    fn deposit_transaction() -> Transaction {
+        let envelope = op_alloy_consensus::OpTxEnvelope::Deposit(alloy_primitives::Sealed::new(
+            op_alloy_consensus::TxDeposit::default(),
+        ));
+        let inner = alloy_rpc_types_eth::Transaction {
+            inner: Recovered::new_unchecked(envelope, alloy_primitives::Address::ZERO),
+            block_hash: None,
+            block_number: None,
+            block_timestamp: None,
+            transaction_index: None,
+            effective_gas_price: None,
+        };
+        Transaction { inner, deposit_nonce: None, deposit_receipt_version: None }
+    }
+
+    /// Batch dump runs the fidelity gate before the shape check: a deposit
+    /// whose replay diverged from its receipt is skipped as the divergence, and
+    /// one whose replay is faithful is skipped as the unsupported shape.
+    #[test]
+    fn test_fixture_fidelity_gate_ranks_before_the_shape_check() {
+        let result: ExecutionResult<MegaHaltReason> = ExecutionResult::Success {
+            reason: mega_evm::revm::context::result::SuccessReason::Return,
+            gas: Default::default(),
+            logs: Vec::new(),
+            output: mega_evm::revm::context::result::Output::Call(Bytes::new()),
+        };
+        let tx = deposit_transaction();
+        let tx_hash = B256::repeat_byte(0x7e);
+        let block = Block::<Transaction>::default();
+        let dir = std::env::temp_dir();
+        let dump = FixtureDumpEnv { dir: &dir, overwrite: false, mega_env: MegaEnv::default() };
+        let result_and_state = mega_evm::revm::context::result::ResultAndState {
+            result: result.clone(),
+            state: Default::default(),
+        };
+        let skip_reason = |onchain_gas: u64| {
+            let onchain_receipts = BTreeMap::from([(
+                tx_hash,
+                Ok(ReceiptFacts {
+                    status: true,
+                    gas_used: onchain_gas,
+                    cumulative_gas_used: onchain_gas,
+                    tx_type: 0x7e,
+                    deposit_nonce: None,
+                    deposit_receipt_version: None,
+                    logs: Vec::new(),
+                }),
+            )]);
+            let hook = FixtureDraftHook {
+                dump: None,
+                chain_id: 4326,
+                executed_spec: MegaSpecId::REX6,
+                block: &block,
+                onchain_receipts: &onchain_receipts,
+            };
+            let report = hook.prepare_fixture(
+                &dump,
+                &kernel::TargetExecution {
+                    db: &mega_evm::revm::database::EmptyDB::default(),
+                    tx_hash,
+                    tx: &tx,
+                    accessed_block_hash_count: 0,
+                    result_and_state: &result_and_state,
+                },
+            );
+            match report {
+                DeferredFixture::Report(report) => report.skipped.expect("a skip"),
+                DeferredFixture::Ready { .. } => panic!("a deposit is never dumped"),
+            }
+        };
+
+        let diverged = skip_reason(result.tx_gas_used() + 1);
+        assert!(diverged.starts_with("fidelity gate failed: "), "skip={diverged}");
+        let faithful = skip_reason(result.tx_gas_used());
+        assert!(faithful.contains("deposit"), "skip={faithful}");
     }
 
     /// A pre-decided fixture report is never rewritten by materialization, so a

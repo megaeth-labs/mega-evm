@@ -18,6 +18,7 @@ use std::{
 use alloy_primitives::B256;
 use serde::{Deserialize, Serialize};
 
+use super::lock::canonical_target;
 use crate::common::{EvmeError, Result};
 
 /// Current on-disk envelope schema version (must match capture/replay).
@@ -83,7 +84,7 @@ impl ExternalEnvDoc {
 }
 
 /// Deduplicate by bucket id (last-wins), then sort by bucket id.
-pub(crate) fn canonicalize_bucket_capacities(caps: &[(u32, u64)]) -> Vec<(u32, u64)> {
+fn canonicalize_bucket_capacities(caps: &[(u32, u64)]) -> Vec<(u32, u64)> {
     let mut map = BTreeMap::new();
     for &(id, capacity) in caps {
         map.insert(id, capacity);
@@ -184,60 +185,96 @@ pub(crate) enum EnvelopeReread {
     Hard(EvmeError),
 }
 
+/// Why a JSON file could not be read, by stage.
+#[derive(Debug)]
+pub(crate) enum JsonFileError {
+    /// The file could not be read.
+    Read(std::io::Error),
+    /// The content is not JSON.
+    Parse(serde_json::Error),
+}
+
+/// Read the file at `path` and parse it as JSON.
+///
+/// The first two stages every cache-file reader shares. Each caller maps a
+/// failure onto its own error type and policy.
+pub(crate) fn read_json_file(path: &Path) -> std::result::Result<serde_json::Value, JsonFileError> {
+    let content = fs::read_to_string(path).map_err(JsonFileError::Read)?;
+    serde_json::from_str(&content).map_err(JsonFileError::Parse)
+}
+
+/// Why an envelope file could not be read as an [`EnvelopeDoc`], by stage.
+///
+/// The stages and their order are shared by every reader of a whole envelope;
+/// what each stage means — a hard failure, a degradable one, which error type
+/// and which message — is the caller's policy.
+#[derive(Debug)]
+pub(crate) enum EnvelopeReadError {
+    /// The file could not be read or is not JSON.
+    File(JsonFileError),
+    /// Structured JSON in a shape neither writer produces; carries
+    /// [`detect_shape`]'s diagnostic.
+    Unrecognized(EvmeError),
+    /// The bare array a retired build wrote ([`CacheShape::Provider`]).
+    RetiredArray,
+    /// An envelope whose fields do not decode.
+    Decode(serde_json::Error),
+    /// An envelope of a version this build does not read.
+    Version(u32),
+}
+
+/// Read the envelope at `path`: read, parse, recognize the shape, decode, and
+/// check the version, in that order.
+pub(crate) fn read_envelope_doc(
+    path: &Path,
+) -> std::result::Result<EnvelopeDoc, EnvelopeReadError> {
+    let value = read_json_file(path).map_err(EnvelopeReadError::File)?;
+    match detect_shape(&value, path).map_err(EnvelopeReadError::Unrecognized)? {
+        CacheShape::Envelope => {}
+        CacheShape::Provider => return Err(EnvelopeReadError::RetiredArray),
+    }
+    let doc: EnvelopeDoc = serde_json::from_value(value).map_err(EnvelopeReadError::Decode)?;
+    if doc.version != ENVELOPE_VERSION {
+        return Err(EnvelopeReadError::Version(doc.version));
+    }
+    Ok(doc)
+}
+
+/// The diagnostic for an envelope of a version this build does not read.
+pub(crate) fn unsupported_version_message(version: u32, path: &Path) -> String {
+    format!(
+        "Unsupported cache file version {version} in '{}'; expected {ENVELOPE_VERSION}",
+        path.display()
+    )
+}
+
 /// Re-read an on-disk envelope for the lock-protected merge-on-persist path.
 ///
 /// Distinguishes hard identity failures from degradable corrupt content without
 /// substring-searching formatted messages.
 pub(crate) fn reread_envelope_for_merge(path: &Path) -> EnvelopeReread {
-    let content = match fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(e) => {
-            return EnvelopeReread::Degradable(format!(
-                "Failed to read envelope {}: {e}",
-                path.display()
-            ));
+    match read_envelope_doc(path) {
+        Ok(doc) => EnvelopeReread::Ok(doc),
+        Err(EnvelopeReadError::File(JsonFileError::Read(e))) => {
+            EnvelopeReread::Degradable(format!("Failed to read envelope {}: {e}", path.display()))
         }
-    };
-    let value: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(e) => {
-            return EnvelopeReread::Degradable(format!(
-                "Failed to parse envelope {}: {e}",
-                path.display()
-            ));
+        Err(EnvelopeReadError::File(JsonFileError::Parse(e))) => {
+            EnvelopeReread::Degradable(format!("Failed to parse envelope {}: {e}", path.display()))
         }
-    };
-    let shape = match detect_shape(&value, path) {
-        Ok(s) => s,
-        Err(e) => {
-            // Unrecognized shape is a hard identity/schema failure: the on-disk
-            // file is not a capture envelope this build can merge into.
-            return EnvelopeReread::Hard(EvmeError::FixtureError(e.to_string()));
+        // Unrecognized shape is a hard identity/schema failure: the on-disk
+        // file is not a capture envelope this build can merge into.
+        Err(EnvelopeReadError::Unrecognized(e)) => {
+            EnvelopeReread::Hard(EvmeError::FixtureError(e.to_string()))
         }
-    };
-    match shape {
-        CacheShape::Envelope => {
-            let doc: EnvelopeDoc = match serde_json::from_value(value) {
-                Ok(d) => d,
-                Err(e) => {
-                    return EnvelopeReread::Degradable(format!(
-                        "Failed to decode envelope {}: {e}",
-                        path.display()
-                    ));
-                }
-            };
-            if doc.version != ENVELOPE_VERSION {
-                return EnvelopeReread::Hard(EvmeError::FixtureError(format!(
-                    "Unsupported cache file version {} in '{}'; expected {ENVELOPE_VERSION}",
-                    doc.version,
-                    path.display(),
-                )));
-            }
-            EnvelopeReread::Ok(doc)
-        }
-        CacheShape::Provider => {
+        Err(EnvelopeReadError::RetiredArray) => {
             EnvelopeReread::Hard(EvmeError::FixtureError(retired_array_format_message(path)))
         }
+        Err(EnvelopeReadError::Decode(e)) => {
+            EnvelopeReread::Degradable(format!("Failed to decode envelope {}: {e}", path.display()))
+        }
+        Err(EnvelopeReadError::Version(version)) => EnvelopeReread::Hard(EvmeError::FixtureError(
+            unsupported_version_message(version, path),
+        )),
     }
 }
 
@@ -506,26 +543,79 @@ pub(crate) fn write_envelope_atomic(path: &Path, doc: &EnvelopeDoc) -> Result<()
     })
 }
 
-/// Temp-file + rename write.
-pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+/// Whether an atomic write may replace a file already at its destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WriteMode {
+    /// Replace whatever is at the destination.
+    Replace,
+    /// Refuse to replace an existing file: the rename itself fails, so a file
+    /// that appears concurrently is never clobbered either.
+    NoClobber,
+}
+
+/// The stage of an atomic write that failed.
+///
+/// Typed by stage so each caller keeps its own diagnostic for every one.
+#[derive(Debug)]
+pub(crate) enum AtomicWriteError {
+    /// The temporary file could not be created in `dir`.
+    Create {
+        /// Directory the temporary file was to be created in.
+        dir: PathBuf,
+        /// Why it could not be.
+        source: std::io::Error,
+    },
+    /// Writing the bytes failed.
+    Write(std::io::Error),
+    /// Flushing the bytes failed.
+    Flush(std::io::Error),
+    /// Syncing the file to disk failed.
+    Sync(std::io::Error),
+    /// The temporary file could not be renamed into place; under
+    /// [`WriteMode::NoClobber`], also because the destination exists.
+    Persist(std::io::Error),
+}
+
+/// Write `bytes` to `path` through a temporary file in the same directory,
+/// synced to disk and then renamed into place.
+pub(crate) fn write_atomic(
+    path: &Path,
+    bytes: &[u8],
+    mode: WriteMode,
+) -> std::result::Result<(), AtomicWriteError> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(|e| {
-        std::io::Error::other(format!("failed to create temp file in {}: {e}", dir.display()))
-    })?;
-    tmp.write_all(bytes)?;
-    tmp.flush()?;
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)
+        .map_err(|source| AtomicWriteError::Create { dir: dir.to_path_buf(), source })?;
+    tmp.write_all(bytes).map_err(AtomicWriteError::Write)?;
+    tmp.flush().map_err(AtomicWriteError::Flush)?;
     // flush() only clears the userspace buffer. Without sync_all() a crash
     // between write and rename can publish a truncated file under the target
     // name — the rename is atomic, the contents are not.
-    tmp.as_file().sync_all()?;
-    tmp.persist(path).map_err(|e| {
-        std::io::Error::other(format!(
-            "failed to rename temp file into {}: {}",
+    tmp.as_file().sync_all().map_err(AtomicWriteError::Sync)?;
+    let persisted = match mode {
+        WriteMode::Replace => tmp.persist(path),
+        WriteMode::NoClobber => tmp.persist_noclobber(path),
+    };
+    persisted.map(drop).map_err(|e| AtomicWriteError::Persist(e.error))
+}
+
+/// Temp-file + rename write that replaces the cache file `path` names.
+///
+/// The write lands on the [`canonical_target`], the file the lock protects, so
+/// a symlink is written through rather than replaced. Errors name the path as
+/// given.
+pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic(&canonical_target(path), bytes, WriteMode::Replace).map_err(|e| match e {
+        AtomicWriteError::Create { source, .. } => std::io::Error::other(format!(
+            "failed to create temp file in {}: {source}",
+            path.parent().unwrap_or_else(|| Path::new(".")).display()
+        )),
+        AtomicWriteError::Write(e) | AtomicWriteError::Flush(e) | AtomicWriteError::Sync(e) => e,
+        AtomicWriteError::Persist(e) => std::io::Error::other(format!(
+            "failed to rename temp file into {}: {e}",
             path.display(),
-            e.error,
-        ))
-    })?;
-    Ok(())
+        )),
+    })
 }
 
 /// Load a `cache merge` input, which must be an envelope.
@@ -536,24 +626,23 @@ pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<(
 /// key their entries differently, so a union of the two would be a file no
 /// build can serve ([`retired_array_format_message`]).
 pub(crate) fn load_cache_file(path: &Path) -> Result<EnvelopeDoc> {
-    let content = fs::read_to_string(path)
-        .map_err(|e| EvmeError::InvalidInput(format!("Failed to read {}: {e}", path.display())))?;
-    let value: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| EvmeError::InvalidInput(format!("Failed to parse {}: {e}", path.display())))?;
-    if !matches!(detect_shape(&value, path), Ok(CacheShape::Envelope)) {
-        return Err(EvmeError::InvalidInput(retired_array_format_message(path)));
-    }
-    let doc: EnvelopeDoc = serde_json::from_value(value).map_err(|e| {
-        EvmeError::InvalidInput(format!("Failed to decode envelope {}: {e}", path.display()))
-    })?;
-    if doc.version != ENVELOPE_VERSION {
-        return Err(EvmeError::InvalidInput(format!(
-            "Unsupported cache file version {} in '{}'; expected {ENVELOPE_VERSION}",
-            doc.version,
-            path.display(),
-        )));
-    }
-    Ok(doc)
+    read_envelope_doc(path).map_err(|e| {
+        EvmeError::InvalidInput(match e {
+            EnvelopeReadError::File(JsonFileError::Read(e)) => {
+                format!("Failed to read {}: {e}", path.display())
+            }
+            EnvelopeReadError::File(JsonFileError::Parse(e)) => {
+                format!("Failed to parse {}: {e}", path.display())
+            }
+            EnvelopeReadError::Unrecognized(_) | EnvelopeReadError::RetiredArray => {
+                retired_array_format_message(path)
+            }
+            EnvelopeReadError::Decode(e) => {
+                format!("Failed to decode envelope {}: {e}", path.display())
+            }
+            EnvelopeReadError::Version(version) => unsupported_version_message(version, path),
+        })
+    })
 }
 
 #[cfg(test)]
@@ -620,6 +709,82 @@ mod tests {
         fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).expect("write");
 
         assert_eq!(load_cache_file(&path).expect("envelope loads"), doc);
+    }
+
+    /// `NoClobber` leaves an existing file alone and reports the rename stage;
+    /// `Replace` replaces it; a missing directory fails at creation.
+    #[test]
+    fn test_write_atomic_modes_and_stages() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("file.json");
+        fs::write(&path, "old").expect("write");
+
+        assert!(matches!(
+            write_atomic(&path, b"new", WriteMode::NoClobber),
+            Err(AtomicWriteError::Persist(_))
+        ));
+        assert_eq!(fs::read_to_string(&path).expect("read"), "old");
+
+        write_atomic(&path, b"new", WriteMode::Replace).expect("replace");
+        assert_eq!(fs::read_to_string(&path).expect("read"), "new");
+
+        let fresh = dir.path().join("fresh.json");
+        write_atomic(&fresh, b"fresh", WriteMode::NoClobber).expect("a new file is written");
+        assert_eq!(fs::read_to_string(&fresh).expect("read"), "fresh");
+
+        let missing = dir.path().join("missing").join("file.json");
+        match write_atomic(&missing, b"", WriteMode::Replace) {
+            Err(AtomicWriteError::Create { dir: at, .. }) => {
+                assert_eq!(at, dir.path().join("missing"));
+            }
+            other => panic!("a missing directory fails at creation: {other:?}"),
+        }
+    }
+
+    /// Each stage of reading an envelope reports its own failure, in order:
+    /// read, parse, shape, decode, version.
+    #[test]
+    fn test_read_envelope_doc_reports_each_stage() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stage = |name: &str, content: Option<&str>| {
+            let path = dir.path().join(name);
+            if let Some(content) = content {
+                fs::write(&path, content).expect("write");
+            }
+            read_envelope_doc(&path)
+        };
+
+        assert!(matches!(
+            stage("absent.json", None),
+            Err(EnvelopeReadError::File(JsonFileError::Read(_)))
+        ));
+        assert!(matches!(
+            stage("corrupt.json", Some("{not json")),
+            Err(EnvelopeReadError::File(JsonFileError::Parse(_)))
+        ));
+        assert!(matches!(
+            stage("foreign.json", Some(r#"{"foo": 1}"#)),
+            Err(EnvelopeReadError::Unrecognized(_))
+        ));
+        assert!(matches!(stage("retired.json", Some("[]")), Err(EnvelopeReadError::RetiredArray)));
+        assert!(matches!(
+            stage("undecodable.json", Some(r#"{"version": 1, "chain_id": 1, "cache": 5}"#)),
+            Err(EnvelopeReadError::Decode(_))
+        ));
+        assert!(
+            matches!(
+                stage("future.json", Some(r#"{"version": 2, "chain_id": 1, "cache": 5}"#)),
+                Err(EnvelopeReadError::Decode(_))
+            ),
+            "an undecodable envelope fails before its version is read"
+        );
+        assert!(matches!(
+            stage("future.json", Some(r#"{"version": 2, "chain_id": 1, "cache": []}"#)),
+            Err(EnvelopeReadError::Version(2))
+        ));
+        let doc = stage("ok.json", Some(r#"{"version": 1, "chain_id": 1, "cache": []}"#))
+            .expect("a current envelope reads");
+        assert_eq!(doc.chain_id, 1);
     }
 
     #[test]

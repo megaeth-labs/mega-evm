@@ -29,6 +29,12 @@ mega-evme tx 0x02f8...
 mega-evme tx 0x02f8... --input 0xdeadbeef
 ```
 
+The overrides are checked against the transaction they produce, with the same rules a flags-only transaction follows, before anything executes.
+The transaction's type is `--tx-type` when given and the decoded type otherwise, and only flags you pass are checked, so an omitted flag keeps the decoded value.
+`--source-hash` and `--mint` need a deposit, `--priority-fee` a type other than legacy or EIP-2930, `--auth` an EIP-7702 transaction, and `--access` an EIP-2930, EIP-1559, or EIP-7702 transaction; `--create` cannot be combined with `--receiver`.
+When `--tx-type` changes the type, the fields the transaction keeps from its decoded form are held to the same rules: a priority fee, an access list, or an authorization list the new type cannot carry is rejected rather than silently dropped.
+`--tx-type` also cannot turn the transaction into a deposit or a deposit into another type, since a deposit's fields come from the decoded transaction.
+
 If `RAW_TX` is omitted, `mega-evme` builds the transaction entirely from CLI flags.
 The default sender is `0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266` and the default gas limit is `10000000`.
 
@@ -84,6 +90,8 @@ The output includes the same fields as [`run --json`](run.md#json-output), plus 
 | Field     | Type             | Description                                                                 |
 | --------- | ---------------- | --------------------------------------------------------------------------- |
 | `receipt` | `object \| null` | Full transaction receipt with status, logs, gas usage, and contract address |
+
+The receipt's `contractAddress` is set for every contract creation, including one whose init code reverted or halted, as an execution client's receipt reports it, while the summary's `contract_address` names only a contract that was actually deployed.
 
 ```bash
 mega-evme tx --fork --rpc https://mainnet.megaeth.com/rpc \

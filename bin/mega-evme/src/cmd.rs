@@ -32,9 +32,6 @@ pub enum Commands {
 /// Error types for the main command system
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// Custom error with static message
-    #[error("Custom error: {0}")]
-    Custom(&'static str),
     /// Evme error (used by run, tx, and replay commands)
     #[error("{0}")]
     Evme(#[from] crate::common::EvmeError),

@@ -41,10 +41,11 @@ use tracing::{debug, info, warn};
 use super::transport::TransportCache;
 use crate::{
     cache::{
-        acquire_exclusive_lock, detect_shape, lock_sidecar_path, merge_cache_entries_capped,
-        merge_envelope_for_persist, reread_envelope_for_merge, warn_user, write_bytes_atomic,
+        acquire_exclusive_lock, canonical_target, detect_shape, lock_sidecar_path,
+        merge_cache_entries_capped, merge_envelope_for_persist, read_json_file,
+        reread_envelope_for_merge, unsupported_version_message, warn_user, write_bytes_atomic,
         write_envelope_atomic, CacheKv, CacheShape, EnvelopeDoc, EnvelopeReread, ExternalEnvDoc,
-        ENVELOPE_VERSION,
+        JsonFileError, ENVELOPE_VERSION,
     },
     common::{EvmeError, Result},
 };
@@ -169,9 +170,6 @@ impl RpcCacheStore {
 
     /// Seed a response into the in-memory transport cache, as a served RPC call
     /// would. Returns `false` for stores that hold no transport cache.
-    ///
-    /// The entry is persistable: seeding stands in for a response the cache
-    /// policy admitted, which is the only kind a test has reason to plant.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn put_cache_entry(&self, key: B256, value: String) -> bool {
         match &self.inner {
@@ -179,7 +177,7 @@ impl RpcCacheStore {
                 RpcCacheStoreInner::OnlineCache { cache, .. } |
                 RpcCacheStoreInner::FixtureCapture { cache, .. },
             ) => {
-                cache.put(key, value, true);
+                cache.put(key, value);
                 true
             }
             _ => false,
@@ -341,15 +339,12 @@ fn classify_online_cache_file(path: &Path, chain_id: u64) -> OnlineCacheFile {
     if !path.exists() {
         return OnlineCacheFile::Absent;
     }
-    let content = match fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(e) => {
+    let value = match read_json_file(path) {
+        Ok(value) => value,
+        Err(JsonFileError::Read(e)) => {
             return OnlineCacheFile::Foreign(format!("cannot be read ({e})"));
         }
-    };
-    let value: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(value) => value,
-        Err(e) => {
+        Err(JsonFileError::Parse(e)) => {
             return OnlineCacheFile::Stale(format!("is not valid JSON ({e})"));
         }
     };
@@ -459,7 +454,7 @@ fn adopt_online_cache_file(
         OnlineCacheFile::Ours(entries) => {
             let count = entries.len();
             for entry in entries {
-                cache.put(entry.key, entry.value, true);
+                cache.put(entry.key, entry.value);
             }
             debug!(path = %path.display(), entries = count, "Loaded RPC cache");
             Ok(())
@@ -475,7 +470,9 @@ fn adopt_online_cache_file(
             Ok(())
         }
         OnlineCacheFile::Stale(reason) => {
-            match fs::remove_file(path) {
+            // The file the lock protects, so a symlinked path removes the cache
+            // it points to rather than the link.
+            match fs::remove_file(canonical_target(path)) {
                 Ok(()) => warn_user(format_args!(
                     "Replaced the RPC cache at '{}': it {reason}. Starting with an \
                      empty cache",
@@ -634,10 +631,9 @@ impl CacheFileEnvelope {
             ))
         })?;
         if envelope.version != ENVELOPE_VERSION {
-            return Err(EvmeError::FixtureError(format!(
-                "Unsupported cache file version {} in '{}'; expected {ENVELOPE_VERSION}",
+            return Err(EvmeError::FixtureError(unsupported_version_message(
                 envelope.version,
-                path.display(),
+                path,
             )));
         }
         Ok(envelope)
@@ -745,7 +741,7 @@ mod tests {
     fn online_cache(max_entries: u32, entries: &[(B256, &str)]) -> TransportCache {
         let cache = TransportCache::with_max_entries(max_entries);
         for (key, value) in entries {
-            cache.put(*key, (*value).to_string(), true);
+            cache.put(*key, (*value).to_string());
         }
         cache
     }
@@ -807,7 +803,7 @@ mod tests {
             (0..20u8).map(|i| (B256::repeat_byte(i), format!(r#"{{"result":"{i}"}}"#))).collect();
         let sibling = TransportCache::with_max_entries(64);
         for (key, value) in &sibling_entries {
-            sibling.put(*key, value.clone(), true);
+            sibling.put(*key, value.clone());
         }
         assert!(save_online_cache_atomic(&sibling, &path, 1).expect("persist sibling"));
 
@@ -815,7 +811,7 @@ mod tests {
         let mine: Vec<B256> = (100..104u8).map(B256::repeat_byte).collect();
         let ours = TransportCache::with_max_entries(4);
         for key in &mine {
-            ours.put(*key, r#"{"result":"mine"}"#.to_string(), true);
+            ours.put(*key, r#"{"result":"mine"}"#.to_string());
         }
         assert!(save_online_cache_atomic(&ours, &path, 1).expect("persist ours"));
 
@@ -866,6 +862,30 @@ mod tests {
         let entries = on_disk_entries(&path);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].value, "from-a");
+    }
+
+    /// Online persist through a symlink to the cache file writes the file the
+    /// link points to and leaves the link in place, so every process sharing
+    /// that file sees one cache.
+    #[cfg(unix)]
+    #[test]
+    fn test_online_cache_persist_through_a_symlink_updates_its_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rpc-cache-1.json");
+        let link = dir.path().join("linked-cache.json");
+
+        let sibling = online_cache(16, &[(B256::repeat_byte(0xbb), "from-sibling")]);
+        assert!(save_online_cache_atomic(&sibling, &path, 1).expect("persist sibling"));
+        std::os::unix::fs::symlink(&path, &link).expect("symlink the cache file");
+
+        let ours = online_cache(16, &[(B256::repeat_byte(0xaa), "ours")]);
+        assert!(save_online_cache_atomic(&ours, &link, 1).expect("persist through the link"));
+
+        assert!(
+            link.symlink_metadata().expect("the link").file_type().is_symlink(),
+            "the symlink stays in place"
+        );
+        assert_eq!(on_disk_entries(&path).len(), 2, "the target holds both processes' entries");
     }
 
     /// Online persist fails closed on the lock: nothing is written, and the

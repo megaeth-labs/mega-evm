@@ -6,11 +6,9 @@
 //! validation paths need no provider at all. The mismatch class (exit 2) is
 //! covered by `replay_verify.rs`, which doctors a copy of the same capture.
 
-use std::process::{Command, Output};
-
 mod common;
 
-use common::doctor::DoctoredEnvelope;
+use common::{doctor::DoctoredEnvelope, Run};
 
 /// Offline RPC capture used as the replay file.
 /// Name of the committed offline capture, resolved through the shared fixture
@@ -56,51 +54,8 @@ const PRE_BLOCK_HISTORY_STORAGE_READ: &str =
 const PRE_BLOCK_BEACON_ROOT_STORAGE_READ: &str =
     "0x49e3c5174c528b49897a0556c762d4fb88e1ad5e6aa8f8795ddbc37aa6c278f0";
 
-/// Outcome of one `mega-evme` invocation.
-struct Run {
-    code: Option<i32>,
-    stdout: String,
-    stderr: String,
-}
-
-impl Run {
-    /// The process exit code the run ended with.
-    fn code(&self) -> i32 {
-        self.code.expect("mega-evme was killed by a signal")
-    }
-
-    /// The structured error object a failing `--json` run ends with.
-    fn error_object(&self) -> serde_json::Value {
-        let values = common::json_values(&self.stdout);
-        let last = values
-            .last()
-            .unwrap_or_else(|| panic!("a failing --json run must not leave stdout empty"));
-        assert!(
-            common::is_run_error(last),
-            "the last stdout value must be the error object, got: {last}"
-        );
-        last.clone()
-    }
-
-    /// How many failure reports stderr carries.
-    ///
-    /// Counted by the report prefix: a message may itself span lines (an RPC
-    /// error appends a re-capture hint), and only the report opens one.
-    fn error_lines(&self) -> usize {
-        self.stderr.lines().filter(|line| line.starts_with("error: ")).count()
-    }
-}
-
 fn run(args: &[&str]) -> Run {
-    let output: Output = Command::new(env!("CARGO_BIN_EXE_mega-evme"))
-        .args(args)
-        .output()
-        .expect("failed to run mega-evme");
-    Run {
-        code: output.status.code(),
-        stdout: String::from_utf8(output.stdout).expect("stdout is utf-8"),
-        stderr: String::from_utf8(output.stderr).expect("stderr is utf-8"),
-    }
+    common::mega_evme().args(args).output().expect("failed to run mega-evme").into()
 }
 
 /// Run `replay` against the committed offline capture.
@@ -112,19 +67,11 @@ fn replay(args: &[&str]) -> Run {
     run(&argv)
 }
 
-/// Write a `--tx-file` holding `contents`, and return its path.
-fn tx_file(name: &str, contents: &str) -> std::path::PathBuf {
-    let path =
-        std::env::temp_dir().join(format!("mega_evme_exit_{name}_{}.txt", std::process::id()));
-    std::fs::write(&path, contents).expect("write tx list");
-    path
-}
-
 /// Bad input is an execution-class failure: exit 1, with the structured object
 /// as the last stdout line.
 #[test]
 fn test_invalid_input_exits_one_with_a_json_error_object() {
-    let list = tx_file("bad_hash", "not-a-hash\n");
+    let list = common::tx_file("exit_bad_hash", &["not-a-hash"]);
 
     let run = replay(&["--tx-file", list.to_str().unwrap(), "--json"]);
     let _ = std::fs::remove_file(&list);
@@ -137,6 +84,23 @@ fn test_invalid_input_exits_one_with_a_json_error_object() {
         error["error"]["message"].as_str().is_some_and(|m| m.contains("not-a-hash")),
         "the message must name the offending input: {error}"
     );
+}
+
+/// An unknown spec name is rejected by the one shared spec parser, with the
+/// same message whichever command and flag carried it.
+#[test]
+fn test_unknown_spec_name_is_rejected_alike_by_every_command() {
+    let from_run = run(&["run", "--spec", "Bogus", "0x00"]);
+    let from_replay = replay(&["--override.spec", "Bogus", TX_OK]);
+
+    for (flag, outcome) in [("run --spec", &from_run), ("replay --override.spec", &from_replay)] {
+        assert_eq!(outcome.code(), 1, "{flag} must exit 1.\nstderr: {}", outcome.stderr);
+        assert_eq!(
+            outcome.stderr.lines().filter(|line| line.starts_with("error: ")).collect::<Vec<_>>(),
+            ["error: Invalid input: Invalid spec name: UnknownHardfork"],
+            "{flag} must report the shared parser's message"
+        );
+    }
 }
 
 /// A rejected flag combination is bad input too, and still ends `--json` stdout
@@ -184,7 +148,7 @@ fn test_state_read_failure_during_execution_is_an_rpc_failure() {
         "the failure must be the block error carrying the missed read: {error}"
     );
 
-    let list = tx_file("state_read", &format!("{TX_OK}\n"));
+    let list = common::tx_file("exit_state_read", &[TX_OK]);
     let batch = run(&["replay", "--rpc.replay-file", cache, "--tx-file", list.to_str().unwrap()]);
     let _ = std::fs::remove_file(&list);
     let _ = std::fs::remove_file(&path);
@@ -228,7 +192,7 @@ fn test_pre_block_blockhash_system_call_cache_miss_is_an_rpc_failure() {
         "the message must name the stringified pre-block path and the miss: {error}"
     );
 
-    let list = tx_file("pre_block_2935", &format!("{TX_OK}\n"));
+    let list = common::tx_file("exit_pre_block_2935", &[TX_OK]);
     let batch = run(&["replay", "--rpc.replay-file", cache, "--tx-file", list.to_str().unwrap()]);
     let _ = std::fs::remove_file(&list);
     let _ = std::fs::remove_file(&path);
@@ -418,7 +382,7 @@ fn test_mined_target_without_an_inclusion_hash_is_an_rpc_failure() {
 /// the stream sees every target before the run-level verdict.
 #[test]
 fn test_batch_error_object_follows_the_per_target_lines() {
-    let list = tx_file("batch_miss", &format!("{UNANSWERABLE_TX}\n"));
+    let list = common::tx_file("exit_batch_miss", &[UNANSWERABLE_TX]);
 
     let run = replay(&["--tx-file", list.to_str().unwrap(), "--json"]);
     let _ = std::fs::remove_file(&list);
@@ -439,7 +403,7 @@ fn test_batch_error_object_follows_the_per_target_lines() {
 /// untouched.
 #[test]
 fn test_human_failure_prints_exactly_one_error_line() {
-    let list = tx_file("human", "not-a-hash\n");
+    let list = common::tx_file("exit_human", &["not-a-hash"]);
 
     let run = replay(&["--tx-file", list.to_str().unwrap()]);
     let _ = std::fs::remove_file(&list);
@@ -607,14 +571,14 @@ fn test_help_in_json_mode_prints_no_error_object() {
 fn test_closed_stdout_during_json_batch_exits_one() {
     use std::{
         io::{BufRead, BufReader, Read},
-        process::{Command, Stdio},
+        process::Stdio,
         thread,
     };
 
     // Multi-target offline batch: many NDJSON lines, so dropping the pipe after
     // the first line still leaves further writes that hit the broken pipe.
     let envelope = common::fixture("replay_batch_blocks.cache.json");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_mega-evme"))
+    let mut child = common::mega_evme()
         .args([
             "replay",
             "--rpc.replay-file",
@@ -677,7 +641,7 @@ fn test_closed_stdout_during_json_batch_exits_one() {
 /// `test-utils` gate as the fixture pre-state inject), not via invalid input.
 #[test]
 fn test_panic_under_json_prints_execution_error_envelope() {
-    let output = Command::new(env!("CARGO_BIN_EXE_mega-evme"))
+    let output = common::mega_evme()
         .args(["--json"])
         .env("MEGA_EVME_INJECT_PANIC", "1")
         .env("RUST_BACKTRACE", "0")
@@ -738,4 +702,123 @@ fn test_overwrite_without_dump_fixture_dir_is_a_usage_error() {
         "--overwrite alongside the single-file dump is still rejected.\nstderr: {}",
         with_single_dump.stderr
     );
+}
+
+/// Code that reads storage slot 0 (`PUSH1 0; SLOAD`).
+const SLOAD_CODE: &str = "0x600054";
+
+/// A `run` or `tx` against a fork whose endpoint answers every account read but
+/// fails every storage read: setup succeeds, and the first storage read happens
+/// while the transaction executes.
+async fn storage_failing_fork() -> common::MockRpcServer {
+    let server = common::MockRpcServer::start().await;
+    server.respond_eth_chain_id(4326, 1).await;
+    server.respond_method_result("eth_getBalance", "0x0", 2).await;
+    server.respond_method_result("eth_getTransactionCount", "0x0", 2).await;
+    server.respond_method_result("eth_getCode", "0x", 2).await;
+    server.respond_jsonrpc_error(-32000, "storage unavailable", 3).await;
+    server
+}
+
+/// A storage read that fails while a forked `run` or `tx` executes is the
+/// endpoint leaving a question unanswered, so the run exits 3 with the read's
+/// own error rather than 1 as an execution failure — traced or not.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_execution_time_storage_read_failure_is_an_rpc_failure() {
+    let receiver = "0x00000000000000000000000000000000000000aa";
+    let code = alloy_primitives::hex::decode(SLOAD_CODE).expect("hex code");
+    let prestate = std::env::temp_dir()
+        .join(format!("mega_evme_exit_storage_prestate_{}.json", std::process::id()));
+    std::fs::write(
+        &prestate,
+        serde_json::json!({
+            receiver: {
+                "balance": "0x0",
+                "nonce": "0x0",
+                "code": SLOAD_CODE,
+                "codeHash": alloy_primitives::keccak256(&code),
+                "storage": {},
+            }
+        })
+        .to_string(),
+    )
+    .expect("write prestate");
+    let prestate = prestate.to_str().expect("utf-8 path").to_string();
+
+    for tracing in [false, true] {
+        let server = storage_failing_fork().await;
+        let uri = server.uri();
+        let fork = [
+            "--fork",
+            "--fork.block",
+            "1",
+            "--rpc",
+            uri.as_str(),
+            "--rpc.no-cache-file",
+            "--rpc.max-retries",
+            "0",
+            "--rpc.backoff-ms",
+            "1",
+        ];
+        let commands: [Vec<&str>; 2] = [
+            vec!["run", SLOAD_CODE],
+            vec!["tx", "--receiver", receiver, "--prestate", prestate.as_str()],
+        ];
+        for mut args in commands {
+            args.extend_from_slice(&fork);
+            if tracing {
+                args.push("--trace");
+            }
+            let run = run(&args);
+            assert_eq!(
+                run.code(),
+                3,
+                "{args:?}: a failed storage read exits 3.\nstderr: {}",
+                run.stderr
+            );
+            assert!(
+                run.stderr.starts_with("error: RPC error: Failed to fetch storage for "),
+                "{args:?}: the read's own error is reported.\nstderr: {}",
+                run.stderr
+            );
+        }
+    }
+}
+
+/// A local envelope whose `cache` is not a list of entries is a broken
+/// artifact, not an unanswered RPC question: the run exits 1 before it makes a
+/// single request. A well-formed envelope that merely lacks a response still
+/// exits 3 on the miss.
+#[test]
+fn test_malformed_envelope_cache_is_a_fixture_error_not_an_rpc_failure() {
+    let mut envelope: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(cache()).expect("read the capture"))
+            .expect("the capture is JSON");
+    envelope["cache"] = serde_json::json!({});
+    let malformed = std::env::temp_dir()
+        .join(format!("mega_evme_exit_malformed_cache_{}.json", std::process::id()));
+    std::fs::write(&malformed, envelope.to_string()).expect("write the malformed envelope");
+
+    let run = run(&[
+        "replay",
+        "--rpc.replay-file",
+        malformed.to_str().expect("utf-8 path"),
+        "--json",
+        TX_OK,
+    ]);
+    let _ = std::fs::remove_file(&malformed);
+
+    assert_eq!(run.code(), 1, "a malformed envelope exits 1.\nstderr: {}", run.stderr);
+    let error = run.error_object();
+    assert_eq!(error["error"]["kind"].as_str(), Some("execution-error"));
+    assert!(
+        error["error"]["message"].as_str().is_some_and(
+            |m| m.starts_with("Fixture error: Failed to parse transport cache entries")
+        ),
+        "the message must name the broken artifact: {error}"
+    );
+
+    let miss = replay(&["--json", UNANSWERABLE_TX]);
+    assert_eq!(miss.code(), 3, "a cache miss still exits 3.\nstderr: {}", miss.stderr);
+    assert_eq!(miss.error_object()["error"]["kind"].as_str(), Some("rpc-failure"));
 }

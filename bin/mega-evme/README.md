@@ -100,7 +100,7 @@ mega-evme run --create 0x6080604052...
 | `--input <HEX>`      | Input data as hex string           |
 | `--inputfile <PATH>` | Path to file containing input data |
 
-For detailed documentation, see [run/README.md](src/run/README.md).
+For detailed documentation, see [the `run` command reference](../../docs/mega-evme/commands/run.md).
 
 ---
 
@@ -408,4 +408,4 @@ State files use JSON format with Ethereum quantity encoding:
 
 ## See Also
 
-- [run Command Documentation](src/run/README.md)
+- [run Command Documentation](../../docs/mega-evme/commands/run.md)

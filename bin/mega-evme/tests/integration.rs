@@ -76,3 +76,41 @@ fn test_fixture(
 ) {
     check(&path);
 }
+
+/// `run` and `tx` announce how execution ended under their own module path, so
+/// a `RUST_LOG` filter that names the command keeps matching the line.
+#[test]
+fn test_execution_result_is_logged_under_the_command_target() {
+    for (target, args) in [
+        ("mega_evme::run::cmd", vec!["run", "0x00"]),
+        (
+            "mega_evme::tx::cmd",
+            vec!["tx", "--receiver", "0x00000000000000000000000000000000000000aa"],
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_mega-evme"))
+            .args(&args)
+            .arg("--log.no-color")
+            .env("RUST_LOG", format!("{target}=info"))
+            .output()
+            .expect("failed to execute mega-evme");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{args:?} failed.\nstderr: {stderr}");
+        assert!(
+            stderr.contains("Execution succeeded"),
+            "the outcome line must be logged under {target}.\nstderr: {stderr}"
+        );
+        assert!(
+            !stderr.contains("Evm executing"),
+            "the filter must only match {target}.\nstderr: {stderr}"
+        );
+    }
+}
+
+/// The shared argument types stay reachable through `run`, the path library
+/// users imported them from before they moved to `common`.
+#[test]
+fn test_run_reexports_the_shared_argument_types() {
+    let _: mega_evme::run::TracerType = mega_evme::common::TracerType::Opcode;
+    let _: Option<mega_evme::run::TraceArgs> = None::<mega_evme::common::TraceArgs>;
+}

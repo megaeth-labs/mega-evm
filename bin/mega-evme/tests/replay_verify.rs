@@ -7,14 +7,11 @@
 //! copy of that capture: its entries are keyed by the request, not the response,
 //! so a doctored response still resolves.
 
-use std::{
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::path::{Path, PathBuf};
 
 mod common;
 
-use common::doctor::DoctoredEnvelope;
+use common::{doctor::DoctoredEnvelope, Run};
 
 /// Offline RPC capture, including the transaction's on-chain receipt.
 /// Name of the committed offline capture, resolved through the shared fixture
@@ -31,56 +28,6 @@ const GAS_USED: u64 = 75_514;
 /// answering a receipt request with another transaction's receipt.
 const OTHER_TX: &str = "0x00000000000000000000000000000000000000000000000000000000feed0001";
 
-/// Outcome of one `mega-evme replay` invocation.
-struct Run {
-    success: bool,
-    code: Option<i32>,
-    stdout: String,
-    stderr: String,
-}
-
-impl Run {
-    /// The process exit code the run ended with.
-    fn code(&self) -> i32 {
-        self.code.expect("mega-evme was killed by a signal")
-    }
-
-    /// The results printed on stdout, without the structured error object a
-    /// failing `--json` run ends with.
-    fn results(&self) -> Vec<serde_json::Value> {
-        let mut values = common::json_values(&self.stdout);
-        if values.last().is_some_and(common::is_run_error) {
-            values.pop();
-        }
-        values
-    }
-
-    /// Parse the stdout of a `--json` single-transaction run.
-    fn json(&self) -> serde_json::Value {
-        let mut results = self.results();
-        assert_eq!(results.len(), 1, "expected one summary on stdout:\n{}", self.stdout);
-        results.pop().expect("checked above")
-    }
-
-    /// Parse the stdout of a `--json` batch run as one value per NDJSON line.
-    fn ndjson(&self) -> Vec<serde_json::Value> {
-        self.results()
-    }
-
-    /// The structured error object a failing `--json` run ends with.
-    fn error_object(&self) -> serde_json::Value {
-        let values = common::json_values(&self.stdout);
-        let last = values
-            .last()
-            .unwrap_or_else(|| panic!("a failing --json run must not leave stdout empty"));
-        assert!(
-            common::is_run_error(last),
-            "the last stdout value must be the error object, got: {last}"
-        );
-        last.clone()
-    }
-}
-
 /// Run `replay` offline against `cache`.
 fn replay(cache: &Path, args: &[&str]) -> Run {
     replay_with_env(cache, args, &[])
@@ -88,19 +35,13 @@ fn replay(cache: &Path, args: &[&str]) -> Run {
 
 /// Run `replay` offline against `cache` with additional process environment.
 fn replay_with_env(cache: &Path, args: &[&str], envs: &[(&str, &str)]) -> Run {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_mega-evme"));
+    let mut cmd = common::mega_evme();
     cmd.args(["replay", "--rpc.replay-file", cache.to_str().expect("cache path is utf-8")])
         .args(args);
     for (key, value) in envs {
         cmd.env(key, value);
     }
-    let output = cmd.output().expect("failed to run mega-evme");
-    Run {
-        success: output.status.success(),
-        code: output.status.code(),
-        stdout: String::from_utf8(output.stdout).expect("stdout is utf-8"),
-        stderr: String::from_utf8(output.stderr).expect("stderr is utf-8"),
-    }
+    cmd.output().expect("failed to run mega-evme").into()
 }
 
 /// The committed capture, unmodified.
@@ -110,10 +51,7 @@ fn cache() -> PathBuf {
 
 /// Write a `--tx-file` holding the single captured transaction.
 fn tx_file(name: &str) -> PathBuf {
-    let path =
-        std::env::temp_dir().join(format!("mega_evme_verify_{name}_{}.txt", std::process::id()));
-    std::fs::write(&path, format!("{TX}\n")).expect("write tx list");
-    path
+    common::tx_file(&format!("verify_{name}"), &[TX])
 }
 
 /// A faithful replay reproduces the on-chain receipt, reports a match, and exits 0.
@@ -121,8 +59,8 @@ fn tx_file(name: &str) -> PathBuf {
 fn test_verify_receipt_reports_a_match() {
     let run = replay(&cache(), &["--verify-receipt", "--json", TX]);
 
-    assert!(run.success, "a matching verification must exit 0.\nstderr: {}", run.stderr);
-    assert_eq!(run.json()["verification"], serde_json::json!({ "match": true }));
+    assert!(run.success(), "a matching verification must exit 0.\nstderr: {}", run.stderr);
+    assert_eq!(run.summary()["verification"], serde_json::json!({ "match": true }));
 }
 
 /// Human-readable output carries one verdict line per transaction.
@@ -130,7 +68,7 @@ fn test_verify_receipt_reports_a_match() {
 fn test_verify_receipt_prints_a_human_verdict_line() {
     let run = replay(&cache(), &["--verify-receipt", TX]);
 
-    assert!(run.success, "a matching verification must exit 0.\nstderr: {}", run.stderr);
+    assert!(run.success(), "a matching verification must exit 0.\nstderr: {}", run.stderr);
     assert!(
         run.stdout.contains("verification: MATCH"),
         "expected a verdict line, got stdout:\n{}",
@@ -145,17 +83,20 @@ fn test_single_transaction_json_is_unchanged_without_the_flag() {
     let plain = replay(&cache(), &["--json", TX]);
     let verified = replay(&cache(), &["--verify-receipt", "--json", TX]);
 
-    assert!(plain.success && verified.success, "both runs must exit 0");
+    assert!(plain.success() && verified.success(), "both runs must exit 0");
     assert!(
         !plain.stdout.contains("verification"),
         "output without the flag must not mention verification:\n{}",
         plain.stdout
     );
-    assert!(plain.json().get("verification").is_none(), "the key must be absent without the flag");
+    assert!(
+        plain.summary().get("verification").is_none(),
+        "the key must be absent without the flag"
+    );
 
-    let mut stripped = verified.json();
+    let mut stripped = verified.summary();
     stripped.as_object_mut().expect("summary is an object").remove("verification");
-    assert_eq!(stripped, plain.json(), "--verify-receipt must add the verdict and nothing else");
+    assert_eq!(stripped, plain.summary(), "--verify-receipt must add the verdict and nothing else");
 }
 
 /// A gas divergence is reported as a `gas_used` diff and fails the run with the
@@ -170,7 +111,7 @@ fn test_verify_receipt_reports_a_gas_mismatch() {
 
     assert_eq!(run.code(), 2, "a mismatch exits 2.\nstderr: {}", run.stderr);
     assert_eq!(
-        run.json()["verification"],
+        run.summary()["verification"],
         serde_json::json!({
             "match": false,
             "diff": { "gas_used": { "onchain": 1, "replay": GAS_USED } },
@@ -198,7 +139,7 @@ fn test_verify_receipt_reports_a_status_mismatch() {
 
     assert_eq!(run.code(), 2, "a mismatch exits 2.\nstderr: {}", run.stderr);
     assert_eq!(
-        run.json()["verification"],
+        run.summary()["verification"],
         serde_json::json!({
             "match": false,
             "diff": { "status": { "onchain": false, "replay": true } },
@@ -207,9 +148,22 @@ fn test_verify_receipt_reports_a_status_mismatch() {
 }
 
 /// A log divergence is reported under `logs`.
+///
+/// The forged receipt carries the bloom of its forged logs: a receipt whose
+/// bloom contradicts its logs is refused at admission, so only a
+/// self-consistent receipt reaches the comparison.
 #[test]
 fn test_verify_receipt_reports_a_log_mismatch() {
+    let log = alloy_primitives::Log::new_unchecked(
+        alloy_primitives::address!("0x00000000000000000000000000000000000000aa"),
+        vec![alloy_primitives::b256!(
+            "0x000000000000000000000000000000000000000000000000000000000000000a"
+        )],
+        alloy_primitives::bytes!("deadbeef"),
+    );
+    let bloom = alloy_primitives::logs_bloom([&log]);
     let path = DoctoredEnvelope::with_receipt(cache(), "logs", |receipt| {
+        receipt["logsBloom"] = serde_json::json!(bloom);
         receipt["logs"] = serde_json::json!([{
             "address": "0x00000000000000000000000000000000000000aa",
             "topics": ["0x000000000000000000000000000000000000000000000000000000000000000a"],
@@ -228,7 +182,7 @@ fn test_verify_receipt_reports_a_log_mismatch() {
 
     assert_eq!(run.code(), 2, "a mismatch exits 2.\nstderr: {}", run.stderr);
     assert_eq!(
-        run.json()["verification"],
+        run.summary()["verification"],
         serde_json::json!({
             "match": false,
             "diff": { "logs": { "count": { "onchain": 1, "replay": 0 } } },
@@ -328,8 +282,8 @@ fn test_batch_verify_receipt_reports_a_match() {
         replay(&cache(), &["--tx-file", list.to_str().unwrap(), "--verify-receipt", "--json"]);
     let _ = std::fs::remove_file(&list);
 
-    assert!(run.success, "a matching verification must exit 0.\nstderr: {}", run.stderr);
-    let lines = run.ndjson();
+    assert!(run.success(), "a matching verification must exit 0.\nstderr: {}", run.stderr);
+    let lines = run.results();
     assert_eq!(lines.len(), 1, "one line per requested transaction");
     assert_eq!(lines[0]["tx_hash"].as_str(), Some(TX));
     assert_eq!(lines[0]["verification"], serde_json::json!({ "match": true }));
@@ -350,7 +304,7 @@ fn test_batch_verify_receipt_reports_a_mismatch_and_exits_nonzero() {
 
     assert_eq!(run.code(), 2, "a mismatch exits 2.\nstderr: {}", run.stderr);
     assert_eq!(run.error_object()["error"]["code"].as_u64(), Some(2));
-    let lines = run.ndjson();
+    let lines = run.results();
     assert_eq!(lines.len(), 1, "a mismatch is still a result line, not an error entry");
     assert!(lines[0].get("error").is_none(), "a mismatch is not an infrastructure error");
     assert_eq!(
@@ -380,7 +334,7 @@ fn test_batch_verify_receipt_missing_receipt_keeps_result_and_is_rpc() {
     let _ = std::fs::remove_file(&list);
 
     assert_eq!(run.code(), 3, "an unverified target exits 3.\nstderr: {}", run.stderr);
-    let lines = run.ndjson();
+    let lines = run.results();
     assert_eq!(lines.len(), 1, "one line per requested transaction");
     assert!(
         lines[0].get("error").is_none(),
@@ -423,7 +377,7 @@ fn test_batch_verify_receipt_reorg_keeps_result_and_is_rpc() {
     let _ = std::fs::remove_file(&list);
 
     assert_eq!(run.code(), 3, "an unverified target exits 3.\nstderr: {}", run.stderr);
-    let lines = run.ndjson();
+    let lines = run.results();
     assert!(lines[0].get("error").is_none(), "result line is kept: {}", lines[0]);
     assert!(
         lines[0]["verification"]["error"]
@@ -449,7 +403,7 @@ fn test_batch_verify_receipt_for_another_transaction_keeps_result_and_is_rpc() {
     let _ = std::fs::remove_file(&list);
 
     assert_eq!(run.code(), 3, "an unverified target exits 3.\nstderr: {}", run.stderr);
-    let lines = run.ndjson();
+    let lines = run.results();
     assert_eq!(lines.len(), 1, "one line per requested transaction");
     assert!(
         lines[0].get("error").is_none(),
@@ -487,6 +441,64 @@ fn test_batch_verify_receipt_for_another_transaction_keeps_result_and_is_rpc() {
         "an unverifiable target must not fail as a mismatch:\n{}",
         run.stderr
     );
+}
+
+/// A logs bloom with every bit set: the bloom of no receipt's logs.
+fn forged_bloom() -> serde_json::Value {
+    format!("0x{}", "f".repeat(512)).into()
+}
+
+/// A receipt whose bloom is not the bloom of its own logs is refused at
+/// admission: the single-transaction run fails as an infrastructure error
+/// (exit 3) rather than matching on logs that the forged bloom contradicts.
+#[test]
+fn test_verify_receipt_with_a_forged_bloom_is_an_infrastructure_error() {
+    let path = DoctoredEnvelope::with_receipt(cache(), "forged_bloom", |receipt| {
+        receipt["logsBloom"] = forged_bloom();
+    });
+
+    let run = replay(&path, &["--verify-receipt", "--json", TX]);
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(run.code(), 3, "an inconsistent receipt exits 3.\nstderr: {}", run.stderr);
+    let err = run.error_object();
+    assert_eq!(err["error"]["kind"].as_str(), Some("rpc-failure"));
+    let message = err["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains(&format!("the on-chain receipt served for transaction {TX}")) &&
+            message.contains("is not the bloom of its own"),
+        "the message names the inconsistency: {message}"
+    );
+    assert!(!run.stdout.contains("MATCH"), "no verdict is rendered: {}", run.stdout);
+}
+
+/// The same receipt in a `--tx-file` run that covers only part of its block:
+/// the target keeps its result line, its verification carries the admission
+/// failure, and the run exits 3.
+#[test]
+fn test_batch_verify_receipt_with_a_forged_bloom_keeps_result_and_is_rpc() {
+    let path = DoctoredEnvelope::with_receipt(cache(), "batch_forged_bloom", |receipt| {
+        receipt["logsBloom"] = forged_bloom();
+    });
+    let list = tx_file("batch_forged_bloom");
+
+    let run = replay(&path, &["--tx-file", list.to_str().unwrap(), "--verify-receipt", "--json"]);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&list);
+
+    assert_eq!(run.code(), 3, "an inconsistent receipt exits 3.\nstderr: {}", run.stderr);
+    let lines = run.results();
+    assert_eq!(lines.len(), 1, "one line per requested transaction");
+    assert!(lines[0].get("error").is_none(), "the target keeps its result line: {}", lines[0]);
+    assert!(lines[0]["verification"].get("match").is_none(), "{}", lines[0]);
+    assert!(
+        lines[0]["verification"]["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("is not the bloom of its own")),
+        "{}",
+        lines[0]
+    );
+    assert_eq!(run.error_object()["error"]["kind"].as_str(), Some("rpc-failure"));
 }
 
 /// A receipt with a null `blockHash` cannot be anchored to the replayed block:
@@ -529,7 +541,7 @@ fn test_batch_verify_receipt_null_block_hash_keeps_result_and_is_rpc() {
     let _ = std::fs::remove_file(&list);
 
     assert_eq!(run.code(), 3, "an unverified target exits 3.\nstderr: {}", run.stderr);
-    let lines = run.ndjson();
+    let lines = run.results();
     assert!(lines[0].get("error").is_none(), "result line is kept: {}", lines[0]);
     assert!(
         lines[0]["verification"]["error"]
@@ -573,7 +585,7 @@ fn test_batch_dump_fixture_dir_null_receipt_is_rpc_fixture_error() {
     let _ = std::fs::remove_dir_all(&dir);
 
     assert_eq!(run.code(), 3, "unanswered receipt for dump exits 3.\nstderr: {}", run.stderr);
-    let lines = run.ndjson();
+    let lines = run.results();
     assert_eq!(lines.len(), 1);
     assert!(lines[0].get("error").is_none(), "result line is kept: {}", lines[0]);
     assert!(lines[0]["receipt"].is_object(), "local receipt is kept: {}", lines[0]);
@@ -616,7 +628,7 @@ fn test_batch_dump_fixture_dir_missing_receipt_is_rpc_fixture_error() {
     let _ = std::fs::remove_dir_all(&dir);
 
     assert_eq!(run.code(), 3, "missing receipt for dump exits 3.\nstderr: {}", run.stderr);
-    let lines = run.ndjson();
+    let lines = run.results();
     assert_eq!(lines.len(), 1);
     assert!(lines[0].get("error").is_none(), "result line is kept: {}", lines[0]);
     assert!(lines[0]["receipt"].is_object(), "local receipt is kept: {}", lines[0]);
@@ -662,7 +674,7 @@ fn test_batch_verify_and_dump_missing_receipt_counted_once() {
     let _ = std::fs::remove_dir_all(&dir);
 
     assert_eq!(run.code(), 3, "shared missing receipt exits 3.\nstderr: {}", run.stderr);
-    let lines = run.ndjson();
+    let lines = run.results();
     assert_eq!(lines.len(), 1, "one target: {}", run.stdout);
     assert!(lines[0].get("error").is_none(), "result line is kept: {}", lines[0]);
     assert!(lines[0]["receipt"].is_object(), "local receipt is kept: {}", lines[0]);
@@ -717,7 +729,7 @@ fn test_batch_dump_fixture_dir_fidelity_mismatch_stays_skip() {
     let _ = std::fs::remove_dir_all(&dir);
 
     assert_eq!(run.code(), 0, "a fidelity skip exits 0.\nstderr: {}", run.stderr);
-    let lines = run.ndjson();
+    let lines = run.results();
     assert_eq!(lines.len(), 1);
     assert!(
         lines[0]["fixture"]["skipped"].as_str().is_some_and(|m| m.contains("fidelity gate failed")),
@@ -747,8 +759,8 @@ fn test_batch_dump_fixture_dir_writes_validatable_file() {
     );
     let _ = std::fs::remove_file(&list);
 
-    assert!(run.success, "a successful dump must exit 0.\nstderr: {}", run.stderr);
-    let lines = run.ndjson();
+    assert!(run.success(), "a successful dump must exit 0.\nstderr: {}", run.stderr);
+    let lines = run.results();
     assert_eq!(lines.len(), 1, "one line per requested transaction");
     assert_eq!(lines[0]["tx_hash"].as_str(), Some(TX));
     let path = lines[0]["fixture"]["path"]
@@ -805,7 +817,7 @@ fn test_batch_refuses_a_transaction_whose_served_hash_field_lies() {
     let _ = std::fs::remove_file(&list);
 
     assert_eq!(run.code(), 3, "an unauthenticated target fetch exits 3.\nstderr: {}", run.stderr);
-    let lines = run.ndjson();
+    let lines = run.results();
     assert_eq!(lines.len(), 1, "one line per requested transaction");
     assert_eq!(
         lines[0]["error"]["kind"].as_str(),
@@ -883,7 +895,7 @@ fn test_batch_fixture_write_failure_keeps_the_receipt_verification() {
     let _ = std::fs::remove_dir_all(&dir);
 
     assert_eq!(run.code(), 1, "a failed dump exits 1.\nstderr: {}", run.stderr);
-    let lines = run.ndjson();
+    let lines = run.results();
     assert_eq!(lines.len(), 1, "one line per requested transaction");
     assert!(lines[0].get("error").is_none(), "a failed dump is not an error entry: {}", lines[0]);
     assert_eq!(
@@ -918,7 +930,7 @@ fn test_batch_dump_fixture_dir_refuses_overwrite_without_flag() {
             "--json",
         ],
     );
-    assert!(first.success, "first dump must succeed.\nstderr: {}", first.stderr);
+    assert!(first.success(), "first dump must succeed.\nstderr: {}", first.stderr);
 
     let second = replay(
         &cache(),
@@ -934,7 +946,7 @@ fn test_batch_dump_fixture_dir_refuses_overwrite_without_flag() {
     // target still replayed, so it keeps its result line and reports the failed
     // dump on it.
     assert_eq!(second.code(), 1, "a failed dump exits 1.\nstderr: {}", second.stderr);
-    let lines = second.ndjson();
+    let lines = second.results();
     assert_eq!(lines.len(), 1);
     assert!(lines[0].get("error").is_none(), "a failed dump is not an error entry: {}", lines[0]);
     assert!(lines[0]["receipt"].is_object(), "the replayed target keeps its receipt: {}", lines[0]);
@@ -960,8 +972,8 @@ fn test_batch_dump_fixture_dir_refuses_overwrite_without_flag() {
         ],
     );
     let _ = std::fs::remove_file(&list);
-    assert!(third.success, "dump with --overwrite must succeed.\nstderr: {}", third.stderr);
-    let lines = third.ndjson();
+    assert!(third.success(), "dump with --overwrite must succeed.\nstderr: {}", third.stderr);
+    let lines = third.results();
     assert!(lines[0]["fixture"]["path"].is_string(), "overwrite must report a written path");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -999,8 +1011,8 @@ fn test_batch_fixture_construction_failure_is_fixture_error_not_skip() {
     let _ = std::fs::remove_file(&list);
     let _ = std::fs::remove_dir_all(&dir);
 
-    assert!(!run.success, "construction failure must not exit 0.\nstderr: {}", run.stderr);
-    let lines = run.ndjson();
+    assert!(!run.success(), "construction failure must not exit 0.\nstderr: {}", run.stderr);
+    let lines = run.results();
     assert_eq!(lines.len(), 1, "one line per requested transaction");
     // Sentinel: execution reached the dump target (receipt present); only the
     // draft failed. The old code path accepted an execution-only failure here.
@@ -1088,8 +1100,8 @@ fn test_batch_dump_does_not_write_or_clobber_when_block_aborts_before_finish() {
     );
     let _ = std::fs::remove_file(&cache_path);
 
-    assert!(!run.success, "an aborted block must exit non-zero.\nstderr: {}", run.stderr);
-    let lines = run.ndjson();
+    assert!(!run.success(), "an aborted block must exit non-zero.\nstderr: {}", run.stderr);
+    let lines = run.results();
     assert!(lines.len() >= 2, "expected lines for both targets, got: {lines:?}");
 
     let dump_line = lines
@@ -1138,8 +1150,8 @@ fn test_replay_receipt_inner_log_metadata_matches_outer_receipt() {
     const LATE_TX: &str = "0xb6a0b7a302c741f64b8e46861a3dcb2d5c1047f6f2cb89a35b5c2183c96296b7";
 
     let run = replay(&envelope, &["--json", LATE_TX]);
-    assert!(run.success, "envelope replay must exit 0.\nstderr: {}", run.stderr);
-    let summary = run.json();
+    assert!(run.success(), "envelope replay must exit 0.\nstderr: {}", run.stderr);
+    let summary = run.summary();
     let receipt = &summary["receipt"];
     let block_hash = receipt["blockHash"].as_str().expect("receipt blockHash");
     let tx_hash = receipt["transactionHash"].as_str().expect("receipt transactionHash");
@@ -1170,8 +1182,8 @@ fn test_replay_receipt_inner_log_metadata_matches_outer_receipt() {
     std::fs::write(&list_path, format!("{LATE_TX}\n")).expect("write tx list");
     let batch = replay(&envelope, &["--tx-file", list_path.to_str().unwrap(), "--json"]);
     let _ = std::fs::remove_file(&list_path);
-    assert!(batch.success, "batch replay must exit 0.\nstderr: {}", batch.stderr);
-    let line = &batch.ndjson()[0];
+    assert!(batch.success(), "batch replay must exit 0.\nstderr: {}", batch.stderr);
+    let line = &batch.results()[0];
     let batch_receipt = &line["receipt"];
     assert_eq!(batch_receipt["blockHash"].as_str(), Some(block_hash));
     assert_eq!(batch_receipt["transactionHash"].as_str(), Some(tx_hash));
@@ -1204,12 +1216,16 @@ fn test_replay_receipt_derives_the_effective_gas_price() {
 
     for source in [cache(), stripped.clone()] {
         let single = replay(&source, &["--json", TX]);
-        assert!(single.success, "single replay must succeed.\nstderr: {}", single.stderr);
-        assert_eq!(single.json()["receipt"]["effectiveGasPrice"], expected, "single, {source:?}");
+        assert!(single.success(), "single replay must succeed.\nstderr: {}", single.stderr);
+        assert_eq!(
+            single.summary()["receipt"]["effectiveGasPrice"],
+            expected,
+            "single, {source:?}"
+        );
 
         let batch = replay(&source, &["--tx-file", list.to_str().expect("utf-8"), "--json"]);
-        assert!(batch.success, "batch replay must succeed.\nstderr: {}", batch.stderr);
-        let lines = batch.ndjson();
+        assert!(batch.success(), "batch replay must succeed.\nstderr: {}", batch.stderr);
+        let lines = batch.results();
         assert_eq!(lines.len(), 1, "one batch line:\n{}", batch.stdout);
         assert_eq!(
             lines[0]["receipt"]["effectiveGasPrice"], expected,
@@ -1244,7 +1260,7 @@ fn test_verify_and_dump_report_the_mismatch_when_the_fixture_is_refused() {
 
     assert_eq!(run.code(), 2, "the mismatch decides the exit code.\nstderr: {}", run.stderr);
     assert_eq!(
-        run.json()["verification"],
+        run.summary()["verification"],
         serde_json::json!({
             "match": false,
             "diff": { "gas_used": { "onchain": 1, "replay": GAS_USED } },

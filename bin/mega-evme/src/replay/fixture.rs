@@ -38,6 +38,10 @@ use state_test::{
 };
 
 use super::{ReplayError, Result};
+use crate::{
+    cache::{write_atomic, AtomicWriteError, WriteMode},
+    common::EvmeExternalEnvs,
+};
 
 /// Why [`build_draft`] refused to produce a fixture.
 ///
@@ -46,22 +50,13 @@ use super::{ReplayError, Result};
 /// transactions the fixture format cannot express, and those must not fail the
 /// run, whereas a failure to construct a draft the caller asked for must.
 pub(crate) enum FixtureBuildError {
-    /// The transaction, spec, or replay is outside what a fixture can express
-    /// (deposit and set-code transactions, specs with no fixture mapping, a
-    /// replay that does not reproduce the chain). Reported as a skip.
+    /// The transaction or spec is outside what a fixture can express (a
+    /// legacy-priced transaction that reports no gas price, a spec with no
+    /// fixture mapping). Reported as a skip.
     Unsupported(String),
     /// The draft could not be built (pre-state or code read failed). The
     /// requested artifact was not produced; reported as an error.
     Construction(ReplayError),
-}
-
-impl Display for FixtureBuildError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Unsupported(reason) => f.write_str(reason),
-            Self::Construction(err) => write!(f, "{err}"),
-        }
-    }
 }
 
 impl From<FixtureBuildError> for ReplayError {
@@ -88,7 +83,7 @@ pub(crate) struct OnchainAnchor {
 
 /// The fixture-specific inputs gathered during a replay: the `MegaETH` external
 /// environment snapshot, the target transaction's execution result, and the
-/// on-chain receipt it is anchored to.
+/// proof that this result reproduced the on-chain receipt.
 ///
 /// Bundling these keeps the fixture's gas, status, and output derived from a
 /// single `ExecutionResult` — there is no second place that recomputes the
@@ -98,9 +93,22 @@ pub(crate) struct FixtureInputs<'a> {
     pub mega_env: MegaEnv,
     /// The target transaction's execution result from the full replay.
     pub result: &'a ExecutionResult<MegaHaltReason>,
-    /// The on-chain receipt this replay is checked against — the fidelity anchor.
-    pub anchor: OnchainAnchor,
+    /// Proof that `result` passed the fidelity gate.
+    pub reproduced: ReproducedAnchor,
 }
+
+/// Proof that a replay reproduced the on-chain receipt it is anchored to.
+///
+/// Only [`check_fidelity`] makes one, so a draft cannot be built for a replay
+/// that skipped the gate, and no builder has to run the gate a second time.
+pub(crate) struct ReproducedAnchor(());
+
+/// A target transaction whose shape a fixture can express.
+///
+/// Only [`check_dumpable`] makes one, so [`build_draft`] is never handed a
+/// shape it would have to refuse.
+#[derive(Clone, Copy)]
+pub(crate) struct DumpableTx<'a>(&'a Transaction);
 
 /// Deposit transaction type byte (EIP-2718 `0x7e`). Deposit transactions carry
 /// MegaETH/Optimism-specific fields (mint, source hash, system flag) that the
@@ -131,7 +139,7 @@ pub(crate) fn check_fidelity(
     result: &ExecutionResult<MegaHaltReason>,
     anchor: &OnchainAnchor,
     chain_id: u64,
-) -> std::result::Result<(), String> {
+) -> std::result::Result<ReproducedAnchor, String> {
     let actual_gas = result.tx_gas_used();
     if actual_gas != anchor.gas_used {
         return Err(format!(
@@ -158,7 +166,31 @@ pub(crate) fn check_fidelity(
             anchor.logs_root
         ));
     }
-    Ok(())
+    Ok(ReproducedAnchor(()))
+}
+
+/// Check that a fixture can express the target transaction's shape.
+///
+/// Deposit transactions carry `MegaETH`/Optimism-specific fields the EEST schema
+/// cannot represent, and the builder does not serialize an EIP-7702
+/// authorization list, so both are refused. Returns the explanatory reason on
+/// failure, which batch dump records as a skip.
+///
+/// The check reads nothing but the transaction, so each driver decides where
+/// it ranks against the fidelity gate.
+pub(crate) fn check_dumpable(
+    target_tx: &Transaction,
+) -> std::result::Result<DumpableTx<'_>, String> {
+    let envelope: &OpTxEnvelope = &target_tx.inner.inner;
+    if envelope.ty() == DEPOSIT_TX_TYPE {
+        return Err("--dump-fixture does not support deposit transactions".to_string());
+    }
+    if envelope.ty() == EIP7702_TX_TYPE {
+        return Err("--dump-fixture does not support EIP-7702 (set-code) transactions: the \
+                    fixture builder does not serialize the authorization list"
+            .to_string());
+    }
+    Ok(DumpableTx(target_tx))
 }
 
 /// Build an [`OnchainAnchor`] from the consensus facts of an on-chain receipt.
@@ -168,6 +200,20 @@ pub(crate) fn anchor_from_receipt_facts(facts: &super::verify::ReceiptFacts) -> 
         success: facts.status,
         logs_root: state_test::utils::log_rlp_hash(&facts.logs),
     }
+}
+
+/// Snapshot the `MegaETH` external environment a fixture records.
+///
+/// The accessed buckets and oracle slots are sorted so a dumped fixture is
+/// byte-reproducible: they come from hash-map iteration, whose order is
+/// otherwise non-deterministic across runs (noisy diffs, and an online dump
+/// would not byte-match an offline re-dump).
+pub(crate) fn mega_env_snapshot(external_envs: &EvmeExternalEnvs) -> MegaEnv {
+    let mut bucket_capacities = external_envs.bucket_capacities();
+    bucket_capacities.sort_unstable();
+    let mut oracle_storage = external_envs.oracle_storage();
+    oracle_storage.sort_unstable();
+    MegaEnv { bucket_capacities, oracle_storage }
 }
 
 /// A fixture built from a replay, awaiting its `post` expectation.
@@ -202,45 +248,31 @@ pub(crate) struct FixtureDraft {
 /// `db` must be read at the point *after* preceding transactions have committed
 /// but *before* the target transaction commits, so that the pre-state closure
 /// reflects exactly what the target transaction observed.
+///
+/// The transaction's shape ([`check_dumpable`]) and the replay's fidelity
+/// ([`check_fidelity`]) are checked by the caller, which decides their order;
+/// the builder takes the proof of each.
 pub(crate) fn build_draft<DB>(
     db: &DB,
     evm_state: &EvmState,
     chain_id: u64,
     spec: MegaSpecId,
     block: &Block<Transaction>,
-    target_tx: &Transaction,
+    target_tx: DumpableTx<'_>,
     inputs: FixtureInputs<'_>,
 ) -> std::result::Result<FixtureDraft, FixtureBuildError>
 where
     DB: DatabaseRef,
     DB::Error: Display,
 {
-    let envelope: &OpTxEnvelope = &target_tx.inner.inner;
-    if envelope.ty() == DEPOSIT_TX_TYPE {
-        return Err(FixtureBuildError::Unsupported(
-            "--dump-fixture does not support deposit transactions".to_string(),
-        ));
-    }
-    if envelope.ty() == EIP7702_TX_TYPE {
-        return Err(FixtureBuildError::Unsupported(
-            "--dump-fixture does not support EIP-7702 (set-code) transactions: the \
-             fixture builder does not serialize the authorization list"
-                .to_string(),
-        ));
-    }
+    let DumpableTx(target_tx) = target_tx;
+    let FixtureInputs { mega_env, result, reproduced: ReproducedAnchor(()) } = inputs;
 
-    let actual_gas = inputs.result.tx_gas_used();
-    let actual_status = execution_status(inputs.result).to_string();
-    let actual_halt_reason = halt_reason(inputs.result);
-    let actual_output = inputs.result.output().cloned();
-    let actual_logs_root = state_test::utils::log_rlp_hash(inputs.result.logs());
-
-    // Fidelity gate: refuse to dump a fixture that does not match the chain.
-    // See [`check_fidelity`] for the rationale and the dimensions checked.
-    // Every rejection it can return is an unsupported replay, not a construction
-    // failure, so the classification does not depend on which one fired.
-    check_fidelity(inputs.result, &inputs.anchor, chain_id)
-        .map_err(FixtureBuildError::Unsupported)?;
+    let actual_gas = result.tx_gas_used();
+    let actual_status = execution_status(result).to_string();
+    let actual_halt_reason = halt_reason(result);
+    let actual_output = result.output().cloned();
+    let actual_logs_root = state_test::utils::log_rlp_hash(result.logs());
 
     let pre = build_pre_state(db, evm_state).map_err(FixtureBuildError::Construction)?;
     let env = build_env(chain_id, block);
@@ -259,7 +291,7 @@ where
         post: BTreeMap::new(),
         transaction,
         out: None,
-        mega_env: Some(inputs.mega_env),
+        mega_env: Some(mega_env),
         extra: BTreeMap::new(),
     };
 
@@ -348,51 +380,32 @@ pub(crate) fn finalize_and_write(
     let json = serde_json::to_string_pretty(&suite)
         .map_err(|e| ReplayError::Other(format!("failed to serialize fixture: {e}")))?;
 
-    // Unique temp file in the target directory, then persist (or noclobber-persist)
-    // into `path`. A fixed sibling name would race two concurrent dumps; a unique
-    // name plus noclobber makes `--overwrite=false` safe at materialization time.
-    let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
-    let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(|e| {
-        ReplayError::Other(format!("failed to create temp fixture file in {}: {e}", dir.display()))
-    })?;
-    use std::io::Write;
-    tmp.write_all(json.as_bytes())
-        .map_err(|e| ReplayError::Other(format!("failed to write fixture temp file: {e}")))?;
-    tmp.flush()
-        .map_err(|e| ReplayError::Other(format!("failed to flush fixture temp file: {e}")))?;
-    // flush() only clears the userspace buffer; the rename below is atomic but
-    // the contents are not. A benchmark corpus that a crash left holding a
-    // truncated fixture would fail in a way that looks like a replay bug.
-    tmp.as_file()
-        .sync_all()
-        .map_err(|e| ReplayError::Other(format!("failed to sync fixture temp file: {e}")))?;
-    if overwrite {
-        tmp.persist(path).map_err(|e| {
-            ReplayError::Other(format!(
-                "failed to persist fixture to {}: {}",
-                path.display(),
-                e.error
-            ))
-        })?;
-    } else {
-        tmp.persist_noclobber(path).map_err(|e| {
-            // Target already present (or appeared between prep and publish): same
-            // refused-overwrite path the prep-time existence check uses.
-            if path.exists() {
-                ReplayError::Other(format!(
-                    "fixture already exists at {} (pass --overwrite to replace)",
-                    path.display()
-                ))
-            } else {
-                ReplayError::Other(format!(
-                    "failed to persist fixture to {}: {}",
-                    path.display(),
-                    e.error
-                ))
+    // Unique temp file in the target directory, synced and then renamed (or
+    // noclobber-renamed) into `path`. A fixed sibling name would race two
+    // concurrent dumps; a unique name plus noclobber makes `--overwrite=false`
+    // safe at materialization time. The sync matters too: a benchmark corpus that
+    // a crash left holding a truncated fixture would fail in a way that looks
+    // like a replay bug.
+    let mode = if overwrite { WriteMode::Replace } else { WriteMode::NoClobber };
+    write_atomic(path, json.as_bytes(), mode).map_err(|e| {
+        ReplayError::Other(match e {
+            AtomicWriteError::Create { dir, source } => {
+                format!("failed to create temp fixture file in {}: {source}", dir.display())
             }
-        })?;
-    }
-    Ok(())
+            AtomicWriteError::Write(e) => format!("failed to write fixture temp file: {e}"),
+            AtomicWriteError::Flush(e) => format!("failed to flush fixture temp file: {e}"),
+            AtomicWriteError::Sync(e) => format!("failed to sync fixture temp file: {e}"),
+            // Target already present (or appeared between prep and publish):
+            // same refused-overwrite path the prep-time existence check uses.
+            AtomicWriteError::Persist(_) if !overwrite && path.exists() => format!(
+                "fixture already exists at {} (pass --overwrite to replace)",
+                path.display()
+            ),
+            AtomicWriteError::Persist(e) => {
+                format!("failed to persist fixture to {}: {e}", path.display())
+            }
+        })
+    })
 }
 
 /// Read the pre-execution values of every account in the target transaction's
@@ -726,40 +739,17 @@ mod tests {
         Transaction { inner, deposit_nonce: None, deposit_receipt_version: None }
     }
 
-    /// A deposit transaction is an unsupported shape, not a construction failure.
+    /// A deposit transaction is a shape a fixture cannot express.
     ///
-    /// Every OP-stack block opens with one, so misclassifying this would make
-    /// `--block N --dump-fixture-dir` exit non-zero on every block instead of
-    /// skipping the transaction the fixture format cannot express. The database
-    /// here fails every read, which proves the rejection is reached without
-    /// touching state — a `Construction` verdict would mean the check moved.
+    /// Every OP-stack block opens with one, so batch dump has to be able to
+    /// skip it; the check reads nothing but the transaction, so each driver can
+    /// rank it against the fidelity gate.
     #[test]
-    fn test_build_draft_rejects_a_deposit_as_unsupported() {
-        let result = success_result(21_000);
-        let anchor = OnchainAnchor {
-            gas_used: 21_000,
-            success: true,
-            logs_root: state_test::utils::log_rlp_hash(&[]),
+    fn test_check_dumpable_rejects_a_deposit() {
+        let Err(reason) = check_dumpable(&deposit_transaction()) else {
+            panic!("a deposit cannot be dumped");
         };
-        let err = build_draft(
-            &UnreadableDb,
-            &EvmState::default(),
-            4326,
-            MegaSpecId::REX6,
-            &Block::default(),
-            &deposit_transaction(),
-            FixtureInputs { mega_env: MegaEnv::default(), result: &result, anchor },
-        )
-        .err()
-        .expect("a deposit cannot be dumped");
-        match err {
-            FixtureBuildError::Unsupported(reason) => {
-                assert!(reason.contains("deposit"), "reason={reason}");
-            }
-            FixtureBuildError::Construction(err) => {
-                panic!("a deposit is an unsupported shape, not a construction failure: {err}")
-            }
-        }
+        assert!(reason.contains("deposit"), "reason={reason}");
     }
 
     /// A failing pre-state read is a construction error, not a skip.
@@ -793,14 +783,16 @@ mod tests {
             effective_gas_price: None,
         };
         let tx = Transaction { inner, deposit_nonce: None, deposit_receipt_version: None };
+        let dumpable = check_dumpable(&tx).expect("an EIP-1559 call can be dumped");
+        let reproduced = check_fidelity(&result, &anchor, 4326).expect("the replay is faithful");
         let err = build_draft(
             &UnreadableDb,
             &evm_state,
             4326,
             MegaSpecId::REX6,
             &Block::default(),
-            &tx,
-            FixtureInputs { mega_env: MegaEnv::default(), result: &result, anchor },
+            dumpable,
+            FixtureInputs { mega_env: MegaEnv::default(), result: &result, reproduced },
         )
         .err()
         .expect("the pre-state read fails");
@@ -817,11 +809,11 @@ mod tests {
 
     /// Each of the three fidelity dimensions rejects on its own.
     ///
-    /// [`build_draft`] wraps every rejection at one `map_err` site, so all three
-    /// are reported as [`FixtureBuildError::Unsupported`] — a whole-block sweep
-    /// skips a diverging replay rather than failing the run, whichever dimension
-    /// diverged. Only the gas and status messages share a phrase; a classifier
-    /// keyed on message text would have had to enumerate the third separately.
+    /// Every rejection comes back the same way, as a reason, so each driver
+    /// reports it alike whichever dimension diverged — a whole-block sweep skips
+    /// a diverging replay rather than failing the run. Only the gas and status
+    /// messages share a phrase; a classifier keyed on message text would have
+    /// had to enumerate the third separately.
     #[test]
     fn test_check_fidelity_rejects_each_dimension() {
         let logs_root = state_test::utils::log_rlp_hash(&[]);
