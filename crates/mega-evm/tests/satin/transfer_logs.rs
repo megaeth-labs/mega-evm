@@ -40,8 +40,8 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{
-        ADDRESS, CALL, CALLDATASIZE, DELEGATECALL, GAS, JUMPDEST, JUMPI, POP, PUSH0, PUSH1, REVERT,
-        SELFDESTRUCT, STOP,
+        ADDRESS, CALL, CALLDATASIZE, DELEGATECALL, GAS, JUMPDEST, JUMPI, LOG1, POP, PUSH0, PUSH1,
+        REVERT, SELFDESTRUCT, STOP,
     },
     context::{
         result::{ExecutionResult, Output},
@@ -1199,4 +1199,82 @@ fn test_a_system_transactions_value_is_logged_and_no_limit_stops_it() {
             "counted all the same",
         );
     }
+}
+
+/// EIP-7708 logs keep execution order. `[S14.3]`
+///
+/// independent: each expected log is the event the bytecode emits, or the transfer of the wei
+/// the program moves, built from those accounts and that amount.
+///
+/// A frame that emits `LOG1` and then `SELFDESTRUCT`s to another account journals the event
+/// first and the transfer once the opcode has moved the balance, so the receipt is
+/// `[event, transfer]`.
+/// A `CREATE` that endows the new account journals that transfer with the creation's start,
+/// before the init code runs, so an init code that emits `LOG1` leaves `[transfer, event]`.
+#[test]
+fn test_transfer_logs_keep_execution_order() {
+    const MOVED: u64 = 7;
+    let marker = B256::repeat_byte(0x4d);
+    // Regular room, the new account a creation adds, and sixty-four times the history of a few
+    // records: the creation is forwarded all but a 64th of the gas, and the caller pays the
+    // records from the 64th it keeps, at whatever a byte costs.
+    let gas_limit = 2_000_000 +
+        2 * account_state_gas() +
+        crate::common::body_history(0) +
+        64 * mega_evm::write_record_history_gas(4).expect("records have a price");
+
+    let event = |address| Log::new_unchecked(address, vec![marker], Bytes::new());
+
+    let destructor = BytecodeBuilder::default()
+        .push_bytes(marker)
+        .append_many([PUSH0, PUSH0, LOG1])
+        .selfdestruct(RECEIVER)
+        .build();
+    let db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(10u64.pow(18)))
+        .account_balance(DESTRUCTOR, U256::from(MOVED))
+        .account_balance(RECEIVER, U256::from(1))
+        .account_code(DESTRUCTOR, destructor);
+    let tx = OpTx(op_transaction(TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(DESTRUCTOR),
+        gas_limit,
+        ..Default::default()
+    }));
+    let outcome = execute(db, tx, EvmTxRuntimeLimits::no_limits());
+    assert!(outcome.result.is_success(), "SELFDESTRUCT: {:?}", outcome.result);
+    assert_eq!(
+        outcome.result.logs(),
+        [event(DESTRUCTOR), transfer_log(DESTRUCTOR, RECEIVER, U256::from(MOVED)),],
+        "LOG1 then SELFDESTRUCT",
+    );
+    assert_eq!(balance(&outcome, RECEIVER), U256::from(1 + MOVED));
+
+    let init = BytecodeBuilder::default()
+        .push_bytes(marker)
+        .append_many([PUSH0, PUSH0, LOG1])
+        .stop()
+        .build();
+    let actor =
+        BytecodeBuilder::default().create(U256::from(MOVED), init).append(POP).stop().build();
+    let created = ACTOR.create(0);
+    let db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(10u64.pow(18)))
+        .account_balance(ACTOR, U256::from(MOVED))
+        .account_nonce(ACTOR, 0)
+        .account_code(ACTOR, actor);
+    let tx = OpTx(op_transaction(TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(ACTOR),
+        gas_limit,
+        ..Default::default()
+    }));
+    let outcome = execute(db, tx, EvmTxRuntimeLimits::no_limits());
+    assert!(outcome.result.is_success(), "CREATE: {:?}", outcome.result);
+    assert_eq!(
+        outcome.result.logs(),
+        [transfer_log(ACTOR, created, U256::from(MOVED)), event(created),],
+        "an endowed creation's init code",
+    );
+    assert_eq!(balance(&outcome, created), U256::from(MOVED));
 }
