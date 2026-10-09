@@ -143,9 +143,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
                 state_load.is_cold |= resident_entry_is_cold;
                 Ok(state_load)
             }
-            Err(LoadError::ColdLoadSkipped) if skip_cold_load => {
-                Err(self.read_declined_account(target))
-            }
+            Err(LoadError::ColdLoadSkipped) => Err(self.read_declined_account(target)),
             Err(e) => Err(e),
         };
 
@@ -159,11 +157,16 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
                 // either, so a frame too poor for the cold read still recorded the refund before it
                 // halted. The refund is the frame's own usage: the halt discards it, but the
                 // frame-end limit check still sees it.
-                Err(LoadError::ColdLoadSkipped) => {
-                    self.inner.journaled_state.state.get(&address).is_some_and(|account| {
-                        !(account.is_selfdestructed() && account.is_selfdestructed_locally())
-                    })
-                }
+                //
+                // revm reports a repeated destruction for an account already destroyed in this
+                // transaction, which is what the local flag records (it is never set without the
+                // global one).
+                Err(LoadError::ColdLoadSkipped) => self
+                    .inner
+                    .journaled_state
+                    .state
+                    .get(&address)
+                    .is_some_and(|account| !account.is_selfdestructed_locally()),
                 Err(LoadError::DBError) => false,
             };
             if first_destruction {
@@ -190,9 +193,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
             return self.oracle_sload(address, key, skip_cold_load);
         }
         match self.inner.sload_skip_cold_load(address, key, skip_cold_load) {
-            Err(LoadError::ColdLoadSkipped) if skip_cold_load => {
-                Err(self.read_declined_slot(address, key))
-            }
+            Err(LoadError::ColdLoadSkipped) => Err(self.read_declined_slot(address, key)),
             result => result,
         }
     }

@@ -1595,11 +1595,11 @@ pub mod volatile_data_ext {
     /// Converts a memory operand to `usize`, reporting `None` for a value revm's
     /// `as_usize_or_fail!` would have rejected.
     fn operand_as_usize(value: U256) -> Option<usize> {
-        let limbs = value.as_limbs();
-        if limbs[0] > usize::MAX as u64 || limbs[1] != 0 || limbs[2] != 0 || limbs[3] != 0 {
+        let [low, high @ ..] = *value.as_limbs();
+        if high != [0; 3] {
             return None;
         }
-        Some(limbs[0] as usize)
+        usize::try_from(low).ok()
     }
 
     /// Rejects the guarded opcode with the `disableVolatileDataAccess` revert data and returns from
