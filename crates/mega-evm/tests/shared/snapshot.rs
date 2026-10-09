@@ -10,9 +10,10 @@
 //! and asserts with `crate::assert_sorted_json_snapshot!(value)`. The directory holds no
 //! `main.rs`, so Cargo builds no target of its own from it.
 //!
-//! A snapshot is a net under a test's explicit assertions, not a replacement for them: the test
-//! asserts the figures that matter against the schedule and the named constants first, and ends
-//! with one snapshot of the whole result, which catches what no assertion names.
+//! A snapshot pins only an output no test can compute an expectation for, such as a tracer's
+//! format or the digest of a recorded trace. A figure the schedule and the named constants
+//! determine is asserted against its derivation, never pinned, and no snapshot is a net over a
+//! behaviour test.
 //!
 //! The snapshot files live in `snapshots/` next to the file that asserts. A mismatch fails the
 //! test; outside CI insta also writes the new value beside the old one as a `.snap.new` file,

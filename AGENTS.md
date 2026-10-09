@@ -595,21 +595,17 @@ When the agent is requested to implement a new feature or bug fix, it should con
   A gas limit is regular room on top of what the scenario adds at the prices in effect (`satin_gas_params()`, `history_gas`), never a number that happened to cover it at the constants; a call or creation that forwards all but a 64th of its gas keeps 64 times the history of the records it pays for.
   A charge a scenario must not be able to pay is derived the same way — a gas limit one short of it — not a number that is short of it only while a byte is dear.
   A test that pins the spec's own numbers returns early at other prices (`runs_at_measurement_prices`); run `scripts/price_grid.sh --pr` before committing a test change.
-- **Snapshots are a net under explicit assertions.**
-  An insta snapshot is a net under a test's explicit assertions, never a replacement for them.
-  Every snapshot test also asserts the figures that matter with `assert_eq!`, each derived independently from the schedule and the named constants, and ends with its snapshots of the whole result.
-  A snapshot takes one of four forms, and each form that does not show everything has a dump variable that writes out what it stands for.
-  A full view shows everything: `crate::assert_sorted_json_snapshot!` of a `test_utils::OutcomeView`, or the six views of a tracer scenario in `tests/tracers/`.
-  A test with more outcomes than a reviewer can read whole snapshots one summary line per case (`crate::assert_summaries_snapshot!`, `tests/satin/cases.rs`), each ending with the keccak256 of the case's full view, so a change the line does not show still fails it; `MEGA_SNAPSHOT_DUMP=<dir>` (an absolute path) writes the full views to `<dir>/<snapshot name>.json`.
-  More per-case lines than a snapshot can hold are pinned as a sweep digest (`cases::sweep_digest`), the distinct lines with their counts and one digest over every case's line; `MEGA_SNAPSHOT_DUMP` writes the lines to `<dir>/<snapshot name>.<sweep>.txt`.
-  A record too large to pin is pinned by its digests, such as the keyless differential's one hash per case (`tests/system/keyless/differential.rs`); `MEGA_KEYLESS_RECORD=<file>` writes the record.
-  A map of cases refuses a case collected twice (`cases::by_case`, `cases::InsertCase::insert_case`), so a case cannot drop out of a snapshot unseen.
-  A digest moves when anything it covers moves, and all of a test's digests move at once when the rendering of a type they cover changes, such as a dependency's `Debug` or `Serialize` format.
-  A changed digest is reviewed by dumping at the base and at the head and diffing the two dumps; it is never accepted on the digest alone.
+- **Pin only outputs with no computable expectation.**
+  A snapshot or a golden is the owner of an output no test can compute an expectation for, and of nothing else.
+  Those outputs are the tracers' formats (`tests/tracers/`, six views per scenario), recorded traces, such as the keyless differential's record pinned by one digest per case (`tests/system/keyless/differential.rs`), and the receipt bytes a node hashes, hand-pinned in `tests/block/receipt_goldens.rs`.
+  A figure the schedule and the named constants determine — gas on any ledger, a usage count, a limit, a balance, a slot, a log — is asserted with `assert_eq!` against its derivation, never pinned.
+  A snapshot is never a net over a behaviour test: a test that runs a transaction asserts what it owns and snapshots nothing of its outcome.
+  A digest stands for a record too large to keep in the tree, so a changed digest is reviewed through the record's dump: `MEGA_KEYLESS_RECORD=<file>` writes the keyless record, written at the base and at the head and diffed; it is never accepted on the digest alone.
+  A digest also moves wholesale when the rendering of a type it covers changes, such as a dependency's `Debug` format, and the dump is how that change is read too.
   Snapshot changes are reviewed one by one like code: with `cargo insta review`, or by diffing each `.snap.new` against its `.snap` and accepting it on its own (`cargo insta accept --snapshot <file>`, or, without cargo-insta, moving it over the `.snap` without its `assertion_line:` header line).
   They are never blanket-accepted (`cargo insta accept` of every pending snapshot, `--accept`, `--force-update-snapshots`, `INSTA_UPDATE=always`).
   Snapshot comparisons run at the spec's byte prices only: at other prices the macro skips the comparison and leaves a note of the skip (`test_utils::note_snapshot_skipped`), not a price guard.
-  `tests/block/receipt_goldens.rs` is the one golden outside insta, on purpose: it pins the receipts root, the blooms and the encoded receipts a node hashes as hand-written constants, the stronger pin for consensus bytes, which no snapshot tool can then rewrite.
+  The receipt goldens are the one pin outside insta, on purpose: the receipts root, the blooms and the encoded receipts are hand-written constants, the stronger pin for consensus bytes, which no snapshot tool can then rewrite.
   The generated documents (`crates/mega-state-test/DEVIATIONS.md`, `crates/mega-evm/tests/satin/pricing-table.md`, `bin/mega-evme/tests/satin-differences.md`) stay rendered by their tests and checked against the file, not snapshotted.
 - **Keep the execution-spec gate honest.**
   A change that makes Satin's machinery differ from Ethereum's fixtures on purpose registers a deviation (its rule, its reason, the entries it fails with the hashes Satin produces for them) and regenerates `crates/mega-state-test/DEVIATIONS.md`; a failure that is a bug is fixed, never registered.
