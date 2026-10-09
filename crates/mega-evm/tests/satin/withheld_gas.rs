@@ -251,6 +251,83 @@ fn test_the_sstore_sentry_reads_the_whole_regular_gas() {
     }
 }
 
+/// At the settlement the withheld gas is unspent gas: it goes back to the sender with the rest of
+/// the unspent gas, and it is not part of the gas used that caps the EIP-3529 refund at a fifth.
+///
+/// After its read, under a cap of 1,000,000, the transaction writes eight fresh slots, each back
+/// to zero at once, so most of its regular gas is withheld when it ends. Each fresh, cold write
+/// costs its two pushes and `SSTORE`'s 100, 2,100 cold and 19,900 for the set; each write back,
+/// its pushes and the warm 100; the slot's state gas and its record's history come back with the
+/// write back. So the transaction spends its intrinsic 15,000, its body's history, the read and
+/// its `POP` and eight times 22,106 + 106, and its refund counter holds eight times the 19,900 a
+/// restored fresh slot refunds — more than a fifth of what it spent, so the refund is that fifth.
+/// Counted as used, the withheld gas would lift the cap above the counter.
+///
+/// The sender pays what the receipt reports at the gas price, and the beneficiary is credited it;
+/// the same transaction without the read settles the same way.
+///
+/// Rules: [S12.34], [S12.42], [S12]. Independence: independent — every charge is the opcode's
+/// price, the refund and its cap are EIP-3529's, the intrinsic gas is EIP-2780's, and the body's
+/// history is `TX_BODY_SIZE` at the cost per history byte in effect.
+#[test]
+fn test_the_settlement_counts_the_withheld_gas_as_unspent() {
+    const SETTLED_CAP: u64 = 1_000_000;
+    const SLOTS: u64 = 8;
+    const GAS_PRICE: u128 = 2;
+    const FRESH_WRITE: u64 = 3 + 3 + 100 + 2_100 + 19_900;
+    const WRITE_BACK: u64 = 3 + 3 + 100;
+    const RESTORED_SLOT_REFUND: u64 = 19_900;
+    let limits = EvmTxRuntimeLimits::default().with_block_env_access_compute_gas_limit(SETTLED_CAP);
+    let funds = U256::from(10u64.pow(18));
+    for gas_limit in TIERS {
+        let run = |first| {
+            let code = (1..=SLOTS).fold(op(BytecodeBuilder::default(), first), |code, slot| {
+                code.sstore(U256::from(slot), U256::from(1)).sstore(U256::from(slot), U256::ZERO)
+            });
+            let db = MemoryDatabase::default()
+                .account_code(CONTRACT, code.stop().build())
+                .account_balance(CALLER, funds);
+            let mut tx = tx(CALLER, CONTRACT, gas_limit);
+            tx.0.base.gas_price = GAS_PRICE;
+            run_on(&mut MegaEvm::new(context(db).with_tx_runtime_limits(limits)), tx)
+        };
+        let (detained, plain) = (run(TIMESTAMP), run(PUSH0));
+        assert_eq!(detained.limit, Some(2 + SETTLED_CAP), "the read set a limit");
+
+        let spent = CALL_INTRINSIC +
+            history(mega_evm::TX_BODY_SIZE) +
+            2 +
+            2 +
+            SLOTS * (FRESH_WRITE + WRITE_BACK);
+        let refund = spent / 5;
+        assert!(SLOTS * RESTORED_SLOT_REFUND > refund, "the cap binds the refund counter");
+        let withheld_at_least = gas_limit.min(TX_GAS_LIMIT_CAP) - spent - (2 + SETTLED_CAP);
+        assert!(
+            (spent + withheld_at_least) / 5 > SLOTS * RESTORED_SLOT_REFUND,
+            "counted as used, the withheld gas would lift the cap above the counter"
+        );
+        let gas_used = spent - refund;
+        for (name, run) in [("with the read", &detained), ("without it", &plain)] {
+            let outcome = &run.outcome;
+            assert!(outcome.result.is_success(), "{name}: {:?}", outcome.result);
+            assert_eq!(outcome.limit_exceeded, None, "{name}: no stop");
+            assert_eq!(outcome.result.gas().total_gas_spent(), spent, "{name}: what it spent");
+            assert_eq!(outcome.result.gas().inner_refunded(), refund, "{name}: a fifth of it back");
+            assert_eq!(outcome.gas.gas_used, gas_used, "{name}: the receipt");
+            assert_eq!(
+                outcome.state[&CALLER].info.balance,
+                funds - U256::from(u128::from(gas_used) * GAS_PRICE),
+                "{name}: the sender pays the receipt's gas, the rest comes back"
+            );
+            assert_eq!(
+                outcome.state[&BENEFICIARY].info.balance,
+                U256::from(u128::from(gas_used) * GAS_PRICE),
+                "{name}: the beneficiary is credited it"
+            );
+        }
+    }
+}
+
 /* ---------- out-of-gas no gas could pay ---------- */
 
 /// An out-of-gas the transaction's whole gas could not pay halts and burns as without the read:
