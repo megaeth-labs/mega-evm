@@ -319,10 +319,12 @@ fn test_a_signer_that_sends_its_own_deployment_makes_no_record_of_its_own() {
         assert_eq!(outcome.gas.state, entry(GasId::create_state_gas()) + deposit_state);
     }
 
-    // What each call has after its overhead: the signed gas limit, which the charges then take it
-    // below.
+    // What each call has after its overhead: the creation's charges with one record, and one gas
+    // short of the signed gas limit beside them, so the forward is refused whoever sends the call
+    // and at any byte price.
     let data = deployment.call_data(LARGE_OVERRIDE);
-    let left = SIGNED_GAS_LIMIT;
+    let created = create_regular(init_code.len()) + entry(GasId::create_state_gas());
+    let left = SIGNED_GAS_LIMIT - 1 + created + record();
     let gas_limit = reference(data.clone(), GAS_LIMITS[0]).result.gas().total_gas_spent() +
         KEYLESS_DEPLOY_OVERHEAD_GAS +
         left;
@@ -333,7 +335,6 @@ fn test_a_signer_that_sends_its_own_deployment_makes_no_record_of_its_own() {
         }
         other => panic!("refused {other:?}, not for the forward"),
     };
-    let created = create_regular(init_code.len()) + entry(GasId::create_state_gas());
     let by_relayer =
         run_with(db_for(&deployment, U256::ONE), data, gas_limit, EvmTxRuntimeLimits::no_limits());
     assert_eq!(
