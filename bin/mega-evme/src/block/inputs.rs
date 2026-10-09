@@ -25,8 +25,8 @@ const CACHE_VERSION: u32 = 1;
 /// zstd level cached blocks are written at.
 const CACHE_ZSTD_LEVEL: i32 = 3;
 
-/// A block's inputs as cached: the RPC responses for the block and its receipts, and the
-/// pre-state built from its trace.
+/// A block's inputs as cached: the RPC responses for the block and its receipts, the pre-state
+/// built from its trace, and the parent block's timestamp.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CachedBlock {
     /// Format version.
@@ -39,6 +39,11 @@ pub struct CachedBlock {
     pub receipts: Value,
     /// Pre-state; codes live in the code store.
     pub prestate: BlockPrestate,
+    /// The parent block's timestamp, which decides whether a fork activates in the block.
+    ///
+    /// Absent from an entry written before the cache kept it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_timestamp: Option<u64>,
 }
 
 /// The header fields block execution reads, in plain data.
@@ -142,7 +147,10 @@ pub struct BlockInputs {
     pub receipts: Vec<ChainReceipt>,
     /// The part of the parent block's state the block reads.
     pub prestate: BlockPrestate,
-    /// Whether the inputs came from the block cache.
+    /// The parent block's timestamp, when the cache or the RPC gave it.
+    pub parent_timestamp: Option<u64>,
+    /// Whether the block cache holds these inputs as they are: false for inputs fetched over RPC,
+    /// wholly or in part, which the replay writes to the cache.
     pub from_cache: bool,
     /// The block and receipts responses as received, for writing the cache entry.
     raw: (Value, Value),
@@ -155,6 +163,7 @@ impl BlockInputs {
         block: Value,
         receipts: Value,
         prestate: BlockPrestate,
+        parent_timestamp: Option<u64>,
         from_cache: bool,
     ) -> Result<Self> {
         let parsed: Block<Transaction> = serde_json::from_value(block.clone())
@@ -215,6 +224,7 @@ impl BlockInputs {
             transactions,
             receipts: chain_receipts,
             prestate,
+            parent_timestamp,
             from_cache,
             raw: (block, receipts),
         })
@@ -228,6 +238,7 @@ impl BlockInputs {
             block: self.raw.0.clone(),
             receipts: self.raw.1.clone(),
             prestate: prestate.clone(),
+            parent_timestamp: self.parent_timestamp,
         }
     }
 }
@@ -308,12 +319,22 @@ impl BlockSource {
                         )));
                     }
                 }
+                // An entry written before the cache kept the parent's timestamp gets it over RPC
+                // when there is one, and is written back with it.
+                let (parent_timestamp, from_cache) = match cached.parent_timestamp {
+                    Some(timestamp) => (Some(timestamp), true),
+                    None => {
+                        let fetched = self.parent_timestamp(number).await?;
+                        (fetched, fetched.is_none())
+                    }
+                };
                 return BlockInputs::from_responses(
                     cached.chain_id,
                     cached.block,
                     cached.receipts,
                     cached.prestate,
-                    true,
+                    parent_timestamp,
+                    from_cache,
                 );
             }
         }
@@ -338,7 +359,29 @@ impl BlockSource {
             request("debug_traceBlockByNumber", json!([tag, { "tracer": "prestateTracer" }]))
                 .await?;
         let prestate = BlockPrestate::from_block_trace(trace, codes)?;
-        BlockInputs::from_responses(chain_id, block, receipts, prestate, false)
+        let parent_timestamp = self.parent_timestamp(number).await?;
+        BlockInputs::from_responses(chain_id, block, receipts, prestate, parent_timestamp, false)
+    }
+
+    /// The timestamp of block `number`'s parent, over RPC; `None` without a provider, or for
+    /// block 0, which has no parent.
+    async fn parent_timestamp(&self, number: u64) -> Result<Option<u64>> {
+        let (Some(provider), Some(parent)) = (&self.provider, number.checked_sub(1)) else {
+            return Ok(None);
+        };
+        let header: Value = provider
+            .raw_request("eth_getBlockByNumber".into(), json!([format!("0x{parent:x}"), false]))
+            .await
+            .map_err(|e| {
+                EvmeError::RpcError(format!("eth_getBlockByNumber of block {parent}: {e}"))
+            })?;
+        if header.is_null() {
+            return Err(EvmeError::BlockNotFound(parent));
+        }
+        let timestamp: U64 = serde_json::from_value(header["timestamp"].clone()).map_err(|e| {
+            EvmeError::RpcError(format!("block {parent} has a malformed timestamp: {e}"))
+        })?;
+        Ok(Some(timestamp.to()))
     }
 
     /// Writes `inputs` to the cache with `prestate` as their pre-state, and the codes it holds.

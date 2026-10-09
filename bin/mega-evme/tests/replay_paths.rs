@@ -19,7 +19,8 @@ use std::sync::Arc;
 
 use alloy_primitives::{Address, B256, U256};
 use common::blocks::{
-    cache_copy_for_satin, code_of, fixtures, overhead_slot, read_block, run_evme, FACTORY, L1_BLOCK,
+    cache_copy_for_satin, code_of, fixtures, is_deposit, overhead_slot, read_block, run_evme,
+    satin_genesis, timestamp_of, FACTORY, L1_BLOCK,
 };
 use mega_evme::block::{CachedBlock, PreAccount};
 use serde_json::{json, Value};
@@ -30,6 +31,8 @@ const BLOCK: u64 = 26_400_110;
 /// Answers JSON-RPC from the recorded block alone.
 struct Recording {
     block: CachedBlock,
+    /// The parent block's timestamp; the block's own when not given.
+    parent_timestamp: Option<u64>,
 }
 
 impl Recording {
@@ -51,6 +54,9 @@ impl Recording {
         parent["number"] = json!(format!("0x{:x}", BLOCK - 1));
         parent["hash"] = self.block.block["parentHash"].clone();
         parent["transactions"] = json!([]);
+        if let Some(timestamp) = self.parent_timestamp {
+            parent["timestamp"] = json!(format!("0x{timestamp:x}"));
+        }
         parent
     }
 
@@ -138,9 +144,14 @@ struct Server(Arc<MockServer>);
 
 impl Server {
     async fn start(block: CachedBlock) -> Self {
+        Self::with_parent_at(block, None).await
+    }
+
+    /// A server whose parent block is at `parent_timestamp`, or at the block's own timestamp.
+    async fn with_parent_at(block: CachedBlock, parent_timestamp: Option<u64>) -> Self {
         let server = MockServer::start().await;
         Mock::given(matchers::method("POST"))
-            .respond_with(Recording { block })
+            .respond_with(Recording { block, parent_timestamp })
             .mount(&server)
             .await;
         Self(Arc::new(server))
@@ -226,4 +237,54 @@ async fn test_a_transaction_replayed_alone_is_the_one_the_block_replay_runs() {
         }
     }
     assert!(stops > 0, "the limits leg checks a stopped transaction");
+}
+
+/// [S1.8] [S21.12] [S1] A transaction replay is told whether its block admits only deposits as a
+/// node is, from the schedule and the parent block it forks. Under a genesis file that activates
+/// Satin at the block's timestamp, with the parent a second earlier, the block is Satin's
+/// activation block: a user transaction of it is refused for the rule, and its deposit replays.
+/// With the parent at the block's own timestamp the user transaction replays.
+///
+/// Expected values: independent.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_transaction_replay_refuses_a_user_transaction_in_an_activation_block() {
+    let recorded = read_block(fixtures(), BLOCK);
+    let timestamp = timestamp_of(&recorded);
+    assert!(is_deposit(&recorded, 0) && !is_deposit(&recorded, 1));
+    let dir = tempfile::tempdir().unwrap();
+    let genesis = satin_genesis(dir.path(), mega_evm::MAINNET_CHAIN_ID, timestamp);
+    let hash = |index: usize| recorded.block["transactions"][index]["hash"].as_str().unwrap();
+
+    for (parent_timestamp, activation) in [(timestamp - 1, true), (timestamp, false)] {
+        let server =
+            Server::with_parent_at(read_block(fixtures(), BLOCK), Some(parent_timestamp)).await;
+        let uri = server.0.uri();
+        let run = |index: usize| {
+            run_evme(&[
+                "replay",
+                hash(index),
+                "--rpc",
+                &uri,
+                "--rpc.no-cache-file",
+                "--rpc.max-retries",
+                "0",
+                "--json",
+                "--genesis",
+                &genesis,
+            ])
+        };
+        let deposit = run(0);
+        assert_eq!(deposit.code, 0, "the deposit replays: {}{}", deposit.stderr, deposit.stdout);
+        let user = run(1);
+        if activation {
+            assert_ne!(user.code, 0, "{}", user.stdout);
+            let output = format!("{}{}", user.stdout, user.stderr);
+            assert!(
+                output.contains("non-deposit transaction in fork activation block"),
+                "{output}"
+            );
+        } else {
+            assert_eq!(user.code, 0, "the block after: {}{}", user.stderr, user.stdout);
+        }
+    }
 }

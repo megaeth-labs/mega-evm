@@ -215,6 +215,7 @@ pub fn execute_block(
             let executed = satin::execute(
                 inputs.chain_id,
                 &inputs.header,
+                inputs.parent_timestamp,
                 &inputs.transactions,
                 bucket_capacities,
                 limits_override,

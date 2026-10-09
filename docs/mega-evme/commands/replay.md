@@ -199,16 +199,21 @@ Each block runs on the engine its spec names: the one `--override.spec` forces, 
 Every transaction of the block runs in order after the block's pre-block changes, as a node runs the block, and every receipt is compared with the chain's: status, gas used, cumulative gas used, and every log's address, topics and data; the replayed receipts root is compared with the header's.
 The state the block leaves is not compared with the header's state root, so a difference that leaves every receipt as it was (a storage write that emits no log) passes.
 
-A block's inputs are the block with its transactions, the chain's receipts, and the state its parent left for everything the block reads, built from a `prestateTracer` trace of the block.
+A block's inputs are the block with its transactions, the chain's receipts, the parent block's timestamp, and the state its parent left for everything the block reads, built from a `prestateTracer` trace of the block.
 A read the trace does not cover (what only a pre-block system call reads, or a path a counterfactual takes that the chain did not) is read from the parent block over RPC.
 
-| Flag                  | Description                                                                                                                                                |
-| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--block <N[..M]>`    | The blocks to replay; conflicts with `TX_HASH`, tracing, state dump, fixture dump, transaction overrides and the RPC cache file                            |
-| `--block-cache <DIR>` | Read a block from `DIR` when it is there; write a block fetched over `--rpc` to it, with what its replay read beyond the trace, so the next run is offline |
-| `--verify`            | Exit with code 2 when a block differs from the chain                                                                                                       |
-| `--rpc <URL>`         | Fetch what the cache lacks: `eth_getBlockByNumber`, `eth_getBlockReceipts`, `debug_traceBlockByNumber` and the parent block's state                        |
-| `--json`              | Print one JSON record per transaction and per block instead of a line per block                                                                            |
+On Satin a block in which a fork activates admits only deposits, as the [Satin upgrade](../../spec/upgrades/satin.md#1-base-layer-optimism-karst-ethereum-osaka) states: Satin itself, or an Optimism fork at or after Jovian.
+The replay works this out as a node does, from the schedule the block runs under and the parent block's timestamp, and tells block execution; every transaction of such a block but its deposits is reported `refused`.
+A transaction replay works it out the same way, from the parent block it forks, and refuses a non-deposit transaction of such a block with an error.
+A cached block written without the parent's timestamp gets it over `--rpc` and is written back with it; offline, it replays when no fork its schedule activates after genesis is active at the block, and otherwise fails, since whether the fork activates in it depends on the parent's timestamp.
+
+| Flag                  | Description                                                                                                                                                        |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `--block <N[..M]>`    | The blocks to replay; conflicts with `TX_HASH`, tracing, state dump, fixture dump, transaction overrides and the RPC cache file                                    |
+| `--block-cache <DIR>` | Read a block from `DIR` when it is there; write a block fetched over `--rpc` to it, with what its replay read beyond the trace, so the next run is offline         |
+| `--verify`            | Exit with code 2 when a block differs from the chain                                                                                                               |
+| `--rpc <URL>`         | Fetch what the cache lacks: `eth_getBlockByNumber` of the block and of its parent, `eth_getBlockReceipts`, `debug_traceBlockByNumber` and the parent block's state |
+| `--json`              | Print one JSON record per transaction and per block instead of a line per block                                                                                    |
 
 The endpoint needs the `debug` namespace and historical state at the parent block: an archive node.
 Without `--rpc`, a read the cache does not hold fails its block with an error naming the read.
