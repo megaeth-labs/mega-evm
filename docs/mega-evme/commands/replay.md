@@ -534,7 +534,7 @@ It then additionally cross-checks the isolated execution against the full replay
 One channel stays open by construction: the isolated run's sender balance is shifted by the zeroed L1 fee, so a contract that stores a balance-derived value bakes that shifted value into `post` (and the sender's final balance in `post` likewise differs from the chain).
 The fixture still self-validates and reproduces gas exactly; only such balance-derived state values differ.
 
-`--dump-fixture` cannot be combined with transaction overrides or `--override.spec` (a forced spec would record a what-if, not the on-chain transaction), and deposit transactions are not supported.
+`--dump-fixture` cannot be combined with transaction overrides or `--override.spec` (a forced spec would record a what-if, not the on-chain transaction), and deposit and EIP-7702 (set-code) transactions are not supported.
 A target transaction that reads a block hash via `BLOCKHASH` is also rejected: fixtures carry no historical block hashes, so the isolated re-execution could not reproduce the values the replay observed.
 Block hash reads by preceding transactions in the same block do not matter — only the target transaction's reads are checked.
 Because the fidelity gate reads the receipt, an offline dump (`--rpc.replay-file`) requires the receipt to be present in the capture — so capture and dump together in the online run, then re-dump offline reproducibly.
@@ -627,7 +627,7 @@ Override the auto-detected spec.
 Useful when you want to test how the transaction would behave under a different spec, or when replaying against a chain that isn't recognized.
 
 ```
-mega-evme replay --override.spec Rex2 <TX_HASH>
+mega-evme replay --rpc https://mainnet.megaeth.com/rpc --override.spec Rex2 <TX_HASH>
 ```
 
 The override replaces the entire execution world, not just the EVM semantics.
@@ -654,7 +654,7 @@ This is useful for "what-if" testing: what happens with less gas, different call
 | `--override.input <HEX>`       | `--override.data`      | Replace the calldata with a hex-encoded byte string                |
 | `--override.input-file <FILE>` | `--override.data-file` | Replace the calldata with the contents of a file                   |
 
-Note that `replay` does not accept `--chain`, block environment flags, or pre-state flags.
+Note that `replay` does not accept `--spec`, `--chain-id`, block environment flags, or pre-state flags.
 All of that context comes from the RPC.
 
 ## Options

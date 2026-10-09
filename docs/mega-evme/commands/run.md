@@ -14,7 +14,7 @@ mega-evme run [OPTIONS] [CODE]
 
 `CODE` is the bytecode to execute, given as a `0x`-prefixed hex string.
 You can also supply bytecode from a file with `--codefile`.
-Exactly one of these two inputs must be provided.
+One of these two inputs must be provided; if both are given, the positional `CODE` is used and `--codefile` is ignored.
 
 ## Code Input
 
@@ -178,12 +178,12 @@ Options:
       --log.file <LOG_FILE>
           Log file path. If specified, logs are written to this file instead of stderr
 
-          [aliases: --log-file]
+          [alias: --log-file]
 
       --log.no-color
           Disable colorful console logging. Only applies when logging to stderr (no --log.file)
 
-          [aliases: --log-no-color]
+          [alias: --log-no-color]
 
   -h, --help
           Print help (see a summary with '-h')
@@ -197,7 +197,7 @@ Transaction Options:
       --gas <GAS>
           Gas limit for the evm [default: 10000000]
 
-          [aliases: --gas-limit]
+          [alias: --gas-limit]
 
       --basefee <BASEFEE>
           Price set for the evm (gas price) [default: 0]
@@ -212,12 +212,12 @@ Transaction Options:
       --sender <SENDER>
           The transaction origin [default: 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266]
 
-          [aliases: --from]
+          [alias: --from]
 
       --receiver <RECEIVER>
           The transaction receiver (execution context)
 
-          [aliases: --to]
+          [alias: --to]
 
       --nonce <NONCE>
           The transaction nonce
@@ -228,13 +228,12 @@ Transaction Options:
           [possible values: true, false]
 
       --value <VALUE>
-          Value set for the evm. VALUE can be: plain number (wei), or number with suffix
-          (ether, gwei, wei). Examples: `--value 1ether`, `--value 100gwei`
+          Value set for the evm. VALUE can be: plain number (wei), or number with suffix (ether, gwei, wei). Examples: `--value 1ether`, `--value 100gwei`, `--value 1000000000000000000`
 
       --input <INPUT>
           Transaction data (input) as hex string
 
-          [aliases: --data]
+          [alias: --data]
 
       --inputfile <INPUTFILE>
           File containing transaction data (input). If '-' is specified, input is read from stdin
@@ -244,7 +243,7 @@ Transaction Options:
       --source-hash <HASH>
           Source hash for deposit transactions (tx-type 126)
 
-          [aliases: --sourcehash]
+          [alias: --sourcehash]
 
       --mint <MINT>
           Amount of ETH to mint for deposit transactions (wei)
@@ -252,7 +251,7 @@ Transaction Options:
       --auth <AUTH>
           EIP-7702 authorization in format `AUTHORITY:NONCE->DELEGATION` (can be repeated)
 
-          [aliases: --authorization]
+          [alias: --authorization]
 
       --access <ACCESS>
           EIP-2930 access list entry in format `ADDRESS` or `ADDRESS:KEY1,KEY2,...` (can be repeated)
@@ -264,63 +263,71 @@ State Options:
           Fork state from a remote RPC endpoint
 
       --fork.block <FORK_BLOCK>
-          Block number of the state (post-block state) to fork from
+          Block number of the state (post-block state) to fork from. If not specified, the latest block is used. Only used if `fork` is true
 
       --prestate <PRESTATE>
-          JSON file with prestate (genesis) config
+          JSON file with prestate (genesis) config. This overrides the state in the forked remote state (if applicable)
 
-          [aliases: --pre-state]
+          [alias: --pre-state]
 
       --block-hash <BLOCK_HASHES>
-          History block hashes for BLOCKHASH opcode. Format: `block_number:block_hash` (repeatable)
+          History block hashes to serve `BLOCKHASH` opcode. This overrides the block hashes in the forked remote state (if applicable). Each entry should be in the format `block_number:block_hash` (can be repeated)
 
           [aliases: --blockhash, --block-hashes, --blockhashes]
 
       --sender.balance <SENDER_BALANCE>
-          Balance to allocate to the sender account. Supports suffixes: ether, gwei, wei
+          Balance to allocate to the sender account. VALUE can be: plain number (wei), or number with suffix (ether, gwei, wei). Examples: `--sender.balance 1ether`, `--sender.balance 1000000000000000000` If not specified, sender balance is not set (fallback to `prestate` if specified, otherwise 0)
 
-          [aliases: --from.balance]
+          [alias: --from.balance]
 
       --faucet <FAUCET>
-          Add ether to addresses. Format: `ADDRESS+=VALUE` (repeatable, supports suffixes)
+          Add ether to specified addresses. Each entry format: `ADDRESS+=VALUE` VALUE can be: plain number (wei), or number with suffix (ether, gwei, wei). Examples: `--faucet 0x1234+=100ether`, `--faucet 0x5678+=1000000gwei` Can be repeated for multiple addresses
 
       --balance <BALANCE>
-          Override balance for addresses. Format: `ADDRESS=VALUE` (repeatable, supports suffixes)
+          Override balance for specified addresses. Each entry format: `ADDRESS=VALUE` VALUE can be: plain number (wei), or number with suffix (ether, gwei, wei). Examples: `--balance 0x1234=100ether`
 
       --storage <STORAGE>
-          Override storage slots. Format: `ADDRESS:SLOT=VALUE` (repeatable)
+          Override storage slots. Each entry format: `ADDRESS:SLOT=VALUE` SLOT and VALUE are U256 (hex or decimal). Examples: `--storage 0x1234:0x0=0x1`
 
 RPC Options:
-      (On run/tx, --rpc and the --rpc.* cache/retry options below take effect only with --fork; without --fork they are accepted but ignored. The capture/replay fixture flags are replay-command-only.)
-
       --rpc <RPC_URL>
-          RPC URL. Required for networked operation (replay, run --fork, tx --fork). No default; the RPC_URL environment variable is not consulted
+          RPC URL. Required for networked operation (replay, run --fork, tx --fork)
 
-          [aliases: --rpc-url] [compat alias: --fork.rpc]
+          [alias: --rpc-url]
 
       --rpc.capture-file <CAPTURE_FILE>
-          (replay command only) Capture JSON-RPC responses to a fixture file; not usable as a run/tx offline-fork path
+          Capture JSON-RPC responses to a single file for later offline replay. Requires `--rpc`. If the file already exists, its entries are loaded and merged; missing entries are fetched via the RPC endpoint and persisted on clean exit. Cannot be used with --rpc.replay-file, --rpc.cache-dir, --rpc.clear-cache, --rpc.no-cache-file, or --rpc.cache-max-entries
 
       --rpc.replay-file <REPLAY_FILE>
-          (replay command only) Serve JSON-RPC from a captured fixture; not usable as a run/tx offline-fork path
+          Replay from a previously captured JSON-RPC fixture file (offline). Cannot be used with `--rpc`. Any RPC miss is a hard error; the file is never written. Cannot be used with --rpc.capture-file, --rpc.cache-dir, --rpc.clear-cache, --rpc.no-cache-file, or --rpc.cache-max-entries
 
       --rpc.cache-max-entries <cache_max_entries>
-          Max items in the in-memory RPC LRU cache (and therefore the cache file); 0 = effectively unlimited, capped at 1,048,576 entries. The ceiling is an eviction threshold, not an allocation [default: 0]
+          Maximum number of items in the in-memory RPC LRU cache (and therefore what gets persisted to the cache file). `0` = effectively unlimited, which caps at 1,048,576 entries so a long-running process cannot grow without bound. The ceiling is not an allocation: memory grows with the entries actually cached, so a high value costs nothing until that many responses arrive. Default is `0`
+
+          [default: 0]
 
       --rpc.cache-dir <CACHE_DIR>
-          Directory for per-chain RPC cache files (default: platform cache dir)
+          Directory for per-chain RPC cache files.
+
+          Each chain's cache is stored as `{cache_dir}/rpc-cache-{chain_id}.json`. Different chains cannot share a file, so cross-chain contamination is impossible by construction.
+
+          Defaults to the platform cache directory (`$XDG_CACHE_HOME/mega-evme/rpc` on Linux, `~/Library/Caches/mega-evme/rpc` on macOS). Pass `--rpc.no-cache-file` to disable on-disk persistence entirely. Batch replay (`--tx-file` / `--block`) uses the on-disk cache only when this flag or `--rpc.clear-cache` is passed explicitly.
 
       --rpc.no-cache-file
-          Disable on-disk cache persistence (the in-memory LRU still applies)
+          Disable on-disk cache persistence. The in-memory LRU cache still applies. Takes precedence over `--rpc.clear-cache`: with no cache file in play there is nothing to delete, load, or persist. This is already the default for batch replay (`--tx-file` / `--block`) unless `--rpc.cache-dir` or `--rpc.clear-cache` is passed
 
       --rpc.clear-cache
-          Delete the current chain's cache file before loading it
+          Delete the current chain's cache file before loading it. Recovery path for a polluted or corrupt cache file. If the unlink itself fails (e.g. insufficient permissions), `mega-evme` aborts rather than silently reloading the stale file. Passing this flag engages the on-disk cache, including in batch replay (`--tx-file` / `--block`), where it is otherwise off by default. Has no effect alongside `--rpc.no-cache-file`
 
       --rpc.max-retries <MAX_RETRIES>
-          Max transport retries on 429/503, rate-limit, transport failures, and request timeouts; 0 disables [default: 5]
+          Maximum number of times the transport layer will retry a failing RPC request. Retries trigger on HTTP 429 / 503, JSON-RPC rate-limit error responses, and transport failures surfaced as `TransportErrorKind::Custom` (connection refused, DNS failure, TLS handshake, request timeout, etc.). Set to 0 to disable retries entirely
+
+          [default: 5]
 
       --rpc.backoff-ms <BACKOFF_MS>
-          Fixed sleep (ms) between retries; no exponential backoff [default: 1000]
+          Fixed sleep duration, in milliseconds, inserted between retry attempts unless the server supplies its own backoff hint. This layer does not perform exponential backoff
+
+          [default: 1000]
 
       --rpc.cu-per-sec <COMPUTE_UNITS_PER_SEC>
           Compute-unit budget (CU/s) for the retry layer's rate-limit accounting. This is NOT requests per second: each RPC method costs multiple compute units. A single-digit value will heavily self-throttle. Default (660) matches typical public-endpoint budgets
@@ -340,42 +347,121 @@ Chain Options:
           [default: Rex6]
 
       --chain-id <CHAIN_ID>
-          Chain ID [default: 6342] [aliases: --chainid]
+          `ChainID` to use
+
+          [default: 6342]
+          [alias: --chainid]
 
 Block Options:
-      --block.number <BLOCK_NUMBER>          Block number [default: 1]
-      --block.coinbase <BLOCK_COINBASE>      Block coinbase [default: 0x0...0] [aliases: --block.beneficiary]
-      --block.timestamp <BLOCK_TIMESTAMP>    Block timestamp [default: 1]
-      --block.gaslimit <BLOCK_GAS_LIMIT>     Block gas limit [default: 10000000000]
-      --block.basefee <BLOCK_BASEFEE>        Block base fee [default: 0]
-      --block.difficulty <BLOCK_DIFFICULTY>   Block difficulty [default: 0]
-      --block.prevrandao <BLOCK_PREVRANDAO>  Previous randao [aliases: --block.random]
-      --block.blobexcessgas <GAS>            Blob excess gas [default: 0]
+      --block.number <BLOCK_NUMBER>
+          Block number
+
+          [default: 1]
+
+      --block.coinbase <BLOCK_COINBASE>
+          Block coinbase/beneficiary address
+
+          [default: 0x0000000000000000000000000000000000000000]
+          [alias: --block.beneficiary]
+
+      --block.timestamp <BLOCK_TIMESTAMP>
+          Block timestamp
+
+          [default: 1]
+
+      --block.gaslimit <BLOCK_GAS_LIMIT>
+          Block gas limit
+
+          [default: 10000000000]
+          [aliases: --block.gas-limit, --block.gas]
+
+      --block.basefee <BLOCK_BASEFEE>
+          Block base fee per gas (EIP-1559)
+
+          [default: 0]
+          [alias: --block.base-fee]
+
+      --block.difficulty <BLOCK_DIFFICULTY>
+          Block difficulty
+
+          [default: 0]
+
+      --block.prevrandao <BLOCK_PREVRANDAO>
+          Block prevrandao (replaces difficulty post-merge). Required for post-merge blocks
+
+          [default: 0x0000000000000000000000000000000000000000000000000000000000000000]
+          [alias: --block.random]
+
+      --block.blobexcessgas <BLOCK_BLOB_EXCESS_GAS>
+          Excess blob gas for EIP-4844, from which the blob base fee is derived
+
+          [default: 0]
+          [alias: --block.blob-excess-gas]
 
 External Environment Options:
       --bucket-capacity <BUCKET_ID:CAPACITY>
-          Bucket capacity configuration. Format: `bucket_id:capacity` (repeatable)
+          Bucket capacity configuration in format "`bucket_id:capacity`" Can be specified multiple times for different buckets. Example: --bucket-capacity 123:1000000 --bucket-capacity 456:2000000
 
 State Dump Options:
-      --dump                           Dump state after the run
-      --dump.output <DUMP_OUTPUT_FILE> Output file for state dump
+      --dump
+          Dumps the state after the run
 
-Output Options:
-      --json                           Output results as JSON instead of human-readable text
+      --dump.output <DUMP_OUTPUT_FILE>
+          Output file for state dump (if not specified, prints to console)
 
 Trace Options:
-      --trace                                    Enable tracing
-      --trace.output <TRACE_OUTPUT_FILE>         Output file for trace data
-      --tracer <TRACER>                          Tracer: opcode, call, pre-state [default: opcode]
-      --trace.opcode.disable-memory              Disable memory capture
-      --trace.opcode.disable-stack               Disable stack capture
-      --trace.opcode.disable-storage             Disable storage capture
-      --trace.opcode.enable-return-data          Enable return data capture
-      --trace.call.only-top-call                 Only trace top-level call
-      --trace.call.with-log                      Include logs in call trace
-      --trace.prestate.diff-mode                 Show state diff
-      --trace.prestate.disable-code              Disable code in prestate output
-      --trace.prestate.disable-storage           Disable storage in prestate output
+      --trace
+          Enable tracing
+
+      --trace.output <TRACE_OUTPUT_FILE>
+          Output file for trace data (if not specified, prints to console)
+
+      --tracer <TRACER>
+          Tracer type to use (defaults to struct logger if not specified)
+
+          Possible values:
+          - opcode:    Enable execution tracing (opcode-level trace in Geth format)
+          - call:      Enable call tracing (tracks call frames in nested tree structure)
+          - pre-state: Enable pre-state tracing (retrieves account state before execution)
+
+          [default: opcode]
+
+      --trace.opcode.disable-memory
+          Disable memory capture in traces (opcode tracer only)
+
+      --trace.opcode.disable-stack
+          Disable stack capture in traces (opcode tracer only)
+
+      --trace.opcode.disable-storage
+          Disable storage capture in traces (opcode tracer only)
+
+      --trace.opcode.enable-return-data
+          Enable return data capture in traces (opcode tracer only)
+
+      --trace.call.only-top-call
+          Only trace top-level call (call tracer only)
+
+      --trace.call.with-log
+          Include logs in call trace (call tracer only)
+
+      --trace.prestate.diff-mode
+          Show state diff instead of prestate (pre-state tracer only)
+
+          [alias: --trace.pre-state.diff-mode]
+
+      --trace.prestate.disable-code
+          Disable code in prestate output (pre-state tracer only)
+
+          [alias: --trace.pre-state.disable-code]
+
+      --trace.prestate.disable-storage
+          Disable storage in prestate output (pre-state tracer only)
+
+          [alias: --trace.pre-state.disable-storage]
+
+Output Options:
+      --json
+          Output results as JSON instead of human-readable text
 ```
 
 ## See Also

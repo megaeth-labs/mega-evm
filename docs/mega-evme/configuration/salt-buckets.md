@@ -25,10 +25,10 @@ Format: `bucket_id:capacity`, where:
 
 ```bash
 # Single bucket
-mega-evme run contract.hex --bucket-capacity 123:1000000
+mega-evme run --codefile contract.hex --bucket-capacity 123:1000000
 
 # Multiple buckets
-mega-evme run contract.hex \
+mega-evme run --codefile contract.hex \
   --bucket-capacity 123:1000000 \
   --bucket-capacity 456:2000000 \
   --bucket-capacity 789:500000
@@ -44,6 +44,6 @@ mega-evme tx \
 ## Notes
 
 - Without any `--bucket-capacity` flags, all buckets default to the minimum size, which means storage operations incur zero storage gas.
-- This option is available in all commands (`run`, `tx`, and `replay`).
+- This option is available in `run`, `tx`, and online `replay`; an offline replay (`--rpc.replay-file`) rejects it and takes the capacities from the fixture envelope.
 - SALT-based dynamic gas pricing is active from the MiniRex behavior onward.
   In `Equivalence` mode — including the alias spec `MiniRex1`, which executes `Equivalence` behavior — bucket capacities have no effect.

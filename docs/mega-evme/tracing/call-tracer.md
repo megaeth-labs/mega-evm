@@ -143,7 +143,7 @@ mega-evme tx \
 Include log events:
 
 ```bash
-# WETH.deposit() emits a Transfer event — use --with-log to capture it
+# WETH.deposit() emits a Deposit event — use --trace.call.with-log to capture it
 mega-evme tx \
   --fork --rpc https://mainnet.megaeth.com/rpc \
   --sender.balance 1ether \
