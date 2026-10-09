@@ -1337,29 +1337,51 @@ fn test_state_revert_when_exceeding_limit() {
     assert_eq!(outcome.state[&CALLER].info.balance, U256::from(10_000), "the value did not move");
 }
 
-/// Data size is held before write records: a body that crosses the data-size limit is its stop
-/// whatever the KV limit, and so is a write that crosses both.
+/// Data size is held before write records where one site crosses both: the first frame's start,
+/// whose recipient's record and transfer log are counted together, and a fresh slot's write after
+/// a log. Under a data-size limit the site crosses and a KV limit of nothing, the data-size limit
+/// is the stop reported. Under the KV limit alone the KV limit stops the transaction on the same
+/// bill, so at the same site: each row crosses both there, and the order is what decides.
+///
+/// Rules: [S10.47]. Independence: constants — the limits and the usage are the byte table's
+/// sizes.
 #[test]
 fn test_check_limit_priority_data_size_before_kv_update() {
-    let db = || MemoryDatabase::default().account_code(A, writer(1));
-    let both = |data_size: u64| {
-        EvmTxRuntimeLimits::default().with_tx_data_size_limit(data_size).with_tx_kv_update_limit(0)
-    };
-    for (data_size, used) in [
-        (1, TX_BODY_SIZE),
-        (TX_BODY_SIZE + LOG_BASE_SIZE, TX_BODY_SIZE + LOG_BASE_SIZE + WRITE_RECORD_SIZE),
-    ] {
-        let outcome = execute(db(), both(data_size), BELOW);
+    let stop =
+        |kind, limit, used| LimitCheck::ExceedsLimit { kind, limit, used, frame_local: false };
+    // (site, the value the transaction carries, the data size the site brings it to)
+    let rows = [
+        (
+            "a value transfer's start",
+            U256::from(1),
+            TX_BODY_SIZE + WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE,
+        ),
+        ("a fresh slot after a log", U256::ZERO, TX_BODY_SIZE + LOG_BASE_SIZE + WRITE_RECORD_SIZE),
+    ];
+    for (site, value, used) in rows {
+        let run = |limits: EvmTxRuntimeLimits| {
+            let db = MemoryDatabase::default()
+                .account_code(A, writer(1))
+                .account_balance(CALLER, U256::from(1));
+            MegaEvm::new(context(db).with_tx_runtime_limits(limits))
+                .execute_transaction(call(CALLER, A, value, BELOW))
+                .expect("the transaction is valid")
+        };
+        let kv_alone = run(EvmTxRuntimeLimits::default().with_tx_kv_update_limit(0));
         assert_eq!(
-            outcome.limit_exceeded,
-            Some(LimitCheck::ExceedsLimit {
-                kind: LimitKind::DataSize,
-                limit: data_size,
-                used,
-                frame_local: false,
-            }),
-            "data size {data_size}"
+            kv_alone.limit_exceeded,
+            Some(stop(LimitKind::KVUpdate, 0, 1)),
+            "{site}: its record crosses the KV limit"
         );
+        let both = run(EvmTxRuntimeLimits::default()
+            .with_tx_data_size_limit(used - 1)
+            .with_tx_kv_update_limit(0));
+        assert_eq!(
+            both.limit_exceeded,
+            Some(stop(LimitKind::DataSize, used - 1, used)),
+            "{site}: the data size is held first"
+        );
+        assert_eq!(kv_alone.gas, both.gas, "{site}: both limits stop it at the same site");
     }
 }
 
