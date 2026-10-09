@@ -275,6 +275,15 @@ pub(crate) fn history(bytes: u64) -> u64 {
     crate::common::history(bytes)
 }
 
+/// The intrinsic gas a call carrying `data` pays below the execution cap, by hand: EIP-2780's
+/// `TX_BASE_COST` of 12,000 and 3,000 for the recipient's access, the calldata at 4 gas a zero
+/// byte and 16 a non-zero one, and the history of the body, which spills onto the regular gas
+/// where there is no reservoir.
+pub(crate) fn intrinsic(data: &[u8]) -> u64 {
+    let calldata: u64 = data.iter().map(|&byte| if byte == 0 { 4 } else { 16 }).sum();
+    12_000 + 3_000 + calldata + crate::common::body_history(data.len() as u64)
+}
+
 /// A Satin context over `db` reading `envs`.
 pub(crate) fn salt_run(
     db: MemoryDatabase,

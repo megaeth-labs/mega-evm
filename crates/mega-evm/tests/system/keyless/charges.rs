@@ -296,8 +296,10 @@ fn test_a_failed_deployment_gives_the_created_account_back_at_its_price() {
 /// its overhead; sent by a relayer for a signer holding a wei, one record more.
 ///
 /// Rule [S15.22]. Expected values `constants`: the charges are the schedule's `create`, initcode
-/// and created-account entries and one record's history; what the call had after its overhead is
-/// set by the test, on an intrinsic measured from a plain call carrying the same calldata.
+/// and created-account entries and one record's history at the cost per history byte; what the
+/// call has after its overhead is set by the test on a gas limit built by hand — the call's
+/// EIP-2780 intrinsic, its calldata's cost, its body's history and the keyless overhead — so an
+/// intrinsic the engine got wrong would move the forward too.
 #[test]
 fn test_a_signer_that_sends_its_own_deployment_makes_no_record_of_its_own() {
     let init_code = deploying(&runtime(RUNTIME_LEN));
@@ -325,9 +327,7 @@ fn test_a_signer_that_sends_its_own_deployment_makes_no_record_of_its_own() {
     let data = deployment.call_data(LARGE_OVERRIDE);
     let created = create_regular(init_code.len()) + entry(GasId::create_state_gas());
     let left = SIGNED_GAS_LIMIT - 1 + created + record();
-    let gas_limit = reference(data.clone(), GAS_LIMITS[0]).result.gas().total_gas_spent() +
-        KEYLESS_DEPLOY_OVERHEAD_GAS +
-        left;
+    let gas_limit = intrinsic(&data) + KEYLESS_DEPLOY_OVERHEAD_GAS + left;
     let provided = |outcome: &MegaTransactionOutcome| match refusal(outcome) {
         KeylessDeployError::GasLimitTooLow { tx_gas_limit, provided_gas_limit } => {
             assert_eq!(tx_gas_limit, SIGNED_GAS_LIMIT);
