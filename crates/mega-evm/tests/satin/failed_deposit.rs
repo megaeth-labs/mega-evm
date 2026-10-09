@@ -156,7 +156,8 @@ fn test_a_failure_before_the_first_frame_wins_over_the_stop_its_body_latched() {
             if failure == CallerAccount && state_is_free() {
                 continue;
             }
-            let case = format!("{failure:?}, {}", if system { "system deposit" } else { "user" });
+            let case =
+                format!("{failure:?}, {}", if system { "system deposit" } else { "user deposit" });
             let (sender, gas_limit, balance_before) = match failure {
                 Validation => (CALLER, INTRINSIC - 1, 1),
                 CallerAccount => (ABSENT, INTRINSIC + account_state_gas() - 1, 0),
@@ -191,7 +192,11 @@ fn test_a_failure_before_the_first_frame_wins_over_the_stop_its_body_latched() {
     assert_eq!((stopped.gas.gas_used, stopped.gas.state), (INTRINSIC, 0));
     assert_eq!(stopped.usage, body);
     let stopped = run(ABSENT, INTRINSIC + account_state_gas(), false);
-    assert_eq!(stopped.limit_exceeded, Some(stop), "the caller paid for: the body's stop");
+    assert_eq!(
+        stopped.limit_exceeded,
+        Some(stop),
+        "its caller's account paid for: the body's stop"
+    );
     assert_eq!(stopped.result.output(), Some(&stop.revert_data()));
     assert_eq!(
         (stopped.gas.gas_used, stopped.gas.state),

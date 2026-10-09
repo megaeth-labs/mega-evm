@@ -1,10 +1,10 @@
 //! The EIP-7623 calldata floor of a transaction exempt from history gas.
 //!
-//! A transaction that pays history gas pays every byte it carries at 88 gas, above the floor's 64,
-//! so the floor never decides what it uses. A transaction exempt from history gas — a deposit, and
-//! the protocol's own — pays its calldata only at the intrinsic token rate, four gas a zero byte
-//! and sixteen a non-zero one, so past a few bytes the floor is above what it spent, and its gas
-//! used is the floor.
+//! At the spec's prices a transaction that pays history gas pays every byte it carries at 88 gas,
+//! above the floor's 64, so the floor never decides what it uses. A transaction exempt from history
+//! gas — a deposit, and the protocol's own — pays its calldata only at the intrinsic token rate,
+//! four gas a zero byte and sixteen a non-zero one, so once its calldata outweighs what it runs and
+//! the state it adds, its gas used is the floor.
 //!
 //! The floor's base is the transaction's own EIP-2780 base without its calldata, access-list,
 //! authorization and initcode costs: 12,000 for a transfer to the sender itself, 15,000 for a call
