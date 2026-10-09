@@ -1478,18 +1478,32 @@ fn test_fresh_slots_fit_a_limit_of_their_state_gas_and_one_more_stops() {
 ///
 /// Each case is a transaction below the execution cap, so there is no reservoir, whose gas limit
 /// pays everything before its state charge and leaves it one gas short of that charge: a fresh
-/// slot's `SSTORE`, a `SELFDESTRUCT` that moves a balance to an account that does not exist, and a
+/// slot's `SSTORE`, a `SELFDESTRUCT` that moves a balance to an account that does not exist, a
 /// value transaction to an account that does not exist, whose start EIP-2780 charges for the new
-/// account. Under a state-gas limit of one gas and of one gas short of the charge, it halts out of
-/// gas, consumes its whole gas limit, keeps no state gas, and reports no stop: not a stop that
-/// would give the unspent gas back. One gas more pays the charge, and the same limit then stops the
-/// transaction there, with the charge as the state gas it reports, which pins the gas limit as one
-/// short of the charge and nothing else.
+/// account, and, from `A`, a value `CALL` to an account that does not exist and a `CREATE`, whose
+/// opcodes charge the account the frame they start adds. Under a state-gas limit of one gas and
+/// of one gas short of the charge, it halts out of gas, consumes its whole gas limit, keeps no
+/// state gas, and reports no stop: not a stop that would give the unspent gas back.
+///
+/// Once the state charge is paid, a frame start still charges the caller the history of the two
+/// records the frame makes, after the gas it forwards is computed [S7.23]; one gas short of what
+/// the start costs in all is an out-of-gas too, and the frame does not start [S7.24]. A `CREATE`
+/// charges the created account before its 63/64 split, as EIP-8037 has it, so the records come out
+/// of the 64th the creator keeps, and the creator must hold 64 times their price after the state
+/// charge. Where a value `CALL`'s state charge falls against its forward and its records is not
+/// fixed, so the `CALL` forwards an explicit nothing — the same forward in any order — and its rows
+/// hold whatever the order: a gas limit short of the state charge, and one gas short of the whole
+/// start, runs out of gas.
+///
+/// With exactly what the transaction needs to the end of its state charge — and of the start's
+/// records — the same limit stops the transaction there, with the charge as the state gas it
+/// reports, which pins each gas limit as one gas short of the charge, or of the start, and nothing
+/// else.
 ///
 /// Independence: constants. Each gas limit is written out from the spec's numbers — the EIP-2780
-/// base of 12,000, 3,000 for the recipient and 6,000 for its value, three gas per push, 5,000 for
-/// `SELFDESTRUCT` — and the schedule's entries for the opcodes' regular gas, the state charges and
-/// the history price; none is read off a run.
+/// base of 12,000, 3,000 for the recipient and 6,000 for its value, two gas per `PUSH0` and three
+/// per other push, 5,000 for `SELFDESTRUCT` — and the schedule's entries for the opcodes' regular
+/// gas, the state charges and the history price; none is read off a run.
 #[test]
 fn test_a_state_charge_the_frame_cannot_pay_runs_out_of_gas_whatever_the_limit() {
     use mega_evm::{satin_gas_params, MegaHaltReason};
@@ -1507,11 +1521,14 @@ fn test_a_state_charge_the_frame_cannot_pay_runs_out_of_gas_whatever_the_limit()
     // A call to an account that exists, before its code runs: the EIP-2780 base and the
     // recipient, then the body's history.
     let call_intrinsic = 12_000 + 3_000 + body_history(0);
+    // The history of the two records a frame start makes: a value transfer's sender and
+    // recipient, or a creation's creator nonce and created account.
+    let start_records = history(2 * WRITE_RECORD_SIZE);
     // (case, database, the transaction at a gas limit, what it pays before the state charge, the
-    // state charge)
-    type Case = (&'static str, MemoryDatabase, fn(u64) -> MegaTransaction, u64, u64);
+    // state charge, what it pays after the state charge for the stop to be reached)
+    type Case = (&'static str, MemoryDatabase, fn(u64) -> MegaTransaction, u64, u64, u64);
     let to_a = |gas_limit| call(CALLER, A, U256::ZERO, gas_limit);
-    let cases: [Case; 3] = [
+    let cases: [Case; 5] = [
         (
             "a fresh slot",
             funded().account_code(A, write_slots(BytecodeBuilder::default(), 0, 1).stop().build()),
@@ -1523,6 +1540,8 @@ fn test_a_state_charge_the_frame_cannot_pay_runs_out_of_gas_whatever_the_limit()
                 entry(GasId::cold_storage_cost()) +
                 entry(GasId::sstore_set_without_load_cost()),
             slot_state_gas(),
+            // The slot's record is held before its history is charged.
+            0,
         ),
         (
             "a SELFDESTRUCT that creates its beneficiary",
@@ -1540,6 +1559,8 @@ fn test_a_state_charge_the_frame_cannot_pay_runs_out_of_gas_whatever_the_limit()
                 entry(GasId::cold_account_additional_cost()) +
                 entry(GasId::warm_storage_read_cost()),
             account_state_gas(),
+            // The beneficiary's record is held before its history is charged.
+            0,
         ),
         (
             "a value transaction to an account that does not exist",
@@ -1549,30 +1570,87 @@ fn test_a_state_charge_the_frame_cannot_pay_runs_out_of_gas_whatever_the_limit()
             // recipient's write record, which is charged before the account.
             12_000 + 3_000 + 6_000 + body_history(0) + history(WRITE_RECORD_SIZE),
             account_state_gas(),
+            0,
+        ),
+        (
+            "a value CALL to an account that does not exist",
+            funded().account_code(
+                A,
+                BytecodeBuilder::default()
+                    .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
+                    .push_number(1_u8)
+                    .push_address(EMPTY)
+                    .append(PUSH0)
+                    .append(CALL)
+                    .stop()
+                    .build(),
+            ),
+            to_a,
+            // Four `PUSH0` for the empty input and output, the value's and the address's pushes,
+            // a `PUSH0` for a forward of nothing, then the call's warm access, the cold surcharge
+            // on the recipient, the value transfer and the new account's regular gas.
+            call_intrinsic +
+                4 * 2 +
+                3 +
+                3 +
+                2 +
+                entry(GasId::warm_storage_read_cost()) +
+                entry(GasId::cold_account_additional_cost()) +
+                entry(GasId::transfer_value_cost()) +
+                entry(GasId::new_account_cost()),
+            account_state_gas(),
+            // The two records, which a forward of nothing leaves to the caller.
+            start_records,
+        ),
+        (
+            "a CREATE",
+            funded().account_code(
+                A,
+                BytecodeBuilder::default()
+                    .append_many([PUSH0, PUSH0, PUSH0, CREATE])
+                    .stop()
+                    .build(),
+            ),
+            to_a,
+            // Three `PUSH0` for an empty init code carrying no value, then the creation's 32,000.
+            call_intrinsic + 3 * 2 + entry(GasId::create()),
+            created_account_state_gas(),
+            // The two records, out of the 64th the creator keeps after its forward.
+            64 * start_records,
         ),
     ];
-    for (name, db, tx, before, charge) in cases {
+    for (name, db, tx, before, charge, then) in cases {
         let short = before + charge - 1;
+        let start = before + charge + then;
         for limit in [1, charge - 1] {
             let case = format!("{name}, limit {limit}");
-            let ran_out = run_under(db.clone(), tx(short), limit);
-            assert!(
-                matches!(
-                    &ran_out.result,
-                    ExecutionResult::Halt {
-                        reason: MegaHaltReason::Base(HaltReason::OutOfGas(_)),
-                        ..
-                    }
-                ),
-                "{case}: one gas short, an out-of-gas: {:?}",
-                ran_out.result
-            );
-            assert_eq!(ran_out.limit_exceeded, None, "{case}: no stop");
-            assert_eq!(ran_out.gas.gas_used, short, "{case}: the whole gas limit is consumed");
-            assert_eq!(ran_out.gas.state, 0, "{case}: the charge was never made");
+            let mut rows = vec![(format!("{case}, one gas short of the state charge"), short)];
+            if then > 0 {
+                rows.push((format!("{case}, one gas short of the frame start"), start - 1));
+            }
+            for (row, gas_limit) in rows {
+                let ran_out = run_under(db.clone(), tx(gas_limit), limit);
+                assert!(
+                    matches!(
+                        &ran_out.result,
+                        ExecutionResult::Halt {
+                            reason: MegaHaltReason::Base(HaltReason::OutOfGas(_)),
+                            ..
+                        }
+                    ),
+                    "{row}: an out-of-gas: {:?}",
+                    ran_out.result
+                );
+                assert_eq!(ran_out.limit_exceeded, None, "{row}: no stop");
+                assert_eq!(
+                    ran_out.gas.gas_used, gas_limit,
+                    "{row}: the whole gas limit is consumed"
+                );
+                assert_eq!(ran_out.gas.state, 0, "{row}: no state gas is kept");
+            }
 
-            let paid = run_under(db.clone(), tx(short + 1), limit);
-            assert_state_stopped(&format!("{case}, one gas more"), &paid, limit, charge);
+            let paid = run_under(db.clone(), tx(start), limit);
+            assert_state_stopped(&format!("{case}, everything paid"), &paid, limit, charge);
         }
     }
 }
