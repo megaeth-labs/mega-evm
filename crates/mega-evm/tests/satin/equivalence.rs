@@ -260,8 +260,9 @@ fn test_value_transfer_matches_op_revm() {
 /// child here is answered without running and spends nothing, so this does not show that a child
 /// can spend the whole reservoir it inherits; a child that does is held in the data-size tests.
 ///
-/// Rule [S4.10]. Expected values `constants`: the history ledger is the byte table at the cost
-/// per history byte, and the reservoir the transaction's own less its two other ledgers.
+/// Rule [S4.10]. Expected values: the history ledger is `constants`, the byte table at the cost
+/// per history byte; the reservoir is an identity against the run's own state and history
+/// ledgers, not a figure of its own; the rest is op-revm's run (`external`).
 #[test]
 fn test_a_nested_value_call_with_a_reservoir_matches_op_revm() {
     if runs_at_measurement_prices() {
