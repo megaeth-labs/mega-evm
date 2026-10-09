@@ -2,7 +2,7 @@
 //! system-address change before its transactions, then runs a system transaction from the new
 //! address and refuses one from the old, replays from its witness.
 
-use alloy_primitives::{address, Address, U256};
+use alloy_primitives::{address, keccak256, Address, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
     system::{
@@ -93,7 +93,12 @@ fn test_a_rotation_and_a_system_transaction_replay() {
 }
 
 /// A system transaction in a block with nothing due reads the live address out of the witness:
-/// the registry's account and its one slot are in the record.
+/// the registry's account and its one slot are in the record and in the transaction's own state,
+/// and the registry's code is not: no read the block made loaded it, so a witness need not carry
+/// it.
+///
+/// Rule [S17.4]. Expected values `independent`: the registry's code hash is computed here from the
+/// bytecode the test put in the chain.
 #[test]
 fn test_a_system_transaction_reads_the_live_address_from_the_witness() {
     let replay = Case::new("system transaction", registry_rotating_at(BLOCK_NUMBER + 1))
@@ -102,6 +107,15 @@ fn test_a_system_transaction_reads_the_live_address_from_the_witness() {
     let run = &replay.recorded;
     assert!(run.tx(0).result.is_success(), "{:?}", run.tx(0).result);
     assert!(run.record.storage.contains_key(&(SEQUENCER_REGISTRY_ADDRESS, CURRENT_SYSTEM_ADDRESS)));
+    let registry = run.tx(0).state.get(&SEQUENCER_REGISTRY_ADDRESS).expect("the registry is read");
+    assert!(
+        registry.storage.contains_key(&CURRENT_SYSTEM_ADDRESS),
+        "the slot is in the transaction's state"
+    );
+    assert!(
+        !run.record.codes.contains_key(&keccak256(SEQUENCER_REGISTRY_CODE)),
+        "the registry's code was never loaded"
+    );
     assert!(!run
         .pre_block
         .iter()
