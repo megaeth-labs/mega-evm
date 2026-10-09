@@ -28,7 +28,7 @@ use mega_evm::{
     MegaTransactionOutcome, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 use revm::{
-    bytecode::opcode::{CALL, CREATE, POP, PUSH0, RETURN, STOP},
+    bytecode::opcode::{CALL, CREATE, MLOAD, POP, PUSH0, RETURN, STOP},
     context_interface::cfg::GasId,
     inspector::NoOpInspector,
     interpreter::{
@@ -50,12 +50,15 @@ const A: Address = address!("0000000000000000000000000000000000a00001");
 const B: Address = address!("0000000000000000000000000000000000a00002");
 
 /// The words of zeros the creation deploys, and their bytes.
-///
-/// Enough that the deposit, and not `B`, binds at any byte price: below the execution cap `B`
-/// pays the history of the creation's two write records out of the 64th it keeps, and the code's
-/// state gas alone leaves it a 64th of millions.
 const DEPLOYED_WORDS: u64 = 100;
 const CODE_LEN: u64 = DEPLOYED_WORDS * 32;
+
+/// The words of memory the init code touches before it returns, so that the creation is forwarded
+/// millions of gas at any byte price: below the execution cap `B` pays the history of the
+/// creation's two write records out of the 64th it keeps, which must cover them whatever a
+/// history byte costs — at the dearest price the grid runs, 1,000 a byte, the two records are
+/// 80,000 gas, and a 64th of the memory's cost alone is 82,400. [`call_gas`] asserts it.
+const BURNT_WORDS: u64 = 51_200;
 
 /// The reservoir the runs above the execution cap carry: ample for every charge here.
 const RESERVOIR: u64 = 100_000_000;
@@ -77,12 +80,19 @@ enum Pool {
 }
 
 impl Pool {
-    /// The transaction's gas limit: above the cap by [`RESERVOIR`], or well below it, or Osaka's
+    /// The transaction's gas limit: above the cap by [`RESERVOIR`]; below it, room for `A` to
+    /// forward the largest gas any case calls `B` with — a 64th more than the forward, and a
+    /// million of slack — which stays below the cap at any byte price the grid runs; or Osaka's
     /// own ceiling (EIP-7825 holds a transaction to 2^24 gas).
-    const fn gas_limit(self) -> u64 {
+    fn gas_limit(self) -> u64 {
         match self {
             Self::AboveCap => TX_GAS_LIMIT_CAP + RESERVOIR,
-            Self::BelowCap => 30_000_000,
+            Self::BelowCap => {
+                let largest = call_gas(Self::BelowCap, deposits_at(Self::BelowCap));
+                let limit = (largest * 64).div_ceil(63) + 1_000_000;
+                assert!(limit <= TX_GAS_LIMIT_CAP, "below the cap at these prices: {limit}");
+                limit
+            }
             Self::NeutralOsaka => 10_000_000,
         }
     }
@@ -111,9 +121,11 @@ const B_BEFORE_THE_SPLIT: u64 = 3 + 3 + (3 + 3) + 3 * 3 + 2 + 32_000;
 /// What `B` spends after the creation returns: the `POP` of its answer.
 const B_AFTER: u64 = 2;
 
-/// What the init code spends: `PUSH2`, `PUSH0`, and the `RETURN`'s expansion of memory to
-/// [`DEPLOYED_WORDS`] words, `3 w + w² / 512`.
-const INIT_EXECUTION: u64 = 3 + 2 + 3 * DEPLOYED_WORDS + DEPLOYED_WORDS * DEPLOYED_WORDS / 512;
+/// What the init code spends: a `PUSH4`, the `MLOAD` that expands memory to [`BURNT_WORDS`]
+/// words at `3 w + w² / 512`, a `POP`, a `PUSH2`, a `PUSH0`, and a `RETURN` of the first
+/// [`CODE_LEN`] bytes, which expands nothing further.
+const INIT_EXECUTION: u64 = 3 + (3 + 3 * BURNT_WORDS + BURNT_WORDS * BURNT_WORDS / 512) + 2 + 3 + 2;
+const _: () = assert!(INIT_EXECUTION == 5_273_613, "the init code's cost, written out");
 
 /// The hashing cost of the deposit: 6 gas per 32-byte word [S5.13].
 const HASH: u64 = 6 * DEPLOYED_WORDS;
@@ -167,7 +179,14 @@ fn call_gas(pool: Pool, forward: u64) -> u64 {
         Pool::BelowCap => created_account_state_gas(),
         Pool::AboveCap | Pool::NeutralOsaka => 0,
     };
-    holding_for(forward) + B_BEFORE_THE_SPLIT + spilled
+    let holding = holding_for(forward);
+    if pool == Pool::BelowCap {
+        assert!(
+            holding / 64 >= history(2 * WRITE_RECORD_SIZE) + B_AFTER,
+            "B's 64th pays the creation's two records and B's POP at these prices",
+        );
+    }
+    holding + B_BEFORE_THE_SPLIT + spilled
 }
 
 /// The regular gas a deposited creation spent as regular gas: its init code and the deposit's
@@ -189,10 +208,17 @@ fn regular(pool: Pool, spent: u64) -> u64 {
 
 /* ---------- the world ---------- */
 
-/// The creation's init code: `PUSH2 CODE_LEN; PUSH0; RETURN`, five bytes, deploying [`CODE_LEN`]
-/// zero bytes.
+/// The creation's init code: `PUSH4 offset; MLOAD; POP; PUSH2 CODE_LEN; PUSH0; RETURN`, twelve
+/// bytes: it touches the last of [`BURNT_WORDS`] words of memory, then deploys [`CODE_LEN`] zero
+/// bytes.
 fn init_code() -> Bytes {
-    BytecodeBuilder::default().push_number(CODE_LEN as u16).append_many([PUSH0, RETURN]).build()
+    let last_word = u32::try_from((BURNT_WORDS - 1) * 32).expect("the offset fits a PUSH4");
+    BytecodeBuilder::default()
+        .push_number(last_word)
+        .append_many([MLOAD, POP])
+        .push_number(CODE_LEN as u16)
+        .append_many([PUSH0, RETURN])
+        .build()
 }
 
 /// `A` calling `B` with `gas`, and `B` creating [`init_code`].
@@ -426,7 +452,7 @@ fn test_a_creation_one_gas_short_of_the_hash_runs_out_of_gas_above_the_cap() {
     if runs_at_measurement_prices() {
         return;
     }
-    assert_eq!(enough, 324 + 600, "the init code and the hash of 100 words");
+    assert_eq!(enough, INIT_EXECUTION + 600, "the init code and the hash of 100 words");
 }
 
 /// Below the execution cap the code's state gas is paid out of regular gas right after the hash:
@@ -479,7 +505,7 @@ fn test_a_creation_one_gas_short_of_its_history_runs_out_of_gas_with_the_state_g
         return;
     }
     assert_eq!(code_history_gas(), 3_200 * 88, "the history of 3,200 bytes");
-    assert_eq!(enough, 324 + 600 + 4_896_000 + 281_600);
+    assert_eq!(enough, INIT_EXECUTION + 600 + 4_896_000 + 281_600);
 }
 
 /* ---------- the limits stand aside ---------- */
