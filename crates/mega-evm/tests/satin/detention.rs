@@ -18,14 +18,16 @@ use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
 use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
     constants::{BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS, TX_GAS_LIMIT_CAP},
+    history_gas,
     system::{IMegaLimitControl, LIMIT_CONTROL_ADDRESS, ORACLE_CONTRACT_ADDRESS},
     test_utils::{
         op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase, OutcomeSummary,
-        OutcomeView,
+        OutcomeView, SlotView,
     },
     volatile_data_access_disabled_revert_data, write_record_history_gas, EvmTxRuntimeLimits,
-    LimitCheck, LimitKind, MegaContext, MegaEvm, MegaLimitExceeded, MegaSpecId, MegaTransaction,
-    MegaTransactionOutcome, OracleRead, ProtocolLimits, VolatileDataAccess,
+    LimitCheck, LimitKind, LimitUsage, MegaContext, MegaEvm, MegaLimitExceeded, MegaSpecId,
+    MegaTransaction, MegaTransactionOutcome, OracleRead, ProtocolLimits, VolatileDataAccess,
+    TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 use revm::{
     bytecode::opcode::*,
@@ -1743,6 +1745,21 @@ fn test_state_and_history_gas_are_not_compute() {
         code = code.sstore(U256::from(slot), U256::from(1));
     }
     let code = code.stop().build();
+    // What the run must report, from the schedule at the prices in effect: each slot's state gas;
+    // the body's history bytes and one record a slot; and the compute of TIMESTAMP and its POP,
+    // two each, then the writes, on top of the intrinsic gas.
+    let state = slots * crate::salt::entry(GasId::sstore_set_state_gas());
+    let history_bytes = TX_BODY_SIZE + slots * WRITE_RECORD_SIZE;
+    let history = history_gas(history_bytes).expect("the history has a price");
+    let compute = 2 + 2 + slots * FRESH_WRITE;
+    assert!(compute < CAP, "the writes' compute fits under the cap");
+    let written: Vec<SlotView> = (1..=slots)
+        .map(|slot| SlotView {
+            slot: U256::from(slot),
+            original: U256::ZERO,
+            present: U256::from(1),
+        })
+        .collect();
     // Too many slots to list: each tier snapshots its summary line and the slots as a sweep, and
     // dumps its full view.
     let name = crate::snapshot_name!();
@@ -1754,11 +1771,21 @@ fn test_state_and_history_gas_are_not_compute() {
             tx(CALLER, CONTRACT, gas_limit),
         );
         assert!(run.outcome.result.is_success(), "{:?}", run.outcome.result);
-        let gas = run.outcome.gas;
-        assert!(gas.state + gas.history >= slots * spill, "{gas:?}");
-        assert!(gas.regular < CAP, "{gas:?}");
         let case = format!("gas limit {gas_limit}");
         let view = OutcomeView::new(&run.outcome);
+        let contract = view.accounts[&CONTRACT].changed().expect("the contract wrote its slots");
+        assert_eq!(contract.storage, written, "{case}: each of the {slots} slots went from 0 to 1");
+        let gas = run.outcome.gas;
+        assert_eq!(gas.state, state, "{case}: each fresh slot's state gas");
+        assert_eq!(gas.history_bytes, history_bytes, "{case}: the body and a record a slot");
+        assert_eq!(gas.history, history, "{case}: the history of those bytes");
+        assert_eq!(gas.regular, intrinsic(gas_limit) + compute, "{case}: the compute alone");
+        assert_eq!(run.limit, Some(2 + CAP), "{case}: TIMESTAMP set the limit, first");
+        assert_eq!(
+            run.outcome.usage,
+            LimitUsage { data_size: history_bytes, write_records: slots },
+            "{case}: one write record a slot",
+        );
         let sweep = slot_sweep(&format!("{name}.slots.{gas_limit}"), &view, CONTRACT);
         sweeps.insert_case(case.clone(), sweep);
         views.insert_case(case, view);
