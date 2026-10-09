@@ -392,20 +392,26 @@ mod tests {
         assert!(result.output.is_empty(), "the signature does not verify");
     }
 
-    /// The BN254 pairing takes input up to the Karst bound and refuses one byte more, without
-    /// charging for the work it did not do.
+    /// The BN254 pairing takes input up to the Karst bound, 57,600 bytes or 300 pairs of 192, and
+    /// refuses a whole pair more.
+    ///
+    /// Both inputs are whole pairs of zeros, which pair to the identity, so the run itself accepts
+    /// either: the 301st pair is refused by the bound alone. One stray byte past the bound would
+    /// prove nothing, since a length that is not a whole number of pairs fails whatever the bound.
+    ///
+    /// Rule [S2.4]. Expected values `independent`: 57,600 bytes and 300 × 192 by hand, and the
+    /// EIP-1108 price of 300 pairs, 45,000 + 300 × 34,000.
     #[test]
     fn test_bn254_pairing_is_bounded_at_the_karst_size() {
         assert_eq!(KARST_MAX_INPUT_SIZE, 57_600);
         let address = *op_revm::precompiles::bn254_pair::KARST.address();
-        // At the bound the input is a whole number of pair elements of zeros, which pair to the
-        // identity: the call succeeds and pays the Istanbul pairing price.
-        let at_bound = run(address, Bytes::from(std::vec![0u8; KARST_MAX_INPUT_SIZE]), 50_000_000);
+        let pairs = |n: usize| Bytes::from(std::vec![0u8; n * 192]);
+        let at_bound = run(address, pairs(300), 50_000_000);
         assert_eq!(at_bound.result, InstructionResult::Return);
-        assert!(at_bound.gas.total_gas_spent() > 0);
+        assert_eq!(at_bound.gas.total_gas_spent(), 45_000 + 300 * 34_000);
 
-        let over = run(address, Bytes::from(std::vec![0u8; KARST_MAX_INPUT_SIZE + 1]), 50_000_000);
-        assert_eq!(over.result, InstructionResult::PrecompileError);
+        let over = run(address, pairs(301), 50_000_000);
+        assert_eq!(over.result, InstructionResult::PrecompileError, "a whole pair past the bound");
     }
 
     /// Every entry of the Satin set carries a price, op-revm's size-limited wrappers of the BN254
