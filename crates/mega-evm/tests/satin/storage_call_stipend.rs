@@ -323,9 +323,14 @@ fn test_the_allowance_cannot_be_spent_on_a_write_record() {
 
 /// The allowance cannot pay state gas either: a hook that fills a fresh slot, given the write's
 /// regular gas and one gas less than the slot's state gas, runs out of gas and keeps no write.
-/// An allowance that paid the state gas would carry it through: drawn first, it would leave the
-/// hook more than the record's history to pay from its own gas. Given the state gas and the record
-/// in full it keeps the write.
+/// An allowance that paid the state gas would carry it through: drawn first, it would pay the
+/// smaller of the state gas and itself, and leave the hook that much less one gas of its own to
+/// pay the record's history with. Given the state gas and the record in full it keeps the write.
+///
+/// So the leak shows only where both the slot's state gas and the allowance outweigh a record.
+/// At a price where the state gas does not — a gas or so a state byte against a dear history
+/// byte — the short hook would run out on the record whether or not the allowance paid its state
+/// gas, and the test returns early with a note.
 ///
 /// Rule [S8.5]. Expected values `independent`: the write's regular gas is the schedule's table by
 /// hand — `PUSH1` 3, `PUSH0` 2, and an `SSTORE` that fills a cold fresh slot, 100 static, 19,900
@@ -341,6 +346,14 @@ fn test_the_allowance_cannot_be_spent_on_state() {
     }
     let state = slot_state_gas();
     let record = record_history();
+    // A leaked allowance leaves the short hook `min(state, allowance) - 1` of its own gas for the
+    // record, which must cover it for the leak to show.
+    if state.min(allowance()) - 1 < record {
+        note_price_guard(
+            "the slot's state gas is worth no more than a write record at these prices",
+        );
+        return;
+    }
     let regular = 3 + 2 + 100 + 19_900 + 2_100;
 
     let short = run_hook(writes_slot_zero(), regular + state - 1, U256::ZERO);
