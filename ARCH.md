@@ -4,14 +4,19 @@ This document provides detailed technical specifications and implementation deta
 
 ## Table of Contents
 
-- [EVM Specifications](#evm-specifications)
-- [Instruction Set Modifications](#instruction-set-modifications)
-- [Contract Size Limits](#contract-size-limits)
+- [EVM Versions](#evm-versions)
+  - [EQUIVALENCE](#equivalence)
+  - [MINI_REX](#mini_rex)
+    - [Dynamic Gas Cost System](#dynamic-gas-cost-system)
+    - [Compute Gas Tracking and Limiting](#compute-gas-tracking-and-limiting)
+    - [LOG Opcodes with Dual Gas Model](#log-opcodes-with-dual-gas-model)
+    - [SELFDESTRUCT Opcode Disabled](#selfdestruct-opcode-disabled)
+    - [Enhanced Transaction Processing](#enhanced-transaction-processing)
+    - [Contract Size Limits](#contract-size-limits)
+    - [Multidimensional Resource Limits](#multidimensional-resource-limits)
+- [General Features](#general-features)
 - [Block Environment Access Tracking](#block-environment-access-tracking)
-- [Context and Handler Extensions](#context-and-handler-extensions)
-- [Project Structure](#project-structure)
-- [Advanced Usage](#advanced-usage)
-- [Dependencies](#dependencies)
+- [Beneficiary Access Tracking](#beneficiary-access-tracking)
 
 ## EVM Versions
 
@@ -58,7 +63,7 @@ The EVM version used for `Mini-Rex` hardfork of MegaETH.
 
 #### Compute Gas Tracking and Limiting
 
-**Files**: `crates/mega-evm/src/evm/limit.rs`, `crates/mega-evm/src/test_utils/evm.rs`
+**Files**: `crates/mega-evm/src/limit/limit.rs`, `crates/mega-evm/src/limit/compute_gas.rs`
 
 **Purpose**: Separate tracking for computational work to enable independent resource pricing and gas detention for volatile data access.
 
@@ -102,7 +107,7 @@ The EVM version used for `Mini-Rex` hardfork of MegaETH.
 
 **Behavior**:
 
-- Returns `InvalidFEOpcode` when executed
+- Halts the frame and consumes all its remaining gas (`InvalidFEOpcode`, or `OutOfGas` when the frame cannot pay SELFDESTRUCT's static gas)
 - Maintains contract state integrity
 - Prevents malicious contract destruction
 
@@ -113,7 +118,7 @@ The EVM version used for `Mini-Rex` hardfork of MegaETH.
 
 #### Enhanced Transaction Processing
 
-**Files**: `crates/mega-evm/src/evm/execution.rs`, `crates/mega-evm/src/evm/instructions.rs`, `crates/mega-evm/src/evm/limit.rs`
+**Files**: `crates/mega-evm/src/evm/execution.rs`, `crates/mega-evm/src/evm/instructions.rs`, `crates/mega-evm/src/limit/data_size.rs`, `crates/mega-evm/src/limit/kv_update.rs`
 
 **Features**:
 
@@ -134,11 +139,11 @@ The EVM version used for `Mini-Rex` hardfork of MegaETH.
 
 - `MAX_CONTRACT_SIZE`: 512 KB (vs standard 24 KB) - ~21x increase
 - `MAX_INITCODE_SIZE`: 536 KB (512 KB + 24 KB buffer) - ~11x increase
-- `CODEDEPOSIT_COST`: 10,000 gas per byte (vs 200) - 50x increase
+- `constants::mini_rex::CODEDEPOSIT_STORAGE_GAS`: 10,000 storage gas per byte of deployed code, charged on top of the standard 200 gas per byte
 
 #### Multidimensional Resource Limits
 
-**Files**: `crates/mega-evm/src/evm/limit.rs`
+**Files**: `crates/mega-evm/src/limit/limit.rs`, `crates/mega-evm/src/limit/compute_gas.rs`, `crates/mega-evm/src/limit/data_size.rs`, `crates/mega-evm/src/limit/kv_update.rs`
 
 **Transaction Limits**:
 

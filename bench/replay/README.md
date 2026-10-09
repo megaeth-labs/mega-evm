@@ -2,9 +2,10 @@
 
 `fixtures/` is a single corpus of characteristic MegaETH workloads, used two ways:
 
-- **Correctness** — `crates/state-test/tests/replay_corpus.rs` re-executes each
-  fixture and checks its recorded post-state (state/logs root, gas, status) on
-  **every PR** (via `cargo test`). A change that alters execution turns this red.
+- **Correctness** — `crates/mega-state-test/tests/replay_corpus.rs` re-executes
+  each fixture and checks its recorded post-state (state/logs root, gas, status)
+  on **every PR** (via `cargo test --workspace`). A change that alters execution
+  turns this red.
 - **Performance** — `run.py` times each fixture and compares a PR against its
   merge-base (`.github/workflows/replay-bench.yml`, on demand), so a speed-up or
   slow-down on real workloads is visible. This is the real-workload counterpart
@@ -117,13 +118,14 @@ Verify with `python3 bench/replay/run.py --bin pr=target/release` (bench) and
 `cargo test -p mega-state-test --test replay_corpus` (correctness).
 
 > To benchmark a single transaction ad-hoc, dump it
-> (`mega-evme replay --dump-fixture /tmp/x.json <tx>`) and time it
+> (`mega-evme replay --rpc <URL> --dump-fixture /tmp/x.json <tx>`) and time it
 > (`state-test --bench /tmp/x.json`) — no manifest entry needed.
 
 ## CI
 
-- **Correctness** runs on every PR: `cargo test` (`build-and-test.yml`) executes
-  `replay_corpus.rs`, which validates the recorded post-state of every fixture.
+- **Correctness** runs on every PR: `cargo test --workspace`
+  (`build-and-test.yml`) executes `replay_corpus.rs`, which validates the
+  recorded post-state of every fixture.
 - **Performance** runs on demand: `replay-bench.yml` (weekly / manual dispatch /
   member `/replay-bench` PR comment) builds the PR and merge-base binaries,
   runs the driver, and posts the comparison table (job summary + PR comment).

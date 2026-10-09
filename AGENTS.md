@@ -14,7 +14,7 @@ cargo build
 cargo build --release -p mega-evme       # CLI tool
 
 # Test
-cargo test                                # all tests
+cargo test --workspace                    # all tests
 cargo test -p mega-evm                    # core crate only
 cargo test -p mega-evm -- test_name       # single test
 
@@ -48,7 +48,7 @@ Git submodules are required — clone with `--recursive` or run `git submodule u
 | `mega-system-contracts` | `crates/system-contracts` | Solidity system contracts with Rust bindings (Foundry-based)                                |
 | `mega-state-test`       | `crates/mega-state-test`  | State-test fixtures + runner library (EEST-compatible, published; imported as `state_test`) |
 | `state-test`            | `crates/state-test`       | Thin CLI front-end over `mega-state-test` (not published)                                   |
-| `mega-evme`             | `bin/mega-evme`           | CLI tool for EVM execution (`run`, `tx`, `replay`)                                          |
+| `mega-evme`             | `bin/mega-evme`           | CLI tool for EVM execution (`run`, `tx`, `replay`, `cache`)                                 |
 | `mega-t8n`              | `bin/mega-t8n`            | Standalone state transition (t8n) tool                                                      |
 
 ## Architecture
@@ -119,7 +119,7 @@ Consequently:
 MegaETH separates EVM gas into two independent dimensions tracked during execution:
 
 - **Compute gas**: Measures pure computational cost.
-  Every opcode's gas consumption is recorded via wrapped instructions in `evm/instructions.rs` — `compute_gas_ext::*` for plain opcodes and `storage_gas_ext::*` for storage-affecting opcodes (SSTORE, LOG, CALL-family, CREATE/CREATE2, SELFDESTRUCT) — both invoking the shared `record_storage_compute_gas!` primitive after the opcode body completes.
+  Every opcode's gas consumption is recorded via wrapped instructions in `evm/instructions.rs` after the opcode body completes: `compute_gas_ext::*` for plain opcodes records via `compute_gas!` (through `wrap_op_compute_gas!`), and `storage_gas_ext::*` for storage-affecting opcodes (SSTORE, LOG, CALL-family, CREATE/CREATE2, SELFDESTRUCT) records via `record_storage_compute_gas!`.
   Subject to a per-spec compute gas limit and further restricted by gas detention (see below).
 - **Storage gas**: Charges for persistent state modifications (SSTORE, account creation, contract deployment).
   These costs scale dynamically with SALT bucket capacity (see External Environment Dependencies below).
@@ -150,7 +150,7 @@ MegaETH's parallel EVM needs to minimize conflicts between concurrent transactio
 
 - Different volatile data categories (block env/beneficiary, oracle) have different cap levels defined in `constants.rs`.
 - The **most restrictive cap wins** when multiple volatile sources are accessed.
-- Caps are applied via host hooks (`evm/host.rs`) that mark access in a `VolatileDataAccessTracker` (`access/tracker.rs`), then enforced after each volatile opcode via `wrap_op_detain_gas!` in `evm/instructions.rs`.
+- Caps are applied via host hooks (`evm/host.rs`) that mark access in a `VolatileDataAccessTracker` (`access/tracker.rs`), then enforced after each volatile opcode via `wrap_op_detain_gas_{unconditional,conditional}!` in `evm/instructions.rs`.
 
 This forces transactions that touch volatile data to terminate quickly, reducing parallel execution conflicts without banning the access outright.
 Detained gas is effectively refunded — users only pay for actual computation performed.
@@ -244,8 +244,8 @@ When adding an opcode or mutation site that touches a non-compute dimension, dec
 
 ## Test Organization (`crates/mega-evm/tests/`)
 
-Tests are organized by spec: `equivalence/`, `mini_rex/` (12 modules), `rex/`, `rex2/`, `rex3/`, `rex4/`, `rex5/`, `rex6/`, and `block_executor/`.
-Each module tests specific features of that spec.
+Tests are organized by spec: `equivalence/`, `mini_rex/`, `rex/`, `rex2/`, `rex3/`, `rex4/`, `rex5/`, `rex6/`, plus `block_executor/`, `compute_gas/` (cross-spec compute-gas snapshot harness), and `mutation/` (mutation-killing system tests).
+Each spec module tests specific features of that spec.
 
 ## Version Control
 

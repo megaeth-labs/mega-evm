@@ -48,9 +48,9 @@ use revm::{
 /// - Data limit enforcement: Halts when total transaction data exceeds 3.125 MB
 ///
 /// ## SELFDESTRUCT Opcode
-/// - Disabled in Mini-Rex, Rex, and Rex1 specs
-/// - Re-enabled in Rex2 with EIP-6780 semantics
-/// - When disabled, halts with `InvalidFEOpcode` to prevent contract destruction
+/// - Disabled in Mini-Rex, Rex, and Rex1 specs; re-enabled in Rex2 with EIP-6780 semantics
+/// - When disabled, halts the frame and consumes all its remaining gas (`InvalidFEOpcode`, or
+///   `OutOfGas` when the frame cannot pay the opcode's static gas)
 ///
 /// ## SSTORE Opcode
 /// - Compute gas: Standard EIP-2200/EIP-2929 costs

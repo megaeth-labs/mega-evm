@@ -18,7 +18,7 @@ Out of scope: CLI tool usability, documentation errors, test-only code, and non-
 | Version                     | Supported |
 | --------------------------- | --------- |
 | `main` branch               | Yes       |
-| Latest stable spec (`REX4`) | Yes       |
+| Latest stable spec (`REX6`) | Yes       |
 | Older specs                 | No        |
 
 ## Reporting a Vulnerability
