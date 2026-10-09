@@ -35,7 +35,7 @@ const LEGACY_MIN_GAS: u64 = mega_evm::modexp::MIN_GAS;
 
 /// Every spec that installs the Osaka `ModExp` schedule — all of them except EQUIVALENCE,
 /// which stays on the inherited Berlin schedule.
-const OSAKA_SCHEDULE_SPECS: [MegaSpecId; 9] = [
+const OSAKA_SCHEDULE_SPECS: [MegaSpecId; 8] = [
     MegaSpecId::MINI_REX,
     MegaSpecId::REX,
     MegaSpecId::REX1,
@@ -44,7 +44,6 @@ const OSAKA_SCHEDULE_SPECS: [MegaSpecId; 9] = [
     MegaSpecId::REX4,
     MegaSpecId::REX5,
     MegaSpecId::REX6,
-    MegaSpecId::REX7,
 ];
 
 /// Wrapper contract: writes a 96-byte `ModExp` header (`base_len=0`, `exp_len`, `mod_len=0`,
@@ -128,23 +127,6 @@ fn test_every_spec_charges_flat_min_gas_for_zero_base_mod() {
              variant and the totals would diverge"
         );
     }
-}
-
-/// Rex7 prices these inputs exactly as Rex6 does. Rex7 is the unstable spec, so it is where an
-/// EIP-7883 adoption would land first; this pins that it has not happened.
-#[test]
-fn test_rex7_prices_zero_base_mod_identically_to_rex6() {
-    let rex6 = transact(MegaSpecId::REX6, zero_base_mod_wrapper(64, 50_000));
-    let rex7 = transact(MegaSpecId::REX7, zero_base_mod_wrapper(64, 50_000));
-
-    assert_eq!(stored_call_result(&rex6), U256::from(1), "REX6 call must succeed");
-    assert_eq!(stored_call_result(&rex7), U256::from(1), "REX7 call must succeed");
-    assert_eq!(
-        rex7.result.tx_gas_used(),
-        rex6.result.tx_gas_used(),
-        "REX7 must charge what REX6 charges — adopting the EIP-7883 formula cost is a \
-         deliberate spec change, not a side effect"
-    );
 }
 
 /// Records what adopting the EIP-7883 formula would cost, so the size of the deviation stays

@@ -15,6 +15,7 @@ mod fee_reward_accounting;
 mod frame_local_accounting;
 mod keyless_sandbox_hardening;
 mod metering_order_parity;
+mod modexp_gas;
 mod oracle_hint_volatile_access;
 mod self_transfer_account_dedup;
 mod sequencer_registry_rotation;

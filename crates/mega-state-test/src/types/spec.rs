@@ -83,8 +83,6 @@ pub enum SpecName {
     Rex5,
     /// `MegaETH` `Rex6` spec
     Rex6,
-    /// `MegaETH` `Rex7` spec
-    Rex7,
     /// Unknown or unsupported specification
     #[serde(other)]
     Unknown,
@@ -111,7 +109,6 @@ impl SpecName {
             Self::Rex4 => Ok(MegaSpecId::REX4),
             Self::Rex5 => Ok(MegaSpecId::REX5),
             Self::Rex6 => Ok(MegaSpecId::REX6),
-            Self::Rex7 => Ok(MegaSpecId::REX7),
             Self::Unknown => Err(UnknownSpecError),
             // All Ethereum specs (and `Equivalence`) map to the equivalent baseline.
             _ => Ok(MegaSpecId::EQUIVALENCE),
@@ -135,7 +132,6 @@ impl SpecName {
             MegaSpecId::REX4 => Self::Rex4,
             MegaSpecId::REX5 => Self::Rex5,
             MegaSpecId::REX6 => Self::Rex6,
-            MegaSpecId::REX7 => Self::Rex7,
             _ => Self::Unknown,
         }
     }
@@ -200,7 +196,6 @@ mod tests {
             MegaSpecId::REX4,
             MegaSpecId::REX5,
             MegaSpecId::REX6,
-            MegaSpecId::REX7,
         ] {
             assert_eq!(SpecName::from_mega_spec(spec).to_spec_id(), Ok(spec));
         }

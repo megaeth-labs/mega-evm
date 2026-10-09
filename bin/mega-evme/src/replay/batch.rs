@@ -2700,13 +2700,13 @@ mod tests {
     #[test]
     fn test_fixture_build_err_classifies_skips_vs_construction_errors() {
         let unsupported = fixture_report_from_build_err(fixture::FixtureBuildError::Unsupported(
-            "--dump-fixture: spec REX7 has no fixture mapping".into(),
+            "--dump-fixture: spec FUTURE has no fixture mapping".into(),
         ));
         assert!(unsupported.skipped.is_some(), "unsupported shape is a skip: {unsupported:?}");
         assert!(unsupported.error.is_none());
         assert_eq!(
             unsupported.skipped.as_deref(),
-            Some("--dump-fixture: spec REX7 has no fixture mapping"),
+            Some("--dump-fixture: spec FUTURE has no fixture mapping"),
             "the builder's reason is reported verbatim"
         );
 

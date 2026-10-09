@@ -18,8 +18,8 @@
 //! Within that corpus, any change to a recorded amount on any spec surfaces as a snapshot diff.
 //! The corpus runs against minimum-capacity SALT buckets throughout, so recorded amounts that only
 //! move once a bucket grows are pinned by the claim tests in `claims.rs` rather than here.
-//! Frozen specs (Equivalence through Rex6) must never move; a diff there is a replay-breaking
-//! regression. Only the unstable spec's rows may change.
+//! Every spec in the progression is frozen, so its rows must never move; a diff there is a
+//! replay-breaking regression.
 //!
 //! Regenerate after an intentional change:
 //!
@@ -76,7 +76,7 @@ const ONE_ETH: u128 = 1_000_000_000_000_000_000;
 /// Every spec in the progression, oldest first. The alias rungs are included: their columns
 /// must stay byte-identical to their behavior targets' (`MiniRex1` = `Equivalence`,
 /// `MiniRex2` = `MiniRex`), so an alias diverging from its target surfaces as a snapshot diff.
-const ALL_SPECS: [(MegaSpecId, &str); 12] = [
+const ALL_SPECS: [(MegaSpecId, &str); 11] = [
     (MegaSpecId::EQUIVALENCE, "Equivalence"),
     (MegaSpecId::MINI_REX, "MiniRex"),
     (MegaSpecId::MINI_REX_1, "MiniRex1"),
@@ -88,7 +88,6 @@ const ALL_SPECS: [(MegaSpecId, &str); 12] = [
     (MegaSpecId::REX4, "Rex4"),
     (MegaSpecId::REX5, "Rex5"),
     (MegaSpecId::REX6, "Rex6"),
-    (MegaSpecId::REX7, "Rex7"),
 ];
 
 /// A single corpus entry: a label and the world state it runs against.
@@ -849,36 +848,6 @@ fn test_compute_gas_snapshot_matches() {
             "compute-gas snapshot mismatch.\n{diff}\n\n\
              If this change is intentional, review it against docs/spec/evm/compute-gas.md and \
              regenerate with:\n  UPDATE_COMPUTE_GAS_SNAPSHOT=1 cargo test -p mega-evm --test compute_gas"
-        );
-    }
-}
-
-/// Rex7 is the unstable spec and carries no behavior of its own yet: it delegates its instruction
-/// table, runtime limits, and precompile set to Rex6 unchanged.
-///
-/// The snapshot alone does not pin this. Its rows differ by the spec-name column, so a Rex7 row
-/// that drifted from its Rex6 counterpart would still render as a well-formed snapshot and could be
-/// blessed by a regeneration. Comparing the readings directly makes the first accidental Rex7
-/// divergence a failure. When Rex7 gains its first deliberate behavior change, this test is
-/// expected to fail and should be narrowed to the corpus entries that behavior does not reach.
-#[test]
-fn test_rex7_matches_rex6_on_every_program() {
-    for program in corpus() {
-        let rex6 = transact(MegaSpecId::REX6, (program.build_db)());
-        let rex7 = transact(MegaSpecId::REX7, (program.build_db)());
-        assert_eq!(
-            (rex7.compute_gas, rex7.gas_used, &rex7.outcome),
-            (rex6.compute_gas, rex6.gas_used, &rex6.outcome),
-            "{}: Rex7 must be behaviorally identical to Rex6 \
-             (Rex6: compute_gas={} gas_used={} outcome={}; \
-             Rex7: compute_gas={} gas_used={} outcome={})",
-            program.name,
-            rex6.compute_gas,
-            rex6.gas_used,
-            rex6.outcome,
-            rex7.compute_gas,
-            rex7.gas_used,
-            rex7.outcome,
         );
     }
 }

@@ -30,7 +30,6 @@ const FORK_PAGES: &[(&str, MegaHardfork)] = &[
     ("Rex4", MegaHardfork::Rex4),
     ("Rex5", MegaHardfork::Rex5),
     ("Rex6", MegaHardfork::Rex6),
-    ("Rex7", MegaHardfork::Rex7),
 ];
 
 /// Published activation per network as written in the overview: `Some(ts)` for a backticked

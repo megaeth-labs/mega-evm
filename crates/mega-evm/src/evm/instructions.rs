@@ -237,11 +237,6 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaInstructions<DB, ExtEnvs> {
                 gas_table,
                 eth_spec,
             ),
-            MegaSpecId::REX7 => EthInstructions::new(
-                rex7::instruction_table::<EthInterpreter, MegaContext<DB, ExtEnvs>>(),
-                gas_table,
-                eth_spec,
-            ),
         };
         Self { spec, inner: instruction_table }
     }
@@ -269,7 +264,6 @@ fn gas_table_for_spec(spec: MegaSpecId) -> GasTable {
         MegaSpecId::REX4 => rex4::gas_table(base),
         MegaSpecId::REX5 => rex5::gas_table(base),
         MegaSpecId::REX6 => rex6::gas_table(base),
-        MegaSpecId::REX7 => rex7::gas_table(base),
     }
 }
 
@@ -581,30 +575,6 @@ macro_rules! set_halt_action {
         let gas = $interpreter.gas;
         $interpreter.bytecode.set_action(InterpreterAction::new_halt($result, gas));
     }};
-}
-
-mod rex7 {
-    use super::*;
-
-    /// Returns the instruction table for the `REX7` spec.
-    ///
-    /// Changes from Rex6: none yet.
-    pub(super) const fn instruction_table<
-        WIRE: InterpreterTypes<Stack: StackInspectTr>,
-        H: HostExt + ContextTr + JournalInspectTr + ?Sized,
-    >() -> [Instruction<WIRE, H>; 256]
-    where
-        WIRE::Stack: StackInspectTr,
-    {
-        rex6::instruction_table::<WIRE, H>()
-    }
-
-    /// Returns the static gas table for the `REX7` spec.
-    ///
-    /// The instruction table is unchanged from Rex6, so the zeroed set is too.
-    pub(super) const fn gas_table(table: GasTable) -> GasTable {
-        rex6::gas_table(table)
-    }
 }
 
 /// Macro to record compute gas and check if the limit has been exceeded. If the limit is exceeded,

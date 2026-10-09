@@ -49,8 +49,7 @@ impl MegaPrecompiles {
             MegaSpecId::REX3 |
             MegaSpecId::REX4 |
             MegaSpecId::REX5 |
-            MegaSpecId::REX6 |
-            MegaSpecId::REX7 => rex(),
+            MegaSpecId::REX6 => rex(),
         };
 
         Self { inner: EthPrecompiles { precompiles: inner, spec: spec.into_eth_spec() }, spec }
