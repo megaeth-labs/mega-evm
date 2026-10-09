@@ -8,8 +8,9 @@ use std::path::Path;
 
 use alloy_primitives::{Address, B256, U256};
 use common::blocks::{
-    block_path, cache_copy, cache_copy_for_satin, code_of, fixtures, overhead_slot, read_block,
-    run_evme, set_overhead, write_block, BLOCKS, FACTORY, L1_BLOCK,
+    block_path, cache_copy, cache_copy_for_satin, code_of, fixtures, is_deposit, overhead_slot,
+    read_block, run_evme, satin_genesis, set_overhead, timestamp_of, write_block, BLOCKS, FACTORY,
+    L1_BLOCK,
 };
 use mega_evm::{system::MEGA_SYSTEM_ADDRESS, ProtocolLimits};
 use mega_evme::block::PreAccount;
@@ -182,55 +183,18 @@ fn test_the_overhead_does_not_change_the_satin_rows() {
     }
 }
 
-/// A block fetched over RPC replays as the chain did, is written to the block cache with what
-/// its replay read beyond the trace, and then replays offline from the cache. The mock serves
-/// the recorded responses, and the trace is the recorded pre-state as one transaction's
-/// sighting.
+/// [S18] A block fetched over RPC replays as the chain did, is written to the block cache with
+/// what its replay read beyond the trace, and then replays offline from the cache. The mock
+/// serves the recorded responses, and the trace is the recorded pre-state as one transaction's
+/// sighting. The Satin replay reads two accounts' worth of state the recording lacks, the
+/// EIP-7997 factory its pre-block deploy reads and the L1 fee overhead its pre-block read of the
+/// L1 block info reads, and the cache keeps both.
+///
+/// Expected values: independent (the chain's own receipts, and the two pre-block reads).
 #[tokio::test(flavor = "multi_thread")]
 async fn test_a_block_fetched_over_rpc_is_cached_and_replays_offline() {
-    use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
-
     let number = BLOCKS[2];
-    let recorded = read_block(fixtures(), number);
-    let mut trace_accounts = serde_json::Map::new();
-    for (address, account) in &recorded.prestate.accounts {
-        let mut entry = serde_json::json!({ "balance": account.balance, "nonce": account.nonce });
-        if let Some(hash) = account.code_hash {
-            entry["code"] = Value::String(alloy_primitives::hex::encode_prefixed(code_of(hash)));
-        }
-        let storage: serde_json::Map<_, _> = account
-            .storage
-            .iter()
-            .map(|(slot, value)| (slot.to_string(), Value::String(B256::from(*value).to_string())))
-            .collect();
-        entry["storage"] = Value::Object(storage);
-        trace_accounts.insert(address.to_string(), entry);
-    }
-    let first_tx = recorded.block["transactions"][0]["hash"].clone();
-    let trace = serde_json::json!([{ "txHash": first_tx, "result": trace_accounts }]);
-
-    let server = MockServer::start().await;
-    let respond = |method: &'static str, result: Value| {
-        Mock::given(matchers::method("POST"))
-            .and(matchers::body_string_contains(format!("\"{method}\"")))
-            .respond_with(move |req: &wiremock::Request| {
-                let body: Value = serde_json::from_slice(&req.body).unwrap();
-                ResponseTemplate::new(200).set_body_json(
-                    serde_json::json!({ "jsonrpc": "2.0", "id": body["id"], "result": result }),
-                )
-            })
-    };
-    respond("eth_chainId", serde_json::json!("0x10e6")).mount(&server).await;
-    respond("eth_getBlockByNumber", recorded.block.clone()).mount(&server).await;
-    respond("eth_getBlockReceipts", recorded.receipts.clone()).mount(&server).await;
-    respond("debug_traceBlockByNumber", trace).mount(&server).await;
-    // The parent state of what the trace does not hold: the factory, which does not exist, and
-    // the L1 fee overhead, which is zero.
-    respond("eth_getBalance", serde_json::json!("0x0")).mount(&server).await;
-    respond("eth_getTransactionCount", serde_json::json!("0x0")).mount(&server).await;
-    respond("eth_getCode", serde_json::json!("0x")).mount(&server).await;
-    respond("eth_getStorageAt", serde_json::json!(B256::ZERO)).mount(&server).await;
-
+    let server = recorded_chain(number, Parent::Block).await;
     let cache = tempfile::tempdir().unwrap();
     let uri = server.uri();
 
@@ -428,4 +392,237 @@ fn test_a_genesis_file_runs_its_chains_blocks_on_its_schedule() {
         mega_evm::MAINNET_CHAIN_ID
     );
     assert!(error.contains(&expected), "{error}");
+}
+
+/// The reason the Satin engine refuses a transaction of a block that admits only deposits.
+const ACTIVATION_REFUSAL: &str = "non-deposit transaction in fork activation block";
+
+/// Checks the transaction records of a replay of the recorded `block` as its activation block:
+/// every deposit runs, and every other transaction — the protocol's legacy transactions
+/// included — is refused for the rule.
+fn assert_refused_as_activation_block(block: &mega_evme::block::CachedBlock, records: &[Value]) {
+    let txs: Vec<_> = records.iter().filter(|r| r["kind"] == "tx").collect();
+    let deposits = (0..txs.len()).filter(|&i| is_deposit(block, i)).count();
+    assert!(
+        deposits > 0 && deposits < txs.len(),
+        "the block holds deposits and other transactions"
+    );
+    for (index, tx) in txs.iter().enumerate() {
+        if is_deposit(block, index) {
+            assert_ne!(tx["status"], "refused", "deposit {index} runs: {tx}");
+        } else {
+            assert_eq!(tx["status"], "refused", "transaction {index}: {tx}");
+            let reason = tx["reason"].as_str().unwrap();
+            assert!(reason.contains(ACTIVATION_REFUSAL), "transaction {index}: {reason}");
+        }
+    }
+    assert_eq!(blocks_of(records)[0]["refused"], txs.len() - deposits);
+}
+
+/// [S1.8] [S21.12] [S1] A replayed block is told whether it admits only deposits as a node is:
+/// from its schedule and its parent's timestamp, which the block cache keeps beside the block.
+/// Under a genesis file that activates Satin at the recorded block's own timestamp, the block
+/// whose parent came a second earlier is Satin's activation block: its deposits run and every
+/// other transaction is refused. With its parent at the block's own timestamp Satin is active at
+/// both, and nothing is refused. Without the parent's timestamp and without `--rpc` the tool
+/// cannot tell, and the block fails saying why.
+///
+/// Expected values: independent.
+#[test]
+fn test_a_replayed_activation_block_refuses_its_user_transactions() {
+    let cache = cache_copy_for_satin();
+    let dir = tempfile::tempdir().unwrap();
+    let number = BLOCKS[0];
+    let recorded = read_block(cache.path(), number);
+    let timestamp = timestamp_of(&recorded);
+    let genesis = satin_genesis(dir.path(), mega_evm::MAINNET_CHAIN_ID, timestamp);
+    let with_parent_at = |parent_timestamp: Option<u64>| {
+        let mut block = read_block(cache.path(), number);
+        block.parent_timestamp = parent_timestamp;
+        write_block(cache.path(), number, &block);
+        replay(number, cache.path(), &["--genesis", &genesis])
+    };
+
+    let run = with_parent_at(Some(timestamp - 1));
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_refused_as_activation_block(&recorded, &run.records());
+
+    let run = with_parent_at(Some(timestamp));
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_eq!(blocks_of(&run.records())[0]["refused"], 0, "the block after admits every one");
+
+    let run = with_parent_at(None);
+    assert_eq!(run.code, 1, "{}", run.stdout);
+    let error = run.records()[0]["error"].as_str().unwrap().to_string();
+    assert!(error.contains("depends on its parent's timestamp"), "{error}");
+    assert!(error.contains("replay it once with '--rpc'"), "it says how to recover: {error}");
+}
+
+/// What a [`recorded_chain`] answers for the parent block's header.
+enum Parent {
+    /// The recorded block's own header, at the block's own timestamp.
+    Block,
+    /// A header at this timestamp.
+    At(u64),
+    /// No block: the endpoint does not have the parent.
+    Missing,
+}
+
+/// A mock of the chain serving the recorded `number` block, its receipts, its pre-state as a
+/// trace, and the reads Satin's pre-block changes make beyond it; the parent block's header is
+/// what `parent` says.
+async fn recorded_chain(number: u64, parent: Parent) -> wiremock::MockServer {
+    use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
+
+    let recorded = read_block(fixtures(), number);
+    let mut trace_accounts = serde_json::Map::new();
+    for (address, account) in &recorded.prestate.accounts {
+        let mut entry = serde_json::json!({ "balance": account.balance, "nonce": account.nonce });
+        if let Some(hash) = account.code_hash {
+            entry["code"] = Value::String(alloy_primitives::hex::encode_prefixed(code_of(hash)));
+        }
+        let storage: serde_json::Map<_, _> = account
+            .storage
+            .iter()
+            .map(|(slot, value)| (slot.to_string(), Value::String(B256::from(*value).to_string())))
+            .collect();
+        entry["storage"] = Value::Object(storage);
+        trace_accounts.insert(address.to_string(), entry);
+    }
+    let first_tx = recorded.block["transactions"][0]["hash"].clone();
+    let trace = serde_json::json!([{ "txHash": first_tx, "result": trace_accounts }]);
+
+    let server = MockServer::start().await;
+    let respond = |method: &'static str, result: Value| {
+        Mock::given(matchers::method("POST"))
+            .and(matchers::body_string_contains(format!("\"{method}\"")))
+            .respond_with(move |req: &wiremock::Request| {
+                let body: Value = serde_json::from_slice(&req.body).unwrap();
+                ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({ "jsonrpc": "2.0", "id": body["id"], "result": result }),
+                )
+            })
+    };
+    let parent = match parent {
+        Parent::Block => None,
+        Parent::At(timestamp) => {
+            let mut header = recorded.block.clone();
+            header["number"] = format!("0x{:x}", number - 1).into();
+            header["timestamp"] = format!("0x{timestamp:x}").into();
+            Some(header)
+        }
+        Parent::Missing => Some(Value::Null),
+    };
+    if let Some(parent) = parent {
+        Mock::given(matchers::method("POST"))
+            .and(matchers::body_string_contains("\"eth_getBlockByNumber\""))
+            .and(matchers::body_string_contains(format!("\"0x{:x}\"", number - 1)))
+            .respond_with(move |req: &wiremock::Request| {
+                let body: Value = serde_json::from_slice(&req.body).unwrap();
+                ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({ "jsonrpc": "2.0", "id": body["id"], "result": parent }),
+                )
+            })
+            .with_priority(1)
+            .mount(&server)
+            .await;
+    }
+    respond("eth_chainId", serde_json::json!("0x10e6")).mount(&server).await;
+    respond("eth_getBlockByNumber", recorded.block.clone()).mount(&server).await;
+    respond("eth_getBlockReceipts", recorded.receipts.clone()).mount(&server).await;
+    respond("debug_traceBlockByNumber", trace).mount(&server).await;
+    // The parent state of what the trace does not hold: the factory, which does not exist, and
+    // the L1 fee overhead, which is zero.
+    respond("eth_getBalance", serde_json::json!("0x0")).mount(&server).await;
+    respond("eth_getTransactionCount", serde_json::json!("0x0")).mount(&server).await;
+    respond("eth_getCode", serde_json::json!("0x")).mount(&server).await;
+    respond("eth_getStorageAt", serde_json::json!(B256::ZERO)).mount(&server).await;
+    server
+}
+
+/// [S1.8] [S1] A block fetched over RPC is fetched with its parent's timestamp, and the cache
+/// keeps it: under a genesis file that activates Satin at the block's timestamp, with the parent
+/// a second earlier, the replay refuses the block's user transactions online, writes the
+/// parent's timestamp to the cache, and refuses them again offline. A cached entry that lacks the
+/// timestamp gets it over RPC and is written back with it.
+///
+/// Expected values: independent.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_block_fetched_over_rpc_keeps_its_parents_timestamp() {
+    let number = BLOCKS[2];
+    let recorded = read_block(fixtures(), number);
+    let timestamp = timestamp_of(&recorded);
+    let server = recorded_chain(number, Parent::At(timestamp - 1)).await;
+    let uri = server.uri();
+    let cache = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let genesis = satin_genesis(dir.path(), mega_evm::MAINNET_CHAIN_ID, timestamp);
+
+    let run = replay(number, cache.path(), &["--rpc", &uri, "--genesis", &genesis]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_refused_as_activation_block(&recorded, &run.records());
+    assert_eq!(read_block(cache.path(), number).parent_timestamp, Some(timestamp - 1));
+
+    // An entry written without it gets it over RPC, and keeps it.
+    let mut entry = read_block(cache.path(), number);
+    entry.parent_timestamp = None;
+    write_block(cache.path(), number, &entry);
+    let run = replay(number, cache.path(), &["--rpc", &uri, "--genesis", &genesis]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_refused_as_activation_block(&recorded, &run.records());
+    assert_eq!(read_block(cache.path(), number).parent_timestamp, Some(timestamp - 1));
+
+    drop(server);
+    let run = replay(number, cache.path(), &["--genesis", &genesis]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_refused_as_activation_block(&recorded, &run.records());
+}
+
+/// How many times `server` was asked for the header of block `number`'s parent.
+async fn parent_requests(server: &wiremock::MockServer, number: u64) -> usize {
+    let tag = format!("\"0x{:x}\"", number - 1);
+    server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|request| {
+            let body = String::from_utf8_lossy(&request.body);
+            body.contains("\"eth_getBlockByNumber\"") && body.contains(&tag)
+        })
+        .count()
+}
+
+/// [S1] A cached block asks for its parent's header only when the activation-block rule needs
+/// the parent's timestamp. With the recorded entries, written before the cache kept it, and an
+/// endpoint that does not have the parent, the legacy replay matches the chain and the Satin
+/// counterfactual, whose schedule activates every fork at genesis, runs: neither asks for the
+/// parent. Under a genesis file that activates Satin at the block's timestamp the answer depends
+/// on the parent, which the endpoint does not have, and the block fails naming it.
+///
+/// Expected values: independent.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_cached_block_asks_for_its_parent_only_when_the_rule_needs_it() {
+    let number = BLOCKS[2];
+    let server = recorded_chain(number, Parent::Missing).await;
+    let uri = server.uri();
+    let cache = cache_copy();
+    assert_eq!(read_block(cache.path(), number).parent_timestamp, None, "an entry without it");
+
+    let run = replay(number, cache.path(), &["--rpc", &uri, "--verify"]);
+    assert_eq!(run.code, 0, "{}{}", run.stderr, run.stdout);
+    assert_eq!(blocks_of(&run.records())[0]["matches_chain"], true, "the legacy replay");
+    let run = replay(number, cache.path(), &["--rpc", &uri, "--override.spec", "Satin"]);
+    assert_eq!(run.code, 0, "{}{}", run.stderr, run.stdout);
+    assert_eq!(blocks_of(&run.records())[0]["refused"], 0, "the Satin counterfactual");
+    assert_eq!(parent_requests(&server, number).await, 0, "neither asked for the parent");
+
+    let dir = tempfile::tempdir().unwrap();
+    let timestamp = timestamp_of(&read_block(cache.path(), number));
+    let genesis = satin_genesis(dir.path(), mega_evm::MAINNET_CHAIN_ID, timestamp);
+    let run = replay(number, cache.path(), &["--rpc", &uri, "--genesis", &genesis]);
+    assert_eq!(run.code, 1, "{}", run.stdout);
+    let error = run.records()[0]["error"].as_str().unwrap().to_string();
+    assert!(error.contains(&format!("Block not found: {}", number - 1)), "{error}");
+    assert_eq!(parent_requests(&server, number).await, 1, "the rule asked for it once");
 }

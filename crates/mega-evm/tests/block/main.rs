@@ -1,5 +1,6 @@
 //! Tests of the block executor.
 
+mod activation;
 mod block_hashes;
 mod bucket_ids;
 mod common;

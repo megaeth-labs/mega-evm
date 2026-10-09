@@ -6,16 +6,24 @@
 //! per-transaction multiplier cache is forgotten before every transaction, so a record that lived
 //! there would lose every transaction's buckets but the last one's.
 
+use alloy_consensus::Sealed;
 use alloy_eips::eip2935::{HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE};
-use alloy_evm::{block::BlockExecutor, EvmFactory};
+use alloy_evm::{
+    block::{BlockExecutionError, BlockExecutor, InternalBlockExecutionError},
+    EvmFactory,
+};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
-use alloy_primitives::{address, Address, Bytes, B256, U256};
+use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    BlockLimits, BucketId, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvm, MegaEvmFactory,
-    MegaHardforkConfig, PreBlockStateSource, SaltEnv, TestExternalEnvs,
+    BlockLimits, BucketId, LimitUsage, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvm,
+    MegaEvmFactory, MegaHardforkConfig, MegaTxEnvelope, PreBlockStateSource, SaltEnv,
+    TestExternalEnvs,
 };
-use revm::{database::State, inspector::NoOpInspector, state::EvmState};
+use op_alloy_consensus::TxDeposit;
+use revm::{
+    context::ContextTr, database::State, inspector::NoOpInspector, state::EvmState, Database,
+};
 
 use crate::common::{self, system_tx, CALLER, CONTRACT};
 
@@ -231,6 +239,88 @@ fn test_a_failed_lookup_is_not_recorded_and_its_transaction_is_not_in_the_block(
     assert_eq!(executor.get_accessed_bucket_ids(), vec![slot_bucket(2)]);
     let (_, result) = executor.finish_with_counters().expect("the block finishes");
     assert_eq!(result.receipts().len(), 1, "the failed transaction is not in the block");
+}
+
+/// What a block has committed: its receipts, its counters, the caller's nonce and balance, the
+/// first slot of [`WRITER`] and the buckets it recorded.
+fn committed(executor: &mut Executor<'_>) -> (usize, [u64; 6], LimitUsage, u64, U256, U256, usize) {
+    let limiter = executor.limiter();
+    let counters = [
+        limiter.block_gas_used,
+        limiter.gas.execution,
+        limiter.gas.state,
+        limiter.gas.history,
+        limiter.block_tx_size_used,
+        limiter.block_da_size_used,
+    ];
+    let usage = limiter.usage;
+    let receipts = executor.receipts().len();
+    let buckets = executor.get_accessed_bucket_ids().len();
+    let db = executor.evm_mut().ctx_mut().db_mut();
+    let caller = db.basic(CALLER).expect("readable").expect("the caller exists");
+    let slot = db.storage(WRITER, U256::from(1)).expect("readable");
+    (receipts, counters, usage, caller.nonce, caller.balance, slot, buckets)
+}
+
+/// The internal error a transaction whose execution the node could not finish returns, with the
+/// hash it names.
+fn internal_evm_error(error: &BlockExecutionError) -> B256 {
+    match error {
+        BlockExecutionError::Internal(InternalBlockExecutionError::EVM { hash, .. }) => *hash,
+        other => panic!("not an internal error of the transaction's execution: {other:?}"),
+    }
+}
+
+/// [S21.17] [S21] [S6.7] A failed bucket read is a fault of the node and gives the transaction no
+/// outcome, for a deposit as for a user transaction: through the executor's own commit, each
+/// returns an internal error that names the transaction and the cause, and the block commits
+/// nothing for it — no receipt, nothing on the block's counters, no nonce bump, no mint, no write,
+/// no bucket. A failed deposit would have bumped its sender's nonce and credited its mint; this
+/// one is not settled at all. The block goes on with the next transaction once the user
+/// transaction is left out.
+///
+/// Expected values: independent (nothing changes).
+#[test]
+fn test_a_failed_bucket_read_commits_nothing_for_a_deposit_or_a_user_transaction() {
+    // Where a state byte is free no charge reads a bucket, so no read can fail.
+    if common::state_is_free() {
+        return;
+    }
+    let envs = Envs::new().with_failing_bucket(slot_bucket(1), "salt backend unreachable".into());
+    let mut state = state();
+    let mut executor = executor(&mut state, envs);
+    executor.apply_pre_execution_changes().expect("the block starts");
+    let before = committed(&mut executor);
+    assert_eq!(before.0, 0, "no receipt yet");
+
+    let deposit_hash = B256::repeat_byte(0xd1);
+    let deposit = TxDeposit {
+        source_hash: B256::repeat_byte(0xd0),
+        from: CALLER,
+        to: TxKind::Call(WRITER),
+        mint: 1_000,
+        value: U256::ZERO,
+        gas_limit: TX_GAS_LIMIT,
+        is_system_transaction: false,
+        input: vec![1].into(),
+    };
+    let deposit =
+        common::recovered(MegaTxEnvelope::Deposit(Sealed::new_unchecked(deposit, deposit_hash)));
+    let user = write(0, 1);
+    let user_hash = user.inner().tx_hash();
+    for (name, tx, hash) in
+        [("the deposit", deposit, deposit_hash), ("the user's", user, user_hash)]
+    {
+        let error = executor.execute_transaction(&tx).expect_err("the bucket read fails");
+        assert_eq!(internal_evm_error(&error), hash, "{name}: the error names the transaction");
+        assert!(error.to_string().contains("salt backend unreachable"), "{name}: {error}");
+        assert_eq!(committed(&mut executor), before, "{name}: the block committed nothing");
+    }
+
+    // The node leaves the user's transaction out, and the block goes on.
+    executor.execute_transaction(&write(0, 2)).expect("the next transaction executes");
+    let (_, result) = executor.finish_with_counters().expect("the block finishes");
+    assert_eq!(result.receipts().len(), 1, "only the transaction that ran is in the block");
 }
 
 /// A transaction that adds no state — a call to an empty account — asks about no bucket, so a

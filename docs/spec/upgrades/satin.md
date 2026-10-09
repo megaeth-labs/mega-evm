@@ -752,6 +752,7 @@ An out-of-gas step halts the call, consuming its regular gas.
   Storage it held is neither written nor cleared: the block's state changes carry no change to those slots, so the state the block commits, and its state root, still hold them, while for the rest of the block a slot it held reads as zero unless seeded.
   A later block executed on the committed state reads such a slot's old value again; one executed on the earlier block's uncommitted changes, held as its prestate, reads it as zero.
   Only a genesis allocation can hold storage at an address with empty code and nonce 0.
+  A chain configuration whose genesis allocation gives storage to an account with empty code and nonce 0 at a system-contract address or the factory's MUST be refused when it is loaded.
   There is one version of each contract (the Oracle and the SequencerRegistry at version 2.0.0): an address holding other code, an address with empty code and a non-zero nonce, and a factory with the expected code and nonce 0 MUST make the block invalid.
 - **Failure.**
   A pre-block call that does not succeed MUST make the block invalid, before its state is used.
@@ -976,6 +977,8 @@ A node, a stateless validator and a replay tool must agree on everything below, 
   An address read from another state treats the old system address's transactions as the protocol's and the new one's as a user's, or the reverse.
   A deposit is never refused for failing validation: one that fails validation is included as a failed deposit, which bumps its sender's nonce and uses its whole gas limit.
   A bucket or database read the node fails to make is not a validation failure, for a deposit either: the transaction gets no outcome; a failed bucket read, a database error the database declares fatal, or any database error on a read block execution makes around the transaction is an internal error of the node, while any other database error the transaction's execution meets makes the block invalid; a builder, which has no outcome to include for that transaction, may then leave a non-deposit transaction out, but cannot build a block that must hold the deposit while the read fails.
+- **The genesis allocation.**
+  A node must refuse, when it loads a chain configuration, a genesis allocation that gives storage to an account with empty code and nonce 0 at a system-contract address or the factory's, since the deploy would neither write nor clear that storage (see [System Calls and Pre-Block Calls](#18-system-calls-and-pre-block-calls)).
 - **Activation blocks.**
   Block execution does not work out whether a block admits only deposits: it is told, and refuses a non-deposit transaction only when told so.
   A node works it out from its configuration and the parent block's timestamp — whether a MegaETH fork, Satin itself, or an Optimism fork at or after Jovian in the Optimism fork order, is active at the block's timestamp and not at the parent's (see [Base Layer](#1-base-layer-optimism-karst-ethereum-osaka)) — for every block it builds and every block it validates, and a stateless validator is given it beside the witness.

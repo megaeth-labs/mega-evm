@@ -133,3 +133,29 @@ pub(crate) fn run_evme<S: AsRef<str>>(args: &[S]) -> Run {
     .join()
     .unwrap()
 }
+
+/// The timestamp of a cached block.
+pub(crate) fn timestamp_of(block: &CachedBlock) -> u64 {
+    let hex = block.block["timestamp"].as_str().expect("a hex timestamp");
+    u64::from_str_radix(hex.trim_start_matches("0x"), 16).expect("a timestamp")
+}
+
+/// Whether the `index`-th transaction of a cached block is a deposit.
+pub(crate) fn is_deposit(block: &CachedBlock, index: usize) -> bool {
+    block.block["transactions"][index]["type"] == "0x7e"
+}
+
+/// A genesis file of chain `chain_id` activating Satin at `satin_time`, with the placeholder
+/// registry seeds and the protocol's default limits, written in `dir`; its path.
+pub(crate) fn satin_genesis(dir: &Path, chain_id: u64, satin_time: u64) -> String {
+    let satin = mega_evm::SatinChainConfig {
+        activation_time: satin_time,
+        sequencer_registry: mega_evm::system::SequencerRegistryConfig::placeholder(),
+        protocol_limits: mega_evm::ProtocolLimits::DEFAULT,
+    };
+    let mut config = serde_json::to_value(satin).unwrap();
+    config["chainId"] = chain_id.into();
+    let path = dir.join(format!("satin-genesis-{chain_id}-{satin_time}.json"));
+    std::fs::write(&path, serde_json::json!({ "config": config }).to_string()).unwrap();
+    path.to_str().unwrap().to_string()
+}

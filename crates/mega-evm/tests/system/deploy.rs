@@ -4,19 +4,20 @@
 use alloy_primitives::{address, keccak256, Address, Bytes, U256};
 use mega_evm::{
     system::{
+        check_genesis_account,
         keyless::{KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE_HASH},
         storage_slots::{
             ADMIN, CURRENT_SEQUENCER, CURRENT_SYSTEM_ADDRESS, INITIAL_FROM_BLOCK,
             INITIAL_SEQUENCER, INITIAL_SYSTEM_ADDRESS, MIN_ROTATION_DELAY,
         },
-        system_contract_specs, transact_deploy, SequencerRegistryConfig, SystemContractDeployError,
-        SystemContractSpec, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE_HASH,
-        CREATE2_FACTORY_ADDRESS, CREATE2_FACTORY_CODE, CREATE2_FACTORY_CODE_HASH,
-        CREATE2_FACTORY_NONCE, HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
+        system_contract_specs, transact_deploy, GenesisAllocationError, SequencerRegistryConfig,
+        SystemContractDeployError, SystemContractSpec, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE,
+        ACCESS_CONTROL_CODE_HASH, CREATE2_FACTORY_ADDRESS, CREATE2_FACTORY_CODE,
+        CREATE2_FACTORY_CODE_HASH, CREATE2_FACTORY_NONCE, HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
         HIGH_PRECISION_TIMESTAMP_ORACLE_CODE_HASH, LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE_HASH,
         MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE,
         ORACLE_CONTRACT_CODE_HASH, SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE_HASH,
-        SYSTEM_CONTRACT_DEPLOY_COUNT,
+        SYSTEM_CONTRACT_ADDRESSES, SYSTEM_CONTRACT_DEPLOY_COUNT,
     },
     test_utils::{ErrorInjectingDatabase, MemoryDatabase},
     HardforkParams,
@@ -51,7 +52,10 @@ fn test_the_factory_code_hashes_to_its_pinned_hash() {
     assert_eq!(CREATE2_FACTORY_NONCE, 1);
 }
 
-/// The spec list is the six `MegaETH` contracts in address order, then the factory.
+/// [S18.8] The spec list is the six `MegaETH` contracts in address order, then the factory, each
+/// at nonce 1, and the public address list is the spec list's addresses in that order.
+///
+/// Expected values: constants (the addresses and code hashes are the production constants).
 #[test]
 fn test_the_spec_list_is_the_seven_predeploys_in_order() {
     let specs = system_contract_specs(&config());
@@ -96,6 +100,7 @@ fn test_the_spec_list_is_the_seven_predeploys_in_order() {
             CREATE2_FACTORY_CODE_HASH,
         ]
     );
+    assert_eq!(specs.clone().map(|spec| spec.address), SYSTEM_CONTRACT_ADDRESSES);
     for spec in &specs {
         assert_eq!(spec.nonce, 1, "{} starts at nonce 1", spec.address);
         assert_eq!(keccak256(&spec.code), spec.code_hash);
@@ -245,9 +250,13 @@ fn test_matching_megaeth_code_at_nonce_zero_is_accepted() {
     assert_eq!(account.info.nonce, 0);
 }
 
-/// An account that exists with empty code and nonce 0 (an EOA that received value) is a fresh
-/// deploy: the balance is kept, the slots are seeded, and marking the account created clears
-/// any storage it had. That is the accepted bootstrap path.
+/// [S18.12] [S18] An account that exists with empty code and nonce 0 (an EOA that received value)
+/// is a fresh deploy: the balance is kept and the slots are seeded, which is the accepted
+/// bootstrap path. The account is marked created, which writes nothing to a slot it held and
+/// clears none: the returned state carries the seeds alone.
+///
+/// Expected values: independent (the balance, nonce 1 and the seven seeds), with the contract's
+/// code hash from the production constant.
 #[test]
 fn test_an_empty_account_at_the_address_is_a_fresh_deploy() {
     let mut db = MemoryDatabase::default();
@@ -259,7 +268,7 @@ fn test_an_empty_account_at_the_address_is_a_fresh_deploy() {
         .unwrap();
     let state = transact_deploy(&mut db, &spec).expect("empty code is a fresh deploy");
     let account = state.get(&SEQUENCER_REGISTRY_ADDRESS).unwrap();
-    assert!(account.is_created(), "the bootstrap path marks created, which clears storage");
+    assert!(account.is_created(), "the bootstrap path marks the account created");
     assert_eq!(account.info.balance, U256::from(1_000));
     assert_eq!(account.info.nonce, 1);
     assert_eq!(account.info.code_hash, SEQUENCER_REGISTRY_CODE_HASH);
@@ -334,5 +343,76 @@ fn test_a_database_error_is_the_source_of_the_deploy_error() {
     assert!(
         core::error::Error::source(&err).is_some(),
         "the database error is the source of the deploy error"
+    );
+}
+
+/// The seven addresses the deploy installs a contract at, by hand.
+fn predeploys() -> [Address; 7] {
+    [
+        ORACLE_CONTRACT_ADDRESS,
+        HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
+        KEYLESS_DEPLOY_ADDRESS,
+        ACCESS_CONTROL_ADDRESS,
+        LIMIT_CONTROL_ADDRESS,
+        SEQUENCER_REGISTRY_ADDRESS,
+        CREATE2_FACTORY_ADDRESS,
+    ]
+}
+
+/// [S18] A genesis allocation that gives an account with empty code and nonce 0 storage at any of
+/// the seven predeploy addresses is refused, naming the address: the deploy would neither write
+/// nor clear that storage. A single non-zero slot among zero ones is storage.
+///
+/// Expected values: independent.
+#[test]
+fn test_a_genesis_account_with_storage_and_no_code_at_a_predeploy_is_refused() {
+    for address in predeploys() {
+        let refusal = check_genesis_account(address, &[], 0, [U256::ZERO, U256::from(7)])
+            .expect_err("storage without code at a predeploy address");
+        assert_eq!(refusal, GenesisAllocationError::StorageWithoutCode { address });
+        let message = refusal.to_string();
+        assert!(message.contains(&address.to_string()), "the error names {address}: {message}");
+        assert!(message.contains("storage without code"), "{message}");
+    }
+}
+
+/// A named genesis account: its address, code, nonce and storage values.
+type GenesisCase<'a> = (&'a str, Address, &'a [u8], u64, &'a [U256]);
+
+/// [S18] Every other account of a genesis allocation passes the check: a predeploy allocated with
+/// its own code and storage, which the deploy only reads; a balance-only account, the bootstrap
+/// path; one whose storage holds zeros alone, which is no storage; one with a used nonce or other
+/// code, which the deploy refuses at the block that runs it; and storage without code at an
+/// address no contract is deployed at.
+///
+/// Expected values: independent.
+#[test]
+fn test_other_genesis_accounts_pass_the_check() {
+    let held = [U256::from(7)];
+    let cases: [GenesisCase<'_>; 6] = [
+        ("its own code and storage", ACCESS_CONTROL_ADDRESS, &ACCESS_CONTROL_CODE, 1, &held),
+        (
+            "its own code and storage at nonce 0",
+            ORACLE_CONTRACT_ADDRESS,
+            &ORACLE_CONTRACT_CODE,
+            0,
+            &held,
+        ),
+        ("a balance alone", SEQUENCER_REGISTRY_ADDRESS, &[], 0, &[]),
+        ("slots holding zero", SEQUENCER_REGISTRY_ADDRESS, &[], 0, &[U256::ZERO, U256::ZERO]),
+        ("a used nonce", ORACLE_CONTRACT_ADDRESS, &[], 1, &held),
+        ("no contract deployed there", SEQUENCER, &[], 0, &held),
+    ];
+    for (name, address, code, nonce, storage) in cases {
+        assert_eq!(
+            check_genesis_account(address, code, nonce, storage.iter().copied()),
+            Ok(()),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        check_genesis_account(CREATE2_FACTORY_ADDRESS, &[0xfe], 0, held),
+        Ok(()),
+        "other code, which the deploy refuses at the block"
     );
 }

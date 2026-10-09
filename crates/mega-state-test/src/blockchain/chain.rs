@@ -9,6 +9,11 @@
 //! The executor needs the Satin fork's parameters; [`chain_spec`] supplies them with values that
 //! bind nothing on an Osaka fixture, and says why for each.
 //!
+//! Each block's context tells the executor whether the block admits only deposits, worked out as
+//! a node works it out: from the schedule and the timestamp of the chain's head, the block's
+//! parent. Under [`chain_spec`], which activates every fork at genesis, no block the runner
+//! imports is such a block.
+//!
 //! A Satin block adds accounts to the state an Ethereum block leaves: the system contracts the
 //! executor deploys before every block, and the fee vaults op-revm routes fees to.
 //! [`SATIN_ACCOUNTS`] lists them, each with the rule it is taken out of the post-state by before
@@ -35,7 +40,8 @@ use mega_evm::{
         HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS, LIMIT_CONTROL_ADDRESS, ORACLE_CONTRACT_ADDRESS,
         SEQUENCER_REGISTRY_ADDRESS,
     },
-    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaHardforkConfig, ProtocolLimits,
+    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaHardforkConfig, MegaHardforks,
+    ProtocolLimits,
 };
 
 use super::fixture::DecodedBlock;
@@ -229,6 +235,8 @@ pub(crate) struct Chain {
     hashes: BTreeMap<u64, B256>,
     /// The head block's hash.
     pub(crate) head: B256,
+    /// The head block's timestamp: the parent's of the next block.
+    head_timestamp: u64,
     /// The base fees of the blocks the chain accepted: what the base-fee vault holds.
     routed_base_fee: U256,
     /// The accounts the fixture's pre-state holds.
@@ -244,10 +252,12 @@ pub(crate) struct Chain {
 }
 
 impl Chain {
-    /// The chain at its genesis block, numbered and hashed `genesis`, holding `pre`.
+    /// The chain at its genesis block, numbered and hashed `genesis` and stamped
+    /// `genesis_timestamp`, holding `pre`.
     pub(crate) fn new(
         pre: &BTreeMap<Address, Account>,
         genesis: (u64, B256),
+        genesis_timestamp: u64,
         chain_id: u64,
         blob_base_fee_update_fraction: u64,
     ) -> Result<Self, String> {
@@ -265,6 +275,7 @@ impl Chain {
             state,
             hashes: BTreeMap::from([genesis]),
             head: genesis.1,
+            head_timestamp: genesis_timestamp,
             routed_base_fee: U256::ZERO,
             pre: pre.keys().copied().collect(),
             chain_id,
@@ -357,12 +368,14 @@ impl Chain {
         state.block_hashes.extend(self.hashes.range(window..).map(|(n, hash)| (*n, *hash)));
 
         let evm = Mode::Equivalence.evm(FORK, &mut state, self.block_env(block), self.chain_id);
+        let only_deposits = self.spec.admits_only_deposits(self.head_timestamp, header.timestamp);
         let ctx = MegaBlockExecutionCtx::new(
             header.parent_hash,
             header.parent_beacon_block_root,
             header.extra_data.clone(),
             BlockLimits::no_limits(),
-        );
+        )
+        .with_no_user_tx_activation_block(only_deposits);
         let mut executor =
             MegaBlockExecutor::new(evm, ctx, self.spec.clone(), OpAlloyReceiptBuilder::default());
         executor.apply_pre_execution_changes().map_err(refusal)?;
@@ -380,6 +393,7 @@ impl Chain {
         self.state = state.cache;
         self.routed_base_fee = routed_base_fee;
         self.head = header.hash_slow();
+        self.head_timestamp = header.timestamp;
         self.hashes.insert(header.number, self.head);
         Ok(BlockOutput {
             gas_used: result.gas_used,
@@ -433,16 +447,88 @@ mod tests {
         );
     }
 
-    /// The parameters the chain runs on are ones a chain may carry: the executor refuses a block
-    /// under any other.
+    /// [S10] The parameters the chain runs on are ones a chain may carry: the executor refuses a
+    /// block under any other.
+    ///
+    /// Expected values: constants (the loosest limits a chain may carry).
     #[test]
     fn test_the_chain_spec_carries_valid_parameters() {
-        use mega_evm::{HardforkParams, MegaHardforks};
+        use mega_evm::HardforkParams;
         let spec = chain_spec();
         let limits = spec.protocol_limits(0).expect("limits from genesis");
         assert_eq!(limits, ProtocolLimits::loosest());
         assert!(limits.validate().is_ok());
         assert!(spec.fork_params::<SequencerRegistryConfig>().is_some());
         assert!(spec.validate_schedule().is_ok());
+    }
+
+    /// [S1.8] [S21.12] [S1] A block's context says whether it admits only deposits, from the
+    /// schedule and the head's timestamp, as a node works it out. Under a schedule that activates
+    /// Satin at the block's timestamp, with the genesis a second earlier, the block is Satin's
+    /// activation block: a user transaction in it is refused, and the block without it is
+    /// imported. The next block, whose parent is that block, admits the transaction. Under the
+    /// runner's own schedule every fork is active from genesis, so no block it imports is an
+    /// activation block.
+    ///
+    /// Expected values: independent (the schedule's own timestamps and the rule).
+    #[test]
+    fn test_an_imported_block_is_told_whether_it_admits_only_deposits() {
+        use mega_evm::{
+            alloy_consensus::{BlockBody, Header, Signed, TxLegacy},
+            alloy_hardforks::ForkCondition,
+            alloy_primitives::{Bytes, Signature, TxKind},
+            MegaHardfork, MegaTxEnvelope,
+        };
+
+        const ACTIVATION: u64 = 1_000;
+        let tx = TxLegacy {
+            chain_id: Some(1),
+            nonce: 0,
+            gas_price: 10,
+            gas_limit: 100_000,
+            to: TxKind::Call(Address::repeat_byte(0xc0)),
+            value: U256::ZERO,
+            input: Bytes::new(),
+        };
+        let signature =
+            Signature::new(U256::from(0x23f5_c4da_u64), U256::from(0x42f9_035f_u64), false);
+        let tx = MegaTxEnvelope::Legacy(Signed::new_unhashed(tx, signature));
+        let sender = tx.recover_signer().expect("the signature recovers a sender");
+        let funded = Account { balance: U256::from(10).pow(U256::from(18)), ..Default::default() };
+        let pre = BTreeMap::from([(sender, funded)]);
+        let block = |number: u64, timestamp: u64, transactions: Vec<MegaTxEnvelope>| {
+            let header = Header {
+                number,
+                timestamp,
+                gas_limit: 30_000_000,
+                base_fee_per_gas: Some(7),
+                parent_beacon_block_root: Some(B256::ZERO),
+                excess_blob_gas: Some(0),
+                ..Default::default()
+            };
+            DecodedBlock::new(header, BlockBody { transactions, ommers: vec![], withdrawals: None })
+        };
+        let satin_at_activation = MegaHardforkConfig::default()
+            .with(MegaHardfork::Satin, ForkCondition::Timestamp(ACTIVATION))
+            .with_params(registry_config())
+            .with_params(ProtocolLimits::loosest());
+
+        let mut chain = Chain::new(&pre, (0, B256::ZERO), ACTIVATION - 1, 1, 5_007_716).unwrap();
+        chain.spec = satin_at_activation;
+        let refusal = chain
+            .import(&block(1, ACTIVATION, vec![tx.clone()]))
+            .expect_err("a user transaction in Satin's activation block");
+        assert!(
+            refusal.detail.contains("non-deposit transaction in fork activation block"),
+            "{}",
+            refusal.detail
+        );
+        chain.import(&block(1, ACTIVATION, vec![])).expect("the activation block, without it");
+        chain.import(&block(2, ACTIVATION + 1, vec![tx])).expect("the block after admits it");
+
+        assert!(
+            !chain_spec().admits_only_deposits(0, u64::MAX),
+            "under the runner's schedule no parent and no block make an activation block"
+        );
     }
 }
