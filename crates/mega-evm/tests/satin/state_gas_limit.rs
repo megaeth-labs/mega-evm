@@ -1490,10 +1490,11 @@ fn test_fresh_slots_fit_a_limit_of_their_state_gas_and_one_more_stops() {
 /// the start costs in all is an out-of-gas too, and the frame does not start [S7.24]. A `CREATE`
 /// charges the created account before its 63/64 split, as EIP-8037 has it, so the records come out
 /// of the 64th the creator keeps, and the creator must hold 64 times their price after the state
-/// charge. Where a value `CALL`'s state charge falls against its forward and its records is not
-/// fixed, so the `CALL` forwards an explicit nothing — the same forward in any order — and its rows
-/// hold whatever the order: a gas limit short of the state charge, and one gas short of the whole
-/// start, runs out of gas.
+/// charge. EIP-8037 states that order for a creation alone — of a value `CALL` it says only that
+/// the charge comes right before the child frame is entered — so, though the engine charges a
+/// `CALL`'s new account before its split too, that order is not pinned here: the `CALL` forwards
+/// an explicit nothing — the same forward in any order — and its rows hold whatever the order: a
+/// gas limit short of the state charge, and one gas short of the whole start, runs out of gas.
 ///
 /// With exactly what the transaction needs to the end of its state charge — and of the start's
 /// records — the same limit stops the transaction there, with the charge as the state gas it
