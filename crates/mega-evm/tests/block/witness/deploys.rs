@@ -1,6 +1,8 @@
 //! The pre-block deploys, the EIP-7997 factory and an activation block through the harness.
 
-use alloy_primitives::{Bytes, U256};
+use std::collections::BTreeMap;
+
+use alloy_primitives::{keccak256, Address, Bytes, U256};
 use mega_evm::{
     system::{
         keyless::{KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE},
@@ -13,26 +15,38 @@ use mega_evm::{
     test_utils::MemoryDatabase,
     PreBlockStateSource,
 };
-use revm::bytecode::opcode::{CODECOPY, PUSH0, RETURN};
+use revm::{
+    bytecode::opcode::{CODECOPY, PUSH0, RETURN},
+    state::Account,
+};
 
 use super::{
     basics::{slot, slot_writer, write_gas},
-    harness::{call, deposit, Case},
+    harness::{call, deposit, Case, Run},
     state::creation_gas,
 };
 use crate::common::{self, CALLER, CONTRACT};
 
+/// Every system contract and the factory, with the code a chain holds for it after its first
+/// Satin block.
+fn contracts() -> [(Address, Bytes); 7] {
+    [
+        (ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE),
+        (HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS, HIGH_PRECISION_TIMESTAMP_ORACLE_CODE),
+        (KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE),
+        (ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE),
+        (LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE),
+        (SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE),
+        (CREATE2_FACTORY_ADDRESS, CREATE2_FACTORY_CODE),
+    ]
+}
+
 /// A database holding every system contract and the factory, as a chain does after its first
 /// Satin block.
 fn chain_with_contracts() -> MemoryDatabase {
-    let db = common::database()
-        .account_code(ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE)
-        .account_code(HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS, HIGH_PRECISION_TIMESTAMP_ORACLE_CODE)
-        .account_code(KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE)
-        .account_code(ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE)
-        .account_code(LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE)
-        .account_code(SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE)
-        .account_code(CREATE2_FACTORY_ADDRESS, CREATE2_FACTORY_CODE);
+    let db = contracts()
+        .into_iter()
+        .fold(common::database(), |db, (address, code)| db.account_code(address, code));
     db.account_nonce(CREATE2_FACTORY_ADDRESS, 1)
 }
 
@@ -45,45 +59,78 @@ fn init_code() -> Bytes {
     code.into()
 }
 
+/// The deploy state the pre-block phase of `run` handed over for the contract at `address`.
+fn deploy_state(run: &Run, address: Address) -> &Account {
+    let (_, state) = run
+        .pre_block
+        .iter()
+        .find(|(source, _)| *source == PreBlockStateSource::SystemContract(address))
+        .unwrap_or_else(|| panic!("{address} has a deploy state"));
+    &state[&address]
+}
+
 /// The first Satin block over a chain without the contracts: every deploy asks about an absent
 /// account, which the record holds as absent, and creates it; a validator given those absences
 /// deploys the same code.
+///
+/// The deploy states carry the code the deploys wrote, and the witness built from them carries
+/// none of it: the chain held no code for those accounts before the block, and a state's code is
+/// not the chain's.
+///
+/// Rule [S22.4]. Expected values `independent`: the absent accounts are the test's own empty chain.
 #[test]
 fn test_the_first_block_deploys_from_absent_accounts() {
-    let replay = Case::new("first block", common::database()).run();
+    let case = || Case::new("first block", common::database());
+    let replay = case().run();
     let run = &replay.recorded;
+    let witness = case().channel_witness(run);
     for spec in system_contract_specs(&common::registry_config()) {
         assert_eq!(run.record.accounts.get(&spec.address), Some(&None), "{}", spec.address);
-        let created = run
-            .pre_block
-            .iter()
-            .find(|(source, _)| *source == PreBlockStateSource::SystemContract(spec.address))
-            .map(|(_, state)| state[&spec.address].is_created());
-        assert_eq!(created, Some(true), "{} was created", spec.address);
+        let state = deploy_state(run, spec.address);
+        assert!(state.is_created(), "{} was created", spec.address);
+        assert_eq!(
+            state.info.code_hash, spec.code_hash,
+            "{} carries the code it wrote",
+            spec.address
+        );
+        assert_eq!(witness.accounts.get(&spec.address), Some(&None), "{}", spec.address);
+        assert!(
+            !witness.codes.contains_key(&spec.code_hash),
+            "{}: the witness carries the chain's code, and the chain held none",
+            spec.address,
+        );
     }
 }
 
-/// A later block over a chain holding the contracts: every deploy reads its account, which the
-/// record holds with its code hash and without its code, and creates nothing.
+/// A later block over a chain holding the contracts: every deploy reads its account and creates
+/// nothing, and no deploy loads code.
+///
+/// The witness built from the deploy states holds, for every contract, the code the chain held
+/// before the block, under its hash: no deploy loaded it, so it is there because the account was
+/// named, resolved against the chain.
+///
+/// Rule [S22.4]. Expected values `independent`: the code is the bytecode the test put in the chain,
+/// and its hash is computed here.
 #[test]
 fn test_a_later_block_reads_the_deployed_contracts() {
-    let replay = Case::new("later block", chain_with_contracts()).run();
+    let case = || Case::new("later block", chain_with_contracts());
+    let replay = case().run();
     let run = &replay.recorded;
+    let witness = case().channel_witness(run);
+    let held: BTreeMap<Address, Bytes> = contracts().into_iter().collect();
     for spec in system_contract_specs(&common::registry_config()) {
+        let code = &held[&spec.address];
+        let hash = keccak256(code);
         let info = run.record.accounts.get(&spec.address).expect("read").as_ref().expect("held");
-        assert_eq!(info.code_hash, spec.code_hash);
-        assert!(info.code.is_none(), "code travels by hash, not with the account");
-        let created = run
-            .pre_block
-            .iter()
-            .find(|(source, _)| *source == PreBlockStateSource::SystemContract(spec.address))
-            .map(|(_, state)| state[&spec.address].is_created());
-        assert_eq!(created, Some(false), "{} was read", spec.address);
+        assert_eq!(info.code_hash, hash, "{} was read with the chain's code hash", spec.address);
+        assert!(!deploy_state(run, spec.address).is_created(), "{} was read", spec.address);
+        assert!(!run.record.codes.contains_key(&hash), "{}: no deploy loads code", spec.address);
+        assert!(
+            witness.codes.get(&hash).is_some_and(|carried| carried.original_bytes() == *code),
+            "{}: the witness carries the code the chain held",
+            spec.address,
+        );
     }
-    assert!(
-        !run.record.codes.contains_key(&mega_evm::system::CREATE2_FACTORY_CODE_HASH),
-        "no deploy loads code"
-    );
 }
 
 /// A `CREATE2` through the EIP-7997 factory: the factory's code travels by hash, the created
