@@ -1259,7 +1259,24 @@ fn test_data_limit_just_exceed() {
 }
 
 /// A library's write, one call down, crosses a limit one byte above the body: the stop is a
-/// revert, and the transaction is billed what ran.
+/// revert, and the transaction is billed what ran — its intrinsic gas, its body's history, the
+/// call and the library up to and including the write — and nothing more: the unspent regular gas
+/// comes back to the sender, and so does the state gas the write spilled onto it, which a revert
+/// gives back.
+///
+/// What ran, below the execution cap, so the body's history is paid from the regular budget:
+///
+/// | Part | Gas |
+/// |---|---:|
+/// | the call's intrinsic regular gas: the EIP-2780 base and the recipient | 15,000 |
+/// | `A`'s five `PUSH0`, its `PUSH20` and its `GAS` | 15 |
+/// | `A`'s `CALL`: the warm access and the cold surcharge for `B` | 2,600 |
+/// | `B`'s `PUSH1` and `PUSH0` | 5 |
+/// | `B`'s cold `SLOAD` | 2,100 |
+/// | `B`'s `SSTORE` of the slot it warmed: static and set | 20,000 |
+///
+/// Rules: [S11.8], [S11.9]. Independence: independent — the parts are written out; the body's
+/// history is priced by the production helper.
 #[test]
 fn test_data_limit_exceed_in_nested_call() {
     let limit = TX_BODY_SIZE + 1;
@@ -1281,11 +1298,11 @@ fn test_data_limit_exceed_in_nested_call() {
         outcome.result
     );
     assert_eq!(outcome.limit_exceeded, Some(stop));
-    assert!(
-        outcome.gas.gas_used < 200_000 + body_history(0),
-        "the stop burns nothing: {}",
-        outcome.gas.gas_used
-    );
+    let ran = 15_000 + 15 + 2_600 + 5 + 2_100 + 20_000;
+    assert_eq!(outcome.gas.regular, ran, "what ran, on the regular ledger");
+    assert_eq!(outcome.gas.history, body_history(0), "the body's history alone");
+    assert_eq!(outcome.gas.state, 0, "the write's state gas came back");
+    assert_eq!(outcome.gas.gas_used, ran + body_history(0), "and nothing more: the rest came back");
 }
 
 /// A value transfer to a contract that writes a slot, under a limit one byte above the body: the
