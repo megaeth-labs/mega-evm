@@ -30,7 +30,9 @@ use mega_evm::{
 };
 use revm::bytecode::opcode::{CALL, CREATE, GAS, MSTORE, POP, PUSH0, PUSH1, RETURN, REVERT, STOP};
 
-use crate::common::{body_history, call, execute, history_is_free, runs_at_measurement_prices};
+use crate::common::{
+    body_history, call, execute, history_is_free, history_rounds, runs_at_measurement_prices,
+};
 
 const CALLER: Address = address!("0000000000000000000000000000000000700000");
 const CALLEE: Address = address!("0000000000000000000000000000000000700001");
@@ -262,8 +264,9 @@ const INTRINSIC: u64 = 12_000 + 3_000;
 /// ledger; the receipt adds the body.
 #[test]
 fn test_the_body_draws_the_reservoir_first_and_only_its_excess_from_regular_gas() {
-    // A body that costs nothing leaves the reservoir nothing to draw.
-    if history_is_free() {
+    // A body that costs nothing leaves the reservoir nothing to draw, and one priced at a fraction
+    // of a gas may round to nothing.
+    if history_is_free() || history_rounds() {
         return;
     }
     let body = body_history(0);

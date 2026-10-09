@@ -33,7 +33,7 @@ use revm::{
 
 use crate::common::{
     account_state_gas, body_history, call, call_with_data, context, create, history,
-    history_is_free, slot_state_gas, state_is_free,
+    history_is_free, history_rounds, slot_state_gas, state_is_free,
 };
 
 const CALLER: Address = address!("0000000000000000000000000000000000300000");
@@ -946,8 +946,9 @@ fn test_a_frame_start_is_charged_before_its_records_are_counted() {
 /// (`constants`: the two byte prices in effect; 713,055 at the spec's prices).
 #[test]
 fn test_a_caller_one_gas_short_of_its_records_runs_out_of_gas_under_a_limit_they_would_cross() {
-    // Records that cost nothing leave no price to be short of.
-    if history_is_free() {
+    // Records that cost nothing leave no price to be short of, and records priced at a fraction
+    // of a gas may round to nothing.
+    if history_is_free() || history_rounds() {
         return;
     }
     let records = history(2 * WRITE_RECORD_SIZE);
@@ -1154,8 +1155,9 @@ fn test_whichever_of_gas_and_data_size_binds_first_is_reported_at_a_childs_write
 /// state gas and the record).
 #[test]
 fn test_a_record_a_limit_refuses_is_not_charged_where_the_reservoir_has_one_gas_too_few() {
-    // A record that costs nothing leaves no gas for the reservoir to be short of.
-    if history_is_free() {
+    // A record that costs nothing leaves no gas for the reservoir to be short of, and one priced
+    // at a fraction of a gas may round to nothing.
+    if history_is_free() || history_rounds() {
         return;
     }
     let params = mega_evm::satin_gas_params();

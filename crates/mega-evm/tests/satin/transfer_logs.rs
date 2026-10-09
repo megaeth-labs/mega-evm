@@ -51,7 +51,7 @@ use revm::{
     Database, Inspector,
 };
 
-use crate::common::{account_state_gas, context};
+use crate::common::{account_state_gas, context, history_rounds};
 
 const CALLER: Address = address!("0000000000000000000000000000000000d00000");
 /// The contract a nested site's transaction calls: it calls [`ACTOR`] and returns what that
@@ -377,7 +377,15 @@ fn assert_completed(
     );
     let history_bytes = body + site.records() * WRITE_RECORD_SIZE + log_history;
     assert_eq!(outcome.gas.history_bytes, history_bytes, "{case}: the history bytes");
-    assert_eq!(outcome.gas.history, history_gas(history_bytes).unwrap(), "{case}: their history");
+    // The body, the records and the log are charged apart, which a history byte priced at a
+    // fraction of a gas rounds one by one.
+    if !history_rounds() {
+        assert_eq!(
+            outcome.gas.history,
+            history_gas(history_bytes).unwrap(),
+            "{case}: their history"
+        );
+    }
 }
 
 /// Asserts `outcome` is `site` stopped at its move by `stop`, with nothing of the move left: no

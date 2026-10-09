@@ -164,6 +164,22 @@ pub(crate) fn history_is_free() -> bool {
     true
 }
 
+/// Whether a history byte costs a fraction of a gas at the prices in effect.
+///
+/// Only a measurement build arranges that, as the grid's 0.001 does. Each history charge is then
+/// rounded to the nearest gas on its own, so a small charge — a body, a record — can cost nothing,
+/// and the history of bytes charged apart is not the history of their sum. No test is held to
+/// its history figures there: a test whose figures add history over several charges, or need a
+/// record to cost something, returns early, or leaves those figures out, with a note like
+/// [`history_is_free`]'s.
+pub(crate) fn history_rounds() -> bool {
+    if active_satin_prices().cphb.milli_gas().is_multiple_of(1_000) {
+        return false;
+    }
+    note_price_guard("MEGA_SATIN_CPHB prices a history byte at a fraction of a gas");
+    true
+}
+
 /// The state gas one fresh storage slot costs at the byte prices in effect, in the minimum
 /// bucket.
 pub(crate) fn slot_state_gas() -> u64 {

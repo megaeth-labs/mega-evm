@@ -26,7 +26,9 @@ use revm::{
     ExecuteEvm,
 };
 
-use crate::common::{account_state_gas, authorizing_call, block, context, history_is_free};
+use crate::common::{
+    account_state_gas, authorizing_call, block, context, history_is_free, history_rounds,
+};
 
 const CALLER: Address = address!("0000000000000000000000000000000000c00000");
 const EXISTING: Address = address!("0000000000000000000000000000000000c00001");
@@ -316,7 +318,8 @@ fn test_what_the_intrinsic_gas_is_made_of() {
     // anyone else, or of another shape, or with no registry naming its sender, does.
     assert_eq!(helper(deposit_with_calldata, None).history, 0);
     assert_eq!(helper(system_transaction, Some(SYSTEM)).history, 0);
-    if !history_is_free() {
+    // A body priced at a fraction of a gas may round to nothing.
+    if !history_is_free() && !history_rounds() {
         assert!(helper(system_shape_from_a_user, Some(SYSTEM)).history > 0);
         assert!(helper(another_shape_from_the_system_address, Some(SYSTEM)).history > 0);
         assert!(helper(system_transaction, None).history > 0);

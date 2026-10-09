@@ -39,7 +39,10 @@ use revm::{
 };
 
 use crate::{
-    common::{call, context, history, history_is_free, runs_at_measurement_prices, state_is_free},
+    common::{
+        call, context, history, history_is_free, history_rounds, runs_at_measurement_prices,
+        state_is_free,
+    },
     salt::entry,
 };
 
@@ -446,6 +449,11 @@ fn assert_deposits(name: &str, pool: Pool, forward: u64) {
 /// the init code's cost plus 6 gas per word of code, by hand (`independent`) [S5.13] [S5.14].
 #[test]
 fn test_a_creation_one_gas_short_of_the_hash_runs_out_of_gas_above_the_cap() {
+    // The ledgers add the history of the body, the records and the code, which a history byte
+    // priced at a fraction of a gas rounds charge by charge.
+    if history_rounds() {
+        return;
+    }
     let enough = deposits_at(Pool::AboveCap);
     assert_runs_out("one gas short of the hash", Pool::AboveCap, enough - 1, HASH - 1, false);
     assert_deposits("the hash paid exactly", Pool::AboveCap, enough);
