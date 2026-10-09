@@ -55,6 +55,9 @@ RPC_URL=<endpoint> python3 scripts/replay_corpus_capture.py \
 The script seeds each block's capture from its member of the archive, and `--rpc.capture-file` is incremental, so only the requests the current `mega-evme` makes and the capture lacks are fetched.
 When no selected block's capture changed, `corpus.tar.xz` and `manifest.json` are left untouched.
 Otherwise the script repacks the whole archive and updates `manifest.json` in place: the changed members' digests and the archive's digest.
+Both files are written in full beside their targets before either is replaced, and the archive is renamed into place before the manifest, so a run that fails or is interrupted can only stop between the two renames.
+Every run, `--check` included, first finishes such an update from the manifest it left staged as `manifest.json.tmp`, and then requires the manifest to describe the archive exactly: its digest, its members, and each member's digest.
+Any other drift fails the run, naming each difference; restore both files from version control and rerun the capture, since the script never re-pins the manifest from an archive it cannot vouch for.
 
 To add a block, pin it with `--pin <N>:<HASH>`; its entry is inserted in block order with a `spec` placeholder (`?`), and the corpus test reports the spec the mainnet schedule assigns to it.
 
@@ -63,7 +66,7 @@ Recapture only the blocks that need it, and batch recaptures and additions into 
 
 ## Checking the packer
 
-`--check` repacks the committed archive's members with the script's packer and fails unless the result is byte-identical to the committed archive:
+`--check` verifies that the manifest describes the archive, then repacks the committed archive's members with the script's packer and fails unless the result is byte-identical to the committed archive:
 
 ```bash
 python3 scripts/replay_corpus_capture.py --check

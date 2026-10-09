@@ -24,6 +24,15 @@ members' digests, the archive's digest, and new entries in block order with a
 spec the mainnet schedule assigns to a new block). When nothing changed, both
 files are left untouched, so the repository history does not move.
 
+Both files are written in full beside their targets first and only then
+renamed into place, the archive before the manifest, so an interrupted or
+failed run can only stop between the two renames. Every run starts by finishing
+such an update (the staged manifest still beside the replaced archive) and by
+checking that the manifest describes the archive: its digest, its members, and
+each member's digest. A drift the script cannot attribute to its own
+interrupted update fails the run with what to do about it; the script never
+re-pins the manifest from an archive it cannot vouch for.
+
 Every repack writes the whole archive into the repository history, so batch
 recaptures into one change and recapture only the blocks that need it.
 
@@ -115,10 +124,93 @@ def read_members(archive):
     return members
 
 
-def write_atomically(path, data):
-    temporary = path.with_name(path.name + ".tmp")
-    temporary.write_bytes(data)
-    temporary.replace(path)
+def staged(path):
+    """Where `path`'s next content is written before it replaces `path`."""
+    return path.with_name(path.name + ".tmp")
+
+
+def write_staged(path, data):
+    """Write `data` in full beside `path`, flushed to disk, without touching
+    `path` itself."""
+    with open(staged(path), "wb") as file:
+        file.write(data)
+        file.flush()
+        os.fsync(file.fileno())
+
+
+def publish(archive, packed, manifest_path, manifest_text):
+    """Replace the archive and the manifest that describes it.
+
+    Both are staged in full first, so a failure while writing leaves the
+    committed pair untouched. Only the two renames remain: the archive goes
+    first, and `recover` finishes the manifest's if the run stops in between.
+    """
+    write_staged(archive, packed)
+    write_staged(manifest_path, manifest_text.encode())
+    staged(archive).replace(archive)
+    staged(manifest_path).replace(manifest_path)
+
+
+def drift(archive, members, manifest):
+    """How `manifest` fails to describe `archive` (holding `members`), one
+    line per difference; empty when it describes it exactly."""
+    problems = []
+    actual = sha256(archive.read_bytes())
+    if actual != manifest["sha256"]:
+        problems.append(f"{archive.name} has sha256 {actual}; the manifest pins {manifest['sha256']}")
+    pinned = {entry["member"]: entry["sha256"] for entry in manifest["blocks"]}
+    for name in sorted(set(pinned) - set(members), key=block_of):
+        problems.append(f"{name} is in the manifest but not in {archive.name}")
+    for name in sorted(set(members) - set(pinned), key=block_of):
+        problems.append(f"{name} is in {archive.name} but not in the manifest")
+    for name in sorted(set(pinned) & set(members), key=block_of):
+        digest = sha256(members[name])
+        if digest != pinned[name]:
+            problems.append(f"{name} has sha256 {digest}; the manifest pins {pinned[name]}")
+    return problems
+
+
+def recover(archive, manifest_path):
+    """Finish or discard an update an earlier run left staged.
+
+    A staged archive means the run stopped before replacing anything, so the
+    committed pair is still the old one and the staged files are discarded. A
+    staged manifest alone means the archive was already replaced; the staged
+    manifest was written by the same run, so it is moved into place once it is
+    shown to describe the archive exactly.
+    """
+    if staged(archive).exists():
+        for path in (staged(archive), staged(manifest_path)):
+            if path.exists():
+                path.unlink()
+        print(f"discarded an unfinished update: {archive.name} was never replaced")
+        return
+    if not staged(manifest_path).exists():
+        return
+    manifest = json.loads(staged(manifest_path).read_text())
+    problems = drift(archive, read_members(archive), manifest)
+    if problems:
+        raise RuntimeError(
+            f"{staged(manifest_path).name} does not describe {archive.name}, so the "
+            "interrupted update cannot be finished:\n  " + "\n  ".join(problems)
+        )
+    staged(manifest_path).replace(manifest_path)
+    print(f"finished an interrupted update: {manifest_path.name} now describes {archive.name}")
+
+
+def require_consistent(archive, members, manifest, manifest_path):
+    """Fail unless the manifest describes the archive exactly."""
+    problems = drift(archive, members, manifest)
+    if problems:
+        raise RuntimeError(
+            f"{manifest_path.name} does not describe {archive.name}:\n  "
+            + "\n  ".join(problems)
+            + "\nThe two files only ever change together, and this drift is not an update "
+            "this script left unfinished. Restore both from version control (git checkout "
+            f"-- {archive} {manifest_path}) and rerun the capture. The script does not re-pin "
+            "the manifest from the archive by itself: the manifest is what the corpus test "
+            "trusts, and an archive of unknown provenance must not become trusted that way."
+        )
 
 
 def rpc(url, method, params):
@@ -199,10 +291,9 @@ def capture_block(binary, url, number, block_hash, work, seed):
     return len(tx_hashes), data
 
 
-def check(archive):
+def check(archive, members):
     """Fail unless repacking the archive's members reproduces it byte for byte."""
     committed = archive.read_bytes()
-    members = read_members(archive)
     repacked = pack(members)
     if repacked != committed:
         print(
@@ -235,10 +326,17 @@ def main():
     args = parser.parse_args()
 
     manifest_path = Path(args.manifest).resolve()
-    manifest = json.loads(manifest_path.read_text())
-    archive = manifest_path.parent / manifest["archive"]
+    archive = manifest_path.parent / json.loads(manifest_path.read_text())["archive"]
+    try:
+        recover(archive, manifest_path)
+        manifest = json.loads(manifest_path.read_text())
+        members = read_members(archive)
+        require_consistent(archive, members, manifest, manifest_path)
+    except (RuntimeError, ValueError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
     if args.check:
-        return check(archive)
+        return check(archive, members)
 
     if not args.bin:
         parser.error("--bin is required to capture")
@@ -263,7 +361,6 @@ def main():
         parser.error("select blocks with --blocks and/or --pin")
 
     binary = Path(args.bin).resolve()
-    members = read_members(archive)
     changed = {}
     failed = []
     for number, block_hash in selected:
@@ -288,7 +385,6 @@ def main():
 
     if changed:
         packed = pack(members)
-        write_atomically(archive, packed)
         for number, (block_hash, tx_count, digest) in changed.items():
             entry = known.get(number)
             if entry is None:
@@ -304,7 +400,7 @@ def main():
             print(f"{number}: manifest entry:\n{json.dumps(entry, indent=2)}", flush=True)
         manifest["blocks"] = [known[number] for number in sorted(known)]
         manifest["sha256"] = sha256(packed)
-        write_atomically(manifest_path, (json.dumps(manifest, indent=2) + "\n").encode())
+        publish(archive, packed, manifest_path, json.dumps(manifest, indent=2) + "\n")
         print(f"rewrote {archive.name} ({len(packed)} bytes) and {manifest_path.name}")
     else:
         print(f"nothing changed; {archive.name} and {manifest_path.name} are untouched")
