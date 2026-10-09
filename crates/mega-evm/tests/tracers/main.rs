@@ -23,8 +23,10 @@
 //! EIP-3155 trace as its JSON lines. The comparison runs only at the spec's byte prices.
 //!
 //! Review a change with `cargo insta review`, which shows each snapshot and accepts or rejects it
-//! on its own. Where `cargo-insta` is not installed, `INSTA_UPDATE=always cargo test -p mega-evm
-//! --test tracers` rewrites them. A snapshot no test refers to is unreferenced, which
+//! on its own. Without `cargo-insta`, diff each `.snap.new` the failing run left against its
+//! `.snap` and accept it on its own, by moving it over the `.snap` without its `assertion_line:`
+//! header line. A tracer-shape change moves many snapshots at once; each is still reviewed and
+//! accepted on its own, never all at once. A snapshot no test refers to is unreferenced, which
 //! `cargo insta test --check --unreferenced=reject` rejects.
 
 mod gas;

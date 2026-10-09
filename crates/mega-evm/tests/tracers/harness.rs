@@ -4,9 +4,11 @@
 //! per scenario and view, under `tests/tracers/snapshots/`. A mismatch fails the test. Outside CI,
 //! insta also writes the new value beside the old one as a `.snap.new` file.
 //!
-//! Review a change with `cargo insta review`, which accepts or rejects each snapshot on its own.
-//! Where `cargo-insta` is not installed, `INSTA_UPDATE=always cargo test -p mega-evm --test
-//! tracers` rewrites them. The comparisons run only at the spec's byte prices.
+//! Review a change with `cargo insta review`, which shows each snapshot's diff and accepts or
+//! rejects it on its own. Without `cargo-insta`, diff each `.snap.new` the failing run left against
+//! its `.snap` and accept it on its own, by moving it over the `.snap` without its
+//! `assertion_line:` header line, which insta's own accept leaves out. The comparisons run only at
+//! the spec's byte prices.
 
 use std::{
     cell::RefCell,
