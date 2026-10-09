@@ -77,7 +77,7 @@ One probe transaction each, at a 5000000 gas limit. `gas used` is the receipt's 
 
 ## SALT scaling
 
-The same probes again, with the SALT bucket the state charge lands in at `m` times the minimum capacity. `m` multiplies the state ledger and nothing else: the regular column is the same on all three rows of a probe, and `gas used` grows by exactly the state column's growth, because these probes run below the execution cap and every state charge spills onto the regular budget.
+The same probes again, with the SALT bucket the state charge lands in at `m` times the minimum capacity. `m` multiplies the state ledger and nothing else: the regular and the history columns are the same on all three rows of a probe, and `gas used` grows by exactly the state column's growth, because these probes run below the execution cap and every state charge spills onto the regular budget.
 
 | Probe | m | gas used | regular | state | history |
 |---|---:|---:|---:|---:|---:|
