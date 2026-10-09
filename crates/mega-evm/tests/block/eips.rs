@@ -255,6 +255,59 @@ fn test_the_pre_block_calls_are_held_to_no_limit() {
     }
 }
 
+/// The pre-block calls count towards none of the block's counters or budgets. With the EIP-2935
+/// and EIP-4788 contracts' own code in state, both calls write their contracts' storage; after the
+/// pre-block phase every counter of the block is still zero, and a block whose four budgets are
+/// one unit each — execution gas, state gas, data size and KV updates, each reached by anything
+/// counted — still admits its first transaction.
+///
+/// Rule [S19.7]. Expected values `independent`: zeros, and the first transaction admitted.
+#[test]
+fn test_the_pre_block_calls_count_towards_no_counter_or_budget() {
+    let policy = BlockLimits::no_limits()
+        .with_block_execution_gas_limit(1)
+        .with_block_state_gas_limit(1)
+        .with_block_txs_data_limit(1)
+        .with_block_kv_update_limit(1);
+    let ctx =
+        MegaBlockExecutionCtx::new(PARENT_HASH, Some(PARENT_BEACON_ROOT), Bytes::new(), policy);
+    let mut db = common::database();
+    db.set_account_code(HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE.clone());
+    db.set_account_code(BEACON_ROOTS_ADDRESS, BEACON_ROOTS_CODE.clone());
+    let mut state = State::builder().with_database(db).build();
+    let mut executor = executor_with_env(&mut state, ctx, env_at_block(BLOCK_NUMBER));
+    let log = record_pre_block(&mut executor);
+    executor.apply_pre_execution_changes().expect("the block starts");
+
+    let states = pre_block_states(&log);
+    for (source, address) in [
+        (PreBlockStateSource::Eip2935, HISTORY_STORAGE_ADDRESS),
+        (PreBlockStateSource::Eip4788, BEACON_ROOTS_ADDRESS),
+    ] {
+        let (_, call) = states
+            .iter()
+            .find(|(observed, _)| *observed == source)
+            .unwrap_or_else(|| panic!("{source:?} reached the observer"));
+        let writes = call[&address].storage.values().filter(|slot| slot.is_changed()).count();
+        assert!(writes > 0, "{source:?} wrote its contract's storage");
+    }
+    let limiter = executor.limiter();
+    assert_eq!(
+        (limiter.gas.execution, limiter.gas.state, limiter.gas.history, limiter.gas.history_bytes),
+        (0, 0, 0, 0),
+        "no gas ledger of the block counts the calls",
+    );
+    assert_eq!(
+        (limiter.usage.data_size, limiter.usage.write_records),
+        (0, 0),
+        "nor its data size or writes"
+    );
+    assert_eq!(limiter.block_gas_used, 0, "nor the gas its receipts report");
+    executor
+        .execute_transaction(&common::user_tx(0, common::empty_call_gas()))
+        .expect("the first transaction is admitted under budgets of one");
+}
+
 /// A chain that has not reached Prague makes no block hashes call; the beacon root call is
 /// unaffected.
 #[test]
