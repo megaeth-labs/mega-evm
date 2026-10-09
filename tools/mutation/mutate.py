@@ -63,7 +63,6 @@ SPEC_ORDER: Tuple[str, ...] = (
     "REX4",
     "REX5",
     "REX6",
-    "REX7",
 )
 
 # Statement-position protocol / recording calls eligible for call_delete.

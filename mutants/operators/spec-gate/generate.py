@@ -49,25 +49,25 @@ ALL_SPECS = [
     "REX4",
     "REX5",
     "REX6",
-    "REX7",
 ]
 
-# The specs whose gates may be mutated. Currently everything through REX6 (see
-# CLAUDE.md for the current unstable spec).
+# The specs whose gates may be mutated: every frozen spec. There is currently
+# no unstable spec (CLAUDE.md marks it when one exists), so this is all of
+# ALL_SPECS.
 #
 # This is a *subset* of ALL_SPECS, not a replacement for it, and the distinction
 # matters in both directions:
 #
 #   * A gate on a frozen spec is the mutation SOURCE — its activation fork is
 #     fixed, so shifting it is a backward-compatibility bug a test must catch.
-#   * The spec shifted TO is only a destination. It may be the unstable spec:
-#     `is_enabled(REX6) ==> is_enabled(REX7)` is the classic "gated one fork too
-#     late" regression — it silently disables frozen REX6 behavior on a REX6
-#     chain — and is exactly what freezing REX6 promises to catch.
+#   * The spec shifted TO is only a destination. It may be an unstable spec:
+#     `is_enabled(FROZEN) ==> is_enabled(UNSTABLE)` is the classic "gated one
+#     fork too late" regression — it silently disables frozen behavior on a chain
+#     running the frozen spec — and is exactly what freezing promises to catch.
 #
-# Conflating the two lists drops every mutant whose destination is the unstable
+# Conflating the two lists drops every mutant whose destination is an unstable
 # spec, leaving the newest frozen spec's gates probed from one side only.
-FROZEN_SPECS = [s for s in ALL_SPECS if s != "REX7"]
+FROZEN_SPECS = list(ALL_SPECS)
 
 # Per-spec instruction-table modules wired in evm/instructions.rs, in spec order.
 #
@@ -90,7 +90,7 @@ def boundary_shift_rules() -> list[str]:
     """`is_enabled(MegaSpecId::X)` -> each adjacent spec, for every frozen X.
 
     The source is restricted to frozen specs; the destination is any neighbour in
-    the full progression, including the unstable spec.
+    the full progression, including an unstable spec.
     """
     out = []
     for i, spec in enumerate(ALL_SPECS):
