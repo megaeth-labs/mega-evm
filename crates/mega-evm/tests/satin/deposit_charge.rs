@@ -457,9 +457,10 @@ fn test_a_creation_one_gas_short_of_the_hash_runs_out_of_gas_above_the_cap() {
 
 /// Below the execution cap the code's state gas is paid out of regular gas right after the hash:
 /// one gas short of it the creation runs out of gas with the hash paid and no state gas charged,
-/// and one gas more charges the state gas and runs out on the history instead. The boundary is
-/// the init code, the hash and 1,530 per byte of code, by hand (`constants`: the cost per state
-/// byte in effect) [S5.13] [S5.14].
+/// and one gas more charges the state gas and runs out on the history instead — or, where a
+/// history byte costs nothing and no history charge follows, deposits the code with nothing
+/// left. The boundary is the init code, the hash and 1,530 per byte of code, by hand
+/// (`constants`: the cost per state byte in effect) [S5.13] [S5.14].
 #[test]
 fn test_a_creation_one_gas_short_of_its_state_gas_runs_out_of_gas_with_the_hash_paid() {
     // A deposit that adds no state gas has no state gas to be short of.
@@ -474,7 +475,13 @@ fn test_a_creation_one_gas_short_of_its_state_gas_runs_out_of_gas_with_the_hash_
         code_state_gas() - 1,
         false,
     );
-    assert_runs_out("the state gas paid exactly", Pool::BelowCap, state_paid, 0, true);
+    if history_is_free() {
+        // The state gas is the deposit's last charge: paying it exactly is the whole deposit.
+        assert_eq!(state_paid, deposits_at(Pool::BelowCap), "no history follows the state gas");
+        assert_deposits("the state gas paid exactly", Pool::BelowCap, state_paid);
+    } else {
+        assert_runs_out("the state gas paid exactly", Pool::BelowCap, state_paid, 0, true);
+    }
     if runs_at_measurement_prices() {
         return;
     }
