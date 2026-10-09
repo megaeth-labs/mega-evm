@@ -417,10 +417,30 @@ mod tests {
     /// Every entry of the Satin set carries a price, op-revm's size-limited wrappers of the BN254
     /// pairing and the BLS12-381 G1 MSM, G2 MSM and pairing included, so gas detention decides a
     /// call to any of them from its price.
+    ///
+    /// Whether an entry has a price is the entry's, not the input's: `required_gas` answers `Some`
+    /// exactly when the entry carries a price function, and that function answers a number for
+    /// any input. So the empty input decides the cell, and the inputs beyond it — every length a
+    /// precompile here reads in words or pairs, around those boundaries, of zeros and of `0xff`
+    /// bytes, up to past the BN254 pairing's size limit — check that each price function answers
+    /// them rather than failing on one.
+    ///
+    /// Rule [S12.47]. Expected values `independent`: a price is present, whatever the input.
     #[test]
     fn test_every_satin_entry_is_priced() {
+        let lengths =
+            [0, 1, 31, 32, 33, 64, 96, 128, 160, 192, 193, 256, 288, 384, 1_024, 57_600, 57_601];
         for precompile in satin_precompiles().inner().values() {
-            assert!(precompile.required_gas(&[]).is_some(), "{:?} is priced", precompile.id());
+            for len in lengths {
+                for byte in [0x00, 0xff] {
+                    let input = std::vec![byte; len];
+                    assert!(
+                        precompile.required_gas(&input).is_some(),
+                        "{:?} is priced at {len} bytes of {byte:#04x}",
+                        precompile.id()
+                    );
+                }
+            }
         }
     }
 
