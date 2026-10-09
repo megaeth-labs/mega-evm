@@ -110,7 +110,7 @@ pub struct AdditionalLimit {
 }
 
 /// The usage of the additional limits.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LimitUsage {
     /// The data size usage in bytes.
     pub data_size: u64,

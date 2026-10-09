@@ -6,6 +6,9 @@ description: Log every instruction with gas, stack, memory, and storage at each 
 
 The opcode tracer records every EVM instruction executed, along with gas costs, stack state, memory, and storage changes.
 This is the default tracer when you pass `--trace` without specifying `--tracer`.
+A KeylessDeploy call includes the sandbox constructor's opcodes in `structLogs`, nested under that call in execution order.
+The constructor's steps are introduced by a synthetic `CREATE` entry on the KeylessDeploy call, which the contract never executes: its `gas` is the call frame's remaining gas when the sandbox started, and its `gasCost` is the gas reserved for the sandbox.
+Before REX5 that reservation is the caller's gas limit override and can exceed `gas`, because the sandbox pays for its own gas there.
 
 ## Usage
 

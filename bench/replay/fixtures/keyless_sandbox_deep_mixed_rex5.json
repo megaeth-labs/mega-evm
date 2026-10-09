@@ -1,0 +1,87 @@
+{
+  "keyless_sandbox_deep_mixed_rex5": {
+    "_info": {
+      "comment": "keyless sandbox corner case (deep_mixed): three CREATE levels, two reverting CALLs into 0x..aaaaaa, a LOG1, and a storage write inside one sandbox. Hand-built from mega_evm::test_utils::keyless, post filled offline with `state-test --fill --bench-spec Rex5`.",
+      "init_code": "0x604461006e600039604460006000f060005560006000600060006000730000000000000000000000000000000000aaaaaa61c350f15063646565706020527fdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd6004603ca1600060605360016060f369600060005360016000f3600052600a60166000f05060006000600060006000730000000000000000000000000000000000aaaaaa61c350f150600060405360016040f3",
+      "inner_signer": "0x7ce5403d2297e4ca6b648a723130e546d3741b17",
+      "deploy_address": "0x9dacb7da59642293dcf9f6a037ad6dd8e45ad876"
+    },
+    "env": {
+      "currentChainID": "0x10e6",
+      "currentCoinbase": "0x4200000000000000000000000000000000000011",
+      "currentDifficulty": "0x0",
+      "currentGasLimit": "0x2540be400",
+      "currentNumber": "0x735b75",
+      "currentTimestamp": "0x69858148",
+      "currentBaseFee": "0xf4240",
+      "currentRandom": "0x5ed22b2a6937705d6c9677f844729acf17d94ad1381c5bd88f3aa7ea2f178af6",
+      "currentExcessBlobGas": "0x0"
+    },
+    "pre": {
+      "0x0000000000000000000000000000000000aaaaaa": {
+        "balance": "0x0",
+        "code": "0x60006000fd",
+        "nonce": "0x1",
+        "storage": {}
+      },
+      "0x7ce5403d2297e4ca6b648a723130e546d3741b17": {
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "nonce": "0x0",
+        "storage": {}
+      },
+      "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf": {
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "nonce": "0x0",
+        "storage": {}
+      }
+    },
+    "post": {
+      "Rex5": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x51f08758161a6ef32d454fa79717733e944b17533075fb6aca256ec30860986c",
+          "logs": "0x8eafa7e60b3e427ae50fb227787e035402075a089427ec0f14041ace04baa5d5",
+          "megaGasUsed": 446122,
+          "megaStatus": "success"
+        }
+      ]
+    },
+    "transaction": {
+      "type": 2,
+      "data": [
+        "0x846365d5000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000002540be4000000000000000000000000000000000000000000000000000000000000000107f901048085174876e800830f42408080b8b2604461006e600039604460006000f060005560006000600060006000730000000000000000000000000000000000aaaaaa61c350f15063646565706020527fdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd6004603ca1600060605360016060f369600060005360016000f3600052600a60166000f05060006000600060006000730000000000000000000000000000000000aaaaaa61c350f150600060405360016040f31ba02222222222222222222222222222222222222222222222222222222222222222a0222222222222222222222222222222222222222222222222222222222222222200000000000000000000000000000000000000000000000000"
+      ],
+      "gasLimit": [
+        "0x1e8480"
+      ],
+      "gasPrice": null,
+      "nonce": "0x0",
+      "secretKey": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "sender": "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf",
+      "to": "0x6342000000000000000000000000000000000003",
+      "value": [
+        "0x0"
+      ],
+      "maxFeePerGas": "0x1e8481",
+      "maxPriorityFeePerGas": "0x1",
+      "initcodes": null,
+      "accessLists": [
+        []
+      ],
+      "authorizationList": null,
+      "blobVersionedHashes": [],
+      "maxFeePerBlobGas": null
+    },
+    "out": "0x000000000000000000000000000000000000000000000000000000000003ab160000000000000000000000009dacb7da59642293dcf9f6a037ad6dd8e45ad87600000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000000",
+    "megaEnv": {
+      "bucketCapacities": [],
+      "oracleStorage": []
+    }
+  }
+}

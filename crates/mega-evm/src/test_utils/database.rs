@@ -138,8 +138,13 @@ pub struct ErrorInjectingDatabase {
     #[deref]
     #[deref_mut]
     inner: MemoryDatabase,
-    /// When set, `basic()` calls for this address return an error.
+    /// When set, `basic()` calls for this address return an error after
+    /// [`Self::fail_on_account_skip`] successful matching lookups.
     pub fail_on_account: Option<Address>,
+    /// Matching `basic()` calls to let succeed before injecting the error.
+    /// `0` fails on the first matching call.
+    pub fail_on_account_skip: usize,
+    fail_on_account_hits: usize,
     /// When set, `storage()` calls for this (address, key) return an error.
     pub fail_on_storage: Option<(Address, StorageKey)>,
     /// When set, `code_by_hash()` calls for this hash return an error. Lets a code load fail
@@ -151,7 +156,14 @@ pub struct ErrorInjectingDatabase {
 impl ErrorInjectingDatabase {
     /// Creates a new `ErrorInjectingDatabase` wrapping the given [`MemoryDatabase`].
     pub fn new(inner: MemoryDatabase) -> Self {
-        Self { inner, fail_on_account: None, fail_on_storage: None, fail_on_code_by_hash: None }
+        Self {
+            inner,
+            fail_on_account: None,
+            fail_on_account_skip: 0,
+            fail_on_account_hits: 0,
+            fail_on_storage: None,
+            fail_on_code_by_hash: None,
+        }
     }
 }
 
@@ -160,7 +172,10 @@ impl revm::Database for ErrorInjectingDatabase {
 
     fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
         if self.fail_on_account == Some(address) {
-            return Err(InjectedDbError(format!("injected basic() error for {address}")));
+            self.fail_on_account_hits = self.fail_on_account_hits.saturating_add(1);
+            if self.fail_on_account_hits > self.fail_on_account_skip {
+                return Err(InjectedDbError(format!("injected basic() error for {address}")));
+            }
         }
         self.inner.basic(address).map_err(|e| match e {})
     }

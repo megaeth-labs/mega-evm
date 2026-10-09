@@ -1,6 +1,7 @@
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use std::{boxed::Box, collections::BTreeMap, vec::Vec};
+use core::cell::RefCell;
+use std::{boxed::Box, collections::BTreeMap, rc::Rc, vec::Vec};
 
 use alloy_consensus::{Eip658Value, Header, Transaction, TxReceipt};
 use alloy_eips::{Encodable2718, Typed2718};
@@ -150,6 +151,28 @@ where
     /// Gets a reference to the inspector in the `MegaEVM`.
     pub fn inspector(&self) -> &INSP {
         self.evm.inspector()
+    }
+
+    /// Attaches a hook for nested sandbox execution on every spec.
+    ///
+    /// Forwards to [`crate::MegaEvm::set_keyless_sandbox_hook`]. The hook must
+    /// implement [`crate::sandbox::SandboxInspector`] for both this executor's
+    /// `ExtEnvs` and [`crate::EmptyExternalEnv`]. Use
+    /// [`Self::clear_keyless_sandbox_hook`] to detach.
+    pub fn set_keyless_sandbox_hook<I>(&mut self, hook: Rc<RefCell<I>>)
+    where
+        I: crate::sandbox::SandboxInspector<ExtEnvs>
+            + crate::sandbox::SandboxInspector<crate::EmptyExternalEnv>
+            + 'static,
+    {
+        self.evm.set_keyless_sandbox_hook(hook);
+    }
+
+    /// Detaches any sandbox hook from both env-type slots.
+    ///
+    /// Forwards to [`crate::MegaEvm::clear_keyless_sandbox_hook`].
+    pub fn clear_keyless_sandbox_hook(&mut self) {
+        self.evm.clear_keyless_sandbox_hook();
     }
 }
 
