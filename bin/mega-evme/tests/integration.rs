@@ -106,3 +106,11 @@ fn test_execution_result_is_logged_under_the_command_target() {
         );
     }
 }
+
+/// The shared argument types stay reachable through `run`, the path library
+/// users imported them from before they moved to `common`.
+#[test]
+fn test_run_reexports_the_shared_argument_types() {
+    let _: mega_evme::run::TracerType = mega_evme::common::TracerType::Opcode;
+    let _: Option<mega_evme::run::TraceArgs> = None::<mega_evme::common::TraceArgs>;
+}
