@@ -390,6 +390,8 @@ The `post` expectation is computed by the `state-test` runner itself — the exa
 **Fidelity gate.** Before building the fixture, the dump fetches the transaction's on-chain receipt and requires the local replay to reproduce the receipt's `gasUsed`, success status, and logs root exactly.
 Logs are compared explicitly rather than inferred from gas: `LOG` gas depends on topic count and data length, never content, so two executions can burn identical gas yet emit different log payloads.
 A mismatch aborts the dump (no file is written) with a clear error — this catches a wrong spec or hardfork config, which self-validation alone cannot, because the fixture is validated under the same spec it was dumped with.
+A refused dump still prints the replay result first.
+With `--verify-receipt` as well, a mismatch is reported as the verification diff and exits `2`, and the refused fixture is reported on stderr beside it.
 It then additionally cross-checks the isolated execution against the full replay (gas, status — including the exact halt reason for halted transactions — output, and logs root), so any gas-, output-, or log-visible divergence — including across the L1 data fee, which the isolated run zeroes but the full replay charges — aborts the dump.
 One channel stays open by construction: the isolated run's sender balance is shifted by the zeroed L1 fee, so a contract that stores a balance-derived value bakes that shifted value into `post` (and the sender's final balance in `post` likewise differs from the chain).
 The fixture still self-validates and reproduces gas exactly; only such balance-derived state values differ.

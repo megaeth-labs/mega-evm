@@ -1220,3 +1220,41 @@ fn test_replay_receipt_derives_the_effective_gas_price() {
     let _ = std::fs::remove_file(&stripped);
     let _ = std::fs::remove_file(&list);
 }
+
+/// With both `--verify-receipt` and `--dump-fixture`, a replay that diverges from
+/// the chain still prints its result and verdict: the fixture is refused because
+/// of the same divergence, the run exits with the mismatch code, and no file is
+/// written.
+#[test]
+fn test_verify_and_dump_report_the_mismatch_when_the_fixture_is_refused() {
+    let path = DoctoredEnvelope::with_receipt(cache(), "verify_dump_gas", |receipt| {
+        receipt["gasUsed"] = "0x1".into()
+    });
+    let out = std::env::temp_dir()
+        .join(format!("mega_evme_verify_dump_refused_{}.json", std::process::id()));
+    let _ = std::fs::remove_file(&out);
+
+    let run = replay(
+        &path,
+        &["--verify-receipt", "--dump-fixture", out.to_str().expect("utf-8"), "--json", TX],
+    );
+    let _ = std::fs::remove_file(&path);
+    let written = out.exists();
+    let _ = std::fs::remove_file(&out);
+
+    assert_eq!(run.code(), 2, "the mismatch decides the exit code.\nstderr: {}", run.stderr);
+    assert_eq!(
+        run.json()["verification"],
+        serde_json::json!({
+            "match": false,
+            "diff": { "gas_used": { "onchain": 1, "replay": GAS_USED } },
+        })
+    );
+    assert_eq!(run.error_object()["error"]["kind"].as_str(), Some("verification-mismatch"));
+    assert!(!written, "a refused fixture must not be written");
+    assert!(
+        run.stderr.contains("fixture"),
+        "the refused fixture must be reported on stderr, got:\n{}",
+        run.stderr
+    );
+}
