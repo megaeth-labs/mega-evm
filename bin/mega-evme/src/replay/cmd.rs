@@ -1219,6 +1219,9 @@ impl Cmd {
         P: Provider<op_alloy_network::Optimism> + Clone + std::fmt::Debug,
     {
         let BlockSetup { hardforks, external_envs, evm_env, block_ctx, executed_spec: _ } = setup;
+        // The price the target paid follows from its signed fee fields and the
+        // base fee of the block it runs in, whatever gas price the endpoint reports.
+        let base_fee = evm_env.block_env.basefee;
 
         info!(fork_block = ctx.parent_block.header.number(), "Forking state from parent block",);
         let mut database = EvmeState::new_forked(
@@ -1314,7 +1317,7 @@ impl Cmd {
             from,
             to,
             contract_address,
-            ctx.target_tx.inner.effective_gas_price.unwrap_or(0),
+            ctx.target_tx.inner.inner.effective_gas_price(Some(base_fee)),
             gas_used,
             Some(ctx.target_tx.inner.inner.tx_hash()),
             Some(ctx.block.hash()),

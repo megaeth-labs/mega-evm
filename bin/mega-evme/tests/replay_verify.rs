@@ -1189,3 +1189,34 @@ fn test_replay_receipt_inner_log_metadata_matches_outer_receipt() {
         assert!(log["logIndex"].is_string(), "batch log {i} must carry logIndex: {log}");
     }
 }
+
+/// The replayed receipt's effective gas price follows from the signed fee caps
+/// and the block's base fee, so an endpoint that leaves out the optional
+/// `gasPrice` metadata yields the same price, in single and batch mode alike.
+#[test]
+fn test_replay_receipt_derives_the_effective_gas_price() {
+    // Base fee 0xf4240 + tip 0x186a0 stays under the 0x200b20 fee cap.
+    let expected = serde_json::json!("0x10c8e0");
+    let stripped = DoctoredEnvelope::load(cache())
+        .set_transaction_field(TX, "gasPrice", serde_json::Value::Null)
+        .write_to_temp("no_gas_price");
+    let list = tx_file("no_gas_price");
+
+    for source in [cache(), stripped.clone()] {
+        let single = replay(&source, &["--json", TX]);
+        assert!(single.success, "single replay must succeed.\nstderr: {}", single.stderr);
+        assert_eq!(single.json()["receipt"]["effectiveGasPrice"], expected, "single, {source:?}");
+
+        let batch = replay(&source, &["--tx-file", list.to_str().expect("utf-8"), "--json"]);
+        assert!(batch.success, "batch replay must succeed.\nstderr: {}", batch.stderr);
+        let lines = batch.ndjson();
+        assert_eq!(lines.len(), 1, "one batch line:\n{}", batch.stdout);
+        assert_eq!(
+            lines[0]["receipt"]["effectiveGasPrice"], expected,
+            "batch, {source:?}: {}",
+            lines[0]
+        );
+    }
+    let _ = std::fs::remove_file(&stripped);
+    let _ = std::fs::remove_file(&list);
+}

@@ -393,6 +393,11 @@ where
         targets,
     } = run;
 
+    // The receipts report the price each transaction paid, which its signed fee
+    // fields and this block's base fee decide; read before the environment moves
+    // into the executor.
+    let base_fee = evm_env.block_env.basefee;
+
     info!(block = identity.number, fork_block, "Forking state for block");
     let database = EvmeState::new_forked(
         provider.clone(),
@@ -538,7 +543,7 @@ where
                 pre_execution_nonce,
                 from: tx.inner.inner.signer(),
                 to: tx.inner.inner.to(),
-                effective_gas_price: tx.inner.effective_gas_price.unwrap_or(0),
+                effective_gas_price: tx.inner.inner.effective_gas_price(Some(base_fee)),
                 draft,
             });
             Ok(())
