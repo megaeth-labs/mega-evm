@@ -370,6 +370,9 @@ fn test_a_genesis_account_with_storage_and_no_code_at_a_predeploy_is_refused() {
     }
 }
 
+/// A named genesis account: its address, code, nonce and storage values.
+type GenesisCase<'a> = (&'a str, Address, &'a [u8], u64, &'a [U256]);
+
 /// [S18] Every other account of a genesis allocation passes the check: a predeploy allocated with
 /// its own code and storage, which the deploy only reads; a balance-only account, the bootstrap
 /// path; one whose storage holds zeros alone, which is no storage; one with a used nonce or other
@@ -380,7 +383,7 @@ fn test_a_genesis_account_with_storage_and_no_code_at_a_predeploy_is_refused() {
 #[test]
 fn test_other_genesis_accounts_pass_the_check() {
     let held = [U256::from(7)];
-    let cases: [(&str, Address, &[u8], u64, &[U256]); 6] = [
+    let cases: [GenesisCase<'_>; 6] = [
         ("its own code and storage", ACCESS_CONTROL_ADDRESS, &ACCESS_CONTROL_CODE, 1, &held),
         (
             "its own code and storage at nonce 0",
