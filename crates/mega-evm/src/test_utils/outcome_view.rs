@@ -1,18 +1,17 @@
-//! A serializable view of a transaction's outcome, for snapshot tests.
+//! A serializable view of a transaction's outcome, for tests that compare parts of it.
 //!
 //! [`MegaTransactionOutcome`] holds revm's result and state beside what `MegaETH` counts, and not
-//! every part of it serializes. [`OutcomeView`] copies what a reviewer of a snapshot needs to
-//! see — the result, every gas figure, the usage counted, the limit stop, the oracle reads and the
-//! touched accounts — into plain fields that serialize the same way on every run: maps are
-//! [`BTreeMap`]s and lists are in a fixed order. A touched account the transaction left as it
-//! found it is one word, so the accounts every transaction touches take a line each
-//! ([`AccountEntry`]).
+//! every part of it serializes. [`OutcomeView`] copies what a test compares — the result, every
+//! gas figure, the usage counted, the limit stop, the oracle reads and the touched accounts — into
+//! plain fields that serialize the same way on every run: maps are [`BTreeMap`]s and lists are in
+//! a fixed order, so an account's changed slots, for one, compare as an ascending list. A touched
+//! account the transaction left as it found it is one word ([`AccountEntry`]).
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
 use std::{collections::BTreeMap, format, string::String, vec::Vec};
 
-use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_sol_types::{GenericContractError, SolInterface};
 use revm::{
     context::result::{ExecutionResult, ResultGas},
@@ -24,7 +23,7 @@ use crate::{
     decode_mega_limit_exceeded, LimitCheck, LimitUsage, MegaGasUsage, MegaTransactionOutcome,
 };
 
-/// What one transaction produced, as a snapshot shows it.
+/// What one transaction produced, in plain fields.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct OutcomeView {
     /// The result: its kind, reason, output and logs.
@@ -71,102 +70,6 @@ impl OutcomeView {
 impl From<&MegaTransactionOutcome> for OutcomeView {
     fn from(outcome: &MegaTransactionOutcome) -> Self {
         Self::new(outcome)
-    }
-}
-
-impl OutcomeView {
-    /// The outcome in one line ([`OutcomeSummary`]).
-    pub fn summary(&self) -> OutcomeSummary {
-        OutcomeSummary {
-            kind: self.result.kind,
-            reason: self.result.reason.clone(),
-            limit_stop: self.limit_stop.clone(),
-            gas: self.gas,
-            usage: self.usage,
-            logs: self.result.logs.len(),
-            accounts: self.accounts.len(),
-            view: self.digest(),
-        }
-    }
-
-    /// The keccak256 of the view's canonical JSON: `serde_json`'s compact form, which writes
-    /// every struct's fields in their declaration order and every map's keys ascending (the
-    /// view's maps are [`BTreeMap`]s), so the same view hashes the same on every run.
-    pub fn digest(&self) -> B256 {
-        keccak256(serde_json::to_vec(self).expect("a view serializes"))
-    }
-}
-
-/// A transaction's outcome in one line, for a test that snapshots more outcomes than a reviewer
-/// can read whole: how it ended — its kind, its reason and the limit that stopped it — every
-/// figure of [`MegaGasUsage`], the counts of [`LimitUsage`], how many logs and touched accounts
-/// it has, and the digest of the full view ([`OutcomeView::digest`]).
-///
-/// The line shows the figures a reviewer reads; the digest stands for everything else the view
-/// holds — the result's output and created address, the logs' contents, the gas figures of revm's
-/// result, the oracle reads and the accounts themselves — so a change to any of them still changes
-/// the line, and the full views, dumped at two trees, show what changed.
-///
-/// It serializes as that line, so a snapshot of many cases holds one line a case, and a change to
-/// a case shows as a change to its line.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OutcomeSummary {
-    /// How the transaction ended.
-    pub kind: ResultKind,
-    /// Why, as [`ResultView::reason`] has it.
-    pub reason: Option<String>,
-    /// The transaction-level limit that stopped the transaction, if one did.
-    pub limit_stop: Option<LimitStopView>,
-    /// The gas by ledger.
-    pub gas: LedgerView,
-    /// The data-size bytes and write records the transaction kept.
-    pub usage: UsageView,
-    /// How many logs the result carries.
-    pub logs: usize,
-    /// How many accounts the transaction touched.
-    pub accounts: usize,
-    /// The full view's digest ([`OutcomeView::digest`]).
-    pub view: B256,
-}
-
-impl core::fmt::Display for OutcomeSummary {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let Self { kind, reason, limit_stop, gas, usage, logs, accounts, view } = self;
-        let kind = match kind {
-            ResultKind::Success => "success",
-            ResultKind::Revert => "revert",
-            ResultKind::Halt => "halt",
-        };
-        write!(f, "{kind} {}; stop ", reason.as_deref().unwrap_or("-"))?;
-        match limit_stop {
-            Some(LimitStopView { kind, limit, used }) => {
-                write!(f, "{kind} limit {limit} used {used}")?;
-            }
-            None => f.write_str("-")?,
-        }
-        let LedgerView {
-            regular,
-            state,
-            history,
-            history_bytes,
-            reservoir_remaining,
-            floor,
-            gas_used,
-        } = gas;
-        let UsageView { data_size, write_records } = usage;
-        write!(
-            f,
-            "; regular {regular} state {state} history {history} history_bytes {history_bytes} \
-             reservoir_remaining {reservoir_remaining} floor {floor} gas_used {gas_used}; \
-             data_size {data_size} write_records {write_records}; logs {logs} accounts {accounts}; \
-             view {view}"
-        )
-    }
-}
-
-impl Serialize for OutcomeSummary {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_str(self)
     }
 }
 
@@ -870,160 +773,6 @@ mod tests {
             if let Some(twin) = seen.insert(json, name) {
                 panic!("{name} serializes like {twin}");
             }
-        }
-    }
-
-    fn summary_json(outcome: &MegaTransactionOutcome) -> String {
-        serde_json::to_string(&OutcomeView::new(outcome).summary()).unwrap()
-    }
-
-    /// The summary's line without the digest: the figures it shows a reader.
-    fn readable(outcome: &MegaTransactionOutcome) -> String {
-        OutcomeSummary { view: B256::ZERO, ..OutcomeView::new(outcome).summary() }.to_string()
-    }
-
-    /// The summary is one line of the view's figures, the same every time it is built and
-    /// whatever order the state's map hands its accounts out in.
-    #[test]
-    fn test_the_summary_is_one_deterministic_line() {
-        let forward = outcome();
-        let mut reversed_accounts = accounts();
-        reversed_accounts.reverse();
-        let reversed = outcome_with(reversed_accounts);
-        assert_eq!(summary_json(&forward), summary_json(&reversed));
-        assert_eq!(summary_json(&forward), summary_json(&forward));
-
-        let view = OutcomeView::new(&forward);
-        assert_eq!(
-            view.digest(),
-            keccak256(serde_json::to_string(&view).unwrap()),
-            "the digest is of the view's compact JSON"
-        );
-        let line = view.summary().to_string();
-        assert_eq!(
-            line,
-            format!(
-                "success Stop; stop DataSize limit 200 used 300; regular 50000 state 30000 \
-                 history 10000 history_bytes 125 reservoir_remaining 5000 floor 21000 \
-                 gas_used 86000; data_size 300 write_records 3; logs 1 accounts 18; view {}",
-                view.digest()
-            )
-        );
-        assert!(line.ends_with(&format!("; view 0x{:x}", view.digest())), "the digest in full");
-        assert_eq!(summary_json(&forward), format!("\"{line}\""), "it serializes as the line");
-
-        let mut stopless = outcome();
-        stopless.limit_exceeded = None;
-        stopless.result = halt(HaltReason::OutOfGas(OutOfGasError::Basic));
-        assert!(
-            OutcomeView::new(&stopless)
-                .summary()
-                .to_string()
-                .starts_with("halt Base(OutOfGas(Basic)); stop -; regular 50000"),
-            "no stop is a dash"
-        );
-    }
-
-    /// Every field the view copies moves the summary, through its digest where the line does not
-    /// show it: no change of [`view_changes`] summarizes like the outcome or like another.
-    #[test]
-    fn test_every_field_of_the_view_moves_the_summary() {
-        let mut seen = BTreeMap::from([(summary_json(&outcome()), "the outcome")]);
-        for (name, change) in view_changes() {
-            let mut changed = outcome();
-            change(&mut changed);
-            if let Some(twin) = seen.insert(summary_json(&changed), name) {
-                panic!("{name} summarizes like {twin}");
-            }
-        }
-    }
-
-    /// Every figure the line shows moves it without the digest: each variant changes one of them,
-    /// and no two of them, nor any of them and the outcome, read alike. What it leaves to the
-    /// full view — the logs' contents, the accounts' state, the oracle reads — moves the digest
-    /// alone.
-    #[test]
-    fn test_every_figure_the_line_shows_moves_it() {
-        let changes: &[(&str, Change)] = &[
-            ("result: revert", |o| o.result = revert(Bytes::from_static(&[0x01]))),
-            ("result: halt", |o| o.result = halt(HaltReason::OutOfGas(OutOfGasError::Basic))),
-            ("result: halt reason", |o| o.result = halt(HaltReason::CallTooDeep)),
-            ("result: success reason", |o| {
-                if let ExecutionResult::Success { reason, .. } = &mut o.result {
-                    *reason = SuccessReason::Return;
-                }
-            }),
-            ("logs: another", |o| logs_mut(o).push(log())),
-            ("logs: none", |o| logs_mut(o).clear()),
-            ("gas: regular", |o| o.gas.regular += 1),
-            ("gas: state", |o| o.gas.state += 1),
-            ("gas: history", |o| o.gas.history += 1),
-            ("gas: history bytes", |o| o.gas.history_bytes += 1),
-            ("gas: reservoir remaining", |o| o.gas.reservoir_remaining += 1),
-            ("gas: floor", |o| o.gas.floor += 1),
-            ("gas: gas used", |o| o.gas.gas_used += 1),
-            ("usage: data size", |o| o.usage.data_size += 1),
-            ("usage: write records", |o| o.usage.write_records += 1),
-            ("limit stop: none", |o| o.limit_exceeded = None),
-            ("limit stop: kind", |o| {
-                if let Some(LimitCheck::ExceedsLimit { kind, .. }) = &mut o.limit_exceeded {
-                    *kind = LimitKind::KVUpdate;
-                }
-            }),
-            ("limit stop: limit", |o| {
-                if let Some(LimitCheck::ExceedsLimit { limit, .. }) = &mut o.limit_exceeded {
-                    *limit += 1;
-                }
-            }),
-            ("limit stop: used", |o| {
-                if let Some(LimitCheck::ExceedsLimit { used, .. }) = &mut o.limit_exceeded {
-                    *used += 1;
-                }
-            }),
-            ("accounts: one more touched", |o| account_mut(o, LOADED).mark_touch()),
-            ("accounts: one fewer touched", |o| account_mut(o, SENDER).unmark_touch()),
-        ];
-        let mut seen = BTreeMap::from([(readable(&outcome()), "the outcome")]);
-        for (name, change) in changes {
-            let mut changed = outcome();
-            change(&mut changed);
-            if let Some(twin) = seen.insert(readable(&changed), name) {
-                panic!("{name} reads like {twin}");
-            }
-        }
-
-        let left_to_the_view: &[(&str, Change)] = &[
-            ("log: data", |o| {
-                let log = &mut logs_mut(o)[0];
-                log.data =
-                    LogData::new_unchecked(log.topics().to_vec(), Bytes::from_static(&[0xab]));
-            }),
-            ("log: address", |o| logs_mut(o)[0].address = SENDER),
-            ("result: output", |o| {
-                if let ExecutionResult::Success { output, .. } = &mut o.result {
-                    *output = Output::Call(Bytes::from_static(&[0x02]));
-                }
-            }),
-            ("result gas: refunded", |o| {
-                let gas = result_gas_mut(o);
-                gas.set_refunded(gas.inner_refunded() + 1);
-            }),
-            ("account: balance", |o| account_mut(o, SENDER).info.balance += U256::from(1)),
-            ("slot: present", |o| {
-                account_mut(o, CONTRACT).storage.get_mut(&U256::from(2)).unwrap().present_value =
-                    U256::from(8);
-            }),
-            ("oracle read: answer", |o| o.oracle_reads[0].answer = None),
-        ];
-        for (name, change) in left_to_the_view {
-            let mut changed = outcome();
-            change(&mut changed);
-            assert_eq!(readable(&changed), readable(&outcome()), "{name}: the line reads the same");
-            assert_ne!(
-                summary_json(&changed),
-                summary_json(&outcome()),
-                "{name}: the digest moved"
-            );
         }
     }
 }

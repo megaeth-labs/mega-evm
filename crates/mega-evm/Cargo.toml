@@ -36,7 +36,6 @@ auto_impl.workspace = true
 delegate.workspace = true
 derive_more = { workspace = true, optional = true, features = ["debug", "deref", "deref_mut", "display", "error"] }
 serde = { workspace = true, features = ["alloc", "derive"] }
-serde_json = { workspace = true, optional = true, features = ["alloc"] }
 
 [dev-dependencies]
 # alloy
@@ -64,8 +63,7 @@ std = [
     "op-revm/std",
     "revm/std",
 ]
-# `serde_json` hashes an outcome view's canonical JSON (`test_utils::OutcomeView::digest`).
-test-utils = ["dep:derive_more", "dep:serde_json"]
+test-utils = ["dep:derive_more"]
 # Measurement-only: lets a process fix other Satin byte prices than the constants, through
 # `install_satin_prices` or the `MEGA_SATIN_CPSB` / `MEGA_SATIN_CPHB` environment variables.
 # Off by default, so a normal build prices with the constants and has no way to do otherwise.
