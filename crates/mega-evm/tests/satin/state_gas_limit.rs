@@ -1480,7 +1480,7 @@ fn test_fresh_slots_fit_a_limit_of_their_state_gas_and_one_more_stops() {
 /// pays everything before its state charge and leaves it one gas short of that charge: a fresh
 /// slot's `SSTORE`, a `SELFDESTRUCT` that moves a balance to an account that does not exist, and a
 /// value transaction to an account that does not exist, whose start EIP-2780 charges for the new
-/// account. Under a state-gas limit of nothing and of one gas short of the charge, it halts out of
+/// account. Under a state-gas limit of one gas and of one gas short of the charge, it halts out of
 /// gas, consumes its whole gas limit, keeps no state gas, and reports no stop: not a stop that
 /// would give the unspent gas back. One gas more pays the charge, and the same limit then stops the
 /// transaction there, with the charge as the state gas it reports, which pins the gas limit as one
@@ -1553,7 +1553,7 @@ fn test_a_state_charge_the_frame_cannot_pay_runs_out_of_gas_whatever_the_limit()
     ];
     for (name, db, tx, before, charge) in cases {
         let short = before + charge - 1;
-        for limit in [0, charge - 1] {
+        for limit in [1, charge - 1] {
             let case = format!("{name}, limit {limit}");
             let ran_out = run_under(db.clone(), tx(short), limit);
             assert!(
