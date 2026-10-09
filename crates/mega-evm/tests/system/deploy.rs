@@ -246,8 +246,9 @@ fn test_matching_megaeth_code_at_nonce_zero_is_accepted() {
 }
 
 /// An account that exists with empty code and nonce 0 (an EOA that received value) is a fresh
-/// deploy: the balance is kept, the slots are seeded, and marking the account created clears
-/// any storage it had. That is the accepted bootstrap path.
+/// deploy: the balance is kept and the slots are seeded, which is the accepted bootstrap path.
+/// The account is marked created, which writes nothing to a slot it held and clears none: the
+/// returned state carries the seeds alone.
 #[test]
 fn test_an_empty_account_at_the_address_is_a_fresh_deploy() {
     let mut db = MemoryDatabase::default();
@@ -259,7 +260,7 @@ fn test_an_empty_account_at_the_address_is_a_fresh_deploy() {
         .unwrap();
     let state = transact_deploy(&mut db, &spec).expect("empty code is a fresh deploy");
     let account = state.get(&SEQUENCER_REGISTRY_ADDRESS).unwrap();
-    assert!(account.is_created(), "the bootstrap path marks created, which clears storage");
+    assert!(account.is_created(), "the bootstrap path marks the account created");
     assert_eq!(account.info.balance, U256::from(1_000));
     assert_eq!(account.info.nonce, 1);
     assert_eq!(account.info.code_hash, SEQUENCER_REGISTRY_CODE_HASH);

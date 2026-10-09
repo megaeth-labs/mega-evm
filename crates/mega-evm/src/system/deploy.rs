@@ -186,9 +186,12 @@ impl<DbError: core::error::Error + 'static> core::error::Error
 ///   otherwise stay invalid forever. The six `MegaETH` contracts leave that flag unset; they
 ///   are not EIP-7997, and matching code is accepted regardless of nonce.
 /// - Absent, or present with empty code and nonce 0: the created account with its bytecode, nonce
-///   and every seeded slot, all marked. An existing balance is kept. Marking the account created
-///   clears any storage it had; that is the accepted bootstrap path (prefunding with balance
-///   alone). An empty-code account with a nonzero nonce is
+///   and every seeded slot, all marked. An existing balance is kept; prefunding with balance alone
+///   is the accepted bootstrap path. Storage the account held is neither written nor cleared: the
+///   returned state carries no change to those slots, so the state a block commits still holds
+///   them, while the created mark has the state layer answer them as zero for the rest of the
+///   block, dropping a value its cache held. Only a genesis allocation can put storage on such an
+///   account. An empty-code account with a nonzero nonce is
 ///   [`SystemContractDeployError::UsedEmptyAccount`]: a used account at a system address is not
 ///   overwritten silently.
 /// - Present with different non-empty code: [`SystemContractDeployError::ForeignCode`].
