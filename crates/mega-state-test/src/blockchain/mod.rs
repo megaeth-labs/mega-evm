@@ -678,7 +678,7 @@ fn import_test(
     let genesis =
         decode_block(&test.genesis_rlp).map_err(|error| fixture(format!("genesis: {error}")))?;
     let genesis_id = (genesis.header.number, genesis.header.hash_slow());
-    let mut chain = Chain::new(&test.pre, genesis_id, chain_id, fraction)
+    let mut chain = Chain::new(&test.pre, genesis_id, genesis.header.timestamp, chain_id, fraction)
         .map_err(|error| fixture(format!("pre-state: {error}")))?;
     // The pre-state is the genesis block's: nothing has run yet, so nothing Satin adds is there.
     let root = chain.state_root();
