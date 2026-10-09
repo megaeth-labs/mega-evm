@@ -287,17 +287,30 @@ fn test_a_failed_deployment_gives_the_created_account_back_at_its_price() {
 /// counts: the creation's nonce bump makes no record of its own, only the created account does,
 /// and the signer, an account already, is charged nothing for it. The transaction's own bump took
 /// it to nonce 1, and the creation's bump from there is taken back.
+///
+/// That bump's record would go back with it at the end, so the ledgers of a deployment that runs
+/// cannot show whether step 14 charged it. What can is the forward: below the execution cap the
+/// call's charges come out of its regular gas, and a forward they leave short of the signed gas
+/// limit is refused `GasLimitTooLow` with what they left. Sent by its signer, the call is left the
+/// `CREATE` opcode's regular gas, the created account and one record short of what it had after
+/// its overhead; sent by a relayer for a signer holding a wei, one record more.
+///
+/// Rule [S15.22]. Expected values `constants`: the charges are the schedule's `create`, initcode
+/// and created-account entries and one record's history; what the call had after its overhead is
+/// set by the test, on an intrinsic measured from a plain call carrying the same calldata.
 #[test]
 fn test_a_signer_that_sends_its_own_deployment_makes_no_record_of_its_own() {
-    let deployment = Deployment::new(deploying(&runtime(RUNTIME_LEN)));
-    for gas_limit in GAS_LIMITS {
+    let init_code = deploying(&runtime(RUNTIME_LEN));
+    let deployment = Deployment::new(init_code.clone());
+    let from_signer = |gas_limit| {
         let mut tx =
             call_tx(KEYLESS_DEPLOY_ADDRESS, deployment.call_data(LARGE_OVERRIDE), U256::ZERO);
         tx.0.base.gas_limit = gas_limit;
         tx.0.base.caller = deployment.signer;
-        let outcome = MegaEvm::new(context(system_db()))
-            .execute_transaction(tx)
-            .expect("a valid transaction");
+        MegaEvm::new(context(system_db())).execute_transaction(tx).expect("a valid transaction")
+    };
+    for gas_limit in GAS_LIMITS {
+        let outcome = from_signer(gas_limit);
         assert_eq!(returned(&outcome).deployedAddress, deployment.address, "at {gas_limit}");
         // The transaction bumped its sender from 0 to 1; the creation's bump is taken back.
         assert_eq!(nonce(&outcome, deployment.signer), 1);
@@ -305,4 +318,33 @@ fn test_a_signer_that_sends_its_own_deployment_makes_no_record_of_its_own() {
         let deposit_state = satin_gas_params().code_deposit_state_gas(RUNTIME_LEN);
         assert_eq!(outcome.gas.state, entry(GasId::create_state_gas()) + deposit_state);
     }
+
+    // What each call has after its overhead: the creation's charges with one record, and one gas
+    // short of the signed gas limit beside them, so the forward is refused whoever sends the call
+    // and at any byte price.
+    let data = deployment.call_data(LARGE_OVERRIDE);
+    let created = create_regular(init_code.len()) + entry(GasId::create_state_gas());
+    let left = SIGNED_GAS_LIMIT - 1 + created + record();
+    let gas_limit = reference(data.clone(), GAS_LIMITS[0]).result.gas().total_gas_spent() +
+        KEYLESS_DEPLOY_OVERHEAD_GAS +
+        left;
+    let provided = |outcome: &MegaTransactionOutcome| match refusal(outcome) {
+        KeylessDeployError::GasLimitTooLow { tx_gas_limit, provided_gas_limit } => {
+            assert_eq!(tx_gas_limit, SIGNED_GAS_LIMIT);
+            provided_gas_limit
+        }
+        other => panic!("refused {other:?}, not for the forward"),
+    };
+    let by_relayer =
+        run_with(db_for(&deployment, U256::ONE), data, gas_limit, EvmTxRuntimeLimits::no_limits());
+    assert_eq!(
+        provided(&from_signer(gas_limit)),
+        left - created - record(),
+        "sent by its signer: the created account's record alone",
+    );
+    assert_eq!(
+        provided(&by_relayer),
+        left - created - 2 * record(),
+        "sent by a relayer: the signer's nonce record too",
+    );
 }

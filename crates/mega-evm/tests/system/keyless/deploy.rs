@@ -21,7 +21,8 @@ use mega_evm::{
 use revm::{
     bytecode::opcode::{
         CALL, CREATE, DELEGATECALL, GAS, GASPRICE, INVALID, JUMP, JUMPDEST, LOG0, LOG1, MLOAD,
-        ORIGIN, POP, PUSH0, REVERT, SELFDESTRUCT, SSTORE, STATICCALL,
+        ORIGIN, POP, PUSH0, RETURNDATACOPY, RETURNDATASIZE, REVERT, SELFDESTRUCT, SHR, SSTORE,
+        STATICCALL,
     },
     context::BlockEnv,
     primitives::KECCAK_EMPTY,
@@ -575,12 +576,24 @@ fn test_keyless_deploy_not_intercepted_for_inner_calls() {
 }
 
 /// A `keylessDeploy` call made inside a keyless deployment is a contract's call like any other:
-/// not dispatched. The outer deployment deploys; the inner one does not.
+/// not dispatched. The contract's bytecode runs and reverts with `NotIntercepted()`, which the
+/// outer constructor stores, and nothing of the inner deployment happens: its address holds no
+/// code and its signer's nonce is unspent. The outer deployment deploys.
+///
+/// A call answered without the bytecode — refused by an interceptor, or run as a deployment that
+/// fails — could fail the same way, but not with the four bytes of `NotIntercepted()`.
+///
+/// Rule [S15.3]. Expected values `independent`: the error's selector is computed here from its
+/// signature, `NotIntercepted()`, not taken from the contract's binding.
 #[test]
 fn test_keyless_deploy_nested_inside_a_keyless_deployment_is_not_intercepted() {
+    let not_intercepted = &alloy_primitives::keccak256("NotIntercepted()")[..4];
+    let selector = U256::from_be_slice(not_intercepted);
     for gas_limit in GAS_LIMITS {
         let inner = Deployment::new(deploying(&[0x00, 0x00]));
         let data = inner.call_data(LARGE_OVERRIDE);
+        // The inner call's status in slot 0, the size of its revert data in slot 2, and the first
+        // four bytes of that data, as a number, in slot 1.
         let prefix = BytecodeBuilder::default()
             .mstore(0, &data)
             .push_number(0_u64)
@@ -592,13 +605,27 @@ fn test_keyless_deploy_nested_inside_a_keyless_deployment_is_not_intercepted() {
             .append(GAS)
             .append(CALL)
             .push_number(0_u64)
+            .append(SSTORE)
+            .append(RETURNDATASIZE)
+            .push_number(2_u64)
+            .append(SSTORE)
+            .append_many([RETURNDATASIZE, PUSH0, PUSH0, RETURNDATACOPY, PUSH0, MLOAD])
+            .push_number(224_u64)
+            .append(SHR)
+            .push_number(1_u64)
             .append(SSTORE);
         let outer = Deployment::new(running(prefix));
         let outcome = deploy(system_db(), &outer, gas_limit);
         assert_eq!(returned(&outcome).deployedAddress, outer.address);
-        let status =
-            outcome.state[&outer.address].storage.get(&U256::ZERO).map(|slot| slot.present_value);
-        assert_eq!(status, Some(U256::ZERO), "the inner call failed");
+        let slot = |index: u64| {
+            outcome.state[&outer.address]
+                .storage
+                .get(&U256::from(index))
+                .map(|slot| slot.present_value)
+        };
+        assert_eq!(slot(0), Some(U256::ZERO), "the inner call failed");
+        assert_eq!(slot(2), Some(U256::from(4)), "with four bytes of revert data");
+        assert_eq!(slot(1), Some(selector), "which are NotIntercepted(): the bytecode ran");
         assert!(code_hash(&outcome, inner.address).is_none_or(|hash| hash == KECCAK_EMPTY));
         assert_eq!(nonce(&outcome, inner.signer), 0);
     }
