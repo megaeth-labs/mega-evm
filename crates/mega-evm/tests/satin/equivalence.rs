@@ -778,8 +778,8 @@ fn test_a_crowded_salt_bucket_is_where_satin_leaves_op_revm() {
 ///
 /// Each engine runs one gas short of what the same transfer spends on it when it succeeds, so
 /// each falls short on the last charge of the phase at any byte price: op-revm has no history to
-/// charge and needs less. Where a state byte costs nothing there is no such charge on op-revm, and
-/// the case returns early.
+/// charge and needs less, or, where a history byte costs nothing, the same. Where a state byte
+/// costs nothing there is no such charge on op-revm, and the case returns early.
 #[test]
 fn test_an_out_of_gas_before_the_first_frame_matches_op_revm() {
     if crate::common::state_is_free() {
@@ -797,7 +797,11 @@ fn test_an_out_of_gas_before_the_first_frame_matches_op_revm() {
     assert!(mega_success.result.is_success() && op_success.result.is_success());
     let mega_limit = mega_success.result.gas().total_gas_spent() - 1;
     let op_limit = op_success.result.gas().total_gas_spent() - 1;
-    assert!(mega_limit > op_limit, "Satin charges the body's and the record's history on top");
+    if crate::common::history_is_free() {
+        assert_eq!(mega_limit, op_limit, "no history to charge on top");
+    } else {
+        assert!(mega_limit > op_limit, "Satin charges the body's and the record's history on top");
+    }
 
     let (mega, _, cfg) = run_both(db(), transfer(mega_limit));
     let op = run_op_alone(db(), transfer(op_limit));
