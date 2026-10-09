@@ -20,6 +20,8 @@ mod salt;
 mod schedule;
 mod sequencer_registry;
 mod sequences;
+#[path = "../shared/snapshot.rs"]
+mod snapshot;
 mod state_gas;
 mod transfer_logs;
 mod witness;

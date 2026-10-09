@@ -43,10 +43,28 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
+      - name: Install cargo-insta
+        uses: taiki-e/install-action@v2
+        with:
+          # The release of the insta version Cargo.lock resolves.
+          tool: cargo-insta@1.47.2
       - name: Build
         run: cargo build
       - name: Run Test
-        run: cargo test --workspace
+        # `cargo test --workspace`, run once through cargo-insta. A snapshot that differs fails its
+        # test and nothing is written (--check); a snapshot file no test compared fails the run
+        # (--unreferenced=reject). The last three flags keep cargo test's own behaviour: the
+        # cargo test runner, its per-test output, and stopping at the first failing test binary.
+        # A pending snapshot (`.snap.new`, `.pending-snap`) in the tree is a change nobody
+        # accepted, which the unreferenced check does not look at: it fails the step too.
+        run: |
+          cargo insta test --workspace --check --unreferenced=reject --test-runner cargo-test --no-quiet --fail-fast
+          pending=$(find . -path ./target -prune -o \( -name '*.snap.new' -o -name '*.pending-snap' \) -print)
+          if [ -n "$pending" ]; then
+            echo "::error::pending snapshots in the tree:"
+            echo "$pending"
+            exit 1
+          fi
 
   test-release:
     runs-on: ubuntu-24.04

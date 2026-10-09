@@ -24,11 +24,11 @@
 //! counted, and revm refuses it after the count.
 
 use alloy_op_evm::OpTx;
-use alloy_primitives::{address, keccak256, Address, Bytes, TxKind, B256, U256};
+use alloy_primitives::{address, keccak256, Address, Bytes, Log, TxKind, B256, U256};
 use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
     constants::TX_GAS_LIMIT_CAP,
-    history_gas,
+    history_gas, log_history_bytes,
     system::{
         IMegaAccessControl, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE, MEGA_SYSTEM_ADDRESS,
         ORACLE_CONTRACT_ADDRESS,
@@ -40,7 +40,8 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{
-        ADDRESS, CALL, DELEGATECALL, GAS, POP, PUSH0, PUSH1, REVERT, SELFDESTRUCT, STOP,
+        ADDRESS, CALL, CALLDATASIZE, DELEGATECALL, GAS, JUMPDEST, JUMPI, POP, PUSH0, PUSH1, REVERT,
+        SELFDESTRUCT, STOP,
     },
     context::{
         result::{ExecutionResult, Output},
@@ -167,6 +168,23 @@ impl Site {
             Self::Create => ACTOR.create(0),
             Self::Create2 => ACTOR.create2(B256::ZERO, keccak256([])),
         }
+    }
+
+    /// The log the twin emits where the transfer log is: a `LOG3` of three zero topics and one
+    /// zero word, from the account whose code ran it — [`TWIN`], or the account the twin creates.
+    fn twin_log(self) -> Log {
+        let twin_init = BytecodeBuilder::default().log3_word().stop().build();
+        let address = match self {
+            Self::TxValue |
+            Self::Call |
+            Self::CallWithoutCode |
+            Self::CallToPrecompile |
+            Self::SelfDestruct => TWIN,
+            Self::TxEndowment => CALLER.create(0),
+            Self::Create => ACTOR.create(0),
+            Self::Create2 => ACTOR.create2(B256::ZERO, keccak256(&twin_init)),
+        };
+        Log::new_unchecked(address, Vec::from([B256::ZERO; 3]), Bytes::from([0; 32]))
     }
 
     /// The account the value moves from.
@@ -329,6 +347,39 @@ fn assert_reservoir_paid(case: &str, gas_limit: u64, outcome: &MegaTransactionOu
     );
 }
 
+/// Asserts `outcome` is `site`'s `variant` run to its end: the one log the receipt carries — the
+/// transfer log, or the twin's `LOG3` of one word — the value at the recipient, the body, the
+/// records and that log counted, and the history of the body and the records, with the twin's
+/// log on top: a transfer log is charged nothing.
+fn assert_completed(
+    case: &str,
+    site: Site,
+    variant: Variant,
+    outcome: &MegaTransactionOutcome,
+    body: u64,
+) {
+    assert!(outcome.result.is_success(), "{case}: {:?}", outcome.result);
+    assert_eq!(outcome.limit_exceeded, None, "{case}: nothing latched");
+    let (log, moved, log_history) = match variant {
+        Variant::Plain => {
+            let value = U256::from(VALUE);
+            (transfer_log(site.sender(), site.recipient(), value), value, 0)
+        }
+        Variant::Twin => (site.twin_log(), U256::ZERO, log_history_bytes(3, 32)),
+        Variant::TakenBack => unreachable!("a move taken back does not complete"),
+    };
+    assert_eq!(outcome.result.logs(), [log], "{case}: the receipt's one log");
+    assert_eq!(balance(outcome, site.recipient()), moved, "{case}: the value at the recipient");
+    assert_eq!(
+        outcome.usage,
+        LimitUsage { data_size: body + site.bytes(), write_records: site.records() },
+        "{case}: the body, the records and one log",
+    );
+    let history_bytes = body + site.records() * WRITE_RECORD_SIZE + log_history;
+    assert_eq!(outcome.gas.history_bytes, history_bytes, "{case}: the history bytes");
+    assert_eq!(outcome.gas.history, history_gas(history_bytes).unwrap(), "{case}: their history");
+}
+
 /// Asserts `outcome` is `site` stopped at its move by `stop`, with nothing of the move left: no
 /// transfer log, no value moved, and only what a stop leaves beside the body counted.
 fn assert_stopped_at_the_move(
@@ -366,21 +417,7 @@ fn test_each_site_counts_its_transfer_log() {
             let body = transaction_body_bytes(&tx);
             let outcome = execute(db, tx, EvmTxRuntimeLimits::no_limits());
 
-            assert!(outcome.result.is_success(), "{case}: {:?}", outcome.result);
-            assert_eq!(
-                transfer_logs(&outcome),
-                [transfer_log(site.sender(), site.recipient(), U256::from(VALUE))],
-                "{case}: the receipt's transfer log",
-            );
-            assert_eq!(balance(&outcome, site.recipient()), U256::from(VALUE), "{case}");
-            assert_eq!(
-                outcome.usage,
-                LimitUsage { data_size: body + site.bytes(), write_records: site.records() },
-                "{case}: the body, the records and one transfer log",
-            );
-            let history_bytes = body + site.records() * WRITE_RECORD_SIZE;
-            assert_eq!(outcome.gas.history_bytes, history_bytes, "{case}: no history bytes");
-            assert_eq!(outcome.gas.history, history_gas(history_bytes).unwrap(), "{case}");
+            assert_completed(&case, site, Variant::Plain, &outcome, body);
             assert_reservoir_paid(&case, gas_limit, &outcome);
         }
     }
@@ -407,9 +444,9 @@ fn test_each_site_stops_one_byte_short_of_its_frame_budget() {
                     (execute(db, tx, limits), body)
                 };
 
-                let (fits, _) = run(cap);
-                assert!(fits.result.is_success(), "{case}: at the budget: {:?}", fits.result);
-                assert_eq!(fits.limit_exceeded, None, "{case}");
+                let (fits, body) = run(cap);
+                assert_completed(&format!("{case}: at the budget"), site, variant, &fits, body);
+                assert_reservoir_paid(&case, gas_limit, &fits);
 
                 let (over, body) = run(cap - 1);
                 assert_eq!(over.limit_exceeded, None, "{case}: a frame budget latches nothing");
@@ -489,8 +526,9 @@ fn test_each_site_stops_one_byte_short_of_the_transaction_limit() {
                 assert_reservoir_paid(&case, gas_limit, &outcome);
 
                 if site.depth() == 0 {
-                    let (fits, _, _) = run(0);
-                    assert!(fits.result.is_success(), "{case}: at the limit: {:?}", fits.result);
+                    let (fits, body, _) = run(0);
+                    assert_completed(&format!("{case}: at the limit"), site, variant, &fits, body);
+                    assert_reservoir_paid(&case, gas_limit, &fits);
                 }
             }
         }
@@ -560,9 +598,25 @@ fn test_no_transfer_log_where_no_value_moves_to_another_account() {
         }))
     };
     let actor = BytecodeBuilder::default;
+    // `ACTOR` calling itself once. Without calldata it calls `ACTOR` with `value` and one byte of
+    // calldata; the frame that call starts sees the byte and jumps past the call. The zero pushed
+    // first stands in, on that inner frame, for the flag the call leaves on the outer one, for the
+    // `POP` every actor ends with.
+    let self_call = BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0, PUSH1, 1, PUSH0])
+        .push_u256(value)
+        .push_address(ACTOR)
+        .append_many([GAS, CALL]);
+    // `PUSH0; CALLDATASIZE; PUSH1 end; JUMPI; POP` is six bytes, then the call, then `end`.
+    let end = u8::try_from(6 + self_call.len()).expect("the call ends before byte 256");
+    let calls_itself_once = BytecodeBuilder::default()
+        .append_many([PUSH0, CALLDATASIZE, PUSH1, end, JUMPI, POP])
+        .append_many(self_call.build_vec())
+        .append(JUMPDEST);
     let cases: [(&str, MemoryDatabase, MegaTransaction, u64, usize); 8] = [
         ("a CALLCODE", db(actor().callcode(RECEIVER, value)), call(ACTOR, 0), 1, 0),
-        ("a CALL to itself", db(actor().call(ACTOR, value)), call(ACTOR, 0), 1, 0),
+        // The move's sender and recipient are one account, recorded once.
+        ("a CALL to itself", db(calls_itself_once), call(ACTOR, 0), 1, 0),
         ("a zero-value CALL", db(actor().call(RECEIVER, U256::ZERO)), call(ACTOR, 0), 0, 0),
         ("a transaction's value to its sender", db(actor()), call(CALLER, VALUE), 0, 0),
         (
@@ -725,6 +779,18 @@ fn test_a_value_call_its_caller_cannot_fund_is_charged_nothing() {
     assert!(refused.result.is_success(), "{:?}", refused.result);
     let funded = execute(db(VALUE), tx(gas_limit), EvmTxRuntimeLimits::no_limits());
     assert!(funded.result.is_halt(), "{:?}", funded.result);
+    let body = transaction_body_bytes(&tx(gas_limit));
+    assert_eq!(
+        refused.usage,
+        LimitUsage { data_size: body, write_records: 0 },
+        "the refused call counted nothing",
+    );
+    assert_eq!(
+        refused.gas.history,
+        history_gas(body).unwrap(),
+        "and paid the body's history alone"
+    );
+    assert_eq!(funded.gas.gas_used, gas_limit, "the funded call's halt used the whole gas limit");
 }
 
 /// Appends a call carrying [`VALUE`] to `MegaAccessControl`, which answers it with

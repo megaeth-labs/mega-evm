@@ -327,11 +327,13 @@ fn test_a_transfer_that_cannot_pay_the_new_account_runs_out_of_gas() {
     let db = MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18)));
     let mut evm = MegaEvm::new(context(db));
     let outcome = evm
-        .transact_raw(call(CALLER, CALLEE, U256::from(1), 21_000 + ACCOUNT_STATE_GAS - 1))
+        .execute_transaction(call(CALLER, CALLEE, U256::from(1), 21_000 + ACCOUNT_STATE_GAS - 1))
         .expect("the transaction is admitted");
 
     assert!(matches!(outcome.result, ExecutionResult::Halt { .. }), "{:?}", outcome.result);
     assert_eq!(outcome.state[&CALLER].info.nonce, 1, "the sender paid for the attempt");
+    assert_eq!(outcome.gas.gas_used, 21_000 + ACCOUNT_STATE_GAS - 1, "its whole gas limit");
+    assert_eq!(outcome.gas.state, 0, "and the account it could not pay for is not created");
 }
 
 /// The same for a creation: the created account's state gas is charged as the frame starts, not
@@ -344,11 +346,13 @@ fn test_a_creation_that_cannot_pay_its_account_runs_out_of_gas() {
     let db = MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18)));
     let mut evm = MegaEvm::new(context(db));
     let outcome = evm
-        .transact_raw(create(CALLER, Bytes::new(), 24_000 + ACCOUNT_STATE_GAS - 1))
+        .execute_transaction(create(CALLER, Bytes::new(), 24_000 + ACCOUNT_STATE_GAS - 1))
         .expect("the transaction is admitted");
 
     assert!(matches!(outcome.result, ExecutionResult::Halt { .. }), "{:?}", outcome.result);
     assert_eq!(outcome.state[&CALLER].info.nonce, 1, "the sender paid for the attempt");
+    assert_eq!(outcome.gas.gas_used, 24_000 + ACCOUNT_STATE_GAS - 1, "its whole gas limit");
+    assert_eq!(outcome.gas.state, 0, "and the account it could not pay for is not created");
 }
 
 /// A gas limit below the intrinsic charge itself is a validation rejection, which leaves the

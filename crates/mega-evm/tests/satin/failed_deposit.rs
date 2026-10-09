@@ -14,8 +14,9 @@ use alloy_sol_types::SolCall;
 use mega_evm::{
     system::{IOracle, ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE},
     test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, ExternalEnvs, LimitUsage, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    MegaTransaction, MegaTransactionOutcome, TestExternalEnvs, TX_BODY_SIZE,
+    EvmTxRuntimeLimits, ExternalEnvs, LimitCheck, LimitKind, LimitUsage, MegaContext, MegaEvm,
+    MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionOutcome, TestExternalEnvs,
+    TX_BODY_SIZE,
 };
 use revm::{
     bytecode::opcode::{CALL, INVALID, POP},
@@ -74,6 +75,16 @@ fn test_a_failed_deposit_reports_the_halt_and_not_the_stop_its_body_latched() {
     let outcome = evm.execute_transaction(deposit(Bytes::from_static(&[0xab]), false)).unwrap();
     assert!(matches!(outcome.result, ExecutionResult::Revert { .. }), "{:?}", outcome.result);
     assert!(outcome.limit_exceeded.is_some(), "the body's stop is reported");
+    assert_eq!(
+        outcome.limit_exceeded,
+        Some(LimitCheck::ExceedsLimit {
+            kind: LimitKind::DataSize,
+            limit: TX_BODY_SIZE,
+            used: body,
+            frame_local: false,
+        }),
+        "the body crossed the data-size limit",
+    );
 }
 
 /// Runs `tx` against a callee that sends the Oracle a hint of `payload` and then halts on
