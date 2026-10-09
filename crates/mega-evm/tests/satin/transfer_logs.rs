@@ -1201,7 +1201,7 @@ fn test_a_system_transactions_value_is_logged_and_no_limit_stops_it() {
     }
 }
 
-/// EIP-7708 logs keep execution order. `[S14.3]`
+/// EIP-7708 logs keep execution order. [S14.3]
 ///
 /// independent: each expected log is the event the bytecode emits, or the transfer of the wei
 /// the program moves, built from those accounts and that amount.

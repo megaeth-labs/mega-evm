@@ -595,6 +595,8 @@ fn assert_data_size_limit_stands_aside(pool: Pool) {
 
 /// Above the execution cap the reservoir pays the code's state gas and history: a creation that
 /// cannot pay the hash of its code runs out of gas on it, whatever the state-gas limit.
+///
+/// Rules: [S5.13], [S5.14], [S7.25], [S10.37], [S10.44].
 #[test]
 fn test_a_creation_that_cannot_pay_the_hash_runs_out_of_gas_under_the_state_gas_limit() {
     // A deposit that adds no state gas has no state-gas limit to cross.
@@ -611,6 +613,8 @@ fn test_a_creation_that_cannot_pay_the_hash_runs_out_of_gas_under_the_state_gas_
 /// whatever the state-gas limit. The limit holds the deposit once all of it is paid, not at the
 /// state gas: a creation that could pay the state gas alone would otherwise be stopped by a limit
 /// it never reaches.
+///
+/// Rules: [S5.13], [S5.14], [S7.25], [S10.37], [S10.44].
 #[test]
 fn test_a_creation_that_cannot_pay_its_history_runs_out_of_gas_under_the_state_gas_limit() {
     // A deposit that pays no history has no history to run out of gas on, and one that adds no
@@ -631,6 +635,8 @@ fn test_a_creation_that_cannot_pay_its_history_runs_out_of_gas_under_the_state_g
 
 /// The data-size limit counts deployed code behind the same check: a creation that cannot pay the
 /// hash of its code, or its history, runs out of gas whatever the limit.
+///
+/// Rules: [S5.14], [S7.25], [S10.12], [S10.33].
 #[test]
 fn test_a_creation_that_cannot_pay_for_its_code_runs_out_of_gas_under_the_data_size_limit() {
     assert_data_size_limit_stands_aside(Pool::AboveCap);
@@ -640,6 +646,8 @@ fn test_a_creation_that_cannot_pay_for_its_code_runs_out_of_gas_under_the_data_s
 /// Without EIP-8037 the deposit's only charge is the regular deposit cost, 200 gas per byte: a
 /// creation one gas short of it runs out of gas, one gas more deposits the code with nothing
 /// left, and a creation that cannot pay it runs out of gas whatever the data-size limit.
+///
+/// Rules: [S5.13], [S5.14], [S10.12].
 #[test]
 fn test_a_creation_that_cannot_pay_the_deposit_cost_runs_out_of_gas_under_the_data_size_limit() {
     let pool = Pool::NeutralOsaka;

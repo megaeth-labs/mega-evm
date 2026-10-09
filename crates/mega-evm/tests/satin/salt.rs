@@ -287,6 +287,8 @@ pub(crate) fn assert_scales(
 
 /// `SSTORE` onto a slot that was zero: the slot's own bucket prices it. The history is the body
 /// and the slot's record.
+///
+/// Rules: [S6.4], [S6.5], [S7.2].
 #[test]
 fn test_the_sstore_set_charge_scales_with_the_slot_s_bucket() {
     const SLOT: u64 = 7;
@@ -305,6 +307,8 @@ fn test_the_sstore_set_charge_scales_with_the_slot_s_bucket() {
 
 /// A `CALL` carrying value to an account that does not exist: the account's bucket prices it. The
 /// history is the body and the transfer's two records, the sender's and the recipient's.
+///
+/// Rules: [S6.4], [S6.5], [S7.2].
 #[test]
 fn test_the_new_account_charge_of_a_call_scales_with_the_account_s_bucket() {
     assert_scales(
@@ -320,6 +324,8 @@ fn test_the_new_account_charge_of_a_call_scales_with_the_account_s_bucket() {
 /// and the beneficiary's own bucket prices it — the same entry and the same site a value `CALL`
 /// pays, reached from the opcode that empties an account rather than the one that funds it. The
 /// history is the body and the beneficiary's record.
+///
+/// Rules: [S6.4], [S6.5], [S7.2].
 #[test]
 fn test_the_selfdestruct_beneficiary_charge_scales_with_the_beneficiary_s_bucket() {
     assert_scales(
@@ -334,6 +340,8 @@ fn test_the_selfdestruct_beneficiary_charge_scales_with_the_beneficiary_s_bucket
 /// `CREATE`: the bucket of the address it deploys to prices the account it adds. The history is
 /// the body and the creation's two records, the creator's nonce and the created account; the
 /// deployed code is empty.
+///
+/// Rules: [S6.4], [S6.5], [S7.2].
 #[test]
 fn test_the_create_charge_scales_with_the_created_address_s_bucket() {
     let created = CONTRACT.create(0);
@@ -349,6 +357,8 @@ fn test_the_create_charge_scales_with_the_created_address_s_bucket() {
 /// The EIP-2780 runtime phase charges the transaction's own recipient before the first frame,
 /// and reads the recipient's bucket to price it. The history is the body and the recipient's
 /// record; the sender is in the body.
+///
+/// Rules: [S6.4], [S6.5], [S7.2].
 #[test]
 fn test_the_top_level_recipient_charge_scales_with_the_recipient_s_bucket() {
     assert_scales(
@@ -363,6 +373,8 @@ fn test_the_top_level_recipient_charge_scales_with_the_recipient_s_bucket() {
 /// The same phase charges a creation transaction's target, in the target's own bucket. The
 /// history is the body, the three bytes of init code it carries as calldata, and the created
 /// account's record.
+///
+/// Rules: [S6.4], [S6.5], [S7.2].
 #[test]
 fn test_the_create_transaction_target_charge_scales_with_its_bucket() {
     const INIT: [u8; 3] = [PUSH0, PUSH0, RETURN];
@@ -379,6 +391,8 @@ fn test_the_create_transaction_target_charge_scales_with_its_bucket() {
 /// An EIP-7702 authorization on an authority that does not exist pays for the account leaf it
 /// adds and for the delegation bytes it writes, both in the authority's bucket. The history is
 /// the body, the authorization it carries, and the applied authority's record.
+///
+/// Rules: [S6.4], [S6.5], [S7.2].
 #[test]
 fn test_the_eip7702_authority_charges_scale_with_the_authority_s_bucket() {
     assert_scales(
@@ -393,6 +407,8 @@ fn test_the_eip7702_authority_charges_scale_with_the_authority_s_bucket() {
 /// Deployed code is charged per byte, in the bucket of the address it is deployed to — the same
 /// bucket that priced the creation itself. The history is the body, the init code it carries as
 /// calldata, the created account's record and the deployed bytes.
+///
+/// Rules: [S6.4], [S6.5], [S7.2].
 #[test]
 fn test_the_code_deposit_charge_scales_with_the_deployed_address_s_bucket() {
     const DEPLOYED: u64 = 32;
@@ -897,6 +913,8 @@ fn test_clearing_a_slot_charges_no_state_gas() {
 
 /// A slot is one leaf however many times the transaction writes it: the first write off zero
 /// pays, the rest pay nothing. It is one record too.
+///
+/// Rules: [S6.4], [S6.5], [S7.2].
 #[test]
 fn test_a_slot_written_twice_pays_for_one_leaf() {
     let set = entry(GasId::sstore_set_state_gas());
@@ -976,6 +994,8 @@ fn test_a_selfdestruct_that_adds_no_account_charges_no_state_gas() {
 /// `CREATE2` reaches its deployment address by hashing rather than by nonce, and is priced in
 /// that address's bucket just as `CREATE` is. Its history is `CREATE`'s: the body and the two
 /// records of the creation.
+///
+/// Rules: [S6.4], [S6.5], [S7.2].
 #[test]
 fn test_the_create2_charge_scales_with_the_created_address_s_bucket() {
     const SALT: U256 = U256::ZERO;

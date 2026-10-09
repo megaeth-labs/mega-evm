@@ -904,6 +904,8 @@ fn start_fits() -> u64 {
 /// records and the transfer log cross the limit or fit it, and one gas below it is an out-of-gas
 /// under either. The log is charged nothing at all. Under the limit they fit, the frame starts
 /// and the records are kept.
+///
+/// Rules: [S7.28], [S10.10].
 #[test]
 fn test_a_frame_start_is_charged_before_its_records_are_counted() {
     let code = value_call_to_fresh();

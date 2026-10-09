@@ -403,7 +403,7 @@ fn test_the_system_address_is_not_detained() {
     );
 }
 
-/// A user's deposit is detained. `[S12.51]` `[S19.8]`
+/// A user's deposit is detained. [S12.51] [S19.8]
 ///
 /// independent: the cap, the compute at the read and the bill are the spec's own numbers.
 /// The cap is 20,000,000.

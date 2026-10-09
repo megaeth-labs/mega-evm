@@ -1,6 +1,6 @@
 //! The order of an EIP-7708 transfer log among a contract's own logs, in a block's receipts.
 //!
-//! `[S14.3]` independent: each expected log is the event the bytecode emits, or the transfer of
+//! [S14.3] independent: each expected log is the event the bytecode emits, or the transfer of
 //! the wei the program moves, built from those accounts and that amount.
 
 use alloy_consensus::{transaction::Recovered, Signed, TxLegacy, TxReceipt};
@@ -99,7 +99,7 @@ fn logs_of(receipt: &OpReceiptEnvelope) -> &[Log] {
     logs
 }
 
-/// A block's receipts carry the same order the engine outcome does. `[S14.3]`
+/// A block's receipts carry the same order the engine outcome does. [S14.3]
 ///
 /// independent: the sequences are the event and the transfer, in the order each program
 /// journals them.
