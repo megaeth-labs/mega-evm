@@ -10,7 +10,7 @@ It covers every behavioral difference from standard Ethereum and Optimism: the E
 
 Any node implementation that produces the same outputs given the same inputs for every case defined in this specification is a correct MegaETH node.
 
-The reference implementation is [MegaEVM](https://github.com/megaeth-labs/mega-evm), built on [revm](https://github.com/bluealloy/revm) and [op-revm](https://github.com/bluealloy/op-revm).
+The reference implementation is [MegaEVM](https://github.com/megaeth-labs/mega-evm), built on [revm](https://github.com/bluealloy/revm) and [op-revm](https://github.com/ethereum-optimism/optimism/tree/develop/rust/op-revm).
 All standard EVM semantics are inherited from Optimism Isthmus (Ethereum Prague) unless explicitly overridden.
 Transactions that don't touch MegaETH-specific features behave identically to Optimism.
 
@@ -40,12 +40,12 @@ For the current stable behavior as a single reference, see the [MegaEVM Overview
 
 ## Reference Implementation
 
-| Component        | Version                                                    |
-| ---------------- | ---------------------------------------------------------- |
-| **MegaEVM**      | [mega-evm](https://github.com/megaeth-labs/mega-evm)       |
-| **Base EVM**     | [revm v27.1.0](https://github.com/bluealloy/revm)          |
-| **Optimism EVM** | [op-revm v8.1.0](https://github.com/bluealloy/op-revm)     |
-| **Alloy EVM**    | [alloy-evm v0.15.0](https://github.com/alloy-rs/alloy-evm) |
+| Component        | Version                                                                                    |
+| ---------------- | ------------------------------------------------------------------------------------------ |
+| **MegaEVM**      | [mega-evm](https://github.com/megaeth-labs/mega-evm)                                       |
+| **Base EVM**     | [revm v40.0.3](https://github.com/bluealloy/revm)                                          |
+| **Optimism EVM** | [op-revm v20.0.0](https://github.com/ethereum-optimism/optimism/tree/develop/rust/op-revm) |
+| **Alloy EVM**    | [alloy-evm v0.36.0](https://github.com/alloy-rs/alloy-evm)                                 |
 
 ## Spec Progression
 

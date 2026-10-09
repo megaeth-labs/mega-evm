@@ -1,6 +1,6 @@
 # MegaETH EVM
 
-A specialized Ethereum Virtual Machine (EVM) implementation tailored for MegaETH specifications, built on top of [revm](https://github.com/bluealloy/revm) and [op-revm](https://github.com/bluealloy/op-revm).
+A specialized Ethereum Virtual Machine (EVM) implementation tailored for MegaETH specifications, built on top of [revm](https://github.com/bluealloy/revm) and [op-revm](https://github.com/ethereum-optimism/optimism/tree/develop/rust/op-revm).
 
 ## Crates
 
@@ -70,7 +70,7 @@ cargo test
 
 ## Documentation
 
-- [mega-evm specification](https://megaeth-labs.github.io/mega-evm/)
+- [mega-evm specification](https://docs.megaeth.com/spec/)
 - [Architecture](ARCH.md)
 
 ## License
