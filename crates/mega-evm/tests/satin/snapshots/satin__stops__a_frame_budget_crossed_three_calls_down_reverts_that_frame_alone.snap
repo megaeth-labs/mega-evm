@@ -1,10 +1,10 @@
 ---
 source: crates/mega-evm/tests/satin/stops.rs
-expression: "&summaries(&views)"
+expression: summaries
 ---
 {
-  "DataSize, gas limit 100000000": "success Stop; stop -; regular 652169 state 685440 history 60368 history_bytes 686 reservoir_remaining 0 floor 15000 gas_used 1397977; data_size 686 write_records 7; logs 3 accounts 8",
-  "DataSize, gas limit 300000000": "success Stop; stop -; regular 652169 state 685440 history 60368 history_bytes 686 reservoir_remaining 99254192 floor 15000 gas_used 1397977; data_size 686 write_records 7; logs 3 accounts 8",
-  "KVUpdate, gas limit 100000000": "success Stop; stop -; regular 2307913 state 783360 history 63888 history_bytes 726 reservoir_remaining 0 floor 15000 gas_used 3155161; data_size 726 write_records 8; logs 3 accounts 8",
-  "KVUpdate, gas limit 300000000": "success Stop; stop -; regular 2307913 state 783360 history 63888 history_bytes 726 reservoir_remaining 99152752 floor 15000 gas_used 3155161; data_size 726 write_records 8; logs 3 accounts 8"
+  "DataSize, gas limit 100000000": "success Stop; stop -; regular 652169 state 685440 history 60368 history_bytes 686 reservoir_remaining 0 floor 15000 gas_used 1397977; data_size 686 write_records 7; logs 3 accounts 8; view 0x32947ce1cd649cbbcd995f96f170e75ea2313956d6ff90e40957d396aa32389d",
+  "DataSize, gas limit 300000000": "success Stop; stop -; regular 652169 state 685440 history 60368 history_bytes 686 reservoir_remaining 99254192 floor 15000 gas_used 1397977; data_size 686 write_records 7; logs 3 accounts 8; view 0x237bb7068fa81d37c0fdfdd7516ae6c6bdfe6d7550e30256b5a9548b57fde5a4",
+  "KVUpdate, gas limit 100000000": "success Stop; stop -; regular 2307913 state 783360 history 63888 history_bytes 726 reservoir_remaining 0 floor 15000 gas_used 3155161; data_size 726 write_records 8; logs 3 accounts 8; view 0x7250495f2c8f8fa8a86fd29b4748f3860c2124baf7d1ccbf9e25d72bffde1ef1",
+  "KVUpdate, gas limit 300000000": "success Stop; stop -; regular 2307913 state 783360 history 63888 history_bytes 726 reservoir_remaining 99152752 floor 15000 gas_used 3155161; data_size 726 write_records 8; logs 3 accounts 8; view 0x8b36ca360eb4ed306eda657417be5f1396300e66a41720c3c9c6b43d8032cd0c"
 }

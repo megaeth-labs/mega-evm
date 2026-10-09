@@ -57,8 +57,8 @@ use crate::{
     common::history,
     detention::{
         assert_stopped, burn, context, execute, fresh_write_spill, intrinsic, memory_cost, op,
-        run_on, spin, stop_data, summaries, tx, work, Calls, Charges, Run, ABOVE, BELOW,
-        BENEFICIARY, CALLER, CAP, CHILD, CONTRACT, FRESH_WRITE, TIERS,
+        run_on, spin, stop_data, tx, work, Calls, Charges, Run, ABOVE, BELOW, BENEFICIARY, CALLER,
+        CAP, CHILD, CONTRACT, FRESH_WRITE, TIERS,
     },
 };
 
@@ -300,7 +300,7 @@ fn test_an_out_of_gas_nothing_could_pay_halts_as_without_the_read() {
             view_pair(&mut views, &format!("{name}, gas limit {gas_limit}"), &detained, &plain);
         }
     }
-    crate::assert_sorted_json_snapshot!(&summaries(&views));
+    crate::assert_summaries_snapshot!(&views);
 }
 
 /// A creation whose code costs more state gas and history than the transaction has halts as
@@ -371,7 +371,7 @@ fn test_a_callees_out_of_gas_is_caught_as_without_the_read() {
             view_pair(&mut views, &format!("{name}, gas limit {gas_limit}"), &detained, &plain);
         }
     }
-    crate::assert_sorted_json_snapshot!(&summaries(&views));
+    crate::assert_summaries_snapshot!(&views);
 }
 
 /// What a halting callee burns is not compute, however the halt ended it: a caller that read and
@@ -472,7 +472,7 @@ fn test_what_a_halting_callee_burns_is_not_compute() {
             &plain,
         );
     }
-    crate::assert_sorted_json_snapshot!(&summaries(&views));
+    crate::assert_summaries_snapshot!(&views);
 }
 
 /// Runs the transaction `build` makes, under a block-environment cap of `cap`, for a first
@@ -603,7 +603,7 @@ fn test_a_halt_on_a_static_charge_counts_what_its_frame_had_as_compute() {
             &plain,
         );
     }
-    crate::assert_sorted_json_snapshot!(&summaries(&views));
+    crate::assert_summaries_snapshot!(&views);
 }
 
 /// Appends a call carrying one wei to `to` with all the gas, keeping its status.
@@ -867,7 +867,7 @@ fn test_a_callee_within_the_cap_bills_the_same_as_without_the_read() {
             &plain,
         );
     }
-    crate::assert_sorted_json_snapshot!(&summaries(&views));
+    crate::assert_summaries_snapshot!(&views);
 }
 
 /// A call that reads the beneficiary itself, with a little gas or none, with value or without,
@@ -955,7 +955,7 @@ fn test_a_call_that_reads_the_beneficiary_costs_what_a_warm_account_costs() {
             }
         }
     }
-    crate::assert_sorted_json_snapshot!(&summaries(&views));
+    crate::assert_summaries_snapshot!(&views);
 }
 
 /* ---------- answers ---------- */
@@ -1159,7 +1159,7 @@ fn test_a_precompile_runs_on_the_allowance() {
             );
         }
     }
-    crate::assert_sorted_json_snapshot!(&summaries(&views));
+    crate::assert_summaries_snapshot!(&views);
 }
 
 /// Modexp on a costly input, replaced by a node's recording copy of it, which the engine does not
@@ -1250,7 +1250,7 @@ fn test_a_precompile_is_held_to_what_the_limit_leaves() {
             &plain.run,
         );
     }
-    crate::assert_sorted_json_snapshot!(&summaries(&views));
+    crate::assert_summaries_snapshot!(&views);
 }
 
 /// A modexp priced far above the cap, 58,687,488 and 125,796,352 gas, called after a read with all
@@ -1353,7 +1353,7 @@ fn test_a_precompile_priced_past_the_cap_computes_nothing() {
         }
     }
     assert_eq!(cases, (3, 1), "the stop above the cap for both, and below it for the cheaper");
-    crate::assert_sorted_json_snapshot!(&summaries(&views));
+    crate::assert_summaries_snapshot!(&views);
 }
 
 /// The built-in modexp priced within the allowance runs as without the read: revm runs it, on the
@@ -1492,7 +1492,7 @@ fn test_a_nodes_own_precompile_keeps_the_clamp_a_priced_wrapper_does_not() {
             OutcomeView::new(&own.outcome),
         );
     }
-    crate::assert_sorted_json_snapshot!(&summaries(&views));
+    crate::assert_summaries_snapshot!(&views);
 }
 
 /// A precompile priced between the allowance and its forward whose input fails a check made after
@@ -1539,7 +1539,7 @@ fn test_a_precompile_whose_input_fails_past_its_gas_check_stops_past_the_allowan
             &plain,
         );
     }
-    crate::assert_sorted_json_snapshot!(&summaries(&views));
+    crate::assert_summaries_snapshot!(&views);
 }
 
 /// A size-limited precompile of the Satin set called with `input`, which its EIP prices at
@@ -1635,7 +1635,7 @@ fn assert_held_from_its_price(
 #[test]
 fn test_the_bn254_pairing_is_held_from_its_price() {
     let views = assert_held_from_its_price(EC_PAIRING, &[0; 2 * 192], 45_000 + 2 * 34_000);
-    crate::assert_sorted_json_snapshot!(&summaries(&views));
+    crate::assert_summaries_snapshot!(&views);
 }
 
 /// op-revm's wrapper of the BLS12-381 G1 MSM, two pairs of zeros: 12,000 a pair, discounted to
@@ -1643,7 +1643,7 @@ fn test_the_bn254_pairing_is_held_from_its_price() {
 #[test]
 fn test_the_bls12_g1_msm_is_held_from_its_price() {
     let views = assert_held_from_its_price(BLS12_G1_MSM, &[0; 2 * 160], 2 * 12_000 * 949 / 1_000);
-    crate::assert_sorted_json_snapshot!(&summaries(&views));
+    crate::assert_summaries_snapshot!(&views);
 }
 
 /// op-revm's wrapper of the BLS12-381 G2 MSM, two pairs of zeros: 22,500 a pair, undiscounted for
@@ -1651,7 +1651,7 @@ fn test_the_bls12_g1_msm_is_held_from_its_price() {
 #[test]
 fn test_the_bls12_g2_msm_is_held_from_its_price() {
     let views = assert_held_from_its_price(BLS12_G2_MSM, &[0; 2 * 288], 2 * 22_500 * 1_000 / 1_000);
-    crate::assert_sorted_json_snapshot!(&summaries(&views));
+    crate::assert_summaries_snapshot!(&views);
 }
 
 /// op-revm's wrapper of the BLS12-381 pairing, two pairs of zeros: 37,700, and 32,600 a pair
@@ -1659,7 +1659,7 @@ fn test_the_bls12_g2_msm_is_held_from_its_price() {
 #[test]
 fn test_the_bls12_pairing_is_held_from_its_price() {
     let views = assert_held_from_its_price(BLS12_PAIRING, &[0; 2 * 384], 37_700 + 2 * 32_600);
-    crate::assert_sorted_json_snapshot!(&summaries(&views));
+    crate::assert_summaries_snapshot!(&views);
 }
 
 /// A keyless deployment's call is the transaction's own frame, and runs no code: its own charges —
@@ -1828,7 +1828,7 @@ fn test_a_keyless_calls_charges_are_held_to_what_the_limit_leaves() {
         assert_eq!(detained.outcome.result, deployed.outcome.result, "as without the read");
         assert_eq!(detained.outcome.gas, deployed.outcome.gas);
     }
-    crate::assert_sorted_json_snapshot!(&summaries(&views));
+    crate::assert_summaries_snapshot!(&views);
 }
 
 /// A refused `keylessDeploy` call is an answer held to the allowance by the regular gas it spent:

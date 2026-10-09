@@ -391,10 +391,10 @@ fn test_each_site_counts_its_transfer_log() {
             assert_eq!(outcome.gas.history_bytes, history_bytes, "{case}: no history bytes");
             assert_eq!(outcome.gas.history, history_gas(history_bytes).unwrap(), "{case}");
             assert_reservoir_paid(&case, gas_limit, &outcome);
-            outcomes.insert_case(case, OutcomeView::new(&outcome).summary());
+            outcomes.insert_case(case, OutcomeView::new(&outcome));
         }
     }
-    crate::assert_sorted_json_snapshot!(&outcomes);
+    crate::assert_summaries_snapshot!(&outcomes);
 }
 
 /// A frame budget holds the move at exactly its bytes, and one byte short of them stops the frame
@@ -450,18 +450,12 @@ fn test_each_site_stops_one_byte_short_of_its_frame_budget() {
                     Variant::TakenBack => unreachable!(),
                 }
                 assert_reservoir_paid(&case, gas_limit, &over);
-                outcomes.insert_case(
-                    format!("{case}: at the budget"),
-                    OutcomeView::new(&fits).summary(),
-                );
-                outcomes.insert_case(
-                    format!("{case}: one byte short"),
-                    OutcomeView::new(&over).summary(),
-                );
+                outcomes.insert_case(format!("{case}: at the budget"), OutcomeView::new(&fits));
+                outcomes.insert_case(format!("{case}: one byte short"), OutcomeView::new(&over));
             }
         }
     }
-    crate::assert_sorted_json_snapshot!(&outcomes);
+    crate::assert_summaries_snapshot!(&outcomes);
 }
 
 /// The transaction's limit one byte short of the move stops the transaction there: it latches, the
@@ -513,19 +507,13 @@ fn test_each_site_stops_one_byte_short_of_the_transaction_limit() {
                 if site.depth() == 0 {
                     let (fits, _, _) = run(0);
                     assert!(fits.result.is_success(), "{case}: at the limit: {:?}", fits.result);
-                    outcomes.insert_case(
-                        format!("{case}: at the limit"),
-                        OutcomeView::new(&fits).summary(),
-                    );
+                    outcomes.insert_case(format!("{case}: at the limit"), OutcomeView::new(&fits));
                 }
-                outcomes.insert_case(
-                    format!("{case}: one byte short"),
-                    OutcomeView::new(&outcome).summary(),
-                );
+                outcomes.insert_case(format!("{case}: one byte short"), OutcomeView::new(&outcome));
             }
         }
     }
-    crate::assert_sorted_json_snapshot!(&outcomes);
+    crate::assert_summaries_snapshot!(&outcomes);
 }
 
 /// A failure above the move takes the transfer log back with the move, and its bytes with them:
@@ -551,10 +539,10 @@ fn test_a_failure_takes_each_sites_transfer_log_back() {
             }
             assert_eq!(balance(&outcome, site.recipient()), U256::ZERO, "{case}");
             assert_reservoir_paid(&case, gas_limit, &outcome);
-            outcomes.insert_case(case, OutcomeView::new(&outcome).summary());
+            outcomes.insert_case(case, OutcomeView::new(&outcome));
         }
     }
-    crate::assert_sorted_json_snapshot!(&outcomes);
+    crate::assert_summaries_snapshot!(&outcomes);
 }
 
 /// Nothing moves to another account, so nothing is logged or counted for a log: a `CALLCODE` and a
@@ -722,11 +710,10 @@ fn test_a_value_call_its_caller_cannot_fund_runs_as_without_a_limit() {
             assert_eq!(limited.gas, free.gas, "{name} under {limits:?}");
             outcomes.insert_case(
                 format!("{name}, unfunded, under {under}"),
-                OutcomeView::new(&limited).summary(),
+                OutcomeView::new(&limited),
             );
         }
-        outcomes
-            .insert_case(format!("{name}, unfunded, no limit"), OutcomeView::new(&free).summary());
+        outcomes.insert_case(format!("{name}, unfunded, no limit"), OutcomeView::new(&free));
 
         let stopped = execute(db(VALUE, &actor), tx.clone(), tx_limit);
         assert_eq!(
@@ -741,7 +728,7 @@ fn test_a_value_call_its_caller_cannot_fund_runs_as_without_a_limit() {
         );
         outcomes.insert_case(
             format!("{name}, funded, under the transaction limit"),
-            OutcomeView::new(&stopped).summary(),
+            OutcomeView::new(&stopped),
         );
         let stopped = execute(db(VALUE, &actor), tx.clone(), frame_budget);
         let stop = MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit: bytes - 1 };
@@ -752,10 +739,10 @@ fn test_a_value_call_its_caller_cannot_fund_runs_as_without_a_limit() {
         );
         outcomes.insert_case(
             format!("{name}, funded, under the frame budget"),
-            OutcomeView::new(&stopped).summary(),
+            OutcomeView::new(&stopped),
         );
     }
-    crate::assert_sorted_json_snapshot!(&outcomes);
+    crate::assert_summaries_snapshot!(&outcomes);
 }
 
 /// A value call its caller cannot fund is charged nothing for the records it would make, as it

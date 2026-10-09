@@ -12,7 +12,7 @@
 use alloc as std;
 use std::{collections::BTreeMap, format, string::String, vec::Vec};
 
-use alloy_primitives::{Address, Bytes, B256, U256};
+use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use alloy_sol_types::{GenericContractError, SolInterface};
 use revm::{
     context::result::{ExecutionResult, ResultGas},
@@ -85,14 +85,27 @@ impl OutcomeView {
             usage: self.usage,
             logs: self.result.logs.len(),
             accounts: self.accounts.len(),
+            view: self.digest(),
         }
+    }
+
+    /// The keccak256 of the view's canonical JSON: `serde_json`'s compact form, which writes
+    /// every struct's fields in their declaration order and every map's keys ascending (the
+    /// view's maps are [`BTreeMap`]s), so the same view hashes the same on every run.
+    pub fn digest(&self) -> B256 {
+        keccak256(serde_json::to_vec(self).expect("a view serializes"))
     }
 }
 
 /// A transaction's outcome in one line, for a test that snapshots more outcomes than a reviewer
 /// can read whole: how it ended — its kind, its reason and the limit that stopped it — every
-/// figure of [`MegaGasUsage`], the counts of [`LimitUsage`], and how many logs and touched
-/// accounts it has. The logs and the accounts themselves are the full view's ([`OutcomeView`]).
+/// figure of [`MegaGasUsage`], the counts of [`LimitUsage`], how many logs and touched accounts
+/// it has, and the digest of the full view ([`OutcomeView::digest`]).
+///
+/// The line shows the figures a reviewer reads; the digest stands for everything else the view
+/// holds — the result's output and created address, the logs' contents, the gas figures of revm's
+/// result, the oracle reads and the accounts themselves — so a change to any of them still changes
+/// the line, and the full views, dumped at two trees, show what changed.
 ///
 /// It serializes as that line, so a snapshot of many cases holds one line a case, and a change to
 /// a case shows as a change to its line.
@@ -112,11 +125,13 @@ pub struct OutcomeSummary {
     pub logs: usize,
     /// How many accounts the transaction touched.
     pub accounts: usize,
+    /// The full view's digest ([`OutcomeView::digest`]).
+    pub view: B256,
 }
 
 impl core::fmt::Display for OutcomeSummary {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let Self { kind, reason, limit_stop, gas, usage, logs, accounts } = self;
+        let Self { kind, reason, limit_stop, gas, usage, logs, accounts, view } = self;
         let kind = match kind {
             ResultKind::Success => "success",
             ResultKind::Revert => "revert",
@@ -143,7 +158,8 @@ impl core::fmt::Display for OutcomeSummary {
             f,
             "; regular {regular} state {state} history {history} history_bytes {history_bytes} \
              reservoir_remaining {reservoir_remaining} floor {floor} gas_used {gas_used}; \
-             data_size {data_size} write_records {write_records}; logs {logs} accounts {accounts}"
+             data_size {data_size} write_records {write_records}; logs {logs} accounts {accounts}; \
+             view {view}"
         )
     }
 }
@@ -723,11 +739,10 @@ mod tests {
         assert_eq!(halted.output, None);
     }
 
-    /// Every field the view copies moves it: each variant changes one field of the outcome, and
-    /// no two of them, nor any of them and the outcome, serialize alike.
-    #[test]
-    fn test_every_field_moves_the_view() {
-        type Change = fn(&mut MegaTransactionOutcome);
+    type Change = fn(&mut MegaTransactionOutcome);
+
+    /// Changes to the outcome, each to one field the view copies.
+    fn view_changes() -> Vec<(&'static str, Change)> {
         let changes: &[(&str, Change)] = &[
             ("result: revert", |o| o.result = revert(Bytes::from_static(&[0x01]))),
             ("result: revert output", |o| o.result = revert(Bytes::from_static(&[0x02]))),
@@ -840,8 +855,15 @@ mod tests {
                 storage.insert(U256::from(4), value);
             }),
         ];
+        changes.to_vec()
+    }
+
+    /// Every field the view copies moves it: each variant changes one field of the outcome, and
+    /// no two of them, nor any of them and the outcome, serialize alike.
+    #[test]
+    fn test_every_field_moves_the_view() {
         let mut seen = BTreeMap::from([(json(&outcome()), "the outcome")]);
-        for (name, change) in changes {
+        for (name, change) in view_changes() {
             let mut changed = outcome();
             change(&mut changed);
             let json = json(&changed);
@@ -855,6 +877,11 @@ mod tests {
         serde_json::to_string(&OutcomeView::new(outcome).summary()).unwrap()
     }
 
+    /// The summary's line without the digest: the figures it shows a reader.
+    fn readable(outcome: &MegaTransactionOutcome) -> String {
+        OutcomeSummary { view: B256::ZERO, ..OutcomeView::new(outcome).summary() }.to_string()
+    }
+
     /// The summary is one line of the view's figures, the same every time it is built and
     /// whatever order the state's map hands its accounts out in.
     #[test]
@@ -866,13 +893,23 @@ mod tests {
         assert_eq!(summary_json(&forward), summary_json(&reversed));
         assert_eq!(summary_json(&forward), summary_json(&forward));
 
-        let line = OutcomeView::new(&forward).summary().to_string();
+        let view = OutcomeView::new(&forward);
+        assert_eq!(
+            view.digest(),
+            keccak256(serde_json::to_string(&view).unwrap()),
+            "the digest is of the view's compact JSON"
+        );
+        let line = view.summary().to_string();
         assert_eq!(
             line,
-            "success Stop; stop DataSize limit 200 used 300; regular 50000 state 30000 \
-             history 10000 history_bytes 125 reservoir_remaining 5000 floor 21000 gas_used 86000; \
-             data_size 300 write_records 3; logs 1 accounts 18"
+            format!(
+                "success Stop; stop DataSize limit 200 used 300; regular 50000 state 30000 \
+                 history 10000 history_bytes 125 reservoir_remaining 5000 floor 21000 \
+                 gas_used 86000; data_size 300 write_records 3; logs 1 accounts 18; view {}",
+                view.digest()
+            )
         );
+        assert!(line.ends_with(&format!("; view 0x{:x}", view.digest())), "the digest in full");
         assert_eq!(summary_json(&forward), format!("\"{line}\""), "it serializes as the line");
 
         let mut stopless = outcome();
@@ -887,12 +924,26 @@ mod tests {
         );
     }
 
-    /// Every field the summary holds moves it: each variant changes one of them, and no two of
-    /// them, nor any of them and the outcome, serialize alike. What it leaves to the full view —
-    /// the logs' contents, the accounts' state — does not move it.
+    /// Every field the view copies moves the summary, through its digest where the line does not
+    /// show it: no change of [`view_changes`] summarizes like the outcome or like another.
     #[test]
-    fn test_every_field_moves_the_summary() {
-        type Change = fn(&mut MegaTransactionOutcome);
+    fn test_every_field_of_the_view_moves_the_summary() {
+        let mut seen = BTreeMap::from([(summary_json(&outcome()), "the outcome")]);
+        for (name, change) in view_changes() {
+            let mut changed = outcome();
+            change(&mut changed);
+            if let Some(twin) = seen.insert(summary_json(&changed), name) {
+                panic!("{name} summarizes like {twin}");
+            }
+        }
+    }
+
+    /// Every figure the line shows moves it without the digest: each variant changes one of them,
+    /// and no two of them, nor any of them and the outcome, read alike. What it leaves to the
+    /// full view — the logs' contents, the accounts' state, the oracle reads — moves the digest
+    /// alone.
+    #[test]
+    fn test_every_figure_the_line_shows_moves_it() {
         let changes: &[(&str, Change)] = &[
             ("result: revert", |o| o.result = revert(Bytes::from_static(&[0x01]))),
             ("result: halt", |o| o.result = halt(HaltReason::OutOfGas(OutOfGasError::Basic))),
@@ -932,12 +983,12 @@ mod tests {
             ("accounts: one more touched", |o| account_mut(o, LOADED).mark_touch()),
             ("accounts: one fewer touched", |o| account_mut(o, SENDER).unmark_touch()),
         ];
-        let mut seen = BTreeMap::from([(summary_json(&outcome()), "the outcome")]);
+        let mut seen = BTreeMap::from([(readable(&outcome()), "the outcome")]);
         for (name, change) in changes {
             let mut changed = outcome();
             change(&mut changed);
-            if let Some(twin) = seen.insert(summary_json(&changed), name) {
-                panic!("{name} summarizes like {twin}");
+            if let Some(twin) = seen.insert(readable(&changed), name) {
+                panic!("{name} reads like {twin}");
             }
         }
 
@@ -947,13 +998,32 @@ mod tests {
                 log.data =
                     LogData::new_unchecked(log.topics().to_vec(), Bytes::from_static(&[0xab]));
             }),
+            ("log: address", |o| logs_mut(o)[0].address = SENDER),
+            ("result: output", |o| {
+                if let ExecutionResult::Success { output, .. } = &mut o.result {
+                    *output = Output::Call(Bytes::from_static(&[0x02]));
+                }
+            }),
+            ("result gas: refunded", |o| {
+                let gas = result_gas_mut(o);
+                gas.set_refunded(gas.inner_refunded() + 1);
+            }),
             ("account: balance", |o| account_mut(o, SENDER).info.balance += U256::from(1)),
+            ("slot: present", |o| {
+                account_mut(o, CONTRACT).storage.get_mut(&U256::from(2)).unwrap().present_value =
+                    U256::from(8);
+            }),
             ("oracle read: answer", |o| o.oracle_reads[0].answer = None),
         ];
         for (name, change) in left_to_the_view {
             let mut changed = outcome();
             change(&mut changed);
-            assert_eq!(summary_json(&changed), summary_json(&outcome()), "{name}");
+            assert_eq!(readable(&changed), readable(&outcome()), "{name}: the line reads the same");
+            assert_ne!(
+                summary_json(&changed),
+                summary_json(&outcome()),
+                "{name}: the digest moved"
+            );
         }
     }
 }

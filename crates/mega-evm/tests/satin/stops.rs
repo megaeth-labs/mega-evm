@@ -56,7 +56,7 @@ use revm::{
 use crate::{
     cases::{by_case, InsertCase},
     common::{body_history, call, call_with_data, create, state_is_free},
-    detention::{context, summaries, work, Charges, BENEFICIARY},
+    detention::{context, work, Charges, BENEFICIARY},
     withheld_gas::{priced, Runs, PRICED},
 };
 
@@ -395,7 +395,7 @@ fn test_every_limit_stops_the_transaction_at_every_depth_and_tier() {
             }
         }
     }
-    crate::assert_sorted_json_snapshot!(&summaries(&views));
+    crate::assert_summaries_snapshot!(&views);
 }
 
 /// Rewrites every frame result it sees end into `into`, and leaves its gas as it is.
@@ -458,7 +458,7 @@ fn test_an_inspector_cannot_turn_a_stop_into_a_halt() {
             }
         }
     }
-    crate::assert_sorted_json_snapshot!(&summaries(&views));
+    crate::assert_summaries_snapshot!(&views);
 }
 
 /// The limits a cell runs under, and the stop's limit where it is known before the run: every
@@ -624,7 +624,7 @@ fn test_a_revived_creation_reports_the_stop() {
             }
         }
     }
-    crate::assert_sorted_json_snapshot!(&summaries(&views));
+    crate::assert_summaries_snapshot!(&views);
 }
 
 /* ---------- a detained callee does not burn its callers' gas ---------- */
@@ -730,7 +730,7 @@ fn test_a_callee_that_reads_the_timestamp_does_not_make_its_callers_burn_their_g
             .collect();
         assert!(bills.windows(2).all(|pair| pair[0] == pair[1]), "depth {depth}: {bills:?}");
     }
-    crate::assert_sorted_json_snapshot!(&summaries(&views));
+    crate::assert_summaries_snapshot!(&views);
 }
 
 /* ---------- frame budgets ---------- */
@@ -868,7 +868,7 @@ fn test_a_frame_budget_crossed_three_calls_down_reverts_that_frame_alone() {
             views.insert_case(case, OutcomeView::new(&outcome));
         }
     }
-    crate::assert_sorted_json_snapshot!(&summaries(&views));
+    crate::assert_summaries_snapshot!(&views);
 }
 
 /* ---------- halts ---------- */
@@ -941,7 +941,7 @@ fn test_a_halt_three_calls_down_burns_its_frames_gas_and_its_caller_resumes() {
             views.insert_case(format!("{case}, forwarded {large}"), OutcomeView::new(&large_run));
         }
     }
-    crate::assert_sorted_json_snapshot!(&summaries(&views));
+    crate::assert_summaries_snapshot!(&views);
 }
 
 /// The transaction's own frame that halts burns all its regular gas, with every limit armed: a
@@ -1843,7 +1843,7 @@ fn test_an_answer_three_calls_down_stops_the_transaction_at_either_tier() {
             assert_answered_cell(answered, gas_limit, &mut views);
         }
     }
-    crate::assert_sorted_json_snapshot!(&summaries(&views));
+    crate::assert_summaries_snapshot!(&views);
 }
 
 /// A frame three calls down whose start's records and transfer log cross the data-size limit is

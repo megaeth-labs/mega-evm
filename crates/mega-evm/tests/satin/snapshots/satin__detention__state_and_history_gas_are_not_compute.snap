@@ -4,7 +4,7 @@ expression: "&sweeps"
 ---
 {
   "gas limit 100000000": {
-    "summary": "success Stop; stop -; regular 17721910 state 78433920 history 2846800 history_bytes 32350 reservoir_remaining 0 floor 15000 gas_used 99002630; data_size 32350 write_records 801; logs 0 accounts 6",
+    "summary": "success Stop; stop -; regular 17721910 state 78433920 history 2846800 history_bytes 32350 reservoir_remaining 0 floor 15000 gas_used 99002630; data_size 32350 write_records 801; logs 0 accounts 6; view 0x60232248bfa3d0d2110a2ca049d7f22e05007d0dce4a56e7f56932b6d07b4d0e",
     "slots": {
       "distinct": {
         "0x0 -> 0x1": 801
@@ -14,7 +14,7 @@ expression: "&sweeps"
     }
   },
   "gas limit 300000000": {
-    "summary": "success Stop; stop -; regular 17721910 state 78433920 history 2846800 history_bytes 32350 reservoir_remaining 18719280 floor 15000 gas_used 99002630; data_size 32350 write_records 801; logs 0 accounts 6",
+    "summary": "success Stop; stop -; regular 17721910 state 78433920 history 2846800 history_bytes 32350 reservoir_remaining 18719280 floor 15000 gas_used 99002630; data_size 32350 write_records 801; logs 0 accounts 6; view 0x7aeac1630d7225ef84e791ac48f9d6ad517394367373d2d2be66538246148d25",
     "slots": {
       "distinct": {
         "0x0 -> 0x1": 801

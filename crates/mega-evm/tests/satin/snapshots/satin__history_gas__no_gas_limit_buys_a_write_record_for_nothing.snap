@@ -1,32 +1,32 @@
 ---
 source: crates/mega-evm/tests/satin/history_gas.rs
-expression: "&outcomes"
+expression: summaries
 ---
 {
   "a creation": {
-    "300000": "halt Base(OutOfGas(Basic)); stop -; regular 272720 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 300000; data_size 310 write_records 0; logs 0 accounts 5",
-    "400000": "halt Base(OutOfGas(Basic)); stop -; regular 372720 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 400000; data_size 310 write_records 0; logs 0 accounts 5",
-    "600000": "halt Base(OutOfGas(Basic)); stop -; regular 572720 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 600000; data_size 310 write_records 0; logs 0 accounts 5",
-    "800000": "success Stop; stop -; regular 47009 state 183600 history 34320 history_bytes 390 reservoir_remaining 0 floor 15000 gas_used 264929; data_size 550 write_records 2; logs 1 accounts 7",
-    "1000000": "success Stop; stop -; regular 47009 state 183600 history 34320 history_bytes 390 reservoir_remaining 0 floor 15000 gas_used 264929; data_size 550 write_records 2; logs 1 accounts 7",
-    "5000000": "success Stop; stop -; regular 47009 state 183600 history 34320 history_bytes 390 reservoir_remaining 0 floor 15000 gas_used 264929; data_size 550 write_records 2; logs 1 accounts 7",
-    "200000001": "success Stop; stop -; regular 47009 state 183600 history 34320 history_bytes 390 reservoir_remaining 0 floor 15000 gas_used 264929; data_size 550 write_records 2; logs 1 accounts 7",
-    "200013640": "success Stop; stop -; regular 47009 state 183600 history 34320 history_bytes 390 reservoir_remaining 0 floor 15000 gas_used 264929; data_size 550 write_records 2; logs 1 accounts 7",
-    "200030800": "success Stop; stop -; regular 47009 state 183600 history 34320 history_bytes 390 reservoir_remaining 0 floor 15000 gas_used 264929; data_size 550 write_records 2; logs 1 accounts 7",
-    "201000000": "success Stop; stop -; regular 47009 state 183600 history 34320 history_bytes 390 reservoir_remaining 782080 floor 15000 gas_used 264929; data_size 550 write_records 2; logs 1 accounts 7",
-    "300000000": "success Stop; stop -; regular 47009 state 183600 history 34320 history_bytes 390 reservoir_remaining 99782080 floor 15000 gas_used 264929; data_size 550 write_records 2; logs 1 accounts 7"
+    "300000": "halt Base(OutOfGas(Basic)); stop -; regular 272720 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 300000; data_size 310 write_records 0; logs 0 accounts 5; view 0xf81905fe0996bb0962b34c257a95894d4a430d84534b5d02adc4d1bd56b11a35",
+    "400000": "halt Base(OutOfGas(Basic)); stop -; regular 372720 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 400000; data_size 310 write_records 0; logs 0 accounts 5; view 0x40f7e4e7e8d067994d39c2ee6a3b1b688fe05022d67b398b4af8e3cfda68e639",
+    "600000": "halt Base(OutOfGas(Basic)); stop -; regular 572720 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 600000; data_size 310 write_records 0; logs 0 accounts 5; view 0x05064b9c2fe8ac2dee26de47137924f35b981245f8c58c76002b31904762d5ea",
+    "800000": "success Stop; stop -; regular 47009 state 183600 history 34320 history_bytes 390 reservoir_remaining 0 floor 15000 gas_used 264929; data_size 550 write_records 2; logs 1 accounts 7; view 0x90e9bec7081d682ae4ae30e4b5fbb31f45509bdb0cfc5e6ee3a36a0c2f291389",
+    "1000000": "success Stop; stop -; regular 47009 state 183600 history 34320 history_bytes 390 reservoir_remaining 0 floor 15000 gas_used 264929; data_size 550 write_records 2; logs 1 accounts 7; view 0x90e9bec7081d682ae4ae30e4b5fbb31f45509bdb0cfc5e6ee3a36a0c2f291389",
+    "5000000": "success Stop; stop -; regular 47009 state 183600 history 34320 history_bytes 390 reservoir_remaining 0 floor 15000 gas_used 264929; data_size 550 write_records 2; logs 1 accounts 7; view 0x90e9bec7081d682ae4ae30e4b5fbb31f45509bdb0cfc5e6ee3a36a0c2f291389",
+    "200000001": "success Stop; stop -; regular 47009 state 183600 history 34320 history_bytes 390 reservoir_remaining 0 floor 15000 gas_used 264929; data_size 550 write_records 2; logs 1 accounts 7; view 0x90e9bec7081d682ae4ae30e4b5fbb31f45509bdb0cfc5e6ee3a36a0c2f291389",
+    "200013640": "success Stop; stop -; regular 47009 state 183600 history 34320 history_bytes 390 reservoir_remaining 0 floor 15000 gas_used 264929; data_size 550 write_records 2; logs 1 accounts 7; view 0x90e9bec7081d682ae4ae30e4b5fbb31f45509bdb0cfc5e6ee3a36a0c2f291389",
+    "200030800": "success Stop; stop -; regular 47009 state 183600 history 34320 history_bytes 390 reservoir_remaining 0 floor 15000 gas_used 264929; data_size 550 write_records 2; logs 1 accounts 7; view 0x90e9bec7081d682ae4ae30e4b5fbb31f45509bdb0cfc5e6ee3a36a0c2f291389",
+    "201000000": "success Stop; stop -; regular 47009 state 183600 history 34320 history_bytes 390 reservoir_remaining 782080 floor 15000 gas_used 264929; data_size 550 write_records 2; logs 1 accounts 7; view 0x74814664d8a0e3e9ae549e8f8e0d19a1269ee5e70b3af2dce0919d108e26b1c3",
+    "300000000": "success Stop; stop -; regular 47009 state 183600 history 34320 history_bytes 390 reservoir_remaining 99782080 floor 15000 gas_used 264929; data_size 550 write_records 2; logs 1 accounts 7; view 0x32343ab9d65c38f6b7788bf831389ab53c2389a14b8eb3063cf759e7a520030c"
   },
   "a value call": {
-    "300000": "halt Base(OutOfGas(Basic)); stop -; regular 272720 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 300000; data_size 310 write_records 0; logs 0 accounts 5",
-    "400000": "halt Base(OutOfGas(Basic)); stop -; regular 372720 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 400000; data_size 310 write_records 0; logs 0 accounts 5",
-    "600000": "halt Base(OutOfGas(Basic)); stop -; regular 572720 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 600000; data_size 310 write_records 0; logs 0 accounts 5",
-    "800000": "success Stop; stop -; regular 49318 state 183600 history 34320 history_bytes 390 reservoir_remaining 0 floor 15000 gas_used 267238; data_size 550 write_records 2; logs 1 accounts 7",
-    "1000000": "success Stop; stop -; regular 49318 state 183600 history 34320 history_bytes 390 reservoir_remaining 0 floor 15000 gas_used 267238; data_size 550 write_records 2; logs 1 accounts 7",
-    "5000000": "success Stop; stop -; regular 49318 state 183600 history 34320 history_bytes 390 reservoir_remaining 0 floor 15000 gas_used 267238; data_size 550 write_records 2; logs 1 accounts 7",
-    "200000001": "success Stop; stop -; regular 49318 state 183600 history 34320 history_bytes 390 reservoir_remaining 0 floor 15000 gas_used 267238; data_size 550 write_records 2; logs 1 accounts 7",
-    "200013640": "success Stop; stop -; regular 49318 state 183600 history 34320 history_bytes 390 reservoir_remaining 0 floor 15000 gas_used 267238; data_size 550 write_records 2; logs 1 accounts 7",
-    "200030800": "success Stop; stop -; regular 49318 state 183600 history 34320 history_bytes 390 reservoir_remaining 0 floor 15000 gas_used 267238; data_size 550 write_records 2; logs 1 accounts 7",
-    "201000000": "success Stop; stop -; regular 49318 state 183600 history 34320 history_bytes 390 reservoir_remaining 782080 floor 15000 gas_used 267238; data_size 550 write_records 2; logs 1 accounts 7",
-    "300000000": "success Stop; stop -; regular 49318 state 183600 history 34320 history_bytes 390 reservoir_remaining 99782080 floor 15000 gas_used 267238; data_size 550 write_records 2; logs 1 accounts 7"
+    "300000": "halt Base(OutOfGas(Basic)); stop -; regular 272720 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 300000; data_size 310 write_records 0; logs 0 accounts 5; view 0xf81905fe0996bb0962b34c257a95894d4a430d84534b5d02adc4d1bd56b11a35",
+    "400000": "halt Base(OutOfGas(Basic)); stop -; regular 372720 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 400000; data_size 310 write_records 0; logs 0 accounts 5; view 0x40f7e4e7e8d067994d39c2ee6a3b1b688fe05022d67b398b4af8e3cfda68e639",
+    "600000": "halt Base(OutOfGas(Basic)); stop -; regular 572720 state 0 history 27280 history_bytes 310 reservoir_remaining 0 floor 15000 gas_used 600000; data_size 310 write_records 0; logs 0 accounts 5; view 0x05064b9c2fe8ac2dee26de47137924f35b981245f8c58c76002b31904762d5ea",
+    "800000": "success Stop; stop -; regular 49318 state 183600 history 34320 history_bytes 390 reservoir_remaining 0 floor 15000 gas_used 267238; data_size 550 write_records 2; logs 1 accounts 7; view 0xf523ebcc6563ea6256205f5e4f4e6e9ddf51f12e427711c97b53d633cdbad39d",
+    "1000000": "success Stop; stop -; regular 49318 state 183600 history 34320 history_bytes 390 reservoir_remaining 0 floor 15000 gas_used 267238; data_size 550 write_records 2; logs 1 accounts 7; view 0xf523ebcc6563ea6256205f5e4f4e6e9ddf51f12e427711c97b53d633cdbad39d",
+    "5000000": "success Stop; stop -; regular 49318 state 183600 history 34320 history_bytes 390 reservoir_remaining 0 floor 15000 gas_used 267238; data_size 550 write_records 2; logs 1 accounts 7; view 0xf523ebcc6563ea6256205f5e4f4e6e9ddf51f12e427711c97b53d633cdbad39d",
+    "200000001": "success Stop; stop -; regular 49318 state 183600 history 34320 history_bytes 390 reservoir_remaining 0 floor 15000 gas_used 267238; data_size 550 write_records 2; logs 1 accounts 7; view 0xf523ebcc6563ea6256205f5e4f4e6e9ddf51f12e427711c97b53d633cdbad39d",
+    "200013640": "success Stop; stop -; regular 49318 state 183600 history 34320 history_bytes 390 reservoir_remaining 0 floor 15000 gas_used 267238; data_size 550 write_records 2; logs 1 accounts 7; view 0xf523ebcc6563ea6256205f5e4f4e6e9ddf51f12e427711c97b53d633cdbad39d",
+    "200030800": "success Stop; stop -; regular 49318 state 183600 history 34320 history_bytes 390 reservoir_remaining 0 floor 15000 gas_used 267238; data_size 550 write_records 2; logs 1 accounts 7; view 0xf523ebcc6563ea6256205f5e4f4e6e9ddf51f12e427711c97b53d633cdbad39d",
+    "201000000": "success Stop; stop -; regular 49318 state 183600 history 34320 history_bytes 390 reservoir_remaining 782080 floor 15000 gas_used 267238; data_size 550 write_records 2; logs 1 accounts 7; view 0x5904a4bbda5e6d663ea362e89660c3ab985c0bb5177188d383a4fcd47ae1ed00",
+    "300000000": "success Stop; stop -; regular 49318 state 183600 history 34320 history_bytes 390 reservoir_remaining 99782080 floor 15000 gas_used 267238; data_size 550 write_records 2; logs 1 accounts 7; view 0x02fce7d9c0dfd212dd8fb077c7c5021745516b092b85b64bcaf614dd657b9cfe"
   }
 }

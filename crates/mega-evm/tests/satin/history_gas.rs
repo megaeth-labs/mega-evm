@@ -429,13 +429,10 @@ fn test_no_gas_limit_buys_a_write_record_for_nothing() {
                 TX_BODY_SIZE + outcome.usage.write_records * WRITE_RECORD_SIZE,
                 "at a {limit} gas limit: and the bytes reported",
             );
-            outcomes
-                .entry(site)
-                .or_default()
-                .insert_case(limit, OutcomeView::new(&outcome).summary());
+            outcomes.entry(site).or_default().insert_case(limit, OutcomeView::new(&outcome));
         }
     }
-    crate::assert_sorted_json_snapshot!(&outcomes);
+    crate::assert_summaries_snapshot!(&outcomes);
 }
 
 /* ---------- the writes every transaction makes ---------- */
