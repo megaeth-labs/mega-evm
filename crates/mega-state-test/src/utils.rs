@@ -24,7 +24,10 @@ pub struct TestValidationResult {
 pub fn compute_test_roots(
     exec_result: &Result<
         ExecutionResult<MegaHaltReason>,
-        EVMError<Infallible, MegaTransactionError>,
+        EVMError<
+            mega_evm::revm::database_interface::bal::EvmDatabaseError<Infallible>,
+            MegaTransactionError,
+        >,
     >,
     db: &State<EmptyDB>,
 ) -> TestValidationResult {

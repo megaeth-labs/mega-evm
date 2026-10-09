@@ -12,7 +12,7 @@ use std::{
 };
 
 use alloy_evm::{
-    block::{BlockExecutor, BlockValidationError, OnStateHook, StateChangeSource},
+    block::{BlockExecutor, BlockValidationError, OnStateHook},
     Evm, EvmEnv,
 };
 use alloy_hardforks::{EthereumHardfork, ForkCondition};
@@ -128,18 +128,32 @@ fn light_external_envs() -> TestExternalEnvs<Infallible, SingleBucketHasher> {
     TestExternalEnvs::<Infallible, SingleBucketHasher>::new()
 }
 
-/// Recording state hook that captures every `(StateChangeSource, EvmState)`
-/// pair the block executor reports, so a test can assert that a failed
-/// pre-block call's state delta did NOT enter the witness path.
+/// Recording state hook that captures every `EvmState` delta the block executor
+/// commits, so a test can assert that a failed pre-block call's state delta did
+/// NOT enter the witness path.
+///
+/// The commit hook no longer carries a `StateChangeSource` label, so a pre-block
+/// call is identified by the system-contract address its delta touches:
+/// `HISTORY_STORAGE_ADDRESS` for EIP-2935 and `BEACON_ROOTS_ADDRESS` for EIP-4788.
 #[derive(Debug, Default, Clone)]
 struct RecordingStateHook {
-    events: Arc<Mutex<Vec<StateChangeSource>>>,
+    events: Arc<Mutex<Vec<EvmState>>>,
 }
 
 impl OnStateHook for RecordingStateHook {
-    fn on_state(&mut self, source: StateChangeSource, _state: &EvmState) {
-        self.events.lock().unwrap().push(source);
+    fn on_state(&mut self, state: &EvmState) {
+        self.events.lock().unwrap().push(state.clone());
     }
+}
+
+/// Whether any recorded delta changed the state of `address`.
+fn touched(recorded: &[EvmState], address: Address) -> bool {
+    recorded.iter().any(|state| state.contains_key(&address))
+}
+
+/// Every address that appears in a recorded delta, for assertion messages.
+fn recorded_addresses(recorded: &[EvmState]) -> Vec<Address> {
+    recorded.iter().flat_map(|state| state.keys().copied()).collect()
 }
 
 /// Block setup with parent_hash = nonzero (so EIP-2935 actually runs the
@@ -171,16 +185,18 @@ fn test_rex5_block_rejected_when_blockhashes_pre_block_call_halts() {
         evm_factory,
         OpAlloyReceiptBuilder::default(),
     );
+    // Recording state hook so we can also pin the witness-path invariant. The hook lives on
+    // the `State` database and fires from `DatabaseCommit::commit`, so install it before the
+    // executor takes its `&mut` borrow.
+    let recorder = RecordingStateHook::default();
+    let events = recorder.events.clone();
+    state.set_state_hook(Some(Box::new(recorder)));
+
     let mut executor = block_executor_factory.create_executor(
         &mut state,
         block_ctx(),
         create_evm_env(MegaSpecId::REX5, BLOCK_GAS_LIMIT),
     );
-
-    // Recording state hook so we can also pin the witness-path invariant.
-    let recorder = RecordingStateHook::default();
-    let events = recorder.events.clone();
-    BlockExecutor::set_state_hook(&mut executor, Some(Box::new(recorder)));
 
     let err = executor
         .apply_pre_execution_changes()
@@ -197,18 +213,12 @@ fn test_rex5_block_rejected_when_blockhashes_pre_block_call_halts() {
 
     // The failed pre-block call's state delta must not reach the on-state hook.
     let recorded = events.lock().unwrap();
-    let saw_block_hashes = recorded.iter().any(|s| {
-        matches!(
-            s,
-            StateChangeSource::PreBlock(
-                alloy_evm::block::StateChangePreBlockSource::BlockHashesContract
-            )
-        )
-    });
+    let saw_block_hashes = touched(&recorded, alloy_eips::eip2935::HISTORY_STORAGE_ADDRESS);
     assert!(
         !saw_block_hashes,
         "Failed EIP-2935 pre-block call's state delta must NOT enter the on-state \
-         witness path; recorded sources: {recorded:?}"
+         witness path; recorded addresses: {:?}",
+        recorded_addresses(&recorded)
     );
 }
 
@@ -369,46 +379,34 @@ fn test_rex5_block_aware_budget_accepts_pre_block_call_above_30m() {
         evm_factory,
         OpAlloyReceiptBuilder::default(),
     );
+    let recorder = RecordingStateHook::default();
+    let events = recorder.events.clone();
+    state.set_state_hook(Some(Box::new(recorder)));
+
     let mut executor = block_executor_factory.create_executor(
         &mut state,
         block_ctx(),
         create_evm_env(MegaSpecId::REX5, BLOCK_GAS_LIMIT),
     );
 
-    let recorder = RecordingStateHook::default();
-    let events = recorder.events.clone();
-    BlockExecutor::set_state_hook(&mut executor, Some(Box::new(recorder)));
-
     executor
         .apply_pre_execution_changes()
         .expect("REX5 block-aware budget must accept pre-block SSTORE costs above the 30M floor");
 
     let recorded = events.lock().unwrap();
-    let saw_block_hashes = recorded.iter().any(|s| {
-        matches!(
-            s,
-            StateChangeSource::PreBlock(
-                alloy_evm::block::StateChangePreBlockSource::BlockHashesContract
-            )
-        )
-    });
-    let saw_beacon_root = recorded.iter().any(|s| {
-        matches!(
-            s,
-            StateChangeSource::PreBlock(
-                alloy_evm::block::StateChangePreBlockSource::BeaconRootContract
-            )
-        )
-    });
+    let saw_block_hashes = touched(&recorded, alloy_eips::eip2935::HISTORY_STORAGE_ADDRESS);
+    let saw_beacon_root = touched(&recorded, alloy_eips::eip4788::BEACON_ROOTS_ADDRESS);
     assert!(
         saw_block_hashes,
         "EIP-2935 pre-block call must succeed at ≈100M cost under the block-aware \
-         REX5 budget; sources: {recorded:?}",
+         REX5 budget; recorded addresses: {:?}",
+        recorded_addresses(&recorded),
     );
     assert!(
         saw_beacon_root,
         "EIP-4788 pre-block call must succeed at ≈100M cost under the block-aware \
-         REX5 budget; sources: {recorded:?}",
+         REX5 budget; recorded addresses: {:?}",
+        recorded_addresses(&recorded),
     );
 }
 
@@ -427,15 +425,15 @@ fn test_rex5_successful_pre_block_call_commits_normally() {
         evm_factory,
         OpAlloyReceiptBuilder::default(),
     );
+    let recorder = RecordingStateHook::default();
+    let events = recorder.events.clone();
+    state.set_state_hook(Some(Box::new(recorder)));
+
     let mut executor = block_executor_factory.create_executor(
         &mut state,
         block_ctx(),
         create_evm_env(MegaSpecId::REX5, BLOCK_GAS_LIMIT),
     );
-
-    let recorder = RecordingStateHook::default();
-    let events = recorder.events.clone();
-    BlockExecutor::set_state_hook(&mut executor, Some(Box::new(recorder)));
 
     executor
         .apply_pre_execution_changes()
@@ -443,29 +441,17 @@ fn test_rex5_successful_pre_block_call_commits_normally() {
 
     // Both EIP-2935 and EIP-4788 outcomes appear in the witness path.
     let recorded = events.lock().unwrap();
-    let saw_block_hashes = recorded.iter().any(|s| {
-        matches!(
-            s,
-            StateChangeSource::PreBlock(
-                alloy_evm::block::StateChangePreBlockSource::BlockHashesContract
-            )
-        )
-    });
-    let saw_beacon_root = recorded.iter().any(|s| {
-        matches!(
-            s,
-            StateChangeSource::PreBlock(
-                alloy_evm::block::StateChangePreBlockSource::BeaconRootContract
-            )
-        )
-    });
+    let saw_block_hashes = touched(&recorded, alloy_eips::eip2935::HISTORY_STORAGE_ADDRESS);
+    let saw_beacon_root = touched(&recorded, alloy_eips::eip4788::BEACON_ROOTS_ADDRESS);
     assert!(
         saw_block_hashes,
-        "Successful EIP-2935 pre-block call must reach the on-state hook; sources: {recorded:?}"
+        "Successful EIP-2935 pre-block call must reach the on-state hook; recorded addresses: {:?}",
+        recorded_addresses(&recorded)
     );
     assert!(
         saw_beacon_root,
-        "Successful EIP-4788 pre-block call must reach the on-state hook; sources: {recorded:?}"
+        "Successful EIP-4788 pre-block call must reach the on-state hook; recorded addresses: {:?}",
+        recorded_addresses(&recorded)
     );
 }
 
@@ -528,32 +514,26 @@ fn test_prague_inactive_skips_blockhashes_pre_block_call() {
     let evm_factory = MegaEvmFactory::new().with_external_env_factory(light_external_envs());
     let block_executor_factory =
         MegaBlockExecutorFactory::new(chain_spec, evm_factory, OpAlloyReceiptBuilder::default());
+    let recorder = RecordingStateHook::default();
+    let events = recorder.events.clone();
+    state.set_state_hook(Some(Box::new(recorder)));
+
     let mut executor = block_executor_factory.create_executor(
         &mut state,
         block_ctx(),
         create_evm_env(MegaSpecId::REX5, BLOCK_GAS_LIMIT),
     );
 
-    let recorder = RecordingStateHook::default();
-    let events = recorder.events.clone();
-    BlockExecutor::set_state_hook(&mut executor, Some(Box::new(recorder)));
-
     executor
         .apply_pre_execution_changes()
         .expect("Prague-inactive helper must skip silently, not error the block");
 
     let recorded = events.lock().unwrap();
-    let saw_block_hashes = recorded.iter().any(|s| {
-        matches!(
-            s,
-            StateChangeSource::PreBlock(
-                alloy_evm::block::StateChangePreBlockSource::BlockHashesContract
-            )
-        )
-    });
+    let saw_block_hashes = touched(&recorded, alloy_eips::eip2935::HISTORY_STORAGE_ADDRESS);
     assert!(
         !saw_block_hashes,
-        "Prague-inactive helper must NOT enter the witness path; sources: {recorded:?}",
+        "Prague-inactive helper must NOT enter the witness path; recorded addresses: {:?}",
+        recorded_addresses(&recorded),
     );
 }
 
@@ -571,32 +551,26 @@ fn test_cancun_inactive_skips_beacon_root_pre_block_call() {
     let evm_factory = MegaEvmFactory::new().with_external_env_factory(light_external_envs());
     let block_executor_factory =
         MegaBlockExecutorFactory::new(chain_spec, evm_factory, OpAlloyReceiptBuilder::default());
+    let recorder = RecordingStateHook::default();
+    let events = recorder.events.clone();
+    state.set_state_hook(Some(Box::new(recorder)));
+
     let mut executor = block_executor_factory.create_executor(
         &mut state,
         block_ctx(),
         create_evm_env(MegaSpecId::REX5, BLOCK_GAS_LIMIT),
     );
 
-    let recorder = RecordingStateHook::default();
-    let events = recorder.events.clone();
-    BlockExecutor::set_state_hook(&mut executor, Some(Box::new(recorder)));
-
     executor
         .apply_pre_execution_changes()
         .expect("Cancun-inactive helper must skip silently, not error the block");
 
     let recorded = events.lock().unwrap();
-    let saw_beacon_root = recorded.iter().any(|s| {
-        matches!(
-            s,
-            StateChangeSource::PreBlock(
-                alloy_evm::block::StateChangePreBlockSource::BeaconRootContract
-            )
-        )
-    });
+    let saw_beacon_root = touched(&recorded, alloy_eips::eip4788::BEACON_ROOTS_ADDRESS);
     assert!(
         !saw_beacon_root,
-        "Cancun-inactive helper must NOT enter the witness path; sources: {recorded:?}",
+        "Cancun-inactive helper must NOT enter the witness path; recorded addresses: {:?}",
+        recorded_addresses(&recorded),
     );
 }
 

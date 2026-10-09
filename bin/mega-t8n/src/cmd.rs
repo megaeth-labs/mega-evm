@@ -7,11 +7,11 @@ use mega_evm::{
             block::BlockEnv, cfg::CfgEnv, either::Either, result::ExecutionResult, tx::TxEnv,
         },
         database::{CacheState, EmptyDB, State},
-        primitives::{eip4844, hardfork::SpecId, Bytes, TxKind, B256},
+        primitives::{eip4844, Bytes, TxKind, B256},
         state::{AccountInfo, Bytecode},
         ExecuteCommitEvm,
     },
-    MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
+    MegaContext, MegaEvm, MegaSpecId, MegaTransaction, MegaTransactionNew as _,
 };
 use state_test::types::Env;
 
@@ -149,7 +149,7 @@ impl Cmd {
         // Setup configuration
         let mut cfg = CfgEnv::default();
         cfg.chain_id = self.chain_id;
-        cfg.spec = self.spec_id();
+        cfg.set_spec_and_mainnet_gas_params(self.spec_id());
 
         // Setup block environment
         let block = self.create_block_env(&inputs.env);
@@ -215,7 +215,7 @@ impl Cmd {
 
             match &exec_result {
                 Ok(result) => {
-                    let tx_gas_used = result.gas_used();
+                    let tx_gas_used = result.tx_gas_used();
                     total_gas_used += tx_gas_used;
 
                     // Determine if execution was successful based on execution result type
@@ -331,6 +331,7 @@ impl Cmd {
             difficulty: env.current_difficulty,
             prevrandao: env.current_random.map(|i| i.into()),
             blob_excess_gas_and_price: None,
+            slot_num: 0,
         };
 
         // Set blob excess gas from currentExcessBlobGas if available
@@ -346,9 +347,7 @@ impl Cmd {
 
     /// Create initial state from prestate allocation
     fn create_initial_state(&self, alloc: &StateAlloc) -> Result<State<EmptyDB>> {
-        // Determine state clear flag based on EVM spec (Spurious Dragon and later)
-        let has_state_clear = self.spec_id().into_eth_spec().is_enabled_in(SpecId::SPURIOUS_DRAGON);
-        let mut cache_state = CacheState::new(has_state_clear);
+        let mut cache_state = CacheState::new();
 
         for (address, info) in alloc {
             let bytecode = Bytecode::new_raw_checked(info.code.clone())
@@ -360,6 +359,7 @@ impl Cmd {
                 code_hash,
                 code: Some(bytecode),
                 nonce: info.nonce,
+                account_id: None,
             };
 
             cache_state.insert_account_with_storage(

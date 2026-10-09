@@ -29,7 +29,7 @@ use mega_evm::{
     sandbox::{calculate_keyless_deploy_address, decode_error_result, KeylessDeployError},
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, IKeylessDeploy, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    MegaTransaction, TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS,
+    MegaTransaction, MegaTransactionNew as _, TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS,
 };
 use revm::{
     bytecode::opcode::{DELEGATECALL, MSTORE8, POP, RETURN, SELFDESTRUCT},
@@ -317,8 +317,8 @@ fn test_rex6_keyless_overhead_oog_rescues_parent_gas() {
         None,
     );
 
-    let gas_used_rex5 = result_rex5.gas_used();
-    let gas_used_rex6 = result_rex6.gas_used();
+    let gas_used_rex5 = result_rex5.tx_gas_used();
+    let gas_used_rex6 = result_rex6.tx_gas_used();
     assert!(
         gas_used_rex6 < gas_used_rex5,
         "REX6 must rescue parent gas on tx-level compute exceed: REX6={gas_used_rex6} \

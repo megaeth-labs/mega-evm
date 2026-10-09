@@ -13,9 +13,10 @@ use std::convert::Infallible;
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
+    alloy_op_evm::OpTxError,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, IMegaAccessControl, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    MegaTransaction, MegaTransactionError, ACCESS_CONTROL_ADDRESS,
+    MegaTransaction, MegaTransactionNew as _, ACCESS_CONTROL_ADDRESS,
 };
 use revm::{
     bytecode::opcode::*,
@@ -53,7 +54,7 @@ fn transact(
     spec: MegaSpecId,
     db: &mut MemoryDatabase,
     tx: TxEnv,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, OpTxError>> {
     let mut context =
         MegaContext::new(db, spec).with_tx_runtime_limits(EvmTxRuntimeLimits::from_spec(spec));
     context.modify_chain(|chain| {
@@ -93,7 +94,7 @@ fn transact_with_limits(
     db: &mut MemoryDatabase,
     tx: TxEnv,
     limits: EvmTxRuntimeLimits,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, OpTxError>> {
     let mut context = MegaContext::new(db, spec).with_tx_runtime_limits(limits);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
@@ -484,6 +485,63 @@ fn test_log1_value_transfer_succeeds_at_zero_gas_rex5() {
     }
 }
 
+/// Pins the REX5 SSTORE storage-gas residual arithmetic
+/// (`sstore_set_storage_gas - drained`).
+///
+/// Under REX the Mega surcharge is `BASE × (multiplier − 1)`, so the default
+/// min-bucket multiplier of 1 yields a zero surcharge and makes
+/// `base - drained` observationally identical to `base + drained`. A multiplier
+/// of 10 yields a non-zero base; with the storage-call stipend draining `23_000`,
+/// flipping `-` to `+` inflates the residual by `2 × drained` and is visible in
+/// total gas used.
+#[test]
+fn test_sstore_storage_gas_residual_subtracts_drained_stipend_rex5() {
+    use mega_evm::{SaltEnv, TestExternalEnvs, MIN_BUCKET_SIZE};
+
+    const MULTIPLIER: u64 = 10;
+    const SSTORE_SET_STORAGE_GAS_BASE: u64 = 20_000;
+    const STORAGE_CALL_STIPEND: u64 = 23_000;
+
+    let sender_code = build_value_transfer_with_gas(RECEIVER, 500_000);
+    let receiver_code = build_sstore_receiver();
+
+    let run = |multiplier: u64| -> u64 {
+        let mut db =
+            setup_db(&[(SENDER_CONTRACT, sender_code.clone()), (RECEIVER, receiver_code.clone())]);
+        // Price the first-write slot against a non-min bucket so the REX surcharge is non-zero.
+        let slot_bucket = TestExternalEnvs::<Infallible>::bucket_id_for_slot(RECEIVER, U256::ZERO);
+        let external_envs = TestExternalEnvs::<Infallible>::new()
+            .with_bucket_capacity(slot_bucket, MIN_BUCKET_SIZE as u64 * multiplier);
+
+        let mut context = MegaContext::new(&mut db, MegaSpecId::REX5)
+            .with_external_envs(external_envs.into())
+            .with_tx_runtime_limits(EvmTxRuntimeLimits::from_spec(MegaSpecId::REX5));
+        context.modify_chain(|chain| {
+            chain.operator_fee_scalar = Some(U256::from(0));
+            chain.operator_fee_constant = Some(U256::from(0));
+        });
+        let mut evm = MegaEvm::new(context);
+        let mut tx = MegaTransaction::new(default_tx());
+        tx.enveloped_tx = Some(Bytes::new());
+        let result = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("tx must not error");
+        assert!(result.result.is_success(), "execution must succeed: {:?}", result.result);
+        result.result.tx_gas_used()
+    };
+
+    let gas_mult1 = run(1);
+    let gas_mult10 = run(MULTIPLIER);
+    // Residual after stipend drain: BASE*(M-1) - min(STIPEND, BASE*(M-1)).
+    let base_mult10 = SSTORE_SET_STORAGE_GAS_BASE * (MULTIPLIER - 1);
+    let drained = STORAGE_CALL_STIPEND.min(base_mult10);
+    let expected_extra = base_mult10 - drained;
+    assert_eq!(
+        gas_mult10 - gas_mult1,
+        expected_extra,
+        "SSTORE residual must be base-drained (not base+drained); mult1={gas_mult1} \
+         mult10={gas_mult10}",
+    );
+}
+
 /// First-time-write SSTORE inside `receive()` succeeds on REX5 when forwarded gas
 /// covers the standard EIP-2200 cost. The 20,000 Mega `sstore_set_storage_gas`
 /// surcharge drains from the 23,000 allowance.
@@ -845,14 +903,16 @@ fn test_stipend_receiving_child_tx_level_rescue_rex5() {
     match &result.result {
         ExecutionResult::Halt {
             reason: MegaHaltReason::VolatileDataAccessOutOfGas { limit, .. },
-            gas_used,
+            gas,
+            ..
         } => {
+            let gas_used = gas.tx_gas_used();
             assert!(
                 *limit <= 1_000_000,
                 "detained limit should stay within the tx compute gas limit, got {limit}"
             );
             assert!(
-                *gas_used < 200_000,
+                gas_used < 200_000,
                 "REX5 rescue_gas must refund excess gas — gas_used {gas_used} indicates no \
                  refund occurred. Allowance must NOT inflate the rescued amount; it never \
                  entered gas.limit() on REX5"

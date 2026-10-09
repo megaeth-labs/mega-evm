@@ -79,9 +79,6 @@ pub struct Env {
     /// Parent block excess blob gas (EIP-4844)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_excess_blob_gas: Option<U256>,
-    /// Parent block target blobs per block (EIP-4844)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent_target_blobs_per_block: Option<U256>,
     /// Current block excess blob gas (EIP-4844)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_excess_blob_gas: Option<U256>,

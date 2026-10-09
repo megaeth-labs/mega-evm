@@ -26,8 +26,9 @@ use mega_evm::{
         KeylessDeployError,
     },
     test_utils::{ErrorInjectingDatabase, MemoryDatabase},
-    EVMError, IKeylessDeploy, MegaContext, MegaEvm, MegaSpecId, MegaTransaction, TestExternalEnvs,
-    KEYLESS_DEPLOY_ADDRESS, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
+    EVMError, IKeylessDeploy, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
+    MegaTransactionNew as _, TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS, MEGA_SYSTEM_ADDRESS,
+    ORACLE_CONTRACT_ADDRESS,
 };
 use revm::{context::TxEnv, inspector::NoOpInspector};
 

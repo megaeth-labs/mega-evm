@@ -12,7 +12,8 @@ use std::convert::Infallible;
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
     test_utils::MemoryDatabase, EthHaltReason, EvmTxRuntimeLimits, MegaContext, MegaEvm,
-    MegaHaltReason, MegaSpecId, MegaTransaction, OpHaltReason, TestExternalEnvs,
+    MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionNew as _, OpHaltReason,
+    TestExternalEnvs,
 };
 use revm::{
     context::{

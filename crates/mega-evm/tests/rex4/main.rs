@@ -1,15 +1,26 @@
 //! Tests for `Rex4` hardfork features.
 
 mod access_control;
+mod access_list_preload;
 mod beneficiary_detention;
+mod call_stipend_forwarding;
 mod create_safety;
+mod declined_reads;
 mod deployment;
 mod eip7702_delegation_cycle;
+mod first_frame_target_read;
 mod frame_limits;
 mod frame_state_growth;
 mod gas_detention;
+mod halt_logs_stripped;
+mod inspector_frame_run_parity;
 mod intrinsic_limit_bypass;
 mod keyless_deploy;
 mod limit_control;
 mod selfdestruct_state_growth;
+mod short_stack_halts;
 mod storage_call_stipend;
+mod unreached_call_target_coldness;
+mod unreached_load_detention;
+mod unreached_read_residency;
+mod volatile_guard_gas;

@@ -19,11 +19,12 @@ use std::convert::Infallible;
 
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
+    alloy_op_evm::OpTxError,
     constants::rex::NEW_ACCOUNT_STORAGE_GAS_BASE,
     test_utils::{BytecodeBuilder, ErrorInjectingDatabase, InjectedDbError, MemoryDatabase},
     BucketId, EVMError, EmptyExternalEnv, EvmTxRuntimeLimits, ExternalEnvs, MegaContext, MegaEvm,
-    MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionError, SaltEnv, TestExternalEnvs,
-    MIN_BUCKET_SIZE,
+    MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionNew as _, SaltEnv,
+    TestExternalEnvs, MIN_BUCKET_SIZE,
 };
 use revm::{
     bytecode::opcode::{CALL, CALLCODE, STOP},
@@ -92,7 +93,7 @@ fn transact(
     callee: Address,
     value: U256,
     gas_limit: u64,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, OpTxError>> {
     let mut context =
         MegaContext::new(db, spec).with_external_envs(external_envs.into()).with_tx_runtime_limits(
             EvmTxRuntimeLimits::no_limits()
@@ -132,7 +133,7 @@ fn run_with_target_multiplier(spec: MegaSpecId, bytecode: Bytes, target_multipli
     let result = transact(spec, &mut db, &external_envs, CALLER, CALLEE, U256::ZERO, 10_000_000)
         .expect("transaction must succeed");
     assert!(result.result.is_success(), "execution must succeed: {:?}", result.result);
-    result.result.gas_used()
+    result.result.tx_gas_used()
 }
 
 // ============================================================================
@@ -206,7 +207,7 @@ fn test_rex5_callcode_from_eip7702_authority_no_storage_gas() {
         )
         .expect("transaction must succeed");
         assert!(result.result.is_success(), "execution must succeed: {:?}", result.result);
-        result.result.gas_used()
+        result.result.tx_gas_used()
     };
 
     let gas_baseline = run(1, 1);
@@ -283,6 +284,65 @@ fn test_rex4_call_to_empty_charges_new_account_storage_gas() {
 }
 
 // ============================================================================
+// CALL + EIP-7702: pre-REX5 must follow delegation for emptiness (instructions.rs:1901)
+// ============================================================================
+
+/// Pre-REX5 `wrap_call_with_storage_gas!` resolves emptiness via
+/// `inspect_account_delegated`, then prices `new_account_storage_gas` against the
+/// **stack target** address (not the resolved account).
+///
+/// Setup: CALL value to a 7702 designator whose delegate is empty.
+/// - Emptiness follows the hop → empty → charge fires.
+/// - Pricing uses the designator's SALT bucket.
+///
+/// A forced REX5 non-delegating inspect sees the designator's EIP-7702 code
+/// (non-empty) and skips the charge, so gas becomes invariant under the
+/// designator bucket multiplier — that is the kill signal for
+/// `instructions.rs:1901:REX5:true`.
+#[test]
+fn test_rex4_call_to_eip7702_empty_delegate_charges_new_account_storage_gas() {
+    // Stack target is a 7702 designator whose delegate is the empty account.
+    const DESIGNATOR: Address = address!("5000000000000000000000000000000000000001");
+
+    let run = |designator_multiplier: u64| -> u64 {
+        let mut db = MemoryDatabase::default()
+            .account_balance(CALLER, U256::from(1_000_000_000_000u64))
+            .account_balance(CALLEE, U256::from(1_000_000_000u64))
+            .account_code(CALLEE, call_bytecode(DESIGNATOR));
+        set_eip7702_delegation(&mut db, DESIGNATOR, EMPTY_TARGET);
+
+        let designator_bucket = TestExternalEnvs::<Infallible>::bucket_id_for_account(DESIGNATOR);
+        let external_envs = TestExternalEnvs::new().with_bucket_capacity(
+            designator_bucket,
+            MIN_BUCKET_SIZE as u64 * designator_multiplier,
+        );
+
+        let result = transact(
+            MegaSpecId::REX4,
+            &mut db,
+            &external_envs,
+            CALLER,
+            CALLEE,
+            U256::ZERO,
+            10_000_000,
+        )
+        .expect("transaction must succeed");
+        assert!(result.result.is_success(), "execution must succeed: {:?}", result.result);
+        result.result.tx_gas_used()
+    };
+
+    let gas_mult1 = run(1);
+    let gas_mult10 = run(10);
+    let expected_extra = NEW_ACCOUNT_STORAGE_GAS_BASE * 9;
+    assert_eq!(
+        gas_mult10 - gas_mult1,
+        expected_extra,
+        "REX4 CALL to EIP-7702 designator→empty must charge new-account storage gas \
+         (emptiness via delegated inspect; pricing against the designator address)",
+    );
+}
+
+// ============================================================================
 // Error-path tests — coverage for FatalExternalError branches in call_code
 // ============================================================================
 
@@ -313,7 +373,7 @@ fn transact_with_error_db(
     caller: Address,
     callee: Address,
     gas_limit: u64,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<InjectedDbError, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<InjectedDbError, OpTxError>> {
     let external_envs = TestExternalEnvs::<Infallible>::new();
     let mut context =
         MegaContext::new(db, spec).with_external_envs(external_envs.into()).with_tx_runtime_limits(
@@ -345,7 +405,7 @@ fn transact_with_failing_salt(
     caller: Address,
     callee: Address,
     gas_limit: u64,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, OpTxError>> {
     let envs: ExternalEnvs<(FailingSaltEnv, EmptyExternalEnv)> =
         ExternalEnvs { salt_env: FailingSaltEnv, oracle_env: EmptyExternalEnv };
     let mut context = MegaContext::new(db, spec).with_external_envs(envs).with_tx_runtime_limits(

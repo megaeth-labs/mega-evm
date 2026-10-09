@@ -16,9 +16,9 @@ use mega_evm::{
         tests::{CREATE2_FACTORY_CONTRACT, CREATE2_FACTORY_DEPLOYER, CREATE2_FACTORY_TX},
     },
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    IKeylessDeploy, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, SaltEnv,
-    TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS, MIN_BUCKET_SIZE, ORACLE_CONTRACT_ADDRESS,
-    ORACLE_CONTRACT_CODE_REX2,
+    IKeylessDeploy, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    MegaTransactionNew as _, SaltEnv, TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS, MIN_BUCKET_SIZE,
+    ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_REX2,
 };
 use revm::{
     bytecode::opcode::{CALL, GAS, MSTORE, POP, PUSH0, RETURN},

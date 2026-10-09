@@ -45,8 +45,8 @@ impl Account {
 
 /// A single `transact()` call, backend-agnostic. Mirrors the minimal set of
 /// fields every adapter needs; kept deliberately small so it does not tie the
-/// abstraction to one revm version's `TxEnv` (the pinned and latest stacks are
-/// separate crates and each translates this into its own envelope).
+/// abstraction to any one stack's `TxEnv` — each subject translates this into
+/// its own envelope.
 #[derive(Clone)]
 pub struct TxSpec {
     pub caller: Address,

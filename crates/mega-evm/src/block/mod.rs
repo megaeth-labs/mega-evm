@@ -19,11 +19,20 @@
 //!
 //! [`MegaBlockExecutor::pre_execution_changes`] collects `Option<EvmState>` outcomes from each
 //! pre-block helper, and [`MegaBlockExecutor::commit_system_call_outcomes`] walks them calling
-//! `system_caller.on_state(source, &state)` **before** `db.commit(state)` for every entry. The
-//! `on_state` hook feeds the stateless witness generator with the complete read/write set, so
-//! helpers must return all accounts and slots they touched — including pure reads on
-//! idempotent no-change paths. See `crates/mega-evm/src/system/AGENTS.md` →
-//! `PRE-BLOCK STATE CHANGE CONTRACT` for the helper-side contract.
+//! `db.commit(state)` for every entry.
+//!
+//! The state hook that feeds the stateless witness generator is installed on the revm `State`
+//! database itself (`State::set_state_hook`) and fires from inside `DatabaseCommit::commit`, so
+//! the commit is what records the outcome — there is no separate pre-commit notification for the
+//! executor to make, and nothing may reach the state without going through `commit`. The hook
+//! receives only the state diff, so the `source` label on each
+//! [`crate::MegaSystemCallOutcome`] no longer reaches it; it is retained for in-crate use, such
+//! as attributing an outcome while debugging.
+//!
+//! The recorded set is still whatever the helper returns, so the helper-side contract is
+//! unchanged: helpers must return all accounts and slots they touched — including pure reads on
+//! idempotent no-change paths — or a stateless client cannot verify the block against its
+//! pre-state.
 //!
 //! # Resource Limit Enforcement
 //!

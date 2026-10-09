@@ -1,6 +1,6 @@
 use alloy_consensus::{transaction::Recovered, Transaction};
 use alloy_eips::{eip2930::AccessList, eip7702::SignedAuthorization, Encodable2718, Typed2718};
-use alloy_evm::{IntoTxEnv, RecoveredTx};
+use alloy_evm::{RecoveredTx, ToTxEnv};
 use alloy_primitives::{Address, Bytes, ChainId, Selector, TxHash, TxKind, B256, U256};
 use auto_impl::auto_impl;
 use delegate::delegate;
@@ -177,10 +177,12 @@ impl<Tx, T: RecoveredTx<Tx>> RecoveredTx<Tx> for EnrichedMegaTx<T> {
     }
 }
 
-impl<Tx, T: IntoTxEnv<Tx>> IntoTxEnv<Tx> for EnrichedMegaTx<T> {
+// `IntoTxEnv` is blanket-implemented from `ToTxEnv`, so implementing it directly here would
+// conflict with that blanket impl.
+impl<Tx, T: ToTxEnv<Tx>> ToTxEnv<Tx> for EnrichedMegaTx<T> {
     delegate! {
         to self.inner {
-            fn into_tx_env(self) -> Tx;
+            fn to_tx_env(&self) -> Tx;
         }
     }
 }
@@ -191,6 +193,7 @@ impl<T: Copy> Copy for EnrichedMegaTx<T> {}
 mod tests {
     use super::*;
     use alloy_consensus::{transaction::Recovered, Signed, TxLegacy};
+    use alloy_evm::IntoTxEnv;
     use alloy_primitives::{address, bytes::BufMut, Signature};
     use revm::context::TxEnv;
 
@@ -307,9 +310,9 @@ mod tests {
         }
     }
 
-    impl IntoTxEnv<TxEnv> for MockRecoveredTx {
-        fn into_tx_env(self) -> TxEnv {
-            self.tx
+    impl ToTxEnv<TxEnv> for MockRecoveredTx {
+        fn to_tx_env(&self) -> TxEnv {
+            self.tx.clone()
         }
     }
 

@@ -340,3 +340,63 @@ fn test_mixed_deposit_and_regular_transactions() {
     let (_, receipts) = block_result.unwrap();
     assert_eq!(receipts.receipts.len(), 2, "Should have 2 receipts (small regular + deposit)");
 }
+
+/// The DA exemption must survive the split commit path: `run_transaction` +
+/// `commit_transaction_outcome` is the same commit as `execute_transaction`, so a deposit whose
+/// DA size exceeds the block limit must still commit. The deposit signal travels as the
+/// `depositor` record — this test goes red if the commit path stops treating `Some` as deposit
+/// (e.g. `depositor.is_some()` hardened to `false` in `commit_tx_result`).
+#[test]
+fn test_deposit_exempt_via_split_run_and_commit() {
+    let mut db = MemoryDatabase::default();
+    db.set_account_code(CONTRACT, Bytes::new());
+    db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000u64));
+
+    let mut state = State::builder().with_database(&mut db).build();
+
+    let external_envs = TestExternalEnvs::<Infallible>::new();
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
+
+    let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.spec = MegaSpecId::MINI_REX;
+    let block_env = BlockEnv {
+        number: U256::from(1000),
+        timestamp: U256::from(1_800_000_000),
+        gas_limit: 30_000_000,
+        ..Default::default()
+    };
+    let evm_env = EvmEnv::new(cfg_env, block_env);
+    let evm = evm_factory.create_evm(&mut state, evm_env);
+
+    // Strict block DA limit, so only the deposit exemption lets the transaction through.
+    let block_ctx = MegaBlockExecutionCtx::new(
+        B256::ZERO,
+        None,
+        Bytes::new(),
+        BlockLimits::no_limits()
+            .with_block_gas_limit(30_000_000)
+            .with_tx_da_size_limit(DA_SIZE_LIMIT * 10)
+            .with_block_da_size_limit(DA_SIZE_LIMIT),
+    );
+
+    use alloy_hardforks::ForkCondition;
+    use mega_evm::MegaHardfork;
+    let chain_spec =
+        MegaHardforkConfig::default().with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
+    let receipt_builder = OpAlloyReceiptBuilder::default();
+    let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
+
+    let deposit_tx = create_deposit_transaction_with_large_calldata();
+    assert!(deposit_tx.estimated_da_size() > DA_SIZE_LIMIT);
+
+    let outcome = executor
+        .run_transaction(&deposit_tx)
+        .expect("deposit must pass admission despite exceeding block_da_size_limit");
+    let gas_used = executor.commit_transaction_outcome(outcome).expect(
+        "deposit must pass commit-time re-validation despite exceeding block_da_size_limit",
+    );
+    assert!(gas_used > 0, "committed deposit must report its gas");
+
+    let (_, receipts) = executor.finish().expect("block should finish");
+    assert_eq!(receipts.receipts.len(), 1, "the deposit must have committed a receipt");
+}

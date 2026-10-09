@@ -8,9 +8,7 @@ use revm::{
     Database,
 };
 
-use crate::{
-    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionError,
-};
+use crate::{MegaContext, MegaEvm, MegaHaltReason, MegaSpecId};
 
 /// Executes a transaction on the EVM.
 pub fn transact<DB>(
@@ -20,7 +18,7 @@ pub fn transact<DB>(
     callee: Option<Address>,
     data: Bytes,
     value: U256,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<DB::Error, MegaTransactionError>>
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<DB::Error, alloy_op_evm::OpTxError>>
 where
     DB: Database + Debug,
     DB::Error: Send + Sync + Debug + 'static,
@@ -39,7 +37,7 @@ where
         gas_limit: 1000000000000000000,
         ..Default::default()
     };
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = crate::MegaTransaction(op_revm::OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx)
 }

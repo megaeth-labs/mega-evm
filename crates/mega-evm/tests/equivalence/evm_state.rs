@@ -84,7 +84,7 @@ fn test_state_clear_with_noop_call() {
     assert!(result.state.get(&empty_account).unwrap().is_touched());
 
     // apply the state changes and get the transitions
-    let transitions = state.cache.apply_evm_state(result.state);
+    let transitions = state.cache.apply_evm_state(result.state, |_, _| {});
     let (_, transition) =
         transitions.iter().find(|(address, _)| *address == empty_account).unwrap();
     // assert that the storage is marked as destroyed
