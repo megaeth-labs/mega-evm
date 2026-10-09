@@ -1570,7 +1570,9 @@ fn test_state_and_history_gas_are_not_compute() {
     // two each, then the writes, on top of the intrinsic gas.
     let state = slots * crate::salt::entry(GasId::sstore_set_state_gas());
     let history_bytes = TX_BODY_SIZE + slots * WRITE_RECORD_SIZE;
-    let history = history_gas(history_bytes).expect("the history has a price");
+    // The body and each slot's record are charges of their own, each priced on its own.
+    let history = history_gas(TX_BODY_SIZE).expect("the body has a price") +
+        slots * history_gas(WRITE_RECORD_SIZE).expect("a record has a price");
     let compute = 2 + 2 + slots * FRESH_WRITE;
     assert!(compute < CAP, "the writes' compute fits under the cap");
     let written: Vec<SlotView> = (1..=slots)

@@ -30,7 +30,8 @@ use mega_evm::{
     },
     satin_gas_params,
     test_utils::{
-        op_transaction, transfer_log, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase,
+        note_price_guard, op_transaction, transfer_log, zero_fee_l1_block_info, BytecodeBuilder,
+        MemoryDatabase,
     },
     MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransactionOutcome, TX_BODY_SIZE,
     WRITE_RECORD_SIZE,
@@ -778,8 +779,10 @@ fn test_a_crowded_salt_bucket_is_where_satin_leaves_op_revm() {
 ///
 /// Each engine runs one gas short of what the same transfer spends on it when it succeeds, so
 /// each falls short on the last charge of the phase at any byte price: op-revm has no history to
-/// charge and needs less, or, where a history byte costs nothing, the same. Where a state byte
-/// costs nothing there is no such charge on op-revm, and the case returns early.
+/// charge and needs less by exactly the body's history and the record's, each a charge priced on
+/// its own — nothing where a history byte costs nothing, or so little that both round to nothing.
+/// Where a state byte costs nothing there is no such charge on op-revm, and the case returns
+/// early.
 #[test]
 fn test_an_out_of_gas_before_the_first_frame_matches_op_revm() {
     if crate::common::state_is_free() {
@@ -797,11 +800,11 @@ fn test_an_out_of_gas_before_the_first_frame_matches_op_revm() {
     assert!(mega_success.result.is_success() && op_success.result.is_success());
     let mega_limit = mega_success.result.gas().total_gas_spent() - 1;
     let op_limit = op_success.result.gas().total_gas_spent() - 1;
-    if crate::common::history_is_free() {
-        assert_eq!(mega_limit, op_limit, "no history to charge on top");
-    } else {
-        assert!(mega_limit > op_limit, "Satin charges the body's and the record's history on top");
-    }
+    assert_eq!(
+        mega_limit - op_limit,
+        body_history(0) + history(WRITE_RECORD_SIZE),
+        "Satin charges the body's and the record's history on top",
+    );
 
     let (mega, _, cfg) = run_both(db(), transfer(mega_limit));
     let op = run_op_alone(db(), transfer(op_limit));
@@ -829,11 +832,16 @@ fn test_an_out_of_gas_before_the_first_frame_matches_op_revm() {
 /// limit. Satin runs out on the history of the record its own frame would make, the one charge of
 /// the phase it adds; op-revm on EIP-2780's charge for the created account, its last.
 ///
-/// Where a history byte costs nothing Satin's phase has nothing of its own left to charge, and the
-/// case returns early.
+/// Where a record's history is nothing — a history byte that costs nothing, or so little that a
+/// record rounds to nothing — Satin's phase has nothing of its own left to charge, and the case
+/// returns early with a note.
 #[test]
 fn test_an_out_of_gas_creation_before_the_first_frame_matches_op_revm() {
-    if crate::common::history_is_free() || crate::common::state_is_free() {
+    if crate::common::state_is_free() {
+        return;
+    }
+    if history(WRITE_RECORD_SIZE) == 0 {
+        note_price_guard("a write record's history rounds to nothing at these prices");
         return;
     }
     let db = || MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18)));
