@@ -20,14 +20,15 @@ use mega_evm::{
     test_utils::{op_transaction, MemoryDatabase},
     MegaEvm, MegaTransaction, TX_BODY_SIZE,
 };
+use op_revm::OpTransactionError;
 use revm::{
     context::{
-        result::{ExecutionResult, InvalidTransaction},
+        result::{EVMError, ExecutionResult, InvalidTransaction},
         transaction::{AccessList, AccessListItem, TransactionType},
         TxEnv,
     },
     primitives::B256,
-    Database,
+    Database, ExecuteCommitEvm, ExecuteEvm,
 };
 
 use crate::common::{call, context, create, runs_at_measurement_prices};
@@ -284,7 +285,10 @@ fn test_the_execution_cap_bounds_the_calldata_a_transaction_may_carry() {
 }
 
 /// A floor above the transaction's own gas limit is rejected too, below the cap: the floor is
-/// measured against whichever of the two is smaller.
+/// measured against whichever of the two is smaller. The rejection leaves the sender as it was.
+///
+/// Rules: [S4.26], [S21.1], [S21.2]. Independence: independent — the base, the floor's rate and the
+/// sender's funding are written out.
 #[test]
 fn test_a_floor_above_the_gas_limit_is_rejected() {
     let gas_limit = 100_000;
@@ -295,23 +299,42 @@ fn test_a_floor_above_the_gas_limit_is_rejected() {
         Bytes::from(vec![0u8; len as usize]),
         gas_limit,
     );
-    let expected = format!(
-        "{:?}",
+    assert_rejected_and_sender_untouched(
+        tx,
         InvalidTransaction::GasFloorMoreThanGasLimit {
             gas_floor: EMPTY_CALL + FLOOR_PER_BYTE * len,
             gas_limit,
-        }
+        },
     );
-    assert_eq!(gas_used(funded(), tx), Err(expected));
-    assert_sender_untouched();
 }
 
-/// The sender's nonce and balance are untouched by a transaction validation rejected.
-fn assert_sender_untouched() {
-    let mut db = funded();
-    let info = db.basic(CALLER).unwrap().unwrap();
-    assert_eq!(info.nonce, 0);
-    assert_eq!(info.balance, U256::from(10u64.pow(18)));
+/// Validation rejects `tx` with `expected` on an EVM over [`funded`], through alloy-evm and through
+/// revm's own entry point, and the sender is untouched in the database the second EVM ran on.
+///
+/// That EVM runs `tx` as a block builder runs one transaction after another, without finalizing
+/// it, and then commits what its journal holds: whatever the rejection left behind for the next
+/// transaction reaches the database, where [`assert_sender_untouched`] reads the sender.
+fn assert_rejected_and_sender_untouched(tx: MegaTransaction, expected: InvalidTransaction) {
+    assert_eq!(gas_used(funded(), tx.clone()), Err(format!("{expected:?}")), "through alloy-evm");
+    let mut evm = MegaEvm::new(context(funded()));
+    match ExecuteEvm::transact_one(&mut evm, tx) {
+        Err(EVMError::Transaction(invalid)) => assert_eq!(
+            format!("{invalid:?}"),
+            format!("{:?}", OpTransactionError::Base(expected)),
+            "the rejection"
+        ),
+        other => panic!("expected the rejection {expected:?}, got {other:?}"),
+    }
+    ExecuteCommitEvm::commit_inner(&mut evm);
+    assert_sender_untouched(evm.db_mut());
+}
+
+/// The sender's nonce and balance in `db`, the database a rejected transaction ran on, are what
+/// [`funded`] gave it.
+fn assert_sender_untouched(db: &mut MemoryDatabase) {
+    let info = db.basic(CALLER).expect("the database reads").expect("the sender exists");
+    assert_eq!(info.nonce, 0, "the sender's nonce");
+    assert_eq!(info.balance, U256::from(10u64.pow(18)), "the sender's balance");
 }
 
 /* ---------- the state component is charged where it happens ---------- */
@@ -357,17 +380,18 @@ fn test_a_creation_that_cannot_pay_its_account_runs_out_of_gas() {
 
 /// A gas limit below the intrinsic charge itself is a validation rejection, which leaves the
 /// sender untouched.
+///
+/// Rules: [S4.25], [S21.1]. Independence: independent — the intrinsic charge and the sender's
+/// funding are written out.
 #[test]
 fn test_a_gas_limit_below_the_intrinsic_charge_is_rejected() {
-    let expected = format!(
-        "{:?}",
+    assert_rejected_and_sender_untouched(
+        call(CALLER, CALLEE, U256::ZERO, EMPTY_CALL - 1),
         InvalidTransaction::CallGasCostMoreThanGasLimit {
             gas_limit: EMPTY_CALL - 1,
             initial_gas: EMPTY_CALL,
-        }
+        },
     );
-    assert_eq!(gas_used(funded(), call(CALLER, CALLEE, U256::ZERO, EMPTY_CALL - 1)), Err(expected));
-    assert_sender_untouched();
 }
 
 /// A plain call within its limits still goes through, so the checks above are not too eager.
@@ -381,26 +405,23 @@ fn test_a_valid_call_still_passes() {
 
 /// A gas limit that covers the intrinsic charge but not the body's history is a validation
 /// rejection too, naming the whole figure: the bytes a transaction carries are part of what makes
-/// it valid, so a transaction that cannot pay for them is never included.
+/// it valid, so a transaction that cannot pay for them is never included, and leaves the sender
+/// untouched.
+///
+/// Rules: [S4.25], [S7.17], [S21.1]. Independence: independent for the intrinsic charge and the
+/// sender's funding, which are written out; the body's history is priced by the production
+/// helper.
 #[test]
 fn test_a_gas_limit_short_of_the_body_is_rejected() {
     if runs_at_measurement_prices() {
         return;
     }
     let minimum = EMPTY_CALL + body_history(0);
-    let expected = |gas_limit| {
-        format!(
-            "{:?}",
-            InvalidTransaction::CallGasCostMoreThanGasLimit { gas_limit, initial_gas: minimum }
-        )
-    };
     for gas_limit in [EMPTY_CALL, EMPTY_CALL + 1, minimum - 1] {
-        assert_eq!(
-            gas_used(funded(), call(CALLER, CALLEE, U256::ZERO, gas_limit)),
-            Err(expected(gas_limit)),
-            "a gas limit of {gas_limit} does not cover the body",
+        assert_rejected_and_sender_untouched(
+            call(CALLER, CALLEE, U256::ZERO, gas_limit),
+            InvalidTransaction::CallGasCostMoreThanGasLimit { gas_limit, initial_gas: minimum },
         );
     }
     assert_eq!(gas_used(funded(), call(CALLER, CALLEE, U256::ZERO, minimum)), Ok(minimum));
-    assert_sender_untouched();
 }
