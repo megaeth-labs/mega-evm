@@ -1752,17 +1752,13 @@ fn test_replay_block_verify_block_after_an_abort_is_unavailable() {
 }
 
 /// A body listing with a transaction left out still sits under an authentic
-/// header, since the header hash does not cover the listing. Whole-block mode
-/// takes its targets from that listing, so nothing is incoherent for a target to
-/// fail on: every listed transaction replays. The served body does not rebuild
-/// the header's transactions root, which depends only on what the endpoint
-/// served, so the block verdict is the endpoint's failure to answer — the error
-/// shape, rpc-class (exit 3) — rather than a divergence of the replay.
-///
-/// With `--verify-receipt` too, the receipts served for the forged listing are
-/// the whole listed body's, so they are authenticated as a set — and one
-/// committed receipt short, they do not rebuild the header's receipts root. No
-/// receipt verdict rests on them either: every one is unverified.
+/// header, since the header hash does not cover the listing. The served body
+/// does not rebuild the header's transactions root, which depends only on what
+/// the endpoint served, so the block verdict is the endpoint's failure to answer
+/// — the error shape, rpc-class (exit 3) — rather than a divergence of the
+/// replay. The body is checked before the block runs, so nothing executes: every
+/// listed target goes unanswered with the block, with or without
+/// `--verify-receipt`.
 #[test]
 fn test_replay_block_forged_body_listing_is_unverified() {
     let (dropped, dropped_index) = BLOCK_TXS[2];
@@ -1781,24 +1777,20 @@ fn test_replay_block_forged_body_listing_is_unverified() {
     );
     let _ = std::fs::remove_file(&path);
 
-    for ((stdout, code), verify_receipt) in [(block_only, false), (with_receipts, true)] {
+    for (stdout, code) in [block_only, with_receipts] {
         assert_eq!(code, Some(3), "a body the header does not commit to is unanswered: {stdout}");
         let error = run_error(&stdout);
         let lines = ndjson(&stdout);
         let (targets, block_line) = common::split_one_block(lines);
         let verdict = &block_line["block_verification"];
 
-        assert_eq!(targets.len(), BLOCK_TX_COUNT - 1, "only the listed transactions replay");
+        assert_eq!(targets.len(), BLOCK_TX_COUNT - 1, "one line per listed transaction");
         for line in &targets {
-            assert!(line.get("error").is_none(), "every listed transaction replays: {line}");
-            if verify_receipt {
-                assert!(
-                    line["verification"]["error"]
-                        .as_str()
-                        .is_some_and(|m| m.contains("receipts the block does not commit to")),
-                    "the forged listing's receipts are unverified: {line}"
-                );
-            }
+            assert_eq!(line["error"]["kind"].as_str(), Some("rpc"), "nothing executes: {line}");
+            assert!(
+                line["error"]["message"].as_str().is_some_and(|m| m.contains("does not commit to")),
+                "every listed transaction goes unanswered with the block: {line}"
+            );
         }
         assert!(
             verdict.get("match").is_none(),
@@ -1812,17 +1804,50 @@ fn test_replay_block_forged_body_listing_is_unverified() {
             "{verdict}"
         );
         assert_eq!(error["error"]["kind"].as_str(), Some("rpc-failure"));
-        let expected = if verify_receipt {
-            format!(
-                "{0} of {0} target transaction(s) failed (0 execution, {0} rpc); 1 block(s) \
-                 could not be verified against the block header",
-                BLOCK_TX_COUNT - 1
-            )
-        } else {
-            "1 block(s) could not be verified against the block header".to_string()
-        };
+        let expected = format!(
+            "{0} of {0} target transaction(s) failed (0 execution, {0} rpc); 1 block(s) could \
+             not be verified against the block header",
+            BLOCK_TX_COUNT - 1
+        );
         assert_eq!(error["error"]["message"].as_str(), Some(expected.as_str()));
     }
+}
+
+/// A transaction left out of the listing whose sender sends again later in the
+/// block: executing the forged body would stop on the later transaction's nonce
+/// gap and report an execution failure. The body is authenticated before the
+/// block runs, so the forgery is reported for what it is — a body the header
+/// does not commit to, rpc-class (exit 3) — and nothing executes.
+#[test]
+fn test_replay_block_forged_listing_with_a_nonce_gap_is_unverified_not_aborted() {
+    // Index 2 and index 12 share a sender; without index 2, index 12 is a
+    // nonce ahead of the sender's account.
+    let (dropped, _) = EXEC_ABORT_TX;
+    let path = DoctoredEnvelope::load(envelope())
+        .remove_from_block_body(BLOCK, &[dropped])
+        .write_to_temp("verify_block_forged_nonce_gap");
+
+    let (stdout, code) = replay_envelope_with_code(
+        &path,
+        &["--block", &BLOCK.to_string(), "--verify-block", "--json"],
+    );
+    let _ = std::fs::remove_file(&path);
+    let error = run_error(&stdout);
+    let (targets, block_line) = common::split_one_block(ndjson(&stdout));
+
+    assert_eq!(code, Some(3), "a forged body is unanswered, not an execution failure: {stdout}");
+    assert_eq!(targets.len(), BLOCK_TX_COUNT - 1, "{stdout}");
+    assert!(
+        targets.iter().all(|line| line["error"]["kind"].as_str() == Some("rpc")),
+        "nothing executes, so no target has a result or an execution error: {stdout}"
+    );
+    let verdict = block_line["block_verification"]["error"].as_str().unwrap_or_default();
+    assert!(
+        verdict.contains("the endpoint served a block body the header does not commit to"),
+        "the verdict names the uncommitted body: {verdict}"
+    );
+    assert!(!verdict.contains("did not execute in full"), "no execution abort: {verdict}");
+    assert_eq!(error["error"]["kind"].as_str(), Some("rpc-failure"));
 }
 
 /// An authentic header served with an emptied listing: whole-block mode has no
@@ -2075,4 +2100,80 @@ fn test_replay_tx_file_partial_receipts_are_compared_as_served() {
         "{}",
         lines[0]
     );
+}
+
+/// Under `--verify-block` the body is fetched and authenticated before the
+/// block runs, then handed to the execution, so each transaction is still
+/// looked up once — as it is without the flag.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_verify_block_looks_each_body_transaction_up_once() {
+    use common::mock_chain as chain;
+    use mega_evm::alloy_eips::Encodable2718;
+    use serde_json::json;
+
+    // The mock block, its header committing to the one transaction it lists.
+    let (tx_hash, _) = chain::tx_identity();
+    let root = alloy_consensus::proofs::ordered_trie_root_with_encoder(
+        &[chain::tx_envelope()],
+        |tx, buf| tx.encode_2718(buf),
+    );
+    let mut header = chain::block_json(chain::BLOCK, &chain::parent_hash(), json!([tx_hash]));
+    header["transactionsRoot"] = json!(root);
+    let block = common::sealed_block(header);
+
+    for verify_block in [false, true] {
+        let server = common::MockRpcServer::start().await;
+        server.respond_eth_chain_id(chain::CHAIN_ID, 1).await;
+        server
+            .respond_method_params_json(
+                "eth_getBlockByNumber",
+                json!([format!("0x{:x}", chain::BLOCK), false]),
+                block.clone(),
+                2,
+            )
+            .await;
+        server
+            .respond_method_params_json(
+                "eth_getBlockByNumber",
+                json!([format!("0x{:x}", chain::BLOCK - 1), false]),
+                chain::block_json(chain::BLOCK - 1, chain::GRANDPARENT_HASH, json!([])),
+                2,
+            )
+            .await;
+        server.respond_method_json("eth_getTransactionByHash", chain::mined_tx_json(), 3).await;
+        chain::respond_account_reads(&server, 4).await;
+
+        let uri = server.uri();
+        let block_number = chain::BLOCK.to_string();
+        let mut args = vec!["replay", "--block", &block_number, "--rpc", &uri];
+        args.extend(["--rpc.max-retries", "0", "--rpc.backoff-ms", "1", "--json"]);
+        if verify_block {
+            args.push("--verify-block");
+        }
+        let run: common::Run =
+            mega_evme().args(&args).output().expect("failed to run mega-evme").into();
+
+        assert_eq!(
+            server.received_method_count("eth_getTransactionByHash").await,
+            1,
+            "--verify-block={verify_block}: the body transaction is looked up once.\nstdout: {}\nstderr: {}",
+            run.stdout,
+            run.stderr
+        );
+        let lines = run.results();
+        assert!(
+            lines
+                .iter()
+                .filter(|line| !common::is_block_line(line))
+                .all(|line| line["success"] == true),
+            "the transaction executes: {}",
+            run.stdout
+        );
+        if verify_block {
+            // The mock header's execution commitments are placeholders, so the
+            // verdict is compared — a mismatch — rather than unanswered.
+            let (_, block_line) = common::split_one_block(lines);
+            assert_eq!(block_line["block_verification"]["match"], false, "{block_line}");
+        }
+    }
 }

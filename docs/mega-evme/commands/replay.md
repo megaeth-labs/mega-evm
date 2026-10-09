@@ -345,10 +345,12 @@ Only valid with [`--block <N>`](#--block-n): a single-transaction replay stops a
 Both are rejected before anything is fetched, with exit `1`.
 The flag is independent of [`--verify-receipt`](#receipt-verification): either can be given alone, or both together.
 
-Once every transaction of the block has executed and the block has been finished, the served body is checked first.
-The ordered trie over the EIP-2718 encodings of the transactions the replay executed — each the encoding that was authenticated against its body-listed hash, in listing order — must rebuild the header's transactions root.
+The served body is checked first, before the block executes.
+Every listed transaction is fetched and authenticated against its body-listed hash, and the ordered trie over their EIP-2718 encodings, in listing order, must rebuild the header's transactions root.
 That root depends only on what the endpoint served, never on execution, so a body that does not rebuild it is not a divergence of the replay: the endpoint served a body the header does not commit to (a listing with a transaction left out, added, or reordered under an authentic header, whose hash does not cover the listing).
-The verdict is then the error shape, and the block counts as an RPC failure.
+The verdict is then the error shape, the block counts as an RPC failure, and nothing executes: every transaction of the block is reported as an RPC failure with the block.
+Checking the body first keeps a forgery that would stop execution — a transaction left out, so that the next one from its sender is a nonce ahead — from being reported as an execution failure.
+A listed transaction that cannot be fetched or authenticated leaves the body unchecked; the block then executes as it would without the flag, and that transaction's failure is reported as usual.
 
 Only for a body the header commits to are the execution commitments the replayed block produces compared against the header:
 
@@ -364,7 +366,7 @@ Whether that header is the canonical one is not something the replay can establi
 The state root and the withdrawals root are not compared.
 `MegaETH` commits to its state in a SALT trie rather than a Merkle-Patricia trie, and a replay over forked RPC state — online or from a capture — holds no proofs to rebuild either root from.
 
-Block verification issues no RPC call of its own, so a capture recorded by a plain `--block` run verifies offline.
+Block verification issues no RPC call of its own: it fetches the body's transactions before the block runs rather than while it runs, each once, so a capture recorded by a plain `--block` run verifies offline.
 
 An empty listing is still a claim about the block, so `--verify-block` does not let it pass silently: where a plain `--block` run reports that the block holds no transactions and exits `0`, a verifying run emits a block line for it.
 Nothing executes; the header must link to its parent and commit to the empty body, and the execution commitments are those of an empty body — the empty receipts root, an empty bloom, zero gas, zero blob gas, and no requests, since the block executor produces receipts, gas and requests only for transactions.

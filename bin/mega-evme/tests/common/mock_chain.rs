@@ -41,14 +41,11 @@ pub(crate) const RECIPIENT: &str = "0x681e908b8ab57c49c74d770f369754ccc3e1ae09";
 /// verification or a fidelity gate matches.
 pub(crate) const GAS_USED: u64 = 21_000;
 
-/// The authentic identity of the transaction: `(hash, from)`.
-///
-/// Builds the same consensus object the replay will deserialize from
-/// [`tx_json`], hashes its encoding, and recovers its signer — the two values
-/// the replay authenticates the served answer against.
-pub(crate) fn tx_identity() -> (String, String) {
+/// The transaction as a consensus object: the one the replay deserializes from
+/// [`tx_json`].
+pub(crate) fn tx_envelope() -> mega_evm::op_alloy_consensus::OpTxEnvelope {
     use mega_evm::{
-        alloy_consensus::{transaction::SignerRecoverable, SignableTransaction, TxEip1559},
+        alloy_consensus::{SignableTransaction, TxEip1559},
         op_alloy_consensus::OpTxEnvelope,
     };
 
@@ -68,9 +65,19 @@ pub(crate) fn tx_identity() -> (String, String) {
         SIG_S.parse().expect("s is a hex word"),
         false,
     );
-    let signed = tx.into_signed(signature);
-    let hash = format!("{:#x}", signed.hash());
-    let from = OpTxEnvelope::Eip1559(signed).recover_signer().expect("signature recovers");
+    OpTxEnvelope::Eip1559(tx.into_signed(signature))
+}
+
+/// The authentic identity of the transaction: `(hash, from)`.
+///
+/// Hashes the encoding of [`tx_envelope`] and recovers its signer — the two
+/// values the replay authenticates the served answer against.
+pub(crate) fn tx_identity() -> (String, String) {
+    use mega_evm::alloy_consensus::transaction::SignerRecoverable;
+
+    let envelope = tx_envelope();
+    let hash = format!("{:#x}", envelope.tx_hash());
+    let from = envelope.recover_signer().expect("signature recovers");
     (hash, format!("{from:#x}"))
 }
 

@@ -18,9 +18,13 @@
 //! about. Offline, those come back as `rpc` entries and the run exits `3`.
 //!
 //! `--verify-block` (whole-block mode only) adds one verdict per block, after
-//! the block's target lines: once the kernel hands back the block it executed
-//! in full, the commitments it produces are compared against the block's
-//! authenticated header ([`super::header`]). It issues no extra RPC call.
+//! the block's target lines. The served body is authenticated against the
+//! header's transactions root before the block runs, and a body the header does
+//! not commit to is reported without executing. Once the kernel hands back the
+//! block it executed in full, the commitments it produces are compared against
+//! the block's authenticated header ([`super::header`]). It issues no extra RPC
+//! call: the body's transactions are fetched before the block runs, each once,
+//! instead of while it runs.
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -1097,6 +1101,32 @@ where
         );
     }
 
+    // Under `--verify-block` the served body is authenticated before anything
+    // executes. A forged listing can make execution abort — a transaction left
+    // out leaves the next one from its sender with a nonce gap — and an abort
+    // would otherwise hide the forgery behind an execution failure. A body the
+    // header does not commit to is the endpoint's failure: nothing is executed,
+    // and every target goes unanswered with the block. The transactions fetched
+    // here are handed to the kernel, so each is still fetched once; without the
+    // flag the kernel fetches the body itself, as it always has.
+    let served = if verify_block {
+        match fetch_served_body(provider, &block, &block_tx_order).await {
+            ServedBody::Committed(transactions) | ServedBody::Prefix(transactions) => transactions,
+            ServedBody::Uncommitted(incoherence) => {
+                let message = incoherence.to_string();
+                return BlockReplayOutcome::ordered(
+                    fail_remaining(&targets, entries, BatchErrorKind::Rpc, &message),
+                    &job_targets,
+                    Some(&block_tx_order),
+                    None,
+                )
+                .with_block(Some(BlockReport::unanswered(&block, message)));
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
     // Fetch the on-chain receipts before the block runs. Needed for
     // `--verify-receipt` (mismatch vs unverified) and for `--dump-fixture-dir`
     // (fidelity gate). A receipt that cannot be fetched, or that describes a
@@ -1154,8 +1184,14 @@ where
     let target_set: HashSet<B256> = targets.iter().copied().collect();
     // Prefer the already-collected body order so stream ordering and the kernel
     // walk the same sequence.
-    let body: Vec<kernel::BodyEntry<'_>> =
-        block_tx_order.iter().copied().map(kernel::BodyEntry::Listed).collect();
+    let body: Vec<kernel::BodyEntry<'_>> = block_tx_order
+        .iter()
+        .enumerate()
+        .map(|(index, tx_hash)| match served.get(index) {
+            Some(tx) => kernel::BodyEntry::Served { tx_hash: *tx_hash, tx },
+            None => kernel::BodyEntry::Listed(*tx_hash),
+        })
+        .collect();
 
     let mut hook = FixtureDraftHook {
         dump: fixture_dump,
@@ -1489,6 +1525,53 @@ fn judge_block(
         warn!(block = block.header.number(), ?diff, "Replayed block does not reproduce its header");
     }
     BlockReport::answered(block, verification)
+}
+
+/// The body transactions a `--verify-block` run fetches before executing.
+enum ServedBody {
+    /// Every listed transaction, each authenticated against its listed hash,
+    /// and together they rebuild the header's transactions root.
+    Committed(Vec<Transaction>),
+    /// Every listed transaction, each authenticated, but the body does not
+    /// rebuild the header's transactions root.
+    Uncommitted(Incoherence),
+    /// The transactions fetched and authenticated before one could not be.
+    /// Without the whole body the root cannot be rebuilt, so the block executes
+    /// as it would without the check: the kernel looks the rest up itself and
+    /// meets the same failure, attributed to the transaction that raised it.
+    Prefix(Vec<Transaction>),
+}
+
+/// Fetch every transaction `body` lists, authenticate each against its listed
+/// hash, and check that the encodings rebuild `block`'s transactions root.
+///
+/// Fetching stops at the first transaction that cannot be fetched or
+/// authenticated; that failure is left for the kernel to meet and report.
+async fn fetch_served_body<P>(provider: &P, block: &Block<Transaction>, body: &[B256]) -> ServedBody
+where
+    P: Provider<op_alloy_network::Optimism>,
+{
+    let mut transactions = Vec::with_capacity(body.len());
+    let mut encoded = Vec::with_capacity(body.len());
+    for tx_hash in body {
+        let Ok(Some(tx)) = provider.get_transaction_by_hash(*tx_hash).await else {
+            return ServedBody::Prefix(transactions);
+        };
+        let Ok(encoding) = verify::authenticate_transaction(&tx, *tx_hash) else {
+            return ServedBody::Prefix(transactions);
+        };
+        encoded.push(encoding);
+        transactions.push(tx);
+    }
+    match coherence::require_committed_body(
+        block.header.number(),
+        block.hash(),
+        block.header.transactions_root(),
+        &encoded,
+    ) {
+        Ok(()) => ServedBody::Committed(transactions),
+        Err(incoherence) => ServedBody::Uncommitted(incoherence),
+    }
 }
 
 /// Judge a block whose body lists no transaction.

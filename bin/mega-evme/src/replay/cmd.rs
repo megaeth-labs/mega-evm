@@ -148,8 +148,8 @@ pub struct Cmd {
 
     /// Verify the replayed block against its header.
     ///
-    /// Once every transaction of the block has executed, a served body that does
-    /// not rebuild the header's transactions root exits `3`. For a committed
+    /// Before the block executes, a served body that does not rebuild the
+    /// header's transactions root exits `3`, and nothing executes. For a committed
     /// body, the replayed block's receipts root, logs bloom, gas used, blob gas
     /// used, and EIP-7685 requests are compared against the header, and a
     /// mismatch exits `2`, like a receipt mismatch. One verdict is reported for
