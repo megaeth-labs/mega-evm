@@ -209,7 +209,7 @@ mod tests {
 
         for (holder, locker) in [
             (alias.join("rpc-cache-1.json"), real.join("rpc-cache-1.json")),
-            (link.clone(), existing.clone()),
+            (link.clone(), existing),
         ] {
             assert_eq!(
                 lock_sidecar_path(&canonical_target(&holder)),
