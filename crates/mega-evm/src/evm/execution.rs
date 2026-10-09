@@ -1916,6 +1916,34 @@ mod mutation_tests {
         consume_synthetic_limit_frame(evm.ctx_ref(), result);
     }
 
+    /// A call transaction's first frame takes the pending bytecode read with it, also when a check
+    /// ends that frame before it runs, while a nested frame leaves a pending read alone.
+    #[test]
+    fn test_first_frame_takes_its_pending_bytecode_read() {
+        let mut evm = MegaEvm::new(context_with_latched_limit());
+        evm.ctx().first_frame_code_pending = true;
+
+        let ItemOrResult::Result(result) = EvmTr::frame_init(&mut evm, call_frame_init(1)).unwrap()
+        else {
+            panic!("latched limit must return a synthetic result");
+        };
+        consume_synthetic_limit_frame(evm.ctx_ref(), result);
+        assert!(
+            evm.ctx_ref().first_frame_code_pending,
+            "a nested frame took the first frame's read"
+        );
+
+        let ItemOrResult::Result(result) = EvmTr::frame_init(&mut evm, call_frame_init(0)).unwrap()
+        else {
+            panic!("latched limit must return a synthetic result");
+        };
+        consume_synthetic_limit_frame(evm.ctx_ref(), result);
+        assert!(
+            !evm.ctx_ref().first_frame_code_pending,
+            "a first frame ended by a check left its read pending"
+        );
+    }
+
     #[derive(Default)]
     struct StopInspector;
 
