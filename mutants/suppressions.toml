@@ -359,3 +359,71 @@ file = "crates/mega-evm/src/evm/host.rs"
 mutant = "spec-gate self.spec.is_enabled(MegaSpecId::MINI_REX) && address == ORACLE_CONTRACT_ADDRESS, -> self.spec.is_enabled(MegaSpecId::EQUIVALENCE) && address == ORACLE_CONTRACT_ADDRESS,"
 justification = "Equivalent: the mutated conjunct lives in the debug_assert! at the top of oracle_sload, which restates the sole caller's guard (sload_skip_cold_load, host.rs:181-182). is_enabled(EQUIVALENCE) is vacuously true, so the mutant only weakens an assertion that never fires on guarded code, and debug_assert! is compiled out of release builds. The guard's own spec-gate mutants are killed."
 reviewer = "RealiCZ (cz)"
+
+# --- host.rs: read_declined_slot / read_declined_account DB-error arm (equivalent) ---
+#
+# Both helpers re-issue a read revm 40 declined and map a `LoadError::DBError` result to
+# `LoadError::DBError`, anything else to `LoadError::ColdLoadSkipped`. Deleting the `DBError` arm
+# reports `ColdLoadSkipped` for a failed read too, so the opcode halts `OutOfGas` instead of
+# `FatalExternalError`. That cannot change the outcome: revm's `Context` stashes the database
+# error in its error slot before returning (revm-context 18.0.3 `context.rs` `sload_skip_cold_load`
+# / `load_account_info_skip_cold_load`), and revm takes that slot as soon as the halted frame's
+# result is handed back (`EthFrame::return_result`) or the transaction result is built
+# (`Handler::execution_result`), so the transaction fails with the same database error either way
+# and no gas, state or result is ever produced. The database-error cases in
+# `tests/rex4/declined_reads.rs` pass with either mutant applied.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/host.rs"
+mutant = "delete match arm Err(LoadError::DBError) in MegaContext<DB, ExtEnvs>::read_declined_slot"
+justification = "Equivalent: revm's Context stashes the database error before returning DBError, and revm takes it when the halted frame returns (EthFrame::return_result) or the transaction result is built (Handler::execution_result), so reporting ColdLoadSkipped (an OutOfGas halt) instead of DBError (a FatalExternalError halt) fails the transaction with the same database error. The declined-SLOAD database-error test passes with the mutant applied."
+reviewer = "RealiCZ (cz)"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/host.rs"
+mutant = "delete match arm Err(LoadError::DBError) in MegaContext<DB, ExtEnvs>::read_declined_account"
+justification = "Equivalent: revm's Context stashes the database error before returning DBError, and revm takes it when the halted frame returns (EthFrame::return_result) or the transaction result is built (Handler::execution_result), so reporting ColdLoadSkipped (an OutOfGas halt) instead of DBError (a FatalExternalError halt) fails the transaction with the same database error. The declined-SELFDESTRUCT database-error test passes with the mutant applied."
+reviewer = "RealiCZ (cz)"
+
+# --- host.rs: recreate_reverted_account_read, resident-delegate guard (equivalent) ---
+#
+# The recreated CALL-family read loads the EIP-7702 delegate only when the journal holds no entry
+# for it. Forcing the guard to `true` also re-loads a resident delegate. The caller's frame is
+# halting, so every journaled effect of that load (the `AccountWarmed` entry of a cold one) is
+# undone by the frame's revert. The unjournaled cold-load effects in revm-context 18.0.3
+# `load_account_mut_optional` are no-ops for any entry reachable here: `set_current_info_as_original`
+# rewrites the original info with the current one, which equal each other while the entry is cold
+# (an entry turns cold only through the revert of the frame that warmed it, which also restores
+# its info); `unmark_created_locally` finds the flag already cleared (that revert unmarks the
+# creation too); the local-selfdestruct cleanup needs an entry left over from an earlier
+# transaction, and the journal starts empty for every transaction. An untouched entry is skipped
+# on commit, and the entry stays resident either way, so the state the transaction hands back has
+# the same keys.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/host.rs"
+mutant = "replace match guard !journal.state.contains_key(&delegate) with true in <impl HostExt for MegaContext<DB, ExtEnvs>>::recreate_reverted_account_read"
+justification = "Equivalent: re-loading a delegate that is already resident happens in a halting frame, whose revert undoes the journaled warm-up; revm's unjournaled cold-load effects are no-ops for such an entry (current info equals original info while cold, the created-locally flag was cleared by the same revert that cooled it, and no entry survives from an earlier transaction), and the entry stays resident either way, so gas, state, result and the returned state keys are unchanged. Full suite green with the mutant applied."
+reviewer = "RealiCZ (cz)"
+
+# --- instructions.rs: recreate_unreached_call_load, stipend-drained new-account charge (equivalent) ---
+#
+# On a frame too poor for the CALL family's 100-gas static charge, the recreation replays the
+# storage-gas wrapper's new-account charge as `budget.checked_sub(cost - drained)` with
+# `budget <= 99`, where `drained <= min(cost, STORAGE_CALL_STIPEND = 23,000)`. Turning `-` into `+`
+# (the function's only subtraction) can only change the outcome when `cost - drained <= 99 <
+# cost + drained`, i.e. `0 < cost <= drained + 99 <= 23,099`. No spec charges a new account that
+# little: REX-family cost is `25,000 × (multiplier − 1)` (0 at the minimum bucket, then at least
+# 25,000), MINI_REX is `2,000,000 × multiplier`. At cost 0 nothing is drained and both forms
+# subtract 0; at any other cost both underflow the budget.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/instructions.rs"
+mutant = "replace - with + in volatile_data_ext::recreate_unreached_call_load"
+justification = "Equivalent: the recreation runs only below the 100-gas static charge (budget <= 99) and drained <= min(cost, 23,000); cost - drained and cost + drained can straddle the budget only for 0 < cost <= 23,099, but new-account storage gas is 0 or at least 25,000 on every spec (25,000 x (multiplier - 1) for REX, 2,000,000 x multiplier for MINI_REX), so both forms subtract 0 at cost 0 and both underflow otherwise. Full suite green with the mutant applied."
+reviewer = "RealiCZ (cz)"

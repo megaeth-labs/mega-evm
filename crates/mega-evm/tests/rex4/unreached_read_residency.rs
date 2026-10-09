@@ -13,10 +13,13 @@
 //! [`EXTCODESIZE`]-based probes cannot see this: they never go through the CALL wrapper's
 //! inspection, and take the pre-warmed fresh-entry path either way.
 
+use std::convert::Infallible;
+
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, ErrorInjectingDatabase, MemoryDatabase},
-    MegaContext, MegaEvm, MegaSpecId, MegaTransaction, MegaTransactionNew as _,
+    BucketHasher, BucketId, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
+    MegaTransactionNew as _, TestExternalEnvs,
 };
 use revm::{
     bytecode::opcode::*,
@@ -57,13 +60,26 @@ fn inner_extcodecopy(target: Address, len: u64) -> Bytes {
 
 /// `INNER`: one CALL-family opcode to `target` forwarding no gas, with empty ranges.
 fn inner_call(opcode: u8, target: Address) -> Bytes {
+    inner_call_with(opcode, target, 0, U256::ZERO, 0)
+}
+
+/// `INNER`: one CALL-family opcode to `target` forwarding no gas, carrying `value` when the opcode
+/// has a value operand, with an `args_len`-byte argument range at `args_offset` and an empty
+/// return range.
+fn inner_call_with(
+    opcode: u8,
+    target: Address,
+    value: u64,
+    args_offset: U256,
+    args_len: u64,
+) -> Bytes {
     let mut b = BytecodeBuilder::default()
         .push_number(0_u64)
         .push_number(0_u64)
-        .push_number(0_u64)
-        .push_number(0_u64);
+        .push_number(args_len)
+        .push_u256(args_offset);
     if opcode == CALL || opcode == CALLCODE {
-        b = b.push_number(0_u64);
+        b = b.push_number(value);
     }
     b.push_address(target).push_number(0_u64).append(opcode).stop().build()
 }
@@ -93,7 +109,31 @@ fn install(db: &mut MemoryDatabase, address: Address, code: Bytes) {
     account.account_state = AccountState::None;
 }
 
-fn gas_used(spec: MegaSpecId, budget: u64, inner: &Bytes, probe: Address) -> u64 {
+/// Bucket every SALT lookup is routed to under [`SingleBucketHasher`].
+const TEST_BUCKET_ID: BucketId = 7;
+
+/// Twice the minimum bucket capacity: a new account costs 25,000 storage gas instead of 0.
+const DOUBLED_BUCKET_CAPACITY: u64 = 512;
+
+/// Routes every SALT lookup to [`TEST_BUCKET_ID`].
+#[derive(Debug, Clone, Copy)]
+struct SingleBucketHasher;
+
+impl BucketHasher for SingleBucketHasher {
+    fn bucket_id(_key: &[u8]) -> BucketId {
+        TEST_BUCKET_ID
+    }
+}
+
+/// Gas used by the transaction, with every SALT bucket at `bucket_capacity` when given and at the
+/// minimum otherwise.
+fn gas_used(
+    spec: MegaSpecId,
+    budget: u64,
+    inner: &Bytes,
+    probe: Address,
+    bucket_capacity: Option<u64>,
+) -> u64 {
     let mut db = MemoryDatabase::default()
         .account_balance(CALLER, U256::from(1_000_000_000_000_000_u64))
         .account_balance(PLAIN, U256::from(1))
@@ -110,7 +150,12 @@ fn gas_used(spec: MegaSpecId, budget: u64, inner: &Bytes, probe: Address) -> u64
     install(&mut db, INNER, inner.clone());
     install(&mut db, OUTER, outer_code(budget, probe));
 
+    let mut external_envs = TestExternalEnvs::<Infallible, SingleBucketHasher>::new();
+    if let Some(capacity) = bucket_capacity {
+        external_envs = external_envs.with_bucket_capacity(TEST_BUCKET_ID, capacity);
+    }
     let mut context = MegaContext::new(&mut db, spec)
+        .with_external_envs(external_envs.into())
         .with_block(BlockEnv { beneficiary: BENEFICIARY, ..Default::default() });
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::ZERO);
@@ -129,7 +174,19 @@ fn gas_used(spec: MegaSpecId, budget: u64, inner: &Bytes, probe: Address) -> u64
 
 /// How much cheaper the later CALL to `probe` is than the same CALL to a cold address.
 fn discount(spec: MegaSpecId, budget: u64, inner: Bytes, probe: Address) -> u64 {
-    gas_used(spec, budget, &inner, COLD) - gas_used(spec, budget, &inner, probe)
+    discount_with_bucket(spec, budget, inner, probe, None)
+}
+
+/// [`discount`] with every SALT bucket at `bucket_capacity` when given.
+fn discount_with_bucket(
+    spec: MegaSpecId,
+    budget: u64,
+    inner: Bytes,
+    probe: Address,
+    bucket_capacity: Option<u64>,
+) -> u64 {
+    gas_used(spec, budget, &inner, COLD, bucket_capacity) -
+        gas_used(spec, budget, &inner, probe, bucket_capacity)
 }
 
 /// `EXTCODECOPY` validates its operands, charges its copy cost and expands memory before its
@@ -182,6 +239,65 @@ fn test_delegate_of_a_halted_call_stays_warm_when_prewarmed() {
                     "{spec:?}: opcode 0x{opcode:02x} to a delegator of a precompile, budget {budget}",
                 );
             }
+        }
+    }
+}
+
+/// On `REX4` the storage-gas wrapper judged a CALL target's emptiness through its EIP-7702
+/// designation, which inspected the delegate into a cold journal entry before anything else ran.
+/// A later CALL to that delegate is then priced cold, although the delegate is pre-warmed.
+#[test]
+fn test_rex4_wrapper_inspection_leaves_the_delegate_of_a_halted_call_cold() {
+    for budget in [80, 2_000] {
+        assert_eq!(
+            discount(MegaSpecId::REX4, budget, inner_call(CALL, DELEGATOR), IDENTITY),
+            LEFT_COLD,
+            "REX4: CALL to a delegator of a precompile, budget {budget}",
+        );
+    }
+}
+
+/// A value-carrying CALL to an account that is not empty owes no new-account storage gas, so a
+/// frame below the CALL's static charge still reached the body's read on the deployed schedule,
+/// however full the target's SALT bucket is.
+#[test]
+fn test_halted_value_call_to_a_nonempty_target_reads_it_in_a_full_bucket() {
+    for spec in [MegaSpecId::REX5, MegaSpecId::REX6] {
+        for capacity in [None, Some(DOUBLED_BUCKET_CAPACITY)] {
+            assert_eq!(
+                discount_with_bucket(
+                    spec,
+                    80,
+                    inner_call_with(CALL, DELEGATOR, 1, U256::ZERO, 0),
+                    IDENTITY,
+                    capacity,
+                ),
+                LEFT_WARM,
+                "{spec:?}: value CALL to a delegator of a precompile, bucket capacity {capacity:?}",
+            );
+        }
+    }
+}
+
+/// The deployed CALL-family body resolved its argument range before its read: an offset that does
+/// not fit a machine word halted it there, while an affordable range let it reach the read.
+#[test]
+fn test_halted_call_reaches_its_read_only_past_a_valid_argument_range() {
+    let unrepresentable = [U256::from(1) << 64, U256::from(1) << 128, U256::from(1) << 192];
+    for spec in [MegaSpecId::REX5, MegaSpecId::REX6] {
+        for opcode in [CALL, STATICCALL] {
+            for offset in unrepresentable {
+                assert_eq!(
+                    discount(spec, 80, inner_call_with(opcode, DELEGATOR, 0, offset, 1), IDENTITY),
+                    LEFT_COLD,
+                    "{spec:?}: opcode 0x{opcode:02x} with argument offset {offset}",
+                );
+            }
+            assert_eq!(
+                discount(spec, 80, inner_call_with(opcode, DELEGATOR, 0, U256::ZERO, 32), IDENTITY),
+                LEFT_WARM,
+                "{spec:?}: opcode 0x{opcode:02x} with a 32-byte argument range",
+            );
         }
     }
 }
