@@ -52,7 +52,10 @@ fn test_the_factory_code_hashes_to_its_pinned_hash() {
     assert_eq!(CREATE2_FACTORY_NONCE, 1);
 }
 
-/// The spec list is the six `MegaETH` contracts in address order, then the factory.
+/// [S18.8] The spec list is the six `MegaETH` contracts in address order, then the factory, each
+/// at nonce 1, and the public address list is the spec list's addresses in that order.
+///
+/// Expected values: constants (the addresses and code hashes are the production constants).
 #[test]
 fn test_the_spec_list_is_the_seven_predeploys_in_order() {
     let specs = system_contract_specs(&config());
@@ -247,10 +250,13 @@ fn test_matching_megaeth_code_at_nonce_zero_is_accepted() {
     assert_eq!(account.info.nonce, 0);
 }
 
-/// An account that exists with empty code and nonce 0 (an EOA that received value) is a fresh
-/// deploy: the balance is kept and the slots are seeded, which is the accepted bootstrap path.
-/// The account is marked created, which writes nothing to a slot it held and clears none: the
-/// returned state carries the seeds alone.
+/// [S18.12] [S18] An account that exists with empty code and nonce 0 (an EOA that received value)
+/// is a fresh deploy: the balance is kept and the slots are seeded, which is the accepted
+/// bootstrap path. The account is marked created, which writes nothing to a slot it held and
+/// clears none: the returned state carries the seeds alone.
+///
+/// Expected values: independent (the balance, nonce 1 and the seven seeds), with the contract's
+/// code hash from the production constant.
 #[test]
 fn test_an_empty_account_at_the_address_is_a_fresh_deploy() {
     let mut db = MemoryDatabase::default();

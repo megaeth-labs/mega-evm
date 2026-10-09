@@ -200,8 +200,10 @@ mod tests {
         MegaHardforkConfig::default().with(MegaHardfork::Satin, ForkCondition::Timestamp(timestamp))
     }
 
-    /// With the parent's timestamp, the block admits only deposits exactly where a fork activates
-    /// in it: active at the block, not at the parent.
+    /// [S1.8] [S21.12] [S1] With the parent's timestamp, the block admits only deposits exactly
+    /// where a fork activates in it: active at the block, not at the parent.
+    ///
+    /// Expected values: independent (the schedule's own timestamps and the rule).
     #[test]
     fn test_the_parent_timestamp_decides_the_activation_block() {
         let schedule = satin_at(ACTIVATION);
@@ -211,9 +213,11 @@ mod tests {
         assert!(!admits_only_deposits(&schedule, 7, Some(0), ACTIVATION - 1).unwrap());
     }
 
-    /// Without it, a block no parent could make an activation block admits every transaction:
-    /// every fork active from genesis, or none active yet. Any other block is refused, naming the
-    /// block.
+    /// [S1.8] [S1] Without it, a block no parent could make an activation block admits every
+    /// transaction: every fork active from genesis, or none active yet. Any other block is
+    /// refused, naming the block and how to recover.
+    ///
+    /// Expected values: independent (the schedule's own timestamps and the rule).
     #[test]
     fn test_without_the_parent_timestamp_only_an_undecidable_block_is_refused() {
         assert!(!admits_only_deposits(&all_activated_hardforks(), 7, None, ACTIVATION).unwrap());

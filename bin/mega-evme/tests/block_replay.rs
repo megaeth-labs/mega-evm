@@ -183,10 +183,14 @@ fn test_the_overhead_does_not_change_the_satin_rows() {
     }
 }
 
-/// A block fetched over RPC replays as the chain did, is written to the block cache with what
-/// its replay read beyond the trace, and then replays offline from the cache. The mock serves
-/// the recorded responses, and the trace is the recorded pre-state as one transaction's
-/// sighting.
+/// [S18] A block fetched over RPC replays as the chain did, is written to the block cache with
+/// what its replay read beyond the trace, and then replays offline from the cache. The mock
+/// serves the recorded responses, and the trace is the recorded pre-state as one transaction's
+/// sighting. The Satin replay reads two accounts' worth of state the recording lacks, the
+/// EIP-7997 factory its pre-block deploy reads and the L1 fee overhead its pre-block read of the
+/// L1 block info reads, and the cache keeps both.
+///
+/// Expected values: independent (the chain's own receipts, and the two pre-block reads).
 #[tokio::test(flavor = "multi_thread")]
 async fn test_a_block_fetched_over_rpc_is_cached_and_replays_offline() {
     let number = BLOCKS[2];

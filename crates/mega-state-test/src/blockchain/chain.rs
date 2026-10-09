@@ -447,8 +447,10 @@ mod tests {
         );
     }
 
-    /// The parameters the chain runs on are ones a chain may carry: the executor refuses a block
-    /// under any other.
+    /// [S10] The parameters the chain runs on are ones a chain may carry: the executor refuses a
+    /// block under any other.
+    ///
+    /// Expected values: constants (the loosest limits a chain may carry).
     #[test]
     fn test_the_chain_spec_carries_valid_parameters() {
         use mega_evm::HardforkParams;
@@ -460,12 +462,15 @@ mod tests {
         assert!(spec.validate_schedule().is_ok());
     }
 
-    /// A block's context says whether it admits only deposits, from the schedule and the head's
-    /// timestamp, as a node works it out. Under a schedule that activates Satin at the block's
-    /// timestamp, with the genesis a second earlier, the block is Satin's activation block: a user
-    /// transaction in it is refused, and the block without it is imported. The next block, whose
-    /// parent is that block, admits the transaction. Under the runner's own schedule every fork is
-    /// active from genesis, so no block it imports is an activation block.
+    /// [S1.8] [S21.12] [S1] A block's context says whether it admits only deposits, from the
+    /// schedule and the head's timestamp, as a node works it out. Under a schedule that activates
+    /// Satin at the block's timestamp, with the genesis a second earlier, the block is Satin's
+    /// activation block: a user transaction in it is refused, and the block without it is
+    /// imported. The next block, whose parent is that block, admits the transaction. Under the
+    /// runner's own schedule every fork is active from genesis, so no block it imports is an
+    /// activation block.
+    ///
+    /// Expected values: independent (the schedule's own timestamps and the rule).
     #[test]
     fn test_an_imported_block_is_told_whether_it_admits_only_deposits() {
         use mega_evm::{
