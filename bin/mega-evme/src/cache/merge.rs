@@ -18,6 +18,7 @@ use std::{
 use alloy_primitives::B256;
 use serde::{Deserialize, Serialize};
 
+use super::lock::canonical_target;
 use crate::common::{EvmeError, Result};
 
 /// Current on-disk envelope schema version (must match capture/replay).
@@ -598,12 +599,16 @@ pub(crate) fn write_atomic(
     persisted.map(drop).map_err(|e| AtomicWriteError::Persist(e.error))
 }
 
-/// Temp-file + rename write that replaces the destination.
+/// Temp-file + rename write that replaces the cache file `path` names.
+///
+/// The write lands on the [`canonical_target`], the file the lock protects, so
+/// a symlink is written through rather than replaced. Errors name the path as
+/// given.
 pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    write_atomic(path, bytes, WriteMode::Replace).map_err(|e| match e {
-        AtomicWriteError::Create { dir, source } => std::io::Error::other(format!(
+    write_atomic(&canonical_target(path), bytes, WriteMode::Replace).map_err(|e| match e {
+        AtomicWriteError::Create { source, .. } => std::io::Error::other(format!(
             "failed to create temp file in {}: {source}",
-            dir.display()
+            path.parent().unwrap_or_else(|| Path::new(".")).display()
         )),
         AtomicWriteError::Write(e) | AtomicWriteError::Flush(e) | AtomicWriteError::Sync(e) => e,
         AtomicWriteError::Persist(e) => std::io::Error::other(format!(

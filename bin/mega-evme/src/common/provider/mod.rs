@@ -41,7 +41,7 @@ use self::{
     transport::{CacheRole, CachingTransport, ReplayTransport, TransportCache},
 };
 use super::{EvmeError, Result};
-use crate::cache::{acquire_exclusive_lock, lock_sidecar_path};
+use crate::cache::{acquire_exclusive_lock, canonical_target, lock_sidecar_path};
 
 /// OP-stack provider type used throughout mega-evme.
 pub type OpProvider = DynProvider<op_alloy_network::Optimism>;
@@ -234,7 +234,9 @@ impl RpcArgs {
                     None
                 };
                 if self.clear_cache {
-                    if let Err(e) = fs::remove_file(&path) {
+                    // The file the lock protects, so a symlinked path clears the
+                    // cache it points to rather than the link.
+                    if let Err(e) = fs::remove_file(canonical_target(&path)) {
                         if e.kind() != std::io::ErrorKind::NotFound {
                             return Err(EvmeError::InvalidInput(format!(
                                 "Failed to clear RPC cache at {}: {e}",

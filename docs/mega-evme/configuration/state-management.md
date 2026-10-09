@@ -292,6 +292,7 @@ On clean-exit persist, each process:
 
 Both writers — the per-chain online cache and `--rpc.capture-file` — follow that sequence; the file they write is the same envelope, and what differs is how each one treats a failure.
 
+The lock and the write both belong to the file the path names, not to its spelling: a cache reached through a symlinked directory, or through a symlink to the file, is locked as that file and replaced in place, so processes naming one file differently still take one lock, and a symlink is written through rather than replaced.
 The lock sidecar is left in place after the process exits; only the flock is released when the handle closes.
 Lock contention blocks for a short critical section rather than failing the finished run.
 If the lock cannot be acquired at all (for example the directory is not writable), persist fails closed and writes nothing.

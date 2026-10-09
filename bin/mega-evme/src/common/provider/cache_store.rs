@@ -41,10 +41,11 @@ use tracing::{debug, info, warn};
 use super::transport::TransportCache;
 use crate::{
     cache::{
-        acquire_exclusive_lock, detect_shape, lock_sidecar_path, merge_cache_entries_capped,
-        merge_envelope_for_persist, read_json_file, reread_envelope_for_merge,
-        unsupported_version_message, warn_user, write_bytes_atomic, write_envelope_atomic, CacheKv,
-        CacheShape, EnvelopeDoc, EnvelopeReread, ExternalEnvDoc, JsonFileError, ENVELOPE_VERSION,
+        acquire_exclusive_lock, canonical_target, detect_shape, lock_sidecar_path,
+        merge_cache_entries_capped, merge_envelope_for_persist, read_json_file,
+        reread_envelope_for_merge, unsupported_version_message, warn_user, write_bytes_atomic,
+        write_envelope_atomic, CacheKv, CacheShape, EnvelopeDoc, EnvelopeReread, ExternalEnvDoc,
+        JsonFileError, ENVELOPE_VERSION,
     },
     common::{EvmeError, Result},
 };
@@ -469,7 +470,9 @@ fn adopt_online_cache_file(
             Ok(())
         }
         OnlineCacheFile::Stale(reason) => {
-            match fs::remove_file(path) {
+            // The file the lock protects, so a symlinked path removes the cache
+            // it points to rather than the link.
+            match fs::remove_file(canonical_target(path)) {
                 Ok(()) => warn_user(format_args!(
                     "Replaced the RPC cache at '{}': it {reason}. Starting with an \
                      empty cache",
@@ -859,6 +862,30 @@ mod tests {
         let entries = on_disk_entries(&path);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].value, "from-a");
+    }
+
+    /// Online persist through a symlink to the cache file writes the file the
+    /// link points to and leaves the link in place, so every process sharing
+    /// that file sees one cache.
+    #[cfg(unix)]
+    #[test]
+    fn test_online_cache_persist_through_a_symlink_updates_its_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rpc-cache-1.json");
+        let link = dir.path().join("linked-cache.json");
+
+        let sibling = online_cache(16, &[(B256::repeat_byte(0xbb), "from-sibling")]);
+        assert!(save_online_cache_atomic(&sibling, &path, 1).expect("persist sibling"));
+        std::os::unix::fs::symlink(&path, &link).expect("symlink the cache file");
+
+        let ours = online_cache(16, &[(B256::repeat_byte(0xaa), "ours")]);
+        assert!(save_online_cache_atomic(&ours, &link, 1).expect("persist through the link"));
+
+        assert!(
+            link.symlink_metadata().expect("the link").file_type().is_symlink(),
+            "the symlink stays in place"
+        );
+        assert_eq!(on_disk_entries(&path).len(), 2, "the target holds both processes' entries");
     }
 
     /// Online persist fails closed on the lock: nothing is written, and the
