@@ -43,10 +43,82 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
+      - name: Install cargo-insta
+        uses: taiki-e/install-action@v2
+        with:
+          # The release of the insta version Cargo.lock resolves.
+          tool: cargo-insta@1.47.2
       - name: Build
         run: cargo build
       - name: Run Test
-        run: cargo test --workspace
+        # `cargo test --workspace`, run once through cargo-insta. A snapshot that differs fails its
+        # test and nothing is written (--check); a snapshot file no test compared fails the run
+        # (--unreferenced=reject). The last three flags keep cargo test's own behaviour: the
+        # cargo test runner, its per-test output, and stopping at the first failing test binary.
+        # A pending snapshot (`.snap.new`, `.pending-snap`) in the tree is a change nobody
+        # accepted, which the unreferenced check does not look at: it fails the step too.
+        run: |
+          cargo insta test --workspace --check --unreferenced=reject --test-runner cargo-test --no-quiet --fail-fast
+          pending=$(find . -path ./target -prune -o \( -name '*.snap.new' -o -name '*.pending-snap' \) -print)
+          if [ -n "$pending" ]; then
+            echo "::error::pending snapshots in the tree:"
+            echo "$pending"
+            exit 1
+          fi
+
+  test-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+      - name: Run tests in release
+        run: cargo test --workspace --release --locked
+
+  system-contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+      - name: Run forge tests
+        working-directory: crates/system-contracts
+        run: forge test
+
+  msrv:
+    runs-on: ubuntu-24.04
+    # Sized for a cold cache, which compiles the whole graph, the legacy leg's included, and then
+    # the no_std target.
+    timeout-minutes: 15
+    env:
+      # The workspace's declared `rust-version`; the variable takes precedence over
+      # rust-toolchain.toml, so every cargo call below runs on it.
+      RUSTUP_TOOLCHAIN: "1.94.0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Rust 1.94.0
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          # Installed in place of rust-toolchain.toml's, and set as the directory's override; the
+          # cache is keyed on it, apart from the other jobs'.
+          toolchain: "1.94.0"
+          target: riscv64imac-unknown-none-elf
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+      - name: Check the workspace
+        run: cargo check --workspace --all-targets --all-features --locked
+      - name: Check no_std
+        run: cargo check -p mega-evm --target riscv64imac-unknown-none-elf --no-default-features --locked
 
   no-std:
     runs-on: ubuntu-24.04

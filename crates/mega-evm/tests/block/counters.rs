@@ -317,3 +317,88 @@ fn test_a_floor_bound_transaction_adds_its_floor_to_the_block() {
     assert!(fork_figure > gas.floor, "the fork's figure carries the history");
     assert!(fork_figure - gas.history < gas.floor, "and less history it falls below the floor");
 }
+
+/// A transaction that runs out of gas before its first frame, here on EIP-2780's charge for the
+/// account its value would create, is billed its whole gas limit everywhere the limit is counted:
+/// the sender pays it at the gas price, the fee recipients are credited the same amount, the
+/// receipt's cumulative gas and the block's gas used are the gas limit, and the block's history
+/// ledger takes the body's history and nothing for the record the frame never made.
+#[test]
+fn test_an_out_of_gas_before_the_first_frame_bills_the_whole_gas_limit_to_the_block() {
+    use alloy_consensus::{Signed, TxLegacy};
+    use alloy_primitives::{Signature, TxKind, B256};
+    use op_revm::constants::{BASE_FEE_RECIPIENT, L1_FEE_RECIPIENT, OPERATOR_FEE_RECIPIENT};
+    use revm::Database as _;
+
+    // With a state byte at nothing the phase has no charge of its own to fall short of.
+    if common::state_is_free() {
+        return;
+    }
+    const FRESH: Address = address!("0x3000000000000000000000000000000000000005");
+    const GAS_PRICE: u128 = 1_000_000;
+    let transfer = |gas_limit: u64| {
+        common::recovered(MegaTxEnvelope::Legacy(Signed::new_unchecked(
+            TxLegacy {
+                chain_id: Some(common::CHAIN_ID),
+                nonce: 0,
+                gas_price: GAS_PRICE,
+                gas_limit,
+                to: TxKind::Call(FRESH),
+                value: U256::from(1),
+                input: Bytes::new(),
+            },
+            Signature::test_signature(),
+            B256::repeat_byte(1),
+        )))
+    };
+
+    // What the transfer spends when it has room, on a block of its own: one gas less falls short
+    // on the last charge of the runtime gas phase.
+    let mut state = common::state();
+    let mut measuring = executor(&mut state, common::unlimited_ctx());
+    measuring.apply_pre_execution_changes().expect("the block starts");
+    let room = 1_000_000 + common::new_account_state_gas() + common::body_history(0);
+    let outcome = measuring.run_transaction(&transfer(room)).expect("the transfer runs");
+    assert!(outcome.inner.result.is_success(), "{:?}", outcome.inner.result);
+    let gas_limit = outcome.inner.gas.gas_used - 1;
+    drop(measuring);
+
+    let mut state = common::state();
+    let fee_recipients =
+        [Address::ZERO, BASE_FEE_RECIPIENT, L1_FEE_RECIPIENT, OPERATOR_FEE_RECIPIENT];
+    let balance = |state: &mut State<mega_evm::test_utils::MemoryDatabase>, address| {
+        state.basic(address).expect("the account is read").map_or(U256::ZERO, |info| info.balance)
+    };
+    let sender_before = balance(&mut state, common::CALLER);
+    let recipients_before: U256 = fee_recipients.iter().map(|a| balance(&mut state, *a)).sum();
+
+    let mut executor = executor(&mut state, common::unlimited_ctx());
+    executor.apply_pre_execution_changes().expect("the block starts");
+    let outcome = executor.run_transaction(&transfer(gas_limit)).expect("it is included");
+    assert!(outcome.inner.result.is_halt(), "{:?}", outcome.inner.result);
+    let gas = outcome.inner.gas;
+    assert_eq!(gas.gas_used, gas_limit, "the whole gas limit burns");
+    assert_eq!(gas.reservoir_remaining, 0, "nothing comes back from a reservoir");
+    assert_eq!(gas.history, common::body_history(0), "the history ledger reads the body");
+    assert_eq!(gas.history_bytes, mega_evm::TX_BODY_SIZE);
+    assert_eq!(gas.state, 0, "the account was not created");
+    executor.commit_transaction_outcome(outcome).expect("the halt is included");
+
+    let (_, result) = executor.finish_with_counters().expect("the block finishes");
+    assert_eq!(result.gas_used, gas_limit, "the block's gas used");
+    assert_eq!(result.receipts()[0].cumulative_gas_used(), gas_limit, "the receipt");
+    let mut counters = BlockGasCounters::default();
+    counters.record(&gas);
+    assert_eq!(result.gas, counters);
+    assert_eq!(result.gas.history, common::body_history(0), "the block's history ledger");
+
+    let paid = U256::from(gas_limit) * U256::from(GAS_PRICE);
+    assert_eq!(
+        sender_before - balance(&mut state, common::CALLER),
+        paid,
+        "the sender pays its whole gas limit, and its value does not move"
+    );
+    let recipients_after: U256 = fee_recipients.iter().map(|a| balance(&mut state, *a)).sum();
+    assert_eq!(recipients_after - recipients_before, paid, "the fee recipients are credited it");
+    assert_eq!(balance(&mut state, FRESH), U256::ZERO, "the recipient was not created");
+}

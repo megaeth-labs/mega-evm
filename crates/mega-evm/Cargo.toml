@@ -20,7 +20,7 @@ alloy-evm.workspace = true
 alloy-hardforks.workspace = true
 alloy-op-evm.workspace = true
 alloy-op-hardforks.workspace = true
-alloy-primitives.workspace = true
+alloy-primitives = { workspace = true, features = ["serde"] }
 alloy-sol-types.workspace = true
 op-alloy-consensus.workspace = true
 op-revm = { workspace = true, features = ["dev", "serde"] }
@@ -35,15 +35,22 @@ mega-system-contracts = { workspace = true, default-features = false }
 auto_impl.workspace = true
 delegate.workspace = true
 derive_more = { workspace = true, optional = true, features = ["debug", "deref", "deref_mut", "display", "error"] }
-serde = { workspace = true, features = ["derive"] }
+serde = { workspace = true, features = ["alloc", "derive"] }
 
 [dev-dependencies]
+# alloy
+alloy-rpc-types-trace = { workspace = true }
+alloy-trie = { workspace = true, features = ["std", "ethereum"] }
+
 # CodSpeed drop-in: `codspeed-criterion-compat` re-exports criterion's API, so
 # `use criterion::...` in the benches is unchanged. Under a normal `cargo bench`
 # it behaves exactly like criterion; under `cargo codspeed` it runs each bench
 # once under valgrind and reports layout-insensitive instruction counts.
 criterion = { package = "codspeed-criterion-compat", version = "5.0.1", default-features = false, features = ["cargo_bench_support", "html_reports", "plotters"] }
+insta.workspace = true
 mega-evm = { path = ".", features = ["test-utils"] }
+proptest = { workspace = true, features = ["std"] }
+revm = { workspace = true, features = ["tracer"] }
 revm-inspectors = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
 

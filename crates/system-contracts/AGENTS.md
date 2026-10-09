@@ -6,10 +6,13 @@ System-contract artifact crate that validates Solidity bytecode at build time an
 ## STRUCTURE
 - `build.rs`: forge-driven bytecode generation, hash validation, versioned constant codegen.
 - `src/lib.rs`: generated constant includes and `alloy_sol_types::sol!` interface bindings.
+- `src/generated/`: the checked-in Rust constants generated from `artifacts/`, which `src/lib.rs` includes; the build regenerates them and fails if the checked-in file differs.
 - `contracts/`: Solidity implementations.
 - `contracts/interfaces/`: ABI interface sources used by Rust bindings.
 - `artifacts/`: versioned bytecode JSON artifacts and `*-latest.json` references.
 - `scripts/`: Foundry scripts used by build-time bytecode generation.
+- `test/`: Foundry tests (`forge test`, the `system-contracts` CI job).
+- `tests/`: Rust tests of the generated constants and of the `SequencerRegistry`'s storage layout.
 
 ## KEY PATTERNS
 - Build script is authoritative for artifact consistency checks.
@@ -20,13 +23,13 @@ System-contract artifact crate that validates Solidity bytecode at build time an
 
 ## ANTI-PATTERNS
 - Do not update Solidity code without updating artifacts and validating hashes.
-- Do not hand-edit generated files in `OUT_DIR` expectations.
-- Modify `build.rs` or artifacts instead.
+- Do not hand-edit `src/generated/`.
+  Change the artifacts or `build.rs`, build once (the build rewrites the file and fails, asking for it to be committed), and commit the rewritten file.
 - Do not collapse versioned artifacts into a single mutable JSON file.
 - Preserve immutable historical versions for spec traceability.
 
 ## WHERE TO LOOK
 - Add a new system contract export: update `build.rs` contract list and `src/lib.rs` module include + interface binding.
-- Rotate to a new bytecode version: add `artifacts/<Name>-X.Y.Z.json` and update `<Name>-latest.json`.
+- Rotate to a new bytecode version: add `artifacts/<Name>-X.Y.Z.json` and update `<Name>-latest.json`, then build and commit the regenerated `src/generated/<name>_artifacts.rs`.
 - Debug bytecode mismatch failures: `build.rs::validate_contract_bytecode` diagnostics.
 - Update ABI interface only: `contracts/interfaces/*.sol` and consuming modules in `src/lib.rs`.

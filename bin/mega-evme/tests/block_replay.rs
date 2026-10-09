@@ -8,8 +8,8 @@ use std::path::Path;
 
 use alloy_primitives::{Address, B256, U256};
 use common::blocks::{
-    block_path, cache_copy, cache_copy_with_absent_factory, code_of, fixtures, read_block,
-    run_evme, write_block, BLOCKS, FACTORY,
+    block_path, cache_copy, cache_copy_for_satin, code_of, fixtures, overhead_slot, read_block,
+    run_evme, set_overhead, write_block, BLOCKS, FACTORY, L1_BLOCK,
 };
 use mega_evm::{system::MEGA_SYSTEM_ADDRESS, ProtocolLimits};
 use mega_evme::block::PreAccount;
@@ -63,17 +63,30 @@ fn test_the_legacy_leg_replays_recorded_blocks_as_the_chain_did() {
     assert_eq!(std::fs::read(block_path(cache.path(), BLOCKS[0])).unwrap(), before);
 }
 
-/// A Satin replay of a recorded block reads the EIP-7997 factory, which the recording lacks:
-/// offline, the block fails and names the account, and the exit code is 1.
+/// A Satin replay of a recorded block reads the EIP-7997 factory and the L1 fee overhead, which
+/// the recording lacks: offline, the block fails and names the first of them it met, and the
+/// exit code is 1.
 #[test]
 fn test_a_read_the_recording_lacks_fails_the_block_offline() {
+    let refusal = |dir: &Path| {
+        let run = replay(BLOCKS[0], dir, &["--override.spec", "Satin"]);
+        assert_eq!(run.code, 1);
+        let error = run.records()[0]["error"].as_str().unwrap().to_lowercase();
+        assert!(error.contains("no rpc to read it"), "{error}");
+        error
+    };
+
     let cache = cache_copy();
-    let run = replay(BLOCKS[0], cache.path(), &["--override.spec", "Satin"]);
-    assert_eq!(run.code, 1);
-    let records = run.records();
-    let error = records[0]["error"].as_str().unwrap();
-    assert!(error.contains("no RPC to read it"), "{error}");
-    assert!(error.to_lowercase().contains(&format!("{FACTORY:#x}")), "{error}");
+    let error = refusal(cache.path());
+    assert!(error.contains(&format!("account {FACTORY:#x}")), "{error}");
+
+    // With the factory in the pre-state, the pre-block read of the L1 block info is the miss:
+    // it reads the overhead beside the fee scalars the recording holds set.
+    let mut block = read_block(cache.path(), BLOCKS[0]);
+    block.prestate.accounts.insert(FACTORY, PreAccount::default());
+    write_block(cache.path(), BLOCKS[0], &block);
+    let error = refusal(cache.path());
+    assert!(error.contains(&format!("storage {L1_BLOCK:#x}[{}]", overhead_slot())), "{error}");
 }
 
 /// The Satin counterfactual of the recorded blocks: every block runs, nothing is refused, every
@@ -81,7 +94,7 @@ fn test_a_read_the_recording_lacks_fails_the_block_offline() {
 /// from the chain with exit code 2.
 #[test]
 fn test_the_satin_counterfactual_of_recorded_blocks() {
-    let cache = cache_copy_with_absent_factory();
+    let cache = cache_copy_for_satin();
     for number in BLOCKS {
         let run = replay(number, cache.path(), &["--override.spec", "Satin"]);
         assert_eq!(run.code, 0, "{}", run.stderr);
@@ -113,8 +126,8 @@ fn test_the_satin_counterfactual_of_recorded_blocks() {
 /// transaction.
 #[test]
 fn test_the_factory_state_does_not_change_the_satin_rows() {
-    let absent = cache_copy_with_absent_factory();
-    let present = cache_copy();
+    let absent = cache_copy_for_satin();
+    let present = cache_copy_for_satin();
     for number in BLOCKS {
         let mut block = read_block(present.path(), number);
         block.prestate.accounts.insert(
@@ -144,6 +157,28 @@ fn test_the_factory_state_does_not_change_the_satin_rows() {
             run.records()
         };
         assert_eq!(rows(absent.path()), rows(present.path()), "block {number}");
+    }
+}
+
+/// Whatever the L1 fee overhead holds, the Satin rows of the recorded blocks are the same: the
+/// blocks' fee scalars are set, so no transaction is priced with it, and the pre-block read that
+/// reads it is no transaction.
+#[test]
+fn test_the_overhead_does_not_change_the_satin_rows() {
+    let zero = cache_copy_for_satin();
+    let set = cache_copy_for_satin();
+    for number in BLOCKS {
+        let mut block = read_block(set.path(), number);
+        set_overhead(&mut block, U256::from(188));
+        write_block(set.path(), number, &block);
+    }
+    for number in BLOCKS {
+        let rows = |dir: &Path| {
+            let run = replay(number, dir, &["--override.spec", "Satin"]);
+            assert_eq!(run.code, 0, "{}", run.stderr);
+            run.records()
+        };
+        assert_eq!(rows(zero.path()), rows(set.path()), "block {number}");
     }
 }
 
@@ -189,10 +224,12 @@ async fn test_a_block_fetched_over_rpc_is_cached_and_replays_offline() {
     respond("eth_getBlockByNumber", recorded.block.clone()).mount(&server).await;
     respond("eth_getBlockReceipts", recorded.receipts.clone()).mount(&server).await;
     respond("debug_traceBlockByNumber", trace).mount(&server).await;
-    // The parent state of what the trace does not hold: only the factory, which does not exist.
+    // The parent state of what the trace does not hold: the factory, which does not exist, and
+    // the L1 fee overhead, which is zero.
     respond("eth_getBalance", serde_json::json!("0x0")).mount(&server).await;
     respond("eth_getTransactionCount", serde_json::json!("0x0")).mount(&server).await;
     respond("eth_getCode", serde_json::json!("0x")).mount(&server).await;
+    respond("eth_getStorageAt", serde_json::json!(B256::ZERO)).mount(&server).await;
 
     let cache = tempfile::tempdir().unwrap();
     let uri = server.uri();
@@ -204,12 +241,14 @@ async fn test_a_block_fetched_over_rpc_is_cached_and_replays_offline() {
 
     let run = replay(number, cache.path(), &["--rpc", &uri, "--override.spec", "Satin"]);
     assert_eq!(run.code, 0, "{}", run.stderr);
-    assert!(
-        blocks_of(&run.records())[0]["rpc_reads"].as_u64().unwrap() > 0,
-        "the factory came over RPC"
+    assert_eq!(
+        blocks_of(&run.records())[0]["rpc_reads"],
+        2,
+        "the factory and the L1 fee overhead came over RPC"
     );
 
-    // Offline now: the cache holds the block and the factory the Satin replay read.
+    // Offline now: the cache holds the block, and the factory and the overhead the Satin replay
+    // read.
     drop(server);
     let run = replay(number, cache.path(), &["--verify"]);
     assert_eq!(run.code, 0, "{}", run.stderr);
@@ -217,7 +256,9 @@ async fn test_a_block_fetched_over_rpc_is_cached_and_replays_offline() {
     let run = replay(number, cache.path(), &["--override.spec", "Satin"]);
     assert_eq!(run.code, 0, "{}", run.stderr);
     assert_eq!(blocks_of(&run.records())[0]["rpc_reads"], 0);
-    assert!(read_block(cache.path(), number).prestate.accounts.contains_key(&FACTORY));
+    let cached = read_block(cache.path(), number).prestate;
+    assert!(cached.accounts.contains_key(&FACTORY));
+    assert_eq!(cached.accounts[&L1_BLOCK].storage.get(&overhead_slot()), Some(&U256::ZERO));
 }
 
 /// `--override.limits` replays a Satin block under other protocol limits: the fields it names
@@ -227,7 +268,7 @@ async fn test_a_block_fetched_over_rpc_is_cached_and_replays_offline() {
 /// transaction and refuses every later one.
 #[test]
 fn test_an_override_replays_a_satin_block_under_other_limits() {
-    let cache = cache_copy_with_absent_factory();
+    let cache = cache_copy_for_satin();
     let number = BLOCKS[0];
     let replay_under = |limits: Option<&str>| -> (Vec<Value>, Value) {
         let mut args = vec!["--override.spec", "Satin"];
@@ -308,4 +349,83 @@ fn test_an_override_refuses_a_legacy_block() {
     assert_eq!(run.code, 1, "{}", run.stdout);
     let error = run.records()[0]["error"].as_str().unwrap().to_string();
     assert!(error.contains("--override.limits applies to Satin only"), "{error}");
+}
+
+/// A genesis file of mainnet activating Satin at `satin_time`, with the placeholder registry
+/// seeds and the protocol's default limits but a transaction data-size limit of the body alone,
+/// in `dir`.
+fn mainnet_genesis(dir: &tempfile::TempDir, satin_time: u64) -> String {
+    genesis_of(dir, mega_evm::MAINNET_CHAIN_ID, satin_time)
+}
+
+/// [`mainnet_genesis`] for chain `chain_id`.
+fn genesis_of(dir: &tempfile::TempDir, chain_id: u64, satin_time: u64) -> String {
+    let limits = ProtocolLimits::DEFAULT.with_tx_runtime_limits(
+        ProtocolLimits::DEFAULT.tx_runtime_limits.with_tx_data_size_limit(310),
+    );
+    let satin = mega_evm::SatinChainConfig {
+        activation_time: satin_time,
+        sequencer_registry: mega_evm::system::SequencerRegistryConfig::placeholder(),
+        protocol_limits: limits,
+    };
+    let mut config = serde_json::to_value(satin).unwrap();
+    config["chainId"] = chain_id.into();
+    let path = dir.path().join(format!("genesis-{chain_id}-{satin_time}.json"));
+    std::fs::write(&path, serde_json::json!({ "config": config }).to_string()).unwrap();
+    path.to_str().unwrap().to_string()
+}
+
+/// A genesis file decides which of its chain's blocks run Satin, and the schedule they run under:
+/// a recorded mainnet block, legacy by the engine's table, runs on Satin from a file's `satinTime`
+/// of zero, held to the file's limits as the chain's own rather than as an override. A block
+/// before the file's `satinTime` would run on the legacy engine, which runs a chain on its own
+/// table and knows nothing of the file: it is refused, and so is one a forced legacy spec runs,
+/// one a forced Satin runs before the file's `satinTime`, and a block of another chain.
+#[test]
+fn test_a_genesis_file_runs_its_chains_blocks_on_its_schedule() {
+    let cache = cache_copy_for_satin();
+    let dir = tempfile::tempdir().unwrap();
+
+    let run = replay(BLOCKS[0], cache.path(), &["--genesis", &mainnet_genesis(&dir, 0)]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    let records = run.records();
+    let block = blocks_of(&records)[0];
+    assert_eq!(block["engine"], "satin");
+    assert!(block["satin"].get("limits_override").is_none(), "{}", block["satin"]);
+    let stopped: Vec<_> = records
+        .iter()
+        .filter(|r| r["kind"] == "tx" && !r["satin"]["limit_exceeded"].is_null())
+        .collect();
+    assert!(!stopped.is_empty(), "the file's limit stops the users' transactions");
+    for tx in stopped {
+        assert_eq!(tx["satin"]["limit_exceeded"]["kind"], "data_size", "{tx}");
+        assert_eq!(tx["satin"]["limit_exceeded"]["limit"], 310, "{tx}");
+    }
+
+    let later = mainnet_genesis(&dir, u64::MAX);
+    let forced = mainnet_genesis(&dir, 0);
+    for args in [&["--genesis", &later][..], &["--genesis", &forced, "--override.spec", "Rex6"]] {
+        let run = replay(BLOCKS[0], cache.path(), args);
+        assert_eq!(run.code, 1, "{args:?}: {}", run.stdout);
+        let error = run.records()[0]["error"].as_str().unwrap().to_string();
+        assert!(error.contains("--genesis applies to Satin blocks only"), "{args:?}: {error}");
+    }
+
+    let run = replay(BLOCKS[0], cache.path(), &["--genesis", &later, "--override.spec", "Satin"]);
+    assert_eq!(run.code, 1, "{}", run.stdout);
+    let error = run.records()[0]["error"].as_str().unwrap().to_string();
+    assert!(
+        error.contains(&format!("--genesis activates Satin at timestamp {}", u64::MAX)),
+        "{error}"
+    );
+
+    // A block of another chain is refused for its chain, before the engine the table gives it.
+    let run = replay(BLOCKS[0], cache.path(), &["--genesis", &genesis_of(&dir, 6342, 0)]);
+    assert_eq!(run.code, 1, "{}", run.stdout);
+    let error = run.records()[0]["error"].as_str().unwrap().to_string();
+    let expected = format!(
+        "--genesis configures chain 6342, and the run is on chain {}",
+        mega_evm::MAINNET_CHAIN_ID
+    );
+    assert!(error.contains(&expected), "{error}");
 }

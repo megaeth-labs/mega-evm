@@ -5,18 +5,19 @@ CLI toolbox for direct MegaEVM execution (`run`, `tx`, `replay`) with optional f
 Two engines: the in-tree sources run Satin; a spec from `Equivalence` to `Rex6` runs on the released `mega-evme` 1.7.1 and `mega-evm` 1.7.1, linked as `mega-evme-legacy` / `mega-evm-legacy` (feature `legacy`, on by default).
 
 ## STRUCTURE
-- `src/main.rs`: CLI bootstrap and panic hook.
-- `src/cmd.rs`: argument parsing, engine selection, and dispatch; a legacy spec's arguments are handed unchanged to the 1.7.1 CLI, but for `--spec Rex6` added, before any `--`, to a `run` or `tx` that left `--spec` out (the 1.7.1 default is `Rex7`).
-- `src/engine.rs`: which engine a spec or a block runs on; the hand-off to the legacy CLI.
+- `src/main.rs`: the binary: installs the panic hook and hands the arguments to `cmd::run_cli`.
+- `src/lib.rs`: the library every command lives in: the module declarations and the panic hook (`set_thread_panic_hook`).
+- `src/cmd.rs`: argument parsing, engine selection, and dispatch; `--genesis` is applied here (a `run` or `tx` that left `--spec` out runs Satin under it), and the chain is checked against the file before the engine is picked.
+- `src/engine.rs`: which engine a spec or a block runs on; the hand-off to the legacy CLI, which gets a legacy spec's arguments unchanged but for `--spec Rex6` added, before any `--`, to a `run` or `tx` that left `--spec` out (the 1.7.1 default is `Rex7`).
 - `src/common/`: shared CLI args, state loading, tracing, tx parsing, output printers; `schedule.rs` is the one place a Satin run's hardfork schedule, and so its protocol limits, is chosen, `--override.limits` included.
 - `src/run/`: bytecode execution command.
 - `src/tx/`: full transaction execution command with raw-tx override support.
 - `src/replay/`: RPC-backed historical transaction replay through block executor (Satin; a legacy spec is the 1.7.1 CLI's).
-- `src/block/`: `replay --block`, whole blocks on either engine compared with the chain: inputs and the block cache (`inputs.rs`), the parent state in plain data (`state.rs`), one executor per engine exchanging only plain data (`satin.rs`, `legacy.rs`), records and the comparison (`record.rs`), the driver (`cmd.rs`).
+- `src/block/`: `replay --block`, whole blocks on either engine compared with the chain: inputs and the block cache (`inputs.rs`), the parent state in plain data (`state.rs`), one executor per engine exchanging only plain data (`satin.rs`, `legacy.rs`), the plain data both hand back (`exec.rs`), records and the comparison (`record.rs`), the driver (`cmd.rs`).
 - `tests/satin-differences.md`: the pinned differences between the engines, rendered by `tests/differences.rs` (`UPDATE_EVME_DIFFERENCES=1` rewrites it).
 
 ## KEY PATTERNS
-- Shared argument groups are flattened from `run` argument structs into sibling commands.
+- Shared argument groups are defined in `src/common/` and flattened into each command; `run` re-exports them, and `tx` names them through it (`crate::run::TxArgs`).
 - Command handlers follow staged flow: parse inputs → build state/env → execute → print summary/receipt/trace.
 - Replay uses block executor flow, including pre-execution system calls and preceding transactions.
 - Logging is structured via tracing macros, with explicit progress milestones.
@@ -29,7 +30,7 @@ Two engines: the in-tree sources run Satin; a spec from `Equivalence` to `Rex6` 
 - Do not edit or re-implement the legacy leg: it is the released 1.7.1 code, pinned with its dependency versions (`tests/legacy_line.rs`).
 - Do not move a package `tests/legacy_line.rs` pins without deciding it there. The leg shares most of its dependencies with the Satin engine and the tool, one copy per compatibility line: the precompiles' backends (`secp256k1`, `k256`, `sha2`, `ripemd`, `aurora-engine-modexp`, arkworks, `blst`, `c-kzg`, `p256`), hashing and word arithmetic (`alloy-primitives`, `ruint`, `sha3`) and the encodings. Each is pinned at the release's version; `alloy-rlp`, `alloy-trie` and the `alloy-sol-types` family, which the Satin engine's alloy 2 line holds above it, are pinned at the version the workspace holds (`AHEAD_OF_THE_RELEASE`). Transport, JSON and derive crates float.
 - Do not use `cargo ... -p mega-evme`: the name also matches the linked 1.7.1 package. Use `--manifest-path bin/mega-evme/Cargo.toml`.
-- Do not build a Satin hardfork schedule, or attach its params, in the CLI: a counterfactual takes the engine's own schedule for a chain it does not know (`mega_evm::all_activated_hardforks`), so it carries every params type Satin requires, and a chain's own Satin schedule is used as it is or refused.
+- Do not build a Satin hardfork schedule, or attach its params, in the CLI: a counterfactual takes the engine's own schedule for a chain it does not know (`mega_evm::all_activated_hardforks`), so it carries every params type Satin requires, and a chain's own Satin schedule — the engine's table's, or the one `mega_evm::SatinChainConfig::hardforks` builds from the chain's genesis file (`--genesis`) — is used as it is or refused. Under `--genesis` no Satin run is a counterfactual: one the file does not run on Satin is refused (`satin_schedule`), and the file's chain is checked before a command's engine is picked (`check_genesis_chain`). Do not parse a genesis file's Satin keys here either: `SatinChainConfig::from_genesis_config` is the one parser every reader shares.
 - Do not duplicate chain/spec parsing logic across commands.
 - Add shared parsing in `src/common/` and reuse.
 - Do not print partial execution output before final outcome object assembly.
@@ -37,8 +38,8 @@ Two engines: the in-tree sources run Satin; a spec from `Equivalence` to `Rex6` 
 - Do not mutate command-level defaults in one subcommand without mirroring related aliases/help text.
 
 ## WHERE TO LOOK
-- Add a new top-level command: `src/cmd.rs` enum + module wiring in `src/main.rs`.
+- Add a new top-level command: `src/cmd.rs` enum + module wiring in `src/lib.rs`.
 - Add a new shared CLI option family: `src/common/*` and flatten into command structs.
 - Change state-forking or prestate merge semantics: `src/common/state.rs`.
-- Change which engine a spec or block runs on: `src/engine.rs`; which Satin schedule and limits it runs under: `src/common/schedule.rs`.
+- Change which engine a spec or block runs on: `src/engine.rs`; which Satin schedule and limits it runs under: `src/common/schedule.rs`, which also holds the genesis file a run was given (`--genesis`) and the activation table `src/engine.rs` reads through it.
 - Change receipt/summary formatting: `src/common/outcome.rs` and printer helpers.

@@ -213,7 +213,7 @@ RPC Options:
       --rpc.rate-limit <CU/S>            Retry-layer compute-units-per-second budget [default: 660]
 
 Chain Options:
-      --spec <SPEC>                Spec: `Satin`, or a legacy spec `Equivalence` to `Rex6` [default: Rex6]
+      --spec <SPEC>                Spec: `Satin`, or a legacy spec `Equivalence` to `Rex6` [default: Rex6; Satin under --genesis]
       --chain-id <CHAIN_ID>       Chain ID [default: 6342] [aliases: --chainid]
       --override.limits <JSON|FILE>  Satin only: protocol limits to run under instead of the chain's
 

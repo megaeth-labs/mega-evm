@@ -169,6 +169,7 @@ pub use record::StagedRecord;
 
 use alloy_primitives::Bytes;
 use alloy_sol_types::SolError;
+use revm::context::result::ExecutionResult;
 
 /// Bytes of one write record: the key and value delta one account or storage write leaves in
 /// the state diff.
@@ -575,6 +576,62 @@ impl LimitCheck {
     }
 }
 
+/// A transaction-level limit that stopped a transaction: the dimension, the limit and the usage
+/// that crossed it. It is what an RPC maps a limit stop to, in place of the halt reasons the
+/// legacy engine reported one with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LimitStop {
+    /// The dimension crossed.
+    pub kind: LimitKind,
+    /// The limit crossed, in the dimension's unit: bytes, write records, or gas.
+    pub limit: u64,
+    /// The usage that crossed it (see [`LimitCheck::ExceedsLimit`]).
+    pub used: u64,
+}
+
+impl LimitStop {
+    /// The stop a transaction ended with, read off its `result` and the `limit_exceeded` it
+    /// reports: [`MegaTransactionOutcome::limit_exceeded`](crate::MegaTransactionOutcome), or,
+    /// for a transaction run through another entry point,
+    /// [`AdditionalLimit::latched`] on the EVM's context, read after the transaction ran and
+    /// before the next transaction or system call starts on the EVM, which resets it.
+    ///
+    /// `Some` when both say so: `limit_exceeded` names a transaction-level limit, and `result` is
+    /// a revert whose output is that limit's [`MegaLimitExceeded`]. The output alone never makes a
+    /// stop. A contract can revert with the same bytes, and a frame a frame budget stopped
+    /// reverts with them while its caller runs on and may re-raise them: `limit_exceeded` is then
+    /// `None`, and so is this.
+    pub fn from_result<HaltReason>(
+        result: &ExecutionResult<HaltReason>,
+        limit_exceeded: Option<&LimitCheck>,
+    ) -> Option<Self> {
+        let Some(&LimitCheck::ExceedsLimit { kind, limit, used, frame_local: false }) =
+            limit_exceeded
+        else {
+            return None;
+        };
+        let ExecutionResult::Revert { output, .. } = result else { return None };
+        (decode_mega_limit_exceeded(output) == Some((kind, limit))).then_some(Self {
+            kind,
+            limit,
+            used,
+        })
+    }
+}
+
+/// The dimension and the limit the revert data of a limit stop names: `MegaLimitExceeded(kind,
+/// limit)`, exactly as the engine encodes it, with a `kind` a [`LimitKind`] has. `None` for any
+/// other bytes, an out-of-range word and trailing data included.
+///
+/// Bytes that decode are not a stop by themselves: see [`LimitStop::from_result`].
+pub fn decode_mega_limit_exceeded(revert_data: &[u8]) -> Option<(LimitKind, u64)> {
+    let decoded = MegaLimitExceeded::abi_decode(revert_data).ok()?;
+    if decoded.abi_encode() != revert_data {
+        return None;
+    }
+    Some((LimitKind::from_u8(decoded.kind)?, decoded.limit))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -702,6 +759,107 @@ mod tests {
             );
         }
         assert_eq!(LimitKind::from_u8(4), None);
+    }
+
+    /// Every kind's revert data decodes to its kind and limit, and nothing else decodes: another
+    /// selector, a kind no dimension has, a `uint8` word with high bits set, trailing or missing
+    /// bytes.
+    #[test]
+    fn test_decode_mega_limit_exceeded_accepts_exactly_the_stops_encoding() {
+        let kinds = [
+            LimitKind::DataSize,
+            LimitKind::KVUpdate,
+            LimitKind::ComputeGas,
+            LimitKind::StateGrowth,
+        ];
+        for kind in kinds {
+            let stop = LimitCheck::ExceedsLimit { kind, limit: 7, used: 8, frame_local: false };
+            assert_eq!(decode_mega_limit_exceeded(&stop.revert_data()), Some((kind, 7)));
+        }
+
+        let encoded = |kind: u8| MegaLimitExceeded { kind, limit: 7 }.abi_encode();
+        assert_eq!(decode_mega_limit_exceeded(&encoded(4)), None, "a kind no dimension has");
+        assert_eq!(decode_mega_limit_exceeded(&encoded(u8::MAX)), None);
+        let mut wide = encoded(0);
+        wide[4 + 30] = 1;
+        assert_eq!(decode_mega_limit_exceeded(&wide), None, "a uint8 word with high bits set");
+        let mut trailing = encoded(0);
+        trailing.push(0);
+        assert_eq!(decode_mega_limit_exceeded(&trailing), None, "trailing bytes");
+        let short = encoded(0);
+        assert_eq!(decode_mega_limit_exceeded(&short[..short.len() - 1]), None, "missing bytes");
+        let mut selector = encoded(0);
+        selector[0] ^= 1;
+        assert_eq!(decode_mega_limit_exceeded(&selector), None, "another selector");
+        assert_eq!(decode_mega_limit_exceeded(&[]), None);
+    }
+
+    /// A stop is read off the result and `limit_exceeded` together: the revert carrying the
+    /// limit's data and a transaction-level check naming it. Either alone is no stop.
+    #[test]
+    fn test_limit_stop_needs_the_revert_and_the_check_to_agree() {
+        use crate::MegaHaltReason;
+        use revm::context::result::{HaltReason, ResultGas, SuccessReason};
+
+        let check = LimitCheck::ExceedsLimit {
+            kind: LimitKind::KVUpdate,
+            limit: 3,
+            used: 4,
+            frame_local: false,
+        };
+        let revert = |output: Bytes| ExecutionResult::<MegaHaltReason>::Revert {
+            gas: ResultGas::default(),
+            logs: Default::default(),
+            output,
+        };
+        let stop = LimitStop { kind: LimitKind::KVUpdate, limit: 3, used: 4 };
+
+        assert_eq!(LimitStop::from_result(&revert(check.revert_data()), Some(&check)), Some(stop));
+        assert_eq!(
+            LimitStop::from_result(&revert(check.revert_data()), None),
+            None,
+            "the same bytes without the check: a contract's own revert"
+        );
+        let frame_local = LimitCheck::ExceedsLimit {
+            kind: LimitKind::KVUpdate,
+            limit: 3,
+            used: 4,
+            frame_local: true,
+        };
+        assert_eq!(
+            LimitStop::from_result(&revert(check.revert_data()), Some(&frame_local)),
+            None,
+            "a frame budget stops no transaction"
+        );
+        let other_limit = LimitCheck::ExceedsLimit {
+            kind: LimitKind::KVUpdate,
+            limit: 9,
+            used: 10,
+            frame_local: false,
+        };
+        assert_eq!(
+            LimitStop::from_result(&revert(check.revert_data()), Some(&other_limit)),
+            None,
+            "revert data naming another limit"
+        );
+        assert_eq!(LimitStop::from_result(&revert(Bytes::new()), Some(&check)), None);
+        assert_eq!(
+            LimitStop::from_result(&revert(check.revert_data()), Some(&LimitCheck::WithinLimit)),
+            None
+        );
+        let success = ExecutionResult::<MegaHaltReason>::Success {
+            reason: SuccessReason::Stop,
+            gas: ResultGas::default(),
+            logs: Default::default(),
+            output: revm::context::result::Output::Call(check.revert_data()),
+        };
+        assert_eq!(LimitStop::from_result(&success, Some(&check)), None, "a stop is a revert");
+        let halt = ExecutionResult::<MegaHaltReason>::Halt {
+            reason: HaltReason::OutOfGas(revm::context::result::OutOfGasError::Basic).into(),
+            gas: ResultGas::default(),
+            logs: Default::default(),
+        };
+        assert_eq!(LimitStop::from_result(&halt, Some(&check)), None);
     }
 
     /// The revert data is the ABI encoding of `MegaLimitExceeded(uint8,uint64)`.

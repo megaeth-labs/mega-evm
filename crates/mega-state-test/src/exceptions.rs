@@ -123,7 +123,7 @@ pub fn check_unbuildable(
 }
 
 /// Whether `got`, the names an error satisfies, includes one of the ones `expected` names.
-fn check_names(expected: &str, got: &'static [&'static str]) -> Result<(), Mismatch> {
+pub(crate) fn check_names(expected: &str, got: &'static [&'static str]) -> Result<(), Mismatch> {
     if got.is_empty() {
         return Err(Mismatch::Unnamed);
     }

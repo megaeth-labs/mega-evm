@@ -28,7 +28,7 @@ pub struct ChainArgs {
     /// Name of spec to use. `Satin` runs on the Satin engine; `Equivalence`, `MiniRex`,
     /// `MiniRex1`, `MiniRex2`, `Rex`, `Rex1`, `Rex2`, `Rex3`, `Rex4`, `Rex5`, `Rex6` run on the
     /// legacy engine, the released 1.7.1 (`MiniRex1`/`MiniRex2` are alias specs executing
-    /// `Equivalence`/`MiniRex` behavior)
+    /// `Equivalence`/`MiniRex` behavior). Under `--genesis` the default is `Satin`
     #[arg(long = "spec", default_value = "Rex6")]
     pub spec: String,
 
@@ -64,7 +64,8 @@ impl ChainArgs {
 
     /// The protocol limits a Satin run of this chain at `timestamp` is held to: those of the
     /// schedule [`satin_schedule`] gives, which for a chain that does not run Satin at `timestamp`
-    /// is a counterfactual on [`ProtocolLimits::DEFAULT`], with `--override.limits` over them.
+    /// is a counterfactual on [`ProtocolLimits::DEFAULT`] (refused under `--genesis`), with
+    /// `--override.limits` over them.
     pub fn protocol_limits(&self, timestamp: u64) -> Result<ProtocolLimits> {
         satin_schedule(self.chain_id, timestamp, self.limits_override.as_ref())?
             .protocol_limits(timestamp)

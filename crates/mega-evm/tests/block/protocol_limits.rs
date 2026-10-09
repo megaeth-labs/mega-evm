@@ -163,6 +163,70 @@ fn test_a_block_is_held_to_the_limits_its_chain_carries() {
     assert_eq!(outcome.inner.limit_exceeded, None);
 }
 
+/// An Oracle hint that would cross the chain's transaction data-size limit is not forwarded, and
+/// the block's data-size counter takes nothing for it: the stopped transaction is included with
+/// its body alone. A hint that fits is forwarded and stays in the counter.
+#[test]
+fn test_a_hint_that_crosses_the_limit_adds_nothing_to_the_block_s_data_size() {
+    use alloy_sol_types::SolCall;
+    use mega_evm::system::{IOracle, ORACLE_CONTRACT_ADDRESS};
+
+    let hint = |data: &'static [u8]| -> Bytes {
+        IOracle::sendHintCall {
+            topic: alloy_primitives::B256::repeat_byte(0x7a),
+            data: Bytes::from_static(data),
+        }
+        .abi_encode()
+        .into()
+    };
+    let (small, large) = (hint(b""), hint(&[0x5a; 64]));
+    let (small_len, large_len) = (small.len() as u64, large.len() as u64);
+    // A transaction that calls `sendHint` counts its calldata in its body and again as the hint.
+    // The limit holds the small one twice and the large one once.
+    let tx_data_size_limit = TX_BODY_SIZE + 2 * large_len - 1;
+    assert!(TX_BODY_SIZE + 2 * small_len <= tx_data_size_limit);
+    let limits = ProtocolLimits::DEFAULT.with_tx_runtime_limits(
+        ProtocolLimits::DEFAULT.tx_runtime_limits.with_tx_data_size_limit(tx_data_size_limit),
+    );
+
+    let mut state = State::builder().with_database(database()).build();
+    let mut executor =
+        common::executor_with_spec(&mut state, common::unlimited_ctx(), chain_with(limits));
+    executor.apply_pre_execution_changes().expect("the block starts");
+
+    let outcome = executor
+        .run_transaction(&tx_from(SENDERS[0], ORACLE_CONTRACT_ADDRESS, large, GAS_LIMIT))
+        .expect("the transaction runs");
+    assert_eq!(
+        outcome.inner.limit_exceeded,
+        Some(LimitCheck::ExceedsLimit {
+            kind: LimitKind::DataSize,
+            limit: tx_data_size_limit,
+            used: TX_BODY_SIZE + 2 * large_len,
+            frame_local: false,
+        }),
+        "the hint crosses the transaction's limit"
+    );
+    assert_eq!(outcome.inner.usage.data_size, TX_BODY_SIZE + large_len);
+    executor.commit_transaction_outcome(outcome).expect("the stopped transaction is included");
+    assert_eq!(
+        executor.limiter().usage.data_size,
+        TX_BODY_SIZE + large_len,
+        "the block counts the stopped transaction's body and nothing for the hint"
+    );
+
+    let outcome = executor
+        .run_transaction(&tx_from(SENDERS[1], ORACLE_CONTRACT_ADDRESS, small, GAS_LIMIT))
+        .expect("the transaction runs");
+    assert!(outcome.inner.result.is_success(), "{:?}", outcome.inner.result);
+    executor.commit_transaction_outcome(outcome).expect("it is included");
+    assert_eq!(
+        executor.limiter().usage.data_size,
+        (TX_BODY_SIZE + large_len) + (TX_BODY_SIZE + 2 * small_len),
+        "a forwarded hint is counted beside its transaction's body"
+    );
+}
+
 /// What a block produced, with the state it left behind: the receipts, the counters and every
 /// account and slot the candidates could have touched.
 #[derive(Debug, PartialEq)]

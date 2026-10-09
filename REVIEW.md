@@ -89,6 +89,12 @@ This is the single most important correctness concern in mega-evm.
 These checks guard every change to the Satin engine.
 `lint`, `test`, `no-std` and `require-label` are the required checks on `satin`; the rest inform the review, and the reviewer reads them.
 
+### The op-revm baseline
+
+- `crates/mega-evm/tests/satin/equivalence.rs` runs ordinary transactions through `MegaEvm` and through op-revm on the same configuration, and holds Satin to op-revm's total plus the history ledger, on op-revm's own state gas, logs and state.
+- It runs in the `test` check.
+- A change that makes Satin differ from op-revm on purpose updates a case or adds one, so the difference is pinned; a case changed to absorb a difference nobody chose is the defect.
+
 ### Differential harness
 
 - The differential harness, which runs JSON scenarios through `MegaEvm` and through stock revm and compares them field by field, is maintained outside this repository.
@@ -104,9 +110,25 @@ These checks guard every change to the Satin engine.
   Equivalence mode is the gate: Satin's machinery priced as the fixture's fork prices it, where every failure must be explained by a deviation registered in `crates/mega-state-test/src/deviations.rs`, with its reason and the exact entries it explains, each with the hashes Satin produces; every listed entry must fail exactly as listed, and the executed and skipped counts equal the fork runner's pins.
   Satin mode reports the same fixtures under Satin's own configuration in the step summary, and does not fail the job.
   The gate runs when a pull request changes the engine, the runner, the system contracts, the toolchain or the lock; the workflow's `execution-spec gate on Satin` job runs on every pull request and reports it, passing when the gate passed or had nothing to run.
+- The same workflow imports the main release's Osaka blockchain tests through Satin's block executor (`state-test btest`, `crates/mega-state-test/src/blockchain/`), in equivalence mode's configuration: every accepted block's gas used, logs bloom, receipts root and state root are held to its header, every block the fixture expects to be invalid must be refused for an exception it names, and the chain must end at the fixture's last block and post-state.
+  A block that differs passes only when a deviation the registry already has lists that test and block with exactly the outcome Satin produces — gas used, logs bloom, receipts root and state root — and the chain goes on from Satin's state, so a listed block exempts nothing after it; a block listed as differing only by an earlier block's state must run as on Ethereum otherwise, and a chain that ends on a listed block's state says why its post-state is not compared.
+  The summary counts the blocks checked against Ethereum apart from those matched to a deviation; the executed tests and the skips of each class are pinned in the workflow.
+  A skip is decided from the fixture before anything runs, and a class added to the list says what Ethereum's block has that an OP block does not, or which check a node makes before the executor does.
+  The accounts a Satin block adds — its predeploys and the fee vaults op-revm credits — are taken out of the state root only when the fixture's pre-state does not hold them and they hold exactly what Satin put there (`SATIN_ACCOUNTS`); widening that rule is reviewed like a deviation.
 - A deviation is a rule Satin keeps on purpose and is reviewed as one: an entry added to explain a failure that is a bug is the defect, and an entry added, removed or given new hashes says which fixtures moved and why.
   `crates/mega-state-test/DEVIATIONS.md` is rendered from the registry, and a test keeps the two equal.
 - Neither workflow is a required check; `execution-spec gate on Satin` is the job a branch rule would require.
+
+### Witness replay
+
+- `crates/mega-evm/tests/block/witness/` executes a block on a recorder of every read and replays the transactions it included twice, on a strict database and environments that serve exactly a witness and refuse everything else: once on the record of every database read, once on the witness a node builds from the pre-block states, the included transactions' returned states and the engine's exports.
+  `witness::check_replay` in `crates/mega-state-test` does the same for a fixture's transaction; an entry the engine rejects has no returned state and replays on the record alone.
+  Its test over the execution-spec fixtures is always ignored by default: it runs only with `-- --ignored` (or `--include-ignored`) and `MEGA_STATE_TEST_FIXTURES` set to the fixtures, and setting the variable alone runs nothing.
+- The replay on the node's witness is the one that finds a read the witness lacks; the replay on the record of every read shows the block has no input outside its database and environments.
+  A change that makes block execution read state outside a transaction's journal hands the read to the pre-block observer as a read-only entry, or exports it, and adds the case that makes the read.
+- The block cases run in the `test` check.
+  `.github/workflows/exec-spec-satin.yml` runs the fixture replay after the equivalence gate, on the same fixture releases: every Osaka and Amsterdam entry, in equivalence and in Satin mode; an entry that does not replay fails the job, and so `execution-spec gate on Satin`, and so does a run that prints no single well-formed summary, executes nothing or reports a failed entry.
+  The step summary counts the entries replayed on both witnesses apart from the rejected ones.
 
 ### Byte-price grid
 
@@ -153,7 +175,7 @@ These checks guard every change to the Satin engine.
 
 - GitHub fires a `schedule` trigger only from the default branch's copy of a workflow, so the schedules in `satin`'s copies (nightly mutation, weekly benchmark, replay-bench, doc-audit, the weekly execution-spec run, the nightly byte-price grid) stay inert until `satin` is the default branch.
 - Run them on `satin` by hand: `gh workflow run <workflow>.yml --ref satin` runs `satin`'s copy of the workflow on `satin`'s head, so none of them needs a `ref` input.
-  - `mutation.yml`: the whole-crate cargo-mutants run, the spec-gate sweep and suppression hygiene.
+  - `mutation.yml`: the whole-crate cargo-mutants run and suppression hygiene.
   - `benchmark.yml`: the Satin bench set on `satin`'s head, without a baseline (`-f aa_check=true` measures the noise floor).
   - `exec-spec.yml`: the execution-spec fixtures at the pinned fork tag.
   - `doc-audit.yml`: the documentation audit of `satin`'s docs.

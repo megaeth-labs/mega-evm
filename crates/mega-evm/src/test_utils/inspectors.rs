@@ -199,8 +199,12 @@ impl<ITEM, META> Pointer<TraceNode<ITEM, META>> {
 /// Represents gas information for a single opcode execution.
 #[derive(Clone)]
 pub struct OpcodeGasInfo {
-    /// The opcode executed.
+    /// The opcode executed. A byte no opcode is defined for, which halts the frame with
+    /// `OpcodeNotFound`, is recorded as `INVALID`; [`byte`](Self::byte) tells it from the
+    /// designated invalid opcode `0xFE`.
     pub opcode: OpCode,
+    /// The byte executed: the opcode's own, or the undefined byte the frame halted on.
+    pub byte: u8,
     /// Gas remaining before the opcode execution.
     pub gas_before: u64,
     /// Gas remaining after the opcode execution.
@@ -211,10 +215,14 @@ pub struct OpcodeGasInfo {
 
 impl core::fmt::Debug for OpcodeGasInfo {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if self.is_undefined() {
+            write!(f, "UNDEFINED(0x{:02x})", self.byte)?;
+        } else {
+            f.write_str(self.opcode.as_str())?;
+        }
         write!(
             f,
-            "{}[depth={}] gas: {} -> {} (cost: {})",
-            self.opcode.as_str(),
+            "[depth={}] gas: {} -> {} (cost: {})",
             self.depth,
             self.gas_before,
             self.gas_after,
@@ -227,6 +235,11 @@ impl OpcodeGasInfo {
     /// Calculates the gas cost of this opcode execution.
     pub fn gas_cost(&self) -> u64 {
         self.gas_before.saturating_sub(self.gas_after)
+    }
+
+    /// Whether the byte executed is one no opcode is defined for.
+    pub fn is_undefined(&self) -> bool {
+        self.byte != self.opcode.get()
     }
 }
 
@@ -320,7 +333,8 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for GasInspect
         let opcode = interp.bytecode.opcode();
         let depth = context.journal().depth();
         let step = OpcodeGasInfo {
-            opcode: OpCode::new(opcode).unwrap(),
+            opcode: OpCode::new(opcode).unwrap_or(OpCode::INVALID),
+            byte: opcode,
             gas_before,
             gas_after: gas_before, // Will be updated in step_end
             depth: depth as u64,

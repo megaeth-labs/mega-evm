@@ -1,0 +1,230 @@
+//! Reads that gas or a switch skips, through the harness: a cold `SLOAD` and a cold account load
+//! with less gas than the cold surcharge, an oracle read the frame cannot pay, and reads a frame
+//! that switched its volatile-data access off is refused. None reaches the database, none is in
+//! the record, and the replay skips them the same way.
+
+use alloy_primitives::{address, Address, Bytes, U256};
+use alloy_sol_types::SolCall;
+use mega_evm::{
+    system::{IMegaAccessControl, IOracle, ACCESS_CONTROL_ADDRESS, ORACLE_CONTRACT_ADDRESS},
+    test_utils::BytecodeBuilder,
+    OracleRead,
+};
+use revm::{
+    bytecode::opcode::{BALANCE, BLOCKHASH, CALL, GAS, MSTORE, POP, PUSH0, RETURN, SLOAD},
+    context::result::ExecutionResult,
+};
+
+use super::{
+    harness::{call, Case},
+    oracle::db as chain_with_oracle,
+};
+use crate::common::{self, BLOCK_NUMBER, CONTRACT};
+
+/// An account no transaction here funds or reads unless a cold load is made.
+const STRANGER: Address = address!("0x5000000000000000000000000000000000000005");
+
+/// The regular gas an empty call spends before its first instruction, at the byte prices in
+/// effect: what a transaction to [`CONTRACT`] with empty code is billed on the regular ledger.
+fn intrinsic() -> u64 {
+    let replay = Case::new("intrinsic probe", common::database())
+        .tx(call(0, CONTRACT, Bytes::new(), common::empty_call_gas()))
+        .run();
+    replay.recorded.tx(0).gas.regular
+}
+
+/// A gas limit leaving the frame `room` of regular gas after the intrinsic cost and the body.
+fn gas_with_room(room: u64) -> u64 {
+    intrinsic() + common::body_history(0) + room
+}
+
+/// A cold `SLOAD` with less gas than its cold surcharge is skipped before the database is asked:
+/// the slot is not in the record, the transaction runs out of gas, and the replay does the same.
+#[test]
+fn test_a_cold_sload_short_of_gas_reads_no_slot() {
+    let mut db = common::database();
+    db.set_account_code(
+        CONTRACT,
+        BytecodeBuilder::default().push_number(7_u8).append(SLOAD).stop().build(),
+    );
+    let replay = Case::new("cold sload skipped", db)
+        .tx(call(0, CONTRACT, Bytes::new(), gas_with_room(3 + 2_000)))
+        .run();
+    let run = &replay.recorded;
+    assert!(matches!(run.tx(0).result, ExecutionResult::Halt { .. }), "{:?}", run.tx(0).result);
+    assert!(!run.record.storage.contains_key(&(CONTRACT, U256::from(7))));
+}
+
+/// The same slot with the gas to pay for it is read and recorded.
+#[test]
+fn test_a_cold_sload_with_gas_reads_the_slot() {
+    let mut db = common::database();
+    db.set_account_code(
+        CONTRACT,
+        BytecodeBuilder::default().push_number(7_u8).append(SLOAD).stop().build(),
+    );
+    let replay = Case::new("cold sload", db)
+        .tx(call(0, CONTRACT, Bytes::new(), gas_with_room(3 + 2_200)))
+        .run();
+    let run = &replay.recorded;
+    assert!(run.tx(0).result.is_success(), "{:?}", run.tx(0).result);
+    assert_eq!(run.record.storage.get(&(CONTRACT, U256::from(7))), Some(&U256::ZERO));
+}
+
+/// A cold `BALANCE` with less gas than its cold surcharge loads no account.
+#[test]
+fn test_a_cold_account_load_short_of_gas_reads_no_account() {
+    let mut db = common::database();
+    db.set_account_code(
+        CONTRACT,
+        BytecodeBuilder::default().push_address(STRANGER).append(BALANCE).stop().build(),
+    );
+    let replay = Case::new("cold balance skipped", db)
+        .tx(call(0, CONTRACT, Bytes::new(), gas_with_room(3 + 2_500)))
+        .run();
+    let run = &replay.recorded;
+    assert!(matches!(run.tx(0).result, ExecutionResult::Halt { .. }), "{:?}", run.tx(0).result);
+    assert!(!run.record.accounts.contains_key(&STRANGER));
+
+    let mut db = common::database();
+    db.set_account_code(
+        CONTRACT,
+        BytecodeBuilder::default().push_address(STRANGER).append(BALANCE).stop().build(),
+    );
+    let replay = Case::new("cold balance", db)
+        .tx(call(0, CONTRACT, Bytes::new(), gas_with_room(3 + 2_700)))
+        .run();
+    assert_eq!(replay.recorded.record.accounts.get(&STRANGER), Some(&None));
+}
+
+/// Code that calls the Oracle's `getSlot(42)` forwarding `gas` and returns whether the call
+/// succeeded, as a word.
+fn oracle_read_forwarding(gas: u64) -> Bytes {
+    let input = IOracle::getSlotCall { slot: U256::from(42) }.abi_encode();
+    BytecodeBuilder::default()
+        .mstore(0, &input)
+        .append_many([PUSH0, PUSH0])
+        .push_number(input.len() as u64)
+        .append_many([PUSH0, PUSH0])
+        .push_address(ORACLE_CONTRACT_ADDRESS)
+        .push_number(gas)
+        .append_many([CALL, PUSH0, MSTORE])
+        .push_number(32_u8)
+        .append_many([PUSH0, RETURN])
+        .build()
+}
+
+/// An oracle read the frame cannot pay is neither loaded nor asked: a call into the Oracle
+/// forwarded less gas than a cold access fails, leaving the slot out of the record and the
+/// service unasked, on a chain that holds the Oracle, so the slot would have been read from the
+/// database otherwise. The gas is the call's own, set by its caller, so the frame is short of the
+/// cold access whatever a byte costs.
+#[test]
+fn test_an_oracle_read_short_of_gas_asks_nothing() {
+    let case = |forwarded: u64| {
+        let mut db = chain_with_oracle();
+        db.set_account_code(CONTRACT, oracle_read_forwarding(forwarded));
+        Case::new("oracle short of gas", db)
+            .envs(super::harness::Envs::new().with_oracle_storage(U256::from(42), U256::from(1)))
+            .tx(call(0, CONTRACT, Bytes::new(), 1_000_000 + common::body_history(0)))
+    };
+    let succeeded = |run: &super::harness::Run| {
+        assert!(run.tx(0).result.is_success(), "{:?}", run.tx(0).result);
+        U256::from_be_slice(run.tx(0).result.output().expect("the flag")) == U256::from(1)
+    };
+
+    let short = case(2_000).run();
+    assert!(!succeeded(&short.recorded), "the call into the Oracle ran out of gas");
+    assert!(short.recorded.record.oracle_reads.is_empty(), "the service was not asked");
+    assert!(short.recorded.tx(0).oracle_reads.is_empty(), "and the transaction recorded no read");
+    assert!(!short
+        .recorded
+        .record
+        .storage
+        .contains_key(&(ORACLE_CONTRACT_ADDRESS, U256::from(42))));
+
+    let enough = case(50_000).run();
+    assert!(succeeded(&enough.recorded));
+    assert_eq!(
+        enough.recorded.record.oracle_reads,
+        vec![OracleRead { slot: U256::from(42), answer: Some(U256::from(1)) }]
+    );
+    assert!(
+        enough.recorded.record.storage.contains_key(&(ORACLE_CONTRACT_ADDRESS, U256::from(42))),
+        "with the gas, the slot is read from the database"
+    );
+}
+
+/// Code that switches its volatile-data access off, then runs `then`.
+fn disabled_then(then: BytecodeBuilder) -> Bytes {
+    let disable = IMegaAccessControl::disableVolatileDataAccessCall {}.abi_encode();
+    let code = BytecodeBuilder::default().mstore(0, &disable);
+    let code = code
+        .append_many([PUSH0, PUSH0])
+        .push_number(disable.len() as u64)
+        .append_many([PUSH0, PUSH0])
+        .push_address(ACCESS_CONTROL_ADDRESS)
+        .append_many([GAS, CALL, POP]);
+    let mut out = code.build().to_vec();
+    out.extend_from_slice(&then.build());
+    out.into()
+}
+
+/// A refused `BLOCKHASH` reads no hash: the frame reverts, the record holds none and the export
+/// is empty.
+#[test]
+fn test_a_refused_block_hash_read_reads_nothing() {
+    let mut db = common::database();
+    let then = BytecodeBuilder::default()
+        .push_number(BLOCK_NUMBER - 1)
+        .append(BLOCKHASH)
+        .append(POP)
+        .stop();
+    db.set_account_code(CONTRACT, disabled_then(then));
+    let replay = Case::new("refused blockhash", db)
+        .tx(call(0, CONTRACT, Bytes::new(), 1_000_000 + common::body_history(0)))
+        .run();
+    let run = &replay.recorded;
+    assert!(matches!(run.tx(0).result, ExecutionResult::Revert { .. }), "{:?}", run.tx(0).result);
+    assert!(run.record.block_hashes.is_empty());
+    assert!(run.block_hashes.is_empty());
+}
+
+/// Code that reads slot 42 through the Oracle and stops.
+fn read_slot_then_stop() -> BytecodeBuilder {
+    let read = IOracle::getSlotCall { slot: U256::from(42) }.abi_encode();
+    let code = BytecodeBuilder::default().mstore(0, &read);
+    code.append_many([PUSH0, PUSH0])
+        .push_number(read.len() as u64)
+        .append_many([PUSH0, PUSH0])
+        .push_address(ORACLE_CONTRACT_ADDRESS)
+        .append_many([GAS, CALL, POP])
+        .stop()
+}
+
+/// A refused oracle read loads nothing and asks nothing, on a chain that holds the Oracle: the
+/// same read with the frame's access on is loaded from the database and asked.
+#[test]
+fn test_a_refused_oracle_read_reads_nothing() {
+    let slot = (ORACLE_CONTRACT_ADDRESS, U256::from(42));
+    let case = |name: &str, code: Bytes| {
+        let mut db = chain_with_oracle();
+        db.set_account_code(CONTRACT, code);
+        Case::new(name, db)
+            .envs(super::harness::Envs::new().with_oracle_storage(U256::from(42), U256::from(1)))
+            .tx(call(0, CONTRACT, Bytes::new(), 1_000_000 + common::body_history(0)))
+            .run()
+    };
+
+    let refused = case("refused oracle read", disabled_then(read_slot_then_stop()));
+    let run = &refused.recorded;
+    assert!(run.tx(0).result.is_success(), "the outer frame survives the Oracle's revert");
+    assert!(run.record.oracle_reads.is_empty());
+    assert!(!run.record.storage.contains_key(&slot));
+
+    let allowed = case("allowed oracle read", read_slot_then_stop().build());
+    let run = &allowed.recorded;
+    assert!(run.tx(0).result.is_success());
+    assert_eq!(run.record.oracle_reads.len(), 1, "with access on, the service is asked");
+    assert!(run.record.storage.contains_key(&slot), "and the slot is read from the database");
+}
