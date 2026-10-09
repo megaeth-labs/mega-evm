@@ -253,6 +253,15 @@ fn test_value_transfer_matches_op_revm() {
 /// cannot see whether the charge survived the frame it started. This one runs the same program
 /// above the cap: op-revm charges nothing for the records, and Satin's total must exceed
 /// op-revm's by exactly the history ledger here too.
+///
+/// The reservoir left at the end holds the child to inheriting its caller's: a caller takes back
+/// the reservoir its child returns as its own, so a child handed none would hand none back, and
+/// the transaction would end with no reservoir rather than what the state and history left. The
+/// child here is answered without running and spends nothing, so this does not show that a child
+/// can spend the whole reservoir it inherits; a child that does is held in the data-size tests.
+///
+/// Rule [S4.10]. Expected values `constants`: the history ledger is the byte table at the cost
+/// per history byte, and the reservoir the transaction's own less its two other ledgers.
 #[test]
 fn test_a_nested_value_call_with_a_reservoir_matches_op_revm() {
     if runs_at_measurement_prices() {
