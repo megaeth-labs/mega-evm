@@ -12,6 +12,7 @@ mod detained_transfers;
 mod detention;
 mod equivalence;
 mod failed_deposit;
+mod floor_exempt;
 mod history_bytes;
 mod history_exemption;
 mod history_gas;
