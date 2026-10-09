@@ -235,6 +235,88 @@ fn test_keyless_deploy_empty_initcode() {
     }
 }
 
+/// [S15.20] [S15.38] [S15] A deployment whose initcode returns empty code leaves the deploy
+/// address with nonce 1 and no code, and the signer at nonce 1. A second deployment there passes
+/// step 12, which checks the code alone, and its creation collides: the call answers
+/// `ExecutionHalted` with the whole forward as `gasUsed`, the signer stays at nonce 1, the
+/// creation's bump from 1 being taken back, and the address keeps nonce 1 and no code.
+///
+/// The second call costs, beyond a transaction carrying the same calldata to an account with no
+/// code, step 1's 100,000 and step 14's `CREATE` charge of 32,000 (empty initcode costs nothing
+/// more), then the forward the collision spends. It charges no state gas at all: the signer, no
+/// longer empty, adds no account at step 10, and the address, not empty, adds none at step 14 —
+/// so a state-growth limit of 1 gas does not stop it. Step 14 charges the history of two records,
+/// the created account's and the signer's nonce, and both come back: the nonce record with the
+/// bump, the account's with the failed creation. So, below the execution cap, the least gas limit
+/// that deploys is the intrinsic gas, 132,000, the two records and the forward, which steps 11
+/// and 15 need left: one gas less is refused with `GasLimitTooLow`.
+///
+/// Expected values: independent.
+#[test]
+fn test_a_deploy_address_left_with_a_nonce_and_no_code_collides() {
+    const FORWARD: u64 = SIGNED_GAS_LIMIT;
+    for gas_limit in GAS_LIMITS {
+        let deployment = Deployment::new(Bytes::new());
+        let mut db = system_db();
+        let data = deployment.call_data(FORWARD);
+        let first =
+            run_nth(db.clone(), data.clone(), gas_limit, EvmTxRuntimeLimits::no_limits(), 0);
+        assert!(
+            matches!(failure(&first), KeylessDeployError::EmptyCodeDeployed { .. }),
+            "{:?}",
+            first.result
+        );
+        assert_eq!(nonce(&first, deployment.address), 1, "the address keeps a nonce");
+        assert_eq!(code_hash(&first, deployment.address), Some(KECCAK_EMPTY), "and no code");
+        assert_eq!(nonce(&first, deployment.signer), 1);
+        db.commit(first.result_and_state.state);
+
+        let no_state = EvmTxRuntimeLimits::no_limits().with_tx_state_gas_limit(1);
+        let second = run_nth(db.clone(), data.clone(), gas_limit, no_state, 1);
+        let ret = returned(&second);
+        assert_eq!(ret.deployedAddress, Address::ZERO, "at {gas_limit}");
+        assert_eq!(ret.gasUsed, FORWARD, "the collision spends the whole forward");
+        let KeylessDeployError::ExecutionHalted { gas_used, .. } = failure(&second) else {
+            panic!("expected ExecutionHalted: {:?}", second.result);
+        };
+        assert_eq!(gas_used, FORWARD);
+        assert_eq!(nonce(&second, deployment.signer), 1, "the bump from 1 is taken back");
+        let [total, regular, state, history, history_bytes] =
+            beyond(&second, &reference(data, gas_limit));
+        assert_eq!(total, 100_000 + 32_000 + FORWARD, "at {gas_limit}");
+        assert_eq!(regular, total, "at {gas_limit}");
+        assert_eq!([state, history, history_bytes], [0, 0, 0], "at {gas_limit}");
+
+        db.commit(second.result_and_state.state);
+        let address = db.basic(deployment.address).unwrap().expect("the address keeps its account");
+        assert_eq!((address.nonce, address.code_hash), (1, KECCAK_EMPTY));
+    }
+
+    let deployment = Deployment::new(Bytes::new());
+    let data = deployment.call_data(FORWARD);
+    let mut db = system_db();
+    let first =
+        run_nth(db.clone(), data.clone(), GAS_LIMITS[0], EvmTxRuntimeLimits::no_limits(), 0);
+    db.commit(first.result_and_state.state);
+    let least = intrinsic(&data) + 100_000 + 32_000 + 2 * record() + FORWARD;
+    let enough = run_nth(db.clone(), data.clone(), least, EvmTxRuntimeLimits::no_limits(), 1);
+    let KeylessDeployError::ExecutionHalted { gas_used, .. } = failure(&enough) else {
+        panic!("expected ExecutionHalted: {:?}", enough.result);
+    };
+    assert_eq!(gas_used, FORWARD);
+    assert_eq!(
+        enough.result.gas().total_gas_spent(),
+        least - 2 * record(),
+        "the two records' history comes back"
+    );
+    let short = run_nth(db, data, least - 1, EvmTxRuntimeLimits::no_limits(), 1);
+    assert!(
+        matches!(refusal(&short), KeylessDeployError::GasLimitTooLow { .. }),
+        "{:?}",
+        short.result
+    );
+}
+
 /// Init code that destroys its own account: the value it held goes to the beneficiary, no code
 /// is left, and the call reports `EmptyCodeDeployed`.
 #[test]
