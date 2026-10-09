@@ -23,7 +23,7 @@
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
     constants::TX_GAS_LIMIT_CAP,
-    test_utils::{neutral_cfg, neutralize_evm, BytecodeBuilder, MemoryDatabase},
+    test_utils::{neutral_cfg, neutralize_evm, note_price_guard, BytecodeBuilder, MemoryDatabase},
     EthSpecId, EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, MegaContext, MegaEvm,
     MegaTransactionOutcome, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
@@ -39,10 +39,7 @@ use revm::{
 };
 
 use crate::{
-    common::{
-        call, context, history, history_is_free, history_rounds, runs_at_measurement_prices,
-        state_is_free,
-    },
+    common::{call, context, history, history_rounds, runs_at_measurement_prices, state_is_free},
     salt::entry,
 };
 
@@ -146,6 +143,20 @@ fn code_state_gas() -> u64 {
 /// spec's price.
 fn code_history_gas() -> u64 {
     entry(GasId::code_deposit_history_gas()) * CODE_LEN
+}
+
+/// Whether the deposit charges its code no history at the prices in effect: a history byte
+/// priced at nothing, or at less than half a gas, which the schedule's per-byte entry rounds to
+/// nothing.
+///
+/// Only a measurement build arranges that. The deposit's state gas is then its last charge, so a
+/// case built on a history charge after it has nothing to run, and notes so.
+fn code_history_is_free() -> bool {
+    if code_history_gas() > 0 {
+        return false;
+    }
+    note_price_guard("the deposit's history per byte rounds to nothing at these prices");
+    true
 }
 
 /// The state gas of the account the creation adds, charged to `B` by its `CREATE`: 183,600 at
@@ -350,6 +361,12 @@ fn history_in(pool: Pool, bytes: u64) -> u64 {
 
 /// Holds a run to the ledgers of a creation that spent `spent` of its forward as regular gas, and
 /// to the receipt and the reservoir those ledgers imply.
+///
+/// The history ledger is the body's, the records' and the code's charges, each priced on its own.
+/// Where a history byte costs a fraction of a gas each charge rounds on its own, so the history of
+/// their bytes together is not the ledger, and the figures that read it — the history ledger, the
+/// receipt and the reservoir above the cap — are left out, with a note; the regular and state
+/// ledgers are held all the same.
 #[track_caller]
 fn assert_ledgers(
     name: &str,
@@ -362,6 +379,9 @@ fn assert_ledgers(
     let history = history_in(pool, history_bytes);
     assert_eq!(outcome.gas.regular, regular(pool, spent), "{name}: the regular ledger");
     assert_eq!(outcome.gas.state, state, "{name}: the state ledger");
+    if history_rounds() {
+        return;
+    }
     assert_eq!(outcome.gas.history, history, "{name}: the history ledger");
     assert_eq!(
         outcome.gas.gas_used,
@@ -449,11 +469,6 @@ fn assert_deposits(name: &str, pool: Pool, forward: u64) {
 /// the init code's cost plus 6 gas per word of code, by hand (`independent`) [S5.13] [S5.14].
 #[test]
 fn test_a_creation_one_gas_short_of_the_hash_runs_out_of_gas_above_the_cap() {
-    // The ledgers add the history of the body, the records and the code, which a history byte
-    // priced at a fraction of a gas rounds charge by charge.
-    if history_rounds() {
-        return;
-    }
     let enough = deposits_at(Pool::AboveCap);
     assert_runs_out("one gas short of the hash", Pool::AboveCap, enough - 1, HASH - 1, false);
     assert_deposits("the hash paid exactly", Pool::AboveCap, enough);
@@ -465,9 +480,9 @@ fn test_a_creation_one_gas_short_of_the_hash_runs_out_of_gas_above_the_cap() {
 
 /// Below the execution cap the code's state gas is paid out of regular gas right after the hash:
 /// one gas short of it the creation runs out of gas with the hash paid and no state gas charged,
-/// and one gas more charges the state gas and runs out on the history instead — or, where a
-/// history byte costs nothing and no history charge follows, deposits the code with nothing
-/// left. The boundary is the init code, the hash and 1,530 per byte of code, by hand
+/// and one gas more charges the state gas and runs out on the history instead — or, where the
+/// deposit's history per byte is nothing and no history charge follows, deposits the code with
+/// nothing left. The boundary is the init code, the hash and 1,530 per byte of code, by hand
 /// (`constants`: the cost per state byte in effect) [S5.13] [S5.14].
 #[test]
 fn test_a_creation_one_gas_short_of_its_state_gas_runs_out_of_gas_with_the_hash_paid() {
@@ -483,7 +498,7 @@ fn test_a_creation_one_gas_short_of_its_state_gas_runs_out_of_gas_with_the_hash_
         code_state_gas() - 1,
         false,
     );
-    if history_is_free() {
+    if code_history_is_free() {
         // The state gas is the deposit's last charge: paying it exactly is the whole deposit.
         assert_eq!(state_paid, deposits_at(Pool::BelowCap), "no history follows the state gas");
         assert_deposits("the state gas paid exactly", Pool::BelowCap, state_paid);
@@ -504,7 +519,7 @@ fn test_a_creation_one_gas_short_of_its_state_gas_runs_out_of_gas_with_the_hash_
 fn test_a_creation_one_gas_short_of_its_history_runs_out_of_gas_with_the_state_gas_paid() {
     // A deposit that pays no history has no history to be short of, and one that adds no state
     // gas has no state charge to show.
-    if history_is_free() || state_is_free() {
+    if code_history_is_free() || state_is_free() {
         return;
     }
     let enough = deposits_at(Pool::BelowCap);
@@ -627,7 +642,7 @@ fn test_a_creation_that_cannot_pay_the_hash_runs_out_of_gas_under_the_state_gas_
 fn test_a_creation_that_cannot_pay_its_history_runs_out_of_gas_under_the_state_gas_limit() {
     // A deposit that pays no history has no history to run out of gas on, and one that adds no
     // state gas has no state-gas limit to cross.
-    if history_is_free() || state_is_free() {
+    if code_history_is_free() || state_is_free() {
         return;
     }
     let pool = Pool::BelowCap;
