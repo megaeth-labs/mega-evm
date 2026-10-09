@@ -98,9 +98,9 @@ impl<K: Clone + Ord + Serialize, V: Summarize> Summarize for BTreeMap<K, V> {
 macro_rules! assert_summaries_snapshot {
     ($views:expr $(,)?) => {{
         let views = $views;
-        crate::cases::dump_views(&crate::snapshot_name!(), views);
-        let summaries = &crate::cases::Summarize::summarize(views);
-        crate::assert_sorted_json_snapshot!(summaries);
+        $crate::cases::dump_views(&$crate::snapshot_name!(), views);
+        let summaries = &$crate::cases::Summarize::summarize(views);
+        $crate::assert_sorted_json_snapshot!(summaries);
     }};
 }
 
@@ -110,7 +110,7 @@ macro_rules! assert_summaries_snapshot {
 macro_rules! snapshot_name {
     () => {{
         fn here() {}
-        crate::cases::snapshot_name_of(::std::any::type_name_of_val(&here))
+        $crate::cases::snapshot_name_of(::std::any::type_name_of_val(&here))
     }};
 }
 
