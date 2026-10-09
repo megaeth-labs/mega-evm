@@ -445,19 +445,34 @@ fn test_oracle_sload_reverts_when_volatile_access_disabled() {
     assert_eq!(refused_type(&run.output()), VolatileDataAccessType::Oracle);
 }
 
-/// A creation whose init code reads volatile data fails below a frame that switched access off.
+/// A creation whose init code reads volatile data fails below a frame that switched access off,
+/// and it fails on the refusal: the creation reverts with `VolatileDataAccessDisabled` naming the
+/// timestamp, which the parent returns. The parent logs the address `CREATE` left, zero for a
+/// failed creation.
+///
+/// Rule [S13.2]. Expected values `constants`: the revert data is decoded with the contract's own
+/// error binding, and the access type is the one the init code reads.
 #[test]
 fn test_create_reverts_when_volatile_access_disabled() {
     let init_code =
         BytecodeBuilder::default().append_many([TIMESTAMP, POP, PUSH0, PUSH0, RETURN]).build();
-    let parent = disable(BytecodeBuilder::default())
-        .mstore(0x40, &init_code)
-        .push_number(init_code.len() as u64)
-        .push_number(0x40_u8)
-        .push_number(0_u8)
-        .append(CREATE);
-    let run = run(&[(PARENT, return_word(parent))]);
-    assert_eq!(run.word(), U256::ZERO, "the creation failed");
+    let parent = log_status(
+        disable(BytecodeBuilder::default())
+            .mstore(0x40, &init_code)
+            .push_number(init_code.len() as u64)
+            .push_number(0x40_u8)
+            .push_number(0_u8)
+            .append(CREATE),
+    )
+    .append_many([RETURNDATASIZE, PUSH0, PUSH0, RETURNDATACOPY, RETURNDATASIZE, PUSH0, RETURN])
+    .build();
+    let run = run(&[(PARENT, parent)]);
+    assert!(!run.logged_status(0), "the creation failed");
+    assert_eq!(
+        refused_type(&run.output()),
+        VolatileDataAccessType::Timestamp,
+        "on the refusal of its read"
+    );
 }
 
 /// A parent that read volatile data before switching access off still has its child refused:
