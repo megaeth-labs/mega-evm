@@ -166,6 +166,55 @@ async fn test_storage_cache_hit_round_trip_via_mock() {
     assert_eq!(phase1_value, phase2_value, "cache reload must return the same value");
 }
 
+/// A prestate entry marking an address as self-destructed keeps it erased over a
+/// fork: neither its account nor its storage is read back from the fork block.
+/// A balance override on top recreates the account with that balance, and its
+/// storage still starts empty rather than from the fork block.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_selfdestructed_prestate_entry_stays_erased_over_a_fork() {
+    let dir = tempdir().expect("tempdir");
+    let erased = Address::repeat_byte(0x11);
+    let prestate_path = dir.path().join("prestate.json");
+    std::fs::write(
+        &prestate_path,
+        serde_json::json!({ erased.to_string(): { "selfdestructed": true } }).to_string(),
+    )
+    .expect("write prestate");
+    let prestate = prestate_path.to_str().expect("utf-8 path");
+    // Every request but `eth_chainId` answers a nonzero word, so any account or
+    // storage field read back from the fork block would show up as nonzero.
+    let word = "0x000000000000000000000000000000000000000000000000000000000000002a";
+
+    for (extra, expected_balance) in
+        [(None, None), (Some(format!("{erased}=7")), Some(U256::from(7)))]
+    {
+        let server = MockRpcServer::start().await;
+        server.respond_eth_chain_id(4326, 1).await;
+        server.respond_jsonrpc_result(word, 2).await;
+
+        let mut args =
+            vec!["mega-evme", "--fork", "--fork.block", "1000000", "--prestate", prestate];
+        if let Some(balance) = &extra {
+            args.extend(["--balance", balance.as_str()]);
+        }
+        let prestate_args = PreStateArgs::parse_from(args);
+        let rpc_args = test_rpc_args_cached(&server.uri(), dir.path(), None);
+        let (state, _cache_store) = prestate_args
+            .create_initial_state(&Address::ZERO, &rpc_args)
+            .await
+            .expect("create_initial_state");
+
+        let account = state.basic_ref(erased).expect("basic_ref");
+        assert_eq!(account.map(|info| info.balance), expected_balance, "override {extra:?}");
+        assert_eq!(state.storage_ref(erased, U256::ZERO).expect("storage_ref"), U256::ZERO);
+        assert_eq!(
+            server.received_request_count().await,
+            1,
+            "only eth_chainId may reach the endpoint for an erased address (override {extra:?})",
+        );
+    }
+}
+
 // ─── Real-RPC tests (#[ignore], skipped by default) ─────────────────────────
 
 /// End-to-end fork smoke test: build a fork session against `MegaETH` mainnet,
@@ -200,7 +249,7 @@ async fn test_create_initial_state_fork_real_rpc_smoke() {
         "mega-evme",
         "--rpc",
         &rpc_url,
-        "--rpc.cache-size",
+        "--rpc.cache-max-entries",
         "256",
         "--rpc.cache-dir",
         dir.path().to_str().unwrap(),
@@ -234,14 +283,14 @@ async fn test_create_initial_state_fork_real_rpc_smoke() {
 /// Real-RPC twin of `test_storage_cache_hit_round_trip_via_mock`. Phase 1
 /// queries a `MegaETH` Oracle storage slot against a public mainnet endpoint
 /// and persists; phase 2 rebuilds against the same RPC URL (needed for the
-/// `eth_chainId` resolution) and relies on the alloy cache to serve the
+/// `eth_chainId` resolution) and relies on the persisted cache to serve the
 /// same slot without an additional `eth_getStorageAt` round-trip.
 /// Useful as a manual smoke test for the full live stack.
 ///
-/// Probes through `storage_ref` rather than `basic_ref` because alloy's
-/// `CacheLayer` (at the pinned version) only intercepts `eth_getStorageAt` /
-/// `eth_getCode` / `eth_getProof`; `basic_ref` fans out to `eth_getBalance`
-/// and `eth_getTransactionCount` too, neither of which is cached.
+/// Probes through `storage_ref` because a single-method probe pins the cache
+/// hit to one request; `basic_ref` fans out to `eth_getBalance` and
+/// `eth_getTransactionCount`, so a miss on either would be reported as a
+/// storage-cache failure.
 ///
 /// Defaults to `https://mainnet.megaeth.com/rpc`. Override via the
 /// `MEGA_EVME_TEST_RPC_URL` environment variable.
@@ -272,7 +321,7 @@ async fn test_create_initial_state_fork_real_rpc_storage_cache_hit() {
             "mega-evme",
             "--rpc",
             &rpc_url,
-            "--rpc.cache-size",
+            "--rpc.cache-max-entries",
             "256",
             "--rpc.cache-dir",
             dir.path().to_str().unwrap(),
@@ -304,7 +353,7 @@ async fn test_create_initial_state_fork_real_rpc_storage_cache_hit() {
             "mega-evme",
             "--rpc",
             &rpc_url,
-            "--rpc.cache-size",
+            "--rpc.cache-max-entries",
             "256",
             "--rpc.cache-dir",
             dir.path().to_str().unwrap(),

@@ -39,6 +39,40 @@ use state_test::{
 
 use super::{ReplayError, Result};
 
+/// Why [`build_draft`] refused to produce a fixture.
+///
+/// The two variants carry different consequences, so the distinction is typed
+/// rather than recovered from the message: a whole-block sweep always meets some
+/// transactions the fixture format cannot express, and those must not fail the
+/// run, whereas a failure to construct a draft the caller asked for must.
+pub(crate) enum FixtureBuildError {
+    /// The transaction, spec, or replay is outside what a fixture can express
+    /// (deposit and set-code transactions, specs with no fixture mapping, a
+    /// replay that does not reproduce the chain). Reported as a skip.
+    Unsupported(String),
+    /// The draft could not be built (pre-state or code read failed). The
+    /// requested artifact was not produced; reported as an error.
+    Construction(ReplayError),
+}
+
+impl Display for FixtureBuildError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unsupported(reason) => f.write_str(reason),
+            Self::Construction(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl From<FixtureBuildError> for ReplayError {
+    fn from(err: FixtureBuildError) -> Self {
+        match err {
+            FixtureBuildError::Unsupported(reason) => Self::Other(reason),
+            FixtureBuildError::Construction(err) => err,
+        }
+    }
+}
+
 /// The on-chain receipt values a dumped fixture is anchored to: a replay that
 /// does not reproduce all of these did not reproduce the on-chain transaction.
 pub(crate) struct OnchainAnchor {
@@ -78,6 +112,63 @@ const DEPOSIT_TX_TYPE: u8 = 0x7e;
 /// execution (the delegations would not apply). Reject these explicitly rather
 /// than emit a fixture whose isolated run diverges from the chain.
 const EIP7702_TX_TYPE: u8 = 0x04;
+
+/// Check that a local replay reproduces the on-chain receipt's gas, success
+/// status, and logs root.
+///
+/// A mismatch means the replay executed under the wrong spec / hardfork config
+/// for this chain and block; self-validation cannot catch this, because the
+/// fixture is validated under the same spec it was dumped with.
+///
+/// Logs are checked, not just inferred from gas: LOG gas depends on topic count
+/// and data length, never content, so two executions can burn identical gas yet
+/// emit different log payloads (e.g. a preceding-tx divergence that changes a
+/// value the target re-emits).
+///
+/// Returns the explanatory reason on failure so batch dump can record a skip
+/// without treating it as an infrastructure error.
+pub(crate) fn check_fidelity(
+    result: &ExecutionResult<MegaHaltReason>,
+    anchor: &OnchainAnchor,
+    chain_id: u64,
+) -> std::result::Result<(), String> {
+    let actual_gas = result.tx_gas_used();
+    if actual_gas != anchor.gas_used {
+        return Err(format!(
+            "replay gas {actual_gas} != on-chain receipt gas {}: the local replay does \
+             not reproduce on-chain execution (likely a wrong spec or hardfork config \
+             for chain {chain_id} at this block)",
+            anchor.gas_used
+        ));
+    }
+    if result.is_success() != anchor.success {
+        return Err(format!(
+            "replay status (success={}) != on-chain receipt status (success={}): the \
+             local replay does not reproduce on-chain execution for chain {chain_id}",
+            result.is_success(),
+            anchor.success
+        ));
+    }
+    let actual_logs_root = state_test::utils::log_rlp_hash(result.logs());
+    if actual_logs_root != anchor.logs_root {
+        return Err(format!(
+            "replay logs root {actual_logs_root} != on-chain receipt logs root {}: the \
+             local replay emits different logs than the chain for chain {chain_id} \
+             (same gas/status, different log contents)",
+            anchor.logs_root
+        ));
+    }
+    Ok(())
+}
+
+/// Build an [`OnchainAnchor`] from the consensus facts of an on-chain receipt.
+pub(crate) fn anchor_from_receipt_facts(facts: &super::verify::ReceiptFacts) -> OnchainAnchor {
+    OnchainAnchor {
+        gas_used: facts.gas_used,
+        success: facts.status,
+        logs_root: state_test::utils::log_rlp_hash(&facts.logs),
+    }
+}
 
 /// A fixture built from a replay, awaiting its `post` expectation.
 ///
@@ -119,19 +210,19 @@ pub(crate) fn build_draft<DB>(
     block: &Block<Transaction>,
     target_tx: &Transaction,
     inputs: FixtureInputs<'_>,
-) -> Result<FixtureDraft>
+) -> std::result::Result<FixtureDraft, FixtureBuildError>
 where
     DB: DatabaseRef,
     DB::Error: Display,
 {
     let envelope: &OpTxEnvelope = &target_tx.inner.inner;
     if envelope.ty() == DEPOSIT_TX_TYPE {
-        return Err(ReplayError::Other(
+        return Err(FixtureBuildError::Unsupported(
             "--dump-fixture does not support deposit transactions".to_string(),
         ));
     }
     if envelope.ty() == EIP7702_TX_TYPE {
-        return Err(ReplayError::Other(
+        return Err(FixtureBuildError::Unsupported(
             "--dump-fixture does not support EIP-7702 (set-code) transactions: the \
              fixture builder does not serialize the authorization list"
                 .to_string(),
@@ -144,55 +235,19 @@ where
     let actual_output = inputs.result.output().cloned();
     let actual_logs_root = state_test::utils::log_rlp_hash(inputs.result.logs());
 
-    // Fidelity gate: the local replay must reproduce the on-chain receipt's gas,
-    // success status, and logs. A mismatch means the replay executed under the
-    // wrong spec / hardfork config for this chain and block; self-validation
-    // cannot catch this, because the fixture is validated under the same spec it
-    // was dumped with. Refuse to build a fixture that does not match the chain.
-    //
-    // Logs are checked, not just inferred from gas: LOG gas depends on topic count
-    // and data length, never content, so two executions can burn identical gas yet
-    // emit different log payloads (e.g. a preceding-tx divergence that changes a
-    // value the target re-emits). The receipt's logs are already fetched, so the
-    // comparison is a single root equality. `finalize_and_write` then re-checks the
-    // isolated run's logs root against this same value, so any gas-, output-, or
-    // log-visible divergence from the zeroed L1 data fee aborts the dump. One
-    // channel stays open by construction: the isolated run's sender balance is
-    // shifted by the zeroed fee, so a contract that stores a balance-derived value
-    // bakes that shifted value into `post` (gas, status, output, and logs all
-    // still match). The fixture still self-validates and reproduces gas exactly.
-    let anchor = &inputs.anchor;
-    if actual_gas != anchor.gas_used {
-        return Err(ReplayError::Other(format!(
-            "replay gas {actual_gas} != on-chain receipt gas {}: the local replay does \
-             not reproduce on-chain execution (likely a wrong spec or hardfork config \
-             for chain {chain_id} at this block)",
-            anchor.gas_used
-        )));
-    }
-    if inputs.result.is_success() != anchor.success {
-        return Err(ReplayError::Other(format!(
-            "replay status (success={}) != on-chain receipt status (success={}): the \
-             local replay does not reproduce on-chain execution for chain {chain_id}",
-            inputs.result.is_success(),
-            anchor.success
-        )));
-    }
-    if actual_logs_root != anchor.logs_root {
-        return Err(ReplayError::Other(format!(
-            "replay logs root {actual_logs_root} != on-chain receipt logs root {}: the \
-             local replay emits different logs than the chain for chain {chain_id} \
-             (same gas/status, different log contents)",
-            anchor.logs_root
-        )));
-    }
+    // Fidelity gate: refuse to dump a fixture that does not match the chain.
+    // See [`check_fidelity`] for the rationale and the dimensions checked.
+    // Every rejection it can return is an unsupported replay, not a construction
+    // failure, so the classification does not depend on which one fired.
+    check_fidelity(inputs.result, &inputs.anchor, chain_id)
+        .map_err(FixtureBuildError::Unsupported)?;
 
-    let pre = build_pre_state(db, evm_state)?;
+    let pre = build_pre_state(db, evm_state).map_err(FixtureBuildError::Construction)?;
     let env = build_env(chain_id, block);
     let transaction = build_transaction(target_tx)?;
     let spec_name = SpecName::from_mega_spec(spec);
     if spec_name == SpecName::Unknown {
-        return Err(ReplayError::Other(format!(
+        return Err(FixtureBuildError::Unsupported(format!(
             "--dump-fixture: spec {spec:?} has no fixture mapping"
         )));
     }
@@ -208,6 +263,10 @@ where
         extra: BTreeMap::new(),
     };
 
+    // The suite key names the transaction the unit was isolated from.
+    // `tx_hash()` is the cached hash seeded from the served `hash` field, and it
+    // is a verified value here: `verify::authenticate_transaction` admits no
+    // transaction whose served field disagrees with what its body hashes to.
     let name = format!("replay_{:#x}", target_tx.inner.inner.tx_hash());
 
     Ok(FixtureDraft {
@@ -224,7 +283,16 @@ where
 
 /// Re-execute the isolated unit through `state-test`, cross-check it against the
 /// observed replay outcome, fill the `post` expectation, and write the fixture.
-pub(crate) fn finalize_and_write(draft: FixtureDraft, path: &std::path::Path) -> Result<()> {
+///
+/// `overwrite` controls the final publish step: when false, the write refuses to
+/// replace an existing file (`persist_noclobber`); when true, it replaces via
+/// `persist`. Existence checks earlier in the dump pipeline are a fast-path only
+/// — correctness against a concurrent creator comes from the noclobber publish.
+pub(crate) fn finalize_and_write(
+    draft: FixtureDraft,
+    path: &std::path::Path,
+    overwrite: bool,
+) -> Result<()> {
     let executed = execute_unit_collect(&draft.unit, &draft.spec)
         .map_err(|e| ReplayError::Other(format!("fixture self-execution failed: {e}")))?;
 
@@ -279,20 +347,52 @@ pub(crate) fn finalize_and_write(draft: FixtureDraft, path: &std::path::Path) ->
     let suite = TestSuite(BTreeMap::from([(draft.name, unit)]));
     let json = serde_json::to_string_pretty(&suite)
         .map_err(|e| ReplayError::Other(format!("failed to serialize fixture: {e}")))?;
-    // Write to a sibling temp file and rename so an interrupted write cannot
-    // truncate an existing fixture at `path` (e.g. a committed corpus entry
-    // being refreshed in place).
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json).map_err(|e| {
-        ReplayError::Other(format!("failed to write fixture {}: {e}", tmp.display()))
+
+    // Unique temp file in the target directory, then persist (or noclobber-persist)
+    // into `path`. A fixed sibling name would race two concurrent dumps; a unique
+    // name plus noclobber makes `--overwrite=false` safe at materialization time.
+    let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(|e| {
+        ReplayError::Other(format!("failed to create temp fixture file in {}: {e}", dir.display()))
     })?;
-    std::fs::rename(&tmp, path).map_err(|e| {
-        ReplayError::Other(format!(
-            "failed to rename fixture {} -> {}: {e}",
-            tmp.display(),
-            path.display()
-        ))
-    })
+    use std::io::Write;
+    tmp.write_all(json.as_bytes())
+        .map_err(|e| ReplayError::Other(format!("failed to write fixture temp file: {e}")))?;
+    tmp.flush()
+        .map_err(|e| ReplayError::Other(format!("failed to flush fixture temp file: {e}")))?;
+    // flush() only clears the userspace buffer; the rename below is atomic but
+    // the contents are not. A benchmark corpus that a crash left holding a
+    // truncated fixture would fail in a way that looks like a replay bug.
+    tmp.as_file()
+        .sync_all()
+        .map_err(|e| ReplayError::Other(format!("failed to sync fixture temp file: {e}")))?;
+    if overwrite {
+        tmp.persist(path).map_err(|e| {
+            ReplayError::Other(format!(
+                "failed to persist fixture to {}: {}",
+                path.display(),
+                e.error
+            ))
+        })?;
+    } else {
+        tmp.persist_noclobber(path).map_err(|e| {
+            // Target already present (or appeared between prep and publish): same
+            // refused-overwrite path the prep-time existence check uses.
+            if path.exists() {
+                ReplayError::Other(format!(
+                    "fixture already exists at {} (pass --overwrite to replace)",
+                    path.display()
+                ))
+            } else {
+                ReplayError::Other(format!(
+                    "failed to persist fixture to {}: {}",
+                    path.display(),
+                    e.error
+                ))
+            }
+        })?;
+    }
+    Ok(())
 }
 
 /// Read the pre-execution values of every account in the target transaction's
@@ -306,18 +406,34 @@ where
     DB: DatabaseRef,
     DB::Error: Display,
 {
+    // Test-only injection: the offline State cache reuses account basics already
+    // loaded during execution, so doctoring the capture cannot force a draft-only
+    // pre-state failure. Integration tests set this env var to exercise the
+    // construction-error path after a successful execution. Compiled out of
+    // production builds: only the test profile and the `test-utils` feature
+    // (enabled for the binary via the self dev-dependency) carry the hook.
+    #[cfg(any(test, feature = "test-utils"))]
+    if std::env::var_os("MEGA_EVME_INJECT_FIXTURE_PRE_STATE_ERROR").is_some() {
+        return Err(ReplayError::Other(
+            "pre-state read for 0x0000000000000000000000000000000000000001: \
+             injected draft-time database failure"
+                .to_string(),
+        ));
+    }
+
     let mut pre = BTreeMap::new();
     for (address, account) in evm_state {
         let Some(info) = db
             .basic_ref(*address)
             .map_err(|e| ReplayError::Other(format!("pre-state read for {address}: {e}")))?
         else {
-            // The database reports no account. RPC-backed databases (AlloyDB)
-            // always materialize an account (possibly all-empty), so on a forked
-            // replay this branch never fires and accounts created by the target
-            // transaction enter `pre` as explicit empty accounts — equivalent
-            // under EIP-161 state clearing. A database that can signal
-            // nonexistence omits the account here.
+            // The database reports no account. On a forked replay the RPC
+            // backend normalizes an all-zero (balance, nonce, code) answer to
+            // `None` (see `normalize_rpc_account` in `common/state.rs`), so
+            // this branch fires for every pre-transaction nonexistent account
+            // — including accounts the target transaction itself creates.
+            // Omitting them is correct state-test semantics: absence in `pre`
+            // means the account did not exist.
             continue;
         };
 
@@ -397,7 +513,9 @@ fn build_env(chain_id: u64, block: &Block<Transaction>) -> Env {
 }
 
 /// Build the EEST `transaction` (single-element index arrays) from the target tx.
-fn build_transaction(target_tx: &Transaction) -> Result<TransactionParts> {
+fn build_transaction(
+    target_tx: &Transaction,
+) -> std::result::Result<TransactionParts, FixtureBuildError> {
     let sender = target_tx.inner.inner.signer();
     let tx: &OpTxEnvelope = &target_tx.inner.inner;
     let tx_type = tx.ty();
@@ -409,7 +527,7 @@ fn build_transaction(target_tx: &Transaction) -> Result<TransactionParts> {
     let (gas_price, max_fee_per_gas) = match tx_type {
         0 | 1 => {
             let gas_price = tx.gas_price().ok_or_else(|| {
-                ReplayError::Other(format!(
+                FixtureBuildError::Unsupported(format!(
                     "--dump-fixture: transaction type {tx_type} reports no gas price; \
                      refusing to record a guessed price in the fixture"
                 ))
@@ -437,4 +555,297 @@ fn build_transaction(target_tx: &Transaction) -> Result<TransactionParts> {
         blob_versioned_hashes: tx.blob_versioned_hashes().map(|h| h.to_vec()).unwrap_or_default(),
         max_fee_per_blob_gas: tx.max_fee_per_blob_gas().map(U256::from),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy_consensus::transaction::Recovered;
+    use alloy_primitives::Sealed;
+    use mega_evm::revm::{
+        context::result::{Output, ResultGas, SuccessReason},
+        primitives::{StorageKey, StorageValue},
+        state::{AccountInfo as RevmAccountInfo, Bytecode},
+    };
+    use op_alloy_consensus::TxDeposit;
+
+    use super::*;
+
+    fn success_result(gas_used: u64) -> ExecutionResult<MegaHaltReason> {
+        ExecutionResult::Success {
+            reason: SuccessReason::Stop,
+            gas: ResultGas::default().with_total_gas_spent(gas_used),
+            logs: Vec::new(),
+            output: Output::Call(Bytes::new()),
+        }
+    }
+
+    /// A database that fails every read.
+    ///
+    /// Any `build_draft` rejection that fires *before* the pre-state closure is
+    /// read must be reachable with this: if a rejection ever moved behind a
+    /// database read, the test would surface a `Construction` error instead.
+    struct UnreadableDb;
+
+    impl DatabaseRef for UnreadableDb {
+        type Error = crate::common::EvmeError;
+
+        fn basic_ref(
+            &self,
+            _: Address,
+        ) -> std::result::Result<Option<RevmAccountInfo>, Self::Error> {
+            Err(unavailable())
+        }
+
+        fn code_by_hash_ref(&self, _: B256) -> std::result::Result<Bytecode, Self::Error> {
+            Err(unavailable())
+        }
+
+        fn storage_ref(
+            &self,
+            _: Address,
+            _: StorageKey,
+        ) -> std::result::Result<StorageValue, Self::Error> {
+            Err(unavailable())
+        }
+
+        fn block_hash_ref(&self, _: u64) -> std::result::Result<B256, Self::Error> {
+            Err(unavailable())
+        }
+    }
+
+    fn unavailable() -> crate::common::EvmeError {
+        crate::common::EvmeError::InvalidInput("database unavailable".to_string())
+    }
+
+    /// A database whose `basic_ref` answers are supplied per address.
+    ///
+    /// Used to pin the `build_pre_state` shape for both existence outcomes:
+    /// a touched address that returns `None` is omitted from `pre`, and a
+    /// touched address that returns `Some` is recorded with its fields.
+    struct MapDb {
+        accounts: std::collections::HashMap<Address, Option<RevmAccountInfo>>,
+    }
+
+    impl DatabaseRef for MapDb {
+        type Error = crate::common::EvmeError;
+
+        fn basic_ref(
+            &self,
+            address: Address,
+        ) -> std::result::Result<Option<RevmAccountInfo>, Self::Error> {
+            Ok(self.accounts.get(&address).cloned().unwrap_or(None))
+        }
+
+        fn code_by_hash_ref(&self, _: B256) -> std::result::Result<Bytecode, Self::Error> {
+            Err(unavailable())
+        }
+
+        fn storage_ref(
+            &self,
+            _: Address,
+            _: StorageKey,
+        ) -> std::result::Result<StorageValue, Self::Error> {
+            Err(unavailable())
+        }
+
+        fn block_hash_ref(&self, _: u64) -> std::result::Result<B256, Self::Error> {
+            Err(unavailable())
+        }
+    }
+
+    /// Touched addresses with no pre-transaction account are omitted from `pre`;
+    /// touched addresses that exist are recorded with their fields — including
+    /// an explicitly present-but-empty account (`Some(AccountInfo::default())`).
+    ///
+    /// Absence-means-nonexistence is the state-test fixture shape: a forked
+    /// backend returns `None` for all-zero RPC answers, so accounts created by
+    /// the target transaction must not appear as explicit empty entries.
+    /// Presence of an empty account is a different DB answer and must still be
+    /// recorded; `build_pre_state` does not filter empties with `is_empty()`.
+    #[test]
+    fn test_build_pre_state_omits_nonexistent_and_records_existing() {
+        let missing = Address::repeat_byte(0xaa);
+        let present = Address::repeat_byte(0xbb);
+        let empty_present = Address::repeat_byte(0xcc);
+        let balance = U256::from(42u64);
+        let nonce = 7u64;
+
+        let mut accounts = std::collections::HashMap::new();
+        accounts.insert(missing, None);
+        accounts.insert(
+            present,
+            Some(RevmAccountInfo {
+                balance,
+                nonce,
+                code_hash: KECCAK256_EMPTY,
+                code: Some(Bytecode::default()),
+                ..Default::default()
+            }),
+        );
+        // Present-but-empty: the DB returns Some with zero fields. This must
+        // stay in `pre` so a future `is_empty()` filter cannot creep in.
+        accounts.insert(empty_present, Some(RevmAccountInfo::default()));
+        let db = MapDb { accounts };
+
+        let mut evm_state = EvmState::default();
+        evm_state.insert(missing, Default::default());
+        evm_state.insert(present, Default::default());
+        evm_state.insert(empty_present, Default::default());
+
+        let pre = build_pre_state(&db, &evm_state).expect("pre-state construction succeeds");
+
+        assert!(
+            !pre.contains_key(&missing),
+            "touched + basic_ref=None must be absent from pre (nonexistence)"
+        );
+        let recorded = pre.get(&present).expect("touched + basic_ref=Some must appear in pre");
+        assert_eq!(recorded.balance, balance);
+        assert_eq!(recorded.nonce, nonce);
+        assert!(recorded.code.is_empty());
+        assert!(recorded.storage.is_empty());
+
+        let empty_recorded = pre
+            .get(&empty_present)
+            .expect("touched + basic_ref=Some(default) must appear in pre (empty is not absent)");
+        assert_eq!(empty_recorded.balance, U256::ZERO);
+        assert_eq!(empty_recorded.nonce, 0);
+        assert!(empty_recorded.code.is_empty());
+        assert!(empty_recorded.storage.is_empty());
+    }
+
+    fn deposit_transaction() -> Transaction {
+        let envelope = OpTxEnvelope::Deposit(Sealed::new(TxDeposit::default()));
+        let inner = alloy_rpc_types_eth::Transaction {
+            inner: Recovered::new_unchecked(envelope, Address::ZERO),
+            block_hash: None,
+            block_number: None,
+            block_timestamp: None,
+            transaction_index: None,
+            effective_gas_price: None,
+        };
+        Transaction { inner, deposit_nonce: None, deposit_receipt_version: None }
+    }
+
+    /// A deposit transaction is an unsupported shape, not a construction failure.
+    ///
+    /// Every OP-stack block opens with one, so misclassifying this would make
+    /// `--block N --dump-fixture-dir` exit non-zero on every block instead of
+    /// skipping the transaction the fixture format cannot express. The database
+    /// here fails every read, which proves the rejection is reached without
+    /// touching state — a `Construction` verdict would mean the check moved.
+    #[test]
+    fn test_build_draft_rejects_a_deposit_as_unsupported() {
+        let result = success_result(21_000);
+        let anchor = OnchainAnchor {
+            gas_used: 21_000,
+            success: true,
+            logs_root: state_test::utils::log_rlp_hash(&[]),
+        };
+        let err = build_draft(
+            &UnreadableDb,
+            &EvmState::default(),
+            4326,
+            MegaSpecId::REX6,
+            &Block::default(),
+            &deposit_transaction(),
+            FixtureInputs { mega_env: MegaEnv::default(), result: &result, anchor },
+        )
+        .err()
+        .expect("a deposit cannot be dumped");
+        match err {
+            FixtureBuildError::Unsupported(reason) => {
+                assert!(reason.contains("deposit"), "reason={reason}");
+            }
+            FixtureBuildError::Construction(err) => {
+                panic!("a deposit is an unsupported shape, not a construction failure: {err}")
+            }
+        }
+    }
+
+    /// A failing pre-state read is a construction error, not a skip.
+    ///
+    /// The counterpart to the deposit case: this rejection means the artifact
+    /// the caller asked for was not produced, so the run must fail rather than
+    /// report a skip and exit 0.
+    #[test]
+    fn test_build_draft_reports_a_failed_pre_state_read_as_construction() {
+        let result = success_result(21_000);
+        let anchor = OnchainAnchor {
+            gas_used: 21_000,
+            success: true,
+            logs_root: state_test::utils::log_rlp_hash(&[]),
+        };
+        // One touched account is enough to force a `basic_ref` during the
+        // pre-state closure; the transaction itself is a plain legacy call.
+        let mut evm_state = EvmState::default();
+        evm_state.insert(Address::repeat_byte(0x11), Default::default());
+        let envelope = OpTxEnvelope::Eip1559(alloy_consensus::Signed::new_unchecked(
+            alloy_consensus::TxEip1559::default(),
+            alloy_primitives::Signature::new(U256::ONE, U256::ONE, false),
+            B256::ZERO,
+        ));
+        let inner = alloy_rpc_types_eth::Transaction {
+            inner: Recovered::new_unchecked(envelope, Address::ZERO),
+            block_hash: None,
+            block_number: None,
+            block_timestamp: None,
+            transaction_index: None,
+            effective_gas_price: None,
+        };
+        let tx = Transaction { inner, deposit_nonce: None, deposit_receipt_version: None };
+        let err = build_draft(
+            &UnreadableDb,
+            &evm_state,
+            4326,
+            MegaSpecId::REX6,
+            &Block::default(),
+            &tx,
+            FixtureInputs { mega_env: MegaEnv::default(), result: &result, anchor },
+        )
+        .err()
+        .expect("the pre-state read fails");
+        match err {
+            FixtureBuildError::Construction(err) => {
+                let message = err.to_string();
+                assert!(message.contains("pre-state read"), "message={message}");
+            }
+            FixtureBuildError::Unsupported(reason) => {
+                panic!("a failed database read is not an unsupported shape: {reason}")
+            }
+        }
+    }
+
+    /// Each of the three fidelity dimensions rejects on its own.
+    ///
+    /// [`build_draft`] wraps every rejection at one `map_err` site, so all three
+    /// are reported as [`FixtureBuildError::Unsupported`] — a whole-block sweep
+    /// skips a diverging replay rather than failing the run, whichever dimension
+    /// diverged. Only the gas and status messages share a phrase; a classifier
+    /// keyed on message text would have had to enumerate the third separately.
+    #[test]
+    fn test_check_fidelity_rejects_each_dimension() {
+        let logs_root = state_test::utils::log_rlp_hash(&[]);
+        let matching = OnchainAnchor { gas_used: 21_000, success: true, logs_root };
+        let result = success_result(21_000);
+        check_fidelity(&result, &matching, 4326).expect("a faithful replay must pass the gate");
+
+        let cases = [
+            ("gas", OnchainAnchor { gas_used: 42_000, ..matching }),
+            ("status", OnchainAnchor { success: false, ..matching }),
+            ("logs root", OnchainAnchor { logs_root: B256::repeat_byte(0xab), ..matching }),
+        ];
+        let mut reasons = Vec::new();
+        for (dimension, anchor) in cases {
+            let Err(reason) = check_fidelity(&result, &anchor, 4326) else {
+                panic!("a {dimension} divergence must be rejected");
+            };
+            assert!(!reason.is_empty(), "{dimension} rejection must explain itself");
+            reasons.push(reason);
+        }
+        assert_eq!(
+            reasons.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            3,
+            "each dimension explains its own divergence: {reasons:?}"
+        );
+    }
 }
