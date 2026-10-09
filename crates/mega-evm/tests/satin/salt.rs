@@ -6,8 +6,10 @@
 //! one where the bucket is at the minimum, one twice as large, one eight times as large — and
 //! reading the ledgers the transaction reports:
 //!
-//! - the state ledger is the schedule's entry times `m`, and
-//! - the regular ledger does not move: `m` scales the state dimension and nothing else.
+//! - the state ledger is the schedule's entry times `m`,
+//! - the regular ledger does not move, and
+//! - the history ledger does not move either, and is the site's bytes at the cost per history byte:
+//!   `m` scales the state dimension and nothing else.
 //!
 //! The refund side is in `salt_refund`, the failed-lookup side in `salt_failure`.
 
@@ -27,7 +29,8 @@ use mega_evm::{
     },
     test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
     BucketId, ExternalEnvs, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
-    MegaTransactionError, MegaTransactionOutcome, SaltEnv, TestExternalEnvs, MIN_BUCKET_SIZE,
+    MegaTransactionError, MegaTransactionOutcome, SaltEnv, TestExternalEnvs, AUTHORIZATION_SIZE,
+    MIN_BUCKET_SIZE, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 use mega_system_contracts::sequencer_registry::storage_slots::CURRENT_SYSTEM_ADDRESS;
 use revm::{
@@ -36,7 +39,7 @@ use revm::{
     context_interface::cfg::GasId,
 };
 
-use crate::common::{block, runs_at_measurement_prices, state_is_free};
+use crate::common::{block, history, runs_at_measurement_prices, state_is_free};
 
 /// The sender of every probe.
 pub(crate) const CALLER: Address = address!("0000000000000000000000000000000000c00000");
@@ -236,47 +239,61 @@ pub(crate) fn entry(id: GasId) -> u64 {
     satin_gas_params().get(id)
 }
 
-/// What a probe spent on state gas at each of the three multipliers, with the regular ledger
-/// checked to be the same at all three: `m` scales the state dimension and nothing else.
+/// What a probe spent on each ledger — `(state, regular, history)` — with the bucket the probe
+/// charges in at multiplier `m`.
 ///
 /// `probe` builds the transaction and the database; `crowd` puts the bucket the probe charges in
 /// at multiplier `m`.
-pub(crate) fn state_gas_at(
+pub(crate) fn ledgers_at(
     m: u64,
     crowd: impl Fn(SaltEnvs, u64) -> SaltEnvs,
     probe: impl Fn() -> (MemoryDatabase, MegaTransaction),
-) -> (u64, u64) {
+) -> (u64, u64, u64) {
     let (db, tx) = probe();
     let outcome = run(db, crowd(minimal_envs(), m), tx);
-    (outcome.gas.state, outcome.gas.regular)
+    (outcome.gas.state, outcome.gas.regular, outcome.gas.history)
 }
 
-/// Pins one charge site: the state ledger is `unit_price x units x m` at every multiplier, and
-/// the regular ledger does not move.
+/// Pins one charge site at the minimum bucket and at `m` = 2 and 8 [S6.4]: the state ledger is
+/// `unscaled × m` at every multiplier, and neither the regular ledger nor the history ledger
+/// moves [S6.5] — history gas is not scaled by SALT [S7.2].
+///
+/// The history ledger is anchored at `m` = 1 to `history_bytes`, the site's bytes from the byte
+/// table by hand, at the cost per history byte in effect (`constants`); at `m` = 2 and 8 it is
+/// the `m` = 1 figure again.
 pub(crate) fn assert_scales(
     site: &str,
     unscaled: u64,
+    history_bytes: u64,
     crowd: impl Fn(SaltEnvs, u64) -> SaltEnvs + Copy,
     probe: impl Fn() -> (MemoryDatabase, MegaTransaction) + Copy,
 ) {
-    let (state_at_one, regular_at_one) = state_gas_at(1, crowd, probe);
+    let (state_at_one, regular_at_one, history_at_one) = ledgers_at(1, crowd, probe);
     assert_eq!(state_at_one, unscaled, "{site}: the minimum bucket pays the schedule's entry");
+    assert_eq!(
+        history_at_one,
+        history(history_bytes),
+        "{site}: the history ledger is the site's bytes at the cost per history byte",
+    );
     for m in [2, 8] {
-        let (state, regular) = state_gas_at(m, crowd, probe);
+        let (state, regular, history) = ledgers_at(m, crowd, probe);
         assert_eq!(state, unscaled * m, "{site}: state gas at m = {m}");
         assert_eq!(regular, regular_at_one, "{site}: regular gas must not scale with m");
+        assert_eq!(history, history_at_one, "{site}: history gas must not scale with m");
     }
 }
 
 /* The seven sites a state gas charge is made at. */
 
-/// `SSTORE` onto a slot that was zero: the slot's own bucket prices it.
+/// `SSTORE` onto a slot that was zero: the slot's own bucket prices it. The history is the body
+/// and the slot's record.
 #[test]
 fn test_the_sstore_set_charge_scales_with_the_slot_s_bucket() {
     const SLOT: u64 = 7;
     assert_scales(
         "SSTORE set",
         entry(GasId::sstore_set_state_gas()),
+        TX_BODY_SIZE + WRITE_RECORD_SIZE,
         |envs, m| crowded_slot(envs, CONTRACT, U256::from(SLOT), m),
         || {
             let code =
@@ -286,12 +303,14 @@ fn test_the_sstore_set_charge_scales_with_the_slot_s_bucket() {
     );
 }
 
-/// A `CALL` carrying value to an account that does not exist: the account's bucket prices it.
+/// A `CALL` carrying value to an account that does not exist: the account's bucket prices it. The
+/// history is the body and the transfer's two records, the sender's and the recipient's.
 #[test]
 fn test_the_new_account_charge_of_a_call_scales_with_the_account_s_bucket() {
     assert_scales(
         "CALL to a new account",
         entry(GasId::new_account_state_gas()),
+        TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE,
         |envs, m| crowded_account(envs, EMPTY, m),
         || (db(value_call(EMPTY).stop().build()), call_contract()),
     );
@@ -299,85 +318,95 @@ fn test_the_new_account_charge_of_a_call_scales_with_the_account_s_bucket() {
 
 /// A `SELFDESTRUCT` moving a balance to an account that does not exist adds that account's leaf,
 /// and the beneficiary's own bucket prices it — the same entry and the same site a value `CALL`
-/// pays, reached from the opcode that empties an account rather than the one that funds it.
+/// pays, reached from the opcode that empties an account rather than the one that funds it. The
+/// history is the body and the beneficiary's record.
 #[test]
 fn test_the_selfdestruct_beneficiary_charge_scales_with_the_beneficiary_s_bucket() {
     assert_scales(
         "SELFDESTRUCT to a new account",
         entry(GasId::new_account_state_gas()),
+        TX_BODY_SIZE + WRITE_RECORD_SIZE,
         |envs, m| crowded_account(envs, EMPTY, m),
         || (db(selfdestruct_to(EMPTY).build()), call_contract()),
     );
 }
 
-/// `CREATE`: the bucket of the address it deploys to prices the account it adds.
+/// `CREATE`: the bucket of the address it deploys to prices the account it adds. The history is
+/// the body and the creation's two records, the creator's nonce and the created account; the
+/// deployed code is empty.
 #[test]
 fn test_the_create_charge_scales_with_the_created_address_s_bucket() {
     let created = CONTRACT.create(0);
     assert_scales(
         "CREATE",
         entry(GasId::create_state_gas()),
+        TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE,
         move |envs, m| crowded_account(envs, created, m),
         || (db(create_empty_contract().stop().build()), call_contract()),
     );
 }
 
 /// The EIP-2780 runtime phase charges the transaction's own recipient before the first frame,
-/// and reads the recipient's bucket to price it.
+/// and reads the recipient's bucket to price it. The history is the body and the recipient's
+/// record; the sender is in the body.
 #[test]
 fn test_the_top_level_recipient_charge_scales_with_the_recipient_s_bucket() {
     assert_scales(
         "the transaction's recipient",
         entry(GasId::new_account_state_gas()),
+        TX_BODY_SIZE + WRITE_RECORD_SIZE,
         |envs, m| crowded_account(envs, EMPTY, m),
         || (db(Bytes::new()), tx(TxKind::Call(EMPTY), Bytes::new(), U256::from(1))),
     );
 }
 
-/// The same phase charges a creation transaction's target, in the target's own bucket.
+/// The same phase charges a creation transaction's target, in the target's own bucket. The
+/// history is the body, the three bytes of init code it carries as calldata, and the created
+/// account's record.
 #[test]
 fn test_the_create_transaction_target_charge_scales_with_its_bucket() {
+    const INIT: [u8; 3] = [PUSH0, PUSH0, RETURN];
     let created = CALLER.create(0);
     assert_scales(
         "a creation transaction's target",
         entry(GasId::create_state_gas()),
+        TX_BODY_SIZE + INIT.len() as u64 + WRITE_RECORD_SIZE,
         move |envs, m| crowded_account(envs, created, m),
-        || {
-            let init = Bytes::from_static(&[PUSH0, PUSH0, RETURN]);
-            (db(Bytes::new()), tx(TxKind::Create, init, U256::ZERO))
-        },
+        || (db(Bytes::new()), tx(TxKind::Create, Bytes::from_static(&INIT), U256::ZERO)),
     );
 }
 
 /// An EIP-7702 authorization on an authority that does not exist pays for the account leaf it
-/// adds and for the delegation bytes it writes, both in the authority's bucket.
+/// adds and for the delegation bytes it writes, both in the authority's bucket. The history is
+/// the body, the authorization it carries, and the applied authority's record.
 #[test]
 fn test_the_eip7702_authority_charges_scale_with_the_authority_s_bucket() {
     assert_scales(
         "an EIP-7702 authority",
         entry(GasId::new_account_state_gas()) + entry(GasId::tx_eip7702_state_gas_bytecode()),
+        TX_BODY_SIZE + AUTHORIZATION_SIZE + WRITE_RECORD_SIZE,
         |envs, m| crowded_account(envs, AUTHORITY, m),
         || (db(Bytes::new()), authorization_tx(CONTRACT)),
     );
 }
 
 /// Deployed code is charged per byte, in the bucket of the address it is deployed to — the same
-/// bucket that priced the creation itself.
+/// bucket that priced the creation itself. The history is the body, the init code it carries as
+/// calldata, the created account's record and the deployed bytes.
 #[test]
 fn test_the_code_deposit_charge_scales_with_the_deployed_address_s_bucket() {
     const DEPLOYED: u64 = 32;
+    /// `PUSH8 32; PUSH0; RETURN`: deploys [`DEPLOYED`] zero bytes.
+    fn init() -> Bytes {
+        BytecodeBuilder::default().push_number(DEPLOYED).append_many([PUSH0, RETURN]).build()
+    }
     let created = CALLER.create(0);
     assert_scales(
         "a code deposit",
         entry(GasId::create_state_gas()) + entry(GasId::code_deposit_state_gas()) * DEPLOYED,
+        TX_BODY_SIZE + init().len() as u64 + WRITE_RECORD_SIZE + DEPLOYED,
         move |envs, m| crowded_account(envs, created, m),
-        || {
-            let init = BytecodeBuilder::default()
-                .push_number(DEPLOYED)
-                .append_many([PUSH0, RETURN])
-                .build();
-            (db(Bytes::new()), tx(TxKind::Create, init, U256::ZERO))
-        },
+        || (db(Bytes::new()), tx(TxKind::Create, init(), U256::ZERO)),
     );
 }
 
@@ -867,13 +896,14 @@ fn test_clearing_a_slot_charges_no_state_gas() {
 }
 
 /// A slot is one leaf however many times the transaction writes it: the first write off zero
-/// pays, the rest pay nothing.
+/// pays, the rest pay nothing. It is one record too.
 #[test]
 fn test_a_slot_written_twice_pays_for_one_leaf() {
     let set = entry(GasId::sstore_set_state_gas());
     assert_scales(
         "a slot written twice",
         set,
+        TX_BODY_SIZE + WRITE_RECORD_SIZE,
         |envs, m| crowded_slot(envs, CONTRACT, U256::ZERO, m),
         || {
             let code = BytecodeBuilder::default()
@@ -944,7 +974,8 @@ fn test_a_selfdestruct_that_adds_no_account_charges_no_state_gas() {
 /* The remaining creation sites. */
 
 /// `CREATE2` reaches its deployment address by hashing rather than by nonce, and is priced in
-/// that address's bucket just as `CREATE` is.
+/// that address's bucket just as `CREATE` is. Its history is `CREATE`'s: the body and the two
+/// records of the creation.
 #[test]
 fn test_the_create2_charge_scales_with_the_created_address_s_bucket() {
     const SALT: U256 = U256::ZERO;
@@ -954,6 +985,7 @@ fn test_the_create2_charge_scales_with_the_created_address_s_bucket() {
     assert_scales(
         "CREATE2",
         entry(GasId::create_state_gas()),
+        TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE,
         move |envs, m| crowded_account(envs, created, m),
         move || {
             let code = BytecodeBuilder::default()

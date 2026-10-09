@@ -20,7 +20,7 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{
-        CALL, CREATE, CREATE2, GAS, ISZERO, LOG0, POP, PUSH0, RETURN, RETURNDATACOPY,
+        CALL, CREATE, CREATE2, GAS, ISZERO, LOG0, MSTORE, POP, PUSH0, RETURN, RETURNDATACOPY,
         RETURNDATASIZE, REVERT, SELFDESTRUCT, SSTORE, STOP,
     },
     context::result::{ExecutionResult, HaltReason},
@@ -33,7 +33,7 @@ use revm::{
 
 use crate::common::{
     account_state_gas, body_history, call, call_with_data, context, create, history,
-    slot_state_gas, state_is_free,
+    history_is_free, slot_state_gas, state_is_free,
 };
 
 const CALLER: Address = address!("0000000000000000000000000000000000300000");
@@ -54,6 +54,15 @@ fn gas_for_history(bytes: u64) -> u64 {
 fn share(remaining: u64) -> u64 {
     (u128::from(remaining) * u128::from(FRAME_DATA_SHARE_NUMERATOR) /
         u128::from(FRAME_DATA_SHARE_DENOMINATOR)) as u64
+}
+
+/// The least a parent must have left for the child's share of it to hold `bytes`: a limit that
+/// fits a child's write by exactly its bytes still reverts the child on its own budget, which is
+/// 98% of the parent's room, rounded down.
+fn child_room(bytes: u64) -> u64 {
+    let room = (bytes * FRAME_DATA_SHARE_DENOMINATOR).div_ceil(FRAME_DATA_SHARE_NUMERATOR);
+    assert!(share(room) >= bytes && share(room - 1) < bytes, "the least room for {bytes} bytes");
+    room
 }
 
 /// Calls `next` with no value, then writes slot 2: the write is what a resumed caller runs.
@@ -877,19 +886,31 @@ fn test_the_fresh_slot_boundary_is_the_sum_of_its_parts() {
     assert_eq!(record_history, WRITE_RECORD_SIZE * mega_evm::constants::COST_PER_HISTORY_BYTE);
 }
 
+/// The bytes a value call's start counts on the caller's lane, its own account's record, and on
+/// the frame's lane, the recipient's record and the transfer log.
+const START_ON_THE_CALLER: u64 = WRITE_RECORD_SIZE;
+const START_ON_THE_FRAME: u64 = WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE;
+
+/// A transaction limit the start of [`value_call_to_fresh`] fits: the caller's record, and room
+/// for the frame's lane under the 98% share the new frame is given of what the caller has left.
+fn start_fits() -> u64 {
+    mega_evm::TX_BODY_SIZE + START_ON_THE_CALLER + child_room(START_ON_THE_FRAME)
+}
+
 /// At a frame start the order is the other way round, and so is the rule's outcome: the caller
 /// pays for the records the frame's start makes at its opcode, before the frame is started and
 /// its records are counted. So the data-size limit does not move the out-of-gas boundary of a
 /// value `CALL`: the smallest gas limit that is not an out-of-gas is the same whether the two
 /// records and the transfer log cross the limit or fit it, and one gas below it is an out-of-gas
-/// under either. The log is charged nothing at all.
+/// under either. The log is charged nothing at all. Under the limit they fit, the frame starts
+/// and the records are kept.
 #[test]
 fn test_a_frame_start_is_charged_before_its_records_are_counted() {
     let code = value_call_to_fresh();
     // `A`'s account and `FRESH`'s, and the transfer log: 240 bytes on top of the body.
-    let start = 2 * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE;
+    let start = START_ON_THE_CALLER + START_ON_THE_FRAME;
     let crosses = mega_evm::TX_BODY_SIZE + start - 1;
-    let fits = mega_evm::TX_BODY_SIZE + start;
+    let fits = start_fits();
     let charged_at = gas_where_the_write_is_counted(&code, crosses);
 
     assert_eq!(gas_where_the_write_is_counted(&code, fits), charged_at);
@@ -897,6 +918,338 @@ fn test_a_frame_start_is_charged_before_its_records_are_counted() {
     assert!(matches!(bound_at(&code, charged_at, crosses), Bound::DataSize));
     assert!(matches!(bound_at(&code, charged_at - 1, fits), Bound::OutOfGas));
     assert!(matches!(bound_at(&code, charged_at, fits), Bound::Success));
+    let started = run_at(
+        funded().account_code(A, code).account_balance(A, U256::from(1)),
+        call(CALLER, A, U256::ZERO, charged_at),
+        fits,
+    );
+    assert_eq!(
+        started.usage,
+        LimitUsage { data_size: mega_evm::TX_BODY_SIZE + start, write_records: 2 },
+        "the frame started and its records were kept, not refused on the frame's budget",
+    );
+}
+
+/// The frame-start order, one gas short by hand [S7.28]: a caller that forwards all but a 64th
+/// keeps a 64th one gas short of the price of the two records its value call makes, under a
+/// limit those records would cross. The caller pays for the records before they are counted, so
+/// it runs out of gas first — a halt, no stop, nothing counted beyond the body — and the limit
+/// never sees the start. One gas more, the 64th pays the records, they are counted, and the same
+/// limit stops the transaction at the start; under a limit they fit, the frame starts.
+///
+/// The gas limit is the call's intrinsic 15,000, the body's history, the caller's sixteen gas of
+/// pushes, the `CALL`'s 9,000 for the value, 2,600 for the cold recipient and 25,000 for the new
+/// account, the recipient's state gas (charged before the split), and what the caller must hold
+/// at the split for its 64th to be the records' price less one: `64 (price − 1) + 63`
+/// (`constants`: the two byte prices in effect; 713,055 at the spec's prices).
+#[test]
+fn test_a_caller_one_gas_short_of_its_records_runs_out_of_gas_under_a_limit_they_would_cross() {
+    // Records that cost nothing leave no price to be short of.
+    if history_is_free() {
+        return;
+    }
+    let records = history(2 * WRITE_RECORD_SIZE);
+    let held_at_the_split = 64 * (records - 1) + 63;
+    let gas_limit = 15_000 +
+        body_history(0) +
+        16 +
+        (9_000 + 2_600 + 25_000) +
+        account_state_gas() +
+        held_at_the_split;
+    let start = START_ON_THE_CALLER + START_ON_THE_FRAME;
+    let crosses = mega_evm::TX_BODY_SIZE + start - 1;
+    let fits = start_fits();
+    let db = || funded().account_code(A, value_call_to_fresh()).account_balance(A, U256::from(1));
+
+    for limit in [crosses, fits] {
+        let short = run_at(db(), call(CALLER, A, U256::ZERO, gas_limit), limit);
+        assert!(
+            matches!(
+                short.result,
+                ExecutionResult::Halt { reason: MegaHaltReason::Base(HaltReason::OutOfGas(_)), .. }
+            ),
+            "under a limit of {limit}: the caller runs out of gas paying for the records: {:?}",
+            short.result,
+        );
+        assert_eq!(short.limit_exceeded, None, "under a limit of {limit}: no limit saw the start");
+        assert_eq!(
+            short.usage,
+            LimitUsage { data_size: mega_evm::TX_BODY_SIZE, write_records: 0 },
+            "under a limit of {limit}: nothing was counted beyond the body",
+        );
+        assert_eq!(short.gas.history, body_history(0), "under a limit of {limit}");
+        assert_eq!(short.gas.state, 0, "under a limit of {limit}: the new account came back");
+        assert_eq!(short.gas.gas_used, gas_limit, "under a limit of {limit}: the halt consumes it");
+    }
+
+    let stopped = run_at(db(), call(CALLER, A, U256::ZERO, gas_limit + 1), crosses);
+    assert_stopped(&stopped, crosses, mega_evm::TX_BODY_SIZE + start);
+    assert_eq!(stopped.usage, LimitUsage { data_size: mega_evm::TX_BODY_SIZE, write_records: 0 });
+
+    let started = run_at(db(), call(CALLER, A, U256::ZERO, gas_limit + 1), fits);
+    assert!(started.result.is_success(), "one gas more, the frame starts: {:?}", started.result);
+    assert_eq!(
+        started.usage,
+        LimitUsage { data_size: mega_evm::TX_BODY_SIZE + start, write_records: 2 }
+    );
+    assert_eq!(started.gas.history, body_history(0) + records);
+    assert_eq!(started.gas.state, account_state_gas());
+
+    if crate::common::runs_at_measurement_prices() {
+        return;
+    }
+    assert_eq!(records, 2 * 40 * 88);
+    assert_eq!(gas_limit, 713_055);
+}
+
+/* ---------- a child frame's write, and the order where the reservoir runs out ---------- */
+
+/// `A`'s code when the write is a child's: a `CALL` to `B` with `forward` gas and no value,
+/// answering with the call's flag and the size of what `B` returned, so a reader of the output
+/// tells `B`'s halt (a flag of zero and no return data) from a revert on its frame budget (the
+/// stop's revert data) and from its success: `PUSH0 ×4; PUSH0; PUSH20 B; PUSH4 forward; CALL;
+/// PUSH0; MSTORE; RETURNDATASIZE; PUSH1 32; MSTORE; PUSH1 64; PUSH0; RETURN`.
+fn calls_b_with(forward: u64) -> Bytes {
+    BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0, PUSH0])
+        .push_address(B)
+        .push_number(u32::try_from(forward).expect("the forward fits a PUSH4"))
+        .append(CALL)
+        .append(PUSH0)
+        .append(MSTORE)
+        .append(RETURNDATASIZE)
+        .push_number(32_u8)
+        .append(MSTORE)
+        .push_number(64_u8)
+        .append(PUSH0)
+        .append(RETURN)
+        .build()
+}
+
+/// A call from `CALLER` to `A`, which calls `B` running `code` with `forward` gas, at `gas_limit`,
+/// under a transaction data-size limit of `data_limit`. `B` holds one wei, so a `SELFDESTRUCT`
+/// of its moves value.
+fn child_outcome(
+    code: &Bytes,
+    forward: u64,
+    gas_limit: u64,
+    data_limit: u64,
+) -> MegaTransactionOutcome {
+    let db = funded()
+        .account_code(A, calls_b_with(forward))
+        .account_code(B, code.clone())
+        .account_balance(B, U256::from(1));
+    let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(data_limit);
+    MegaEvm::new(context(db).with_tx_runtime_limits(limits))
+        .execute_transaction(call(CALLER, A, U256::ZERO, gas_limit))
+        .expect("the transaction is valid")
+}
+
+/// What `B`'s write did, read off `A`'s answer: a stop is the transaction's revert, a halt of `B`
+/// is a flag of zero with no return data, and a success a flag of one. A flag of zero with return
+/// data is `B` reverting on its own frame budget, which no case here means to reach. `A` itself
+/// has gas to spare and never halts.
+fn child_bound(outcome: &MegaTransactionOutcome) -> Bound {
+    match &outcome.result {
+        ExecutionResult::Halt { reason, .. } => panic!("A does not halt: {reason:?}"),
+        ExecutionResult::Revert { .. } => {
+            assert!(outcome.limit_exceeded.is_some(), "{:?}", outcome.result);
+            Bound::DataSize
+        }
+        ExecutionResult::Success { .. } => {
+            assert_eq!(outcome.limit_exceeded, None);
+            let answer = outcome.result.output().expect("A answers");
+            let flag = U256::from_be_slice(&answer[..32]);
+            let returned = U256::from_be_slice(&answer[32..]);
+            if flag.is_zero() {
+                assert!(returned.is_zero(), "B reverted with data rather than halting: {answer}");
+                Bound::OutOfGas
+            } else {
+                assert_eq!(flag, U256::ONE, "a CALL's flag");
+                Bound::Success
+            }
+        }
+    }
+}
+
+/// The smallest forward at which `code`'s write in `B` is counted rather than run out of gas,
+/// below the cap.
+fn forward_where_the_write_is_counted(code: &Bytes, data_limit: u64) -> u64 {
+    smallest_gas_limit(high_bound(), |forward| {
+        !matches!(
+            child_bound(&child_outcome(code, forward, GAS_LIMIT, data_limit)),
+            Bound::OutOfGas
+        )
+    })
+}
+
+/// `B`'s code for a `SELFDESTRUCT` that moves its wei to `C`, which nobody has touched.
+fn selfdestruct_to_c() -> Bytes {
+    BytecodeBuilder::default().push_address(C).append(SELFDESTRUCT).build()
+}
+
+/// The same rule at a child frame's write [S7.27]: the record's history is the child's to pay,
+/// out of the gas it was forwarded, so the forward where the write is counted and the forward
+/// where it is kept are exactly the record's history apart, with the caller's gas out of the
+/// picture. The fresh slot's forward is also the sum of its parts by hand: two pushes, the
+/// store's regular gas and its state gas (`constants`).
+#[test]
+fn test_whichever_of_gas_and_data_size_binds_first_is_reported_at_a_childs_write() {
+    let sites = [
+        ("a fresh slot", fresh_slot(), WRITE_RECORD_SIZE, WRITE_RECORD_SIZE),
+        ("a log of one byte", log0(1), mega_evm::LOG_BASE_SIZE + 1, mega_evm::LOG_BASE_SIZE + 1),
+        (
+            "a SELFDESTRUCT that moves value",
+            selfdestruct_to_c(),
+            WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE,
+            WRITE_RECORD_SIZE,
+        ),
+    ];
+    for (name, code, bytes, history_bytes) in sites {
+        let crosses = mega_evm::TX_BODY_SIZE + bytes - 1;
+        let fits = mega_evm::TX_BODY_SIZE + child_room(bytes);
+        let counted_at = forward_where_the_write_is_counted(&code, crosses);
+        let kept_at = forward_where_the_write_is_counted(&code, fits);
+        let history = history(history_bytes);
+        let bound = |forward, limit| child_bound(&child_outcome(&code, forward, GAS_LIMIT, limit));
+
+        assert_eq!(kept_at - counted_at, history, "{name}: a kept record costs its history");
+        assert!(matches!(bound(counted_at - 1, crosses), Bound::OutOfGas), "{name}");
+        assert!(matches!(bound(counted_at, crosses), Bound::DataSize), "{name}");
+        assert!(matches!(bound(kept_at, crosses), Bound::DataSize), "{name}");
+        if history > 0 {
+            assert!(matches!(bound(counted_at, fits), Bound::OutOfGas), "{name}");
+            assert!(matches!(bound(kept_at - 1, fits), Bound::OutOfGas), "{name}");
+        }
+        assert!(matches!(bound(kept_at, fits), Bound::Success), "{name}");
+    }
+
+    let params = mega_evm::satin_gas_params();
+    let store_regular = params.get(GasId::sstore_static()) +
+        params.get(GasId::cold_storage_cost()) +
+        params.get(GasId::sstore_set_without_load_cost());
+    assert_eq!(
+        forward_where_the_write_is_counted(
+            &fresh_slot(),
+            mega_evm::TX_BODY_SIZE + WRITE_RECORD_SIZE - 1
+        ),
+        2 * 3 + store_regular + slot_state_gas(),
+        "the fresh slot's forward is two pushes, the store's regular gas and its state gas",
+    );
+}
+
+/// Above the cap, where a reservoir one gas short of a record's history makes the order visible
+/// [S7.27]: the record's history draws the reservoir first and spills its last gas onto the
+/// child, which was forwarded exactly the gas of its write and has none left. Counted under a
+/// limit it crosses, the record is refused and nothing is charged — the transaction stops, and
+/// the spill the child could not pay is never asked of it. A charge made before the check would
+/// have run the child out of gas instead, and the limit would have reported nothing. Under a
+/// limit the record fits, the spill is asked, the child runs out, and one gas more pays it with
+/// the reservoir spent to the last gas.
+///
+/// Every forward is by hand — pushes, the opcode's regular gas, and the state gas it adds, drawn
+/// from the reservoir (`constants`: the schedule in effect for the store, the byte prices for the
+/// state gas and the record).
+#[test]
+fn test_a_record_a_limit_refuses_is_not_charged_where_the_reservoir_has_one_gas_too_few() {
+    // A record that costs nothing leaves no gas for the reservoir to be short of.
+    if history_is_free() {
+        return;
+    }
+    let params = mega_evm::satin_gas_params();
+    let store_regular = params.get(GasId::sstore_static()) +
+        params.get(GasId::cold_storage_cost()) +
+        params.get(GasId::sstore_set_without_load_cost());
+    // (site, code, the child's regular gas up to and including the write, the state gas the write
+    // adds, the bytes the limit counts, the record's history bytes, the records kept)
+    let sites = [
+        (
+            "a fresh slot",
+            fresh_slot(),
+            2 * 3 + store_regular,
+            slot_state_gas(),
+            WRITE_RECORD_SIZE,
+            WRITE_RECORD_SIZE,
+            1,
+        ),
+        (
+            "a log of one byte",
+            log0(1),
+            2 * 3 + (375 + 8 + 3),
+            0,
+            mega_evm::LOG_BASE_SIZE + 1,
+            mega_evm::LOG_BASE_SIZE + 1,
+            0,
+        ),
+        (
+            "a SELFDESTRUCT that moves value",
+            selfdestruct_to_c(),
+            3 + (5_000 + 2_600 + 25_000),
+            account_state_gas(),
+            WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE,
+            WRITE_RECORD_SIZE,
+            1,
+        ),
+    ];
+    let body = body_history(0);
+    for (name, code, counted_at, state, bytes, history_bytes, records) in sites {
+        let record = history(history_bytes);
+        let reservoir = body + state + record - 1;
+        let gas_limit = TX_GAS_LIMIT_CAP + reservoir;
+        let crosses = mega_evm::TX_BODY_SIZE + bytes - 1;
+        let fits = mega_evm::TX_BODY_SIZE + child_room(bytes);
+        let run = |forward, limit| child_outcome(&code, forward, gas_limit, limit);
+        let body_only = LimitUsage { data_size: mega_evm::TX_BODY_SIZE, write_records: 0 };
+
+        // One gas short of the write itself: an out-of-gas before any record exists, under either
+        // limit, with the reservoir untouched beyond the body.
+        for limit in [crosses, fits] {
+            let short = run(counted_at - 1, limit);
+            assert!(matches!(child_bound(&short), Bound::OutOfGas), "{name} under {limit}");
+            assert_eq!(short.usage, body_only, "{name} under {limit}");
+            assert_eq!(short.gas.reservoir_remaining, reservoir - body, "{name} under {limit}");
+        }
+
+        // The record refused: counted, the limit crosses, the transaction stops. Nothing was
+        // charged for it, so the one gas it would spill was never asked of the child.
+        let refused = run(counted_at, crosses);
+        assert!(matches!(child_bound(&refused), Bound::DataSize), "{name}: {:?}", refused.result);
+        assert_eq!(
+            refused.limit_exceeded,
+            Some(LimitCheck::ExceedsLimit {
+                kind: LimitKind::DataSize,
+                limit: crosses,
+                used: mega_evm::TX_BODY_SIZE + bytes,
+                frame_local: false,
+            }),
+            "{name}: the record crossed",
+        );
+        assert_eq!(refused.gas.history, body, "{name}: the refused record was not charged");
+        assert_eq!(refused.gas.state, 0, "{name}: the stop gave the state gas back");
+        assert_eq!(refused.gas.reservoir_remaining, reservoir - body, "{name}: the reservoir");
+
+        // The record kept: its history draws the reservoir's last `record - 1` and spills one gas
+        // the child does not have, so the child runs out, and its write comes back.
+        let kept = run(counted_at, fits);
+        assert!(matches!(child_bound(&kept), Bound::OutOfGas), "{name}: {:?}", kept.result);
+        assert_eq!(kept.usage, body_only, "{name}: the child's write came back with it");
+        assert_eq!(kept.gas.history, body, "{name}");
+        assert_eq!(kept.gas.state, 0, "{name}");
+        assert_eq!(kept.gas.reservoir_remaining, reservoir - body, "{name}");
+
+        // One gas more pays the spill: the write is kept, and the reservoir is spent to the last
+        // gas.
+        let paid = run(counted_at + 1, fits);
+        assert!(matches!(child_bound(&paid), Bound::Success), "{name}: {:?}", paid.result);
+        assert_eq!(paid.gas.reservoir_remaining, 0, "{name}: the reservoir spent to the last gas");
+        assert_eq!(paid.gas.history, body + record, "{name}: the body and the record");
+        assert_eq!(paid.gas.state, state, "{name}: the state the write added");
+        assert_eq!(
+            paid.usage,
+            LimitUsage { data_size: mega_evm::TX_BODY_SIZE + bytes, write_records: records },
+            "{name}",
+        );
+    }
 }
 
 /* ---------- a body over the limit, at the smallest gas limit validation accepts ---------- */
