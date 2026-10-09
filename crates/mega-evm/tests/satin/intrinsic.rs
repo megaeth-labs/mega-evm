@@ -381,6 +381,14 @@ fn test_a_creation_that_cannot_pay_its_account_runs_out_of_gas() {
 /// A gas limit below the intrinsic charge itself is a validation rejection, which leaves the
 /// sender untouched.
 ///
+/// The figure the error carries is one reading of a point the spec leaves open. The spec fixes
+/// the rejection and its error, `CallGasCostMoreThanGasLimit`, for a gas limit below the intrinsic
+/// regular gas plus the body's history, but not which figure the error names. Here, below the
+/// intrinsic regular gas alone, it names that charge without the body's history; a gas limit that
+/// covers the intrinsic charge but not the body is named with the whole minimum (the next test).
+/// Whether the error should name one figure in both cases is undecided, so a change to it is not
+/// a change of the rules this test holds: the rejection, and a sender left untouched.
+///
 /// Rules: [S4.25], [S21.1]. Independence: independent — the intrinsic charge and the sender's
 /// funding are written out.
 #[test]
@@ -407,6 +415,13 @@ fn test_a_valid_call_still_passes() {
 /// rejection too, naming the whole figure: the bytes a transaction carries are part of what makes
 /// it valid, so a transaction that cannot pay for them is never included, and leaves the sender
 /// untouched.
+///
+/// The figure the error carries — the whole minimum, the intrinsic charge and the body's history
+/// together — is one reading of a point the spec leaves open: the spec fixes the rejection and its
+/// error, not which figure the error names, and below the intrinsic charge alone the error names
+/// that charge without the body (the test above). Whether it should name one figure in both cases
+/// is undecided, so a change to it is not a change of the rules this test holds: the rejection, a
+/// sender left untouched, and a gas limit of the whole minimum admitted.
 ///
 /// Rules: [S4.25], [S7.17], [S21.1]. Independence: independent for the intrinsic charge and the
 /// sender's funding, which are written out; the body's history is priced by the production
