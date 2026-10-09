@@ -1,6 +1,5 @@
 ---
 source: crates/mega-evm/tests/system/keyless/differential.rs
-assertion_line: 93
 expression: "serde_json::json!({\n    \"summary\":\n    {\n        \"cases\": cases.len(), \"runs\": cases.len() * 4, \"bytes\": record.len(),\n        \"lines\": record.lines().count(),\n    }, \"cases\": cases,\n})"
 ---
 {
