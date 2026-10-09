@@ -526,6 +526,7 @@ for s in $(seq 1 20); do MEGA_FUZZ_SEED=$s cargo test --release -p mega-evm --te
   The prices are provisional, so a test holds at any of them — a byte price of nothing, or one gas per byte up to the grid's dearest point: it sizes its gas from the schedule at the prices in effect, and a case whose scenario is state or history gas returns early where that byte costs nothing (`state_is_free`, `history_is_free`).
   Below one gas per byte the schedule's entries round to nothing one at a time, and no test is held there.
   Each guard leaves a note (`test_utils::note_price_guard`), and the grid reports per point how many tests were guarded beside how many passed.
+  A test that only skipped a snapshot comparison leaves a note of its own (`test_utils::note_snapshot_skipped`), which the grid counts apart, as snapshot skips: it ran every assertion it makes.
 
 ## Version Control
 

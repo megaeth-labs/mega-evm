@@ -24,8 +24,8 @@
 ///
 /// The snapshots are pinned at the spec's byte prices. At other prices, which only a
 /// measurement build fixes (the `satin-price-override` feature), the comparison is skipped and
-/// the test leaves a price-guard note, which the byte-price grid counts; the rest of the test
-/// runs as it does at the spec's prices.
+/// the test leaves a note of the skip (`note_snapshot_skipped`), which the byte-price grid counts
+/// apart from the price guards; the rest of the test runs as it does at the spec's prices.
 #[macro_export]
 macro_rules! assert_sorted_json_snapshot {
     ($value:expr $(,)?) => {
@@ -34,9 +34,7 @@ macro_rules! assert_sorted_json_snapshot {
                 ::insta::assert_json_snapshot!($value);
             })
         } else {
-            ::mega_evm::test_utils::note_price_guard(
-                "insta snapshots are pinned at the spec's byte prices",
-            );
+            ::mega_evm::test_utils::note_snapshot_skipped();
         }
     };
     ($name:expr, $value:expr $(,)?) => {
@@ -45,9 +43,7 @@ macro_rules! assert_sorted_json_snapshot {
                 ::insta::assert_json_snapshot!($name, $value);
             })
         } else {
-            ::mega_evm::test_utils::note_price_guard(
-                "insta snapshots are pinned at the spec's byte prices",
-            );
+            ::mega_evm::test_utils::note_snapshot_skipped();
         }
     };
 }

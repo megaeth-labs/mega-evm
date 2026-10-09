@@ -45,9 +45,6 @@ use revm_inspectors::tracing::{
 
 use crate::gas::Ledgers;
 
-/// The note the snapshot comparison leaves when the byte prices are not the spec's.
-const SNAPSHOT_PRICE_GUARD: &str = "insta snapshots are pinned at the spec's byte prices";
-
 /// A block with room for any transaction these tests run.
 pub(crate) fn block() -> BlockEnv {
     BlockEnv {
@@ -282,13 +279,13 @@ pub(crate) fn eip3155_steps(traced: &Traced) -> Vec<serde_json::Value> {
 }
 
 /// The EIP-3155 trace as a string snapshot. The JSON views go through the shared sorted-JSON
-/// snapshot, which carries the same price guard; this one repeats it, with the same note, because
-/// a line-oriented trace is not JSON.
+/// snapshot, which compares only at the spec's byte prices; this one repeats that, with the same
+/// note of the skip, because a line-oriented trace is not JSON.
 fn assert_eip3155_snapshot(name: &str, trace: &str) {
     if mega_evm::active_satin_prices().is_constants() {
         insta::assert_snapshot!(name, trace);
     } else {
-        mega_evm::test_utils::note_price_guard(SNAPSHOT_PRICE_GUARD);
+        mega_evm::test_utils::note_snapshot_skipped();
     }
 }
 
