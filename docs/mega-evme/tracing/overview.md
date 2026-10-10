@@ -9,7 +9,7 @@ Traces are useful for debugging reverts, analyzing gas consumption, and understa
 
 ## Enabling Tracing
 
-Add `--trace` to any command to enable tracing:
+Add `--trace` to `run`, `tx`, or a single-transaction `replay` to enable tracing:
 
 ```bash
 mega-evme run 0x60016000526001601ff3 --trace

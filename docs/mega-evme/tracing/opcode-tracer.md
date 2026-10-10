@@ -51,6 +51,7 @@ Each entry in `structLogs`:
 | `stack`      | array      | Stack contents as hex strings (unless disabled)          |
 | `memory`     | array      | Memory contents as 32-byte hex chunks (unless disabled)  |
 | `storage`    | object     | Storage changes as key-value hex pairs (unless disabled) |
+| `refund`     | number     | Gas refund counter at this step                          |
 | `returnData` | hex string | Return data at this step (only if enabled)               |
 
 ### Example Output
@@ -70,7 +71,8 @@ Running `mega-evme run 0x60016000526001601ff3 --trace --tracer opcode` produces:
       "gasCost": 3,
       "depth": 1,
       "stack": [],
-      "memory": []
+      "memory": [],
+      "refund": 0
     },
     {
       "pc": 2,
@@ -79,7 +81,8 @@ Running `mega-evme run 0x60016000526001601ff3 --trace --tracer opcode` produces:
       "gasCost": 3,
       "depth": 1,
       "stack": ["0x1"],
-      "memory": []
+      "memory": [],
+      "refund": 0
     },
     {
       "pc": 4,
@@ -88,7 +91,8 @@ Running `mega-evme run 0x60016000526001601ff3 --trace --tracer opcode` produces:
       "gasCost": 6,
       "depth": 1,
       "stack": ["0x1", "0x0"],
-      "memory": []
+      "memory": [],
+      "refund": 0
     },
     {
       "pc": 5,
@@ -98,8 +102,9 @@ Running `mega-evme run 0x60016000526001601ff3 --trace --tracer opcode` produces:
       "depth": 1,
       "stack": [],
       "memory": [
-        "0000000000000000000000000000000000000000000000000000000000000001"
-      ]
+        "0x0000000000000000000000000000000000000000000000000000000000000001"
+      ],
+      "refund": 0
     },
     {
       "pc": 7,
@@ -109,8 +114,9 @@ Running `mega-evme run 0x60016000526001601ff3 --trace --tracer opcode` produces:
       "depth": 1,
       "stack": ["0x1"],
       "memory": [
-        "0000000000000000000000000000000000000000000000000000000000000001"
-      ]
+        "0x0000000000000000000000000000000000000000000000000000000000000001"
+      ],
+      "refund": 0
     },
     {
       "pc": 9,
@@ -120,8 +126,9 @@ Running `mega-evme run 0x60016000526001601ff3 --trace --tracer opcode` produces:
       "depth": 1,
       "stack": ["0x1", "0x1f"],
       "memory": [
-        "0000000000000000000000000000000000000000000000000000000000000001"
-      ]
+        "0x0000000000000000000000000000000000000000000000000000000000000001"
+      ],
+      "refund": 0
     }
   ]
 }

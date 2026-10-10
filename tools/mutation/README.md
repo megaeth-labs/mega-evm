@@ -56,7 +56,7 @@ survivor pinpoints an untested boundary between two specific specs.
   `crates/mega-evm/src/evm/spec.rs`; enumeration hard-fails if the source enum
   diverges):
 
-  `EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4 → REX5 → REX6 → REX7`
+  `EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4 → REX5 → REX6`
 
   Alias rungs (`MINI_REX_1`, `MINI_REX_2`) are parsed from `MegaSpecId::behavior`
   and excluded: they re-execute an earlier spec's behavior instead of introducing

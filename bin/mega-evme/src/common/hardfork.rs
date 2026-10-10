@@ -123,7 +123,6 @@ mod tests {
             MegaSpecId::REX4,
             MegaSpecId::REX5,
             MegaSpecId::REX6,
-            MegaSpecId::REX7,
         ] {
             assert_eq!(FixedHardfork::new(spec).spec_id(0), spec, "{spec:?}");
         }
@@ -143,7 +142,7 @@ mod tests {
     #[test]
     fn test_params_are_delegated_to_the_chain_config() {
         let chain = config_with_all_params();
-        let fixed = FixedHardfork::new(MegaSpecId::REX7).with_params_from(&chain);
+        let fixed = FixedHardfork::new(MegaSpecId::REX6).with_params_from(&chain);
 
         assert_eq!(
             fixed.fork_params::<SequencerRegistryConfig>(),

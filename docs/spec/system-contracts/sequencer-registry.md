@@ -242,7 +242,7 @@ The signature commits to `(chainId, verifyingContract, newSequencer, activationB
 The execution layer MUST call `applyPendingChanges()` as a pre-block system call when a pre-check confirms any role change is due.
 For each role, if a change is pending and due, `applyPendingChanges()` MUST update the current address, append to the change history, and clear pending state.
 
-The system call MUST be issued with `gas_limit = max(block.gas_limit, 30_000_000)` instead of revm's upstream-fixed 30M default, matching the EIP-2935 / EIP-4788 pre-block calls.
+The system call MUST be issued with `gas_limit = max(block.gas_limit, 30_000_000)` instead of the fixed 30,000,000 gas budget that system calls used before Rex5, matching the EIP-2935 / EIP-4788 pre-block calls.
 This gas floor is necessary because the slot-rotation cost scales with REX dynamic storage gas (SALT bucket capacity), and a fixed 30M is no longer guaranteed to be sufficient on activation blocks.
 
 #### Apply/Deploy Commit Order

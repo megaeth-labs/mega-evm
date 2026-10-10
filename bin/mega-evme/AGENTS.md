@@ -28,7 +28,7 @@ CLI toolbox for direct MegaEVM execution (`run`, `tx`, `replay`, `cache`) with o
 - Do not mutate command-level defaults in one subcommand without mirroring related aliases/help text.
 
 ## WHERE TO LOOK
-- Add a new top-level command: `src/cmd.rs` enum + module wiring in `src/main.rs`.
+- Add a new top-level command: `src/cmd.rs` enum + module declaration in `src/lib.rs`.
 - Add a new shared CLI option family: `src/common/*` and flatten into command structs.
 - Change state-forking or prestate merge semantics: `src/common/state.rs`.
 - Change replay hardfork/spec selection: `src/replay/{cmd.rs,hardforks.rs}`.

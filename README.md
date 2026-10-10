@@ -1,16 +1,17 @@
 # MegaETH EVM
 
-A specialized Ethereum Virtual Machine (EVM) implementation tailored for MegaETH specifications, built on top of [revm](https://github.com/bluealloy/revm) and [op-revm](https://github.com/bluealloy/op-revm).
+A specialized Ethereum Virtual Machine (EVM) implementation tailored for MegaETH specifications, built on top of [revm](https://github.com/bluealloy/revm) and [op-revm](https://github.com/ethereum-optimism/optimism/tree/develop/rust/op-revm).
 
 ## Crates
 
 | Crate                                            | Description                                                               |
 | ------------------------------------------------ | ------------------------------------------------------------------------- |
-| [mega-evm](crates/mega-evm)                      | Core EVM implementation with MegaETH specs (`EQUIVALENCE` through `REX7`) |
+| [mega-evm](crates/mega-evm)                      | Core EVM implementation with MegaETH specs (`EQUIVALENCE` through `REX6`) |
 | [mega-system-contracts](crates/system-contracts) | Solidity system contracts with Rust bindings                              |
-| [mega-evme](bin/mega-evme)                       | CLI tool for EVM execution (`run`, `tx`, `replay`)                        |
+| [mega-evme](bin/mega-evme)                       | CLI tool for EVM execution (`run`, `tx`, `replay`, `cache`)               |
 | [mega-t8n](bin/mega-t8n)                         | Standalone state transition (t8n) tool                                    |
-| [state-test](crates/state-test)                  | Ethereum state test runner                                                |
+| [mega-state-test](crates/mega-state-test)        | Ethereum state test fixtures and runner library (EEST-compatible)         |
+| [state-test](crates/state-test)                  | Thin CLI front-end over `mega-state-test`                                 |
 
 ## Installation
 
@@ -65,12 +66,12 @@ cargo build
 ### Testing
 
 ```bash
-cargo test
+cargo test --workspace
 ```
 
 ## Documentation
 
-- [mega-evm specification](https://megaeth-labs.github.io/mega-evm/)
+- [mega-evm specification](https://docs.megaeth.com/spec/)
 - [Architecture](ARCH.md)
 
 ## License

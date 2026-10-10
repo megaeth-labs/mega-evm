@@ -174,7 +174,7 @@ Two habits keep that honest:
 A spec has two independent properties, and they MUST NOT be conflated:
 
 - **Maturity** — `unstable` (semantics may still change) or `frozen` (semantics are fixed forever).
-  Exactly one spec is unstable at a time, and it is always the latest.
+  At most one spec is unstable at a time, and when one exists it is always the latest.
 - **Network status** — `not scheduled`, `scheduled`, or `active`, tracked **per network** (mainnet and testnet each have their own).
   A frozen spec is not automatically live: it takes effect on a network only at the block where that network activates it.
 

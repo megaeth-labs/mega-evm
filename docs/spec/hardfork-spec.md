@@ -51,17 +51,16 @@ Protocol-level changes outside the verifiable execution layer (e.g., networking,
 ## Spec Progression
 
 ```
-EQUIVALENCE → MINI_REX → MINI_REX_1 → MINI_REX_2 → REX → REX1 → REX2 → REX3 → REX4 → REX5 → REX6 → REX7
+EQUIVALENCE → MINI_REX → MINI_REX_1 → MINI_REX_2 → REX → REX1 → REX2 → REX3 → REX4 → REX5 → REX6
 ```
 
 Each newer behavior-introducing spec includes all previous behaviors.
 The alias rungs `MINI_REX_1` (behavior: `EQUIVALENCE`) and `MINI_REX_2` (behavior: `MINI_REX`) are the exception: an alias rung introduces no behavior of its own and instead executes exactly its target's earlier behavior (see [Alias Specs](#alias-specs-behavior-vs-position)).
 All specs build on Optimism Isthmus (Ethereum Prague) as the base layer.
-All specs through REX6 are frozen; REX7 is **unstable** and under active development.
+Every spec is frozen; there is currently no unstable spec.
 
 Frozen and activated are separate properties.
 A frozen spec's semantics no longer change, but it takes effect on a network only once that network schedules the corresponding hardfork.
-REX7 is unstable and has no activation timestamp on either mainnet or testnet.
 
 ### Backward Compatibility
 
@@ -183,10 +182,3 @@ REX6 is frozen and scheduled on both networks; see the [upgrade overview](upgrad
 - **Value self-transfer dedup** — A value transfer whose target equals the caller is counted as a single account-info write.
 
 _See [Rex6 Network Upgrade](upgrades/rex6.md) for full details._
-
-### REX7
-
-REX7 is the current **unstable** spec under active development.
-It introduces no behavioral change over REX6 yet; its semantics may change at any time before it is frozen.
-
-_See [Rex7 Network Upgrade](upgrades/rex7.md) for the current state._

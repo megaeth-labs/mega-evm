@@ -46,15 +46,15 @@ For the relationship between total gas, compute gas, and storage gas, see [Dual 
 
 A node MUST enforce the following limits:
 
-| Resource                                                                                | Phase         | Transaction Limit       | Block Limit                        |
-| --------------------------------------------------------------------------------------- | ------------- | ----------------------- | ---------------------------------- |
-| [Gas Limit](https://ethereum.org/en/developers/docs/gas/#block-size)                    | Pre-execution | Sequencer-configured    | `block.gasLimit` from block header |
-| Transaction Size                                                                        | Pre-execution | Sequencer-configured    | Sequencer-configured               |
-| [DA Size](https://docs.optimism.io/stack/transactions/transaction-fees#the-l1-data-fee) | Pre-execution | Sequencer-configured    | Sequencer-configured               |
-| [Compute Gas](../glossary.md#compute-gas)                                               | Runtime       | `TX_COMPUTE_GAS_LIMIT`  | No separate limit                  |
-| Data Size                                                                               | Runtime       | `TX_DATA_LIMIT`         | `BLOCK_DATA_LIMIT`                 |
-| KV Updates                                                                              | Runtime       | `TX_KV_UPDATE_LIMIT`    | `BLOCK_KV_UPDATE_LIMIT`            |
-| State Growth                                                                            | Runtime       | `TX_STATE_GROWTH_LIMIT` | `BLOCK_STATE_GROWTH_LIMIT`         |
+| Resource                                                                   | Phase         | Transaction Limit       | Block Limit                        |
+| -------------------------------------------------------------------------- | ------------- | ----------------------- | ---------------------------------- |
+| [Gas Limit](https://ethereum.org/en/developers/docs/gas/#block-size)       | Pre-execution | Sequencer-configured    | `block.gasLimit` from block header |
+| Transaction Size                                                           | Pre-execution | Sequencer-configured    | Sequencer-configured               |
+| [DA Size](https://docs.optimism.io/op-stack/transactions/fees#l1-data-fee) | Pre-execution | Sequencer-configured    | Sequencer-configured               |
+| [Compute Gas](../glossary.md#compute-gas)                                  | Runtime       | `TX_COMPUTE_GAS_LIMIT`  | No separate limit                  |
+| Data Size                                                                  | Runtime       | `TX_DATA_LIMIT`         | `BLOCK_DATA_LIMIT`                 |
+| KV Updates                                                                 | Runtime       | `TX_KV_UPDATE_LIMIT`    | `BLOCK_KV_UPDATE_LIMIT`            |
+| State Growth                                                               | Runtime       | `TX_STATE_GROWTH_LIMIT` | `BLOCK_STATE_GROWTH_LIMIT`         |
 
 The absence of a separate block-level compute gas limit means that cumulative block compute gas is bounded only indirectly by the block gas limit.
 

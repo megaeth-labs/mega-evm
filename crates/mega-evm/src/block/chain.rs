@@ -106,11 +106,10 @@ pub fn testnet_hardforks() -> MegaHardforkConfig {
 /// would otherwise replay differently — through [`hardfork_schedule`], which is what
 /// `mega-evme replay` resolves an unknown chain ID with — against the same binary
 /// that produced it. Advancing this rung is a deliberate edit; it currently names
-/// `REX7`, the unstable development head, which carries no behavior of its own yet,
-/// so dev chains track the newest semantics at no cost.
+/// `REX6`, the latest spec.
 pub fn all_activated_hardforks() -> MegaHardforkConfig {
     MegaHardforkConfig::new()
-        .with_all_activated_through(MegaSpecId::REX7)
+        .with_all_activated_through(MegaSpecId::REX6)
         .with_params(SequencerRegistryConfig {
             rex5_initial_sequencer: MEGA_SYSTEM_ADDRESS,
             rex5_initial_admin: MEGA_SYSTEM_ADDRESS,
@@ -177,16 +176,14 @@ mod tests {
         assert_eq!(hardfork_schedule(MAINNET_CHAIN_ID).spec_id(1787626800), MegaSpecId::REX6);
         assert_eq!(hardfork_schedule(TESTNET_CHAIN_ID).spec_id(1786330800), MegaSpecId::REX6);
         // Unknown chain: every fork up to the pinned rung, active at genesis.
-        assert_eq!(hardfork_schedule(1).spec_id(0), MegaSpecId::REX7);
+        assert_eq!(hardfork_schedule(1).spec_id(0), MegaSpecId::REX6);
     }
 
     #[test]
-    fn test_canonical_schedules_activate_rex6_and_pin_rex7_never() {
+    fn test_canonical_schedules_activate_rex6_as_the_terminal_spec() {
         // Rex6 is scheduled on both networks at the published timestamps (testnet
         // 2026-08-10, mainnet 2026-08-25) and carries the governance-seeded rotation
-        // delay. Rex7 is still unstable and must not appear in a canonical schedule
-        // until governance publishes a timestamp: an accidental entry here would
-        // fork the live chains at that timestamp.
+        // delay.
         for (hf, rex6_activation) in
             [(mainnet_hardforks(), 1787626800), (testnet_hardforks(), 1786330800)]
         {
@@ -194,8 +191,7 @@ mod tests {
                 hf.mega_fork_activation(MegaHardfork::Rex6),
                 ForkCondition::Timestamp(rex6_activation)
             );
-            assert_eq!(hf.mega_fork_activation(MegaHardfork::Rex7), ForkCondition::Never);
-            // Rex6 is therefore the terminal spec on both chains, at any later timestamp.
+            // Rex6 is the terminal spec on both chains, at any later timestamp.
             assert_eq!(hf.spec_id(u64::MAX), MegaSpecId::REX6);
             let params = hf
                 .fork_params::<SequencerRegistryRex6Config>()
@@ -209,7 +205,7 @@ mod tests {
         // Rex5 block execution fails pre-block without a SequencerRegistryConfig,
         // so the all-activated fallback must attach placeholder roles.
         let hf = hardfork_schedule(999_999);
-        assert_eq!(hf.spec_id(0), MegaSpecId::REX7);
+        assert_eq!(hf.spec_id(0), MegaSpecId::REX6);
         let params = hf
             .fork_params::<SequencerRegistryConfig>()
             .expect("fallback schedule must carry a SequencerRegistryConfig");
@@ -239,7 +235,7 @@ mod tests {
     #[test]
     fn test_unknown_chain_fallback_pins_its_rung() {
         let hf = all_activated_hardforks();
-        const RUNG: MegaSpecId = MegaSpecId::REX7;
+        const RUNG: MegaSpecId = MegaSpecId::REX6;
 
         assert_eq!(hf.spec_id(0), RUNG, "the rung applies from genesis");
         assert_eq!(hf.spec_id(u64::MAX), RUNG, "and is terminal — no later fork is registered");

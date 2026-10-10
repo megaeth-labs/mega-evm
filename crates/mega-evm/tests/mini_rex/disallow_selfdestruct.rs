@@ -138,7 +138,7 @@ fn test_disallowed_selfdestruct_consumes_the_whole_budget_at_any_funding() {
 /// with a transaction that has almost nothing left after its intrinsic cost.
 #[test]
 fn test_unwired_opcode_consumes_the_whole_budget_at_any_funding() {
-    for spec in [MegaSpecId::MINI_REX, MegaSpecId::REX6, MegaSpecId::REX7] {
+    for spec in [MegaSpecId::MINI_REX, MegaSpecId::REX6] {
         for gas_above_intrinsic in [1, 100_000] {
             let gas_limit = intrinsic_gas(spec) + gas_above_intrinsic;
             let result = transact_with_gas_limit(spec, vec![DUPN, 0x00], gas_limit);
