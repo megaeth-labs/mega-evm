@@ -142,11 +142,11 @@ let mut tx = MegaTransaction(OpTransaction::new(TxEnv {
 // The enveloped transaction feeds the L1 data fee; empty is enough here.
 tx.enveloped_tx = Some(Bytes::new());
 
-let result = alloy_evm::Evm::transact_raw(&mut evm, tx)?;
+let result = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("the transaction executes");
 assert!(result.result.is_success());
 ```
 
-The same code runs as an example: `cargo run -p mega-evm --example quick_start`.
+This snippet runs as a doctest of the crate (`cargo test -p mega-evm --doc`).
 
 ## Documentation
 

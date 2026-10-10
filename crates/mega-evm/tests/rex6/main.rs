@@ -3,6 +3,8 @@
 //! - `eip7702_authority_accounting` — consolidated per-authorization accounting: dynamic SALT
 //!   account-creation gas for net-new authorities, and DataSize/KV charged only for *applied*
 //!   authorities (not every recoverable one).
+//! - `modexp_gas` — a cross-spec pin rather than a Rex6 feature: every spec keeps the historical
+//!   zero-base/zero-modulus `ModExp` pricing. It lives in the latest spec's module.
 
 mod beneficiary_detention;
 mod common;
