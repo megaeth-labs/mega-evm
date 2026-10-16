@@ -15,9 +15,11 @@ workspace = true
 [dependencies]
 # alloy
 alloy-consensus = { workspace = true, features = ["k256"] }
+alloy-eips.workspace = true
 alloy-evm.workspace = true
 alloy-hardforks.workspace = true
 alloy-op-evm.workspace = true
+alloy-op-hardforks.workspace = true
 alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
 op-alloy-consensus.workspace = true
@@ -55,11 +57,19 @@ std = [
     "revm/std",
 ]
 test-utils = ["dep:derive_more"]
+# Measurement-only: lets a process fix other Satin byte prices than the constants, through
+# `install_satin_prices` or the `MEGA_SATIN_CPSB` / `MEGA_SATIN_CPHB` environment variables.
+# Off by default, so a normal build prices with the constants and has no way to do otherwise.
+satin-price-override = ["std"]
 
 # The Satin bench set: `transact` (MegaEvm next to op-revm), `corpus` (the JSON scenarios under
-# benches/scenarios, a bench input) and `factory` (EVM construction). The inputs under
-# benches/data (revm_bench) and benches/fixtures (attack_replay) stay for the rebuild of the rest
-# of the suite.
+# benches/scenarios, a bench input), `factory` (EVM construction) and `block` (a block through
+# MegaBlockExecutor). The inputs under benches/data (revm_bench) and benches/fixtures
+# (attack_replay) stay for the rebuild of the rest of the suite.
+[[bench]]
+name = "block"
+harness = false
+
 [[bench]]
 name = "corpus"
 harness = false

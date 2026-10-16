@@ -107,6 +107,13 @@ pub struct TestExternalEnvs<Error = Infallible, Hasher = SimpleBucketHasher> {
     /// Fallback capacity for buckets not in `bucket_capacity`.
     /// When `None`, falls back to [`MIN_BUCKET_SIZE`](crate::MIN_BUCKET_SIZE).
     default_bucket_capacity: Rc<RefCell<Option<u64>>>,
+    /// Buckets whose capacity query fails, with the error it fails with. Lets a test drive the
+    /// pricing hook's failure path, where a state gas charge cannot be priced at all.
+    #[debug(ignore)]
+    failing_buckets: Rc<RefCell<HashMap<BucketId, Error>>>,
+    /// How many times [`SaltEnv::get_bucket_capacity`] was called per bucket, so a test can
+    /// assert the engine reads a bucket once and answers later charges from its own cache.
+    bucket_queries: Rc<RefCell<HashMap<BucketId, u32>>>,
     /// Recorded hints from `on_hint` calls. Used for testing the hint mechanism.
     recorded_hints: Rc<RefCell<Vec<RecordedHint>>>,
 }
@@ -143,6 +150,8 @@ impl<Error: Unpin + Clone + Display + 'static, Hasher: BucketHasher>
             oracle_storage: Rc::new(RefCell::new(HashMap::default())),
             bucket_capacity: Rc::new(RefCell::new(HashMap::default())),
             default_bucket_capacity: Rc::new(RefCell::new(None)),
+            failing_buckets: Rc::new(RefCell::new(HashMap::default())),
+            bucket_queries: Rc::new(RefCell::new(HashMap::default())),
             recorded_hints: Rc::new(RefCell::new(Vec::new())),
         }
     }
@@ -191,6 +200,31 @@ impl<Error: Unpin + Clone + Display + 'static, Hasher: BucketHasher>
     /// set, otherwise [`MIN_BUCKET_SIZE`](crate::MIN_BUCKET_SIZE).
     pub fn clear_bucket_capacity(&self) {
         self.bucket_capacity.borrow_mut().clear();
+    }
+
+    /// Makes the capacity query of `bucket_id` fail with `error`, whatever capacity it carries.
+    ///
+    /// This is what an unreachable SALT backend looks like to the engine: the state gas charge
+    /// on an account or slot of that bucket cannot be priced, so the transaction fails instead
+    /// of falling back to a price nobody chose.
+    pub fn with_failing_bucket(self, bucket_id: BucketId, error: Error) -> Self {
+        self.failing_buckets.borrow_mut().insert(bucket_id, error);
+        self
+    }
+
+    /// How many capacity queries `bucket_id` has received.
+    pub fn bucket_queries(&self, bucket_id: BucketId) -> u32 {
+        self.bucket_queries.borrow().get(&bucket_id).copied().unwrap_or_default()
+    }
+
+    /// How many capacity queries every bucket has received together.
+    pub fn total_bucket_queries(&self) -> u32 {
+        self.bucket_queries.borrow().values().sum()
+    }
+
+    /// Forgets the capacity queries counted so far.
+    pub fn clear_bucket_queries(&self) {
+        self.bucket_queries.borrow_mut().clear();
     }
 
     /// Configures a storage slot in the oracle contract to have a specific value.
@@ -242,7 +276,7 @@ impl<Error: Unpin + Clone + Display, Hasher: BucketHasher> ExternalEnvFactory
     }
 }
 
-impl<Error: Unpin + Display, Hasher: BucketHasher> ExternalEnvTypes
+impl<Error: Unpin + Clone + Display, Hasher: BucketHasher> ExternalEnvTypes
     for TestExternalEnvs<Error, Hasher>
 {
     type SaltEnv = Self;
@@ -258,10 +292,16 @@ const PLAIN_ACCOUNT_KEY_LEN: usize = Address::len_bytes();
 const PLAIN_STORAGE_KEY_LEN: usize = PLAIN_ACCOUNT_KEY_LEN + SLOT_KEY_LEN;
 
 /// SALT environment implementation with configurable bucket ID hashing.
-impl<Error: Unpin + Display, Hasher: BucketHasher> SaltEnv for TestExternalEnvs<Error, Hasher> {
+impl<Error: Unpin + Clone + Display, Hasher: BucketHasher> SaltEnv
+    for TestExternalEnvs<Error, Hasher>
+{
     type Error = Error;
 
     fn get_bucket_capacity(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {
+        *self.bucket_queries.borrow_mut().entry(bucket_id).or_default() += 1;
+        if let Some(error) = self.failing_buckets.borrow().get(&bucket_id) {
+            return Err(error.clone());
+        }
         Ok(self.bucket_capacity.borrow().get(&bucket_id).copied().unwrap_or_else(|| {
             self.default_bucket_capacity.borrow().unwrap_or(crate::MIN_BUCKET_SIZE as u64)
         }))

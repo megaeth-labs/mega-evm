@@ -457,7 +457,8 @@ mod tests {
     /// current nonce.
     #[test]
     fn test_run_commits_each_transaction_before_the_next() {
-        let scenario = scenario(vec![call(Some(100_000)), call(Some(100_000))]);
+        // Room for the state gas the first transaction's new slot draws.
+        let scenario = scenario(vec![call(Some(200_000)), call(Some(200_000))]);
         let (outcomes, mut db) = scenario.run(scenario.database());
 
         assert_eq!(outcomes.len(), 2);

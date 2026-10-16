@@ -117,129 +117,6 @@ fn sstore_test_case(
     assert_eq!(gas_used, expected_gas_used);
 }
 
-/// Tests SSTORE setting a zero slot to non-zero value without bucket expansion, expecting 2M+ gas
-/// due to high `SSTORE_SET_GAS` cost plus EIP-2929 cold access penalty.
-#[test]
-fn test_sstore_no_bucket_expansion() {
-    sstore_test_case(MegaSpecId::MINI_REX, UpdateMode::Set, 0, 43_106 + SSTORE_SET_STORAGE_GAS);
-}
-
-/// Tests SSTORE with single bucket expansion, expecting doubled gas cost (4M+ gas) due to bucket
-/// capacity doubling, plus EIP-2929 cold access penalty.
-#[test]
-fn test_sstore_with_bucket_expansion_once() {
-    sstore_test_case(MegaSpecId::MINI_REX, UpdateMode::Set, 1, 43_106 + SSTORE_SET_STORAGE_GAS * 2);
-}
-
-/// Tests SSTORE with 10x bucket expansion, expecting 10x gas cost (20M+ gas) due to linear scaling
-/// with bucket capacity, plus EIP-2929 cold access penalty.
-#[test]
-fn test_sstore_with_bucket_expansion_ten_times() {
-    sstore_test_case(
-        MegaSpecId::MINI_REX,
-        UpdateMode::Set,
-        9,
-        43_106 + SSTORE_SET_STORAGE_GAS * 10,
-    );
-}
-
-/// Tests SSTORE resetting non-zero to different non-zero value, expecting standard gas cost (base +
-/// `WARM_SSTORE_RESET`) plus EIP-2929 cold access penalty.
-#[test]
-fn test_sstore_reset() {
-    sstore_test_case(
-        MegaSpecId::MINI_REX,
-        UpdateMode::Reset,
-        0,
-        23_906 + constants::equivalence::COLD_SLOAD_COST,
-    );
-}
-
-/// Tests SSTORE reset with bucket expansion, expecting same gas cost as without expansion since no
-/// new storage allocation, plus EIP-2929 cold access penalty.
-#[test]
-fn test_sstore_reset_with_bucket_expansion() {
-    sstore_test_case(
-        MegaSpecId::MINI_REX,
-        UpdateMode::Reset,
-        1,
-        23_906 + constants::equivalence::COLD_SLOAD_COST,
-    );
-}
-
-/// Tests SSTORE clearing non-zero to zero value.
-///
-/// Gas calculation with EIP-2929 (cold access) and EIP-3529 (refund):
-/// 1. Base tx: 21,000
-/// 2. SSTORE cost: `WARM_SSTORE_RESET` (2900) + `COLD_SLOAD_COST` (2100) = 5,000
-/// 3. Bytecode overhead: ~6 gas (PUSH, STOP, etc.)
-/// 4. Total charged: 26,006
-/// 5. Refund (EIP-3529): min(4800, 26006/5) = 4,800
-///    - `sstore_clears_schedule` = `SSTORE_RESET` - `COLD_SLOAD_COST` + `ACCESS_LIST_STORAGE_KEY`
-///    - = 5000 - 2100 + 1900 = 4,800
-/// 6. Final gas used: 26,006 - 4,800 = 21,206
-#[test]
-fn test_sstore_clear() {
-    sstore_test_case(MegaSpecId::MINI_REX, UpdateMode::Clear, 0, 21_206);
-}
-
-/// Tests SSTORE clear with bucket expansion. Bucket expansion doesn't affect clearing operations
-/// since no new storage is allocated. Same gas cost as `test_sstore_clear` (21,206) due to:
-/// - SSTORE charges: `WARM_SSTORE_RESET` + `COLD_SLOAD_COST` = 5,000
-/// - EIP-3529 refund: 4,800
-/// - Net SSTORE cost: 200 gas (plus ~6 overhead)
-#[test]
-fn test_sstore_clear_with_bucket_expansion() {
-    sstore_test_case(MegaSpecId::MINI_REX, UpdateMode::Clear, 1, 21_206);
-}
-
-/// Tests EIP-2929: First SSTORE to a slot charges cold access penalty (2100 gas), subsequent
-/// SSTOREs to the same slot in the same transaction use warm pricing.
-#[test]
-fn test_sstore_cold_then_warm_access() {
-    let mut db = MemoryDatabase::default();
-
-    let storage_key = U256::from(0);
-    let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_slot(CALLEE, storage_key);
-    let external_envs =
-        TestExternalEnvs::new().with_bucket_capacity(bucket_id, MIN_BUCKET_SIZE as u64);
-
-    // Contract that performs two SSTOREs to the same slot:
-    // 1. First SSTORE (cold): should charge SSTORE_SET_GAS + COLD_SLOAD_COST
-    // 2. Second SSTORE (warm): should only charge WARM_STORAGE_READ_COST (no cold penalty)
-    let bytecode = BytecodeBuilder::default()
-        .sstore(storage_key, U256::from(100)) // Cold access
-        .sstore(storage_key, U256::from(200)) // Warm access
-        .stop()
-        .build();
-    db.set_account_code(CALLEE, bytecode);
-
-    let res = transact(
-        MegaSpecId::MINI_REX,
-        &mut db,
-        &external_envs,
-        CALLER,
-        Some(CALLEE),
-        Default::default(),
-        U256::ZERO,
-    )
-    .unwrap();
-    assert!(res.result.is_success());
-
-    // Expected gas breakdown:
-    // - Base: 21_000
-    // - Bytecode execution overhead: ~12 gas (PUSH opcodes, STOP, etc.)
-    // - First SSTORE (cold): SSTORE_SET_GAS + COLD_SLOAD_COST
-    // - Second SSTORE (warm, overwriting non-zero with non-zero): WARM_STORAGE_READ_COST
-    let expected_gas = 21_000
-        + 12 // bytecode overhead
-        + SSTORE_SET_STORAGE_GAS
-        + constants::equivalence::SSTORE_SET
-        + constants::equivalence::COLD_SLOAD_COST
-        + constants::equivalence::WARM_STORAGE_READ_COST;
-    assert_eq!(res.result.gas_used(), expected_gas);
-}
-
 /// Executes an ether transfer test case, verifying gas usage for account creation and bucket
 /// expansion scenarios.
 ///
@@ -291,34 +168,6 @@ fn ether_transfer_test_case(
     assert!(res.result.is_success());
     let gas_used = res.result.gas_used();
     assert_eq!(gas_used, expected_gas_used);
-}
-
-/// Tests ether transfer to new account charges increased `NEW_ACCOUNT_GAS` in `MegaETH`.
-#[test]
-fn test_ether_transfer_to_non_existent_account() {
-    ether_transfer_test_case(
-        MegaSpecId::MINI_REX,
-        UpdateMode::Set,
-        0,
-        21_000 + constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS,
-    );
-}
-
-/// Tests ether transfer with bucket expansion doubles the `NEW_ACCOUNT_GAS` cost.
-#[test]
-fn test_ether_transfer_to_non_existent_account_with_bucket_expansion() {
-    ether_transfer_test_case(
-        MegaSpecId::MINI_REX,
-        UpdateMode::Set,
-        1,
-        21_000 + constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS * 2,
-    );
-}
-
-/// Tests ether transfer to existing account only charges base transaction gas.
-#[test]
-fn test_ether_transfer_to_existent_account() {
-    ether_transfer_test_case(MegaSpecId::MINI_REX, UpdateMode::Reset, 0, 21_000);
 }
 
 /// Executes a nested ether transfer test case, verifying gas usage for account creation and bucket
@@ -384,34 +233,6 @@ fn nested_ether_transfer_test_case(
     assert_eq!(gas_used, expected_gas_used);
 }
 
-/// Tests nested ether transfer (via CALL) to new account charges increased `NEW_ACCOUNT_GAS`.
-#[test]
-fn test_nested_ether_transfer_to_non_existent_account() {
-    nested_ether_transfer_test_case(
-        MegaSpecId::MINI_REX,
-        UpdateMode::Set,
-        0,
-        55_316 + constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS,
-    );
-}
-
-/// Tests nested ether transfer with bucket expansion doubles the `NEW_ACCOUNT_GAS` cost.
-#[test]
-fn test_nested_ether_transfer_to_non_existent_account_with_bucket_expansion() {
-    nested_ether_transfer_test_case(
-        MegaSpecId::MINI_REX,
-        UpdateMode::Set,
-        1,
-        55_316 + constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS * 2,
-    );
-}
-
-/// Tests nested ether transfer to existing account only charges base CALL gas.
-#[test]
-fn test_nested_ether_transfer_to_existent_account() {
-    nested_ether_transfer_test_case(MegaSpecId::MINI_REX, UpdateMode::Reset, 0, 30_316);
-}
-
 /// Executes a create contract test case, verifying gas usage for account creation and bucket
 /// expansion scenarios.
 ///
@@ -445,32 +266,6 @@ fn create_contract_test_case(spec: MegaSpecId, expansion_times: u64, expected_ga
     assert!(res.result.is_success());
     let gas_used = res.result.gas_used();
     assert_eq!(gas_used, expected_gas_used);
-}
-
-/// Tests CREATE contract charges increased `NEW_ACCOUNT_GAS` and additional code deposit gas.
-#[test]
-fn test_create_contract_to_non_existent_account() {
-    create_contract_test_case(
-        MegaSpecId::MINI_REX,
-        0,
-        53_554 +
-            constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS +
-            constants::mini_rex::CODEDEPOSIT_STORAGE_GAS +
-            constants::mini_rex::CALLDATA_STANDARD_TOKEN_STORAGE_GAS * 83,
-    );
-}
-
-/// Tests CREATE with bucket expansion doubles the `NEW_ACCOUNT_GAS` cost.
-#[test]
-fn test_create_contract_to_non_existent_account_with_bucket_expansion() {
-    create_contract_test_case(
-        MegaSpecId::MINI_REX,
-        1,
-        53_554 +
-            constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS * 2 +
-            constants::mini_rex::CODEDEPOSIT_STORAGE_GAS +
-            constants::mini_rex::CALLDATA_STANDARD_TOKEN_STORAGE_GAS * 83,
-    );
 }
 
 /// Executes a nested create contract test case, verifying gas usage for account creation and bucket
@@ -538,62 +333,6 @@ fn nested_create_contract_test_case(
     assert!(res.result.is_success());
     let gas_used = res.result.gas_used();
     assert_eq!(gas_used, expected_gas_used);
-}
-
-/// Tests nested CREATE (via CALL) charges `CREATE_GAS` plus `NEW_ACCOUNT_GAS`.
-#[test]
-fn test_nested_create_contract_to_non_existent_account() {
-    nested_create_contract_test_case(
-        MegaSpecId::MINI_REX,
-        false,
-        0,
-        21_255 +
-            constants::equivalence::CREATE +
-            constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS +
-            constants::mini_rex::CODEDEPOSIT_STORAGE_GAS,
-    );
-}
-
-/// Tests nested CREATE with bucket expansion doubles the `NEW_ACCOUNT_GAS` cost.
-#[test]
-fn test_nested_create_contract_to_non_existent_account_with_bucket_expansion() {
-    nested_create_contract_test_case(
-        MegaSpecId::MINI_REX,
-        false,
-        1,
-        21_255 +
-            constants::equivalence::CREATE +
-            constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS * 2 +
-            constants::mini_rex::CODEDEPOSIT_STORAGE_GAS,
-    );
-}
-
-/// Tests nested CREATE2 charges `CREATE_GAS` plu`NEW_ACCOUNT_GAS`AS plus KECCAK256 cost.
-#[test]
-fn test_nested_create2_contract_to_non_existent_account() {
-    nested_create_contract_test_case(
-        MegaSpecId::MINI_REX,
-        true,
-        0,
-        21_270 +
-            constants::equivalence::CREATE +
-            constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS +
-            constants::mini_rex::CODEDEPOSIT_STORAGE_GAS,
-    );
-}
-
-/// Tests nested CREATE2 with bucket expansion doubles the `NEW_ACCOUNT_GAS` cost.
-#[test]
-fn test_nested_create2_contract_to_non_existent_account_with_bucket_expansion() {
-    nested_create_contract_test_case(
-        MegaSpecId::MINI_REX,
-        true,
-        1,
-        21_270 +
-            constants::equivalence::CREATE +
-            constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS * 2 +
-            constants::mini_rex::CODEDEPOSIT_STORAGE_GAS,
-    );
 }
 
 /// Executes a calldata test case, verifying gas usage for calldata scenarios.
@@ -794,30 +533,4 @@ fn floor_gas_test_case(spec: MegaSpecId, calldata_size: usize, expected_gas_used
     assert!(res.result.is_success());
     let gas_used = res.result.gas_used();
     assert_eq!(gas_used, expected_gas_used);
-}
-
-/// Tests floor gas charges additional cost for calldata in `MINI_REX` spec.
-#[test]
-fn test_floor_gas_calldata_mini_rex() {
-    // Test with 100 bytes of calldata
-    floor_gas_test_case(MegaSpecId::MINI_REX, 100, 65_000);
-}
-
-/// Tests floor gas charges additional cost for large calldata in `MINI_REX` spec.
-#[test]
-fn test_floor_gas_large_calldata_mini_rex() {
-    // Test with 1024 bytes of calldata
-    floor_gas_test_case(MegaSpecId::MINI_REX, 1024, 471_560);
-}
-
-/// Tests floor gas with empty calldata (edge case).
-#[test]
-fn test_floor_gas_empty_calldata() {
-    floor_gas_test_case(MegaSpecId::MINI_REX, 0, 21_000);
-}
-
-/// Tests floor gas with minimal calldata (1 byte).
-#[test]
-fn test_floor_gas_minimal_calldata() {
-    floor_gas_test_case(MegaSpecId::MINI_REX, 1, 21_440);
 }

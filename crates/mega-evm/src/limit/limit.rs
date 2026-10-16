@@ -192,6 +192,19 @@ impl AdditionalLimit {
 
     /* Transaction-level records */
 
+    /// Counts the `bytes` of an Oracle hint, the payload a `sendHint` call hands to the node's
+    /// oracle service.
+    ///
+    /// The bytes are counted before the payload is decoded, so a caller cannot make the node
+    /// materialise a payload for free by appending bytes an ABI decoder ignores. They are the
+    /// transaction's, not the calling frame's: the hint has left the machine by the time the
+    /// frame could fail, so nothing takes it back. A crossing latches the transaction, and the
+    /// hint is not forwarded.
+    pub(crate) fn record_hint_bytes(&mut self, bytes: u64) -> LimitCheck {
+        self.tracker.record_tx(LimitUsage { data_size: bytes, write_records: 0 });
+        self.check()
+    }
+
     /// Records the account writes of the applied EIP-7702 authorities other than the sender:
     /// `authorities` distinct accounts, `target_is_authority` if the transaction's call target is
     /// one of them, from the transaction's `sender`.

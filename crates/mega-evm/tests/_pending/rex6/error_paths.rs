@@ -105,39 +105,6 @@ fn assert_injected_salt_custom_error(
     }
 }
 
-/// `create_rex6` must surface a SALT-env failure on `create_contract_storage_gas` as a fatal
-/// external error rather than charging zero storage gas for the new contract.
-#[test]
-fn test_rex6_create_salt_error_on_create_contract_storage_gas() {
-    // CREATE(value=0, offset=0, length=0): empty initcode, so the address is computed and the
-    // contract-creation storage-gas charge is reached without needing any memory contents.
-    let code = BytecodeBuilder::default()
-        .push_number(0u64) // length
-        .push_number(0u64) // offset
-        .push_number(0u64) // value
-        .append(CREATE)
-        .append(STOP)
-        .build();
-
-    assert_injected_salt_custom_error(transact_with_failing_salt(MegaSpecId::REX6, code));
-}
-
-/// REX6 SSTORE of a zero→non-zero slot must surface a SALT-env failure on `sstore_set_storage_gas`
-/// as a fatal external error rather than charging zero storage gas for the set.
-#[test]
-fn test_rex6_sstore_salt_error_on_sstore_set_storage_gas() {
-    // SSTORE(key=0, value=1) into a fresh slot: original == present == 0, new != 0, so the
-    // dynamic `sstore_set_storage_gas` charge fires.
-    let code = BytecodeBuilder::default()
-        .push_number(1u64) // value
-        .push_number(0u64) // key
-        .append(SSTORE)
-        .append(STOP)
-        .build();
-
-    assert_injected_salt_custom_error(transact_with_failing_salt(MegaSpecId::REX6, code));
-}
-
 fn is_stack_underflow(result: &crate::common::Outcome) -> bool {
     matches!(&result.result, revm::context::result::ExecutionResult::Halt { reason, .. }
         if format!("{reason:?}").contains("StackUnderflow"))

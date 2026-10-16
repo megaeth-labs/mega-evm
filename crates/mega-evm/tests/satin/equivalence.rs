@@ -1,14 +1,23 @@
-//! `MegaEvm` on Satin adds nothing to op-revm yet.
+//! What `MegaEvm` on Satin adds to op-revm, and what it does not.
 //!
-//! The same transaction on the same `CfgEnv`, block and L1 info must produce the same result
+//! An ordinary transaction on the same `CfgEnv`, block and L1 info must produce the same result
 //! through `MegaEvm` and through op-revm's `OpEvm`, down to every `ResultGas` field, the logs and
-//! the resulting state. Once later changes add `MegaETH` behavior (SALT pricing, history gas,
-//! limits), these cases stay the baseline that shows where the two diverge on purpose.
+//! the resulting state. The five cases at the end are the ones that diverge on purpose — the
+//! system contract interceptors, the `KeylessDeploy` overhead, the system-address transaction,
+//! the account a deposit creates for its sender and a crowded SALT bucket — and they pin both
+//! sides, so a divergence is never silently absorbed. Later changes (history gas, limits) add
+//! their own.
+//!
+//! SALT pricing multiplies a state gas charge by the capacity of the bucket it lands in, and
+//! op-revm has no SALT to read. Every baseline case runs without a SALT environment, where every
+//! bucket is minimal and the multiplier is one, so the baseline holds; the last case crowds one
+//! bucket and pins what the difference is and how large.
 
 use alloy_op_evm::OpTx;
 use alloy_primitives::{address, Address, TxKind, U256};
 use mega_evm::{
-    constants::TX_GAS_LIMIT_CAP,
+    constants::{MAX_CONTRACT_SIZE, MAX_INITCODE_SIZE, SLOT_STATE_GAS, TX_GAS_LIMIT_CAP},
+    satin_gas_params,
     test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
     MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
 };
@@ -18,12 +27,13 @@ use revm::{
         result::{ExecResultAndState, ExecutionResult},
         BlockEnv, CfgEnv, Context, ContextTr, TxEnv,
     },
-    context_interface::cfg::GasParams,
+    context_interface::cfg::gas_params::Eip2780TxInfo,
     inspector::NoOpInspector,
-    primitives::hardfork::SpecId,
     state::EvmState,
     ExecuteEvm, Journal,
 };
+
+use crate::common::runs_at_measurement_prices;
 
 const CALLER: Address = address!("0x4000000000000000000000000000000000000001");
 const CALLEE: Address = address!("0x5000000000000000000000000000000000000001");
@@ -97,15 +107,17 @@ fn assert_same(mega: &Outcome, op: &Outcome) {
     assert_eq!(mega.state, op.state, "state");
 }
 
-/// Both engines run on the Satin configuration: Karst on the Osaka gas table, EIP-8037 and
-/// EIP-2780 switched on, the 200M execution cap, EIP-7708 and the system-call reservoir margin
-/// off.
+/// Both engines run on the Satin configuration: Karst on the Satin gas schedule, EIP-8037 and
+/// EIP-2780 switched on, the 200M execution cap, `MegaETH`'s code-size limits, EIP-7708 and the
+/// system-call reservoir margin off.
 fn assert_satin_cfg(cfg: &CfgEnv<OpSpecId>) {
     assert_eq!(cfg.spec, OpSpecId::KARST);
-    assert_eq!(cfg.gas_params.table(), GasParams::new_spec(SpecId::OSAKA).table());
+    assert_eq!(cfg.gas_params.table(), satin_gas_params().table());
     assert!(cfg.enable_amsterdam_eip8037);
     assert!(cfg.enable_amsterdam_eip2780);
-    assert_eq!(cfg.tx_gas_limit_cap, Some(200_000_000));
+    assert_eq!(cfg.tx_gas_limit_cap, Some(TX_GAS_LIMIT_CAP));
+    assert_eq!(cfg.limit_contract_code_size, Some(MAX_CONTRACT_SIZE));
+    assert_eq!(cfg.limit_contract_initcode_size, Some(MAX_INITCODE_SIZE));
     assert!(!cfg.enable_amsterdam_eip7708);
     assert!(!cfg.system_call_state_gas_margin_in_reservoir);
 }
@@ -149,6 +161,9 @@ fn test_value_transfer_matches_op_revm() {
 
 #[test]
 fn test_sstore_matches_op_revm() {
+    if runs_at_measurement_prices() {
+        return;
+    }
     let code = BytecodeBuilder::default().sstore(U256::ZERO, U256::from(42)).stop().build();
     let db = MemoryDatabase::default().account_code(CALLEE, code);
     let tx = TxEnv {
@@ -162,9 +177,9 @@ fn test_sstore_matches_op_revm() {
     assert_satin_cfg(&cfg);
     assert!(mega.result.is_success());
     assert_eq!(mega.state[&CALLEE].storage[&U256::ZERO].present_value, U256::from(42));
-    // The Osaka gas table has no state-gas prices, so the new slot draws no state gas even with
-    // EIP-8037 on. The Satin gas table prices it; this assertion changes with it.
-    assert_eq!(mega.result.gas().state_gas_spent_final(), 0);
+    // The new slot draws the Satin schedule's state gas, which op-revm on the same schedule
+    // draws too: the schedule is configuration, not engine behavior.
+    assert_eq!(mega.result.gas().state_gas_spent_final(), SLOT_STATE_GAS);
     assert_same(&mega, &op);
 }
 
@@ -261,4 +276,238 @@ fn test_invalid_transaction_matches_op_revm() {
     let op_error = op.transact(op_transaction(tx)).unwrap_err();
     assert_eq!(format!("{mega_error:?}"), format!("{op_error:?}"));
     assert!(format!("{mega_error:?}").contains("CallerGasLimitMoreThanBlock"), "{mega_error:?}");
+}
+
+/* Where the two diverge on purpose */
+
+/// A call to a system contract is answered by the engine, where op-revm runs the contract's
+/// bytecode and gets its `NotIntercepted()` revert.
+#[test]
+fn test_an_intercepted_call_diverges_from_op_revm() {
+    use alloy_sol_types::{SolCall, SolError};
+    use mega_evm::system::{IMegaAccessControl, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE};
+
+    let db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(10u64.pow(18)))
+        .account_code(ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE);
+    let tx = TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(ACCESS_CONTROL_ADDRESS),
+        data: IMegaAccessControl::isVolatileDataAccessDisabledCall::SELECTOR.into(),
+        gas_limit: 1_000_000,
+        ..Default::default()
+    };
+    let (mega, op, cfg) = run_both(db, tx);
+
+    assert_satin_cfg(&cfg);
+    assert_eq!(
+        mega.result.output().cloned().unwrap_or_default(),
+        IMegaAccessControl::isVolatileDataAccessDisabledCall::abi_encode_returns(&false),
+        "the interceptor answers",
+    );
+    assert!(!op.result.is_success(), "op-revm runs the bytecode");
+    assert_eq!(
+        op.result.output().cloned().unwrap_or_default()[..],
+        IMegaAccessControl::NotIntercepted::SELECTOR,
+    );
+}
+
+/// A legacy transaction from the system address is a fee-free deposit on Satin, where op-revm
+/// sees an ordinary transaction and refuses it for want of a balance to pay with.
+#[test]
+fn test_a_system_address_transaction_diverges_from_op_revm() {
+    use mega_evm::system::{IOracle, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS};
+
+    let db = MemoryDatabase::default()
+        .account_code(ORACLE_CONTRACT_ADDRESS, mega_evm::system::ORACLE_CONTRACT_CODE);
+    let tx = TxEnv {
+        caller: MEGA_SYSTEM_ADDRESS,
+        kind: TxKind::Call(ORACLE_CONTRACT_ADDRESS),
+        data: alloy_sol_types::SolCall::abi_encode(&IOracle::getSlotCall { slot: U256::ZERO })
+            .into(),
+        gas_limit: 1_000_000,
+        gas_price: 1_000,
+        chain_id: Some(1),
+        ..Default::default()
+    };
+    let (mut mega, mut op, cfg) = both_evms(db, block());
+    assert_satin_cfg(&cfg);
+
+    let mega_outcome = mega.transact(OpTx(op_transaction(tx.clone()))).expect("Satin accepts it");
+    assert!(mega_outcome.result.is_success(), "{:?}", mega_outcome.result);
+    assert!(
+        mega_outcome
+            .state
+            .get(&MEGA_SYSTEM_ADDRESS)
+            .is_none_or(|account| account.info.balance.is_zero()),
+        "the sender pays no fee and needed no balance",
+    );
+
+    let error = op.transact(op_transaction(tx)).expect_err("op-revm wants a fee");
+    assert!(format!("{error:?}").contains("LackOfFundForMaxFee"), "{error:?}");
+}
+
+/// A deposit-like transaction whose sender does not exist yet pays the state gas of the account
+/// it creates for it; op-revm creates the same account and charges nothing for it.
+#[test]
+fn test_the_created_deposit_caller_diverges_from_op_revm() {
+    use alloy_primitives::B256;
+
+    let sender = address!("0x00000000000000000000000000000000000f0001");
+    let tx = TxEnv {
+        caller: sender,
+        kind: TxKind::Call(CALLEE),
+        gas_limit: 1_000_000,
+        gas_price: 0,
+        ..Default::default()
+    };
+    let deposit = |tx: TxEnv| {
+        let mut tx = op_transaction(tx);
+        tx.deposit.source_hash = B256::repeat_byte(0x11);
+        tx
+    };
+    let (mut mega, mut op, cfg) = both_evms(MemoryDatabase::default(), block());
+    assert_satin_cfg(&cfg);
+
+    let mega_outcome = mega.transact(OpTx(deposit(tx.clone()))).unwrap();
+    let op_outcome = op.transact(deposit(tx)).unwrap();
+
+    assert!(mega_outcome.result.is_success() && op_outcome.result.is_success());
+    assert!(
+        mega_outcome.result.gas().state_gas_spent_final() > 0,
+        "Satin charges the account the deposit creates for its sender",
+    );
+    assert_eq!(
+        op_outcome.result.gas().state_gas_spent_final(),
+        0,
+        "op-revm charges nothing for it",
+    );
+}
+
+/// A `keylessDeploy` transaction is charged the fixed overhead before its frame runs, where
+/// op-revm charges nothing for it. Both engines then run the contract's bytecode and get its
+/// `NotIntercepted()` revert, because the rewrite that turns the call into a deployment is not
+/// here yet; the whole divergence is the overhead.
+#[test]
+fn test_the_keyless_deploy_overhead_diverges_from_op_revm() {
+    use alloy_primitives::Bytes;
+    use alloy_sol_types::{SolCall, SolError};
+    use mega_evm::system::keyless::{
+        IKeylessDeploy, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE, KEYLESS_DEPLOY_OVERHEAD_GAS,
+    };
+
+    let db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(10u64.pow(18)))
+        .account_code(KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE);
+    let data: Bytes = IKeylessDeploy::keylessDeployCall {
+        keylessDeploymentTransaction: Bytes::from_static(b"a transaction"),
+        gasLimitOverride: U256::from(1_000_000),
+    }
+    .abi_encode()
+    .into();
+    let tx = TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(KEYLESS_DEPLOY_ADDRESS),
+        data: data.clone(),
+        gas_limit: 1_000_000,
+        ..Default::default()
+    };
+    let (mega, op, cfg) = run_both(db, tx);
+
+    assert_satin_cfg(&cfg);
+    let revert_data = Bytes::from_static(&IKeylessDeploy::NotIntercepted::SELECTOR);
+    assert_eq!(
+        mega.result.output().cloned().unwrap_or_default(),
+        revert_data,
+        "the bytecode runs after the charge",
+    );
+    assert_eq!(op.result.output().cloned().unwrap_or_default(), revert_data);
+
+    // What each transaction spent, not what its receipt reports: op-revm spends less than the
+    // EIP-7623 calldata floor here, so its receipt is lifted to the floor and Satin's is not.
+    // The two run the same bytecode on the same input, so the whole difference is the charge.
+    let charged = mega.result.gas().total_gas_spent() - op.result.gas().total_gas_spent();
+    assert_eq!(charged, KEYLESS_DEPLOY_OVERHEAD_GAS, "the divergence is the overhead, exactly");
+
+    // Which floor, exactly: the one this transaction's own calldata buys, computed by revm from
+    // the schedule both engines run on. Satin is above it and reports what it spent; op-revm is
+    // below it and reports the floor, so the receipts differ by less than the charge.
+    let floor = cfg
+        .gas_params
+        .initial_tx_gas(
+            &data,
+            false,
+            0,
+            0,
+            0,
+            Some(Eip2780TxInfo { value: U256::ZERO, is_self_transfer: false }),
+        )
+        .floor_gas();
+    assert_eq!(
+        mega.result.gas().tx_gas_used(),
+        mega.result.gas().total_gas_spent(),
+        "Satin spends past the floor, so its receipt is its own spend",
+    );
+    assert_eq!(
+        op.result.gas().tx_gas_used(),
+        floor,
+        "op-revm spends below the floor, so its receipt is the floor",
+    );
+    assert!(
+        mega.result.gas().tx_gas_used() - op.result.gas().tx_gas_used() < charged,
+        "the floor lifts the cheaper receipt, so the receipts differ by less than the charge",
+    );
+}
+
+/// Where Satin leaves op-revm on purpose: a state gas charge in a crowded SALT bucket.
+///
+/// The transaction, the configuration, the block and the database are the ones
+/// [`test_sstore_matches_op_revm`] uses, and every field of the outcome still agrees — except the
+/// state ledger, which Satin multiplies by the bucket's capacity in minimum buckets. op-revm has
+/// no SALT to read, so it charges the schedule's entry, which is Satin's own answer at the
+/// minimum bucket.
+#[test]
+fn test_a_crowded_salt_bucket_is_where_satin_leaves_op_revm() {
+    use crate::salt::{crowded_slot, minimal_envs, salt_context};
+
+    const MULTIPLIER: u64 = 8;
+    if runs_at_measurement_prices() {
+        return;
+    }
+    let code = BytecodeBuilder::default().sstore(U256::ZERO, U256::from(42)).stop().build();
+    let db = MemoryDatabase::default().account_code(CALLEE, code);
+    let tx = TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(CALLEE),
+        gas_limit: 1_000_000,
+        ..Default::default()
+    };
+
+    let envs = crowded_slot(minimal_envs(), CALLEE, U256::ZERO, MULTIPLIER);
+    let ctx = salt_context(db.clone(), envs).with_block(block());
+    let cfg = ctx.cfg().clone();
+    let mega = MegaEvm::new(ctx).transact(OpTx(op_transaction(tx.clone()))).unwrap();
+    let op_ctx = OpContext::new(db, OpSpecId::KARST)
+        .with_cfg(cfg.clone())
+        .with_block(block())
+        .with_chain(zero_fee_l1_block_info());
+    let op = OpEvm::new(op_ctx, NoOpInspector).transact(op_transaction(tx)).unwrap();
+
+    assert_satin_cfg(&cfg);
+    assert!(mega.result.is_success() && op.result.is_success());
+
+    // The one difference, and its exact size.
+    assert_eq!(op.result.gas().state_gas_spent_final(), SLOT_STATE_GAS);
+    assert_eq!(mega.result.gas().state_gas_spent_final(), SLOT_STATE_GAS * MULTIPLIER);
+    assert_eq!(
+        mega.result.gas().total_gas_spent() - op.result.gas().total_gas_spent(),
+        SLOT_STATE_GAS * (MULTIPLIER - 1),
+        "the extra state gas is the whole of the extra spend",
+    );
+
+    // Everything the transaction did is the same: the fees are zero here, so the multiplier
+    // moves the gas ledgers and nothing else.
+    assert_eq!(mega.result.logs(), op.result.logs(), "logs");
+    assert_eq!(mega.result.output(), op.result.output(), "output");
+    assert_eq!(mega.state, op.state, "state");
 }

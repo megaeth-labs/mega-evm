@@ -9,20 +9,34 @@
 //! - `storage_writes`: 200 first writes to fresh slots, then 200 writes back, in one frame: the
 //!   `SSTORE` wrapper's commit and refund.
 //! - `logs`: 200 two-topic logs in one frame: the `LOG` wrapper's commit.
+//! - `intercepted_calls`: 200 `STATICCALL`s to `MegaAccessControl`'s
+//!   `isVolatileDataAccessDisabled`, which the interceptor answers: the dispatch and the synthetic
+//!   result, 200 times.
+//! - `system_address_misses`: the same 200 calls with a selector the contract does not intercept,
+//!   so each pays the dispatch's address match and selector peek and then runs the bytecode.
+//!
+//! Two more run through `MegaEvm` alone, because they price something op-revm has no equivalent
+//! of: `salt_storage_writes` and `salt_new_accounts` each draw one EIP-8037 state gas charge per
+//! slot or per account, and are benchmarked twice — once against the default environment, where
+//! every bucket is minimal, and once (`/crowded`) against a SALT environment holding every bucket
+//! at eight times the minimum capacity. The gap is what the pricing hook costs on the hot path:
+//! one environment read per bucket and a cache hit per charge after it.
 #![allow(missing_docs)]
 
 use alloy_op_evm::OpTx;
-use alloy_primitives::{address, Address, Bytes, TxKind, U256};
+use alloy_primitives::{address, Address, Bytes, TxKind, U160, U256};
+use alloy_sol_types::SolCall;
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use mega_evm::{
+    system::{IMegaAccessControl, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE},
     test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
-    MegaContext, MegaEvm, MegaSpecId,
+    ExternalEnvs, MegaContext, MegaEvm, MegaSpecId, TestExternalEnvs, MIN_BUCKET_SIZE,
 };
 use op_revm::{L1BlockInfo, OpEvm, OpSpecId, OpTransaction};
 use revm::{
     bytecode::opcode::{
-        ADDRESS, CALL, CALLDATALOAD, DUP1, GAS, ISZERO, JUMPDEST, JUMPI, LOG0, LOG2, MSTORE, PUSH0,
-        PUSH1, SSTORE, STOP, SUB, SWAP1,
+        ADDRESS, CALL, CALLDATALOAD, DUP1, GAS, ISZERO, JUMPDEST, JUMPI, LOG0, LOG2, MSTORE, POP,
+        PUSH0, PUSH1, SSTORE, STATICCALL, STOP, SUB, SWAP1,
     },
     context::{BlockEnv, CfgEnv, Context, ContextTr, TxEnv},
     inspector::NoOpInspector,
@@ -34,6 +48,14 @@ const CALLEE: Address = address!("0x0000000000000000000000000000000000100001");
 const RECURSIVE: Address = address!("0x0000000000000000000000000000000000100002");
 const WRITER: Address = address!("0x0000000000000000000000000000000000100003");
 const LOGGER: Address = address!("0x0000000000000000000000000000000000100004");
+const SALT_WRITER: Address = address!("0x0000000000000000000000000000000000100005");
+const SALT_CALLER: Address = address!("0x0000000000000000000000000000000000100006");
+const INTERCEPTED: Address = address!("0x0000000000000000000000000000000000100007");
+const MISSING: Address = address!("0x0000000000000000000000000000000000100008");
+
+/// A selector `MegaAccessControl` intercepts, and one it does not.
+const IS_DISABLED: [u8; 4] = IMegaAccessControl::isVolatileDataAccessDisabledCall::SELECTOR;
+const UNKNOWN_SELECTOR: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
 
 /// Depth the recursive contract reaches.
 const DEPTH: u8 = 64;
@@ -42,6 +64,16 @@ const REPEAT: u64 = 200;
 
 /// Offset of the `JUMPDEST` the recursion ends at.
 const DONE: u8 = 0x1f;
+
+/// Slots written, and accounts created, by the two SALT workloads. Small enough that the whole
+/// transaction fits in [`SALT_GAS_LIMIT`] at the crowded multiplier.
+const SALT_REPEAT: u64 = 16;
+/// How many minimum buckets a crowded bucket holds in the `/crowded` arms.
+const SALT_MULTIPLIER: u64 = 8;
+/// Room for `SALT_REPEAT` state charges at `SALT_MULTIPLIER`, on both arms alike.
+const SALT_GAS_LIMIT: u64 = 60_000_000;
+/// The first of `SALT_REPEAT` consecutive addresses the value calls create.
+const SALT_ACCOUNT_BASE: u64 = 0x200000;
 
 /// Reads `n` from calldata; while `n > 0` it writes slot `n`, logs, and calls itself with `n - 1`.
 fn recursive_code() -> Bytes {
@@ -86,6 +118,65 @@ fn logger_code() -> Bytes {
     code.stop().build()
 }
 
+/// Writes `SALT_REPEAT` fresh slots, each drawing one state gas charge the pricing hook prices.
+fn salt_writer_code() -> Bytes {
+    let mut code = BytecodeBuilder::default();
+    for slot in 0..SALT_REPEAT {
+        code = code.sstore(U256::from(slot), U256::from(1));
+    }
+    code.stop().build()
+}
+
+/// Sends one wei to each of `SALT_REPEAT` accounts that do not exist, each drawing one
+/// new-account state gas charge.
+fn salt_caller_code() -> Bytes {
+    let mut code = BytecodeBuilder::default();
+    for i in 0..SALT_REPEAT {
+        code = code
+            .push_number(0_u64)
+            .push_number(0_u64)
+            .push_number(0_u64)
+            .push_number(0_u64)
+            .push_number(1_u64)
+            .push_address(Address::from(U160::from(SALT_ACCOUNT_BASE + i)))
+            .push_number(1_000_000_u64)
+            .append(CALL)
+            .append(POP);
+    }
+    code.stop().build()
+}
+
+/// A SALT environment holding every bucket at `m` times the minimum capacity.
+fn salt_envs(m: u64) -> TestExternalEnvs {
+    TestExternalEnvs::new().with_default_bucket_capacity(MIN_BUCKET_SIZE as u64 * m)
+}
+
+/// A context over `db` reading `envs`.
+fn salt_context(
+    db: MemoryDatabase,
+    envs: TestExternalEnvs,
+) -> MegaContext<MemoryDatabase, TestExternalEnvs> {
+    MegaContext::new_with_external_envs(db, MegaSpecId::SATIN, ExternalEnvs::from(envs))
+        .with_chain(zero_fee_l1_block_info())
+}
+
+/// `STATICCALL`s `MegaAccessControl` with `selector` `REPEAT` times, discarding the answers.
+fn system_caller_code(selector: [u8; 4]) -> Bytes {
+    let mut code = BytecodeBuilder::default().mstore(0x0, selector);
+    for _ in 0..REPEAT {
+        code = code
+            .push_number(0_u64) // retSize
+            .push_number(0_u64) // retOffset
+            .push_number(4_u64) // argsSize
+            .push_number(0_u64) // argsOffset
+            .push_address(ACCESS_CONTROL_ADDRESS)
+            .push_number(100_000_u64)
+            .append(STATICCALL)
+            .append(POP);
+    }
+    code.stop().build()
+}
+
 fn call_tx(to: Address, data: Bytes, gas_limit: u64) -> OpTransaction<TxEnv> {
     op_transaction(TxEnv {
         caller: CALLER,
@@ -125,7 +216,13 @@ fn bench_transact(c: &mut Criterion) {
         .account_balance(CALLEE, U256::from(1))
         .account_code(RECURSIVE, recursive_code())
         .account_code(WRITER, writer_code())
-        .account_code(LOGGER, logger_code());
+        .account_code(LOGGER, logger_code())
+        .account_code(SALT_WRITER, salt_writer_code())
+        .account_balance(SALT_CALLER, U256::from(10u64.pow(9)))
+        .account_code(SALT_CALLER, salt_caller_code())
+        .account_code(INTERCEPTED, system_caller_code(IS_DISABLED))
+        .account_code(MISSING, system_caller_code(UNKNOWN_SELECTOR))
+        .account_code(ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE);
     let cfg = mega_context(db.clone()).cfg().clone();
 
     let mut depth = [0u8; 32];
@@ -136,6 +233,8 @@ fn bench_transact(c: &mut Criterion) {
         ("deep_calls", call_tx(RECURSIVE, Bytes::from(depth.to_vec()), 30_000_000)),
         ("storage_writes", call_tx(WRITER, Bytes::new(), 30_000_000)),
         ("logs", call_tx(LOGGER, Bytes::new(), 30_000_000)),
+        ("intercepted_calls", call_tx(INTERCEPTED, Bytes::new(), 30_000_000)),
+        ("system_address_misses", call_tx(MISSING, Bytes::new(), 30_000_000)),
     ];
 
     let mut group = c.benchmark_group("transact");
@@ -166,6 +265,40 @@ fn bench_transact(c: &mut Criterion) {
                 BatchSize::SmallInput,
             );
         });
+    }
+
+    // The SALT arms: the same transaction against a minimal environment and against one where
+    // every bucket is crowded, both through `MegaEvm` — op-revm has nothing to compare to.
+    let salt_workloads = [
+        ("salt_storage_writes", call_tx(SALT_WRITER, Bytes::new(), SALT_GAS_LIMIT)),
+        ("salt_new_accounts", call_tx(SALT_CALLER, Bytes::new(), SALT_GAS_LIMIT)),
+    ];
+    for (workload, tx) in salt_workloads {
+        let minimal = salt_envs(1);
+        let crowded = salt_envs(SALT_MULTIPLIER);
+        let at_minimum = MegaEvm::new(salt_context(db.clone(), minimal.clone()))
+            .execute_transaction(OpTx(tx.clone()))
+            .unwrap();
+        let at_crowded = MegaEvm::new(salt_context(db.clone(), crowded.clone()))
+            .execute_transaction(OpTx(tx.clone()))
+            .unwrap();
+        assert!(at_minimum.result.is_success(), "{workload}: {:?}", at_minimum.result);
+        assert!(at_crowded.result.is_success(), "{workload}: {:?}", at_crowded.result);
+        assert_eq!(
+            at_crowded.gas.state,
+            at_minimum.gas.state * SALT_MULTIPLIER,
+            "{workload}: the crowded arm must actually pay the crowded price",
+        );
+
+        for (arm, envs) in [("satin", minimal), ("crowded", crowded)] {
+            group.bench_function(format!("{workload}/{arm}"), |b| {
+                b.iter_batched(
+                    || MegaEvm::new(salt_context(db.clone(), envs.clone())),
+                    |mut evm| evm.transact(OpTx(tx.clone())).unwrap(),
+                    BatchSize::SmallInput,
+                );
+            });
+        }
     }
     group.finish();
 }
