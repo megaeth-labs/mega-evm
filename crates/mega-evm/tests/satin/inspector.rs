@@ -569,6 +569,9 @@ fn test_declared_observer_forwards_every_callback() {
 }
 
 /// Edits a frame's inputs, writes to the journal, or rewrites a frame result, one per flag.
+///
+/// Only the debug-build tests below use it: a release build does not check declarations.
+#[cfg(debug_assertions)]
 #[derive(Default)]
 struct Writer {
     edit_inputs: bool,
@@ -576,6 +579,7 @@ struct Writer {
     rewrite_frame_end: bool,
 }
 
+#[cfg(debug_assertions)]
 impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Writer {
     fn step(&mut self, _interp: &mut Interpreter<EthInterpreter>, context: &mut MegaContext<DB>) {
         if self.log_in_step {
@@ -608,6 +612,7 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Writer {
     }
 }
 
+#[cfg(debug_assertions)]
 fn run_declared(writer: Writer) {
     let mut evm =
         MegaEvm::new(context(writes_two_slots())).with_trusted_inspector(DeclaredObserver(writer));
