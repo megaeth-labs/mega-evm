@@ -10,6 +10,19 @@
 //! deposits when it is a creation — ride on the same lanes and follow the same rule, so what a
 //! transaction reports it appended is what it kept.
 //!
+//! The lanes also carry what the state-gas limit counts: the state gas the transaction holds.
+//! EIP-8037 charges state gas for exactly the state a transaction adds — a fresh slot, a new
+//! account, the bytes of deployed code, a delegation — at the state's own price, scaled by the
+//! SALT bucket it lands in. So the state a transaction grows is the state gas it spends, and a
+//! limit on that gas is the limit on its growth; nothing counts new accounts and slots beside it.
+//! revm keeps state gas on each frame's own gas, net of what the frame refilled, and merges a
+//! frame's into its caller's when the frame succeeds; a frame that fails rolls its own back. What
+//! the transaction holds at any point is therefore what it was charged before its first frame,
+//! plus what every frame on the call stack holds. The first part is fixed once the first frame
+//! starts, and every frame below the running one is suspended, so each frame's share of the rest
+//! is fixed while it runs: each lane keeps what the transaction holds outside its frame, and the
+//! running frame adds what it holds itself ([`FrameLimitTracker::state_gas_held`]).
+//!
 //! Every operation is O(1): the totals are cached and kept in step with each change.
 
 #[cfg(not(feature = "std"))]
@@ -61,6 +74,13 @@ pub(crate) struct Lane {
     /// records: the logs it emitted and, when it is a creation, the code it deposits. Its write
     /// records are history too, and are counted in [`used`](Self::used), as are these bytes.
     pub(crate) log_and_code_bytes: u64,
+    /// The state gas the transaction holds outside the frame: what was charged before the first
+    /// frame, and what each frame below it held when the frame above it started. Set when the
+    /// lane is pushed ([`FrameLimitTracker::push`]).
+    pub(crate) state_gas_outside: i64,
+    /// The state gas the frame held when it last suspended on a child, which that child's lane
+    /// holds outside it beyond this lane's own.
+    pub(crate) state_gas_at_suspension: i64,
 }
 
 impl Lane {
@@ -85,6 +105,8 @@ impl Lane {
             budget,
             stipend_remaining: 0,
             log_and_code_bytes: 0,
+            state_gas_outside: 0,
+            state_gas_at_suspension: 0,
         }
     }
 
@@ -156,6 +178,9 @@ pub(crate) struct FrameLimitTracker {
     total_refund: LimitUsage,
     /// The log and code bytes the outermost frame kept, plus every lane's.
     log_and_code_bytes: u64,
+    /// The state gas the transaction was charged before its first frame, which the first frame's
+    /// lane holds outside it.
+    state_gas_before_frames: i64,
 }
 
 impl FrameLimitTracker {
@@ -167,6 +192,7 @@ impl FrameLimitTracker {
         self.total_used = LimitUsage::ZERO;
         self.total_refund = LimitUsage::ZERO;
         self.log_and_code_bytes = 0;
+        self.state_gas_before_frames = 0;
     }
 
     /// The number of lanes, which is the number of frames on the call stack.
@@ -214,11 +240,39 @@ impl FrameLimitTracker {
         drawn
     }
 
-    /// Pushes the lane of a frame that starts.
-    pub(crate) fn push(&mut self, lane: Lane) {
+    /// Pushes the lane of a frame that starts. It holds outside its frame what its caller's lane
+    /// holds outside the caller, plus what the caller held when it suspended on this frame; the
+    /// transaction's own frame holds what was charged before any frame.
+    pub(crate) fn push(&mut self, mut lane: Lane) {
+        lane.state_gas_outside = match self.lanes.last() {
+            Some(caller) => caller.state_gas_outside.saturating_add(caller.state_gas_at_suspension),
+            None => self.state_gas_before_frames,
+        };
         self.total_used = self.total_used.saturating_add(lane.used);
         self.total_refund = self.total_refund.saturating_add(lane.refund);
         self.lanes.push(lane);
+    }
+
+    /// Records the state gas the transaction was charged before its first frame.
+    pub(crate) const fn set_state_gas_before_frames(&mut self, spent: i64) {
+        self.state_gas_before_frames = spent;
+    }
+
+    /// Records the state gas `held` by the running frame as it suspends on a child.
+    pub(crate) fn set_state_gas_at_suspension(&mut self, held: i64) {
+        if let Some(lane) = self.lanes.last_mut() {
+            lane.state_gas_at_suspension = held;
+        }
+    }
+
+    /// The state gas the transaction holds while the running frame holds `running`; outside any
+    /// frame, `running` is all of it.
+    ///
+    /// A frame can hold less than nothing — it refilled a slot a caller of its filled — but never
+    /// by more than its callers hold, so the sum is never below zero.
+    pub(crate) fn state_gas_held(&self, running: i64) -> u64 {
+        let outside = self.lanes.last().map_or(0, |lane| lane.state_gas_outside);
+        u64::try_from(outside.saturating_add(running)).unwrap_or_default()
     }
 
     /// Counts `usage` on the running frame's lane, or on the transaction's outside any frame.
@@ -272,38 +326,6 @@ impl FrameLimitTracker {
         self.total_used = self.total_used.saturating_add(WRITE_RECORD);
     }
 
-    /// Drops the caller's record from the running frame's lane: the frame failed before the
-    /// write it stands for happened (a creation that did not bump the creator's nonce).
-    pub(crate) fn drop_caller_record(&mut self) {
-        let [.., caller, lane] = self.lanes.as_mut_slice() else { return };
-        if !lane.holds_caller_record {
-            return;
-        }
-        caller.account_recorded = false;
-        lane.holds_caller_record = false;
-        lane.creator_record = false;
-        lane.used = lane.used.saturating_sub(WRITE_RECORD);
-        self.total_used = self.total_used.saturating_sub(WRITE_RECORD);
-    }
-
-    /// Takes back everything the running frame's start counted, its caller's record included
-    /// ([`drop_caller_record`](Self::drop_caller_record)): the start did not happen after all, so
-    /// the lane keeps nothing whatever the frame's answer, and its caller gets back all it paid
-    /// for the records. Must run before the frame runs, when its start is all the lane holds.
-    pub(crate) fn undo_frame_start(&mut self) {
-        self.drop_caller_record();
-        let Some(lane) = self.lanes.last_mut() else { return };
-        debug_assert_eq!(
-            lane.refund,
-            LimitUsage::ZERO,
-            "a frame that has not run took nothing back"
-        );
-        debug_assert_eq!(lane.log_and_code_bytes, 0, "a frame that has not run logged nothing");
-        self.total_used = self.total_used.saturating_sub(lane.used);
-        lane.used = LimitUsage::ZERO;
-        lane.records_made = false;
-    }
-
     /// Settles the running frame's lane as its failure would, before the frame returns: what it
     /// counted is discarded, its caller's record with it, and an empty lane stands in for it,
     /// holding the history its caller gets back for records the failure did not keep. So the frame
@@ -313,7 +335,10 @@ impl FrameLimitTracker {
     /// all the same: the lane follows the checkpoint, not the result.
     pub(crate) fn discard_running_lane(&mut self) {
         let Some(lane) = self.pop(false) else { return };
-        self.lanes.push(Lane::empty(lane.history_refund(false)));
+        self.lanes.push(Lane {
+            state_gas_outside: lane.state_gas_outside,
+            ..Lane::empty(lane.history_refund(false))
+        });
     }
 
     /// Takes the record of the running frame's own account back from its lane, where a child
@@ -548,6 +573,43 @@ mod tests {
         assert_eq!(t.log_and_code_bytes(), 0);
     }
 
+    /// Each lane holds outside its frame the state gas charged before the first frame and what
+    /// each caller held when it suspended on the frame above it. A frame that returned leaves its
+    /// caller where it was, a caller that suspends again hands its next child what it holds then,
+    /// and a lane discarded before its frame returns keeps what its frame held outside it.
+    #[test]
+    fn test_each_lane_holds_what_its_callers_held_when_it_started() {
+        let mut t = FrameLimitTracker::default();
+        assert_eq!(t.state_gas_held(7), 7, "outside any frame, what is charged is all of it");
+
+        t.set_state_gas_before_frames(100);
+        t.push(Lane::new(Some(ADDR), false, UNLIMITED, 0));
+        assert_eq!(t.state_gas_held(0), 100, "the first frame starts on what was charged before");
+        assert_eq!(t.state_gas_held(20), 120);
+
+        t.set_state_gas_at_suspension(20);
+        t.push(Lane::new(None, false, UNLIMITED, 0));
+        assert_eq!(t.state_gas_held(5), 125, "a child counts its caller's twenty");
+        t.set_state_gas_at_suspension(5);
+        t.push(Lane::empty(0));
+        assert_eq!(t.state_gas_held(-5), 120, "a grandchild that refilled its caller's fill");
+        assert_eq!(t.depth(), 3);
+
+        t.discard_running_lane();
+        assert_eq!(t.state_gas_held(0), 125, "the discarded lane keeps what it holds outside");
+        t.pop(false);
+        t.pop(true);
+        assert_eq!(t.state_gas_held(30), 130, "the first frame, holding its child's merged gas");
+
+        t.set_state_gas_at_suspension(30);
+        t.push(Lane::new(None, false, UNLIMITED, 0));
+        assert_eq!(t.state_gas_held(0), 130, "the next child starts on what its caller holds now");
+
+        t.reset();
+        t.push(Lane::new(Some(ADDR), false, UNLIMITED, 0));
+        assert_eq!(t.state_gas_held(0), 0, "a reset forgets what was charged before the frames");
+    }
+
     /// A refund larger than the usage clamps the net at zero.
     #[test]
     fn test_net_usage_saturates_when_refund_exceeds_used() {
@@ -680,22 +742,6 @@ mod tests {
         let mut empty = FrameLimitTracker::default();
         empty.discard_running_lane();
         assert_eq!(empty.depth(), 0);
-    }
-
-    /// A creation that fails before bumping the nonce takes the creator record back.
-    #[test]
-    fn test_drop_caller_record_rearms_the_caller() {
-        let mut t = FrameLimitTracker::default();
-        t.push(Lane::new(Some(ADDR), false, UNLIMITED, 0));
-        t.push(Lane::new(None, true, UNLIMITED, 0));
-        t.record_caller(true, 0);
-        t.drop_caller_record();
-        t.drop_caller_record();
-        assert_eq!(t.net(), LimitUsage::ZERO);
-        assert!(!t.lanes[0].account_recorded);
-        t.pop(false);
-        assert_eq!(t.net(), LimitUsage::ZERO);
-        assert_eq!(t.net(), t.net_uncached());
     }
 
     /// The creator record a failed creation left its creator is taken back once, and a lane with

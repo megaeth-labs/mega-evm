@@ -24,7 +24,7 @@ use revm::{
     Inspector,
 };
 
-use crate::common::{system_db, CALLER};
+use crate::common::{body_history, system_db, CALLER};
 
 const CONTRACT: Address = address!("0x0000000000000000000000000000000000300001");
 const CONTRACT2: Address = address!("0x0000000000000000000000000000000000300002");
@@ -139,10 +139,17 @@ fn test_direct_tx_remaining_compute_gas() {
         )
         .unwrap();
         if gas_limit < TX_GAS_LIMIT_CAP {
-            assert_eq!(answer, gas_limit - outcome.result.tx_gas_used(), "below the cap");
+            // What it paid before the frame, which the answer spends nothing of: the receipt's
+            // figure where the EIP-7623 floor does not bind, as it does not at the spec's prices.
+            let paid = outcome.result.gas().total_gas_spent();
+            assert_eq!(answer, gas_limit - paid, "below the cap");
         } else {
             assert_eq!(answer, TX_GAS_LIMIT_CAP - outcome.gas.regular, "above the cap");
-            assert!(outcome.gas.history > 0, "the body's history came out of the reservoir");
+            assert_eq!(
+                outcome.gas.history,
+                body_history(SELECTOR.len() as u64),
+                "the body's history came out of the reservoir",
+            );
         }
     }
 }
@@ -198,7 +205,7 @@ fn test_remaining_compute_gas_exact_value_matches_tracker() {
         outcome.result.output().unwrap(),
     )
     .unwrap();
-    assert_eq!(answer, 1_000_000 - outcome.result.tx_gas_used());
+    assert_eq!(answer, 1_000_000 - outcome.result.gas().total_gas_spent());
 }
 
 /// A caller that forwards the query little still hears its own gas, not the forward: the answer
@@ -297,7 +304,7 @@ fn test_a_detained_transactions_own_call_hears_the_cap() {
         outcome.result.output().unwrap(),
     )
     .unwrap();
-    assert_eq!(answer, 10_000_000 - outcome.result.tx_gas_used());
+    assert_eq!(answer, 10_000_000 - outcome.result.gas().total_gas_spent());
 }
 
 /// A contract's query, without a read and after one, below and above the execution cap: its own

@@ -36,7 +36,7 @@ use revm::{
     Database, Inspector,
 };
 
-use crate::common::{call, context};
+use crate::common::{call, context, history_is_free, state_is_free};
 
 const CALLER: Address = address!("0000000000000000000000000000000000a00000");
 /// Calls `B` with a chosen gas, keeps what `B` answers in slot 1, then writes slot 0.
@@ -54,9 +54,10 @@ const B: Address = address!("0000000000000000000000000000000000a00002");
 /// the records whatever the prices, where a kilobyte does only while a state byte is dear.
 const CODE_LEN: u16 = 6 * 1_024;
 
-/// Below the execution cap: there is no reservoir, and every state charge is paid out of regular
-/// gas.
-const BELOW_CAP: u64 = 100_000_000;
+/// At the execution cap: the whole gas limit is regular gas, there is no reservoir, and every state
+/// charge is paid out of regular gas. Half of it pays for the creation's deposit at any byte price
+/// up to several times the dearest one considered.
+const BELOW_CAP: u64 = TX_GAS_LIMIT_CAP;
 /// Above the execution cap: the reservoir pays every state and history charge.
 const ABOVE_CAP: u64 = TX_GAS_LIMIT_CAP + 100_000_000;
 
@@ -319,6 +320,10 @@ fn assert_data_size_limit_stands_aside(setup: Setup) {
 /// cannot pay the hash of its code runs out of gas on it, whatever the state-gas limit.
 #[test]
 fn test_a_creation_that_cannot_pay_the_hash_runs_out_of_gas_under_the_state_gas_limit() {
+    // A deposit that adds no state gas has no state-gas limit to cross.
+    if state_is_free() {
+        return;
+    }
     let setup = Setup::Satin(ABOVE_CAP);
     let (enough, _) = boundary(setup);
     let end = creation_end(setup, enough - 1);
@@ -333,6 +338,11 @@ fn test_a_creation_that_cannot_pay_the_hash_runs_out_of_gas_under_the_state_gas_
 /// it never reaches.
 #[test]
 fn test_a_creation_that_cannot_pay_its_history_runs_out_of_gas_under_the_state_gas_limit() {
+    // A deposit that pays no history has no history to run out of gas on, and one that adds no
+    // state gas has no state-gas limit to cross.
+    if history_is_free() || state_is_free() {
+        return;
+    }
     let setup = Setup::Satin(BELOW_CAP);
     let (enough, _) = boundary(setup);
     let end = creation_end(setup, enough - 1);

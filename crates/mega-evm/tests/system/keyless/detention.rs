@@ -37,7 +37,7 @@ use revm::{
 };
 
 use super::*;
-use crate::common::{call_tx, context, CALLER as RELAYER};
+use crate::common::{call_tx, context, state_is_free, CALLER as RELAYER};
 
 /// The block beneficiary of the cases where nobody in the transaction is the beneficiary.
 const BENEFICIARY: Address = address!("0x0000000000000000000000000000000000beef02");
@@ -626,6 +626,10 @@ fn test_a_failed_deployment_keeps_the_reads_its_creation_made() {
 /// room for stops the transaction on state growth, not on compute.
 #[test]
 fn test_a_deployment_another_limit_stops_keeps_the_reads_its_creation_made() {
+    // A deployment that adds no state gas has no state-gas limit to cross.
+    if state_is_free() {
+        return;
+    }
     let prefix =
         BytecodeBuilder::default().append_many([TIMESTAMP, POP]).sstore(U256::ZERO, U256::ONE);
     let deployment = Deployment::new(constructor(&prefix.build_vec(), &runtime(1)));

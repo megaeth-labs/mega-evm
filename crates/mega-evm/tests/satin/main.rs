@@ -3,6 +3,7 @@
 mod common;
 mod compute_gas;
 mod contract_size;
+mod create_opcodes;
 mod data_size;
 mod data_size_counts;
 mod db_error;
@@ -14,6 +15,7 @@ mod history_bytes;
 mod history_exemption;
 mod history_gas;
 mod history_reservoir;
+mod inherited_costs;
 mod inspector;
 mod inspector_cheatcodes;
 mod inspector_limits;

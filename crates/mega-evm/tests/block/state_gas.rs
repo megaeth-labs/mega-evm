@@ -33,8 +33,15 @@ const TOGGLER: Address = address!("0x1000000000000000000000000000000000000004");
 /// Runs [`reverting_slot_writer`].
 const REVERTER: Address = address!("0x1000000000000000000000000000000000000005");
 
-/// Below the execution cap, where the reservoir is empty and state gas spills onto regular gas.
-const GAS_LIMIT: u64 = 1_000_000;
+/// Below the execution cap, where the reservoir is empty and state gas spills onto regular gas:
+/// 1,000,000 of regular gas on top of what one fresh slot, its record and the body cost at the
+/// byte prices in effect.
+fn gas_limit() -> u64 {
+    1_000_000 +
+        common::slot_state_gas() +
+        common::body_history(32) +
+        mega_evm::write_record_history_gas(1).expect("a record has a price")
+}
 
 /// Above the execution cap, where the reservoir pays state gas first.
 const ABOVE_CAP: u64 = TX_GAS_LIMIT_CAP + 100_000_000;
@@ -120,14 +127,20 @@ fn writes(nonce: u64, slot: u64, gas_limit: u64) -> Recovered<MegaTxEnvelope> {
 }
 
 /// The state gas a transaction that fills one fresh slot spends, read off a probe block.
-fn one_slot() -> u64 {
+///
+/// `None` when a state byte costs nothing: no transaction adds state gas then, and the block's
+/// state-gas limit has nothing to hold.
+fn one_slot() -> Option<u64> {
+    if common::state_is_free() {
+        return None;
+    }
     let mut state = state();
     let mut probe = executor(&mut state, common::unlimited_ctx());
     probe.apply_pre_execution_changes().expect("the block starts");
-    probe.execute_transaction(&writes(0, 1, GAS_LIMIT)).expect("the probe executes");
+    probe.execute_transaction(&writes(0, 1, gas_limit())).expect("the probe executes");
     let slot = probe.gas().state;
-    assert!(slot > 0, "a fresh slot draws state gas");
-    slot
+    assert_eq!(slot, common::slot_state_gas(), "a fresh slot draws its state gas");
+    Some(slot)
 }
 
 /// A block with room for one slot and a half: the second slot crosses the limit.
@@ -140,19 +153,19 @@ fn limits(slot: u64) -> BlockLimits {
 /// behind. A transaction after it that adds none still fits.
 #[test]
 fn test_the_crossing_transaction_is_packed_and_the_next_that_adds_state_is_skipped() {
-    let slot = one_slot();
+    let Some(slot) = one_slot() else { return };
     let mut state = state();
     let mut executor = executor(&mut state, common::block_ctx(limits(slot)));
     executor.apply_pre_execution_changes().expect("the block starts");
 
-    executor.execute_transaction(&writes(0, 1, GAS_LIMIT)).expect("the block has room");
+    executor.execute_transaction(&writes(0, 1, gas_limit())).expect("the block has room");
     executor
-        .execute_transaction(&writes(1, 2, GAS_LIMIT))
+        .execute_transaction(&writes(1, 2, gas_limit()))
         .expect("the transaction that crosses the limit is still packed");
     assert_eq!(executor.gas().state, 2 * slot, "the block overshoots by that one transaction");
 
     let err = executor
-        .execute_transaction(&writes(2, 3, GAS_LIMIT))
+        .execute_transaction(&writes(2, 3, gas_limit()))
         .expect_err("the next transaction adds state gas");
     assert!(format!("{err}").contains("Block state gas limit reached"), "{err}");
     assert_eq!(
@@ -163,10 +176,10 @@ fn test_the_crossing_transaction_is_packed_and_the_next_that_adds_state_is_skipp
 
     // The same nonce again, now writing a slot that already holds its value: no state gas.
     executor
-        .execute_transaction(&writes(2, 1, GAS_LIMIT))
+        .execute_transaction(&writes(2, 1, gas_limit()))
         .expect("a transaction that adds no state gas still fits");
     executor
-        .execute_transaction(&tx_from(CALLER, 3, EMPTY, Bytes::new(), GAS_LIMIT))
+        .execute_transaction(&tx_from(CALLER, 3, EMPTY, Bytes::new(), gas_limit()))
         .expect("and so does one that writes nothing at all");
 
     let (_, result) = executor.finish_with_counters().expect("the block finishes");
@@ -179,13 +192,13 @@ fn test_the_crossing_transaction_is_packed_and_the_next_that_adds_state_is_skipp
 /// so an ordinary transaction after the deposits finds the room they used.
 #[test]
 fn test_a_deposit_is_never_refused_by_the_state_gas_limit() {
-    let slot = one_slot();
+    let Some(slot) = one_slot() else { return };
     let mut state = state();
     let mut executor = executor(&mut state, common::block_ctx(limits(slot)));
     executor.apply_pre_execution_changes().expect("the block starts");
 
     let slot_word = |slot: u64| Bytes::from(U256::from(slot).to_be_bytes::<32>());
-    let deposit = |slot: u64| common::deposit_tx_to(CONTRACT, slot_word(slot), GAS_LIMIT);
+    let deposit = |slot: u64| common::deposit_tx_to(CONTRACT, slot_word(slot), gas_limit());
 
     executor.execute_transaction(&deposit(1)).expect("the block has room");
     executor.execute_transaction(&deposit(2)).expect("the deposit that crosses the limit");
@@ -197,7 +210,7 @@ fn test_a_deposit_is_never_refused_by_the_state_gas_limit() {
     assert_eq!(executor.gas().state, 3 * slot, "and it counts");
 
     let err = executor
-        .execute_transaction(&tx_from(CALLER2, 0, CONTRACT, slot_word(4), GAS_LIMIT))
+        .execute_transaction(&tx_from(CALLER2, 0, CONTRACT, slot_word(4), gas_limit()))
         .expect_err("an ordinary transaction that adds state gas finds no room left");
     assert!(format!("{err}").contains("Block state gas limit reached"), "{err}");
     assert!(format!("{err}").contains(&format!("block_used={}", 3 * slot)), "{err}");
@@ -211,19 +224,19 @@ fn test_a_deposit_is_never_refused_by_the_state_gas_limit() {
 /// the same rule at commit: the block's state gas may have been reached while a candidate waited.
 #[test]
 fn test_the_state_gas_limit_is_checked_again_at_commit() {
-    let slot = one_slot();
+    let Some(slot) = one_slot() else { return };
     let mut state = state();
     let limits = BlockLimits::no_limits().with_block_state_gas_limit(slot);
     let mut executor = executor(&mut state, common::block_ctx(limits));
     executor.apply_pre_execution_changes().expect("the block starts");
 
     let slot_word = |slot: u64| Bytes::from(U256::from(slot).to_be_bytes::<32>());
-    let first = executor.run_transaction(&writes(0, 1, GAS_LIMIT)).expect("the block has room");
+    let first = executor.run_transaction(&writes(0, 1, gas_limit())).expect("the block has room");
     let second = executor
-        .run_transaction(&tx_from(CALLER2, 0, CONTRACT, slot_word(2), GAS_LIMIT))
+        .run_transaction(&tx_from(CALLER2, 0, CONTRACT, slot_word(2), gas_limit()))
         .expect("nothing has committed yet");
     let third = executor
-        .run_transaction(&tx_from(CALLER3, 0, EMPTY, Bytes::new(), GAS_LIMIT))
+        .run_transaction(&tx_from(CALLER3, 0, EMPTY, Bytes::new(), gas_limit()))
         .expect("nothing has committed yet");
     assert!(second.gas.state > 0 && third.gas.state == 0);
 
@@ -264,14 +277,14 @@ impl<CTX> Inspector<CTX, EthInterpreter> for PeakStateGas {
 /// of its own: the most its frame's state gas rose while it ran. The transaction ends with none.
 fn state_gas_drawn_partway(to: Address, input: Bytes) -> u64 {
     let ctx = MegaContext::new(state(), MegaSpecId::SATIN)
-        .with_block(BlockEnv { gas_limit: GAS_LIMIT, ..Default::default() })
+        .with_block(BlockEnv { gas_limit: gas_limit(), ..Default::default() })
         .with_chain(zero_fee_l1_block_info());
     let mut evm = MegaEvm::new(ctx).with_inspector(PeakStateGas::default());
     let tx = OpTx(op_transaction(TxEnv {
         caller: CALLER2,
         kind: TxKind::Call(to),
         data: input,
-        gas_limit: GAS_LIMIT,
+        gas_limit: gas_limit(),
         ..Default::default()
     }));
     let outcome = evm.execute_transaction(tx).expect("the transaction is valid");
@@ -285,12 +298,12 @@ fn state_gas_drawn_partway(to: Address, input: Bytes) -> u64 {
 /// transaction ends with, not what it drew on the way. Below the execution cap and above it.
 #[test]
 fn test_a_transaction_whose_state_gas_comes_back_to_zero_still_fits() {
-    let slot = one_slot();
+    let Some(slot) = one_slot() else { return };
     let slot_word = |slot: u64| Bytes::from(U256::from(slot).to_be_bytes::<32>());
     assert_eq!(state_gas_drawn_partway(TOGGLER, slot_word(7)), slot, "the write-back's");
     assert_eq!(state_gas_drawn_partway(REVERTER, slot_word(8)), slot, "the reverted write's");
 
-    for gas_limit in [GAS_LIMIT, ABOVE_CAP] {
+    for gas_limit in [gas_limit(), ABOVE_CAP] {
         let mut state = state();
         let mut env = common::evm_env();
         env.block_env = BlockEnv { gas_limit: 10_000_000_000, ..env.block_env };
@@ -334,9 +347,8 @@ fn test_a_transaction_whose_state_gas_comes_back_to_zero_still_fits() {
 /// refuses. The trait's commit makes the same check in a debug build and trips on it.
 #[cfg(debug_assertions)]
 #[test]
-#[should_panic(expected = "an outcome the block no longer has room for")]
 fn test_the_trait_commit_trips_on_an_outcome_the_block_has_no_room_for() {
-    let slot = one_slot();
+    let Some(slot) = one_slot() else { return };
     let mut state = state();
     let limits = BlockLimits::no_limits().with_block_state_gas_limit(slot);
     let mut executor = executor(&mut state, common::block_ctx(limits));
@@ -344,23 +356,40 @@ fn test_the_trait_commit_trips_on_an_outcome_the_block_has_no_room_for() {
 
     let slot_word = |slot: u64| Bytes::from(U256::from(slot).to_be_bytes::<32>());
     let first = executor
-        .execute_transaction_without_commit(&writes(0, 1, GAS_LIMIT))
+        .execute_transaction_without_commit(&writes(0, 1, gas_limit()))
         .expect("the block has room");
     let second = executor
-        .execute_transaction_without_commit(&tx_from(CALLER2, 0, CONTRACT, slot_word(2), GAS_LIMIT))
+        .execute_transaction_without_commit(&tx_from(
+            CALLER2,
+            0,
+            CONTRACT,
+            slot_word(2),
+            gas_limit(),
+        ))
         .expect("nothing has committed yet");
     assert!(second.gas.state > 0);
 
     BlockExecutor::commit_transaction(&mut executor, first);
     assert_eq!(executor.gas().state, slot, "the block has spent exactly its limit");
-    BlockExecutor::commit_transaction(&mut executor, second);
+    // Caught rather than expected of the whole test, which returns early where no transaction
+    // adds state gas.
+    let tripped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        BlockExecutor::commit_transaction(&mut executor, second);
+    }))
+    .expect_err("the commit trips");
+    let message = tripped
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| tripped.downcast_ref::<&str>().copied())
+        .unwrap_or_default();
+    assert!(message.contains("an outcome the block no longer has room for"), "{message}");
 }
 
 /// Above the execution cap the reservoir pays the state gas, and the block counts and caps it the
 /// same way: the ledger is the state gas spent, whichever pool paid it.
 #[test]
 fn test_the_state_gas_limit_counts_what_the_reservoir_paid() {
-    let slot = one_slot();
+    let Some(slot) = one_slot() else { return };
     let mut state = state();
     let mut env = common::evm_env();
     env.block_env = BlockEnv { gas_limit: 10_000_000_000, ..env.block_env };

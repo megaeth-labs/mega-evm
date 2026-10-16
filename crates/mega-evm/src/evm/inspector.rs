@@ -606,7 +606,7 @@ pub(crate) fn journal_position<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// Takes back every journal entry, log and self-destruct made since `checkpoint`, as revm takes
 /// back a frame that fails, and leaves the journal's depth as it is: the frame's own checkpoint was
 /// already closed, so one is opened for the revert to close.
-fn revert_journal_to<DB: Database, ExtEnvs: ExternalEnvTypes>(
+pub(crate) fn revert_journal_to<DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: &mut MegaContext<DB, ExtEnvs>,
     checkpoint: JournalCheckpoint,
 ) {

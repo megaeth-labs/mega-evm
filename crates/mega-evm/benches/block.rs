@@ -5,8 +5,8 @@
 //!
 //! - on a state that already holds the seven predeploys, which a chain deploys once, in its first
 //!   block after activation: the state the previous block's pre-block changes left;
-//! - under the limits a block runs under when its caller configures nothing else,
-//!   `BlockLimits::default()`: the production data-size limits and gas detention's caps;
+//! - under the chain's default limits, `ProtocolLimits::DEFAULT`: the production data-size limits
+//!   and gas detention's caps, with no building policy on top (`BlockLimits::default()`);
 //! - from a fresh `State` over that database, as a node starts each block.
 //!
 //! Two workloads of `N` transactions each, whose per-transaction work beyond the transaction
@@ -38,7 +38,7 @@ use mega_evm::{
     system::{SequencerRegistryConfig, SYSTEM_CONTRACT_DEPLOY_COUNT},
     test_utils::{BytecodeBuilder, MemoryDatabase},
     BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardforkConfig,
-    MegaSpecId, MegaTxEnvelope, PreBlockStateSource,
+    MegaSpecId, MegaTxEnvelope, PreBlockStateSource, ProtocolLimits,
 };
 use revm::{
     bytecode::opcode::{CALLDATALOAD, SSTORE},
@@ -119,7 +119,8 @@ fn evm_env() -> EvmEnv<MegaSpecId> {
     evm_env_at(BLOCK_NUMBER)
 }
 
-/// A block under the limits a block runs under when its caller configures nothing else.
+/// A block packed under no building policy, as a validator executes one: the chain's limits
+/// alone hold it.
 fn block_ctx() -> MegaBlockExecutionCtx {
     MegaBlockExecutionCtx::new(B256::ZERO, Some(B256::ZERO), Bytes::new(), BlockLimits::default())
 }
@@ -153,6 +154,7 @@ fn chain_spec() -> MegaHardforkConfig {
     MegaHardforkConfig::default()
         .with_all_activated()
         .with_params(SequencerRegistryConfig::placeholder())
+        .with_params(ProtocolLimits::DEFAULT)
 }
 
 /// Runs the pre-block changes of block `number` on `db` and returns what they handed their

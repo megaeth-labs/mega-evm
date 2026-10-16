@@ -8,7 +8,9 @@
 use alloy_hardforks::ForkCondition;
 use alloy_primitives::BlockTimestamp;
 
-use crate::{system::SequencerRegistryConfig, MegaHardfork, MegaHardforkConfig, MegaSpecId};
+use crate::{
+    system::SequencerRegistryConfig, MegaHardfork, MegaHardforkConfig, MegaSpecId, ProtocolLimits,
+};
 
 /// `MegaETH` mainnet chain ID.
 pub const MAINNET_CHAIN_ID: u64 = 4326;
@@ -83,6 +85,9 @@ pub fn testnet_hardforks() -> MegaHardforkConfig {
 /// `_minRotationDelay` is [`crate::system::PLACEHOLDER_MIN_ROTATION_DELAY`]. The placeholder
 /// only matters when bootstrapping a fresh registry: on a chain whose registry is already
 /// deployed, the live roles are read from storage.
+///
+/// Satin also requires its [`ProtocolLimits`]; an unknown chain runs on
+/// [`ProtocolLimits::DEFAULT`].
 pub fn all_activated_hardforks() -> MegaHardforkConfig {
     let mut config = MegaHardforkConfig::new();
     for fork in MegaHardfork::VARIANTS {
@@ -93,7 +98,7 @@ pub fn all_activated_hardforks() -> MegaHardforkConfig {
         };
         config.insert(*fork, condition);
     }
-    config.with_params(SequencerRegistryConfig::placeholder())
+    config.with_params(SequencerRegistryConfig::placeholder()).with_params(ProtocolLimits::DEFAULT)
 }
 
 /// The hardfork schedule of `chain_id`: a known chain's table, or the unknown-chain fallback.
@@ -144,7 +149,8 @@ mod tests {
     fn test_a_scheduled_activation_resolves_at_its_timestamp() {
         let hf = ChainActivation { chain_id: MAINNET_CHAIN_ID, satin: Some(1_800_000_000) }
             .hardforks()
-            .with_params(SequencerRegistryConfig::placeholder());
+            .with_params(SequencerRegistryConfig::placeholder())
+            .with_params(ProtocolLimits::DEFAULT);
 
         assert_eq!(hf.spec_id(1_799_999_999), None);
         assert_eq!(hf.spec_id(1_800_000_000), Some(MegaSpecId::SATIN));
@@ -176,6 +182,11 @@ mod tests {
         assert_eq!(params.initial_from_block, 0);
         assert_eq!(params.min_rotation_delay, PLACEHOLDER_MIN_ROTATION_DELAY);
         assert_ne!(params.min_rotation_delay, 0);
+        assert_eq!(
+            hf.protocol_limits(0),
+            Some(ProtocolLimits::DEFAULT),
+            "an unknown chain runs on Satin's default limits"
+        );
     }
 
     /// [`SequencerRegistryConfig::placeholder`] is attached only by the unknown-chain fallback.

@@ -5,13 +5,9 @@
 
 use std::cell::RefCell;
 
-use alloy_eips::{Encodable2718, Typed2718};
-use alloy_primitives::{Address, Bytes, TxHash, U256};
+use alloy_primitives::{Bytes, TxHash, U256};
 use clap::Args;
-use mega_evm::{
-    alloy_evm::{IntoTxEnv, RecoveredTx},
-    MegaTransaction, MegaTransactionExt,
-};
+use mega_evm::{alloy_evm::block::ExecutableTxParts, MegaTransaction, MegaTransactionExt};
 
 use super::{load_hex, parse_ether_value, Result};
 
@@ -77,9 +73,8 @@ impl TxOverrideArgs {
 
 /// Parsed transaction overrides.
 ///
-/// All fields must be `Copy` because `OverriddenTx<T>` must implement `Copy`
-/// (required by block executor's `run_transaction`). The input override is stored
-/// in a thread-local (`INPUT_OVERRIDE`) since `Bytes` is not `Copy`.
+/// All fields are `Copy`, as `OverriddenTx<T>` is. The input override is stored in a
+/// thread-local (`INPUT_OVERRIDE`) since `Bytes` is not `Copy`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TxOverrides {
     /// Override for gas limit.
@@ -107,10 +102,10 @@ impl TxOverrides {
     }
 }
 
-/// A wrapper that applies overrides when converting to `TxEnv`.
+/// A wrapper that applies overrides to the transaction environment the block executor builds.
 ///
-/// This wrapper implements all the required traits by delegating to the inner
-/// transaction, but intercepts `IntoTxEnv` to apply overrides.
+/// Only the environment changes: the recovered transaction, its encoding and so its hash and
+/// sizes stay the original's, which is what the executor charges the data-availability size of.
 #[derive(Debug, Clone, Copy)]
 pub struct OverriddenTx<T: Copy> {
     inner: T,
@@ -124,55 +119,33 @@ impl<T: Copy> OverriddenTx<T> {
     }
 }
 
-// Implement IntoTxEnv - this is where we apply the overrides
-impl<T: IntoTxEnv<MegaTransaction> + Copy> IntoTxEnv<MegaTransaction> for OverriddenTx<T> {
-    fn into_tx_env(self) -> MegaTransaction {
-        let mut tx = self.inner.into_tx_env();
+// The block executor builds the environment through `into_parts`; this is where the overrides
+// apply.
+impl<T, Tx> ExecutableTxParts<MegaTransaction, Tx> for OverriddenTx<T>
+where
+    T: ExecutableTxParts<MegaTransaction, Tx> + Copy,
+{
+    type Recovered = T::Recovered;
+
+    fn into_parts(self) -> (MegaTransaction, Self::Recovered) {
+        let (mut tx, recovered) = self.inner.into_parts();
         self.overrides.apply(&mut tx);
-        tx
+        (tx, recovered)
     }
 }
 
-// Delegate RecoveredTx to inner
-impl<Tx, T: RecoveredTx<Tx> + Copy> RecoveredTx<Tx> for OverriddenTx<T> {
-    fn tx(&self) -> &Tx {
-        self.inner.tx()
-    }
-
-    fn signer(&self) -> &Address {
-        self.inner.signer()
-    }
-}
-
-// Delegate Typed2718 to inner (required as the `Encodable2718` supertrait below).
-impl<T: Typed2718 + Copy> Typed2718 for OverriddenTx<T> {
-    fn ty(&self) -> u8 {
-        self.inner.ty()
-    }
-}
-
-// Delegate Encodable2718 to inner. Overrides only affect the `TxEnv` produced by `IntoTxEnv`, not
-// the EIP-2718 encoding, so the encoded size reflects the original transaction — matching the
-// `tx_size`/`da_size` the executor charged before override support existed.
-impl<T: Encodable2718 + Copy> Encodable2718 for OverriddenTx<T> {
-    fn type_flag(&self) -> Option<u8> {
-        self.inner.type_flag()
-    }
-
-    fn encode_2718_len(&self) -> usize {
-        self.inner.encode_2718_len()
-    }
-
-    fn encode_2718(&self, out: &mut dyn alloy_primitives::bytes::BufMut) {
-        self.inner.encode_2718(out)
-    }
-}
-
-// Delegate MegaTransactionExt to inner so `OverriddenTx` is accepted by `run_transaction`.
-// `tx_size`/`estimated_da_size` fall back to the trait defaults (recomputed from the delegated
-// encoding above); only `tx_hash` needs explicit forwarding.
+// Delegate MegaTransactionExt to inner so `OverriddenTx` is accepted by `run_transaction`: the
+// hash and the two sizes are the original transaction's.
 impl<T: MegaTransactionExt + Copy> MegaTransactionExt for OverriddenTx<T> {
     fn tx_hash(&self) -> TxHash {
         self.inner.tx_hash()
+    }
+
+    fn tx_size(&self) -> u64 {
+        self.inner.tx_size()
+    }
+
+    fn estimated_da_size(&self) -> u64 {
+        self.inner.estimated_da_size()
     }
 }

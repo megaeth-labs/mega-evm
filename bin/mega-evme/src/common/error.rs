@@ -1,6 +1,9 @@
 use alloy_primitives::{hex::FromHexError, BlockNumber, TxHash, B256};
 use alloy_provider::transport::TransportError;
-use mega_evm::{alloy_evm::block::BlockExecutionError, revm::bytecode::BytecodeDecodeError};
+use mega_evm::{
+    alloy_evm::block::BlockExecutionError,
+    revm::{bytecode::BytecodeDecodeError, database_interface::bal::EvmDatabaseError},
+};
 
 /// Error types for the replay command
 #[derive(Debug, thiserror::Error)]
@@ -69,6 +72,15 @@ pub enum EvmeError {
 
 // Implement DBErrorMarker to allow EvmeError to be used as Database error type
 impl mega_evm::revm::database::DBErrorMarker for EvmeError {}
+
+impl From<EvmDatabaseError<Self>> for EvmeError {
+    fn from(err: EvmDatabaseError<Self>) -> Self {
+        match err {
+            EvmDatabaseError::Database(e) => e,
+            EvmDatabaseError::Bal(e) => Self::Other(format!("BAL error: {e}")),
+        }
+    }
+}
 
 /// Result type for the mega-evme command
 pub type Result<T> = std::result::Result<T, EvmeError>;

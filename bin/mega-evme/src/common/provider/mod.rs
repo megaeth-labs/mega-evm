@@ -151,7 +151,7 @@ impl RpcArgs {
             EvmeError::InvalidInput("No RPC URL provided. Pass '--rpc <URL>'.".to_string())
         })?;
 
-        let url: reqwest::Url = rpc_url_str.parse().map_err(|e| {
+        let url: alloy_transport_http::reqwest::Url = rpc_url_str.parse().map_err(|e| {
             EvmeError::RpcError(format!("Invalid RPC URL '{}': {}", rpc_url_str, e))
         })?;
 
@@ -246,6 +246,29 @@ impl RpcArgs {
         })
     }
 
+    /// A provider for reading what decides a command's engine (the chain id, and a block's
+    /// timestamp), over the same source the command reads, without a cache that could be
+    /// persisted: the replay file when one is given, otherwise the RPC endpoint directly.
+    pub async fn build_lookup_provider(&self) -> Result<(OpProvider, u64)> {
+        if self.replay_file.is_some() {
+            let BuildProviderOutput { provider, chain_id, .. } =
+                self.build_replay_provider().await?;
+            return Ok((provider, chain_id));
+        }
+        let rpc_url_str = self.rpc_url.as_deref().ok_or_else(|| {
+            EvmeError::InvalidInput(
+                "'mega-evme replay' requires '--rpc <URL>', '--rpc.capture-file <PATH>', or \
+                 '--rpc.replay-file <PATH>'"
+                    .to_string(),
+            )
+        })?;
+        let url: alloy_transport_http::reqwest::Url = rpc_url_str.parse().map_err(|e| {
+            EvmeError::RpcError(format!("Invalid RPC URL '{}': {}", rpc_url_str, e))
+        })?;
+        let chain_id = self.resolve_chain_id(url.clone()).await?;
+        Ok((build_bare_op_provider(self.build_retry_client(url)), chain_id))
+    }
+
     /// Build the provider in replay mode (`--rpc.replay-file` without `--rpc`).
     ///
     /// Loads the envelope's transport-level cache and builds the provider over
@@ -300,7 +323,7 @@ impl RpcArgs {
         let path = self.capture_file.as_ref().expect("capture mode requires --rpc.capture-file");
         let rpc_url_str = self.rpc_url.as_ref().expect("capture mode requires --rpc");
 
-        let url: reqwest::Url = rpc_url_str.parse().map_err(|e| {
+        let url: alloy_transport_http::reqwest::Url = rpc_url_str.parse().map_err(|e| {
             EvmeError::RpcError(format!("Invalid RPC URL '{}': {}", rpc_url_str, e))
         })?;
 
@@ -372,7 +395,7 @@ impl RpcArgs {
     }
 
     /// Build an `RpcClient` over HTTP, wired with the configured retry layer.
-    fn build_retry_client(&self, url: reqwest::Url) -> RpcClient {
+    fn build_retry_client(&self, url: alloy_transport_http::reqwest::Url) -> RpcClient {
         self.build_client(alloy_transport_http::Http::new(url.clone()), &url)
     }
 
@@ -382,7 +405,7 @@ impl RpcArgs {
     fn build_client<T: alloy_transport::IntoBoxTransport>(
         &self,
         transport: T,
-        url: &reqwest::Url,
+        url: &alloy_transport_http::reqwest::Url,
     ) -> RpcClient {
         let is_local =
             url.host_str().is_some_and(|h| h == "localhost" || h == "127.0.0.1" || h == "::1");
@@ -404,7 +427,7 @@ impl RpcArgs {
 
     /// Resolve the chain ID by issuing `eth_chainId` against a throwaway
     /// cache-less provider using the configured retry policy.
-    async fn resolve_chain_id(&self, url: reqwest::Url) -> Result<u64> {
+    async fn resolve_chain_id(&self, url: alloy_transport_http::reqwest::Url) -> Result<u64> {
         let url_str = url.as_str().to_string();
         let bare = build_bare_op_provider(self.build_retry_client(url));
         bare.get_chain_id().await.map_err(|e| {

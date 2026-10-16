@@ -28,9 +28,12 @@ use revm::{
     state::Bytecode,
 };
 
-use crate::salt::{
-    account_bucket, call_contract, crowded_account, db, entry, minimal_envs, run, try_run,
-    SaltEnvs, EMPTY,
+use crate::{
+    common::state_is_free,
+    salt::{
+        account_bucket, call_contract, crowded_account, db, entry, minimal_envs, run, try_run,
+        SaltEnvs, EMPTY,
+    },
 };
 
 /// An account whose code is a delegation designator pointing at itself.
@@ -215,6 +218,10 @@ fn test_a_value_call_to_a_truly_empty_address_pays_the_crowded_price() {
 /// guards — the delegate's nonce used with the authority's address — cannot be seen.
 #[test]
 fn test_a_create_inside_a_delegated_frame_is_priced_at_the_authority_s_address() {
+    // A charge that costs nothing costs nothing at any capacity, and the engine asks for none.
+    if state_is_free() {
+        return;
+    }
     const AUTHORITY: Address = address!("0000000000000000000000000000000000c00013");
     const CODE: Address = address!("0000000000000000000000000000000000c00014");
     /// The nonce the authority carries, which derives the address the frame deploys at.

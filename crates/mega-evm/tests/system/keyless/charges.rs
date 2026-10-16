@@ -9,6 +9,7 @@ use mega_evm::{constants::MAX_INITCODE_SIZE, system::keyless::KEYLESS_DEPLOY_OVE
 use revm::bytecode::opcode::{PUSH0, REVERT};
 
 use super::*;
+use crate::common::state_is_free;
 
 /// The length of the runtime the tests deploy.
 const RUNTIME_LEN: usize = 5;
@@ -162,7 +163,7 @@ fn test_the_call_pays_the_create_opcodes_regular_gas() {
         let deployment = Deployment::new(vec![0; len].into());
         // Gas limits that cover the body of a transaction carrying a mebibyte of calldata, below
         // and above the execution cap.
-        for gas_limit in [TX_GAS_LIMIT_CAP * 3 / 4, 10 * TX_GAS_LIMIT_CAP] {
+        for gas_limit in tiers_carrying(deployment.call_data(LARGE_OVERRIDE).len()) {
             let outcome = deploy(system_db(), &deployment, gas_limit);
             let KeylessDeployError::EmptyCodeDeployed { gas_used } = failure(&outcome) else {
                 panic!("expected EmptyCodeDeployed: {:?}", outcome.result);
@@ -250,6 +251,10 @@ fn test_the_upfront_charges_scale_with_their_buckets() {
 /// account is kept at its own bucket's price.
 #[test]
 fn test_a_failed_deployment_gives_the_created_account_back_at_its_price() {
+    // A charge that costs nothing costs nothing at any capacity, and the engine asks for none.
+    if state_is_free() {
+        return;
+    }
     let deployment = Deployment::new(Bytes::from_static(&[PUSH0, PUSH0, REVERT]));
     let new_account = entry(GasId::new_account_state_gas());
     for gas_limit in GAS_LIMITS {

@@ -32,6 +32,17 @@ fn writing_contract() -> Bytes {
         .build()
 }
 
+/// A gas limit for a call to the writing contract: 1,000,000 of regular gas on top of what its
+/// slot, its write record, its log and its body cost at the byte prices in effect.
+fn writer_gas() -> u64 {
+    1_000_000 +
+        common::slot_state_gas() +
+        mega_evm::history_gas(
+            mega_evm::TX_BODY_SIZE + mega_evm::WRITE_RECORD_SIZE + mega_evm::LOG_BASE_SIZE + 64,
+        )
+        .expect("the bytes have a price")
+}
+
 fn state_with_writer() -> State<mega_evm::test_utils::MemoryDatabase> {
     let mut db = common::database();
     db.set_account_code(CONTRACT, writing_contract());
@@ -40,7 +51,7 @@ fn state_with_writer() -> State<mega_evm::test_utils::MemoryDatabase> {
 
 /// A transfer to an account with no code.
 fn transfer(nonce: u64) -> Recovered<MegaTxEnvelope> {
-    common::recovered(common::tx(nonce, RECIPIENT, Bytes::new(), 100_000))
+    common::recovered(common::tx(nonce, RECIPIENT, Bytes::new(), common::empty_call_gas()))
 }
 
 /// The block's three ledgers are the sum of its transactions', each on its own ledger, and the
@@ -53,7 +64,7 @@ fn test_a_block_sums_each_ledger_of_its_transactions() {
 
     let mut expected = BlockGasCounters::default();
     let mut expected_gas_used = 0;
-    for tx in [transfer(0), user_tx(1, 1_000_000), transfer(2)] {
+    for tx in [transfer(0), user_tx(1, writer_gas()), transfer(2)] {
         let outcome = executor.run_transaction(&tx).expect("the transaction executes");
         expected.record(&outcome.gas);
         expected_gas_used += outcome.gas.gas_used;
@@ -79,7 +90,7 @@ fn test_the_result_carries_the_counters_and_the_footprint() {
     let mut state = state_with_writer();
     let mut executor = executor(&mut state, common::unlimited_ctx());
     executor.apply_pre_execution_changes().expect("the block starts");
-    executor.execute_transaction(&user_tx(0, 1_000_000)).expect("the transaction executes");
+    executor.execute_transaction(&user_tx(0, writer_gas())).expect("the transaction executes");
 
     let usage = executor.limiter().usage;
     let gas = *executor.gas();
@@ -190,11 +201,11 @@ fn test_the_state_and_history_ledgers_refuse_nothing() {
     executor.apply_pre_execution_changes().expect("the block starts");
 
     for nonce in 0..3 {
-        executor.execute_transaction(&user_tx(nonce, 1_000_000)).expect("nothing refuses these");
+        executor.execute_transaction(&user_tx(nonce, writer_gas())).expect("nothing refuses these");
     }
 
     let counters = *executor.gas();
-    assert!(counters.state > 0, "the Satin gas table prices state gas, and these writes draw it");
+    assert_eq!(counters.state, common::slot_state_gas(), "the one fresh slot's state gas");
     // Each transaction carries its body and emits a log over 64 bytes. Only the first writes the
     // slot: the two after it find it already holding the value, which is no write and no record.
     let bytes = 3 * mega_evm::TX_BODY_SIZE +

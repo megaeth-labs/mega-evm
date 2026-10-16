@@ -25,7 +25,7 @@ use revm::{
     Database, Inspector,
 };
 
-use crate::common::{call, context, runs_at_measurement_prices};
+use crate::common::{call, context, history, runs_at_measurement_prices, slot_state_gas};
 
 const CALLER: Address = address!("0000000000000000000000000000000000200000");
 const A: Address = address!("00000000000000000000000000000000000000A0");
@@ -575,7 +575,7 @@ fn test_stop_refills_the_state_gas_drawn_from_the_reservoir() {
         "the kept charge"
     );
     assert_eq!(kept.gas.state, plain.gas.state + 50_000);
-    assert!(plain.gas.state > 0, "the chain's slots are state gas of their own");
+    assert_eq!(plain.gas.state, 9 * slot_state_gas(), "the chain's nine slots are state gas");
 
     let stopped = execute_with(chain(), cap(180), charger(), gas_limit);
     assert_stopped(&stopped.result, LimitKind::DataSize, mega_evm::TX_BODY_SIZE + 180);
@@ -593,7 +593,13 @@ fn test_outcome_reports_history_gas() {
         execute_with(chain(), EvmTxRuntimeLimits::no_limits(), Charger::default(), GAS_LIMIT);
     assert!(kept.result.is_success());
     assert_eq!(kept.gas.history, plain.gas.history + 700);
-    assert!(plain.gas.history > body_history(), "the chain's own writes are history too");
+    assert_eq!(
+        plain.gas.history,
+        body_history() +
+            9 * history(mega_evm::WRITE_RECORD_SIZE) +
+            3 * history(mega_evm::LOG_BASE_SIZE),
+        "the chain's own writes are history too: nine records and three empty logs",
+    );
     assert_eq!(kept.gas.regular, plain.gas.regular, "history is not regular gas");
     assert_eq!(kept.gas.gas_used, plain.gas.gas_used + 700);
 

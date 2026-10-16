@@ -11,6 +11,7 @@ mod external_envs;
 mod factory;
 mod inspector;
 mod limits;
+mod protocol_limits;
 mod receipts;
 mod rules;
 mod salt;

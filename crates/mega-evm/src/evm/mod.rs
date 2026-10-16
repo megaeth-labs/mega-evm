@@ -207,8 +207,12 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
 
     /// Enforces `limits` on every transaction this EVM runs from now on.
     ///
-    /// Block execution installs the block's limits this way, so a transaction runs under them
-    /// whatever the caller configured when it built the EVM.
+    /// Block execution installs the chain's limits this way before every transaction
+    /// ([`ProtocolLimits`](crate::ProtocolLimits)), so a block's transaction runs under them
+    /// whatever the caller configured on the EVM. An EVM from
+    /// [`MegaEvmFactory`](crate::MegaEvmFactory) already runs under the limits the factory
+    /// resolved for its block; outside block execution — an RPC call, a tool, a test — this is how
+    /// a caller chooses others.
     #[must_use]
     pub fn with_tx_runtime_limits(mut self, limits: crate::EvmTxRuntimeLimits) -> Self {
         self.set_tx_runtime_limits(limits);
@@ -596,11 +600,17 @@ mod tests {
     }
 
     /// A call to `CALLEE`, with room for the state gas a value transfer to it draws: `CALLEE`
-    /// holds nothing, so a transfer creates it and pays the new account's state gas.
+    /// holds nothing, so a transfer creates it and pays the new account's state gas. The room is
+    /// counted at the byte prices in effect, with the history of the body and of the recipient's
+    /// write record on top of 100,000 of regular gas.
     fn tx(value: U256) -> MegaTransaction {
+        use revm::context_interface::cfg::GasId;
+        let gas_limit = 100_000 +
+            crate::satin_gas_params().get(GasId::new_account_state_gas()) +
+            crate::history_gas(crate::TX_BODY_SIZE + crate::WRITE_RECORD_SIZE).unwrap();
         OpTx(op_transaction(TxEnv {
             caller: CALLER,
-            gas_limit: 300_000,
+            gas_limit,
             kind: TxKind::Call(CALLEE),
             value,
             ..Default::default()

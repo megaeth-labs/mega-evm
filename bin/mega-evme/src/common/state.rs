@@ -3,15 +3,15 @@
 use std::{collections::BTreeMap, path::PathBuf, str::FromStr};
 
 use alloy_network::Network;
-use alloy_primitives::{map::DefaultHashBuilder, Address, BlockNumber, Bytes, B256, U256};
+use alloy_primitives::{Address, BlockNumber, Bytes, B256, U256};
 use alloy_provider::Provider;
 use clap::Parser;
 use op_alloy_network::Optimism;
 
-use mega_evm::revm::{
+use revm::{
     database::{AlloyDB, CacheDB, EmptyDB, WrapDatabaseAsync},
     primitives::HashMap,
-    state::{Account, AccountInfo, Bytecode, EvmState, EvmStorageSlot},
+    state::{Account, AccountInfo, Bytecode, EvmState, EvmStorageSlot, TransactionId},
     Database, DatabaseRef,
 };
 use tracing::{debug, info, trace};
@@ -224,10 +224,8 @@ impl PreStateArgs {
                     EvmeError::InvalidInput(format!("Failed to parse prestate JSON: {}", e))
                 })?;
             trace!(loaded_prestate = ?loaded_prestate, "Prestate loaded from file");
-            let mut prestate = EvmState::with_capacity_and_hasher(
-                loaded_prestate.len(),
-                DefaultHashBuilder::default(),
-            );
+            let mut prestate =
+                EvmState::with_capacity_and_hasher(loaded_prestate.len(), Default::default());
             for (address, account_state) in loaded_prestate {
                 let account = account_state.into_account()?;
                 prestate.insert(address, account);
@@ -252,7 +250,7 @@ impl PreStateArgs {
                 .entry(address)
                 .or_default()
                 .storage
-                .insert(slot, EvmStorageSlot::new(value, 0));
+                .insert(slot, EvmStorageSlot::new(value, TransactionId::ZERO));
         }
 
         // Set balance for the sender if specified (overrides prestate)
@@ -438,9 +436,20 @@ impl AccountState {
             .storage
             .unwrap_or_default()
             .into_iter()
-            .map(|(slot, value)| (slot, EvmStorageSlot::new(value, 0)));
+            .map(|(slot, value)| (slot, EvmStorageSlot::new(value, TransactionId::ZERO)));
         Ok(Account::from(info).with_storage(storage))
     }
+}
+
+/// Whether an account an RPC endpoint reported is one that does not exist.
+///
+/// JSON-RPC cannot say "no such account": `eth_getBalance`, `eth_getTransactionCount` and
+/// `eth_getCode` answer zeros for it. A node's database answers `None`, and the difference is
+/// observable (EIP-7702 refunds an authorization whose authority already exists), so an all-zero
+/// answer is read as absent. An existing account that is empty cannot occur on a chain that has
+/// had EIP-161 from genesis, as every `MegaETH` chain has.
+fn rpc_reads_as_absent(info: &AccountInfo) -> bool {
+    info.balance.is_zero() && info.nonce == 0 && info.code_hash == revm::primitives::KECCAK_EMPTY
 }
 
 /// Backend database type with generic provider and network
@@ -540,39 +549,27 @@ where
 
     /// Set the storage for an account.
     pub fn set_account_storage(&mut self, address: Address, storage: HashMap<U256, U256>) {
-        self.prestate
-            .entry(address)
-            .or_default()
-            .storage
-            .extend(storage.into_iter().map(|(slot, value)| (slot, EvmStorageSlot::new(value, 0))));
+        self.prestate.entry(address).or_default().storage.extend(
+            storage
+                .into_iter()
+                .map(|(slot, value)| (slot, EvmStorageSlot::new(value, TransactionId::ZERO))),
+        );
     }
 
-    /// Deploys system contracts based on the given spec.
-    pub fn deploy_system_contracts(&mut self, spec: mega_evm::MegaSpecId) {
-        use mega_evm::{
-            flat_system_contract_specs, MegaSpecId, SEQUENCER_REGISTRY_ADDRESS,
-            SEQUENCER_REGISTRY_CODE, SEQUENCER_REGISTRY_CODE_REX6,
-        };
+    /// Installs the code of Satin's predeploys: the six system contracts and the EIP-7997 factory.
+    ///
+    /// `run` and `tx` execute no block, so nothing deploys them; the code is applied as a raw
+    /// state patch, over whatever a forked state holds at those addresses. The factory gets the
+    /// nonce its deployment gives it. The `SequencerRegistry`'s storage is not seeded: a local run
+    /// has no chain configuration to seed it from, and a forked run reads the chain's.
+    pub fn deploy_system_contracts(&mut self) {
+        use mega_evm::system::{system_contract_specs, SequencerRegistryConfig};
 
-        // Flat predeploys (Oracle, high-precision timestamp Oracle, KeylessDeploy,
-        // MegaAccessControl, MegaLimitControl) come from the canonical registry shared
-        // with the block executor. mega-evme runs with a fixed spec, so activations are
-        // resolved via a `FixedHardfork` at timestamp 0, and the bytecode is applied as a
-        // raw state patch (no witness / storage seeding needed for local execution).
-        for contract in flat_system_contract_specs(super::FixedHardfork::new(spec), 0) {
+        for contract in system_contract_specs(&SequencerRegistryConfig::placeholder()) {
             self.set_account_code(contract.address, Bytecode::new_raw(contract.code));
-        }
-
-        // Rex5+: SequencerRegistry (v1.0.0 pre-Rex6, v2.0.0 from Rex6). Only the bytecode
-        // is installed here — a local run has no chain-config sequencer/admin to seed (the
-        // registry's storage is otherwise read from forked state).
-        if spec.reaches(MegaSpecId::REX5) {
-            let code = if spec.reaches(MegaSpecId::REX6) {
-                SEQUENCER_REGISTRY_CODE_REX6
-            } else {
-                SEQUENCER_REGISTRY_CODE
-            };
-            self.set_account_code(SEQUENCER_REGISTRY_ADDRESS, Bytecode::new_raw(code));
+            if contract.nonce != 0 {
+                self.set_account_nonce(contract.address, contract.nonce);
+            }
         }
     }
 }
@@ -651,7 +648,7 @@ where
                     EvmeError::RpcError(format!("Failed to fetch account {}: {:?}", address, e))
                 })?;
                 trace!(address = %address, account = ?account, "Loaded account basic from forked state");
-                Ok(account)
+                Ok(account.filter(|info| !rpc_reads_as_absent(info)))
             }
         }
     }
@@ -772,7 +769,7 @@ where
                     EvmeError::RpcError(format!("Failed to fetch account {}: {:?}", address, e))
                 })?;
                 trace!(address = %address, account = ?account, "Loaded account basic from forked state");
-                Ok(account)
+                Ok(account.filter(|info| !rpc_reads_as_absent(info)))
             }
         }
     }

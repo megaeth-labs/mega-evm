@@ -19,6 +19,7 @@ use alloy_op_evm::OpTx;
 use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
+    constants::TX_GAS_LIMIT_CAP,
     satin_gas_params,
     system::{
         IOracle, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE,
@@ -35,7 +36,7 @@ use revm::{
     context_interface::cfg::GasId,
 };
 
-use crate::common::{block, runs_at_measurement_prices};
+use crate::common::{block, runs_at_measurement_prices, state_is_free};
 
 /// The sender of every probe.
 pub(crate) const CALLER: Address = address!("0000000000000000000000000000000000c00000");
@@ -418,6 +419,10 @@ fn test_a_crowded_bucket_elsewhere_does_not_change_the_price() {
 /// asks the SALT environment for its capacity a single time.
 #[test]
 fn test_a_bucket_is_read_once_per_transaction() {
+    // A charge that costs nothing costs nothing at any capacity, and the engine asks for none.
+    if state_is_free() {
+        return;
+    }
     const SLOTS: u64 = 16;
     // Put every slot this program writes in one bucket, so one capacity query serves them all.
     let mut code = BytecodeBuilder::default();
@@ -429,8 +434,17 @@ fn test_a_bucket_is_read_once_per_transaction() {
     let buckets: Vec<BucketId> =
         (0..SLOTS).map(|slot| slot_bucket(CONTRACT, U256::from(slot))).collect();
 
+    // Room for every slot at the crowded price on top of what the other probes have.
+    let gas_limit = GAS_LIMIT + entry(GasId::sstore_set_state_gas()) * 4 * SLOTS;
     let mut evm = MegaEvm::new(salt_context(db(code.stop().build()), envs.clone()));
-    let outcome = evm.execute_transaction(call_contract()).expect("the probe is valid");
+    let outcome = evm
+        .execute_transaction(tx_with_gas(
+            TxKind::Call(CONTRACT),
+            Bytes::new(),
+            U256::ZERO,
+            gas_limit,
+        ))
+        .expect("the probe is valid");
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
 
     assert_eq!(
@@ -452,6 +466,10 @@ fn test_a_bucket_is_read_once_per_transaction() {
 /// capacity makes a charge unaffordable, never free.
 #[test]
 fn test_an_absurd_capacity_saturates_rather_than_wrapping() {
+    // A charge that costs nothing costs nothing at any capacity, and the engine asks for none.
+    if state_is_free() {
+        return;
+    }
     const SLOT: u64 = 7;
     let code = BytecodeBuilder::default().sstore(U256::from(SLOT), U256::from(1)).stop().build();
     let envs =
@@ -535,6 +553,10 @@ fn test_a_transaction_from_the_system_address_prices_at_the_minimum_bucket() {
 /// Without this the exemption above could be passing for the wrong reason.
 #[test]
 fn test_a_user_transaction_into_the_same_bucket_pays_the_crowded_price() {
+    // A charge that costs nothing costs nothing at any capacity, and the engine asks for none.
+    if state_is_free() {
+        return;
+    }
     const SLOT: u64 = 7;
     let code = BytecodeBuilder::default().sstore(U256::from(SLOT), U256::from(1)).stop().build();
     let envs = crowded_slot(minimal_envs(), CONTRACT, U256::from(SLOT), 8);
@@ -679,6 +701,10 @@ fn test_the_system_call_entry_point_prices_the_same_at_any_capacity() {
 /// to the block they run in.
 #[test]
 fn test_a_user_transaction_in_the_same_block_still_pays_the_crowded_price() {
+    // A charge that costs nothing costs nothing at any capacity, and the engine asks for none.
+    if state_is_free() {
+        return;
+    }
     let set = entry(GasId::sstore_set_state_gas());
     let envs = crowded_slot(
         crowded_oracle_slot(SYSTEM_TX_MULTIPLIER),
@@ -709,6 +735,10 @@ fn test_a_user_transaction_in_the_same_block_still_pays_the_crowded_price() {
 /// here would be a way around the scaling.
 #[test]
 fn test_a_deposit_transaction_pays_the_crowded_price() {
+    // A charge that costs nothing costs nothing at any capacity, and the engine asks for none.
+    if state_is_free() {
+        return;
+    }
     const SLOT: u64 = 7;
     let code = BytecodeBuilder::default().sstore(U256::from(SLOT), U256::from(1)).stop().build();
     let envs = crowded_slot(minimal_envs(), CONTRACT, U256::from(SLOT), 8);
@@ -730,6 +760,10 @@ fn test_a_deposit_transaction_pays_the_crowded_price() {
 /// being system-originated cuts both ways.
 #[test]
 fn test_an_unpriceable_deposit_transaction_fails() {
+    // A charge that costs nothing costs nothing at any capacity, and the engine asks for none.
+    if state_is_free() {
+        return;
+    }
     const SLOT: u64 = 7;
     let code = BytecodeBuilder::default().sstore(U256::from(SLOT), U256::from(1)).stop().build();
     let envs = minimal_envs()
@@ -987,13 +1021,15 @@ fn test_a_creation_that_writes_a_slot_pays_both_in_their_own_buckets() {
 /// which is where a charge this size is meant to be paid from.
 #[test]
 fn test_the_multiplier_is_linear_over_a_wide_range() {
-    const WIDE_GAS_LIMIT: u64 = 400_000_000;
     let set = entry(GasId::sstore_set_state_gas());
+    // Above the execution cap by the slot at the widest multiplier and 200,000,000 more, so the
+    // reservoir pays for the slot at every multiplier.
+    let wide_gas_limit = TX_GAS_LIMIT_CAP + 1_000 * set + 200_000_000;
     let code = || BytecodeBuilder::default().sstore(U256::ZERO, U256::from(1)).stop().build();
 
     for m in [1, 2, 10, 1_000] {
         let envs = crowded_slot(minimal_envs(), CONTRACT, U256::ZERO, m);
-        let probe = tx_with_gas(TxKind::Call(CONTRACT), Bytes::new(), U256::ZERO, WIDE_GAS_LIMIT);
+        let probe = tx_with_gas(TxKind::Call(CONTRACT), Bytes::new(), U256::ZERO, wide_gas_limit);
         let outcome = run(db(code()), envs, probe);
         assert_eq!(outcome.gas.state, set * m, "at m = {m}");
     }

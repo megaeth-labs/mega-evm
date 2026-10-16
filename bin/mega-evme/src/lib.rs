@@ -6,11 +6,15 @@
 //! the library directly and exercise the public API the same way an external
 //! consumer would.
 
+/// Whole-block replay on either engine, compared with the chain.
+pub mod block;
 /// Top-level CLI command parser and dispatch (`MainCmd`, `Commands`, `Error`).
 pub mod cmd;
 /// Shared building blocks: RPC provider/session, state, env, error, output
 /// formatting, tracing, transaction utilities.
 pub mod common;
+/// Which engine runs a command, and the hand-off to the legacy one.
+pub mod engine;
 /// Historical transaction replay command.
 pub mod replay;
 /// Arbitrary EVM bytecode execution command.

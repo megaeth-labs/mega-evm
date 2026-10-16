@@ -51,7 +51,7 @@ Each group is documented on its own page.
 | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------- |
 | Transaction       | `--create`, `--gas`, `--basefee`, `--priority-fee`, `--tx-type`, `--value`, `--sender`, `--receiver`, `--nonce`, `--input`, `--inputfile`, `--source-hash`, `--mint`, `--auth`, `--access` | [Transaction Types](../transaction-types.md)                                    |
 | State management  | `--prestate`, `--sender.balance`, `--faucet`, `--balance`, `--storage`, `--block-hash`, `--fork`, `--fork.block`, `--rpc`, `--dump`, `--dump.output`                                       | [State Management](../configuration/state-management.md)                        |
-| Chain and spec    | `--spec`, `--chain-id`                                                                                                                                                                     | [Chain and Spec](../configuration/chain-and-spec.md)                            |
+| Chain and spec    | `--spec`, `--chain-id`, `--override.limits`                                                                                                                                                | [Chain and Spec](../configuration/chain-and-spec.md)                            |
 | Block environment | `--block.number`, `--block.coinbase`, `--block.timestamp`, `--block.gaslimit`, `--block.basefee`, `--block.difficulty`, `--block.prevrandao`, `--block.blobexcessgas`                      | [Block Environment](../configuration/block-environment.md)                      |
 | SALT buckets      | `--bucket-capacity`                                                                                                                                                                        | [SALT Buckets](../configuration/salt-buckets.md)                                |
 | RPC cache / retry | `--rpc.cache-size`, `--rpc.cache-dir`, `--rpc.no-cache-file`, `--rpc.clear-cache`, `--rpc.max-retries`, `--rpc.backoff-ms`, `--rpc.rate-limit`                                             | [RPC Cache and Retry](../configuration/state-management.md#rpc-cache-and-retry) |
@@ -74,17 +74,18 @@ No banners or diagnostic text are printed in JSON mode — stdout contains exact
 
 The object includes these fields:
 
-| Field              | Type             | Description                                                                  |
-| ------------------ | ---------------- | ---------------------------------------------------------------------------- |
-| `success`          | `bool`           | Whether execution succeeded                                                  |
-| `gas_used`         | `number`         | Gas consumed                                                                 |
-| `output`           | `string \| null` | Hex-encoded return data (present only on success with non-empty output)      |
-| `contract_address` | `string \| null` | Deployed address (present only for successful `--create` transactions)       |
-| `logs_count`       | `number`         | Number of log entries emitted                                                |
-| `revert_reason`    | `string \| null` | Decoded revert reason (present only on revert)                               |
-| `halt_reason`      | `string \| null` | Halt reason (present only on halt)                                           |
-| `trace`            | `object \| null` | Execution trace (when `--trace` is enabled without `--trace.output`)         |
-| `state`            | `object \| null` | Post-execution state dump (when `--dump` is enabled without `--dump.output`) |
+| Field              | Type             | Description                                                                                                                           |
+| ------------------ | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `success`          | `bool`           | Whether execution succeeded                                                                                                           |
+| `gas_used`         | `number`         | Gas consumed                                                                                                                          |
+| `output`           | `string \| null` | Hex-encoded return data (present only on success with non-empty output)                                                               |
+| `contract_address` | `string \| null` | Deployed address (present only for successful `--create` transactions)                                                                |
+| `logs_count`       | `number`         | Number of log entries emitted                                                                                                         |
+| `revert_reason`    | `string \| null` | Decoded revert reason (present only on revert)                                                                                        |
+| `halt_reason`      | `string \| null` | Halt reason (present only on halt)                                                                                                    |
+| `trace`            | `object \| null` | Execution trace (when `--trace` is enabled without `--trace.output`)                                                                  |
+| `state`            | `object \| null` | Post-execution state dump (when `--dump` is enabled without `--dump.output`)                                                          |
+| `satin`            | `object`         | On `--spec Satin` only: the gas by ledger and the limits' counts, see [Satin output](../configuration/chain-and-spec.md#satin-output) |
 
 When `--trace` or `--dump` is used with an output file (`--trace.output`, `--dump.output`), data is written to that file and the corresponding JSON field is omitted.
 When no output file is specified, the data is inlined into the JSON object.
@@ -327,12 +328,15 @@ RPC Options:
 
 Chain Options:
       --spec <SPEC>
-          Name of spec to use, possible values: `Equivalence`, `MiniRex`, `MiniRex1`, `MiniRex2`, `Rex`, `Rex1`, `Rex2`, `Rex3`, `Rex4`, `Rex5`, `Rex6` (`MiniRex1`/`MiniRex2` are alias specs executing `Equivalence`/`MiniRex` behavior)
+          Name of spec to use. `Satin` runs on the Satin engine; `Equivalence`, `MiniRex`, `MiniRex1`, `MiniRex2`, `Rex`, `Rex1`, `Rex2`, `Rex3`, `Rex4`, `Rex5`, `Rex6` run on the legacy engine, the released 1.7.1 (`MiniRex1`/`MiniRex2` are alias specs executing `Equivalence`/`MiniRex` behavior)
 
           [default: Rex6]
 
       --chain-id <CHAIN_ID>
           Chain ID [default: 6342] [aliases: --chainid]
+
+      --override.limits <JSON|FILE>
+          Satin only: run under these protocol limits instead of the chain's, a counterfactual. A JSON object in the shape a chain configuration carries `ProtocolLimits` in (camelCase, per-transaction limits under `txRuntimeLimits`), inline or in a file; the fields it names replace the chain's, every other stays. Refused when it names an unknown field or a value no chain may carry
 
 Block Options:
       --block.number <BLOCK_NUMBER>          Block number [default: 1]

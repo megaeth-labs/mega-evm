@@ -31,7 +31,10 @@ use revm::{
     Database, Inspector,
 };
 
-use crate::common::{call, call_with_data, context, create};
+use crate::common::{
+    account_state_gas, body_history, call, call_with_data, context, create, history,
+    slot_state_gas, state_is_free,
+};
 
 const CALLER: Address = address!("0000000000000000000000000000000000300000");
 const A: Address = address!("0000000000000000000000000000000000300001");
@@ -40,6 +43,12 @@ const C: Address = address!("0000000000000000000000000000000000300003");
 const D: Address = address!("0000000000000000000000000000000000300004");
 
 const GAS_LIMIT: u64 = 20_000_000;
+
+/// [`GAS_LIMIT`] on top of twice the history of `bytes` at the byte prices in effect: enough for
+/// the frame three calls down to keep `bytes`, after each caller kept a 64th of what it forwards.
+fn gas_for_history(bytes: u64) -> u64 {
+    GAS_LIMIT + 2 * history(bytes)
+}
 
 /// 98% of `remaining`, the share a child frame is given.
 fn share(remaining: u64) -> u64 {
@@ -103,7 +112,8 @@ fn test_depth_3_frame_budget_reverts_the_child_and_the_parents_resume() {
     let run = |data_len: u64| {
         let db = chain(log0(data_len));
         let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits));
-        let result = evm.transact_raw(call(CALLER, A, U256::ZERO, GAS_LIMIT)).unwrap();
+        let gas_limit = gas_for_history(budget);
+        let result = evm.transact_raw(call(CALLER, A, U256::ZERO, gas_limit)).unwrap();
         (
             result,
             evm.ctx().additional_limit().latched().copied(),
@@ -512,7 +522,13 @@ fn test_code_return_create_refuses_is_not_counted() {
 
             // The same length, deployable and paid for: counted, and it crosses.
             let deployable = constructor_returning_from(0x00, len.min(max));
-            let (stopped, _) = run(&deployable, inspect, TX_GAS_LIMIT_CAP + 2_000_000_000);
+            // The reservoir pays the state gas and the history of the largest contract, and a
+            // billion more, at the byte prices in effect.
+            let roomy = TX_GAS_LIMIT_CAP +
+                max * mega_evm::satin_gas_params().get(GasId::code_deposit_state_gas()) +
+                history(max) +
+                1_000_000_000;
+            let (stopped, _) = run(&deployable, inspect, roomy);
             assert_eq!(
                 stopped.limit_exceeded,
                 Some(LimitCheck::ExceedsLimit {
@@ -741,9 +757,20 @@ fn bound_at(code: &Bytes, gas_limit: u64, data_limit: u64) -> Bound {
     }
 }
 
+/// A gas limit above what any write here needs to be counted, at the byte prices in effect:
+/// 1,000,000 on top of a new account, a fresh slot and the body, and 64 times the history of two
+/// records, which a value call that forwards all but a 64th of its gas pays from the 64th it keeps.
+fn high_bound() -> u64 {
+    1_000_000 +
+        account_state_gas() +
+        slot_state_gas() +
+        body_history(0) +
+        64 * history(2 * WRITE_RECORD_SIZE)
+}
+
 /// The smallest gas limit at which `code`'s write is counted rather than run out of gas.
 fn gas_where_the_write_is_counted(code: &Bytes, data_limit: u64) -> u64 {
-    smallest_gas_limit(1_000_000, |gas| {
+    smallest_gas_limit(high_bound(), |gas| {
         !matches!(bound_at(code, gas, data_limit), Bound::Rejected | Bound::OutOfGas)
     })
 }
@@ -805,8 +832,12 @@ fn test_whichever_of_gas_and_data_size_binds_first_is_reported() {
         assert!(matches!(bound_at(&code, counted_at - 1, crosses), Bound::OutOfGas), "{name}");
         assert!(matches!(bound_at(&code, counted_at, crosses), Bound::DataSize), "{name}");
         assert!(matches!(bound_at(&code, kept_at, crosses), Bound::DataSize), "{name}");
-        assert!(matches!(bound_at(&code, counted_at, fits), Bound::OutOfGas), "{name}");
-        assert!(matches!(bound_at(&code, kept_at - 1, fits), Bound::OutOfGas), "{name}");
+        // A record whose history costs nothing, where a history byte is free, moves no boundary:
+        // the write the limit counts is the write that succeeds.
+        if history > 0 {
+            assert!(matches!(bound_at(&code, counted_at, fits), Bound::OutOfGas), "{name}");
+            assert!(matches!(bound_at(&code, kept_at - 1, fits), Bound::OutOfGas), "{name}");
+        }
         assert!(matches!(bound_at(&code, kept_at, fits), Bound::Success), "{name}");
     }
 }
@@ -954,17 +985,28 @@ fn test_a_body_over_the_limit_is_the_stop_at_the_smallest_valid_gas_limit() {
             "{name}: the limit does not move validation"
         );
 
-        let unlimited = outcome_at(tx(valid), u64::MAX).unwrap();
-        assert!(
-            matches!(
-                unlimited.result,
-                ExecutionResult::Halt { reason: MegaHaltReason::Base(HaltReason::OutOfGas(_)), .. }
-            ),
-            "{name}: without a limit the start runs out of gas, got {:?}",
-            unlimited.result
-        );
-
         let stopped = outcome_at(tx(valid), limit).unwrap();
+        // Where a state byte and a record's history are both free the start costs nothing past
+        // the intrinsic gas, and there is no out-of-gas for the stop to stand in for. Where a
+        // history byte is cheap enough, the calldata floor lifts the smallest valid gas limit past
+        // the intrinsic cost, which the stop spends alone, and what it covers past it may pay the
+        // start.
+        let free = state_is_free() && history(WRITE_RECORD_SIZE) == 0;
+        if !free && valid == stopped.result.gas().total_gas_spent() {
+            let unlimited = outcome_at(tx(valid), u64::MAX).unwrap();
+            assert!(
+                matches!(
+                    unlimited.result,
+                    ExecutionResult::Halt {
+                        reason: MegaHaltReason::Base(HaltReason::OutOfGas(_)),
+                        ..
+                    }
+                ),
+                "{name}: without a limit the start runs out of gas, got {:?}",
+                unlimited.result
+            );
+        }
+
         assert_stopped(&stopped, limit, body);
         assert_eq!(stopped.usage, LimitUsage { data_size: body, write_records: 0 }, "{name}");
         assert_eq!(stopped.result.gas().tx_gas_used(), valid, "{name}: the intrinsic cost only");

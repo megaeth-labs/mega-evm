@@ -260,10 +260,21 @@ const NEXT_ADMIN: Address = address!("0x6000000000000000000000000000000000000006
 
 /// A Satin-at-genesis schedule whose registry is seeded with [`GENESIS_SYSTEM_ADDRESS`].
 fn chain_seeding_genesis_system_address() -> MegaHardforkConfig {
-    MegaHardforkConfig::default().with_all_activated().with_params(SequencerRegistryConfig {
+    common::chain_spec().with_params(SequencerRegistryConfig {
         initial_system_address: GENESIS_SYSTEM_ADDRESS,
         ..common::registry_config()
     })
+}
+
+/// A gas limit for a call carrying `input_len` bytes to the Oracle or the registry: 1,000,000 of
+/// regular gas on top of the account the engine creates for a system-address caller, up to four
+/// fresh slots, their records and the body, at the byte prices in effect.
+fn gas_limit(input_len: usize) -> u64 {
+    1_000_000 +
+        common::new_account_state_gas() +
+        4 * common::slot_state_gas() +
+        common::body_history(input_len as u64) +
+        mega_evm::write_record_history_gas(5).expect("the records have a price")
 }
 
 /// A legacy call from `sender` to the Oracle's `getSlot(0)`: a system-address transaction when
@@ -273,16 +284,18 @@ fn chain_seeding_genesis_system_address() -> MegaHardforkConfig {
 /// validation read.
 fn oracle_call_from(sender: Address, nonce: u64) -> Recovered<MegaTxEnvelope> {
     let input = IOracle::getSlotCall { slot: U256::ZERO }.abi_encode();
+    let gas_limit = gas_limit(input.len());
     Recovered::new_unchecked(
-        common::tx(nonce, ORACLE_CONTRACT_ADDRESS, input.into(), 1_000_000),
+        common::tx(nonce, ORACLE_CONTRACT_ADDRESS, input.into(), gas_limit),
         sender,
     )
 }
 
 /// A transaction from `sender` to the registry carrying `input`.
 fn registry_call_from(sender: Address, input: Vec<u8>) -> Recovered<MegaTxEnvelope> {
+    let gas_limit = gas_limit(input.len());
     Recovered::new_unchecked(
-        common::tx(0, SEQUENCER_REGISTRY_ADDRESS, input.into(), 1_000_000),
+        common::tx(0, SEQUENCER_REGISTRY_ADDRESS, input.into(), gas_limit),
         sender,
     )
 }

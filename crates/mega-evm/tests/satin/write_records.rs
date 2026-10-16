@@ -31,15 +31,18 @@ use revm::{
     Database, Inspector,
 };
 
-use crate::common::{call, call_with_data, context, create, run};
+use crate::common::{account_state_gas, call, call_with_data, context, create, history, run};
 
 const CALLER: Address = address!("0000000000000000000000000000000000100000");
 const CALLEE: Address = address!("0000000000000000000000000000000000100001");
 const CONTRACT: Address = address!("0000000000000000000000000000000000100002");
 const CONTRACT2: Address = address!("0000000000000000000000000000000000100003");
 /// Room for the state gas of several new accounts, including in a frame that resumes after a
-/// child burned the 63/64 it was forwarded.
-const GAS_LIMIT: u64 = 50_000_000;
+/// child burned the 63/64 it was forwarded: at least 50,000,000, and 64 times what a value call to
+/// a new account costs its caller at the byte prices in effect.
+fn gas_limit() -> u64 {
+    (64 * (account_state_gas() + history(4 * WRITE_RECORD_SIZE) + 50_000)).max(50_000_000)
+}
 
 /// The transaction body and nothing else.
 const fn body_only() -> LimitUsage {
@@ -90,7 +93,7 @@ fn test_two_value_calls_record_the_sender_once() {
     let code = append_value_call(BytecodeBuilder::default(), CONTRACT, 1).append(POP);
     let code = append_value_call(code, CONTRACT2, 1).append(POP).append(STOP).build();
     let (result, usage) =
-        run(funded().account_code(CALLEE, code), call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
+        run(funded().account_code(CALLEE, code), call(CALLER, CALLEE, U256::ZERO, gas_limit()));
     assert!(result.result.is_success());
     assert_eq!(
         usage,
@@ -105,7 +108,7 @@ fn test_create_then_call_record_the_frame_account_once() {
     let code = append_value_create(BytecodeBuilder::default()).append(POP);
     let code = append_value_call(code, CONTRACT, 1).append(POP).append(STOP).build();
     let (result, usage) =
-        run(funded().account_code(CALLEE, code), call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
+        run(funded().account_code(CALLEE, code), call(CALLER, CALLEE, U256::ZERO, gas_limit()));
     assert!(result.result.is_success());
     assert_eq!(
         usage,
@@ -120,7 +123,7 @@ fn test_two_creates_record_the_creator_once() {
     let code = append_value_create(BytecodeBuilder::default()).append(POP);
     let code = append_value_create(code).append(POP).append(STOP).build();
     let (result, usage) =
-        run(funded().account_code(CALLEE, code), call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
+        run(funded().account_code(CALLEE, code), call(CALLER, CALLEE, U256::ZERO, gas_limit()));
     assert!(result.result.is_success());
     assert_eq!(
         usage,
@@ -136,7 +139,7 @@ fn test_failed_child_discards_its_transfer_records() {
         append_value_call(BytecodeBuilder::default(), CONTRACT, 1).append(POP).append(STOP).build();
     let db =
         funded().account_code(CALLEE, code).account_code(CONTRACT, Bytes::from_static(&[INVALID]));
-    let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
+    let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, gas_limit()));
     assert!(result.result.is_success(), "the outer call succeeds although the child halts");
     assert_eq!(usage, body_only());
 }
@@ -161,7 +164,7 @@ fn test_failed_first_child_lets_the_next_transfer_record_the_sender() {
         .build();
     let db =
         funded().account_code(CALLEE, code).account_code(CONTRACT, Bytes::from_static(&[INVALID]));
-    let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
+    let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, gas_limit()));
     assert!(result.result.is_success());
     assert_eq!(
         usage,
@@ -187,7 +190,7 @@ fn reverting_creations(n: usize) -> Bytes {
 #[test]
 fn test_reverted_nested_create_keeps_the_creator_nonce_record() {
     let db = funded().account_code(OUTER_CREATOR, reverting_creations(1));
-    let (result, usage) = run(db, call(CALLER, OUTER_CREATOR, U256::ZERO, GAS_LIMIT));
+    let (result, usage) = run(db, call(CALLER, OUTER_CREATOR, U256::ZERO, gas_limit()));
     assert!(result.result.is_success());
     assert_eq!(usage, records(1), "the creator's nonce; the created account is gone");
 }
@@ -197,7 +200,7 @@ fn test_reverted_nested_create_keeps_the_creator_nonce_record() {
 #[test]
 fn test_reverted_then_retried_create_records_the_creator_once() {
     let db = funded().account_code(OUTER_CREATOR, reverting_creations(2));
-    let (result, usage) = run(db, call(CALLER, OUTER_CREATOR, U256::ZERO, GAS_LIMIT));
+    let (result, usage) = run(db, call(CALLER, OUTER_CREATOR, U256::ZERO, gas_limit()));
     assert!(result.result.is_success());
     assert_eq!(usage, records(1));
 }
@@ -214,7 +217,7 @@ fn test_creation_without_funds_records_nothing() {
         .stop()
         .build();
     let db = MemoryDatabase::default().account_code(CALLEE, code);
-    let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
+    let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, gas_limit()));
     assert!(result.result.is_success());
     assert_eq!(usage, body_only());
     assert_eq!(result.state[&CALLEE].info.nonce, 0, "the nonce was never bumped");
@@ -226,8 +229,8 @@ const SELF_CALLER: Address = address!("000000000000000000000000000000005E1F0004"
 
 fn value_delta(to: Address) -> LimitUsage {
     let db = || MemoryDatabase::default().account_balance(A, U256::from(1_000_000));
-    let (with_value, usage_value) = run(db(), call(A, to, U256::from(1), GAS_LIMIT));
-    let (zero_value, usage_zero) = run(db(), call(A, to, U256::ZERO, GAS_LIMIT));
+    let (with_value, usage_value) = run(db(), call(A, to, U256::from(1), gas_limit()));
+    let (zero_value, usage_zero) = run(db(), call(A, to, U256::ZERO, gas_limit()));
     assert!(with_value.result.is_success() && zero_value.result.is_success());
     usage_value.saturating_sub(usage_zero)
 }
@@ -272,7 +275,7 @@ fn nested_delta(targets: &[Address]) -> LimitUsage {
             .account_balance(SELF_CALLER, U256::from(1_000_000))
             .account_code(SELF_CALLER, self_calling_code(targets, value));
         let (result, usage) =
-            run(db, call_with_data(A, SELF_CALLER, Bytes::from_static(&[1]), GAS_LIMIT));
+            run(db, call_with_data(A, SELF_CALLER, Bytes::from_static(&[1]), gas_limit()));
         assert!(result.result.is_success());
         usage
     };
@@ -316,7 +319,7 @@ fn test_sstore_first_change_records_and_write_back_refunds() {
         let db = MemoryDatabase::default()
             .account_code(CALLEE, code.stop().build())
             .account_storage(CALLEE, U256::ZERO, U256::from(original));
-        let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
+        let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, gas_limit()));
         assert!(result.result.is_success());
         assert_eq!(usage, expected, "writes {writes:?} over original {original}");
     }
@@ -343,7 +346,7 @@ fn test_write_back_in_a_child_refunds_the_caller_record() {
             .build();
         let db =
             MemoryDatabase::default().account_code(CALLEE, parent).account_code(CONTRACT, code);
-        let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
+        let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, gas_limit()));
         assert!(result.result.is_success());
         assert_eq!(usage, expected);
     }
@@ -362,7 +365,7 @@ fn test_log_counts_its_bytes() {
         .build();
     let (result, usage) = run(
         MemoryDatabase::default().account_code(CALLEE, code),
-        call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT),
+        call(CALLER, CALLEE, U256::ZERO, gas_limit()),
     );
     assert!(result.result.is_success());
     assert_eq!(result.result.logs().len(), 1);
@@ -387,7 +390,7 @@ fn test_selfdestruct_records_the_beneficiary_when_value_moves() {
         let db = MemoryDatabase::default()
             .account_code(CALLEE, destruct_to(beneficiary))
             .account_balance(CALLEE, balance);
-        let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
+        let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, gas_limit()));
         assert!(result.result.is_success());
         assert_eq!(usage, expected, "balance {balance}, beneficiary {beneficiary}");
     }
@@ -398,12 +401,12 @@ fn test_selfdestruct_records_the_beneficiary_when_value_moves() {
 fn test_top_level_create_records_the_created_account() {
     // `STOP` is one byte of init code and deposits nothing.
     let (result, usage) =
-        run(MemoryDatabase::default(), create(CALLER, Bytes::from_static(&[STOP]), GAS_LIMIT));
+        run(MemoryDatabase::default(), create(CALLER, Bytes::from_static(&[STOP]), gas_limit()));
     assert!(result.result.is_success());
     assert_eq!(usage, with_extra(records(1), 1));
 
     let (result, usage) =
-        run(MemoryDatabase::default(), create(CALLER, Bytes::from_static(&[INVALID]), GAS_LIMIT));
+        run(MemoryDatabase::default(), create(CALLER, Bytes::from_static(&[INVALID]), gas_limit()));
     assert!(!result.result.is_success());
     assert_eq!(usage, with_extra(body_only(), 1));
 }
@@ -467,7 +470,7 @@ fn after_sstore(steps: &[(u8, bool, LimitUsage)]) -> (bool, LimitUsage) {
 #[test]
 fn test_completed_sstore_commits_its_record() {
     let code = BytecodeBuilder::default().sstore(U256::ZERO, U256::from(1)).stop().build();
-    let steps = probe(MemoryDatabase::default().account_code(CALLEE, code), GAS_LIMIT, false);
+    let steps = probe(MemoryDatabase::default().account_code(CALLEE, code), gas_limit(), false);
     let (staged, usage) = after_sstore(&steps);
     assert!(!staged);
     assert_eq!(usage, records(1));
@@ -488,7 +491,7 @@ fn test_sstore_out_of_gas_after_the_write_discards_the_record() {
         .stop()
         .build();
     let db = MemoryDatabase::default().account_code(CALLEE, parent).account_code(CONTRACT, child);
-    let steps = probe(db, GAS_LIMIT, false);
+    let steps = probe(db, gas_limit(), false);
     let (staged, usage) = after_sstore(&steps);
     assert!(!staged, "the record is discarded, not left for the next opcode");
     assert_eq!(usage, body_only(), "a failed opcode's write is not counted");
@@ -499,7 +502,7 @@ fn test_sstore_out_of_gas_after_the_write_discards_the_record() {
 #[test]
 fn test_wrapper_discards_a_stale_record_on_entry() {
     let code = BytecodeBuilder::default().sstore(U256::ZERO, U256::from(1)).stop().build();
-    let steps = probe(MemoryDatabase::default().account_code(CALLEE, code), GAS_LIMIT, true);
+    let steps = probe(MemoryDatabase::default().account_code(CALLEE, code), gas_limit(), true);
     let (staged, usage) = after_sstore(&steps);
     assert!(!staged);
     assert_eq!(usage, records(1), "the SSTORE's record, and not the stale log's bytes");
@@ -539,7 +542,7 @@ fn authorizing_call(
         caller: CALLER,
         kind: alloy_primitives::TxKind::Call(to),
         value: U256::from(value),
-        gas_limit: GAS_LIMIT,
+        gas_limit: gas_limit(),
         gas_priority_fee: Some(0),
         authorization_list,
         ..Default::default()
@@ -637,7 +640,7 @@ fn test_frames_running_as_the_sender_do_not_record_it() {
     let account = db.load_account(CALLER).unwrap();
     account.info.code_hash = delegation.hash_slow();
     account.info.code = Some(delegation);
-    let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
+    let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, gas_limit()));
     assert!(result.result.is_success(), "{:?}", result.result);
     assert_eq!(result.state[&CONTRACT2].info.balance, U256::from(1), "the transfer happened");
     assert_eq!(
@@ -669,7 +672,7 @@ fn test_creation_failing_before_the_nonce_bump_records_nothing() {
     let mut evm = MegaEvm::new(context(funded().account_code(CALLEE, code)))
         .with_inspector(OverfundCreations);
     let result =
-        alloy_evm::Evm::transact_raw(&mut evm, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT))
+        alloy_evm::Evm::transact_raw(&mut evm, call(CALLER, CALLEE, U256::ZERO, gas_limit()))
             .unwrap();
     assert!(result.result.is_success());
     assert_eq!(result.state[&CALLEE].info.nonce, 0, "the nonce was never bumped");
@@ -682,7 +685,7 @@ fn test_creation_failing_before_the_nonce_bump_records_nothing() {
 fn test_colliding_creation_keeps_the_creator_record() {
     let code = append_value_create(BytecodeBuilder::default()).append(POP).append(STOP).build();
     let db = funded().account_code(CALLEE, code).account_nonce(CALLEE.create(0), 1);
-    let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
+    let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, gas_limit()));
     assert!(result.result.is_success());
     assert_eq!(result.state[&CALLEE].info.nonce, 1, "the collision comes after the bump");
     assert_eq!(usage, records(1), "the creator's nonce only");
@@ -706,7 +709,7 @@ fn test_creation_stopped_at_init_bumps_the_creator_nonce() {
     let limits = mega_evm::EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(100);
     let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits));
     let result =
-        alloy_evm::Evm::transact_raw(&mut evm, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT))
+        alloy_evm::Evm::transact_raw(&mut evm, call(CALLER, CALLEE, U256::ZERO, gas_limit()))
             .unwrap();
     assert!(result.result.is_success(), "{:?}", result.result);
     assert_eq!(result.state[&CALLEE].info.nonce, 1, "the stopped creation bumped the nonce");
@@ -778,7 +781,10 @@ fn one_short_of_the_runtime_phase() -> u64 {
     // Gas is monotone here: every limit above the smallest one that succeeds succeeds too. Search
     // for that smallest limit rather than walking up to it, which the delegation's state gas puts
     // several hundred thousand gas away.
-    let (mut fails, mut succeeds) = (0u64, 1_000_000u64);
+    // 1,000,000 of regular gas on top of the authority's account and delegation and a kilobyte of
+    // history, at the byte prices in effect.
+    let high = 1_000_000 + 2 * account_state_gas() + history(1_000);
+    let (mut fails, mut succeeds) = (0u64, high);
     assert!(succeeds_at(succeeds), "the high bound must succeed");
     while succeeds - fails > 1 {
         let middle = fails + (succeeds - fails) / 2;
@@ -850,7 +856,7 @@ fn test_value_receiving_child_records_itself_once() {
         .append(STOP)
         .build();
     let db = funded().account_code(CALLEE, a).account_code(CONTRACT, b);
-    let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
+    let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, gas_limit()));
     assert!(result.result.is_success());
     assert_eq!(result.state[&CONTRACT2].info.balance, U256::from(1));
     assert_eq!(
@@ -880,7 +886,7 @@ fn test_zero_value_child_starts_unrecorded() {
         .account_code(CALLEE, a)
         .account_code(CONTRACT, b)
         .account_balance(CONTRACT, U256::from(5));
-    let (result, usage) = run(db, call(CALLER, CALLEE, U256::from(1), GAS_LIMIT));
+    let (result, usage) = run(db, call(CALLER, CALLEE, U256::from(1), gas_limit()));
     assert!(result.result.is_success());
     assert_eq!(
         usage,
@@ -909,7 +915,7 @@ fn test_delegatecall_child_inherits_the_frame_account_record() {
         .append(STOP)
         .build();
     let db = funded().account_code(CALLEE, delegate_to_d()).account_code(D, d);
-    let (result, usage) = run(db, call(CALLER, CALLEE, U256::from(1), GAS_LIMIT));
+    let (result, usage) = run(db, call(CALLER, CALLEE, U256::from(1), gas_limit()));
     assert!(result.result.is_success());
     assert_eq!(result.state[&CONTRACT2].info.balance, U256::from(1), "CALLEE's value moved");
     assert_eq!(
@@ -929,7 +935,7 @@ fn test_created_frame_delegatecall_inherits_the_created_account_record() {
         .build();
     let db = funded().account_code(D, d);
     let tx = {
-        let mut tx = create(CALLER, delegate_to_d(), GAS_LIMIT);
+        let mut tx = create(CALLER, delegate_to_d(), gas_limit());
         tx.0.base.value = U256::from(5);
         tx
     };
@@ -956,7 +962,7 @@ fn test_top_level_self_call_counts_the_sender_as_recorded() {
     let account = db.load_account(CALLER).unwrap();
     account.info.code_hash = delegation.hash_slow();
     account.info.code = Some(delegation);
-    let (result, usage) = run(db, call(CALLER, CALLER, U256::ZERO, GAS_LIMIT));
+    let (result, usage) = run(db, call(CALLER, CALLER, U256::ZERO, gas_limit()));
     assert!(result.result.is_success(), "{:?}", result.result);
     assert_eq!(result.state[&CONTRACT2].info.balance, U256::from(1));
     assert_eq!(usage, with_extra(records(1), TRANSFER_LOG_SIZE), "CONTRACT2 and its log only");
@@ -998,7 +1004,7 @@ fn test_inspector_answered_call_keeps_the_caller_lane() {
     let mut evm =
         MegaEvm::new(context(funded().account_code(CALLEE, a))).with_inspector(AnswerContract);
     let result =
-        alloy_evm::Evm::transact_raw(&mut evm, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT))
+        alloy_evm::Evm::transact_raw(&mut evm, call(CALLER, CALLEE, U256::ZERO, gas_limit()))
             .unwrap();
     assert!(result.result.is_success());
     assert_eq!(
@@ -1071,7 +1077,7 @@ fn paired_corpus() -> Vec<Paired> {
         beneficiary: Address::ZERO,
     };
     let to_callee = |code: Bytes| funded().account_code(CALLEE, code);
-    let plain = || call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT);
+    let plain = || call(CALLER, CALLEE, U256::ZERO, gas_limit());
     let calling = |target, value| {
         append_value_call(BytecodeBuilder::default(), target, value)
             .append(POP)
@@ -1142,7 +1148,7 @@ fn paired_corpus() -> Vec<Paired> {
         case(
             "a creation whose init code reverts",
             funded().account_code(OUTER_CREATOR, reverting_creations(1)),
-            call(CALLER, OUTER_CREATOR, U256::ZERO, GAS_LIMIT),
+            call(CALLER, OUTER_CREATOR, U256::ZERO, gas_limit()),
             0,
             1,
         ),
@@ -1171,7 +1177,7 @@ fn paired_corpus() -> Vec<Paired> {
         case(
             "a transaction carrying calldata",
             to_callee(Bytes::new()),
-            call_with_data(CALLER, CALLEE, Bytes::from(vec![7u8; 100]), GAS_LIMIT),
+            call_with_data(CALLER, CALLEE, Bytes::from(vec![7u8; 100]), gas_limit()),
             0,
             0,
         ),
@@ -1180,7 +1186,7 @@ fn paired_corpus() -> Vec<Paired> {
             ..case(
                 "a value transaction",
                 funded(),
-                call(CALLER, CONTRACT, U256::from(1), GAS_LIMIT),
+                call(CALLER, CONTRACT, U256::from(1), gas_limit()),
                 0,
                 1,
             )
@@ -1188,22 +1194,22 @@ fn paired_corpus() -> Vec<Paired> {
         case(
             "a value transaction the recipient reverts",
             funded().account_code(CONTRACT, reverting),
-            call(CALLER, CONTRACT, U256::from(1), GAS_LIMIT),
+            call(CALLER, CONTRACT, U256::from(1), gas_limit()),
             0,
             0,
         ),
-        case("a creation transaction", funded(), create(CALLER, Bytes::new(), GAS_LIMIT), 0, 1),
+        case("a creation transaction", funded(), create(CALLER, Bytes::new(), gas_limit()), 0, 1),
         case(
             "a creation that deploys code",
             funded(),
-            create(CALLER, constructor_returning(32), GAS_LIMIT),
+            create(CALLER, constructor_returning(32), gas_limit()),
             32,
             1,
         ),
         case(
             "a creation whose revert data is not deployed code",
             funded(),
-            create(CALLER, reverting_with(10), GAS_LIMIT),
+            create(CALLER, reverting_with(10), gas_limit()),
             0,
             0,
         ),
@@ -1219,7 +1225,7 @@ fn paired_corpus() -> Vec<Paired> {
                     CALLER,
                     ORACLE_CONTRACT_ADDRESS,
                     send_hint(b"a hint the transaction pays data size for"),
-                    GAS_LIMIT,
+                    gas_limit(),
                 ),
                 0,
                 0,
@@ -1234,7 +1240,7 @@ fn paired_corpus() -> Vec<Paired> {
                 {
                     // A fee the beneficiary is actually credited, so the account the transfer
                     // records is one the body's five already bound.
-                    let mut tx = call(CALLER, CONTRACT, U256::from(1), GAS_LIMIT);
+                    let mut tx = call(CALLER, CONTRACT, U256::from(1), gas_limit());
                     tx.0.base.gas_price = 10;
                     tx
                 },
@@ -1326,7 +1332,7 @@ fn test_an_inspector_answered_value_call_gives_its_history_back() {
         append_value_call(BytecodeBuilder::default(), CONTRACT, 1).append(POP).append(STOP).build();
     let run_with = |inspector: Option<AnswerContract>| {
         let db = funded().account_code(CALLEE, code.clone());
-        let tx = call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT);
+        let tx = call(CALLER, CALLEE, U256::ZERO, gas_limit());
         match inspector {
             Some(inspector) => {
                 let mut evm = MegaEvm::new(context(db)).with_inspector(inspector);

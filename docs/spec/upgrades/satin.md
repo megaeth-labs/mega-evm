@@ -66,7 +66,7 @@ The changes, in the order this page records them:
 - Satin builds on Optimism Karst, whose Ethereum base is Osaka.
   Every standard EVM, transaction and block rule this page does not override MUST be Karst's, including the Optimism changes of Jovian and Karst and the Ethereum changes of Osaka (for example `CLZ`, [EIP-7939](https://eips.ethereum.org/EIPS/eip-7939)).
 - The per-transaction gas limit cap of [EIP-7825](https://eips.ethereum.org/EIPS/eip-7825) MUST NOT be applied.
-  The execution cap of [Two-Pool Gas](#4-two-pool-gas-eip-8037-replaces-the-dual-gas-model) bounds a transaction's regular gas instead, and a transaction's gas limit is bounded by the block's gas limit and the node's per-transaction gas-limit policy.
+  The execution cap of [Two-Pool Gas](#4-two-pool-gas-eip-8037-replaces-the-dual-gas-model) bounds a transaction's regular gas instead, and a transaction's gas limit is bounded by the block's gas limit; a block builder MAY refuse a larger declared gas limit as building policy, which a node validating a block does not apply (see [Block Limits](#20-block-limits)).
 - A node MUST enable four opcodes that Osaka does not have: `DUPN` (`0xE6`), `SWAPN` (`0xE7`) and `EXCHANGE` (`0xE8`) from [EIP-8024](https://eips.ethereum.org/EIPS/eip-8024), and `SLOTNUM` (`0x4B`) from [EIP-7843](https://eips.ethereum.org/EIPS/eip-7843).
   `SLOTNUM` MUST push the block's slot number as the node supplies it, and zero for a block that carries none.
 - The Karst block rules apply to MegaETH blocks:
@@ -385,15 +385,17 @@ Three dimensions are limited per transaction; compute is not one of them (see [T
   A frame that crosses its budget MUST revert with `MegaLimitExceeded(kind, budget)` and its caller continues.
 - **State gas** is the net EIP-8037 state gas the transaction holds: what it was charged before the first frame, plus what every frame on the call stack holds, net of refills and of failed frames.
   It MUST be checked wherever state gas is charged, after the charge: a charge the frame cannot pay is an out-of-gas whatever the limit.
-  The sites are the applied authorities and the account a deposit-like transaction creates for its caller, before the first frame (the authorities are taken back on a crossing), the first frame's recipient or created account, a fresh slot, a `SELFDESTRUCT`'s new beneficiary, a new account a `CALL`, `CREATE` or `CREATE2` adds (held once the frame is decided: a frame refused on its caller's account gives the charge back and is not held for it), and deployed code (at the deposit, before the creation commits).
+  The sites are the applied authorities and the account a deposit-like transaction creates for its caller, before the first frame (the authorities are taken back on a crossing), a fresh slot, a `SELFDESTRUCT`'s new beneficiary, a new account a frame's start adds — the first frame's recipient or created account, and the account a `CALL`, `CREATE` or `CREATE2` adds — (held once the frame is decided: a frame refused on its caller's account, or answered with a failure, gives the charge back and is not held for it), and deployed code (at the deposit, before the creation commits).
   Because it is a limit on gas, a slot or an account in a bucket `m` times the minimum reaches it `m` times sooner.
 - **Order at one site.**
   Where the state gas and a count cross at the same site, the state gas is the dimension reported; between the counts, data size is checked before write records, and a transaction limit before a frame budget.
-  A frame start is the exception: its records and transfer log are held before the frame is built, and the state gas its opcode charged upfront for the account it adds only once the frame is decided; a start the records stop adds no account, so its upfront state gas is given back rather than held, and the data-size or KV stop is the one reported.
+  A frame start is the exception: its records and transfer log are held before the frame is built, and the state gas charged upfront for the account it adds — by its opcode, or, for the first frame, by EIP-2780 — only once the frame is decided; a start the records stop adds no account, so its upfront state gas is given back rather than held, and the data-size or KV stop is the one reported.
 - **A frame start** is counted before the frame is built.
   A start the caller's account refuses — a value the caller cannot fund, a creation whose creator nonce cannot be bumped — MUST count nothing, be charged nothing, and be stopped by no limit.
   A creation onto an occupied address is counted, and a crossing it causes stops it where it would otherwise have failed on the collision.
-- The per-transaction limits and the per-frame caps are execution parameters the node supplies with each block, and every node executing a chain MUST use the same values; the values above apply when none is set.
+- The per-transaction limits and the per-frame caps are protocol values: the chain configuration carries them as parameters of the Satin hardfork, together with the detention caps and the block limits, and a node MUST hold every transaction to the values the chain configures, never to values it is handed with a block.
+  The values above are the defaults.
+  A chain configuration that activates Satin without these parameters MUST be refused when it is loaded, and so MUST one that sets a limit to zero, a transaction data-size limit below `TX_BODY_SIZE`, or a detention cap no transaction's compute reaches (see [Gas Detention on Withheld Gas](#12-gas-detention-on-withheld-gas)).
   The 98/100 share is not a parameter.
   At the default data-size limit a transaction keeps fewer than 327,680 write records (13,107,200 / 40), so a KV limit binds only below that.
 
@@ -421,7 +423,7 @@ What was applied before the first frame is not the frames' doing, and a later st
 A limit is enforced before the writes it guards:
 
 - A frame whose start would cross a limit MUST be answered with the stop before it is built, so no value moves; a stopped creation still bumps its creator's nonce.
-  The one exception is the state gas the calling opcode charges upfront for the account the frame adds: it is held once the frame is decided, so a frame built by then returns the stop before its first instruction, a frame answered without running is rewritten to the stop, and what the start moved is reverted with the frames the stop reverts.
+  The one exception is the state gas charged upfront for the account the frame adds — by the calling opcode, or, for the first frame, by EIP-2780: it is held once the frame is decided, so a frame built by then returns the stop before its first instruction, a frame answered without running is rewritten to the stop, and what the start moved is reverted with the frames the stop reverts — for the first frame, which no frame's revert follows, with its answer.
 - A body over the data-size limit MUST stop the transaction before it runs: no authorization is applied, no record made outside a frame is charged, the first frame's start is charged nothing, and the first frame is answered with the stop.
 - EIP-7702 authorities whose state gas or records would cross a limit MUST be taken back before the first frame, with their writes and the state gas applying them charged; the first frame is then answered with the stop.
   Authorities admitted there are kept through a later stop, as above.
@@ -462,7 +464,8 @@ A contract can revert with the same bytes, so the revert data alone does not ide
   What a halting frame burns is not compute, with one exception: when an opcode's static gas cannot be paid, what the halting frame had left counts as compute.
 - **The limit.**
   A read MUST set `limit = compute_at_read + cap`, with `cap` = `BLOCK_ENV_ACCESS_COMPUTE_GAS` = 20,000,000 for the block environment and the beneficiary and `ORACLE_ACCESS_COMPUTE_GAS` = 20,000,000 for the Oracle; the limit only goes down, so the most restrictive read binds.
-  The caps are execution parameters the node supplies with each block, 20,000,000 each when none is set.
+  The caps are protocol values the chain configuration carries with the other limits (see [Resource Limits](#10-resource-limits)), 20,000,000 each by default.
+  A chain's caps MUST be below 199,987,900, the most compute a transaction can spend, so that they can stop one: the execution cap less EIP-2780's base cost of 12,000, which every transaction pays, and the 100 of a warm account access, the least a frame pays for the code it runs.
 - **Withheld gas.**
   Once a limit is set, every frame's regular gas MUST be split into a spendable part, held at what the limit leaves the transaction (`limit − compute`), and a withheld part, the rest.
   The split MUST be applied when the read's opcode completes, when a frame starts or resumes, and after an `SSTORE` (whose restore of a slot can refill regular gas).
@@ -716,8 +719,14 @@ Four of those counts can be limited:
 - A deposit — a transaction whose envelope is a deposit — MUST NOT be refused by any of the four, and MUST count towards all four.
   A Mega System Transaction is a legacy transaction in the block, so at block level it is held to these budgets and to the data-availability limits like any non-deposit transaction.
 - History gas has no block limit; the block's history bytes are reported, not limited.
-- The pre-execution limits are unchanged in kind: the block gas limit (a transaction's declared gas limit must fit in what the block has left), the per-transaction gas limit, the encoded size, and the data-availability size, from which deposits are exempt.
-- The limits are execution parameters the node supplies with each block; every node executing a chain MUST use the same values.
+- The block gas limit is unchanged: a transaction's declared gas limit MUST fit in what the block has left.
+- The four limits are protocol values the chain configuration carries as parameters of the Satin hardfork, with the per-transaction limits (see [Resource Limits](#10-resource-limits)); the defaults are the table's.
+  A node validating a block MUST hold it to the chain's values, as the rules above state them, and to no other value.
+- A block builder MAY pack tighter, as building policy: it MAY refuse a transaction for its declared gas limit, its encoded size or its data-availability size, hold the block to an encoded-size or data-availability budget, and hold any of the four limits below the chain's value, never above it.
+  A building policy MUST NOT refuse a deposit, which the block derived from L1 must include: none of those per-transaction limits and budgets applies to one.
+  A deposit counts towards the block's encoded size and not towards its data-availability size; the block gas limit holds it as it holds every transaction.
+  A node validating a block MUST NOT apply a building policy, and a policy never changes what a packed block computes: it only decides which transactions the builder packs.
+- Satin sets no limit on a transaction's or a block's encoded size; a block-size rule of the base layer, where a chain adopts one, is the node's to apply and is not one of these limits.
 
 ### 21. Transaction and Block Refusals
 
@@ -737,15 +746,16 @@ A transaction MUST be rejected before inclusion when:
 A transaction MUST be skipped for the current block, and MAY be included in a later one, when:
 
 - its declared gas limit does not fit in the block's remaining gas;
-- it does not fit the block's encoded-size or data-availability budget;
 - its data-availability footprint does not fit in what the block's gas limit has left for footprints;
-- the block has reached its execution-gas, data-size or KV budget;
-- the block has reached its state-gas budget and the transaction adds state gas;
+- the block has reached the chain's execution-gas, data-size or KV limit;
+- the block has reached the chain's state-gas limit and the transaction adds state gas;
 - it is not a deposit and the block activates Satin or an Optimism fork from Jovian onward.
 
 A block that contains a transaction it should have skipped is invalid.
 
-A transaction exceeding a per-transaction encoded-size, data-availability or gas-limit policy MUST be rejected permanently.
+A block builder MAY also skip a transaction other than a deposit under its own building policy (see [Block Limits](#20-block-limits)): a per-transaction declared-gas, encoded-size or data-availability limit, a block encoded-size or data-availability budget, or one of the four block limits held below the chain's value.
+A transaction over a builder's per-transaction limit never fits that builder's blocks, and the builder MAY drop it.
+A block is not invalid for a transaction a building policy would have skipped.
 
 A transaction MUST be included with a failed receipt when it reverts, halts, or is stopped by a limit (see [The Revert-Class Stop](#11-the-revert-class-stop)).
 A failed bucket-capacity read or database read MUST fail the transaction with its cause rather than settle it at any price.
@@ -786,8 +796,9 @@ Satin is a restatement rather than a delta, so a Rex6 rule this page does not ca
 The six system contracts keep their Rex6 bytecode and ABI; the Satin deploy step refuses, rather than upgrades, any other code at their addresses.
 A system-address transaction without the system shape is now executed as a user transaction instead of being refused; only the holder of the system key can send one.
 
-The per-transaction and block limits and the detention caps are execution parameters the node supplies with each block: unless set, the KV-update and state-gas limits and the block's execution-gas limit are unlimited, the data-size limits are 13,107,200 bytes, and the detention caps are 20,000,000 each.
-Every node executing a chain must use the same values.
+The per-transaction and block limits and the detention caps are protocol values: the chain configuration carries them as parameters of the Satin hardfork, so every node executing a chain holds its blocks to the same ones, and a configuration that activates Satin without them does not load.
+By default the KV-update and state-gas limits and the block's execution-gas limit are unlimited, the data-size limits are 13,107,200 bytes, and the detention caps are 20,000,000 each.
+The per-transaction gas-limit, encoded-size and data-availability limits are a block builder's policy, not the chain's: a node validating a block does not apply them.
 
 Satin is unstable and not scheduled on any network: its prices, limits and rules may change in either direction until it is frozen.
 

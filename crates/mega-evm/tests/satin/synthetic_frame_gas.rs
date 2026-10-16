@@ -23,7 +23,7 @@ use mega_evm::{
         ORACLE_CONTRACT_CODE,
     },
     test_utils::MemoryDatabase,
-    EvmTxRuntimeLimits, LimitKind, MegaEvm,
+    EvmTxRuntimeLimits, LimitKind, LimitUsage, MegaEvm,
 };
 use revm::{
     context::{result::ExecutionResult, ContextTr, JournalTr},
@@ -32,7 +32,8 @@ use revm::{
     interpreter::{
         interpreter::SharedMemory, interpreter_action::FrameInit,
         interpreter_types::InterpreterTypes, CallInput, CallInputs, CallOutcome, CallScheme,
-        CallValue, FrameInput, Gas, InstructionResult, InterpreterResult,
+        CallValue, CreateInputs, CreateScheme, FrameInput, Gas, InstructionResult,
+        InterpreterResult,
     },
     primitives::CALL_STACK_LIMIT,
     Inspector,
@@ -102,6 +103,58 @@ fn test_depth_guard_returns_call_too_deep_with_the_inherited_reservoir() {
         .expect("frame_init does not fail");
     let ItemOrResult::Result(result) = result else { panic!("no frame is built past the limit") };
     assert_call_too_deep(&result);
+}
+
+/// Every start past the call-stack limit is answered by the guard as revm answers it — a creation
+/// and every call scheme alike — with the forwarded gas untouched and the inherited reservoir
+/// carried, before anything reads its caller's account or counts its start: nothing is counted,
+/// and the creator's nonce is not bumped, so no nonce record outlives the answer.
+#[test]
+fn test_depth_guard_answers_a_creation_and_every_call_scheme() {
+    let past = CALL_STACK_LIMIT as usize + 1;
+    let creation = FrameInit {
+        depth: past,
+        memory: SharedMemory::new(),
+        frame_input: FrameInput::Create(Box::new(CreateInputs::new(
+            CALLER,
+            CreateScheme::Create,
+            U256::from(1),
+            Bytes::new(),
+            GAS_LIMIT,
+            RESERVOIR,
+        ))),
+    };
+    let mut inits = vec![creation];
+    for (scheme, value) in [
+        (CallScheme::Call, CallValue::Transfer(U256::from(1))),
+        (CallScheme::CallCode, CallValue::Transfer(U256::from(1))),
+        (CallScheme::DelegateCall, CallValue::Apparent(U256::from(1))),
+        (CallScheme::StaticCall, CallValue::Transfer(U256::ZERO)),
+    ] {
+        let mut init = call_frame_init(past);
+        if let FrameInput::Call(inputs) = &mut init.frame_input {
+            inputs.scheme = scheme;
+            inputs.value = value;
+            inputs.is_static = scheme == CallScheme::StaticCall;
+        }
+        inits.push(init);
+    }
+    for init in inits {
+        let what = format!("{:?}", init.frame_input);
+        // The caller's account is never loaded: nothing reads it for a start the guard answers.
+        let mut evm = MegaEvm::new(context(MemoryDatabase::default()));
+        let result = EvmTr::frame_init(&mut evm, init).expect("frame_init does not fail");
+        let ItemOrResult::Result(result) = result else { panic!("{what}: no frame is built") };
+        let gas = result.gas();
+        assert_eq!(result.instruction_result(), InstructionResult::CallTooDeep, "{what}");
+        assert_eq!(gas.remaining(), GAS_LIMIT, "{what}: the forwarded gas is untouched");
+        assert_eq!(gas.reservoir(), RESERVOIR, "{what}: the inherited reservoir is carried");
+        if let FrameResult::Create(outcome) = &result {
+            assert_eq!(outcome.address, None, "{what}");
+        }
+        assert_eq!(evm.ctx().additional_limit().usage(), LimitUsage::ZERO, "{what}: counted");
+        assert!(!evm.ctx().journal_ref().state.contains_key(&CALLER), "{what}: no nonce bumped");
+    }
 }
 
 /// `CALL_STACK_LIMIT` itself is the last permitted depth: the guard does not fire there.

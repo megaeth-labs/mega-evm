@@ -24,7 +24,7 @@ use revm::{
     },
     context_interface::{
         cfg::{gas::GasTracker, GasId, StateGasCharge, StateGasSite},
-        journaled_state::{account::JournaledAccountTr, entry::JournalEntry},
+        journaled_state::{account::JournaledAccountTr, entry::JournalEntry, JournalCheckpoint},
         Host,
     },
     handler::{
@@ -50,7 +50,9 @@ use crate::{
     access::ComputeStop,
     evm::{
         history::transaction_body_bytes,
-        inspector::{frame_end_checked, journal_position, ResultSource, StepGuard},
+        inspector::{
+            frame_end_checked, journal_position, revert_journal_to, ResultSource, StepGuard,
+        },
     },
     history_gas, synthetic_frame_result,
     system::keyless,
@@ -246,12 +248,13 @@ where
     /// out-of-gas in place of the stop that bound first. The input carries no charged flag, so
     /// the stop's settlement gives nothing back that was not charged.
     ///
-    /// Once revm has built the first frame, the state gas the transaction has been charged is all
-    /// it holds outside its frames: the account a deposit-like transaction creates for its caller,
-    /// the applied authorities, and the new account EIP-2780 charges the first frame's start for.
-    /// It is held to the state-gas limit there, and a crossing latches the transaction: the frame
-    /// is answered with the stop before it runs, and its settlement gives the start's charge back
-    /// as it does for any first frame that fails.
+    /// Once revm has prepared the first frame, the state gas the transaction has been charged is
+    /// all it holds outside its frames: the account a deposit-like transaction creates for its
+    /// caller, the applied authorities, and the new account EIP-2780 charges the first frame's
+    /// start for. The first two stand whatever the first frame does, and are held to the
+    /// state-gas limit here: a crossing latches the transaction, and the frame is answered with the
+    /// stop before it is built. The third is the first frame's upfront charge, held as every
+    /// frame's is, once revm has decided the frame ([`hold_upfront_state_gas`]).
     fn first_frame_input(
         &mut self,
         evm: &mut Self::Evm,
@@ -260,8 +263,10 @@ where
         if evm.ctx_ref().additional_limit.latched().is_some() {
             return Ok(Some(unbuilt_first_frame(evm.ctx_ref(), gas)));
         }
+        let stands = gas.state_gas_spent();
         let frame = self.op.first_frame_input(evm, gas)?;
-        evm.ctx_mut().additional_limit.on_state_gas_before_frames(gas.state_gas_spent());
+        let spent = gas.state_gas_spent();
+        evm.ctx_mut().additional_limit.on_state_gas_before_frames(stands, spent);
         evm.ctx_mut().mark_beneficiary_delegate();
         Ok(frame)
     }
@@ -412,8 +417,8 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     /// Starts a frame, in this order:
     ///
     /// 1. the latch: a latched transaction's frame is answered with the stop;
-    /// 2. the depth guard: a `CALL` or `STATICCALL` past the call-stack limit is answered with
-    ///    `CallTooDeep` before anything could intercept it;
+    /// 2. the depth guard: a frame past the call-stack limit is answered with `CallTooDeep`, as
+    ///    revm answers it, before anything could intercept it or count its start;
     /// 3. the keyless dispatch ([`keyless::is_dispatched`]): a `keylessDeploy` call a transaction
     ///    makes is answered when it carries value, and otherwise readied for revm to build as the
     ///    frame whose actions [`keyless::run`] makes ([`keyless::ready`]);
@@ -427,7 +432,10 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     /// 6. revm builds the frame, or answers it;
     /// 7. the state gas the caller was charged upfront for the frame's start is held to the
     ///    state-gas limit, unless revm refused the frame and so gives it back
-    ///    ([`hold_upfront_state_gas`]).
+    ///    ([`hold_upfront_state_gas`]); for the transaction's own frame, the account EIP-2780
+    ///    charges its start for. A success answer of the transaction's own frame rewritten into the
+    ///    stop has its journal taken back to where its start began, since no caller's revert will
+    ///    take back what the answer wrote.
     ///
     /// A frame answered at step 3, 4 or 6 — a `keylessDeploy` call carrying value, an
     /// interceptor's answer, a precompile's, revm's for a call it did not start — is held to the
@@ -446,9 +454,9 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     /// the results [`frame_return_result`](EvmTr::frame_return_result) pops. A creation answered
     /// with a stop still bumps its creator's nonce, as one that starts and reverts does.
     ///
-    /// Before any of it, the state gas the caller holds is noted: the state-gas limit counts it
-    /// as held outside the frame, with its own entry pushed beside the frame's lane, and adds to
-    /// it what the frame charges. An interceptor's answer is held as revm's own is at step 7.
+    /// The frame's lane holds outside it what its caller held when it suspended on this frame
+    /// ([`after_frame_run`]), which the state-gas limit adds what the frame charges to. An
+    /// interceptor's answer is held as revm's own is at step 7.
     #[inline]
     fn frame_init(
         &mut self,
@@ -482,14 +490,6 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
                 return Ok(ItemOrResult::Result(stop_before_building(ctx, &frame_init, &check)?));
             }
         }
-        // The creator of a creation, to tell afterwards whether revm bumped its nonce: a creation
-        // revm answers without the bump made nothing its start counted.
-        let creator = match &frame_init.frame_input {
-            FrameInput::Create(inputs) => {
-                Some((inputs.caller(), account_nonce(ctx, inputs.caller())))
-            }
-            _ => None,
-        };
         #[cfg(debug_assertions)]
         let counted = (
             ctx.additional_limit.frame_start_transfer_log(&frame_init.frame_input),
@@ -503,6 +503,8 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             &mut frame_init,
             refused,
         );
+        // Where the transaction's own frame starts, for an answer the engine then stops.
+        let start = (depth == 0).then(|| journal_position(ctx));
         let outcome = if hold == PrecompileHold::Crossing {
             Err(crossing_answer(&frame_init.frame_input))
         } else {
@@ -525,16 +527,15 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
                 Ok(ItemOrResult::Item(self.inner.frame_stack.get()))
             }
             Err(mut result) => {
-                if let Some((creator, nonce)) = creator {
-                    if account_nonce(ctx, creator) == nonce {
-                        ctx.additional_limit.creation_did_not_bump_nonce();
-                    }
-                }
                 if let PrecompileHold::Clamped(withheld) = hold {
                     Detention::restore_forward(result.interpreter_result_mut(), withheld);
                 }
+                let succeeded = result.instruction_result().is_ok();
                 settle_answer(ctx, depth, gas_limit, &mut result);
                 hold_upfront_state_gas(ctx, Some(&mut result));
+                if let Some(start) = start {
+                    take_back_a_stopped_answer(ctx, start, succeeded, &result);
+                }
                 Ok(ItemOrResult::Result(result))
             }
         }
@@ -775,7 +776,8 @@ fn before_frame_run<DB: Database, ExtEnvs: ExternalEnvTypes>(
 }
 
 /// Settles gas detention once the frame ran: a frame that suspends on a child keeps its compute
-/// for the child's start to add to the transaction's; a frame that returns is classified.
+/// for the child's start to add to the transaction's, and its state gas on its lane for the
+/// child's to hold outside it; a frame that returns is classified.
 ///
 /// The frame's result is read here, after revm processed its last action — `return_create`
 /// included, whose deposit and hash charges are the creating frame's own compute — and before
@@ -795,6 +797,7 @@ fn after_frame_run<DB: Database, ExtEnvs: ExternalEnvTypes, E>(
     match next {
         Ok(ItemOrResult::Item(_)) => {
             ctx.detention.on_frame_suspend(&frame.interpreter.gas, frame.depth);
+            ctx.additional_limit.on_frame_suspend(frame.interpreter.gas.state_gas_spent());
         }
         Ok(ItemOrResult::Result(result)) => {
             let instruction_result = result.instruction_result();
@@ -1000,19 +1003,11 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     /// start ([`answer_before_building`]), with the empty lane that stands in for it. It comes
     /// before the keyless dispatch, so the dispatch never sees a latched transaction; on the
     /// inspected path it comes after the inspector's `frame_start`.
-    ///
-    /// Before it, the state gas the caller holds is noted: it is held outside the frame it starts.
-    /// The caller is the frame on top of the stack, suspended on this frame's input; the
-    /// transaction's own frame has none, and starts on what was charged before it.
     #[inline]
     fn answered_before_building(
         &mut self,
         frame_init: &FrameInit,
     ) -> Result<Option<FrameResult>, ContextDbError<MegaContext<DB, ExtEnvs>>> {
-        if self.inner.frame_stack.index().is_some() {
-            let held = self.inner.frame_stack.get().interpreter.gas.state_gas_spent();
-            self.inner.ctx.additional_limit.note_caller_state_gas(held);
-        }
         let answer = answer_before_building(&mut self.inner.ctx, frame_init)?;
         if answer.is_some() {
             self.inner.ctx.additional_limit.push_empty_frame();
@@ -1022,24 +1017,27 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
 }
 
 /// Holds the state gas the caller was charged upfront for the frame that is starting — the new
-/// account a value `CALL` adds, a creation's account — to the state-gas limit, once revm has
-/// decided the frame. `answer` is the frame's result when it was answered without running; a
-/// frame revm built has none yet.
+/// account a value `CALL` adds, a creation's account, or, for the transaction's own frame, the
+/// recipient or created account EIP-2780 charges the transaction for — to the state-gas limit,
+/// once revm has decided the frame. `answer` is the frame's result when it was answered without
+/// running; a frame revm built has none yet.
 ///
-/// revm's `CALL`, `CREATE` and `CREATE2` make that charge before anything knows whether the frame
-/// can start, and a frame that adds no account gives it back when its answer returns
-/// ([`FrameResult::refundable_state_gas_charge`]): a value call its caller cannot fund, a call past
-/// the call-stack limit, an answer that fails. Such a charge is never held. A charge that stands —
-/// the frame is built, or answered with a success, as a value call to an account with no code is
-/// — is held, and a crossing latches the transaction: a built frame returns the stop before its
-/// first instruction, and an answer is rewritten to it here, so an inspector sees the answer the
-/// caller gets. The writes the frame's start made go with the frames the stop reverts. A built
-/// frame that later fails gives the charge back too, but by then it has started, and a crossing
-/// inside a frame that later fails is a crossing.
+/// revm's `CALL`, `CREATE` and `CREATE2`, and its EIP-2780 phase for the first frame, make that
+/// charge before anything knows whether the frame can start, and a frame that adds no account
+/// gives it back when its answer returns ([`FrameResult::refundable_state_gas_charge`]): a value
+/// call its caller cannot fund, a call past the call-stack limit, an answer that fails. Such a
+/// charge is never held. A charge that stands — the frame is built, or answered with a success, as
+/// a value call to an account with no code is — is held, and a crossing latches the transaction: a
+/// built frame returns the stop before its first instruction, and an answer is rewritten to it
+/// here, so an inspector sees the answer the caller gets. The writes the frame's start made go with
+/// the frames the stop reverts; an answer of the transaction's own frame, which no frame's revert
+/// follows, is taken back by its start ([`take_back_a_stopped_answer`]). A built frame that later
+/// fails gives the charge back too, but by then it has started, and a crossing inside a frame that
+/// later fails is a crossing.
 ///
-/// The frame's own entry is on top by now, and holds what its caller held, the charge included;
-/// the frame itself holds nothing yet. Every other charge was held where it was made, so only the
-/// upfront one can cross here.
+/// The frame's own lane is on top by now, and holds outside it what its caller held, the charge
+/// included; the frame itself holds nothing yet. Every other charge was held where it was made, so
+/// only the upfront one can cross here.
 fn hold_upfront_state_gas<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     answer: Option<&mut FrameResult>,
@@ -1052,6 +1050,26 @@ fn hold_upfront_state_gas<DB: Database, ExtEnvs: ExternalEnvTypes>(
         ctx.additional_limit.check_state_gas(0).exceeded_limit()
     {
         ctx.additional_limit.apply_latch(answer);
+    }
+}
+
+/// Takes the journal back to `start`, where the transaction's own frame began, when revm answered
+/// that frame with a success (`succeeded`) that the engine then rewrote into `result`, the stop.
+///
+/// revm commits an answered frame's journal checkpoint before its answer returns: a value transfer
+/// to an account with no code, or to a precompile that answers, has moved the value, created the
+/// recipient and journaled the transfer log by then. Below the transaction's own frame the stop
+/// reverts every caller, and the caller's checkpoint takes the answer's writes back with its own;
+/// the transaction's own frame has no caller, so its answer's writes are taken back here, as revm
+/// takes back a frame that fails. The journal's depth is left as it is.
+fn take_back_a_stopped_answer<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    start: JournalCheckpoint,
+    succeeded: bool,
+    result: &FrameResult,
+) {
+    if succeeded && !result.instruction_result().is_ok() {
+        revert_journal_to(ctx, start);
     }
 }
 
@@ -1125,16 +1143,21 @@ fn stop_before_building<DB: Database, ExtEnvs: ExternalEnvTypes>(
     Ok(stopped_frame_result(frame_init, check))
 }
 
-/// The depth guard: a `CALL` or `STATICCALL` past the call-stack limit, answered with
-/// `CallTooDeep`, its gas untouched and its reservoir carried.
+/// The depth guard: a frame past the call-stack limit, of any call scheme or a creation, answered
+/// with `CallTooDeep`, its gas untouched and its reservoir carried — the answer revm gives it.
 ///
-/// revm checks the depth when it builds a frame; an interceptor or an inspector answers before
-/// revm builds anything, so without the guard a system contract could be reached at any depth.
-/// `CALLCODE` and `DELEGATECALL` never reach an interceptor and are left to revm's own check.
+/// revm checks the depth first when it builds a frame, before it moves value or bumps a creator's
+/// nonce. The guard gives the same answer before anything else sees the frame: an interceptor or an
+/// inspector answers before revm builds anything, so without the guard a system contract could be
+/// reached at any depth; and a start's writes are counted before revm decides it, so without the
+/// guard a creation past the limit would count its creator's nonce record — which outlives a failed
+/// creation — for a nonce revm never bumps.
+///
+/// No transaction reaches the limit: regular gas is capped by the execution cap and every call
+/// forwards at most sixty-three sixty-fourths of what its caller has left, so a frame at depth
+/// 1,024 has a few gas.
 fn call_too_deep(frame_init: &FrameInit) -> Option<FrameResult> {
-    let FrameInput::Call(inputs) = &frame_init.frame_input else { return None };
-    let guarded = matches!(inputs.scheme, CallScheme::Call | CallScheme::StaticCall);
-    (guarded && frame_init.depth > CALL_STACK_LIMIT as usize).then(|| {
+    (frame_init.depth > CALL_STACK_LIMIT as usize).then(|| {
         synthetic_frame_result(
             &frame_init.frame_input,
             InstructionResult::CallTooDeep,
@@ -1155,7 +1178,9 @@ fn call_too_deep(frame_init: &FrameInit) -> Option<FrameResult> {
 /// is where a divergence from revm's own rules would show. revm refuses a start on its caller's
 /// account with `OutOfFunds`, for a value the caller cannot fund, and with a `Return` for a
 /// creation whose creator's nonce cannot be bumped — the one creation it answers with a success.
-/// A built frame has run no instruction yet, so the move is all revm has done. An answered call
+/// It refuses a start past the call-stack limit too, but the depth guard answers that start
+/// before revm sees it ([`call_too_deep`]), so revm never answers one. A built frame has run no
+/// instruction yet, so the move is all revm has done. An answered call
 /// moved the value when it succeeded — a call to an account with no code, a precompile — and took
 /// the move back when it failed. A creation revm answers never moved value: it refused before its
 /// checkpoint, or reverted it (a creation onto an occupied address). Only transfer logs are
@@ -1166,6 +1191,10 @@ fn assert_start_as_counted<DB: Database, ExtEnvs: ExternalEnvTypes>(
     (counted, refused, logs_i): (bool, bool, usize),
     answer: Option<&FrameResult>,
 ) {
+    debug_assert!(
+        answer.is_none_or(|answer| answer.instruction_result() != InstructionResult::CallTooDeep),
+        "the depth guard answers every start past the call-stack limit"
+    );
     let refused_by_revm = match answer {
         None => false,
         Some(FrameResult::Call(outcome)) => outcome.result.result == InstructionResult::OutOfFunds,
@@ -1353,14 +1382,6 @@ fn caller_refuses<DB: revm::Database, ExtEnvs: ExternalEnvTypes>(
     })
 }
 
-/// The nonce of an account the journal holds; zero for one it does not.
-fn account_nonce<DB: Database, ExtEnvs: ExternalEnvTypes>(
-    ctx: &MegaContext<DB, ExtEnvs>,
-    address: Address,
-) -> u64 {
-    ctx.journal_ref().state.get(&address).map_or(0, |account| account.info.nonce)
-}
-
 /// Records the account writes of the EIP-7702 authorities applied since journal entry
 /// `journal_i`: each applied authorization bumps its authority's nonce once, so the distinct
 /// authorities other than the sender are the accounts written. The sender's write is part of the
@@ -1508,13 +1529,13 @@ mod tests {
     }
 
     /// A context under a state-gas limit of 99, with the transaction's own frame on the call stack
-    /// holding 100 — the upfront charge of the frame it starts — and the entry of that frame
+    /// holding 100 — the upfront charge of the frame it starts — and the lane of that frame
     /// pushed.
     fn starting_a_frame_charged_100() -> MegaContext<MemoryDatabase> {
         let mut ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN)
             .with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits().with_tx_state_gas_limit(99));
         let _ = ctx.additional_limit.on_frame_init(&call(CALLER, CALLER, 0, false), 0);
-        ctx.additional_limit.note_caller_state_gas(100);
+        ctx.additional_limit.on_frame_suspend(100);
         ctx.additional_limit.push_empty_frame();
         ctx
     }
@@ -1771,6 +1792,20 @@ mod tests {
     fn test_a_predicted_refusal_revm_did_not_make_trips() {
         let ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
         assert_start_as_counted(&ctx, (false, true, 0), None);
+    }
+
+    /// The guard trips on a start revm answered past the call-stack limit, which the depth guard
+    /// answers before revm sees it, for a creation and a call alike.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "the depth guard answers every start past the call-stack limit")]
+    fn test_a_start_revm_answered_past_the_depth_limit_trips() {
+        let ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
+        for input in [creation(), value_call()] {
+            let too_deep =
+                synthetic_frame_result(&input, InstructionResult::CallTooDeep, Bytes::new());
+            assert_start_as_counted(&ctx, (false, false, 0), Some(&too_deep));
+        }
     }
 
     /// The guard expects no log where nothing moved, whatever the input would count: a start

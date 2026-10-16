@@ -53,7 +53,7 @@ use revm::{
     Journal,
 };
 
-use crate::common::runs_at_measurement_prices;
+use crate::common::{runs_at_measurement_prices, state_is_free};
 
 const CALLER: Address = address!("0x4000000000000000000000000000000000000001");
 const CONTRACT: Address = address!("0x5000000000000000000000000000000000000001");
@@ -235,12 +235,20 @@ fn test_a_system_call_above_30m_carries_the_excess_as_reservoir() {
 /// regular budget. `GAS`, read after the writes, shows the spill: the regular gas the next write
 /// took is its own regular cost, which the writes before it show, plus the part of its slot the
 /// reservoir did not hold.
+///
+/// Where a slot is cheaper, the default reservoir holds more fresh slots than the regular budget
+/// can write, so the call is given a reservoir of sixteen.
 #[test]
 fn test_a_system_call_s_state_draws_the_reservoir_first_then_spills() {
+    // Slots that cost nothing never empty the reservoir, and there is nothing to spill.
+    if state_is_free() || slot() == 0 {
+        return;
+    }
     if !runs_at_measurement_prices() {
         assert_eq!(SLOT_STATE_GAS, slot());
         assert_eq!(DEFAULT_RESERVOIR, 16 * SLOT_STATE_GAS);
     }
+    let reservoir = DEFAULT_RESERVOIR.min(16 * slot());
     // The reading is stored into a slot that already holds a value, which writes no new state.
     const READING: u64 = 0xff;
     let run = |writes| {
@@ -248,8 +256,8 @@ fn test_a_system_call_s_state_draws_the_reservoir_first_then_spills() {
             fresh_writes(writes).append(GAS).push_number(READING as u8).append(SSTORE).stop();
         let db =
             db_with(code.build()).account_storage(CONTRACT, U256::from(READING), U256::from(1));
-        let (mega, op) =
-            run_both(both_evms(db), CALLER, CONTRACT, Bytes::new(), SYSTEM_CALL_GAS_LIMIT);
+        let gas_limit = SYSTEM_CALL_REGULAR_GAS_LIMIT + reservoir;
+        let (mega, op) = run_both(both_evms(db), CALLER, CONTRACT, Bytes::new(), gas_limit);
         assert!(mega.result.is_success(), "{:?}", mega.result);
         assert_eq!(mega.result.gas().state_gas_spent_final(), writes * slot());
         assert_same(&mega, &op);
@@ -258,14 +266,14 @@ fn test_a_system_call_s_state_draws_the_reservoir_first_then_spills() {
     };
 
     // The most slots the reservoir holds, and what the one after them spills.
-    let held = DEFAULT_RESERVOIR / slot();
-    let spill = (held + 1) * slot() - DEFAULT_RESERVOIR;
+    let held = reservoir / slot();
+    let spill = (held + 1) * slot() - reservoir;
     let (two_short, _) = run(held - 2);
     let (one_short, reservoir_one_short) = run(held - 1);
     let (at, reservoir_at) = run(held);
     let (past, reservoir_past) = run(held + 1);
-    assert_eq!(reservoir_one_short, DEFAULT_RESERVOIR - (held - 1) * slot());
-    assert_eq!(reservoir_at, DEFAULT_RESERVOIR - held * slot(), "empty at Satin's price");
+    assert_eq!(reservoir_one_short, reservoir - (held - 1) * slot());
+    assert_eq!(reservoir_at, reservoir - held * slot(), "empty at Satin's price");
     assert_eq!(reservoir_past, 0);
     // A write the reservoir holds takes regular gas for itself alone, the same for each.
     let one_write = one_short - at;
@@ -277,7 +285,9 @@ fn test_a_system_call_s_state_draws_the_reservoir_first_then_spills() {
 /// leaves all of it.
 #[test]
 fn test_reservoir_remaining_is_what_the_writes_left() {
-    for writes in [0, 1, 5] {
+    // As many as five writes, and no more than the reservoir holds at the byte prices in effect.
+    let most = DEFAULT_RESERVOIR.checked_div(slot()).map_or(5, |held| held.min(5));
+    for writes in [0, 1, most] {
         let code = fresh_writes(writes).stop().build();
         let (mega, op) = run_both(
             both_evms(db_with(code)),
@@ -396,8 +406,12 @@ fn test_apply_pending_changes_at_30m_is_priced_at_the_minimum_bucket() {
     );
     assert!(mega.result.is_success(), "{:?}", mega.result);
     assert_eq!(mega.result.gas().reservoir_remaining(), 0);
-    assert!(mega.result.gas().state_gas_spent_final() > 0, "the change wrote fresh slots");
-    assert_eq!(mega.result.gas().state_gas_spent_final() % slot(), 0, "at m = 1");
+    // Where a state byte is free the slots cost nothing, at any bucket.
+    if !state_is_free() {
+        let state = mega.result.gas().state_gas_spent_final();
+        assert!(state > 0, "the change wrote fresh slots");
+        assert_eq!(state % slot(), 0, "at m = 1");
+    }
     assert_eq!(crowded.total_bucket_queries(), 0);
     assert_same(&mega, &op);
 }

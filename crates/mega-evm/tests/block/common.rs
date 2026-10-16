@@ -12,13 +12,14 @@ use alloy_sol_types::SolCall;
 use mega_evm::{
     system::{IOracle, SequencerRegistryConfig, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS},
     test_utils::MemoryDatabase,
-    BlockLimits, EmptyExternalEnv, MegaBlockExecutionCtx, MegaBlockExecutor,
+    BlockLimits, EmptyExternalEnv, EvmTxRuntimeLimits, MegaBlockExecutionCtx, MegaBlockExecutor,
     MegaBlockExecutorFactory, MegaEvm, MegaEvmFactory, MegaHardforkConfig, MegaSpecId,
-    MegaTxEnvelope, PreBlockStateSource,
+    MegaTxEnvelope, PreBlockStateSource, ProtocolLimits,
 };
 use op_alloy_consensus::TxDeposit;
 use revm::{
     context::{BlockEnv, CfgEnv},
+    context_interface::cfg::GasId,
     database::State,
     inspector::NoOpInspector,
     state::EvmState,
@@ -86,20 +87,42 @@ pub(crate) fn registry_config() -> SequencerRegistryConfig {
     }
 }
 
-/// A schedule that activates Satin at genesis and can seed the `SequencerRegistry`.
+/// A schedule that activates Satin at genesis, can seed the `SequencerRegistry`, and holds its
+/// blocks to the loosest limits a chain may carry.
+///
+/// Its limits are [`ProtocolLimits::loosest`]: most block tests exercise one mechanism and take
+/// the limits out, and a test that holds a block or a transaction to a limit attaches its own
+/// ([`chain_spec_with`]). Every limit is unlimited but gas detention's caps, which no transaction
+/// of a block this size reaches, so a transaction that reads volatile data is detained and never
+/// stopped.
 pub(crate) fn chain_spec() -> MegaHardforkConfig {
-    MegaHardforkConfig::default().with_all_activated().with_params(registry_config())
+    chain_spec_with(ProtocolLimits::loosest())
 }
 
-/// The context of a block held to `limits`.
+/// [`chain_spec`], holding its blocks to `limits`, which must be limits a chain may carry: the
+/// block executor refuses a block under any other.
+pub(crate) fn chain_spec_with(limits: ProtocolLimits) -> MegaHardforkConfig {
+    MegaHardforkConfig::default()
+        .with_all_activated()
+        .with_params(registry_config())
+        .with_params(limits)
+}
+
+/// The per-transaction half of [`ProtocolLimits::loosest`], for a test that holds a block's
+/// transactions to one limit and no other.
+pub(crate) const fn loosest_tx() -> EvmTxRuntimeLimits {
+    ProtocolLimits::loosest().tx_runtime_limits
+}
+
+/// The context of a block the builder packs under `policy`.
 ///
 /// Cancun is active, so the block carries a parent beacon block root; without one the EIP-4788
 /// pre-block call refuses the block.
-pub(crate) fn block_ctx(limits: BlockLimits) -> MegaBlockExecutionCtx {
-    MegaBlockExecutionCtx::new(B256::ZERO, Some(B256::ZERO), Bytes::new(), limits)
+pub(crate) fn block_ctx(policy: BlockLimits) -> MegaBlockExecutionCtx {
+    MegaBlockExecutionCtx::new(B256::ZERO, Some(B256::ZERO), Bytes::new(), policy)
 }
 
-/// The context of a block with no limits at all.
+/// The context of a block packed under no building policy, as a validator executes one.
 pub(crate) fn unlimited_ctx() -> MegaBlockExecutionCtx {
     block_ctx(BlockLimits::no_limits())
 }
@@ -113,16 +136,20 @@ pub(crate) type TestExecutor<'a> =
     MegaBlockExecutor<TestEvm<'a>, OpAlloyReceiptBuilder, MegaHardforkConfig>;
 
 /// The factory the tests build executors from.
-pub(crate) fn factory() -> MegaBlockExecutorFactory<
+pub(crate) type TestFactory = MegaBlockExecutorFactory<
     OpAlloyReceiptBuilder,
     MegaHardforkConfig,
     MegaEvmFactory<EmptyExternalEnv>,
-> {
-    MegaBlockExecutorFactory::new(
-        OpAlloyReceiptBuilder::default(),
-        chain_spec(),
-        MegaEvmFactory::new(),
-    )
+>;
+
+/// The factory the tests build executors from.
+pub(crate) fn factory() -> TestFactory {
+    factory_on(chain_spec())
+}
+
+/// A factory of executors for blocks on the chain `spec` describes.
+pub(crate) fn factory_on(spec: MegaHardforkConfig) -> TestFactory {
+    MegaBlockExecutorFactory::new(OpAlloyReceiptBuilder::default(), spec, MegaEvmFactory::new())
 }
 
 /// An executor over `state`, for a block held to `ctx`.
@@ -140,6 +167,15 @@ pub(crate) fn executor_with_env(
     env: EvmEnv<MegaSpecId>,
 ) -> TestExecutor<'_> {
     build(state, ctx, env, chain_spec())
+}
+
+/// An executor over `state`, for a block the chain holds to `limits`, packed under no building
+/// policy.
+pub(crate) fn executor_with_limits(
+    state: &mut State<MemoryDatabase>,
+    limits: ProtocolLimits,
+) -> TestExecutor<'_> {
+    build(state, unlimited_ctx(), evm_env(), chain_spec_with(limits))
 }
 
 /// An executor over `state`, for a block on the chain `spec` describes.
@@ -192,6 +228,19 @@ pub(crate) fn pre_block_states(log: &PreBlockLog) -> Vec<(PreBlockStateSource, E
     log.lock().expect("pre-block observer").clone()
 }
 
+/// The history gas the body of a legacy transaction carrying `calldata_len` bytes of calldata
+/// pays, at the byte prices in effect.
+pub(crate) fn body_history(calldata_len: u64) -> u64 {
+    mega_evm::history_gas(mega_evm::tx_body_history_bytes(calldata_len, 0, 0, 0))
+        .expect("the body has a price")
+}
+
+/// A gas limit for a call to the empty [`CONTRACT`]: 100,000 of regular gas on top of the
+/// history its body pays, so the call has the same room whatever a history byte costs.
+pub(crate) fn empty_call_gas() -> u64 {
+    100_000 + body_history(0)
+}
+
 /// A legacy transaction from [`CALLER`].
 pub(crate) fn tx(nonce: u64, to: Address, input: Bytes, gas_limit: u64) -> MegaTxEnvelope {
     let tx_legacy = TxLegacy {
@@ -215,12 +264,42 @@ pub(crate) fn user_tx(nonce: u64, gas_limit: u64) -> Recovered<MegaTxEnvelope> {
     recovered(tx(nonce, CONTRACT, Bytes::new(), gas_limit))
 }
 
+/// The state gas one fresh storage slot costs at the byte prices in effect, in the minimum
+/// bucket the tests' environment prices every slot in.
+pub(crate) fn slot_state_gas() -> u64 {
+    mega_evm::satin_gas_params().get(GasId::sstore_set_state_gas())
+}
+
+/// Whether a state byte costs nothing at the prices in effect: every state-gas entry of the
+/// schedule is zero.
+///
+/// Only a measurement build arranges that, with `MEGA_SATIN_CPSB` at 0 or at a price every entry
+/// rounds to nothing. A case whose scenario is state gas to cross a limit with has nothing to run
+/// then, and is skipped; each test that skips one leaves a note (`note_price_guard`),
+/// which the byte-price grid counts.
+pub(crate) fn state_is_free() -> bool {
+    let params = mega_evm::satin_gas_params();
+    if !mega_evm::STATE_GAS_REPRICED.iter().all(|&(id, _)| params.get(id()) == 0) {
+        return false;
+    }
+    mega_evm::test_utils::note_price_guard("MEGA_SATIN_CPSB prices a state byte at nothing");
+    true
+}
+
+/// The state gas one new account costs at the byte prices in effect.
+pub(crate) fn new_account_state_gas() -> u64 {
+    mega_evm::satin_gas_params().get(GasId::new_account_state_gas())
+}
+
 /// A Mega System Transaction: a legacy call from the system address the registry names to the
 /// Oracle's `getSlot(0)`.
+///
+/// Its gas is 1,000,000 on top of the account the engine creates for its caller, which the
+/// tests' state does not hold, so it runs the same whatever a state byte costs.
 pub(crate) fn system_tx() -> Recovered<MegaTxEnvelope> {
     let input = IOracle::getSlotCall { slot: U256::ZERO }.abi_encode();
     Recovered::new_unchecked(
-        tx(0, ORACLE_CONTRACT_ADDRESS, input.into(), 1_000_000),
+        tx(0, ORACLE_CONTRACT_ADDRESS, input.into(), 1_000_000 + new_account_state_gas()),
         MEGA_SYSTEM_ADDRESS,
     )
 }

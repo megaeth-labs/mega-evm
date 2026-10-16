@@ -324,7 +324,12 @@ fn test_pause_and_resume_gas_metering_hold_the_gas() {
 
     let unpaused = region(BytecodeBuilder::default()).stop().build();
     let (metered, _) = run(db(unpaused), false);
-    assert!(metered.gas.state > 0 && metered.gas.gas_used > 0, "unpaused, the region pays");
+    assert!(metered.gas.gas_used > 0, "unpaused, the region pays");
+    assert_eq!(
+        metered.gas.state,
+        entry(GasId::sstore_set_state_gas()),
+        "the slot's state gas included"
+    );
 }
 
 /// `expectRevert` turns the next call's revert into a success that keeps the revert data. `TARGET`

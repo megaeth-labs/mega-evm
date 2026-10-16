@@ -48,7 +48,9 @@ use revm::{
     ExecuteEvm, Journal,
 };
 
-use crate::common::runs_at_measurement_prices;
+use crate::common::{
+    account_state_gas, body_history, history, runs_at_measurement_prices, slot_state_gas,
+};
 
 const CALLER: Address = address!("0x4000000000000000000000000000000000000001");
 const CALLEE: Address = address!("0x5000000000000000000000000000000000000001");
@@ -128,7 +130,7 @@ fn both_evms(
 /// ([`test_fees_match_op_revm`]).
 fn assert_same_but_history(mega: &MegaTransactionOutcome, op: &Outcome) {
     let history = mega.gas.history;
-    assert!(history > 0, "every Satin transaction pays for its own body");
+    assert!(history >= body_history(0), "every Satin transaction pays for its own body");
     let (m, o) = (mega.result.gas(), op.result.gas());
     assert_eq!(m.total_gas_spent(), o.total_gas_spent() + history, "total gas spent");
     assert_eq!(m.state_gas_spent_final(), o.state_gas_spent_final(), "state gas spent");
@@ -220,7 +222,8 @@ fn test_value_transfer_matches_op_revm() {
         caller: CALLER,
         kind: TxKind::Call(CALLEE),
         value: U256::from(1_000),
-        gas_limit: 1_000_000,
+        // Room for the account the transfer creates, at the byte prices in effect.
+        gas_limit: 1_000_000 + account_state_gas(),
         ..Default::default()
     };
     let (mega, op, cfg) = run_both(db, tx);
@@ -232,9 +235,7 @@ fn test_value_transfer_matches_op_revm() {
     assert_same_but_history(&mega, &op);
     // The transfer log is in the receipt and costs no history: the ledger is the body and the
     // recipient's record, as it is for the same transfer without the log.
-    if !runs_at_measurement_prices() {
-        assert_eq!(mega.gas.history, (TX_BODY_SIZE + WRITE_RECORD_SIZE) * COST_PER_HISTORY_BYTE);
-    }
+    assert_eq!(mega.gas.history, history(TX_BODY_SIZE) + history(WRITE_RECORD_SIZE));
 }
 
 /// A nested value call above the execution cap, where the reservoir is what pays the history.
@@ -324,19 +325,26 @@ fn test_fees_match_op_revm() {
             BytecodeBuilder::default().sstore(U256::ZERO, U256::from(1)).stop().build(),
         );
     let block = BlockEnv { basefee: 7, beneficiary: COINBASE, ..block() };
+    // Room for the slot the callee fills, and for the body's and the two records' history, at the
+    // byte prices in effect.
+    let gas_limit = 1_000_000 +
+        slot_state_gas() +
+        body_history(0) +
+        history(WRITE_RECORD_SIZE) +
+        history(WRITE_RECORD_SIZE);
     let tx = TxEnv {
         caller: CALLER,
         kind: TxKind::Call(CALLEE),
         value: U256::from(1_000),
         gas_price: 10,
-        gas_limit: 1_000_000,
+        gas_limit,
         ..Default::default()
     };
     let (mega, op, _) = run_both_in(db, tx, block);
     assert!(mega.result.is_success());
     assert!(mega.state[&COINBASE].info.balance > U256::ZERO, "the beneficiary was paid");
     assert!(
-        mega.state[&CALLER].info.balance > U256::from(10u64.pow(18) - 10 * 1_000_000 - 1_000),
+        mega.state[&CALLER].info.balance > U256::from(10u64.pow(18) - 10 * gas_limit - 1_000),
         "the unused gas came back"
     );
     assert_eq!(
@@ -381,9 +389,11 @@ fn test_refund_matches_op_revm() {
     assert!(mega.result.gas().inner_refunded() > 0, "the clear is refunded");
 
     // The EIP-3529 cap is a fifth of what the transaction spent, so the history ledger raises it:
-    // op-revm has to cap the clearing refund here and Satin, spending more, keeps all of it.
-    // EIP-8037 state gas raises the same cap; this is that rule applied to the third ledger.
+    // op-revm has to cap the clearing refund here and Satin, spending more, keeps all of it once
+    // the history it pays lifts the cap past the refund, as it does at the spec's prices. EIP-8037
+    // state gas raises the same cap; this is that rule applied to the third ledger.
     let quotient = satin_gas_params().get(GasId::max_refund_quotient());
+    let clearing = satin_gas_params().get(GasId::sstore_clearing_slot_refund());
     assert_eq!(
         op.result.gas().inner_refunded(),
         op.result.gas().total_gas_spent() / quotient,
@@ -391,8 +401,8 @@ fn test_refund_matches_op_revm() {
     );
     assert_eq!(
         mega.result.gas().inner_refunded(),
-        satin_gas_params().get(GasId::sstore_clearing_slot_refund()),
-        "Satin keeps the whole clearing refund",
+        clearing.min(mega.result.gas().total_gas_spent() / quotient),
+        "Satin keeps the whole clearing refund, where its history lifts the cap past it",
     );
     assert_same_but_history(&mega, &op);
 }
@@ -503,7 +513,8 @@ fn test_a_system_address_transaction_diverges_from_op_revm() {
         kind: TxKind::Call(ORACLE_CONTRACT_ADDRESS),
         data: alloy_sol_types::SolCall::abi_encode(&IOracle::getSlotCall { slot: U256::ZERO })
             .into(),
-        gas_limit: 1_000_000,
+        // Room for the account the engine creates for the sender, at the byte prices in effect.
+        gas_limit: 1_000_000 + account_state_gas(),
         gas_price: 1_000,
         chain_id: Some(1),
         ..Default::default()
@@ -539,7 +550,7 @@ fn test_the_created_deposit_caller_diverges_from_op_revm() {
     let tx = TxEnv {
         caller: sender,
         kind: TxKind::Call(CALLEE),
-        gas_limit: 1_000_000,
+        gas_limit: 1_000_000 + account_state_gas(),
         gas_price: 0,
         ..Default::default()
     };
@@ -555,8 +566,9 @@ fn test_the_created_deposit_caller_diverges_from_op_revm() {
     let op_outcome = op.transact(deposit(tx)).unwrap();
 
     assert!(mega_outcome.result.is_success() && op_outcome.result.is_success());
-    assert!(
-        mega_outcome.result.gas().state_gas_spent_final() > 0,
+    assert_eq!(
+        mega_outcome.result.gas().state_gas_spent_final(),
+        account_state_gas(),
         "Satin charges the account the deposit creates for its sender",
     );
     assert_eq!(
