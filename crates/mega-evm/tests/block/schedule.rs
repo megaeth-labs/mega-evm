@@ -2,37 +2,13 @@
 
 use alloy_evm::block::BlockExecutor;
 use alloy_hardforks::ForkCondition;
-use alloy_primitives::{address, Address};
 use mega_evm::{
-    chain_activation, mainnet_hardforks, testnet_hardforks, HardforkParams, HardforkParamsError,
+    chain_activation, mainnet_hardforks, system::SequencerRegistryConfig, testnet_hardforks,
     MegaHardfork, MegaHardforkConfig, MegaHardforks, ScheduleError, MAINNET_CHAIN_ID,
     TESTNET_CHAIN_ID,
 };
 
-use crate::common::{self, user_tx};
-
-/// Parameters a fork requires from the chain configuration. Satin requires none yet, so this
-/// stands in for the ones the mechanisms that bring the system contracts will register.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RegistryParams {
-    sequencer: Address,
-}
-
-impl HardforkParams for RegistryParams {
-    const FORK: MegaHardfork = MegaHardfork::Satin;
-    const NAME: &'static str = "RegistryParams";
-
-    fn validate(&self) -> Result<(), HardforkParamsError> {
-        if self.sequencer.is_zero() {
-            return Err(HardforkParamsError { message: "sequencer must be set".into() });
-        }
-        Ok(())
-    }
-}
-
-fn params() -> RegistryParams {
-    RegistryParams { sequencer: address!("0x4444444444444444444444444444444444444444") }
-}
+use crate::common::{self, registry_config, user_tx};
 
 /// The canonical schedules are the chain activation table: the two are one source, so a
 /// timestamp cannot be right in one and wrong in the other. What the published upgrade pages
@@ -73,16 +49,26 @@ fn test_a_schedule_missing_its_fork_params_is_refused_at_load() {
     let missing =
         MegaHardforkConfig::default().with(MegaHardfork::Satin, ForkCondition::Timestamp(0));
     assert_eq!(
-        missing.require_params::<RegistryParams>(),
-        Err(ScheduleError::MissingParams { fork: MegaHardfork::Satin, params: "RegistryParams" }),
+        missing.require_params::<SequencerRegistryConfig>(),
+        Err(ScheduleError::MissingParams {
+            fork: MegaHardfork::Satin,
+            params: "SequencerRegistryConfig",
+        }),
         "the load refuses it"
+    );
+    assert_eq!(
+        missing.validate_schedule(),
+        Err(ScheduleError::MissingParams {
+            fork: MegaHardfork::Satin,
+            params: "SequencerRegistryConfig",
+        }),
     );
 
     // With the parameters attached the schedule loads, and a block runs on it.
-    let loaded = missing.with_params(params());
-    assert_eq!(loaded.require_params::<RegistryParams>(), Ok(()));
+    let loaded = missing.with_params(registry_config());
+    assert_eq!(loaded.require_params::<SequencerRegistryConfig>(), Ok(()));
     assert_eq!(loaded.validate_schedule(), Ok(()));
-    assert_eq!(loaded.fork_params::<RegistryParams>(), Some(&params()));
+    assert_eq!(loaded.fork_params::<SequencerRegistryConfig>(), Some(&registry_config()));
 
     let mut state = common::state();
     let mut executor = common::executor_with_spec(&mut state, common::unlimited_ctx(), loaded);
@@ -95,6 +81,6 @@ fn test_a_schedule_missing_its_fork_params_is_refused_at_load() {
 fn test_an_unscheduled_fork_needs_no_params() {
     let unscheduled = MegaHardforkConfig::default();
 
-    assert_eq!(unscheduled.require_params::<RegistryParams>(), Ok(()));
+    assert_eq!(unscheduled.require_params::<SequencerRegistryConfig>(), Ok(()));
     assert_eq!(unscheduled.validate_schedule(), Ok(()));
 }

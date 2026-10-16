@@ -3,6 +3,12 @@
 //! Satin runs a single spec, [`MegaSpecId::SATIN`], on op-revm's Karst handler with EIP-8037
 //! state gas and the EIP-2780 intrinsic cost. The legacy engine (specs `Equivalence` through
 //! `Rex7`) is a separate crate line; nothing here executes a legacy spec.
+//!
+//! A volatile read that `MegaAccessControl`'s switch refuses reverts its frame with
+//! `VolatileDataAccessDisabled(uint8 accessType)`. A refused `SLOTNUM` names access type 12
+//! ([`system::SLOT_NUM_ACCESS_TYPE`]), past the last variant of the contract's
+//! `VolatileDataAccessType`, so a Solidity handler must decode the argument as `uint8`;
+//! [`decode_volatile_data_access_disabled`] decodes it on the Rust side.
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 #![cfg_attr(not(feature = "std"), no_std)]
@@ -21,6 +27,7 @@ pub mod system;
 pub mod test_utils;
 mod types;
 
+pub use access::*;
 pub use block::*;
 pub use evm::*;
 pub use external::*;

@@ -82,7 +82,7 @@ pub(crate) enum InterceptedContract {
     KeylessDeploy,
     /// `MegaAccessControl`: the volatile-data access switch.
     AccessControl,
-    /// `MegaLimitControl`: what the running call has left.
+    /// `MegaLimitControl`: what the calling frame has left.
     LimitControl,
 }
 
@@ -109,7 +109,9 @@ pub(crate) fn intercepted_contract(address: &Address) -> Option<InterceptedContr
 /// own bytecode runs.
 ///
 /// `depth` is the depth of the frame the call would start, which is the calling frame's journal
-/// depth. The caller has already applied the scheme guard.
+/// depth, and `caller_remaining` the regular gas the calling frame has left after the call
+/// deducted its forward — zero for a transaction's own call, which no frame makes. The caller has
+/// already applied the scheme guard.
 ///
 /// The inputs are taken mutably because an interceptor may charge the frame it hands on
 /// (`KeylessDeploy`'s fixed overhead); an interceptor that answers the call charges its own
@@ -119,12 +121,15 @@ pub(crate) fn intercept<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     inputs: &mut CallInputs,
     depth: usize,
+    caller_remaining: u64,
 ) -> Option<FrameResult> {
     match intercepted_contract(&inputs.target_address)? {
-        InterceptedContract::Oracle => crate::system::oracle::intercept(ctx, inputs),
+        InterceptedContract::Oracle => crate::system::oracle::intercept(ctx, inputs, depth),
         InterceptedContract::KeylessDeploy => crate::system::keyless::intercept(ctx, inputs, depth),
-        InterceptedContract::AccessControl => crate::system::control::intercept(ctx, inputs),
-        InterceptedContract::LimitControl => crate::system::limit_control::intercept(ctx, inputs),
+        InterceptedContract::AccessControl => crate::system::control::intercept(ctx, inputs, depth),
+        InterceptedContract::LimitControl => {
+            crate::system::limit_control::intercept(ctx, inputs, depth, caller_remaining)
+        }
     }
 }
 

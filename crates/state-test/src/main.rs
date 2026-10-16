@@ -1,270 +1,188 @@
-//! State test crate
+//! Runs the execution-spec state tests on the Satin engine.
+//!
+//! `state-test --fork Osaka <paths>` executes every Osaka entry of the fixtures under `paths` in
+//! equivalence mode and exits non-zero when a failure is not explained by a registered deviation;
+//! `--mode satin` runs the same entries under Satin's own configuration and only reports. See the
+//! `mega-state-test` crate for what the two modes are.
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+
+use std::{path::PathBuf, process::ExitCode};
 
 use clap::Parser;
 use state_test::{
-    runner::{
-        bench_test_suite, fill_test_suite, find_all_json_tests, run, TestError, TestErrorKind,
-        UnitBench,
-    },
-    types::SpecName,
+    deviations,
+    runner::{find_json_files, run, Config, Outcome, Report, Summary, TestResult},
+    Fork, Mode,
 };
-use std::{path::PathBuf, str::FromStr};
 
-use mega_evm::MegaSpecId;
-use serde_json::json;
+/// How many unattributed failures, and how many unreproduced entries, the summary lists.
+const LISTED_FAILURES: usize = 50;
 
-/// `statetest` subcommand
+/// Command-line arguments.
 #[derive(Parser, Debug)]
-pub struct Cmd {
-    /// Path to folder or file containing the tests
-    ///
-    /// If multiple paths are specified they will be run in sequence.
-    ///
-    /// Folders will be searched recursively for files with the extension `.json`.
+#[command(name = "state-test", about = "Runs execution-spec state tests on the Satin engine")]
+struct Cmd {
+    /// Fixture files, or directories searched recursively for `.json` files.
     #[arg(required = true, num_args = 1..)]
     paths: Vec<PathBuf>,
-    /// Run tests in a single thread
-    #[arg(short = 's', long)]
-    single_thread: bool,
-    /// Output results in JSON format
-    ///
-    /// It will stop second run of evm on failure.
+    /// The configuration the tests run under: `equivalence` (a gate) or `satin` (a report).
+    #[arg(long, default_value = "equivalence")]
+    mode: Mode,
+    /// The fork whose fixture entries run: `Osaka` or `Amsterdam`.
     #[arg(long)]
-    json: bool,
-    /// Output outcome in JSON format
-    ///
-    /// If `--json` is true, this is implied.
-    ///
-    /// It will stop second run of EVM on failure.
-    #[arg(short = 'o', long)]
+    fork: Fork,
+    /// Worker threads (default: one per core).
+    #[arg(long)]
+    threads: Option<usize>,
+    /// Print one JSON line per test to standard error.
+    #[arg(long)]
     json_outcome: bool,
-    /// Keep going after a test failure
-    #[arg(long, alias = "no-fail-fast")]
-    keep_going: bool,
-    /// Benchmark each fixture's isolated EVM execution instead of validating it.
-    ///
-    /// Emits per-unit timing (min/median/mean) and Mgas/s as JSON. The fixture
-    /// is self-contained, so this needs no RPC — any state-test fixture (a
-    /// dumped replay, a prestate snapshot, a hand-crafted case) can be measured.
+    /// Trace every test with an EIP-3155 tracer on standard error; runs on one thread.
     #[arg(long)]
-    bench: bool,
-    /// Timed iterations per unit when `--bench` is set.
-    #[arg(long, default_value_t = 50)]
-    bench_runs: u32,
-    /// Discarded warmup iterations before timing when `--bench` is set.
-    #[arg(long, default_value_t = 5)]
-    bench_warmup: u32,
-    /// Spec to benchmark / fill under (default: the fixture's single `post` spec).
-    #[arg(long, value_name = "SPEC")]
-    bench_spec: Option<String>,
-    /// Compute and write each fixture's `post` expectation in place.
-    ///
-    /// The offline analog of `--dump-fixture`'s post-fill: makes a fixture that
-    /// has no `post` (a hand-built or prestate-snapshot case) self-validating.
-    /// Use `--bench-spec` to choose the spec when the fixture has no `post` yet.
-    /// Refuses fixtures that already have a `post` unless `--force` is set.
-    #[arg(long, conflicts_with_all = ["bench", "bench_runs", "bench_warmup"])]
-    fill: bool,
-    /// Overwrite an existing non-empty `post` when filling with `--fill`.
-    #[arg(long, requires = "fill")]
-    force: bool,
+    trace: bool,
+    /// Write the summary, as JSON, to this file.
+    #[arg(long, value_name = "FILE")]
+    summary_json: Option<PathBuf>,
+    /// Equivalence mode: fail unless exactly this many tests execute.
+    #[arg(long, value_name = "N")]
+    expect_executed: Option<usize>,
+    /// Equivalence mode: fail unless exactly this many tests are skipped.
+    #[arg(long, value_name = "N")]
+    expect_skipped: Option<usize>,
+    /// Equivalence mode: fail unless every entry a registered deviation lists for the fork fails
+    /// exactly as listed, with the hashes listed.
+    #[arg(long)]
+    expect_deviations: bool,
 }
 
-impl Cmd {
-    /// Runs `statetest` command.
-    pub fn run(&self) -> Result<(), TestError> {
-        if self.fill {
-            return self.run_fill();
-        }
-        if self.bench {
-            return self.run_bench();
-        }
-        for path in &self.paths {
-            if !path.exists() {
-                return Err(TestError {
-                    name: "Path validation".to_string(),
-                    path: path.display().to_string(),
-                    kind: TestErrorKind::InvalidPath,
-                });
-            }
-
-            println!("\nRunning tests in {}...", path.display());
-            let test_files = find_all_json_tests(path);
-
-            if test_files.is_empty() {
-                return Err(TestError {
-                    name: "Path validation".to_string(),
-                    path: path.display().to_string(),
-                    kind: TestErrorKind::NoJsonFiles,
-                });
-            }
-
-            run(test_files, self.single_thread, self.json, self.json_outcome, self.keep_going)?
-        }
-        Ok(())
-    }
-
-    /// Parse `--bench-spec` into a [`SpecName`], if given.
-    fn resolve_spec(&self) -> Result<Option<SpecName>, TestError> {
-        self.bench_spec
-            .as_deref()
-            .map(|s| {
-                // Derived from `MegaSpecId::ALL` so the roster tracks the ladder (aliases and
-                // new specs included) instead of drifting as a hand-written list.
-                let invalid_spec = || TestError {
-                    name: "spec".to_string(),
-                    path: s.to_string(),
-                    kind: TestErrorKind::FixtureError(format!(
-                        "invalid --bench-spec {s:?}; expected one of: {}",
-                        MegaSpecId::ALL
-                            .iter()
-                            .copied()
-                            .filter(|spec| SpecName::from_mega_spec(*spec) != SpecName::Unknown)
-                            .map(<&'static str>::from)
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )),
-                };
-                let spec = MegaSpecId::from_str(s)
-                    .map(SpecName::from_mega_spec)
-                    .map_err(|_| invalid_spec())?;
-                // A spec id that parses but has no fixture-facing name (a
-                // future `MegaSpecId` this crate does not map yet) would
-                // otherwise fail much later, deep inside execution — reject it
-                // here with the same actionable message.
-                if spec == SpecName::Unknown {
-                    return Err(invalid_spec());
-                }
-                Ok(spec)
-            })
-            .transpose()
-    }
-
-    /// Fill every fixture's `post` expectation in place (see `--fill`).
-    fn run_fill(&self) -> Result<(), TestError> {
-        let spec_override = self.resolve_spec()?;
-        for path in &self.paths {
-            if !path.exists() {
-                return Err(TestError {
-                    name: "Path validation".to_string(),
-                    path: path.display().to_string(),
-                    kind: TestErrorKind::InvalidPath,
-                });
-            }
-            for file in find_all_json_tests(path) {
-                let n = fill_test_suite(&file, spec_override, self.force)?;
-                println!("Filled post for {n} unit(s) in {}", file.display());
-            }
-        }
-        Ok(())
-    }
-
-    /// Benchmark every fixture under the given paths and print the results as JSON.
-    ///
-    /// A single benchmarked unit prints one object `{ gas_used, success, bench }`;
-    /// multiple units print a JSON array of `{ name, ... }` objects. The
-    /// replay-bench driver (`bench/replay/run.py`) consumes this output.
-    fn run_bench(&self) -> Result<(), TestError> {
-        let spec_override = self.resolve_spec()?;
-
-        let mut all: Vec<UnitBench> = Vec::new();
-        for path in &self.paths {
-            if !path.exists() {
-                return Err(TestError {
-                    name: "Path validation".to_string(),
-                    path: path.display().to_string(),
-                    kind: TestErrorKind::InvalidPath,
-                });
-            }
-            for file in find_all_json_tests(path) {
-                all.extend(bench_test_suite(
-                    &file,
-                    self.bench_runs,
-                    self.bench_warmup,
-                    spec_override,
-                )?);
-            }
-        }
-
-        let bench_json = |u: &UnitBench| {
-            json!({
-                "runs": u.runs,
-                "gasUsed": u.gas_used,
-                "minNs": u.min.as_nanos(),
-                "medianNs": u.median.as_nanos(),
-                "meanNs": u.mean.as_nanos(),
-                "mgasPerSec": u.mgas_per_sec(),
-            })
-        };
-        let output = if all.len() == 1 {
-            let u = &all[0];
-            json!({ "gas_used": u.gas_used, "success": u.success, "bench": bench_json(u) })
-        } else {
-            json!(all
-                .iter()
-                .map(|u| json!({
-                    "name": u.name,
-                    "gas_used": u.gas_used,
-                    "success": u.success,
-                    "bench": bench_json(u),
-                }))
-                .collect::<Vec<_>>())
-        };
-        println!("{}", serde_json::to_string_pretty(&output).expect("serialize bench output"));
-        Ok(())
-    }
-}
-
-fn main() {
+fn main() -> ExitCode {
     let cmd = Cmd::parse();
-    // CI exit-code contract: any error — including `TestsFailed` when tests
-    // fail under `--keep-going` — prints to stderr and exits with code 1.
-    if let Err(e) = cmd.run() {
-        eprintln!("{e}");
-        std::process::exit(1);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn cmd_with_bench_spec(spec: &str) -> Cmd {
-        Cmd::parse_from(["state-test", "fixture.json", "--bench-spec", spec])
+    let mut files = Vec::new();
+    for path in &cmd.paths {
+        if !path.exists() {
+            eprintln!("error: {} does not exist", path.display());
+            return ExitCode::FAILURE;
+        }
+        let found = find_json_files(path);
+        if found.is_empty() {
+            eprintln!("error: no JSON fixtures under {}", path.display());
+            return ExitCode::FAILURE;
+        }
+        files.extend(found);
     }
 
-    #[test]
-    fn resolve_spec_none_when_absent() {
-        let cmd = Cmd::parse_from(["state-test", "fixture.json"]);
-        assert_eq!(cmd.resolve_spec().expect("no spec is fine"), None);
-    }
+    let threads = if cmd.trace {
+        1
+    } else {
+        cmd.threads.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
+    };
+    let config = Config {
+        mode: cmd.mode,
+        fork: cmd.fork,
+        threads,
+        json_outcome: cmd.json_outcome,
+        trace: cmd.trace,
+        deviations: deviations::DEVIATIONS,
+    };
+    let report = run(&files, config);
+    let summary = report.summary();
+    print_summary(&report, &summary);
 
-    #[test]
-    fn resolve_spec_accepts_every_known_spec() {
-        // Driven off `MegaSpecId::ALL`, so a newly introduced spec or alias joins here
-        // automatically — and a spec left without a fixture-facing `SpecName` fails loudly
-        // instead of being quietly absent from the roster.
-        for spec in MegaSpecId::ALL.iter().copied() {
-            let s: &str = spec.into();
-            let resolved =
-                cmd_with_bench_spec(s).resolve_spec().expect("valid spec").expect("present");
-            assert_eq!(resolved, SpecName::from_mega_spec(spec), "--bench-spec {s}");
-            // No accepted spec may slip through as Unknown and fail later.
-            assert_ne!(resolved, SpecName::Unknown, "--bench-spec {s}");
+    if let Some(path) = &cmd.summary_json {
+        let json =
+            serde_json::json!({ "mode": report.mode, "fork": report.fork, "summary": summary });
+        let json = serde_json::to_string_pretty(&json).expect("a summary serializes");
+        if let Err(error) = std::fs::write(path, json + "\n") {
+            eprintln!("error: writing {}: {error}", path.display());
+            return ExitCode::FAILURE;
         }
     }
 
-    #[test]
-    fn resolve_spec_rejects_unparseable_string() {
-        let err = cmd_with_bench_spec("FutureFork9000")
-            .resolve_spec()
-            .expect_err("unknown spec string must be rejected");
-        assert!(
-            err.to_string().contains("invalid --bench-spec"),
-            "error should be actionable: {err}"
-        );
+    match cmd.mode {
+        Mode::Equivalence => {
+            let problems =
+                report.gate(cmd.expect_executed, cmd.expect_skipped, cmd.expect_deviations);
+            for problem in &problems {
+                println!("gate: {problem}");
+            }
+            if problems.is_empty() {
+                println!("gate: passed");
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        // A report: it fails only when a fixture could not be run at all, which is the runner's
+        // failure rather than Satin's.
+        Mode::Satin if summary.file_failures > 0 => ExitCode::FAILURE,
+        Mode::Satin => ExitCode::SUCCESS,
+    }
+}
+
+fn print_summary(report: &Report, summary: &Summary) {
+    println!("{} mode, {} fixtures: {} files", report.mode, report.fork, summary.files);
+    println!(
+        "  defined {}  executed {}  passed {}  failed {}  skipped {}",
+        summary.defined,
+        summary.executed,
+        summary.passed,
+        summary.failed_total(),
+        summary.skipped_total()
+    );
+    for (reason, count) in &summary.skipped {
+        println!("  skipped  {:<34} {count}", reason.name());
+    }
+    for (kind, count) in &summary.failed {
+        println!("  failed   {:<34} {count}", kind.name());
+    }
+    if report.mode == Mode::Equivalence {
+        for deviation in report.deviations {
+            let listed = deviation.listed(report.fork).len();
+            if listed > 0 {
+                let explained = summary.deviated.get(deviation.id).copied().unwrap_or(0);
+                println!("  deviated {:<34} {explained} (listed {listed})", deviation.id);
+            }
+        }
+        println!("  unattributed {}", summary.unattributed);
+        for (id, failure) in report.unattributed().take(LISTED_FAILURES) {
+            println!("    {id}\n      {}: {}", failure.kind.name(), failure.detail);
+        }
+        if summary.unattributed > LISTED_FAILURES {
+            println!("    ... and {} more", summary.unattributed - LISTED_FAILURES);
+        }
+        let unreproduced: usize = summary.unreproduced.values().sum();
+        println!("  unreproduced {unreproduced}");
+        for entry in report.unreproduced().take(LISTED_FAILURES) {
+            println!(
+                "    {}\n      {} lists {}, {}; {}",
+                entry.entry,
+                entry.deviation.id,
+                entry.entry.produced.kind().name(),
+                entry.entry.produced,
+                seen(&entry.seen)
+            );
+        }
+        if unreproduced > LISTED_FAILURES {
+            println!("    ... and {} more", unreproduced - LISTED_FAILURES);
+        }
+    }
+    for (path, failure) in &report.file_failures {
+        println!("  unreadable {path}\n      {}", failure.detail);
+    }
+}
+
+/// What a run did with a listed entry, given the results it has for it.
+fn seen(results: &[&TestResult]) -> String {
+    match results {
+        [] => "the run did not execute it".into(),
+        [result] => match &result.outcome {
+            Outcome::Passed => "it passed".into(),
+            Outcome::Skipped { reason } => format!("it was skipped: {}", reason.name()),
+            Outcome::Failed(failure) => {
+                format!("it failed: {}: {}", failure.kind.name(), failure.detail)
+            }
+        },
+        results => format!("{} results of the run are the entry's", results.len()),
     }
 }

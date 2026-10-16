@@ -817,37 +817,3 @@ fn render_snapshot() -> String {
 fn snapshot_path() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/compute_gas/snapshot.txt")
 }
-
-/// Compute gas is the sole non-revertible resource dimension: a child frame that reverts still
-/// contributes its consumption to the transaction total.
-#[test]
-fn test_compute_gas_survives_reverted_frame() {
-    let program = corpus()
-        .into_iter()
-        .find(|p| p.name == "reverting_subcall")
-        .expect("corpus must contain reverting_subcall");
-
-    // A caller-only baseline: same outer code, but the callee returns immediately.
-    let baseline_db = || {
-        let outer = push_valueless_call_operands(BytecodeBuilder::default(), CALLEE, 1_000_000)
-            .append(STATICCALL)
-            .stop()
-            .build();
-        base_db(outer).account_code(CALLEE, BytecodeBuilder::default().stop().build())
-    };
-
-    for (spec, spec_name) in ALL_SPECS {
-        if spec.behavior() == MegaSpecId::EQUIVALENCE {
-            continue; // no metering (covers the `MiniRex1` alias, which executes Equivalence)
-        }
-        let with_revert = transact(spec, (program.build_db)());
-        let baseline = transact(spec, baseline_db());
-        assert!(
-            with_revert.compute_gas > baseline.compute_gas,
-            "{spec_name}: a reverted subcall's compute gas must still be counted \
-             (reverting={} baseline={})",
-            with_revert.compute_gas,
-            baseline.compute_gas
-        );
-    }
-}

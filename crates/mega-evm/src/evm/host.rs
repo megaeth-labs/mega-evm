@@ -5,13 +5,37 @@
 //! revm hands the Host the facts of every state-writing opcode: an `SSTORE`'s original, present and
 //! new values, a log's topics and data, a `SELFDESTRUCT`'s balance and beneficiary. The Host
 //! stages them ([`AdditionalLimit::stage_record`](crate::AdditionalLimit)) and records nothing.
-//! The opcode's wrapper commits the staged record after the opcode completed, and discards it when
-//! the opcode failed. Recording in the Host would count a write the opcode's own failure then takes
+//! The opcode's wrapper commits the staged record after the opcode completed, and charges the
+//! frame the history the record costs; it discards the record, and charges nothing, when the
+//! opcode failed. Recording in the Host would count a write the opcode's own failure then takes
 //! back: `SSTORE` charges its dynamic gas after the Host call, and an out-of-gas there halts the
-//! frame with the record already counted.
+//! frame with the record already counted — and would have charged the frame for a byte the chain
+//! never carries.
 //!
 //! `block_hash` serves the read and records it, so a stateless witness learns of a `BLOCKHASH`
 //! that bypassed the journal.
+//!
+//! # Volatile reads
+//!
+//! The Host is where gas detention marks a read of volatile data: the block-environment
+//! accessors, the account load when the account is the block beneficiary, the storage load when
+//! the storage is the Oracle's, and `SELFDESTRUCT` when either end is the beneficiary. A read is
+//! marked once the load succeeded, and the opcode's wrapper commits it once the opcode completed
+//! (see the `access` module). Every account opcode reaches the account load: `balance`,
+//! `load_account_delegated`, `load_account_code` and `load_account_code_hash` are the trait's own,
+//! built on it.
+//!
+//! While volatile-data access is switched off for the running frame, the Host refuses those loads
+//! instead: an account or storage load fails as a skipped cold load, and a block-environment
+//! accessor answers zero. Nothing is loaded, and the opcode's wrapper turns the refusal into the
+//! frame's revert.
+//!
+//! # The Oracle's storage
+//!
+//! A storage load whose owner is the Oracle reads the slot from the node's oracle service
+//! ([`OracleEnv`]) and falls back to the database for a slot the service has no value for. Every
+//! such read is priced as a cold access, because a node replaying a block cannot tell which of the
+//! two sources the node that built it read.
 //!
 //! # One hook prices every state charge
 //!
@@ -43,56 +67,134 @@ use revm::{
         cfg::{GasId, GasParams, StateGasSite},
         context::{ContextError, SStoreResult, SelfDestructResult, StateLoad},
         host::LoadError,
-        journaled_state::{AccountInfoLoad, AccountLoad},
+        journaled_state::AccountInfoLoad,
     },
-    primitives::{Address, Bytes, Log, StorageKey, StorageValue, B256, KECCAK_EMPTY, U256},
+    primitives::{Address, Log, StorageKey, StorageValue, B256, KECCAK_EMPTY, U256},
     state::{Account, EvmStorageSlot},
     Database, Journal,
 };
 
-use crate::{ExternalEnvTypes, MegaContext, StagedRecord};
+use crate::{
+    system::ORACLE_CONTRACT_ADDRESS, ExternalEnvTypes, MegaContext, OracleEnv, StagedRecord,
+    VolatileDataAccess,
+};
 
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
     for MegaContext<DB, ExtEnvs>
 {
     delegate! {
         to self.inner {
-            fn basefee(&self) -> U256;
-            fn blob_gasprice(&self) -> U256;
-            fn gas_limit(&self) -> U256;
-            fn difficulty(&self) -> U256;
-            fn prevrandao(&self) -> Option<U256>;
-            fn block_number(&self) -> U256;
-            fn timestamp(&self) -> U256;
-            fn beneficiary(&self) -> Address;
-            fn slot_num(&self) -> U256;
             fn chain_id(&self) -> U256;
+            // `DIFFICULTY` reads the randomness on every spec since the merge; see `prevrandao`.
+            fn difficulty(&self) -> U256;
             fn effective_gas_price(&self) -> U256;
             fn caller(&self) -> Address;
             fn blob_hash(&self, number: usize) -> Option<U256>;
             fn max_initcode_size(&self) -> usize;
             fn gas_params(&self) -> &GasParams;
             fn is_amsterdam_eip8037_enabled(&self) -> bool;
-            fn sload_skip_cold_load(
-                &mut self,
-                address: Address,
-                key: StorageKey,
-                skip_cold_load: bool,
-            ) -> Result<StateLoad<StorageValue>, LoadError>;
-            fn sload(&mut self, address: Address, key: StorageKey) -> Option<StateLoad<StorageValue>>;
             fn tstore(&mut self, address: Address, key: StorageKey, value: StorageValue);
             fn tload(&mut self, address: Address, key: StorageKey) -> StorageValue;
-            fn load_account_info_skip_cold_load(
-                &mut self,
-                address: Address,
-                load_code: bool,
-                skip_cold_load: bool,
-            ) -> Result<AccountInfoLoad<'_>, LoadError>;
-            fn balance(&mut self, address: Address) -> Option<StateLoad<U256>>;
-            fn load_account_delegated(&mut self, address: Address) -> Option<StateLoad<AccountLoad>>;
-            fn load_account_code(&mut self, address: Address) -> Option<StateLoad<Bytes>>;
-            fn load_account_code_hash(&mut self, address: Address) -> Option<StateLoad<B256>>;
         }
+    }
+
+    #[inline]
+    fn basefee(&self) -> U256 {
+        if !self.read_block_env(VolatileDataAccess::BASE_FEE) {
+            return Default::default();
+        }
+        self.inner.basefee()
+    }
+
+    #[inline]
+    fn blob_gasprice(&self) -> U256 {
+        if !self.read_block_env(VolatileDataAccess::BLOB_BASE_FEE) {
+            return Default::default();
+        }
+        self.inner.blob_gasprice()
+    }
+
+    #[inline]
+    fn gas_limit(&self) -> U256 {
+        if !self.read_block_env(VolatileDataAccess::GAS_LIMIT) {
+            return Default::default();
+        }
+        self.inner.gas_limit()
+    }
+
+    #[inline]
+    fn prevrandao(&self) -> Option<U256> {
+        if !self.read_block_env(VolatileDataAccess::PREV_RANDAO) {
+            return Some(U256::ZERO);
+        }
+        self.inner.prevrandao()
+    }
+
+    #[inline]
+    fn block_number(&self) -> U256 {
+        if !self.read_block_env(VolatileDataAccess::BLOCK_NUMBER) {
+            return Default::default();
+        }
+        self.inner.block_number()
+    }
+
+    #[inline]
+    fn timestamp(&self) -> U256 {
+        if !self.read_block_env(VolatileDataAccess::TIMESTAMP) {
+            return Default::default();
+        }
+        self.inner.timestamp()
+    }
+
+    #[inline]
+    fn beneficiary(&self) -> Address {
+        if !self.read_block_env(VolatileDataAccess::COINBASE) {
+            return Default::default();
+        }
+        self.inner.beneficiary()
+    }
+
+    #[inline]
+    fn slot_num(&self) -> U256 {
+        if !self.read_block_env(VolatileDataAccess::SLOT_NUM) {
+            return Default::default();
+        }
+        self.inner.slot_num()
+    }
+
+    /// Loads the slot; a slot of the Oracle's storage is read through the oracle environment
+    /// ([`oracle_sload`](Self::oracle_sload)).
+    #[inline]
+    fn sload_skip_cold_load(
+        &mut self,
+        address: Address,
+        key: StorageKey,
+        skip_cold_load: bool,
+    ) -> Result<StateLoad<StorageValue>, LoadError> {
+        if address == ORACLE_CONTRACT_ADDRESS {
+            return self.oracle_sload(key, skip_cold_load);
+        }
+        self.inner.sload_skip_cold_load(address, key, skip_cold_load)
+    }
+
+    /// Loads the account, marking a read of the block beneficiary's.
+    #[inline]
+    fn load_account_info_skip_cold_load(
+        &mut self,
+        address: Address,
+        load_code: bool,
+        skip_cold_load: bool,
+    ) -> Result<AccountInfoLoad<'_>, LoadError> {
+        let beneficiary = address == self.inner.block.beneficiary;
+        if beneficiary && self.detention.refuses(VolatileDataAccess::BENEFICIARY_BALANCE) {
+            return Err(LoadError::ColdLoadSkipped);
+        }
+        let load =
+            self.inner.load_account_info_skip_cold_load(address, load_code, skip_cold_load)?;
+        if beneficiary {
+            self.detention.observe(VolatileDataAccess::BENEFICIARY_BALANCE);
+        }
+        Ok(load)
     }
 
     /// Prices one EIP-8037 state gas unit, scaling the schedule's entry by the SALT bucket
@@ -141,6 +243,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
     /// journal alone would miss it; the record is where a node learns of the read.
     #[inline]
     fn block_hash(&mut self, number: u64) -> Option<B256> {
+        if !self.read_block_env(VolatileDataAccess::BLOCK_HASH) {
+            return Some(B256::ZERO);
+        }
         let hash = self.inner.block_hash(number)?;
         self.block_hash_record.record(number, hash);
         Some(hash)
@@ -183,7 +288,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
         self.inner.log(log);
     }
 
-    /// Destructs the account and stages whether value moved and where to.
+    /// Destructs the account and stages whether value moved and where to, marking a read of the
+    /// block beneficiary's account when it is either end: the source's balance is read and
+    /// cleared, the target's read and credited.
     #[inline]
     fn selfdestruct(
         &mut self,
@@ -191,7 +298,15 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
         target: Address,
         skip_cold_load: bool,
     ) -> Result<StateLoad<SelfDestructResult>, LoadError> {
+        let beneficiary = self.inner.block.beneficiary;
+        let volatile = target == beneficiary || address == beneficiary;
+        if volatile && self.detention.refuses(VolatileDataAccess::BENEFICIARY_BALANCE) {
+            return Err(LoadError::ColdLoadSkipped);
+        }
         let load = self.inner.selfdestruct(address, target, skip_cold_load)?;
+        if volatile {
+            self.detention.observe(VolatileDataAccess::BENEFICIARY_BALANCE);
+        }
         self.additional_limit.stage_record(StagedRecord::SelfDestruct {
             had_value: load.data.had_value,
             target_exists: load.data.target_exists,
@@ -199,6 +314,65 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
             beneficiary: target,
         });
         Ok(load)
+    }
+}
+
+impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
+    /// Reads the block-environment field `access` stands for: `false` when the read is refused,
+    /// and the accessor answers zero instead of the field.
+    #[inline]
+    fn read_block_env(&self, access: VolatileDataAccess) -> bool {
+        if self.detention.refuses(access) {
+            return false;
+        }
+        self.detention.observe(access);
+        true
+    }
+
+    /// Reads the slot `key` of the Oracle's storage, in the Oracle's own frame: a storage load
+    /// whose owner is the Oracle, so an `SLOAD` of any other contract, and a `DELEGATECALL` into
+    /// the Oracle's code, which runs on its caller's storage, are ordinary loads.
+    ///
+    /// The slot is loaded through the journal as any read of it is, then the oracle environment
+    /// is asked ([`OracleEnv::get_oracle_storage`]): the frame gets the environment's value when
+    /// it has one, over whatever the chain or the frame itself stored in the slot, and the loaded
+    /// value otherwise. Hints reach the environment synchronously as the `sendHint` call is made,
+    /// so a read that follows a hint in execution finds the environment told, as the trait
+    /// promises.
+    ///
+    /// A node replaying a block cannot tell whether the node that built it answered a read from
+    /// its oracle service or from the chain, so nothing the transaction pays and nothing its
+    /// state records may depend on the source. The read is always priced cold, whichever source
+    /// answered and however often the transaction read the slot before; and the slot is loaded on
+    /// both paths, so afterwards it is warm for the frame's `SSTORE` whichever source answered,
+    /// and it is in the transaction's state, which a stateless witness is built from, even when
+    /// the environment's value was the one used.
+    ///
+    /// A frame whose regular gas, the part detention withholds included, cannot pay the cold
+    /// access reads nothing and asks nothing, as revm's own skipped cold load does. A detained
+    /// frame that holds the gas but may not spend it does read and ask, and the charge then stops
+    /// the transaction at the compute limit.
+    ///
+    /// It is a read of volatile data: it is refused while the frame's volatile-data access is off,
+    /// and marked for gas detention, under the Oracle's cap, once it succeeded.
+    fn oracle_sload(
+        &mut self,
+        key: StorageKey,
+        skip_cold_load: bool,
+    ) -> Result<StateLoad<StorageValue>, LoadError> {
+        if self.detention.refuses(VolatileDataAccess::ORACLE) || skip_cold_load {
+            return Err(LoadError::ColdLoadSkipped);
+        }
+        let loaded = revm::context_interface::Host::sload_skip_cold_load(
+            &mut self.inner,
+            ORACLE_CONTRACT_ADDRESS,
+            key,
+            false,
+        )?
+        .data;
+        let value = self.external_envs().oracle_env.get_oracle_storage(key).unwrap_or(loaded);
+        self.detention.observe(VolatileDataAccess::ORACLE);
+        Ok(StateLoad::new(value, true))
     }
 }
 
@@ -314,7 +488,7 @@ impl<DB: Database> JournalInspectTr for Journal<DB> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::{address, keccak256};
+    use alloy_primitives::{address, keccak256, Bytes};
     use core::cell::Cell;
     use revm::{
         context::JournalTr,

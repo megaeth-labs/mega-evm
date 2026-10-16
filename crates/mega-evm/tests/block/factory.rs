@@ -138,7 +138,8 @@ fn test_direct_construction_applies_block_context_runtime_limits() {
 /// the block allows is stopped with `MegaLimitExceeded`.
 #[test]
 fn test_direct_construction_stops_a_transaction_over_the_block_data_size_limit() {
-    const DATA_SIZE_LIMIT: u64 = 40;
+    // The body is 310 bytes. One storage write fits; the second crosses.
+    const DATA_SIZE_LIMIT: u64 = mega_evm::TX_BODY_SIZE + 40;
 
     let mut db = common::database();
     db.set_account_code(
@@ -167,7 +168,7 @@ fn test_direct_construction_stops_a_transaction_over_the_block_data_size_limit()
         Some(LimitCheck::ExceedsLimit {
             kind: LimitKind::DataSize,
             limit: DATA_SIZE_LIMIT,
-            used: 2 * DATA_SIZE_LIMIT,
+            used: mega_evm::TX_BODY_SIZE + 2 * 40,
             frame_local: false,
         })
     );

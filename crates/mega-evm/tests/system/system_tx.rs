@@ -11,7 +11,7 @@ use mega_evm::{
         SEQUENCER_REGISTRY_ADDRESS,
     },
     test_utils::{op_transaction, MemoryDatabase},
-    MegaContext, MegaEvm, MegaTransaction, MegaTransactionOutcome,
+    EvmTxRuntimeLimits, LimitUsage, MegaContext, MegaEvm, MegaTransaction, MegaTransactionOutcome,
 };
 use mega_system_contracts::sequencer_registry::storage_slots::CURRENT_SYSTEM_ADDRESS;
 use revm::{
@@ -533,6 +533,33 @@ fn test_a_deposit_that_cannot_pay_for_its_caller_halts() {
         matches!(outcome.result, ExecutionResult::Halt { .. }),
         "{:?} is not a halt",
         outcome.result,
+    );
+}
+
+/// The account a deposit creates for its caller exists whatever the deposit does, so a stop the
+/// deposit's body latched does not waive its charge: a deposit that cannot pay for it is still an
+/// out-of-gas halt, and the halt is not a data-size stop.
+#[test]
+fn test_a_deposit_over_the_data_size_limit_that_cannot_pay_for_its_caller_halts() {
+    let sender = address!("0x00000000000000000000000000000000000f0008");
+    let mut tx = deposit_tx(sender, TxKind::Call(ORACLE_CONTRACT_ADDRESS), U256::ZERO, 0);
+    tx.0.base.gas_limit = 30_000;
+    let limits =
+        EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(mega_evm::TX_BODY_SIZE - 1);
+
+    let outcome = MegaEvm::new(chain_context(chain_db()).with_tx_runtime_limits(limits))
+        .execute_transaction(tx)
+        .expect("the deposit is included");
+    assert!(
+        matches!(outcome.result, ExecutionResult::Halt { .. }),
+        "{:?} is not a halt",
+        outcome.result,
+    );
+    assert_eq!(outcome.limit_exceeded, None, "the halt is not a data-size stop");
+    assert_eq!(
+        outcome.usage,
+        LimitUsage { data_size: mega_evm::TX_BODY_SIZE, write_records: 0 },
+        "the body stays counted",
     );
 }
 

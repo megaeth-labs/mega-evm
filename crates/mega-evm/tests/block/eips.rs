@@ -13,7 +13,7 @@ use alloy_hardforks::{EthereumHardfork, ForkCondition};
 use alloy_primitives::{Bytes, B256, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    BlockLimits, MegaBlockExecutionCtx, MegaHardforkConfig, MegaSpecId,
+    BlockLimits, EvmTxRuntimeLimits, MegaBlockExecutionCtx, MegaHardforkConfig, MegaSpecId,
 };
 use revm::{
     bytecode::opcode::{CALLDATALOAD, SSTORE},
@@ -100,6 +100,28 @@ fn pre_block_calls(
 fn test_the_pre_block_calls_record_the_parent_hash_and_the_beacon_root() {
     assert_eq!(
         pre_block_calls(common::chain_spec(), BLOCK_NUMBER, ctx()),
+        (PARENT_HASH, PARENT_BEACON_ROOT)
+    );
+}
+
+/// The pre-block calls are the protocol's own work, held to no per-transaction limit: under
+/// limits their bodies, their writes and their state gas each cross, both calls still record.
+#[test]
+fn test_the_pre_block_calls_are_held_to_no_limit() {
+    let limits = EvmTxRuntimeLimits::no_limits()
+        .with_tx_data_size_limit(0)
+        .with_frame_data_size_limit(0)
+        .with_tx_kv_update_limit(0)
+        .with_frame_kv_update_limit(0)
+        .with_tx_state_gas_limit(0);
+    let ctx = MegaBlockExecutionCtx::new(
+        PARENT_HASH,
+        Some(PARENT_BEACON_ROOT),
+        Bytes::new(),
+        BlockLimits::no_limits().with_tx_runtime_limits(limits),
+    );
+    assert_eq!(
+        pre_block_calls(common::chain_spec(), BLOCK_NUMBER, ctx),
         (PARENT_HASH, PARENT_BEACON_ROOT)
     );
 }

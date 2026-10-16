@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "CLI to run Ethereum State Tests for mega-evm"
+description = "CLI running the execution-spec state tests on the mega-evm Satin engine"
 # The runner library lives in the published `mega-state-test` crate; this CLI is
 # a thin front-end and is not published.
 publish = false
@@ -17,11 +17,15 @@ workspace = true
 [[bin]]
 name = "state-test"
 path = "src/main.rs"
+# The library it fronts is `state_test`, whose documentation would share the bin's file name.
+doc = false
 
 [dependencies]
-mega-evm = { workspace = true, features = ["default", "test-utils"] }
 mega-state-test.workspace = true
 
 # misc
 clap = { workspace = true, features = ["default"] }
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+tempfile.workspace = true

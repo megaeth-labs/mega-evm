@@ -4,7 +4,9 @@
 //! the [`High-Precision Timestamp`](timestamp) wrapper, [`KeylessDeploy`](keyless),
 //! [`MegaAccessControl`](control), [`MegaLimitControl`](limit_control) and the
 //! [`SequencerRegistry`](sequencer_registry). Each module carries its address, the code and code
-//! hash the `mega-system-contracts` crate ships, and its ABI.
+//! hash the `mega-system-contracts` crate ships, and its ABI. The EIP-7997 `CREATE2` factory
+//! lives at its canonical address beside them; [`deploy`] is the single list that deploys all
+//! seven.
 //!
 //! Four of them have an interceptor: a `CALL` or `STATICCALL` to one of their intercepted
 //! selectors is answered by the engine instead of by the contract's code (see the `intercept`
@@ -13,13 +15,11 @@
 //!
 //! [`tx`](tx) holds the system-address transaction: the deposit-like transaction the sequencer
 //! maintains the protocol's own state with.
-//!
-//! Deploying the contracts at the fork that activates them belongs to system contract
-//! deployment; it is not here.
 
 pub mod keyless;
 
 mod control;
+mod deploy;
 mod intercept;
 mod limit_control;
 mod oracle;
@@ -28,6 +28,7 @@ mod timestamp;
 mod tx;
 
 pub use control::*;
+pub use deploy::*;
 pub use intercept::NON_ZERO_TRANSFER_REVERT_DATA;
 pub use limit_control::*;
 pub use oracle::*;

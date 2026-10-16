@@ -104,32 +104,6 @@ fn is_volatile_data_access_oog(result: &ExecutionResult<MegaHaltReason>) -> bool
 // TESTS
 // ============================================================================
 
-/// REX4: Transaction uses >20M compute gas before accessing TIMESTAMP, then does minimal work.
-/// With relative cap, the effective limit becomes `usage_at_access` + 20M, so the TX succeeds.
-/// Pre-REX4 would halt immediately because absolute 20M cap < actual usage.
-#[test]
-fn test_rex4_volatile_access_after_heavy_compute_succeeds() {
-    // Burn 25M compute gas, then access TIMESTAMP, then STOP.
-    // With relative cap: effective limit = 25M + 20M = 45M. Actual usage ~25M. Succeeds.
-    let builder = append_burn_gas(BytecodeBuilder::default(), 25_000_000);
-    let code = builder.append(TIMESTAMP).append(POP).stop().build();
-
-    let mut db = MemoryDatabase::default()
-        .account_balance(CALLER, U256::from(1_000_000))
-        .account_code(CALLEE, code);
-
-    let tx = default_tx();
-    let (result, compute_gas, detained_limit) =
-        transact_with_spec(MegaSpecId::REX4, &mut db, 200_000_000, BLOCK_ENV_CAP, tx).unwrap();
-
-    assert!(result.result.is_success(), "Should succeed with relative cap: {compute_gas} used");
-    // Detained limit should be anchored at ~25M + 20M = ~45M
-    assert!(
-        detained_limit > BLOCK_ENV_CAP,
-        "Detained limit should be > absolute 20M cap, got {detained_limit}"
-    );
-}
-
 /// REX4: Transaction accesses TIMESTAMP early, then tries to use >20M compute gas after.
 /// The post-access cap (20M) should still be enforced.
 #[test]
@@ -151,36 +125,6 @@ fn test_rex4_volatile_access_post_access_cap_enforced() {
     assert!(
         is_volatile_data_access_oog(&result.result),
         "Should halt with VolatileDataAccessOutOfGas when exceeding post-access cap"
-    );
-}
-
-/// REX4: Transaction uses X compute gas before TIMESTAMP, then uses <20M after.
-/// Total usage is X + <20M which exceeds the old absolute 20M cap, but should succeed.
-#[test]
-fn test_rex4_pre_access_usage_not_counted_against_cap() {
-    // Burn 15M compute gas, then access TIMESTAMP, then burn 15M more.
-    // Total = ~30M > absolute 20M cap. But relative cap = 15M + 20M = 35M. Actual ~30M. Succeeds.
-    let builder = append_burn_gas(BytecodeBuilder::default(), 15_000_000);
-    let builder = builder.append(TIMESTAMP).append(POP);
-    let builder = append_burn_gas(builder, 15_000_000);
-    let code = builder.stop().build();
-
-    let mut db = MemoryDatabase::default()
-        .account_balance(CALLER, U256::from(1_000_000))
-        .account_code(CALLEE, code);
-
-    let tx = default_tx();
-    let (result, compute_gas, detained_limit) =
-        transact_with_spec(MegaSpecId::REX4, &mut db, 200_000_000, BLOCK_ENV_CAP, tx).unwrap();
-
-    assert!(
-        result.result.is_success(),
-        "Should succeed: pre-access usage not counted against cap. \
-         Compute gas: {compute_gas}, detained limit: {detained_limit}"
-    );
-    assert!(
-        compute_gas > BLOCK_ENV_CAP,
-        "Total compute gas ({compute_gas}) should exceed absolute 20M cap"
     );
 }
 
@@ -234,34 +178,5 @@ fn test_rex4_non_binding_detention_reports_normal_compute_limit() {
     assert!(
         !is_volatile_data_access_oog(&result.result),
         "Should resolve as normal compute-limit failure, not volatile-data OOG"
-    );
-}
-
-/// REX4: Multiple volatile accesses — first access anchors the cap.
-/// TX accesses TIMESTAMP at usage=5M, then NUMBER at usage=10M.
-/// Cap should be anchored at first access: 5M + 20M = 25M.
-#[test]
-fn test_rex4_multiple_volatile_accesses_first_wins() {
-    // Burn 5M, access TIMESTAMP, burn 5M more, access NUMBER, then STOP.
-    let builder = append_burn_gas(BytecodeBuilder::default(), 5_000_000);
-    let builder = builder.append(TIMESTAMP).append(POP);
-    let builder = append_burn_gas(builder, 5_000_000);
-    let code = builder.append(NUMBER).append(POP).stop().build();
-
-    let mut db = MemoryDatabase::default()
-        .account_balance(CALLER, U256::from(1_000_000))
-        .account_code(CALLEE, code);
-
-    let tx = default_tx();
-    let (result, _compute_gas, detained_limit) =
-        transact_with_spec(MegaSpecId::REX4, &mut db, 200_000_000, BLOCK_ENV_CAP, tx).unwrap();
-
-    assert!(result.result.is_success(), "Should succeed with both accesses within cap");
-    // First access at ~5M: limit = 5M + 20M = 25M
-    // Second access at ~10M: limit = min(25M, 10M + 20M) = min(25M, 30M) = 25M
-    // First access wins.
-    assert!(
-        detained_limit < 30_000_000,
-        "Detained limit should be anchored at first access (~25M), got {detained_limit}"
     );
 }

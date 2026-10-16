@@ -7,6 +7,7 @@ use mega_evm::{
     active_satin_prices,
     test_utils::{op_transaction, zero_fee_l1_block_info},
     LimitUsage, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    MegaTransactionOutcome,
 };
 use revm::{
     context::{result::ResultAndState, BlockEnv, TxEnv},
@@ -47,6 +48,44 @@ fn tx(caller: Address, kind: TxKind, data: Bytes, value: U256, gas_limit: u64) -
     OpTx(op_transaction(TxEnv { caller, kind, data, value, gas_limit, ..Default::default() }))
 }
 
+/// A type-4 call from `caller` to `to` carrying `value`, with one authorization per
+/// `(authority, nonce)` delegating the authority to `delegate`, valid on any chain.
+pub(crate) fn authorizing_call(
+    caller: Address,
+    to: Address,
+    value: U256,
+    gas_limit: u64,
+    delegate: Address,
+    authorizations: &[(Address, u64)],
+) -> MegaTransaction {
+    use revm::{
+        context::transaction::TransactionType,
+        context_interface::{
+            either::Either,
+            transaction::{Authorization, RecoveredAuthority, RecoveredAuthorization},
+        },
+    };
+    let authorization_list = authorizations
+        .iter()
+        .map(|(authority, nonce)| {
+            Either::Right(RecoveredAuthorization::new_unchecked(
+                Authorization { chain_id: U256::ZERO, address: delegate, nonce: *nonce },
+                RecoveredAuthority::Valid(*authority),
+            ))
+        })
+        .collect();
+    OpTx(op_transaction(TxEnv {
+        tx_type: TransactionType::Eip7702 as u8,
+        caller,
+        kind: TxKind::Call(to),
+        value,
+        gas_limit,
+        gas_priority_fee: Some(0),
+        authorization_list,
+        ..Default::default()
+    }))
+}
+
 /// Runs `tx` on a fresh Satin EVM over `db` and returns its result and what the common execution
 /// layer counted.
 pub(crate) fn run<DB: alloy_evm::Database>(
@@ -57,6 +96,15 @@ pub(crate) fn run<DB: alloy_evm::Database>(
     let result = evm.transact_raw(tx).expect("the transaction is valid");
     let usage = evm.ctx().additional_limit().usage();
     (result, usage)
+}
+
+/// Runs `tx` on a fresh Satin EVM over `db` and returns its outcome: the result and state, the
+/// gas by ledger and what the common execution layer counted.
+pub(crate) fn execute<DB: alloy_evm::Database>(
+    db: DB,
+    tx: MegaTransaction,
+) -> MegaTransactionOutcome {
+    MegaEvm::new(context(db)).execute_transaction(tx).expect("the transaction is valid")
 }
 
 /// Whether this process prices bytes at something other than the constants the spec fixes.

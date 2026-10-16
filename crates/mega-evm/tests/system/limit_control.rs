@@ -29,8 +29,9 @@ fn remaining(data: &Bytes) -> u64 {
         .expect("the answer is a uint64")
 }
 
-/// `remainingComputeGas()` is intercepted and answers the regular gas the call was forwarded,
-/// which is below the execution cap and below what the caller had.
+/// `remainingComputeGas()` is intercepted and answers the caller's regular gas, which is below the
+/// execution cap and below what the transaction had. What the figure is exactly is in
+/// `remaining_compute_gas`.
 #[test]
 fn test_remaining_compute_gas_is_intercepted() {
     let (status, data) = through_contract(CALL, &REMAINING_COMPUTE_GAS, 0);

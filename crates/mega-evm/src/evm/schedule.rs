@@ -22,9 +22,12 @@
 //! there by the capacity of the bucket it lands in, which the pricing hook does
 //! (`Host::state_gas_price`); the schedule holds the number that scaling starts from.
 //!
+//! The one entry outside Amsterdam's table is the history price of deposited code
+//! ([`HISTORY_GAS_PRICED`]): upstream leaves it at zero, and Satin gives it the cost of one
+//! history byte, which is what makes a deployment pay for the bytes every node has to carry.
+//!
 //! Every other entry is Amsterdam's, including the EIP-2780 decomposition entries
 //! (`tx_account_write_cost`, `tx_create_access_cost`), the zero `code_deposit_cost` and the floor.
-//! The history entry stays at zero: history gas is its own mechanism and switches it on.
 //!
 //! The schedule is built once for the process and handed to every configuration as a shared
 //! clone ([`MegaContext::with_cfg`](crate::MegaContext)); an opcode reads its price out of the
@@ -93,6 +96,13 @@ pub const STATE_GAS_REPRICED: &[ScheduleEntry] = &[
     (GasId::tx_eip7702_state_gas_bytecode, eip8037::AUTH_BASE_BYTES),
 ];
 
+/// The history-gas entries, rebuilt at `MegaETH`'s own cost per history byte.
+///
+/// Deposited code is the one history charge the schedule prices, because it is the one revm makes
+/// itself: `return_create` writes the code and charges the entry for its length. Every other
+/// history charge is made by the engine, which prices its own byte counts (the `history` module).
+pub const HISTORY_GAS_PRICED: &[ScheduleEntry] = &[(GasId::code_deposit_history_gas, 1)];
+
 /// The Satin gas schedule at the prices in effect.
 ///
 /// See the module documentation for what it changes; [`satin_gas_params_at`] is the same schedule
@@ -103,6 +113,23 @@ pub const STATE_GAS_REPRICED: &[ScheduleEntry] = &[
 pub fn satin_gas_params() -> GasParams {
     static TABLE: OnceLock<GasParams> = OnceLock::new();
     TABLE.get_or_init(|| satin_gas_params_at(active_satin_prices())).clone()
+}
+
+/// The Satin gas schedule with no price on a history byte, for a transaction exempt from history
+/// gas.
+///
+/// The one history charge revm makes itself reads the schedule, so the way to keep it off an
+/// exempt transaction is to hand that transaction a schedule that prices it at zero. Built once
+/// and handed out as a shared clone, like [`satin_gas_params`]; every other entry is the same.
+pub fn satin_gas_params_history_exempt() -> GasParams {
+    static TABLE: OnceLock<GasParams> = OnceLock::new();
+    TABLE
+        .get_or_init(|| {
+            let mut params = satin_gas_params();
+            params.override_gas(HISTORY_GAS_PRICED.iter().map(|&(id, _)| (id(), 0)));
+            params
+        })
+        .clone()
 }
 
 /// The Satin gas schedule at `prices`.
@@ -116,6 +143,9 @@ pub fn satin_gas_params_at(prices: SatinPrices) -> GasParams {
     params.override_gas(
         STATE_GAS_REPRICED.iter().map(|&(id, bytes)| (id(), prices.cpsb.fixed_size_gas(bytes))),
     );
+    params.override_gas(
+        HISTORY_GAS_PRICED.iter().map(|&(id, bytes)| (id(), prices.cphb.fixed_size_gas(bytes))),
+    );
     params
 }
 
@@ -123,7 +153,9 @@ pub fn satin_gas_params_at(prices: SatinPrices) -> GasParams {
 mod tests {
     use super::*;
     use crate::{
-        constants::{ACCOUNT_STATE_GAS, COST_PER_STATE_BYTE, SLOT_STATE_GAS},
+        constants::{
+            ACCOUNT_STATE_GAS, COST_PER_HISTORY_BYTE, COST_PER_STATE_BYTE, SLOT_STATE_GAS,
+        },
         evm::prices::{runs_at_measurement_prices, BytePrice},
     };
 
@@ -201,15 +233,16 @@ mod tests {
     /// Every entry outside the seventeen is Amsterdam's. The state-gas entries are rebuilt from
     /// the cost per state byte rather than copied, so they are checked separately; at the
     /// provisional price they land on Amsterdam's numbers too, which
-    /// [`test_other_prices_move_only_the_state_entries`] shows is a coincidence of the price and
-    /// not a copy.
+    /// [`test_other_prices_move_only_the_byte_priced_entries`] shows is a coincidence of the
+    /// price and not a copy.
     #[test]
     fn test_every_other_entry_is_amsterdam() {
         let (satin, amsterdam) = (satin_gas_params(), amsterdam());
         for slot in 0..=u8::MAX {
             let id = GasId::new(slot);
             let rebuilt = EIP8038_REPRICED.iter().any(|entry| entry() == id) ||
-                STATE_GAS_REPRICED.iter().any(|&(entry, _)| entry() == id);
+                STATE_GAS_REPRICED.iter().any(|&(entry, _)| entry() == id) ||
+                HISTORY_GAS_PRICED.iter().any(|&(entry, _)| entry() == id);
             if rebuilt {
                 continue;
             }
@@ -232,12 +265,30 @@ mod tests {
         }
     }
 
-    /// History gas is a later mechanism; until it lands the schedule prices no history byte, the
-    /// way Osaka and Amsterdam do not.
+    /// The schedule an exempt transaction runs prices no history byte and is otherwise the same
+    /// table.
     #[test]
-    fn test_the_history_entry_is_not_priced_yet() {
+    fn test_the_exempt_schedule_only_drops_the_history_price() {
+        let exempt = satin_gas_params_history_exempt();
+        let satin = satin_gas_params();
+        assert_eq!(exempt.get(GasId::code_deposit_history_gas()), 0);
+        for slot in 0..=u8::MAX {
+            let id = GasId::new(slot);
+            if HISTORY_GAS_PRICED.iter().any(|&(entry, _)| entry() == id) {
+                continue;
+            }
+            assert_eq!(exempt.get(id), satin.get(id), "{} must not move", id.name());
+        }
+    }
+
+    /// Deposited code costs one history byte per byte, which is the whole of Satin's history
+    /// schedule. Osaka and Amsterdam price no history byte at all.
+    #[test]
+    fn test_deposited_code_is_priced_per_history_byte() {
         let id = GasId::code_deposit_history_gas();
-        assert_eq!(satin_gas_params().get(id), 0);
+        let satin = satin_gas_params_at(SatinPrices::CONSTANTS);
+        assert_eq!(satin.get(id), COST_PER_HISTORY_BYTE);
+        assert_eq!(satin.get(id), 88);
         assert_eq!(osaka().get(id), 0);
         assert_eq!(amsterdam().get(id), 0);
     }
@@ -266,10 +317,10 @@ mod tests {
         assert_eq!(satin.get(GasId::tx_eip7702_state_gas_bytecode()), 35_190);
     }
 
-    /// Other prices move the five state entries and nothing else, which is what makes a
-    /// measurement build a repricing rather than a different schedule.
+    /// Other prices move the five state entries and the history entry, and nothing else, which
+    /// is what makes a measurement build a repricing rather than a different schedule.
     #[test]
-    fn test_other_prices_move_only_the_state_entries() {
+    fn test_other_prices_move_only_the_byte_priced_entries() {
         let constants = satin_gas_params_at(SatinPrices::CONSTANTS);
         let prices = SatinPrices { cpsb: "312.5".parse().unwrap(), cphb: BytePrice::from_gas(400) };
         let repriced = satin_gas_params_at(prices);
@@ -279,6 +330,7 @@ mod tests {
             (GasId::create_state_gas(), 37_500),
             (GasId::code_deposit_state_gas(), 313),
             (GasId::tx_eip7702_state_gas_bytecode(), 7_188),
+            (GasId::code_deposit_history_gas(), 400),
         ];
         for slot in 0..=u8::MAX {
             let id = GasId::new(slot);

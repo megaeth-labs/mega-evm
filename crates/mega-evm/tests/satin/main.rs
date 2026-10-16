@@ -1,11 +1,24 @@
 //! Tests of the Satin engine.
 
 mod common;
+mod compute_gas;
 mod contract_size;
+mod data_size;
+mod data_size_counts;
 mod db_error;
+mod deposit_charge;
+mod detained_transfers;
+mod detention;
 mod equivalence;
+mod history_bytes;
+mod history_exemption;
+mod history_gas;
+mod history_reservoir;
 mod inspector;
 mod intrinsic;
+mod kv_limit;
+mod limit_exemption;
+mod neutral;
 mod outcome;
 mod precompile_gas;
 mod pricing_table;
@@ -16,7 +29,12 @@ mod salt_failure;
 mod salt_refund;
 mod schedule;
 mod state;
+mod state_gas_limit;
 mod static_callee;
+mod storage_call_stipend;
 mod strategic_stop;
 mod synthetic_frame_gas;
+mod transfer_logs;
+mod volatile_access;
+mod withheld_gas;
 mod write_records;
