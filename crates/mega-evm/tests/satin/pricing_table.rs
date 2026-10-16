@@ -179,10 +179,10 @@ fn render() -> String {
     out.push_str("\n## SALT scaling\n\n");
     out.push_str(
         "The same probes again, with the SALT bucket the state charge lands in at `m` times the \
-         minimum capacity. `m` multiplies the state ledger and nothing else: the regular column \
-         is the same on all three rows of a probe, and `gas used` grows by exactly the state \
-         column's growth, because these probes run below the execution cap and every state \
-         charge spills onto the regular budget.\n\n",
+         minimum capacity. `m` multiplies the state ledger and nothing else: the regular and the \
+         history columns are the same on all three rows of a probe, and `gas used` grows by \
+         exactly the state column's growth, because these probes run below the execution cap \
+         and every state charge spills onto the regular budget.\n\n",
     );
     out.push_str(
         "| Probe | m | gas used | regular | state | history |\n|---|---:|---:|---:|---:|---:|\n",
@@ -334,9 +334,11 @@ fn test_the_table_shows_where_satin_differs_from_amsterdam() {
     );
 }
 
-/// The SALT scaling section says what it claims: on each probe the regular ledger is the same at
-/// every multiplier and the state ledger is the minimum bucket's times the multiplier. Read off
-/// the rendered table rather than the engine, so the table cannot drift from the claim above it.
+/// The SALT scaling section says what it claims: on each probe the regular ledger and the
+/// history ledger are the same at every multiplier [S6.5] — history gas is not scaled by SALT
+/// [S7.2] — and the state ledger is the minimum bucket's times the multiplier. Read off the
+/// rendered table rather than the engine, so the table cannot drift from the claim above it
+/// (`constants`: the relation across `m` is the spec's; the `m` = 1 row is the table's own).
 #[test]
 fn test_the_table_shows_the_multiplier_on_the_state_ledger_alone() {
     if runs_at_measurement_prices() {
@@ -346,7 +348,7 @@ fn test_the_table_shows_the_multiplier_on_the_state_ledger_alone() {
     let section = rendered.split("## SALT scaling").nth(1).expect("the scaling section");
     let section = section.split("\n## ").next().expect("the section ends at the next heading");
 
-    let mut baselines: Vec<(String, u64, u64)> = Vec::new();
+    let mut baselines: Vec<(String, u64, u64, u64)> = Vec::new();
     for line in section.lines().filter(|l| l.starts_with("| ") && l.matches('|').count() == 7) {
         let mut cells = line.split('|').map(str::trim).skip(1);
         let probe = cells.next().expect("probe").to_string();
@@ -358,18 +360,24 @@ fn test_the_table_shows_the_multiplier_on_the_state_ledger_alone() {
         let _gas_used = cells.next();
         let regular: u64 = cells.next().expect("regular").parse().expect("a number");
         let state: u64 = cells.next().expect("state").parse().expect("a number");
+        let history: u64 = cells.next().expect("history").parse().expect("a number");
 
         match baselines.iter().find(|(name, ..)| *name == probe) {
             None => {
                 assert_eq!(m, 1, "{probe}: the first row of a probe is the minimum bucket");
-                baselines.push((probe, regular, state));
+                baselines.push((probe, regular, state, history));
             }
-            Some((_, base_regular, base_state)) => {
+            Some((_, base_regular, base_state, base_history)) => {
                 assert_eq!(regular, *base_regular, "{probe} at m = {m}: regular gas moved");
                 assert_eq!(state, base_state * m, "{probe} at m = {m}: state gas");
+                assert_eq!(history, *base_history, "{probe} at m = {m}: history gas moved");
             }
         }
     }
     assert_eq!(baselines.len(), 2, "one slot-scoped probe and one account-scoped probe");
-    assert!(baselines.iter().all(|(_, _, state)| *state > 0), "a probe must charge state gas");
+    assert!(baselines.iter().all(|(_, _, state, _)| *state > 0), "a probe must charge state gas");
+    assert!(
+        baselines.iter().all(|(_, _, _, history)| *history > 0),
+        "a probe must pay history gas, or the column would hold constant for nothing"
+    );
 }

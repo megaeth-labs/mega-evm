@@ -7,9 +7,9 @@
 
 use std::ffi::OsString;
 
-use mega_evm::{chain_activation, ChainActivation, MegaSpecId, ParseMegaSpecError};
+use mega_evm::{ChainActivation, MegaSpecId, ParseMegaSpecError};
 
-use crate::common::{EvmeError, Result};
+use crate::common::{chain_activation, EvmeError, Result};
 
 /// The spec `run` and `tx` default to: the chain's current spec, on the legacy engine.
 pub const DEFAULT_SPEC: &str = "Rex6";
@@ -50,7 +50,8 @@ impl Engine {
     ///
     /// A known chain runs Satin from the timestamp its activation table gives, and the legacy
     /// engine before it, or throughout while Satin is not scheduled. An unknown chain runs the
-    /// Satin engine's fallback rung, Satin, from genesis.
+    /// Satin engine's fallback rung, Satin, from genesis. A chain the run was given the genesis
+    /// file of (`--genesis`) is known, by its file's `satinTime`.
     pub fn of_block(chain_id: u64, timestamp: u64) -> Self {
         Self::under(chain_activation(chain_id), timestamp)
     }

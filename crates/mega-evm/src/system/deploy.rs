@@ -9,6 +9,10 @@
 //! address order, then the factory. There is one version of each (the bytecode
 //! `mega-system-contracts` ships; the Oracle and the `SequencerRegistry` are their v2.0.0), and
 //! a system address that already holds different code is an error rather than an upgrade.
+//!
+//! [`check_genesis_account`] is the one check made before any block: a deploy over an account
+//! that holds storage neither writes nor clears that storage, and only a genesis allocation can
+//! put storage there, so a node refuses such an allocation when it loads its chain configuration.
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
@@ -186,11 +190,14 @@ impl<DbError: core::error::Error + 'static> core::error::Error
 ///   otherwise stay invalid forever. The six `MegaETH` contracts leave that flag unset; they
 ///   are not EIP-7997, and matching code is accepted regardless of nonce.
 /// - Absent, or present with empty code and nonce 0: the created account with its bytecode, nonce
-///   and every seeded slot, all marked. An existing balance is kept. Marking the account created
-///   clears any storage it had; that is the accepted bootstrap path (prefunding with balance
-///   alone). An empty-code account with a nonzero nonce is
-///   [`SystemContractDeployError::UsedEmptyAccount`]: a used account at a system address is not
-///   overwritten silently.
+///   and every seeded slot, all marked. An existing balance is kept; prefunding with balance alone
+///   is the accepted bootstrap path. Storage the account held is neither written nor cleared: the
+///   returned state carries no change to those slots, so the state a block commits still holds
+///   them, while the created mark has the state layer answer them as zero for the rest of the
+///   block, dropping a value its cache held. Only a genesis allocation can put storage on such an
+///   account, and [`check_genesis_account`] refuses one that does. An empty-code account with a
+///   nonzero nonce is [`SystemContractDeployError::UsedEmptyAccount`]: a used account at a system
+///   address is not overwritten silently.
 /// - Present with different non-empty code: [`SystemContractDeployError::ForeignCode`].
 ///
 /// # Errors
@@ -297,6 +304,82 @@ pub fn system_contract_specs(
         )
         .require_nonzero_nonce(),
     ]
+}
+
+/// The addresses [`system_contract_specs`] deploys at, in its order: the six `MegaETH` contracts,
+/// then the EIP-7997 factory.
+pub const SYSTEM_CONTRACT_ADDRESSES: [Address; SYSTEM_CONTRACT_DEPLOY_COUNT] = [
+    ORACLE_CONTRACT_ADDRESS,
+    HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
+    KEYLESS_DEPLOY_ADDRESS,
+    ACCESS_CONTROL_ADDRESS,
+    LIMIT_CONTROL_ADDRESS,
+    SEQUENCER_REGISTRY_ADDRESS,
+    CREATE2_FACTORY_ADDRESS,
+];
+
+/// A genesis allocation the system-contract deploy cannot run over, as
+/// [`check_genesis_account`] reports it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GenesisAllocationError {
+    /// The allocation gives `address`, where a system contract or the factory is deployed, an
+    /// account with empty code, nonce 0 and storage.
+    ///
+    /// The deploy installs the code over it and neither writes nor clears the storage: the state
+    /// a block commits keeps the slots, while the block that deploys reads them as zero, so two
+    /// nodes, or one node before and after it persists the block, would read them differently.
+    StorageWithoutCode {
+        /// The predeploy address.
+        address: Address,
+    },
+}
+
+impl fmt::Display for GenesisAllocationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StorageWithoutCode { address } => write!(
+                f,
+                "the genesis allocation gives the predeploy address {address} storage without \
+                 code and at nonce 0, which the system-contract deploy neither writes nor clears"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for GenesisAllocationError {}
+
+/// Refuses an account of a genesis allocation that the system-contract deploy would run over
+/// without clearing what it holds: one at a predeploy address ([`SYSTEM_CONTRACT_ADDRESSES`])
+/// with empty `code`, `nonce` 0 and a slot of `storage`, the values of its storage, that is not
+/// zero.
+///
+/// A node calls it on every account of its genesis allocation when it loads a chain
+/// configuration, as it checks the configuration's Satin keys
+/// ([`SatinChainConfig::from_genesis_config`](crate::SatinChainConfig::from_genesis_config)):
+/// only a genesis allocation can put storage on an account with empty code and nonce 0, and a
+/// deploy over one ([`transact_deploy`]) leaves the slots to the state layer. Any other account
+/// passes: one holding the contract's own code is only read by the deploy, a slot holding zero is
+/// no storage, and the deploy refuses every other account it cannot install the contract on —
+/// other code, or a used nonce — at the block that runs it.
+///
+/// # Errors
+///
+/// [`GenesisAllocationError::StorageWithoutCode`], naming the address.
+pub fn check_genesis_account(
+    address: Address,
+    code: &[u8],
+    nonce: u64,
+    storage: impl IntoIterator<Item = U256>,
+) -> Result<(), GenesisAllocationError> {
+    let predeploy = SYSTEM_CONTRACT_ADDRESSES.contains(&address);
+    if predeploy &&
+        code.is_empty() &&
+        nonce == 0 &&
+        storage.into_iter().any(|value| !value.is_zero())
+    {
+        return Err(GenesisAllocationError::StorageWithoutCode { address });
+    }
+    Ok(())
 }
 
 /// Encodes an address into its `U256` storage representation (standard Solidity address-in-slot).

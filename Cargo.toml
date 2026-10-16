@@ -18,7 +18,7 @@ resolver = "2"
 [workspace.package]
 version = "2.0.0-alpha.1"
 edition = "2021"
-rust-version = "1.94.1"
+rust-version = "1.94"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/megaeth-labs/mega-evm"
 repository = "https://github.com/megaeth-labs/mega-evm"
@@ -178,9 +178,11 @@ getrandom = { version = "0.3", default-features = false }
 hash-db = { version = "0.15", default-features = false }
 hex = { version = "0.4", default-features = false }
 indicatif = { version = "0.17", default-features = false }
+insta = { version = "1.47.2", default-features = false, features = ["json"] }
 k256 = { version = "0.13.4", default-features = false }
 once_cell = { version = "1.21", default-features = false }
 plain_hasher = { version = "0.2", default-features = false }
+proptest = { version = "1.7", default-features = false }
 rand = { version = "0.10", default-features = false }
 rstest = { version = "0.25", default-features = false }
 semver = { version = "1", default-features = false }

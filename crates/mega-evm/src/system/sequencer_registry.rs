@@ -64,7 +64,13 @@ pub const PLACEHOLDER_MIN_ROTATION_DELAY: u64 = 10;
 /// whatever the contract holds, rotated by the `applyPendingChanges()` pre-block call. The contract
 /// has no setter for `_minRotationDelay`, so a matching-code registry cannot be repaired later
 /// through this helper: the delay must be seeded here, and it must not be zero.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// It travels with the chain configuration as [`ProtocolLimits`](crate::ProtocolLimits) does: a
+/// JSON object with camelCase keys, every field required and no other accepted. Deserializing does
+/// not validate; whoever loads it runs [`HardforkParams::validate`], as the chain-config parser and
+/// [`validate_schedule`](crate::MegaHardforks::validate_schedule) do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SequencerRegistryConfig {
     /// Seeded into `_currentSystemAddress` and `_initialSystemAddress`.
     pub initial_system_address: Address,
@@ -209,6 +215,29 @@ where
     let data = Bytes::from(ISequencerRegistry::applyPendingChangesCall {}.abi_encode());
     let refused = |message| MegaBlockExecutionError::ApplyPendingChangesFailed { message }.into();
     transact_pre_block_call(evm, "applyPendingChanges()", SEQUENCER_REGISTRY_ADDRESS, data, refused)
+}
+
+/// The live system address in the state `db` holds: the address a system-address transaction
+/// must be sent from, read as a transaction of the system shape reads it when it is validated.
+///
+/// It is what a transaction pool gives
+/// [`validate_transaction_stateless`](crate::validate_transaction_stateless), read off the state
+/// the pool validates against, and it holds for the block whose pre-block changes made that
+/// state: a later block's pre-block step may change it, so a pool reads it again for every block.
+/// `None` when the registry names no address this engine trusts: it has no account, it holds
+/// other code than [`SEQUENCER_REGISTRY_CODE`], or its `_currentSystemAddress` is zero.
+///
+/// It reads two things and writes nothing, so any database serves: pass `&mut db` for a
+/// [`Database`](revm::Database) the caller keeps, and `WrapDatabaseRef(&db)`
+/// ([`revm::database_interface::WrapDatabaseRef`]) for a [`DatabaseRef`](revm::DatabaseRef),
+/// such as a read-only view of a block's state.
+///
+/// # Errors
+///
+/// The database's, when the registry's account or its slot cannot be read.
+pub fn live_system_address<DB: revm::Database>(db: DB) -> Result<Option<Address>, DB::Error> {
+    let mut journal: revm::Journal<DB> = revm::context::JournalTr::new(db);
+    inspect_system_address(&mut journal)
 }
 
 /// The live system address, read out of the registry in the running transaction's journal: the
@@ -571,6 +600,66 @@ mod tests {
         let registry = &journal.inner.state[&SEQUENCER_REGISTRY_ADDRESS];
         assert!(registry.is_loaded_as_not_existing());
         assert!(registry.storage.is_empty());
+    }
+
+    /// The seeds travel with a chain configuration: they survive a round trip through its JSON,
+    /// whose shape is written out here. A field left out is an error rather than a zero, and so is
+    /// one the type does not have. Deserializing does not validate: a zero address reads, and
+    /// [`HardforkParams::validate`] is what refuses it on load.
+    #[test]
+    fn test_sequencer_registry_config_round_trip() {
+        let config = SequencerRegistryConfig {
+            initial_system_address: NEXT_SYSTEM_ADDRESS,
+            initial_sequencer: NEXT_SEQUENCER,
+            initial_admin: CURRENT_SEQUENCER_ADDRESS,
+            initial_from_block: 7,
+            min_rotation_delay: 11,
+        };
+        let json = serde_json::to_string(&config).expect("serializes");
+        assert_eq!(
+            json,
+            r#"{"initialSystemAddress":"0x1111111111111111111111111111111111111111","initialSequencer":"0x2222222222222222222222222222222222222222","initialAdmin":"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","initialFromBlock":7,"minRotationDelay":11}"#
+        );
+        assert_eq!(serde_json::from_str::<SequencerRegistryConfig>(&json).unwrap(), config);
+        assert_eq!(config.validate(), Ok(()));
+
+        let missing = json.replace(r#","minRotationDelay":11"#, "");
+        assert!(serde_json::from_str::<SequencerRegistryConfig>(&missing).is_err(), "{missing}");
+        let unknown = json.replace(r#""minRotationDelay":11"#, r#""minRotationDelay":11,"x":1"#);
+        assert!(serde_json::from_str::<SequencerRegistryConfig>(&unknown).is_err(), "{unknown}");
+        let snake = json.replace("minRotationDelay", "min_rotation_delay");
+        assert!(serde_json::from_str::<SequencerRegistryConfig>(&snake).is_err(), "{snake}");
+
+        let zero =
+            json.replace("0x2222222222222222222222222222222222222222", &Address::ZERO.to_string());
+        let read = serde_json::from_str::<SequencerRegistryConfig>(&zero).expect("it reads");
+        assert_eq!(
+            read.validate().map_err(|e| e.message),
+            Err("SequencerRegistryConfig.initial_sequencer must not be zero".into())
+        );
+    }
+
+    /// Read off a database, the live system address is what a transaction's validation reads:
+    /// the address the registry stores when it holds this engine's code, and none otherwise.
+    #[test]
+    fn test_live_system_address_reads_what_validation_reads() {
+        let read = |db: InMemoryDB| live_system_address(db).expect("the read succeeds");
+        assert_eq!(
+            read(registry_holding(SEQUENCER_REGISTRY_CODE, Some(NEXT_SYSTEM_ADDRESS))),
+            Some(NEXT_SYSTEM_ADDRESS)
+        );
+        assert_eq!(read(registry_holding(SEQUENCER_REGISTRY_CODE, None)), None);
+        assert_eq!(
+            read(registry_holding(Bytes::from_static(&[0x60, 0x00]), Some(NEXT_SYSTEM_ADDRESS))),
+            None
+        );
+        assert_eq!(read(InMemoryDB::default()), None);
+
+        // A database the caller keeps, and one it can only read through `DatabaseRef`.
+        let mut db = registry_holding(SEQUENCER_REGISTRY_CODE, Some(NEXT_SYSTEM_ADDRESS));
+        assert_eq!(live_system_address(&mut db).unwrap(), Some(NEXT_SYSTEM_ADDRESS));
+        let wrapped = revm::database_interface::WrapDatabaseRef(&db);
+        assert_eq!(live_system_address(wrapped).unwrap(), Some(NEXT_SYSTEM_ADDRESS));
     }
 
     /// A read the database cannot serve is the database's error, not an absent address.

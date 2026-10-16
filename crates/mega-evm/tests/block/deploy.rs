@@ -2,6 +2,7 @@
 
 use alloy_evm::block::BlockExecutor;
 use alloy_primitives::{Address, Bytes, B256, U256};
+use alloy_sol_types::SolCall;
 use mega_evm::{
     system::{
         keyless::{KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE_HASH},
@@ -9,7 +10,7 @@ use mega_evm::{
             ADMIN as ADMIN_SLOT, CURRENT_SEQUENCER, CURRENT_SYSTEM_ADDRESS, INITIAL_FROM_BLOCK,
             INITIAL_SEQUENCER, INITIAL_SYSTEM_ADDRESS, MIN_ROTATION_DELAY,
         },
-        SequencerRegistryConfig, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE_HASH,
+        IOracle, SequencerRegistryConfig, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE_HASH,
         CREATE2_FACTORY_ADDRESS, CREATE2_FACTORY_CODE, CREATE2_FACTORY_CODE_HASH,
         HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS, HIGH_PRECISION_TIMESTAMP_ORACLE_CODE_HASH,
         LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE_HASH, MEGA_SYSTEM_ADDRESS,
@@ -19,7 +20,12 @@ use mega_evm::{
     test_utils::MemoryDatabase,
     MegaHardfork, MegaHardforkConfig, MegaHardforks, PreBlockStateSource, ProtocolLimits,
 };
-use revm::{context::result::ExecutionResult, database::State, state::Account, Database};
+use revm::{
+    context::{result::ExecutionResult, ContextTr},
+    database::{states::bundle_state::BundleRetention, OriginalValuesKnown, State},
+    state::Account,
+    Database,
+};
 
 use crate::common::{
     self, executor, executor_with_spec, pre_block_states, record_pre_block, recovered,
@@ -51,17 +57,18 @@ fn deploy_sources() -> [PreBlockStateSource; SYSTEM_CONTRACT_DEPLOY_COUNT] {
     expected_hashes().map(|(address, _)| PreBlockStateSource::SystemContract(address))
 }
 
-/// The two EIP calls, the seven deploys, then the read of the registry's pending changes, which
-/// finds none due on these blocks. The live system address is not read before the block: a
-/// system-address transaction reads it itself.
+/// The two EIP calls, the seven deploys, the read of the registry's pending changes, which
+/// finds none due on these blocks, then the read of the L1 block info. The live system address
+/// is not read before the block: a system-address transaction reads it itself.
 fn assert_pre_block_order(outcomes: &[(PreBlockStateSource, revm::state::EvmState)]) {
-    assert_eq!(outcomes.len(), 2 + SYSTEM_CONTRACT_DEPLOY_COUNT + 1);
+    assert_eq!(outcomes.len(), 2 + SYSTEM_CONTRACT_DEPLOY_COUNT + 2);
     assert_eq!(outcomes[0].0, PreBlockStateSource::Eip2935);
     assert_eq!(outcomes[1].0, PreBlockStateSource::Eip4788);
     for (i, source) in deploy_sources().iter().enumerate() {
         assert_eq!(outcomes[2 + i].0, *source);
     }
     assert_eq!(outcomes[2 + SYSTEM_CONTRACT_DEPLOY_COUNT].0, PreBlockStateSource::PendingChanges);
+    assert_eq!(outcomes[3 + SYSTEM_CONTRACT_DEPLOY_COUNT].0, PreBlockStateSource::L1BlockInfo);
 }
 
 fn assert_registry_account_seed(account: &Account, config: &SequencerRegistryConfig) {
@@ -179,6 +186,89 @@ fn test_the_second_block_is_seven_read_only_entries() {
     }
     assert_deployed(&mut state);
     assert_registry_seed(&mut state, &registry_config());
+}
+
+/// [S18.12] [S18] An account a genesis allocation gave storage but no code, at a predeploy
+/// address, is deployed over: it gets the code and nonce 1, and the slot it held is neither
+/// written nor cleared. For the rest of the block the slot reads as zero, to the block's state and
+/// to a transaction that reads it through the contract, whether or not the state's cache already
+/// held the slot when the block started; the state the block returns carries no change to the
+/// slot and no wipe of the account's storage, so the state it commits still holds the old value.
+///
+/// Expected values: independent (zero, no entry, no wipe).
+#[test]
+fn test_a_deploy_over_storage_neither_writes_nor_clears_it() {
+    const SLOT: U256 = U256::from_limbs([5, 0, 0, 0]);
+    const HELD: U256 = U256::from_limbs([7, 0, 0, 0]);
+    for cached in [false, true] {
+        let mut db = common::database();
+        db.set_account_storage(ORACLE_CONTRACT_ADDRESS, SLOT, HELD);
+        db.set_account_balance(ORACLE_CONTRACT_ADDRESS, U256::from(9));
+        let mut state = State::builder().with_database(db).with_bundle_update().build();
+        if cached {
+            // A state cache an earlier read filled, as a node's cache can be.
+            assert_eq!(state.storage(ORACLE_CONTRACT_ADDRESS, SLOT).unwrap(), HELD);
+        }
+
+        {
+            let mut executor = executor(&mut state, unlimited_ctx());
+            let log = record_pre_block(&mut executor);
+            executor.apply_pre_execution_changes().expect("the block starts");
+            let deploy = pre_block_states(&log)
+                .into_iter()
+                .find(|(source, _)| {
+                    *source == PreBlockStateSource::SystemContract(ORACLE_CONTRACT_ADDRESS)
+                })
+                .expect("the Oracle's deploy")
+                .1;
+            let account = &deploy[&ORACLE_CONTRACT_ADDRESS];
+            assert!(account.is_created(), "cached {cached}: a fresh deploy");
+            assert_eq!(account.info.code_hash, ORACLE_CONTRACT_CODE_HASH);
+            assert_eq!(account.info.nonce, 1);
+            assert_eq!(account.info.balance, U256::from(9), "the balance is kept");
+            assert!(account.storage.is_empty(), "the deploy writes no slot of the Oracle");
+
+            let read = executor.evm_mut().ctx_mut().db_mut().storage(ORACLE_CONTRACT_ADDRESS, SLOT);
+            assert_eq!(read.unwrap(), U256::ZERO, "cached {cached}: the block's state reads zero");
+            let input = IOracle::getSlotCall { slot: SLOT }.abi_encode();
+            let gas_limit = 1_000_000 + common::body_history(input.len() as u64);
+            let outcome = executor
+                .execute_transaction_without_commit(&recovered(tx(
+                    0,
+                    ORACLE_CONTRACT_ADDRESS,
+                    input.into(),
+                    gas_limit,
+                )))
+                .expect("the read runs");
+            let ExecutionResult::Success { output, .. } = &outcome.result else {
+                panic!("the read succeeds: {:?}", outcome.result);
+            };
+            assert_eq!(
+                output.data().as_ref(),
+                B256::ZERO.as_slice(),
+                "cached {cached}: a transaction reads zero"
+            );
+            executor.finish_with_counters().expect("the block finishes");
+        }
+
+        state.merge_transitions(BundleRetention::Reverts);
+        let bundle = state.take_bundle();
+        let oracle = &bundle.state[&ORACLE_CONTRACT_ADDRESS];
+        assert!(!oracle.was_destroyed(), "cached {cached}: the storage is not wiped");
+        assert!(!oracle.storage.contains_key(&SLOT), "cached {cached}: the slot is not written");
+        let changes = bundle.to_plain_state(OriginalValuesKnown::Yes);
+        let oracle_info = changes
+            .accounts
+            .iter()
+            .find(|(address, _)| *address == ORACLE_CONTRACT_ADDRESS)
+            .and_then(|(_, info)| info.clone())
+            .expect("the deploy changes the account");
+        assert_eq!((oracle_info.code_hash, oracle_info.nonce), (ORACLE_CONTRACT_CODE_HASH, 1));
+        for change in changes.storage.iter().filter(|c| c.address == ORACLE_CONTRACT_ADDRESS) {
+            assert!(!change.wipe_storage, "cached {cached}: the committed state wipes nothing");
+            assert!(change.storage.iter().all(|(slot, _)| *slot != SLOT), "nor writes the slot");
+        }
+    }
 }
 
 /// A factory that already holds the right code is left as it is, including a balance it already

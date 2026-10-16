@@ -5,10 +5,12 @@
 //! the stop, what gas detention made of the transaction, and every event the inspector saw with
 //! the journal depth it saw it at.
 //!
-//! The record is the way to hold a change to the engine's frame lifecycle to what it changes:
-//! when `MEGA_KEYLESS_RECORD` names a file, the record is written there, and the records of two
-//! builds can be compared line by line. The test itself holds every scenario's recorded run to its
-//! plain one, on everything but the events.
+//! An in-tree insta snapshot pins one line per case: its name and the keccak256 digest of its
+//! complete four-mode record, including line endings, plus the record's case, run, byte and line
+//! counts. It compares at the spec's byte prices; the recorded-versus-plain assertions run at
+//! every price. Review digest changes with the full dump: when `MEGA_KEYLESS_RECORD` names a
+//! file, the record is written there, and two builds can be compared line by line. The test also
+//! holds every scenario's recorded run to its plain one, on everything but the events.
 //!
 //! The scenarios: every rule a call can be refused by, and every charge it can run out of gas
 //! on; a deployment from nonce 0 and from nonce 1, one that moves value, one by a delegated
@@ -52,12 +54,14 @@ use crate::common::{context, state_is_free, CALLER as RELAYER};
 /// Where the record is written, when set.
 const RECORD_PATH: &str = "MEGA_KEYLESS_RECORD";
 
-/// Every scenario, in every mode: the recorded runs match the plain ones, and the record is
-/// written where `MEGA_KEYLESS_RECORD` says.
+/// Every scenario, in every mode: the recorded runs match the plain ones, the case digests are
+/// snapshotted, and the full record is written where `MEGA_KEYLESS_RECORD` says.
 #[test]
 fn test_keyless_differential_record() {
     let mut record = String::new();
+    let mut cases = Vec::new();
     for scenario in scenarios() {
+        let start = record.len();
         let plain = scenario.run(Mode::Plain);
         let recorded = scenario.run(Mode::Recorded);
         assert_eq!(
@@ -77,10 +81,24 @@ fn test_keyless_differential_record() {
             scenario.name, recorded.outcome, recorded.events
         )
         .unwrap();
+        cases.push(format!(
+            "{} | keccak256={}",
+            scenario.name,
+            keccak256(&record.as_bytes()[start..])
+        ));
     }
     if let Ok(path) = std::env::var(RECORD_PATH) {
-        std::fs::write(&path, record).expect("the record is written");
+        std::fs::write(&path, &record).expect("the record is written");
     }
+    crate::assert_sorted_json_snapshot!(serde_json::json!({
+        "summary": {
+            "cases": cases.len(),
+            "runs": cases.len() * 4,
+            "bytes": record.len(),
+            "lines": record.lines().count(),
+        },
+        "cases": cases,
+    }));
 }
 
 /* ---------- the scenarios ---------- */

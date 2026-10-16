@@ -1,10 +1,16 @@
-//! The two roots a state test's expectation is written in: the post-state root and the hash of
-//! the logs, computed the way the reference runner computes them.
+//! The roots a test's expectation is written in: the post-state root and the hash of the logs a
+//! state test carries, computed the way the reference runner computes them, and the receipts root
+//! and logs bloom a block header carries.
 
 use alloy_trie::{root::storage_root_unhashed, HashBuilder, Nibbles, TrieAccount};
-use mega_evm::revm::{
-    database::PlainAccount,
-    primitives::{keccak256, Address, Log, B256},
+use mega_evm::{
+    alloy_consensus::{proofs::calculate_receipt_root, TxReceipt},
+    alloy_primitives::Bloom,
+    op_alloy_consensus::OpReceiptEnvelope,
+    revm::{
+        database::PlainAccount,
+        primitives::{keccak256, Address, Log, B256},
+    },
 };
 
 /// The keccak hash of the RLP list of `logs`: a state test's `logs` field.
@@ -14,7 +20,25 @@ pub fn logs_hash(logs: &[Log]) -> B256 {
     keccak256(&out)
 }
 
-/// The state root over `accounts`: a state test's `hash` field.
+/// The receipts root over `receipts`: a block header's `receiptsRoot`.
+///
+/// Each receipt is a leaf at the RLP of its index, encoded as EIP-2718 has it with its bloom. A
+/// receipt of an OP transaction that is not a deposit is an Ethereum receipt, and encodes as one.
+pub fn receipts_root(receipts: &[OpReceiptEnvelope]) -> B256 {
+    calculate_receipt_root(receipts)
+}
+
+/// The bloom of every log of `receipts`: a block header's `logsBloom`.
+pub fn logs_bloom(receipts: &[OpReceiptEnvelope]) -> Bloom {
+    let mut bloom = Bloom::ZERO;
+    for receipt in receipts {
+        bloom.accrue_bloom(&receipt.bloom());
+    }
+    bloom
+}
+
+/// The state root over `accounts`: a state test's `hash` field, and a block header's
+/// `stateRoot`.
 ///
 /// A zero slot is not a leaf of an account's storage trie, which is how an account's storage
 /// root forgets a slot the transaction cleared.
@@ -53,10 +77,57 @@ pub fn state_root<'a>(accounts: impl IntoIterator<Item = (Address, &'a PlainAcco
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mega_evm::revm::{
-        primitives::{b256, KECCAK_EMPTY},
-        state::AccountInfo,
+    use mega_evm::{
+        alloy_consensus::{proofs::calculate_receipt_root, Receipt, ReceiptEnvelope},
+        revm::{
+            primitives::{b256, Bytes, KECCAK_EMPTY},
+            state::AccountInfo,
+        },
     };
+
+    /// No receipts have the empty trie's root and an empty bloom.
+    #[test]
+    fn test_no_receipts() {
+        assert_eq!(receipts_root(&[]), alloy_trie::EMPTY_ROOT_HASH);
+        assert_eq!(logs_bloom(&[]), Bloom::ZERO);
+    }
+
+    /// A receipt of an OP transaction that is not a deposit has the root the same Ethereum
+    /// receipt has, whatever its type, and the block's bloom holds every receipt's logs.
+    #[test]
+    fn test_op_receipts_root_and_bloom_as_ethereum_s() {
+        let log = |byte: u8| {
+            Log::new_unchecked(
+                Address::repeat_byte(byte),
+                vec![B256::repeat_byte(byte)],
+                Bytes::from(vec![byte]),
+            )
+        };
+        let receipt = |status: bool, gas: u64, byte: u8| {
+            Receipt { status: status.into(), cumulative_gas_used: gas, logs: vec![log(byte)] }
+                .with_bloom()
+        };
+        let op = [
+            OpReceiptEnvelope::Legacy(receipt(true, 21_000, 1)),
+            OpReceiptEnvelope::Eip2930(receipt(false, 42_000, 2)),
+            OpReceiptEnvelope::Eip1559(receipt(true, 63_000, 3)),
+            OpReceiptEnvelope::Eip7702(receipt(true, 84_000, 4)),
+        ];
+        let ethereum = [
+            ReceiptEnvelope::Legacy(receipt(true, 21_000, 1)),
+            ReceiptEnvelope::Eip2930(receipt(false, 42_000, 2)),
+            ReceiptEnvelope::Eip1559(receipt(true, 63_000, 3)),
+            ReceiptEnvelope::Eip7702(receipt(true, 84_000, 4)),
+        ];
+        assert_eq!(receipts_root(&op), calculate_receipt_root(&ethereum));
+        assert_ne!(receipts_root(&op), receipts_root(&op[..3]));
+
+        let bloom = logs_bloom(&op);
+        let mut expected = Bloom::ZERO;
+        expected.accrue_logs(&[log(1), log(2), log(3), log(4)]);
+        assert_eq!(bloom, expected);
+        assert_ne!(bloom, logs_bloom(&op[..3]));
+    }
 
     /// No logs hash to the keccak of an empty RLP list, the value every fixture without logs
     /// carries.

@@ -19,6 +19,7 @@ mod result;
 mod schedule;
 mod spec;
 mod state;
+mod validation;
 
 pub use context::*;
 pub use execution::*;
@@ -33,10 +34,11 @@ pub use result::*;
 pub use schedule::*;
 pub use spec::*;
 pub use state::*;
+pub use validation::*;
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, vec::Vec};
 
 use alloy_evm::{
     precompiles::{DynPrecompile, PrecompilesMap},
@@ -62,7 +64,7 @@ use revm::{
     DatabaseCommit, ExecuteCommitEvm, ExecuteEvm,
 };
 
-use crate::{EmptyExternalEnv, ExternalEnvTypes, MegaTransaction, MegaTransactionError};
+use crate::{BucketId, EmptyExternalEnv, ExternalEnvTypes, MegaTransaction, MegaTransactionError};
 
 /// The instruction table of the Satin engine.
 pub(crate) type MegaInstructions<DB, ExtEnvs> =
@@ -254,6 +256,33 @@ where
     pub fn clear_accessed_block_hashes(&mut self) {
         self.ctx_mut().clear_block_hash_record();
     }
+
+    /// The SALT buckets the SALT environment answered with a valid capacity on this EVM so far,
+    /// in ascending order.
+    ///
+    /// A bucket's capacity is read through a side channel no database sees, so this is where a
+    /// stateless witness learns which buckets it must prove. The record holds what this EVM
+    /// executed since it was last cleared, dropped candidates included and lookups that failed
+    /// left out: it starts empty, block execution empties it when a block starts, and nothing
+    /// empties it between the transactions of a block, as the per-transaction multiplier cache
+    /// is. An EVM reused across blocks outside a block executor reports every block it ran since
+    /// it was last cleared; a node that executes on several EVMs takes the union of their records.
+    pub fn get_accessed_bucket_ids(&self) -> Vec<BucketId> {
+        self.ctx().bucket_record().to_vec()
+    }
+
+    /// Forgets the SALT buckets asked about so far, so the next asks are attributable to one
+    /// transaction. The record decides nothing, so clearing it changes no execution result.
+    pub fn clear_accessed_bucket_ids(&mut self) {
+        self.ctx_mut().clear_bucket_record();
+    }
+
+    /// The reads of the Oracle's storage the running (or last) transaction or system call made
+    /// through the oracle service, in order, each with the service's answer. It is emptied before
+    /// every transaction and system call; a transaction's outcome carries a copy.
+    pub fn oracle_reads(&self) -> &[OracleRead] {
+        self.ctx().oracle_reads().reads()
+    }
 }
 
 impl<DB, INSP, ExtEnvs> MegaEvm<DB, INSP, ExtEnvs>
@@ -263,8 +292,9 @@ where
     ExtEnvs: ExternalEnvTypes,
 {
     /// Executes `tx`, through the inspector when one is enabled, and returns its outcome: the
-    /// result and state, the gas by ledger, the usage the common execution layer counted and the
-    /// limit that stopped the transaction, if any. Nothing is committed.
+    /// result and state, the gas by ledger, the usage the common execution layer counted, the
+    /// limit that stopped the transaction, if any, and the reads of the Oracle's storage it made
+    /// through the oracle service. Nothing is committed.
     pub fn execute_transaction(
         &mut self,
         tx: MegaTransaction,
@@ -281,6 +311,7 @@ where
             gas,
             usage: layer.usage(),
             limit_exceeded: layer.latched().copied(),
+            oracle_reads: self.inner.ctx.oracle_reads().reads().to_vec(),
         })
     }
 }

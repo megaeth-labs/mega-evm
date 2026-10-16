@@ -136,7 +136,11 @@ fn test_a_system_transaction_is_held_to_no_limit() {
 }
 
 /// A system call over any of the limits runs as it does without one, whatever caller it names,
-/// and the layer reports what it used.
+/// and the layer reports what it used: its body, three slots' records and the log, in data size,
+/// and the three records in the KV count.
+///
+/// Rule [S19.5]. Expected values `independent`: the spec's byte table by hand — a body of 310
+/// bytes, 40 a record, and a log's 32 bytes of base and its 64 bytes of data.
 #[test]
 fn test_a_system_call_is_held_to_no_limit() {
     let run = |limits| {
@@ -152,6 +156,7 @@ fn test_a_system_call_is_held_to_no_limit() {
     let (free, free_usage, _) = run(EvmTxRuntimeLimits::no_limits());
     assert!(free.result.is_success(), "{:?}", free.result);
     assert_eq!(free_usage.write_records, 3);
+    assert_eq!(free_usage.data_size, 310 + 3 * 40 + 32 + 64, "its body, records and log");
 
     for (name, limits) in limits() {
         let (result, usage, latched) = run(limits);

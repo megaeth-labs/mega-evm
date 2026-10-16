@@ -128,9 +128,21 @@ pub async fn replay_blocks(
     for number in range.from..=range.to {
         summary.blocks += 1;
         let outcome = async {
-            let inputs = source.load(number, &mut codes).await?;
+            let mut inputs = source.load(number, &mut codes).await?;
             let engine = forced_engine
                 .unwrap_or_else(|| Engine::of_block(inputs.chain_id, inputs.header.timestamp));
+            // The parent's timestamp is fetched only for a Satin block whose schedule makes the
+            // activation-block rule depend on it, so every other block replays from the cache.
+            if engine == Engine::Satin &&
+                inputs.parent_timestamp.is_none() &&
+                satin::needs_parent_timestamp(
+                    inputs.chain_id,
+                    inputs.header.timestamp,
+                    limits_override,
+                )?
+            {
+                source.complete_parent_timestamp(&mut inputs).await?;
+            }
             let fallback =
                 source.provider().and_then(|p| ParentStateRpc::new(p.clone(), number - 1));
             let mut state =
@@ -197,7 +209,10 @@ pub async fn replay_blocks(
 /// spec the chain's schedule gives at the block's timestamp.
 ///
 /// `limits_override` replaces the protocol limits a Satin block runs under; a legacy block,
-/// whose limits its spec fixes, is refused with one.
+/// whose limits its spec fixes, is refused with one. Under a genesis file (`--genesis`) a block of
+/// another chain is refused first, and then a legacy block: the legacy engine runs a chain on its
+/// own table, which knows nothing of the file, and for a chain it does not know that is a spec no
+/// chain ran.
 pub fn execute_block(
     engine: Engine,
     inputs: &super::inputs::BlockInputs,
@@ -206,11 +221,13 @@ pub fn execute_block(
     limits_override: Option<&LimitsOverride>,
     state: &mut BlockState,
 ) -> Result<(super::exec::ExecutedBlock, String)> {
+    crate::common::check_genesis_chain(inputs.chain_id)?;
     match engine {
         Engine::Satin => {
             let executed = satin::execute(
                 inputs.chain_id,
                 &inputs.header,
+                inputs.parent_timestamp,
                 &inputs.transactions,
                 bucket_capacities,
                 limits_override,
@@ -221,6 +238,11 @@ pub fn execute_block(
         Engine::Legacy if limits_override.is_some() => Err(EvmeError::InvalidInput(format!(
             "block {} runs on the legacy engine, whose limits its spec fixes; --override.limits \
              applies to Satin only",
+            inputs.header.number
+        ))),
+        Engine::Legacy if crate::common::genesis_in_use() => Err(EvmeError::InvalidInput(format!(
+            "block {} runs on the legacy engine, which runs a chain on its own table; \
+                 --genesis applies to Satin blocks only",
             inputs.header.number
         ))),
         Engine::Legacy => run_legacy_block(inputs, bucket_capacities, spec_override, state),

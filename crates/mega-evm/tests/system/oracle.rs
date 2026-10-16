@@ -293,18 +293,21 @@ fn test_a_reverting_frame_does_not_take_the_hint_bytes_back() {
 }
 
 /// A payload that does not fit in what is left of the transaction's data-size limit is not
-/// forwarded, and the crossing stops the transaction: the hint's bytes are counted before the
-/// payload is decoded, so the limit is crossed before the frame the call would have started.
+/// forwarded, and the crossing stops the transaction: the limit is checked on the hint's bytes
+/// before the payload is decoded, so it is crossed before the frame the call would have started.
 ///
-/// The bytes stay counted — the crossing is what the transaction is stopped for, and the usage
-/// is what shows it — and the transaction settles as a revert carrying the stop's own data.
+/// The bytes are not counted: the payload never left the machine, so the stopped transaction
+/// keeps its body alone, and a block's data-size counter takes nothing for the hint. The stop
+/// reports the usage the hint would have reached, and the transaction settles as a revert
+/// carrying the stop's own data.
 #[test]
 fn test_a_hint_that_crosses_the_data_size_limit_is_not_forwarded() {
     let data = send_hint(METERED_HINT);
-    // The body already counts the calldata. The hint counts it again, and that second copy is
-    // the byte that crosses.
-    let counted = top_level_hint(data.len() as u64);
-    let limit = counted - 1;
+    // The body already counts the calldata. The hint would count it again, and that second copy
+    // holds the byte that crosses.
+    let body = mega_evm::TX_BODY_SIZE + data.len() as u64;
+    let reached = top_level_hint(data.len() as u64);
+    let limit = reached - 1;
     let (outcome, hints) = run_with_oracle_under(
         system_db(),
         call_tx(ORACLE_CONTRACT_ADDRESS, data, U256::ZERO),
@@ -313,17 +316,19 @@ fn test_a_hint_that_crosses_the_data_size_limit_is_not_forwarded() {
 
     assert!(hints.is_empty(), "the hint the transaction cannot pay for is not forwarded");
     assert_eq!(
-        outcome.usage.data_size, counted,
-        "the whole payload is counted: the count is what crossed the limit",
+        outcome.usage,
+        LimitUsage { data_size: body, write_records: 0 },
+        "a hint that was not forwarded is not counted: the body is what the transaction keeps",
     );
     assert_eq!(
         outcome.limit_exceeded,
         Some(LimitCheck::ExceedsLimit {
             kind: LimitKind::DataSize,
             limit,
-            used: counted,
+            used: reached,
             frame_local: false,
         }),
+        "the stop reports the usage the hint would have reached",
     );
     assert_eq!(
         outcome.result.output().cloned().unwrap_or_default(),
@@ -537,6 +542,7 @@ fn test_a_malformed_or_padded_hint_is_counted_whole() {
                 frame_local: false,
             }),
         );
+        assert_eq!(outcome.usage.data_size, nested_hint(0), "and it is not counted");
     }
 }
 
@@ -557,10 +563,21 @@ fn test_consecutive_hints_add_up_on_the_transaction() {
         EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit),
     );
     assert_eq!(hints.len(), 1, "the first hint was forwarded, the second was not");
-    assert!(matches!(
+    assert_eq!(
         outcome.limit_exceeded,
-        Some(LimitCheck::ExceedsLimit { kind: LimitKind::DataSize, .. })
-    ));
+        Some(LimitCheck::ExceedsLimit {
+            kind: LimitKind::DataSize,
+            limit,
+            used: nested_hint(2 * len),
+            frame_local: false,
+        }),
+        "the stop reports what both hints would have reached",
+    );
+    assert_eq!(
+        outcome.usage,
+        LimitUsage { data_size: nested_hint(len), write_records: 0 },
+        "the forwarded hint stays counted and the one that crossed is not",
+    );
 }
 
 /// A contract's hint whose payload crosses the transaction's data-size limit is not forwarded, and
@@ -593,6 +610,11 @@ fn test_data_size_overflow_blocks_forwarding_and_stops_the_transaction() {
             if output == &stop.revert_data()),
         "the stop, not the status: {:?}",
         outcome.result
+    );
+    assert_eq!(
+        outcome.usage,
+        LimitUsage { data_size: nested_hint(0), write_records: 0 },
+        "the stopped transaction keeps its body: the hint never left the machine",
     );
 
     // What ran is the contract's code up to its call, which the stop answered at the Oracle's

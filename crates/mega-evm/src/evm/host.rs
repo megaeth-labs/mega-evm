@@ -355,6 +355,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     ///
     /// It is a read of volatile data: it is refused while the frame's volatile-data access is off,
     /// and marked for gas detention, under the Oracle's cap, once it succeeded.
+    ///
+    /// The read and the answer are recorded on the context for the transaction's outcome
+    /// ([`OracleReadRecord`](crate::OracleReadRecord)): the answer is in no database, so a
+    /// stateless validator is given the included transactions' reads in place of the service.
     fn oracle_sload(
         &mut self,
         key: StorageKey,
@@ -370,9 +374,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
             false,
         )?
         .data;
-        let value = self.external_envs().oracle_env.get_oracle_storage(key).unwrap_or(loaded);
+        let answer = self.external_envs().oracle_env.get_oracle_storage(key);
+        self.oracle_reads.record(key, answer);
         self.detention.observe(VolatileDataAccess::ORACLE);
-        Ok(StateLoad::new(value, true))
+        Ok(StateLoad::new(answer.unwrap_or(loaded), true))
     }
 }
 

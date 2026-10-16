@@ -1,0 +1,6 @@
+---
+source: crates/mega-evm/tests/tracers/harness.rs
+expression: trace
+---
+{"pc":0,"depth":1,"opName":"STOP","op":0,"gas":"0xf4240","reservoir":"0x0","stateGas":"0x0","gasCost":"0x0","stack":[],"returnData":"0x","refund":"0x0","memSize":"0x0","error":"Stop"}
+{"stateRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","output":"0x","gasUsed":"0x5208","pass":true,"fork":"Osaka"}

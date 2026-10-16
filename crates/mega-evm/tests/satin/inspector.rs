@@ -352,6 +352,32 @@ fn test_declared_tracer_changes_nothing() {
     assert_eq!(evm.inspector().0.traces().nodes().len(), 2, "the tracer saw both frames");
 }
 
+/// The gas inspector of the test utilities records a byte no opcode is defined for as `INVALID`,
+/// and keeps the byte, so the undefined byte is told from the designated invalid opcode.
+#[test]
+fn test_the_gas_inspector_keeps_the_byte_of_an_undefined_opcode() {
+    const UNDEFINED: u8 = 0x21;
+    assert!(revm::bytecode::opcode::OpCode::new(UNDEFINED).is_none(), "no opcode is defined");
+    for (code, undefined) in [(UNDEFINED, true), (INVALID, false)] {
+        let db = MemoryDatabase::default()
+            .account_balance(CALLER, U256::from(1_000_000))
+            .account_code(A, Bytes::from(vec![PUSH0, code]));
+        let mut evm = MegaEvm::new(context(db)).with_inspector(GasInspector::new());
+        let outcome = evm.transact_raw(call(CALLER, A, U256::ZERO, gas_limit())).unwrap();
+        assert!(outcome.result.is_halt(), "{:?}", outcome.result);
+        let records = evm.inspector().records();
+        let last = records.last().expect("the frame ran");
+        assert_eq!((last.opcode.get(), last.byte), (INVALID, code));
+        assert_eq!(last.is_undefined(), undefined);
+        assert!(!records[0].is_undefined(), "a defined opcode carries its own byte");
+        assert_eq!(
+            format!("{last:?}").starts_with("UNDEFINED(0x21)"),
+            undefined,
+            "the rendering names the byte: {last:?}"
+        );
+    }
+}
+
 /// The admission gate: only an enabled inspector that did not arrive declared is a rewriting one.
 #[test]
 fn test_has_rewriting_inspector_truth_table() {
@@ -543,6 +569,9 @@ fn test_declared_observer_forwards_every_callback() {
 }
 
 /// Edits a frame's inputs, writes to the journal, or rewrites a frame result, one per flag.
+///
+/// Only the debug-build tests below use it: a release build does not check declarations.
+#[cfg(debug_assertions)]
 #[derive(Default)]
 struct Writer {
     edit_inputs: bool,
@@ -550,6 +579,7 @@ struct Writer {
     rewrite_frame_end: bool,
 }
 
+#[cfg(debug_assertions)]
 impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Writer {
     fn step(&mut self, _interp: &mut Interpreter<EthInterpreter>, context: &mut MegaContext<DB>) {
         if self.log_in_step {
@@ -582,6 +612,7 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Writer {
     }
 }
 
+#[cfg(debug_assertions)]
 fn run_declared(writer: Writer) {
     let mut evm =
         MegaEvm::new(context(writes_two_slots())).with_trusted_inspector(DeclaredObserver(writer));

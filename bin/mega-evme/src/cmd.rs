@@ -3,8 +3,13 @@ use std::ffi::OsString;
 use clap::{parser::ValueSource, ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand};
 use tracing::error;
 
+use mega_evm::MegaSpecId;
+
 use crate::{
-    common::{EvmeError, LimitsOverride, LogArgs},
+    common::{
+        check_genesis_chain, parse_genesis, use_genesis, EvmeError, GenesisChain, LimitsOverride,
+        LogArgs,
+    },
     engine::Engine,
 };
 
@@ -15,6 +20,14 @@ pub struct MainCmd {
     /// Logging configuration
     #[command(flatten)]
     pub log: LogArgs,
+
+    /// Satin only: the genesis file of the chain the command runs on. Its `config` object's
+    /// `chainId` and Satin keys (`satinTime`, the registry seeds, the protocol limits) replace the
+    /// engine's table for that chain: which blocks run Satin, and the schedule they run under.
+    /// `run` and `tx` default to `--spec Satin` under it. A run on another chain, on a legacy
+    /// spec, before the file's `satinTime`, or on a file without Satin keys is refused
+    #[arg(long = "genesis", global = true, value_name = "FILE", value_parser = parse_genesis)]
+    pub genesis: Option<GenesisChain>,
 
     /// Subcommand to execute
     #[command(subcommand)]
@@ -53,7 +66,25 @@ pub enum Error {
 pub async fn run_cli(args: Vec<OsString>) -> Result<(), Error> {
     let matches = MainCmd::command().get_matches_from(&args);
     let spec_is_default = spec_is_default(&matches);
-    let cmd = MainCmd::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    let mut cmd = MainCmd::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    if let Some(genesis) = &cmd.genesis {
+        if let Err(e) = use_genesis(genesis.clone()) {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+        // The file configures Satin alone, so a `run` or `tx` that left `--spec` out runs it.
+        if spec_is_default {
+            cmd.command.set_spec(MegaSpecId::SATIN.to_string());
+        }
+    }
+    // The chain is checked before the engine is picked: a run on another chain than the file's is
+    // refused for its chain, whatever its spec.
+    if let Some(chain_id) = cmd.command.chain_id() {
+        if let Err(e) = check_genesis_chain(chain_id) {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    }
 
     // Whole-block replay runs here for both engines, choosing one per block.
     let engine = match &cmd.command {
@@ -76,6 +107,17 @@ pub async fn run_cli(args: Vec<OsString>) -> Result<(), Error> {
                 EvmeError::InvalidInput(
                     "--override.limits applies to Satin only: the legacy engine holds a \
                      transaction to its spec's own limits"
+                        .to_string()
+                )
+            );
+            std::process::exit(1);
+        }
+        Engine::Legacy if cmd.genesis.is_some() => {
+            eprintln!(
+                "{}",
+                EvmeError::InvalidInput(
+                    "--genesis applies to Satin only: the legacy engine runs a chain on its own \
+                     table"
                         .to_string()
                 )
             );
@@ -108,6 +150,25 @@ impl Commands {
             Self::Run(cmd) => Engine::of_spec(&cmd.env_args.chain.spec),
             Self::Tx(cmd) => Engine::of_spec(&cmd.env_args.chain.spec),
             Self::Replay(cmd) => cmd.engine().await,
+        }
+    }
+
+    /// The chain `run` or `tx` runs on (`--chain-id`); `None` for `replay`, which learns its
+    /// chain from the source it replays.
+    pub const fn chain_id(&self) -> Option<u64> {
+        match self {
+            Self::Run(cmd) => Some(cmd.env_args.chain.chain_id),
+            Self::Tx(cmd) => Some(cmd.env_args.chain.chain_id),
+            Self::Replay(_) => None,
+        }
+    }
+
+    /// Sets the spec of `run` or `tx` (`--spec`) to `spec`; `replay` has none.
+    fn set_spec(&mut self, spec: String) {
+        match self {
+            Self::Run(cmd) => cmd.env_args.chain.spec = spec,
+            Self::Tx(cmd) => cmd.env_args.chain.spec = spec,
+            Self::Replay(_) => {}
         }
     }
 

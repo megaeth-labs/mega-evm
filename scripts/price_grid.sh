@@ -13,9 +13,11 @@
 # `--no-fail-fast`, so every failing test of every point is reported.
 #
 # Each point's output lands in $OUT_DIR/<cpsb>_<cphb>.log (default target/price-grid), and the
-# tests a price guard held back at it (`note_price_guard`) in <cpsb>_<cphb>.guards, one per line. A
-# summary line per point, with how many passed, were guarded and failed, goes to stdout and, when
-# $GITHUB_STEP_SUMMARY is set, a table to the step summary. Exits 1 if any point fails.
+# notes its tests left in <cpsb>_<cphb>.guards, one per line: the tests a price guard held back
+# (`note_price_guard`), and apart from them the tests that skipped only a snapshot comparison,
+# since snapshots are pinned at the spec's prices (`note_snapshot_skipped`). A summary line per
+# point, with how many passed, were guarded, skipped a snapshot and failed, goes to stdout and,
+# when $GITHUB_STEP_SUMMARY is set, a table to the step summary. Exits 1 if any point fails.
 #
 # The grid brackets the prices under consideration and adds the edges the code allows: a price of
 # nothing on either axis, the smallest price the code represents (0.001), the cheapest price that
@@ -34,6 +36,9 @@ EXTRA_POINTS="0.001/0.001"
 PR_POINTS="0/0 1/1 312.5/20 5000/300 10000/1000"
 
 FEATURES="satin-price-override,test-utils"
+# The reason `note_snapshot_skipped` leaves (`test_utils::SNAPSHOT_SKIPPED`): a test that skipped a
+# snapshot comparison ran every assertion it makes, so it is counted apart from the guards.
+SNAPSHOT_SKIPPED="snapshot comparison skipped"
 
 cd "$(dirname "$0")/.." || exit 1
 OUT_DIR="${OUT_DIR:-target/price-grid}"
@@ -52,7 +57,7 @@ case "${1:-}" in
         points="$points $EXTRA_POINTS"
         ;;
     "" | -h | --help)
-        sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
         exit 2
         ;;
     *)
@@ -71,7 +76,7 @@ if ! cargo test -p mega-evm --features "$FEATURES" --locked --no-run; then
     exit 1
 fi
 
-summary="| CPSB | CPHB | result | passed | guarded | failed |"$'\n'"|---|---|---|---:|---:|---:|"
+summary="| CPSB | CPHB | result | passed | guarded | snapshot skips | failed |"$'\n'"|---|---|---|---:|---:|---:|---:|"
 failed_points=""
 for point in $points; do
     cpsb="${point%/*}"
@@ -92,21 +97,25 @@ for point in $points; do
     passed=$(grep -E '^test result:' "$log" | sed -E 's/.* ([0-9]+) passed.*/\1/' | awk '{s += $1} END {print s + 0}')
     failed=$(grep -cE '^test .* \.\.\. FAILED$' "$log")
     guarded=0
-    [ -f "$guards" ] && guarded=$(wc -l <"$guards" | tr -d ' ')
+    snapshot_skips=0
+    if [ -f "$guards" ]; then
+        snapshot_skips=$(grep -c "^$SNAPSHOT_SKIPPED: " "$guards")
+        guarded=$(grep -vc "^$SNAPSHOT_SKIPPED: " "$guards")
+    fi
     if [ "$status" -eq 0 ]; then
         result="ok"
     else
         result="FAILED"
         failed_points="$failed_points $point"
     fi
-    printf '%-12s %-7s %5s passed %4s guarded %4s failed  %4ss  %s\n' \
-        "$point" "$result" "$passed" "$guarded" "$failed" "$seconds" "$log"
+    printf '%-12s %-7s %5s passed %4s guarded %4s snapshot skips %4s failed  %4ss  %s\n' \
+        "$point" "$result" "$passed" "$guarded" "$snapshot_skips" "$failed" "$seconds" "$log"
     if [ "$status" -ne 0 ]; then
         grep -E '^test .* \.\.\. FAILED$' "$log" | sed 's/^/    /'
         # A failure that is not a test's, such as a build error, shows in the log's tail.
         [ "$failed" -eq 0 ] && tail -20 "$log" | sed 's/^/    /'
     fi
-    summary="$summary"$'\n'"| $cpsb | $cphb | $result | $passed | $guarded | $failed |"
+    summary="$summary"$'\n'"| $cpsb | $cphb | $result | $passed | $guarded | $snapshot_skips | $failed |"
 done
 
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then

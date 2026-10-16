@@ -694,3 +694,48 @@ fn test_a_creation_that_cannot_pay_its_code_deposit_keeps_no_state_gas() {
         "the creation, the slot its init code wrote and the bytes it deposited",
     );
 }
+
+/// A `CREATE` whose init code `SELFDESTRUCT`s the account it is creating, in the same transaction.
+///
+/// EIP-8037's gas refills for `SELFDESTRUCT` say that destruction leaves the account, its code
+/// and its storage out of the trie, and still produces no state-gas refill and no change to the
+/// state gas the transaction has spent. The created-account charge therefore stands, priced in
+/// the created address's bucket, at the minimum multiplier and above it.
+#[test]
+fn test_a_created_account_selfdestructed_in_the_same_transaction_keeps_its_state_gas() {
+    // A charge that costs nothing is the same number whether or not it is given back.
+    if state_is_free() {
+        return;
+    }
+    // `ADDRESS SELFDESTRUCT`: the init code destroys the account being created. The beneficiary
+    // is that account, which the creation itself just added, so no second account is charged.
+    let init = selfdestruct_to_self();
+    let created = CONTRACT.create(0);
+    let account = entry(GasId::create_state_gas());
+
+    assert_eq!(
+        net_state_at(
+            [1, 2, 8],
+            move |envs, m| crowded_account(envs, created, m),
+            || (db(create_with(&init).stop().build()), call_contract()),
+        ),
+        [account, account * 2, account * 8],
+        "the created account's state gas is not refilled",
+    );
+
+    let outcome = run(
+        db(create_with(&init).stop().build()),
+        crowded_account(minimal_envs(), created, 8),
+        call_contract(),
+    );
+    assert!(
+        outcome.state.get(&created).is_some_and(|account| account.is_selfdestructed()),
+        "the same-transaction destruction removes the account from the trie",
+    );
+}
+
+/// Init code that self-destructs the account being created: `ADDRESS SELFDESTRUCT`.
+fn selfdestruct_to_self() -> Vec<u8> {
+    use revm::bytecode::opcode::{ADDRESS, SELFDESTRUCT};
+    vec![ADDRESS, SELFDESTRUCT]
+}

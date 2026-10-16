@@ -1,0 +1,778 @@
+//! A serializable view of a transaction's outcome, for tests that compare parts of it.
+//!
+//! [`MegaTransactionOutcome`] holds revm's result and state beside what `MegaETH` counts, and not
+//! every part of it serializes. [`OutcomeView`] copies what a test compares — the result, every
+//! gas figure, the usage counted, the limit stop, the oracle reads and the touched accounts — into
+//! plain fields that serialize the same way on every run: maps are [`BTreeMap`]s and lists are in
+//! a fixed order, so an account's changed slots, for one, compare as an ascending list. A touched
+//! account the transaction left as it found it is one word ([`AccountEntry`]).
+
+#[cfg(not(feature = "std"))]
+use alloc as std;
+use std::{collections::BTreeMap, format, string::String, vec::Vec};
+
+use alloy_primitives::{Address, Bytes, B256, U256};
+use alloy_sol_types::{GenericContractError, SolInterface};
+use revm::{
+    context::result::{ExecutionResult, ResultGas},
+    state::Account,
+};
+use serde::Serialize;
+
+use crate::{
+    decode_mega_limit_exceeded, LimitCheck, LimitUsage, MegaGasUsage, MegaTransactionOutcome,
+};
+
+/// What one transaction produced, in plain fields.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct OutcomeView {
+    /// The result: its kind, reason, output and logs.
+    pub result: ResultView,
+    /// The gas by ledger ([`MegaGasUsage`]).
+    pub gas: LedgerView,
+    /// The gas figures revm's result carries ([`ResultGas`]).
+    pub result_gas: ResultGasView,
+    /// The data-size bytes and write records the transaction kept.
+    pub usage: UsageView,
+    /// The transaction-level limit that stopped the transaction, if one did.
+    pub limit_stop: Option<LimitStopView>,
+    /// The reads of the Oracle's storage through the oracle service, in order.
+    pub oracle_reads: Vec<OracleReadView>,
+    /// The accounts the transaction touched, by address: in full where it changed them, one word
+    /// where it did not ([`AccountEntry`]).
+    pub accounts: BTreeMap<Address, AccountEntry>,
+}
+
+impl OutcomeView {
+    /// The view of `outcome`.
+    pub fn new(outcome: &MegaTransactionOutcome) -> Self {
+        Self {
+            result: ResultView::new(&outcome.result),
+            gas: LedgerView::new(&outcome.gas),
+            result_gas: ResultGasView::new(outcome.result.gas()),
+            usage: UsageView::new(&outcome.usage),
+            limit_stop: outcome.limit_exceeded.as_ref().and_then(LimitStopView::new),
+            oracle_reads: outcome
+                .oracle_reads
+                .iter()
+                .map(|read| OracleReadView { slot: read.slot, answer: read.answer })
+                .collect(),
+            accounts: outcome
+                .state
+                .iter()
+                .filter(|(_, account)| account.is_touched())
+                .map(|(address, account)| (*address, AccountEntry::new(account)))
+                .collect(),
+        }
+    }
+}
+
+impl From<&MegaTransactionOutcome> for OutcomeView {
+    fn from(outcome: &MegaTransactionOutcome) -> Self {
+        Self::new(outcome)
+    }
+}
+
+/// How a transaction ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultKind {
+    /// It succeeded.
+    Success,
+    /// It reverted.
+    Revert,
+    /// It halted.
+    Halt,
+}
+
+/// The result of a transaction, without its gas.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ResultView {
+    /// How the transaction ended.
+    pub kind: ResultKind,
+    /// Why: the success reason (`Stop`, `Return`, `SelfDestruct`) or the halt reason, as their
+    /// `Debug` prints them; for a revert, its output decoded as `MegaLimitExceeded` or as a
+    /// Solidity `Error(string)` or `Panic(uint256)`, and `None` when it decodes as neither.
+    pub reason: Option<String>,
+    /// The output: the returned or deployed bytes, or the revert data. `None` for a halt.
+    pub output: Option<Bytes>,
+    /// The address a creation deployed to, if it deployed.
+    pub created: Option<Address>,
+    /// The logs, in the order they were emitted.
+    pub logs: Vec<LogView>,
+}
+
+impl ResultView {
+    fn new<H: core::fmt::Debug>(result: &ExecutionResult<H>) -> Self {
+        let (kind, reason, output, created) = match result {
+            ExecutionResult::Success { reason, output, .. } => (
+                ResultKind::Success,
+                Some(format!("{reason:?}")),
+                Some(output.data().clone()),
+                output.address().copied(),
+            ),
+            ExecutionResult::Revert { output, .. } => {
+                (ResultKind::Revert, revert_reason(output), Some(output.clone()), None)
+            }
+            ExecutionResult::Halt { reason, .. } => {
+                (ResultKind::Halt, Some(format!("{reason:?}")), None, None)
+            }
+        };
+        let logs = result
+            .logs()
+            .iter()
+            .map(|log| LogView {
+                address: log.address,
+                topics: log.topics().to_vec(),
+                data: log.data.data.clone(),
+            })
+            .collect();
+        Self { kind, reason, output, created, logs }
+    }
+}
+
+/// The reason a revert's `output` names: a limit stop's `MegaLimitExceeded`, or a Solidity
+/// `Error(string)` or `Panic(uint256)`.
+fn revert_reason(output: &Bytes) -> Option<String> {
+    if let Some((kind, limit)) = decode_mega_limit_exceeded(output) {
+        return Some(format!("MegaLimitExceeded({kind:?}, {limit})"));
+    }
+    match GenericContractError::abi_decode(output) {
+        Ok(error @ (GenericContractError::Revert(_) | GenericContractError::Panic(_))) => {
+            Some(format!("{error}"))
+        }
+        _ => None,
+    }
+}
+
+/// One log.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct LogView {
+    /// The account that emitted it.
+    pub address: Address,
+    /// Its topics, in order.
+    pub topics: Vec<B256>,
+    /// Its data.
+    pub data: Bytes,
+}
+
+/// Every figure of [`MegaGasUsage`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct LedgerView {
+    /// Regular gas spent, before the refund.
+    pub regular: u64,
+    /// State gas spent.
+    pub state: u64,
+    /// History gas spent.
+    pub history: u64,
+    /// The history bytes the transaction appended.
+    pub history_bytes: u64,
+    /// The reservoir left unspent.
+    pub reservoir_remaining: u64,
+    /// The EIP-7623 floor.
+    pub floor: u64,
+    /// The gas used the receipt reports.
+    pub gas_used: u64,
+}
+
+impl LedgerView {
+    const fn new(gas: &MegaGasUsage) -> Self {
+        let MegaGasUsage {
+            regular,
+            state,
+            history,
+            history_bytes,
+            reservoir_remaining,
+            floor,
+            gas_used,
+        } = *gas;
+        Self { regular, state, history, history_bytes, reservoir_remaining, floor, gas_used }
+    }
+}
+
+/// The figures [`ResultGas`] holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct ResultGasView {
+    /// The total spent before the refund: regular, state and history gas.
+    pub total_gas_spent: u64,
+    /// The state gas spent.
+    pub state_gas_spent: u64,
+    /// The refund, before the EIP-7623 floor.
+    pub refunded: u64,
+    /// The EIP-7623 floor.
+    pub floor_gas: u64,
+    /// The reservoir left unspent.
+    pub reservoir_remaining: u64,
+}
+
+impl ResultGasView {
+    const fn new(gas: &ResultGas) -> Self {
+        Self {
+            total_gas_spent: gas.total_gas_spent(),
+            state_gas_spent: gas.state_gas_spent_final(),
+            refunded: gas.inner_refunded(),
+            floor_gas: gas.floor_gas(),
+            reservoir_remaining: gas.reservoir_remaining(),
+        }
+    }
+}
+
+/// The counts of [`LimitUsage`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct UsageView {
+    /// Data-size bytes.
+    pub data_size: u64,
+    /// Account and storage write records: the KV count.
+    pub write_records: u64,
+}
+
+impl UsageView {
+    const fn new(usage: &LimitUsage) -> Self {
+        let LimitUsage { data_size, write_records } = *usage;
+        Self { data_size, write_records }
+    }
+}
+
+/// A transaction-level limit that stopped the transaction.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct LimitStopView {
+    /// The dimension crossed, as [`LimitKind`](crate::LimitKind)'s `Debug` prints it.
+    pub kind: String,
+    /// The limit crossed.
+    pub limit: u64,
+    /// The usage that crossed it.
+    pub used: u64,
+}
+
+impl LimitStopView {
+    fn new(check: &LimitCheck) -> Option<Self> {
+        match *check {
+            LimitCheck::ExceedsLimit { kind, limit, used, .. } => {
+                Some(Self { kind: format!("{kind:?}"), limit, used })
+            }
+            LimitCheck::WithinLimit => None,
+        }
+    }
+}
+
+/// One read of the Oracle's storage through the oracle service.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct OracleReadView {
+    /// The slot read.
+    pub slot: U256,
+    /// The service's answer, if it had one.
+    pub answer: Option<U256>,
+}
+
+/// A touched account in the view: in full where the transaction changed it, and the one word
+/// `"unchanged"` where it did not, so the accounts a transaction touches without changing them —
+/// the fee vaults a free transaction credits nothing, an empty account a call reaches — take a
+/// line each.
+///
+/// An account is unchanged when its balance, nonce and code hash are the ones it had when the
+/// transaction loaded it, none of its slots changed, and the transaction neither created nor
+/// destroyed it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AccountEntry {
+    /// The transaction left the account as it found it.
+    Unchanged,
+    /// The transaction changed the account, which is shown as it left it.
+    Changed(AccountView),
+}
+
+impl AccountEntry {
+    fn new(account: &Account) -> Self {
+        let view = AccountView::new(account);
+        let original = account.original_info();
+        let unchanged = view.balance == original.balance &&
+            view.nonce == original.nonce &&
+            view.code_hash == original.code_hash &&
+            view.storage.is_empty() &&
+            !view.created &&
+            !view.selfdestructed;
+        if unchanged {
+            Self::Unchanged
+        } else {
+            Self::Changed(view)
+        }
+    }
+
+    /// The account as the transaction left it, if the transaction changed it.
+    pub const fn changed(&self) -> Option<&AccountView> {
+        match self {
+            Self::Unchanged => None,
+            Self::Changed(view) => Some(view),
+        }
+    }
+}
+
+impl Serialize for AccountEntry {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Unchanged => serializer.serialize_str("unchanged"),
+            Self::Changed(view) => view.serialize(serializer),
+        }
+    }
+}
+
+/// A touched account the transaction changed, as it left it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct AccountView {
+    /// Its balance.
+    pub balance: U256,
+    /// Its nonce.
+    pub nonce: u64,
+    /// The hash of its code.
+    pub code_hash: B256,
+    /// Whether the transaction created it.
+    pub created: bool,
+    /// Whether the transaction destroyed it.
+    pub selfdestructed: bool,
+    /// The slots whose value changed, by slot, ascending.
+    pub storage: Vec<SlotView>,
+}
+
+impl AccountView {
+    fn new(account: &Account) -> Self {
+        let mut storage: Vec<SlotView> = account
+            .changed_storage_slots()
+            .map(|(slot, value)| SlotView {
+                slot: *slot,
+                original: value.original_value,
+                present: value.present_value,
+            })
+            .collect();
+        storage.sort_unstable_by_key(|slot| slot.slot);
+        Self {
+            balance: account.info.balance,
+            nonce: account.info.nonce,
+            code_hash: account.info.code_hash,
+            created: account.is_created(),
+            selfdestructed: account.is_selfdestructed(),
+            storage,
+        }
+    }
+}
+
+/// A storage slot whose value changed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct SlotView {
+    /// The slot.
+    pub slot: U256,
+    /// Its value before the transaction.
+    pub original: U256,
+    /// Its value after the transaction.
+    pub present: U256,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{LimitKind, MegaHaltReason, MegaLimitExceeded, OracleRead};
+    use alloy_primitives::{address, Log, LogData};
+    use alloy_sol_types::{Revert, SolError};
+    use revm::{
+        context::result::{HaltReason, OutOfGasError, Output, ResultAndState, SuccessReason},
+        state::{EvmState, EvmStorageSlot, TransactionId},
+    };
+
+    const SENDER: Address = address!("0x00000000000000000000000000000000000000c1");
+    const CONTRACT: Address = address!("0x00000000000000000000000000000000000000c2");
+    /// An account the transaction loaded and did not touch.
+    const LOADED: Address = address!("0x00000000000000000000000000000000000000c3");
+
+    /// How many more touched accounts the state carries, so the order a map hands them out in
+    /// would show if the view followed it.
+    const FILLER: u8 = 16;
+
+    fn filler(i: u8) -> Address {
+        let mut address = Address::repeat_byte(0xe0);
+        address.0[19] = i;
+        address
+    }
+
+    fn slot(original: u64, present: u64) -> EvmStorageSlot {
+        let mut slot = EvmStorageSlot::new(U256::from(original), TransactionId::ZERO);
+        slot.present_value = U256::from(present);
+        slot
+    }
+
+    /// The accounts of [`outcome`]'s state: the sender, the contract with its slots, an account
+    /// only loaded, and [`FILLER`] more touched ones.
+    fn accounts() -> Vec<(Address, Account)> {
+        let mut sender = Account::default();
+        sender.info.balance = U256::from(1_000);
+        sender.info.nonce = 1;
+        sender.mark_touch();
+
+        let mut contract = Account::default();
+        contract.info.code_hash = B256::repeat_byte(0xcc);
+        contract.mark_touch();
+        // Two changed slots, one read and left alone.
+        contract.storage.insert(U256::from(10), slot(5, 0));
+        contract.storage.insert(U256::from(2), slot(0, 7));
+        contract.storage.insert(U256::from(3), slot(4, 4));
+        for i in 0..FILLER {
+            contract.storage.insert(U256::from(100 + u64::from(i)), slot(0, u64::from(i) + 1));
+        }
+
+        let mut accounts =
+            Vec::from([(SENDER, sender), (CONTRACT, contract), (LOADED, Account::default())]);
+        for i in 0..FILLER {
+            let mut account = Account::default();
+            account.info.balance = U256::from(i);
+            account.mark_touch();
+            accounts.push((filler(i), account));
+        }
+        accounts
+    }
+
+    fn result_gas() -> ResultGas {
+        ResultGas::default()
+            .with_total_gas_spent(90_000)
+            .with_state_gas_spent(30_000)
+            .with_refunded(4_000)
+            .with_floor_gas(21_000)
+            .with_reservoir_remaining(5_000)
+    }
+
+    fn log() -> Log {
+        Log {
+            address: CONTRACT,
+            data: LogData::new_unchecked(
+                Vec::from([B256::repeat_byte(1), B256::repeat_byte(2)]),
+                Bytes::from_static(&[0xab, 0xcd]),
+            ),
+        }
+    }
+
+    /// An outcome with every part of the view filled in: a successful call with a log, and a
+    /// limit stop beside it, which a real transaction would not report with a success.
+    fn outcome_with(accounts: Vec<(Address, Account)>) -> MegaTransactionOutcome {
+        let result = ExecutionResult::Success {
+            reason: SuccessReason::Stop,
+            gas: result_gas(),
+            logs: Vec::from([log()]),
+            output: Output::Call(Bytes::from_static(&[0x01])),
+        };
+        MegaTransactionOutcome {
+            result_and_state: ResultAndState::new(result, EvmState::from_iter(accounts)),
+            gas: MegaGasUsage {
+                regular: 50_000,
+                state: 30_000,
+                history: 10_000,
+                history_bytes: 125,
+                reservoir_remaining: 5_000,
+                floor: 21_000,
+                gas_used: 86_000,
+            },
+            usage: LimitUsage { data_size: 300, write_records: 3 },
+            limit_exceeded: Some(LimitCheck::ExceedsLimit {
+                kind: LimitKind::DataSize,
+                limit: 200,
+                used: 300,
+                frame_local: false,
+            }),
+            oracle_reads: Vec::from([
+                OracleRead { slot: U256::from(1), answer: Some(U256::from(11)) },
+                OracleRead { slot: U256::from(2), answer: None },
+            ]),
+        }
+    }
+
+    fn outcome() -> MegaTransactionOutcome {
+        outcome_with(accounts())
+    }
+
+    fn json(outcome: &MegaTransactionOutcome) -> String {
+        serde_json::to_string_pretty(&OutcomeView::new(outcome)).unwrap()
+    }
+
+    fn result_gas_mut(outcome: &mut MegaTransactionOutcome) -> &mut ResultGas {
+        match &mut outcome.result {
+            ExecutionResult::Success { gas, .. } |
+            ExecutionResult::Revert { gas, .. } |
+            ExecutionResult::Halt { gas, .. } => gas,
+        }
+    }
+
+    fn logs_mut(outcome: &mut MegaTransactionOutcome) -> &mut Vec<Log> {
+        match &mut outcome.result {
+            ExecutionResult::Success { logs, .. } |
+            ExecutionResult::Revert { logs, .. } |
+            ExecutionResult::Halt { logs, .. } => logs,
+        }
+    }
+
+    fn account_mut(outcome: &mut MegaTransactionOutcome, address: Address) -> &mut Account {
+        outcome.state.get_mut(&address).unwrap()
+    }
+
+    fn halt(reason: HaltReason) -> ExecutionResult<MegaHaltReason> {
+        ExecutionResult::Halt {
+            reason: MegaHaltReason::Base(reason),
+            gas: result_gas(),
+            logs: Vec::from([log()]),
+        }
+    }
+
+    fn revert(output: Bytes) -> ExecutionResult<MegaHaltReason> {
+        ExecutionResult::Revert { gas: result_gas(), logs: Vec::from([log()]), output }
+    }
+
+    /// The view serializes the same whatever order the state's map hands its accounts and slots
+    /// out in, and every time it is built.
+    #[test]
+    fn test_the_view_is_deterministic() {
+        let forward = outcome();
+        let mut reversed_accounts = accounts();
+        reversed_accounts.reverse();
+        for (_, account) in &mut reversed_accounts {
+            let slots: Vec<_> = account.storage.drain().collect();
+            account.storage.extend(slots.into_iter().rev());
+        }
+        let reversed = outcome_with(reversed_accounts);
+        assert_eq!(json(&forward), json(&reversed));
+        assert_eq!(json(&forward), json(&forward));
+        assert_eq!(OutcomeView::new(&forward), OutcomeView::from(&reversed));
+    }
+
+    /// The view holds the touched accounts alone, and of each the slots whose value changed,
+    /// ascending.
+    #[test]
+    fn test_the_view_holds_touched_accounts_and_changed_slots() {
+        let view = OutcomeView::new(&outcome());
+        assert!(!view.accounts.contains_key(&LOADED), "an account only loaded is not shown");
+        assert_eq!(view.accounts.len(), 2 + usize::from(FILLER));
+        assert_eq!(
+            view.accounts[&filler(0)],
+            AccountEntry::Unchanged,
+            "a touched account left as it was found is one word"
+        );
+        let contract = view.accounts[&CONTRACT].changed().expect("the contract changed");
+        let slots: Vec<U256> = contract.storage.iter().map(|s| s.slot).collect();
+        let mut expected = Vec::from([U256::from(2), U256::from(10)]);
+        expected.extend((0..FILLER).map(|i| U256::from(100 + u64::from(i))));
+        assert_eq!(slots, expected, "the slot read and left alone is not shown");
+        assert_eq!(
+            contract.storage[1],
+            SlotView { slot: U256::from(10), original: U256::from(5), present: U256::ZERO }
+        );
+        assert_eq!(view.result.kind, ResultKind::Success);
+        assert_eq!(view.result.reason.as_deref(), Some("Stop"));
+        assert_eq!(
+            view.limit_stop,
+            Some(LimitStopView { kind: "DataSize".into(), limit: 200, used: 300 })
+        );
+        let mut within = outcome();
+        within.limit_exceeded = Some(LimitCheck::WithinLimit);
+        assert_eq!(OutcomeView::new(&within).limit_stop, None, "a check that passed is no stop");
+    }
+
+    /// A touched account whose balance, nonce and code hash are the ones it was loaded with, with
+    /// no changed slot, neither created nor destroyed, is the one word `"unchanged"`; a change to
+    /// any of those shows it in full.
+    #[test]
+    fn test_an_account_left_as_it_was_found_is_one_word() {
+        let entry = |change: fn(&mut Account)| {
+            let mut account = Account::default();
+            account.info.balance = U256::from(5);
+            account.info.nonce = 2;
+            account.info.code_hash = B256::repeat_byte(0xcc);
+            *account.original_info_mut() = account.info.clone();
+            account.storage.insert(U256::from(1), slot(3, 3));
+            account.mark_touch();
+            change(&mut account);
+            AccountEntry::new(&account)
+        };
+        let unchanged = entry(|_| {});
+        assert_eq!(
+            unchanged,
+            AccountEntry::Unchanged,
+            "a slot read and left alone changes nothing"
+        );
+        assert_eq!(serde_json::to_string(&unchanged).unwrap(), r#""unchanged""#);
+        assert_eq!(unchanged.changed(), None);
+        assert_eq!(
+            AccountEntry::new(&{
+                let mut account = Account::default();
+                account.mark_touch();
+                account
+            }),
+            AccountEntry::Unchanged,
+            "an empty account touched and left empty",
+        );
+
+        type Change = fn(&mut Account);
+        let changes: &[(&str, Change)] = &[
+            ("balance", |a| a.info.balance += U256::from(1)),
+            ("nonce", |a| a.info.nonce += 1),
+            ("code hash", |a| a.info.code_hash = B256::repeat_byte(0xdd)),
+            ("slot", |a| a.storage.get_mut(&U256::from(1)).unwrap().present_value = U256::ZERO),
+            ("created", |a| a.mark_created()),
+            ("selfdestructed", |a| a.mark_selfdestruct()),
+        ];
+        for (name, change) in changes {
+            let changed = entry(*change);
+            let view = changed.changed().unwrap_or_else(|| panic!("{name}: shown in full"));
+            assert_eq!(
+                serde_json::to_value(&changed).unwrap(),
+                serde_json::to_value(view).unwrap(),
+                "{name}: serializes as the account",
+            );
+        }
+    }
+
+    /// A revert's reason is its output decoded as a limit stop or a Solidity error, and nothing
+    /// for other bytes.
+    #[test]
+    fn test_a_revert_names_its_reason() {
+        let reason = |output: Bytes| ResultView::new(&revert(output)).reason;
+        let stop = MegaLimitExceeded { kind: LimitKind::KVUpdate.as_u8(), limit: 7 };
+        assert_eq!(
+            reason(stop.abi_encode().into()).as_deref(),
+            Some("MegaLimitExceeded(KVUpdate, 7)")
+        );
+        let error = Revert { reason: "boom".into() };
+        assert_eq!(reason(error.abi_encode().into()).as_deref(), Some("revert: boom"));
+        assert_eq!(reason(Bytes::from_static(b"plain text")), None);
+        assert_eq!(reason(Bytes::new()), None);
+        let halted = ResultView::new(&halt(HaltReason::OutOfGas(OutOfGasError::Basic)));
+        assert_eq!(halted.reason.as_deref(), Some("Base(OutOfGas(Basic))"));
+        assert_eq!(halted.output, None);
+    }
+
+    type Change = fn(&mut MegaTransactionOutcome);
+
+    /// Changes to the outcome, each to one field the view copies.
+    fn view_changes() -> Vec<(&'static str, Change)> {
+        let changes: &[(&str, Change)] = &[
+            ("result: revert", |o| o.result = revert(Bytes::from_static(&[0x01]))),
+            ("result: revert output", |o| o.result = revert(Bytes::from_static(&[0x02]))),
+            ("result: halt", |o| o.result = halt(HaltReason::OutOfGas(OutOfGasError::Basic))),
+            ("result: halt reason", |o| o.result = halt(HaltReason::CallTooDeep)),
+            ("result: success reason", |o| {
+                if let ExecutionResult::Success { reason, .. } = &mut o.result {
+                    *reason = SuccessReason::Return;
+                }
+            }),
+            ("result: output", |o| {
+                if let ExecutionResult::Success { output, .. } = &mut o.result {
+                    *output = Output::Call(Bytes::from_static(&[0x02]));
+                }
+            }),
+            ("result: created address", |o| {
+                if let ExecutionResult::Success { output, .. } = &mut o.result {
+                    *output = Output::Create(Bytes::from_static(&[0x01]), Some(CONTRACT));
+                }
+            }),
+            ("log: address", |o| logs_mut(o)[0].address = SENDER),
+            ("log: topic", |o| {
+                let log = &mut logs_mut(o)[0];
+                let mut topics = log.topics().to_vec();
+                topics[1] = B256::repeat_byte(3);
+                log.data = LogData::new_unchecked(topics, log.data.data.clone());
+            }),
+            ("log: data", |o| {
+                let log = &mut logs_mut(o)[0];
+                log.data =
+                    LogData::new_unchecked(log.topics().to_vec(), Bytes::from_static(&[0xab]));
+            }),
+            ("log: another", |o| logs_mut(o).push(log())),
+            ("gas: regular", |o| o.gas.regular += 1),
+            ("gas: state", |o| o.gas.state += 1),
+            ("gas: history", |o| o.gas.history += 1),
+            ("gas: history bytes", |o| o.gas.history_bytes += 1),
+            ("gas: reservoir remaining", |o| o.gas.reservoir_remaining += 1),
+            ("gas: floor", |o| o.gas.floor += 1),
+            ("gas: gas used", |o| o.gas.gas_used += 1),
+            ("result gas: total spent", |o| {
+                let gas = result_gas_mut(o);
+                gas.set_total_gas_spent(gas.total_gas_spent() + 1);
+            }),
+            ("result gas: state spent", |o| {
+                let gas = result_gas_mut(o);
+                gas.set_state_gas_spent(gas.state_gas_spent_final() + 1);
+            }),
+            ("result gas: refunded", |o| {
+                let gas = result_gas_mut(o);
+                gas.set_refunded(gas.inner_refunded() + 1);
+            }),
+            ("result gas: floor", |o| {
+                let gas = result_gas_mut(o);
+                gas.set_floor_gas(gas.floor_gas() + 1);
+            }),
+            ("result gas: reservoir remaining", |o| {
+                let gas = result_gas_mut(o);
+                gas.set_reservoir_remaining(gas.reservoir_remaining() + 1);
+            }),
+            ("usage: data size", |o| o.usage.data_size += 1),
+            ("usage: write records", |o| o.usage.write_records += 1),
+            ("limit stop: none", |o| o.limit_exceeded = None),
+            ("limit stop: kind", |o| {
+                if let Some(LimitCheck::ExceedsLimit { kind, .. }) = &mut o.limit_exceeded {
+                    *kind = LimitKind::KVUpdate;
+                }
+            }),
+            ("limit stop: limit", |o| {
+                if let Some(LimitCheck::ExceedsLimit { limit, .. }) = &mut o.limit_exceeded {
+                    *limit += 1;
+                }
+            }),
+            ("limit stop: used", |o| {
+                if let Some(LimitCheck::ExceedsLimit { used, .. }) = &mut o.limit_exceeded {
+                    *used += 1;
+                }
+            }),
+            ("oracle read: slot", |o| o.oracle_reads[0].slot = U256::from(9)),
+            ("oracle read: answer", |o| o.oracle_reads[0].answer = None),
+            ("oracle read: order", |o| o.oracle_reads.reverse()),
+            ("account: balance", |o| account_mut(o, SENDER).info.balance += U256::from(1)),
+            ("account: nonce", |o| account_mut(o, SENDER).info.nonce += 1),
+            ("account: code hash", |o| {
+                account_mut(o, CONTRACT).info.code_hash = B256::repeat_byte(0xdd);
+            }),
+            ("account: created", |o| account_mut(o, CONTRACT).mark_created()),
+            ("account: selfdestructed", |o| account_mut(o, CONTRACT).mark_selfdestruct()),
+            ("account: touched", |o| account_mut(o, LOADED).mark_touch()),
+            ("account: untouched", |o| account_mut(o, SENDER).unmark_touch()),
+            ("account: as it was loaded", |o| {
+                let sender = account_mut(o, SENDER);
+                *sender.original_info_mut() = sender.info.clone();
+            }),
+            ("slot: original", |o| {
+                account_mut(o, CONTRACT).storage.get_mut(&U256::from(2)).unwrap().original_value =
+                    U256::from(1);
+            }),
+            ("slot: present", |o| {
+                account_mut(o, CONTRACT).storage.get_mut(&U256::from(2)).unwrap().present_value =
+                    U256::from(8);
+            }),
+            ("slot: changed", |o| {
+                account_mut(o, CONTRACT).storage.get_mut(&U256::from(3)).unwrap().present_value =
+                    U256::from(5);
+            }),
+            ("slot: key", |o| {
+                let storage = &mut account_mut(o, CONTRACT).storage;
+                let value = storage.remove(&U256::from(2)).unwrap();
+                storage.insert(U256::from(4), value);
+            }),
+        ];
+        changes.to_vec()
+    }
+
+    /// Every field the view copies moves it: each variant changes one field of the outcome, and
+    /// no two of them, nor any of them and the outcome, serialize alike.
+    #[test]
+    fn test_every_field_moves_the_view() {
+        let mut seen = BTreeMap::from([(json(&outcome()), "the outcome")]);
+        for (name, change) in view_changes() {
+            let mut changed = outcome();
+            change(&mut changed);
+            let json = json(&changed);
+            if let Some(twin) = seen.insert(json, name) {
+                panic!("{name} serializes like {twin}");
+            }
+        }
+    }
+}

@@ -392,29 +392,55 @@ mod tests {
         assert!(result.output.is_empty(), "the signature does not verify");
     }
 
-    /// The BN254 pairing takes input up to the Karst bound and refuses one byte more, without
-    /// charging for the work it did not do.
+    /// The BN254 pairing takes input up to the Karst bound, 57,600 bytes or 300 pairs of 192, and
+    /// refuses a whole pair more.
+    ///
+    /// Both inputs are whole pairs of zeros, which pair to the identity, so the run itself accepts
+    /// either: the 301st pair is refused by the bound alone. One stray byte past the bound would
+    /// prove nothing, since a length that is not a whole number of pairs fails whatever the bound.
+    ///
+    /// Rule [S2.4]. Expected values `independent`: 57,600 bytes and 300 × 192 by hand, and the
+    /// EIP-1108 price of 300 pairs, 45,000 + 300 × 34,000.
     #[test]
     fn test_bn254_pairing_is_bounded_at_the_karst_size() {
         assert_eq!(KARST_MAX_INPUT_SIZE, 57_600);
         let address = *op_revm::precompiles::bn254_pair::KARST.address();
-        // At the bound the input is a whole number of pair elements of zeros, which pair to the
-        // identity: the call succeeds and pays the Istanbul pairing price.
-        let at_bound = run(address, Bytes::from(std::vec![0u8; KARST_MAX_INPUT_SIZE]), 50_000_000);
+        let pairs = |n: usize| Bytes::from(std::vec![0u8; n * 192]);
+        let at_bound = run(address, pairs(300), 50_000_000);
         assert_eq!(at_bound.result, InstructionResult::Return);
-        assert!(at_bound.gas.total_gas_spent() > 0);
+        assert_eq!(at_bound.gas.total_gas_spent(), 45_000 + 300 * 34_000);
 
-        let over = run(address, Bytes::from(std::vec![0u8; KARST_MAX_INPUT_SIZE + 1]), 50_000_000);
-        assert_eq!(over.result, InstructionResult::PrecompileError);
+        let over = run(address, pairs(301), 50_000_000);
+        assert_eq!(over.result, InstructionResult::PrecompileError, "a whole pair past the bound");
     }
 
     /// Every entry of the Satin set carries a price, op-revm's size-limited wrappers of the BN254
     /// pairing and the BLS12-381 G1 MSM, G2 MSM and pairing included, so gas detention decides a
     /// call to any of them from its price.
+    ///
+    /// Whether an entry has a price is the entry's, not the input's: `required_gas` answers `Some`
+    /// exactly when the entry carries a price function, and that function answers a number for
+    /// any input. So the empty input decides the cell, and the inputs beyond it — every length a
+    /// precompile here reads in words or pairs, around those boundaries, of zeros and of `0xff`
+    /// bytes, up to past the BN254 pairing's size limit — check that each price function answers
+    /// them rather than failing on one.
+    ///
+    /// Rule [S12.47]. Expected values `independent`: a price is present, whatever the input.
     #[test]
     fn test_every_satin_entry_is_priced() {
+        let lengths =
+            [0, 1, 31, 32, 33, 64, 96, 128, 160, 192, 193, 256, 288, 384, 1_024, 57_600, 57_601];
         for precompile in satin_precompiles().inner().values() {
-            assert!(precompile.required_gas(&[]).is_some(), "{:?} is priced", precompile.id());
+            for len in lengths {
+                for byte in [0x00, 0xff] {
+                    let input = std::vec![byte; len];
+                    assert!(
+                        precompile.required_gas(&input).is_some(),
+                        "{:?} is priced at {len} bytes of {byte:#04x}",
+                        precompile.id()
+                    );
+                }
+            }
         }
     }
 

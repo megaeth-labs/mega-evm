@@ -16,11 +16,16 @@ use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
 use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
     constants::{BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS, TX_GAS_LIMIT_CAP},
+    history_gas,
     system::{IMegaLimitControl, LIMIT_CONTROL_ADDRESS, ORACLE_CONTRACT_ADDRESS},
-    test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
+    test_utils::{
+        op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase, OutcomeView,
+        SlotView,
+    },
     volatile_data_access_disabled_revert_data, write_record_history_gas, EvmTxRuntimeLimits,
-    LimitCheck, LimitKind, MegaContext, MegaEvm, MegaLimitExceeded, MegaSpecId, MegaTransaction,
-    MegaTransactionOutcome, ProtocolLimits, VolatileDataAccess,
+    LimitCheck, LimitKind, LimitUsage, MegaContext, MegaEvm, MegaLimitExceeded, MegaSpecId,
+    MegaTransaction, MegaTransactionOutcome, OracleRead, ProtocolLimits, VolatileDataAccess,
+    TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 use revm::{
     bytecode::opcode::*,
@@ -547,6 +552,14 @@ fn test_every_volatile_read_caps_the_transaction_from_where_it_read() {
                 read.name
             );
             assert_eq!(run.accessed, read.access, "{}", read.name);
+            // Only a read of the Oracle's storage goes through the oracle service: its slot zero,
+            // which the service, absent from this context, does not answer.
+            let oracle_reads: &[OracleRead] = if read.access == VolatileDataAccess::ORACLE {
+                &[OracleRead { slot: U256::ZERO, answer: None }]
+            } else {
+                &[]
+            };
+            assert_eq!(run.outcome.oracle_reads, oracle_reads, "{}: the oracle reads", read.name);
         }
     }
 }
@@ -1552,15 +1565,44 @@ fn test_state_and_history_gas_are_not_compute() {
         code = code.sstore(U256::from(slot), U256::from(1));
     }
     let code = code.stop().build();
+    // What the run must report, from the schedule at the prices in effect: each slot's state gas;
+    // the body's history bytes and one record a slot; and the compute of TIMESTAMP and its POP,
+    // two each, then the writes, on top of the intrinsic gas.
+    let state = slots * crate::salt::entry(GasId::sstore_set_state_gas());
+    let history_bytes = TX_BODY_SIZE + slots * WRITE_RECORD_SIZE;
+    // The body and each slot's record are charges of their own, each priced on its own.
+    let history = history_gas(TX_BODY_SIZE).expect("the body has a price") +
+        slots * history_gas(WRITE_RECORD_SIZE).expect("a record has a price");
+    let compute = 2 + 2 + slots * FRESH_WRITE;
+    assert!(compute < CAP, "the writes' compute fits under the cap");
+    let written: Vec<SlotView> = (1..=slots)
+        .map(|slot| SlotView {
+            slot: U256::from(slot),
+            original: U256::ZERO,
+            present: U256::from(1),
+        })
+        .collect();
     for gas_limit in TIERS {
         let run = execute(
             MemoryDatabase::default().account_code(CONTRACT, code.clone()),
             tx(CALLER, CONTRACT, gas_limit),
         );
         assert!(run.outcome.result.is_success(), "{:?}", run.outcome.result);
+        let case = format!("gas limit {gas_limit}");
+        let view = OutcomeView::new(&run.outcome);
+        let contract = view.accounts[&CONTRACT].changed().expect("the contract wrote its slots");
+        assert_eq!(contract.storage, written, "{case}: each of the {slots} slots went from 0 to 1");
         let gas = run.outcome.gas;
-        assert!(gas.state + gas.history >= slots * spill, "{gas:?}");
-        assert!(gas.regular < CAP, "{gas:?}");
+        assert_eq!(gas.state, state, "{case}: each fresh slot's state gas");
+        assert_eq!(gas.history_bytes, history_bytes, "{case}: the body and a record a slot");
+        assert_eq!(gas.history, history, "{case}: the history of those bytes");
+        assert_eq!(gas.regular, intrinsic(gas_limit) + compute, "{case}: the compute alone");
+        assert_eq!(run.limit, Some(2 + CAP), "{case}: TIMESTAMP set the limit, first");
+        assert_eq!(
+            run.outcome.usage,
+            LimitUsage { data_size: history_bytes, write_records: slots },
+            "{case}: one write record a slot",
+        );
     }
 }
 

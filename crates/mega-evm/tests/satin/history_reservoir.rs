@@ -28,9 +28,11 @@ use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
     LimitUsage, MegaTransactionOutcome, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
-use revm::bytecode::opcode::{CALL, CREATE, GAS, POP, PUSH0, PUSH1, REVERT, STOP};
+use revm::bytecode::opcode::{CALL, CREATE, GAS, MSTORE, POP, PUSH0, PUSH1, RETURN, REVERT, STOP};
 
-use crate::common::{call, execute, runs_at_measurement_prices};
+use crate::common::{
+    body_history, call, execute, history_is_free, history_rounds, runs_at_measurement_prices,
+};
 
 const CALLER: Address = address!("0000000000000000000000000000000000700000");
 const CALLEE: Address = address!("0000000000000000000000000000000000700001");
@@ -225,4 +227,82 @@ fn test_an_intercepted_value_call_gives_its_records_back_once() {
         RESERVOIR - BODY,
         "the refused call's records cost the reservoir nothing in the end",
     );
+}
+
+/* ---------- the body, drawn from the reservoir first ---------- */
+
+/// `GAS; PUSH0; MSTORE; PUSH1 32; PUSH0; RETURN`: answers with the regular gas the frame has
+/// left after the `GAS` itself, and charges nothing else — no record, no log, no state.
+fn answers_its_gas() -> Bytes {
+    BytecodeBuilder::default()
+        .append(GAS)
+        .append(PUSH0)
+        .append(MSTORE)
+        .push_number(32_u8)
+        .append(PUSH0)
+        .append(RETURN)
+        .build()
+}
+
+/// What [`answers_its_gas`] spends: `GAS` 2, `PUSH0` 2, `MSTORE` 3 and the first word of memory
+/// 3, `PUSH1` 3, `PUSH0` 2, `RETURN` 0.
+const ANSWERING: u64 = 2 + 2 + 3 + 3 + 3 + 2;
+
+/// The intrinsic regular gas of a call carrying no data: `TX_BASE_COST` 12,000 and 3,000 for the
+/// recipient's access.
+const INTRINSIC: u64 = 12_000 + 3_000;
+
+/// The body's history gas is taken from the reservoir first, and only its excess from the regular
+/// budget [S4.4]; a reservoir short of the body is spent to the last gas, one of exactly the body
+/// too, and one a gas larger keeps that gas [S4.7]. A body-only transaction shows it: the first
+/// frame's `GAS` is the regular budget — the execution cap less the intrinsic gas, less the
+/// excess the reservoir did not cover, less the `GAS` itself — and not the reservoir [S4.8].
+///
+/// Every figure is by hand (`constants`: the execution cap and the body's history at the price in
+/// effect, which is 310 × 88 at the spec's price): the regular ledger is the intrinsic gas and
+/// the program, whichever pool paid the body, because a charge that spilled stays on its own
+/// ledger; the receipt adds the body.
+#[test]
+fn test_the_body_draws_the_reservoir_first_and_only_its_excess_from_regular_gas() {
+    // A body that costs nothing leaves the reservoir nothing to draw, and one priced at a fraction
+    // of a gas may round to nothing.
+    if history_is_free() || history_rounds() {
+        return;
+    }
+    let body = body_history(0);
+    let db = || funded().account_code(CALLEE, answers_its_gas());
+
+    for reservoir in [1, body - 1, body, body + 1] {
+        let name = format!("a reservoir of {reservoir} against a body of {body}");
+        let excess = body.saturating_sub(reservoir);
+        let outcome = execute(db(), call(CALLER, CALLEE, U256::ZERO, TX_GAS_LIMIT_CAP + reservoir));
+        assert!(outcome.result.is_success(), "{name}: {:?}", outcome.result);
+
+        let gas_seen = U256::from_be_slice(outcome.result.output().expect("the answer"));
+        assert_eq!(
+            gas_seen,
+            U256::from(TX_GAS_LIMIT_CAP - INTRINSIC - excess - 2),
+            "{name}: GAS is the regular budget less the excess, not the reservoir",
+        );
+        assert_eq!(
+            outcome.gas.reservoir_remaining,
+            reservoir.saturating_sub(body),
+            "{name}: the reservoir paid the body as far as it went",
+        );
+        assert_eq!(outcome.gas.history, body, "{name}: the history ledger is the body");
+        assert_eq!(outcome.gas.state, 0, "{name}: no state");
+        assert_eq!(
+            outcome.gas.regular,
+            INTRINSIC + ANSWERING,
+            "{name}: the regular ledger is the intrinsic gas and the program, whoever paid the body",
+        );
+        assert_eq!(outcome.gas.gas_used, INTRINSIC + ANSWERING + body, "{name}: the receipt");
+        assert_eq!(outcome.usage.write_records, 0, "{name}: body only");
+    }
+
+    if runs_at_measurement_prices() {
+        return;
+    }
+    assert_eq!(body, 310 * 88, "the body at the spec's price");
+    assert_eq!(INTRINSIC + ANSWERING + body, 42_295, "the empty call's 42,280 and the program");
 }

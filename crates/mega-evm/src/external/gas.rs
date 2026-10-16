@@ -18,7 +18,7 @@
 
 use core::fmt;
 
-use alloy_primitives::{map::Entry, Address};
+use alloy_primitives::Address;
 use revm::primitives::{HashMap, StorageKey};
 
 use crate::{BucketId, SaltEnv, MIN_BUCKET_SIZE};
@@ -121,20 +121,40 @@ impl BucketMultipliers {
     /// Only a multiplier is cached, so a bucket whose capacity could not be turned into one is
     /// asked for again rather than remembered as anything.
     #[inline]
-    fn of_bucket<S: SaltEnv>(
+    pub(crate) fn of_bucket<S: SaltEnv>(
         &mut self,
         salt_env: &S,
         bucket: BucketId,
     ) -> Result<u64, BucketError<S::Error>> {
-        match self.cached.entry(bucket) {
-            Entry::Occupied(entry) => Ok(*entry.get()),
-            Entry::Vacant(entry) => {
-                let capacity = salt_env.get_bucket_capacity(bucket).map_err(BucketError::Env)?;
-                let multiplier = Self::for_capacity(capacity)
-                    .ok_or(BucketError::BelowMinimum { bucket, capacity })?;
-                Ok(*entry.insert(multiplier))
-            }
+        match self.cached(bucket) {
+            Some(multiplier) => Ok(multiplier),
+            None => self.fetch(salt_env, bucket),
         }
+    }
+
+    /// The multiplier of `bucket` this transaction has already read, if it has.
+    #[inline]
+    pub fn cached(&self, bucket: BucketId) -> Option<u64> {
+        self.cached.get(&bucket).copied()
+    }
+
+    /// Reads the capacity of `bucket` from `salt_env`, turns it into the multiplier and caches
+    /// it: the cache miss of [`of_bucket`](Self::of_bucket), on its own so a caller that must know
+    /// whether the environment was asked can ask it first.
+    ///
+    /// A bucket the cache already holds is asked for again, and the answer replaces the cached
+    /// multiplier.
+    #[inline]
+    pub(crate) fn fetch<S: SaltEnv>(
+        &mut self,
+        salt_env: &S,
+        bucket: BucketId,
+    ) -> Result<u64, BucketError<S::Error>> {
+        let capacity = salt_env.get_bucket_capacity(bucket).map_err(BucketError::Env)?;
+        let multiplier =
+            Self::for_capacity(capacity).ok_or(BucketError::BelowMinimum { bucket, capacity })?;
+        self.cached.insert(bucket, multiplier);
+        Ok(multiplier)
     }
 
     /// The buckets this transaction has read, for tests and tools that check the read set.

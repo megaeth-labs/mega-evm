@@ -25,7 +25,11 @@ use crate::common::{
 /// The word the L1 block contract holds at its scalars slot: the data-availability footprint
 /// gas scalar, the operator fee scalar and the operator fee constant, at the offsets the fork
 /// reads them from.
-fn scalars_word(da_footprint: u16, operator_fee_scalar: u32, operator_fee_constant: u64) -> U256 {
+pub(crate) fn scalars_word(
+    da_footprint: u16,
+    operator_fee_scalar: u32,
+    operator_fee_constant: u64,
+) -> U256 {
     let mut word = [0_u8; 32];
     word[DA_FOOTPRINT_GAS_SCALAR_OFFSET..DA_FOOTPRINT_GAS_SCALAR_OFFSET + 2]
         .copy_from_slice(&da_footprint.to_be_bytes());
@@ -45,7 +49,7 @@ fn state_with_scalars(word: U256) -> State<mega_evm::test_utils::MemoryDatabase>
 
 /// Code that writes its 32 bytes of calldata to the scalars slot, which is what the L1 info
 /// deposit's setter does for the fields this test reads.
-fn l1_block_setter() -> Bytes {
+pub(crate) fn l1_block_setter() -> Bytes {
     BytecodeBuilder::default()
         .push_number(0_u64)
         .append(CALLDATALOAD)

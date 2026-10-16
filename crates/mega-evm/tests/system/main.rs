@@ -11,4 +11,6 @@ mod limit_control;
 mod oracle;
 mod oracle_storage;
 mod remaining_compute_gas;
+#[path = "../shared/snapshot.rs"]
+mod snapshot;
 mod system_tx;

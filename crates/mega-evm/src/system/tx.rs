@@ -164,8 +164,13 @@ pub(crate) fn originates_from_the_protocol(tx: &MegaTransaction, system_transact
 /// fee it does not check. The checks the deposit path drops and this chain still wants are made
 /// here (see the module documentation), each under the configuration switch a user transaction
 /// obeys.
+///
+/// The system address's nonce and code are the state's: they are checked when `check_account`
+/// says so, which is always in execution. Validation without state leaves them to the state, as
+/// it leaves every sender's.
 pub(crate) fn validate_and_promote<DB, ExtEnvs, ERROR>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
+    check_account: bool,
 ) -> Result<(), ERROR>
 where
     DB: Database,
@@ -188,14 +193,16 @@ where
     // EIP-2929 access list, which would make the transaction's first touch of it cheaper than
     // the same transaction from anyone else. Its code is loaded, so EIP-3607 sees a lazy
     // database's code too.
-    let (system_address, tx_nonce) = (ctx.tx().caller(), ctx.tx().nonce());
-    let account = ctx.journal_mut().inspect_account(system_address, true)?;
-    validate_account_nonce_and_code(
-        &account.info,
-        tx_nonce,
-        eip3607_disabled,
-        nonce_check_disabled,
-    )?;
+    if check_account {
+        let (system_address, tx_nonce) = (ctx.tx().caller(), ctx.tx().nonce());
+        let account = ctx.journal_mut().inspect_account(system_address, true)?;
+        validate_account_nonce_and_code(
+            &account.info,
+            tx_nonce,
+            eip3607_disabled,
+            nonce_check_disabled,
+        )?;
+    }
 
     // The deposit shape: op-revm skips the signature, the nonce and every fee for it. The gas
     // price goes to zero with it, so the fee accounting of the block degenerates to nothing.

@@ -13,11 +13,11 @@ use mega_evm::{
     constants::{ACCOUNT_STATE_GAS, TX_GAS_LIMIT_CAP},
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, LimitCheck, LimitKind, MegaContext, MegaEvm, MegaHaltReason,
-    MegaLimitExceeded, MegaTransaction,
+    MegaLimitExceeded, MegaTransaction, MegaTransactionOutcome,
 };
 use revm::{
     bytecode::opcode::{CALL, GAS, LOG0, POP, PUSH0, SSTORE},
-    context::result::{ExecutionResult, ResultAndState},
+    context::result::ExecutionResult,
     interpreter::{
         interpreter::EthInterpreter, interpreter_types::Jumps, CallInputs, CallOutcome,
         InstructionResult, Interpreter,
@@ -78,14 +78,16 @@ fn evm_with<INSP>(
     MegaEvm::new(context(db).with_tx_runtime_limits(limits)).with_inspector(inspector)
 }
 
+/// Runs `tx` over `db` under `limits`: its outcome, and the limit the transaction latched.
 fn run(
     db: MemoryDatabase,
     limits: EvmTxRuntimeLimits,
     tx: MegaTransaction,
-) -> (ResultAndState<MegaHaltReason>, Option<LimitCheck>) {
-    let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits));
-    let result = evm.transact_raw(tx).unwrap();
-    (result, evm.ctx().additional_limit().latched().copied())
+) -> (MegaTransactionOutcome, Option<LimitCheck>) {
+    let outcome =
+        MegaEvm::new(context(db).with_tx_runtime_limits(limits)).execute_transaction(tx).unwrap();
+    let latched = outcome.limit_exceeded;
+    (outcome, latched)
 }
 
 /// The history gas an empty transaction body costs, which every transaction here pays before its
@@ -326,6 +328,18 @@ fn test_child_out_of_gas_under_a_cap_does_not_latch() {
     assert!(result.result.is_success(), "{:?}", result.result);
     assert_eq!(result.state[&A].storage[&U256::from(9)].present_value(), U256::from(1));
     assert_eq!(latched, None);
+    assert!(
+        result.state[&B].storage.values().all(|slot| !slot.is_changed()),
+        "B's writes went with its halt"
+    );
+    assert_eq!(
+        result.usage,
+        mega_evm::LimitUsage {
+            data_size: mega_evm::TX_BODY_SIZE + mega_evm::WRITE_RECORD_SIZE,
+            write_records: 1
+        },
+        "A's record alone, which meets the cap and does not cross it"
+    );
 }
 
 /// A cap crossed by the writes the first frame's start makes (a value transfer's recipient)

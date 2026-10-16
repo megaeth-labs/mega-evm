@@ -27,7 +27,7 @@ The legacy spec names do not parse: `"Rex6".parse::<MegaSpecId>()` fails with `P
 Satin is under construction.
 Today it runs transactions through its own handler over op-revm's, with EIP-8037 and the EIP-2780 intrinsic cost switched on and a 200,000,000 execution cap; gas above the cap goes to the EIP-8037 reservoir.
 
-The gas schedule is Amsterdam's with three changes: the entries EIP-8038 repriced go back to their Osaka values, the EIP-8037 state-gas entries are rebuilt from MegaETH's own cost per state byte, so a new storage slot draws 97,920 state gas and a new account 183,600, and a byte of deployed code is priced at MegaETH's cost per history byte.
+The gas schedule is Amsterdam's with three changes: the seventeen regular-gas entries Amsterdam changed for EIP-8037 or EIP-8038 go back to their Osaka values, the EIP-8037 state-gas entries are rebuilt from MegaETH's own cost per state byte, so a new storage slot draws 97,920 state gas and a new account 183,600, and a byte of deployed code is priced at MegaETH's cost per history byte.
 The schedule also brings the Amsterdam opcodes (`DUPN`, `SWAPN`, `EXCHANGE`, `SLOTNUM`) and raises the code-size limits to 512 KiB of contract and 1 MiB of initcode.
 `SLOTNUM` pushes the slot number the node supplies in `BlockEnv::slot_num`, zero when it leaves it unset.
 Satin takes EIP-7708 from Amsterdam too: every value movement — a transaction's value, a value `CALL`, a creation's endowment, a `SELFDESTRUCT`'s balance moved to another account — emits a `Transfer(from, to, amount)` log from `0xff…fe` into the receipt, in execution order among the contracts' own logs.
@@ -60,8 +60,9 @@ The execution figure a block counts for a transaction is its regular ledger — 
 A block's state gas can be capped: the transaction that reaches the cap is packed, and after it only a transaction that adds no state gas is.
 No block cap on execution gas, state gas, data size or write records refuses a deposit, which the block must include; a deposit still counts towards all four.
 A builder that executes candidates and chooses among them commits through `commit_transaction_outcome`, which checks the block's counters again; alloy-evm's `commit_transaction` cannot fail and expects each outcome to commit before the next transaction executes, and a debug build asserts it.
-`apply_pre_execution_changes` makes the EIP-2935 and EIP-4788 calls, deploys the six MegaETH system contracts and the EIP-7997 `CREATE2` factory every block, idempotently, and applies a role change the `SequencerRegistry` has due in the block with its `applyPendingChanges()` call.
-It hands each pre-block state — the two EIP calls, the seven deploys, the read of the registry's pending changes and its call — to an optional observer before it commits; that sequence is the witness a stateless client needs.
+`apply_pre_execution_changes` makes the EIP-2935 and EIP-4788 calls, deploys the six MegaETH system contracts and the EIP-7997 `CREATE2` factory every block, idempotently, applies a role change the `SequencerRegistry` has due in the block with its `applyPendingChanges()` call, and last reads the L1 block contract's account and the five slots the block's transactions can be priced against, which op-revm and the executor read on the database rather than through a transaction.
+It hands each pre-block state — the two EIP calls, the seven deploys, the read of the registry's pending changes and its call, and the L1 block info — to an optional observer before it commits; with the included transactions' states and oracle reads, and the block hashes and buckets the executor exports, that is the witness a stateless client needs.
+A database that cannot serve one of those L1 reads fails the block before its first transaction, as an internal error, whatever the block holds.
 
 A system call runs as EIP-8037 has it: at most 30,000,000 of its gas limit is regular gas, which is what `GAS` reads inside it, and the rest is its state-gas reservoir, which the state it writes draws first.
 revm's default system-call gas limit, 31,566,720, is 30,000,000 and a reservoir of sixteen fresh slots.
@@ -223,7 +224,24 @@ A success an inspector rewrites into a failure has its journal taken back as a f
 Gas an inspector writes after a frame's last instruction reaches nobody, and a charge a frame cannot pay is refused without stopping it.
 `tests/satin/inspector_cheatcodes.rs` drives `deal`, `store`, `pauseGasMetering` / `resumeGasMetering` and `expectRevert` through the engine as Foundry's inspector does.
 
+## Node integration
+
+A node, a stateless validator and a tool take the following from the engine rather than restating it, so they cannot disagree with it.
+The crate builds on Rust 1.94.
+
+- `spec_cfg(cfg)` is the configuration Satin runs on: the caller's configuration with every field the spec fixes set from the spec.
+  A node builds its `EvmEnv` through it, so what reads the env before an EVM exists — gas estimation reads the execution cap — reads what the EVM executes on.
+- `validate_transaction_stateless(cfg, block, tx, system_address)` is a pool's check: it runs the handler's own validation phases on an EVM over an empty database and returns the intrinsic gas by ledger, `IntrinsicGas { regular, state, history, floor }`.
+  `system::live_system_address(db)` reads the address it takes, off the state the pool validates against, as a transaction's validation reads it.
+  The state a transaction adds is charged when it runs, so a new recipient or authority is not in the intrinsic gas; a deposit that fails validation is included as a failed deposit rather than refused.
+- `MegaTransactionOutcome::limit_stop()`, or `LimitStop::from_result(result, limit_exceeded)` for a result read elsewhere, gives the kind, limit and usage of the limit that stopped a transaction, for an RPC's error.
+  `decode_mega_limit_exceeded` reads revert data alone; bytes that decode are no stop without the outcome's `limit_exceeded`.
+- `SatinChainConfig::from_genesis_config(config)` reads a genesis file's `config` object: `satinTime` and one flat `satin`-prefixed key per field of `SequencerRegistryConfig` and `ProtocolLimits`.
+  It refuses a missing, unknown or mistyped key and a value the parameters or the schedule refuse, and `hardforks()` builds the schedule; it serializes to the same keys, for a genesis generator.
+  The key format is provisional.
+  `SequencerRegistryConfig` and `ProtocolLimits` also serialize on their own, camelCase with no unknown field.
+
 ## Documentation
 
-- [Specification](https://megaeth-labs.github.io/mega-evm/) (describes the legacy engine until the Satin pages land)
+- [The Satin specification](../../docs/spec/upgrades/satin.md); the other pages under `docs/spec/` describe the legacy engine
 - [Architecture](../../ARCH.md)

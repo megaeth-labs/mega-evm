@@ -11,7 +11,8 @@ use mega_evm::{
         SEQUENCER_REGISTRY_ADDRESS,
     },
     test_utils::{op_transaction, ErrorInjectingDatabase, GasInspector, MemoryDatabase},
-    EvmTxRuntimeLimits, LimitUsage, MegaContext, MegaEvm, MegaTransaction, MegaTransactionOutcome,
+    EvmTxRuntimeLimits, LimitUsage, MegaContext, MegaEvm, MegaHaltReason, MegaTransaction,
+    MegaTransactionOutcome,
 };
 use mega_system_contracts::sequencer_registry::storage_slots::CURRENT_SYSTEM_ADDRESS;
 use revm::{
@@ -633,40 +634,50 @@ fn test_a_deposit_that_creates_two_accounts_pays_for_both() {
 
 /// A deposit from `sender`, an account that does not exist, to the Oracle, whose gas limit is one
 /// short of its intrinsic gas and the account it creates for its caller, at the byte prices in
-/// effect.
+/// effect. It carries no value and no calldata, so its intrinsic gas, which is its floor too, is
+/// EIP-2780's base of 12,000 and 3,000 for the recipient.
 fn deposit_one_short_of_its_caller(sender: Address) -> MegaTransaction {
-    let deposit = || deposit_tx(sender, TxKind::Call(ORACLE_CONTRACT_ADDRESS), U256::ZERO, 0);
-    // A transaction without calldata has its intrinsic gas as its floor; run with its caller in
-    // place, the deposit creates no account.
-    let intrinsic =
-        run_outcome(chain_db().account_balance(sender, U256::from(1)), deposit()).gas.floor;
-    let mut tx = deposit();
-    tx.0.base.gas_limit = intrinsic + account_state_gas() - 1;
+    const INTRINSIC: u64 = 12_000 + 3_000;
+    let mut tx = deposit_tx(sender, TxKind::Call(ORACLE_CONTRACT_ADDRESS), U256::ZERO, 0);
+    tx.0.base.gas_limit = INTRINSIC + account_state_gas() - 1;
     tx
 }
 
-/// A deposit that cannot pay for the account it creates for its caller is an out-of-gas halt,
-/// as a transaction that runs out in its runtime phase is.
+/// A deposit that cannot pay for the account it creates for its caller runs out of gas before its
+/// first frame, and a deposit that does is a failed deposit: the `FailedDeposit` halt, not an
+/// out-of-gas, billed its whole gas limit.
+///
+/// Rules: [S5], [S21.5], [S21.7], [S5.12]. Independence: constants — the intrinsic gas is
+/// EIP-2780's, the caller account's state gas the schedule's entry at the price in effect.
 #[test]
-fn test_a_deposit_that_cannot_pay_for_its_caller_halts() {
+fn test_a_deposit_that_cannot_pay_for_its_caller_is_a_failed_deposit() {
     // An account that costs nothing is one any deposit can pay for.
     if state_is_free() {
         return;
     }
     let sender = address!("0x00000000000000000000000000000000000f0006");
-    let outcome = run_outcome(chain_db(), deposit_one_short_of_its_caller(sender));
+    let tx = deposit_one_short_of_its_caller(sender);
+    let gas_limit = tx.0.base.gas_limit;
+    let outcome = run_outcome(chain_db(), tx);
     assert!(
-        matches!(outcome.result, ExecutionResult::Halt { .. }),
-        "{:?} is not a halt",
+        matches!(
+            outcome.result,
+            ExecutionResult::Halt { reason: MegaHaltReason::FailedDeposit, .. }
+        ),
+        "{:?} is not a failed deposit",
         outcome.result,
     );
+    assert_eq!(outcome.gas.gas_used, gas_limit, "a failed deposit bills its whole gas limit");
 }
 
-/// The account a deposit creates for its caller exists whatever the deposit does, so a stop the
-/// deposit's body latched does not waive its charge: a deposit that cannot pay for it is still an
-/// out-of-gas halt, and the halt is not a data-size stop.
+/// The account a deposit creates for its caller is charged before its first frame, and a stop the
+/// deposit's body latched does not waive the charge: a deposit that cannot pay for it is a failed
+/// deposit, which reports the failure and not the data-size stop, and keeps its body counted.
+///
+/// Rules: [S11], [S10.15], [S21.7]. Independence: constants — the body is `TX_BODY_SIZE`, the gas
+/// limit as [`deposit_one_short_of_its_caller`] works it out.
 #[test]
-fn test_a_deposit_over_the_data_size_limit_that_cannot_pay_for_its_caller_halts() {
+fn test_a_deposit_over_the_data_size_limit_that_cannot_pay_for_its_caller_is_a_failed_deposit() {
     // An account that costs nothing is one any deposit can pay for.
     if state_is_free() {
         return;
@@ -675,15 +686,21 @@ fn test_a_deposit_over_the_data_size_limit_that_cannot_pay_for_its_caller_halts(
     let limits =
         EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(mega_evm::TX_BODY_SIZE - 1);
 
+    let tx = deposit_one_short_of_its_caller(sender);
+    let gas_limit = tx.0.base.gas_limit;
     let outcome = MegaEvm::new(chain_context(chain_db()).with_tx_runtime_limits(limits))
-        .execute_transaction(deposit_one_short_of_its_caller(sender))
+        .execute_transaction(tx)
         .expect("the deposit is included");
     assert!(
-        matches!(outcome.result, ExecutionResult::Halt { .. }),
-        "{:?} is not a halt",
+        matches!(
+            outcome.result,
+            ExecutionResult::Halt { reason: MegaHaltReason::FailedDeposit, .. }
+        ),
+        "{:?} is not a failed deposit",
         outcome.result,
     );
-    assert_eq!(outcome.limit_exceeded, None, "the halt is not a data-size stop");
+    assert_eq!(outcome.gas.gas_used, gas_limit, "a failed deposit bills its whole gas limit");
+    assert_eq!(outcome.limit_exceeded, None, "the failure is not a data-size stop");
     assert_eq!(
         outcome.usage,
         LimitUsage { data_size: mega_evm::TX_BODY_SIZE, write_records: 0 },

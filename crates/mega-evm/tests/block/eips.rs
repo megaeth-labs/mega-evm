@@ -56,6 +56,19 @@ fn recorder() -> Bytes {
         .build()
 }
 
+/// Code that stores the word it was called with in slot zero, as [`recorder`] does, and one in slot
+/// one: two writes, so two write records.
+fn recorder_writing_twice() -> Bytes {
+    BytecodeBuilder::default()
+        .push_number(0_u32)
+        .append(CALLDATALOAD)
+        .push_number(0_u32)
+        .append(SSTORE)
+        .sstore(U256::from(1), U256::from(1))
+        .stop()
+        .build()
+}
+
 /// A state whose two pre-block system contracts record what they are called with.
 fn state_with_recorders() -> State<MemoryDatabase> {
     let mut db = common::database();
@@ -182,18 +195,117 @@ fn test_the_pre_block_calls_record_the_parent_hash_and_the_beacon_root() {
 }
 
 /// The pre-block calls are the protocol's own work, held to no per-transaction limit: under the
-/// smallest limits a chain may carry, which their bodies, their writes and their state gas cross,
-/// both calls still record.
+/// smallest value a chain may carry for each limit, which their bodies, their writes and their
+/// state gas cross, both calls still record.
+///
+/// Each contract writes two slots, so each call keeps two write records, past a KV count of one
+/// at the transaction and at the frame; the body (`TX_BODY_SIZE` and 32 bytes of calldata) crosses
+/// the transaction's data size, a record the frame's, and a fresh slot the state gas. The states
+/// the observer receives show the two writes; a limit of zero, which would let one write cross,
+/// is not a limit a chain may carry. Each limit is set alone as well as all together: data size is
+/// checked before the write records, so with every limit set the KV counts are never reached.
+///
+/// Rule [S19.3]. Expected values `independent`: the parent hash and the beacon root are the
+/// block's own inputs, and the crossings are counted here from the writes the calls made.
 #[test]
 fn test_the_pre_block_calls_are_held_to_no_limit() {
-    let limits = common::loosest_tx()
+    let loosest = common::loosest_tx();
+    let every = loosest
         .with_tx_data_size_limit(mega_evm::TX_BODY_SIZE)
         .with_frame_data_size_limit(1)
         .with_tx_kv_update_limit(1)
         .with_frame_kv_update_limit(1)
         .with_tx_state_gas_limit(1);
-    let spec = common::chain_spec_with(ProtocolLimits::loosest().with_tx_runtime_limits(limits));
-    assert_eq!(pre_block_calls(spec, BLOCK_NUMBER, ctx()), (PARENT_HASH, PARENT_BEACON_ROOT));
+    for (name, limits) in [
+        ("the transaction's data size", loosest.with_tx_data_size_limit(mega_evm::TX_BODY_SIZE)),
+        ("a frame's data size", loosest.with_frame_data_size_limit(1)),
+        ("the transaction's KV count", loosest.with_tx_kv_update_limit(1)),
+        ("a frame's KV count", loosest.with_frame_kv_update_limit(1)),
+        ("the transaction's state gas", loosest.with_tx_state_gas_limit(1)),
+        ("every limit at once", every),
+    ] {
+        let spec =
+            common::chain_spec_with(ProtocolLimits::loosest().with_tx_runtime_limits(limits));
+        let mut db = common::database();
+        db.set_account_code(HISTORY_STORAGE_ADDRESS, recorder_writing_twice());
+        db.set_account_code(BEACON_ROOTS_ADDRESS, recorder_writing_twice());
+        let mut state = State::builder().with_database(db).build();
+        let states = {
+            let mut executor =
+                executor_with_env_and_spec(&mut state, ctx(), env_at_block(BLOCK_NUMBER), spec);
+            let log = record_pre_block(&mut executor);
+            executor
+                .apply_pre_execution_changes()
+                .unwrap_or_else(|error| panic!("{name}: the block starts: {error}"));
+            pre_block_states(&log)
+        };
+
+        for (source, address) in [
+            (PreBlockStateSource::Eip2935, HISTORY_STORAGE_ADDRESS),
+            (PreBlockStateSource::Eip4788, BEACON_ROOTS_ADDRESS),
+        ] {
+            let (_, call) = states
+                .iter()
+                .find(|(observed, _)| *observed == source)
+                .unwrap_or_else(|| panic!("{name}: {source:?} reached the observer"));
+            let writes = call[&address].storage.values().filter(|slot| slot.is_changed()).count();
+            assert_eq!(writes, 2, "{name}: {source:?} made two writes, two records");
+        }
+        assert_eq!(recorded(&mut state), (PARENT_HASH, PARENT_BEACON_ROOT), "{name}");
+    }
+}
+
+/// The pre-block calls count towards none of the block's counters or budgets. With the EIP-2935
+/// and EIP-4788 contracts' own code in state, both calls write their contracts' storage; after the
+/// pre-block phase every counter of the block is still zero, and a block whose four budgets are
+/// one unit each — execution gas, state gas, data size and KV updates, each reached by anything
+/// counted — still admits its first transaction.
+///
+/// Rule [S19.7]. Expected values `independent`: zeros, and the first transaction admitted.
+#[test]
+fn test_the_pre_block_calls_count_towards_no_counter_or_budget() {
+    let policy = BlockLimits::no_limits()
+        .with_block_execution_gas_limit(1)
+        .with_block_state_gas_limit(1)
+        .with_block_txs_data_limit(1)
+        .with_block_kv_update_limit(1);
+    let ctx =
+        MegaBlockExecutionCtx::new(PARENT_HASH, Some(PARENT_BEACON_ROOT), Bytes::new(), policy);
+    let mut db = common::database();
+    db.set_account_code(HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE.clone());
+    db.set_account_code(BEACON_ROOTS_ADDRESS, BEACON_ROOTS_CODE.clone());
+    let mut state = State::builder().with_database(db).build();
+    let mut executor = executor_with_env(&mut state, ctx, env_at_block(BLOCK_NUMBER));
+    let log = record_pre_block(&mut executor);
+    executor.apply_pre_execution_changes().expect("the block starts");
+
+    let states = pre_block_states(&log);
+    for (source, address) in [
+        (PreBlockStateSource::Eip2935, HISTORY_STORAGE_ADDRESS),
+        (PreBlockStateSource::Eip4788, BEACON_ROOTS_ADDRESS),
+    ] {
+        let (_, call) = states
+            .iter()
+            .find(|(observed, _)| *observed == source)
+            .unwrap_or_else(|| panic!("{source:?} reached the observer"));
+        let writes = call[&address].storage.values().filter(|slot| slot.is_changed()).count();
+        assert!(writes > 0, "{source:?} wrote its contract's storage");
+    }
+    let limiter = executor.limiter();
+    assert_eq!(
+        (limiter.gas.execution, limiter.gas.state, limiter.gas.history, limiter.gas.history_bytes),
+        (0, 0, 0, 0),
+        "no gas ledger of the block counts the calls",
+    );
+    assert_eq!(
+        (limiter.usage.data_size, limiter.usage.write_records),
+        (0, 0),
+        "nor its data size or writes"
+    );
+    assert_eq!(limiter.block_gas_used, 0, "nor the gas its receipts report");
+    executor
+        .execute_transaction(&common::user_tx(0, common::empty_call_gas()))
+        .expect("the first transaction is admitted under budgets of one");
 }
 
 /// A chain that has not reached Prague makes no block hashes call; the beacon root call is

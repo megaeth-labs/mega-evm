@@ -35,6 +35,8 @@ On Satin every output field keeps its legacy name and meaning, and a `satin` obj
 
 A Satin run is held to the protocol limits of the chain's schedule at the block's timestamp; a chain that does not run Satin there (mainnet and testnet today, the default chain, any chain the tool does not know) runs on Satin's default limits, a counterfactual.
 `--override.limits <JSON|FILE>` on `run`, `tx` and `replay` replaces the fields it names of those limits; it is refused on a legacy spec.
+`--genesis <FILE>` gives a chain the tool does not know, a devnet for one, its own Satin configuration: its genesis file's `satinTime`, registry seeds and limits replace the tool's table for that chain, read with the parser a node reads them with.
+Under it `run` and `tx` default to `--spec Satin`, and a run the file cannot configure — on another chain, on a legacy spec, before the file's `satinTime`, or on a file without Satin keys — is refused rather than run on the tool's table.
 
 The legacy leg is the default feature `legacy`; `--no-default-features` builds a Satin-only binary.
 
@@ -118,7 +120,7 @@ mega-evme run --create 0x6080604052...
 | `--input <HEX>`      | Input data as hex string           |
 | `--inputfile <PATH>` | Path to file containing input data |
 
-For detailed documentation, see [run/README.md](src/run/README.md).
+For detailed documentation, see [the `run` command's page](../../docs/mega-evme/commands/run.md).
 
 ---
 
@@ -131,10 +133,10 @@ Run a transaction with full transaction context. Similar to `run`, but with addi
 mega-evme tx --input 0x1234 --receiver 0x1234...
 
 # Fork state from remote RPC
-mega-evme tx --fork --fork.rpc https://rpc.example.com --receiver 0x1234...
+mega-evme tx --fork --rpc https://rpc.example.com --receiver 0x1234...
 
 # Fork from specific block
-mega-evme tx --fork --fork.block 12345678 --receiver 0x1234...
+mega-evme tx --fork --rpc https://rpc.example.com --fork.block 12345678 --receiver 0x1234...
 ```
 
 #### Transaction Options
@@ -207,11 +209,11 @@ mega-evme tx --tx-type 4 \
 
 #### Fork Options
 
-| Option                  | Default               | Description                          |
-| ----------------------- | --------------------- | ------------------------------------ |
-| `--fork`                | false                 | Enable state forking from RPC        |
-| `--fork.rpc <URL>`      | http://localhost:8545 | RPC URL for forking (env: `RPC_URL`) |
-| `--fork.block <NUMBER>` | latest                | Block number to fork from            |
+| Option                  | Default         | Description                                                                                  |
+| ----------------------- | --------------- | -------------------------------------------------------------------------------------------- |
+| `--fork`                | false           | Enable state forking from RPC                                                                |
+| `--rpc <URL>`           | none — required | RPC URL for forking (alias `--rpc-url`; `--fork.rpc` is accepted); `RPC_URL` is not read     |
+| `--fork.block <NUMBER>` | latest          | Block number to fork from                                                                    |
 
 ---
 
@@ -222,13 +224,10 @@ The spec, and so the engine, comes from the chain's schedule at the block's time
 
 ```bash
 # Replay a transaction
-mega-evme replay 0x1234...txhash...5678
-
-# Replay with custom RPC
-mega-evme replay 0x1234...txhash --rpc https://rpc.example.com
+mega-evme replay 0x1234...txhash...5678 --rpc https://rpc.example.com
 
 # Replay with execution trace
-mega-evme replay 0x1234...txhash --trace
+mega-evme replay 0x1234...txhash --rpc https://rpc.example.com --trace
 ```
 
 #### Arguments
@@ -239,9 +238,9 @@ mega-evme replay 0x1234...txhash --trace
 
 #### Options
 
-| Option        | Default               | Description                       |
-| ------------- | --------------------- | --------------------------------- |
-| `--rpc <URL>` | http://localhost:8545 | RPC URL to fetch transaction from |
+| Option        | Default         | Description                                                                                                 |
+| ------------- | --------------- | ----------------------------------------------------------------------------------------------------------- |
+| `--rpc <URL>` | none — required | RPC URL to fetch the transaction from (alias `--rpc-url`; `--fork.rpc` is accepted); `RPC_URL` is not read |
 
 #### Transaction Override Options
 
@@ -306,7 +305,7 @@ These options are available across all commands.
 
 | Option                 | Default | Description                               |
 | ---------------------- | ------- | ----------------------------------------- |
-| `--spec <SPEC>`        | Rex6    | Spec: `Satin` (the Satin engine), or `Equivalence`, `MiniRex`, `MiniRex1`, `MiniRex2`, `Rex`, `Rex1`, `Rex2`, `Rex3`, `Rex4`, `Rex5`, `Rex6` (the legacy engine; `MiniRex1`/`MiniRex2` are aliases executing `Equivalence`/`MiniRex` behavior) |
+| `--spec <SPEC>`        | Rex6    | Spec: `Satin` (the Satin engine), or `Equivalence`, `MiniRex`, `MiniRex1`, `MiniRex2`, `Rex`, `Rex1`, `Rex2`, `Rex3`, `Rex4`, `Rex5`, `Rex6` (the legacy engine; `MiniRex1`/`MiniRex2` are aliases executing `Equivalence`/`MiniRex` behavior); `Satin` by default under `--genesis` |
 | `--chain-id <ID>`      | 6342    | Chain ID                                  |
 
 ### Block Environment
@@ -391,7 +390,7 @@ mega-evme run --create 0x6080604052... --dump
 # Fork mainnet state and execute against a contract
 mega-evme tx \
   --fork \
-  --fork.rpc https://eth-mainnet.example.com \
+  --rpc https://eth-mainnet.example.com \
   --receiver 0xContractAddress \
   --input 0xMethodSelector...
 ```
@@ -449,4 +448,4 @@ State files use JSON format with Ethereum quantity encoding:
 
 ## See Also
 
-- [run Command Documentation](src/run/README.md)
+- [The `run`, `tx` and `replay` command pages](../../docs/mega-evme/commands/)

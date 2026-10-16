@@ -1,0 +1,5 @@
+# A `cargo update` picks, for each dependency, the newest release whose declared `rust-version` the
+# workspace's own (1.94) builds, so the lock stays on the declared minimum toolchain; CI's msrv
+# job checks it there. Resolver "2" would otherwise pick the newest release whatever it declares.
+[resolver]
+incompatible-rust-versions = "fallback"
