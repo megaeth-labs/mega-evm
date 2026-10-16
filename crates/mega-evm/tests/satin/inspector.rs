@@ -249,6 +249,55 @@ fn test_create_revival_is_refused() {
         .is_success());
 }
 
+/// A creation its own frame budget stops is refused its revival too: the stop is the creation's
+/// alone and latches nothing, so the creation failed as any failed creation does. Under a KV limit
+/// of three, the creation's start makes two records, and the write in its init code is a third one
+/// over its budget of 98% of the three, which the transaction's limit still holds; under a limit
+/// of four the budget holds it, and the same creation succeeds.
+#[test]
+fn test_a_creation_its_frame_budget_stops_is_refused_its_revival() {
+    // A write of 1 to slot 1, short enough for `create_and_store_address`.
+    let init_code = BytecodeBuilder::default()
+        .push_number(1_u8)
+        .push_number(1_u8)
+        .append(SSTORE)
+        .stop()
+        .build();
+    let db = || MemoryDatabase::default().account_code(A, create_and_store_address(&init_code));
+    let under =
+        |records: u64| mega_evm::EvmTxRuntimeLimits::default().with_tx_kv_update_limit(records);
+    let plain = |records: u64| {
+        MegaEvm::new(context(db()).with_tx_runtime_limits(under(records)))
+            .execute_transaction(call(CALLER, A, U256::ZERO, GAS_LIMIT))
+            .unwrap()
+    };
+    let created = |outcome: &mega_evm::MegaTransactionOutcome| {
+        outcome.state[&A]
+            .storage
+            .get(&U256::ZERO)
+            .is_some_and(|slot| !slot.present_value().is_zero())
+    };
+    let roomy = plain(4);
+    assert!(roomy.result.is_success() && created(&roomy), "{:?}", roomy.result);
+
+    // Without the inspector the creation fails alone: its creator stores no address and succeeds,
+    // and the transaction is not stopped.
+    let stopped = plain(3);
+    assert!(stopped.result.is_success(), "{:?}", stopped.result);
+    assert_eq!(stopped.limit_exceeded, None, "a frame budget latches nothing");
+    assert!(!created(&stopped), "the creation failed");
+
+    let limits = under(3);
+    let mut evm = MegaEvm::new(context(db()).with_tx_runtime_limits(limits))
+        .with_inspector(Rewriter { create_succeeds: true, ..Default::default() });
+    match evm.transact_raw(call(CALLER, A, U256::ZERO, GAS_LIMIT)) {
+        Err(EVMError::Custom(message)) => {
+            assert!(message.starts_with(FORBIDDEN_CREATE_REVIVAL), "{message}")
+        }
+        other => panic!("expected the refusal, got {other:?}"),
+    }
+}
+
 /// A declared observer that writes back fails its declaration in a debug build.
 #[test]
 #[cfg(debug_assertions)]

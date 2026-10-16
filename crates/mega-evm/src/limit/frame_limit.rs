@@ -113,6 +113,21 @@ impl Lane {
         }
     }
 
+    /// Whether the frame's return hands its caller what no check held the caller to: a failed
+    /// creation's nonce record, which outlives it and lands on the creator's lane
+    /// ([`FrameLimitTracker::pop`]), or a success past the frame's own budget, which only an
+    /// inspector's rewrite of the frame's stop into a success returns.
+    ///
+    /// Any other return hands the caller nothing, or what the frame kept within its budget, which
+    /// is at most the share of what the caller had left.
+    pub(crate) const fn hands_caller_unchecked(&self, success: bool) -> bool {
+        if success {
+            self.net().crossing(self.budget).is_some()
+        } else {
+            self.creator_record
+        }
+    }
+
     /// What the frame keeps if it succeeds.
     pub(crate) const fn net(&self) -> LimitUsage {
         self.used.saturating_sub(self.refund)
@@ -287,12 +302,27 @@ impl FrameLimitTracker {
         lane.records_made = false;
     }
 
+    /// Takes the record of the running frame's own account back from its lane, where a child
+    /// left it: the nonce record of a creation that failed, whose bump is being taken back.
+    /// Returns whether the account was recorded, and so whether there was a record to take.
+    pub(crate) fn take_back_own_record(&mut self) -> bool {
+        let Some(lane) = self.lanes.last_mut() else { return false };
+        if !lane.account_recorded {
+            return false;
+        }
+        lane.account_recorded = false;
+        lane.used = lane.used.saturating_sub(WRITE_RECORD);
+        self.total_used = self.total_used.saturating_sub(WRITE_RECORD);
+        true
+    }
+
     /// Pops the lane of the frame that returned: `success` merges it into its caller's lane (or
     /// the transaction's), a failure discards it.
     ///
     /// A creator's record outlives the creation's failure and lands on the caller's lane, which
     /// nothing here holds to its budget; any other record of the caller dies with it, and the
     /// caller's account stops counting as recorded.
+    #[inline]
     pub(crate) fn pop(&mut self, success: bool) -> Option<Lane> {
         let lane = self.lanes.pop()?;
         if success {
@@ -325,6 +355,16 @@ impl FrameLimitTracker {
             }
         }
         Some(lane)
+    }
+
+    /// Whether the return of `returned`, the lane just popped with `success`, handed the running
+    /// frame what no check held it to ([`Lane::hands_caller_unchecked`]).
+    ///
+    /// A return into no lane hands nothing that needs holding: what the transaction's own frame
+    /// keeps goes to the transaction, which has no budget of its own and whose total the return
+    /// does not grow, and no frame runs on after it.
+    pub(crate) fn hands_unchecked(&self, returned: &Lane, success: bool) -> bool {
+        !self.lanes.is_empty() && returned.hands_caller_unchecked(success)
     }
 
     /// [`net`](Self::net) recomputed from the lanes, for checking the cache.
@@ -531,6 +571,58 @@ mod tests {
         assert_eq!(t.net(), t.net_uncached());
     }
 
+    /// A return hands its caller what no check held the caller to in two cases: the nonce record
+    /// a failed creation leaves its creator, and a success past the frame's own budget. A success
+    /// within its budget hands over no more than that budget, and any other failure hands over
+    /// nothing.
+    #[test]
+    fn test_what_a_return_hands_its_caller_unchecked() {
+        let budget = LimitUsage { data_size: 200, write_records: 10 };
+        // The record of the caller's account the child holds (a creator's or a sender's), the
+        // bytes it counted beside it, and whether it succeeded.
+        for (creator, counted, success, unchecked) in [
+            (false, 160, true, false),
+            (true, 160, true, false),
+            (false, 161, true, true),
+            (false, 161, false, false),
+            (false, 0, false, false),
+            (true, 0, false, true),
+        ] {
+            let case = format!("creator {creator}, {counted} bytes, success {success}");
+            let mut t = FrameLimitTracker::default();
+            t.push(Lane::new(Some(ADDR), false, UNLIMITED, 0));
+            t.push(Lane::new(None, true, budget, 0));
+            t.record_caller(creator, 0);
+            t.record(bytes(counted));
+            let lane = t.pop(success).unwrap();
+            assert_eq!(lane.hands_caller_unchecked(success), unchecked, "{case}");
+            let handed = t.net();
+            let past_budget = handed.crossing(budget).is_some();
+            if success {
+                assert_eq!(past_budget, unchecked, "{case}: a success hands over what it kept");
+            } else {
+                assert_eq!(handed != LimitUsage::ZERO, unchecked, "{case}: a failure, the record");
+            }
+        }
+    }
+
+    /// The return of the transaction's own frame hands nothing unchecked, whatever it kept: there
+    /// is no lane left to hand it to. With a frame below it, the same return does.
+    #[test]
+    fn test_a_return_into_no_lane_hands_nothing_unchecked() {
+        let budget = LimitUsage { data_size: 200, write_records: 10 };
+        let mut t = FrameLimitTracker::default();
+        t.push(Lane::new(Some(ADDR), false, budget, 0));
+        t.record(bytes(201));
+        let lane = t.pop(true).unwrap();
+        assert!(lane.hands_caller_unchecked(true), "it kept more than its budget");
+        assert!(!t.hands_unchecked(&lane, true), "but no frame is left to hand it to");
+
+        t.push(Lane::new(Some(ADDR), false, UNLIMITED, 0));
+        assert!(t.hands_unchecked(&lane, true), "a caller is");
+        assert!(!t.hands_unchecked(&lane, false), "which a failure hands nothing");
+    }
+
     /// A creation that fails before bumping the nonce takes the creator record back.
     #[test]
     fn test_drop_caller_record_rearms_the_caller() {
@@ -544,6 +636,27 @@ mod tests {
         assert!(!t.lanes[0].account_recorded);
         t.pop(false);
         assert_eq!(t.net(), LimitUsage::ZERO);
+        assert_eq!(t.net(), t.net_uncached());
+    }
+
+    /// The creator record a failed creation left its creator is taken back once, and a lane with
+    /// no record of its own account has nothing to take.
+    #[test]
+    fn test_take_back_own_record_takes_the_creator_record_once() {
+        let mut t = FrameLimitTracker::default();
+        assert!(!t.take_back_own_record(), "no lane");
+        t.push(Lane::new(Some(ADDR), false, UNLIMITED, 0));
+        t.record(bytes(7));
+        t.push(Lane::new(None, true, UNLIMITED, 0));
+        t.record_caller(true, 0);
+        t.pop(false);
+        assert_eq!(t.net(), bytes(7).saturating_add(WRITE_RECORD));
+
+        assert!(t.take_back_own_record());
+        assert_eq!(t.net(), bytes(7), "the record, and nothing else, is gone");
+        assert!(!t.current().unwrap().account_recorded);
+        assert!(!t.take_back_own_record(), "taken once");
+        assert_eq!(t.net(), bytes(7));
         assert_eq!(t.net(), t.net_uncached());
     }
 

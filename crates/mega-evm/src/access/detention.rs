@@ -11,6 +11,17 @@ use revm::interpreter::{gas::WithheldCrossing, Gas, InstructionResult, Interpret
 use super::VolatileDataAccess;
 use crate::system::VOLATILE_DATA_ACCESS_DISABLED_SELECTOR;
 
+/// A transaction gas detention stops: the compute limit it crossed, and its compute at the
+/// crossing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ComputeStop {
+    /// The most compute the transaction may reach.
+    pub(crate) limit: u64,
+    /// The transaction's compute before the charge that would have crossed the limit: what its
+    /// regular ledger bills once the stopped frame's gas is put back.
+    pub(crate) used: u64,
+}
+
 /// What detention keeps of one frame that runs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct DetainedFrame {
@@ -19,6 +30,92 @@ struct DetainedFrame {
     /// While a child of the frame runs: what the frame adds to the transaction's compute, which is
     /// [`at_suspension`](Self::at_suspension) less the child's gas limit.
     contribution: u64,
+}
+
+/// What detention records of a frame when revm is about to build a child of it, while no read has
+/// set a limit: enough to rebuild what the frame adds to the transaction's compute while that
+/// child runs, should a read below it set the first limit.
+#[derive(Clone, Copy, Debug, Default)]
+struct CallerRecord {
+    /// The frame's regular gas spent ([`regular_spent`]).
+    spent: u64,
+    /// The frame's own gas limit: what its caller's regular gas spent is taken less of.
+    limit: u64,
+}
+
+/// The frames' figures the transaction's compute is read from.
+///
+/// Detention keeps them from the first read that sets a limit on; debug builds keep a second copy
+/// from the transaction's first frame on, by the same updates, and hold the first to it.
+#[derive(Clone, Debug, Default)]
+struct FrameFigures {
+    /// One entry per frame that runs or is suspended, the running one last.
+    frames: Vec<DetainedFrame>,
+    /// The compute of the frames suspended on a child that runs.
+    suspended: u64,
+}
+
+impl FrameFigures {
+    fn clear(&mut self) {
+        self.frames.clear();
+        self.suspended = 0;
+    }
+
+    /// The frame at `depth`, whose gas limit is `gas_limit`, is about to run. On its first run its
+    /// caller's compute is added; on a resume it is taken back out, because the frame's own
+    /// regular gas spent now accounts for the child.
+    fn on_frame_run(&mut self, gas_limit: u64, depth: usize) {
+        if self.frames.len() == depth {
+            let contribution = self.caller_contribution(depth, gas_limit);
+            if let Some(caller) = depth.checked_sub(1).and_then(|i| self.frames.get_mut(i)) {
+                caller.contribution = contribution;
+            }
+            self.suspended = self.suspended.saturating_add(contribution);
+            self.frames.push(DetainedFrame::default());
+        } else if let Some(frame) = self.frames.get_mut(depth) {
+            self.suspended = self.suspended.saturating_sub(frame.contribution);
+            frame.contribution = 0;
+        }
+        debug_assert_eq!(self.frames.len(), depth + 1, "one entry per frame that runs");
+    }
+
+    /// The frame at `depth`, whose gas is `gas`, suspended to start a child.
+    fn on_frame_suspend(&mut self, gas: &Gas, depth: usize) {
+        if let Some(frame) = self.frames.get_mut(depth) {
+            frame.at_suspension = regular_spent(gas);
+        }
+    }
+
+    /// The frame at `depth` returns.
+    fn on_frame_end(&mut self, depth: usize) {
+        debug_assert_eq!(self.frames.len(), depth + 1, "the frame that returns is the last");
+        self.frames.pop();
+    }
+
+    /// What the caller of a frame at `depth` with `gas_limit` adds to the transaction's compute
+    /// while the frame runs: its regular gas spent at suspension, less the frame's gas limit. The
+    /// transaction's own frame has no caller.
+    fn caller_contribution(&self, depth: usize, gas_limit: u64) -> u64 {
+        depth
+            .checked_sub(1)
+            .and_then(|i| self.frames.get(i))
+            .map_or(0, |caller| caller.at_suspension.saturating_sub(gas_limit))
+    }
+
+    /// Asserts that `kept`, the figures detention keeps, are these, kept from the transaction's
+    /// first frame on: the same entries, but for the running frame's regular gas spent at its last
+    /// suspension, which these keep stale until the frame suspends again and nothing reads before.
+    #[cfg(debug_assertions)]
+    fn assert_kept(&self, kept: &Self) {
+        assert_eq!(kept.suspended, self.suspended, "the compute of the suspended frames");
+        assert_eq!(kept.frames.len(), self.frames.len(), "one entry per frame that runs");
+        if let Some(((last, below), (eager_last, eager_below))) =
+            kept.frames.split_last().zip(self.frames.split_last())
+        {
+            assert_eq!(below, eager_below, "the frames the running one runs under");
+            assert_eq!(last.contribution, eager_last.contribution, "the running frame's");
+        }
+    }
 }
 
 /// Gas detention for the running transaction: which volatile data it read, and the most compute
@@ -43,7 +140,6 @@ struct DetainedFrame {
 ///
 /// ```text
 /// compute = Σ suspended callers (spent at suspension − child's gas limit)
-///         + an interceptor's charge on the transaction's own frame
 ///         + regular_spent(running frame)
 ///         − burned
 /// ```
@@ -54,11 +150,11 @@ struct DetainedFrame {
 /// 9,000 of the value transfer and a warm access of 100 — so the gas run after a read is at most
 /// about 25% (2,300 / 9,100) more than the cap.
 ///
-/// An interceptor that charges a frame by taking gas off its limit charges compute: its own work,
-/// decoding and recovering a signer, whether it then answers the call or lets the frame run. A
-/// caller's regular gas spent holds all it forwarded, and its contribution takes only the frame's
-/// limit off, so the charge is in it; the transaction's own frame has no caller, and its charge is
-/// added when the frame is built.
+/// A keyless deployment's call is the transaction's own frame, and runs no code: it charges its
+/// own work — the overhead of decoding the signed transaction and recovering its signer, and the
+/// `CREATE` opcode's regular gas — on its own gas, held to the limit as any frame's is when it
+/// runs, then suspends on its creation. Its charges are compute as a caller's are, whether a rule
+/// then refuses the call or its creation runs.
 ///
 /// The one part of the regular ledger that is not compute is what a halt burns (`burned`): a
 /// frame that halts consumes the gas it had left, and its spill, without running anything with
@@ -74,6 +170,17 @@ struct DetainedFrame {
 /// frame whose leftover takes the compute past the limit does so without a crossing, so the stop
 /// is its caller's next charge, and the regular ledger at the stop holds that leftover's part
 /// past the limit beside the limit.
+///
+/// # Keeping the figure
+///
+/// Only a read that sets a limit, and what follows it, needs the transaction's compute, so the
+/// frames' figures are kept only from the first such read on. Before it, what a halt burns and the
+/// switch are kept as every frame starts and ends, and nothing else but one record per frame revm
+/// builds a child of: its regular gas spent and its own gas limit then, which is what it stands at
+/// while that child runs. At the first read, the frames the reading frame runs under are exactly
+/// the frames suspended on a running child, and what each adds is rebuilt from its record: its
+/// regular gas spent less the gas limit of the frame above it, the reading frame's own for the
+/// last. From there every frame is kept as it starts, suspends, resumes and ends.
 ///
 /// # Refused reads
 ///
@@ -106,15 +213,20 @@ pub struct Detention {
     accessed: VolatileDataAccess,
     /// The most compute the transaction may reach, once it read volatile data.
     limit: Option<u64>,
-    /// The compute of the frames suspended on a child that runs, and an interceptor's charge on
-    /// the transaction's own frame.
-    suspended: u64,
     /// The regular gas the frames that halted burned without running anything with it.
     burned: u64,
     /// What the running frame had left when a charge failed on an out-of-gas whose halt zeroes it.
     left_at_halt: Option<u64>,
-    /// One entry per frame that runs or is suspended, the running one last.
-    frames: Vec<DetainedFrame>,
+    /// The frames' figures, once a read set a limit.
+    figures: FrameFigures,
+    /// While no read has set a limit: at each depth, the record of the frame there when revm last
+    /// built a child of it in the transaction ([`on_child_build`](Self::on_child_build)). An entry
+    /// below the running frame's depth is its caller's, made when revm built the frame above it.
+    callers: Vec<CallerRecord>,
+    /// The frames' figures kept from the transaction's first frame on, in debug builds, to hold
+    /// the ones rebuilt at the first read, and every one kept after it, to them.
+    #[cfg(debug_assertions)]
+    eager: FrameFigures,
 }
 
 impl Detention {
@@ -140,10 +252,12 @@ impl Detention {
         }
         self.accessed = VolatileDataAccess::empty();
         self.limit = None;
-        self.suspended = 0;
         self.burned = 0;
         self.left_at_halt = None;
-        self.frames.clear();
+        self.figures.clear();
+        self.callers.clear();
+        #[cfg(debug_assertions)]
+        self.eager.clear();
     }
 
     /// Starts every transaction with volatile-data access switched off from `depth` down, as if
@@ -241,9 +355,11 @@ impl Detention {
         self.observed.replace(VolatileDataAccess::empty())
     }
 
-    /// Commits the reads `observed` of the opcode the running frame completed, whose gas is `gas`:
-    /// the transaction's limit becomes its compute now plus the reads' cap, unless it is already
-    /// lower, and the frame's spendable gas is held to what the limit leaves it.
+    /// Commits the reads `observed` of the opcode the running frame, at `depth` and whose gas is
+    /// `gas`, completed: the transaction's limit becomes its compute now plus the reads' cap,
+    /// unless it is already lower, and the frame's spendable gas is held to what the limit leaves
+    /// it. The first read that sets a limit starts keeping the frames' figures
+    /// ([`track`](Self::track)).
     ///
     /// `forwarded` is the regular gas the opcode forwarded to a frame it is about to start, which
     /// the frame's regular gas spent includes and its compute does not.
@@ -251,12 +367,16 @@ impl Detention {
         &mut self,
         observed: VolatileDataAccess,
         gas: &mut Gas,
+        depth: usize,
         forwarded: u64,
     ) {
         self.accessed |= observed;
         let cap = self.cap_of(observed);
         if cap == u64::MAX {
             return;
+        }
+        if self.limit.is_none() {
+            self.track(gas, depth);
         }
         let compute = self.compute(gas).saturating_sub(forwarded);
         let limit = self.lower_limit(compute.saturating_add(cap));
@@ -302,28 +422,25 @@ impl Detention {
     /// The frame at `depth`, whose gas is `gas`, is about to run: for the first time, or again
     /// after a child returned into it.
     ///
-    /// A frame's first run adds its caller's compute to the transaction's, now that the frame's
-    /// gas limit is known — what the caller forwarded, what an interceptor charged it, and a value
-    /// call's stipend; a resumed frame takes it back out, because its own regular gas spent now
-    /// accounts for the child. Then the frame is held to the limit, and the switch is read for it.
+    /// The switch is read for the frame. Once a read set a limit, a frame's first run adds its
+    /// caller's compute to the transaction's, now that the frame's gas limit is known — what the
+    /// caller forwarded, and a value call's stipend; a resumed frame takes it back out, because
+    /// its own regular gas spent now accounts for the child. Then the frame is held to the limit.
     #[inline]
     pub(crate) fn on_frame_run(&mut self, gas: &mut Gas, depth: usize) {
         self.refusing = self.disabled_from.is_some_and(|from| depth >= from);
-        if !self.detains {
+        #[cfg(debug_assertions)]
+        if self.detains {
+            self.eager.on_frame_run(gas.limit(), depth);
+        }
+        // Only a read of a transaction detention holds sets a limit.
+        if self.limit.is_none() {
             return;
         }
-        if self.frames.len() == depth {
-            let contribution = self.caller_contribution(depth, gas.limit());
-            if let Some(caller) = depth.checked_sub(1).and_then(|i| self.frames.get_mut(i)) {
-                caller.contribution = contribution;
-            }
-            self.suspended = self.suspended.saturating_add(contribution);
-            self.frames.push(DetainedFrame::default());
-        } else if let Some(frame) = self.frames.get_mut(depth) {
-            self.suspended = self.suspended.saturating_sub(frame.contribution);
-            frame.contribution = 0;
-        }
-        debug_assert_eq!(self.frames.len(), depth + 1, "one entry per frame that runs");
+        debug_assert!(self.detains, "a limit on a transaction detention does not hold");
+        self.figures.on_frame_run(gas.limit(), depth);
+        #[cfg(debug_assertions)]
+        self.eager.assert_kept(&self.figures);
         self.hold(gas);
     }
 
@@ -331,27 +448,103 @@ impl Detention {
     /// still until the child returns.
     #[inline]
     pub(crate) fn on_frame_suspend(&mut self, gas: &Gas, depth: usize) {
-        if !self.detains {
+        #[cfg(debug_assertions)]
+        if self.detains {
+            self.eager.on_frame_suspend(gas, depth);
+        }
+        if self.limit.is_none() {
             return;
         }
-        if let Some(frame) = self.frames.get_mut(depth) {
-            frame.at_suspension = regular_spent(gas);
+        self.figures.on_frame_suspend(gas, depth);
+    }
+
+    /// Whether revm building a frame's child is to be recorded ([`on_child_build`]): the
+    /// transaction is detained, and no read has set a limit.
+    ///
+    /// [`on_child_build`]: Self::on_child_build
+    #[inline]
+    pub(crate) const fn records_callers(&self) -> bool {
+        self.detains && self.limit.is_none()
+    }
+
+    /// Records the frame at `depth − 1`, whose gas is `caller`, as revm is about to build a child
+    /// of it at `depth`, while no read has set a limit ([`records_callers`]): its regular gas
+    /// spent and its gas limit. Until the child returns, that is what the frame stands at, so a
+    /// read below it rebuilds what the frame adds to the transaction's compute from it
+    /// ([`track`](Self::track)).
+    ///
+    /// A frame answered without running records its caller too, which the caller's next child
+    /// overwrites; a read is only ever made in a frame revm built.
+    ///
+    /// [`records_callers`]: Self::records_callers
+    #[inline]
+    pub(crate) fn on_child_build(&mut self, depth: usize, caller: &Gas) {
+        debug_assert!(self.records_callers() && depth > 0, "a caller recorded while untracked");
+        let index = depth - 1;
+        if index >= self.callers.len() {
+            self.callers.resize(index + 1, CallerRecord::default());
+        }
+        self.callers[index] = CallerRecord { spent: regular_spent(caller), limit: caller.limit() };
+    }
+
+    /// Starts keeping the frames' figures at the first read that sets a limit, made by the frame
+    /// that runs, at `depth` and whose gas is `gas`.
+    ///
+    /// The frames it runs under are those suspended on a running child, and each one's record is
+    /// the one made when revm built that child: what the frame adds to the transaction's compute is
+    /// its regular gas spent then less the child's gas limit — the next record's, or the reading
+    /// frame's own for the last. They are added in the order the frames started, as they would
+    /// have been when each child first ran.
+    #[cold]
+    #[inline(never)]
+    fn track(&mut self, gas: &Gas, depth: usize) {
+        // Every frame below the reading one was built in the transaction while no read had set a
+        // limit, so revm building it recorded its caller.
+        let records = &self.callers[..depth];
+        let reading_limit = gas.limit();
+        let figures = &mut self.figures;
+        figures.clear();
+        for (index, record) in records.iter().enumerate() {
+            let child_limit = records.get(index + 1).map_or(reading_limit, |child| child.limit);
+            let contribution = record.spent.saturating_sub(child_limit);
+            figures.suspended = figures.suspended.saturating_add(contribution);
+            figures.frames.push(DetainedFrame { at_suspension: record.spent, contribution });
+        }
+        figures.frames.push(DetainedFrame::default());
+        #[cfg(debug_assertions)]
+        self.eager.assert_kept(&self.figures);
+    }
+
+    /// Records a read of `access` the running frame, at `depth` and whose gas is `gas`, makes
+    /// itself rather than through an opcode — a keyless deployment's call reading its signer's
+    /// account — and holds the frame to the limit it sets, as an opcode's read is committed
+    /// ([`commit_reads`](Self::commit_reads)). A transaction detention does not hold records
+    /// nothing, as the Host observes nothing for it.
+    pub(crate) fn read_by_frame(
+        &mut self,
+        access: VolatileDataAccess,
+        gas: &mut Gas,
+        depth: usize,
+    ) {
+        if self.detains {
+            self.commit_reads(access, gas, depth, 0);
         }
     }
 
     /// The frame at `depth` returns `result` with `gas`, after it ran. The switch turns back on if
     /// the frame, or a frame below it, turned it off. A frame that halts burns what it had left.
     ///
-    /// Returns the limit when the frame ran out of gas on a charge the withheld part of its gas
+    /// Returns the stop when the frame ran out of gas on a charge the withheld part of its gas
     /// would have paid ([`stop`](Self::stop)): the frame crossed the limit, and must stop the
-    /// transaction rather than halt.
+    /// transaction rather than halt. The stop's compute is the transaction's with the frame's gas
+    /// put back.
     #[inline]
     pub(crate) fn on_frame_end(
         &mut self,
         result: InstructionResult,
         gas: &mut Gas,
         depth: usize,
-    ) -> Option<u64> {
+    ) -> Option<ComputeStop> {
         let left_at_halt = self.left_at_halt.take();
         if self.disabled_from.is_some_and(|from| from >= depth) {
             self.disabled_from = None;
@@ -359,10 +552,15 @@ impl Detention {
         if !self.detains {
             return None;
         }
-        debug_assert_eq!(self.frames.len(), depth + 1, "the frame that returns is the last");
-        self.frames.pop();
+        #[cfg(debug_assertions)]
+        self.eager.on_frame_end(depth);
+        if self.limit.is_some() {
+            self.figures.on_frame_end(depth);
+            #[cfg(debug_assertions)]
+            self.eager.assert_kept(&self.figures);
+        }
         if let Some(limit) = self.stop(gas) {
-            return Some(limit);
+            return Some(ComputeStop { limit, used: self.compute(gas) });
         }
         if result.is_halt() {
             // The settlement rolls the spill back into regular gas and burns it all.
@@ -380,100 +578,137 @@ impl Detention {
         Some(limit.saturating_sub(self.compute_at_start(depth, gas_limit)))
     }
 
-    /// Whether an interceptor's `charge` on a frame at `depth` that its caller forwarded
-    /// `gas_limit` crosses the limit. The interceptor took the charge off the frame's limit and
-    /// lets the frame run; the charge is its own work — decoding, recovering a signer — and
-    /// compute, whether the frame then runs or is answered. A charge the allowance cannot pay is
-    /// a regular charge past the limit, and the frame must be answered for the stop rather than
-    /// run ([`on_answer`](Self::on_answer)).
-    pub(crate) fn charge_crosses(&self, depth: usize, gas_limit: u64, charge: u64) -> bool {
-        self.allowance(depth, gas_limit).is_some_and(|allowance| charge > allowance)
-    }
-
-    /// The frame at `depth` was built on a gas limit an interceptor took `charge` off
-    /// ([`charge_crosses`](Self::charge_crosses)), and the charge is compute. A deeper frame's
-    /// caller already holds it: the caller's regular gas spent carries all it forwarded, and its
-    /// contribution takes only the frame's limit off. The transaction's own frame has no caller,
-    /// so its charge is added to the transaction's compute here.
-    pub(crate) fn on_charged_frame_built(&mut self, depth: usize, charge: u64) {
-        if depth == 0 {
-            self.suspended = self.suspended.saturating_add(charge);
-        }
-    }
-
     /// The frame at `depth`, whose gas limit was `gas_limit`, was answered without running —
-    /// `result` is the answer: a precompile's, an interceptor's, an inspector's, or revm's for a
-    /// call it did not start.
+    /// `result` is the answer: a precompile's, an interceptor's, a `keylessDeploy` call's that
+    /// carries value, an inspector's, or revm's for a call it did not start.
     ///
-    /// An answer marked as a crossing — a precompile that ran out of the allowance it was held to
-    /// ([`restore_forward`](Self::restore_forward)) — crossed the limit. Otherwise, an answer that
-    /// halts burns the whole gas limit: nothing ran with it. An answer that spent more regular gas
-    /// than the limit leaves the frame — the allowance it would have run on — is a charge the
-    /// frame could not have made: it is answered out of gas and marked as a crossing of what the
-    /// frame would have had withheld. A crossing is settled by the same rule as a frame that ran
-    /// ([`stop`](Self::stop)). Returns the limit when it crossed.
+    /// An answer marked as a crossing — a precompile whose price crosses the limit
+    /// ([`cross_at_price`](Self::cross_at_price)), or one the engine cannot price that ran out of
+    /// the allowance it was held to ([`restore_forward`](Self::restore_forward)) — crossed the
+    /// limit. Otherwise, an answer that halts burns the whole gas limit: nothing ran with it. An
+    /// answer that spent more regular gas than the limit leaves the frame — the allowance it would
+    /// have run on — is a charge the frame could not have made; state and history gas that spilled
+    /// onto its regular gas are not counted, as they are not a running frame's compute. Such an
+    /// answer is answered out of gas and marked as a crossing, the answer's spending being the
+    /// charge that crossed. A crossing is settled by the same rule as a frame that ran
+    /// ([`stop`](Self::stop)): the frame spent nothing before the charge, so it is given its whole
+    /// gas back, and the stop's compute is the transaction's when the frame started. Returns the
+    /// stop when it crossed.
+    ///
+    /// Until a read sets a limit an answer can only burn: nothing it spends can cross a limit, and
+    /// only the engine marks an answer as a crossing, which it does only under a limit.
+    #[inline]
     pub(crate) fn on_answer(
         &mut self,
         result: &mut InterpreterResult,
         depth: usize,
         gas_limit: u64,
-    ) -> Option<u64> {
+    ) -> Option<ComputeStop> {
         if !self.detains {
             return None;
         }
+        if self.limit.is_none() && result.gas.withheld_crossing().is_none() {
+            if result.result.is_halt() {
+                self.burned = self.burned.saturating_add(gas_limit);
+            }
+            return None;
+        }
+        self.on_held_answer(result, depth, gas_limit)
+    }
+
+    /// [`on_answer`](Self::on_answer) once a read set a limit, or for an answer marked as a
+    /// crossing.
+    #[inline(never)]
+    fn on_held_answer(
+        &mut self,
+        result: &mut InterpreterResult,
+        depth: usize,
+        gas_limit: u64,
+    ) -> Option<ComputeStop> {
         if result.gas.withheld_crossing().is_none() {
             if result.result.is_halt() {
                 self.burned = self.burned.saturating_add(gas_limit);
                 return None;
             }
             let allowance = self.allowance(depth, gas_limit)?;
-            if gas_limit.saturating_sub(result.gas.remaining()) <= allowance {
+            // The regular gas the answer spent: state and history gas that spilled onto it are not
+            // compute, as they are not a running frame's.
+            let spent = gas_limit
+                .saturating_sub(result.gas.remaining())
+                .saturating_sub(result.gas.state_gas_spilled());
+            if spent <= allowance {
                 return None;
             }
             // The answer spent more than the allowance, and no more than the gas limit, so the
-            // gas limit is above the allowance and the frame would have had the rest withheld. An
-            // interceptor that charged by taking gas off the frame's limit answered on less than
-            // it was forwarded; the frame is settled on what it was forwarded.
-            let withheld = NonZeroU64::new(gas_limit - allowance)?;
+            // gas limit is above the allowance and the frame would have had the rest withheld. The
+            // one answer of the engine's own that spends regular gas is that of a `keylessDeploy`
+            // call carrying value; the limit is set to the forward all the same, so
+            // an inspector's answer built on another limit is settled on what the frame was
+            // forwarded.
+            //
+            // The record holds the regular gas the frame had before the charge: the gas limit,
+            // less the state and history gas that spilled onto it, which the revert that settles
+            // the stop credits back. The spill is below the gas limit, less the regular gas the
+            // answer spent, so what is left is never zero.
+            let remaining = NonZeroU64::new(gas_limit - result.gas.state_gas_spilled())?;
             result.result = InstructionResult::OutOfGas;
             result.gas.tracker_mut().set_limit(gas_limit);
-            result.gas.set_withheld_crossing(Some(WithheldCrossing::new(withheld)));
+            result.gas.set_withheld_crossing(Some(WithheldCrossing::with_remaining(remaining)));
         }
-        self.stop(&mut result.gas)
+        let limit = self.stop(&mut result.gas)?;
+        // Every crossing an answer carries was marked by the engine with the regular gas the frame
+        // had before the charge: the forward less the spill here, the forward for a precompile's,
+        // which spills nothing. Put back, it leaves the answer no regular gas spent, so the stop's
+        // compute is the transaction's when the frame started.
+        debug_assert_eq!(regular_spent(&result.gas), 0, "a stopped answer spent nothing");
+        Some(ComputeStop { limit, used: self.compute_at_start(depth, gas_limit) })
     }
 
-    /// Gives a precompile's answer, which ran on `withheld` less than its caller forwarded — the
-    /// allowance, not the forward — the rest back, as the frame would have had it withheld: the
-    /// answer's gas limit is the forward again, and an answer that did not halt keeps the
-    /// withheld part unspent. A precompile that ran out of gas on the allowance ran out of what
-    /// the limit left the transaction: the answer is marked as a crossing of the withheld part,
-    /// and [`on_answer`](Self::on_answer) settles it as the stop.
+    /// Gives the answer of a precompile the engine cannot price, which ran on `withheld` less than
+    /// its caller forwarded — the allowance, not the forward — the rest back, as the frame would
+    /// have had it withheld: the answer's gas limit is the forward again, and an answer that did
+    /// not halt keeps the withheld part unspent. A precompile that ran out of gas on the allowance
+    /// ran out of what the limit left the transaction: the answer is marked as a crossing, and
+    /// [`on_answer`](Self::on_answer) settles it as the stop.
     ///
-    /// The precompile's price is not known without running it, so a precompile priced above its
-    /// whole forward runs out of the allowance as well, and is the stop too. So is one priced
-    /// within its forward, past the allowance, whose input fails a check made after its gas check,
-    /// which without the read fails the call instead.
+    /// Without a price the run on the allowance is all there is to go by, so such a precompile
+    /// priced above its whole forward runs out of the allowance as well, and is the stop too.
     pub(crate) fn restore_forward(result: &mut InterpreterResult, withheld: NonZeroU64) {
-        let forward = result.gas.limit().saturating_add(withheld.get());
-        result.gas.tracker_mut().set_limit(forward);
+        let forward = withheld.saturating_add(result.gas.limit());
+        result.gas.tracker_mut().set_limit(forward.get());
         if result.result == InstructionResult::PrecompileOOG {
-            result.gas.set_withheld_crossing(Some(WithheldCrossing::new(withheld)));
+            // The record holds the regular gas the frame had before the charge: its forward.
+            result.gas.set_withheld_crossing(Some(WithheldCrossing::with_remaining(forward)));
         } else if !result.result.is_halt() {
             result.gas.erase_cost(withheld.get());
+        }
+    }
+
+    /// Marks `result`, the answer to a precompile call held to an allowance below its forward and
+    /// answered without running because its price is past the allowance and within the forward,
+    /// as that crossing: the record holds the forward, the regular gas the frame had before the
+    /// charge, since the call spent none of it. [`on_answer`](Self::on_answer) settles it as the
+    /// stop.
+    pub(crate) fn cross_at_price(result: &mut InterpreterResult) {
+        if let Some(forward) = NonZeroU64::new(result.gas.limit()) {
+            result.gas.set_withheld_crossing(Some(WithheldCrossing::with_remaining(forward)));
         }
     }
 
     /// Settles a frame whose regular gas ran out on a charge the withheld part would have paid —
     /// the fork records it as a [`WithheldCrossing`] — and returns the limit it crossed.
     ///
-    /// The frame's gas becomes the withheld part at the crossing: the spendable part the frame had
-    /// counts as spent, which brings the transaction's compute to the limit, and the withheld part
-    /// goes back to its caller. Whether the halt already zeroed the frame's gas (`OutOfGas`) or not
-    /// (`MemoryOOG`), the settlement is the same. A crossing only ever ends a frame on an
-    /// out-of-gas, and only a frame detention held carries one.
+    /// The frame's regular gas is put back to what it had before the charge that crossed, the
+    /// record's [`remaining`](WithheldCrossing::remaining): the charge is not made, so the
+    /// transaction is billed its compute at the crossing, less than one charge short of the limit,
+    /// and all the frame had left, its spendable and withheld parts together, goes back to its
+    /// caller. Whether the halt already zeroed the frame's gas (`OutOfGas`) or not (`MemoryOOG`,
+    /// or `return_create`'s own out-of-gas on a deposit charge), the settlement is the same. A
+    /// crossing only ever ends a frame on an out-of-gas, and only a frame detention held carries
+    /// one.
     fn stop(&self, gas: &mut Gas) -> Option<u64> {
         let crossing = gas.withheld_crossing()?;
-        gas.set_remaining(crossing.withheld());
+        gas.set_remaining(crossing.remaining());
         gas.clear_withheld_crossing();
         self.limit
     }
@@ -509,25 +744,16 @@ impl Detention {
 
     /// The transaction's compute while the running frame has `gas`.
     fn compute(&self, gas: &Gas) -> u64 {
-        self.suspended.saturating_add(regular_spent(gas)).saturating_sub(self.burned)
+        self.figures.suspended.saturating_add(regular_spent(gas)).saturating_sub(self.burned)
     }
 
     /// The transaction's compute when a frame at `depth` with `gas_limit` starts, before it runs
     /// anything: every suspended caller's, the frame's own caller's included.
     fn compute_at_start(&self, depth: usize, gas_limit: u64) -> u64 {
-        self.suspended
-            .saturating_add(self.caller_contribution(depth, gas_limit))
+        self.figures
+            .suspended
+            .saturating_add(self.figures.caller_contribution(depth, gas_limit))
             .saturating_sub(self.burned)
-    }
-
-    /// What the caller of a frame at `depth` with `gas_limit` adds to the transaction's compute
-    /// while the frame runs: its regular gas spent at suspension, less the frame's gas limit. The
-    /// transaction's own frame has no caller.
-    fn caller_contribution(&self, depth: usize, gas_limit: u64) -> u64 {
-        depth
-            .checked_sub(1)
-            .and_then(|i| self.frames.get(i))
-            .map_or(0, |caller| caller.at_suspension.saturating_sub(gas_limit))
     }
 
     /// Lowers the limit to `limit`, unless it is already lower, and returns the limit.
@@ -626,7 +852,7 @@ mod tests {
         let mut frame = gas(100_000_000, 7);
         detention.on_frame_run(&mut frame, 0);
         assert!(frame.record_regular_cost(1_000));
-        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0);
+        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0, 0);
 
         assert_eq!(detention.compute_limit(), Some(1_000 + BLOCK_ENV_ACCESS_COMPUTE_GAS));
         assert_eq!(frame.spendable(), BLOCK_ENV_ACCESS_COMPUTE_GAS);
@@ -642,9 +868,9 @@ mod tests {
         let mut detention = detaining();
         let mut frame = gas(100_000_000, 0);
         detention.on_frame_run(&mut frame, 0);
-        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0);
+        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0, 0);
         assert!(frame.record_regular_cost(5_000));
-        detention.commit_reads(VolatileDataAccess::ORACLE, &mut frame, 0);
+        detention.commit_reads(VolatileDataAccess::ORACLE, &mut frame, 0, 0);
         assert_eq!(detention.compute_limit(), Some(BLOCK_ENV_ACCESS_COMPUTE_GAS));
         assert_eq!(frame.spendable(), BLOCK_ENV_ACCESS_COMPUTE_GAS - 5_000);
     }
@@ -656,35 +882,61 @@ mod tests {
         let mut detention = detaining();
         let mut frame = gas(100_000_000, 0);
         detention.on_frame_run(&mut frame, 0);
-        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0);
+        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0, 0);
         assert!(frame.record_state_cost(1_000_000));
         detention.hold(&mut frame);
         assert_eq!(detention.compute(&frame), 0);
         assert_eq!(frame.spendable(), BLOCK_ENV_ACCESS_COMPUTE_GAS);
     }
 
-    /// A regular charge the withheld part would have paid is the cap: the frame's gas becomes the
-    /// withheld part, and the spendable part it had counts as spent.
+    /// A regular charge the withheld part would have paid is the cap: the frame's gas is put back
+    /// to what it had before the charge, and the stop's compute is the transaction's then — here
+    /// the 10 the frame charged after the read, whatever the halt did to its gas.
     #[test]
-    fn test_a_crossing_stops_with_the_withheld_part_left() {
+    fn test_a_crossing_stops_with_the_gas_it_had_before_the_charge() {
         for (result, zeroed) in
             [(InstructionResult::OutOfGas, true), (InstructionResult::MemoryOOG, false)]
         {
             let mut detention = detaining();
             let mut frame = gas(100_000_000, 0);
             detention.on_frame_run(&mut frame, 0);
-            detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0);
+            detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0, 0);
             assert!(frame.record_regular_cost(10));
             assert!(!frame.record_regular_cost(BLOCK_ENV_ACCESS_COMPUTE_GAS));
             if zeroed {
                 frame.spend_all();
             }
             let stop = detention.on_frame_end(result, &mut frame, 0);
-            assert_eq!(stop, Some(BLOCK_ENV_ACCESS_COMPUTE_GAS), "{result:?}");
-            assert_eq!(frame.remaining(), 100_000_000 - BLOCK_ENV_ACCESS_COMPUTE_GAS);
+            let limit = BLOCK_ENV_ACCESS_COMPUTE_GAS;
+            assert_eq!(stop, Some(ComputeStop { limit, used: 10 }), "{result:?}");
+            assert_eq!(frame.remaining(), 100_000_000 - 10);
             assert_eq!(frame.withheld_crossing(), None);
-            assert_eq!(regular_spent(&frame), BLOCK_ENV_ACCESS_COMPUTE_GAS, "compute at the limit");
+            assert_eq!(regular_spent(&frame), 10, "the charge that crossed is not made");
         }
+    }
+
+    /// A child's crossing stops with the compute of the whole transaction: what its callers
+    /// computed before they suspended, less the gas they forwarded, and what it computed itself.
+    #[test]
+    fn test_a_childs_crossing_stops_with_the_transactions_compute() {
+        let mut detention = detaining();
+        let mut caller = gas(100_000_000, 0);
+        detention.on_frame_run(&mut caller, 0);
+        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut caller, 0, 0);
+        assert!(caller.record_regular_cost(7_000));
+        assert!(caller.record_withheld_first_cost(50_000_000));
+        detention.on_frame_suspend(&caller, 0);
+        let mut child = gas(50_000_000, 0);
+        detention.on_frame_run(&mut child, 1);
+        assert_eq!(child.spendable(), BLOCK_ENV_ACCESS_COMPUTE_GAS - 7_000);
+        assert!(child.record_regular_cost(3_000));
+        assert!(!child.record_regular_cost(BLOCK_ENV_ACCESS_COMPUTE_GAS));
+        child.spend_all();
+
+        let stop = detention.on_frame_end(InstructionResult::OutOfGas, &mut child, 1);
+        let limit = BLOCK_ENV_ACCESS_COMPUTE_GAS;
+        assert_eq!(stop, Some(ComputeStop { limit, used: 7_000 + 3_000 }));
+        assert_eq!(child.remaining(), 50_000_000 - 3_000);
     }
 
     /// An out-of-gas nothing withheld could have paid halts and burns what the frame had.
@@ -693,7 +945,7 @@ mod tests {
         let mut detention = detaining();
         let mut frame = gas(100_000_000, 0);
         detention.on_frame_run(&mut frame, 0);
-        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0);
+        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0, 0);
         assert!(!frame.record_regular_cost(100_000_001));
         detention.note_halt(frame.remaining());
         frame.spend_all();
@@ -704,7 +956,7 @@ mod tests {
         let mut detention = detaining();
         let mut frame = gas(1_000_000, 0);
         detention.on_frame_run(&mut frame, 0);
-        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0);
+        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0, 0);
         assert_eq!(frame.withheld(), 0, "nothing to withhold");
         assert!(!frame.record_regular_cost(1_000_001));
         frame.spend_all();
@@ -716,6 +968,7 @@ mod tests {
     #[test]
     fn test_compute_spans_frames() {
         let mut detention = detaining();
+        detention.mark_before_execution(VolatileDataAccess::BENEFICIARY_BALANCE);
         let mut caller = gas(100_000, 0);
         detention.on_frame_run(&mut caller, 0);
         assert!(caller.record_regular_cost(9_000 + 60_000));
@@ -732,7 +985,145 @@ mod tests {
         caller.erase_cost(child.remaining());
         detention.on_frame_run(&mut caller, 0);
         assert_eq!(detention.compute(&caller), 9_000 + 4_000 - 2_300);
-        assert_eq!(detention.suspended, 0);
+        assert_eq!(detention.figures.suspended, 0);
+    }
+
+    /// Nothing is kept of the frames before a read sets a limit but what a halt burns and one
+    /// record per frame revm builds a child of. The first read rebuilds what the frames it runs
+    /// under add to the transaction's compute from those records: each one's regular gas spent less
+    /// its child's gas limit, a stipend included, and a halted child's burn taken off.
+    #[test]
+    fn test_the_first_read_rebuilds_the_compute_of_the_frames_it_runs_under() {
+        const CAP: u64 = 1_000;
+        let mut detention = Detention::default();
+        detention.reset(true, CAP, CAP);
+        let mut caller = gas(1_000_000, 0);
+        detention.on_frame_run(&mut caller, 0);
+        assert!(caller.record_regular_cost(2_000));
+
+        // A child that halts after running 1,000 of the 10,000 it was forwarded.
+        assert!(caller.record_withheld_first_cost(10_000));
+        detention.on_frame_suspend(&caller, 0);
+        detention.on_child_build(1, &caller);
+        let mut halting = gas(10_000, 0);
+        detention.on_frame_run(&mut halting, 1);
+        assert!(halting.record_regular_cost(1_000));
+        assert_eq!(
+            detention.on_frame_end(InstructionResult::InvalidFEOpcode, &mut halting, 1),
+            None
+        );
+        detention.on_frame_run(&mut caller, 0);
+
+        // A value call: 9,000 of its own, 60,000 forwarded and a stipend of 2,300.
+        assert!(caller.record_regular_cost(9_000));
+        assert!(caller.record_withheld_first_cost(60_000));
+        detention.on_frame_suspend(&caller, 0);
+        detention.on_child_build(1, &caller);
+        let mut child = gas(60_000 + 2_300, 0);
+        detention.on_frame_run(&mut child, 1);
+        assert!(child.record_regular_cost(4_000));
+        assert!(child.record_withheld_first_cost(30_000));
+        detention.on_frame_suspend(&child, 1);
+        detention.on_child_build(2, &child);
+        let mut grandchild = gas(30_000, 0);
+        detention.on_frame_run(&mut grandchild, 2);
+        assert!(grandchild.record_regular_cost(500));
+        assert!(detention.figures.frames.is_empty(), "nothing kept before a read");
+        assert_eq!(detention.burned, 9_000);
+
+        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut grandchild, 2, 0);
+        let caller_adds = 2_000 + 10_000 + 9_000 + 60_000 - (60_000 + 2_300);
+        let child_adds = 4_000 + 30_000 - 30_000;
+        assert_eq!(detention.figures.suspended, caller_adds + child_adds);
+        let compute = 2_000 + 1_000 + 9_000 - 2_300 + 4_000 + 500;
+        assert_eq!(detention.compute(&grandchild), compute);
+        assert_eq!(detention.compute_limit(), Some(compute + CAP));
+        assert_eq!(grandchild.spendable(), CAP);
+
+        // From the read on the frames are kept as they return.
+        assert!(grandchild.record_regular_cost(600));
+        assert_eq!(detention.on_frame_end(InstructionResult::Stop, &mut grandchild, 2), None);
+        child.erase_cost(grandchild.remaining());
+        detention.on_frame_run(&mut child, 1);
+        assert_eq!(detention.figures.suspended, caller_adds);
+        assert_eq!(detention.compute(&child), compute + 600);
+        assert_eq!(child.spendable(), CAP - 600);
+    }
+
+    /// A caller is recorded only while it may be needed: the transaction is detained and no read
+    /// has set a limit yet. From the first read on, the frames are kept as they run.
+    #[test]
+    fn test_callers_are_recorded_only_until_the_first_read() {
+        let mut free = Detention::default();
+        free.reset(false, BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS);
+        assert!(!free.records_callers(), "a transaction detention does not hold");
+
+        let mut detention = detaining();
+        assert!(detention.records_callers());
+        let mut frame = gas(1_000_000, 0);
+        detention.on_frame_run(&mut frame, 0);
+        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0, 0);
+        assert!(!detention.records_callers(), "a read set a limit");
+
+        detention.reset(true, BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS);
+        detention.mark_before_execution(VolatileDataAccess::BENEFICIARY_BALANCE);
+        assert!(!detention.records_callers(), "a read before any frame set a limit");
+    }
+
+    /// A transaction can end with frames still running — an error stops it mid-frame — and the
+    /// next one starts from nothing: a read in its child rebuilds from its own records alone.
+    #[test]
+    fn test_a_reset_forgets_the_frames_a_transaction_left_running() {
+        let mut detention = detaining();
+        let mut caller = gas(1_000_000, 0);
+        detention.on_frame_run(&mut caller, 0);
+        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut caller, 0, 0);
+        assert!(caller.record_regular_cost(7_000));
+        assert!(caller.record_withheld_first_cost(500_000));
+        detention.on_frame_suspend(&caller, 0);
+        let mut child = gas(500_000, 0);
+        detention.on_frame_run(&mut child, 1);
+        assert_eq!(detention.figures.suspended, 7_000);
+
+        detention.reset(true, BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS);
+        let mut caller = gas(1_000_000, 0);
+        detention.on_frame_run(&mut caller, 0);
+        assert!(caller.record_regular_cost(3_000));
+        assert!(caller.record_withheld_first_cost(500_000));
+        detention.on_frame_suspend(&caller, 0);
+        detention.on_child_build(1, &caller);
+        let mut child = gas(500_000, 0);
+        detention.on_frame_run(&mut child, 1);
+        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut child, 1, 0);
+        assert_eq!(detention.figures.suspended, 3_000);
+        assert_eq!(detention.figures.frames.len(), 2);
+        assert_eq!(detention.compute_limit(), Some(3_000 + BLOCK_ENV_ACCESS_COMPUTE_GAS));
+    }
+
+    /// A reset forgets the callers a transaction recorded: the next one reads only its own.
+    #[test]
+    fn test_a_reset_forgets_the_callers_a_transaction_recorded() {
+        let mut detention = detaining();
+        let caller = gas(1_000_000, 0);
+        detention.on_child_build(1, &caller);
+        detention.on_child_build(2, &caller);
+        assert_eq!(detention.callers.len(), 2);
+
+        detention.reset(true, BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS);
+        assert!(detention.callers.is_empty());
+    }
+
+    /// The eager figures debug builds keep catch a kept figure that parts from them.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "the compute of the suspended frames")]
+    fn test_the_eager_figures_catch_a_kept_one_that_parts_from_them() {
+        let mut eager = FrameFigures::default();
+        eager.on_frame_run(1_000_000, 0);
+        let mut kept = eager.clone();
+        eager.assert_kept(&kept);
+        kept.suspended = 1;
+        eager.assert_kept(&kept);
     }
 
     /// What a halting child burns is not compute: its caller's compute after it returns is what
@@ -766,14 +1157,15 @@ mod tests {
         }
     }
 
-    /// An answer that halts burns the gas limit; one that spent more than the frame's allowance is
-    /// answered out of gas and stops at the limit, with what the frame would have had withheld.
+    /// An answer that halts burns the gas limit; one that spent more regular gas than the frame's
+    /// allowance is answered out of gas and stops at the limit, with its whole gas limit back but
+    /// the spill. State gas that spilled onto the answer's regular gas is not compute.
     #[test]
     fn test_an_answer_is_held_to_the_allowance_it_would_have_run_on() {
         let mut detention = detaining();
         let mut caller = gas(100_000_000, 0);
         detention.on_frame_run(&mut caller, 0);
-        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut caller, 0);
+        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut caller, 0, 0);
         assert!(caller.record_withheld_first_cost(90_000_000));
         detention.on_frame_suspend(&caller, 0);
 
@@ -786,29 +1178,43 @@ mod tests {
         assert_eq!(detention.on_answer(&mut within, 1, 90_000_000), None);
         assert_eq!(within.result, InstructionResult::Return);
 
+        let mut spilled = answer(BLOCK_ENV_ACCESS_COMPUTE_GAS, InstructionResult::Revert);
+        assert!(spilled.gas.record_state_cost(1_000));
+        assert_eq!(spilled.gas.state_gas_spilled(), 1_000);
+        assert_eq!(detention.on_answer(&mut spilled, 1, 90_000_000), None, "a spill is no compute");
+        assert_eq!(spilled.result, InstructionResult::Revert);
+
         let mut halted = answer(0, InstructionResult::PrecompileError);
         assert_eq!(detention.on_answer(&mut halted, 1, 90_000_000), None);
         assert_eq!(detention.burned, 90_000_000);
         detention.burned = 0;
 
-        let mut beyond = answer(BLOCK_ENV_ACCESS_COMPUTE_GAS + 1, InstructionResult::Return);
-        assert_eq!(
-            detention.on_answer(&mut beyond, 1, 90_000_000),
-            Some(BLOCK_ENV_ACCESS_COMPUTE_GAS)
-        );
-        assert_eq!(beyond.result, InstructionResult::OutOfGas);
-        assert_eq!(beyond.gas.remaining(), 90_000_000 - BLOCK_ENV_ACCESS_COMPUTE_GAS);
+        // The answer's spending is the charge that crossed: before it the frame had its whole gas
+        // limit, less the spill, which the revert that settles the stop credits back.
+        let limit = BLOCK_ENV_ACCESS_COMPUTE_GAS;
+        for spill in [0, 1_000] {
+            let mut beyond = answer(BLOCK_ENV_ACCESS_COMPUTE_GAS + 1, InstructionResult::Return);
+            assert!(beyond.gas.record_state_cost(spill));
+            assert_eq!(
+                detention.on_answer(&mut beyond, 1, 90_000_000),
+                Some(ComputeStop { limit, used: 0 }),
+                "the transaction computed nothing before the answer: {spill}"
+            );
+            assert_eq!(beyond.result, InstructionResult::OutOfGas);
+            assert_eq!(beyond.gas.remaining(), 90_000_000 - spill);
+            assert_eq!(regular_spent(&beyond.gas), 0);
+        }
     }
 
     /// A precompile run on the allowance gets the rest of the forward back: a success keeps it
     /// unspent, a halt burns the forward as it would without the read, and an out-of-gas on the
-    /// allowance is a crossing, which the answer's settlement stops with the rest left.
+    /// allowance is a crossing, which the answer's settlement stops with the whole forward back.
     #[test]
     fn test_a_precompile_run_on_the_allowance_is_settled_on_the_forward() {
         let mut detention = detaining();
         let mut caller = gas(100_000_000, 0);
         detention.on_frame_run(&mut caller, 0);
-        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut caller, 0);
+        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut caller, 0, 0);
         assert!(caller.record_withheld_first_cost(90_000_000));
         detention.on_frame_suspend(&caller, 0);
         let allowance = detention.allowance(1, 90_000_000).unwrap();
@@ -838,37 +1244,58 @@ mod tests {
         detention.burned = 0;
 
         let mut out_of_gas = answer(InstructionResult::PrecompileOOG, 0);
-        assert_eq!(out_of_gas.gas.withheld_crossing(), Some(WithheldCrossing::new(withheld)));
+        let forward = NonZeroU64::new(90_000_000).unwrap();
+        assert_eq!(
+            out_of_gas.gas.withheld_crossing(),
+            Some(WithheldCrossing::with_remaining(forward))
+        );
         assert_eq!(
             detention.on_answer(&mut out_of_gas, 1, 90_000_000),
-            Some(BLOCK_ENV_ACCESS_COMPUTE_GAS)
+            Some(ComputeStop { limit: BLOCK_ENV_ACCESS_COMPUTE_GAS, used: 0 })
         );
-        assert_eq!(out_of_gas.gas.remaining(), withheld.get(), "the allowance counts as spent");
+        assert_eq!(out_of_gas.gas.remaining(), 90_000_000, "the precompile computed nothing");
         assert_eq!(out_of_gas.gas.withheld_crossing(), None);
         assert_eq!(detention.burned, 0, "a crossing burns nothing");
     }
 
-    /// An interceptor's charge is compute, counted once: the transaction's own frame has no
-    /// caller, so its charge is added when the frame is built; a deeper frame's caller already
-    /// holds its charge in what it forwarded. A charge past the allowance crosses the limit.
+    /// A keyless deployment's call is the transaction's own frame: held to the limit before it
+    /// charges anything, its charges are compute once its creation runs, and the gas it forwards
+    /// is not.
     #[test]
-    fn test_an_interceptors_charge_is_compute() {
+    fn test_a_keyless_call_is_the_transactions_own_frame() {
         let mut detention = detaining();
         detention.mark_before_execution(VolatileDataAccess::BENEFICIARY_BALANCE);
-        assert!(!detention.charge_crosses(0, 100_000_000, BLOCK_ENV_ACCESS_COMPUTE_GAS));
-        assert!(detention.charge_crosses(0, 100_000_000, BLOCK_ENV_ACCESS_COMPUTE_GAS + 1));
+        let mut call = gas(100_000_000, 0);
+        detention.on_frame_run(&mut call, 0);
+        assert_eq!(call.spendable(), BLOCK_ENV_ACCESS_COMPUTE_GAS);
 
-        detention.on_charged_frame_built(0, 100_000);
-        let mut frame = gas(100_000_000 - 100_000, 0);
-        detention.on_frame_run(&mut frame, 0);
-        assert_eq!(frame.spendable(), BLOCK_ENV_ACCESS_COMPUTE_GAS - 100_000);
+        assert!(call.record_regular_cost(132_000));
+        assert!(call.record_withheld_first_cost(50_000_000));
+        detention.on_frame_suspend(&call, 0);
+        let mut creation = gas(50_000_000, 0);
+        detention.on_frame_run(&mut creation, 1);
+        assert_eq!(detention.compute(&creation), 132_000, "the charges, not the forward");
+        assert_eq!(creation.spendable(), BLOCK_ENV_ACCESS_COMPUTE_GAS - 132_000);
+        assert_eq!(detention.allowance(2, 0), Some(BLOCK_ENV_ACCESS_COMPUTE_GAS - 132_000));
+    }
 
-        assert!(frame.record_withheld_first_cost(500_000));
-        detention.on_frame_suspend(&frame, 0);
-        detention.on_charged_frame_built(1, 100_000);
-        let mut child = gas(500_000 - 100_000, 0);
-        detention.on_frame_run(&mut child, 1);
-        assert_eq!(detention.compute(&child), 200_000, "each charge once");
+    /// A frame's own read is committed as an opcode's is: the limit is its compute at the read
+    /// plus the cap. A transaction detention does not hold records nothing.
+    #[test]
+    fn test_a_frames_own_read_sets_the_limit_from_its_compute() {
+        let mut detention = detaining();
+        let mut call = gas(100_000_000, 0);
+        detention.on_frame_run(&mut call, 0);
+        assert!(call.record_regular_cost(100_000));
+        detention.read_by_frame(VolatileDataAccess::BENEFICIARY_BALANCE, &mut call, 0);
+        assert_eq!(detention.compute_limit(), Some(100_000 + BLOCK_ENV_ACCESS_COMPUTE_GAS));
+        assert_eq!(detention.accessed(), VolatileDataAccess::BENEFICIARY_BALANCE);
+        assert_eq!(call.spendable(), BLOCK_ENV_ACCESS_COMPUTE_GAS);
+
+        let mut free = Detention::default();
+        free.reset(false, BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS);
+        free.read_by_frame(VolatileDataAccess::BENEFICIARY_BALANCE, &mut call, 0);
+        assert_eq!((free.compute_limit(), free.accessed()), (None, VolatileDataAccess::empty()));
     }
 
     /// The switch holds for the frame that turned it off and every frame below it, turns back on
@@ -1001,11 +1428,11 @@ mod tests {
         assert!(detention.detains());
         let mut frame = gas(100_000_000, 0);
         detention.on_frame_run(&mut frame, 0);
-        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0);
+        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0, 0);
         detention.mark_before_execution(VolatileDataAccess::BENEFICIARY_BALANCE);
         assert_eq!(detention.compute_limit(), None, "an unlimited cap sets no limit");
         assert_eq!(frame.withheld(), 0);
-        detention.commit_reads(VolatileDataAccess::ORACLE, &mut frame, 0);
+        detention.commit_reads(VolatileDataAccess::ORACLE, &mut frame, 0, 0);
         assert_eq!(detention.compute_limit(), Some(5));
     }
 }

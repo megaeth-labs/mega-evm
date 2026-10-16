@@ -7,8 +7,8 @@ use revm::{
         BlockEnv, Cfg, CfgEnv, Context, ContextError, ContextSetters, ContextTr, LocalContext,
         Transaction,
     },
-    context_interface::cfg::GasId,
-    primitives::{Address, StorageKey},
+    context_interface::{cfg::GasId, context::CodeDeposit},
+    primitives::{Address, Bytes, StorageKey},
     Database, Journal,
 };
 
@@ -18,7 +18,7 @@ use crate::{
         history::transaction_body_bytes,
         schedule::{satin_gas_params, satin_gas_params_history_exempt},
     },
-    system::{self, MEGA_SYSTEM_ADDRESS},
+    system::{self, keyless::KeylessFrame},
     AdditionalLimit, BlockHashRecord, BucketError, BucketMultipliers, Detention, EmptyExternalEnv,
     EthSpecId, EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs, MegaSpecId, MegaTransaction,
     SaltEnv, VolatileDataAccess,
@@ -54,11 +54,14 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes = EmptyExternalEn
     pub(crate) block_hash_record: BlockHashRecord,
     /// The SALT bucket multipliers the running transaction has read.
     bucket_multipliers: BucketMultipliers,
-    /// Whether the running transaction is system-originated, and so prices its state gas at the
-    /// minimum bucket. See [`system::is_system_originated`].
+    /// Whether the running transaction is the protocol's own, decided when it is validated. See
+    /// [`MegaContext::is_system_originated`].
     system_originated: bool,
     /// Whether the running transaction pays history gas. See [`MegaContext::prices_history`].
     prices_history: bool,
+    /// Where the running transaction's `keylessDeploy` call stands, from the start of its frame
+    /// to its answer. See the [`keyless`](crate::system::keyless) module.
+    pub(crate) keyless_frame: Option<KeylessFrame>,
     /// Whether the context runs the neutral configuration. See [`MegaContext::with_neutral_cfg`].
     #[cfg(any(test, feature = "test-utils"))]
     neutral: bool,
@@ -90,6 +93,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
             bucket_multipliers: BucketMultipliers::default(),
             system_originated: false,
             prices_history: true,
+            keyless_frame: None,
             #[cfg(any(test, feature = "test-utils"))]
             neutral: false,
         }
@@ -285,8 +289,13 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     }
 
     /// Whether the running (or last) transaction is system-originated, and so prices every
-    /// EIP-8037 state gas charge at the minimum bucket and is held to no per-transaction limit.
-    /// See [`system::is_system_originated`].
+    /// EIP-8037 state gas charge at the minimum bucket and is held to no per-transaction limit
+    /// (see [`system::is_system_originated`]). A system call always is.
+    ///
+    /// A transaction's answer is decided when it is validated: a system-address transaction is
+    /// recognised by the live system address its validation reads out of the `SequencerRegistry`
+    /// in the state the EVM runs on, so every EVM answers as block execution does, however it was
+    /// built.
     pub const fn is_system_originated(&self) -> bool {
         self.system_originated
     }
@@ -308,15 +317,17 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         self.prices_history
     }
 
-    /// Prepares the common execution layer for a new transaction. Every transaction entry point
-    /// of [`MegaEvm`](crate::MegaEvm) calls it before it runs the handler.
-    pub(crate) fn on_new_tx(&mut self) {
-        let system_originated = system::is_system_originated(&self.inner.tx, MEGA_SYSTEM_ADDRESS);
-        self.prepare(system_originated);
+    /// Prepares the common execution layer for a new transaction, which is a system-address
+    /// transaction or not as `system_transaction` says. The handler calls it first thing, once
+    /// validation has read the live system address for a transaction of the system shape, so the
+    /// layer is prepared before anything else of the transaction runs.
+    pub(crate) fn on_new_tx(&mut self, system_transaction: bool) {
+        self.prepare(system::originates_from_the_protocol(&self.inner.tx, system_transaction));
     }
 
     /// Prepares the context for a system call. Every system-call entry point of
-    /// [`MegaEvm`](crate::MegaEvm) calls it instead of [`on_new_tx`](Self::on_new_tx).
+    /// [`MegaEvm`](crate::MegaEvm) calls it before it runs the handler's system-call path, which
+    /// skips validation and so [`on_new_tx`](Self::on_new_tx).
     ///
     /// A system call is system-originated whatever caller it names: it is the protocol running,
     /// not a transaction anybody sent.
@@ -339,6 +350,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         self.additional_limit.reset();
         self.additional_limit.set_transfer_logs(emits_transfer_logs(&self.inner.cfg));
         self.bucket_multipliers.reset();
+        // A transaction that failed with an error, or was stopped, left its `keylessDeploy` call
+        // unanswered.
+        self.keyless_frame = None;
         self.system_originated = system_originated;
         let exempt = self.inner.tx.tx_type() == DEPOSIT_TRANSACTION_TYPE || system_originated;
         self.set_history_exempt(exempt);
@@ -435,8 +449,13 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
 /// transfer log is data size like any log, and pays no history gas: Ethereum prices it at
 /// nothing, and it is not a byte the transaction chose to write (see the `limit` module).
 ///
-/// The system-call reservoir margin is set off rather than left alone: it belongs to the
-/// system-call reservoir split.
+/// A system call runs as EIP-8037 has it: on at most the base 30,000,000 of regular gas, the
+/// rest of its gas limit being its state-gas reservoir, which the state it writes draws first.
+/// The switch for it is set on whatever the caller's configuration says, because which pool pays
+/// the protocol's own state writes, and what `GAS` reads inside a system contract, are part of
+/// executing the chain. It reaches system calls only: every transaction's gas is split by the
+/// execution cap as before, the system-address transaction's included, which is a deposit and
+/// not a system call.
 fn spec_cfg(mut cfg: CfgEnv<MegaSpecId>) -> CfgEnv<MegaSpecId> {
     cfg.gas_params = satin_gas_params();
     cfg.enable_amsterdam_eip8037 = true;
@@ -444,7 +463,7 @@ fn spec_cfg(mut cfg: CfgEnv<MegaSpecId>) -> CfgEnv<MegaSpecId> {
     cfg.tx_gas_limit_cap = Some(constants::TX_GAS_LIMIT_CAP);
     cfg.enable_amsterdam_eip7708 = true;
     cfg.amsterdam_eip7708_disabled = false;
-    cfg.system_call_state_gas_margin_in_reservoir = false;
+    cfg.system_call_state_gas_margin_in_reservoir = true;
     cfg.limit_contract_code_size = Some(constants::MAX_CONTRACT_SIZE);
     cfg.limit_contract_initcode_size = Some(constants::MAX_INITCODE_SIZE);
     cfg
@@ -500,6 +519,15 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextTr for MegaContext<DB, ExtE
             fn error(&mut self) -> &mut Result<(), ContextError<DB::Error>>;
         }
     }
+
+    /// Holds the code a creation deposits to the state-gas and data-size limits, and counts its
+    /// history bytes, once `return_create` made every charge for the deposit and before it commits
+    /// the creation ([`AdditionalLimit::on_code_deposit`]). A crossing refuses the deposit with the
+    /// stop's revert data: the creation reverts with it, on the gas it had before the deposit.
+    #[inline]
+    fn admit_code_deposit(&mut self, deposit: &CodeDeposit<'_>) -> Result<(), Bytes> {
+        self.additional_limit.on_code_deposit(deposit)
+    }
 }
 
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextSetters for MegaContext<DB, ExtEnvs> {
@@ -530,7 +558,7 @@ mod tests {
             assert_eq!(cfg.cap, Some(constants::TX_GAS_LIMIT_CAP), "execution cap");
             assert!(cfg.eip7708, "EIP-7708 must be on");
             assert!(!cfg.eip7708_disabled, "EIP-7708 must not be disabled");
-            assert!(!cfg.margin, "the system-call reservoir margin stays off");
+            assert!(cfg.margin, "a system call's gas above 30M must be its reservoir");
             assert_eq!(cfg.code_size, Some(constants::MAX_CONTRACT_SIZE), "contract size");
             assert_eq!(cfg.initcode_size, Some(constants::MAX_INITCODE_SIZE), "initcode size");
             assert_eq!(cfg.gas_params.table(), satin_gas_params().table(), "gas schedule");
@@ -591,7 +619,7 @@ mod tests {
             cfg.tx_gas_limit_cap = Some(1 << 24);
             cfg.enable_amsterdam_eip7708 = false;
             cfg.amsterdam_eip7708_disabled = true;
-            cfg.system_call_state_gas_margin_in_reservoir = true;
+            cfg.system_call_state_gas_margin_in_reservoir = false;
             cfg.limit_contract_code_size = Some(24 * 1024);
             cfg.limit_contract_initcode_size = Some(48 * 1024);
             cfg.gas_params = GasParams::new_spec(EthSpecId::AMSTERDAM);
@@ -625,8 +653,10 @@ mod tests {
     }
 
     #[test]
-    fn test_the_system_call_reservoir_margin_stays_off() {
-        assert_satin_cfg(&context_with(|cfg| cfg.system_call_state_gas_margin_in_reservoir = true));
+    fn test_the_system_call_reservoir_margin_stays_on() {
+        assert_satin_cfg(&context_with(|cfg| {
+            cfg.system_call_state_gas_margin_in_reservoir = false;
+        }));
     }
 
     #[test]
@@ -696,7 +726,7 @@ mod tests {
         assert_eq!(ctx.account_bucket_multiplier(ACCOUNT), Ok(4));
         assert_eq!(env.bucket_queries(bucket), 1, "the second charge came from the cache");
 
-        ctx.on_new_tx();
+        ctx.on_new_tx(false);
         assert_eq!(ctx.bucket_multipliers().cached_buckets().len(), 0);
         assert_eq!(ctx.account_bucket_multiplier(ACCOUNT), Ok(4));
         assert_eq!(env.bucket_queries(bucket), 2, "the next transaction read it again");
@@ -801,7 +831,7 @@ mod tests {
             MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN).with_neutral_cfg(cfg.clone());
 
         ctx.set_tx(call_from(Address::repeat_byte(0x11)));
-        ctx.on_new_tx();
+        ctx.on_new_tx(false);
         assert!(!ctx.prices_history(), "a user's transaction pays no history");
         assert_cfg_is(&ctx, &cfg);
 
@@ -813,13 +843,13 @@ mod tests {
         deposit.0.deposit.source_hash = revm::primitives::B256::repeat_byte(1);
         deposit.0.base.tx_type = DEPOSIT_TRANSACTION_TYPE;
         ctx.set_tx(deposit);
-        ctx.on_new_tx();
+        ctx.on_new_tx(false);
         assert!(!ctx.prices_history());
         assert_cfg_is(&ctx, &cfg);
 
         // And back to a user's transaction, after an exempt one would have swapped the schedule.
         ctx.set_tx(call_from(Address::repeat_byte(0x11)));
-        ctx.on_new_tx();
+        ctx.on_new_tx(false);
         assert!(!ctx.prices_history());
         assert_cfg_is(&ctx, &cfg);
     }
@@ -835,7 +865,7 @@ mod tests {
         assert!(!ctx.is_neutral());
         assert_satin_cfg(&ctx);
         ctx.set_tx(call_from(Address::repeat_byte(0x11)));
-        ctx.on_new_tx();
+        ctx.on_new_tx(false);
         assert!(ctx.prices_history());
         assert_satin_cfg(&ctx);
     }
@@ -858,7 +888,7 @@ mod tests {
             let mut ctx =
                 MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN).with_neutral_cfg(cfg);
             ctx.set_tx(call_from(Address::repeat_byte(0x11)));
-            ctx.on_new_tx();
+            ctx.on_new_tx(false);
             assert_eq!(
                 ctx.additional_limit.frame_start_transfer_log(&endowed_creation),
                 emits_transfer_logs(ctx.cfg()),
@@ -882,7 +912,7 @@ mod tests {
             cfg.amsterdam_eip7708_disabled = true;
         });
         ctx.set_tx(call_from(Address::repeat_byte(0x11)));
-        ctx.on_new_tx();
+        ctx.on_new_tx(false);
         assert!(ctx.additional_limit.frame_start_transfer_log(&endowed_creation));
     }
 
@@ -892,7 +922,7 @@ mod tests {
         let mut ctx = MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN);
         assert!(!ctx.is_neutral());
         ctx.set_tx(call_from(Address::repeat_byte(0x11)));
-        ctx.on_new_tx();
+        ctx.on_new_tx(false);
         assert!(ctx.prices_history());
     }
 }

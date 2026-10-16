@@ -64,6 +64,7 @@ fn db() -> MemoryDatabase {
         .account_code(ORACLE_CONTRACT_ADDRESS, program())
         .account_code(CONTRACT, program())
         .account_code(HELPER, helper)
+        .sequencer_registry(MEGA_SYSTEM_ADDRESS)
 }
 
 /// A call to `to` from `caller`.

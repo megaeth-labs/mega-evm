@@ -27,9 +27,8 @@ pub enum KeylessDeployError {
     NoEtherTransfer,
     /// Failed to recover signer from signature (invalid signature)
     InvalidSignature,
-    /// The signer does not have enough balance to cover the sandbox tx's pre-execution
-    /// debit: `gas_limit × gas_price + value` on pre-Rex5 specs, `value` only on Rex5+
-    /// (where the sandbox tx is fee-free and only the `value` transfer needs funding).
+    /// The signer cannot fund the deployment's value. The deployment pays no gas out of the
+    /// signer's balance, so the value is all it must hold.
     InsufficientBalance,
     /// The deploy address already has code (contract already exists)
     ContractAlreadyExists,
@@ -38,14 +37,15 @@ pub enum KeylessDeployError {
         /// The on-chain nonce of the recovered signer
         signer_nonce: u64,
     },
-    /// The sandbox execution reverted
+    /// The deployment's creation reverted.
     ExecutionReverted {
         /// The gas used
         gas_used: u64,
         /// The output
         output: Bytes,
     },
-    /// The sandbox execution halted (out of gas, stack overflow, etc.)
+    /// The deployment's creation halted (out of gas, an invalid opcode, code the creation
+    /// refuses).
     ExecutionHalted {
         /// The gas used
         gas_used: u64,
@@ -54,6 +54,10 @@ pub enum KeylessDeployError {
     },
     /// The call's remaining budget in some resource dimension was below the deployment's
     /// known upfront usage, so the deployment was not started.
+    ///
+    /// The legacy engine's, which ran the deployment with a budget of its own and preflighted it.
+    /// Kept in the ABI with no producer here: a native deployment is held to the call's own
+    /// budgets as it runs.
     ParentBudgetExceeded {
         /// The resource dimension, as the raw `kind` code of the `IKeylessDeploy` error. The
         /// Satin resource dimensions and their codes are not defined yet.
@@ -80,39 +84,37 @@ pub enum KeylessDeployError {
         provided_gas_limit: u64,
     },
     /// The remaining compute gas is insufficient to pay for the keyless deploy overhead.
+    ///
+    /// Kept in the ABI with no producer here: the overhead is regular gas, and a call that
+    /// cannot pay it runs out of gas.
     InsufficientComputeGas {
         /// The configured compute gas limit
         limit: u64,
         /// The actual compute gas usage
         used: u64,
     },
-    /// The keyless transaction's init code exceeds the configured maximum init code size.
-    ///
-    /// Rex5+ only: the sandbox runs as an OP deposit-like transaction which bypasses
-    /// op-revm's `validate_env` (where revm's EIP-3860 size check lives), so the sandbox
-    /// must re-enforce the limit itself against `cfg().max_initcode_size()`.
+    /// The keyless transaction's init code exceeds the configured maximum init code size
+    /// (EIP-3860), which no validation of the outer transaction holds it to.
     InitCodeTooLarge {
         /// The init code length in bytes.
         size: u64,
         /// The configured max init code size.
         max: u64,
     },
-    /// The recovered signer has non-empty, non-EIP-7702 bytecode in parent state.
-    ///
-    /// Rex5+ only: the deposit-style sandbox bypasses op-revm's EIP-3607 check (which
-    /// normally lives in `validate_account_nonce_and_code`), so the sandbox enforces it
-    /// itself before constructing the sandbox transaction.
+    /// The recovered signer has non-empty, non-EIP-7702 bytecode: EIP-3607 for a creator that
+    /// is not the transaction's sender, which no validation of the outer transaction checks.
     SignerHasCode,
-    /// Internal sandbox failure (DB I/O, header validation, etc.).
-    /// Selector-only so the top-level error ABI stays stable and does not depend on
-    /// upstream revm/op-revm `Display` text. The interceptor only runs at call depth 0,
-    /// so this returndata has no inner caller to read it and never reaches a consensus
-    /// root; the selector-only shape is for off-chain decoder/tooling stability.
+    /// An internal failure (a failed read). Selector-only, so the error ABI does not depend on
+    /// upstream `Display` text.
+    ///
+    /// Kept in the ABI with no producer here: a failed read or SALT lookup fails the transaction
+    /// with its cause, as it does at every other site.
     InternalError,
-    /// Sandbox rejected the inner transaction as a tx-validation error
-    /// (`IsTxError::is_tx_error() == true`). A dedicated selector lets relayer-side
-    /// decoders distinguish this from a genuine internal failure. Selector-only for the
-    /// same ABI-stability reason as `InternalError`.
+    /// The inner transaction failed its validation as a transaction. Selector-only for the same
+    /// reason as `InternalError`.
+    ///
+    /// The legacy engine's, which ran the deployment as a transaction of its own. Kept in the
+    /// ABI with no producer here: the deployment is a creation, not a transaction.
     InvalidTransaction,
     /// The keylessDeploy call was not intercepted (only returned by Solidity contract for inner
     /// calls)

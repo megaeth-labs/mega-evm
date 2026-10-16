@@ -6,11 +6,12 @@ use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
     system::{
-        IMegaAccessControl, IMegaLimitControl, IOracle, ACCESS_CONTROL_ADDRESS,
-        LIMIT_CONTROL_ADDRESS, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
+        storage_slots::CURRENT_SYSTEM_ADDRESS, IMegaAccessControl, IMegaLimitControl, IOracle,
+        ACCESS_CONTROL_ADDRESS, LIMIT_CONTROL_ADDRESS, MEGA_SYSTEM_ADDRESS,
+        ORACLE_CONTRACT_ADDRESS, SEQUENCER_REGISTRY_ADDRESS,
     },
     test_utils::{BytecodeBuilder, ErrorInjectingDatabase, InjectedDbError},
-    MegaEvm, MegaTransactionError,
+    MegaEvm, MegaTransaction, MegaTransactionError,
 };
 use revm::{
     bytecode::opcode::{CALL, POP, STOP},
@@ -142,33 +143,57 @@ fn test_an_inspector_sees_an_intercepted_call() {
     assert_eq!(evm.inspector().call_ends, vec![LIMIT_CONTROL_ADDRESS, CONTRACT]);
 }
 
-/// A database error while the system address is read during validation fails the transaction
-/// with that error: a database blip must not let the transaction through as a deposit.
-#[test]
-fn test_a_database_error_reading_the_system_address_fails_the_transaction() {
-    let mut db = ErrorInjectingDatabase::new(system_db());
-    db.fail_on_account = Some(MEGA_SYSTEM_ADDRESS);
+/// A system-address transaction: a legacy call from [`MEGA_SYSTEM_ADDRESS`] to the Oracle.
+fn system_address_tx() -> MegaTransaction {
+    let mut tx = call_tx(
+        ORACLE_CONTRACT_ADDRESS,
+        IOracle::getSlotCall { slot: U256::ZERO }.abi_encode(),
+        U256::ZERO,
+    );
+    tx.0.base.caller = MEGA_SYSTEM_ADDRESS;
+    tx.0.base.chain_id = Some(revm::context::CfgEnv::<mega_evm::MegaSpecId>::default().chain_id);
+    tx
+}
 
-    let tx = {
-        let mut tx = call_tx(
-            ORACLE_CONTRACT_ADDRESS,
-            IOracle::getSlotCall { slot: U256::ZERO }.abi_encode(),
-            U256::ZERO,
-        );
-        tx.0.base.caller = MEGA_SYSTEM_ADDRESS;
-        tx.0.base.chain_id =
-            Some(revm::context::CfgEnv::<mega_evm::MegaSpecId>::default().chain_id);
-        tx
-    };
+/// Runs [`system_address_tx`] over `db` and answers the database error it failed with.
+fn database_error(db: ErrorInjectingDatabase) -> InjectedDbError {
     let result: Result<_, EVMError<InjectedDbError, MegaTransactionError>> =
-        MegaEvm::new(context(db)).transact_raw(tx);
-
+        MegaEvm::new(context(db)).transact_raw(system_address_tx());
     match result {
-        Err(EVMError::Database(error)) => {
-            assert!(format!("{error}").contains(&MEGA_SYSTEM_ADDRESS.to_string()), "{error}");
-        }
+        Err(EVMError::Database(error)) => error,
         other => panic!("expected a database error, got: {other:?}"),
     }
+}
+
+/// A database error while the system address's account is read during validation fails the
+/// transaction with that error: a database blip must not let the transaction through as a
+/// deposit.
+#[test]
+fn test_a_database_error_reading_the_system_address_fails_the_transaction() {
+    let mut db = ErrorInjectingDatabase::new(system_db().sequencer_registry(MEGA_SYSTEM_ADDRESS));
+    db.fail_on_account = Some(MEGA_SYSTEM_ADDRESS);
+    let error = database_error(db);
+    assert!(format!("{error}").contains(&MEGA_SYSTEM_ADDRESS.to_string()), "{error}");
+}
+
+/// A database error while the registry is read for the live system address fails the
+/// transaction with that error too, whether it is the registry's account or its slot the
+/// database cannot serve: the transaction is neither promoted nor run as an ordinary one on a
+/// guess.
+#[test]
+fn test_a_database_error_reading_the_registry_fails_the_transaction() {
+    let registry =
+        || ErrorInjectingDatabase::new(system_db().sequencer_registry(MEGA_SYSTEM_ADDRESS));
+
+    let mut db = registry();
+    db.fail_on_account = Some(SEQUENCER_REGISTRY_ADDRESS);
+    let error = database_error(db);
+    assert!(format!("{error}").contains(&SEQUENCER_REGISTRY_ADDRESS.to_string()), "{error}");
+
+    let mut db = registry();
+    db.fail_on_storage = Some((SEQUENCER_REGISTRY_ADDRESS, CURRENT_SYSTEM_ADDRESS));
+    let error = database_error(db);
+    assert!(format!("{error}").contains("injected storage() error"), "{error}");
 }
 
 /// The value policy is the interceptor's, not the account's: a value-bearing transaction to a

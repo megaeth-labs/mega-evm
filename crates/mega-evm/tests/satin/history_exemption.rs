@@ -79,6 +79,7 @@ fn db() -> MemoryDatabase {
         .account_balance(CONTRACT, U256::from(10u64.pow(9)))
         .account_code(CONTRACT, program())
         .account_code(ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE)
+        .sequencer_registry(MEGA_SYSTEM_ADDRESS)
 }
 
 /// A call to `to` from `caller`.

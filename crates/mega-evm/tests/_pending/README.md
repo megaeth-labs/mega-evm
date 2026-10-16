@@ -28,13 +28,9 @@ Do not add a `_pending/main.rs`.
 | Owning mechanism | Tests | From `tests/` | From `src/` | Keep | Rewrite | Undecided |
 |---|---:|---:|---:|---:|---:|---:|
 | the common execution layer | 21 | 21 | 0 | 21 | 0 | 0 |
-| revert-class aborts | 17 | 17 | 0 | 0 | 17 | 0 |
-| the pre-block system calls | 34 | 22 | 12 | 30 | 4 | 0 |
-| system contract deployment | 11 | 5 | 6 | 11 | 0 | 0 |
-| native keyless deployment | 75 | 73 | 2 | 29 | 46 | 0 |
 | inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **169** | **149** | **20** | **92** | **70** | **7** |
+| **Total** | **32** | **32** | **0** | **22** | **3** | **7** |
 
 ## Tests ported in place
 
@@ -275,7 +271,7 @@ These 54 rows run in a real test target now, adapted to the Satin API: the state
 
 ## Tests ported by detention
 
-These 83 rows run in a real test target now, adapted to the Satin API and to the relative cap, the revert-class stop and the load-time marking the decisions they cite fix, so the counts above are lower than the inventory's by exactly these rows.
+These 89 rows run in a real test target now, adapted to the Satin API and to the relative cap, the revert-class stop and the load-time marking the decisions they cite fix, so the counts above are lower than the inventory's by exactly these rows.
 
 | Legacy file | Owner in the inventory | Tests | Now in |
 |---|---|---:|---|
@@ -290,12 +286,13 @@ These 83 rows run in a real test target now, adapted to the Satin API and to the
 | `rex4/access_control.rs` | detention (2) | 2 | `tests/satin/detention.rs`, `tests/satin/volatile_access.rs` |
 | `rex4/beneficiary_detention.rs` | detention (12) | 12 | `tests/satin/detention.rs`, `tests/satin/volatile_access.rs` |
 | `rex4/gas_detention.rs` | detention (3) | 3 | `tests/satin/detention.rs`, `tests/satin/volatile_access.rs` |
+| `rex5/sandbox_accounting.rs` | detention (6) | 6 | `tests/system/keyless/detention.rs` |
 | `rex5/selfdestruct_beneficiary.rs` | detention (2) | 2 | `tests/satin/detention.rs`, `tests/satin/volatile_access.rs` |
 | `rex6/beneficiary_detention.rs` | detention (13) | 13 | `tests/satin/detention.rs`, `tests/satin/volatile_access.rs` |
 | `rex6/eip7702_authority_accounting.rs` | detention (2) | 2 | `tests/satin/volatile_access.rs` |
 | `src/access/volatile.rs` | detention (4) | 4 | `crates/mega-evm/src/access/volatile.rs` |
 | `src/limit/compute_gas.rs` | detention (1) | 1 | `tests/satin/detention.rs` |
-| **Total** | | **83** | |
+| **Total** | | **89** | |
 
 ## Tests ported by the oracle and control contracts
 
@@ -310,6 +307,55 @@ These 77 rows run in a real test target now, adapted to the Satin API: the Oracl
 | `rex5/oracle_hint_metering.rs` | the oracle and control contracts (8) | 8 | `tests/system/oracle.rs` |
 | `rex6/oracle_hint_volatile_access.rs` | the oracle and control contracts (4) | 4 | `tests/system/oracle.rs` |
 | **Total** | | **77** | |
+
+## Tests ported by native keyless deployment
+
+These 69 rows run in a real test target now, adapted to the Satin API: a keyless deployment is a native creation below its `keylessDeploy` call, validated by the same rules and answered in the same error ABI, so what the sandbox merged back is counted, charged and limited as any frame's is. The counts above are lower than the inventory's by exactly these rows.
+
+| Legacy file | Owner in the inventory | Tests | Now in |
+|---|---|---:|---|
+| `rex2/keyless_deploy.rs` | native keyless deployment (36) | 36 | `tests/system/keyless/charges.rs`, `tests/system/keyless/deploy.rs`, `tests/system/keyless/rules.rs` |
+| `rex4/keyless_deploy.rs` | native keyless deployment (2) | 2 | `tests/system/keyless/deploy.rs` |
+| `rex5/db_error.rs` | native keyless deployment (3) | 3 | `tests/system/keyless/rules.rs` |
+| `rex5/keyless_empty_code_logs.rs` | native keyless deployment (2) | 2 | `tests/system/keyless/deploy.rs` |
+| `rex5/keyless_fee_free.rs` | native keyless deployment (12) | 12 | `tests/system/keyless/deploy.rs`, `tests/system/keyless/rules.rs` |
+| `rex5/keyless_gas_cap_postcap_recheck.rs` | native keyless deployment (3) | 3 | `tests/system/keyless/rules.rs` |
+| `rex5/keyless_replay_barrier.rs` | native keyless deployment (3) | 3 | `tests/system/keyless/deploy.rs`, `tests/system/keyless/rules.rs` |
+| `rex5/sandbox_accounting.rs` | native keyless deployment (3) | 3 | `tests/system/keyless/charges.rs`, `tests/system/keyless/deploy.rs` |
+| `rex6/keyless_sandbox_hardening.rs` | native keyless deployment (3) | 3 | `tests/system/keyless/deploy.rs` |
+| `src/sandbox/execution.rs` | native keyless deployment (2) | 2 | `tests/system/keyless/rules.rs` |
+| **Total** | | **69** | |
+
+## Tests ported by the pre-block system calls
+
+These 45 rows run in a real test target now, adapted to the Satin API: a system call runs on at most 30,000,000 of regular gas with the rest of its gas limit as its state-gas reservoir, priced at the minimum SALT bucket and held to no per-transaction limit; a pre-block call that does not succeed refuses the block; and a due `SequencerRegistry` change is applied by a pre-block call before the live system address is read out of the registry. The counts above are lower than the inventory's by exactly these rows.
+
+| Legacy file | Owner in the inventory | Tests | Now in |
+|---|---|---:|---|
+| `block_executor/sequencer_registry.rs` | the pre-block system calls (7) | 7 | `tests/block/sequencer_registry.rs` |
+| `rex5/apply_pending_changes_gas_budget.rs` | the pre-block system calls (4) | 4 | `tests/block/sequencer_registry.rs`, `tests/satin/system_call.rs` |
+| `rex5/pre_block_system_calls.rs` | the pre-block system calls (11) | 11 | `tests/block/eips.rs` |
+| `rex6/sequencer_registry_rotation.rs` | system contract deployment (5) | 5 | `tests/block/eips.rs`, `tests/block/sequencer_registry.rs` |
+| `src/evm/mod.rs` | the pre-block system calls (3) | 3 | `src/evm/mod.rs` |
+| `src/system/sequencer_registry.rs` | the pre-block system calls (9), system contract deployment (6) | 15 | `src/system/sequencer_registry.rs` |
+| **Total** | | **45** | |
+
+## Tests ported by revert-class aborts
+
+These 17 rows run in a real test target now, adapted to the Satin API: a transaction-level limit — data size, KV updates, state gas or gas detention's compute limit — stops the transaction with a revert carrying `MegaLimitExceeded`, which settles like an EIP-8037 revert, where the legacy engine halted and rescued the remaining gas; a frame budget reverts its frame alone. The counts above are lower than the inventory's by exactly these rows.
+
+| Legacy file | Owner in the inventory | Tests | Now in |
+|---|---|---:|---|
+| `mini_rex/access_beneficiary_balance.rs` | revert-class aborts (1) | 1 | `tests/satin/stops.rs` |
+| `mini_rex/block_env_gas_limit.rs` | revert-class aborts (3) | 3 | `tests/satin/stops.rs` |
+| `mini_rex/oracle.rs` | revert-class aborts (3) | 3 | `tests/satin/stops.rs` |
+| `mini_rex/tx_data_and_kv_update_limit.rs` | revert-class aborts (4) | 4 | `tests/satin/stops.rs` |
+| `rex3/oracle_gas_limit.rs` | revert-class aborts (1) | 1 | `tests/satin/stops.rs` |
+| `rex4/beneficiary_detention.rs` | revert-class aborts (1) | 1 | `tests/satin/stops.rs` |
+| `rex4/frame_limits.rs` | revert-class aborts (1) | 1 | `tests/satin/stops.rs` |
+| `rex4/gas_detention.rs` | revert-class aborts (2) | 2 | `tests/satin/stops.rs` |
+| `rex5/oracle_hint_metering.rs` | revert-class aborts (1) | 1 | `tests/system/oracle.rs` |
+| **Total** | | **17** | |
 
 ## Tests retired after the inventory
 
@@ -338,22 +384,6 @@ They are not counted above.
 
 | File | Test | Parked under | Reason |
 |---|---|---|---|
-| `src/system/sequencer_registry.rs` | `test_is_apply_pending_changes_due_checks_sequencer_when_system_not_due` | the pre-block system calls | the pre-block system calls own transact_apply_pending_changes |
-| `src/system/sequencer_registry.rs` | `test_is_apply_pending_changes_due_no_pending` | the pre-block system calls | the pre-block system calls own transact_apply_pending_changes |
-| `src/system/sequencer_registry.rs` | `test_is_apply_pending_changes_due_no_registry` | the pre-block system calls | the pre-block system calls own transact_apply_pending_changes |
-| `src/system/sequencer_registry.rs` | `test_is_apply_pending_changes_due_sequencer_due` | the pre-block system calls | the pre-block system calls own transact_apply_pending_changes |
-| `src/system/sequencer_registry.rs` | `test_is_apply_pending_changes_due_system_address_due` | the pre-block system calls | the pre-block system calls own transact_apply_pending_changes |
-| `src/system/sequencer_registry.rs` | `test_transact_apply_pending_changes_errors_when_registry_reverts` | the pre-block system calls | the pre-block system calls own transact_apply_pending_changes |
-| `src/system/sequencer_registry.rs` | `test_transact_apply_pending_changes_respects_30m_floor` | the pre-block system calls | the pre-block system calls own transact_apply_pending_changes |
-| `src/system/sequencer_registry.rs` | `test_transact_apply_pending_changes_updates_and_clears_due_roles` | the pre-block system calls | the pre-block system calls own transact_apply_pending_changes |
-| `src/system/sequencer_registry.rs` | `test_transact_apply_pending_changes_uses_block_gas_limit` | the pre-block system calls | the pre-block system calls own transact_apply_pending_changes |
-| `block_executor/sequencer_registry.rs` | `test_admin_handoff_via_block_executor` | the pre-block system calls | the pre-block system calls own the two-step admin handoff |
-| `block_executor/sequencer_registry.rs` | `test_bootstrap_block_resolves_system_address` | the pre-block system calls | the pre-block system calls own resolving the live system address |
-| `block_executor/sequencer_registry.rs` | `test_dual_change_in_same_block` | the pre-block system calls | the pre-block system calls own applying a pending rotation |
-| `block_executor/sequencer_registry.rs` | `test_pending_not_yet_due_is_noop` | the pre-block system calls | the pre-block system calls own applying a pending rotation |
-| `block_executor/sequencer_registry.rs` | `test_sequencer_change_does_not_affect_system_address` | the pre-block system calls | the pre-block system calls own applying a pending rotation |
-| `block_executor/sequencer_registry.rs` | `test_system_address_change` | the pre-block system calls | the pre-block system calls own applying a pending rotation |
-| `block_executor/sequencer_registry.rs` | `test_system_tx_uses_resolved_system_address` | the pre-block system calls | the pre-block system calls own resolving the live system address |
 
 ## Files
 
@@ -362,36 +392,11 @@ Each cell lists `disposition count (mechanism · decision)`.
 | File | Tests | Owners |
 |---|---:|---|
 | `block_executor/inspector.rs` | 3 | keep 1 (inspector support); rewrite 2 (inspector support · D39/D41) |
-| `block_executor/sequencer_registry.rs` | 7 | keep 7 (the pre-block system calls) |
 | `compute_gas/claims.rs` | 5 | undecided 5 (— · D57, open: whether preload-warm addresses (precompile / beneficiary / access-list) are charged cold) |
-| `mini_rex/access_beneficiary_balance.rs` | 1 | rewrite 1 (revert-class aborts · D48) |
-| `mini_rex/block_env_gas_limit.rs` | 3 | rewrite 3 (revert-class aborts · D48 (detention halt -> revert-class)) |
 | `mini_rex/gas.rs` | 2 | undecided 2 (— · D58, open: 98/100 forwarding, while the design has frames follow EIP-8037 (63/64)) |
-| `mini_rex/oracle.rs` | 3 | rewrite 3 (revert-class aborts · D48) |
-| `mini_rex/tx_data_and_kv_update_limit.rs` | 4 | rewrite 4 (revert-class aborts · D48) |
-| `rex2/keyless_deploy.rs` | 36 | rewrite 13 (native keyless deployment · native CREATE sub-frame; D37/D38); keep 19 (native keyless deployment · validation rules 1-9 unchanged); keep 1 (native keyless deployment · rule 4 (tx nonce == 0) unchanged); rewrite 3 (native keyless deployment · D36) |
-| `rex3/oracle_gas_limit.rs` | 1 | rewrite 1 (revert-class aborts · D48) |
-| `rex4/beneficiary_detention.rs` | 1 | rewrite 1 (revert-class aborts · D48) |
 | `rex4/create_safety.rs` | 1 | keep 1 (the common execution layer · canonical revm behaviour) |
-| `rex4/frame_limits.rs` | 1 | rewrite 1 (revert-class aborts · D48) |
-| `rex4/gas_detention.rs` | 2 | rewrite 2 (revert-class aborts · D48/D53) |
 | `rex4/intrinsic_limit_bypass.rs` | 1 | rewrite 1 (inspector support · D41) |
-| `rex4/keyless_deploy.rs` | 2 | keep 2 (native keyless deployment · native sub-frame inherits env) |
-| `rex5/apply_pending_changes_gas_budget.rs` | 4 | rewrite 4 (the pre-block system calls · D51 (system source m = 1; the system-call reservoir split)) |
 | `rex5/create2_empty_initcode.rs` | 5 | keep 5 (the common execution layer · canonical revm behaviour) |
 | `rex5/create2_resize_gas_metering.rs` | 2 | keep 2 (the common execution layer · canonical behaviour) |
-| `rex5/db_error.rs` | 3 | rewrite 3 (native keyless deployment · native path surfaces DB errors) |
-| `rex5/keyless_empty_code_logs.rs` | 2 | rewrite 2 (native keyless deployment · native sub-frame keeps logs inherently) |
-| `rex5/keyless_fee_free.rs` | 12 | rewrite 8 (native keyless deployment · D16/D37/D38 (GASPRICE native; materialisation explicit)); keep 4 (native keyless deployment · rules unchanged) |
-| `rex5/keyless_gas_cap_postcap_recheck.rs` | 3 | rewrite 3 (native keyless deployment · native sub-frame gas handling) |
-| `rex5/keyless_replay_barrier.rs` | 3 | rewrite 3 (native keyless deployment · D36 (real nonce increment)) |
-| `rex5/oracle_hint_metering.rs` | 1 | rewrite 1 (revert-class aborts · D48) |
-| `rex5/pre_block_system_calls.rs` | 11 | keep 11 (the pre-block system calls) |
-| `rex5/sandbox_accounting.rs` | 9 | rewrite 9 (native keyless deployment · native sub-frame: parent tracker sees child directly) |
 | `rex6/create2_metering_order.rs` | 11 | keep 11 (the common execution layer · canonical halt reasons; D04 512 KiB boundary) |
 | `rex6/error_paths.rs` | 2 | keep 2 (the common execution layer · canonical) |
-| `rex6/keyless_sandbox_hardening.rs` | 3 | rewrite 1 (native keyless deployment · D44 / EIP-6780 native); keep 2 (native keyless deployment · canonical CREATE rules) |
-| `rex6/sequencer_registry_rotation.rs` | 5 | keep 5 (system contract deployment) |
-| `src/evm/mod.rs` | 3 | keep 3 (the pre-block system calls) |
-| `src/sandbox/execution.rs` | 2 | keep 1 (native keyless deployment · rule); rewrite 1 (native keyless deployment · D16) |
-| `src/system/sequencer_registry.rs` | 15 | keep 6 (system contract deployment · the pre-block system calls for transact_apply_pending_changes); keep 9 (the pre-block system calls · the pre-block system calls for transact_apply_pending_changes) |

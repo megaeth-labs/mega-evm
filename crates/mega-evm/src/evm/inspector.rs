@@ -20,7 +20,10 @@
 //!   transaction fails with [`FORBIDDEN_CREATE_REVIVAL`] as an `EVMError::Custom`. By the time
 //!   `create_end` runs, revm has reverted the frame and deposited no code, so the rewrite would
 //!   push an address for code that does not exist and merge the frame's state gas for state that
-//!   was rolled back. Every other rewrite is the tool's business.
+//!   was rolled back. A transaction a limit stopped is the exception: once it is latched, every
+//!   frame's result is the stop whatever produced it, so a revived creation is put back and reports
+//!   the stop, and the transaction does not fail. A creation stopped by its own frame budget
+//!   latches nothing, and its revival is refused. Every other rewrite is the tool's business.
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
@@ -35,8 +38,10 @@ use revm::{
         Interpreter, InterpreterTypes,
     },
     primitives::{Address, Log, U256},
-    Inspector,
+    Database, Inspector,
 };
+
+use crate::{ExternalEnvTypes, MegaContext};
 
 /// The message of the `EVMError::Custom` a refused creation revival fails the transaction with.
 ///
@@ -325,30 +330,36 @@ fn assert_result_unwritten(before: ResultSnapshot, result: &FrameResult, callbac
 
 /// Hands a frame's end to the inspector, then applies the one refusal: a creation that failed,
 /// rewritten into a success, is put back and fails the transaction with
-/// [`FORBIDDEN_CREATE_REVIVAL`].
+/// [`FORBIDDEN_CREATE_REVIVAL`] — unless the transaction is latched, where the creation is put back
+/// and reports the stop, which the latch writes over every result.
 ///
 /// Every place a frame result reaches the inspector goes through here, so the refusal covers a
 /// result a frame ran to produce and one answered without running. A frame the inspector answered
-/// with a success itself is no revival: nothing failed.
+/// with a success itself is no revival: nothing failed. The latch is read after the hooks that can
+/// set it — the frame's run, detention's classification of its end, the hold on a start's upfront
+/// state gas, and the answer before building — have run, so a creation the latch stopped is never
+/// refused.
 #[inline]
-pub(crate) fn frame_end_checked<CTX, INTR, INSP>(
-    context: &mut CTX,
+pub(crate) fn frame_end_checked<DB, ExtEnvs, INTR, INSP>(
+    context: &mut MegaContext<DB, ExtEnvs>,
     inspector: &mut INSP,
     frame_input: &FrameInput,
     frame_result: &mut FrameResult,
 ) where
-    CTX: ContextTr,
+    DB: Database,
+    ExtEnvs: ExternalEnvTypes,
     INTR: InterpreterTypes,
-    INSP: Inspector<CTX, INTR, FrameInput, FrameResult>,
+    INSP: Inspector<MegaContext<DB, ExtEnvs>, INTR, FrameInput, FrameResult>,
 {
     let before = frame_result.instruction_result();
     frame_end(context, inspector, frame_input, frame_result);
     refuse_create_revival(context, before, frame_result);
 }
 
-/// Puts a revived creation back to `before` and records the refusal as the context's error.
-fn refuse_create_revival<CTX: ContextTr>(
-    context: &mut CTX,
+/// Puts a revived creation back to `before` and, unless the transaction is latched, records the
+/// refusal as the context's error.
+fn refuse_create_revival<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    context: &mut MegaContext<DB, ExtEnvs>,
     before: InstructionResult,
     result: &mut FrameResult,
 ) {
@@ -357,7 +368,7 @@ fn refuse_create_revival<CTX: ContextTr>(
         return;
     }
     outcome.result.result = before;
-    if context.error().is_ok() {
+    if context.additional_limit.latched().is_none() && context.error().is_ok() {
         let message: String = format!("{FORBIDDEN_CREATE_REVIVAL}: {before:?}");
         *context.error() = Err(ContextError::Custom(message));
     }

@@ -34,16 +34,20 @@ use mega_evm::{
         ORACLE_CONTRACT_ADDRESS,
     },
     test_utils::{is_transfer_log, op_transaction, transfer_log, BytecodeBuilder, MemoryDatabase},
-    transaction_body_bytes, EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, MegaEvm,
-    MegaLimitExceeded, MegaTransaction, MegaTransactionOutcome, FRAME_DATA_SHARE_DENOMINATOR,
-    FRAME_DATA_SHARE_NUMERATOR, TRANSFER_LOG_SIZE, WRITE_RECORD_SIZE,
+    transaction_body_bytes, EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, MegaContext,
+    MegaEvm, MegaLimitExceeded, MegaTransaction, MegaTransactionOutcome,
+    FRAME_DATA_SHARE_DENOMINATOR, FRAME_DATA_SHARE_NUMERATOR, TRANSFER_LOG_SIZE, WRITE_RECORD_SIZE,
 };
 use revm::{
-    bytecode::opcode::{ADDRESS, CALL, GAS, POP, PUSH0, PUSH1, REVERT, SELFDESTRUCT, STOP},
+    bytecode::opcode::{
+        ADDRESS, CALL, DELEGATECALL, GAS, POP, PUSH0, PUSH1, REVERT, SELFDESTRUCT, STOP,
+    },
     context::{
         result::{ExecutionResult, Output},
         TxEnv,
     },
+    interpreter::{interpreter::EthInterpreter, CallInputs, CallOutcome, CallValue},
+    Database, Inspector,
 };
 
 use crate::common::context;
@@ -715,6 +719,184 @@ fn test_a_value_call_its_caller_cannot_fund_is_charged_nothing() {
     assert!(funded.result.is_halt(), "{:?}", funded.result);
 }
 
+/// Appends a call carrying [`VALUE`] to `MegaAccessControl`, which answers it with
+/// `NonZeroTransfer()` before revm looks at the caller's balance, leaving the call's status on the
+/// stack. From a caller that holds less, it is a start revm would refuse, answered before its
+/// init.
+fn call_the_system_contract_answers(code: BytecodeBuilder) -> BytecodeBuilder {
+    code.mstore(0, IMegaAccessControl::isVolatileDataAccessDisabledCall::SELECTOR)
+        .append_many([PUSH0, PUSH0])
+        .push_number(4u64)
+        .append(PUSH0)
+        .push_u256(U256::from(VALUE))
+        .push_address(ACCESS_CONTROL_ADDRESS)
+        .append_many([GAS, CALL])
+}
+
+/// Whether revm refuses a start on its caller's account is found once, by the opcode starting it,
+/// and taken by the frame's init. A start answered before its init leaves that answer behind:
+/// here a value call its caller cannot fund, which the system contract answers with
+/// `NonZeroTransfer()` before revm could refuse it. The frame the caller starts next takes none
+/// of it: a `DELEGATECALL` whose two fresh slots cross its budget by a byte reverts on that
+/// budget, as it does with no call before it, and keeps nothing.
+#[test]
+fn test_a_start_answered_before_its_init_leaves_no_refusal_for_the_next() {
+    const WRITER: Address = address!("0000000000000000000000000000000000d00008");
+    let writer = BytecodeBuilder::default()
+        .sstore(U256::from(1), U256::from(1))
+        .sstore(U256::from(2), U256::from(1))
+        .stop()
+        .build();
+    // The `ACTOR` holds nothing, so revm would refuse the value; the system contract answers first.
+    let answered_call = call_the_system_contract_answers;
+    let delegate_to_writer = |code: BytecodeBuilder| {
+        code.append_many([PUSH0, PUSH0, PUSH0, PUSH0])
+            .push_address(WRITER)
+            .append_many([GAS, DELEGATECALL])
+            .return_top()
+    };
+    let db = |actor: BytecodeBuilder| {
+        MemoryDatabase::default()
+            .account_balance(CALLER, U256::from(10u64.pow(18)))
+            .account_code(ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE)
+            .account_code(WRITER, writer.clone())
+            .account_code(ACTOR, actor.build())
+    };
+    let tx = OpTx(op_transaction(TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(ACTOR),
+        gas_limit: 20_000_000,
+        ..Default::default()
+    }));
+    let body = transaction_body_bytes(&tx);
+    let limits = EvmTxRuntimeLimits::no_limits()
+        .with_frame_data_size_limit(cap_for(1, 2 * WRITE_RECORD_SIZE - 1));
+
+    let answer = execute(
+        db(answered_call(BytecodeBuilder::default()).append(POP).return_returndata()),
+        tx.clone(),
+        limits,
+    );
+    assert_eq!(
+        answer.result.output(),
+        Some(&Bytes::from(IMegaAccessControl::NonZeroTransfer::SELECTOR.to_vec())),
+        "the system contract answers the call, not revm"
+    );
+
+    let cases = [
+        ("alone", delegate_to_writer(BytecodeBuilder::default())),
+        (
+            "after the answered call",
+            delegate_to_writer(answered_call(BytecodeBuilder::default()).append(POP)),
+        ),
+    ];
+    for (name, actor) in cases {
+        let outcome = execute(db(actor), tx.clone(), limits);
+        assert_eq!(
+            outcome.result.output(),
+            Some(&Bytes::from(U256::ZERO.to_be_bytes::<32>())),
+            "{name}: the DELEGATECALL reverted on its budget",
+        );
+        assert_eq!(outcome.limit_exceeded, None, "{name}: a frame budget latches nothing");
+        assert_eq!(outcome.usage, LimitUsage { data_size: body, write_records: 0 }, "{name}");
+    }
+}
+
+/// The answer a transaction's last start left behind is not taken by the next transaction's first
+/// frame, whose own answer nothing staged: a deposit pays no history, so no record of its is
+/// charged before execution and nothing asks its sender's account before the frame's init. Its
+/// value to `RECEIVER` is counted — the recipient's record and the transfer log — as on an EVM
+/// that ran nothing before it.
+#[test]
+fn test_an_answer_a_transaction_leaves_is_not_taken_by_the_next() {
+    let db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(10u64.pow(18)))
+        .account_code(ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE)
+        .account_code(RECEIVER, Bytes::from_static(&[STOP]))
+        .account_code(
+            ACTOR,
+            call_the_system_contract_answers(BytecodeBuilder::default()).stop().build(),
+        );
+    let answered = OpTx(op_transaction(TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(ACTOR),
+        gas_limit: 20_000_000,
+        ..Default::default()
+    }));
+    let user_deposit = || deposit(TxKind::Call(RECEIVER), 1_000, 400);
+    let body = transaction_body_bytes(&user_deposit());
+
+    let alone = execute(db.clone(), user_deposit(), EvmTxRuntimeLimits::no_limits());
+    let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits()));
+    let first = evm.execute_transaction(answered).expect("the transaction is valid");
+    assert!(first.result.is_success(), "{:?}", first.result);
+    let next = evm.execute_transaction(user_deposit()).expect("the transaction is valid");
+
+    assert_eq!(
+        next.usage,
+        LimitUsage { data_size: body + WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE, write_records: 1 },
+    );
+    assert_eq!(next.usage, alone.usage);
+    assert_eq!(next.result, alone.result);
+}
+
+/// Raises the value of every call to [`RECEIVER`] by one wei as the call starts: an inspector's
+/// rewrite of a frame's input after the opcode that starts it ran.
+struct RaisesValue;
+
+impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for RaisesValue {
+    fn call(
+        &mut self,
+        _context: &mut MegaContext<DB>,
+        inputs: &mut CallInputs,
+    ) -> Option<CallOutcome> {
+        if inputs.target_address == RECEIVER {
+            inputs.value = CallValue::Transfer(inputs.call_value() + U256::from(1));
+        }
+        None
+    }
+}
+
+/// An inspector may rewrite a frame's input after the opcode that starts it found whether revm
+/// refuses it, so the inspected start asks again on the input the inspector leaves. The `ACTOR`
+/// can fund the value its `CALL` carries and not the one the inspector raises it to: revm refuses
+/// the start with `OutOfFunds` and no data, which the actor returns, and nothing is counted for
+/// it — under a frame budget one byte short of the records and the transfer log the start would
+/// count, which would stop it with the limit's revert data otherwise.
+#[test]
+fn test_a_start_an_inspector_rewrites_is_refused_on_the_input_it_leaves() {
+    let actor = BytecodeBuilder::default()
+        .call(RECEIVER, U256::from(VALUE))
+        .append(POP)
+        .return_returndata()
+        .build();
+    let db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(10u64.pow(18)))
+        .account_balance(ACTOR, U256::from(VALUE))
+        .account_code(RECEIVER, Bytes::from_static(&[STOP]))
+        .account_code(ACTOR, actor);
+    let tx = OpTx(op_transaction(TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(ACTOR),
+        gas_limit: 20_000_000,
+        ..Default::default()
+    }));
+    let body = transaction_body_bytes(&tx);
+    let start = 2 * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE;
+    let limits = EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(cap_for(1, start - 1));
+
+    let outcome = MegaEvm::new(context(db).with_tx_runtime_limits(limits))
+        .with_inspector(RaisesValue)
+        .execute_transaction(tx)
+        .expect("the transaction is valid");
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    assert_eq!(outcome.result.output(), Some(&Bytes::new()), "the refusal's empty data");
+    assert!(transfer_logs(&outcome).is_empty(), "nothing moved");
+    assert_eq!(balance(&outcome, ACTOR), U256::from(VALUE));
+    assert_eq!(outcome.usage, LimitUsage { data_size: body, write_records: 0 });
+    assert_eq!(outcome.limit_exceeded, None);
+}
+
 /// A creation onto an occupied address is the one refusal decided after its start is counted:
 /// revm reads the created address's account only once it builds the frame, and reading it any
 /// earlier would load it. Without a limit, the creation fails on the collision after it bumped its
@@ -901,6 +1083,7 @@ fn test_a_system_transactions_value_is_logged_and_no_limit_stops_it() {
         MemoryDatabase::default()
             .account_balance(MEGA_SYSTEM_ADDRESS, U256::from(VALUE))
             .account_code(ORACLE_CONTRACT_ADDRESS, Bytes::from_static(&[STOP]))
+            .sequencer_registry(MEGA_SYSTEM_ADDRESS)
     };
     let system = |value: u64| {
         OpTx(op_transaction(TxEnv {

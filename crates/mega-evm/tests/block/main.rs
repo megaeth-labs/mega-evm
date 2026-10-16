@@ -15,5 +15,6 @@ mod receipts;
 mod rules;
 mod salt;
 mod schedule;
+mod sequencer_registry;
 mod state_gas;
 mod transfer_logs;

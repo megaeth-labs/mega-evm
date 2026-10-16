@@ -8,7 +8,7 @@ The legacy engine (specs `Equivalence` through `Rex7`) is the 1.x line.
 ## Base
 
 - **revm**: 40.0.3, from the [MegaETH fork of revm](https://github.com/megaeth-labs/revm) (the revm 43 gas core with EIP-8037 and EIP-2780, plus MegaETH hooks)
-- **op-revm**: 20.0.0, from the [MegaETH fork of op-revm](https://github.com/megaeth-labs/op-revm)
+- **op-revm**: 20.0.0, from the [MegaETH fork of op-revm](https://github.com/megaeth-labs/op-revm) (op-revm's size-limited precompiles priced through the revm fork's `Precompile::required_gas`)
 - **alloy-evm**: 0.36; **alloy-op-evm**: 0.32
 
 A consumer redirects all twelve revm crates and `op-revm` to the forks with `[patch]` entries; see this repository's root `Cargo.toml`.
@@ -57,7 +57,17 @@ The execution figure a block counts for a transaction is its regular ledger — 
 A block's state gas can be capped: the transaction that reaches the cap is packed, and after it only a transaction that adds no state gas is.
 No block cap on execution gas, state gas, data size or write records refuses a deposit, which the block must include; a deposit still counts towards all four.
 A builder that executes candidates and chooses among them commits through `commit_transaction_outcome`, which checks the block's counters again; alloy-evm's `commit_transaction` cannot fail and expects each outcome to commit before the next transaction executes, and a debug build asserts it.
-`apply_pre_execution_changes` deploys the six MegaETH system contracts and the EIP-7997 `CREATE2` factory every block, idempotently, hands each pre-block state (the two EIP calls and the seven deploys) to an optional observer before it commits — that sequence is the witness a stateless client needs — and leaves one hook point empty: the pre-block system calls.
+`apply_pre_execution_changes` makes the EIP-2935 and EIP-4788 calls, deploys the six MegaETH system contracts and the EIP-7997 `CREATE2` factory every block, idempotently, and applies a role change the `SequencerRegistry` has due in the block with its `applyPendingChanges()` call.
+It hands each pre-block state — the two EIP calls, the seven deploys, the read of the registry's pending changes and its call — to an optional observer before it commits; that sequence is the witness a stateless client needs.
+
+A system call runs as EIP-8037 has it: at most 30,000,000 of its gas limit is regular gas, which is what `GAS` reads inside it, and the rest is its state-gas reservoir, which the state it writes draws first.
+revm's default system-call gas limit, 31,566,720, is 30,000,000 and a reservoir of sixteen fresh slots.
+The block's pre-block calls run on the block's gas limit and never less than 30,000,000, the legacy engine's budget kept as it was; what it adds above 30,000,000 is reservoir, not regular gas.
+The legacy engine widened it for the storage gas a crowded SALT bucket multiplied, which a system call no longer pays: it prices its state at the minimum bucket.
+A pre-block call that does not succeed refuses the block with the call's own validation error; a database error the database calls fatal is an internal error instead, since it says nothing about the block.
+That is the rule alloy-evm's block executor holds a transaction's database error to.
+A system call pays no history gas, is held to no per-transaction limit and is not detained.
+A transaction is not a system call: every transaction's gas, the system-address transaction's included, is split by the execution cap.
 
 SALT pricing is in place: every EIP-8037 state gas charge costs the schedule's entry times the capacity of the SALT bucket it lands in, counted in minimum buckets, so a slot written into a region eight times as crowded as the minimum costs eight times as much.
 The multiplier applies to the state dimension only; regular gas never scales.
@@ -66,19 +76,40 @@ Without a SALT environment every bucket is minimal, so the numbers above are wha
 `tests/satin/pricing-table.md` shows two probes at three multipliers.
 
 The six system contracts live at their fixed `0x6342…` addresses and are deployed at Satin activation, together with the EIP-7997 factory at `0x4e59…`.
-Four of them answer calls through an interceptor instead of running their bytecode.
+Three of them answer calls through an interceptor instead of running their bytecode, and `KeylessDeploy` turns the `keylessDeploy` calls a transaction makes into the deployments they stand for.
 A `CALL` or `STATICCALL` is dispatched on its target address, then on the four selector bytes of its input: `CALLCODE` and `DELEGATECALL` never reach an interceptor, and a selector a contract does not intercept falls through to the deployed bytecode, whose answer is that contract's own — the two control contracts revert with `NotIntercepted()` from their fallback, and `KeylessDeploy` and the Oracle, which have none, revert with empty data on a selector they do not declare.
 A method that takes no value answers a value-bearing call with `NonZeroTransfer()`.
 `MegaAccessControl` steers gas detention's switch: `disableVolatileDataAccess()` switches volatile-data access off for the calling frame and every frame below it, until that frame switches it back on or returns, `enableVolatileDataAccess()` reverts with `DisabledByParent()` in a frame below the one that switched it off, and `isVolatileDataAccessDisabled()` answers for the caller.
 `MegaLimitControl.remainingComputeGas()` answers the compute the calling frame could still spend: the lesser of its own regular gas, with the gas the call forwarded counted back, and what gas detention leaves the transaction once it read volatile data.
 It is regular gas only, so a transaction above the execution cap hears at most the cap's share.
 Only one property of the legacy engine's answer carries over, that the gas a call forwards is not counted: the legacy answer came from a separate compute ledger and could exceed the caller's gas, while this one is at most the caller's own.
-The Oracle forwards a `sendHint` payload to the node's oracle service, unless the calling frame's volatile-data access is off, and a `keylessDeploy` transaction is charged its fixed 100,000 gas and handed to the keyless rewrite hook that native keyless deployment fills in.
+The Oracle forwards a `sendHint` payload to the node's oracle service, unless the calling frame's volatile-data access is off.
 
 The Oracle's storage is read through the node's oracle service: an `SLOAD` in the Oracle's own frame loads the slot from the chain's state, then asks `OracleEnv`, and answers the service's value when it has one and the loaded value otherwise.
 A node that replays a block without the service must price and witness it as the node that built it did, and it cannot tell which source the building node read, so nothing may depend on the source: every such read is priced as a cold access, and the slot is loaded either way, so a later write to it finds it warm and a stateless witness carries it.
 
-The system address (`MEGA_SYSTEM_ADDRESS`) sends the protocol's own transactions: a legacy transaction from it to a whitelisted contract is validated — the whitelist, the chain id, the nonce and EIP-3607 — and promoted to a deposit, which pays no fee and rewards none.
+`KeylessDeploy` deploys a pre-EIP-155 signed creation — Nick's Method — at the address its signer's first creation gets on every chain, with the gas limit the caller chooses.
+A `keylessDeploy` call a transaction makes is taken before any interceptor sees it, and runs as a frame of its own in which no code runs; the deployment is a native creation, the call's child, and a tracer sees the call, and the creation as its child.
+The call's frame is built on the contract as any call's is: the contract's account, which a transaction to it loads with its code in any case, is touched by a call that returns, and the contract's bytecode never runs for it.
+A call carrying value is refused before its frame is built, so no value moves.
+The call pays a fixed 100,000 gas for decoding the transaction and recovering its signer, and is held to the legacy engine's nine rules and error ABI, in the legacy engine's order.
+It pays for the signer's account when the creation's nonce bump is what creates it, and what a `CREATE` opcode charges its frame: its regular gas, the created account, and the two write records of the creation's start.
+It then starts the creation as the signer, below it, with `gasLimitOverride` capped to what it has left.
+From there the creation is an ordinary frame, priced, limited, journaled and traced as one, and its `ORIGIN` and `GASPRICE` are the transaction's.
+Once the creation returns the call answers in the contract's ABI — the deployed address, or the error the creation failed with; a transaction limit the deployment crosses stops the transaction and takes the deployment back whole.
+A signer is refused once its nonce is above 1.
+A deployment spends the signer's nonce from 0 to 1.
+A signer at nonce 1 stays there, as in the legacy engine, however often its deployment fails, so nobody can use up its attempts, and once it deploys, so a resubmission finds the address taken (`ContractAlreadyExists()`).
+The creation's bump is taken back with its write record, which stays only when a creation that succeeded moved value out of the signer.
+The exception is a signer whose own code spends a nonce in the constructor that survives it — on a default configuration, a delegated signer's `CREATE` or `CREATE2`, successful or not: every bump stays, the creation's included, because a later bump may stand for an account, so the signer ends above 1 and every later deployment of it is refused.
+A `keylessDeploy` call a contract makes is not a deployment: it runs the method body, which reverts with `NotIntercepted()`.
+
+The system address sends the protocol's own transactions: a legacy transaction from it to a whitelisted contract is validated — the chain id, the nonce and EIP-3607 — and promoted to a deposit, which pays no fee and rewards none.
+It is the address the `SequencerRegistry` holds, and the transaction reads it itself: a transaction of that shape reads the registry's `_currentSystemAddress` from the journal when it is validated, without warming it, and compares it with its caller.
+Every other transaction reads nothing, and one of another shape from the system address is an ordinary transaction.
+The registry cannot change the address inside a block after its pre-block call, so every transaction of a block reads the address a rotation due in the block left, and an EVM a node builds outside block execution — an RPC call, the replay of a block's transactions for a trace — reads the one in the state it runs on, with nothing to set.
+A registry that is absent, holds other code or names a zero address promotes nothing.
+The read is in the system-address transaction's own state and witness; the pre-block steps no longer carry it.
 The account such a transaction creates for its caller is charged the account-creation state gas exactly once.
 
 History gas is in place: every byte a transaction appends to the chain is priced at MegaETH's cost per history byte, and the byte counts are the ones the data-size limit meters, so a record's history bytes are its own data size.
@@ -114,18 +145,25 @@ The one exception is what a frame has left when an opcode's static gas fails, wh
 The Host marks the read where it loads the value, and the most restrictive read binds.
 Every frame's spendable gas is held to what the limit leaves the transaction, and the rest is withheld, with the revm fork's withheld part of a frame's regular gas: a regular charge cannot draw it, and every other reader of the frame's gas — `GAS`, the gas a call forwards, the `SSTORE` sentry, what a callee returns — counts it.
 So a transaction that reads runs as it would without the read until a regular charge needs the withheld gas.
-That charge crossed the cap: the transaction is stopped with a revert carrying `MegaLimitExceeded` of kind compute, billed its compute up to the limit, and the sender gets back everything withheld.
-A precompile is run on what the limit leaves its frame, not on all its caller forwarded: one priced past that computes nothing and is the same crossing, as is an interceptor's answer that spent more than it.
-A precompile forwarded more than what the limit leaves its frame, and priced past its whole forward, is the crossing too, where without the read it would be a failed call its caller survives.
-So is one priced between what the limit leaves its frame and its forward whose input fails a check made after its gas check: without the read, that check fails the call, which its caller survives.
-An interceptor's own charge on a frame is compute whether it answers the call or lets the frame run.
+That charge crossed the cap, and it is not made: the transaction is stopped with a revert carrying `MegaLimitExceeded` of kind compute, billed its compute before that charge, less than one charge short of the limit, and the sender gets back everything the frame had, the part withheld included.
+The stop reports that compute as what the transaction used.
+A precompile forwarded more than what the limit leaves its frame is decided from its price before it runs: priced within what the limit leaves, it runs as without the read; priced past it and within its forward, it computes nothing and is the same crossing, as is an interceptor's answer that spent more than the limit leaves; priced past its whole forward, it is a failed call its caller survives, as without the read.
+So an input priced between what the limit leaves and the forward that would fail a check made after the gas check is the crossing too, where without the read that check fails the call.
+Every precompile of the Satin set is priced, op-revm's size-limited BN254 pairing and BLS12-381 MSMs and pairing included.
+A precompile the engine cannot price — a node's own, an address a node replaced — is run on what the limit leaves its frame, and one it does not pay is the crossing, whatever its price.
+A keyless deployment's call is the transaction's own frame, held to the limit as any frame is: the overhead and the `CREATE` opcode's regular gas it charges are compute whether a rule then refuses the call or its creation runs, and the creation runs under what the limit leaves it.
 Every other out-of-gas halts and burns as it would without the read.
 While `MegaAccessControl`'s switch is off for a frame, its volatile reads are refused: the frame reverts with `VolatileDataAccessDisabled`, having paid the opcode's static gas and nothing more.
 The error's argument is a `uint8`: a refused `SLOTNUM` names access type 12, which the contract's `VolatileDataAccessType` does not declare, so a Solidity handler must decode it as `uint8`, and `decode_volatile_data_access_disabled` decodes it on the Rust side.
 The two caps are runtime limits, 20,000,000 each by default; `EvmTxRuntimeLimits::no_limits()` leaves them unlimited, and a transaction whose caps are both unlimited is not detained.
 The protocol's own transactions and the system calls are not detained either.
 
-Keyless deployment arrives in a later change.
+Every transaction-level limit — data size, KV updates, state gas, gas detention's compute limit — stops a transaction the same way.
+The frame that crosses it reverts with `MegaLimitExceeded(kind, limit)`, and every frame above returns the same revert without running another instruction, whatever produced its result: revm, an interceptor, or an inspector that rewrites it into a success or a halt.
+The transaction settles like any EIP-8037 revert: it keeps nothing it wrote or logged, its sender pays the intrinsic gas and what ran, and gets back the rest of its regular gas and the reservoir, less the body's history.
+Nothing is rescued, because nothing was taken: detention withholds gas inside a frame's own tracker and never spends it.
+A frame budget reverts its frame alone, and its caller runs on; a real out-of-gas and a precompile given less than its price still halt and burn what their frame was given.
+`tests/satin/stops.rs` pins every limit at the transaction's own frame and three calls down, below and above the execution cap, with and without an inspector that rewrites every result.
 
 ## Quick start
 

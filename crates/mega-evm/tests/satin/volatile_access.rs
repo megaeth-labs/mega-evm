@@ -22,8 +22,8 @@ use revm::{bytecode::opcode::*, context::TxEnv, interpreter::InstructionResult, 
 
 use crate::detention::{
     assert_stopped, burn, call, context, execute, intrinsic, on_beneficiary, op, run_on, spin,
-    stop_data, tx, with_delegation, work, Calls, BELOW, BENEFICIARY, CALLER, CAP, CHILD, CONTRACT,
-    DELEGATOR, TIERS,
+    stop_data, tx, with_delegation, work, Calls, Charges, BELOW, BENEFICIARY, CALLER, CAP, CHILD,
+    CONTRACT, DELEGATOR, TIERS,
 };
 
 /// A second contract, never the beneficiary.
@@ -176,7 +176,10 @@ fn test_a_read_two_frames_down_caps_every_caller() {
             db(spin(call(BytecodeBuilder::default(), CALL, CHILD))),
             tx(CALLER, CONTRACT, gas_limit),
         );
-        let limit = assert_stopped(&run, intrinsic(gas_limit));
+        // The reading frame's `POP`, the middle frame's `POP` and work, then the transaction's own
+        // frame's `POP` and loop, each in its own memory.
+        let left = Charges::default().then(&[2, 2]).work(10, 0).then(&[2]).spin(0).left(CAP);
+        let limit = assert_stopped(&run, intrinsic(gas_limit), left);
         assert!(limit < CAP + 100_000, "the read was the third frame's first opcode: {limit}");
         assert_eq!(run.accessed, VolatileDataAccess::BENEFICIARY_BALANCE);
 
@@ -219,7 +222,10 @@ fn test_a_read_in_a_frame_that_reverts_still_caps() {
             .account_code(CHILD, child.clone())
             .account_code(BENEFICIARY, beneficiary.clone());
         let run = execute(db, tx(CALLER, CONTRACT, gas_limit));
-        let limit = assert_stopped(&run, intrinsic(gas_limit));
+        // The read is the child's call to the beneficiary: the beneficiary's revert — two
+        // `PUSH0` — the child's `POP` and its own revert, then its caller's `POP` and loop.
+        let left = Charges::default().then(&[2, 2, 2, 2, 2, 2]).spin(0).left(CAP);
+        let limit = assert_stopped(&run, intrinsic(gas_limit), left);
         assert!(limit < CAP + 100_000, "{limit}");
     }
 }
@@ -287,9 +293,11 @@ fn test_the_oracle_reading_its_own_storage_is_held_to_the_cap() {
                 .account_code(ORACLE_CONTRACT_ADDRESS, oracle_reads_then_spins())
         };
 
+        // Whoever calls it, the Oracle's `POP` and loop come after its read.
+        let left = Charges::default().then(&[2]).spin(0).left(CAP);
         let run = execute(db(), tx(CALLER, ORACLE_CONTRACT_ADDRESS, gas_limit));
         assert_eq!(
-            assert_stopped(&run, intrinsic),
+            assert_stopped(&run, intrinsic, left),
             CAP + 2 + 2_100,
             "the direct call: PUSH0 and a cold SLOAD"
         );
@@ -299,7 +307,7 @@ fn test_the_oracle_reading_its_own_storage_is_held_to_the_cap() {
             let code =
                 call(BytecodeBuilder::default(), scheme, ORACLE_CONTRACT_ADDRESS).stop().build();
             let run = execute(db().account_code(CONTRACT, code), tx(CALLER, CONTRACT, gas_limit));
-            assert_stopped(&run, intrinsic);
+            assert_stopped(&run, intrinsic, left);
             assert_eq!(run.accessed, VolatileDataAccess::ORACLE, "{scheme:#04x}");
         }
     }
@@ -349,7 +357,11 @@ fn test_the_system_address_is_not_detained() {
     let oracle = work(BytecodeBuilder::default().append_many([PUSH0, SLOAD, POP]), PAST_THE_CAP)
         .stop()
         .build();
-    let db = || MemoryDatabase::default().account_code(ORACLE_CONTRACT_ADDRESS, oracle.clone());
+    let db = || {
+        MemoryDatabase::default()
+            .account_code(ORACLE_CONTRACT_ADDRESS, oracle.clone())
+            .sequencer_registry(MEGA_SYSTEM_ADDRESS)
+    };
 
     let system = op_transaction(TxEnv {
         caller: MEGA_SYSTEM_ADDRESS,
@@ -390,7 +402,9 @@ fn test_the_beneficiarys_own_frame_is_detained() {
             MemoryDatabase::default().account_code(BENEFICIARY, code),
             tx(CALLER, BENEFICIARY, gas_limit),
         );
-        assert_eq!(assert_stopped(&run, intrinsic(gas_limit)), CAP);
+        // Detained from its start: `SELFBALANCE`, its `POP` and the loop all come after the read.
+        let left = Charges::default().then(&[5, 2]).spin(0).left(CAP);
+        assert_eq!(assert_stopped(&run, intrinsic(gas_limit), left), CAP);
 
         let code = BytecodeBuilder::default().push_address(OTHER).append(SELFDESTRUCT).build();
         let db = MemoryDatabase::default()
@@ -713,19 +727,22 @@ fn test_a_cap_below_the_intrinsic_gas_stops_nothing_before_the_first_frame() {
         let within = run(burn(BytecodeBuilder::default(), 10).stop().build());
         assert!(within.outcome.result.is_success(), "{:?}", within.outcome.result);
 
-        // The stop takes back what the frame did, not the authorization or its state gas.
+        // The stop takes back what the frame did, not the authorization or its state gas. The
+        // frame is detained from its start: the loop's copy is the first charge past the cap.
         let past = run(spin(BytecodeBuilder::default()));
+        let used = tiny - Charges::default().spin(0).left(tiny);
+        assert_eq!(used, 1 + 3 + 2 + 2 + 3, "the loop up to the copy");
         assert_eq!(
             past.outcome.limit_exceeded,
             Some(LimitCheck::ExceedsLimit {
                 kind: LimitKind::ComputeGas,
                 limit: tiny,
-                used: tiny,
+                used,
                 frame_local: false
             })
         );
         assert_eq!(past.outcome.result.output(), Some(&stop_data(tiny)));
-        assert_eq!(past.outcome.gas.regular, intrinsic + tiny);
+        assert_eq!(past.outcome.gas.regular, intrinsic + used);
         assert_eq!(past.outcome.gas.state, stops.outcome.gas.state);
         assert!(delegates_to_child(&past, BENEFICIARY), "the authorization stands");
     }

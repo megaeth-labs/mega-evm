@@ -1,20 +1,34 @@
 //! The `KeylessDeploy` dispatch: which calls are recognised, what they are charged, and which
 //! run the deployed bytecode instead.
+//!
+//! A recognised call pays the fixed overhead before anything else, then either starts its
+//! deployment or is refused. The tests here send transactions a rule refuses, so that what is
+//! left beyond the reference transaction — the same calldata to an account with no code — is the
+//! overhead alone.
 
 use alloy_primitives::{Bytes, U256};
 use alloy_sol_types::{SolCall, SolError};
-use mega_evm::system::keyless::{
-    IKeylessDeploy, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_OVERHEAD_GAS,
+use mega_evm::{
+    system::keyless::{
+        IKeylessDeploy, KeylessDeployError, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_OVERHEAD_GAS,
+    },
+    EvmTxRuntimeLimits,
 };
 use revm::{
     bytecode::opcode::{CALL, CALLCODE, DELEGATECALL, STATICCALL},
     context::result::ExecutionResult,
 };
 
+use super::{beyond, reference, refusal, run_with, GAS_LIMITS};
 use crate::common::{
     call_tx, calls_with, output, revert_data, run, split_outcome, system_db, with_contract,
     CONTRACT, GAS_LIMIT,
 };
+
+/// No runtime limit.
+fn no_limits() -> EvmTxRuntimeLimits {
+    EvmTxRuntimeLimits::no_limits()
+}
 
 const KEYLESS_DEPLOY: [u8; 4] = IKeylessDeploy::keylessDeployCall::SELECTOR;
 const NOT_INTERCEPTED: [u8; 4] = IKeylessDeploy::NotIntercepted::SELECTOR;
@@ -39,27 +53,18 @@ fn unknown_selector(data: &Bytes) -> Bytes {
     Bytes::from(data)
 }
 
-/// A dispatched `keylessDeploy` transaction pays the fixed overhead, and then runs the deployed
-/// bytecode, because the rewrite that turns it into a deployment is not here yet.
+/// A dispatched `keylessDeploy` transaction pays the fixed overhead, then is refused by the
+/// rules: bytes that do not decode as a signed transaction are `MalformedEncoding()`. The
+/// deployed bytecode does not run, and the overhead is all the refusal keeps.
 #[test]
 fn test_a_keyless_deploy_transaction_pays_the_overhead() {
     let data = keyless_deploy(b"a transaction");
-    let dispatched = run(system_db(), call_tx(KEYLESS_DEPLOY_ADDRESS, data.clone(), U256::ZERO));
-    let plain =
-        run(system_db(), call_tx(KEYLESS_DEPLOY_ADDRESS, unknown_selector(&data), U256::ZERO));
-
-    assert_eq!(
-        revert_data(&dispatched),
-        Bytes::from_static(&NOT_INTERCEPTED),
-        "the deployed bytecode runs after the charge",
-    );
-    // What each transaction spent, not what its receipt reports: the calldata floor of
-    // EIP-7623 lifts the receipt of the cheaper one above what it spent.
-    let charged = dispatched.result.gas().total_gas_spent() - plain.result.gas().total_gas_spent();
-    assert!(
-        (KEYLESS_DEPLOY_OVERHEAD_GAS..KEYLESS_DEPLOY_OVERHEAD_GAS + 1_000).contains(&charged),
-        "{charged} is not the fixed overhead plus what the two paths differ by in the bytecode",
-    );
+    for gas_limit in GAS_LIMITS {
+        let dispatched = run_with(system_db(), data.clone(), gas_limit, no_limits());
+        assert_eq!(refusal(&dispatched), KeylessDeployError::MalformedEncoding);
+        let [total, regular, ..] = beyond(&dispatched, &reference(data.clone(), gas_limit));
+        assert_eq!([total, regular], [KEYLESS_DEPLOY_OVERHEAD_GAS; 2], "at {gas_limit}");
+    }
 }
 
 /// A call that carries value is refused with the ABI's own `NoEtherTransfer()`, and the
@@ -154,35 +159,24 @@ fn test_a_call_that_cannot_pay_the_overhead_runs_out_of_gas() {
 /// payload.
 #[test]
 fn test_the_overhead_does_not_depend_on_the_payload() {
-    let charge_of = |payload: &[u8]| {
+    for payload in [&b""[..], &[0xab; 512]] {
         let data = keyless_deploy(payload);
-        let dispatched =
-            run(system_db(), call_tx(KEYLESS_DEPLOY_ADDRESS, data.clone(), U256::ZERO));
-        let plain =
-            run(system_db(), call_tx(KEYLESS_DEPLOY_ADDRESS, unknown_selector(&data), U256::ZERO));
-        assert!(dispatched.result.gas().total_gas_spent() < GAS_LIMIT);
-        dispatched.result.gas().total_gas_spent() - plain.result.gas().total_gas_spent()
-    };
-    let (empty, payload) = (charge_of(b""), charge_of(&[0xab; 512]));
-    assert!(empty >= KEYLESS_DEPLOY_OVERHEAD_GAS, "{empty} is below the fixed overhead");
-    assert!(payload >= KEYLESS_DEPLOY_OVERHEAD_GAS, "{payload} is below the fixed overhead");
+        let dispatched = run_with(system_db(), data.clone(), GAS_LIMIT, no_limits());
+        assert_eq!(refusal(&dispatched), KeylessDeployError::MalformedEncoding);
+        let [total, ..] = beyond(&dispatched, &reference(data, GAS_LIMIT));
+        assert_eq!(total, KEYLESS_DEPLOY_OVERHEAD_GAS, "a payload of {} bytes", payload.len());
+    }
 }
 
 /// Admission is the selector alone here too: a payload too short to hold the arguments the ABI
-/// names is still dispatched and charged. What the deployment makes of it is the deployment's
-/// to decide — it rejects a transaction it cannot decode.
+/// names is still dispatched and charged, and the deployment rejects what it cannot decode with
+/// `MalformedEncoding()`.
 #[test]
 fn test_a_truncated_payload_is_still_dispatched() {
     let truncated: Bytes =
         KEYLESS_DEPLOY.iter().copied().chain([0_u8; 16]).collect::<Vec<_>>().into();
-    let dispatched =
-        run(system_db(), call_tx(KEYLESS_DEPLOY_ADDRESS, truncated.clone(), U256::ZERO));
-    let plain =
-        run(system_db(), call_tx(KEYLESS_DEPLOY_ADDRESS, unknown_selector(&truncated), U256::ZERO));
-
-    let charged = dispatched.result.gas().total_gas_spent() - plain.result.gas().total_gas_spent();
-    assert!(
-        charged >= KEYLESS_DEPLOY_OVERHEAD_GAS,
-        "{charged} is below the overhead a dispatched call pays",
-    );
+    let dispatched = run_with(system_db(), truncated.clone(), GAS_LIMIT, no_limits());
+    assert_eq!(refusal(&dispatched), KeylessDeployError::MalformedEncoding);
+    let [total, ..] = beyond(&dispatched, &reference(truncated, GAS_LIMIT));
+    assert_eq!(total, KEYLESS_DEPLOY_OVERHEAD_GAS);
 }

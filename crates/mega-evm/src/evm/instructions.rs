@@ -297,7 +297,8 @@ fn selfdestruct<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// of what the caller kept rather than out of what the callee gets. An opcode that starts no frame
 /// — a creation the balance, the nonce or the depth refuses, an out-of-gas — makes no records and
 /// is charged nothing. Neither is a frame revm will refuse on its caller's account — a value call
-/// the caller cannot fund ([`caller_refuses_start`]) — which the data size does not count either.
+/// the caller cannot fund ([`caller_refuses_start`]) — which the data size does not count either;
+/// the answer is left for the frame's init, which would otherwise read the caller's account again.
 /// A frame revm refuses for another reason — one past the call-stack limit — makes no records,
 /// and its failure gives the charge back. A charge the caller cannot pay fails the opcode with an
 /// out-of-gas, which takes the frame the opcode was suspending on with it ([`abandon_frame`]).
@@ -320,7 +321,12 @@ fn charge_frame_start<DB: Database, ExtEnvs: ExternalEnvTypes>(
     // otherwise — a creation the balance cannot fund, an out-of-gas — leaves no such action and
     // makes no records.
     let records = match interpreter.bytecode.action() {
-        Some(InterpreterAction::NewFrame(input)) if !caller_refuses_start(host, input) => {
+        Some(InterpreterAction::NewFrame(input)) => {
+            let refused = caller_refuses_start(host, input);
+            host.additional_limit.stage_start_refused(refused);
+            if refused {
+                return result;
+            }
             host.additional_limit.frame_start_records(input)
         }
         _ => return note_halt(interpreter, host, result),
@@ -489,7 +495,7 @@ fn settle_reads<DB: Database, ExtEnvs: ExternalEnvTypes>(
         }
         _ => 0,
     };
-    host.detention.commit_reads(observed, &mut interpreter.gas, forwarded);
+    host.detention.commit_reads(observed, &mut interpreter.gas, interpreter.input.depth, forwarded);
     result
 }
 

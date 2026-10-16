@@ -10,12 +10,17 @@ use mega_evm::{
         MEGA_SYSTEM_ADDRESS, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH, ORACLE_CONTRACT_ADDRESS,
         SEQUENCER_REGISTRY_ADDRESS,
     },
-    test_utils::{op_transaction, MemoryDatabase},
+    test_utils::{op_transaction, ErrorInjectingDatabase, GasInspector, MemoryDatabase},
     EvmTxRuntimeLimits, LimitUsage, MegaContext, MegaEvm, MegaTransaction, MegaTransactionOutcome,
 };
 use mega_system_contracts::sequencer_registry::storage_slots::CURRENT_SYSTEM_ADDRESS;
 use revm::{
-    context::{result::ExecutionResult, CfgEnv, TxEnv},
+    bytecode::opcode::{SLOAD, STOP},
+    context::{
+        result::{EVMError, ExecutionResult},
+        transaction::{AccessList, AccessListItem},
+        CfgEnv, TxEnv,
+    },
     database::State,
     DatabaseCommit,
 };
@@ -28,23 +33,17 @@ const CHAIN_ID: u64 = 4326;
 /// A contract that is not on the whitelist.
 const OFF_WHITELIST: Address = address!("0x00000000000000000000000000000000000dead1");
 
-/// The refusal every transaction from the system address that is not a system transaction gets:
-/// the rule it broke, whichever way it broke it.
-const NOT_A_SYSTEM_TRANSACTION: &str =
-    "a transaction from the system address must be a legacy call to a whitelisted contract";
+/// A balance that pays any fee the tests' transactions carry.
+const FUNDS: u64 = 1_000_000_000_000_000;
 
 /// The Oracle's slot the system transactions write.
 const ORACLE_SLOT: U256 = U256::ZERO;
 
 /// A database with the system contracts in place and the registry naming
-/// [`MEGA_SYSTEM_ADDRESS`] the current system address, which is what lets an Oracle write from
-/// it through.
+/// [`MEGA_SYSTEM_ADDRESS`] the current system address: that is what makes a legacy call from it
+/// to the Oracle a system-address transaction, and what lets its Oracle write through.
 fn chain_db() -> MemoryDatabase {
-    system_db().account_storage(
-        SEQUENCER_REGISTRY_ADDRESS,
-        CURRENT_SYSTEM_ADDRESS,
-        U256::from_be_slice(MEGA_SYSTEM_ADDRESS.as_slice()),
-    )
+    system_db().sequencer_registry(MEGA_SYSTEM_ADDRESS)
 }
 
 /// A legacy transaction from `caller`, as the sequencer builds one.
@@ -218,33 +217,139 @@ fn test_a_system_transaction_moves_only_its_value() {
     assert_eq!(outcome.state[&ORACLE_CONTRACT_ADDRESS].info.balance, transferred);
 }
 
-/// A transaction from the system address to a contract that is not on the whitelist is
-/// rejected, and so is one that creates a contract.
-#[test]
-fn test_the_whitelist_is_what_the_system_address_may_call() {
-    let off_whitelist =
-        legacy_tx(MEGA_SYSTEM_ADDRESS, TxKind::Call(OFF_WHITELIST), Bytes::new(), 0);
-    let refused = rejection(chain_db(), off_whitelist);
-    assert!(refused.contains(NOT_A_SYSTEM_TRANSACTION), "{refused}");
-
-    let creation = legacy_tx(
-        MEGA_SYSTEM_ADDRESS,
-        TxKind::Create,
-        Bytes::from_static(&[0x60, 0x00, 0x60, 0x00, 0xf3]),
-        0,
-    );
-    let refused = rejection(chain_db(), creation);
-    assert!(refused.contains(NOT_A_SYSTEM_TRANSACTION), "{refused}");
+/// `tx` with its type set to `tx_type`: an EIP-2930 (1) or EIP-1559 (2) transaction with the same
+/// fields and an empty access list. An EIP-1559 one tips its whole fee cap, so it pays the price
+/// the legacy one does on a block with no base fee.
+fn typed(mut tx: MegaTransaction, tx_type: u8) -> MegaTransaction {
+    tx.0.base.tx_type = tx_type;
+    if tx_type == 2 {
+        tx.0.base.gas_priority_fee = Some(tx.0.base.gas_price);
+    }
+    tx
 }
 
-/// A transaction from the system address that is not a legacy one is refused whatever it calls:
-/// the sequencer builds the legacy shape, and the promotion is what turns it into a deposit.
+/// A call to the Oracle's `getSlot`, which reads nothing of the registry itself.
+fn get_slot() -> Bytes {
+    IOracle::getSlotCall { slot: ORACLE_SLOT }.abi_encode().into()
+}
+
+/// The transactions from `caller` that do not have the system shape: a legacy call off the
+/// whitelist, a legacy creation, and an EIP-2930 and an EIP-1559 call to the Oracle.
+fn other_shapes(caller: Address) -> [(&'static str, MegaTransaction); 4] {
+    let oracle = TxKind::Call(ORACLE_CONTRACT_ADDRESS);
+    [
+        ("off the whitelist", legacy_tx(caller, TxKind::Call(OFF_WHITELIST), Bytes::new(), 0)),
+        ("a creation", legacy_tx(caller, TxKind::Create, Bytes::from_static(&[STOP]), 0)),
+        ("EIP-2930", typed(legacy_tx(caller, oracle, get_slot(), 0), 1)),
+        ("EIP-1559", typed(legacy_tx(caller, oracle, get_slot(), 0), 2)),
+    ]
+}
+
+/// A transaction from the system address that does not have the system shape — off the
+/// whitelist, a creation, another type than legacy — is an ordinary transaction: it is not
+/// promoted, so an empty system address cannot pay its fee, and a funded one pays its fee and
+/// its history like any sender.
 #[test]
-fn test_a_non_legacy_transaction_from_the_system_address_is_refused() {
-    let mut tx = system_tx(0, B256::with_last_byte(0xaf));
-    tx.0.base.tx_type = 2; // EIP-1559
-    let refused = rejection(chain_db(), tx);
-    assert!(refused.contains(NOT_A_SYSTEM_TRANSACTION), "{refused}");
+fn test_another_shape_from_the_system_address_is_an_ordinary_transaction() {
+    let db = || chain_db().account_code(OFF_WHITELIST, Bytes::from_static(&[STOP]));
+    for (shape, tx) in other_shapes(MEGA_SYSTEM_ADDRESS) {
+        let refused = rejection(db(), tx.clone());
+        assert!(refused.contains("LackOfFundForMaxFee"), "{shape}: {refused}");
+
+        let mut evm = MegaEvm::new(chain_context(
+            db().account_balance(MEGA_SYSTEM_ADDRESS, U256::from(FUNDS)),
+        ));
+        let outcome = evm.execute_transaction(tx).expect("an ordinary transaction");
+        assert!(outcome.result.is_success(), "{shape}: {:?}", outcome.result);
+        assert!(!evm.ctx().is_system_originated(), "{shape}");
+        assert!(outcome.state[&MEGA_SYSTEM_ADDRESS].info.balance < U256::from(FUNDS), "{shape}");
+        assert!(outcome.gas.history > 0, "{shape} pays history");
+    }
+}
+
+/// A transaction without the system shape never reads the registry, whoever sends it: a database
+/// that cannot serve the registry's account does not stop it, and its state holds nothing of the
+/// registry. A legacy call to the Oracle has the shape, and its validation reads the registry,
+/// here into the database's error.
+#[test]
+fn test_a_transaction_of_another_shape_never_reads_the_registry() {
+    let db = || {
+        let mut db = ErrorInjectingDatabase::new(
+            chain_db()
+                .account_code(OFF_WHITELIST, Bytes::from_static(&[STOP]))
+                .account_balance(MEGA_SYSTEM_ADDRESS, U256::from(FUNDS))
+                .account_balance(CALLER, U256::from(FUNDS)),
+        );
+        db.fail_on_account = Some(SEQUENCER_REGISTRY_ADDRESS);
+        db
+    };
+    for caller in [MEGA_SYSTEM_ADDRESS, CALLER] {
+        for (shape, tx) in other_shapes(caller) {
+            let outcome = MegaEvm::new(chain_context(db()))
+                .execute_transaction(tx)
+                .expect("the registry is never read");
+            assert!(outcome.result.is_success(), "{shape}: {:?}", outcome.result);
+            assert!(!outcome.state.contains_key(&SEQUENCER_REGISTRY_ADDRESS), "{shape}");
+        }
+    }
+
+    let shaped = legacy_tx(CALLER, TxKind::Call(ORACLE_CONTRACT_ADDRESS), get_slot(), 0);
+    let error = MegaEvm::new(chain_context(db()))
+        .execute_transaction(shaped)
+        .expect_err("the shaped transaction reads the registry");
+    assert!(matches!(error, EVMError::Database(_)), "{error:?}");
+}
+
+/// The read of the live system address warms nothing. A user's legacy call to the Oracle's
+/// `setSlots` has the system shape, so its validation reads the registry's slot and finds the
+/// caller is not the system address; the Oracle then asks the registry for the system address
+/// itself, and that `SLOAD` pays the cold price, as it does for the same call as an EIP-2930
+/// transaction, which reads nothing at validation: the two spend the same gas on every ledger.
+/// Only an access list that names the slot makes the `SLOAD` warm.
+#[test]
+fn test_the_read_leaves_the_slot_and_the_registry_cold() {
+    let run = |tx: MegaTransaction| {
+        let mut evm =
+            MegaEvm::new(chain_context(chain_db().account_balance(CALLER, U256::from(FUNDS))))
+                .with_inspector(GasInspector::new());
+        let outcome = evm.execute_transaction(tx).expect("an ordinary transaction");
+        assert!(!outcome.result.is_success(), "the Oracle refuses a write from a user");
+        let sloads: Vec<u64> = evm
+            .inspector()
+            .records()
+            .iter()
+            // The transaction's frame is at journal depth 1, the registry's call below it at 2.
+            .filter(|record| record.opcode.get() == SLOAD && record.depth == 2)
+            .map(|record| record.gas_cost())
+            .collect();
+        assert_eq!(sloads.len(), 1, "the registry reads its one slot: {sloads:?}");
+        (outcome, sloads[0])
+    };
+    let write = || {
+        legacy_tx(
+            CALLER,
+            TxKind::Call(ORACLE_CONTRACT_ADDRESS),
+            set_slot(ORACLE_SLOT, B256::with_last_byte(1)),
+            0,
+        )
+    };
+
+    let (shaped, cold) = run(write());
+    assert!(
+        shaped.state[&SEQUENCER_REGISTRY_ADDRESS].storage.contains_key(&CURRENT_SYSTEM_ADDRESS),
+        "the shaped transaction read the slot",
+    );
+    let (unshaped, unread) = run(typed(write(), 1));
+    assert_eq!(cold, unread, "the SLOAD after the read costs what it costs without one");
+    assert_eq!(shaped.gas, unshaped.gas, "and so does the whole transaction");
+
+    let mut warmed = typed(write(), 1);
+    warmed.0.base.access_list = AccessList(vec![AccessListItem {
+        address: SEQUENCER_REGISTRY_ADDRESS,
+        storage_keys: vec![B256::from(CURRENT_SYSTEM_ADDRESS)],
+    }]);
+    let (_, warm) = run(warmed);
+    assert!(warm < cold, "a warm SLOAD ({warm}) is cheaper than the cold one ({cold})");
 }
 
 /// The whitelist holds for the system address alone: anyone else may call anything, and pays
@@ -659,19 +764,23 @@ fn test_a_deposit_that_creates_a_contract_pays_for_its_caller_too() {
     );
 }
 
-/// A transaction that already carries the system source hash is not executed as one: the
-/// promotion is the engine's own, made once per execution, and a transaction that arrives
-/// promoted has skipped the validation that precedes it.
+/// A transaction that already carries the system source hash is a deposit by type, so it does
+/// not have the system shape: it reads nothing of the registry and runs as the deposit it is, as
+/// one carrying the hash from any other caller does (see
+/// `test_a_deposit_from_another_caller_is_untouched`). No promotion is made for it, so none of the
+/// promotion's checks runs: its nonce is not the system address's.
 ///
 /// A block's transactions are decoded from their legacy encoding, which carries no source hash,
 /// so this is the shape a caller hands the engine directly, not one a block holds.
 #[test]
-fn test_a_transaction_that_arrives_promoted_is_refused() {
-    let mut tx = system_tx(0, B256::with_last_byte(0xaf));
+fn test_a_transaction_that_arrives_promoted_runs_as_a_deposit() {
+    let mut tx =
+        legacy_tx(MEGA_SYSTEM_ADDRESS, TxKind::Call(ORACLE_CONTRACT_ADDRESS), get_slot(), 7);
     tx.0.deposit.source_hash = MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
-    let refused = rejection(chain_db(), tx);
-    assert!(
-        refused.contains(NOT_A_SYSTEM_TRANSACTION),
-        "the refusal names the rule, not the whitelist alone: {refused}",
-    );
+    let mut db = ErrorInjectingDatabase::new(chain_db());
+    db.fail_on_storage = Some((SEQUENCER_REGISTRY_ADDRESS, CURRENT_SYSTEM_ADDRESS));
+    let outcome = MegaEvm::new(chain_context(db))
+        .execute_transaction(tx)
+        .expect("validation reads nothing of the registry");
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
 }

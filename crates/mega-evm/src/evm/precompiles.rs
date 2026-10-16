@@ -8,13 +8,48 @@
 //! The set is handed to the EVM as an alloy-evm [`PrecompilesMap`], so a node can add or replace
 //! an address at runtime ([`DynPrecompilesBuilder`]). A map built from the static set looks the
 //! address up in the same table op-revm would, so carrying it costs no allocation per call.
+//!
+//! # Prices
+//!
+//! Gas detention needs a precompile call's price before the call runs, to tell a call its
+//! allowance can pay from one that crosses the limit ([`PricedPrecompiles::price`]). A price
+//! belongs to the precompile that runs: every entry revm defines carries one
+//! ([`Precompile::required_gas`](revm::precompile::Precompile::required_gas)), and so does the
+//! KZG entry here. So does every one of op-revm's size-limited wrappers — here the BN254 pairing
+//! and the BLS12-381 G1 MSM, G2 MSM and pairing — which prices an input within its size limit as
+//! the run it wraps does, and one past it at nothing, since it refuses that input before any gas
+//! check. Every entry of the table is priced.
+//!
+//! The map erases what it holds once a node changes it, so the engine prices from its own table,
+//! [`satin_precompiles`], and only an address whose dispatched entry is still the table's. These
+//! calls are not priced, and gas detention runs them on the allowance:
+//!
+//! - a call to a node's own precompile, at a new address;
+//! - a call to an address a node replaced: through
+//!   [`MegaEvm::with_dyn_precompiles`](crate::MegaEvm), which records it, or through the map's own
+//!   API with an entry of another id;
+//! - every call, once the whole set was replaced by one that is not the Satin set: the neutral
+//!   configuration's, the fixture fork's own.
+//!
+//! A node changes the set through `with_dyn_precompiles`, or the factory's builder, which calls
+//! it. The engine cannot see a change made around it, through the mutable reference to the map
+//! that revm's `EvmTr::all_mut` and alloy-evm's `Evm::components_mut` hand out:
+//!
+//! - an entry replaced through the map's mutable accessors under the id of the entry it replaces;
+//! - the whole map replaced by another set: an address whose dispatched entry carries the id of the
+//!   Satin table's entry there is then priced from the Satin table, whatever the other set charges
+//!   for it.
+//!
+//! Neither accessor is a sign of a change: revm reaches the context and the frame stack through
+//! `all_mut` on every frame, and alloy-evm's transaction tracer calls `components_mut`, so a
+//! trace would stop pricing where block execution priced.
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
 use std::{string::String, sync::Arc};
 
 use alloy_evm::{
-    precompiles::{DynPrecompile, PrecompilesMap},
+    precompiles::{DynPrecompile, Precompile as _, PrecompilesMap},
     Database,
 };
 use revm::{
@@ -39,6 +74,61 @@ pub fn satin_precompiles() -> &'static Precompiles {
 /// A precompile map carrying the Satin set, ready for a node to add its own entries to.
 pub fn satin_precompiles_map() -> PrecompilesMap {
     PrecompilesMap::from_static(satin_precompiles())
+}
+
+/// Which precompile calls gas detention may price from the Satin table: what the engine knows of
+/// the changes made to the set it dispatches from.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct PricedPrecompiles {
+    /// The Satin addresses a node replaced with a precompile of its own
+    /// ([`MegaEvm::with_dyn_precompiles`](crate::MegaEvm)).
+    replaced: AddressSet,
+    /// Whether the whole set was replaced, through the engine, by one that is not the Satin set:
+    /// the neutral configuration's, the fixture fork's own. A set replaced through a mutable
+    /// reference to the map is not recorded.
+    foreign: bool,
+}
+
+impl PricedPrecompiles {
+    /// Records that a node installed a precompile of its own at `address`. An address outside the
+    /// Satin set replaces nothing the table prices.
+    pub(crate) fn record_replaced(&mut self, address: Address) {
+        if satin_precompiles().contains(&address) {
+            self.replaced.insert(address);
+        }
+    }
+
+    /// Records that the whole set was replaced by one that is not the Satin set: nothing is
+    /// priced from the Satin table from then on.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) const fn record_foreign(&mut self) {
+        self.foreign = true;
+    }
+
+    /// The gas a call of `input` to the precompile `dispatched` runs at `address` needs, read
+    /// before the call runs, or `None` when the engine cannot price it.
+    ///
+    /// The price is the Satin table's, and only for an address whose dispatched entry is still
+    /// the table's: the set is the Satin one, no node replaced the address through the engine
+    /// ([`record_replaced`](Self::record_replaced)), and the entry carries the table entry's id,
+    /// so a replacement made through the map's own API under another id is not priced either.
+    /// Every entry of the table carries a price function; one built without it would answer
+    /// `None`.
+    pub(crate) fn price(
+        &self,
+        dispatched: &PrecompilesMap,
+        address: &Address,
+        input: &[u8],
+    ) -> Option<u64> {
+        if self.foreign || self.replaced.contains(address) {
+            return None;
+        }
+        let builtin = satin_precompiles().get(address)?;
+        if dispatched.get(address)?.precompile_id() != builtin.id() {
+            return None;
+        }
+        builtin.required_gas(input)
+    }
 }
 
 /// Builds the dynamic precompiles an EVM runs on top of the Satin set.
@@ -81,9 +171,18 @@ pub mod kzg_point_evaluation {
         })
     }
 
+    /// The price of a KZG point evaluation, read before it runs: [`GAS_COST`] for every input.
+    /// A call below it is out of gas, and one at or above it gives the same result on every gas
+    /// limit, a malformed input's failure included, since upstream's checks all come after the
+    /// gas check.
+    const fn required_gas(_input: &[u8]) -> u64 {
+        GAS_COST
+    }
+
     /// KZG point evaluation, priced at [`GAS_COST`].
     pub const KZG_POINT_EVALUATION: Precompile =
-        Precompile::new(PrecompileId::KzgPointEvaluation, ADDRESS, run_with_fixed_cost);
+        Precompile::new(PrecompileId::KzgPointEvaluation, ADDRESS, run_with_fixed_cost)
+            .with_required_gas(required_gas);
 }
 
 /// Runs the Satin precompile set on a [`MegaContext`].
@@ -130,7 +229,7 @@ mod tests {
     use op_revm::precompiles::bn254_pair::KARST_MAX_INPUT_SIZE;
     use revm::{
         interpreter::{CallInput, CallScheme, CallValue, InstructionResult},
-        precompile::secp256r1,
+        precompile::{secp256r1, PrecompileId, PrecompileOutput},
         primitives::U256,
     };
 
@@ -307,6 +406,167 @@ mod tests {
 
         let over = run(address, Bytes::from(std::vec![0u8; KARST_MAX_INPUT_SIZE + 1]), 50_000_000);
         assert_eq!(over.result, InstructionResult::PrecompileError);
+    }
+
+    /// Every entry of the Satin set carries a price, op-revm's size-limited wrappers of the BN254
+    /// pairing and the BLS12-381 G1 MSM, G2 MSM and pairing included, so gas detention decides a
+    /// call to any of them from its price.
+    #[test]
+    fn test_every_satin_entry_is_priced() {
+        for precompile in satin_precompiles().inner().values() {
+            assert!(precompile.required_gas(&[]).is_some(), "{:?} is priced", precompile.id());
+        }
+    }
+
+    /// op-revm's size-limited entries of the Satin set are priced by their EIPs up to their size
+    /// limits, and at nothing past them, where the wrapper refuses the input before any gas check:
+    ///
+    /// - the BN254 pairing (EIP-1108): 45,000, and 34,000 per whole 192-byte pair, a stray byte
+    ///   included, since the run checks the length after its gas;
+    /// - the BLS12-381 G1 and G2 MSMs (EIP-2537): 12,000 and 22,500 per pair of 160 and 288 bytes,
+    ///   discounted by the EIP's tables — per mille, 1,000 and 949 for one and two G1 pairs, 1,000
+    ///   for one and two G2 pairs, and from 128 pairs on 519 and 524 — and nothing for a length
+    ///   that is not a positive multiple of a pair, which the run refuses before its gas check;
+    /// - the BLS12-381 pairing (EIP-2537): 37,700, and 32,600 per 384-byte pair, and nothing for a
+    ///   length that is not a positive multiple of a pair.
+    #[test]
+    fn test_the_size_limited_entries_are_priced_by_their_eips() {
+        use op_revm::precompiles::{bls12_381, bn254_pair};
+        let price = |precompile: &revm::precompile::Precompile, len: usize| {
+            let entry = satin_precompiles().get(precompile.address()).unwrap();
+            assert_eq!(entry.id(), precompile.id(), "the Satin set dispatches the wrapper");
+            entry.required_gas(&std::vec![0; len]).unwrap()
+        };
+
+        // The BN254 pairing: its 57,600 bytes are 300 pairs.
+        let pairing = &bn254_pair::KARST;
+        assert_eq!(bn254_pair::KARST_MAX_INPUT_SIZE, 300 * 192);
+        for pairs in [0, 1, 2, 300] {
+            let at = 45_000 + 34_000 * pairs as u64;
+            assert_eq!(price(pairing, pairs * 192), at, "{pairs} pairs");
+            if pairs < 300 {
+                assert_eq!(price(pairing, pairs * 192 + 1), at, "{pairs} pairs and a byte");
+            }
+        }
+        for len in [300 * 192 + 1, 301 * 192] {
+            assert_eq!(price(pairing, len), 0, "{len} bytes: past the limit");
+        }
+
+        // The MSMs: the G1 limit is 1,806 pairs, the G2 limit 968.
+        assert_eq!(bls12_381::JOVIAN_G1_MSM_MAX_INPUT_SIZE, 1_806 * 160);
+        assert_eq!(bls12_381::JOVIAN_G2_MSM_MAX_INPUT_SIZE, 968 * 288);
+        let msms = [
+            (&bls12_381::JOVIAN_G1_MSM, 160, 12_000, [1_000, 949, 519], 1_806),
+            (&bls12_381::JOVIAN_G2_MSM, 288, 22_500, [1_000, 1_000, 524], 968),
+        ];
+        for (msm, pair, base, [one, two, most], limit) in msms {
+            let id = msm.id();
+            for (pairs, discount) in [(1, one), (2, two), (128, most), (129, most), (limit, most)] {
+                let at = pairs as u64 * base * discount / 1_000;
+                assert_eq!(price(msm, pairs * pair), at, "{id:?}: {pairs} pairs");
+            }
+            for len in [0, pair - 1, pair + 1, limit * pair + 1, (limit + 1) * pair] {
+                assert_eq!(price(msm, len), 0, "{id:?}: {len} bytes");
+            }
+        }
+
+        // The BLS12-381 pairing: its 156,672 bytes are 408 pairs.
+        let pairing = &bls12_381::JOVIAN_PAIRING;
+        assert_eq!(bls12_381::JOVIAN_PAIRING_MAX_INPUT_SIZE, 408 * 384);
+        for pairs in [1, 2, 408] {
+            assert_eq!(price(pairing, pairs * 384), 37_700 + 32_600 * pairs as u64, "{pairs}");
+        }
+        for len in [0, 383, 385, 408 * 384 + 1, 409 * 384] {
+            assert_eq!(price(pairing, len), 0, "{len} bytes");
+        }
+    }
+
+    /// The KZG entry's price is its run's: below [`GAS_COST`](kzg_point_evaluation::GAS_COST) the
+    /// run is out of gas, and from it on the run gives one result that uses exactly the price, a
+    /// valid proof, a malformed input and an empty one alike.
+    #[test]
+    fn test_the_kzg_price_is_its_runs() {
+        let kzg = &kzg_point_evaluation::KZG_POINT_EVALUATION;
+        let mut wrong_proof = kzg_input().to_vec();
+        wrong_proof[191] ^= 1;
+        for input in
+            [kzg_input(), Bytes::from(wrong_proof), Bytes::from_static(&[1; 100]), Bytes::new()]
+        {
+            let price = kzg.required_gas(&input);
+            assert_eq!(price, Some(kzg_point_evaluation::GAS_COST));
+            let price = kzg_point_evaluation::GAS_COST;
+            for gas_limit in [0, price / 2, price - 1] {
+                let result = run(kzg_point_evaluation::ADDRESS, input.clone(), gas_limit);
+                assert_eq!(result.result, InstructionResult::PrecompileOOG, "{gas_limit}");
+            }
+            let at_price = run(kzg_point_evaluation::ADDRESS, input.clone(), price);
+            assert_ne!(at_price.result, InstructionResult::PrecompileOOG);
+            for gas_limit in [price + 1, 2 * price + 7, 30_000_000] {
+                let result = run(kzg_point_evaluation::ADDRESS, input.clone(), gas_limit);
+                assert_eq!(result.result, at_price.result, "{gas_limit}");
+                assert_eq!(result.output, at_price.output, "{gas_limit}");
+                if result.result.is_ok_or_revert() {
+                    assert_eq!(result.gas.total_gas_spent(), price, "{gas_limit}");
+                }
+            }
+        }
+    }
+
+    /// A Satin address is priced from the Satin table only while the entry the map dispatches
+    /// there is still the table's: one a node replaced through the engine is not, whatever id its
+    /// precompile carries, nor is one replaced through the map's own API under another id. An
+    /// address outside the table is never priced; op-revm's wrapper of the BN254 pairing is, from
+    /// its own entry.
+    #[test]
+    fn test_a_replaced_address_is_not_priced_from_the_satin_table() {
+        let modexp = *revm::precompile::modexp::OSAKA.address();
+        let input = [0_u8; 96];
+        let own = |id: PrecompileId| {
+            DynPrecompile::new(id, |input| {
+                Ok(PrecompileOutput::new(1, Bytes::new(), input.reservoir))
+            })
+        };
+        let untouched = satin_precompiles_map();
+        let none = PricedPrecompiles::default();
+        assert_eq!(none.price(&untouched, &modexp, &input), Some(500), "the Osaka minimum");
+        assert_eq!(
+            none.price(&untouched, &kzg_point_evaluation::ADDRESS, &input),
+            Some(kzg_point_evaluation::GAS_COST)
+        );
+
+        // Replaced through the engine, even under the built-in's own id.
+        let mut replaced = PricedPrecompiles::default();
+        replaced.record_replaced(modexp);
+        let mut map = satin_precompiles_map();
+        map.apply_precompile(&modexp, |_| Some(own(PrecompileId::ModExp)));
+        assert_eq!(replaced.price(&map, &modexp, &input), None);
+        assert_eq!(
+            replaced.price(&map, &kzg_point_evaluation::ADDRESS, &input),
+            Some(kzg_point_evaluation::GAS_COST),
+            "the other addresses are still the table's"
+        );
+
+        // Replaced through the map's own API, under another id.
+        let mut map = satin_precompiles_map();
+        map.apply_precompile(&kzg_point_evaluation::ADDRESS, |_| {
+            Some(own(PrecompileId::Custom("own".into())))
+        });
+        assert_eq!(none.price(&map, &kzg_point_evaluation::ADDRESS, &input), None);
+        assert_eq!(none.price(&map, &modexp, &input), Some(500));
+
+        // A node's own address, and an address outside the table recorded as replaced.
+        let own_address = Address::repeat_byte(0xd1);
+        let mut map = satin_precompiles_map();
+        map.apply_precompile(&own_address, |_| Some(own(PrecompileId::Custom("own".into()))));
+        let mut recorded = PricedPrecompiles::default();
+        recorded.record_replaced(own_address);
+        assert_eq!(recorded.price(&map, &own_address, &input), None);
+        assert_eq!(recorded.price(&map, &modexp, &input), Some(500));
+
+        // op-revm's wrapper of the BN254 pairing: one pair, 45,000 and 34,000 per pair (EIP-1108).
+        let pairing = *op_revm::precompiles::bn254_pair::KARST.address();
+        assert!(untouched.get(&pairing).is_some());
+        assert_eq!(none.price(&untouched, &pairing, &[0; 192]), Some(45_000 + 34_000));
     }
 
     /// A `ModExp` header of `base_len`, `exp_len` and `mod_len`, followed by the operands.
