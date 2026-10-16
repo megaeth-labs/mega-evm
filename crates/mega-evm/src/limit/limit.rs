@@ -834,6 +834,17 @@ impl AdditionalLimit {
         true
     }
 
+    /// Discards the lane of the frame about to return as its failure would, and stands an empty
+    /// lane in for it, which gives the caller back, when it is popped, the history the failure
+    /// gives back.
+    ///
+    /// For a frame whose journal checkpoint was reverted and whose result an inspector then
+    /// rewrote into a success: nothing the frame counted was kept, so none of it reaches its
+    /// caller, whatever the result says.
+    pub(crate) fn discard_returning_lane(&mut self) {
+        self.tracker.discard_running_lane();
+    }
+
     /// Pushes the lane of a frame answered without running: a result built without an
     /// interpreter keeps the lanes aligned with the frames revm returns.
     ///
@@ -851,17 +862,19 @@ impl AdditionalLimit {
     /// whatever produced it (an interceptor, an inspector's rewrite), so neither a success nor a
     /// halt passes it.
     ///
-    /// Two returns add to a caller what no check has held it to, and after them the caller is held
-    /// to its limits with what it now holds; a crossing is the stop it returns before it runs on
-    /// ([`stop_before_run`](Self::stop_before_run)): its own frame-local revert for its budget,
+    /// Two returns would add to a caller what no check has held it to, and after them the caller is
+    /// held to its limits with what it now holds; a crossing is the stop it returns before it runs
+    /// on ([`stop_before_run`](Self::stop_before_run)): its own frame-local revert for its budget,
     /// the latch for the transaction's limit.
     ///
     /// - A failed creation leaves its creator the nonce record. The creation counted that record on
     ///   its own lane, against its own share, and a creation stopped for crossing that share still
     ///   bumps the nonce — so a creator with fewer bytes left than a record would keep one it may
     ///   not.
-    /// - A success past the frame's own budget hands the caller more than the share it gave. Only
-    ///   an inspector that rewrote the frame's stop into a success returns one.
+    /// - A success past the frame's own budget would hand the caller more than the share it gave.
+    ///   No frame returns one: a frame past its budget failed, and a failure an inspector rewrites
+    ///   into a success has its lane discarded before it returns
+    ///   ([`discard_returning_lane`](Self::discard_returning_lane)). It is held all the same.
     ///
     /// Any other return leaves the caller within its limits, and is not checked: a failure hands
     /// it nothing, and a success hands it no more than the share it gave. Neither is the return of
@@ -1219,9 +1232,9 @@ mod tests {
         (limit, child)
     }
 
-    /// A success is checked on its return only when it kept more than its own budget, which an
-    /// inspector that rewrote the frame's stop into a success returns. Within its budget it hands
-    /// the caller no more than the caller's share, and the caller runs on unchecked; past it, the
+    /// A success is checked on its return only when it kept more than its own budget, which no
+    /// frame returns and the check guards against all the same. Within its budget it hands the
+    /// caller no more than the caller's share, and the caller runs on unchecked; past it, the
     /// caller is held to its own budget with what it now keeps, and stops when that crosses it.
     #[test]
     fn test_a_success_past_its_budget_holds_its_caller_to_the_caller_budget() {

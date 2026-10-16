@@ -17,8 +17,8 @@ use alloy_op_evm::OpTx;
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
-    constants::TX_GAS_LIMIT_CAP,
-    satin_gas_params,
+    constants::{MAX_CONTRACT_SIZE, TX_GAS_LIMIT_CAP},
+    history_gas, satin_gas_params,
     system::{
         keyless::{
             decode_keyless_tx,
@@ -39,6 +39,7 @@ use revm::{
         transaction::{AccessList, AccessListItem, TransactionType},
         TxEnv,
     },
+    context_interface::cfg::GasId,
     interpreter::{
         interpreter::EthInterpreter, CallInputs, CallOutcome, Gas, InstructionResult,
         InterpreterResult,
@@ -49,8 +50,9 @@ use revm::{
 };
 
 use crate::detention::{
-    assert_stopped, burn, context, execute, intrinsic, memory_cost, op, run_on, spin, stop_data,
-    tx, work, Calls, Charges, Run, ABOVE, BELOW, BENEFICIARY, CALLER, CAP, CHILD, CONTRACT, TIERS,
+    assert_stopped, burn, context, execute, fresh_write_spill, intrinsic, memory_cost, op, run_on,
+    spin, stop_data, tx, work, Calls, Charges, Run, ABOVE, BELOW, BENEFICIARY, CALLER, CAP, CHILD,
+    CONTRACT, FRESH_WRITE, TIERS,
 };
 
 /// A contract between the transaction's frame and `CHILD`.
@@ -195,9 +197,11 @@ fn test_gas_answers_the_whole_regular_gas_after_a_read() {
 }
 
 /// A callee started after the caller's read with an explicit gas stays bounded by it: its state
-/// writes draw the reservoir the transaction has, not the caller's withheld gas. Below the
-/// execution cap the callee runs out of gas on its third fresh slot, above it the reservoir pays
-/// all three — each as without the read.
+/// writes draw the reservoir the transaction has, not the caller's withheld gas. The bound pays
+/// the compute of three fresh slots and what one of them spills: below the execution cap, where
+/// every slot's state gas and history spill onto it, the callee runs out of gas before its third
+/// write completes — at the spec's prices already on its second write's state gas, which is more
+/// than one write's compute; above it the reservoir pays all three — each as without the read.
 #[test]
 fn test_a_bounded_callee_writes_what_it_writes_without_the_read() {
     let child = BytecodeBuilder::default()
@@ -206,16 +210,17 @@ fn test_a_bounded_callee_writes_what_it_writes_without_the_read() {
         .sstore(U256::from(3), U256::from(1))
         .stop()
         .build();
+    let bound = u32::try_from(3 * FRESH_WRITE + fresh_write_spill()).expect("a bound in a push");
     for (gas_limit, status) in [(BELOW, 0), (ABOVE, 1)] {
         let (detained, plain) = with_and_without_read(|first| {
             let parent =
-                call_keeping_status(op(BytecodeBuilder::default(), first), CHILD, Some(150_000));
+                call_keeping_status(op(BytecodeBuilder::default(), first), CHILD, Some(bound));
             let db = MemoryDatabase::default()
                 .account_code(CONTRACT, store_status(parent))
                 .account_code(CHILD, child.clone());
             (db, gas_limit)
         });
-        assert_as_without_read(&detained, &plain, "a callee bounded to 150,000");
+        assert_as_without_read(&detained, &plain, "a bounded callee");
         assert_eq!(slot(&detained, 0), Some(U256::from(status)), "{gas_limit}");
     }
 }
@@ -271,20 +276,28 @@ fn test_an_out_of_gas_nothing_could_pay_halts_as_without_the_read() {
     }
 }
 
-/// A creation whose code costs more state gas than the transaction has halts as without the read:
-/// a failed state charge is never the cap.
+/// A creation whose code costs more state gas and history than the transaction has halts as
+/// without the read: a failed state or history charge is never the cap.
 #[test]
 fn test_a_creation_that_cannot_pay_its_deposit_halts_as_without_the_read() {
+    // The largest code a creation may deploy, and a gas limit below the execution cap that pays no
+    // more than that code's state gas and history, and at least twice the cap, so the read
+    // withholds gas.
+    let len = MAX_CONTRACT_SIZE as u64;
+    let deposit = len * satin_gas_params().get(GasId::code_deposit_state_gas()) +
+        history_gas(len).expect("the code's history has a price");
+    let gas_limit = BELOW.min(deposit);
+    assert!(gas_limit > 2 * CAP, "the transaction holds more than the cap: {gas_limit}");
     let run = |first| {
         let initcode = op(BytecodeBuilder::default(), first)
-            .push_number(70_000_u32)
+            .push_number(len)
             .append_many([PUSH0, RETURN])
             .build();
         let create = OpTx(op_transaction(TxEnv {
             caller: CALLER,
             kind: TxKind::Create,
             data: initcode,
-            gas_limit: BELOW,
+            gas_limit,
             ..Default::default()
         }));
         run_on(&mut MegaEvm::new(context(MemoryDatabase::default())), create)
@@ -870,20 +883,21 @@ fn recording_modexp(runs: &Runs) -> DynPrecompile {
     })
 }
 
-/// The calldata of a modexp that is costly to compute: a 1,024-byte base with no zero byte, an
-/// exponent of `exponent_len` bytes, all ones, and an odd 1,024-byte modulus, then `padding`
-/// zero bytes the precompile ignores. Its price grows with the exponent, and so does the work.
+/// The calldata of a modexp that is costly: a 1,024-byte base with no zero byte, an exponent of
+/// `exponent_len` bytes, all ones, and an odd one-byte modulus, then `padding` zero bytes the
+/// precompile ignores. Its price grows with the exponent.
+///
+/// The price is that of a 1,024-byte modulus: it counts the longer of the base and the modulus.
+/// The work is sized by the modulus, so the call computes in a moment what an unoptimized test
+/// build takes a second over at 1,024 bytes; nothing here depends on how long it computes.
 pub(crate) fn costly_modexp_input(exponent_len: usize, padding: usize) -> Vec<u8> {
     let mut input = Vec::new();
-    for len in [1_024_usize, exponent_len, 1_024] {
+    for len in [1_024_usize, exponent_len, 1] {
         input.extend_from_slice(&U256::from(len).to_be_bytes::<32>());
     }
     input.extend((0..1_024_u32).map(|i| (i % 251) as u8 + 1));
     input.extend(core::iter::repeat_n(0xff_u8, exponent_len));
-    let mut modulus: Vec<u8> = (0..1_024_u32).map(|i| (i % 241) as u8).collect();
-    modulus[0] = 0xff;
-    modulus[1_023] |= 1;
-    input.extend(modulus);
+    input.push(0xfb);
     input.extend(core::iter::repeat_n(0_u8, padding));
     input
 }

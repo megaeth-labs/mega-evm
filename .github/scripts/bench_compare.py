@@ -279,7 +279,7 @@ BASELINE_ROW = "revm_pinned"
 ROW_ORDER = [
     "revm_pinned", "revm_latest", "op_revm_pinned", "op_revm_latest",
     "equivalence", "mini_rex", "rex", "rex1", "rex2", "rex3", "rex4", "rex5",
-    "rex6", "rex7",
+    "rex6",
 ]
 SPECS = set(ROW_ORDER)
 

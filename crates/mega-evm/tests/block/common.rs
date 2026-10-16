@@ -8,8 +8,9 @@ use alloy_consensus::{transaction::Recovered, Sealed, Signed, TxLegacy};
 use alloy_evm::{EvmEnv, EvmFactory};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_sol_types::SolCall;
 use mega_evm::{
-    system::{SequencerRegistryConfig, MEGA_SYSTEM_ADDRESS},
+    system::{IOracle, SequencerRegistryConfig, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS},
     test_utils::MemoryDatabase,
     BlockLimits, EmptyExternalEnv, MegaBlockExecutionCtx, MegaBlockExecutor,
     MegaBlockExecutorFactory, MegaEvm, MegaEvmFactory, MegaHardforkConfig, MegaSpecId,
@@ -212,6 +213,16 @@ pub(crate) fn tx(nonce: u64, to: Address, input: Bytes, gas_limit: u64) -> MegaT
 /// A legacy transaction from [`CALLER`], with its sender recovered.
 pub(crate) fn user_tx(nonce: u64, gas_limit: u64) -> Recovered<MegaTxEnvelope> {
     recovered(tx(nonce, CONTRACT, Bytes::new(), gas_limit))
+}
+
+/// A Mega System Transaction: a legacy call from the system address the registry names to the
+/// Oracle's `getSlot(0)`.
+pub(crate) fn system_tx() -> Recovered<MegaTxEnvelope> {
+    let input = IOracle::getSlotCall { slot: U256::ZERO }.abi_encode();
+    Recovered::new_unchecked(
+        tx(0, ORACLE_CONTRACT_ADDRESS, input.into(), 1_000_000),
+        MEGA_SYSTEM_ADDRESS,
+    )
 }
 
 /// A legacy transaction carrying `input`.

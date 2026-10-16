@@ -29,7 +29,7 @@ The two scopes are disjoint; a mutant belongs to exactly one of them.
 # Mutate only what your branch changed (what CI runs on a PR):
 scripts/mutation_test.sh diff origin/main
 python3 scripts/mutation_gate.py report --results target/mutants/mutants.out \
-        --suppressions mutants/suppressions.toml
+        --recheck target/mutants/recheck/mutants.out --suppressions mutants/suppressions.toml
 
 # One subsystem while iterating:
 scripts/mutation_test.sh file 'crates/mega-evm/src/limit/**'
@@ -37,13 +37,14 @@ scripts/mutation_test.sh file 'crates/mega-evm/src/limit/**'
 # The infrastructure scope (its own output directory, so it does not overwrite the production run):
 OUT_DIR=target/mutants-infra scripts/mutation_test.sh infra
 python3 scripts/mutation_gate.py report --results target/mutants-infra/mutants.out \
-        --suppressions mutants/suppressions.toml
+        --recheck target/mutants-infra/recheck/mutants.out --suppressions mutants/suppressions.toml
 
 # Shard k of n of a large run (cargo-mutants' --shard), each into its own directory:
 MUTANTS_SHARD=0/4 OUT_DIR=target/mutants-0 scripts/mutation_test.sh diff origin/main
 ```
 
-The driver needs bash 4 or later and Python 3.11 or later on `PATH`; with the macOS defaults (bash 3.2, Python 3.9) it fails before mutating anything.
+The driver needs bash 5 or later and Python 3.11 or later on `PATH`; it refuses to start under an older bash (macOS's `/bin/bash` is 3.2), and under an older Python (macOS's `python3` is 3.9) the gate's scripts say so and exit before anything is mutated.
+The gate's own tests run with `python3 -m unittest discover -s scripts -p 'test_*.py'`, on the same Python; an older one runs a single test in their place, which fails with the reason.
 When to shard is in `REVIEW.md` (Test gates, Mutation testing).
 
 ## The gate
@@ -52,6 +53,18 @@ PR CI runs **diff-scoped** (`cargo mutants --in-diff`), so every mutant lives on
 Policy is **no new survivors**: if a mutant on changed code survives and is not suppressed, the gate fails.
 To pass, either add a test that kills it, or — only if it is provably equivalent/dead — add a justified entry to `suppressions.toml`.
 The reported mutation score is informational.
+
+The gate reads a run **fail-closed**: it scores `outcomes.json`, and only a run that finished, whose baseline succeeded, and whose every selected mutant has an outcome.
+cargo-mutants rewrites `outcomes.json` after every outcome, so a run that stops part way leaves one that looks whole; the gate reads completion from the two things the producer writes for it.
+One is `end_time`, which stays null until the run finishes.
+The other is `mutants.json`, the selection written before any mutant is tested, which the outcomes must name exactly.
+`total_mutants` counts the outcomes recorded so far, not the mutants selected, and the gate does not read it.
+Missing results, a run that did not finish, a missing or failed baseline, or a selected mutant without an outcome fail the gate with the reason, instead of reading as nothing to test.
+A run that tested nothing passes only on the producer's own word for it: cargo-mutants' empty `mutants.json` when its filters leave no mutant, or, when `--in-diff` leaves none and cargo-mutants writes no results at all, the line it printed saying so, which the driver records in `no-mutants.txt`.
+
+A mutant that **timed out** was tested beside the others the run tests at once, each running the whole suite on the same cores, so the driver re-runs every unsuppressed one once, alone (`--jobs 1`, into `recheck/mutants.out`), and the gate takes that outcome for it.
+One caught alone is caught, one that survives alone is a survivor, and one that times out again stays inconclusive and fails the gate.
+A re-check that exits abnormally proves nothing by the files it left, so the driver records its exit in its results (`run-failed.txt`), and the gate refuses to score them, saying why.
 
 ## Suppressions (hybrid)
 
@@ -81,12 +94,13 @@ Run the `improve-mutation-score` skill: it triages each survivor (equivalent vs.
 cargo-mutants applies a fixed, generic operator set and cannot be extended.
 To mutate mega-evm-specific constructs — starting with **spec gates**, the lever for backward-compatibility — there is a second engine built on [universalmutator](https://github.com/agroce/universalmutator) in `--comby` mode.
 
-The two engines are complementary and **share one gate**: both produce the `caught.txt`/`missed.txt` file contract that `scripts/mutation_gate.py` scores, so suppressions, the PR comment, and the exit code are identical for both.
+The two engines are complementary and **share one gate**: both write `outcomes.json` in cargo-mutants' shape, with the `caught.txt`/`missed.txt` lists beside it, which `scripts/mutation_gate.py` scores, so suppressions, the PR comment, and the exit code are identical for both.
+`umutate.py` keeps the same completion contract: it writes `mutants.json` with every mutant it selected before it tests any, and `outcomes.json`, with its `end_time`, only once every one has an outcome.
 
 ```
 cargo-mutants ─(mutation_test.sh)─┐
-                                  ├─► caught.txt / missed.txt ─► mutation_gate.py ─► gate
-custom packs ─(umutate.py)────────┘            (shared contract)        (shared)
+                                  ├─► outcomes.json ─► mutation_gate.py ─► gate
+custom packs ─(umutate.py)────────┘  (shared contract)      (shared)
 ```
 
 ## Operator packs

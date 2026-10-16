@@ -1,18 +1,57 @@
 #!/usr/bin/env python3
-"""Score and gate a cargo-mutants run for mega-evm.
+"""Score and gate a mutation run for mega-evm.
 
-Two subcommands:
+Subcommands:
 
   exclude-re  --suppressions <toml>
         Print one `--exclude-re <regex>` pair per line for every function-scoped
         suppression. Consumed by scripts/mutation_test.sh so suppressed
         functions are never generated as mutants.
 
-  report      --results <mutants.out dir> [--suppressions <toml>]
-              [--comment <path>] [--summary <path>]
-        Read the run outcomes, apply line-scoped suppressions, compute the
-        mutation score, write a Markdown report, and exit non-zero if any
-        unsuppressed survivor remains (the "no new survivors" gate).
+  note-empty  --log <cargo-mutants output> --results <mutants.out dir>
+        Record that cargo-mutants itself said it had nothing to mutate. With
+        `--in-diff`, cargo-mutants writes no results at all when the diff is
+        empty, changes no Rust source file or touches no mutant, and says so
+        only in its output; this writes
+        that line to <results>/no-mutants.txt. Does nothing when <results>
+        exists, and fails when it does not and the output says no such thing.
+
+  timeout-re  --results <mutants.out dir> [--suppressions <toml>]
+        Print one `--re <regex>` pair per line for every unsuppressed mutant
+        that timed out, each regex matching that mutant's name alone. Consumed
+        by scripts/mutation_test.sh to re-run those mutants one at a time.
+
+  report      --results <mutants.out dir> [--recheck <mutants.out dir>]
+              [--suppressions <toml>] [--comment <path>] [--summary <path>]
+        Read the run outcomes, take the re-check's outcome for a mutant that
+        timed out, apply line-scoped suppressions, compute the mutation score,
+        write a Markdown report, and exit non-zero if any unsuppressed survivor
+        or timeout remains (the "no new survivors" gate). Exits 2, with a
+        report saying why, when the results cannot be scored.
+
+  orphans     --suppressions <toml> --universe <file>
+        Flag suppressions that match no live mutant.
+
+The results a run leaves are read fail-closed, on the contract cargo-mutants 27
+keeps and scripts/umutate.py keeps with it. Before it tests anything the
+producer writes `mutants.json`, a list of objects each with the `name` of a
+mutant it selected. It then writes `outcomes.json`: `outcomes`, each with a
+`scenario`, `"Baseline"` or `{"Mutant": {"name": ...}}`, and a `summary`; and
+`end_time`, null until the run finishes. cargo-mutants rewrites `outcomes.json`
+after every outcome, so a run that stops part way leaves one that looks whole;
+its `total_mutants` counts the outcomes recorded so far, not the mutants
+selected, and proves nothing about completion. A run is scored only if its
+`end_time` is set, its baseline succeeded, and its outcomes name exactly the
+mutants `mutants.json` selects. A run without `outcomes.json` tested nothing,
+and passes only on the producer's own word that it had nothing to test: a
+`mutants.json` holding `[]`, which cargo-mutants writes when its filters leave
+no mutant, or a `no-mutants.txt` written by `note-empty`. Anything else fails:
+no results directory, no outcomes, a run that did not finish, a baseline that
+failed or is missing, no `mutants.json` beside the outcomes, a selected mutant
+without an outcome or an outcome of a mutant not selected, an outcome of a kind
+this script does not know, and results holding the `run-failed.txt` that
+scripts/mutation_test.sh writes into them when the run that wrote them exited
+abnormally, whatever else they hold.
 
 The gate is intended to run diff-scoped (cargo mutants --in-diff), so every
 mutant it sees lives on a line the PR changed; an unsuppressed survivor there is
@@ -21,14 +60,49 @@ a test gap the PR introduced.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
-import tomllib
-from pathlib import Path
+from collections import Counter
+
+# tomllib is new in Python 3.11: say so rather than fail on the import below.
+if sys.version_info < (3, 11):
+    sys.exit(f"scripts/mutation_gate.py needs Python 3.11 or newer, for tomllib; this is Python "
+             f"{sys.version.split()[0]}.")
+
+import tomllib  # noqa: E402
+from dataclasses import dataclass, field  # noqa: E402
+from pathlib import Path  # noqa: E402
 
 # Cap how many survivors are rendered inline in the PR comment (GitHub caps a
 # single comment at 65536 chars). The rest live in the run artifacts.
 MAX_SURVIVORS_SHOWN = 20
+
+# What cargo-mutants 27 prints, and writes no results for, when `--in-diff`
+# leaves it nothing to mutate: a diff touching no mutant, an empty diff, and a
+# diff changing no `.rs` file (a module guide under src/, say).
+NOTHING_TO_MUTATE = (
+    "No mutants to filter",
+    "Diff file is empty",
+    "Diff changes no Rust source files",
+)
+
+# The file `note-empty` records such a line in.
+NO_MUTANTS_NOTE = "no-mutants.txt"
+
+# The file scripts/mutation_test.sh writes into the results of a run it started that exited
+# abnormally: an exit the files the run left cannot show.
+RUN_FAILED_NOTE = "run-failed.txt"
+
+# The outcome kinds a mutant can have, by the list they are reported in.
+MUTANT_SUMMARIES = {
+    "CaughtMutant": "caught",
+    "MissedMutant": "missed",
+    "Timeout": "timeout",
+    "Unviable": "unviable",
+}
+
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def load_suppressions(path: Path) -> tuple[list[dict], list[dict]]:
@@ -67,51 +141,255 @@ def mutant_body(line: str) -> str:
     return parts[1] if len(parts) == 2 else line
 
 
+class ResultsError(Exception):
+    """Results that cannot be scored."""
+
+
+@dataclass
+class Run:
+    """What a run decided about its mutants, by name."""
+
+    caught: list[str] = field(default_factory=list)
+    missed: list[str] = field(default_factory=list)
+    timeout: list[str] = field(default_factory=list)
+    unviable: list[str] = field(default_factory=list)
+    # Set when the run tested nothing: the producer's own word for it.
+    nothing_to_test: str | None = None
+
+
+def nothing_to_mutate(line: str) -> bool:
+    """Whether a line of cargo-mutants' output says it had nothing to mutate."""
+    return any(re.search(rf"\b(INFO|WARN)\s+{re.escape(m)}\s*$", line) for m in NOTHING_TO_MUTATE)
+
+
+def read_selection(results: Path) -> list[str] | None:
+    """The names of the mutants a run selected, from its `mutants.json`; None without one."""
+    listed = results / "mutants.json"
+    if not listed.exists():
+        return None
+    try:
+        mutants = json.loads(listed.read_text())
+        if not isinstance(mutants, list) or not all(
+                isinstance(m, dict) and isinstance(m.get("name"), str) for m in mutants):
+            raise TypeError("not a list of objects each with a string `name`")
+    except (json.JSONDecodeError, TypeError) as err:
+        raise ResultsError(f"{listed} is not a list of mutants: {err!r}") from err
+    return [m["name"] for m in mutants]
+
+
+def empty_list_evidence(results: Path) -> str | None:
+    """The producer's own word that it had nothing to test, if it gave it."""
+    selected = read_selection(results)
+    if selected is not None:
+        if not selected:
+            return "the mutant list under the run's filters was empty"
+        raise ResultsError(
+            f"{results / 'mutants.json'} lists {len(selected)} mutants but {results} has no "
+            f"outcomes.json: the run stopped before it recorded an outcome"
+        )
+    note = results / NO_MUTANTS_NOTE
+    if note.exists():
+        text = note.read_text().strip()
+        if nothing_to_mutate(text):
+            return f"cargo-mutants said: `{text}`"
+        raise ResultsError(f"{note} does not hold a line cargo-mutants prints: {text!r}")
+    return None
+
+
+def load_run(results: Path) -> Run:
+    """Read a run's results fail-closed; see the module docstring."""
+    if not results.is_dir():
+        raise ResultsError(
+            f"no results at {results}: the run did not happen, crashed before it wrote "
+            f"anything, or wrote elsewhere"
+        )
+    failed = results / RUN_FAILED_NOTE
+    if failed.exists():
+        raise ResultsError(
+            f"the run that wrote {results} exited abnormally ({failed.read_text().strip()}), "
+            f"so what it left does not show that it finished"
+        )
+    outcomes_path = results / "outcomes.json"
+    if not outcomes_path.exists():
+        evidence = empty_list_evidence(results)
+        if evidence is None:
+            raise ResultsError(
+                f"{results} has no outcomes.json and no word from the producer that it had "
+                f"nothing to test: the run aborted or changed its output format"
+            )
+        return Run(nothing_to_test=evidence)
+    try:
+        data = json.loads(outcomes_path.read_text())
+        outcomes = data["outcomes"]
+        if not isinstance(outcomes, list) or not all(isinstance(o, dict) for o in outcomes):
+            raise TypeError("`outcomes` is not a list of objects")
+    except (json.JSONDecodeError, KeyError, TypeError) as err:
+        raise ResultsError(f"{outcomes_path} is not a mutation run's outcomes: {err!r}") from err
+
+    end_time = data.get("end_time")
+    if not isinstance(end_time, str) or not end_time:
+        raise ResultsError(
+            f"{outcomes_path} records no end_time ({end_time!r}): the producer sets it only once "
+            f"the run finishes, so this is the record of a run that stopped part way"
+        )
+
+    baselines = [o for o in outcomes if o.get("scenario") == "Baseline"]
+    if not baselines:
+        raise ResultsError(
+            f"{outcomes_path} has no baseline outcome: nothing shows the unmutated tree "
+            f"passes its tests, so a failing test proves nothing about a mutant"
+        )
+    failed = [o.get("summary") for o in baselines if o.get("summary") != "Success"]
+    if failed:
+        raise ResultsError(
+            f"the baseline failed ({failed[0]}): the unmutated tree does not pass its tests, "
+            f"so every mutant would read as caught. Fix the tests first"
+        )
+
+    run = Run()
+    mutants = [o for o in outcomes if isinstance(o.get("scenario"), dict)]
+    for outcome in mutants:
+        try:
+            name = outcome["scenario"]["Mutant"]["name"]
+        except (KeyError, TypeError) as err:
+            raise ResultsError(f"an outcome in {outcomes_path} names no mutant: {outcome!r}") from err
+        kind = MUTANT_SUMMARIES.get(outcome.get("summary"))
+        if kind is None:
+            raise ResultsError(
+                f"{name}: outcome {outcome.get('summary')!r} is none this gate knows "
+                f"({', '.join(MUTANT_SUMMARIES)})"
+            )
+        getattr(run, kind).append(name)
+
+    selected = read_selection(results)
+    if selected is None:
+        raise ResultsError(
+            f"{results} has outcomes.json but no mutants.json: nothing says which mutants the "
+            f"run selected, so nothing shows each has an outcome"
+        )
+    tested = Counter(o["scenario"]["Mutant"]["name"] for o in mutants)
+    untested = Counter(selected) - tested
+    if untested:
+        raise ResultsError(
+            f"{sum(untested.values())} of the {len(selected)} mutants mutants.json selects have "
+            f"no outcome in {outcomes_path}, `{next(iter(untested))}` among them: the run did not "
+            f"test them all"
+        )
+    unselected = tested - Counter(selected)
+    if unselected:
+        raise ResultsError(
+            f"{outcomes_path} records {sum(unselected.values())} outcomes of mutants mutants.json "
+            f"does not select, `{next(iter(unselected))}` among them: the two are not one run's"
+        )
+    if not selected:
+        run.nothing_to_test = "the run tested no mutant"
+    return run
+
+
+def cmd_note_empty(args: argparse.Namespace) -> int:
+    results = Path(args.results)
+    if results.exists():
+        return 0
+    log = Path(args.log)
+    lines = [ANSI.sub("", ln).rstrip() for ln in log.read_text().splitlines()] if log.exists() else []
+    said = [ln.strip() for ln in lines if nothing_to_mutate(ln)]
+    if not said:
+        print(
+            f"ERROR: cargo-mutants wrote no results at {results}, and its output ({log}) does not "
+            f"say it had nothing to mutate.",
+            file=sys.stderr,
+        )
+        return 1
+    results.mkdir(parents=True)
+    (results / NO_MUTANTS_NOTE).write_text(said[-1] + "\n")
+    print(f"cargo-mutants had nothing to mutate: {said[-1]}", file=sys.stderr)
+    return 0
+
+
+def suppressed_names(path: str | None) -> set[str]:
+    """The mutants line-scoped suppressions name.
+
+    A line suppression matches either the bare mutation text (`mutant` written
+    without a locator) or the full `file:line:col: text` line. The latter lets
+    two mutants that share identical source text be suppressed independently.
+    """
+    _, line_supp = load_suppressions(Path(path)) if path else ([], [])
+    return {e["mutant"].strip() for e in line_supp if "mutant" in e}
+
+
+def is_suppressed(name: str, supp: set[str]) -> bool:
+    return name in supp or mutant_body(name) in supp
+
+
+def cmd_timeout_re(args: argparse.Namespace) -> int:
+    try:
+        run = load_run(Path(args.results))
+    except ResultsError as err:
+        # Nothing to re-check; the gate reports why the results cannot be scored.
+        print(f"no timed-out mutants to re-check: {err}", file=sys.stderr)
+        return 0
+    supp = suppressed_names(args.suppressions)
+    for name in run.timeout:
+        if is_suppressed(name, supp):
+            continue
+        print("--re")
+        print(f"^{re.escape(name)}$")
+    return 0
+
+
+def write_report(report: str, args: argparse.Namespace) -> None:
+    if args.comment:
+        Path(args.comment).write_text(report)
+    if args.summary:
+        with open(args.summary, "a") as fh:
+            fh.write(report)
+    print(report)
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     results = Path(args.results)
+    try:
+        run = load_run(results)
+        recheck = None
+        if run.timeout and args.recheck and Path(args.recheck).exists():
+            recheck = load_run(Path(args.recheck))
+    except ResultsError as err:
+        write_report(
+            "## 🧬 Mutation testing — ❌ FAIL\n\n"
+            f"**The results cannot be scored:** {err}.\n",
+            args,
+        )
+        return 2
 
-    # Guard against a silent pass when the run produced no results. We must tell
-    # apart two cases that both leave the outcome lists empty:
-    #   * the results dir is absent  -> no run happened (e.g. the diff had no
-    #     mutatable changes); benign, report "nothing tested" and pass.
-    #   * the results dir exists but the expected files are missing -> the run
-    #     aborted, wrote elsewhere, or the tool renamed its output. Refusing to
-    #     report a 100% pass here is the whole point.
-    if not results.exists():
-        report = "## 🧬 Mutation testing\n\nNo results at "
-        report += f"`{results}` — nothing was mutated (e.g. no mutatable changes).\n"
-        if args.comment:
-            Path(args.comment).write_text(report)
-        if args.summary:
-            with open(args.summary, "a") as fh:
-                fh.write(report)
-        print(report)
+    if run.nothing_to_test is not None:
+        note = f"**Nothing to test**: {run.nothing_to_test}"
+        write_report(f"## 🧬 Mutation testing — ✅ PASS\n\n{note}.\n", args)
         return 0
-    for required in ("caught.txt", "missed.txt"):
-        if not (results / required).exists():
-            print(
-                f"ERROR: {results / required} is missing although {results} exists. "
-                f"The mutation run aborted or changed its output format — refusing to "
-                f"report a passing gate on incomplete results.",
-                file=sys.stderr,
-            )
-            return 2
 
-    missed = read_lines(results / "missed.txt")
-    caught = read_lines(results / "caught.txt")
-    unviable = read_lines(results / "unviable.txt")
-    timeout = read_lines(results / "timeout.txt")
+    caught, missed, timeout = list(run.caught), list(run.missed), []
+    rechecked: dict[str, list[str]] = {"caught": [], "missed": [], "timeout": [], "absent": []}
+    if recheck is not None:
+        verdicts = {n: k for k in ("caught", "missed", "timeout", "unviable") for n in getattr(recheck, k)}
+        for name in run.timeout:
+            verdict = verdicts.get(name)
+            if verdict == "caught":
+                caught.append(name)
+                rechecked["caught"].append(name)
+            elif verdict == "missed":
+                missed.append(name)
+                rechecked["missed"].append(name)
+            else:
+                timeout.append(name)
+                rechecked["timeout" if verdict else "absent"].append(name)
+    else:
+        timeout = list(run.timeout)
 
-    _, line_supp = load_suppressions(Path(args.suppressions)) if args.suppressions else ([], [])
-    # A line suppression matches either the bare mutation text (`mutant` written
-    # without a locator) or the full `file:line:col: text` line. The latter lets
-    # two mutants that share identical source text be suppressed independently.
-    supp = {e["mutant"].strip() for e in line_supp if "mutant" in e}
+    supp = suppressed_names(args.suppressions)
 
     def partition(items: list[str]) -> tuple[list[str], list[str]]:
         sup, real = [], []
         for m in items:
-            (sup if (m in supp or mutant_body(m) in supp) else real).append(m)
+            (sup if is_suppressed(m, supp) else real).append(m)
         return sup, real
 
     suppressed, real_survivors = partition(missed)
@@ -129,22 +407,13 @@ def cmd_report(args: argparse.Namespace) -> int:
     # ---- Markdown report (PR comment + step summary) ----
     status = "✅ PASS" if gate_pass else "❌ FAIL"
 
-    # No viable mutants and nothing inconclusive (typical diff run whose changed
-    # lines contain nothing mutatable). Reporting "100% (0/0)" reads like a real
-    # result and confuses readers — say plainly that nothing was tested.
+    # No viable mutants and nothing inconclusive (every mutant unviable, or every
+    # timeout suppressed). Reporting "100% (0/0)" reads like a real result and
+    # confuses readers — say plainly that nothing was tested.
     if viable == 0 and not real_timeouts:
-        note = "**Nothing to test** — no mutants were generated"
-        if unviable or timeout:
-            note += f" ({len(unviable)} unviable, {len(timeout)} timed out)"
-        else:
-            note += " on the changed lines"
-        report = f"## 🧬 Mutation testing — ✅ PASS\n\n{note}.\n"
-        if args.comment:
-            Path(args.comment).write_text(report)
-        if args.summary:
-            with open(args.summary, "a") as fh:
-                fh.write(report)
-        print(report)
+        note = "**Nothing to test** — no viable mutant"
+        note += f" ({len(run.unviable)} unviable, {len(timeout)} timed out)"
+        write_report(f"## 🧬 Mutation testing — ✅ PASS\n\n{note}.\n", args)
         return 0
 
     md = [
@@ -156,9 +425,18 @@ def cmd_report(args: argparse.Namespace) -> int:
         f"- survived (real gaps): **{len(real_survivors)}**",
         f"- timed out (inconclusive): **{len(real_timeouts)}**",
         f"- suppressed (equivalent/dead-code): {len(suppressed) + len(supp_timeouts)}",
-        f"- unviable: {len(unviable)} · timeout total: {len(timeout)}",
-        "",
+        f"- unviable: {len(run.unviable)} · timeout total: {len(timeout)}",
     ]
+    if run.timeout:
+        if recheck is None:
+            md.append(f"- re-checked: none of the {len(run.timeout)} that timed out (no re-check results)")
+        else:
+            md.append(
+                f"- re-checked alone after timing out: {len(run.timeout)} — "
+                f"{len(rechecked['caught'])} caught, {len(rechecked['missed'])} survived, "
+                f"{len(rechecked['timeout'])} timed out again, {len(rechecked['absent'])} not re-run"
+            )
+    md.append("")
 
     def section(title: str, blurb: str, items: list[str], artifact: str) -> list[str]:
         out = [f"### {title}", "", blurb, ""]
@@ -191,14 +469,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         md += ["", "_Tip: run `/improve-mutation-score` to triage and fix these._"]
     else:
         md.append("No new test gaps introduced by this change. 🎉")
-    report = "\n".join(md) + "\n"
-
-    if args.comment:
-        Path(args.comment).write_text(report)
-    if args.summary:
-        with open(args.summary, "a") as fh:
-            fh.write(report)
-    print(report)
+    write_report("\n".join(md) + "\n", args)
 
     return 0 if gate_pass else 1
 
@@ -261,8 +532,20 @@ def main() -> int:
     pe.add_argument("--suppressions", required=True)
     pe.set_defaults(func=cmd_exclude_re)
 
+    pn = sub.add_parser("note-empty", help="record cargo-mutants saying it had nothing to mutate")
+    pn.add_argument("--log", required=True, help="cargo-mutants' output")
+    pn.add_argument("--results", required=True)
+    pn.set_defaults(func=cmd_note_empty)
+
+    pt = sub.add_parser("timeout-re", help="--re arguments selecting the mutants that timed out")
+    pt.add_argument("--results", required=True)
+    pt.add_argument("--suppressions", default=None)
+    pt.set_defaults(func=cmd_timeout_re)
+
     pr = sub.add_parser("report")
     pr.add_argument("--results", required=True)
+    pr.add_argument("--recheck", default=None,
+                    help="results of re-running the timed-out mutants one at a time")
     pr.add_argument("--suppressions", default=None)
     pr.add_argument("--comment", default=None, help="write Markdown report here")
     pr.add_argument("--summary", default=None, help="append report here (GITHUB_STEP_SUMMARY)")

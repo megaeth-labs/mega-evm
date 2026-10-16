@@ -28,9 +28,8 @@ Do not add a `_pending/main.rs`.
 | Owning mechanism | Tests | From `tests/` | From `src/` | Keep | Rewrite | Undecided |
 |---|---:|---:|---:|---:|---:|---:|
 | the common execution layer | 21 | 21 | 0 | 21 | 0 | 0 |
-| inspector support | 4 | 4 | 0 | 1 | 3 | 0 |
 | — (undecided: D57 preload-warm cold charging, D58 98/100 forwarding) | 7 | 7 | 0 | 0 | 0 | 7 |
-| **Total** | **32** | **32** | **0** | **22** | **3** | **7** |
+| **Total** | **28** | **28** | **0** | **21** | **0** | **7** |
 
 ## Tests ported in place
 
@@ -357,6 +356,16 @@ These 17 rows run in a real test target now, adapted to the Satin API: a transac
 | `rex5/oracle_hint_metering.rs` | revert-class aborts (1) | 1 | `tests/system/oracle.rs` |
 | **Total** | | **17** | |
 
+## Tests ported by inspector support
+
+These 4 rows run in a real test target now, adapted to the Satin API: block execution admits an inspector only when it is declared an observer, so an inspector that answers a frame has no route to a block and is exercised on the EVM, where a frame it answers, or a failed frame it rewrites into a success, settles as a frame that kept nothing; and a body over the data-size limit is stopped before any inspector's answer to its first frame. The counts above are lower than the inventory's by exactly these rows.
+
+| Legacy file | Owner in the inventory | Tests | Now in |
+|---|---|---:|---|
+| `block_executor/inspector.rs` | inspector support (3) | 3 | `tests/block/inspector.rs` |
+| `rex4/intrinsic_limit_bypass.rs` | inspector support (1) | 1 | `tests/satin/inspector.rs` |
+| **Total** | | **4** | |
+
 ## Tests retired after the inventory
 
 These 21 rows were parked when the inventory was applied and have since been retired: the mechanism that owns them landed and left them nothing to pin, so no later mechanism will port them.
@@ -391,11 +400,9 @@ Each cell lists `disposition count (mechanism · decision)`.
 
 | File | Tests | Owners |
 |---|---:|---|
-| `block_executor/inspector.rs` | 3 | keep 1 (inspector support); rewrite 2 (inspector support · D39/D41) |
 | `compute_gas/claims.rs` | 5 | undecided 5 (— · D57, open: whether preload-warm addresses (precompile / beneficiary / access-list) are charged cold) |
 | `mini_rex/gas.rs` | 2 | undecided 2 (— · D58, open: 98/100 forwarding, while the design has frames follow EIP-8037 (63/64)) |
 | `rex4/create_safety.rs` | 1 | keep 1 (the common execution layer · canonical revm behaviour) |
-| `rex4/intrinsic_limit_bypass.rs` | 1 | rewrite 1 (inspector support · D41) |
 | `rex5/create2_empty_initcode.rs` | 5 | keep 5 (the common execution layer · canonical revm behaviour) |
 | `rex5/create2_resize_gas_metering.rs` | 2 | keep 2 (the common execution layer · canonical behaviour) |
 | `rex6/create2_metering_order.rs` | 11 | keep 11 (the common execution layer · canonical halt reasons; D04 512 KiB boundary) |

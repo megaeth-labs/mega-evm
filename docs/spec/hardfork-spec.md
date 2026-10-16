@@ -51,17 +51,17 @@ Protocol-level changes outside the verifiable execution layer (e.g., networking,
 ## Spec Progression
 
 ```
-EQUIVALENCE → MINI_REX → MINI_REX_1 → MINI_REX_2 → REX → REX1 → REX2 → REX3 → REX4 → REX5 → REX6 → REX7
+EQUIVALENCE → MINI_REX → MINI_REX_1 → MINI_REX_2 → REX → REX1 → REX2 → REX3 → REX4 → REX5 → REX6 → SATIN
 ```
 
 Each newer behavior-introducing spec includes all previous behaviors.
 The alias rungs `MINI_REX_1` (behavior: `EQUIVALENCE`) and `MINI_REX_2` (behavior: `MINI_REX`) are the exception: an alias rung introduces no behavior of its own and instead executes exactly its target's earlier behavior (see [Alias Specs](#alias-specs-behavior-vs-position)).
-All specs build on Optimism Isthmus (Ethereum Prague) as the base layer.
-All specs through REX6 are frozen; REX7 is **unstable** and under active development.
+Every spec through REX6 builds on Optimism Isthmus (Ethereum Prague) as the base layer; SATIN builds on Optimism Karst (Ethereum Osaka).
+All specs through REX6 are frozen; SATIN is **unstable** and under active development.
 
 Frozen and activated are separate properties.
 A frozen spec's semantics no longer change, but it takes effect on a network only once that network schedules the corresponding hardfork.
-REX7 is unstable and has no activation timestamp on either mainnet or testnet.
+SATIN is unstable and has no activation timestamp on either mainnet or testnet.
 
 ### Backward Compatibility
 
@@ -184,9 +184,21 @@ REX6 is frozen and scheduled on both networks; see the [upgrade overview](upgrad
 
 _See [Rex6 Network Upgrade](upgrades/rex6.md) for full details._
 
-### REX7
+### SATIN
 
-REX7 is the current **unstable** spec under active development.
-It introduces no behavioral change over REX6 yet; its semantics may change at any time before it is frozen.
+SATIN is the current **unstable** spec under active development, scheduled by the `Satin` hardfork.
+It is not scheduled on any network, and its semantics may change at any time before it is frozen.
+It restates MegaETH's execution rules on Optimism Karst (Ethereum Osaka) rather than adding to REX6's:
 
-_See [Rex7 Network Upgrade](upgrades/rex7.md) for the current state._
+- **Two-pool gas** — [EIP-8037](https://eips.ethereum.org/EIPS/eip-8037) regular gas under a 200,000,000 per-transaction execution cap, with the rest of the gas limit as a state-gas reservoir, replacing the [dual gas model](evm/dual-gas-model.md).
+- **State gas** — EIP-8037's byte counts at MegaETH's cost per state byte, scaled by the [SALT bucket](glossary.md#salt-bucket) the state lands in.
+- **History gas** — a price per byte on the transaction body, logs, write records and deployed code, replacing the storage gas on logs and calldata, the intrinsic storage gas, and the [storage gas stipend](glossary.md#storage-gas-stipend).
+- **Resource limits** — data size, KV updates and state gas per transaction, with no separate compute-gas limit; every transaction-level limit stops a transaction with a revert carrying `MegaLimitExceeded`.
+- **[Gas detention](evm/gas-detention.md)** — enforced on the gas a frame is allowed to spend, withholding the rest inside the frame's own gas.
+- **[EIP-7708](https://eips.ethereum.org/EIPS/eip-7708) transfer logs**, the `DUPN`, `SWAPN`, `EXCHANGE` and `SLOTNUM` opcodes, and 63/64 gas forwarding.
+- **[KeylessDeploy](system-contracts/keyless-deploy.md)** — the deployment runs as a native creation frame instead of a sandbox.
+- **System calls** — at most 30,000,000 of a system call's gas is regular gas; the pre-block calls, the system-contract deploys and the EIP-7997 factory run before every block.
+- **Live system address** — a system-shaped transaction reads the [SequencerRegistry](system-contracts/sequencer-registry.md) itself.
+- **Block limits** — execution gas, state gas, data size and KV updates are packing budgets that never refuse a deposit.
+
+_See [Satin Network Upgrade](upgrades/satin.md) for the current state._

@@ -18,14 +18,14 @@ use mega_evm::{
     constants::{BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS, TX_GAS_LIMIT_CAP},
     system::{IMegaLimitControl, LIMIT_CONTROL_ADDRESS, ORACLE_CONTRACT_ADDRESS},
     test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
-    volatile_data_access_disabled_revert_data, BlockLimits, EvmTxRuntimeLimits, LimitCheck,
-    LimitKind, MegaContext, MegaEvm, MegaLimitExceeded, MegaSpecId, MegaTransaction,
-    MegaTransactionOutcome, VolatileDataAccess,
+    volatile_data_access_disabled_revert_data, write_record_history_gas, BlockLimits,
+    EvmTxRuntimeLimits, LimitCheck, LimitKind, MegaContext, MegaEvm, MegaLimitExceeded, MegaSpecId,
+    MegaTransaction, MegaTransactionOutcome, VolatileDataAccess,
 };
 use revm::{
     bytecode::opcode::*,
     context::{result::ExecutionResult, BlockEnv, TxEnv},
-    context_interface::block::BlobExcessGasAndPrice,
+    context_interface::{block::BlobExcessGasAndPrice, cfg::GasId},
     interpreter::{
         interpreter::EthInterpreter, CallInputs, CallOutcome, InstructionResult, Interpreter,
     },
@@ -45,6 +45,17 @@ pub(crate) const BELOW: u64 = 100_000_000;
 /// Above it: a reservoir of 100,000,000.
 pub(crate) const ABOVE: u64 = TX_GAS_LIMIT_CAP + 100_000_000;
 pub(crate) const TIERS: [u64; 2] = [BELOW, ABOVE];
+
+/// The compute of a write to a fresh, cold slot as [`BytecodeBuilder::sstore`] makes it: its two
+/// pushes and `SSTORE`'s 22,100.
+pub(crate) const FRESH_WRITE: u64 = 3 + 3 + 22_100;
+
+/// What a write to a fresh slot costs beside its compute: the slot's state gas and its record's
+/// history, at the prices the schedule was built with.
+pub(crate) fn fresh_write_spill() -> u64 {
+    crate::salt::entry(GasId::sstore_set_state_gas()) +
+        write_record_history_gas(1).expect("a record has a price")
+}
 
 /// Rounds of [`work`] spent before a read: 5,283,600 of compute.
 pub(crate) const WORK: u32 = 1_700;
@@ -1086,10 +1097,11 @@ fn test_running_out_of_the_frames_own_gas_still_halts() {
 }
 
 /// Writes after a read are held to the cap by the regular gas they spend. With room in the
-/// reservoir for their state and history gas, a thousand fresh slots — 22,100,000 of compute —
-/// cross it and stop the transaction, at the first write's charge past it. Without that room the
-/// writes drain the withheld gas first and the frame runs out of its own gas where it would have
-/// undetained: it halts.
+/// reservoir for their state and history gas, a thousand fresh slots — 22,106,000 of compute —
+/// cross it and stop the transaction, at the first write's charge past it. Without a reservoir,
+/// and with less gas than the writes spend before their compute reaches the cap, the writes drain
+/// the withheld gas first and the frame runs out of its own gas where it would have undetained: it
+/// halts.
 #[test]
 fn test_writes_after_a_read_stop_at_the_cap_or_run_out_of_their_own_gas() {
     let mut code = op(BytecodeBuilder::default(), TIMESTAMP);
@@ -1098,20 +1110,26 @@ fn test_writes_after_a_read_stop_at_the_cap_or_run_out_of_their_own_gas() {
     }
     let code = code.stop().build();
 
+    // A reservoir that pays every write's state gas and history.
+    let gas_limit = TX_GAS_LIMIT_CAP + 1_000 * fresh_write_spill();
     let run = execute(
         MemoryDatabase::default().account_code(CONTRACT, code.clone()),
-        tx(CALLER, CONTRACT, ABOVE),
+        tx(CALLER, CONTRACT, gas_limit),
     );
     let left = Charges::default().then(&[2]).fresh_writes(1_000).left(CAP);
-    assert_stopped(&run, intrinsic(ABOVE), left);
+    assert_stopped(&run, intrinsic(gas_limit), left);
 
+    // The cap, and half of what the writes that fit in it spill: more than the cap, so the read
+    // withholds gas, and less than those writes spend, so the gas runs out before the compute
+    // reaches the cap. Below the execution cap either way.
+    let gas_limit = BELOW.min(CAP + CAP / FRESH_WRITE * fresh_write_spill() / 2);
     let run = execute(
         MemoryDatabase::default().account_code(CONTRACT, code),
-        tx(CALLER, CONTRACT, BELOW),
+        tx(CALLER, CONTRACT, gas_limit),
     );
     assert!(matches!(run.outcome.result, ExecutionResult::Halt { .. }), "{:?}", run.outcome.result);
     assert_eq!(run.outcome.limit_exceeded, None);
-    assert_eq!(run.outcome.result.gas().tx_gas_used(), BELOW, "a halt burns the gas");
+    assert_eq!(run.outcome.result.gas().tx_gas_used(), gas_limit, "a halt burns the gas");
 }
 
 /* ---------- what is not marked ---------- */
@@ -1515,12 +1533,17 @@ fn test_a_frames_return_hands_back_what_was_withheld() {
 }
 
 /// State and history gas are not compute, whether they come out of the reservoir or spill onto
-/// regular gas: after the read, a frame writes more state gas than the cap and still completes.
+/// regular gas: after the read, a frame spends more than the cap on fresh slots and still
+/// completes, its compute within the cap and their state and history gas past it.
 #[test]
 fn test_state_and_history_gas_are_not_compute() {
-    // 300 fresh slots: 29,376,000 of state gas and 1,056,000 of history, 6,630,000 of compute.
+    // As many fresh slots as the cap leaves compute for, and as a gas limit below the execution
+    // cap pays for with a million to spare: at the spec's prices, more state gas than the cap.
+    let spill = fresh_write_spill();
+    let slots = (CAP / FRESH_WRITE).min((BELOW - 1_000_000) / (FRESH_WRITE + spill));
+    assert!(slots * (FRESH_WRITE + spill) > CAP, "counted as compute, the writes cross the cap");
     let mut code = op(BytecodeBuilder::default(), TIMESTAMP);
-    for slot in 1..=300_u64 {
+    for slot in 1..=slots {
         code = code.sstore(U256::from(slot), U256::from(1));
     }
     let code = code.stop().build();
@@ -1530,8 +1553,9 @@ fn test_state_and_history_gas_are_not_compute() {
             tx(CALLER, CONTRACT, gas_limit),
         );
         assert!(run.outcome.result.is_success(), "{:?}", run.outcome.result);
-        assert!(run.outcome.gas.state > CAP, "{}", run.outcome.gas.state);
-        assert!(run.outcome.gas.regular < CAP);
+        let gas = run.outcome.gas;
+        assert!(gas.state + gas.history >= slots * spill, "{gas:?}");
+        assert!(gas.regular < CAP, "{gas:?}");
     }
 }
 
