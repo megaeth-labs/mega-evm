@@ -91,7 +91,7 @@ mutant = "crates/mega-evm/src/external/hasher/fallback.rs:125:47: replace | with
 justification = "Equivalent: `(value[0] as u128) | ((value[1] as u128) << 64)` ORs a u64-widened low half (bits 0..63 only) with a u64-widened high half shifted into bits 64..127 only. The operands have disjoint set bits by construction for every input, so | == ^ identically; no reachable input distinguishes them."
 reviewer = "improve-mutation-score (William Aaron Cheung)"
 
-# --- DeterministicHasher typed write_uN / update mutants (dead: unreachable from public API) -------
+# --- DeterministicHasher typed write_uN / update mutants (dead outside the unit tests) ------------
 # `AHashBucketHasher` — the crate's ONLY public hasher — computes bucket ids via
 # `hash(bytes)` (hasher/mod.rs), which calls `DeterministicHasher::write(&[u8])` (the slice
 # write) and `finish()`. The slice `write` routes exclusively through `large_update`; it
@@ -99,74 +99,73 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 #
 # `update` is reached ONLY from `write_u8/u16/u32/u64` (and `write_usize` -> `write_u64`);
 # those typed `write_uN` methods are reached ONLY through `core::hash::Hasher` trait dispatch.
-# `DeterministicHasher` / `RandomState` are `pub(crate)` and are NOT re-exported, so no
-# integration test (a separate crate) can construct a hasher and drive the typed writes; and
-# a grep of the whole `mega-evm` src confirms ZERO non-test callers of any typed `write_uN`,
-# `.update(`, `build_hasher`, `DeterministicHasher`, or `RandomState` outside the hasher
-# module itself. The typed methods exist solely to satisfy the `core::hash::Hasher` trait
-# contract; they are dead with respect to every reachable code path of the public API.
+# `DeterministicHasher` / `RandomState` live in the hasher's private `fallback` module, so no
+# integration test (a separate crate) can construct a hasher and drive the typed writes, and no
+# non-test code outside the hasher module names them. The typed methods exist solely to satisfy
+# the `core::hash::Hasher` trait contract; no bucket id depends on them.
 #
-# Because they are unreachable, mutating them (`write_uN -> ()`, or `^` -> `|`/`&` inside the
-# dead `update`) cannot change any observable output of `AHashBucketHasher::bucket_id` (the
-# full mega-evm suite is green with each mutant applied). The inline `#[cfg(test)]` unit test
-# `test_hasher_typed_write_methods` does exercise them via the crate-internal `RandomState`,
-# but the mutation run builds the integration test targets only, so that unit test cannot
-# kill them — and the public API offers no path to do so. Recorded here as dead code.
+# The mutation run executes the lib's unit tests (nextest over the whole package), so the inline
+# unit test `test_hasher_typed_write_methods` does run the typed writes. It asserts only that the
+# typed hashes of one value differ from one another and that `write_u64` and `write_usize`
+# agree, never what a hash is. It kills `update -> ()` (the typed writes then collide) and
+# `write_usize -> ()` (it then differs from `write_u64`), which are not suppressed. The seven
+# mutants below keep those relations: applied one at a time, each passes the hasher's unit tests
+# and the whole mega-evm lib and test suite. Recorded here as dead code.
 [[suppress]]
 kind = "line"
 category = "dead"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
 mutant = "replace ^ with | in DeterministicHasher::update"
-justification = "Dead/unreachable from the public API: AHashBucketHasher::bucket_id drives only the slice write() -> large_update; update() is reached solely via the typed write_uN methods, which are unreachable (pub(crate) DeterministicHasher/RandomState are not re-exported, no integration test can construct them, and zero non-test callers exist crate-wide). The ^->| mutant changes no observable bucket_id output."
-reviewer = "improve-mutation-score (William Aaron Cheung)"
+justification = "Dead outside the unit tests: bucket_id drives only the slice write() -> large_update, and update() is reached solely via the typed write_uN methods, which no non-test code calls. test_hasher_typed_write_methods runs it but asserts only that the typed hashes differ from one another, which `new_data | buffer` keeps; observed passing the hasher tests and the whole mega-evm suite. Changes no bucket id."
+reviewer = "RealiCZ"
 
 [[suppress]]
 kind = "line"
 category = "dead"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
 mutant = "replace ^ with & in DeterministicHasher::update"
-justification = "Dead/unreachable from the public API: see the ^->| entry for update — update() is only reached via the unreachable typed write_uN methods. The ^->& mutant changes no observable bucket_id output."
-reviewer = "improve-mutation-score (William Aaron Cheung)"
+justification = "Dead outside the unit tests: see the ^->| entry for update. test_hasher_typed_write_methods asserts only that the typed hashes differ from one another, which `new_data & buffer` keeps; observed passing the hasher tests and the whole mega-evm suite. Changes no bucket id."
+reviewer = "RealiCZ"
 
 [[suppress]]
 kind = "line"
 category = "dead"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
 mutant = "replace <impl core::hash::Hasher for DeterministicHasher>::write_u8 with ()"
-justification = "Dead/unreachable from the public API: bucket_id uses only the slice write() -> large_update; write_u8 is reached only via core::hash::Hasher trait dispatch on the pub(crate), non-re-exported DeterministicHasher, which no integration test (or any non-test crate caller) can invoke. Stubbing it to () changes no observable bucket_id output."
-reviewer = "improve-mutation-score (William Aaron Cheung)"
+justification = "Dead outside the unit tests: bucket_id uses only the slice write() -> large_update, and no non-test code calls write_u8. test_hasher_typed_write_methods calls it but asserts only that its hash differs from the other typed writes', which the hash of an unwritten hasher still does; observed passing the hasher tests and the whole mega-evm suite. Changes no bucket id."
+reviewer = "RealiCZ"
 
 [[suppress]]
 kind = "line"
 category = "dead"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
 mutant = "replace <impl core::hash::Hasher for DeterministicHasher>::write_u16 with ()"
-justification = "Dead/unreachable from the public API: same as write_u8 — write_u16 is reached only via trait dispatch on the non-re-exported pub(crate) hasher; never on any bucket_id path. Stubbing it to () changes no observable output."
-reviewer = "improve-mutation-score (William Aaron Cheung)"
+justification = "Dead outside the unit tests: same as write_u8. test_hasher_typed_write_methods asserts only that write_u16's hash differs from the other typed writes', which the hash of an unwritten hasher still does; observed passing the hasher tests and the whole mega-evm suite. Changes no bucket id."
+reviewer = "RealiCZ"
 
 [[suppress]]
 kind = "line"
 category = "dead"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
 mutant = "replace <impl core::hash::Hasher for DeterministicHasher>::write_u32 with ()"
-justification = "Dead/unreachable from the public API: same as write_u8 — write_u32 is reached only via trait dispatch on the non-re-exported pub(crate) hasher; never on any bucket_id path. Stubbing it to () changes no observable output."
-reviewer = "improve-mutation-score (William Aaron Cheung)"
+justification = "Dead outside the unit tests: same as write_u8. test_hasher_typed_write_methods asserts only that write_u32's hash differs from the other typed writes', which the hash of an unwritten hasher still does; observed passing the hasher tests and the whole mega-evm suite. Changes no bucket id."
+reviewer = "RealiCZ"
 
 [[suppress]]
 kind = "line"
 category = "dead"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
 mutant = "replace <impl core::hash::Hasher for DeterministicHasher>::write_u64 with ()"
-justification = "Dead/unreachable from the public API: same as write_u8 — write_u64 (and write_usize, which delegates to it) is reached only via trait dispatch on the non-re-exported pub(crate) hasher; never on any bucket_id path. Stubbing it to () changes no observable output."
-reviewer = "improve-mutation-score (William Aaron Cheung)"
+justification = "Dead outside the unit tests: same as write_u8; write_usize delegates to it. test_hasher_typed_write_methods asserts only that write_u64 and write_usize agree, which they still do, both hashing nothing; observed passing the hasher tests and the whole mega-evm suite. Changes no bucket id."
+reviewer = "RealiCZ"
 
 [[suppress]]
 kind = "line"
 category = "dead"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
 mutant = "replace <impl core::hash::Hasher for DeterministicHasher>::write_u128 with ()"
-justification = "Dead/unreachable from the public API: bucket_id's slice write() never delegates to write_u128 (it calls large_update directly); write_u128 is reached only via trait dispatch on the non-re-exported pub(crate) hasher, which no non-test caller invokes. Stubbing it to () changes no observable output."
-reviewer = "improve-mutation-score (William Aaron Cheung)"
+justification = "Dead outside the unit tests: bucket_id's slice write() calls large_update directly, never write_u128, and no non-test code calls it. test_hasher_typed_write_methods asserts only that its hash differs from the other typed writes', which the hash of an unwritten hasher still does; observed passing the hasher tests and the whole mega-evm suite. Changes no bucket id."
+reviewer = "RealiCZ"
 
 # --- DeterministicHasher::write line-109 `> 16` -> `>= 16` (equivalent) ------------
 # `if data.len() > 16 { large branch } else { mid branch }`. The `>=` mutant only diverges
@@ -247,18 +246,6 @@ reviewer = "RealiCZ"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # crates/mega-evm/src/ survivors of the common execution layer.
-
-# --- DeclaredObserver::log forwarding (dead while EIP-7708 is off) ----------------------
-# revm hands a log to `Inspector::log` (without an interpreter) only from the frame-init path
-# (`inspect_frame_init`); every log an opcode emits goes to `log_full`, which the forwarding
-# test covers.
-[[suppress]]
-kind = "line"
-category = "dead"
-file = "crates/mega-evm/src/evm/inspector.rs"
-mutant = "replace <impl Inspector<CTX, INTR> for DeclaredObserver<I>>::log with ()"
-justification = "Dead in Satin: revm calls `Inspector::log` only for logs journaled by frame init, which Satin never journals (EIP-7708 fixed off, no logging precompile); opcode logs reach `log_full`, which test_declared_observer_forwards_every_callback covers. Becomes live when EIP-7708 is switched on."
-reviewer = "RealiCZ"
 
 # --- AdditionalLimit::discard_stale_record (equivalent) ---------------------------------
 # Every wrapper discards a record staged before its opcode on entry. The three wrapped opcodes
