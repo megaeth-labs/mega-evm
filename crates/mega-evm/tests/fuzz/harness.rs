@@ -10,9 +10,10 @@
 //!   a long run is reproducible.
 //!
 //! `MEGA_FUZZ_CASES` replaces a property's case count in either mode: every property then runs
-//! exactly that many cases, and the long mode's multiplier does not apply. `MEGA_FUZZ_SEED` names
-//! the seed in either mode. Either variable set to the empty string counts as unset, so a caller
-//! that always exports them, as a workflow input does, need not unset them. A failure panics with
+//! exactly that many cases, and the long mode's multiplier does not apply. A count of zero is
+//! refused. `MEGA_FUZZ_SEED` names the seed in either mode. Either variable set to the empty
+//! string counts as unset, so a caller that always exports them, as a workflow input does, need
+//! not unset them. A failure panics with
 //! the property's name, the reason, the seed and case count that reproduce the run and the minimal
 //! failing case, as `Debug` renders it.
 
@@ -75,14 +76,14 @@ impl FuzzConfig {
     /// - The long mode is on when its variable is anything but empty, `0` or `false`.
     /// - A case count, when named, is the count: it replaces the bounded count and the long mode's
     ///   multiple of it alike. Unnamed, the count is the bounded one, times [`LONG_MULTIPLIER`] in
-    ///   the long mode.
+    ///   the long mode. Zero is refused: a property that runs no case passes without checking.
     /// - A seed, when named, is the seed. Unnamed, the bounded mode's is [`DEFAULT_SEED`] and the
     ///   long mode's comes from the clock.
     /// - An empty value is an unnamed one.
     ///
     /// # Panics
     ///
-    /// When a case count or a seed is named and is not a number.
+    /// When a case count or a seed is named and is not a number, or the case count is zero.
     fn from_vars(
         bounded_cases: u32,
         long: Option<&str>,
@@ -96,7 +97,12 @@ impl FuzzConfig {
         let long = named(long).is_some_and(|v| !matches!(v, "0" | "false"));
         let cases = match named(cases) {
             Some(v) => {
-                v.parse().unwrap_or_else(|_| panic!("{CASES_ENV_VAR}={v:?} is not a number"))
+                let cases: u32 =
+                    v.parse().unwrap_or_else(|_| panic!("{CASES_ENV_VAR}={v:?} is not a number"));
+                if cases == 0 {
+                    panic!("{CASES_ENV_VAR} must name at least one case");
+                }
+                cases
             }
             None if long => bounded_cases.saturating_mul(LONG_MULTIPLIER),
             None => bounded_cases,
@@ -292,6 +298,18 @@ mod tests {
     #[should_panic(expected = "MEGA_FUZZ_CASES=\"many\" is not a number")]
     fn test_a_case_count_that_is_not_a_number_is_refused() {
         config(None, Some("many"), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "MEGA_FUZZ_CASES must name at least one case")]
+    fn test_a_case_count_of_zero_is_refused() {
+        config(None, Some("0"), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "MEGA_FUZZ_CASES must name at least one case")]
+    fn test_a_blank_padded_case_count_of_zero_is_refused() {
+        config(Some("1"), Some(" 0 "), Some("9"));
     }
 
     #[test]

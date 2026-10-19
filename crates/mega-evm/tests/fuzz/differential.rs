@@ -156,6 +156,7 @@ fn run_eth(case: &Case, fork: EthSpecId, block: BlockEnv, tx: TxEnv) -> Result<O
 /// every transaction but a deposit that creates its caller's account.
 #[test]
 fn test_differential_neutral_mega_evm_matches_op_revm() {
+    let compared = AtomicU32::new(0);
     check(
         "differential_op_revm",
         CASES,
@@ -168,6 +169,7 @@ fn test_differential_neutral_mega_evm_matches_op_revm() {
             if case.tx.is_deposit() && caller_is_empty {
                 return Ok(());
             }
+            compared.fetch_add(1, Ordering::Relaxed);
             for fork in FORKS {
                 let block = case.block();
                 let tx = case.transaction().0;
@@ -178,6 +180,8 @@ fn test_differential_neutral_mega_evm_matches_op_revm() {
             Ok(())
         },
     );
+    let compared = compared.load(Ordering::Relaxed);
+    assert!(compared > 0, "no case was compared with op-revm");
 }
 
 /// Under the neutral configuration of each fork, an unpriced transaction that is not a deposit
@@ -222,10 +226,12 @@ fn test_differential_neutral_mega_evm_matches_ethereum() {
             Ok(())
         },
     );
+    let compared = compared.load(Ordering::Relaxed);
+    let rewritten = rewritten.load(Ordering::Relaxed);
     println!(
-        "differential_ethereum: {} cases compared on both forks, {} of them on Amsterdam without \
-         the self-destruction their init code held",
-        compared.load(Ordering::Relaxed),
-        rewritten.load(Ordering::Relaxed)
+        "differential_ethereum: {compared} cases compared on both forks, {rewritten} of them on \
+         Amsterdam without the self-destruction their init code held"
     );
+    assert!(compared > 0, "no case was compared with Ethereum");
+    assert!(rewritten > 0, "no case was rewritten for Amsterdam");
 }
