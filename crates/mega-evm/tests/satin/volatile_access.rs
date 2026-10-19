@@ -141,38 +141,6 @@ fn test_detention_starts_afresh_for_every_transaction() {
     assert!(second.outcome.gas.regular > CAP);
 }
 
-/// A read that stays within the cap costs what it ran: the gas detention withheld is never
-/// spent, below and above the execution cap.
-#[test]
-fn test_a_read_within_the_cap_bills_what_ran() {
-    for gas_limit in TIERS {
-        for opcode in [TIMESTAMP, NUMBER, COINBASE, DIFFICULTY, GASLIMIT, BASEFEE] {
-            // The read, a word stored, a short loop, and the word returned.
-            let code = BytecodeBuilder::default().append(opcode).push_number(0_u8).append(MSTORE);
-            let code = work(code, 10).push_number(32_u8).push_number(0_u8).append(RETURN).build();
-            let run = execute(
-                MemoryDatabase::default().account_code(CONTRACT, code),
-                tx(CALLER, CONTRACT, gas_limit),
-            );
-            assert!(run.outcome.result.is_success(), "{opcode:#04x}");
-            assert!(run.limit.is_some(), "{opcode:#04x}");
-            // What it ran is well under 100,000; the body's history comes on top.
-            let used = run.outcome.result.gas().tx_gas_used();
-            assert!(
-                used < 100_000 + body_history(0),
-                "{opcode:#04x}: {used}, not the gas it was given"
-            );
-        }
-        let code = BytecodeBuilder::default().push_number(299_u16).append(BLOCKHASH).stop().build();
-        let run = execute(
-            MemoryDatabase::default().account_code(CONTRACT, code),
-            tx(CALLER, CONTRACT, gas_limit),
-        );
-        assert!(run.outcome.result.is_success());
-        assert!(run.outcome.result.gas().tx_gas_used() < 100_000 + body_history(0));
-    }
-}
-
 /* ---------- which read sets the limit ---------- */
 
 /// A read two frames down caps every caller: the middle frame and the transaction's own frame

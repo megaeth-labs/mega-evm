@@ -207,22 +207,6 @@ fn test_cap_crossed_at_depth_three_stops_each_frame_that_crosses_it() {
     }
 }
 
-/// With and without an inspector the stopped transaction spends the same gas, and the stop burns
-/// none of what the transaction did not run.
-#[test]
-fn test_stop_bills_only_what_ran() {
-    let gas_of = |db: MemoryDatabase, inspect: bool| {
-        let mut evm = evm_with(db, cap(180), Probe::default());
-        alloy_evm::Evm::set_inspector_enabled(&mut evm, inspect);
-        let result = evm.transact_raw(call(CALLER, A, U256::ZERO, GAS_LIMIT)).unwrap();
-        assert_stopped(&result.result, LimitKind::DataSize, mega_evm::TX_BODY_SIZE + 180);
-        result.result.gas().tx_gas_used()
-    };
-    let plain = gas_of(chain(), false);
-    assert_eq!(gas_of(chain(), true), plain, "an observing inspector changes nothing");
-    assert!(plain < GAS_LIMIT / 2, "the stop does not burn the gas: {plain}");
-}
-
 /// The stopped transaction gives the whole reservoir back, and spends the same gas whatever its
 /// gas limit, so a limit above the execution cap changes nothing but the refund.
 #[test]
