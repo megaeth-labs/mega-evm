@@ -202,3 +202,55 @@ fn test_a_legacy_command_ending_its_options_runs_on_the_default_spec() {
     args.extend(["--json", "--"]);
     assert_eq!(run(&args), transfer.expected);
 }
+
+/// Runs the binary and returns its stdout, failing on a non-zero exit.
+fn run_ok(args: &[&str]) -> String {
+    let output = Command::new(env!("CARGO_BIN_EXE_mega-evme")).args(args).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{args:?} exited {:?}: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// `SELFBALANCE PUSH0 MSTORE PUSH1 32 PUSH0 RETURN`: returns the executing account's balance.
+const SELF_BALANCE_CODE: &str = "0x475f5260205ff3";
+
+/// The 32-byte word `value` as the `Output:` line of a human run prints it.
+fn word(value: u64) -> String {
+    format!("0x{value:064x}")
+}
+
+/// A `--balance` or `--faucet` override of the `run` receiver survives the code `run` installs
+/// at that address afterwards.
+#[test]
+fn test_a_balance_override_of_the_run_receiver_survives_its_code() {
+    let receiver = "0x2000000000000000000000000000000000000002";
+    let balance = format!("{receiver}=1000");
+    let faucet = format!("{receiver}+=1000");
+    for overrides in [["--balance", balance.as_str()], ["--faucet", faucet.as_str()]] {
+        let mut args = vec!["run", "--spec", "Satin", SELF_BALANCE_CODE, "--receiver", receiver];
+        args.extend(overrides);
+        let stdout = run_ok(&args);
+        assert!(stdout.contains(&word(1000)), "{overrides:?}: {stdout}");
+    }
+}
+
+/// A `--balance` or `--faucet` override of a system predeploy survives the deployment of its code.
+#[test]
+fn test_a_balance_override_of_a_predeploy_survives_its_deployment() {
+    // A contract that returns the balance of the MegaAccessControl predeploy:
+    // PUSH20 <addr> BALANCE PUSH0 MSTORE PUSH1 32 PUSH0 RETURN.
+    let predeploy = mega_evm::system::ACCESS_CONTROL_ADDRESS;
+    let code = format!("0x73{}315f5260205ff3", alloy_primitives::hex::encode(predeploy));
+    let balance = format!("{predeploy}=777");
+    let faucet = format!("{predeploy}+=777");
+    for overrides in [["--balance", balance.as_str()], ["--faucet", faucet.as_str()]] {
+        let mut args = vec!["run", "--spec", "Satin", code.as_str()];
+        args.extend(overrides);
+        let stdout = run_ok(&args);
+        assert!(stdout.contains(&word(777)), "{overrides:?}: {stdout}");
+    }
+}

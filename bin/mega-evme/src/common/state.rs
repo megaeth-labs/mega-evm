@@ -330,7 +330,7 @@ impl PreStateArgs {
 
 /// One CLI override of an account the prestate file does not already hold.
 ///
-/// Applied on read, on top of the backend account, so a balance or one storage slot does not
+/// Applied on read, on top of the backend account or of an entry added to the prestate later, so a balance or one storage slot does not
 /// replace the rest of a forked account.
 #[derive(Debug, Default, Clone)]
 struct AccountOverlay {
@@ -758,10 +758,11 @@ where
     type Error = EvmeError;
 
     fn basic(&mut self, address: Address) -> std::result::Result<Option<AccountInfo>, Self::Error> {
-        // Check prestate overrides first
+        // Check prestate overrides first. An overlay applies on top of an entry too: `run` and
+        // `tx` add entries (the receiver's code, the predeploys) after the overlays were taken.
         if let Some(account) = self.prestate.get(&address) {
             trace!(address = %address, account = ?account, "Loaded account basic from prestate");
-            return Ok(Some(account.info.clone()));
+            return self.apply_account_overlay(address, Some(account.info.clone()));
         }
 
         // Query backend database
@@ -883,10 +884,11 @@ where
     type Error = EvmeError;
 
     fn basic_ref(&self, address: Address) -> std::result::Result<Option<AccountInfo>, Self::Error> {
-        // Check prestate overrides first
+        // Check prestate overrides first. An overlay applies on top of an entry too: `run` and
+        // `tx` add entries (the receiver's code, the predeploys) after the overlays were taken.
         if let Some(account) = self.prestate.get(&address) {
             trace!(address = %address, account = ?account, "Loaded account basic from prestate");
-            return Ok(Some(account.info.clone()));
+            return self.apply_account_overlay(address, Some(account.info.clone()));
         }
 
         // Query backend database
