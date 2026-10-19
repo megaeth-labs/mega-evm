@@ -582,8 +582,11 @@ fn test_a_destruction_grows_state_only_when_it_creates_its_beneficiary() {
 /// Every case runs under a data-size limit of the body alone, which the record made right after
 /// the state charge crosses — the slot's, the beneficiary's, the new account's — and which a charge
 /// the transaction cannot pay never reaches. With exactly what the transaction needs to the end of
-/// its state charge — and of the start's records — it is that limit that stops the transaction,
-/// which pins each gas limit as one gas short of the charge, or of the start, and nothing else.
+/// its state charge — and of the start's records — it is that limit that stops the frame that
+/// makes the record, which pins each gas limit as one gas short of the charge, or of the start,
+/// and nothing else. A value `CALL`'s start is answered with the stop, which its caller catches
+/// and ends on; a `CREATE`'s still bumps its creator's nonce, whose record then stops the creator,
+/// the transaction's own frame.
 ///
 /// Independence: constants. Each gas limit is written out from the spec's numbers — the EIP-2780
 /// base of 12,000, 3,000 for the recipient and 6,000 for its value, two gas per `PUSH0` and three
@@ -610,8 +613,9 @@ fn test_a_state_charge_the_frame_cannot_pay_runs_out_of_gas_whatever_the_limit()
     // recipient, or a creation's creator nonce and created account.
     let start_records = history(2 * WRITE_RECORD_SIZE);
     // (case, database, the transaction at a gas limit, what it pays before the state charge, the
-    // state charge, what it pays after the state charge for the stop to be reached)
-    type Case = (&'static str, MemoryDatabase, fn(u64) -> MegaTransaction, u64, u64, u64);
+    // state charge, what it pays after the state charge for the stop to be reached, whether the
+    // transaction's own frame catches the stop)
+    type Case = (&'static str, MemoryDatabase, fn(u64) -> MegaTransaction, u64, u64, u64, bool);
     let to_a = |gas_limit| call(CALLER, A, U256::ZERO, gas_limit);
     let cases: [Case; 5] = [
         (
@@ -627,6 +631,7 @@ fn test_a_state_charge_the_frame_cannot_pay_runs_out_of_gas_whatever_the_limit()
             slot_state_gas(),
             // The slot's record is held before its history is charged.
             0,
+            false,
         ),
         (
             "a SELFDESTRUCT that creates its beneficiary",
@@ -646,6 +651,7 @@ fn test_a_state_charge_the_frame_cannot_pay_runs_out_of_gas_whatever_the_limit()
             account_state_gas(),
             // The beneficiary's record is held before its history is charged.
             0,
+            false,
         ),
         (
             "a value transaction to an account that does not exist",
@@ -656,6 +662,7 @@ fn test_a_state_charge_the_frame_cannot_pay_runs_out_of_gas_whatever_the_limit()
             12_000 + 3_000 + 6_000 + body_history(0) + history(WRITE_RECORD_SIZE),
             account_state_gas(),
             0,
+            false,
         ),
         (
             "a value CALL to an account that does not exist",
@@ -686,6 +693,7 @@ fn test_a_state_charge_the_frame_cannot_pay_runs_out_of_gas_whatever_the_limit()
             account_state_gas(),
             // The two records, which a forward of nothing leaves to the caller.
             start_records,
+            true,
         ),
         (
             "a CREATE",
@@ -702,9 +710,10 @@ fn test_a_state_charge_the_frame_cannot_pay_runs_out_of_gas_whatever_the_limit()
             created_account_state_gas(),
             // The two records, out of the 64th the creator keeps after its forward.
             64 * start_records,
+            false,
         ),
     ];
-    for (name, db, tx, before, charge, then) in cases {
+    for (name, db, tx, before, charge, then, caught) in cases {
         let short = before + charge - 1;
         let start = before + charge + then;
         let mut rows = vec![(format!("{name}, one gas short of the state charge"), short)];
@@ -730,6 +739,15 @@ fn test_a_state_charge_the_frame_cannot_pay_runs_out_of_gas_whatever_the_limit()
         }
 
         let paid = run_under_data_size(db.clone(), tx(start), TX_BODY_SIZE);
+        if caught {
+            assert!(paid.result.is_success(), "{name}: the caller catches the stop");
+            assert_eq!(
+                paid.limit_exceeded, None,
+                "{name}: a stop below the transaction's own frame"
+            );
+            assert_eq!(paid.usage.data_size, TX_BODY_SIZE, "{name}: the start's records went");
+            continue;
+        }
         assert!(
             matches!(
                 paid.limit_exceeded,

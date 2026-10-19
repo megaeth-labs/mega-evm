@@ -293,10 +293,10 @@ where
         Ok(Some(frame))
     }
 
-    /// Settles the outermost frame: pops its lane and, when the transaction is latched, turns its
-    /// result into the latched stop; then settles its gas into the transaction's as op-revm does
-    /// (op-revm replaces revm's settlement, so revm's never runs here): a stopped transaction
-    /// settles like an EIP-8037 revert, its unspent regular gas and reservoir back to the sender.
+    /// Settles the outermost frame: pops its lane, then settles its gas into the transaction's as
+    /// op-revm does (op-revm replaces revm's settlement, so revm's never runs here): a transaction
+    /// whose own frame a limit stopped settles like an EIP-8037 revert, its unspent regular gas
+    /// and reservoir back to the sender.
     /// Keeps the history gas the transaction spent: what the body was charged, and what the frames
     /// charged net of what they gave back; and the history bytes it appended, which are what those
     /// charges were made for.
@@ -380,18 +380,16 @@ where
     }
 
     /// op-revm's error handling, which answers a deposit's transaction error with a failed-deposit
-    /// halt and discards everything the deposit did. The halt is what the transaction reports, and
-    /// no stop is left standing beside it; what the deposit counted stands, the body and the
-    /// Oracle hints it forwarded before it halted. Any other error refuses the transaction, and
-    /// the layer's state is reset by the next one.
+    /// halt and discards everything the deposit did. The halt is what the transaction reports;
+    /// what the deposit counted stands, the body and the Oracle hints it forwarded before it
+    /// halted, as for any transaction that halts. Any other error refuses the transaction, and the
+    /// layer's state is reset by the next one.
     fn catch_error(
         &self,
         evm: &mut Self::Evm,
         error: Self::Error,
     ) -> Result<revm::context::result::ExecutionResult<Self::HaltReason>, Self::Error> {
-        let result = self.op.catch_error(evm, error)?;
-        evm.ctx_mut().additional_limit.on_transaction_error();
-        Ok(result)
+        self.op.catch_error(evm, error)
     }
 }
 
@@ -457,9 +455,9 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     ///    answers the frame with the stop before it runs. A start revm refuses on its caller's
     ///    account ([`caller_refuses_start`]) makes no write and journals no transfer log, so it
     ///    gets an empty lane and nothing is counted;
-    /// 5. revm builds the frame, or answers it. A success answer of the transaction's own frame
-    ///    rewritten into the stop has its journal taken back to where its start began, since no
-    ///    caller's revert will take back what the answer wrote ([`take_back_a_stopped_answer`]).
+    /// 5. revm builds the frame, or answers it. A success answer the engine then rewrites into the
+    ///    stop has its journal taken back to where its start began, as revm takes back a frame that
+    ///    fails ([`take_back_a_stopped_answer`]).
     ///
     /// A frame answered at step 2, 3 or 5 — a `keylessDeploy` call carrying value, an
     /// interceptor's answer, a precompile's, revm's for a call it did not start — is held to the
@@ -470,8 +468,8 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     /// forwarded ([`hold_precompile`]).
     ///
     /// Step 1 is the pre-frame check: it answers a frame nothing may start. No limit has a part in
-    /// it: validation admits no transaction a limit would stop before its first frame, and once a
-    /// limit stops a transaction no caller resumes to start another. The frame's own writes are
+    /// it: validation admits no transaction a limit would stop before its first frame, and a start
+    /// is held to the limits with the writes it makes, at step 4. The frame's own writes are
     /// counted after the interceptor, because an intercepted frame's writes are the interceptor's
     /// to count. A `keylessDeploy` call's frame is built as any call's, and its creation is started
     /// by its first run, through this same frame start, as its child.
@@ -524,8 +522,10 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             &mut frame_init,
             refused,
         );
-        // Where the transaction's own frame starts, for an answer the engine then stops.
-        let start = (depth == 0).then(|| journal_position(ctx));
+        // Where the frame's start begins, for an answer the engine then stops. Only gas detention
+        // turns an answer into the stop, and only once a read set its limit, which a frame's start
+        // reads nothing to set.
+        let start = ctx.detention.compute_limit().is_some().then(|| journal_position(ctx));
         let outcome = if hold == PrecompileHold::Crossing {
             Err(crossing_answer(&frame_init.frame_input))
         } else {
@@ -552,17 +552,21 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
                 }
                 let succeeded = result.instruction_result().is_ok();
                 settle_answer(ctx, depth, gas_limit, &mut result);
-                if let Some(start) = start {
-                    take_back_a_stopped_answer(ctx, start, succeeded, &result);
+                match start {
+                    Some(start) => take_back_a_stopped_answer(ctx, start, succeeded, &result),
+                    None => debug_assert!(
+                        !succeeded || result.instruction_result().is_ok(),
+                        "an answer became the stop with no compute limit set"
+                    ),
                 }
                 Ok(ItemOrResult::Result(result))
             }
         }
     }
 
-    /// Runs the frame on top of the stack, unless it has a stop to return: the latched one, or
-    /// its own when a failed creation put it over its budget. Then the frame returns the stop
-    /// without running another instruction (see [`before_frame_run`]). A `keylessDeploy` call's
+    /// Runs the frame on top of the stack, unless it has a stop to return: its own, when what a
+    /// child left it put it over a limit. Then the frame returns the stop without running another
+    /// instruction (see [`before_frame_run`]). A `keylessDeploy` call's
     /// frame runs no instruction at all: its actions are made by hand ([`keyless::run`]).
     ///
     /// Gas detention holds the frame to the compute limit before it runs, and settles the frame
@@ -585,16 +589,6 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         };
         let mut next = frame.process_next_action(ctx, action);
         after_frame_run(ctx, frame, &mut next);
-        // No frame runs an instruction once the transaction is latched, and every site that
-        // latches rewrites its own frame's action to the stop, so no frame returns a halt under
-        // the latch. Checked on this path alone: on the inspected one an inspector's step hooks
-        // can rewrite a running frame's action, and the latch writes over that halt instead.
-        debug_assert!(
-            !matches!(&next, Ok(ItemOrResult::Result(result))
-                if result.instruction_result().is_halt() &&
-                    ctx.additional_limit.latched().is_some()),
-            "a frame returned a halt under the latch"
-        );
         next.inspect(|next| {
             if next.is_result() {
                 frame.set_finished(true);
@@ -602,9 +596,8 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         })
     }
 
-    /// Pops the returning frame's lane (merged on success, discarded on failure; under a latch the
-    /// result is first rewritten to the stop), then returns the result to the caller as revm
-    /// does.
+    /// Pops the returning frame's lane (merged on success, discarded on failure), then returns the
+    /// result to the caller as revm does.
     ///
     /// The creation a `keylessDeploy` call started returns into the call: what the call answers is
     /// read off the creation's result before revm merges it ([`keyless::returning`]), and settled
@@ -612,9 +605,9 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     #[inline]
     fn frame_return_result(
         &mut self,
-        mut result: FrameResult,
+        result: FrameResult,
     ) -> Result<Option<FrameResult>, ContextDbError<Self::Context>> {
-        let refund = self.inner.ctx.additional_limit.on_frame_return(&mut result);
+        let refund = self.inner.ctx.additional_limit.on_frame_return(&result);
         let creation = keyless::returning(&self.inner.ctx, &mut self.inner.frame_stack, &result);
         let returned = self.inner.frame_return_result(result)?;
         // The history of the records the caller paid for and the frame did not keep, given back
@@ -778,9 +771,9 @@ where
 /// and the frame runs.
 ///
 /// A frame runs here for the first time or after a child returned into it. A stop is always the
-/// latter. Under a latch, the child that crossed the limit reverted, and its caller must not
-/// resume. Without one, the child was a failed creation whose nonce record put its creator over
-/// its budget, and the creator reverts alone.
+/// latter: the child was a failed creation whose nonce record, which lands on its creator, put the
+/// creator over a limit, its budget or the transaction's, and the creator reverts alone, as for a
+/// write of its own. A child that crossed a limit itself reverted alone, and its caller resumes.
 ///
 /// Either way gas detention sees the frame first: a frame's first run adds its caller's compute
 /// to the transaction's, a resume takes it back, and the frame's spendable gas is held to what the
@@ -810,8 +803,9 @@ fn before_frame_run<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// transaction's.
 ///
 /// A frame that ran out of gas on a charge the withheld part of its gas would have paid crossed
-/// the compute limit rather than its own gas: its halt becomes the transaction-level stop
-/// ([`stop_at_the_compute_limit`]). Every other out-of-gas halts, as it would without the read.
+/// the compute limit rather than its own gas: its halt becomes the compute stop, a revert of that
+/// frame alone ([`stop_at_the_compute_limit`]). Every other out-of-gas halts, as it would without
+/// the read.
 #[inline]
 fn after_frame_run<DB: Database, ExtEnvs: ExternalEnvTypes, E>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
@@ -972,10 +966,11 @@ const fn input_gas_limit(input: &FrameInput) -> u64 {
     }
 }
 
-/// Turns a frame that crossed gas detention's compute limit into the transaction-level stop: a
-/// revert carrying `MegaLimitExceeded` (kind: compute), with the transaction latched, so no caller
-/// resumes. The frame's gas is what it had before the charge that crossed, which goes back with
-/// the revert, to the caller and in the end to the sender.
+/// Turns a frame that crossed gas detention's compute limit into the compute stop: a revert of
+/// that frame alone carrying `MegaLimitExceeded` (kind: compute). The frame's gas is what it had
+/// before the charge that crossed, which goes back with the revert to its caller. The caller
+/// resumes held to what the limit leaves the transaction, which is less than the charge that
+/// crossed, so a caller that carries on is stopped at its next charge past it.
 ///
 /// The crossing charge's size is not kept, so the stop reports the transaction's compute at the
 /// crossing as what was used ([`LimitCheck::ExceedsLimit`]): what its regular ledger bills.
@@ -984,7 +979,7 @@ fn stop_at_the_compute_limit<DB: Database, ExtEnvs: ExternalEnvTypes>(
     result: &mut InterpreterResult,
     stop: ComputeStop,
 ) {
-    let stop = ctx.additional_limit.latch(LimitKind::ComputeGas, stop.limit, stop.used);
+    let stop = ctx.additional_limit.crossed(LimitKind::ComputeGas, stop.limit, stop.used, false);
     result.result = InstructionResult::Revert;
     result.output = ctx.additional_limit.note_frame_stop(&stop);
 }
@@ -1028,15 +1023,15 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     }
 }
 
-/// Takes the journal back to `start`, where the transaction's own frame began, when revm answered
-/// that frame with a success (`succeeded`) that the engine then rewrote into `result`, the stop.
+/// Takes the journal back to `start`, where a frame's start began, when revm answered the frame
+/// with a success (`succeeded`) that the engine then rewrote into `result`, the stop.
 ///
 /// revm commits an answered frame's journal checkpoint before its answer returns: a value transfer
 /// to an account with no code, or to a precompile that answers, has moved the value, created the
-/// recipient and journaled the transfer log by then. Below the transaction's own frame the stop
-/// reverts every caller, and the caller's checkpoint takes the answer's writes back with its own;
-/// the transaction's own frame has no caller, so its answer's writes are taken back here, as revm
-/// takes back a frame that fails. The journal's depth is left as it is.
+/// recipient and journaled the transfer log by then. The stop is a revert of the frame alone, and
+/// the caller that resumes keeps its own writes, so the answer's writes are taken back here, as
+/// revm takes back a frame that fails; for the transaction's own frame, which has no caller, this
+/// is all that takes them back. The journal's depth is left as it is.
 fn take_back_a_stopped_answer<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     start: JournalCheckpoint,
@@ -1639,9 +1634,9 @@ mod tests {
         }
     }
 
-    /// The transaction's own frame answered with a success that the engine then rewrote into the
-    /// stop has what its start wrote taken back to where its start began. An answer revm made a
-    /// failure took its writes back itself, and one the engine did not rewrite keeps them.
+    /// A frame answered with a success that the engine then rewrote into the stop, at any depth,
+    /// has what its start wrote taken back to where its start began. An answer revm made a failure
+    /// took its writes back itself, and one the engine did not rewrite keeps them.
     #[test]
     fn test_a_success_answer_rewritten_into_the_stop_is_taken_back() {
         for (succeeded, result, taken_back) in [

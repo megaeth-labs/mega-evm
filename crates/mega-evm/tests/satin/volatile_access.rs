@@ -31,9 +31,9 @@ use revm::{
 use crate::{
     common::body_history,
     detention::{
-        assert_stopped, burn, call, context, execute, intrinsic, on_beneficiary, op, run_on, spin,
-        stop_data, tx, with_delegation, work, Calls, Charges, BELOW, BENEFICIARY, CALLER, CAP,
-        CHILD, CONTRACT, DELEGATOR, TIERS,
+        assert_caught, assert_stopped, burn, call, context, execute, intrinsic, on_beneficiary, op,
+        run_on, spin, stop_data, tx, with_delegation, work, Calls, Charges, BELOW, BENEFICIARY,
+        CALLER, CAP, CHILD, CONTRACT, DELEGATOR, TIERS,
     },
     salt::entry,
 };
@@ -298,7 +298,8 @@ fn test_calling_the_oracle_without_reading_its_storage_detains_nothing() {
 }
 
 /// The Oracle's own code is held to the cap once it read its storage, whether the transaction
-/// calls it directly or through a frame, and whether the call is a `CALL` or a `STATICCALL`.
+/// calls it directly or through a frame, which catches its stop and ends on a `POP`, and whether
+/// the call is a `CALL` or a `STATICCALL`.
 #[test]
 fn test_the_oracle_reading_its_own_storage_is_held_to_the_cap() {
     assert_eq!(ORACLE_ACCESS_COMPUTE_GAS, CAP);
@@ -323,7 +324,7 @@ fn test_the_oracle_reading_its_own_storage_is_held_to_the_cap() {
             let code =
                 call(BytecodeBuilder::default(), scheme, ORACLE_CONTRACT_ADDRESS).stop().build();
             let run = execute(db().account_code(CONTRACT, code), tx(CALLER, CONTRACT, gas_limit));
-            assert_stopped(&run, intrinsic, left);
+            assert_caught(&run, intrinsic, left, &Charges::default().then(&[2]));
             assert_eq!(run.accessed, VolatileDataAccess::ORACLE, "{scheme:#04x}");
         }
     }

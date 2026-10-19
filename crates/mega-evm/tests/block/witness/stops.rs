@@ -1,7 +1,7 @@
 //! Every stop class through the harness: a transaction stopped by the data-size and compute
-//! limits, a crossing at a precompile's price, a crossing in an answer, and a block
-//! budget refusing a later transaction. A stop is what the block records, so a validator must
-//! produce the same stop from the same witness.
+//! limits, a crossing at a precompile's price, which its caller catches, a crossing in an answer,
+//! and a block budget refusing a later transaction. A stop is what the block records, so a
+//! validator must produce the same stop from the same witness.
 
 use alloy_primitives::{Bytes, U256};
 use alloy_sol_types::SolCall;
@@ -12,7 +12,9 @@ use mega_evm::{
     LimitCheck, LimitKind, TX_BODY_SIZE,
 };
 use revm::{
-    bytecode::opcode::{CALL, GAS, JUMP, JUMPDEST, LOG0, MCOPY, POP, PUSH0, TIMESTAMP},
+    bytecode::opcode::{
+        CALL, GAS, JUMP, JUMPDEST, LOG0, MCOPY, MSTORE, POP, PUSH0, RETURN, TIMESTAMP,
+    },
     context::result::ExecutionResult,
 };
 
@@ -53,7 +55,8 @@ fn read_then_spin() -> Bytes {
 }
 
 /// Code that reads the block's timestamp, then calls `ecrecover` on 128 bytes of memory with
-/// all its gas: a precompile priced at 3,000, more than a small cap leaves.
+/// all its gas — a precompile priced at 3,000, more than a small cap leaves — and returns the
+/// call's status.
 fn read_then_ecrecover() -> Bytes {
     BytecodeBuilder::default()
         .append_many([TIMESTAMP, POP])
@@ -61,8 +64,9 @@ fn read_then_ecrecover() -> Bytes {
         .push_number(128_u8)
         .append_many([PUSH0, PUSH0])
         .push_number(1_u8)
-        .append_many([GAS, CALL, POP])
-        .stop()
+        .append_many([GAS, CALL, PUSH0, MSTORE])
+        .push_number(32_u8)
+        .append_many([PUSH0, RETURN])
         .build()
 }
 
@@ -117,7 +121,8 @@ fn test_a_compute_stop_replays() {
 
 /// A crossing decided at a precompile's price: after a read of the block's timestamp under a cap
 /// of 1,000, `ecrecover`'s 3,000 is past the allowance and within the forward, so the call is
-/// answered without running and the transaction stopped.
+/// answered without running, with the stop, which its caller catches and returns as a failed
+/// call's status.
 #[test]
 fn test_a_precompile_price_crossing_replays() {
     let mut db = common::database();
@@ -128,7 +133,10 @@ fn test_a_precompile_price_crossing_replays() {
         .limits(limits)
         .tx(call(0, CONTRACT, Bytes::new(), 1_000_000))
         .run();
-    assert_stopped(&replay.recorded, 0, LimitKind::ComputeGas);
+    let caught = replay.recorded.tx(0);
+    assert!(caught.result.is_success(), "{:?}", caught.result);
+    assert_eq!(caught.result.output(), Some(&Bytes::from([0_u8; 32])), "the call was stopped");
+    assert_eq!(caught.limit_exceeded, None);
 }
 
 /// A crossing in an answer: a `keylessDeploy` call carrying value from the block beneficiary,

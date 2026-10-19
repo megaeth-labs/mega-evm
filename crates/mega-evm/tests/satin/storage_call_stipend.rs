@@ -737,7 +737,7 @@ fn test_a_frame_budget_revert_does_not_hand_the_allowance_back() {
     );
 
     assert!(spent.result.is_success(), "the caller resumes past a frame budget");
-    assert_eq!(spent.limit_exceeded, None, "a frame budget latches nothing");
+    assert_eq!(spent.limit_exceeded, None, "a frame budget below is no stop");
     assert_eq!(spent.gas.history, body(), "the reverted frame kept neither event nor record");
     assert_eq!(quiet.gas.history, body() + 2 * record(), "the frame that returned kept its own");
     // The reverting frame's records came back to the caller and its computation did not, which

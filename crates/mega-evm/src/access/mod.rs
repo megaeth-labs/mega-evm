@@ -88,15 +88,19 @@
 //! # The stop
 //!
 //! A frame whose result carries a crossing record crossed the cap, not its own gas: undetained,
-//! the withheld part would have paid the charge. The frame stops the transaction the way every
-//! transaction-level limit does — it reverts with `MegaLimitExceeded` (kind: compute), the
-//! transaction is latched, no caller resumes, and the transaction settles like an EIP-8037 revert
-//! (see [`AdditionalLimit`](crate::AdditionalLimit)). The stopped frame's gas is put back to what
-//! it had before the charge that crossed, from the record: the charge is not made, the spendable
-//! part the frame had and the withheld part go back to the sender, and the transaction is billed
-//! its compute at the crossing, less than one charge short of the limit. The stop reports that
-//! compute as what was used, the same figure at every site a crossing is made: a frame that ran,
+//! the withheld part would have paid the charge. The frame is stopped the way every limit stops
+//! the frame that crosses it: it reverts alone with `MegaLimitExceeded` (kind: compute), and its
+//! caller resumes as after any revert (see [`AdditionalLimit`](crate::AdditionalLimit)). The
+//! stopped frame's gas is put back to what it had before the charge that crossed, from the record:
+//! the charge is not made, and the spendable part the frame had and the withheld part go back to
+//! its caller, and in the end to the sender. The stop reports the transaction's compute at the
+//! crossing as what was used, the same figure at every site a crossing is made: a frame that ran,
 //! an answer, a precompile; the size of the charge that crossed is not kept.
+//!
+//! The limit holds without stopping the callers: a caller resumes held to what the limit leaves
+//! the transaction, which is less than the charge that crossed, so a regular charge it makes past
+//! that crosses again and stops it in turn. A caller that catches the stop and ends within what is
+//! left ends the transaction within the limit.
 //!
 //! Every other out-of-gas halts and burns as it would without the read: an operand above `usize`,
 //! a failed state or history charge, and a regular charge the frame's whole gas could not pay.
@@ -110,15 +114,15 @@
 //!   read;
 //! - priced past the allowance and within the forward, it needs gas the limit withholds: it is
 //!   answered out of gas without running, the answer is marked as a crossing, and the same rule
-//!   stops the transaction;
+//!   makes it the stop;
 //! - priced past its whole forward, it runs on the forward and runs out of gas, as without the
 //!   read: a failed call that burns its forward and that its caller survives.
 //!
 //! One residual is a choice: the price does not tell whether an input passes the checks a
 //! precompile makes after its gas check, so an input priced between the allowance and the forward
-//! that would fail such a check is the stop, where without the read the check fails the call,
-//! which burns its forward and which its caller survives. Running it to find out would compute
-//! past the limit.
+//! that would fail such a check is the stop, which gives its forward back, where without the read
+//! the check fails the call, which burns its forward. Its caller survives either. Running it to
+//! find out would compute past the limit.
 //!
 //! Every entry of the Satin set is priced, op-revm's size-limited wrappers of the BN254 pairing
 //! and the BLS12-381 MSMs and pairing included. A precompile the engine cannot price — a node's
@@ -126,13 +130,12 @@
 //! the forward back. Within the allowance, it answers as it would without the read. Past it, it
 //! answers out of gas without computing, the answer is marked as a crossing, and it is the stop,
 //! whether its price is within its forward or not: one priced past its whole forward is the stop
-//! too, where without the read it would be a failed call its caller survives. It also sees the
+//! too, where without the read it would be a failed call that burns its forward. It also sees the
 //! allowance as its gas limit.
 //!
 //! An interceptor builds its answer on all the gas the caller forwarded, the caller's withheld
 //! part included: an answer that spent more regular gas than the allowance the frame would have
-//! run on is answered out of gas and marked as a crossing, and the same rule stops the
-//! transaction.
+//! run on is answered out of gas and marked as a crossing, and the same rule makes it the stop.
 //!
 //! A keyless deployment's call is the transaction's own frame, and runs no code: it charges its
 //! own work — the overhead of decoding and recovering the signer, then the `CREATE` opcode's

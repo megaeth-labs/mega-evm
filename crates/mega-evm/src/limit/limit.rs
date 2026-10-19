@@ -16,34 +16,34 @@ use super::{
 use crate::storage_call_stipend;
 
 /// What the common execution layer tracks for the running transaction: the per-frame lanes of
-/// data-size bytes and write records, the record the Host staged for the running opcode, and where
-/// the transaction stands with its limits — within them or latched by one — and whether it is
-/// exempt from all of them.
+/// data-size bytes and write records, the record the Host staged for the running opcode, the stops
+/// its frames return, and whether it is exempt from every limit.
 ///
 /// It lives on the [`MegaContext`](crate::MegaContext), is reset before each transaction and
 /// system call, and is driven by the Host (staging), the opcode wrappers (commit and discard)
-/// and the frame lifecycle (lanes, the latch).
+/// and the frame lifecycle (lanes, stops).
 ///
-/// # The abort protocol
+/// # The stop
 ///
-/// A transaction-level limit stops the transaction with a revert, not a halt. The frame that
-/// crosses the limit reverts with [`MegaLimitExceeded`](crate::MegaLimitExceeded) as its output
-/// and the transaction is latched ([`latch`](Self::latch)). From then on no frame runs another
-/// instruction: a caller that gets the reverted result back returns the same revert instead of
-/// resuming, a frame about to start is answered with it, and every result returned above is
-/// rewritten to it. The outermost frame settles like any EIP-8037 revert: its unspent regular gas
-/// and the reservoir go back to the sender, who pays only for what ran. A frame budget crossed
-/// reverts that frame alone, without a latch, and its caller resumes. Exceptional halts (a real
-/// out-of-gas, an invalid opcode) are not limit stops and still burn the frame's gas.
+/// A limit crossed stops the frame that crossed it with a revert, not a halt: the frame reverts
+/// with [`MegaLimitExceeded`](crate::MegaLimitExceeded) as its output, whether it crossed the
+/// transaction's limit or its own frame budget, and its caller resumes as after any revert. What
+/// the frame counted goes with it, so a caller that resumes is back within the limits, and a
+/// transaction never keeps more than its limit: a caller that carries on is held to what is left,
+/// and a charge that crosses again stops the frame that makes it. A crossing the transaction's
+/// own frame makes is the transaction's result, which settles like any EIP-8037 revert: its
+/// unspent regular gas and the reservoir go back to the sender, who pays only for what ran.
+/// Exceptional halts (a real out-of-gas, an invalid opcode) are not limit stops and still burn the
+/// frame's gas.
 ///
 /// # The exemption
 ///
 /// The protocol's own work is held to none of the per-transaction limits: a system-originated
 /// transaction and a system call are marked exempt before their body is counted, and the mark is
 /// sticky for the transaction ([`is_exempt`](Self::is_exempt)). Every stop the layer hands out
-/// comes from one place, which answers an exempt transaction with [`LimitCheck::WithinLimit`]
-/// whatever it crossed — a transaction limit or a frame budget, in any dimension — and never
-/// latches it.
+/// comes from one place ([`crossed`](Self::crossed)), which answers an exempt transaction with
+/// [`LimitCheck::WithinLimit`] whatever it crossed — a transaction limit or a frame budget, in
+/// any dimension.
 /// What the transaction uses is counted all the same, so its usage is reported as any other
 /// transaction's is.
 #[derive(Clone, Debug, Default)]
@@ -51,9 +51,6 @@ pub struct AdditionalLimit {
     pub(crate) tracker: FrameLimitTracker,
     staged: Option<StagedRecord>,
     limits: EvmTxRuntimeLimits,
-    /// Where the transaction stands with its limits: within them, or stopped by the
-    /// transaction-level limit it latched, which is sticky for the transaction.
-    standing: LimitCheck,
     /// Whether the transaction is exempt from every per-transaction limit, sticky for the
     /// transaction. See [`exempt`](Self::exempt).
     exempt: bool,
@@ -128,7 +125,6 @@ impl AdditionalLimit {
     pub(crate) fn reset(&mut self) {
         self.tracker.reset();
         self.staged = None;
-        self.standing = LimitCheck::WithinLimit;
         self.exempt = false;
         self.resume_stop = None;
         self.frame_stop = None;
@@ -159,26 +155,16 @@ impl AdditionalLimit {
         self.transfer_logs && moves_value(input)
     }
 
-    /* The latch and the exemption */
-
-    /// The stop a transaction-level limit latched, if any.
-    ///
-    /// It is the running transaction's, or the last one's until the next transaction or system
-    /// call starts: each resets it first, so a stop read after that is the next one's.
-    pub const fn latched(&self) -> Option<&LimitCheck> {
-        match &self.standing {
-            latched @ LimitCheck::ExceedsLimit { .. } => Some(latched),
-            LimitCheck::WithinLimit => None,
-        }
-    }
+    /* The stops and the exemption */
 
     /// The crossing that produced the result of the transaction's own frame, if one did: what
     /// [`MegaTransactionOutcome::limit_exceeded`](crate::MegaTransactionOutcome) reports.
     ///
-    /// It is a transaction-level limit the transaction latched, whose stop every frame returns, or
-    /// the frame's own data-size budget. A crossing below the transaction's own frame that its
-    /// caller survives produced no result of the transaction's own frame, and neither did a stop an
-    /// inspector rewrote into another result: the frame's result must still be the stop's revert.
+    /// It is a crossing the transaction's own frame made, of the transaction's limit or of its own
+    /// budget. A crossing below that frame produced the result of the frame that crossed, which its
+    /// caller caught: a caller that then reverts with the same bytes made its own result, and is no
+    /// stop. Neither is a stop an inspector rewrote into another result: the frame's result must
+    /// still be the stop's revert.
     ///
     /// It is the running transaction's, or the last one's until the next transaction or system
     /// call starts: each resets it first.
@@ -213,40 +199,33 @@ impl AdditionalLimit {
         self.exempt = true;
     }
 
-    /// Latches the transaction: `kind`'s transaction-level `limit` was crossed at `used`. The
-    /// running frame must stop with [`LimitCheck::revert_data`]; the frame lifecycle stops every
-    /// frame above it. A later latch does not replace the first, and an exempt transaction is not
-    /// latched at all: the verdict is then [`LimitCheck::WithinLimit`].
-    pub fn latch(&mut self, kind: LimitKind, limit: u64, used: u64) -> LimitCheck {
-        self.crossed(kind, limit, used, false)
-    }
-
-    /// The verdict on `used` crossing `kind`'s `limit`: a frame budget's stop when `frame_local`,
-    /// which reverts the running frame alone, and the transaction's latch otherwise.
+    /// The verdict on `used` crossing `kind`'s `limit`, a frame budget when `frame_local` and a
+    /// transaction-level limit otherwise: the stop the running frame reverts with, alone, its
+    /// [`LimitCheck::revert_data`] naming the limit crossed.
     ///
-    /// Every stop the layer hands out comes from here, so this is where the exemption applies: an
-    /// exempt transaction's verdict is [`LimitCheck::WithinLimit`], whatever it crossed.
-    fn crossed(&mut self, kind: LimitKind, limit: u64, used: u64, frame_local: bool) -> LimitCheck {
+    /// Every stop the layer hands out comes from here, gas detention's included, so this is where
+    /// the exemption applies: an exempt transaction's verdict is [`LimitCheck::WithinLimit`],
+    /// whatever it crossed.
+    pub(crate) const fn crossed(
+        &self,
+        kind: LimitKind,
+        limit: u64,
+        used: u64,
+        frame_local: bool,
+    ) -> LimitCheck {
         if self.exempt {
             return LimitCheck::WithinLimit;
         }
-        let crossed = LimitCheck::ExceedsLimit { kind, limit, used, frame_local };
-        if frame_local {
-            return crossed;
-        }
-        if !self.standing.exceeded_limit() {
-            self.standing = crossed;
-        }
-        self.standing
+        LimitCheck::ExceedsLimit { kind, limit, used, frame_local }
     }
 
     /// Checks the data-size limit after the running frame counted something: what the
-    /// transaction keeps against its limit (latching on a crossing), then what the running frame
-    /// keeps against its budget.
-    fn check(&mut self) -> LimitCheck {
+    /// transaction keeps against its limit, then what the running frame keeps against its budget.
+    /// A record that crosses both names the transaction's limit.
+    fn check(&self) -> LimitCheck {
         let (kept, limit) = (self.tracker.net(), self.limits.tx_data_size_limit);
         if kept.exceeds_data_size(limit) {
-            return self.latch(LimitKind::DataSize, limit, kept.data_size);
+            return self.crossed(LimitKind::DataSize, limit, kept.data_size, false);
         }
         if let Some(lane) = self.tracker.current() {
             let (kept, budget) = (lane.net(), lane.budget);
@@ -257,40 +236,22 @@ impl AdditionalLimit {
         LimitCheck::WithinLimit
     }
 
-    /// Whether [`check`](Self::check) would find nothing to stop the running frame for, asked
-    /// without latching anything: the transaction keeps no more than its limits, and the running
-    /// frame no more than its budget. An exempt transaction is stopped by nothing, and a latched
-    /// one by nothing but the latch, which [`stop_before_run`](Self::stop_before_run) takes
-    /// first.
+    /// Whether [`check`](Self::check) would find nothing to stop the running frame for: the
+    /// transaction keeps no more than its limits, and the running frame no more than its budget.
+    /// An exempt transaction is stopped by nothing.
     fn check_finds_nothing(&self) -> bool {
-        if self.is_exempt() || self.latched().is_some() {
+        if self.is_exempt() {
             return true;
         }
         !self.tracker.net().exceeds_data_size(self.limits.tx_data_size_limit) &&
             self.tracker.current().is_none_or(|lane| !lane.net().exceeds_data_size(lane.budget))
     }
 
-    /// The stop the running frame returns instead of running another instruction: the latched
-    /// one, or the one [`on_frame_return`](Self::on_frame_return) left for a caller its child put
-    /// over its budget. Taking it clears the latter, which stops one frame.
-    pub(crate) fn stop_before_run(&mut self) -> Option<LimitCheck> {
-        let resume_stop = self.resume_stop.take();
-        self.latched().copied().or(resume_stop)
-    }
-
-    /// Rewrites `result` to the latched stop, when the transaction is latched: a success, a revert
-    /// or a halt becomes the latched revert, on the gas the result carries.
-    ///
-    /// No frame runs an instruction once the transaction is latched, so no out-of-gas can happen
-    /// after the latch: the frame that crossed returns the stop, and every frame above it returns
-    /// it again without running. A halt that reaches here under the latch was made by an
-    /// inspector's rewrite, which cannot turn the stop into a halt any more than into a success.
-    /// A real halt before the latch is left alone: it was returned before the latch was set.
-    pub(crate) fn apply_latch(&self, result: &mut FrameResult) {
-        let Some(latched) = self.latched() else { return };
-        let interpreter_result = result.interpreter_result_mut();
-        interpreter_result.result = InstructionResult::Revert;
-        interpreter_result.output = latched.revert_data();
+    /// The stop the running frame returns instead of running another instruction: the one
+    /// [`on_frame_return`](Self::on_frame_return) left for a caller its child put over a limit.
+    /// Taking it clears it, which stops one frame.
+    pub(crate) const fn stop_before_run(&mut self) -> Option<LimitCheck> {
+        self.resume_stop.take()
     }
 
     /// What the transaction keeps so far: its data-size bytes and write records, with every
@@ -542,16 +503,16 @@ impl AdditionalLimit {
     /// service cannot be taken back, and admitting a payload and decoding it is work done whether
     /// or not it decodes.
     ///
-    /// The limit is checked before the bytes are counted. A hint that would cross it latches the
-    /// transaction with the usage it would have reached, is not forwarded and is not counted: its
-    /// payload never left the machine, so the stopped transaction keeps none of it, as it keeps
-    /// nothing of a log that crossed the limit.
+    /// The limit is checked before the bytes are counted. A hint that would cross it is the stop,
+    /// with the usage it would have reached, and is neither forwarded nor counted: its payload
+    /// never left the machine, so the transaction keeps none of it, as it keeps nothing of a log
+    /// that crossed the limit.
     pub(crate) fn record_hint_bytes(&mut self, bytes: u64) -> LimitCheck {
         let hint = LimitUsage { data_size: bytes, write_records: 0 };
         let (reached, limit) =
             (self.tracker.net().saturating_add(hint), self.limits.tx_data_size_limit);
         if reached.exceeds_data_size(limit) {
-            let stop = self.latch(LimitKind::DataSize, limit, reached.data_size);
+            let stop = self.crossed(LimitKind::DataSize, limit, reached.data_size, false);
             if stop.exceeded_limit() {
                 return stop;
             }
@@ -616,13 +577,8 @@ impl AdditionalLimit {
     /// without a crossing revm's refusal fails the creation and discards them.
     ///
     /// A crossed limit in the verdict means the frame must not run: it is answered with the stop.
-    /// So is every frame of a latched transaction, whose lane stays empty.
     pub(crate) fn on_frame_init(&mut self, input: &FrameInput, depth: usize) -> LimitCheck {
         self.frame_began = true;
-        if let Some(latched) = self.latched().copied() {
-            self.push_empty_frame();
-            return latched;
-        }
         self.push_lane(input, depth);
         if self.frame_start_transfer_log(input) {
             self.tracker.record(TRANSFER_LOG);
@@ -822,7 +778,7 @@ impl AdditionalLimit {
     /// the signer ([`set_frame_creator`](Self::set_frame_creator)). A signer that is the
     /// transaction's sender has no such record, its account being the body's.
     ///
-    /// A stop the record left the frame, by putting it over its budget, goes with it: the frame is
+    /// A stop the record left the frame, by putting it over a limit, goes with it: the frame is
     /// held to its limits again without the record. Returns whether a record was taken back.
     pub(crate) fn take_back_creator_record(&mut self) -> bool {
         let sender = self.sender;
@@ -859,14 +815,12 @@ impl AdditionalLimit {
     }
 
     /// Pops the lane of the frame `result` returns from: a success merges it into the caller's,
-    /// a failure discards it. Under a latch the result is first rewritten to the latched stop,
-    /// whatever produced it (an interceptor, an inspector's rewrite), so neither a success nor a
-    /// halt passes it.
+    /// a failure discards it, a stop's included, so the caller resumes within its limits.
     ///
     /// Two returns would add to a caller what no check has held it to, and after them the caller is
     /// held to its limits with what it now holds; a crossing is the stop it returns before it runs
-    /// on ([`stop_before_run`](Self::stop_before_run)): its own frame-local revert for its budget,
-    /// the latch for the transaction's limit.
+    /// on ([`stop_before_run`](Self::stop_before_run)), naming its budget or the transaction's
+    /// limit.
     ///
     /// - A failed creation leaves its creator the nonce record. The creation counted that record on
     ///   its own lane, against its own share, and a creation stopped for crossing that share still
@@ -882,20 +836,18 @@ impl AdditionalLimit {
     /// the transaction's own frame, which has no caller to hold. A debug build asserts that the
     /// check would have found nothing to stop.
     ///
-    /// The crossing the result is made of — the latch, which wrote over whatever the frame
-    /// returned, or the stop noted for the frame ([`note_frame_stop`](Self::note_frame_stop)) — is
-    /// the transaction's [`limit_exceeded`](Self::limit_exceeded) when the frame is the
-    /// transaction's own and its result is still the stop's revert.
+    /// The crossing the result is made of, the stop noted for the frame
+    /// ([`note_frame_stop`](Self::note_frame_stop)), is the transaction's
+    /// [`limit_exceeded`](Self::limit_exceeded) when the frame is the transaction's own and its
+    /// result is still the stop's revert.
     ///
     /// Returns the history gas the caller paid for records this frame did not keep, which the
     /// caller gets back once the frame has merged into it.
     #[must_use = "the history of the records the frame did not keep goes back to its caller"]
-    pub(crate) fn on_frame_return(&mut self, result: &mut FrameResult) -> u64 {
-        self.apply_latch(result);
+    pub(crate) fn on_frame_return(&mut self, result: &FrameResult) -> u64 {
         let noted = self.frame_stop.take();
         if self.tracker.depth() == 1 {
-            self.limit_exceeded =
-                self.latched().copied().or(noted).filter(|stop| is_the_revert_of(result, stop));
+            self.limit_exceeded = noted.filter(|stop| is_the_revert_of(result, stop));
         }
         // A charge an opcode of this frame made for a child that never started died with that
         // opcode, which failed after making it.
@@ -919,21 +871,18 @@ impl AdditionalLimit {
 
     /// Settles the transaction's outermost frame: pops its lane unless the frame already
     /// returned through [`on_frame_return`](Self::on_frame_return), which is the case whenever
-    /// it ran, and rewrites the result to the latched stop.
+    /// it ran.
     ///
     /// A transaction whose first frame never reached frame init ran out of gas in the runtime
     /// phase before it: the out-of-gas took back the authorizations applied before it, so their
     /// records go too, and the halt stays a halt. The body is not one of those records. It is put
-    /// back after the reset.
-    ///
-    /// A latch goes with the reset, so the halt is what the transaction reports; nothing counted
-    /// before the first frame sets one, validation having held the body and the authorities'
-    /// records to the limit. An exemption stays: it is the transaction's, not its frames'.
-    pub(crate) fn on_last_frame_return(&mut self, result: &mut FrameResult) {
+    /// back after the reset. Nothing counted before the first frame can have crossed a limit,
+    /// validation having held the body and the authorities' records to it, so the halt is what the
+    /// transaction reports. An exemption stays: it is the transaction's, not its frames'.
+    pub(crate) fn on_last_frame_return(&mut self, result: &FrameResult) {
         if !self.frame_began {
             let body = self.body_bytes;
             self.tracker.reset();
-            self.standing = LimitCheck::WithinLimit;
             self.tracker.record_tx(LimitUsage { data_size: body, write_records: 0 });
             return;
         }
@@ -943,24 +892,7 @@ impl AdditionalLimit {
             // before execution, and the settlement gives that charge back.
             let refund = self.on_frame_return(result);
             debug_assert_eq!(refund, 0, "the outermost frame's caller is the transaction");
-        } else {
-            self.apply_latch(result);
         }
-    }
-
-    /// Settles a transaction the handler answered with a result after an error: op-revm's failed
-    /// deposit, which reports a halt whether the deposit was refused before it ran or halted after
-    /// its frames ran. The halt is what the transaction reports, so no stop is left standing
-    /// beside it.
-    ///
-    /// Nothing counted is touched. A deposit refused before it ran counted its body alone. One
-    /// that halted had its frames' lanes discarded as any failed frame's are, which leaves the
-    /// body and every Oracle hint input it admitted, one that then failed to decode included.
-    /// Those stay counted, as they do for any other transaction that halts, for two separate
-    /// reasons: a payload forwarded to the oracle service cannot be taken back, and admitting an
-    /// input and decoding it is work done whether or not it decodes.
-    pub(crate) const fn on_transaction_error(&mut self) {
-        self.standing = LimitCheck::WithinLimit;
     }
 }
 
@@ -1099,8 +1031,9 @@ mod tests {
     }
 
     /// A hint is held to the transaction's data-size limit before it is counted: one that fits is
-    /// counted, one that would cross latches the transaction at the usage it would have reached
-    /// and leaves the count as it was, and an exempt transaction's is counted whatever it crosses.
+    /// counted, one that would cross is the stop at the usage it would have reached and leaves the
+    /// count as it was, and a later one that fits is counted, the crossing having stopped nothing
+    /// but its own call. An exempt transaction's is counted whatever it crosses.
     #[test]
     fn test_a_hint_that_would_cross_the_limit_is_not_counted() {
         let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(100);
@@ -1108,25 +1041,24 @@ mod tests {
 
         let mut limit = AdditionalLimit::new(limits);
         limit.record_tx_body(40);
-        assert_eq!(limit.record_hint_bytes(60), LimitCheck::WithinLimit, "it fits exactly");
-        assert_eq!(kept(&limit), 100);
-        assert_eq!(limit.latched(), None);
+        assert_eq!(limit.record_hint_bytes(59), LimitCheck::WithinLimit);
+        assert_eq!(kept(&limit), 99);
         let stop = LimitCheck::ExceedsLimit {
             kind: LimitKind::DataSize,
             limit: 100,
             used: 101,
             frame_local: false,
         };
-        assert_eq!(limit.record_hint_bytes(1), stop, "one more byte crosses");
-        assert_eq!(kept(&limit), 100, "the hint that crossed is not counted");
-        assert_eq!(limit.latched(), Some(&stop));
+        assert_eq!(limit.record_hint_bytes(2), stop, "two more bytes cross");
+        assert_eq!(kept(&limit), 99, "the hint that crossed is not counted");
+        assert_eq!(limit.record_hint_bytes(1), LimitCheck::WithinLimit, "one more fits exactly");
+        assert_eq!(kept(&limit), 100, "and is counted");
 
         let mut exempt = AdditionalLimit::new(limits);
         exempt.exempt();
         exempt.record_tx_body(40);
         assert_eq!(exempt.record_hint_bytes(61), LimitCheck::WithinLimit);
         assert_eq!(kept(&exempt), 101, "an exempt transaction's hint is counted");
-        assert_eq!(exempt.latched(), None);
     }
 
     /// A layer with the transaction's own frame started: `SENDER` calling `CALLEE`, which has
@@ -1155,14 +1087,14 @@ mod tests {
         );
     }
 
-    /// A frame answered without running — by the depth guard, the latch, an interceptor or an
+    /// A frame answered without running — by the depth guard, a stop, an interceptor or an
     /// inspector — keeps none of the records its caller paid for, whatever its answer: its lane is
     /// empty, the whole charge comes back, and the transaction's history bytes are its body alone.
     ///
     /// The depth guard's answer is reached here rather than through a transaction: under the
     /// execution cap no call chain reaches the call-stack limit, because each call forwards at most
     /// sixty-three sixty-fourths of what its caller has left, and 200,000,000 gas leaves about
-    /// twenty at depth 1,024. The latch's and an interceptor's answers are also reached through
+    /// twenty at depth 1,024. A stop's and an interceptor's answers are also reached through
     /// transactions, in the history-byte tests.
     #[test]
     fn test_a_frame_answered_without_running_keeps_nothing_whatever_the_answer() {
@@ -1176,14 +1108,14 @@ mod tests {
             limit.stage_frame_charge(limit.frame_start_records(&inner), 1_000, 2_000);
             limit.push_empty_frame();
 
-            let mut result = crate::synthetic_frame_result(&inner, answer, Bytes::new());
-            assert_eq!(limit.on_frame_return(&mut result), 3_000, "{answer:?}: all of it back");
+            let result = crate::synthetic_frame_result(&inner, answer, Bytes::new());
+            assert_eq!(limit.on_frame_return(&result), 3_000, "{answer:?}: all of it back");
             assert_eq!(limit.usage(), LimitUsage::ZERO, "{answer:?}: nothing kept");
 
             let outer = call_from_to(SENDER, CALLEE, U256::ZERO);
-            let mut result =
+            let result =
                 crate::synthetic_frame_result(&outer, InstructionResult::Stop, Bytes::new());
-            limit.on_last_frame_return(&mut result);
+            limit.on_last_frame_return(&result);
             limit.settle_history_bytes(true);
             assert_eq!(limit.history_bytes(), BODY, "{answer:?}: the body alone");
         }
@@ -1266,9 +1198,9 @@ mod tests {
         for (kept, caller_stopped) in [(98, false), (99, false), (100, false), (101, true)] {
             let (mut limit, child) = with_a_child_of_a_capped_frame();
             limit.tracker.record(LimitUsage { data_size: kept, write_records: 0 });
-            let mut result =
+            let result =
                 crate::synthetic_frame_result(&child, InstructionResult::Stop, Bytes::new());
-            let _ = limit.on_frame_return(&mut result);
+            let _ = limit.on_frame_return(&result);
             let stop = limit.stop_before_run();
             let expected = caller_stopped.then_some(LimitCheck::ExceedsLimit {
                 kind: LimitKind::DataSize,
@@ -1291,9 +1223,8 @@ mod tests {
         let (mut limit, child) = with_a_child_of_a_capped_frame();
         limit.tracker.current_mut().unwrap().budget = u64::MAX;
         limit.tracker.record(LimitUsage { data_size: 101, write_records: 0 });
-        let mut result =
-            crate::synthetic_frame_result(&child, InstructionResult::Stop, Bytes::new());
-        let _ = limit.on_frame_return(&mut result);
+        let result = crate::synthetic_frame_result(&child, InstructionResult::Stop, Bytes::new());
+        let _ = limit.on_frame_return(&result);
     }
 
     /// Whether a start's caller refuses it is staged by the opcode that found it and taken once,
@@ -1333,14 +1264,21 @@ mod tests {
         [first, records]
     }
 
-    /// A transaction that is not exempt is stopped by the first limit it crosses: counting the
-    /// body checks nothing, and the first check, at its frame's start, latches it.
+    /// A transaction that is not exempt is stopped wherever it crosses a limit: counting the
+    /// body checks nothing, the first check, at its frame's start, is the stop, and a later start
+    /// that crosses again is a stop of its own, with the usage it reached, not the first one's.
     #[test]
     fn test_a_transaction_that_is_not_exempt_is_stopped() {
         let mut limit = AdditionalLimit::new(zero_limits());
-        let [first, ..] = count_a_transaction(&mut limit);
-        assert!(first.exceeded_limit() && !first.is_frame_local());
-        assert_eq!(limit.latched(), Some(&first));
+        let [first, records] = count_a_transaction(&mut limit);
+        let stop = |used| LimitCheck::ExceedsLimit {
+            kind: LimitKind::DataSize,
+            limit: 0,
+            used,
+            frame_local: false,
+        };
+        assert_eq!(first, stop(crate::TX_BODY_SIZE), "the body crosses at the first check");
+        assert_eq!(records, stop(crate::TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE));
         assert!(!limit.is_exempt());
     }
 
@@ -1368,33 +1306,35 @@ mod tests {
         assert!(layer(0, true).admits_tx_body(2), "an exempt transaction");
         assert_eq!(layer(at, false).body_bytes(), body);
         assert_eq!(layer(at, false).usage().data_size, body, "the body is counted");
-        assert_eq!(layer(0, false).latched(), None, "and counting it latches nothing");
     }
 
     /// An exempt transaction is stopped by no limit, in any dimension, at the transaction or at a
-    /// frame: every verdict is within the limits, nothing is latched and no caller is stopped. What
-    /// it uses is counted all the same.
+    /// frame: every verdict is within the limits and no caller is stopped. What it uses is counted
+    /// all the same.
     #[test]
     fn test_an_exempt_transaction_is_stopped_by_no_limit() {
         let mut limit = AdditionalLimit::new(zero_limits());
         limit.exempt();
         assert_eq!(count_a_transaction(&mut limit), [LimitCheck::WithinLimit; 2]);
-        assert_eq!(limit.latch(LimitKind::DataSize, 0, 1), LimitCheck::WithinLimit);
-        assert_eq!(limit.latched(), None);
+        for kind in [LimitKind::DataSize, LimitKind::ComputeGas] {
+            for frame_local in [false, true] {
+                let verdict = limit.crossed(kind, 0, 1, frame_local);
+                assert_eq!(verdict, LimitCheck::WithinLimit, "{kind:?}, frame-local {frame_local}");
+            }
+        }
         assert_eq!(limit.stop_before_run(), None);
         assert_eq!(
             limit.usage(),
             LimitUsage { data_size: crate::TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE, write_records: 2 },
         );
 
-        let mut result = crate::synthetic_frame_result(
+        let result = crate::synthetic_frame_result(
             &call_from_to(CALLEE, TARGET, U256::from(1)),
             InstructionResult::Stop,
             Bytes::new(),
         );
-        let _ = limit.on_frame_return(&mut result);
-        assert_eq!(result.instruction_result(), InstructionResult::Stop, "nothing is rewritten");
-        assert_eq!(limit.stop_before_run(), None, "and the caller runs on");
+        let _ = limit.on_frame_return(&result);
+        assert_eq!(limit.stop_before_run(), None, "the caller runs on");
     }
 
     /// Validation admits no body whose authority records cross the data-size limit, so a debug
@@ -1418,22 +1358,21 @@ mod tests {
         let mut limit = AdditionalLimit::new(zero_limits());
         limit.exempt();
         limit.record_applied_authorities(SENDER, 2, false);
-        assert_eq!(limit.latched(), None);
         assert_eq!(limit.usage(), WRITE_RECORD.times(2));
     }
 
     /// The exemption is the transaction's: a reset clears it, and the next transaction is held to
-    /// its limits again. A latch cleared before the first frame keeps it.
+    /// its limits again. An out-of-gas before the first frame keeps it.
     #[test]
     fn test_the_exemption_lasts_one_transaction() {
         let mut limit = AdditionalLimit::new(zero_limits());
         limit.exempt();
-        let mut result = crate::synthetic_frame_result(
+        let result = crate::synthetic_frame_result(
             &call_from_to(SENDER, CALLEE, U256::ZERO),
             InstructionResult::OutOfGas,
             Bytes::new(),
         );
-        limit.on_last_frame_return(&mut result);
+        limit.on_last_frame_return(&result);
         assert!(limit.is_exempt(), "an out-of-gas before the first frame keeps the exemption");
 
         limit.reset();
@@ -1539,12 +1478,10 @@ mod tests {
             "the recipient of each move — the inner one's caller is the outer one's — and two logs",
         );
 
-        let mut result =
-            crate::synthetic_frame_result(&inner, InstructionResult::Stop, Bytes::new());
-        let _ = limit.on_frame_return(&mut result);
-        let mut result =
-            crate::synthetic_frame_result(&outer, InstructionResult::Stop, Bytes::new());
-        limit.on_last_frame_return(&mut result);
+        let result = crate::synthetic_frame_result(&inner, InstructionResult::Stop, Bytes::new());
+        let _ = limit.on_frame_return(&result);
+        let result = crate::synthetic_frame_result(&outer, InstructionResult::Stop, Bytes::new());
+        limit.on_last_frame_return(&result);
         limit.settle_history_bytes(true);
         assert_eq!(limit.history_bytes(), crate::TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE);
     }
@@ -1559,14 +1496,14 @@ mod tests {
         limit.on_frame_init(&inner, 1);
         assert_eq!(limit.usage().data_size, 2 * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE);
 
-        let mut result =
-            crate::synthetic_frame_result(&inner, InstructionResult::Revert, Bytes::new());
-        let _ = limit.on_frame_return(&mut result);
+        let result = crate::synthetic_frame_result(&inner, InstructionResult::Revert, Bytes::new());
+        let _ = limit.on_frame_return(&result);
         assert_eq!(limit.usage(), LimitUsage::ZERO);
     }
 
     /// A frame start whose transfer log crosses a limit is stopped there, before revm moves the
-    /// value: its own budget reverts it alone, the transaction's limit latches. The records alone
+    /// value, with a stop that names the limit it crossed, its own budget or the transaction's
+    /// limit. The records alone
     /// fit, so it is the log that crosses; at exactly the limit it holds.
     #[test]
     fn test_a_frame_start_whose_transfer_log_crosses_is_stopped() {
@@ -1593,7 +1530,6 @@ mod tests {
                         frame_local: true,
                     },
                 );
-                assert_eq!(limit.latched(), None, "a frame budget does not latch");
             }
         }
 
@@ -1617,7 +1553,6 @@ mod tests {
                     frame_local: false,
                 },
             );
-            assert_eq!(limit.latched(), Some(&check));
         }
     }
 

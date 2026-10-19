@@ -11,8 +11,8 @@ use revm::interpreter::{gas::WithheldCrossing, Gas, InstructionResult, Interpret
 use super::VolatileDataAccess;
 use crate::system::VOLATILE_DATA_ACCESS_DISABLED_SELECTOR;
 
-/// A transaction gas detention stops: the compute limit it crossed, and its compute at the
-/// crossing.
+/// A crossing gas detention stops a frame for: the compute limit the transaction crossed, and its
+/// compute at the crossing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ComputeStop {
     /// The most compute the transaction may reach.
@@ -542,8 +542,8 @@ impl Detention {
     /// the frame, or a frame below it, turned it off. A frame that halts burns what it had left.
     ///
     /// Returns the stop when the frame ran out of gas on a charge the withheld part of its gas
-    /// would have paid ([`stop`](Self::stop)): the frame crossed the limit, and must stop the
-    /// transaction rather than halt. The stop's compute is the transaction's with the frame's gas
+    /// would have paid ([`stop`](Self::stop)): the frame crossed the limit, and must revert with
+    /// the stop rather than halt. The stop's compute is the transaction's with the frame's gas
     /// put back.
     #[inline]
     pub(crate) fn on_frame_end(

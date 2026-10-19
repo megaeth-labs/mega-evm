@@ -1,5 +1,5 @@
 ---
-description: Satin network upgrade (unstable) — MegaETH's execution rules restated on Optimism Karst (Ethereum Osaka) — EIP-8037 regular and state gas under a 200,000,000 execution cap with a state-gas reservoir, a history-gas ledger for the bytes a transaction appends, SALT-scaled state gas, per-transaction limits that stop a transaction with a revert, gas detention on withheld gas, EIP-7708 transfer logs, keyless deployment as a native creation, system calls on a split budget, the live system address read by the transaction itself, the block's data-size limit as a packing budget, and the witness a stateless validator re-executes a block from.
+description: Satin network upgrade (unstable) — MegaETH's execution rules restated on Optimism Karst (Ethereum Osaka) — EIP-8037 regular and state gas under a 200,000,000 execution cap with a state-gas reservoir, a history-gas ledger for the bytes a transaction appends, SALT-scaled state gas, limits that stop the frame that crosses them with a revert, gas detention on withheld gas, EIP-7708 transfer logs, keyless deployment as a native creation, system calls on a split budget, the live system address read by the transaction itself, the block's data-size limit as a packing budget, and the witness a stateless validator re-executes a block from.
 ---
 
 # Satin Network Upgrade
@@ -20,7 +20,7 @@ State growth is paid in [state gas](../glossary.md#state-gas) — EIP-8037's byt
 Together they replace [storage gas](../glossary.md#storage-gas), the 39,000 intrinsic storage gas, the 10× multiplier on logs and calldata, and the 23,000-gas [storage gas stipend](../glossary.md#storage-gas-stipend).
 
 The per-transaction resource limits keep data size and drop the KV-update, state-growth and compute-gas limits: write records are bounded by the data size they weigh and priced in history gas, state growth is priced in state gas, and compute is regular gas, bounded by the execution cap and by [gas detention](../evm/gas-detention.md).
-Every transaction-level limit — data size and detention's compute limit — now stops a transaction with a revert carrying `MegaLimitExceeded(kind, limit)` instead of a halt, and the sender pays only for what ran.
+Every limit — data size and detention's compute limit — now stops the frame that crosses it with a revert carrying `MegaLimitExceeded(kind, limit)` instead of a halt: the frame's caller can catch the stop and carry on within what the limits leave, and a transaction whose own frame is stopped pays only for what ran.
 Detention holds each frame's spendable regular gas inside the frame's own gas, so a transaction that read volatile data runs exactly as it would have without the read until a regular charge needs the gas it is not allowed to spend.
 
 Satin also brings EIP-7708 transfer logs, deploys a `keylessDeploy` transaction as a native creation instead of in a sandbox, runs system calls on at most 30,000,000 of regular gas with the rest as reservoir, has a system-address transaction read the live system address itself, and makes the block's data-size limit, its one block-level execution limit, a packing budget that never refuses a deposit or a Mega System Transaction.
@@ -40,7 +40,7 @@ The changes, in the order this page records them:
 8. **History allowance.** A 160-byte allowance for value calls, replacing the 23,000-gas storage gas stipend.
 9. **Gas forwarding.** The standard 63/64 rule, replacing 98/100.
 10. **Resource limits.** Data size over a byte table and write records, and no KV-update, state-growth or compute-gas limit.
-11. **The revert-class stop.** Every transaction-level limit stops the transaction with a revert.
+11. **The revert-class stop.** Every limit stops the frame that crosses it with a revert, which its caller can catch.
 12. **Gas detention on withheld gas.**
 13. **Volatile-data access control and `remainingComputeGas()`.**
 14. **EIP-7708 transfer logs.**
@@ -121,7 +121,7 @@ A KZG call given at least 100,000 gas that fails otherwise — an input of the w
 - Initcode MUST be at most `MAX_INITCODE_SIZE` = 1,048,576 bytes, twice the code limit, the ratio [EIP-3860](https://eips.ethereum.org/EIPS/eip-3860) sets between the two.
 - The creation opcodes MUST make their checks and charges in this order: the static context; the value, offset and size operands, and the size's range; the initcode size; EIP-3860's initcode cost; the offset's range and the memory the initcode is read from (neither checked for empty initcode); for `CREATE2`, the salt operand, then the 12,000 and the hashing cost of the initcode, and for `CREATE` the 12,000.
   Satin adds no charge ahead of these.
-  So a creation in a static frame fails before its operands are read, and a `CREATE2` short of its salt pays the initcode cost and the memory first: the halt consumes the frame's gas either way, but under [gas detention](#12-gas-detention-on-withheld-gas) those charges can be the crossing, which stops the transaction where the stack underflow would have halted the frame.
+  So a creation in a static frame fails before its operands are read, and a `CREATE2` short of its salt pays the initcode cost and the memory first: the halt consumes the frame's gas either way, but under [gas detention](#12-gas-detention-on-withheld-gas) those charges can be the crossing, which stops the frame with a revert where the stack underflow would have halted it.
 
 ### 4. Two-Pool Gas (EIP-8037) Replaces the Dual Gas Model
 
@@ -419,11 +419,12 @@ One dimension is limited per transaction, data size; compute is not one (see [Tw
   The transaction's own frame MUST get what the transaction has left once its body and pre-frame records are counted; every child MUST get `FRAME_SHARE_NUMERATOR / FRAME_SHARE_DENOMINATOR` = 98/100 of what its parent has left, rounded down.
   Satin sets no further per-frame cap.
   A frame that crosses its budget MUST revert with `MegaLimitExceeded(kind, budget)` and its caller continues.
+  The budget keeps a caller's own work within reach of what it calls: a child inherits its caller's whole reservoir and history gas draws the reservoir first, so EIP-150's 63/64 forwarding does not bound the bytes a child can append, and without a budget a callee could take the transaction to its limit and leave its caller, which can catch the stop (see [The Revert-Class Stop](#11-the-revert-class-stop)), nothing to carry on with.
 - **State growth** is not limited.
   EIP-8037 charges state gas for exactly the state a transaction adds, at the price of the SALT bucket it lands in (see [State Gas and SALT Pricing](#6-state-gas-and-salt-pricing)), so what bounds state growth is what it costs: the transaction's gas limit and the block's.
   That the bound stays within the state growth the chain's storage sustains is a property of the state-gas prices, not of a limit.
 - **Order at one site.**
-  A record that crosses the transaction's data-size limit and its frame's budget at once MUST stop the transaction: the transaction limit is checked before the frame budget.
+  A record that crosses the transaction's data-size limit and its frame's budget at once MUST stop its frame with the transaction's limit in the revert data: the transaction limit is checked before the frame budget.
 - **A frame start** is counted before the frame is built.
   A start the caller's account refuses — a value the caller cannot fund, a creation whose creator nonce cannot be bumped — MUST count nothing, be charged nothing, and be stopped by no limit.
   A creation onto an occupied address is counted, and a crossing it causes stops it where it would otherwise have failed on the collision.
@@ -445,32 +446,38 @@ One dimension is limited per transaction, data size; compute is not one (see [Tw
 
 #### New behavior
 
-Every transaction-level limit — data size and gas detention's compute limit — MUST stop the transaction with a revert, never a halt.
+Every limit — the transaction's data-size limit, a frame's data-size budget, and gas detention's compute limit — MUST stop the frame that crosses it with a revert, never a halt.
 The stop applies to a transaction that passes validation and pays every charge made before its first frame.
 A transaction that fails validation, or that cannot pay a charge made before its first frame (see [Gas Schedule and Intrinsic Gas](#5-gas-schedule-and-intrinsic-gas)), MUST report no stop: a non-deposit transaction that fails validation is rejected, and a deposit that fails validation — a system deposit, which the inherited rules refuse under Regolith, and a deposit whose body is over the data-size limit included — or that cannot pay a charge made before its first frame is included as a failed deposit, whatever kind of deposit it is (see [Transaction and Block Refusals](#21-transaction-and-block-refusals)).
 The body of such a deposit MUST stay counted as data size.
 For a transaction the stop applies to:
 
-1. The frame that crosses the limit MUST revert with `MegaLimitExceeded(uint8 kind, uint64 limit)` as its output.
-2. From then on no frame runs another instruction: a caller receiving that result MUST return the same revert instead of resuming, a frame about to start MUST be answered with it, and every result returned upward MUST be rewritten to it, whatever produced the result.
-3. The transaction MUST settle like an EIP-8037 revert: every write and log its frames made MUST be reverted, the value its first frame carried and that frame's write record included; the sender pays the intrinsic gas, the body's history gas, the charges of what it keeps from before the first frame (below), and what ran; the unspent regular gas and the reservoir return to the sender.
-4. The transaction is included with a failed receipt, and its usage counts towards the block's counters.
+1. The frame that crosses a limit MUST revert with `MegaLimitExceeded(uint8 kind, uint64 limit)` as its output.
+   The write or the charge that crossed MUST NOT be kept or made, and every write and log the frame made MUST be reverted, as a `REVERT` reverts them.
+2. Its caller MUST resume as after any revert: the call fails, its return data is the stop's revert data, and the gas the frame had — before the charge that crossed, for gas detention's limit — returns to the caller, its reservoir included.
+3. What the frame counted MUST be discarded with it, so the caller resumes within every limit.
+   A caller that carries on is held to what the transaction has left: a write or a charge of its own that crosses a limit again MUST stop the caller's frame in turn.
+   A transaction therefore never keeps more data size than its limit, and never computes past gas detention's limit but by what [Gas Detention on Withheld Gas](#12-gas-detention-on-withheld-gas) allows.
+4. A caller that catches the stop MUST run on as after any failed call: a transaction whose frames catch every stop below its own frame MAY succeed, keeping what its frames did and nothing of a frame that was stopped.
+5. A stop of the transaction's own frame is the transaction's result.
+   The transaction MUST settle like an EIP-8037 revert: every write and log its frames made MUST be reverted, the value its first frame carried and that frame's write record included; the sender pays the intrinsic gas, the body's history gas, the charges of what it keeps from before the first frame (below), and what ran; the unspent regular gas and the reservoir return to the sender.
+   The transaction is included with a failed receipt, and its usage counts towards the block's counters.
 
-What was applied before the first frame is not the frames' doing, and a later stop MUST NOT revert it, as a revert of the first frame does not:
+What was applied before the first frame is not the frames' doing, and a stop of the transaction's own frame MUST NOT revert it, as a revert of the first frame does not:
 
 - the sender's nonce and the fees it pays; for a deposit, its mint and the caller account it created, with that account's state gas;
 - the EIP-7702 authorizations admitted before the first frame: their authorities' nonce and delegation writes, their state gas, their write records, and the history gas those records cost.
 
-An Oracle hint a frame admitted before the stop is not the frames' state either: it MUST stay counted as data size through the stop, whether its payload reached the oracle service or failed to decode (see [Oracle Storage Reads and Hints](#16-oracle-storage-reads-and-hints)).
+An Oracle hint a frame admitted is not the frames' state either: it MUST stay counted as data size through any stop, whether its payload reached the oracle service or failed to decode (see [Oracle Storage Reads and Hints](#16-oracle-storage-reads-and-hints)).
 A hint that would itself cross the data-size limit is neither forwarded nor counted.
 
 A limit is enforced before the writes it guards:
 
-- A frame whose start would cross a limit MUST be answered with the stop before it is built, so no value moves; a stopped creation still bumps its creator's nonce.
-  A frame answered without running whose answer is then rewritten to the stop (see [Gas Detention on Withheld Gas](#12-gas-detention-on-withheld-gas)) has what its start moved reverted with the frames the stop reverts — for the first frame, which no frame's revert follows, with its answer.
+- A frame whose start would cross a limit MUST be answered with the stop before it is built, so no value moves.
+  A stopped creation still bumps its creator's nonce, and that write's record lands on the creator, which MUST be held to its limits with it before it runs on and be stopped if it crosses one.
+- A frame answered without running whose answer is then rewritten to the stop (see [Gas Detention on Withheld Gas](#12-gas-detention-on-withheld-gas)) MUST have what its start moved reverted with it, as a frame that fails has.
 - Nothing counted before the first frame — the body, and the records of the EIP-7702 authorities applied — crosses the data-size limit: validation rejects a transaction whose body, with a record for each entry of its authorization list, would (see [Two-Pool Gas](#4-two-pool-gas-eip-8037-replaces-the-dual-gas-model)).
 
-A frame budget MUST revert its frame alone, with the same revert data, and its caller continues.
 A real out-of-gas, a precompile given less than its price, and an invalid opcode still halt and consume the frame's gas.
 
 The revert data:
@@ -483,7 +490,7 @@ The revert data:
 The discriminants are Rex6's, so a decoder of the Rex6 revert data decodes Satin's.
 Kinds 1 and 3, Rex6's KV updates and state growth, are not reported: no limit holds either dimension.
 Kind 2 names the limit; the compute the transaction is billed can exceed it when frames halt because they cannot pay an opcode's static gas — the first of them taking the compute past the limit, each later one holding it there — by less than that static gas per halting frame, added over those frames (see [Gas Detention on Withheld Gas](#12-gas-detention-on-withheld-gas)).
-A contract can revert with the same bytes, so the revert data alone does not identify a stop.
+A contract can revert with the same bytes, and so can a caller that re-raises the stop a frame below it returned, so the revert data alone does not identify a stop: the stop of a transaction is the crossing that produced the result of its own frame (see [Developer Impact](#developer-impact)).
 
 ### 12. Gas Detention on Withheld Gas
 
@@ -518,12 +525,13 @@ A contract can revert with the same bytes, so the revert data alone does not ide
   A forward and a spill of state or history gas MUST draw the withheld part first.
   So a transaction that read volatile data runs exactly as it would without the read until a regular charge needs the withheld part.
 - **The crossing.**
-  A regular charge that the spendable part cannot pay but the frame's whole regular gas can is the crossing: the charge MUST NOT be made, the frame's gas MUST be put back to what it was before the charge, and the transaction MUST be stopped with `MegaLimitExceeded(2, limit)` (see [The Revert-Class Stop](#11-the-revert-class-stop)).
-  The transaction MUST be billed what it spent before the crossing charge, and the sender MUST get back everything the frames had, the withheld part included.
-  The compute billed is then at most the limit and less than the crossing charge short of it, with one exception.
+  A regular charge that the spendable part cannot pay but the frame's whole regular gas can is the crossing: the charge MUST NOT be made, the frame's gas MUST be put back to what it was before the charge, and the frame MUST be stopped with `MegaLimitExceeded(2, limit)` (see [The Revert-Class Stop](#11-the-revert-class-stop)).
+  What the frame spent before the crossing charge stays spent, and its caller MUST get back everything the frame had, the withheld part included.
+  The transaction's compute at the crossing is then at most the limit and less than the crossing charge short of it, with one exception.
+  A caller the stop returns into resumes held to what the limit leaves the transaction, which is less than the charge that crossed, so any regular charge of its own past that is a crossing too.
   A frame that halts because it cannot pay an opcode's static gas counts what it had left as compute (see Compute, above), and that can take the transaction's compute past the limit without a crossing, by less than the static charge the frame failed to pay: at most 4,999 gas per such frame, `SELFDESTRUCT`'s static gas of 5,000 being the largest.
   Its caller then resumes with no spendable gas; a caller whose whole regular gas cannot pay its next opcode's static gas either halts the same way and adds what it had left, so the overshoots accumulate along such a chain of frames, each adding less than its own static charge, with no fixed total.
-  From then on the spendable part is zero, so the next non-zero regular charge that a frame's whole regular gas can pay MUST be the crossing, and the stop bills the compute past the limit by the overshoots together.
+  From then on the spendable part is zero, so the next non-zero regular charge that a frame's whole regular gas can pay MUST be the crossing, and the compute stays past the limit by the overshoots together.
   A transaction whose frames make no such charge after the overshoot ends as it would without the read, its compute past the limit.
   A regular charge beyond the frame's whole regular gas, and every other out-of-gas, MUST halt as it would without the read.
 - **Precompiles.**
@@ -668,9 +676,9 @@ An out-of-gas step halts the call, consuming its regular gas.
   `gasUsed` MUST be what the creation spent from both pools, with no intrinsic gas and before the EIP-3529 refund: the regular gas it spent and the state and history gas it kept, net of every give-back within the creation — a slot written back to its original value, a record taken back, the upfront state gas of a frame it started that failed; the call's own charges of steps 1 and 14 are not in it, and a give-back is not a refund.
   It is never less than the regular gas the creation spent.
 - **Limits.**
-  A frame budget the creation crosses reverts the creation, and the call answers `ExecutionReverted` with the stop's revert data.
-  A transaction-level limit stops the transaction: the call reverts with the stop, and the deployment — the signer's nonce included — is taken back.
-  When the signer's nonce record, which survives a failed creation, takes the call over its own frame budget, the call reverts with that stop and the deployment, the nonce included, is taken back; no transaction-level limit is crossed, and since the call is the transaction's own frame, the stop reported for the transaction is that budget's.
+  A limit the creation crosses — its frame budget, the transaction's data-size limit or gas detention's compute limit, at its start or in its initcode — stops the creation, and the call answers `ExecutionReverted` with the stop's revert data, keeping what the creation's start wrote.
+  A limit the call's own charges cross — gas detention's compute limit — stops the call: it reverts with the stop, and the deployment, the signer's nonce included, is taken back.
+  When the signer's nonce record, which survives a failed creation, takes the call over a limit — its own frame budget or the transaction's data-size limit — the call reverts with that stop and the deployment, the nonce included, is taken back; since the call is the transaction's own frame, the stop reported for the transaction is that one.
 - The contract's interface no longer declares the four errors only Rex6 and earlier produced: `ParentBudgetExceeded(uint8,uint64,uint64)`, `InvalidTransaction()`, `InsufficientComputeGas(uint64,uint64)` and `InternalError()`.
   A node MUST NOT produce them: a failed database read or SALT lookup gives the transaction no outcome, as [Transaction and Block Refusals](#21-transaction-and-block-refusals) says.
   `AddressMismatch()` and `NoContractCreated()` remain as answers to a creation reported at another address or at none, which no deployment reaches.
@@ -701,8 +709,8 @@ An out-of-gas step halts the call, consuming its regular gas.
   Every admitted input stays counted, whatever the calling frame or the transaction does afterwards — a revert, a halt, a later stop, a failed deposit — and that includes an input that fails to decode, which reaches no service.
   Two reasons keep the count, each on its own: a payload forwarded to the service cannot be taken back, and admitting an input and decoding it is work the node has done whether or not the input decodes.
 - A hint whose input length would take the transaction's data size over its data-size limit MUST NOT be forwarded and MUST NOT be counted.
-  The `sendHint` call MUST be answered with the stop, without running the Oracle's bytecode: the limit stops the transaction, and the stop reports the data size the hint would have reached.
-  The data size the stopped transaction keeps, which the block's data-size budget counts, holds none of the hint's bytes: the payload never left the node, so it is taken back as a log that crosses the limit is.
+  The `sendHint` call MUST be answered with the stop, without running the Oracle's bytecode: the stop is the call's, which its caller can catch, and when the call is the transaction's own frame the stop the transaction reports counts the data size the hint would have reached as used.
+  The data size the transaction keeps, which the block's data-size budget counts, holds none of the hint's bytes: the payload never left the node, so it is taken back as a log that crosses the limit is.
   The check is against the transaction's limit alone, because a hint's bytes are on no frame's budget.
 
 ### 17. The Live System Address
@@ -877,7 +885,7 @@ A block builder MAY also skip a transaction other than a deposit under its own b
 A transaction over a builder's per-transaction limit never fits that builder's blocks, and the builder MAY drop it.
 A block is not invalid for a transaction a building policy would have skipped.
 
-A transaction MUST be included with a failed receipt when it reverts, halts, or is stopped by a limit (see [The Revert-Class Stop](#11-the-revert-class-stop)).
+A transaction MUST be included with a failed receipt when it reverts, halts, or its own frame is stopped by a limit (see [The Revert-Class Stop](#11-the-revert-class-stop)).
 A failed bucket-capacity read or database read is a fault of the node, never an outcome of the transaction, for a deposit as for any transaction: the transaction gets no outcome and MUST NOT be settled, as a failed deposit or otherwise.
 The node MUST report the failure as an internal error with its cause: a failed bucket-capacity read always; a failed database read the transaction's execution makes when the node's database declares the error fatal, and otherwise as an invalid-block verdict, as for a pre-block call (see [System Calls and Pre-Block Calls](#18-system-calls-and-pre-block-calls)); and a failed read block execution makes for the transaction outside its execution — the L1 block contract's account and footprint gas scalar before a non-deposit transaction, a transaction's sender's account before the transaction runs — always, as a pre-block deploy's is.
 A node that meets the failure cannot execute the block past that transaction: it reaches no verdict on the block, except that a non-fatal database error met inside the transaction's execution is reported as an invalid block (above); a builder, which has no outcome to include for that transaction, MAY leave a non-deposit transaction out of the block it builds, but a deposit MUST be included, so the block that must hold it cannot be built while the read fails.
@@ -969,9 +977,10 @@ Calldata, logs and deployed code cost 88 gas per byte of history; a fresh slot o
 Gas limits above 200,000,000 behave differently: at most 200,000,000, less the intrinsic regular gas, is available to computation and `GAS`, and the rest can pay only state and history gas.
 A contract that checks `gasleft()` against a large constant sees at most the regular budget.
 
-A transaction stopped by a resource limit or by gas detention now reverts rather than halting, with `MegaLimitExceeded(kind, limit)` as its output, and its sender pays only for what ran.
+A frame stopped by a resource limit or by gas detention now reverts rather than halting the transaction, with `MegaLimitExceeded(kind, limit)` as its output: its caller sees a failed call whose return data is the stop, and can catch it and carry on within what the limits leave.
+A transaction whose own frame is stopped reverts with the stop, and its sender pays only for what ran.
 No KV-update or state-growth limit stops a transaction, so kinds 1 and 3 are never reported.
-A transaction that reads volatile data is still held to its compute at the read plus the cap (20,000,000), but until a regular charge needs gas past that limit, `GAS`, call forwarding and state or history charges see its whole gas, and the stop is a revert.
+A transaction that reads volatile data is still held to its compute at the read plus the cap (20,000,000), but until a regular charge needs gas past that limit, `GAS`, call forwarding and state or history charges see its whole gas, and the stop is a revert of the frame that makes that charge.
 `VolatileDataAccessDisabled` can carry the value 12 (`SLOTNUM`), which a Solidity handler must decode as a `uint8`.
 
 Every movement of value to another account now emits a `Transfer` log from `0xff…fe`, which indexers see in receipts beside the contracts' own logs; a `CALLCODE`, a call to oneself, a deposit's mint and a self-destruct to oneself emit none.
@@ -1022,8 +1031,9 @@ A node, a stateless validator and a replay tool must agree on everything below, 
   A block's data-size budget and a builder's policy never refuse one (see [Block Limits](#20-block-limits)), so a builder has no reason to skip it for either and requeue the transaction that triggered it; the block gas limit and the data-availability footprint still hold it, and a builder keeps room for both.
   The execution result tells a node which transactions the block treated so: `MegaBlockTxResult::is_system_transaction`, beside `is_deposit`, which stays the envelope's.
 - **Reporting a limit stop.**
-  A stop is a revert whose output is `MegaLimitExceeded(kind, limit)`, and a contract can revert with the same bytes, as can a caller that re-raises what a frame budget returned.
-  Execution reports the crossing that produced the result of the transaction's own frame — a transaction-level limit, or that frame's own data-size budget — and none when that result is not the stop's revert; a node must read that report, and must not infer a stop from the output alone.
+  A stop is a revert whose output is `MegaLimitExceeded(kind, limit)`, and a contract can revert with the same bytes, as can a caller that re-raises the stop a frame below it returned.
+  Execution reports the crossing that produced the result of the transaction's own frame — the transaction's data-size limit, gas detention's compute limit, or that frame's own data-size budget — and none when that result is not the stop's revert; a node must read that report, and must not infer a stop from the output alone.
+  A stop a caller caught produced no result of the transaction's own frame: the transaction reports none, and it can succeed, so a node maps an RPC error or a builder's handling of a stopped transaction from that report alone.
 - **The chain configuration.**
   A genesis file's `config` object carries Satin as five flat keys beside the other forks': `satinTime`, the activation timestamp, and one key per parameter of the `SequencerRegistry`'s bootstrap, the `satin` prefix before the parameter's own name.
 

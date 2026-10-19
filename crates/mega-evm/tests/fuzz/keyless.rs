@@ -135,13 +135,14 @@ fn rules(case: &Case) -> Rules {
 /// A `keylessDeploy` call follows its rules, in their order, and settles its signer:
 ///
 /// - a call a rule refuses whatever its gas reverts with that rule's error, the first in the spec's
-///   order, unless it ran out of gas before or a limit stopped the transaction, and init code over
-///   the initcode size limit is refused naming its size and the limit;
+///   order, unless it ran out of gas before or a limit stopped it, and init code over the initcode
+///   size limit is refused naming its size and the limit;
 /// - a call those rules admit reverts only with `GasLimitTooLow`, when what it has left no longer
 ///   covers the signed gas limit, with `ContractAlreadyExists` when the deploy address holds a
-///   contract, with `InsufficientBalance` when the signer cannot fund the carried value, or with
-///   the stop of its own frame budget, which is the transaction's own frame's and so a limit stop
-///   of the transaction;
+///   contract, with `InsufficientBalance` when the signer cannot fund the carried value, or with a
+///   stop of its own frame — its budget, or a limit its own charges cross — which is the
+///   transaction's own frame's and so the limit stop the transaction reports, its revert data the
+///   stop's; a limit its creation crosses is the creation's stop, which the call answers;
 /// - a call that succeeds started its creation, so no rule refused it, and answers the deploy
 ///   address with no error when the address holds code afterwards, and otherwise the zero address
 ///   with `ExecutionReverted`, `ExecutionHalted` or `EmptyCodeDeployed`, the address then holding
@@ -206,8 +207,10 @@ fn test_property_a_keyless_deployment_follows_its_rules() {
                 );
                 count("the call's own frame budget stops it".to_string());
             }
-            ExecutionResult::Revert { .. } if outcome.limit_exceeded.is_some() => {
-                count("a limit stops the transaction".to_string());
+            ExecutionResult::Revert { output, .. } if outcome.limit_exceeded.is_some() => {
+                let stop = outcome.limit_exceeded.expect("a stop");
+                prop_eq!(*output, stop.revert_data(), "the call's own stop\n{rendered}");
+                count("a limit stops the call".to_string());
             }
             ExecutionResult::Revert { output, .. } => {
                 let error = error_name(output);

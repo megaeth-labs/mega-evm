@@ -265,10 +265,10 @@ fn test_a_revived_creation_settles_as_the_failure_it_was() {
 }
 
 /// A creation its own frame budget stops, revived by an inspector: the stop is the creation's alone
-/// and latches nothing, so the creation failed as any failed creation does and its revival
-/// settles as the failure — the transaction is not refused. Under a data-size limit of the body and
-/// 122 bytes, the creator may keep 122 and the creation 98% of them, 119: the creation's start
-/// makes two records, 80 bytes, and the write in its init code is a third, 40 more, over its
+/// and no stop of the transaction, so the creation failed as any failed creation does and its
+/// revival settles as the failure — the transaction is not refused. Under a data-size limit of the
+/// body and 122 bytes, the creator may keep 122 and the creation 98% of them, 119: the creation's
+/// start makes two records, 80 bytes, and the write in its init code is a third, 40 more, over its
 /// budget, which the transaction's limit still holds. Under the body and 160 bytes the budget holds
 /// it, and so does the transaction's limit once the creator stores the address, a fourth record:
 /// the same creation succeeds.
@@ -303,7 +303,7 @@ fn test_a_creation_its_frame_budget_stops_may_be_revived() {
     // and the transaction is not stopped.
     let stopped = plain(122);
     assert!(stopped.result.is_success(), "{:?}", stopped.result);
-    assert_eq!(stopped.limit_exceeded, None, "a frame budget latches nothing");
+    assert_eq!(stopped.limit_exceeded, None, "a frame budget below is no stop");
     assert!(!created(&stopped), "the creation failed");
 
     let limits = under(122);
@@ -312,7 +312,7 @@ fn test_a_creation_its_frame_budget_stops_may_be_revived() {
         .execute_transaction(call(CALLER, A, U256::ZERO, gas_limit()))
         .unwrap();
     assert!(revived.result.is_success(), "{:?}", revived.result);
-    assert_eq!(revived.limit_exceeded, None, "and the revival latches nothing");
+    assert_eq!(revived.limit_exceeded, None, "and the revival is no stop either");
     let stored = revived.state[&A].storage[&U256::ZERO].present_value();
     assert_eq!(Address::from_word(stored.into()), FAKE, "the creator got the revived address");
     let created_address = A.create(0);
@@ -746,7 +746,10 @@ fn test_only_the_inspecting_system_call_entry_point_runs_the_inspector() {
     .unwrap();
     assert!(inspected.is_success(), "{inspected:?}");
     assert_eq!(*evm.inspector(), Seen { frames: 1, steps: 3 }, "PUSH0, POP, STOP");
-    assert!(evm.ctx().additional_limit().latched().is_none(), "no limit holds a system call");
+    assert!(
+        evm.ctx().additional_limit().limit_exceeded().is_none(),
+        "no limit holds a system call"
+    );
 }
 
 /// Answers every call itself with a success, and counts the answers.

@@ -193,7 +193,7 @@ It restates MegaETH's execution rules on Optimism Karst (Ethereum Osaka) rather 
 - **Two-pool gas** — [EIP-8037](https://eips.ethereum.org/EIPS/eip-8037) regular gas under a 200,000,000 per-transaction execution cap, with the rest of the gas limit as a state-gas reservoir, replacing the [dual gas model](evm/dual-gas-model.md).
 - **State gas** — EIP-8037's byte counts at MegaETH's cost per state byte, scaled by the [SALT bucket](glossary.md#salt-bucket) the state lands in.
 - **History gas** — a price per byte on the transaction body, logs, write records and deployed code, replacing the storage gas on logs and calldata, the intrinsic storage gas, and the [storage gas stipend](glossary.md#storage-gas-stipend).
-- **Resource limits** — data size per transaction, with no KV-update, state-growth or separate compute-gas limit; every transaction-level limit stops a transaction with a revert carrying `MegaLimitExceeded`.
+- **Resource limits** — data size per transaction, with no KV-update, state-growth or separate compute-gas limit; every limit stops the frame that crosses it with a revert carrying `MegaLimitExceeded`, which its caller can catch.
 - **[Gas detention](evm/gas-detention.md)** — enforced on the gas a frame is allowed to spend, withholding the rest inside the frame's own gas.
 - **[EIP-7708](https://eips.ethereum.org/EIPS/eip-7708) transfer logs**, the `DUPN`, `SWAPN`, `EXCHANGE` and `SLOTNUM` opcodes, and 63/64 gas forwarding.
 - **[KeylessDeploy](system-contracts/keyless-deploy.md)** — the deployment runs as a native creation frame instead of a sandbox.

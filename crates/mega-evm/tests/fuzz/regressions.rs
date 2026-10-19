@@ -179,8 +179,8 @@ fn test_an_out_of_gas_before_the_first_frame_pays_the_operator_fee_on_the_whole_
 /// answers the refusal with a failed-deposit halt, and the outcome reports the halt and no stop,
 /// as an out-of-gas before the first frame does; the body is what the deposit kept.
 ///
-/// Found by the survivors property: the body's latch, set before op-revm validated the deposit,
-/// was reported beside the halt.
+/// Found by the survivors property: the stop the body's count set, before op-revm validated the
+/// deposit, was reported beside the halt.
 #[test]
 fn test_a_failed_deposit_reports_no_stop() {
     if runs_at_measurement_prices() {

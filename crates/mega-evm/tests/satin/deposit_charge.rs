@@ -569,7 +569,7 @@ fn assert_data_size_limit_stands_aside(pool: Pool) {
 
     let stopped = run(pool, enough, limits);
     assert!(stopped.result.is_success(), "{pool:?}: {:?}", stopped.result);
-    assert_eq!(stopped.limit_exceeded, None, "{pool:?}: a frame budget latches nothing");
+    assert_eq!(stopped.limit_exceeded, None, "{pool:?}: a frame budget below is no stop");
     assert!(!deployed(&stopped), "{pool:?}");
     let end = creation_end_under(pool, enough, limits);
     assert!(!end.deposited, "{pool:?}: {end:?}");

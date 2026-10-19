@@ -105,6 +105,7 @@ The whole shape, at Satin's values:
 An override is refused when it names an unknown field or gives a value that is not a 64-bit integer; any other value is run, since an override is a counterfactual.
 A transaction a limit stops reports it in `satin.limit_exceeded`.
 Its `used` is the usage where the limit was crossed.
+A limit stops the frame that crosses it: a stop of a frame below the transaction's own is caught by its caller, and the transaction then reports none, whatever its result.
 A transaction whose body, with 40 bytes for each entry of its authorization list, is over `txDataSizeLimit` is not stopped but refused, as a node refuses it at validation: the command exits with the validation error, and in a replay the transaction is `refused`, or, for a deposit, included as a failed deposit.
 A run under an override reports the limits it was held to in `satin.limits_override`, the merged object whole, so a counterfactual's output says what it ran under; in text mode they follow the Satin numbers as `Limits Override:`.
 A command on a legacy spec is refused with `--override.limits`: the legacy engine's limits are its spec's.

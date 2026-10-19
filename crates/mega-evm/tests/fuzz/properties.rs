@@ -11,8 +11,8 @@ use mega_evm::{
     constants::TX_GAS_LIMIT_CAP,
     system::is_system_originated,
     test_utils::{GasInspector, MemoryDatabase},
-    transaction_body_bytes, LimitCheck, MegaContext, MegaTransaction, MegaTransactionOutcome,
-    WRITE_RECORD_SIZE,
+    transaction_body_bytes, LimitCheck, LimitKind, MegaContext, MegaTransaction,
+    MegaTransactionOutcome, WRITE_RECORD_SIZE,
 };
 use revm::{
     context::{result::ExecutionResult, Transaction},
@@ -99,9 +99,9 @@ fn test_property_determinism() {
 ///
 /// Nothing is committed between the runs, so the state is the same each time; what could differ
 /// is what the engine keeps for one transaction and must reset for the next: the limits layer and
-/// its latch, gas detention, the SALT multipliers it read, the keyless frame. A transaction that
-/// ends in an error leaves through no settlement, so the reset is all that stands between it and
-/// the next. The tally of how the previous transaction ended is printed.
+/// the stop it reported, gas detention, the SALT multipliers it read, the keyless frame. A
+/// transaction that ends in an error leaves through no settlement, so the reset is all that stands
+/// between it and the next. The tally of how the previous transaction ended is printed.
 #[test]
 fn test_property_a_reused_evm_runs_a_transaction_as_a_fresh_one_does() {
     let tally: Mutex<BTreeMap<&'static str, u32>> = Mutex::new(BTreeMap::new());
@@ -299,8 +299,12 @@ fn test_property_gas_ledgers() {
 }
 
 /// After every instruction the KV count never weighs more than the data size, `KV × 40 ≤ data
-/// size`; at the end the same holds, the history bytes are within the data size, and every
-/// transaction keeps at least its body and the Oracle hints it forwarded.
+/// size`; at the end the same holds, the history bytes are within the data size, every
+/// transaction keeps at least its body and the Oracle hints it forwarded, and a user's
+/// transaction keeps no more than its data-size limit: a frame that crossed the limit took what
+/// it counted back with it, whether its caller caught the stop or not. Deposits and the protocol's
+/// transactions are left out of the last: the protocol's are held to no limit, and a deposit whose
+/// body is over the limit keeps it as a failed deposit.
 #[test]
 fn test_property_kv_weighs_no_more_than_data_size() {
     #[derive(Default)]
@@ -352,6 +356,13 @@ fn test_property_kv_weighs_no_more_than_data_size() {
                 usage.data_size >= transaction_body_bytes(&tx) + hints,
                 "the body and the {hints} bytes of hints forwarded are counted: {usage:?}"
             );
+            if !is_exempt(&tx) {
+                let limit = case.world.limits.runtime().tx_data_size_limit;
+                prop_check!(
+                    usage.data_size <= limit,
+                    "a user's transaction keeps more than its limit of {limit}: {usage:?}"
+                );
+            }
             Ok(())
         },
     );
@@ -370,9 +381,10 @@ fn forwarded_hint_bytes<I>(evm: &mega_evm::MegaEvm<MemoryDatabase, I, Envs>) -> 
         .sum()
 }
 
-/// A stopped transaction keeps only what the spec says survives: the stop is the one the
-/// transaction latched, or, when it latched none, its own frame's budget, which latches nothing
-/// and reverts that frame as the latch does; it is a revert carrying `MegaLimitExceeded`, with no
+/// A stopped transaction keeps only what the spec says survives: the stop is the crossing of its
+/// own frame, which names a limit the case runs under — the transaction's data-size limit, that
+/// frame's budget, which is below it, or a compute limit, which no frame budget is — and reverts
+/// that frame and so everything below it; it is a revert carrying `MegaLimitExceeded`, with no
 /// log; no storage write stands; no account changes but the sender's
 /// nonce and fee, the fee recipients' credit, an applied EIP-7702 authority's nonce and
 /// delegation, and a deposit's mint; the records kept are the applied authorities', and the data
@@ -395,32 +407,37 @@ fn test_property_a_stop_keeps_only_what_survives() {
             let (execution, evm) = case.execute_with_evm();
             let Ok(outcome) = execution else { return Ok(()) };
             let Some(stop) = outcome.limit_exceeded else { return Ok(()) };
-            let latched = evm.ctx().additional_limit().latched().copied();
-            check_survivors(case, &tx, &outcome, stop, latched, forwarded_hint_bytes(&evm))
+            check_survivors(case, &tx, &outcome, stop, forwarded_hint_bytes(&evm))
         },
     );
 }
 
 /// What [`test_property_a_stop_keeps_only_what_survives`] checks of a stopped transaction;
-/// `latched` is the stop its EVM latched, if any, and `hint_bytes` is what the Oracle hints it
-/// forwarded weigh.
+/// `hint_bytes` is what the Oracle hints it forwarded weigh.
 pub(crate) fn check_survivors(
     case: &Case,
     tx: &MegaTransaction,
     outcome: &MegaTransactionOutcome,
     stop: LimitCheck,
-    latched: Option<LimitCheck>,
     hint_bytes: u64,
 ) -> Result<(), proptest::test_runner::TestCaseError> {
     let rendered = render_outcome(outcome);
-    let LimitCheck::ExceedsLimit { frame_local, .. } = stop else {
+    let LimitCheck::ExceedsLimit { kind, limit, frame_local, .. } = stop else {
         return Err(crate::harness::fail(format!(
             "a reported stop that is within the limit\n{rendered}"
         )));
     };
-    match latched {
-        Some(_) => prop_check!(!frame_local, "a frame budget latched the transaction\n{rendered}"),
-        None => prop_check!(frame_local, "a transaction-level stop latched nothing\n{rendered}"),
+    let tx_limit = case.world.limits.runtime().tx_data_size_limit;
+    match (kind, frame_local) {
+        (LimitKind::DataSize, false) => {
+            prop_eq!(limit, tx_limit, "the stop names the transaction's limit\n{rendered}");
+        }
+        (LimitKind::DataSize, true) => {
+            prop_check!(limit < tx_limit, "a frame budget is below the limit\n{rendered}");
+        }
+        (LimitKind::ComputeGas, frame_local) => {
+            prop_check!(!frame_local, "a compute stop is no frame budget\n{rendered}");
+        }
     }
     match &outcome.result {
         ExecutionResult::Revert { output, .. } => {
@@ -444,7 +461,7 @@ pub(crate) fn check_survivors(
         op_revm::constants::OPERATOR_FEE_RECIPIENT,
     ];
     // The authorizations that apply, by revm's rules, and what the state says of them: either
-    // every one applied, or the latch took them all back before the first frame.
+    // every one applied, or the runtime phase before the first frame took them all back.
     let simulated = applied_authorizations(case);
     let mut expected: BTreeMap<Address, (u64, Delegate)> = BTreeMap::new();
     for (authority, delegate) in &simulated {

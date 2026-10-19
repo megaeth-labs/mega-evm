@@ -523,62 +523,65 @@ fn test_the_bytes_on_the_edge_paths_are_the_history_gas_at_the_price() {
     if runs_at_measurement_prices() {
         return;
     }
-    type Case = (&'static str, fn() -> MemoryDatabase, fn(u64) -> MegaTransaction, u64, u64);
+    // A case under a limit names it, and whether it stops the transaction's own frame rather than a
+    // frame below it, whose caller catches the stop.
+    type Held = Option<(u64, bool)>;
+    type Case = (&'static str, fn() -> MemoryDatabase, fn(u64) -> MegaTransaction, Held, u64);
     let cases: [Case; 19] = [
         (
             "an access list: twenty bytes an address and thirty-two a key",
             || callee_running(BytecodeBuilder::default()),
             |gas| with_access_list(&[(CALLEE, 2), (PAYEE, 1), (FRESH, 0)], gas),
-            u64::MAX,
+            None,
             TX_BODY_SIZE + 3 * ACCESS_LIST_ADDRESS_SIZE + 3 * ACCESS_LIST_SLOT_SIZE,
         ),
         (
             "authorizations: each in the body, and a record for the one authority applied",
             || callee_running(BytecodeBuilder::default()),
             |gas| with_authorizations(&[(AUTHORITY, 0), (OTHER_AUTHORITY, 7)], gas),
-            u64::MAX,
+            None,
             TX_BODY_SIZE + 2 * AUTHORIZATION_SIZE + WRITE_RECORD_SIZE,
         ),
         (
             "an authority applied twice is one record",
             || callee_running(BytecodeBuilder::default()),
             |gas| with_authorizations(&[(AUTHORITY, 0), (AUTHORITY, 1)], gas),
-            u64::MAX,
+            None,
             TX_BODY_SIZE + 2 * AUTHORIZATION_SIZE + WRITE_RECORD_SIZE,
         ),
         (
             "the sender's own authorization: in the body, and no record beside it",
             || callee_running(BytecodeBuilder::default()),
             |gas| with_authorizations(&[(CALLER, 1)], gas),
-            u64::MAX,
+            None,
             TX_BODY_SIZE + AUTHORIZATION_SIZE,
         ),
         (
             "a SELFDESTRUCT that moves a balance to another account records it",
             || funded().account_code(CALLEE, destructs_to(PAYEE)),
             |gas| call(CALLER, CALLEE, U256::ZERO, gas),
-            u64::MAX,
+            None,
             TX_BODY_SIZE + WRITE_RECORD_SIZE,
         ),
         (
             "a SELFDESTRUCT that moves a balance to an account it creates records it",
             || funded().account_code(CALLEE, destructs_to(FRESH)),
             |gas| call(CALLER, CALLEE, U256::ZERO, gas),
-            u64::MAX,
+            None,
             TX_BODY_SIZE + WRITE_RECORD_SIZE,
         ),
         (
             "a SELFDESTRUCT to the sender records nothing: the body carries the sender",
             || funded().account_code(CALLEE, destructs_to(CALLER)),
             |gas| call(CALLER, CALLEE, U256::ZERO, gas),
-            u64::MAX,
+            None,
             TX_BODY_SIZE,
         ),
         (
             "a SELFDESTRUCT that moves nothing records nothing",
             || funded().account_code(RECEIVER, destructs_to(PAYEE)),
             |gas| call(CALLER, RECEIVER, U256::ZERO, gas),
-            u64::MAX,
+            None,
             TX_BODY_SIZE,
         ),
         (
@@ -588,36 +591,37 @@ fn test_the_bytes_on_the_edge_paths_are_the_history_gas_at_the_price() {
                 beside_access_control(asks_access_control(code, 0))
             },
             |gas| call(CALLER, CALLEE, U256::ZERO, gas),
-            u64::MAX,
+            None,
             TX_BODY_SIZE + WRITE_RECORD_SIZE,
         ),
         (
             "a value call an interceptor refuses keeps none of the records its caller paid for",
             || beside_access_control(asks_access_control(BytecodeBuilder::default(), 1)),
             |gas| call(CALLER, CALLEE, U256::ZERO, gas),
-            u64::MAX,
+            None,
             TX_BODY_SIZE,
         ),
         (
             "a limit stops the transaction before its first frame: the recipient is not written",
             funded,
             |gas| call(CALLER, FRESH, U256::from(1), gas),
-            TX_BODY_SIZE + WRITE_RECORD_SIZE - 1,
+            Some((TX_BODY_SIZE + WRITE_RECORD_SIZE - 1, true)),
             TX_BODY_SIZE,
         ),
         (
-            "a limit stops a value call before its frame is built: nothing the transaction wrote \
-             is kept",
+            "a limit stops a value call before its frame is built: nothing its start would write is \
+             kept, and its caller, which catches the stop, keeps its own write",
             || {
                 let code = BytecodeBuilder::default().sstore(U256::from(1), U256::from(1));
                 callee_running(calling(code, PAYEE, 1, 100_000))
             },
             |gas| call(CALLER, CALLEE, U256::ZERO, gas),
-            TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE - 1,
-            TX_BODY_SIZE,
+            Some((TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE - 1, false)),
+            TX_BODY_SIZE + WRITE_RECORD_SIZE,
         ),
         (
-            "a limit crossed by a child's write: nothing the transaction wrote or logged is kept",
+            "a limit crossed by a child's write: the child keeps nothing, and its caller, which \
+             catches the stop, keeps its log",
             || {
                 callee_running(calling(log(BytecodeBuilder::default(), 0, 0), CHILD, 0, 1_000_000))
                     .account_code(
@@ -626,29 +630,29 @@ fn test_the_bytes_on_the_edge_paths_are_the_history_gas_at_the_price() {
                     )
             },
             |gas| call(CALLER, CALLEE, U256::ZERO, gas),
-            TX_BODY_SIZE + LOG_BASE_SIZE + WRITE_RECORD_SIZE - 1,
-            TX_BODY_SIZE,
+            Some((TX_BODY_SIZE + LOG_BASE_SIZE + WRITE_RECORD_SIZE - 1, false)),
+            TX_BODY_SIZE + LOG_BASE_SIZE,
         ),
         (
             "a nested creation whose code EIP-3541 refuses: the creator's nonce outlives it, and \
              nothing is deposited",
             || callee_running(creating(BytecodeBuilder::default(), &refused_code())),
             |gas| call(CALLER, CALLEE, U256::ZERO, gas),
-            u64::MAX,
+            None,
             TX_BODY_SIZE + WRITE_RECORD_SIZE,
         ),
         (
             "a nested creation whose code is past the size limit: the same",
             || callee_running(creating(BytecodeBuilder::default(), &oversized_code())),
             |gas| call(CALLER, CALLEE, U256::ZERO, gas),
-            u64::MAX,
+            None,
             TX_BODY_SIZE + WRITE_RECORD_SIZE,
         ),
         (
             "a creation transaction whose code EIP-3541 refuses: its body and init code alone",
             funded,
             |gas| create(CALLER, refused_code(), gas),
-            u64::MAX,
+            None,
             TX_BODY_SIZE + refused_code().len() as u64,
         ),
         (
@@ -661,7 +665,7 @@ fn test_the_bytes_on_the_edge_paths_are_the_history_gas_at_the_price() {
                 )
             },
             |gas| call(CALLER, CALLEE, U256::ZERO, gas),
-            u64::MAX,
+            None,
             TX_BODY_SIZE,
         ),
         (
@@ -674,19 +678,20 @@ fn test_the_bytes_on_the_edge_paths_are_the_history_gas_at_the_price() {
                 )
             },
             |gas| call(CALLER, CALLEE, U256::ZERO, gas),
-            u64::MAX,
+            None,
             TX_BODY_SIZE,
         ),
         (
             "a slot written, then written back by a call to itself",
             || funded().account_code(CALLEE, writes_then_calls_itself_to_write_back()),
             |gas| call(CALLER, CALLEE, U256::ZERO, gas),
-            u64::MAX,
+            None,
             TX_BODY_SIZE,
         ),
     ];
 
-    for (name, db, tx, limit, bytes) in cases {
+    for (name, db, tx, held, bytes) in cases {
+        let (limit, stopped) = held.unwrap_or((u64::MAX, false));
         // A limit the body alone crosses would stop every case before its first write, and the
         // case would pin the body's stop rather than its own.
         assert!(limit > TX_BODY_SIZE, "{name}: the body fits under the limit");
@@ -696,7 +701,7 @@ fn test_the_bytes_on_the_edge_paths_are_the_history_gas_at_the_price() {
                 .expect("the transaction is valid");
             assert_eq!(
                 outcome.limit_exceeded.is_some(),
-                limit != u64::MAX,
+                stopped,
                 "{name} at {gas_limit}: {:?}",
                 outcome.result,
             );
@@ -855,8 +860,12 @@ fn beside_the_oracle() -> MemoryDatabase {
 enum Run {
     /// With no limit.
     Plain,
-    /// Under a transaction data-size limit of this many bytes, which the case crosses.
+    /// Under a transaction data-size limit of this many bytes, which the transaction's own frame
+    /// crosses.
     Limited(u64),
+    /// Under a transaction data-size limit of this many bytes, which a frame below the
+    /// transaction's own crosses, whose caller catches the stop.
+    Caught(u64),
     /// With an inspector that answers every creation without running it.
     AnsweringCreations,
 }
@@ -1071,7 +1080,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             0,
         ),
         (
-            "a stop at a child's write",
+            "a stop at a child's write, which its caller catches: its log is kept",
             || {
                 callee_running(calling(log(BytecodeBuilder::default(), 0, 0), CHILD, 0, 1_000_000))
                     .account_code(
@@ -1080,8 +1089,8 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
                     )
             },
             |gas| call(CALLER, CALLEE, U256::ZERO, gas),
-            Run::Limited(TX_BODY_SIZE + LOG_BASE_SIZE + WRITE_RECORD_SIZE - 1),
-            TX_BODY_SIZE,
+            Run::Caught(TX_BODY_SIZE + LOG_BASE_SIZE + WRITE_RECORD_SIZE - 1),
+            TX_BODY_SIZE + LOG_BASE_SIZE,
             0,
             0,
         ),
@@ -1111,7 +1120,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
     for (name, db, tx, run, bytes, hints, moves) in cases {
         for gas_limit in GAS_LIMITS {
             let limit = match run {
-                Run::Limited(limit) => limit,
+                Run::Limited(limit) | Run::Caught(limit) => limit,
                 Run::Plain | Run::AnsweringCreations => u64::MAX,
             };
             let mut evm = MegaEvm::new(context(db()).with_tx_runtime_limits(limited_to(limit)));
@@ -1119,7 +1128,9 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
                 Run::AnsweringCreations => {
                     evm.with_inspector(AnswersCreations).execute_transaction(tx(gas_limit))
                 }
-                Run::Plain | Run::Limited(_) => evm.execute_transaction(tx(gas_limit)),
+                Run::Plain | Run::Limited(_) | Run::Caught(_) => {
+                    evm.execute_transaction(tx(gas_limit))
+                }
             }
             .expect("the transaction is valid");
             assert_eq!(

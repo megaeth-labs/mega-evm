@@ -7,9 +7,10 @@
 //!
 //! Gas detention caps compute, [`LimitKind::ComputeGas`]: its state lives beside this module, in
 //! [`Detention`](crate::Detention), because what it meters is gas rather than anything the lanes
-//! count, and it holds a frame to the cap with the gas the frame may spend. It stops a transaction
-//! through the same latch ([`AdditionalLimit::latch`]), with the compute the transaction may reach
-//! as the limit, and its compute at the crossing as what was used ([`LimitCheck::ExceedsLimit`]).
+//! count, and it holds a frame to the cap with the gas the frame may spend. It stops the frame that
+//! crosses the cap with the same revert ([`AdditionalLimit`]), with the compute the transaction may
+//! reach as the limit, and its compute at the crossing as what was used
+//! ([`LimitCheck::ExceedsLimit`]).
 //!
 //! It also counts what the data-size limit meters, at the sites the bytes are made: data-size
 //! bytes and write records, on a lane per frame ([`AdditionalLimit`]). The Host stages what it
@@ -21,10 +22,14 @@
 //! budget. The transaction's own frame gets what the transaction has left once its body is
 //! counted, and a child gets [`FRAME_DATA_SHARE_NUMERATOR`] / [`FRAME_DATA_SHARE_DENOMINATOR`] of
 //! what its parent has left, under [`EvmTxRuntimeLimits::frame_data_size_limit`]. A frame that
-//! crosses its budget reverts alone and its caller resumes; a transaction that crosses its limit
-//! is stopped through the latch ([`AdditionalLimit`]). A creation stopped at its start still bumps
-//! its creator's nonce, and the record of that write lands on the creator: the creator is held to
-//! its budget with it before it runs on, and reverts alone if it crossed.
+//! crosses either reverts alone, its caller resumes, and what the frame counted goes with it, so
+//! the caller is back within both ([`AdditionalLimit`]). The budget is what keeps a caller's own
+//! work safe from what it calls: a child inherits its caller's whole reservoir, so gas does not
+//! bound the bytes it can append, and without a budget a callee could take the transaction to its
+//! limit and leave its caller nothing to carry on with once it catches the stop. A creation
+//! stopped at its start still bumps its creator's nonce, and the record of that write lands on the
+//! creator: the creator is held to its limits with it before it runs on, and reverts alone if it
+//! crossed one.
 //!
 //! What is counted, and when:
 //!
@@ -215,10 +220,11 @@ pub struct LimitUsage {
 
 /// Limits one transaction's data size and its compute after a read of volatile data.
 ///
-/// [`tx_data_size_limit`](Self::tx_data_size_limit) stops the transaction. A frame's own budget is
-/// derived from it: the transaction's frame gets what the transaction has left, and each child gets
-/// [`FRAME_DATA_SHARE_NUMERATOR`] / [`FRAME_DATA_SHARE_DENOMINATOR`] of what its parent has left.
-/// Crossing a frame budget reverts that frame alone.
+/// [`tx_data_size_limit`](Self::tx_data_size_limit) is what the transaction may keep: a frame
+/// whose count crosses it reverts alone. A frame's own budget is derived from it: the transaction's
+/// frame gets what the transaction has left, and each child gets [`FRAME_DATA_SHARE_NUMERATOR`] /
+/// [`FRAME_DATA_SHARE_DENOMINATOR`] of what its parent has left. Crossing a frame budget reverts
+/// that frame alone.
 ///
 /// [`frame_data_size_limit`](Self::frame_data_size_limit) is a further cap on every frame's budget.
 ///
@@ -237,21 +243,22 @@ pub struct LimitUsage {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EvmTxRuntimeLimits {
-    /// The most data-size bytes the transaction may keep. Crossing it stops the transaction.
+    /// The most data-size bytes the transaction may keep. Crossing it reverts the frame that
+    /// crosses it.
     pub tx_data_size_limit: u64,
     /// A cap on every frame's data-size budget, applied after the share of what its parent has
     /// left. Crossing it reverts the frame alone.
     pub frame_data_size_limit: u64,
     /// The compute a transaction may still spend once it read the block environment or the block
-    /// beneficiary's account: its compute at the read plus this. Crossing it stops the
-    /// transaction.
+    /// beneficiary's account: its compute at the read plus this. Crossing it reverts the frame
+    /// that crosses it.
     ///
     /// `u64::MAX` caps nothing, and with the Oracle's cap unlimited too the transaction is not
     /// detained at all, as under [`no_limits`](Self::no_limits): that is for equivalence runs and
     /// tests, not for executing the chain, which runs on the spec's cap, the default.
     pub block_env_access_compute_gas_limit: u64,
     /// The compute a transaction may still spend once it read the Oracle's storage: its compute
-    /// at the read plus this. Crossing it stops the transaction.
+    /// at the read plus this. Crossing it reverts the frame that crosses it.
     ///
     /// `u64::MAX` caps nothing, and with the block-environment cap unlimited too the transaction
     /// is not detained at all, as under [`no_limits`](Self::no_limits): that is for equivalence
@@ -400,9 +407,9 @@ impl LimitKind {
 
 /// The verdict of a limit check.
 ///
-/// A transaction-level exceed stops the transaction: the frame that crosses it reverts, the
-/// transaction is latched and every frame above reverts in turn. A frame-local exceed (a frame
-/// budget) reverts the frame alone and its caller resumes. A transaction exempt from the limits
+/// An exceed reverts the frame that crossed the limit, alone, and its caller resumes: a
+/// transaction-level exceed and a frame-local one (a frame budget) alike, which the revert data
+/// tell apart by the limit they name. A transaction exempt from the limits
 /// ([`AdditionalLimit::is_exempt`]) is within them whatever it crosses.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LimitCheck {
@@ -482,7 +489,7 @@ impl LimitStop {
     ///
     /// `Some` when both say so: `limit_exceeded` names a crossing, and `result` is a revert whose
     /// output is that limit's [`MegaLimitExceeded`]. The output alone never makes a stop. A
-    /// contract can revert with the same bytes, and a frame a frame budget stopped below the
+    /// contract can revert with the same bytes, and a frame a limit stopped below the
     /// transaction's own reverts with them while its caller runs on and may re-raise them:
     /// `limit_exceeded` is then `None`, and so is this.
     pub fn from_result<HaltReason>(

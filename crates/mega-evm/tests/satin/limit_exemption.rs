@@ -140,7 +140,7 @@ fn test_a_system_call_is_held_to_no_limit() {
         (
             result,
             evm.ctx().additional_limit().usage(),
-            evm.ctx().additional_limit().latched().copied(),
+            evm.ctx().additional_limit().limit_exceeded().copied(),
         )
     };
     let (free, free_usage, _) = run(EvmTxRuntimeLimits::no_limits());
@@ -149,9 +149,9 @@ fn test_a_system_call_is_held_to_no_limit() {
     assert_eq!(free_usage.data_size, 310 + 3 * 40 + 32 + 64, "its body, records and log");
 
     for (name, limits) in limits() {
-        let (result, usage, latched) = run(limits);
+        let (result, usage, stop) = run(limits);
         assert!(result.result.is_success(), "{name}: {:?}", result.result);
-        assert_eq!(latched, None, "{name}");
+        assert_eq!(stop, None, "{name}");
         assert_eq!(usage, free_usage, "{name}: its usage is counted all the same");
         assert_eq!(result.result, free.result, "{name}");
     }

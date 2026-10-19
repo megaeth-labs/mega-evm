@@ -78,8 +78,7 @@ pub(crate) struct Started {
 /// read off its own return data. A call a contract makes, and a selector the contract does not
 /// declare, run the deployed bytecode: a `keylessDeploy` call reaches the method body and its
 /// `NotIntercepted()`, and an undeclared selector finds no function and no fallback, so it reverts
-/// with empty data. Nothing stops a transaction before its first frame, so the dispatch never sees
-/// a stopped transaction.
+/// with empty data.
 ///
 /// The depth is tested first: every frame below the transaction's own leaves after one
 /// comparison.
@@ -141,8 +140,8 @@ pub(crate) fn runs<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// or the creation [`start`] makes; on its resume, once its creation returned into it, its answer
 /// ([`settle::answer`]).
 ///
-/// A frame with a stop to return — the latch, or its own budget, which the nonce record a failed
-/// creation leaves the call can cross — returns it before this runs, as any frame does.
+/// A frame with a stop to return — a limit the nonce record a failed creation leaves the call
+/// crosses — returns it before this runs, as any frame does.
 #[inline(never)]
 pub(crate) fn run<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
@@ -208,7 +207,7 @@ pub(crate) fn run<DB: Database, ExtEnvs: ExternalEnvTypes>(
 ///
 /// The creation is started as the signer's, at the signer's Nick's-Method address
 /// (`CreateScheme::Custom`), as the call's child: its share of the data-size budget, its records,
-/// its forward and the reservoir it inherits, the latch. The call's lane runs as the signer, whose
+/// its forward and the reservoir it inherits. The call's lane runs as the signer, whose
 /// nonce the creation's start writes. The call's journal checkpoint was taken when revm built its
 /// frame, so a call that is stopped takes that write back with the rest.
 fn start<DB: Database, ExtEnvs: ExternalEnvTypes>(

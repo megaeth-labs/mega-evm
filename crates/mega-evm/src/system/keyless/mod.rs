@@ -65,10 +65,12 @@
 //! - `gasUsed` is what the creation spent, with no transaction intrinsic: the sandbox of the legacy
 //!   engine ran the deployment as a transaction of its own, this engine does not. It is counted
 //!   before refunds: a refund the creation earns goes to the transaction, as any frame's does.
-//! - A limit the deployment crosses stops it as it stops any frame: a frame budget reverts the
-//!   creation, and the call returns `ExecutionReverted` with the limit's revert data; a transaction
-//!   limit stops the transaction, and the call reverts with the stop, taking back the signer's
-//!   nonce with everything else.
+//! - A limit the deployment crosses stops the frame that crosses it, as it stops any frame. The
+//!   creation crossing a limit — its budget or the transaction's, its start's records or its init
+//!   code's work — reverts with the stop, and the call returns `ExecutionReverted` with the stop's
+//!   revert data, keeping what the creation's start wrote. The call crossing one itself — its own
+//!   charges past gas detention's limit, or a limit the nonce record a failed creation leaves it
+//!   crosses — reverts with the stop, taking back the signer's nonce with everything else.
 //!
 //! A creation an inspector revives — a tool's `create_end` that turns a failed creation into a
 //! success at an address of its own, as Foundry's `expectRevert` does — settles as a frame that

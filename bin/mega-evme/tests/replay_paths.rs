@@ -175,18 +175,20 @@ fn block_rows(spec: Option<&str>, limits: Option<&str>) -> Vec<Value> {
 }
 
 /// The transactions checked: the first user transaction, the plain value transfer, one in the
-/// middle, the first a limit stopped, and the last the block ran before it refused one.
+/// middle, the first a limit stopped, the one at `held`, and the last the block ran before it
+/// refused one.
 ///
 /// A Satin replay can refuse a transaction the chain included, for the block gas it declared, and
 /// a transaction after it is not replayed alone: the replay of its block's earlier transactions
 /// meets the refusal and fails.
-fn checked(rows: &[Value]) -> Vec<usize> {
+fn checked(rows: &[Value], held: Option<usize>) -> Vec<usize> {
     let ran = rows.iter().position(|row| row["status"] == "refused").unwrap_or(rows.len());
     let rows = &rows[..ran];
     let transfer = rows.iter().position(|row| row["logs"] == 0 && row["index"] != 0).unwrap_or(1);
     let stopped = rows.iter().position(|row| !row["satin"]["limit_exceeded"].is_null());
     let mut picks = vec![1, transfer, rows.len() / 2, rows.len() - 1];
     picks.extend(stopped);
+    picks.extend(held.filter(|held| *held < ran));
     picks.sort_unstable();
     picks.dedup();
     picks
@@ -199,21 +201,23 @@ async fn test_a_transaction_replayed_alone_is_the_one_the_block_replay_runs() {
     let uri = server.0.uri();
 
     // The last leg holds both paths to a transaction data-size limit one byte below the most a
-    // transaction of the block keeps, which stops that transaction where it crosses it.
-    let most = block_rows(Some("Satin"), None)
-        .iter()
-        .filter_map(|row| row["satin"]["data_size"].as_u64())
-        .max()
-        .expect("the block keeps data");
-    let stopping = format!(r#"{{"txRuntimeLimits":{{"txDataSizeLimit":{}}}}}"#, most - 1);
-    let mut stops = 0;
+    // transaction of the block keeps, which stops the frame of that transaction that crosses it:
+    // the transaction keeps less than it did, whether that frame was its own or a caller caught
+    // the stop.
+    let unlimited = block_rows(Some("Satin"), None);
+    let kept = |row: &Value| row["satin"]["data_size"].as_u64();
+    let most = unlimited.iter().filter_map(kept).max().expect("the block keeps data");
+    let heaviest = unlimited.iter().position(|row| kept(row) == Some(most));
+    let holding = format!(r#"{{"txRuntimeLimits":{{"txDataSizeLimit":{}}}}}"#, most - 1);
+    let mut held = 0;
     for (spec, engine, limits) in [
         (None, "legacy", None),
         (Some("Satin"), "satin", None),
-        (Some("Satin"), "satin", Some(stopping.as_str())),
+        (Some("Satin"), "satin", Some(holding.as_str())),
     ] {
         let rows = block_rows(spec, limits);
-        for index in checked(&rows) {
+        let heaviest = heaviest.filter(|_| limits.is_some());
+        for index in checked(&rows, heaviest) {
             let row = &rows[index];
             let mut args = vec!["replay", row["hash"].as_str().unwrap(), "--rpc", &uri];
             args.extend(["--rpc.no-cache-file", "--rpc.max-retries", "0", "--json"]);
@@ -222,7 +226,10 @@ async fn test_a_transaction_replayed_alone_is_the_one_the_block_replay_runs() {
             }
             if let Some(limits) = limits {
                 args.extend(["--override.limits", limits]);
-                stops += usize::from(!row["satin"]["limit_exceeded"].is_null());
+                if heaviest == Some(index) {
+                    assert!(kept(row).is_some_and(|kept| kept < most), "the limit held tx {index}");
+                    held += 1;
+                }
             }
             let run = run_evme(&args);
             assert_eq!(run.code, 0, "{engine} tx {index}: {}{}", run.stderr, run.stdout);
@@ -249,7 +256,7 @@ async fn test_a_transaction_replayed_alone_is_the_one_the_block_replay_runs() {
             }
         }
     }
-    assert!(stops > 0, "the limits leg checks a stopped transaction");
+    assert_eq!(held, 1, "the limits leg checks the transaction the limit held");
 }
 
 /// [S1.8] [S21.12] [S1] A transaction replay is told whether its block admits only deposits as a

@@ -9,9 +9,9 @@
 //!
 //! Whatever detention does to the movement, the transfer logs a receipt carries are the ones the
 //! data size kept: a transaction keeps its body, forty bytes a write record and 160 a transfer
-//! log, and a transaction the cap stops keeps its body alone. A debug build also asserts at every
-//! frame start that revm refused exactly the start predicted and journaled exactly the log
-//! counted, so every case below runs that check too.
+//! log, and a frame the cap stops keeps nothing, its movement and its log included. A debug build
+//! also asserts at every frame start that revm refused exactly the start predicted and journaled
+//! exactly the log counted, so every case below runs that check too.
 //!
 //! Each case runs with a read of the block's timestamp first, and with `PUSH0`, which costs the
 //! same two gas and reads nothing, in its place.
@@ -30,8 +30,9 @@ use revm::{
 
 use crate::{
     detention::{
-        assert_stopped, cold_access, context, intrinsic, memory_cost, op, run_on, spin,
-        value_transfer, Calls, Charges, Run, BENEFICIARY, CALLER, CAP, CHILD, CONTRACT, TIERS,
+        assert_caught, assert_stopped, cold_access, context, failed_status_store, intrinsic,
+        memory_cost, op, run_on, spin, value_transfer, Calls, Charges, Run, BENEFICIARY, CALLER,
+        CAP, CHILD, CONTRACT, TIERS,
     },
     withheld_gas::{costly_modexp_input, intrinsic_with},
 };
@@ -200,9 +201,10 @@ fn balance(run: &Run, address: Address) -> U256 {
 ///
 /// - Priced within the allowance, modexp computes, the value moves, and the receipt carries the log
 ///   the data size counted, as without the read.
-/// - Priced past the allowance but within the forward, modexp is answered without running: nothing
-///   moves and no log is journaled, and the transaction stops at the limit, billed its intrinsic
-///   gas and its compute at the call, and keeping its body alone. Without the read the call
+/// - Priced past the allowance but within the forward, modexp is answered without running, with the
+///   stop: nothing moves and no log is journaled. The contract catches it and stores the failed
+///   call's status on what the limit leaves it, ending within the limit or crossing it at the
+///   store, and the transaction keeps its body alone either way. Without the read the call
 ///   succeeds, and its log is kept.
 /// - Sent with value by the beneficiary straight to modexp, the transaction's own frame is detained
 ///   from its start with the cap as its allowance: priced past it, the same stop, billed its
@@ -233,7 +235,8 @@ fn test_a_value_call_to_a_precompile_after_a_read_keeps_the_log_it_counted() {
         let price = mega_evm::satin_precompiles().get(&MODEXP).unwrap().required_gas(&above);
         let charges = charges_to_the_call(above.len() as u64, call_to_an_empty_precompile())
             .then(&[price.unwrap()]);
-        assert_stopped(&detained, intrinsic_with(&above, gas_limit), charges.left(CAP));
+        let intrinsic = intrinsic_with(&above, gas_limit);
+        assert_caught(&detained, intrinsic, charges.left(CAP), &failed_status_store());
         // The answer is the stop, having spent nothing.
         assert_eq!(ended(&calls, MODEXP), (InstructionResult::Revert, 0));
         assert_eq!(detained.outcome.usage, LimitUsage { data_size: body, write_records: 0 });
@@ -405,8 +408,8 @@ struct Start {
     input: fn() -> Vec<u8>,
     /// What [`CONTRACT`] holds.
     held: u64,
-    /// When the cap stops the transaction: the regular charges it makes after the read, with
-    /// calldata of the given length.
+    /// When the cap stops the call: the regular charges the transaction makes after the read up to
+    /// the one that crosses, with calldata of the given length.
     stops: Option<fn(u64) -> Charges>,
 }
 
@@ -419,7 +422,9 @@ struct Start {
 ///
 /// Every transaction keeps the data size of the transfer logs its receipt carries: a debug build
 /// asserts at each start that revm journaled exactly the log counted, and the receipt shows what
-/// that means for the transaction. Every case the cap does not stop runs as without the read.
+/// that means for the transaction. Every case the cap does not stop runs as without the read; in
+/// one it stops, the call is the stop, which the contract catches before it stores the call's
+/// status.
 #[test]
 fn test_every_detained_frame_start_keeps_the_log_it_counted() {
     let none = Vec::new;
@@ -561,7 +566,8 @@ fn test_every_detained_frame_start_keeps_the_log_it_counted() {
                 assert_counts_its_transfer_logs(&detained, body, &case);
                 if let Some(charges) = start.stops {
                     let left = charges(input.len() as u64).left(CAP);
-                    assert_stopped(&detained, intrinsic_with(&input, gas_limit), left);
+                    let intrinsic = intrinsic_with(&input, gas_limit);
+                    assert_caught(&detained, intrinsic, left, &failed_status_store());
                     assert_eq!(detained.outcome.usage.write_records, 0, "{case}");
                 } else {
                     let plain = exec(PUSH0);
