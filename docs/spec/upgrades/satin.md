@@ -567,7 +567,7 @@ The reference implementation has no price for one, so it runs such a precompile 
   The load comes before the opcode pushes its result, so a read on a full stack is refused rather than overflowing it.
   A `BLOCKHASH` is refused as `BLOCKHASH` (7) whatever its operand.
 - A refused read MUST revert the frame with `VolatileDataAccessDisabled(accessType)` on the gas it had after the opcode's static gas: the refused read pays its static gas and nothing else — not a cold access, not a copy's memory, not a call's value transfer.
-  The static gas is the opcode's base cost: 2 for `NUMBER`, `TIMESTAMP`, `COINBASE`, `PREVRANDAO`, `GASLIMIT`, `BASEFEE`, `BLOBBASEFEE` and `SLOTNUM`; 5 for `SELFBALANCE`; 20 for `BLOCKHASH`; 100 for `BALANCE`, `EXTCODESIZE`, `EXTCODECOPY`, `EXTCODEHASH`, the four call opcodes and an `SLOAD` of the Oracle's storage (whose cold surcharge is not paid); and 5,000 for `SELFDESTRUCT`.
+  The static gas is the opcode's base cost: 2 for `NUMBER`, `TIMESTAMP`, `COINBASE`, `PREVRANDAO`, `GASLIMIT`, `BASEFEE`, `BLOBBASEFEE` and `SLOTNUM`; 5 for `SELFBALANCE`; 20 for `BLOCKHASH`; 100 for `BALANCE`, `EXTCODEHASH`, the four call opcodes and an `SLOAD` of the Oracle's storage (whose cold surcharge is not paid); 200 for `EXTCODESIZE` and `EXTCODECOPY`, EIP-8038's base of two warm accesses (see [Gas Schedule and Intrinsic Gas](#5-gas-schedule-and-intrinsic-gas)); and 5,000 for `SELFDESTRUCT`.
   What the opcode charged after its static gas and before the load — the memory and the copy cost of `EXTCODECOPY`, a call's memory and value-transfer cost — MUST be given back.
 - A `CREATE` or `CREATE2` in a frame whose access is off is outside this rule when it loads the block beneficiary's account: the creator's, which it loads first for its balance and nonce, or the created address's, which it loads to decide the created account's state gas once the endowment, nonce and depth checks passed; that load is refused as a load the frame cannot make, and the creating frame MUST halt with an out-of-gas, consuming its gas, instead of reverting with the error.
 - The error's argument MUST be ABI-encoded as a `uint8`:
@@ -876,12 +876,12 @@ A transaction MUST be skipped for the current block, and MAY be included in a la
 
 - its declared gas limit does not fit in the block's remaining gas;
 - its data-availability footprint does not fit in what the block's gas limit has left for footprints;
-- it is not a deposit and the block has reached its data-size limit;
+- it is neither a deposit nor a Mega System Transaction and the block has reached its data-size limit;
 - it is not a deposit and the block activates Satin or an Optimism fork at or after Jovian in the Optimism fork order, as the chain configuration schedules it (see [Base Layer](#1-base-layer-optimism-karst-ethereum-osaka)).
 
 A block that contains a transaction it should have skipped is invalid.
 
-A block builder MAY also skip a transaction other than a deposit under its own building policy (see [Block Limits](#20-block-limits)): a per-transaction declared-gas, encoded-size or data-availability limit, a block encoded-size or data-availability budget, or the block's data-size limit held below the protocol's value.
+A block builder MAY also skip a transaction other than a deposit or a Mega System Transaction under its own building policy (see [Block Limits](#20-block-limits)): a per-transaction declared-gas, encoded-size or data-availability limit, a block encoded-size or data-availability budget, or the block's data-size limit held below the protocol's value.
 A transaction over a builder's per-transaction limit never fits that builder's blocks, and the builder MAY drop it.
 A block is not invalid for a transaction a building policy would have skipped.
 
