@@ -199,9 +199,9 @@ The gas schedule MUST be Amsterdam's — including [EIP-8038](https://eips.ether
 - the history gas of deposited code MUST be the cost of one history byte (see [History Gas](#7-history-gas)); Amsterdam prices it at zero.
 
 Every other entry MUST be Amsterdam's: every regular-gas entry, the regular code-deposit cost (zero), the EIP-7702 entries, and the entries Amsterdam introduced for EIP-8037, EIP-2780, EIP-7976 and EIP-7981.
-The static gas every opcode pays before its dynamic cost MUST be Amsterdam's too: `EXTCODESIZE` and `EXTCODECOPY` pay EIP-8038's base of two warm accesses, one for the account and one for its code, and every other opcode's static gas is Osaka's and Amsterdam's alike.
 So creating state is split between the two dimensions as Amsterdam splits it: the regular gas pays for the access and the write EIP-8038 prices, and the new state itself is paid in state gas alone.
 A value call that creates its recipient pays no regular gas for the new account beyond the account write its value transfer carries, a creation pays 12,000 of regular gas for its access, a fresh slot pays the 10,000 of a storage write, and a `SELFDESTRUCT` that moves a balance to a new account pays an account write of 9,000.
+The static gas every opcode pays before its dynamic cost MUST be Amsterdam's too: `EXTCODESIZE` and `EXTCODECOPY` pay EIP-8038's base of two warm accesses, one for the account and one for its code, and every other opcode's static gas is Osaka's and Amsterdam's alike.
 
 Regular-gas entries that EIP-8038 or EIP-8037 reprice, and the other entries that differ from Osaka:
 
