@@ -18,8 +18,7 @@
 
 use core::fmt;
 
-use alloy_primitives::Address;
-use revm::primitives::{HashMap, StorageKey};
+use revm::primitives::HashMap;
 
 use crate::{BucketId, SaltEnv, MIN_BUCKET_SIZE};
 
@@ -94,44 +93,6 @@ impl BucketMultipliers {
         }
     }
 
-    /// The multiplier of the bucket `account`'s own state lives in.
-    #[inline]
-    pub fn account<S: SaltEnv>(
-        &mut self,
-        salt_env: &S,
-        account: Address,
-    ) -> Result<u64, BucketError<S::Error>> {
-        self.of_bucket(salt_env, S::bucket_id_for_account(account))
-    }
-
-    /// The multiplier of the bucket the slot `key` of `address` lives in.
-    #[inline]
-    pub fn slot<S: SaltEnv>(
-        &mut self,
-        salt_env: &S,
-        address: Address,
-        key: StorageKey,
-    ) -> Result<u64, BucketError<S::Error>> {
-        self.of_bucket(salt_env, S::bucket_id_for_slot(address, key))
-    }
-
-    /// The multiplier of `bucket`, read from `salt_env` the first time this transaction asks for
-    /// it and from the cache afterwards.
-    ///
-    /// Only a multiplier is cached, so a bucket whose capacity could not be turned into one is
-    /// asked for again rather than remembered as anything.
-    #[inline]
-    pub(crate) fn of_bucket<S: SaltEnv>(
-        &mut self,
-        salt_env: &S,
-        bucket: BucketId,
-    ) -> Result<u64, BucketError<S::Error>> {
-        match self.cached(bucket) {
-            Some(multiplier) => Ok(multiplier),
-            None => self.fetch(salt_env, bucket),
-        }
-    }
-
     /// The multiplier of `bucket` this transaction has already read, if it has.
     #[inline]
     pub fn cached(&self, bucket: BucketId) -> Option<u64> {
@@ -139,11 +100,12 @@ impl BucketMultipliers {
     }
 
     /// Reads the capacity of `bucket` from `salt_env`, turns it into the multiplier and caches
-    /// it: the cache miss of [`of_bucket`](Self::of_bucket), on its own so a caller that must know
-    /// whether the environment was asked can ask it first.
+    /// it: the cache miss of a lookup that asks [`cached`](Self::cached) first, kept apart so the
+    /// caller knows whether the environment was asked.
     ///
     /// A bucket the cache already holds is asked for again, and the answer replaces the cached
-    /// multiplier.
+    /// multiplier. Only a multiplier is cached, so a bucket whose capacity could not be turned
+    /// into one is asked for again rather than remembered as anything.
     #[inline]
     pub(crate) fn fetch<S: SaltEnv>(
         &mut self,
@@ -167,8 +129,9 @@ impl BucketMultipliers {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{TestExternalEnvs, MIN_BUCKET_SIZE};
-    use alloy_primitives::{address, U256};
+    use crate::{ExternalEnvs, MegaContext, MegaSpecId, TestExternalEnvs, MIN_BUCKET_SIZE};
+    use alloy_primitives::{address, Address, U256};
+    use revm::{database::EmptyDB, primitives::StorageKey};
 
     const ACCOUNT: Address = address!("00000000000000000000000000000000000000a1");
     const OTHER: Address = address!("00000000000000000000000000000000000000a2");
@@ -183,14 +146,24 @@ mod tests {
         <Env as SaltEnv>::bucket_id_for_slot(address, key)
     }
 
+    /// A context over `env`: the multipliers are read through it, as every state charge reads them.
+    fn context<E: Unpin + Clone + fmt::Display>(
+        env: &TestExternalEnvs<E>,
+    ) -> MegaContext<EmptyDB, TestExternalEnvs<E>> {
+        MegaContext::new_with_external_envs(
+            EmptyDB::default(),
+            MegaSpecId::SATIN,
+            ExternalEnvs { salt_env: env.clone(), oracle_env: env.clone() },
+        )
+    }
+
     /// A bucket at the minimum capacity multiplies by one, so the schedule's own price stands.
     #[test]
     fn test_the_minimum_bucket_multiplies_by_one() {
-        let env = Env::new();
-        let mut cache = BucketMultipliers::default();
+        let mut ctx = context(&Env::new());
 
-        assert_eq!(cache.account(&env, ACCOUNT), Ok(1));
-        assert_eq!(cache.slot(&env, ACCOUNT, U256::ZERO), Ok(1));
+        assert_eq!(ctx.account_bucket_multiplier(ACCOUNT), Ok(1));
+        assert_eq!(ctx.slot_bucket_multiplier(ACCOUNT, U256::ZERO), Ok(1));
     }
 
     /// The multiplier is the capacity in minimum buckets, over the range a capacity can take.
@@ -216,13 +189,12 @@ mod tests {
         }
 
         let bucket = account_bucket(ACCOUNT);
-        let env = Env::new().with_bucket_capacity(bucket, 0);
-        let mut cache = BucketMultipliers::default();
+        let mut ctx = context(&Env::new().with_bucket_capacity(bucket, 0));
         assert_eq!(
-            cache.account(&env, ACCOUNT),
+            ctx.account_bucket_multiplier(ACCOUNT),
             Err(BucketError::BelowMinimum { bucket, capacity: 0 }),
         );
-        assert_eq!(cache.cached_buckets().len(), 0, "nothing was cached for it");
+        assert_eq!(ctx.bucket_multipliers().cached_buckets().len(), 0, "nothing was cached for it");
     }
 
     /// The two failures read differently, so a node can tell a backend that could not answer from
@@ -244,17 +216,18 @@ mod tests {
     #[test]
     fn test_a_crowded_bucket_scales_the_account_and_the_slot_separately() {
         let min = MIN_BUCKET_SIZE as u64;
-        let env = Env::new()
-            .with_bucket_capacity(account_bucket(ACCOUNT), min * 8)
-            .with_bucket_capacity(slot_bucket(ACCOUNT, U256::ZERO), min * 2);
-        let mut cache = BucketMultipliers::default();
+        let mut ctx = context(
+            &Env::new()
+                .with_bucket_capacity(account_bucket(ACCOUNT), min * 8)
+                .with_bucket_capacity(slot_bucket(ACCOUNT, U256::ZERO), min * 2),
+        );
 
-        assert_eq!(cache.account(&env, ACCOUNT), Ok(8));
-        assert_eq!(cache.slot(&env, ACCOUNT, U256::ZERO), Ok(2));
+        assert_eq!(ctx.account_bucket_multiplier(ACCOUNT), Ok(8));
+        assert_eq!(ctx.slot_bucket_multiplier(ACCOUNT, U256::ZERO), Ok(2));
         // A slot of the same account in another bucket is untouched by either.
-        assert_eq!(cache.slot(&env, ACCOUNT, U256::from(1)), Ok(1));
+        assert_eq!(ctx.slot_bucket_multiplier(ACCOUNT, U256::from(1)), Ok(1));
         // So is another account.
-        assert_eq!(cache.account(&env, OTHER), Ok(1));
+        assert_eq!(ctx.account_bucket_multiplier(OTHER), Ok(1));
     }
 
     /// A bucket is read from the environment once; every later charge on it is answered from the
@@ -263,28 +236,28 @@ mod tests {
     fn test_a_bucket_is_read_once_and_cached() {
         let bucket = account_bucket(ACCOUNT);
         let env = Env::new().with_bucket_capacity(bucket, MIN_BUCKET_SIZE as u64 * 4);
-        let mut cache = BucketMultipliers::default();
+        let mut ctx = context(&env);
 
         for _ in 0..8 {
-            assert_eq!(cache.account(&env, ACCOUNT), Ok(4));
+            assert_eq!(ctx.account_bucket_multiplier(ACCOUNT), Ok(4));
         }
         assert_eq!(env.bucket_queries(bucket), 1, "one capacity query for eight charges");
-        assert_eq!(cache.cached_buckets().collect::<Vec<_>>(), vec![bucket]);
+        assert_eq!(ctx.bucket_multipliers().cached_buckets().collect::<Vec<_>>(), vec![bucket]);
     }
 
-    /// The cache belongs to one transaction: a reset forgets it, and the next transaction reads
-    /// the capacity again.
+    /// The cache belongs to one transaction: a reset forgets what it read, so the next
+    /// transaction reads the capacity again.
     #[test]
     fn test_a_reset_forgets_what_the_transaction_read() {
         let bucket = account_bucket(ACCOUNT);
         let env = Env::new().with_bucket_capacity(bucket, MIN_BUCKET_SIZE as u64 * 4);
         let mut cache = BucketMultipliers::default();
 
-        assert_eq!(cache.account(&env, ACCOUNT), Ok(4));
+        assert_eq!(cache.fetch(&env, bucket), Ok(4));
+        assert_eq!(cache.cached(bucket), Some(4));
         cache.reset();
-        assert_eq!(cache.cached_buckets().len(), 0, "the reset emptied the cache");
-        assert_eq!(cache.account(&env, ACCOUNT), Ok(4));
-        assert_eq!(env.bucket_queries(bucket), 2, "one query per transaction");
+        assert_eq!(cache.cached(bucket), None, "the reset emptied the cache");
+        assert_eq!(cache.cached_buckets().len(), 0);
     }
 
     /// A failed capacity query is reported, not swallowed: the caller must fail the transaction
@@ -294,27 +267,32 @@ mod tests {
         let bucket = account_bucket(ACCOUNT);
         let env = TestExternalEnvs::<String>::new()
             .with_failing_bucket(bucket, "salt backend unreachable".into());
-        let mut cache = BucketMultipliers::default();
+        let mut ctx = context(&env);
 
         assert_eq!(
-            cache.account(&env, ACCOUNT),
+            ctx.account_bucket_multiplier(ACCOUNT),
             Err(BucketError::Env("salt backend unreachable".into())),
         );
-        assert_eq!(cache.cached_buckets().len(), 0, "a failed lookup caches nothing");
+        assert_eq!(
+            ctx.bucket_multipliers().cached_buckets().len(),
+            0,
+            "a failed lookup caches nothing"
+        );
         // It is not cached either, so the next charge asks again.
-        assert!(cache.account(&env, ACCOUNT).is_err());
+        assert!(ctx.account_bucket_multiplier(ACCOUNT).is_err());
         assert_eq!(env.bucket_queries(bucket), 2);
     }
 
     /// One bucket failing does not stop another from being priced.
     #[test]
     fn test_only_the_failing_bucket_fails() {
-        let env = TestExternalEnvs::<String>::new()
-            .with_bucket_capacity(account_bucket(OTHER), MIN_BUCKET_SIZE as u64 * 2)
-            .with_failing_bucket(account_bucket(ACCOUNT), "unreachable".into());
-        let mut cache = BucketMultipliers::default();
+        let mut ctx = context(
+            &TestExternalEnvs::<String>::new()
+                .with_bucket_capacity(account_bucket(OTHER), MIN_BUCKET_SIZE as u64 * 2)
+                .with_failing_bucket(account_bucket(ACCOUNT), "unreachable".into()),
+        );
 
-        assert!(cache.account(&env, ACCOUNT).is_err());
-        assert_eq!(cache.account(&env, OTHER), Ok(2));
+        assert!(ctx.account_bucket_multiplier(ACCOUNT).is_err());
+        assert_eq!(ctx.account_bucket_multiplier(OTHER), Ok(2));
     }
 }
