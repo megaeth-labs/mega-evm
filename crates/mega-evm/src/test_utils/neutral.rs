@@ -90,7 +90,7 @@ pub fn neutral_precompiles(fork: EthSpecId) -> Option<PrecompilesMap> {
 /// revm keeps part of a fork's gas table out of the schedule: the static price every opcode pays
 /// before its dynamic cost lives in the instruction table, keyed on the spec id. Amsterdam's
 /// differs from Osaka's in EIP-8038's two-read base for `EXTCODESIZE` and `EXTCODECOPY`; Satin's
-/// instruction table carries its Osaka base's.
+/// instruction table carries Amsterdam's.
 pub fn neutral_gas_table(fork: EthSpecId) -> Option<GasTable> {
     neutral_cfg(fork)?;
     Some(gas_table_spec(fork))
@@ -225,21 +225,22 @@ mod tests {
         }
     }
 
-    /// Satin's instruction table prices opcodes as its Osaka base does, so Osaka's static prices
-    /// change nothing; Amsterdam's differ in EIP-8038's two-read base for `EXTCODESIZE` and
-    /// `EXTCODECOPY` alone.
+    /// Satin's instruction table prices opcodes as Amsterdam does, so Amsterdam's static prices
+    /// change nothing; Osaka's differ in EIP-8038's two-read base for `EXTCODESIZE` and
+    /// `EXTCODECOPY` alone, which the neutral configuration puts back for an Osaka fixture.
     #[test]
     fn test_neutral_gas_tables() {
         use revm::bytecode::opcode::{EXTCODECOPY, EXTCODESIZE};
-        let mut evm = MegaEvm::new(context(EthSpecId::OSAKA));
+        let mut evm = MegaEvm::new(context(EthSpecId::AMSTERDAM));
         let satin = *evm.all_mut().1.gas_table();
-        assert_eq!(neutral_gas_table(EthSpecId::OSAKA), Some(satin));
+        assert_eq!(neutral_gas_table(EthSpecId::AMSTERDAM), Some(satin));
 
-        let amsterdam = neutral_gas_table(EthSpecId::AMSTERDAM).expect("a neutral fork");
+        let osaka = neutral_gas_table(EthSpecId::OSAKA).expect("a neutral fork");
         let changed: Vec<_> =
-            (0..=u8::MAX).filter(|&op| amsterdam[op as usize] != satin[op as usize]).collect();
+            (0..=u8::MAX).filter(|&op| osaka[op as usize] != satin[op as usize]).collect();
         assert_eq!(changed, vec![EXTCODESIZE, EXTCODECOPY]);
-        assert_eq!(amsterdam[EXTCODESIZE as usize], 200);
+        assert_eq!(osaka[EXTCODESIZE as usize], 100);
+        assert_eq!(satin[EXTCODESIZE as usize], 200);
         assert!(neutral_gas_table(EthSpecId::PRAGUE).is_none());
     }
 
@@ -249,11 +250,11 @@ mod tests {
     #[test]
     fn test_neutralize_evm_installs_the_fork_s_static_prices() {
         use revm::bytecode::opcode::EXTCODESIZE;
-        let mut evm = MegaEvm::new(context(EthSpecId::AMSTERDAM));
+        let mut evm = MegaEvm::new(context(EthSpecId::OSAKA));
         assert!(neutralize_evm(&mut evm, EthSpecId::PRAGUE).is_none());
-        assert_eq!(evm.all_mut().1.gas_table()[EXTCODESIZE as usize], 100);
-
-        assert!(neutralize_evm(&mut evm, EthSpecId::AMSTERDAM).is_some());
         assert_eq!(evm.all_mut().1.gas_table()[EXTCODESIZE as usize], 200);
+
+        assert!(neutralize_evm(&mut evm, EthSpecId::OSAKA).is_some());
+        assert_eq!(evm.all_mut().1.gas_table()[EXTCODESIZE as usize], 100);
     }
 }

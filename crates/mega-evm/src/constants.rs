@@ -93,9 +93,9 @@ pub const ORACLE_ACCESS_COMPUTE_GAS: u64 = 20_000_000;
 /// Compute is the regular gas a transaction's frames spend, and the first frame holds what the
 /// execution cap leaves once the transaction paid for itself: EIP-2780's base cost, which every
 /// transaction pays, and the account whose code the frame runs — a recipient other than the sender
-/// at the cold rate, the delegate of a sender that calls itself at least at the warm one (Satin
-/// keeps Osaka's). A gas-detention cap at or above this never stops a transaction, however early
-/// it read, so a chain's caps must be below it.
+/// at the cold rate, the delegate of a sender that calls itself at least at the warm one, 100,
+/// which EIP-8038 leaves where it was. A gas-detention cap at or above this never stops a
+/// transaction, however early it read, so a chain's caps must be below it.
 pub const MAX_TX_COMPUTE_GAS: u64 =
     TX_GAS_LIMIT_CAP - eip2780::TX_BASE_COST - WARM_STORAGE_READ_COST;
 

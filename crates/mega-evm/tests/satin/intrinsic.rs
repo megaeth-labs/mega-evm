@@ -3,9 +3,10 @@
 //!
 //! Satin keeps Amsterdam's floor: a base of 12,000 with the recipient and value charges on top,
 //! and every calldata byte at 64 gas whether it is zero or not. EIP-7981 puts the access list's
-//! own bytes in the floor at the same rate, while the per-item intrinsic charge stays at its
-//! pre-EIP-8038 value. A transaction whose floor is above the 200M execution cap is rejected
-//! before it runs, which is what bounds the calldata a transaction may carry.
+//! own bytes in the floor at the same rate, and its per-item intrinsic charge is Amsterdam's:
+//! EIP-8038's cold premium with those bytes at 64 gas each on top. A transaction whose floor is
+//! above the 200M execution cap is rejected before it runs, which is what bounds the calldata a
+//! transaction may carry.
 //!
 //! The floor is still computed and still validated, and it no longer decides what anyone pays:
 //! history gas charges the same bytes at a higher rate, so a Satin transaction is always above
@@ -27,6 +28,7 @@ use revm::{
         transaction::{AccessList, AccessListItem, TransactionType},
         TxEnv,
     },
+    context_interface::cfg::GasId,
     primitives::B256,
     Database, ExecuteCommitEvm, ExecuteEvm,
 };
@@ -39,9 +41,9 @@ const CALLEE: Address = address!("0000000000000000000000000000000000800001");
 /// The intrinsic gas of a plain call to an account that is not the sender: the EIP-2780 sender
 /// base of 12,000 plus 3,000 for reaching the recipient.
 ///
-/// The 3,000 is EIP-2780's own fixed charge, not the schedule's cold-account entry: inside
-/// execution the schedule prices a cold account access at 2,600 — 100 for the read and 2,500 for
-/// the cold surcharge — so repricing that entry would leave this number where it is.
+/// The 3,000 is EIP-2780's own fixed charge, EIP-8038's cold account access, not the schedule's
+/// cold-account entry: inside execution the schedule prices the same access as 100 for the read
+/// and 2,900 for the cold surcharge, so repricing that entry would leave this number where it is.
 const EMPTY_CALL: u64 = 15_000;
 
 /// What one byte of anything a transaction carries costs in the EIP-7976 / EIP-7981 floor: four
@@ -194,22 +196,24 @@ fn with_access_list(keys: usize) -> MegaTransaction {
     }))
 }
 
-/// An access-list address costs 2,400 in the intrinsic phase — its pre-EIP-8038 price — and its
-/// twenty bytes cost 64 each in the floor. With one address alone the intrinsic charge is the
-/// larger of the two, so that is what the transaction pays.
+/// An access-list address costs the schedule's entry in the intrinsic phase — 4,180, EIP-8038's
+/// cold premium of 2,900 with its twenty bytes at 64 gas each on top — and its twenty bytes cost
+/// 64 each in the floor. The intrinsic charge carries the floor's bytes and more, so it is what
+/// the transaction pays.
 #[test]
-fn test_an_access_list_address_is_priced_at_the_pre_eip8038_rate() {
+fn test_an_access_list_address_pays_its_cold_premium_and_its_bytes() {
     assert_eq!(floor(funded(), with_access_list(0)), Ok(EMPTY_CALL + 20 * FLOOR_PER_BYTE));
     assert_eq!(
         gas_used(funded(), with_access_list(0)),
-        Ok(EMPTY_CALL + 2_400 + body_history(20)),
+        Ok(EMPTY_CALL + address_entry() + body_history(20)),
         "the intrinsic charge and the address's twenty bytes of history",
     );
 }
 
-/// A storage key costs 1,900 in the intrinsic phase and its thirty-two bytes cost 2,048 in the
-/// floor, so every key pushes the floor further above the intrinsic sum. Past the address's
-/// 1,120-gas head start the floor takes over, and from there the transaction pays the bytes.
+/// A storage key costs the schedule's entry in the intrinsic phase — 4,048, EIP-8038's cold
+/// premium of 2,000 with its thirty-two bytes at 64 gas each on top — and those bytes cost 2,048
+/// in the floor. The bytes are in both, and the intrinsic charge has the premium besides, so
+/// however many keys there are the floor stays below what the transaction pays.
 #[test]
 fn test_access_list_bytes_are_counted_in_the_floor_at_sixty_four_each() {
     let address_bytes = 20 * FLOOR_PER_BYTE;
@@ -220,14 +224,25 @@ fn test_access_list_bytes_are_counted_in_the_floor_at_sixty_four_each() {
             Ok(EMPTY_CALL + address_bytes + key_bytes * keys),
             "{keys} keys: the floor counts every byte at the same rate"
         );
-        // The floor binds only where a history byte is cheap: the bill is the larger of the two.
         let floor = EMPTY_CALL + address_bytes + key_bytes * keys;
+        let intrinsic = EMPTY_CALL + address_entry() + key_entry() * keys;
+        assert!(intrinsic > floor, "{keys} keys: the intrinsic charge carries the floor's bytes");
         assert_eq!(
             gas_used(funded(), with_access_list(keys as usize)),
-            Ok((EMPTY_CALL + 2_400 + 1_900 * keys + body_history(20 + 32 * keys)).max(floor)),
+            Ok(intrinsic + body_history(20 + 32 * keys)),
             "{keys} keys: the intrinsic charge and the entry's bytes of history"
         );
     }
+}
+
+/// The intrinsic charge of an access-list address, at the schedule's price.
+fn address_entry() -> u64 {
+    mega_evm::satin_gas_params().get(GasId::tx_access_list_address_cost())
+}
+
+/// The intrinsic charge of an access-list storage key, at the schedule's price.
+fn key_entry() -> u64 {
+    mega_evm::satin_gas_params().get(GasId::tx_access_list_storage_key_cost())
 }
 
 /* ---------- the execution cap ---------- */

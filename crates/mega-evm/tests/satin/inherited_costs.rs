@@ -24,6 +24,7 @@ use revm::{
         transaction::{AccessList, AccessListItem, TransactionType},
         TxEnv,
     },
+    context_interface::cfg::GasId,
     interpreter::{
         interpreter::EthInterpreter, interpreter_types::Jumps, CallInputs, CallOutcome,
         CreateInputs, CreateOutcome, Interpreter,
@@ -31,7 +32,10 @@ use revm::{
     Database, Inspector,
 };
 
-use crate::common::{block, call, context, execute};
+use crate::{
+    common::{block, call, context, execute},
+    salt::entry,
+};
 
 const CALLER: Address = address!("0000000000000000000000000000000000e20000");
 const CONTRACT: Address = address!("0000000000000000000000000000000000e20001");
@@ -40,9 +44,11 @@ const EXISTING: Address = address!("0000000000000000000000000000000000e20002");
 /// The identity precompile.
 const IDENTITY: Address = address!("0000000000000000000000000000000000000004");
 
-/// What the first touch of an address costs over a warm one: EIP-2929's cold account access less
-/// its warm read.
-const COLD_OVER_WARM: u64 = 2_600 - 100;
+/// What the first touch of an address costs over a warm one: the schedule's cold account access
+/// less its warm read.
+fn cold_over_warm() -> u64 {
+    entry(GasId::cold_account_additional_cost())
+}
 
 /* ---------- preload-warm addresses ---------- */
 
@@ -95,7 +101,7 @@ fn plain() -> MegaTransaction {
 /// price on its first touch, so the measurement sees a cold touch where there is one.
 #[test]
 fn test_the_first_call_to_an_address_nothing_warmed_is_charged_cold() {
-    assert_eq!(first_call_over_second(CALL, EXISTING, plain), COLD_OVER_WARM as i64);
+    assert_eq!(first_call_over_second(CALL, EXISTING, plain), cold_over_warm() as i64);
 }
 
 /// A precompile is warm from the transaction's start: the first `CALL` to one costs what the
@@ -214,7 +220,7 @@ fn test_a_call_forwards_all_but_a_64th_of_its_gas() {
         .build();
     let (held, forwarded, outcome) = forward_of(code);
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    let left = held - 2_600;
+    let left = held - entry(GasId::warm_storage_read_cost()) - cold_over_warm();
     assert_eq!(forwarded, left - left / 64);
 }
 
@@ -229,6 +235,6 @@ fn test_a_creation_forwards_all_but_a_64th_of_its_gas() {
         .build();
     let (held, forwarded, outcome) = forward_of(code);
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    let left = held - 32_000 - 2 - 3;
+    let left = held - entry(GasId::create()) - entry(GasId::initcode_per_word()) - 3;
     assert_eq!(forwarded, left - left / 64);
 }

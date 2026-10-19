@@ -23,12 +23,15 @@ use mega_evm::{
     transaction_body_bytes, EvmTxRuntimeLimits, LimitUsage, MegaEvm, MegaTransaction,
     TRANSFER_LOG_SIZE, WRITE_RECORD_SIZE,
 };
-use revm::{bytecode::opcode::*, context::TxEnv, interpreter::InstructionResult};
+use revm::{
+    bytecode::opcode::*, context::TxEnv, context_interface::cfg::GasId,
+    interpreter::InstructionResult,
+};
 
 use crate::{
     detention::{
-        assert_stopped, context, intrinsic, memory_cost, op, run_on, spin, Calls, Charges, Run,
-        BENEFICIARY, CALLER, CAP, CHILD, CONTRACT, TIERS,
+        assert_stopped, cold_access, context, intrinsic, memory_cost, op, run_on, spin,
+        value_transfer, Calls, Charges, Run, BENEFICIARY, CALLER, CAP, CHILD, CONTRACT, TIERS,
     },
     withheld_gas::{costly_modexp_input, intrinsic_with},
 };
@@ -92,12 +95,16 @@ fn charges_to_the_call(len: u64, call: u64) -> Charges {
 }
 
 /// A value call's own charges to a cold contract: the cold access and the transfer.
-const CALL_TO_A_CONTRACT: u64 = 2_600 + 9_000;
+fn call_to_a_contract() -> u64 {
+    cold_access() + value_transfer()
+}
 
 /// A value call's own charges to a precompile whose account is empty: the warm access, the
-/// transfer, and the account the transfer adds, whose regular price Satin keeps beside its state
-/// gas.
-const CALL_TO_AN_EMPTY_PRECOMPILE: u64 = 100 + 9_000 + 25_000;
+/// transfer, and the regular price of the account the transfer adds, which is nothing at the
+/// schedule's prices: the account is paid for in state gas.
+fn call_to_an_empty_precompile() -> u64 {
+    100 + value_transfer() + crate::salt::entry(GasId::new_account_cost())
+}
 
 /// The accounts every case runs against: [`CONTRACT`] running `code` and holding `held`, a
 /// [`RECEIVER`] and a [`DESTRUCTOR`].
@@ -224,7 +231,7 @@ fn test_a_value_call_to_a_precompile_after_a_read_keeps_the_log_it_counted() {
         let ((plain, _), _) = exec(PUSH0, &above);
         // The price is the charge past what the limit leaves the call, a precompile's warm access.
         let price = mega_evm::satin_precompiles().get(&MODEXP).unwrap().required_gas(&above);
-        let charges = charges_to_the_call(above.len() as u64, CALL_TO_AN_EMPTY_PRECOMPILE)
+        let charges = charges_to_the_call(above.len() as u64, call_to_an_empty_precompile())
             .then(&[price.unwrap()]);
         assert_stopped(&detained, intrinsic_with(&above, gas_limit), charges.left(CAP));
         // The answer is the stop, having spent nothing.
@@ -309,8 +316,10 @@ fn test_a_value_call_its_caller_cannot_fund_after_a_read_runs_as_without_it() {
 
 /// What a frame computes from a timestamp read to a completed `SELFDESTRUCT` of its balance to a
 /// cold contract: the read's `POP`, the beneficiary's `PUSH20`, the opcode's 5,000 and the cold
-/// access of 2,600, which revm charges after it journaled the move and its transfer log.
-const DESTRUCT_AFTER_READ: u64 = 2 + 3 + 5_000 + 2_600;
+/// access, which revm charges after it journaled the move and its transfer log.
+fn destruct_after_read() -> u64 {
+    2 + 3 + 5_000 + cold_access()
+}
 
 /// A `SELFDESTRUCT` of a balance, after a read, whose frame the cap stops.
 ///
@@ -340,14 +349,14 @@ fn test_a_selfdestructs_transfer_log_goes_with_the_frame_the_cap_stops() {
             run_tx(accounts(own(first).build(), VALUE), tx.clone(), under(cap), false).0
         };
         let (detained, plain) =
-            (run_own(TIMESTAMP, DESTRUCT_AFTER_READ), run_own(PUSH0, DESTRUCT_AFTER_READ));
+            (run_own(TIMESTAMP, destruct_after_read()), run_own(PUSH0, destruct_after_read()));
         assert_as_without_read(&detained, &plain, "a cap that pays the destruction");
         let logs = assert_counts_its_transfer_logs(&detained, body, "a destruction the cap pays");
         assert_eq!(logs, [transfer_log(CONTRACT, RECEIVER, U256::from(VALUE))]);
         assert_eq!(detained.outcome.usage.write_records, 1, "the beneficiary's record");
-        for cap in [DESTRUCT_AFTER_READ - 1, DESTRUCT_AFTER_READ - 2_600 - 1] {
+        for cap in [destruct_after_read() - 1, destruct_after_read() - cold_access() - 1] {
             let stopped = run_own(TIMESTAMP, cap);
-            let left = Charges::default().then(&[2, 3, 5_000, 2_600]).left(cap);
+            let left = Charges::default().then(&[2, 3, 5_000, cold_access()]).left(cap);
             assert_stopped(&stopped, intrinsic(gas_limit), left);
             assert_eq!(stopped.limit, Some(2 + cap));
             assert_eq!(stopped.outcome.usage, LimitUsage { data_size: body, write_records: 0 });
@@ -375,7 +384,7 @@ fn test_a_selfdestructs_transfer_log_goes_with_the_frame_the_cap_stops() {
         // The read's `POP`, the call's five pushes, its address, `GAS` and cold access, the child's
         // `PUSH20` and destruction to a cold account, the caller's `POP`, then its loop.
         let left = Charges::default()
-            .then(&[2, 2, 2, 2, 2, 2, 3, 2, 2_600, 3, 5_000, 2_600, 2])
+            .then(&[2, 2, 2, 2, 2, 2, 3, 2, cold_access(), 3, 5_000, cold_access(), 2])
             .spin(0)
             .left(CAP);
         assert_stopped(&stopped, intrinsic(gas_limit), left);
@@ -428,7 +437,7 @@ fn test_every_detained_frame_start_keeps_the_log_it_counted() {
             input: none,
             held: VALUE,
             // The call to the child's cold account, then the child's loop.
-            stops: Some(|len| charges_to_the_call(len, CALL_TO_A_CONTRACT).spin(0)),
+            stops: Some(|len| charges_to_the_call(len, call_to_a_contract()).spin(0)),
         },
         Start {
             name: "a value call to an account with no code",
@@ -461,7 +470,7 @@ fn test_every_detained_frame_start_keeps_the_log_it_counted() {
                 let input = costly_modexp_input(64, 0);
                 let price =
                     mega_evm::satin_precompiles().get(&MODEXP).unwrap().required_gas(&input);
-                charges_to_the_call(len, CALL_TO_AN_EMPTY_PRECOMPILE).then(&[price.unwrap()])
+                charges_to_the_call(len, call_to_an_empty_precompile()).then(&[price.unwrap()])
             }),
         },
         Start {

@@ -243,7 +243,7 @@ fn test_keyless_deploy_empty_initcode() {
 ///
 /// The second transaction's ledgers, by hand and the same at both tiers: its regular gas is
 /// EIP-2780's 12,000 and 3,000 for the recipient, the calldata at 4 gas a zero byte and 16 a
-/// non-zero one, step 1's 100,000, step 14's `CREATE` charge of 32,000 (empty initcode costs
+/// non-zero one, step 1's 100,000, step 14's `CREATE` charge of 12,000 (empty initcode costs
 /// nothing more), and the forward the collision spends. It charges no state gas at all: the
 /// signer, no longer empty, adds no account at step 10, and the address, not empty, adds none at
 /// step 14 — so a state-growth limit of 1 gas does not stop it. Its history is its body alone,
@@ -251,7 +251,7 @@ fn test_keyless_deploy_empty_initcode() {
 /// effect: step 14 charges the history of two records, the created account's and the signer's
 /// nonce, and both come back, the nonce record with the bump and the account's with the failed
 /// creation. So, below the execution cap, the least gas limit that deploys is the intrinsic gas,
-/// 132,000, the two records and the forward, which steps 11 and 15 need left: one gas less is
+/// 112,000, the two records and the forward, which steps 11 and 15 need left: one gas less is
 /// refused with `GasLimitTooLow`.
 ///
 /// Expected values: independent (hand arithmetic over the calldata and the configured byte
@@ -286,7 +286,7 @@ fn test_a_deploy_address_left_with_a_nonce_and_no_code_collides() {
         assert_eq!(gas_used, FORWARD);
         assert_eq!(nonce(&second, deployment.signer), 1, "the bump from 1 is taken back");
         let calldata: u64 = data.iter().map(|&byte| if byte == 0 { 4 } else { 16 }).sum();
-        let regular = 12_000 + 3_000 + calldata + 100_000 + 32_000 + FORWARD;
+        let regular = 12_000 + 3_000 + calldata + 100_000 + 12_000 + FORWARD;
         let history_bytes = 310 + data.len() as u64;
         let history_gas = history(history_bytes);
         assert_eq!(
@@ -311,7 +311,7 @@ fn test_a_deploy_address_left_with_a_nonce_and_no_code_collides() {
     let first =
         run_nth(db.clone(), data.clone(), GAS_LIMITS[0], EvmTxRuntimeLimits::no_limits(), 0);
     db.commit(first.result_and_state.state);
-    let least = intrinsic(&data) + 100_000 + 32_000 + 2 * record() + FORWARD;
+    let least = intrinsic(&data) + 100_000 + 12_000 + 2 * record() + FORWARD;
     let enough = run_nth(db.clone(), data.clone(), least, EvmTxRuntimeLimits::no_limits(), 1);
     let KeylessDeployError::ExecutionHalted { gas_used, .. } = failure(&enough) else {
         panic!("expected ExecutionHalted: {:?}", enough.result);

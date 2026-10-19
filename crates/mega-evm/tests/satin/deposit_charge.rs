@@ -105,18 +105,32 @@ impl Pool {
             Self::NeutralOsaka => 21_000,
         }
     }
+
+    /// What `A` spends on its own: five `PUSH0`, a `PUSH20`, a `PUSH4`, a `CALL` to a cold
+    /// account carrying no value (100 warm plus the cold surcharge, Amsterdam's 2,900 under Satin
+    /// and 2,500 under Osaka), and a `POP`.
+    const fn a_regular(self) -> u64 {
+        let cold = match self {
+            Self::AboveCap | Self::BelowCap => 2_900,
+            Self::NeutralOsaka => 2_500,
+        };
+        5 * 2 + 3 + 3 + (100 + cold) + 2
+    }
+
+    /// What `B` spends before its `CREATE` splits the gas: a `PUSH32` and a `PUSH8` and the
+    /// `MSTORE` that puts the init code in memory, with the first word of memory; three `PUSH8`;
+    /// EIP-3860's 2 gas for the one word of init code; and `CREATE`'s own charge, Amsterdam's
+    /// 12,000 under Satin and 32,000 under Osaka.
+    const fn b_before_the_split(self) -> u64 {
+        let create = match self {
+            Self::AboveCap | Self::BelowCap => 12_000,
+            Self::NeutralOsaka => 32_000,
+        };
+        3 + 3 + (3 + 3) + 3 * 3 + 2 + create
+    }
 }
 
 /* ---------- the figures by hand ---------- */
-
-/// What `A` spends on its own: five `PUSH0`, a `PUSH20`, a `PUSH4`, a `CALL` to a cold account
-/// carrying no value (100 warm plus 2,500 cold), and a `POP`.
-const A_REGULAR: u64 = 5 * 2 + 3 + 3 + (100 + 2_500) + 2;
-
-/// What `B` spends before its `CREATE` splits the gas: a `PUSH32` and a `PUSH8` and the `MSTORE`
-/// that puts the init code in memory, with the first word of memory; three `PUSH8`; EIP-3860's 2
-/// gas for the one word of init code; and `CREATE`'s 32,000.
-const B_BEFORE_THE_SPLIT: u64 = 3 + 3 + (3 + 3) + 3 * 3 + 2 + 32_000;
 
 /// What `B` spends after the creation returns: the `POP` of its answer.
 const B_AFTER: u64 = 2;
@@ -200,7 +214,7 @@ fn call_gas(pool: Pool, forward: u64) -> u64 {
             "B's 64th pays the creation's two records and B's POP at these prices",
         );
     }
-    holding + B_BEFORE_THE_SPLIT + spilled
+    holding + pool.b_before_the_split() + spilled
 }
 
 /// The regular gas a deposited creation spent as regular gas: its init code and the deposit's
@@ -217,7 +231,7 @@ fn regular_deposit(pool: Pool) -> u64 {
 /// whole forward when it halted (what was charged and given back comes back as regular gas, and
 /// the halt consumes it), or [`regular_deposit`] when it deposited with nothing left.
 fn regular(pool: Pool, spent: u64) -> u64 {
-    pool.intrinsic() + A_REGULAR + B_BEFORE_THE_SPLIT + B_AFTER + spent
+    pool.intrinsic() + pool.a_regular() + pool.b_before_the_split() + B_AFTER + spent
 }
 
 /* ---------- the world ---------- */

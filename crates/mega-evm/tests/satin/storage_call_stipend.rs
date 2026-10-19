@@ -292,8 +292,8 @@ fn writes_slot_zero() -> Bytes {
 /// charge past the regular gas, and the only one the allowance could have paid.
 ///
 /// Rule [S8.3]. Expected values `independent`: the write's regular gas is the schedule's table by
-/// hand — `PUSH1` 3, `PUSH0` 2, and an `SSTORE` that resets a cold slot, 100 static, 2,800 for the
-/// reset and 2,100 for the cold load — which no byte price moves; the record's history is 40
+/// hand — `PUSH1` 3, `PUSH0` 2, and an `SSTORE` that resets a cold slot, 100 static, 10,000 for
+/// the reset and 2,000 for the cold load — which no byte price moves; the record's history is 40
 /// bytes at the cost per history byte in effect (`constants`), 3,520 at 88 gas a byte, written
 /// out.
 #[test]
@@ -303,7 +303,7 @@ fn test_the_allowance_cannot_be_spent_on_a_write_record() {
     }
     let record = record_history();
     assert_eq!(mega_evm::write_record_history_gas(1), Some(record), "the record the engine prices");
-    let regular = 3 + 2 + 100 + 2_800 + 2_100;
+    let regular = 3 + 2 + 100 + 10_000 + 2_000;
 
     let short = run_hook(writes_slot_zero(), regular + record - 1, U256::from(1));
     assert!(!transfer_succeeded(&short), "one gas short of the record is out of gas");
@@ -333,8 +333,8 @@ fn test_the_allowance_cannot_be_spent_on_a_write_record() {
 /// gas, and the test returns early with a note.
 ///
 /// Rule [S8.5]. Expected values `independent`: the write's regular gas is the schedule's table by
-/// hand — `PUSH1` 3, `PUSH0` 2, and an `SSTORE` that fills a cold fresh slot, 100 static, 19,900
-/// for the fresh slot and 2,100 for the cold load — which no byte price moves; the slot's state
+/// hand — `PUSH1` 3, `PUSH0` 2, and an `SSTORE` that fills a cold fresh slot, 100 static, 10,000
+/// for the fresh slot and 2,000 for the cold load — which no byte price moves; the slot's state
 /// gas at the minimum bucket is the schedule's entry and the record's history 40 bytes at the cost
 /// per history byte, both at the prices in effect (`constants`), and at the spec's prices 97,920
 /// and 3,520, written out.
@@ -354,7 +354,7 @@ fn test_the_allowance_cannot_be_spent_on_state() {
         );
         return;
     }
-    let regular = 3 + 2 + 100 + 19_900 + 2_100;
+    let regular = 3 + 2 + 100 + 10_000 + 2_000;
 
     let short = run_hook(writes_slot_zero(), regular + state - 1, U256::ZERO);
     assert!(!transfer_succeeded(&short), "one gas short of the state gas is out of gas");

@@ -31,6 +31,7 @@ use revm::{
         transaction::{AccessList, AccessListItem, TransactionType},
         TxEnv,
     },
+    context_interface::cfg::GasId,
     interpreter::{interpreter::EthInterpreter, Interpreter},
     precompile::{
         bn254::pair,
@@ -42,7 +43,7 @@ use revm::{
 
 use crate::{
     common::{call, call_with_data, context, execute, runs_at_measurement_prices},
-    salt::{crowded_account, minimal_envs},
+    salt::{crowded_account, entry, minimal_envs},
 };
 
 const CALLER: Address = address!("0000000000000000000000000000000000c00000");
@@ -306,18 +307,21 @@ fn test_storage_computes_what_is_neither_state_nor_history() {
         assert_eq!(gas.regular, gas.gas_used - gas.state - gas.history);
         assert_eq!(gas.regular, EMPTY_CALL + computed);
     }
-    // Two pushes; a cold `SSTORE` of a fresh slot — the cold surcharge and Osaka's price for
-    // setting a slot, which the schedule keeps beside the state gas; `PUSH0`; a warm `SLOAD`;
-    // `POP`.
-    assert_eq!(computed, 3 + 3 + (2_100 + 20_000) + 2 + 100 + 2);
+    // Two pushes; a cold `SSTORE` of a fresh slot — its warm base, the cold surcharge and the
+    // storage write, the regular gas the schedule charges beside the state gas; `PUSH0`; a warm
+    // `SLOAD`; `POP`.
+    let fresh_sstore = entry(GasId::sstore_static()) +
+        entry(GasId::cold_storage_cost()) +
+        entry(GasId::sstore_set_without_load_cost());
+    assert_eq!(computed, 3 + 3 + fresh_sstore + 2 + 100 + 2);
 }
 
 /// A refund lowers the receipt and never the compute figure: clearing a slot and overwriting it
 /// compute the same, and the receipt of the clearing one is lower by the refund.
 #[test]
 fn test_a_refund_does_not_lower_the_compute_figure() {
-    /// The refund for clearing a storage slot (EIP-3529).
-    const SSTORE_CLEARS_SCHEDULE: u64 = 4_800;
+    // The refund for clearing a storage slot.
+    let clears_schedule = entry(GasId::sstore_clearing_slot_refund());
     let writes = |value: u64, gas_limit: u64| {
         let code = BytecodeBuilder::default().sstore(U256::from(7), U256::from(value)).stop();
         let db = funded().account_code(CALLEE, code.build()).account_storage(
@@ -334,12 +338,9 @@ fn test_a_refund_does_not_lower_the_compute_figure() {
         let cleared = writes(0, gas_limit);
         let overwritten = writes(2, gas_limit);
         // EIP-3529 caps the refund at a fifth of what the transaction spent, which the two spend
-        // alike before it; the history the transaction pays lifts the cap past the refund at the
-        // spec's prices.
-        let cap = overwritten.gas_used /
-            mega_evm::satin_gas_params()
-                .get(revm::context_interface::cfg::GasId::max_refund_quotient());
-        assert_eq!(overwritten.gas_used - cleared.gas_used, SSTORE_CLEARS_SCHEDULE.min(cap));
+        // alike before it.
+        let cap = overwritten.gas_used / entry(GasId::max_refund_quotient());
+        assert_eq!(overwritten.gas_used - cleared.gas_used, clears_schedule.min(cap));
         assert_eq!(cleared.regular, overwritten.regular, "the refund is not taken off compute");
         assert_eq!(cleared.block_execution_gas(), overwritten.block_execution_gas());
     }
@@ -556,7 +557,7 @@ fn test_a_nested_call_cannot_compute_past_the_cap() {
 }
 
 /// A transaction whose intrinsic gas alone is more computation than the cap allows is rejected
-/// before it runs, not included as a failure: an access list of 83,328 addresses is 2,400 gas each
+/// before it runs, not included as a failure: an access list of 47,844 addresses is 4,180 gas each
 /// on top of the call, just past the cap, and one address fewer is admitted.
 ///
 /// Calldata reaches the cap through its floor first, sixty-four gas a byte against sixteen, and is
@@ -583,14 +584,16 @@ fn test_intrinsic_gas_past_the_execution_cap_is_rejected_before_it_runs() {
         err.as_invalid_tx_err().and_then(InvalidTxError::as_invalid_tx_err).cloned()
     };
 
-    let admitted = execute(funded(), with_addresses(83_327));
+    let address = entry(GasId::tx_access_list_address_cost());
+    let inside = (TX_GAS_LIMIT_CAP - EMPTY_CALL) / address;
+    let admitted = execute(funded(), with_addresses(inside as usize));
     assert!(admitted.result.is_success(), "{:?}", admitted.result);
     assert_ledgers("an access list just inside the cap", TX_GAS_LIMIT_CAP + 200_000_000, &admitted);
-    assert_eq!(admitted.gas.regular, EMPTY_CALL + 2_400 * 83_327);
+    assert_eq!(admitted.gas.regular, EMPTY_CALL + address * inside);
     assert_eq!(
-        rejection(with_addresses(83_328)),
+        rejection(with_addresses(inside as usize + 1)),
         Some(InvalidTransaction::GasFloorMoreThanGasLimit {
-            gas_floor: EMPTY_CALL + 2_400 * 83_328,
+            gas_floor: EMPTY_CALL + address * (inside + 1),
             gas_limit: TX_GAS_LIMIT_CAP,
         }),
     );

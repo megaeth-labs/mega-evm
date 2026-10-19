@@ -34,7 +34,7 @@ The changes, in the order this page records them:
 2. **Precompiles.** Karst's set, with KZG point evaluation still at 100,000.
 3. **Contract size limits.** 512 KiB of code and 1 MiB of initcode.
 4. **Two-pool gas.** EIP-8037 regular gas and state-gas reservoir under a 200,000,000 execution cap, and three gas ledgers.
-5. **Gas schedule and intrinsic gas.** Amsterdam's schedule and EIP-2780 intrinsic cost, with the EIP-8038 repricing left at Osaka's values.
+5. **Gas schedule and intrinsic gas.** Amsterdam's schedule, EIP-8038's state-access prices included, and EIP-2780 intrinsic cost.
 6. **State gas and SALT pricing.** `entry × multiplier` on EIP-8037's byte counts, replacing `base × (multiplier − 1)`.
 7. **History gas.** A price per byte on everything a transaction appends to history.
 8. **History allowance.** A 160-byte allowance for value calls, replacing the 23,000-gas storage gas stipend.
@@ -118,7 +118,7 @@ A KZG call given at least 100,000 gas that fails otherwise — an input of the w
 
 - Deployed code MUST be at most `MAX_CONTRACT_SIZE` = 524,288 bytes.
 - Initcode MUST be at most `MAX_INITCODE_SIZE` = 1,048,576 bytes, twice the code limit, the ratio [EIP-3860](https://eips.ethereum.org/EIPS/eip-3860) sets between the two.
-- The creation opcodes MUST make their checks and charges in this order: the static context; the value, offset and size operands, and the size's range; the initcode size; EIP-3860's initcode cost; the offset's range and the memory the initcode is read from (neither checked for empty initcode); for `CREATE2`, the salt operand, then the 32,000 and the hashing cost of the initcode, and for `CREATE` the 32,000.
+- The creation opcodes MUST make their checks and charges in this order: the static context; the value, offset and size operands, and the size's range; the initcode size; EIP-3860's initcode cost; the offset's range and the memory the initcode is read from (neither checked for empty initcode); for `CREATE2`, the salt operand, then the 12,000 and the hashing cost of the initcode, and for `CREATE` the 12,000.
   Satin adds no charge ahead of these.
   So a creation in a static frame fails before its operands are read, and a `CREATE2` short of its salt pays the initcode cost and the memory first: the halt consumes the frame's gas either way, but under [gas detention](#12-gas-detention-on-withheld-gas) those charges can be the crossing, which stops the transaction where the stack underflow would have halted the frame.
 
@@ -193,55 +193,56 @@ Satin has no separate compute-gas limit: compute is regular gas, bounded by the 
 
 #### New behavior
 
-The gas schedule MUST be Amsterdam's — including [EIP-2780](https://eips.ethereum.org/EIPS/eip-2780)'s decomposition of the intrinsic cost, EIP-7976's calldata floor and EIP-7981's access-list floor — with three changes:
+The gas schedule MUST be Amsterdam's — including [EIP-8038](https://eips.ethereum.org/EIPS/eip-8038)'s state-access prices, [EIP-2780](https://eips.ethereum.org/EIPS/eip-2780)'s decomposition of the intrinsic cost, EIP-7976's calldata floor and EIP-7981's access-list floor — with two changes:
 
-- the seventeen regular-gas entries below, which Amsterdam repriced for [EIP-8038](https://eips.ethereum.org/EIPS/eip-8038) (four of them because EIP-8037 moved the cost of creating state onto the state dimension), MUST keep their Osaka values;
 - the EIP-8037 state-gas entries MUST be rebuilt at MegaETH's cost per state byte (see [State Gas](#6-state-gas-and-salt-pricing));
 - the history gas of deposited code MUST be the cost of one history byte (see [History Gas](#7-history-gas)); Amsterdam prices it at zero.
 
-Every other entry MUST be Amsterdam's, including the regular code-deposit cost (zero), the EIP-7702 entries, and the entries Amsterdam introduced for EIP-8037, EIP-2780, EIP-7976 and EIP-7981.
+Every other entry MUST be Amsterdam's: every regular-gas entry, the regular code-deposit cost (zero), the EIP-7702 entries, and the entries Amsterdam introduced for EIP-8037, EIP-2780, EIP-7976 and EIP-7981.
+So creating state is split between the two dimensions as Amsterdam splits it: the regular gas pays for the access and the write EIP-8038 prices, and the new state itself is paid in state gas alone.
+A value call that creates its recipient pays no regular gas for the new account beyond the account write its value transfer carries, a creation pays 12,000 of regular gas for its access, a fresh slot pays the 10,000 of a storage write, and a `SELFDESTRUCT` that moves a balance to a new account pays an account write of 9,000.
+The static gas every opcode pays before its dynamic cost MUST be Amsterdam's too: `EXTCODESIZE` and `EXTCODECOPY` pay EIP-8038's base of two warm accesses, one for the account and one for its code, and every other opcode's static gas is Osaka's and Amsterdam's alike.
 
-Regular-gas entries that keep their Osaka value:
+Regular-gas entries that EIP-8038 or EIP-8037 reprice, and the other entries that differ from Osaka:
 
-| Entry                                          | Satin  |
-| ---------------------------------------------- | ------ |
-| Warm storage read                              | 100    |
-| Cold account access, additional                | 2,500  |
-| Cold storage access, additional                | 2,000  |
-| Cold `SLOAD`                                   | 2,100  |
-| Value transfer of a call                       | 9,000  |
-| New account of a call                          | 25,000 |
-| New account of `SELFDESTRUCT`                  | 25,000 |
-| `SSTORE` static cost                           | 100    |
-| `SSTORE` of a fresh slot, before the load cost | 19,900 |
-| `SSTORE` reset, before the cold load           | 2,800  |
-| `SSTORE` refund of a restored fresh slot       | 19,900 |
-| `SSTORE` refund of a restored reset            | 2,800  |
-| `SSTORE` refund of a cleared slot              | 4,800  |
-| `CREATE` and `CREATE2`                         | 32,000 |
-| Creation transaction (unused under EIP-2780)   | 32,000 |
-| Access-list address                            | 2,400  |
-| Access-list storage key                        | 1,900  |
+| Entry                                                | Osaka  | Satin   |
+| ---------------------------------------------------- | ------ | ------- |
+| Warm storage read                                    | 100    | 100     |
+| Cold account access, additional                      | 2,500  | 2,900   |
+| Cold storage access of an `SLOAD`, additional        | 2,000  | 2,000   |
+| Cold storage access of an `SSTORE`                   | 2,100  | 2,000   |
+| Value transfer of a call, with its 2,300 stipend     | 9,000  | 11,300  |
+| New account of a call                                | 25,000 | 0       |
+| New account of `SELFDESTRUCT`                        | 25,000 | 9,000   |
+| `SSTORE` static cost                                 | 100    | 100     |
+| `SSTORE` of a fresh slot, before the load cost       | 19,900 | 10,000  |
+| `SSTORE` reset, before the cold load                 | 2,800  | 10,000  |
+| `SSTORE` refund of a restored fresh slot             | 19,900 | 10,000  |
+| `SSTORE` refund of a restored reset                  | 2,800  | 10,000  |
+| `SSTORE` refund of a cleared slot                    | 4,800  | 11,616  |
+| `CREATE` and `CREATE2`                               | 32,000 | 12,000  |
+| `EXTCODESIZE` and `EXTCODECOPY`, static gas          | 100    | 200     |
+| Creation transaction (unused under EIP-2780)         | 32,000 | 12,000  |
+| Access-list address, with its 20 bytes at 64 gas     | 2,400  | 4,180   |
+| Access-list storage key, with its 32 bytes at 64 gas | 1,900  | 4,048   |
+| Code deposit, regular gas per byte                   | 200    | 0       |
+| Code deposit, state gas per byte                     | 0      | 1,530   |
+| Code deposit, history gas per byte                   | 0      | 88      |
+| Fresh-slot `SSTORE`, state gas                       | 0      | 97,920  |
+| New account, state gas                               | 0      | 183,600 |
+| Created account, state gas                           | 0      | 183,600 |
+| EIP-7702 delegation indicator, state gas             | 0      | 35,190  |
+| EIP-7702 authorization, intrinsic regular gas        | 25,000 | 7,816   |
+| EIP-7702 refund for an existing authority            | 12,500 | 0       |
+| Account write (EIP-2780)                             | 0      | 9,000   |
+| Creation access (EIP-2780)                           | 0      | 12,000  |
+| Floor cost per token                                 | 10     | 16      |
+| Floor base                                           | 21,000 | 12,000  |
+| Floor tokens per zero calldata byte                  | 1      | 4       |
+| Floor tokens per access-list byte                    | 0      | 4       |
 
-Entries that differ from Osaka:
-
-| Entry                                         | Osaka  | Satin   |
-| --------------------------------------------- | ------ | ------- |
-| Code deposit, regular gas per byte            | 200    | 0       |
-| Code deposit, state gas per byte              | 0      | 1,530   |
-| Code deposit, history gas per byte            | 0      | 88      |
-| Fresh-slot `SSTORE`, state gas                | 0      | 97,920  |
-| New account, state gas                        | 0      | 183,600 |
-| Created account, state gas                    | 0      | 183,600 |
-| EIP-7702 delegation indicator, state gas      | 0      | 35,190  |
-| EIP-7702 authorization, intrinsic regular gas | 25,000 | 7,816   |
-| EIP-7702 refund for an existing authority     | 12,500 | 0       |
-| Account write (EIP-2780)                      | 0      | 9,000   |
-| Creation access (EIP-2780)                    | 0      | 12,000  |
-| Floor cost per token                          | 10     | 16      |
-| Floor base                                    | 21,000 | 12,000  |
-| Floor tokens per zero calldata byte           | 1      | 4       |
-| Floor tokens per access-list byte             | 0      | 4       |
+The warm read, the `SLOAD` cold surcharge and the `SSTORE` static cost are EIP-8038's own values and Osaka's alike.
+EIP-8038 folds the warm base into a cold slot's access, so a cold `SSTORE` pays 2,100 for it with its static cost, as a cold `SLOAD` does.
 
 Under EIP-2780 the floor's base is not the 12,000 entry: it MUST be the transaction's own decomposed base (below) without its calldata, access-list, authorization and initcode costs, which is 12,000 for a transfer to the sender itself, 15,000 for a call to another account without value, 21,000 for one with value, and 24,000 for a creation.
 The floor is that base plus 64 gas per calldata byte, zero or non-zero, a creation's initcode included, and 64 gas per access-list byte, 20 bytes for an address and 32 for a storage key.
@@ -333,7 +334,7 @@ When each charge is made:
   An opcode that fails after its write was observed — an `SSTORE` or a `SELFDESTRUCT` that cannot pay the gas it charges after its load — keeps nothing and is charged no history; a `LOG` observes its write after every charge of the inherited opcode, so only the limits and its history charge, below, can fail it after its write was observed.
 - A `CALL`, `CALLCODE`, `CREATE` or `CREATE2` MUST charge its own frame for the records the frame it starts makes (a value transfer's sender and recipient; a creation's creator nonce and created account), after the gas it forwards is computed, so the forward is not reduced by them.
   A caller that cannot pay MUST halt with out-of-gas, and the frame MUST NOT start.
-  A value `CALL` to an empty account (EIP-161) MUST charge its caller in this order: its regular gas — the access's static 100, memory, the value transfer, then the cold surcharge with the new account's 25,000 — then the new account's state gas, reservoir first, then the 63/64 forward of the regular gas left, then the history of the start's records; a state charge that spills onto the regular budget so shrinks the forward, and the records' history does not.
+  A value `CALL` to an empty account (EIP-161) MUST charge its caller in this order: its regular gas — the access's static 100, memory, the value transfer, then the cold surcharge with the new account's regular gas, which is zero — then the new account's state gas, reservoir first, then the 63/64 forward of the regular gas left, then the history of the start's records; a state charge that spills onto the regular budget so shrinks the forward, and the records' history does not.
   A `CREATE` or `CREATE2` likewise charges the created account's state gas, when the account at the created address is empty, before it computes the forward.
 - Deployed code MUST be charged at the deposit (see [Gas Schedule and Intrinsic Gas](#5-gas-schedule-and-intrinsic-gas)).
 - What a frame does not keep — a failed frame's records and logs, a slot written back to its original value — MUST be given back at the price it was charged, to whoever paid it.
@@ -643,7 +644,7 @@ An out-of-gas step halts the call, consuming its regular gas.
 | 11   | `min(gasLimitOverride, remaining gas)` still covers the signed gas limit                                                                                                                                                                                                          | `GasLimitTooLow(uint64,uint64)`                                  |
 | 12   | The deploy address `keccak256(rlp([signer, 0]))[12:]` holds no code                                                                                                                                                                                                               | `ContractAlreadyExists()`                                        |
 | 13   | The signer's balance covers the carried value                                                                                                                                                                                                                                     | `InsufficientBalance()`                                          |
-| 14   | Charge what a `CREATE` charges its frame: 32,000 plus EIP-3860's initcode cost, the created account's state gas if the deploy address is empty, and the history gas of the created account's record and, unless the signer is the transaction's sender, the signer's nonce record | Out-of-gas                                                       |
+| 14   | Charge what a `CREATE` charges its frame: 12,000 plus EIP-3860's initcode cost, the created account's state gas if the deploy address is empty, and the history gas of the created account's record and, unless the signer is the transaction's sender, the signer's nonce record | Out-of-gas                                                       |
 | 15   | `min(gasLimitOverride, remaining gas)` still covers the signed gas limit                                                                                                                                                                                                          | `GasLimitTooLow(uint64,uint64)`                                  |
 
 - Steps 1 to 13 keep the legacy engine's order, so a call several rules refuse reports the Rex6 error.
@@ -938,7 +939,7 @@ The witness is defined by what the block's execution returns and exports, and a 
 ## Developer Impact
 
 Gas numbers move for every transaction.
-At the minimum bucket: an empty call uses 42,280 gas (15,000 regular and 27,280 history), a transfer to an existing account 51,800, a fresh `SSTORE` 165,826 (97,920 of it state gas), a `LOG1` with 32 bytes of data about 51,750, and a value `CALL` that creates its recipient about 267,240 (183,600 of it state gas); the last two move by a few gas with the code that sets them up.
+At the minimum bucket: an empty call uses 42,280 gas (15,000 regular and 27,280 history), a transfer to an existing account 51,800, a fresh `SSTORE` 155,826 (97,920 of it state gas), a `LOG1` with 32 bytes of data about 51,750, and a value `CALL` that creates its recipient about 244,940 (183,600 of it state gas); the last two move by a few gas with the code that sets them up.
 Calldata, logs and deployed code cost 88 gas per byte of history; a fresh slot or account costs state gas even in a minimum-size bucket, and `m` times that in a bucket `m` times larger.
 
 Gas limits above 200,000,000 behave differently: at most 200,000,000, less the intrinsic regular gas, is available to computation and `GAS`, and the rest can pay only state and history gas.
@@ -1045,6 +1046,7 @@ Satin is unstable and not scheduled on any network: its prices, limits and rules
 
 - [EIP-8037](https://eips.ethereum.org/EIPS/eip-8037) — state gas and the reservoir.
 - [EIP-2780](https://eips.ethereum.org/EIPS/eip-2780) — the decomposed intrinsic cost.
+- [EIP-8038](https://eips.ethereum.org/EIPS/eip-8038) — the state-access prices.
 - [EIP-7708](https://eips.ethereum.org/EIPS/eip-7708) — transfer logs.
 - [EIP-7997](https://eips.ethereum.org/EIPS/eip-7997) — the deterministic `CREATE2` factory.
 - [EIP-8024](https://eips.ethereum.org/EIPS/eip-8024) and [EIP-7843](https://eips.ethereum.org/EIPS/eip-7843) — `DUPN`, `SWAPN`, `EXCHANGE` and `SLOTNUM`.

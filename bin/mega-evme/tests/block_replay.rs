@@ -9,8 +9,8 @@ use std::path::Path;
 use alloy_primitives::{Address, B256, U256};
 use common::blocks::{
     block_path, cache_copy, cache_copy_for_satin, code_of, fixtures, is_deposit, overhead_slot,
-    read_block, run_evme, satin_genesis, set_overhead, timestamp_of, write_block, BLOCKS, FACTORY,
-    L1_BLOCK,
+    read_block, refused_for_block_gas, run_evme, satin_genesis, set_overhead, timestamp_of,
+    write_block, BLOCKS, FACTORY, L1_BLOCK,
 };
 use mega_evm::{system::MEGA_SYSTEM_ADDRESS, ProtocolLimits};
 use mega_evme::block::PreAccount;
@@ -90,8 +90,9 @@ fn test_a_read_the_recording_lacks_fails_the_block_offline() {
     assert!(error.contains(&format!("storage {L1_BLOCK:#x}[{}]", overhead_slot())), "{error}");
 }
 
-/// The Satin counterfactual of the recorded blocks: every block runs, nothing is refused, every
-/// record carries the legacy columns and adds `satin`, and `--verify` reports the difference
+/// The Satin counterfactual of the recorded blocks: every block runs, a transaction is refused
+/// only for the block gas it declared ([`refused_for_block_gas`]), every record carries the
+/// legacy columns, every record of what ran adds `satin`, and `--verify` reports the difference
 /// from the chain with exit code 2.
 #[test]
 fn test_the_satin_counterfactual_of_recorded_blocks() {
@@ -103,7 +104,7 @@ fn test_the_satin_counterfactual_of_recorded_blocks() {
         let block = blocks_of(&records)[0];
         assert_eq!(block["engine"], "satin");
         assert_eq!(block["spec"], "Satin");
-        assert_eq!(block["refused"], 0);
+        assert_eq!(block["refused"], refused_for_block_gas(&records));
         assert_eq!(block["matches_chain"], false);
         assert!(block["satin"]["history_gas"].as_u64().unwrap() > 0);
     }
@@ -118,7 +119,10 @@ fn test_the_satin_counterfactual_of_recorded_blocks() {
         for key in l.keys() {
             assert!(s.contains_key(key), "the Satin record lacks the legacy column {key}");
         }
-        assert!(s.contains_key("satin"), "{satin}");
+        // A refused transaction ran nothing and has no ledgers.
+        if satin["status"] != "refused" {
+            assert!(s.contains_key("satin"), "{satin}");
+        }
     }
 }
 
@@ -424,7 +428,8 @@ fn assert_refused_as_activation_block(block: &mega_evme::block::CachedBlock, rec
 /// Under a genesis file that activates Satin at the recorded block's own timestamp, the block
 /// whose parent came a second earlier is Satin's activation block: its deposits run and every
 /// other transaction is refused. With its parent at the block's own timestamp Satin is active at
-/// both, and nothing is refused. Without the parent's timestamp and without `--rpc` the tool
+/// both, and nothing is refused for the activation, only for the block gas a transaction declared
+/// ([`refused_for_block_gas`]). Without the parent's timestamp and without `--rpc` the tool
 /// cannot tell, and the block fails saying why.
 ///
 /// Expected values: independent.
@@ -449,7 +454,12 @@ fn test_a_replayed_activation_block_refuses_its_user_transactions() {
 
     let run = with_parent_at(Some(timestamp));
     assert_eq!(run.code, 0, "{}", run.stderr);
-    assert_eq!(blocks_of(&run.records())[0]["refused"], 0, "the block after admits every one");
+    let records = run.records();
+    assert_eq!(
+        blocks_of(&records)[0]["refused"],
+        refused_for_block_gas(&records),
+        "the block after admits every transaction its gas fits"
+    );
 
     let run = with_parent_at(None);
     assert_eq!(run.code, 1, "{}", run.stdout);
@@ -596,9 +606,10 @@ async fn parent_requests(server: &wiremock::MockServer, number: u64) -> usize {
 /// [S1] A cached block asks for its parent's header only when the activation-block rule needs
 /// the parent's timestamp. With the recorded entries, written before the cache kept it, and an
 /// endpoint that does not have the parent, the legacy replay matches the chain and the Satin
-/// counterfactual, whose schedule activates every fork at genesis, runs: neither asks for the
-/// parent. Under a genesis file that activates Satin at the block's timestamp the answer depends
-/// on the parent, which the endpoint does not have, and the block fails naming it.
+/// counterfactual, whose schedule activates every fork at genesis, runs, refusing a transaction
+/// only for the block gas it declared: neither asks for the parent. Under a genesis file that
+/// activates Satin at the block's timestamp the answer depends on the parent, which the endpoint
+/// does not have, and the block fails naming it.
 ///
 /// Expected values: independent.
 #[tokio::test(flavor = "multi_thread")]
@@ -614,7 +625,12 @@ async fn test_a_cached_block_asks_for_its_parent_only_when_the_rule_needs_it() {
     assert_eq!(blocks_of(&run.records())[0]["matches_chain"], true, "the legacy replay");
     let run = replay(number, cache.path(), &["--rpc", &uri, "--override.spec", "Satin"]);
     assert_eq!(run.code, 0, "{}{}", run.stderr, run.stdout);
-    assert_eq!(blocks_of(&run.records())[0]["refused"], 0, "the Satin counterfactual");
+    let records = run.records();
+    assert_eq!(
+        blocks_of(&records)[0]["refused"],
+        refused_for_block_gas(&records),
+        "the Satin counterfactual"
+    );
     assert_eq!(parent_requests(&server, number).await, 0, "neither asked for the parent");
 
     let dir = tempfile::tempdir().unwrap();

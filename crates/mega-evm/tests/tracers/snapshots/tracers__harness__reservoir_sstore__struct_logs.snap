@@ -4,7 +4,7 @@ expression: "&traced.struct_logs()"
 ---
 {
   "failed": false,
-  "gas": 165826,
+  "gas": 155826,
   "returnValue": "0x",
   "structLogs": [
     {
@@ -31,7 +31,7 @@ expression: "&traced.struct_logs()"
       "pc": 66,
       "op": "SSTORE",
       "gas": 199984994,
-      "gasCost": 22100,
+      "gasCost": 12100,
       "depth": 1,
       "stack": [
         "0x1",
@@ -45,7 +45,7 @@ expression: "&traced.struct_logs()"
     {
       "pc": 67,
       "op": "STOP",
-      "gas": 199962894,
+      "gas": 199972894,
       "gasCost": 0,
       "depth": 1,
       "stack": [],

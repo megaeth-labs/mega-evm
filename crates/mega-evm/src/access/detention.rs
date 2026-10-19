@@ -147,8 +147,8 @@ impl FrameFigures {
 /// The stipend stays outside compute on purpose: compute is regular gas drawn from the
 /// transaction's own pools. A callee may run up to 2,300 gas on each value call's stipend beyond
 /// the compute counted, and each value call costs its caller at least 9,100 of compute — the
-/// 9,000 of the value transfer and a warm access of 100 — so the gas run after a read is at most
-/// about 25% (2,300 / 9,100) more than the cap.
+/// 11,300 of the value transfer less the 2,300 stipend it carries, and a warm access of 100 — so
+/// the gas run after a read is at most about 25% (2,300 / 9,100) more than the cap.
 ///
 /// A keyless deployment's call is the transaction's own frame, and runs no code: it charges its
 /// own work — the overhead of decoding the signed transaction and recovering its signer, and the
@@ -1269,14 +1269,14 @@ mod tests {
         detention.on_frame_run(&mut call, 0);
         assert_eq!(call.spendable(), BLOCK_ENV_ACCESS_COMPUTE_GAS);
 
-        assert!(call.record_regular_cost(132_000));
+        assert!(call.record_regular_cost(112_000));
         assert!(call.record_withheld_first_cost(50_000_000));
         detention.on_frame_suspend(&call, 0);
         let mut creation = gas(50_000_000, 0);
         detention.on_frame_run(&mut creation, 1);
-        assert_eq!(detention.compute(&creation), 132_000, "the charges, not the forward");
-        assert_eq!(creation.spendable(), BLOCK_ENV_ACCESS_COMPUTE_GAS - 132_000);
-        assert_eq!(detention.allowance(2, 0), Some(BLOCK_ENV_ACCESS_COMPUTE_GAS - 132_000));
+        assert_eq!(detention.compute(&creation), 112_000, "the charges, not the forward");
+        assert_eq!(creation.spendable(), BLOCK_ENV_ACCESS_COMPUTE_GAS - 112_000);
+        assert_eq!(detention.allowance(2, 0), Some(BLOCK_ENV_ACCESS_COMPUTE_GAS - 112_000));
     }
 
     /// A frame's own read is committed as an opcode's is: the limit is its compute at the read

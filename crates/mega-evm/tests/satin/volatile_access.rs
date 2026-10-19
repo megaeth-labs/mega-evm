@@ -22,6 +22,7 @@ use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 use revm::{
     bytecode::opcode::*,
     context::{result::ExecutionResult, Transaction, TxEnv},
+    context_interface::cfg::GasId,
     interpreter::InstructionResult,
     primitives::{eip2780::TX_BASE_COST, eip8038::COLD_ACCOUNT_ACCESS},
     state::Bytecode,
@@ -34,6 +35,7 @@ use crate::{
         stop_data, tx, with_delegation, work, Calls, Charges, BELOW, BENEFICIARY, CALLER, CAP,
         CHILD, CONTRACT, DELEGATOR, TIERS,
     },
+    salt::entry,
 };
 
 /// A second contract, never the beneficiary.
@@ -813,8 +815,10 @@ fn test_a_call_to_the_access_control_contract_costs_its_overhead() {
     );
     assert!(run.outcome.result.is_success());
     let consumed = U256::from_be_slice(run.outcome.result.output().unwrap());
-    // The pushes (2 + 2 + 3 + 2 + 2 + 3 + 3), the cold call (2,600), POP and GAS.
-    assert_eq!(consumed, U256::from(17 + 2_600 + 2 + 2));
+    // The pushes (2 + 2 + 3 + 2 + 2 + 3 + 3), the cold call, POP and GAS.
+    let cold_call =
+        entry(GasId::warm_storage_read_cost()) + entry(GasId::cold_account_additional_cost());
+    assert_eq!(consumed, U256::from(17 + cold_call + 2 + 2));
 }
 
 /* ---------- an applied authority ---------- */
