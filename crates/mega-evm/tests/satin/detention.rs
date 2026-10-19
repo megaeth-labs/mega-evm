@@ -18,10 +18,7 @@ use mega_evm::{
     constants::{BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS, TX_GAS_LIMIT_CAP},
     history_gas,
     system::{IMegaLimitControl, LIMIT_CONTROL_ADDRESS, ORACLE_CONTRACT_ADDRESS},
-    test_utils::{
-        op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase, OutcomeView,
-        SlotView,
-    },
+    test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
     volatile_data_access_disabled_revert_data, write_record_history_gas, EvmTxRuntimeLimits,
     LimitCheck, LimitKind, LimitUsage, MegaContext, MegaEvm, MegaLimitExceeded, MegaSpecId,
     MegaTransaction, MegaTransactionOutcome, OracleRead, ProtocolLimits, VolatileDataAccess,
@@ -1673,13 +1670,9 @@ fn test_state_and_history_gas_are_not_compute() {
         slots * history_gas(WRITE_RECORD_SIZE).expect("a record has a price");
     let compute = 2 + 2 + slots * fresh_write();
     assert!(compute < CAP, "the writes' compute fits under the cap");
-    let written: Vec<SlotView> = (1..=slots)
-        .map(|slot| SlotView {
-            slot: U256::from(slot),
-            original: U256::ZERO,
-            present: U256::from(1),
-        })
-        .collect();
+    // Each slot as (slot, original, present), by slot.
+    let written: Vec<_> =
+        (1..=slots).map(|slot| (U256::from(slot), U256::ZERO, U256::from(1))).collect();
     for gas_limit in TIERS {
         let run = execute(
             MemoryDatabase::default().account_code(CONTRACT, code.clone()),
@@ -1687,9 +1680,14 @@ fn test_state_and_history_gas_are_not_compute() {
         );
         assert!(run.outcome.result.is_success(), "{:?}", run.outcome.result);
         let case = format!("gas limit {gas_limit}");
-        let view = OutcomeView::new(&run.outcome);
-        let contract = view.accounts[&CONTRACT].changed().expect("the contract wrote its slots");
-        assert_eq!(contract.storage, written, "{case}: each of the {slots} slots went from 0 to 1");
+        let contract = &run.outcome.state[&CONTRACT];
+        assert!(contract.is_touched(), "{case}: the contract wrote its slots");
+        let mut storage: Vec<_> = contract
+            .changed_storage_slots()
+            .map(|(slot, value)| (*slot, value.original_value, value.present_value))
+            .collect();
+        storage.sort_unstable();
+        assert_eq!(storage, written, "{case}: each of the {slots} slots went from 0 to 1");
         let gas = run.outcome.gas;
         assert_eq!(gas.state, state, "{case}: each fresh slot's state gas");
         assert_eq!(gas.history_bytes, history_bytes, "{case}: the body and a record a slot");
