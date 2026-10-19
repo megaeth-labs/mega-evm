@@ -3,8 +3,10 @@
 //! creation, one journal depth below it, then every step of the init code, the creation's end and
 //! the call's, each with the gas and the output it had.
 
+use alloy_sol_types::SolError;
 use mega_evm::{
-    system::keyless::KEYLESS_DEPLOY_OVERHEAD_GAS, test_utils::BytecodeBuilder, MegaTransaction,
+    system::keyless::KEYLESS_DEPLOY_OVERHEAD_GAS, test_utils::BytecodeBuilder, MegaLimitExceeded,
+    MegaTransaction, WRITE_RECORD_SIZE,
 };
 use revm::{
     bytecode::opcode::{LOG0, PUSH0, REVERT},
@@ -372,6 +374,43 @@ fn test_a_revived_keyless_creation_answers_address_mismatch() {
         let revived = evm.execute_transaction(keyless_tx(&deployment, gas_limit)).expect("valid");
         assert_eq!(refusal(&revived), KeylessDeployError::AddressMismatch, "at {gas_limit}");
         assert_eq!(nonce(&plain, deployment.signer), 1, "the plain run spends the nonce");
+        assert_eq!(nonce(&revived, deployment.signer), 0, "the reverted call takes the bump back");
+        assert!(code_hash(&revived, deployment.address).is_none_or(|hash| hash == KECCAK_EMPTY));
+    }
+}
+
+/// A creation a transaction-level limit stopped is a failed creation like any other, so a revived
+/// one is answered as the reverted one above: the constructor's `LOG0` of 2,000 bytes crosses the
+/// transaction's data-size limit, which holds the body, the start's two records and 100 bytes
+/// more. Without the inspector the call answers the stop as `ExecutionReverted` and keeps the
+/// signer's nonce; with it, the creation is revived at an address the deployment did not pin, and
+/// the call reverts with `AddressMismatch()`, taking the bump back, and reports no stop.
+#[test]
+fn test_a_revived_keyless_creation_a_limit_stopped_answers_address_mismatch() {
+    let prefix = BytecodeBuilder::default().push_number(2_000_u64).push_number(0_u64).append(LOG0);
+    let deployment = Deployment::new(constructor(&prefix.build_vec(), &runtime(1)));
+    let body = reference(deployment.call_data(LARGE_OVERRIDE), GAS_LIMITS[0]).usage.data_size;
+    let limit = body + 2 * WRITE_RECORD_SIZE + 100;
+    let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit);
+    for gas_limit in GAS_LIMITS {
+        let plain = MegaEvm::new(context(system_db()).with_tx_runtime_limits(limits))
+            .execute_transaction(keyless_tx(&deployment, gas_limit))
+            .expect("valid");
+        let KeylessDeployError::ExecutionReverted { output, .. } = failure(&plain) else {
+            panic!("the creation did not revert: {:?}", plain.result);
+        };
+        assert_eq!(
+            MegaLimitExceeded::abi_decode(&output).expect("a limit stop"),
+            MegaLimitExceeded { kind: 0, limit },
+            "at {gas_limit}: the constructor's log crossed the transaction's limit"
+        );
+        assert_eq!(nonce(&plain, deployment.signer), 1, "the plain run spends the nonce");
+
+        let mut evm = MegaEvm::new(context(system_db()).with_tx_runtime_limits(limits))
+            .with_inspector(Revives);
+        let revived = evm.execute_transaction(keyless_tx(&deployment, gas_limit)).expect("valid");
+        assert_eq!(refusal(&revived), KeylessDeployError::AddressMismatch, "at {gas_limit}");
+        assert_eq!(revived.limit_exceeded, None, "at {gas_limit}: no stop is the call's result");
         assert_eq!(nonce(&revived, deployment.signer), 0, "the reverted call takes the bump back");
         assert!(code_hash(&revived, deployment.address).is_none_or(|hash| hash == KECCAK_EMPTY));
     }
