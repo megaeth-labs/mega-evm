@@ -1474,31 +1474,27 @@ mod tests {
     const CALLER: Address = address!("00000000000000000000000000000000000e0001");
     const TARGET: Address = address!("00000000000000000000000000000000000e0002");
 
-    /// A `CALL` from `caller` to `target` of `value` wei, which its opcode charged a new account
-    /// for when `charged`.
-    fn call(caller: Address, target: Address, value: u64, charged: bool) -> FrameInput {
+    /// A `CALL` of one wei to `TARGET`, which its opcode charged a new account for.
+    #[cfg(debug_assertions)]
+    fn value_call() -> FrameInput {
         FrameInput::Call(Box::new(CallInputs {
             input: CallInput::Bytes(Bytes::new()),
             return_memory_offset: 0..0,
             gas_limit: 100_000,
             reservoir: 0,
-            bytecode_address: target,
+            bytecode_address: TARGET,
             known_bytecode: Default::default(),
-            target_address: target,
-            caller,
-            value: CallValue::Transfer(U256::from(value)),
+            target_address: TARGET,
+            caller: CALLER,
+            value: CallValue::Transfer(U256::from(1)),
             scheme: CallScheme::Call,
             is_static: false,
-            charged_new_account_state_gas: charged,
+            charged_new_account_state_gas: true,
         }))
     }
 
-    /// A `CALL` of one wei to `TARGET`, which its opcode charged a new account for.
-    fn value_call() -> FrameInput {
-        call(CALLER, TARGET, 1, true)
-    }
-
     /// A `CREATE` its opcode charged the created account for.
+    #[cfg(debug_assertions)]
     fn creation() -> FrameInput {
         let mut inputs =
             CreateInputs::new(CALLER, CreateScheme::Create, U256::ZERO, Bytes::new(), 100_000, 0);
