@@ -104,7 +104,7 @@ fn named_constants(doc: &str) {
     require(
         doc,
         &format!(
-            "`FRAME_SHARE_NUMERATOR / FRAME_SHARE_DENOMINATOR` = {}/{}",
+            "`FRAME_DATA_SHARE_NUMERATOR / FRAME_DATA_SHARE_DENOMINATOR` = {}/{}",
             FRAME_DATA_SHARE_NUMERATOR, FRAME_DATA_SHARE_DENOMINATOR
         ),
     );
