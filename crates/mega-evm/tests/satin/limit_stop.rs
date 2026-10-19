@@ -153,19 +153,19 @@ fn test_a_creation_whose_deposit_crosses_its_budget_is_a_stop() {
     );
 }
 
-/// Rewrites every call's result into an empty success.
+/// Rewrites every call's result into a success, keeping its output.
 #[derive(Debug, Default)]
 struct Revives;
 
 impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for Revives {
     fn call_end(&mut self, _context: &mut CTX, _inputs: &CallInputs, outcome: &mut CallOutcome) {
-        outcome.result.result = InstructionResult::Stop;
-        outcome.result.output = Bytes::new();
+        outcome.result.result = InstructionResult::Return;
     }
 }
 
 /// The transaction's own frame stopped by its budget and turned into a success by an inspector
-/// ends on the success: the crossing no longer produced the result, so the outcome names none.
+/// ends on the success, the stop's bytes for its output: the crossing no longer produced the
+/// result, which is no revert, so the outcome names none.
 #[test]
 fn test_a_stop_an_inspector_turns_into_a_success_is_no_stop() {
     let ctx = context(logging_past_the_cap()).with_tx_runtime_limits(frame_capped(FRAME_CAP));
@@ -174,7 +174,16 @@ fn test_a_stop_an_inspector_turns_into_a_success_is_no_stop() {
         .execute_transaction(call(CALLER, A, U256::ZERO, 10_000_000))
         .expect("the transaction is valid");
 
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    let stop = LimitCheck::ExceedsLimit {
+        kind: LimitKind::DataSize,
+        limit: FRAME_CAP,
+        used: LOG_BASE_SIZE + FRAME_CAP,
+        frame_local: true,
+    };
+    let ExecutionResult::Success { output, .. } = &outcome.result else {
+        panic!("expected a success, got {:?}", outcome.result)
+    };
+    assert_eq!(output.data(), &stop.revert_data(), "the stop's bytes, in a success");
     assert_eq!(outcome.limit_exceeded, None);
     assert_eq!(outcome.limit_stop(), None);
 }
