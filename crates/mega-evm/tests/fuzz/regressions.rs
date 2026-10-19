@@ -14,20 +14,9 @@ use crate::{
         world::{AccountShape, Balance, BeneficiaryIs, BlockShape, Limits, Salt, World},
         Value, Who,
     },
+    harness::runs_at_measurement_prices,
     render::render,
 };
-
-/// Whether this process prices bytes at something other than the constants, in which case the
-/// minimal cases below do not reproduce what they were found with.
-fn runs_at_measurement_prices() -> bool {
-    if mega_evm::active_satin_prices().is_constants() {
-        return false;
-    }
-    mega_evm::test_utils::note_price_guard(
-        "MEGA_SATIN_CPSB or MEGA_SATIN_CPHB fixed prices other than the spec's",
-    );
-    true
-}
 
 /// A world of empty programs, with the sender funded and nothing else.
 fn plain_world() -> World {
