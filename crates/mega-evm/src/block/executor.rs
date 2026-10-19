@@ -121,7 +121,7 @@ use op_revm::{
 use revm::{
     context::{result::ResultAndState, Block, ContextTr},
     database::DatabaseCommitExt,
-    state::EvmState,
+    state::{AccountInfo, EvmState},
     DatabaseCommit, Inspector,
 };
 
@@ -587,14 +587,11 @@ where
     /// sender debited once for two transactions, or a credit lost. Every other read the outcome
     /// made is not checked; that the state it read is still the block's is the builder's to keep.
     /// It reads the sender's account and changes nothing.
-    fn check_fresh<T>(&mut self, output: &MegaBlockTxResult<T>) -> Result<(), BlockExecutionError> {
-        let now = self
-            .evm
-            .ctx_mut()
-            .db_mut()
-            .basic(output.sender)
-            .map_err(BlockExecutionError::other)?
-            .unwrap_or_default();
+    fn check_sender_unchanged<T>(
+        &mut self,
+        output: &MegaBlockTxResult<T>,
+    ) -> Result<(), BlockExecutionError> {
+        let now = self.sender_account(output.sender)?;
         if (now.nonce, now.balance) != (output.sender_nonce, output.sender_balance) {
             return Err(MegaBlockExecutionError::StaleOutcome {
                 tx_hash: output.tx_hash,
@@ -603,6 +600,18 @@ where
             .into());
         }
         Ok(())
+    }
+
+    /// The account of `sender` as the block's state holds it now, empty when it holds none. A read
+    /// the database cannot serve is an internal error: it says nothing about the block.
+    fn sender_account(&mut self, sender: Address) -> Result<AccountInfo, BlockExecutionError> {
+        Ok(self
+            .evm
+            .ctx_mut()
+            .db_mut()
+            .basic(sender)
+            .map_err(BlockExecutionError::other)?
+            .unwrap_or_default())
     }
 
     /// Refuses an EVM that runs an inspector which may rewrite what execution produces.
@@ -849,7 +858,7 @@ where
             self.check_room(&output).expect_err("the check just failed"),
         );
         #[cfg(debug_assertions)]
-        if let Err(stale) = self.check_fresh(&output) {
+        if let Err(stale) = self.check_sender_unchanged(&output) {
             panic!(
                 "commit_transaction was handed a stale outcome, which commit_transaction_outcome \
                  refuses: {stale}"
@@ -975,7 +984,7 @@ where
     ) -> Result<GasOutput, BlockExecutionError> {
         self.check_admission()?;
         self.check_room(&output)?;
-        self.check_fresh(&output)?;
+        self.check_sender_unchanged(&output)?;
         Ok(self.commit_transaction(output))
     }
 
@@ -1047,13 +1056,7 @@ where
         // check refuses a schedule in which Regolith is not active when Satin activates: every
         // deposit receipt carries the depositor's nonce.
         let sender = *tx.signer();
-        let sender_before = self
-            .evm
-            .ctx_mut()
-            .db_mut()
-            .basic(sender)
-            .map_err(BlockExecutionError::other)?
-            .unwrap_or_default();
+        let sender_before = self.sender_account(sender)?;
         let depositor_nonce = is_deposit.then_some(sender_before.nonce);
 
         // The transaction runs under the block's limits, whatever was set on the EVM since the

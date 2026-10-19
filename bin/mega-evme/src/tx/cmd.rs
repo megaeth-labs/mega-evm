@@ -66,11 +66,11 @@ impl Cmd {
         let tx = if let Some(ref raw) = self.raw {
             let raw_bytes = load_hex(Some(raw.clone()), None)?.unwrap_or_default();
             let decoded = DecodedRawTx::from_raw(raw_bytes)?.override_tx_env(&self.tx_args)?;
-            if decoded.tx_env.chain_id != Some(chain_id) {
+            if let Some(decoded_chain_id) = decoded.tx_env.chain_id.filter(|id| *id != chain_id) {
                 warn!(
                     chain_id,
-                    decoded_chain_id = decoded.tx_env.chain_id,
-                    "Raw transaction chain_id does not match the configured chain_id"
+                    decoded_chain_id,
+                    "Raw transaction carries another chain's id, which Satin refuses"
                 );
             }
             decoded.into_tx()

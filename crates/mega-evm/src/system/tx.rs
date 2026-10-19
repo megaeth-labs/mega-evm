@@ -133,7 +133,10 @@ pub(crate) fn classify_system_transaction(
 /// pre-block calls, whose caller is the EIP-4788 system address) and for a system-address
 /// transaction, before or after it was promoted. A user's deposit transaction is not
 /// system-originated, however deposit-like it is: it carries another source hash and another
-/// caller.
+/// caller. A deposit that carries the promotion's source hash is system-originated whoever sends
+/// it; from the live system address it is also invalid, as every deposit from that address is
+/// ([`SYSTEM_ADDRESS_WITHOUT_SYSTEM_SHAPE`]), so a transaction handed to the engine already
+/// promoted is a failed deposit.
 ///
 /// It is what exempts the protocol's own work from the metering `MegaETH` holds users to — the
 /// history gas of a system transaction is not charged, and no per-transaction limit stops it, so

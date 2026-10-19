@@ -605,10 +605,11 @@ fn test_the_configuration_switches_hold_for_system_transactions() {
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
 }
 
-/// Validating a system transaction does not warm the system address: the transaction pays the
-/// cold access its first touch of any account would.
+/// Validating a system transaction reads the system address's account, the transaction's caller,
+/// which every transaction starts warm: the system transaction pays for its own account what any
+/// sender pays for its own.
 #[test]
-fn test_validating_a_system_transaction_does_not_warm_the_system_address() {
+fn test_validating_a_system_transaction_charges_its_caller_as_any_senders() {
     // `getSlot` reads one slot and writes nothing, so what the two transactions differ by is
     // the access to the caller's own account.
     let read = Bytes::from(IOracle::getSlotCall { slot: ORACLE_SLOT }.abi_encode());
