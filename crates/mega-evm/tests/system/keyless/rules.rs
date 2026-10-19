@@ -667,6 +667,24 @@ fn test_a_signer_with_code_is_refused() {
     }
 }
 
+/// A chain that disables EIP-3607 disables rule 9 with it, as it does for its own transactions.
+#[test]
+fn test_disabling_eip3607_disables_the_signer_code_rule() {
+    for gas_limit in GAS_LIMITS {
+        let deployment = small();
+        let db = system_db().account_code(deployment.signer, Bytes::from_static(&[0x00]));
+        let mut cfg = CfgEnv::new_with_spec(MegaSpecId::SATIN);
+        cfg.disable_eip3607 = true;
+        let mut tx =
+            call_tx(KEYLESS_DEPLOY_ADDRESS, deployment.call_data(LARGE_OVERRIDE), U256::ZERO);
+        tx.0.base.gas_limit = gas_limit;
+        let outcome = MegaEvm::new(context(db).with_cfg(cfg))
+            .execute_transaction(tx)
+            .expect("a valid transaction");
+        assert_eq!(returned(&outcome).deployedAddress, deployment.address);
+    }
+}
+
 /// A chain that disables EIP-3607 does not read the signer's code at all: a node missing the
 /// signer's bytecode deploys, where one that holds the rule fails on the read.
 #[test]
@@ -904,7 +922,7 @@ fn test_keyless_deploy_insufficient_balance_zero() {
     }
 }
 
-/// A signer holding part of the value is refused too.
+/// A signer holding part of the value is refused too, and the refusal writes nothing.
 #[test]
 fn test_keyless_deploy_insufficient_balance_partial() {
     for gas_limit in GAS_LIMITS {
@@ -912,6 +930,7 @@ fn test_keyless_deploy_insufficient_balance_partial() {
         let outcome =
             submit(db_for(&deployment, U256::from(9)), &deployment.tx, LARGE_OVERRIDE, gas_limit);
         assert_eq!(refusal(&outcome), KeylessDeployError::InsufficientBalance);
+        assert_nothing_written(&outcome, &deployment, 0);
     }
 }
 
