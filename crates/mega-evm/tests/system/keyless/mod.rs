@@ -148,6 +148,15 @@ pub(crate) fn runtime(len: usize) -> Vec<u8> {
     vec![0x00; len]
 }
 
+/// Init code that logs `len` bytes of data and deploys a one-byte runtime.
+pub(crate) fn logging(len: u64) -> Bytes {
+    use mega_evm::test_utils::BytecodeBuilder;
+    use revm::bytecode::opcode::LOG0;
+    let prefix =
+        BytecodeBuilder::default().push_number(len).push_number(0_u64).append(LOG0).build_vec();
+    constructor(&prefix, &runtime(1))
+}
+
 /// A database holding the system contracts, the relayer's balance and `balance` on the signer of
 /// `deployment`.
 pub(crate) fn db_for(deployment: &Deployment, balance: U256) -> MemoryDatabase {

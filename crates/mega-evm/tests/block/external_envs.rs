@@ -15,7 +15,6 @@ use alloy_sol_types::SolCall;
 use mega_evm::{
     satin_gas_params,
     system::{IOracle, ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE},
-    test_utils::BytecodeBuilder,
     BucketId, ExternalEnvFactory, ExternalEnvs, MegaBlockExecutorFactory, MegaEvmFactory, SaltEnv,
     TestExternalEnvs, MIN_BUCKET_SIZE,
 };
@@ -55,17 +54,6 @@ fn bucket(slot: u64) -> BucketId {
     <TestExternalEnvs as SaltEnv>::bucket_id_for_slot(WRITER, U256::from(slot))
 }
 
-/// Code that writes 1 into the slot named by the first byte of its calldata.
-fn writer() -> alloy_primitives::Bytes {
-    use revm::bytecode::opcode::{CALLDATALOAD, PUSH0, SHR, SSTORE, STOP};
-    BytecodeBuilder::default()
-        .push_number(1_u8)
-        .append_many([PUSH0, CALLDATALOAD])
-        .push_number(248_u8)
-        .append_many([SHR, SSTORE, STOP])
-        .build()
-}
-
 /// A block with three fresh slots written — one in a bucket at the minimum capacity, one at twice
 /// it, one at eight times it — and a read of the Oracle's storage the oracle service answers:
 /// every state gas charge is the schedule's entry times the bucket's multiplier, and the regular
@@ -84,7 +72,7 @@ fn test_a_blocks_environments_come_from_the_factory() {
     );
 
     let mut db = common::database();
-    db.set_account_code(WRITER, writer());
+    db.set_account_code(WRITER, common::writer());
     db.set_account_code(ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE);
     let mut state = State::builder().with_database(db).build();
     let evm = factory.evm_factory().create_evm(&mut state, common::evm_env());

@@ -23,7 +23,7 @@ use mega_evm::{
     LimitKind, MegaLimitExceeded, LOG_BASE_SIZE, WRITE_RECORD_SIZE,
 };
 use revm::{
-    bytecode::opcode::{LOG0, PUSH0, REVERT, TIMESTAMP},
+    bytecode::opcode::{PUSH0, REVERT, TIMESTAMP},
     interpreter::{
         interpreter::EthInterpreter, CallInputs, CallOutcome, CreateInputs, CreateOutcome,
         InstructionResult,
@@ -37,16 +37,6 @@ use super::{
     *,
 };
 use crate::common::context;
-
-/// Init code that logs `len` bytes of data and deploys a one-byte runtime.
-fn logging(len: u64) -> Bytes {
-    let prefix = mega_evm::test_utils::BytecodeBuilder::default()
-        .push_number(len)
-        .push_number(0_u64)
-        .append(LOG0)
-        .build_vec();
-    constructor(&prefix, &runtime(1))
-}
 
 /// Init code that fills a fresh slot and deploys a one-byte runtime.
 fn filling_a_slot() -> Bytes {

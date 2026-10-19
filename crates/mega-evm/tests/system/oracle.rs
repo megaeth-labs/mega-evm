@@ -17,7 +17,9 @@ use revm::{
     context::result::ResultAndState,
 };
 
-use crate::common::{block, call_tx, calls_with, run, system_db, with_contract, CALLER, CONTRACT};
+use crate::common::{
+    block, call_tx, calls_with, run, steer, system_db, with_contract, CALLER, CONTRACT,
+};
 
 /// A topic and payload the tests send.
 const TOPIC: B256 = B256::repeat_byte(0x7a);
@@ -383,21 +385,6 @@ fn return_status(code: BytecodeBuilder) -> Bytes {
 /// The status a contract of [`return_status`] returned.
 fn returned_status(outcome: &MegaTransactionOutcome) -> U256 {
     U256::from_be_slice(outcome.result.output().expect("the contract returns its status"))
-}
-
-/// Appends a `CALL` of `MegaAccessControl` with `selector`, discarding its status.
-fn steer(code: BytecodeBuilder, selector: [u8; 4]) -> BytecodeBuilder {
-    use mega_evm::system::ACCESS_CONTROL_ADDRESS;
-    use revm::bytecode::opcode::POP;
-    code.mstore(0x0, selector)
-        .push_number(0_u8)
-        .push_number(0_u8)
-        .push_number(4_u8)
-        .push_number(0_u8)
-        .push_number(0_u8)
-        .push_address(ACCESS_CONTROL_ADDRESS)
-        .push_number(100_000_u32)
-        .append_many([CALL, POP])
 }
 
 const DISABLE: [u8; 4] =

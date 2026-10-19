@@ -11,7 +11,7 @@ use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
     system::{IOracle, SequencerRegistryConfig, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS},
-    test_utils::MemoryDatabase,
+    test_utils::{BytecodeBuilder, MemoryDatabase},
     BlockLimits, EmptyExternalEnv, EvmTxRuntimeLimits, MegaBlockExecutionCtx, MegaBlockExecutor,
     MegaBlockExecutorFactory, MegaEvm, MegaEvmFactory, MegaHardforkConfig, MegaSpecId,
     MegaTxEnvelope, PreBlockStateSource, ProtocolLimits,
@@ -75,6 +75,22 @@ pub(crate) const SEQUENCER: Address = address!("0x222222222222222222222222222222
 
 /// The admin the tests seed into the registry, distinct from the system address and sequencer.
 pub(crate) const ADMIN: Address = address!("0x3333333333333333333333333333333333333333");
+
+/// An address as the word the registry stores it as.
+pub(crate) fn word(address: Address) -> U256 {
+    U256::from_be_bytes(address.into_word().0)
+}
+
+/// Code that writes 1 into the slot named by the first byte of its calldata.
+pub(crate) fn writer() -> Bytes {
+    use revm::bytecode::opcode::{CALLDATALOAD, PUSH0, SHR, SSTORE, STOP};
+    BytecodeBuilder::default()
+        .push_number(1_u8)
+        .append_many([PUSH0, CALLDATALOAD])
+        .push_number(248_u8)
+        .append_many([SHR, SSTORE, STOP])
+        .build()
+}
 
 /// Registry params the block tests attach to a Satin-at-genesis schedule.
 pub(crate) fn registry_config() -> SequencerRegistryConfig {
@@ -209,7 +225,12 @@ fn build(
 pub(crate) type PreBlockLog = Arc<Mutex<Vec<(PreBlockStateSource, EvmState)>>>;
 
 /// Installs a recording observer on `executor` and returns the log it writes.
-pub(crate) fn record_pre_block(executor: &mut TestExecutor<'_>) -> PreBlockLog {
+pub(crate) fn record_pre_block<E, R, Spec>(
+    executor: &mut MegaBlockExecutor<E, R, Spec>,
+) -> PreBlockLog
+where
+    R: alloy_op_evm::block::receipt_builder::OpReceiptBuilder,
+{
     let log = Arc::new(Mutex::new(Vec::new()));
     let captured = Arc::clone(&log);
     executor.set_pre_block_observer(Some(Box::new(

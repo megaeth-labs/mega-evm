@@ -15,10 +15,9 @@ use alloy_evm::{
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
 use mega_evm::{
-    test_utils::{BytecodeBuilder, MemoryDatabase},
-    BlockLimits, BucketId, LimitUsage, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvm,
-    MegaEvmFactory, MegaHardforkConfig, MegaTxEnvelope, PreBlockStateSource, SaltEnv,
-    TestExternalEnvs,
+    test_utils::MemoryDatabase, BlockLimits, BucketId, LimitUsage, MegaBlockExecutionCtx,
+    MegaBlockExecutor, MegaEvm, MegaEvmFactory, MegaHardforkConfig, MegaTxEnvelope,
+    PreBlockStateSource, SaltEnv, TestExternalEnvs,
 };
 use op_alloy_consensus::TxDeposit;
 use revm::{
@@ -48,21 +47,10 @@ fn slot_bucket(slot: u8) -> BucketId {
     <Envs as SaltEnv>::bucket_id_for_slot(WRITER, U256::from(slot))
 }
 
-/// Code that writes 1 into the slot named by the first byte of its calldata.
-fn writer() -> Bytes {
-    use revm::bytecode::opcode::{CALLDATALOAD, PUSH0, SHR, SSTORE, STOP};
-    BytecodeBuilder::default()
-        .push_number(1_u8)
-        .append_many([PUSH0, CALLDATALOAD])
-        .push_number(248_u8)
-        .append_many([SHR, SSTORE, STOP])
-        .build()
-}
-
 /// A state holding the writer, the empty callee and the caller's balance.
 fn state() -> State<MemoryDatabase> {
     let mut db = common::database();
-    db.set_account_code(WRITER, writer());
+    db.set_account_code(WRITER, common::writer());
     State::builder().with_database(db).build()
 }
 

@@ -12,12 +12,14 @@ use mega_evm::{
         SEQUENCER_REGISTRY_CODE,
     },
     test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
-    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionOutcome,
+    VolatileDataAccess,
 };
 use revm::{
     bytecode::opcode::{ADD, MSTORE, RETURN, RETURNDATACOPY, RETURNDATASIZE},
     context::{result::ResultAndState, BlockEnv, TxEnv},
-    Database,
+    interpreter::{interpreter::EthInterpreter, CallInputs, CallOutcome, Interpreter},
+    Database, Inspector,
 };
 
 /// The sender of every transaction the tests run.
@@ -70,6 +72,23 @@ pub(crate) fn call_tx(to: Address, data: impl AsRef<[u8]>, value: U256) -> MegaT
     }))
 }
 
+/// [`call_tx`] carrying `gas_limit`.
+pub(crate) fn call_tx_with_gas(
+    to: Address,
+    data: impl AsRef<[u8]>,
+    value: U256,
+    gas_limit: u64,
+) -> MegaTransaction {
+    let mut tx = call_tx(to, data, value);
+    tx.0.base.gas_limit = gas_limit;
+    tx
+}
+
+/// A `keylessDeploy` transaction carrying `data`, from [`CALLER`], at `gas_limit`.
+pub(crate) fn keyless_tx(data: impl AsRef<[u8]>, gas_limit: u64) -> MegaTransaction {
+    call_tx_with_gas(KEYLESS_DEPLOY_ADDRESS, data, U256::ZERO, gas_limit)
+}
+
 /// Runs `tx` on a fresh Satin EVM over `db`, without committing.
 pub(crate) fn run<DB: alloy_evm::Database>(
     db: DB,
@@ -113,6 +132,34 @@ pub(crate) fn calls_with(scheme: u8, target: Address, data: &[u8], value: u64) -
         .push_number(0_u64)
         .append(RETURN)
         .build()
+}
+
+/// Appends a `CALL` of `selector` on the access control contract, discarding its status.
+pub(crate) fn steer(code: BytecodeBuilder, selector: [u8; 4]) -> BytecodeBuilder {
+    use revm::bytecode::opcode::{CALL, POP};
+    code.mstore(0x0, selector)
+        .push_number(0_u8) // retSize
+        .push_number(0_u8) // retOffset
+        .push_number(4_u8) // argsSize
+        .push_number(0_u8) // argsOffset
+        .push_number(0_u8) // value
+        .push_address(ACCESS_CONTROL_ADDRESS)
+        .push_number(100_000_u32)
+        .append_many([CALL, POP])
+}
+
+/// A call from [`CONTRACT`] to `target` through `scheme`, run as a transaction.
+pub(crate) fn through_contract(
+    target: Address,
+    scheme: u8,
+    data: &[u8],
+    value: u64,
+) -> (bool, Bytes) {
+    let code = calls_with(scheme, target, data, value);
+    let result = run(with_contract(code), call_tx(CONTRACT, [], U256::ZERO));
+    let outcome = output(&result);
+    let (status, data) = split_outcome(&outcome);
+    (status, Bytes::copy_from_slice(data))
 }
 
 /// Splits what [`calls_with`] returns into the inner call's status and its return data.
@@ -176,4 +223,53 @@ pub(crate) fn history(bytes: u64) -> u64 {
 /// bytes, and one byte per byte of calldata.
 pub(crate) fn body_history(calldata_len: u64) -> u64 {
     history(mega_evm::TX_BODY_SIZE + calldata_len)
+}
+
+/// What a transaction did, and what gas detention made of its reads.
+pub(crate) struct Run {
+    pub(crate) outcome: MegaTransactionOutcome,
+    pub(crate) accessed: VolatileDataAccess,
+    pub(crate) limit: Option<u64>,
+}
+
+impl Run {
+    /// The output of the transaction, which must have succeeded.
+    pub(crate) fn output(&self) -> Bytes {
+        assert!(self.outcome.result.is_success(), "{:?}", self.outcome.result);
+        self.outcome.result.output().cloned().unwrap_or_default()
+    }
+
+    /// The output as a word.
+    pub(crate) fn word(&self) -> U256 {
+        U256::from_be_slice(&self.output())
+    }
+
+    /// The call status the log at `index` carries.
+    pub(crate) fn logged_status(&self, index: usize) -> bool {
+        let logs = self.outcome.result.logs();
+        assert!(logs.len() > index, "{} logs, wanted {}", logs.len(), index + 1);
+        U256::from_be_slice(&logs[index].data.data) == U256::ONE
+    }
+}
+
+/// Records every answer `remainingComputeGas()` returns, next to the spendable regular gas its
+/// caller resumes with.
+#[derive(Debug, Default)]
+pub(crate) struct AnswerAndResume {
+    pub(crate) pending: Option<u64>,
+    pub(crate) pairs: Vec<(u64, u64)>,
+}
+
+impl<CTX> Inspector<CTX, EthInterpreter> for AnswerAndResume {
+    fn step(&mut self, interp: &mut Interpreter<EthInterpreter>, _context: &mut CTX) {
+        if let Some(answer) = self.pending.take() {
+            self.pairs.push((answer, interp.gas.tracker().spendable()));
+        }
+    }
+
+    fn call_end(&mut self, _context: &mut CTX, inputs: &CallInputs, outcome: &mut CallOutcome) {
+        if inputs.target_address == LIMIT_CONTROL_ADDRESS && outcome.result.is_ok() {
+            self.pending = Some(U256::from_be_slice(&outcome.result.output).to::<u64>());
+        }
+    }
 }

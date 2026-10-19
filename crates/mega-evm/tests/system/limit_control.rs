@@ -6,21 +6,14 @@ use alloy_sol_types::{SolCall, SolError};
 use mega_evm::system::{IMegaLimitControl, LIMIT_CONTROL_ADDRESS, NON_ZERO_TRANSFER_REVERT_DATA};
 use revm::bytecode::opcode::{CALL, CALLCODE, DELEGATECALL};
 
-use crate::common::{
-    call_tx, calls_with, output, revert_data, run, split_outcome, system_db, with_contract,
-    CONTRACT, GAS_LIMIT,
-};
+use crate::common::{call_tx, output, revert_data, run, system_db, GAS_LIMIT};
 
 const REMAINING_COMPUTE_GAS: [u8; 4] = IMegaLimitControl::remainingComputeGasCall::SELECTOR;
 const NOT_INTERCEPTED: [u8; 4] = IMegaLimitControl::NotIntercepted::SELECTOR;
 
 /// A call from a contract to the limit control contract, run as a transaction.
 fn through_contract(scheme: u8, data: &[u8], value: u64) -> (bool, Bytes) {
-    let code = calls_with(scheme, LIMIT_CONTROL_ADDRESS, data, value);
-    let result = run(with_contract(code), call_tx(CONTRACT, [], U256::ZERO));
-    let outcome = output(&result);
-    let (status, data) = split_outcome(&outcome);
-    (status, Bytes::copy_from_slice(data))
+    crate::common::through_contract(LIMIT_CONTROL_ADDRESS, scheme, data, value)
 }
 
 /// Decodes what `remainingComputeGas()` answered.

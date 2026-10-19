@@ -37,8 +37,8 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{
-        CALL, CALLER, CREATE, GAS, INVALID, LOG0, POP, PUSH0, REVERT, SELFDESTRUCT, STATICCALL,
-        STOP, TIMESTAMP,
+        CALL, CALLER, CREATE, GAS, INVALID, POP, PUSH0, REVERT, SELFDESTRUCT, STATICCALL, STOP,
+        TIMESTAMP,
     },
     context::{BlockEnv, CfgEnv, ContextTr, JournalTr},
     interpreter::{
@@ -272,13 +272,6 @@ impl Mode {
             Self::Answered => Some(Recorder { answer_creations: true, ..Default::default() }),
         }
     }
-}
-
-/// Init code that logs `len` bytes of data and deploys a one-byte runtime.
-fn logging(len: u64) -> Bytes {
-    let prefix =
-        BytecodeBuilder::default().push_number(len).push_number(0_u64).append(LOG0).build_vec();
-    constructor(&prefix, &runtime(1))
 }
 
 /// Init code that fills a fresh slot and deploys a one-byte runtime.
