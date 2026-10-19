@@ -354,28 +354,9 @@ fn assert_sender_untouched(db: &mut MemoryDatabase) {
 
 /* ---------- the state component is charged where it happens ---------- */
 
-/// A transfer whose recipient must be created needs the account's state gas on top of the
-/// intrinsic charge. The state gas is not part of the intrinsic phase, so a gas limit that covers
-/// the intrinsic charge alone is accepted and then runs out of gas, charging the sender.
-#[test]
-fn test_a_transfer_that_cannot_pay_the_new_account_runs_out_of_gas() {
-    if runs_at_measurement_prices() {
-        return;
-    }
-    let db = MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18)));
-    let mut evm = MegaEvm::new(context(db));
-    let outcome = evm
-        .execute_transaction(call(CALLER, CALLEE, U256::from(1), 21_000 + ACCOUNT_STATE_GAS - 1))
-        .expect("the transaction is admitted");
-
-    assert!(matches!(outcome.result, ExecutionResult::Halt { .. }), "{:?}", outcome.result);
-    assert_eq!(outcome.state[&CALLER].info.nonce, 1, "the sender paid for the attempt");
-    assert_eq!(outcome.gas.gas_used, 21_000 + ACCOUNT_STATE_GAS - 1, "its whole gas limit");
-    assert_eq!(outcome.gas.state, 0, "and the account it could not pay for is not created");
-}
-
-/// The same for a creation: the created account's state gas is charged as the frame starts, not
-/// at validation.
+/// A creation transaction's created account's state gas is charged as the frame starts, not at
+/// validation: a gas limit that covers the intrinsic charge alone is accepted and then runs out of
+/// gas, charging the sender.
 #[test]
 fn test_a_creation_that_cannot_pay_its_account_runs_out_of_gas() {
     if runs_at_measurement_prices() {

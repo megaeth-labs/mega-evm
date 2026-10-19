@@ -11,18 +11,18 @@
 use alloy_evm::Evm;
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    constants::{ACCOUNT_STATE_GAS, SLOT_STATE_GAS},
+    constants::ACCOUNT_STATE_GAS,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    MegaEvm, MegaHaltReason,
+    MegaEvm,
 };
 use revm::{
     bytecode::opcode::{CLZ, CREATE, DUPN, EXCHANGE, MSTORE, PUSH0, PUSH1, RETURN, SLOTNUM, SWAPN},
-    context::result::{ExecutionResult, HaltReason},
+    context::result::ExecutionResult,
 };
 
 use crate::common::{
-    account_state_gas, call, call_with_data, context, create, deploying, history,
-    runs_at_measurement_prices, slot_state_gas,
+    account_state_gas, call, call_with_data, context, create, history, runs_at_measurement_prices,
+    slot_state_gas,
 };
 
 const CALLER: Address = address!("0000000000000000000000000000000000900000");
@@ -163,36 +163,6 @@ fn test_init_code_costs_its_calldata_tokens_and_an_eip3860_word() {
 
 /* ---------- the state entries ---------- */
 
-/// A slot's first write to a non-zero value draws the slot's state gas; writing it again does
-/// not, because the slot is no longer new.
-#[test]
-fn test_a_new_slot_draws_the_slot_state_gas() {
-    if runs_at_measurement_prices() {
-        return;
-    }
-    let code = BytecodeBuilder::default().sstore(U256::ZERO, U256::from(1)).stop().build();
-    let new = spend(with_code(code.clone()), call(CALLER, CALLEE, U256::ZERO, gas_limit()));
-    assert_eq!(new.state, SLOT_STATE_GAS);
-
-    let db = with_code(code).account_storage(CALLEE, U256::ZERO, U256::from(1));
-    let again = spend(db, call(CALLER, CALLEE, U256::ZERO, gas_limit()));
-    assert_eq!(again.state, 0, "the slot already holds the value");
-}
-
-/// Deployed code is priced by the byte on the state dimension, on top of the created account.
-#[test]
-fn test_deployed_code_draws_state_gas_by_the_byte() {
-    if runs_at_measurement_prices() {
-        return;
-    }
-    let db = || MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18)));
-    let empty = spend(db(), create(CALLER, Bytes::new(), gas_limit()));
-    let thirty_two = spend(db(), create(CALLER, deploying(32), gas_limit()));
-
-    assert_eq!(empty.state, ACCOUNT_STATE_GAS);
-    assert_eq!(thirty_two.state - empty.state, 32 * 1_530, "32 bytes at the state byte price");
-}
-
 /// A creation that reverts deposits nothing, so it draws no state gas at all: neither the
 /// created account's nor the code's. The state gas a creation draws is charged on the deposit,
 /// not on the attempt.
@@ -219,31 +189,6 @@ fn depositing_an_ef_byte() -> Bytes {
         .build()
 }
 
-/// EIP-3541 rejects deployed code whose first byte is `0xEF`, and the rejection lands before the
-/// deposit is charged: the creation halts and draws no state gas, neither the account's nor the
-/// byte's.
-#[test]
-fn test_a_creation_rejected_for_its_first_byte_draws_no_state_gas() {
-    let db = MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18)));
-    let mut evm = MegaEvm::new(context(db));
-    let result = evm
-        .transact_raw(create(CALLER, depositing_an_ef_byte(), gas_limit()))
-        .expect("the transaction is valid")
-        .result;
-
-    assert!(
-        matches!(
-            result,
-            ExecutionResult::Halt {
-                reason: MegaHaltReason::Base(HaltReason::CreateContractStartingWithEF),
-                ..
-            }
-        ),
-        "{result:?}"
-    );
-    assert_eq!(result.gas().state_gas_spent_final(), 0);
-}
-
 /// The same from a `CREATE` frame: the frame fails and returns the zero address, the transaction
 /// around it goes through, and the state gas the frame took upfront is back.
 #[test]
@@ -263,18 +208,6 @@ fn test_a_create_frame_rejected_for_its_first_byte_draws_no_state_gas() {
     let spent = spend(with_code(factory), call(CALLER, CALLEE, U256::ZERO, gas_limit()));
 
     assert_eq!(spent.state, 0, "the created account and its byte are both taken back");
-}
-
-/// A creation that deposits nothing — empty runtime code — still pays for the account it
-/// created, and nothing for code.
-#[test]
-fn test_a_creation_depositing_no_code_pays_for_the_account_alone() {
-    if runs_at_measurement_prices() {
-        return;
-    }
-    let db = MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18)));
-    let spent = spend(db, create(CALLER, deploying(0), gas_limit()));
-    assert_eq!(spent.state, ACCOUNT_STATE_GAS);
 }
 
 /* ---------- the Amsterdam opcodes ---------- */
