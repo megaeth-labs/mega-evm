@@ -113,7 +113,7 @@ fn block_tx() -> impl Strategy<Value = BlockTx> {
         })
 }
 
-/// One of the block's three protocol budgets.
+/// One of the block's two protocol budgets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Budget {
     Unlimited,
@@ -151,11 +151,9 @@ fn budget(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Budgets {
     pub(crate) execution: Budget,
-    pub(crate) state: Budget,
     pub(crate) data: Budget,
-    /// The policy's caps on the same three, which only tighten.
+    /// The policy's caps on the same two, which only tighten.
     pub(crate) policy_execution: Budget,
-    pub(crate) policy_state: Budget,
     pub(crate) policy_data: Budget,
     /// The policy's cap on a transaction's declared gas.
     pub(crate) policy_tx_gas: Option<u32>,
@@ -167,16 +165,8 @@ pub(crate) struct Budgets {
 
 fn budgets() -> impl Strategy<Value = Budgets> {
     (
-        (
-            budget(20_000..=200_000, 500_000..=5_000_000),
-            budget(1_000..=200_000, 300_000..=2_000_000),
-            budget(300..=600, 1_000..=5_000),
-        ),
-        (
-            budget(20_000..=200_000, 500_000..=5_000_000),
-            budget(1_000..=200_000, 300_000..=2_000_000),
-            budget(300..=600, 1_000..=5_000),
-        ),
+        (budget(20_000..=200_000, 500_000..=5_000_000), budget(300..=600, 1_000..=5_000)),
+        (budget(20_000..=200_000, 500_000..=5_000_000), budget(300..=600, 1_000..=5_000)),
         proptest::option::weighted(
             0.3,
             prop_oneof![Just(100_000u32), Just(1_000_000), Just(50_000_000)],
@@ -184,18 +174,14 @@ fn budgets() -> impl Strategy<Value = Budgets> {
         proptest::option::weighted(0.3, prop_oneof![Just(80u16), Just(150), Just(2_000)]),
         proptest::option::weighted(0.3, prop_oneof![Just(200u16), Just(500), Just(5_000)]),
     )
-        .prop_map(|((execution, state, data), (pe, ps, pd), tx_gas, tx_size, block_size)| {
-            Budgets {
-                execution,
-                state,
-                data,
-                policy_execution: pe,
-                policy_state: ps,
-                policy_data: pd,
-                policy_tx_gas: tx_gas,
-                policy_tx_size: tx_size,
-                policy_block_size: block_size,
-            }
+        .prop_map(|((execution, data), (pe, pd), tx_gas, tx_size, block_size)| Budgets {
+            execution,
+            data,
+            policy_execution: pe,
+            policy_data: pd,
+            policy_tx_gas: tx_gas,
+            policy_tx_size: tx_size,
+            policy_block_size: block_size,
         })
 }
 
@@ -218,7 +204,6 @@ impl BlockCase {
         ProtocolLimits {
             tx_runtime_limits: self.base.world.limits.runtime(),
             block_execution_gas_limit: self.budgets.execution.value(),
-            block_state_gas_limit: self.budgets.state.value(),
             block_txs_data_limit: self.budgets.data.value(),
         }
     }
@@ -230,7 +215,6 @@ impl BlockCase {
             tx_encode_size_limit: b.policy_tx_size.map_or(u64::MAX, u64::from),
             block_txs_encode_size_limit: b.policy_block_size.map_or(u64::MAX, u64::from),
             block_execution_gas_limit: b.policy_execution.value(),
-            block_state_gas_limit: b.policy_state.value(),
             block_txs_data_limit: b.policy_data.value(),
             ..BlockLimits::no_limits()
         }
@@ -350,7 +334,7 @@ impl BlockCase {
 
 /// Whether the block admits a transaction of `gas_limit` and `tx_size` before it runs, by the
 /// limiter's rules: a deposit is held to the header's gas limit alone; any other transaction to
-/// the policy's per-transaction caps and to the three packing budgets, which refuse the next
+/// the policy's per-transaction caps and to the two packing budgets, which refuse the next
 /// transaction once reached.
 fn admits_before(limiter: &BlockLimiter, gas_limit: u64, tx_size: u64, is_deposit: bool) -> bool {
     let limits = &limiter.limits;
@@ -367,27 +351,6 @@ fn admits_before(limiter: &BlockLimiter, gas_limit: u64, tx_size: u64, is_deposi
         tx_size.saturating_add(limiter.block_tx_size_used) <= limits.block_txs_encode_size_limit &&
         limiter.gas.execution < limits.block_execution_gas_limit &&
         limiter.usage.data_size < limits.block_txs_data_limit
-}
-
-/// Whether the block still admits an executed transaction that adds `state_gas`: the state-gas
-/// budget refuses one that adds any once reached, and never a deposit. The executor applies it
-/// after the transaction ran, in `run_transaction`, and again at commit.
-fn admits_after(limiter: &BlockLimiter, state_gas: u64, is_deposit: bool) -> bool {
-    is_deposit || state_gas == 0 || limiter.gas.state < limiter.limits.block_state_gas_limit
-}
-
-/// Whether a refusal is the state-gas budget's, applied after the transaction ran.
-fn is_state_gas_refusal(error: &BlockExecutionError) -> bool {
-    match error {
-        BlockExecutionError::Validation(BlockValidationError::InvalidTx { error, .. }) => {
-            (error.as_ref() as &dyn std::any::Any)
-                .downcast_ref::<mega_evm::MegaBlockLimitExceededError>()
-                .is_some_and(|e| {
-                    matches!(e, mega_evm::MegaBlockLimitExceededError::StateGasLimit { .. })
-                })
-        }
-        _ => false,
-    }
 }
 
 /// Whether a refusal names a block or transaction limit rather than the transaction's validity:
@@ -467,17 +430,12 @@ fn run_block(case: &BlockCase) -> Result<BlockRun, proptest::test_runner::TestCa
                     outcome.usage.write_records * WRITE_RECORD_SIZE <= outcome.usage.data_size,
                     "tx {index}: KV x 40 within the data size"
                 );
-                let fits = admits_after(executor.limiter(), gas.state, is_deposit);
                 let logs = outcome.result.logs().to_vec();
                 // What the transaction itself reports it kept, taken before the commit: the
                 // block's usage must be the sum of these, not a figure read back from the block.
                 let usage = outcome.usage;
                 match executor.commit_transaction_outcome(outcome) {
                     Ok(_) => {
-                        prop_check!(
-                            fits,
-                            "tx {index} was committed though the state-gas budget refuses it"
-                        );
                         expected.record(&gas);
                         expected_gas_used += gas.gas_used;
                         expected_usage.data_size += usage.data_size;
@@ -499,25 +457,18 @@ fn run_block(case: &BlockCase) -> Result<BlockRun, proptest::test_runner::TestCa
                         run.committed.push(index);
                     }
                     Err(error) => {
-                        prop_check!(
-                            !fits,
+                        // Nothing committed since it ran, so the block's counters are the ones it
+                        // was admitted against.
+                        return Err(fail(format!(
                             "tx {index} was refused at commit though it fits: {error:?}"
-                        );
-                        run.refused.push((index, format!("{error:?}")));
+                        )));
                     }
                 }
             }
             Err(error) => {
                 let message = format!("{error:?}");
                 let on_a_limit = is_limit_refusal(&error);
-                if admitted && is_state_gas_refusal(&error) {
-                    // The transaction ran and added state gas once the budget was reached.
-                    prop_check!(
-                        !is_deposit && !admits_after(executor.limiter(), 1, false),
-                        "tx {index} was refused on the state-gas budget the rules do not name: {message}\n{:?}",
-                        executor.limiter()
-                    );
-                } else if admitted {
+                if admitted {
                     prop_check!(
                         !on_a_limit,
                         "tx {index} was refused on a limit the rules do not name: {message}\n{:?}",
@@ -582,8 +533,8 @@ fn run_block(case: &BlockCase) -> Result<BlockRun, proptest::test_runner::TestCa
 
 /// A block's counters are the sum of its committed transactions', its gas used the sum of its
 /// receipts', and every budget holds as the block executor states it: a transaction runs only if
-/// the packing budgets and the policy admit it, is refused after it ran if it adds state gas once
-/// the state-gas budget is reached, and a deposit is refused by the header's gas limit alone.
+/// the packing budgets and the policy admit it, it commits once it ran, and a deposit is refused by
+/// the header's gas limit alone.
 #[test]
 fn test_property_block_counters_and_budgets() {
     check("block_counters_and_budgets", CASES, block_case, |case| {

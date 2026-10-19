@@ -49,7 +49,7 @@ use revm::{
 };
 
 use super::{detention::reads_then_burns, *};
-use crate::common::{context, state_is_free, CALLER as RELAYER};
+use crate::common::{context, CALLER as RELAYER};
 
 /// Where the record is written, when set.
 const RECORD_PATH: &str = "MEGA_KEYLESS_RECORD";
@@ -546,7 +546,6 @@ fn scenarios() -> Vec<Scenario> {
         /* Limits. */
         let data_size = Deployment::new(logging(2_000));
         let body = reference(data_size.call_data(LARGE_OVERRIDE), GAS_LIMITS[0]).usage.data_size;
-        let slot = Deployment::new(filling_a_slot());
         let compute = Deployment::new(reads_then_burns(TIMESTAMP, 1_000));
         for nonce in [0, 1] {
             let db = |d: &Deployment| system_db().account_nonce(d.signer, nonce);
@@ -559,22 +558,6 @@ fn scenarios() -> Vec<Scenario> {
                 )
                 .limits(EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(body + 80 + 100)),
             );
-            let signer = if nonce == 0 { entry(GasId::new_account_state_gas()) } else { 0 };
-            let used =
-                signer + entry(GasId::create_state_gas()) + entry(GasId::sstore_set_state_gas());
-            // A deployment that adds no state gas, where a state byte is free, crosses no
-            // state-gas limit.
-            if !state_is_free() {
-                all.push(
-                    Scenario::deploying(
-                        format!("limit: state gas, nonce {nonce}"),
-                        db(&slot),
-                        &slot,
-                        gas_limit,
-                    )
-                    .limits(EvmTxRuntimeLimits::no_limits().with_tx_state_gas_limit(used - 1)),
-                );
-            }
             all.push(
                 Scenario::deploying(
                     format!("limit: compute, nonce {nonce}"),
@@ -613,18 +596,6 @@ fn scenarios() -> Vec<Scenario> {
                 )
                 .limits(EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(body + 40)),
             );
-            let upfront = entry(GasId::new_account_state_gas()) + entry(GasId::create_state_gas());
-            if !state_is_free() {
-                all.push(
-                    Scenario::deploying(
-                        format!("limit: upfront state gas, nonce {nonce}"),
-                        db(&small),
-                        &small,
-                        gas_limit,
-                    )
-                    .limits(EvmTxRuntimeLimits::no_limits().with_tx_state_gas_limit(upfront - 1)),
-                );
-            }
         }
         all.push(
             Scenario::deploying("limit: a latched body", system_db(), &small, gas_limit)

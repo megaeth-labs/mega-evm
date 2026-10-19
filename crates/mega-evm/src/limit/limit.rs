@@ -16,9 +16,9 @@ use super::{
 use crate::storage_call_stipend;
 
 /// What the common execution layer tracks for the running transaction: the per-frame lanes of
-/// data-size bytes and write records, the state gas the transaction holds outside each frame, the
-/// record the Host staged for the running opcode, and where the transaction stands with its
-/// limits — within them or latched by one — and whether it is exempt from all of them.
+/// data-size bytes and write records, the record the Host staged for the running opcode, and where
+/// the transaction stands with its limits — within them or latched by one — and whether it is
+/// exempt from all of them.
 ///
 /// It lives on the [`MegaContext`](crate::MegaContext), is reset before each transaction and
 /// system call, and is driven by the Host (staging), the opcode wrappers (commit and discard)
@@ -506,24 +506,19 @@ impl AdditionalLimit {
 
     /// Records the account writes of the applied EIP-7702 authorities other than the sender:
     /// `authorities` distinct accounts, `target_is_authority` if the transaction's call target is
-    /// one of them, from the transaction's `sender`, which has been charged `state_gas` so far.
+    /// one of them, from the transaction's `sender`.
     ///
-    /// The limits are checked before the records are made — the state gas the authorities were
-    /// charged first, then their records: a crossing latches the transaction and records nothing,
-    /// and the caller takes the authorizations back with the gas they charged, so the writes the
-    /// limit guards never happen. The first frame is then answered with the stop without running.
+    /// The data-size limit is checked before the records are made: a crossing latches the
+    /// transaction and records nothing, and the caller takes the authorizations back with the gas
+    /// they charged, so the writes the limit guards never happen. The first frame is then answered
+    /// with the stop without running.
     pub(crate) fn record_applied_authorities(
         &mut self,
         sender: Address,
         authorities: u64,
         target_is_authority: bool,
-        state_gas: i64,
     ) -> LimitCheck {
         self.sender = sender;
-        let check = self.check_state_gas(state_gas);
-        if check.exceeded_limit() {
-            return check;
-        }
         let records = WRITE_RECORD.times(authorities);
         let (used, limit) =
             (self.tracker.net().saturating_add(records), self.limits.tx_data_size_limit);
@@ -536,43 +531,6 @@ impl AdditionalLimit {
         self.target_is_authority = target_is_authority;
         self.tracker.record(records);
         LimitCheck::WithinLimit
-    }
-
-    /* The state-gas limit */
-
-    /// Holds the state gas the transaction holds to its limit, the running frame — or, outside
-    /// any frame, the transaction — holding `running`, and latches the transaction when it is
-    /// crossed.
-    ///
-    /// Called where state gas has just been charged, so a charge the frame could not pay is an
-    /// out-of-gas whatever the limit: the limit holds what was paid. What a frame refilled, and
-    /// what a failed frame rolled back, is out of what it holds, so a write taken back gives its
-    /// room back.
-    pub(crate) fn check_state_gas(&mut self, running: i64) -> LimitCheck {
-        let used = self.tracker.state_gas_held(running);
-        let limit = self.limits.tx_state_gas_limit;
-        if used > limit {
-            return self.latch(LimitKind::StateGrowth, limit, used);
-        }
-        LimitCheck::WithinLimit
-    }
-
-    /// Records the state gas the transaction was charged before its first frame, `spent`, which
-    /// the first frame's lane holds outside it, and holds to the limit the part of it that stands
-    /// whatever the first frame does, `stands`: all of it but the account EIP-2780 charges the
-    /// first frame's start for, which is held once revm has decided the frame, as every frame's
-    /// upfront charge is. A crossing latches the transaction, and its first frame is answered with
-    /// the stop before it is built.
-    pub(crate) fn on_state_gas_before_frames(&mut self, stands: i64, spent: i64) {
-        self.tracker.set_state_gas_before_frames(spent);
-        self.check_state_gas(stands);
-    }
-
-    /// Records the state gas `held` by the running frame as it suspends on a child, which the
-    /// child's lane counts as held outside it.
-    #[inline]
-    pub(crate) fn on_frame_suspend(&mut self, held: i64) {
-        self.tracker.set_state_gas_at_suspension(held);
     }
 
     /* Frame lanes */
@@ -623,9 +581,8 @@ impl AdditionalLimit {
         self.check()
     }
 
-    /// Holds the code a creation deposits to the limits, and names the stop when it crosses one:
-    /// first the state gas `return_create` charged for the bytes, then the bytes themselves,
-    /// counted on the creation's own lane.
+    /// Holds the code a creation deposits to the data-size limit, and names the stop when it
+    /// crosses it: the bytes are counted on the creation's own lane.
     ///
     /// Called through
     /// [`ContextTr::admit_code_deposit`](revm::context::ContextTr::admit_code_deposit), which
@@ -641,20 +598,13 @@ impl AdditionalLimit {
     /// code, code it refuses, and a creation that cannot pay one of the deposit's charges, which
     /// runs out of gas whatever the limit. Empty code deposits nothing and is held to nothing.
     ///
-    /// The state gas is held with what the creation already holds, and before the bytes, as it is
-    /// wherever both cross at one site. A deposit the schedule charges no state gas for adds none,
-    /// and holding what the creation already held finds nothing its own charges did not. The same
-    /// bytes are history beside the write records, counted here on the same lane, so the
+    /// The same bytes are history beside the write records, counted here on the same lane, so the
     /// history a transaction reports it appended and the data size it kept move together: a
     /// creation that deposits nothing, or whose deposit fails, appends neither.
     pub(crate) fn on_code_deposit(&mut self, deposit: &CodeDeposit<'_>) -> Result<(), Bytes> {
         let bytes = deposit.code.len() as u64;
         if bytes == 0 {
             return Ok(());
-        }
-        let check = self.check_state_gas(deposit.gas_after.state_gas_spent());
-        if check.exceeded_limit() {
-            return Err(check.revert_data());
         }
         debug_assert!(self.tracker.current().is_some(), "a creation returns on its own lane");
         self.tracker.record(LimitUsage { data_size: bytes, write_records: 0 });
@@ -1308,18 +1258,15 @@ mod tests {
 
     /// Limits every dimension holds at zero: anything a transaction counts crosses one.
     fn zero_limits() -> EvmTxRuntimeLimits {
-        EvmTxRuntimeLimits::no_limits()
-            .with_tx_data_size_limit(0)
-            .with_frame_data_size_limit(0)
-            .with_tx_state_gas_limit(0)
+        EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(0).with_frame_data_size_limit(0)
     }
 
-    /// Counts a body, a value call's two records and some state gas, and reports each verdict.
-    fn count_a_transaction(limit: &mut AdditionalLimit) -> [LimitCheck; 3] {
+    /// Counts a body and a value call's two records, and reports each verdict.
+    fn count_a_transaction(limit: &mut AdditionalLimit) -> [LimitCheck; 2] {
         let body = limit.record_tx_body(crate::TX_BODY_SIZE);
         limit.on_frame_init(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
         let records = limit.on_frame_init(&call_from_to(CALLEE, TARGET, U256::from(1)), 1);
-        [body, records, limit.check_state_gas(1_000)]
+        [body, records]
     }
 
     /// A transaction that is not exempt is stopped by the first limit it crosses: its body latches
@@ -1340,7 +1287,7 @@ mod tests {
     fn test_an_exempt_transaction_is_stopped_by_no_limit() {
         let mut limit = AdditionalLimit::new(zero_limits());
         limit.exempt();
-        assert_eq!(count_a_transaction(&mut limit), [LimitCheck::WithinLimit; 3]);
+        assert_eq!(count_a_transaction(&mut limit), [LimitCheck::WithinLimit; 2]);
         assert_eq!(limit.latch(LimitKind::DataSize, 0, 1), LimitCheck::WithinLimit);
         assert_eq!(limit.latched(), None);
         assert_eq!(limit.stop_before_run(), None);
@@ -1364,7 +1311,7 @@ mod tests {
     fn test_an_exempt_transaction_records_its_authorities() {
         let mut limit = AdditionalLimit::new(zero_limits());
         limit.exempt();
-        let check = limit.record_applied_authorities(SENDER, 2, false, 1_000);
+        let check = limit.record_applied_authorities(SENDER, 2, false);
         assert!(!check.exceeded_limit(), "{check:?}");
         assert_eq!(limit.usage(), WRITE_RECORD.times(2));
     }

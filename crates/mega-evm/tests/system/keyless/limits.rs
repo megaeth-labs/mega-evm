@@ -1,12 +1,11 @@
 //! The limits a keyless deployment is held to, and what a stop leaves behind.
 //!
 //! The creation is an ordinary frame below its `keylessDeploy` call, so it is held to everything
-//! an ordinary creation is: its share of the data-size budget, the transaction's limits, the
-//! state-gas limit. A frame budget reverts the creation alone, and the call answers
-//! `ExecutionReverted` with the stop's revert data, the signer's nonce spent. A transaction limit
-//! stops the transaction: the call reverts with the stop and takes back everything the
-//! deployment wrote, the signer's nonce included, and the sender pays for what ran and gets the
-//! rest of its gas and its reservoir back.
+//! an ordinary creation is: its share of the data-size budget, the transaction's limits. A frame
+//! budget reverts the creation alone, and the call answers `ExecutionReverted` with the stop's
+//! revert data, the signer's nonce spent. A transaction limit stops the transaction: the call
+//! reverts with the stop and takes back everything the deployment wrote, the signer's nonce
+//! included, and the sender pays for what ran and gets the rest of its gas and its reservoir back.
 //!
 //! The stop is pinned as a column of the matrix: every transaction-level limit a creation can
 //! cross, from a signer at nonce 0 and at nonce 1, below the execution cap and above it, with and
@@ -34,7 +33,7 @@ use super::{
     detention::{crossing_left, reads_then_burns},
     *,
 };
-use crate::common::{context, state_is_free};
+use crate::common::context;
 
 /// Init code that logs `len` bytes of data and deploys a one-byte runtime.
 fn logging(len: u64) -> Bytes {
@@ -248,87 +247,14 @@ fn test_a_failure_from_nonce_one_leaves_the_call_within_its_budget() {
     }
 }
 
-/// The state gas of the creation's start — the signer's account and the created account — is held
-/// once the creation is built, as a `CREATE`'s upfront charge is: a limit below it stops the
-/// transaction before the init code runs.
-#[test]
-fn test_the_upfront_state_gas_is_held_to_the_state_gas_limit() {
-    // A deployment that adds no state gas has no state-gas limit to cross.
-    if state_is_free() {
-        return;
-    }
-    let deployment = Deployment::new(deploying(&runtime(1)));
-    let upfront = entry(GasId::new_account_state_gas()) + entry(GasId::create_state_gas());
-    for gas_limit in GAS_LIMITS {
-        let outcome = limited(
-            &deployment,
-            gas_limit,
-            EvmTxRuntimeLimits::no_limits().with_tx_state_gas_limit(upfront - 1),
-        );
-        assert_eq!(stop(&outcome), MegaLimitExceeded { kind: 3, limit: upfront - 1 });
-        assert_stopped_whole(&outcome, &deployment, gas_limit);
-    }
-}
-
-/// A slot the constructor fills counts on top of the upfront state gas.
-#[test]
-fn test_a_deployment_crossing_the_state_gas_limit_stops_it() {
-    // A deployment that adds no state gas has no state-gas limit to cross.
-    if state_is_free() {
-        return;
-    }
-    let deployment = Deployment::new(filling_a_slot());
-    let upfront = entry(GasId::new_account_state_gas()) + entry(GasId::create_state_gas());
-    let limit = upfront + entry(GasId::sstore_set_state_gas()) - 1;
-    for gas_limit in GAS_LIMITS {
-        let outcome = limited(
-            &deployment,
-            gas_limit,
-            EvmTxRuntimeLimits::no_limits().with_tx_state_gas_limit(limit),
-        );
-        assert_eq!(stop(&outcome), MegaLimitExceeded { kind: 3, limit });
-        assert_stopped_whole(&outcome, &deployment, gas_limit);
-    }
-}
-
-/// And so does the code it deposits: a limit one short of it stops the transaction before the
-/// code is written.
-#[test]
-fn test_the_deposited_code_is_held_to_the_state_gas_limit() {
-    // A deployment that adds no state gas has no state-gas limit to cross.
-    if state_is_free() {
-        return;
-    }
-    let deployment = Deployment::new(deploying(&runtime(5)));
-    let limit = entry(GasId::new_account_state_gas()) +
-        entry(GasId::create_state_gas()) +
-        satin_gas_params().code_deposit_state_gas(5) -
-        1;
-    for gas_limit in GAS_LIMITS {
-        let outcome = limited(
-            &deployment,
-            gas_limit,
-            EvmTxRuntimeLimits::no_limits().with_tx_state_gas_limit(limit),
-        );
-        assert_eq!(stop(&outcome), MegaLimitExceeded { kind: 3, limit });
-        assert_stopped_whole(&outcome, &deployment, gas_limit);
-    }
-}
-
 /// A limit that holds the whole deployment lets it through.
 #[test]
 fn test_a_deployment_within_every_limit_deploys() {
     let deployment = Deployment::new(filling_a_slot());
-    let upfront = entry(GasId::new_account_state_gas()) + entry(GasId::create_state_gas());
     // The creation gets 98% of what the call has left, rounded down: room for its three records
     // and its byte of code.
     let limits = EvmTxRuntimeLimits::no_limits()
-        .with_tx_data_size_limit(body_bytes(&deployment) + 3 * 40 + 1 + 10)
-        .with_tx_state_gas_limit(
-            upfront +
-                entry(GasId::sstore_set_state_gas()) +
-                satin_gas_params().code_deposit_state_gas(1),
-        );
+        .with_tx_data_size_limit(body_bytes(&deployment) + 3 * 40 + 1 + 10);
     for gas_limit in GAS_LIMITS {
         let outcome = limited(&deployment, gas_limit, limits);
         assert_eq!(returned(&outcome).deployedAddress, deployment.address, "at {gas_limit}");
@@ -445,8 +371,6 @@ fn test_the_unspent_forward_comes_back_on_success_and_revert_alike() {
 enum Crossing {
     /// The constructor's `LOG0` of 2,000 bytes crosses the data-size limit.
     DataSize,
-    /// The slot the constructor fills crosses the state-gas limit.
-    StateGas,
     /// The constructor reads the block's timestamp, then computes past the cap.
     Compute,
 }
@@ -455,21 +379,20 @@ enum Crossing {
 const COMPUTE_CAP: u64 = 1_000;
 
 impl Crossing {
-    const ALL: [Self; 3] = [Self::DataSize, Self::StateGas, Self::Compute];
+    const ALL: [Self; 2] = [Self::DataSize, Self::Compute];
 
     /// The init code whose run crosses the limit.
     fn init_code(self) -> Bytes {
         match self {
             Self::DataSize => logging(2_000),
-            Self::StateGas => filling_a_slot(),
             Self::Compute => reads_then_burns(TIMESTAMP, 1_000),
         }
     }
 
-    /// The limits under which a deployment of `deployment`, by a signer at `signer_nonce`,
-    /// crosses the limit, with the stop it reports: its kind, its limit, and what it counts as
-    /// used where the constructor crosses.
-    fn limits(self, deployment: &Deployment, signer_nonce: u64) -> (EvmTxRuntimeLimits, Crossed) {
+    /// The limits under which a deployment of `deployment`, by a signer at either nonce, crosses
+    /// the limit, with the stop it reports: its kind, its limit, and what it counts as used where
+    /// the constructor crosses.
+    fn limits(self, deployment: &Deployment) -> (EvmTxRuntimeLimits, Crossed) {
         let limits = EvmTxRuntimeLimits::no_limits();
         match self {
             Self::DataSize => {
@@ -482,18 +405,6 @@ impl Crossing {
                     limits.with_tx_data_size_limit(limit),
                     Crossed::new(LimitKind::DataSize, limit, used),
                 )
-            }
-            Self::StateGas => {
-                // The signer's account when the bump creates it, the created account, and the
-                // slot, which crosses a limit one gas short of it.
-                let signer =
-                    if signer_nonce == 0 { entry(GasId::new_account_state_gas()) } else { 0 };
-                let used = signer +
-                    entry(GasId::create_state_gas()) +
-                    entry(GasId::sstore_set_state_gas());
-                let limit = used - 1;
-                let stop = Crossed::new(LimitKind::StateGrowth, limit, used);
-                (limits.with_tx_state_gas_limit(limit), stop)
             }
             Self::Compute => {
                 // Read at the call's charges and the read's own two gas. The stop lands on the
@@ -588,8 +499,8 @@ fn plain_and_rewritten(
 /// one that rewrites every frame result into a success and revives the creation.
 ///
 /// Every run reverts with the stop, and the stop counts as used what the constructor's crossing
-/// brings the transaction to: the body, the start's two records and the whole log; the accounts
-/// the deployment adds and the slot; the compute up to the limit. So the crossing is the
+/// brings the transaction to: the body, the start's two records and the whole log; the compute up
+/// to the limit. So the crossing is the
 /// constructor's, not the creation's start or the call's charges. Every run keeps nothing of the
 /// deployment: the signer's nonce is where it was, neither spent from 0 nor left at 2 from 1; no
 /// code, no record, and no state or history gas beyond the transaction's body; above the cap the
@@ -599,13 +510,10 @@ fn plain_and_rewritten(
 /// transaction reports.
 #[test]
 fn test_every_limit_stops_a_deployment_from_either_nonce_at_either_tier() {
-    // A deployment that adds no state gas, where a state byte is free, crosses no state-gas limit.
-    let free = state_is_free();
-    for crossing in Crossing::ALL.into_iter().filter(|c| !(free && matches!(c, Crossing::StateGas)))
-    {
+    for crossing in Crossing::ALL {
         let deployment = Deployment::new(crossing.init_code());
         for signer_nonce in [0, 1] {
-            let (limits, expected) = crossing.limits(&deployment, signer_nonce);
+            let (limits, expected) = crossing.limits(&deployment);
             let Crossed { kind, limit, used } = expected;
             let db = match signer_nonce {
                 0 => system_db(),
@@ -695,49 +603,30 @@ fn crowded_run(
     MegaEvm::new(context).execute_transaction(tx).expect("the transaction is valid")
 }
 
-/// The state-gas limit holds each upfront charge of a deployment once, at the price its bucket
-/// sets: the signer's account the call pays for, and the created account the creation's start
-/// holds, as the frame-start hold holds any `CREATE`'s. With the signer's bucket at twice the
-/// minimum and the deploy address's at four times, a deployment holds `2 ×` the new account, `4 ×`
-/// the created account and `4 ×` its deposited byte. A limit of exactly that deploys, as without a
-/// limit; one gas less stops the transaction. A signer that has an account pays for none, and the
-/// limit that holds the rest deploys it.
+/// A deployment charges each upfront charge once, at the price its bucket sets: the signer's
+/// account the call pays for, and the created account the creation's start adds, as any
+/// `CREATE`'s. With the signer's bucket at twice the minimum and the deploy address's at four
+/// times, a deployment spends `2 ×` the new account, `4 ×` the created account and `4 ×` its
+/// deposited byte. A signer that has an account pays for none.
 #[test]
-fn test_the_upfront_charges_are_held_once_at_their_bucket_prices() {
-    // A deployment that adds no state gas has no state-gas limit to cross.
-    if state_is_free() {
-        return;
-    }
+fn test_the_upfront_charges_are_charged_once_at_their_bucket_prices() {
     let deployment = Deployment::new(deploying(&runtime(1)));
     assert_ne!(bucket(deployment.signer), bucket(deployment.address));
     let created = entry(GasId::create_state_gas()) + satin_gas_params().code_deposit_state_gas(1);
-    let held = 2 * entry(GasId::new_account_state_gas()) + 4 * created;
-    let limited = |db: MemoryDatabase, gas_limit, limit| {
-        let limits = EvmTxRuntimeLimits::no_limits().with_tx_state_gas_limit(limit);
-        crowded_run(db, &deployment, gas_limit, limits, (2, 4))
+    let run = |db: MemoryDatabase, gas_limit| {
+        crowded_run(db, &deployment, gas_limit, EvmTxRuntimeLimits::no_limits(), (2, 4))
     };
     for gas_limit in GAS_LIMITS {
-        let unlimited = crowded_run(
-            system_db(),
-            &deployment,
-            gas_limit,
-            EvmTxRuntimeLimits::no_limits(),
-            (2, 4),
+        let fresh = run(system_db(), gas_limit);
+        assert_eq!(returned(&fresh).deployedAddress, deployment.address, "at {gas_limit}");
+        assert_eq!(
+            fresh.gas.state,
+            2 * entry(GasId::new_account_state_gas()) + 4 * created,
+            "at {gas_limit}"
         );
-        assert_eq!(unlimited.gas.state, held, "at {gas_limit}");
 
-        let exact = limited(system_db(), gas_limit, held);
-        assert_eq!(returned(&exact).deployedAddress, deployment.address, "at {gas_limit}");
-        assert_eq!(exact.gas, unlimited.gas);
-        let short = limited(system_db(), gas_limit, held - 1);
-        assert_eq!(stop(&short), MegaLimitExceeded { kind: 3, limit: held - 1 });
-        assert_stopped_whole(&short, &deployment, gas_limit);
-
-        let funded = db_for(&deployment, U256::from(1));
-        let exact = limited(funded.clone(), gas_limit, 4 * created);
-        assert_eq!(returned(&exact).deployedAddress, deployment.address, "at {gas_limit}");
-        assert_eq!(exact.gas.state, 4 * created);
-        let short = limited(funded, gas_limit, 4 * created - 1);
-        assert_eq!(stop(&short), MegaLimitExceeded { kind: 3, limit: 4 * created - 1 });
+        let funded = run(db_for(&deployment, U256::from(1)), gas_limit);
+        assert_eq!(returned(&funded).deployedAddress, deployment.address, "at {gas_limit}");
+        assert_eq!(funded.gas.state, 4 * created, "at {gas_limit}");
     }
 }

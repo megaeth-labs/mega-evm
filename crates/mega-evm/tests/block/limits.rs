@@ -409,6 +409,47 @@ fn test_block_tx_size_limit_with_varying_sizes() {
         .expect_err("nothing fits any more");
 }
 
+/// alloy-evm's commit cannot refuse, and its contract is that an outcome commits before the next
+/// transaction executes. A builder that breaks it — two candidates executed against the same
+/// pre-state, then both committed through the trait — would pack what the checked commit refuses.
+/// The trait's commit makes the same check in a debug build and trips on it: here the block's
+/// data-size budget has room for one of the two.
+#[cfg(debug_assertions)]
+#[test]
+fn test_the_trait_commit_trips_on_an_outcome_the_block_has_no_room_for() {
+    // The body and a log of 100 bytes: what each candidate keeps.
+    let kept = mega_evm::TX_BODY_SIZE + mega_evm::LOG_BASE_SIZE + 100;
+    let tx_gas_limit = log_call_gas(100);
+    let mut db = common::database();
+    db.set_account_code(CONTRACT, log_generating_contract(100));
+    db.set_account_balance(CALLER2, U256::from(1_000_000_000_000_000_u64));
+    let mut state = revm::database::State::builder().with_database(db).build();
+    let limits = BlockLimits::no_limits().with_block_txs_data_limit(kept);
+    let mut executor = executor(&mut state, common::block_ctx(limits));
+    executor.apply_pre_execution_changes().expect("the block starts");
+
+    let first = executor
+        .execute_transaction_without_commit(&tx_from(CALLER, 0, tx_gas_limit))
+        .expect("the block has room");
+    let second = executor
+        .execute_transaction_without_commit(&tx_from(CALLER2, 0, tx_gas_limit))
+        .expect("nothing has committed yet");
+    assert_eq!(second.usage.data_size, kept);
+
+    BlockExecutor::commit_transaction(&mut executor, first);
+    assert_eq!(executor.limiter().usage.data_size, kept, "the block has kept exactly its limit");
+    let tripped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        BlockExecutor::commit_transaction(&mut executor, second);
+    }))
+    .expect_err("the commit trips");
+    let message = tripped
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| tripped.downcast_ref::<&str>().copied())
+        .unwrap_or_default();
+    assert!(message.contains("an outcome the block no longer has room for"), "{message}");
+}
+
 /// The block's counters may move between a transaction executing and its commit, so what it
 /// adds is checked against the block once more before it is committed.
 ///

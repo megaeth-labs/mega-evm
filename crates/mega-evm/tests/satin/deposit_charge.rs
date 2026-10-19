@@ -15,10 +15,10 @@
 //! of the engine. The creation's regular budget is set exactly: `A` calls the creator `B` with an
 //! explicit gas, `B` spends a known amount before its `CREATE`, and the EIP-150 split forwards all
 //! but a 64th of what `B` holds, which [`holding_for`] inverts. Each case is one gas short of a
-//! charge, or exactly enough, and reads every ledger against its derivation. The state-gas limit
-//! and the data-size limit both hold the deposit after the last of those charges and before
-//! `return_create` commits it: with exactly enough gas a limit the deposit crosses stops the
-//! creation, and one gas short the creation runs out of gas under the limit exactly as without it.
+//! charge, or exactly enough, and reads every ledger against its derivation. The data-size limit
+//! holds the deposit after the last of those charges and before `return_create` commits it: with
+//! exactly enough gas a limit the deposit crosses stops the creation, and one gas short the
+//! creation runs out of gas under the limit exactly as without it.
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
@@ -554,44 +554,6 @@ fn test_a_creation_one_gas_short_of_its_history_runs_out_of_gas_with_the_state_g
 
 /* ---------- the limits stand aside ---------- */
 
-/// Under a state-gas limit one gas short of what the creation holds with its code, the creation
-/// forwarded exactly enough is stopped, and the one forwarded one gas less runs out of gas as it
-/// does without the limit: the transaction succeeds with no code deployed and the same gas.
-///
-/// The stop latches the transaction, so the whole transaction reverts whichever frame crossed.
-/// The creation's own end tells the deposit's check from a later one: the deposit is held where
-/// it is made when the creation itself reverts with the stop.
-fn assert_state_gas_limit_stands_aside(pool: Pool) {
-    let enough = deposits_at(pool);
-    let creation = created_account_state_gas() + code_state_gas();
-    let limits = EvmTxRuntimeLimits::no_limits().with_tx_state_gas_limit(creation - 1);
-
-    let stopped = run(pool, enough, limits);
-    let stop = LimitCheck::ExceedsLimit {
-        kind: LimitKind::StateGrowth,
-        limit: creation - 1,
-        used: creation,
-        frame_local: false,
-    };
-    assert_eq!(stopped.limit_exceeded, Some(stop), "{pool:?}: exactly enough, the check fires");
-    assert!(!deployed(&stopped), "{pool:?}");
-    let end = creation_end_under(pool, enough, limits);
-    assert!(!end.deposited, "{pool:?}: the deposit is refused: {end:?}");
-    assert_eq!(
-        end.reverted_with,
-        Some(stop.revert_data()),
-        "{pool:?}: the creation that made the deposit is the one the stop ends",
-    );
-
-    let short = run(pool, enough - 1, EvmTxRuntimeLimits::no_limits());
-    let ran_out = run(pool, enough - 1, limits);
-    assert!(ran_out.result.is_success(), "{pool:?}: {:?}", ran_out.result);
-    assert_eq!(ran_out.limit_exceeded, None, "{pool:?}: one gas short, it stands aside");
-    assert!(!deployed(&ran_out), "{pool:?}");
-    assert_eq!(ran_out.gas, short.gas, "{pool:?}: as without the limit");
-    assert_eq!(ran_out.usage, short.usage, "{pool:?}: and it keeps what it keeps without it");
-}
-
 /// Under a frame cap the creation's code crosses, the creation forwarded exactly enough is
 /// stopped alone — it reverts with the stop's revert data, and its caller goes on — and the one
 /// forwarded one gas less runs out of gas as it does without the cap.
@@ -628,46 +590,6 @@ fn assert_data_size_limit_stands_aside(pool: Pool) {
     assert!(!deployed(&ran_out), "{pool:?}");
     assert_eq!(ran_out.gas, short.gas, "{pool:?}: as without the limit");
     assert_eq!(ran_out.usage, short.usage, "{pool:?}: and it keeps what it keeps without it");
-}
-
-/// Above the execution cap the reservoir pays the code's state gas and history: a creation that
-/// cannot pay the hash of its code runs out of gas on it, whatever the state-gas limit.
-///
-/// Rules: [S5.13], [S5.14], [S7.25], [S10.37], [S10.44].
-#[test]
-fn test_a_creation_that_cannot_pay_the_hash_runs_out_of_gas_under_the_state_gas_limit() {
-    // A deposit that adds no state gas has no state-gas limit to cross.
-    if state_is_free() {
-        return;
-    }
-    let pool = Pool::AboveCap;
-    assert_runs_out("one gas short of the hash", pool, deposits_at(pool) - 1, HASH - 1, false);
-    assert_state_gas_limit_stands_aside(pool);
-}
-
-/// Below the execution cap the code's state gas and then its history are paid out of regular gas:
-/// a creation that can pay its state gas but not its history runs out of gas on the history,
-/// whatever the state-gas limit. The limit holds the deposit once all of it is paid, not at the
-/// state gas: a creation that could pay the state gas alone would otherwise be stopped by a limit
-/// it never reaches.
-///
-/// Rules: [S5.13], [S5.14], [S7.25], [S10.37], [S10.44].
-#[test]
-fn test_a_creation_that_cannot_pay_its_history_runs_out_of_gas_under_the_state_gas_limit() {
-    // A deposit that pays no history has no history to run out of gas on, and one that adds no
-    // state gas has no state-gas limit to cross.
-    if code_history_is_free() || state_is_free() {
-        return;
-    }
-    let pool = Pool::BelowCap;
-    assert_runs_out(
-        "one gas short of the history",
-        pool,
-        deposits_at(pool) - 1,
-        code_history_gas() - 1,
-        true,
-    );
-    assert_state_gas_limit_stands_aside(pool);
 }
 
 /// The data-size limit counts deployed code behind the same check: a creation that cannot pay the

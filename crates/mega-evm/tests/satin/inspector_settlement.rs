@@ -39,12 +39,9 @@ use revm::{
     Inspector,
 };
 
-use crate::{
-    common::state_is_free,
-    salt::{
-        create_with, crowded_account, db, entry, minimal_envs, salt_context, tx_with_gas,
-        value_call, SaltEnvs, CALLER, CONTRACT, EMPTY,
-    },
+use crate::salt::{
+    create_with, crowded_account, db, entry, minimal_envs, salt_context, tx_with_gas, value_call,
+    SaltEnvs, CALLER, CONTRACT, EMPTY,
 };
 
 /// A contract `CONTRACT` calls.
@@ -417,31 +414,28 @@ fn test_the_transactions_own_creation_an_inspector_answers_keeps_nothing() {
 }
 
 /// A value call an inspector answers leaves its caller holding none of the state gas its `CALL`
-/// was charged for the account: the charge came back, so it never stands against the state-gas
-/// limit. The caller then fills a slot, and a limit one gas short of the slot and the account
-/// together stops the caller whose call ran, and not the one whose call was answered.
+/// was charged for the account: the charge came back. The caller then fills a slot, and holds the
+/// slot alone, where the caller whose call ran holds the slot and the account.
 #[test]
-fn test_an_answered_call_holds_nothing_against_the_state_gas_limit() {
-    // A slot and an account that add no state gas have no state-gas limit to cross.
-    if state_is_free() {
-        return;
-    }
+fn test_an_answered_call_leaves_its_caller_none_of_the_accounts_state_gas() {
     let caller =
         || value_call(EMPTY).append(POP).sstore(U256::from(1), U256::from(1)).stop().build();
     let slot = entry(GasId::sstore_set_state_gas());
-    let limit = slot + entry(GasId::new_account_state_gas()) - 1;
-    let limits = mega_evm::EvmTxRuntimeLimits::no_limits().with_tx_state_gas_limit(limit);
     let tx = to(CONTRACT, 0, Bytes::new(), GAS_LIMITS[0]);
-    let context = || salt_context(db(caller()), minimal_envs()).with_tx_runtime_limits(limits);
+    let context = || salt_context(db(caller()), minimal_envs());
 
     let ran = MegaEvm::new(context()).execute_transaction(tx.clone()).unwrap();
-    assert!(ran.limit_exceeded.is_some(), "the account and the slot cross: {:?}", ran.result);
+    assert!(ran.result.is_success(), "{:?}", ran.result);
+    assert_eq!(
+        ran.gas.state,
+        slot + entry(GasId::new_account_state_gas()),
+        "the slot and the account"
+    );
 
     let answered = MegaEvm::new(context())
         .with_inspector(Answers::call(EMPTY, InstructionResult::Stop))
         .execute_transaction(tx)
         .unwrap();
-    assert_eq!(answered.limit_exceeded, None, "{:?}", answered.result);
     assert!(answered.result.is_success(), "{:?}", answered.result);
     assert_eq!(answered.gas.state, slot, "the slot alone");
 }

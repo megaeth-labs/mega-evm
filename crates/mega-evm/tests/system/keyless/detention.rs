@@ -30,14 +30,13 @@ use revm::{
         STOP, SUB, SWAP1, TIMESTAMP,
     },
     context::{BlockEnv, TxEnv},
-    context_interface::cfg::GasId,
     interpreter::{interpreter::EthInterpreter, CallInputs, CallOutcome, Interpreter},
     primitives::KECCAK_EMPTY,
     Inspector,
 };
 
 use super::*;
-use crate::common::{call_tx, context, state_is_free, CALLER as RELAYER};
+use crate::common::{call_tx, context, CALLER as RELAYER};
 
 /// The block beneficiary of the cases where nobody in the transaction is the beneficiary.
 const BENEFICIARY: Address = address!("0x0000000000000000000000000000000000beef02");
@@ -622,27 +621,24 @@ fn test_a_failed_deployment_keeps_the_reads_its_creation_made() {
 }
 
 /// A deployment another limit stops still reports the reads its creation made, and the stop stays
-/// that limit's: a constructor that reads the timestamp and fills a slot the state-gas limit has no
-/// room for stops the transaction on state growth, not on compute.
+/// that limit's: a constructor that reads the timestamp and fills a slot the data-size limit has no
+/// room for stops the transaction on data size, not on compute.
 #[test]
 fn test_a_deployment_another_limit_stops_keeps_the_reads_its_creation_made() {
-    // A deployment that adds no state gas has no state-gas limit to cross.
-    if state_is_free() {
-        return;
-    }
     let prefix =
         BytecodeBuilder::default().append_many([TIMESTAMP, POP]).sstore(U256::ZERO, U256::ONE);
     let deployment = Deployment::new(constructor(&prefix.build_vec(), &runtime(1)));
-    let upfront = entry(GasId::new_account_state_gas()) + entry(GasId::create_state_gas());
-    let limit = upfront + entry(GasId::sstore_set_state_gas()) - 1;
+    // The body, the creation's two start records and the slot's record, one byte short.
+    let body = reference(deployment.call_data(LARGE_OVERRIDE), GAS_LIMITS[0]).usage.data_size;
+    let limit = body + 3 * mega_evm::WRITE_RECORD_SIZE - 1;
     for gas_limit in GAS_LIMITS {
-        let run = run_both(&deployment, gas_limit, capped(CAP).with_tx_state_gas_limit(limit));
+        let run = run_both(&deployment, gas_limit, capped(CAP).with_tx_data_size_limit(limit));
         let ExecutionResult::Revert { output, .. } = &run.outcome.result else {
-            panic!("expected the state-gas stop, got {:?}", run.outcome.result);
+            panic!("expected the data-size stop, got {:?}", run.outcome.result);
         };
         assert_eq!(
             MegaLimitExceeded::abi_decode(output).unwrap(),
-            MegaLimitExceeded { kind: LimitKind::StateGrowth.as_u8(), limit },
+            MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit },
         );
         assert_eq!(run.accessed, VolatileDataAccess::TIMESTAMP);
         assert!(run.limit.is_some());

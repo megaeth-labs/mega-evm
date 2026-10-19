@@ -26,12 +26,8 @@
 //! against them, and changing one of the two moves a test rather than a price.
 //! [`TX_DATA_LIMIT`], [`BLOCK_DATA_LIMIT`] and the two detention caps are the defaults of the
 //! Satin fork's parameters, [`ProtocolLimits::DEFAULT`](crate::ProtocolLimits::DEFAULT): a chain
-//! carries its own in its configuration, and block execution reads them from there. The state-gas
-//! limits have no constant at all: the per-transaction one is
-//! [`EvmTxRuntimeLimits::tx_state_gas_limit`](crate::EvmTxRuntimeLimits::tx_state_gas_limit) and
-//! the per-block one
-//! [`ProtocolLimits::block_state_gas_limit`](crate::ProtocolLimits::block_state_gas_limit). A chain
-//! sets both, and both are unlimited by default.
+//! carries its own in its configuration, and block execution reads them from there. No limit holds
+//! state growth: state gas prices it.
 
 use revm::{
     context_interface::cfg::gas::WARM_STORAGE_READ_COST,

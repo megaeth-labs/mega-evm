@@ -399,11 +399,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// The SALT bucket multipliers and the oracle reads go with it: they are what one transaction
     /// read, so the next one reads its own.
     ///
-    /// A system-originated transaction is exempt from every per-transaction limit — the data size,
-    /// its frame budgets, and the state gas — before anything is counted, its body included: the
-    /// protocol's own work must not fail on a resource limit, as it pays no history gas for the
-    /// same reason. What it uses is counted all the same. A user's deposit is not
-    /// system-originated and is held to every one of them.
+    /// A system-originated transaction is exempt from every per-transaction limit — the data size
+    /// and its frame budgets — before anything is counted, its body included: the protocol's own
+    /// work must not fail on a resource limit, as it pays no history gas for the same reason. What
+    /// it uses is counted all the same. A user's deposit is not system-originated and is held
+    /// to every one of them.
     fn prepare(&mut self, system_originated: bool) {
         self.additional_limit.reset();
         self.additional_limit.set_transfer_logs(emits_transfer_logs(&self.inner.cfg));

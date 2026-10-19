@@ -197,12 +197,11 @@ fn test_a_failed_deposit_reports_no_stop() {
     if runs_at_measurement_prices() {
         return;
     }
-    use crate::gen::world::{DataLimit, DetentionCap, StateLimit};
+    use crate::gen::world::{DataLimit, DetentionCap};
     let mut world = plain_world();
     world.limits = Limits::Custom {
         data: DataLimit::Body,
         frame_data: None,
-        state: StateLimit::Unlimited,
         block_env_cap: DetentionCap::Default,
         oracle_cap: DetentionCap::Default,
     };

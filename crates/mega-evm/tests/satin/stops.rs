@@ -1,7 +1,7 @@
 //! The revert-class stop, pinned as a matrix.
 //!
-//! A transaction-level limit — data size, state gas, or gas detention's compute limit — stops the
-//! transaction with a revert. The frame that crosses it reverts with
+//! A transaction-level limit — data size or gas detention's compute limit — stops the transaction
+//! with a revert. The frame that crosses it reverts with
 //! `MegaLimitExceeded(kind, limit)`, the transaction is latched, and every frame above returns the
 //! same revert without running another instruction, whatever produced its result. The transaction
 //! settles like an EIP-8037 revert: the sender pays for what ran, and its unspent regular gas and
@@ -20,16 +20,14 @@
 //! once the transaction is latched the revival is not refused, and the creation reports the stop.
 //!
 //! The last cells cross a limit three calls down with a frame answered without running — an
-//! answer past what the compute limit leaves it, a precompile run on that allowance, a value call
-//! whose new account crosses the state-gas limit, and a start whose records cross the data-size
-//! limit before the frame is built — and settle the same way.
+//! answer past what the compute limit leaves it, a precompile run on that allowance, and a start
+//! whose records cross the data-size limit before the frame is built — and settle the same way.
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
     constants::{
         BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS, TX_DATA_LIMIT, TX_GAS_LIMIT_CAP,
     },
-    satin_gas_params,
     system::ORACLE_CONTRACT_ADDRESS,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitStop, LimitUsage, MegaContext, MegaEvm,
@@ -42,7 +40,6 @@ use revm::{
         SLOAD, SSTORE, TIMESTAMP,
     },
     context::result::ExecutionResult,
-    context_interface::cfg::GasId,
     interpreter::{
         interpreter::EthInterpreter, interpreter_types::Jumps, CallInputs, CallOutcome,
         CreateInputs, CreateOutcome, Gas, InstructionResult, Interpreter, InterpreterResult,
@@ -52,7 +49,7 @@ use revm::{
 };
 
 use crate::{
-    common::{body_history, call, call_with_data, create, slot_state_gas, state_is_free},
+    common::{body_history, call, call_with_data, create},
     detention::{cold_access, context, fresh_write, fresh_write_spill, work, Charges, BENEFICIARY},
     withheld_gas::{priced, Runs, PRICED},
 };
@@ -91,23 +88,15 @@ const TWIN_REVERT: u64 = 4;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Limit {
     DataSize,
-    StateGas,
     Compute,
 }
 
 impl Limit {
-    const ALL: [Self; 3] = [Self::DataSize, Self::StateGas, Self::Compute];
-
-    /// Whether a transaction can cross this limit at the byte prices in effect: where a state byte
-    /// is free no transaction adds state gas, and the state-gas limit has nothing to hold.
-    fn crossable(self) -> bool {
-        !(self == Self::StateGas && state_is_free())
-    }
+    const ALL: [Self; 2] = [Self::DataSize, Self::Compute];
 
     const fn kind(self) -> LimitKind {
         match self {
             Self::DataSize => LimitKind::DataSize,
-            Self::StateGas => LimitKind::StateGrowth,
             Self::Compute => LimitKind::ComputeGas,
         }
     }
@@ -243,7 +232,7 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Rewriter {
 
 /// One row of the matrix, both columns: `limit` crossed by the frame at `crossing` of a
 /// transaction with `gas_limit`, without an inspector and under a [`Rewriter`].
-fn assert_cell(limit: Limit, crossing: usize, gas_limit: u64, slot: u64) {
+fn assert_cell(limit: Limit, crossing: usize, gas_limit: u64) {
     let row = format!("{limit:?} at depth {crossing}, gas limit {gas_limit}");
     let frames = crossing as u64 + 1;
     let intrinsic = intrinsic(gas_limit);
@@ -264,11 +253,10 @@ fn assert_cell(limit: Limit, crossing: usize, gas_limit: u64, slot: u64) {
     // The regular gas the frames spent up to the crossing: for the compute limit, up to the read.
     let before_crossing = twin.gas.regular - intrinsic.gas.regular - TWIN_REVERT * frames;
 
-    // The limit crossed, and the usage that crossed it: one more byte, record or unit of state gas
-    // than the limit. The compute limit is set by the read, at the compute it ran to plus the cap,
-    // and the stop reports the compute up to the charge that crosses it: after the read's `POP`,
-    // one of the work's.
-    let (configured, value) = limits_of(limit, crossing, slot);
+    // The limit crossed, and the usage that crossed it: one more byte than the limit. The compute
+    // limit is set by the read, at the compute it ran to plus the cap, and the stop reports the
+    // compute up to the charge that crosses it: after the read's `POP`, one of the work's.
+    let (configured, value) = limits_of(limit, crossing);
     let (value, used) = match value {
         Some(value) => (value, value + 1),
         None => {
@@ -362,16 +350,14 @@ fn assert_cell(limit: Limit, crossing: usize, gas_limit: u64, slot: u64) {
 /// below it, stops the transaction the same way — below the execution cap and above it, with and
 /// without an inspector that rewrites every frame result into a success.
 ///
-/// Rules: [S10.40], [S11.1], [S11.2], [S11.3], [S11.4], [S11.6], [S11.7], [S11.8]. Independence:
-/// constants for every limit and the stop it reports — the state-gas limit is the schedule's
-/// fresh slot — and engine-derived for the bill, which a twin run sets.
+/// Rules: [S11.1], [S11.2], [S11.3], [S11.4], [S11.6], [S11.7], [S11.8]. Independence: constants
+/// for every limit and the stop it reports, and engine-derived for the bill, which a twin run sets.
 #[test]
 fn test_every_limit_stops_the_transaction_at_every_depth_and_tier() {
-    let slot = slot_state_gas();
-    for limit in Limit::ALL.into_iter().filter(|limit| limit.crossable()) {
+    for limit in Limit::ALL {
         for crossing in [0, 3] {
             for gas_limit in TIERS {
-                assert_cell(limit, crossing, gas_limit, slot);
+                assert_cell(limit, crossing, gas_limit);
             }
         }
     }
@@ -398,19 +384,18 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Halter {
 /// stop and bills what ran, as it does without the inspector, rather than burning its gas.
 ///
 /// Rules: [S11.1], [S11.6]. Independence: engine-derived — the run without the inspector is the
-/// expectation; the state-gas limit is the schedule's fresh slot.
+/// expectation.
 #[test]
 fn test_an_inspector_cannot_turn_a_stop_into_a_halt() {
-    let slot = slot_state_gas();
     let halts = [
         InstructionResult::OutOfGas,
         InstructionResult::PrecompileOOG,
         InstructionResult::InvalidFEOpcode,
     ];
-    for limit in Limit::ALL.into_iter().filter(|limit| limit.crossable()) {
+    for limit in Limit::ALL {
         for crossing in [0, 3] {
             for gas_limit in TIERS {
-                let (configured, _) = limits_of(limit, crossing, slot);
+                let (configured, _) = limits_of(limit, crossing);
                 let plain = execute(chain(limit, crossing, false), configured, gas_limit);
                 for into in halts {
                     let case =
@@ -438,17 +423,13 @@ fn test_an_inspector_cannot_turn_a_stop_into_a_halt() {
 
 /// The limits a cell runs under, and the stop's limit where it is known before the run: every
 /// dimension but the compute limit, which the read sets.
-fn limits_of(limit: Limit, crossing: usize, slot: u64) -> (EvmTxRuntimeLimits, Option<u64>) {
+fn limits_of(limit: Limit, crossing: usize) -> (EvmTxRuntimeLimits, Option<u64>) {
     let frames = crossing as u64 + 1;
     match limit {
         Limit::DataSize => {
             let value =
                 TX_BODY_SIZE + frames * LOG_BASE_SIZE + (OWN_SLOTS + 1) * WRITE_RECORD_SIZE - 1;
             (EvmTxRuntimeLimits::default().with_tx_data_size_limit(value), Some(value))
-        }
-        Limit::StateGas => {
-            let value = (OWN_SLOTS + 1) * slot - 1;
-            (EvmTxRuntimeLimits::default().with_tx_state_gas_limit(value), Some(value))
         }
         Limit::Compute => (EvmTxRuntimeLimits::default(), None),
     }
@@ -508,7 +489,6 @@ fn creation_limits(creation: Creation, limit: Limit, gas_limit: u64) -> EvmTxRun
     if matches!(creation, Creation::NestedStart) {
         return match limit {
             Limit::DataSize => limits.with_tx_data_size_limit(TX_BODY_SIZE),
-            Limit::StateGas => limits.with_tx_state_gas_limit(0),
             Limit::Compute => unreachable!("a start charges no compute past the cap"),
         };
     }
@@ -520,7 +500,6 @@ fn creation_limits(creation: Creation, limit: Limit, gas_limit: u64) -> EvmTxRun
     assert!(unlimited.result.is_success(), "{creation:?}, {limit:?}: {:?}", unlimited.result);
     match limit {
         Limit::DataSize => limits.with_tx_data_size_limit(unlimited.usage.data_size - 1),
-        Limit::StateGas => limits.with_tx_state_gas_limit(unlimited.gas.state - 1),
         Limit::Compute => limits,
     }
 }
@@ -536,10 +515,10 @@ fn test_a_revived_creation_reports_the_stop() {
     let cases = [
         (Creation::Transaction, Limit::ALL.as_slice()),
         (Creation::Nested, Limit::ALL.as_slice()),
-        (Creation::NestedStart, [Limit::DataSize, Limit::StateGas].as_slice()),
+        (Creation::NestedStart, [Limit::DataSize].as_slice()),
     ];
     for (creation, limits) in cases {
-        for &limit in limits.iter().filter(|limit| limit.crossable()) {
+        for &limit in limits {
             for gas_limit in TIERS {
                 let case = format!("{creation:?}, {limit:?}, gas limit {gas_limit}");
                 let configured = creation_limits(creation, limit, gas_limit);
@@ -812,9 +791,7 @@ fn test_a_frame_budget_crossed_three_calls_down_reverts_that_frame_alone() {
 
 /// Every per-transaction limit, armed and never crossed: a halt must stay a halt under them.
 fn armed() -> EvmTxRuntimeLimits {
-    EvmTxRuntimeLimits::default()
-        .with_tx_data_size_limit(TX_DATA_LIMIT)
-        .with_tx_state_gas_limit(TX_GAS_LIMIT_CAP)
+    EvmTxRuntimeLimits::default().with_tx_data_size_limit(TX_DATA_LIMIT)
 }
 
 /// A loop that never ends. A round copies 32 KiB within memory, which costs 3,075 gas and the
@@ -1448,9 +1425,6 @@ enum Answered {
     /// `C` calls a precompile priced past the cap, which revm runs on the allowance: it runs out
     /// of it without computing.
     Precompile,
-    /// `C` sends a wei to [`EMPTY`], which revm answers without running: the account it adds
-    /// crosses the state-gas limit.
-    NewAccount,
     /// `C` sends a wei to [`EMPTY`], whose start's records and transfer log cross the data-size
     /// limit, before revm builds the frame.
     StartRecords,
@@ -1462,7 +1436,7 @@ impl Answered {
         match self {
             Self::PastTheAllowance => D,
             Self::Precompile => PRICED,
-            Self::NewAccount | Self::StartRecords => EMPTY,
+            Self::StartRecords => EMPTY,
         }
     }
 }
@@ -1488,7 +1462,7 @@ fn answered_chain(answered: Answered, twin: bool) -> MemoryDatabase {
             .append_many([PUSH0, PUSH0])
             .push_address(PRICED)
             .append_many([GAS, CALL]),
-        Answered::NewAccount | Answered::StartRecords => BytecodeBuilder::default()
+        Answered::StartRecords => BytecodeBuilder::default()
             .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
             .push_number(1_u8)
             .push_address(EMPTY)
@@ -1517,9 +1491,7 @@ fn to_the_answer(answered: Answered) -> u64 {
 
 /// The limits `answered`'s chain crosses its limit under, and the stop it reports. The compute
 /// limit is set by `A`'s read, at the read's own two gas plus the cap, and the answer is the
-/// charge that crosses it: the stop reports the compute when the answered call was made. The
-/// state-gas limit is one gas short of the schedule's new account, which the test database prices
-/// at the minimum bucket.
+/// charge that crosses it: the stop reports the compute when the answered call was made.
 fn answered_limits(answered: Answered) -> (EvmTxRuntimeLimits, LimitCheck) {
     let stop =
         |kind, limit, used| LimitCheck::ExceedsLimit { kind, limit, used, frame_local: false };
@@ -1528,13 +1500,6 @@ fn answered_limits(answered: Answered) -> (EvmTxRuntimeLimits, LimitCheck) {
             EvmTxRuntimeLimits::default(),
             stop(LimitKind::ComputeGas, 2 + CAP, 2 + to_the_answer(answered)),
         ),
-        Answered::NewAccount => {
-            let account = satin_gas_params().get(GasId::new_account_state_gas());
-            (
-                EvmTxRuntimeLimits::no_limits().with_tx_state_gas_limit(account - 1),
-                stop(LimitKind::StateGrowth, account - 1, account),
-            )
-        }
         Answered::StartRecords => {
             // The body, and one byte short of the start's two records and its transfer log.
             let limit = TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE - 1;
@@ -1703,20 +1668,15 @@ fn assert_answered_cell(answered: Answered, gas_limit: u64) {
 
 /// A frame three calls down that is answered without running, and whose answer crosses a limit,
 /// stops the transaction as a frame that ran there does: an answer past what the compute limit
-/// leaves the frame, a precompile run on that allowance and priced past it, and a value call to
-/// an empty account whose new account crosses the state-gas limit. Below the execution cap and
+/// leaves the frame, and a precompile run on that allowance and priced past it. Below the execution
+/// cap and
 /// above it, with and without an inspector that rewrites every frame result into a success, the
 /// answer is the stop, every caller returns it without running on, and the transaction settles
 /// like any stop: it bills what ran, keeps the body's history and nothing else, and gets its
 /// reservoir back.
 #[test]
 fn test_an_answer_three_calls_down_stops_the_transaction_at_either_tier() {
-    for answered in [Answered::PastTheAllowance, Answered::Precompile, Answered::NewAccount] {
-        // A new account that adds no state gas, where a state byte is free, crosses no state-gas
-        // limit.
-        if answered == Answered::NewAccount && state_is_free() {
-            continue;
-        }
+    for answered in [Answered::PastTheAllowance, Answered::Precompile] {
         for gas_limit in TIERS {
             assert_answered_cell(answered, gas_limit);
         }

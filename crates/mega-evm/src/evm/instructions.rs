@@ -10,8 +10,7 @@
 //! 1. discard any record staged before the opcode (nothing may commit it for this one);
 //! 2. run revm's instruction, whose Host call stages the record and which charges the state gas of
 //!    a fresh slot or a new beneficiary;
-//! 3. discard the record if the opcode failed; if it completed, hold the state gas it charged to
-//!    the state-gas limit, then commit the record;
+//! 3. discard the record if the opcode failed; if it completed, commit it;
 //! 4. charge the frame the history gas of what the record appends — and give it back when the
 //!    record was taken away, as a slot written back to its original value takes its own back.
 //!
@@ -19,7 +18,7 @@
 //! a log pays for its address, its topics and its data, a storage write or a destructed account's
 //! beneficiary for the forty bytes of one write record.
 //!
-//! A state charge or a commit that crosses a limit stops the opcode's frame with a revert whose
+//! A commit that crosses a limit stops the opcode's frame with a revert whose
 //! output is [`MegaLimitExceeded`](crate::MegaLimitExceeded) (see
 //! [`AdditionalLimit`](crate::AdditionalLimit) for the abort protocol). A history charge the frame
 //! cannot pay is an ordinary out-of-gas, which burns the frame's gas the way any other does.
@@ -31,10 +30,7 @@
 //! caller when it returns. The frame the opcode is suspending on carries the caller's reservoir,
 //! which the charge has just moved, so the wrapper writes the reservoir it left into the frame's
 //! input; and a caller that cannot pay the charge drops that frame before it fails, because an
-//! interpreter halts on an instruction's error only when no frame is pending. The state gas revm's
-//! instruction charged for the account the frame would add is held to the state-gas limit later,
-//! once revm has decided the frame: revm refuses some frames after the charge — a value call its
-//! caller cannot fund, one past the call-stack limit — and gives the charge back.
+//! interpreter halts on an instruction's error only when no frame is pending.
 //!
 //! Every opcode that can read volatile data — the block-environment opcodes, the account opcodes,
 //! `SLOAD`, the four calls and `SELFDESTRUCT` — runs in a wrapper that settles the reads its Host
@@ -159,12 +155,10 @@ pub(crate) fn mega_instructions<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// returns its own `SelfDestruct` result). Any other result fails the opcode, which takes the
 /// staged write back with it.
 ///
-/// The state gas the opcode charged is held to the state-gas limit first — `SSTORE` charges a
-/// fresh slot's and `SELFDESTRUCT` a new beneficiary's inside revm's instruction — and a crossing
-/// stops the frame and discards the record with the write. Then the record is held to the
-/// data-size limit, and only then is its history charged. A record a limit rejects is not
-/// kept, so its history is not a charge and the stop is what the frame reports. A record the
-/// limits accept is charged, and a charge the frame cannot pay is an out-of-gas.
+/// The record is held to the data-size limit first, and only then is its history charged. A record
+/// a limit rejects is not kept, so its history is not a charge and the stop is what the frame
+/// reports. A record the limits accept is charged, and a charge the frame cannot pay is an
+/// out-of-gas.
 #[inline(always)]
 fn commit_after<const FROM_ALLOWANCE: bool, DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: Ctx<'_, DB, ExtEnvs>,
@@ -180,11 +174,6 @@ fn commit_after<const FROM_ALLOWANCE: bool, DB: Database, ExtEnvs: ExternalEnvTy
     if !completed {
         host.additional_limit.discard_staged_record();
         return note_halt(interpreter, host, result);
-    }
-    let check = host.additional_limit.check_state_gas(interpreter.gas.state_gas_spent());
-    if check.exceeded_limit() {
-        host.additional_limit.discard_staged_record();
-        return Err(stop_frame(interpreter, &check));
     }
     let (check, history) = host.additional_limit.commit_staged_record();
     if check.exceeded_limit() {

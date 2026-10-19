@@ -604,8 +604,7 @@ where
             output.da_size,
             output.is_deposit,
         )?;
-        self.check_da_footprint(output.da_footprint)?;
-        self.limiter.post_execution_check(output.tx_hash, &output.block_usage())
+        self.check_da_footprint(output.da_footprint)
     }
 
     /// The limits the schedule holds this block to, or the refusal of a block whose schedule
@@ -1079,10 +1078,6 @@ where
             depositor_nonce,
             inner: outcome,
         };
-        // A block that has reached its state gas refuses a transaction that adds some, and only
-        // its execution tells whether it does. Nothing is committed yet, so the refusal leaves the
-        // block as it was.
-        self.limiter.post_execution_check(tx_hash, &result.block_usage())?;
         Ok(result)
     }
 

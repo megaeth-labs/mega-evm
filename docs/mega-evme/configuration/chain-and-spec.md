@@ -63,7 +63,7 @@ On Satin, every output field keeps its legacy name and meaning, and one field is
 | `floor_gas`           | The EIP-7623 floor the receipt's gas used cannot fall below                                                                   |
 | `data_size`           | Data-size bytes the transaction kept                                                                                          |
 | `write_records`       | Account and storage write records it kept: its KV count                                                                       |
-| `limit_exceeded`      | `null`, or the limit that stopped it: `kind` (`data_size`, `compute_gas`, `state_growth`), `limit`, `used`                    |
+| `limit_exceeded`      | `null`, or the limit that stopped it: `kind` (`data_size`, `compute_gas`), `limit`, `used`                                    |
 | `limits_override`     | Present only under `--override.limits`: the protocol limits the run was held to, in the shape the flag takes                  |
 
 In text mode the same numbers follow the summary under `=== Satin Gas ===`.
@@ -97,12 +97,10 @@ The whole shape, at the defaults:
   "txRuntimeLimits": {
     "txDataSizeLimit": 13107200,
     "frameDataSizeLimit": 18446744073709551615,
-    "txStateGasLimit": 18446744073709551615,
     "blockEnvAccessComputeGasLimit": 20000000,
     "oracleAccessComputeGasLimit": 20000000
   },
   "blockExecutionGasLimit": 18446744073709551615,
-  "blockStateGasLimit": 18446744073709551615,
   "blockTxsDataLimit": 13107200
 }
 ```
@@ -110,7 +108,7 @@ The whole shape, at the defaults:
 `18446744073709551615` (`u64::MAX`) leaves a limit unlimited.
 The limits an override leaves are held to what a chain configuration is: an unknown field, a zero limit, a transaction data-size limit below the 310 bytes every transaction's body counts, or a compute cap no transaction reaches is refused.
 A transaction a limit stops reports it in `satin.limit_exceeded`.
-Its `used` is the usage where the limit was crossed; for `state_growth`, the state gas held there, so a deposit whose created caller alone crosses the limit reports that account, even where its first frame would add another.
+Its `used` is the usage where the limit was crossed.
 A run under an override reports the limits it was held to in `satin.limits_override`, the merged object whole, so a counterfactual's output says what it ran under; in text mode they follow the Satin numbers as `Limits Override:`.
 A command on a legacy spec is refused with `--override.limits`: the legacy engine's limits are its spec's.
 

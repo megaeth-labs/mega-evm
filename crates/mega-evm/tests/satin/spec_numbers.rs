@@ -235,9 +235,7 @@ fn limits(doc: &str) {
     assert_eq!(defaults.tx_runtime_limits.tx_data_size_limit, TX_DATA_LIMIT);
     assert_eq!(defaults.block_txs_data_limit, BLOCK_DATA_LIMIT);
     assert_eq!(TX_DATA_LIMIT, BLOCK_DATA_LIMIT, "the page states one data-size number for both");
-    assert_eq!(defaults.tx_runtime_limits.tx_state_gas_limit, u64::MAX);
     assert_eq!(defaults.block_execution_gas_limit, u64::MAX);
-    assert_eq!(defaults.block_state_gas_limit, u64::MAX);
     assert_eq!(
         defaults.tx_runtime_limits.block_env_access_compute_gas_limit,
         BLOCK_ENV_ACCESS_COMPUTE_GAS
@@ -367,11 +365,8 @@ fn detention_and_stops(doc: &str) {
     );
 
     let stops = section(doc, "### 11. The Revert-Class", "### 12. Gas Detention");
-    let kinds = [
-        (LimitKind::DataSize, "Data size"),
-        (LimitKind::ComputeGas, "Compute (gas detention)"),
-        (LimitKind::StateGrowth, "State growth"),
-    ];
+    let kinds =
+        [(LimitKind::DataSize, "Data size"), (LimitKind::ComputeGas, "Compute (gas detention)")];
     for (kind, name) in kinds {
         let cells = row_with_first(stops, &kind.as_u8().to_string());
         assert_eq!(cells[1], name, "kind {}", kind.as_u8());

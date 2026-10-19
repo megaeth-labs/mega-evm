@@ -41,10 +41,6 @@
 //!   checked against a limit it is about to reach (`satin`); the same one byte short of it, so the
 //!   last log crosses and the transaction is stopped (`stopped`); and through op-revm, which has no
 //!   limit to check (`op_revm`).
-//! - `state_limits`: the same transaction under a state-gas limit equal to exactly the state gas it
-//!   keeps, so every fresh slot is held to it as it is written (`satin`); and under a state-gas
-//!   limit one gas short, so the last slot crosses and the transaction is stopped (`stopped`). Its
-//!   op-revm baseline is `data_size_limit/op_revm`.
 //! - `keyless_deploy`: a `keylessDeploy` of the canonical `CREATE2` factory, which Satin runs as a
 //!   native creation below the call (`satin`), next to op-revm running the same init code as a
 //!   creation transaction (`op_revm`). The gap is what the keyless path adds to a creation:
@@ -545,46 +541,6 @@ fn bench_transact(c: &mut Criterion) {
             BatchSize::SmallInput,
         );
     });
-
-    // The state-limit arms: the same transaction under a state-gas limit it exactly reaches, and
-    // under one gas short of it.
-    let state_gas = MegaEvm::new(mega_context(db.clone()))
-        .execute_transaction(OpTx(limited_tx.clone()))
-        .unwrap()
-        .gas
-        .state;
-    let state_limited = |limit| {
-        mega_context(db.clone())
-            .with_tx_runtime_limits(EvmTxRuntimeLimits::default().with_tx_state_gas_limit(limit))
-    };
-    let at_limit = MegaEvm::new(state_limited(state_gas))
-        .execute_transaction(OpTx(limited_tx.clone()))
-        .unwrap();
-    assert!(at_limit.result.is_success(), "state_limits: {:?}", at_limit.result);
-    assert_eq!(at_limit.gas.state, state_gas, "state_limits: the arm must reach its state gas");
-    assert_eq!(at_limit.usage.write_records, REPEAT, "state_limits: and its records");
-    let stopped = MegaEvm::new(state_limited(state_gas - 1))
-        .execute_transaction(OpTx(limited_tx.clone()))
-        .unwrap();
-    assert_eq!(
-        stopped.limit_exceeded,
-        Some(LimitCheck::ExceedsLimit {
-            kind: LimitKind::StateGrowth,
-            limit: state_gas - 1,
-            used: state_gas,
-            frame_local: false,
-        }),
-        "state_limits/stopped: the last slot must be the gas that crosses",
-    );
-    for (arm, limit) in [("satin", state_gas), ("stopped", state_gas - 1)] {
-        group.bench_function(format!("state_limits/{arm}"), |b| {
-            b.iter_batched(
-                || MegaEvm::new(state_limited(limit)),
-                |mut evm| evm.transact(OpTx(limited_tx.clone())).unwrap(),
-                BatchSize::SmallInput,
-            );
-        });
-    }
 
     // The Oracle's storage answered by the oracle service, every slot of it: each slot is loaded
     // all the same, and each read is priced as the database's is.

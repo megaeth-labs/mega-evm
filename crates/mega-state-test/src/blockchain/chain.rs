@@ -159,11 +159,11 @@ pub fn registry_config() -> SequencerRegistryConfig {
 ///
 /// - The `SequencerRegistry` roles are [`registry_config`]'s.
 /// - The protocol limits are the loosest a chain may carry ([`ProtocolLimits::loosest`]). The
-///   data-size, KV and state-gas limits, per transaction, per frame and per block, and the block's
-///   execution-gas budget are unlimited. Gas detention's two caps are one below the most compute a
-///   transaction can spend under Satin's own 200,000,000 execution cap; under the neutral Osaka
-///   configuration EIP-7825 caps a transaction's gas at 2^24, so no transaction's compute comes
-///   near a cap, and a detained transaction runs exactly as it would undetained.
+///   data-size limits, per transaction, per frame and per block, and the block's execution-gas
+///   budget are unlimited. Gas detention's two caps are one below the most compute a transaction
+///   can spend under Satin's own 200,000,000 execution cap; under the neutral Osaka configuration
+///   EIP-7825 caps a transaction's gas at 2^24, so no transaction's compute comes near a cap, and a
+///   detained transaction runs exactly as it would undetained.
 ///
 /// The executor installs those per-transaction limits before every transaction, whatever the EVM
 /// carried; the limits the gate's state-test runner installs (`no_limits()`) are not ones a chain

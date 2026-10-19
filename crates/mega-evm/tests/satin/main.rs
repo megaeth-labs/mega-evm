@@ -42,7 +42,7 @@ mod schedule;
 mod snapshot;
 mod spec_numbers;
 mod state;
-mod state_gas_limit;
+mod state_growth;
 mod static_callee;
 mod stops;
 mod storage_call_stipend;

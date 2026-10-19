@@ -75,41 +75,11 @@
 //! [`WRITE_RECORD_SIZE`] bytes of data size, counted and taken back with them, so the data-size
 //! limit bounds the records, and history gas prices each of them.
 //!
-//! # The state-gas limit
+//! # State growth
 //!
-//! EIP-8037 charges state gas for exactly the state a transaction adds, so the state a transaction
-//! grows is the state gas it spends: [`EvmTxRuntimeLimits::tx_state_gas_limit`] holds it, and
-//! nothing counts new accounts and slots beside it. What is held is net — what a frame refilled
-//! and what a failed frame rolled back is out of it — and is the state gas charged before the
-//! first frame plus what every frame on the call stack holds (the `frame_limit` module). The limit
-//! is per transaction, with no frame budget: a crossing anywhere stops the transaction, reported as
-//! [`LimitKind::StateGrowth`] with the limit in gas.
-//!
-//! The limit holds each charge where it is made, once it is made, so a charge the frame cannot
-//! pay is an out-of-gas whatever the limit: the authorities' before the first frame, which are
-//! taken back on a crossing; a fresh slot and a destruction's new beneficiary, which stop the
-//! frame; and a new account a frame's start adds — the first frame's recipient or created account,
-//! which EIP-2780 charges the transaction for, and the account a `CALL`, `CREATE` or `CREATE2`
-//! adds, which its opcode is charged for — held once revm has decided the frame. A frame refused —
-//! a value its caller cannot fund, one past the call-stack limit — or answered with a failure gives
-//! that charge back and is never held for it; a frame revm builds, or answers with a success,
-//! returns the stop, and an answer of the transaction's own frame takes its writes back with it.
-//!
-//! Deployed code is held once `return_create` has charged every part of its deposit and before it
-//! commits the creation, as its bytes are ([`ContextTr::admit_code_deposit`]), so a crossing
-//! leaves no code behind: the creation reverts with the stop, on the gas it had before the
-//! deposit. A creation that cannot pay a part of its deposit — the regular costs, the state gas,
-//! the history — runs out of gas there whatever the limit.
-//!
-//! [`ContextTr::admit_code_deposit`]: revm::context::ContextTr::admit_code_deposit
-//!
-//! Wherever the state gas and a record cross together at one site, the state gas is the stop
-//! reported. At a frame start the records are held before revm builds the frame, and a frame they
-//! stop adds no account, so its upfront state gas is given back rather than held.
-//!
-//! It is a limit on gas, so it counts state at the SALT price: a slot or an account in a bucket
-//! `m` times the minimum costs `m` times the schedule's entry, and reaches the limit that many
-//! times sooner.
+//! No limit holds the state a transaction adds. EIP-8037 charges state gas for exactly that state,
+//! at the SALT price of the bucket it lands in, so state growth is bounded by what it costs: the
+//! transaction's gas limit and the block's.
 //!
 //! Every limit is unlimited unless a caller sets it, gas detention's caps aside. A block executor
 //! installs the chain's, the per-transaction half of the Satin fork's parameters
@@ -123,11 +93,10 @@
 //! transaction ([`crate::system::is_system_originated`]) and a system call — the pre-block calls
 //! among them — are exempt ([`AdditionalLimit::is_exempt`]), sticky for the transaction, and the
 //! one place every stop comes from answers that they are within the limits whatever they cross:
-//! the data size, the state gas and the data-size frame budgets. It is the set that pays no
-//! history gas, exempt for the same reason: the protocol's maintenance must not fail on a resource
-//! limit. What such a transaction uses is counted all the same and reported in its usage and in the
-//! block's counters, as a deposit's is. A user's deposit is not in the set and is held to every
-//! limit.
+//! the data size and the frame budgets. It is the set that pays no history gas, exempt for the
+//! same reason: the protocol's maintenance must not fail on a resource limit. What such a
+//! transaction uses is counted all the same and reported in its usage and in the block's counters,
+//! as a deposit's is. A user's deposit is not in the set and is held to every limit.
 //!
 //! # The byte table
 //!
@@ -230,7 +199,7 @@ pub struct LimitUsage {
     pub write_records: u64,
 }
 
-/// Limits one transaction's data size, state gas and compute after a read of volatile data.
+/// Limits one transaction's data size and its compute after a read of volatile data.
 ///
 /// [`tx_data_size_limit`](Self::tx_data_size_limit) stops the transaction. A frame's own budget is
 /// derived from it: the transaction's frame gets what the transaction has left, and each child gets
@@ -238,9 +207,6 @@ pub struct LimitUsage {
 /// Crossing a frame budget reverts that frame alone.
 ///
 /// [`frame_data_size_limit`](Self::frame_data_size_limit) is a further cap on every frame's budget.
-///
-/// [`tx_state_gas_limit`](Self::tx_state_gas_limit) holds the transaction's state gas and stops
-/// the transaction; it has no frame budget.
 ///
 /// [`block_env_access_compute_gas_limit`](Self::block_env_access_compute_gas_limit) and
 /// [`oracle_access_compute_gas_limit`](Self::oracle_access_compute_gas_limit) are gas detention's
@@ -266,14 +232,6 @@ pub struct EvmTxRuntimeLimits {
     /// A cap on every frame's data-size budget, applied after the share of what its parent has
     /// left. Crossing it reverts the frame alone.
     pub frame_data_size_limit: u64,
-    /// The most EIP-8037 state gas the transaction may hold, net of what it refilled and of what
-    /// its failed frames rolled back: the limit on the state it grows. Crossing it stops the
-    /// transaction.
-    ///
-    /// It is a limit on gas, so it counts the state at the price the transaction pays for it: a
-    /// slot or an account in a crowded SALT bucket costs its bucket's multiple of the schedule's
-    /// entry, and reaches the limit that many times sooner.
-    pub tx_state_gas_limit: u64,
     /// The compute a transaction may still spend once it read the block environment or the block
     /// beneficiary's account: its compute at the read plus this. Crossing it stops the
     /// transaction.
@@ -314,7 +272,6 @@ impl EvmTxRuntimeLimits {
         Self {
             tx_data_size_limit: u64::MAX,
             frame_data_size_limit: u64::MAX,
-            tx_state_gas_limit: u64::MAX,
             block_env_access_compute_gas_limit: u64::MAX,
             oracle_access_compute_gas_limit: u64::MAX,
         }
@@ -329,12 +286,6 @@ impl EvmTxRuntimeLimits {
     /// Caps every frame's data-size budget at `limit`.
     pub const fn with_frame_data_size_limit(mut self, limit: u64) -> Self {
         self.frame_data_size_limit = limit;
-        self
-    }
-
-    /// Sets the transaction's state-gas limit: the most state gas it may hold.
-    pub const fn with_tx_state_gas_limit(mut self, limit: u64) -> Self {
-        self.tx_state_gas_limit = limit;
         self
     }
 
@@ -408,17 +359,14 @@ alloy_sol_types::sol! {
 ///
 /// The discriminants are the `kind` of [`MegaLimitExceeded`] and keep the values the legacy engine
 /// encoded, so a contract that decodes the legacy revert data decodes Satin's. The legacy engine's
-/// key-value updates, `1`, name no dimension: no limit holds the write records.
+/// key-value updates, `1`, and state growth, `3`, name no dimension: no limit holds the write
+/// records or the state a transaction adds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LimitKind {
     /// Bytes of data a transaction produces; metered by the data-size limit.
     DataSize,
     /// Compute gas, the regular gas a transaction spends; capped by detention.
     ComputeGas,
-    /// Net new state, metered in EIP-8037 state gas by the state-gas limit: the `limit` of its
-    /// stop is the transaction's state-gas limit, in gas. The legacy engine counted the same
-    /// dimension in new accounts and slots.
-    StateGrowth,
 }
 
 impl LimitKind {
@@ -427,7 +375,6 @@ impl LimitKind {
         match self {
             Self::DataSize => 0,
             Self::ComputeGas => 2,
-            Self::StateGrowth => 3,
         }
     }
 
@@ -436,7 +383,6 @@ impl LimitKind {
         match kind {
             0 => Some(Self::DataSize),
             2 => Some(Self::ComputeGas),
-            3 => Some(Self::StateGrowth),
             _ => None,
         }
     }
@@ -467,13 +413,6 @@ pub enum LimitCheck {
         /// the frame's gas back to what it had before it. The charge's size is not kept, so this
         /// is at most the limit, unless a halting frame's leftover, counted as compute, took the
         /// transaction past it before the charge.
-        ///
-        /// For [`LimitKind::StateGrowth`] it is the state gas the transaction held where the limit
-        /// was crossed. Before the first frame that is what stands whatever the frame does — a
-        /// deposit's created caller, the applied authorities — and not the account EIP-2780
-        /// charges the first frame's start for, which is held once revm has decided the frame: a
-        /// deposit whose created caller alone crosses the limit reports that account, even where
-        /// its first frame would add another.
         used: u64,
         /// Whether the limit is a frame budget rather than a transaction-level limit.
         frame_local: bool,
@@ -595,14 +534,12 @@ mod tests {
         let EvmTxRuntimeLimits {
             tx_data_size_limit,
             frame_data_size_limit,
-            tx_state_gas_limit,
             block_env_access_compute_gas_limit,
             oracle_access_compute_gas_limit,
         } = EvmTxRuntimeLimits::no_limits();
         for limit in [
             tx_data_size_limit,
             frame_data_size_limit,
-            tx_state_gas_limit,
             block_env_access_compute_gas_limit,
             oracle_access_compute_gas_limit,
         ] {
@@ -673,13 +610,11 @@ mod tests {
     }
 
     /// The kinds keep the legacy engine's wire encoding: every discriminant survives the round
-    /// trip, and the legacy engine's key-value updates, `1`, name no dimension, nor does an
-    /// unknown kind.
+    /// trip, and the legacy engine's key-value updates, `1`, and state growth, `3`, name no
+    /// dimension, nor does an unknown kind.
     #[test]
     fn test_limit_kind_keeps_its_wire_encoding() {
-        for (kind, expected) in
-            [(LimitKind::DataSize, 0), (LimitKind::ComputeGas, 2), (LimitKind::StateGrowth, 3)]
-        {
+        for (kind, expected) in [(LimitKind::DataSize, 0), (LimitKind::ComputeGas, 2)] {
             assert_eq!(kind.as_u8(), expected, "{kind:?}");
             assert_eq!(
                 LimitKind::from_u8(kind.as_u8()),
@@ -687,7 +622,7 @@ mod tests {
                 "round-trip failed for {kind:?}"
             );
         }
-        for retired in [1, 4, u8::MAX] {
+        for retired in [1, 3, 4, u8::MAX] {
             assert_eq!(LimitKind::from_u8(retired), None, "{retired}");
         }
     }
@@ -697,7 +632,7 @@ mod tests {
     /// bytes.
     #[test]
     fn test_decode_mega_limit_exceeded_accepts_exactly_the_stops_encoding() {
-        let kinds = [LimitKind::DataSize, LimitKind::ComputeGas, LimitKind::StateGrowth];
+        let kinds = [LimitKind::DataSize, LimitKind::ComputeGas];
         for kind in kinds {
             let stop = LimitCheck::ExceedsLimit { kind, limit: 7, used: 8, frame_local: false };
             assert_eq!(decode_mega_limit_exceeded(&stop.revert_data()), Some((kind, 7)));
@@ -705,6 +640,7 @@ mod tests {
 
         let encoded = |kind: u8| MegaLimitExceeded { kind, limit: 7 }.abi_encode();
         assert_eq!(decode_mega_limit_exceeded(&encoded(1)), None, "a kind no dimension has");
+        assert_eq!(decode_mega_limit_exceeded(&encoded(3)), None, "a kind no dimension has");
         assert_eq!(decode_mega_limit_exceeded(&encoded(4)), None, "a kind no dimension has");
         assert_eq!(decode_mega_limit_exceeded(&encoded(u8::MAX)), None);
         let mut wide = encoded(0);
@@ -793,7 +729,7 @@ mod tests {
     #[test]
     fn test_revert_data_encodes_mega_limit_exceeded() {
         let check = LimitCheck::ExceedsLimit {
-            kind: LimitKind::StateGrowth,
+            kind: LimitKind::ComputeGas,
             limit: 7,
             used: 9,
             frame_local: true,
@@ -801,7 +737,7 @@ mod tests {
         let data = check.revert_data();
         assert_eq!(&data[..4], MegaLimitExceeded::SELECTOR.as_slice());
         let decoded = MegaLimitExceeded::abi_decode(&data).unwrap();
-        assert_eq!(decoded, MegaLimitExceeded { kind: 3, limit: 7 });
+        assert_eq!(decoded, MegaLimitExceeded { kind: 2, limit: 7 });
         assert_eq!(MegaLimitExceeded::SIGNATURE, "MegaLimitExceeded(uint8,uint64)");
     }
 }
