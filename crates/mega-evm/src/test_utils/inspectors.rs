@@ -1,6 +1,9 @@
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use std::{rc::Rc, vec::Vec};
+use std::{
+    rc::{Rc, Weak},
+    vec::Vec,
+};
 
 use core::cell::RefCell;
 use revm::{
@@ -86,8 +89,8 @@ pub struct TraceLocation {
 pub struct TraceNode<ITEM, META> {
     /// Metadata about this call (e.g., call inputs, creation inputs).
     pub meta: META,
-    /// Reference to the parent node, if any.
-    pub parent: Option<Pointer<Self>>,
+    /// The parent node, if any. Weak, so a node and its parent do not keep each other alive.
+    pub parent: Option<Weak<RefCell<Self>>>,
     /// Sections of items. There is always one more section than children.
     /// Sections are interleaved with children to maintain chronological order.
     pub sections: Vec<Vec<Pointer<ITEM>>>,
@@ -100,13 +103,22 @@ impl<ITEM, META> TraceNode<ITEM, META> {
     ///
     /// If a parent is provided, this node is automatically added as a child of the parent.
     pub fn new(meta: META, parent: Option<Pointer<Self>>) -> Pointer<Self> {
-        let this: Pointer<Self> =
-            Self { meta, parent: parent.clone(), sections: vec![Vec::new()], childrens: vec![] }
-                .into();
+        let this: Pointer<Self> = Self {
+            meta,
+            parent: parent.as_ref().map(|parent| Rc::downgrade(&parent.0)),
+            sections: vec![Vec::new()],
+            childrens: vec![],
+        }
+        .into();
         if let Some(p) = parent {
             p.borrow_mut().add_child(this.clone());
         }
         this
+    }
+
+    /// The parent node, when it is still alive.
+    pub fn parent_node(&self) -> Option<Pointer<Self>> {
+        self.parent.as_ref().and_then(Weak::upgrade).map(Pointer)
     }
 
     /// Returns the last item added to this node across all sections.
@@ -398,5 +410,14 @@ mod tests {
         Inspector::<_, _>::step_end(&mut inspector, &mut interp, &mut context);
         assert_eq!(inspector.records()[0].gas_after, interp.gas.remaining());
         assert_eq!(inspector.records()[0].gas_before, 50);
+    }
+
+    #[test]
+    fn test_a_trace_parent_drops_with_the_parent() {
+        let parent = TraceNode::<(), u8>::new(1, None);
+        let child = TraceNode::<(), u8>::new(2, Some(parent.clone()));
+        assert_eq!(child.borrow().parent_node().expect("the parent is alive").borrow().meta, 1);
+        drop(parent);
+        assert!(child.borrow().parent_node().is_none());
     }
 }
