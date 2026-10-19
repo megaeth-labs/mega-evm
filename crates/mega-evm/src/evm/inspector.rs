@@ -58,8 +58,10 @@
 //!   turns a failed call into a success — the caller sees the success, the output and the regular
 //!   gas the inspector chose, and nothing else of the frame: no state or history gas, no refund and
 //!   no write record for writes the journal does not hold, and the upfront state gas its caller's
-//!   opcode was charged for an account the frame did not add comes back. A creation revived this
-//!   way hands its creator the address the inspector gave, with nothing deployed there.
+//!   opcode was charged for an account the frame did not add comes back, at the price of the
+//!   account it was charged for: a call whose target the inspector's `call` hook rewrote gives the
+//!   charge back as recorded before the hook ran. A creation revived this way hands its creator the
+//!   address the inspector gave, with nothing deployed there.
 //! - **A success rewritten into a failure keeps nothing either.** A frame the inspector turns from
 //!   a success into a failure — Foundry's `expectRevert` on a call that did not revert — has its
 //!   journal taken back to its checkpoint, as revm takes back a frame that fails: the frame's own,
@@ -445,6 +447,51 @@ fn assert_result_unwritten(before: ResultSnapshot, result: &FrameResult, callbac
     }
 }
 
+/// What the calling opcode charged upfront for a call, as it stood before the inspector could see
+/// the call: whether it charged the new-account state gas, and for which address.
+///
+/// An inspector's `call` hook holds the call's inputs mutably, and a rewritten target would
+/// otherwise be the address the charge is given back at, priced in another SALT bucket than the one
+/// it was made in. The record is taken before `frame_start` and written into the frame's result
+/// when the frame ends, whatever produced the result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct UpfrontRecord {
+    charged_new_account_state_gas: bool,
+    charged_state_gas_address: Address,
+}
+
+impl UpfrontRecord {
+    /// The record of the call `input` starts; none for any other frame, whose creation inputs keep
+    /// what they charged and where in fields an inspector's hook cannot write.
+    pub(crate) fn of(input: &FrameInput) -> Option<Self> {
+        match input {
+            FrameInput::Call(inputs) => Some(Self {
+                charged_new_account_state_gas: inputs.charged_new_account_state_gas,
+                charged_state_gas_address: inputs.target_address,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Writes the record into `result`, the result of the call it was taken for.
+    fn write_into(self, result: &mut FrameResult) {
+        if let FrameResult::Call(outcome) = result {
+            outcome.charged_new_account_state_gas = self.charged_new_account_state_gas;
+            outcome.charged_state_gas_address = self.charged_state_gas_address;
+        }
+    }
+
+    /// `input` with the call's upfront charge as the record has it.
+    fn restore(self, input: &FrameInput) -> FrameInput {
+        let mut input = input.clone();
+        if let FrameInput::Call(inputs) = &mut input {
+            inputs.charged_new_account_state_gas = self.charged_new_account_state_gas;
+            inputs.target_address = self.charged_state_gas_address;
+        }
+        input
+    }
+}
+
 /// Where the result [`frame_end_checked`] hands the inspector came from.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum ResultSource {
@@ -480,6 +527,7 @@ pub(crate) fn frame_end_checked<DB, ExtEnvs, INTR, INSP>(
     frame_result: &mut FrameResult,
     depth: usize,
     source: ResultSource,
+    upfront: Option<UpfrontRecord>,
 ) where
     DB: Database,
     ExtEnvs: ExternalEnvTypes,
@@ -488,6 +536,13 @@ pub(crate) fn frame_end_checked<DB, ExtEnvs, INTR, INSP>(
 {
     let before = frame_result.instruction_result();
     frame_end(context, inspector, frame_input, frame_result);
+    // What the opcode charged is what was recorded before the inspector saw the call, not what its
+    // hooks left in the inputs.
+    let restored = upfront.and_then(|record| {
+        record.write_into(frame_result);
+        (UpfrontRecord::of(frame_input) != Some(record)).then(|| record.restore(frame_input))
+    });
+    let frame_input = restored.as_ref().unwrap_or(frame_input);
     let answered = match source {
         ResultSource::Inspector => true,
         ResultSource::Engine(checkpoint) => {

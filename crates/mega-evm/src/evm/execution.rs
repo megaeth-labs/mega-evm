@@ -53,6 +53,7 @@ use crate::{
         history::transaction_body_bytes,
         inspector::{
             frame_end_checked, journal_position, revert_journal_to, ResultSource, StepGuard,
+            UpfrontRecord,
         },
     },
     history_gas, synthetic_frame_result,
@@ -707,8 +708,11 @@ where
         // frame's start: the caller's answer is asked again on the input it leaves.
         let _ = self.inner.ctx.additional_limit.take_start_refused();
         let (ctx, inspector) = self.ctx_inspector();
+        // What the calling opcode charged upfront, before the inspector's hooks can rewrite the
+        // call it charged for.
+        let upfront = UpfrontRecord::of(&frame_init.frame_input);
         if let Some(output) = frame_start(ctx, inspector, &mut frame_init.frame_input) {
-            return answered_by_inspector(ctx, inspector, &frame_init, output)
+            return answered_by_inspector(ctx, inspector, &frame_init, output, upfront)
                 .map(ItemOrResult::Result);
         }
         let (frame_input, depth) = (frame_init.frame_input.clone(), frame_init.depth);
@@ -733,10 +737,12 @@ where
                 }
             }
             let source = ResultSource::Engine(start);
-            frame_end_checked(ctx, inspector, &frame_input, &mut output, depth, source);
+            frame_end_checked(ctx, inspector, &frame_input, &mut output, depth, source, upfront);
             return Ok(ItemOrResult::Result(output));
         }
         let (ctx, inspector, frame) = self.ctx_inspector_frame();
+        ctx.upfront_records.resize(depth, None);
+        ctx.upfront_records.push(upfront);
         if ctx.journal().logs().len() != logs_i {
             inspect_logs(ctx, inspector, logs_i);
         }
@@ -772,7 +778,8 @@ where
         after_frame_run(ctx, frame, &mut next);
         if let Ok(ItemOrResult::Result(result)) = &mut next {
             let source = ResultSource::Engine(frame.checkpoint);
-            frame_end_checked(ctx, inspector, &frame.input, result, frame.depth, source);
+            let upfront = ctx.upfront_records.get(frame.depth).copied().flatten();
+            frame_end_checked(ctx, inspector, &frame.input, result, frame.depth, source, upfront);
             frame.set_finished(true);
         }
         next
@@ -1073,6 +1080,7 @@ fn answered_by_inspector<DB: Database, ExtEnvs: ExternalEnvTypes, INSP>(
     inspector: &mut INSP,
     frame_init: &FrameInit,
     mut output: FrameResult,
+    upfront: Option<UpfrontRecord>,
 ) -> Result<FrameResult, ContextDbError<MegaContext<DB, ExtEnvs>>>
 where
     INSP: Inspector<MegaContext<DB, ExtEnvs>, EthInterpreter>,
@@ -1080,7 +1088,7 @@ where
     if let Some(answer) = answer_before_building(ctx, frame_init)? {
         output = answer;
     }
-    Ok(answered_without_running(ctx, inspector, frame_init, output))
+    Ok(answered_without_running(ctx, inspector, frame_init, output, upfront))
 }
 
 /// Settles `output`, the answer an inspector gave the frame `frame_init` starts in its place, as
@@ -1094,6 +1102,7 @@ fn answered_without_running<DB: Database, ExtEnvs: ExternalEnvTypes, INSP>(
     inspector: &mut INSP,
     frame_init: &FrameInit,
     mut output: FrameResult,
+    upfront: Option<UpfrontRecord>,
 ) -> FrameResult
 where
     INSP: Inspector<MegaContext<DB, ExtEnvs>, EthInterpreter>,
@@ -1102,7 +1111,7 @@ where
     let gas_limit = input_gas_limit(&frame_init.frame_input);
     settle_answer(ctx, frame_init.depth, gas_limit, &mut output);
     let (input, depth) = (&frame_init.frame_input, frame_init.depth);
-    frame_end_checked(ctx, inspector, input, &mut output, depth, ResultSource::Inspector);
+    frame_end_checked(ctx, inspector, input, &mut output, depth, ResultSource::Inspector, upfront);
     output
 }
 

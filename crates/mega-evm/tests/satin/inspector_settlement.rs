@@ -28,7 +28,10 @@ use mega_evm::{
     MegaEvm, MegaTransaction, MegaTransactionOutcome, WRITE_RECORD_SIZE,
 };
 use revm::{
-    bytecode::opcode::{CALL, POP, PUSH0, RETURN, REVERT, STOP},
+    bytecode::{
+        opcode::{CALL, POP, PUSH0, RETURN, REVERT, STOP},
+        Bytecode,
+    },
     context::{ContextTr, JournalTr},
     context_interface::{cfg::GasId, journaled_state::account::JournaledAccountTr, Transaction},
     interpreter::{
@@ -438,6 +441,79 @@ fn test_an_answered_call_leaves_its_caller_none_of_the_accounts_state_gas() {
         .unwrap();
     assert!(answered.result.is_success(), "{:?}", answered.result);
     assert_eq!(answered.gas.state, slot, "the slot alone");
+}
+
+/* ---------- a call an inspector retargets ---------- */
+
+/// The address `Retargets` sends a call to.
+const RETARGET: Address = address!("0000000000000000000000000000000000c00020");
+
+/// Rewrites every call to `from` into a call to `RETARGET`, whose code it supplies, in the
+/// inspector's `call` hook, and answers it with `answer` when it has one: a tool that redirects a
+/// call after the opcode charged for the account it was made to.
+struct Retargets {
+    from: Address,
+    code: Bytecode,
+    answer: Option<InstructionResult>,
+}
+
+impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for Retargets {
+    fn call(&mut self, context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
+        if inputs.target_address != self.from {
+            return None;
+        }
+        // The new target is loaded before the frame starts, as a hook that redirects a call must.
+        context.journal_mut().load_account(RETARGET).expect("in memory");
+        inputs.target_address = RETARGET;
+        inputs.bytecode_address = RETARGET;
+        inputs.known_bytecode = (self.code.hash_slow(), self.code.clone());
+        self.answer.map(|result| {
+            CallOutcome::new(
+                InterpreterResult::new(result, Bytes::new(), untouched_call_gas(inputs)),
+                inputs.return_memory_offset.clone(),
+            )
+        })
+    }
+}
+
+/// A value call to an account that does not exist charges that account's state gas upfront, in its
+/// SALT bucket. An inspector that redirects the call to another account, whose bucket is priced
+/// otherwise, changes which account the charge comes back for: it comes back at the price it was
+/// made at, the original account's, whatever the new target costs. Both ways — the account dearer
+/// than the new target (`m` = 8 and 1) and cheaper (1 and 8) — the call answered in place of
+/// running, and the call that runs and reverts, keep nothing: no state gas, the body's history
+/// alone, and the reservoir back where it started. A refund at the new target's price would leave
+/// state gas behind in one direction and drive the state ledger negative, growing the reservoir,
+/// in the other.
+#[test]
+fn test_a_retargeted_value_calls_upfront_charge_comes_back_at_the_price_it_was_made_at() {
+    let caller = || value_call(EMPTY).append(POP).stop().build();
+    let reverts = Bytecode::new_raw(Bytes::from_static(&[PUSH0, PUSH0, REVERT]));
+    for (account_m, retarget_m) in [(8, 1), (1, 8)] {
+        let envs = || {
+            crowded_account(crowded_account(minimal_envs(), EMPTY, account_m), RETARGET, retarget_m)
+        };
+        let db = || db(caller()).account_code(RETARGET, reverts.original_bytes());
+        for gas_limit in GAS_LIMITS {
+            let tx = to(CONTRACT, 0, Bytes::new(), gas_limit);
+            let ran = plain(db(), envs(), tx.clone());
+            assert_eq!(
+                ran.gas.state,
+                account_m * entry(GasId::new_account_state_gas()),
+                "{account_m}/{retarget_m}: run, the call adds the account in its bucket"
+            );
+            for (name, answer) in
+                [("answered", Some(InstructionResult::Stop)), ("running and reverting", None)]
+            {
+                let case = format!("{name}, m {account_m}/{retarget_m}, gas limit {gas_limit}");
+                let inspector = Retargets { from: EMPTY, code: reverts.clone(), answer };
+                let outcome = inspected(db(), envs(), tx.clone(), inspector);
+                assert!(outcome.result.is_success(), "{case}: {:?}", outcome.result);
+                assert_keeps_only_its_body(&case, &tx, &outcome);
+                assert!(!holds_something(&outcome, EMPTY), "{case}: no account");
+            }
+        }
+    }
 }
 
 /* ---------- a failed creation rewritten into a success ---------- */

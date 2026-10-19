@@ -1,5 +1,9 @@
 //! The execution context of the Satin engine.
 
+#[cfg(not(feature = "std"))]
+use alloc as std;
+use std::vec::Vec;
+
 use delegate::delegate;
 use op_revm::{transaction::deposit::DEPOSIT_TRANSACTION_TYPE, L1BlockInfo, OpSpecId};
 use revm::{
@@ -16,6 +20,7 @@ use crate::{
     constants,
     evm::{
         history::transaction_body_bytes,
+        inspector::UpfrontRecord,
         schedule::{satin_gas_params, satin_gas_params_history_exempt},
     },
     system::{
@@ -55,6 +60,9 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes = EmptyExternalEn
     pub(crate) additional_limit: AdditionalLimit,
     /// Gas detention for the running transaction.
     pub(crate) detention: Detention,
+    /// What the calling opcode charged upfront for each running frame of an inspected transaction,
+    /// by depth, taken before the inspector could rewrite the call.
+    pub(crate) upfront_records: Vec<Option<UpfrontRecord>>,
     pub(crate) block_hash_record: BlockHashRecord,
     /// The SALT bucket multipliers the running transaction has read.
     bucket_multipliers: BucketMultipliers,
@@ -104,6 +112,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
                 ProtocolLimits::for_spec(spec).tx_runtime_limits,
             ),
             detention: Detention::default(),
+            upfront_records: Vec::new(),
             block_hash_record: BlockHashRecord::default(),
             bucket_multipliers: BucketMultipliers::default(),
             bucket_record: BucketRecord::default(),
