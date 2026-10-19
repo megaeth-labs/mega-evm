@@ -867,3 +867,75 @@ fn test_a_schedule_without_a_proof_reverts() {
     assert!(!schedule(&mut state, next, activation, Bytes::new()), "the call reverts");
     assert_eq!(slot(&mut state, PENDING_SEQUENCER), U256::ZERO);
 }
+
+/// A database error that is not fatal, as an EIP-7928 block access list that does not cover a
+/// read would raise.
+#[derive(Debug)]
+struct NonFatalError;
+
+impl core::fmt::Display for NonFatalError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "the pending slot is not covered")
+    }
+}
+
+impl core::error::Error for NonFatalError {}
+
+impl revm::context::DBErrorMarker for NonFatalError {
+    fn is_fatal(&self) -> bool {
+        false
+    }
+}
+
+/// A database that refuses to read the registry's pending system address, with an error that is
+/// not fatal.
+#[derive(Debug)]
+struct RefusesThePendingRead(MemoryDatabase);
+
+impl Database for RefusesThePendingRead {
+    type Error = NonFatalError;
+
+    fn basic(&mut self, address: Address) -> Result<Option<revm::state::AccountInfo>, Self::Error> {
+        Ok(self.0.basic(address).expect("the memory database serves"))
+    }
+
+    fn code_by_hash(&mut self, code_hash: B256) -> Result<revm::state::Bytecode, Self::Error> {
+        Ok(self.0.code_by_hash(code_hash).expect("the memory database serves"))
+    }
+
+    fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {
+        if (address, index) == (SEQUENCER_REGISTRY_ADDRESS, PENDING_SYSTEM_ADDRESS) {
+            return Err(NonFatalError);
+        }
+        Ok(self.0.storage(address, index).expect("the memory database serves"))
+    }
+
+    fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
+        Ok(self.0.block_hash(number).expect("the memory database serves"))
+    }
+}
+
+/// The due check is a direct read of the block's state, as the other direct reads of the executor
+/// are: a database error there, fatal or not, is an internal error, not a verdict on the block.
+/// The same chain starts when the read is served.
+#[test]
+fn test_a_non_fatal_error_on_the_due_read_is_an_internal_error() {
+    fn start<DB: alloy_evm::Database>(db: DB) -> Result<(), alloy_evm::block::BlockExecutionError> {
+        let mut state = State::builder().with_database(db).build();
+        let evm = MegaEvmFactory::new().create_evm(&mut state, common::evm_env());
+        MegaBlockExecutor::new(
+            evm,
+            common::unlimited_ctx(),
+            common::chain_spec(),
+            OpAlloyReceiptBuilder::default(),
+        )
+        .apply_pre_execution_changes()
+    }
+    let chain = || common::database().sequencer_registry(MEGA_SYSTEM_ADDRESS);
+
+    start(chain()).expect("the chain starts when the pending slot is served");
+
+    let err = start(RefusesThePendingRead(chain())).expect_err("the due read fails");
+    assert!(matches!(err, alloy_evm::block::BlockExecutionError::Internal(_)), "{err:?}");
+    assert!(err.to_string().contains("the pending slot is not covered"), "{err}");
+}
