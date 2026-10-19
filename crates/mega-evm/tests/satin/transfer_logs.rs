@@ -359,7 +359,7 @@ fn assert_completed(
     body: u64,
 ) {
     assert!(outcome.result.is_success(), "{case}: {:?}", outcome.result);
-    assert_eq!(outcome.limit_exceeded, None, "{case}: nothing latched");
+    assert_eq!(outcome.limit_exceeded, None, "{case}: no stop");
     let (log, moved, log_history) = match variant {
         Variant::Plain => {
             let value = U256::from(VALUE);
@@ -433,9 +433,9 @@ fn test_each_site_counts_its_transfer_log() {
 
 /// A frame budget holds the move at exactly its bytes, and one byte short of them stops the frame
 /// that moves the value before anything moves, frame-locally: the caller resumes — the relay and
-/// the actor return the stop as their output — and nothing is latched. The transaction's own
-/// frame has no caller, so its stop reverts the transaction, still without a latch, and the
-/// outcome names it, the crossing that produced that frame's result.
+/// the actor return the stop as their output — and the transaction reports no stop. The
+/// transaction's own frame has no caller, so its stop reverts the transaction, and the outcome
+/// names it, the crossing that produced that frame's result.
 ///
 /// A `LOG3` of one word where the transfer log is, after the same bytes of records, stops the
 /// same frame at the same budget with the same revert.
@@ -466,8 +466,7 @@ fn test_each_site_stops_one_byte_short_of_its_frame_budget() {
                 });
                 assert_eq!(
                     over.limit_exceeded, own_frames,
-                    "{case}: a frame budget latches nothing; the outcome names the transaction's \
-                     own frame's"
+                    "{case}: the outcome names the transaction's own frame's stop alone"
                 );
                 assert_eq!(
                     over.result.is_success(),
@@ -499,11 +498,13 @@ fn test_each_site_stops_one_byte_short_of_its_frame_budget() {
     }
 }
 
-/// The transaction's limit one byte short of the move stops the transaction there: it latches, the
-/// stop names the data size and the limit, the whole transaction reverts, and the move's bytes are
-/// reported in the figure that crossed. A `LOG3` of one word where the transfer log is, after the
-/// same bytes of records, crosses the same way. At the transaction's own frame, whose budget is
-/// the limit, a limit of exactly the bytes holds.
+/// The transaction's limit one byte short of the move stops the frame that moves the value there,
+/// as its budget does: the stop names the data size and the transaction's limit, the caller
+/// resumes — the relay and the actor return the stop as their output — and the move's bytes go
+/// with the frame. At the transaction's own frame the stop is the transaction's result, the
+/// outcome names it with the move's bytes in the figure that crossed, and a limit of exactly the
+/// bytes holds. A `LOG3` of one word where the transfer log is, after the same bytes of records,
+/// crosses the same way.
 #[test]
 fn test_each_site_stops_one_byte_short_of_the_transaction_limit() {
     for site in Site::ALL {
@@ -519,28 +520,38 @@ fn test_each_site_stops_one_byte_short_of_the_transaction_limit() {
                 };
 
                 let (outcome, body, limit) = run(1);
+                let own_frames = (site.depth() == 0).then_some(LimitCheck::ExceedsLimit {
+                    kind: LimitKind::DataSize,
+                    limit,
+                    used: body + site.bytes(),
+                    frame_local: false,
+                });
                 assert_eq!(
-                    outcome.limit_exceeded,
-                    Some(LimitCheck::ExceedsLimit {
-                        kind: LimitKind::DataSize,
-                        limit,
-                        used: body + site.bytes(),
-                        frame_local: false,
-                    }),
-                    "{case}: the transaction is stopped at the move",
+                    outcome.limit_exceeded, own_frames,
+                    "{case}: the outcome names the transaction's own frame's stop alone",
                 );
-                assert!(!outcome.result.is_success() && !outcome.result.is_halt(), "{case}");
+                assert_eq!(
+                    outcome.result.is_success(),
+                    site.depth() > 0,
+                    "{case}: the caller resumes: {:?}",
+                    outcome.result
+                );
                 let stop = MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit };
-                assert_eq!(
-                    outcome.result.output(),
-                    Some(&Bytes::from(stop.abi_encode())),
-                    "{case}: the stop is what the transaction reports",
-                );
-                assert!(outcome.result.logs().is_empty(), "{case}: every log went");
-                assert_eq!(outcome.usage, LimitUsage { data_size: body, write_records: 0 });
-                if variant == Variant::Plain {
-                    let to = site.recipient();
-                    assert_eq!(balance(&outcome, to), U256::ZERO, "{case}: no value moved");
+                match variant {
+                    Variant::Plain => {
+                        assert_stopped_at_the_move(&case, site, &outcome, body, stop);
+                    }
+                    Variant::Twin => {
+                        assert_eq!(
+                            outcome.result.output(),
+                            Some(&Bytes::from(stop.abi_encode())),
+                            "{case}: the same stop",
+                        );
+                        let left = site.left_by_a_stop();
+                        assert_eq!(outcome.usage.data_size - body, left.data_size, "{case}");
+                        assert!(outcome.result.logs().is_empty(), "{case}: the log went");
+                    }
+                    Variant::TakenBack => unreachable!(),
                 }
                 assert_reservoir_paid(&case, gas_limit, &outcome);
 
@@ -739,16 +750,13 @@ fn test_a_value_call_its_caller_cannot_fund_runs_as_without_a_limit() {
         }
 
         let stopped = execute(db(VALUE, &actor), tx.clone(), tx_limit);
+        let stop = MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit: body + bytes - 1 };
         assert_eq!(
-            stopped.limit_exceeded,
-            Some(LimitCheck::ExceedsLimit {
-                kind: LimitKind::DataSize,
-                limit: body + bytes - 1,
-                used: body + bytes,
-                frame_local: false,
-            }),
-            "{name}: funded to the last wei, the move is counted",
+            stopped.result.output(),
+            Some(&Bytes::from(stop.abi_encode())),
+            "{name}: funded to the last wei, the move is counted, and stopped at the limit",
         );
+        assert_eq!(stopped.limit_exceeded, None, "{name}: the actor caught the stop");
         let stopped = execute(db(VALUE, &actor), tx.clone(), frame_budget);
         let stop = MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit: bytes - 1 };
         assert_eq!(
@@ -890,7 +898,7 @@ fn test_a_start_answered_before_its_init_leaves_no_refusal_for_the_next() {
             Some(&Bytes::from(U256::ZERO.to_be_bytes::<32>())),
             "{name}: the DELEGATECALL reverted on its budget",
         );
-        assert_eq!(outcome.limit_exceeded, None, "{name}: a frame budget latches nothing");
+        assert_eq!(outcome.limit_exceeded, None, "{name}: a frame budget below is no stop");
         assert_eq!(outcome.usage, LimitUsage { data_size: body, write_records: 0 }, "{name}");
     }
 }
@@ -995,14 +1003,16 @@ fn test_a_start_an_inspector_rewrites_is_refused_on_the_input_it_leaves() {
 /// earlier would load it. Without a limit, the creation fails on the collision after it bumped its
 /// creator's nonce, so the creator's record is kept, and the created account's record and the
 /// transfer log are not. Under the transaction's limit one byte short of what the start counts,
-/// the start's records and transfer log cross it, and the stop comes first.
+/// the start's records and transfer log cross it, and the stop comes first: the creation returns
+/// the stop rather than the collision's empty data, which the creator returns, and the creator
+/// keeps its nonce record either way.
 #[test]
 fn test_a_creation_onto_an_occupied_address_is_counted_before_revm_refuses_it() {
     let occupied = Site::Create2.recipient();
     let actor = BytecodeBuilder::default()
         .create2(U256::from(VALUE), [], U256::ZERO)
         .append(POP)
-        .stop()
+        .return_returndata()
         .build();
     let db = || {
         MemoryDatabase::default()
@@ -1021,6 +1031,7 @@ fn test_a_creation_onto_an_occupied_address_is_counted_before_revm_refuses_it() 
 
     let free = execute(db(), tx.clone(), EvmTxRuntimeLimits::no_limits());
     assert!(free.result.is_success(), "{:?}", free.result);
+    assert_eq!(free.result.output(), Some(&Bytes::new()), "the collision's empty data");
     assert!(free.result.logs().is_empty(), "no transfer log");
     assert_eq!(free.state[&ACTOR].info.nonce, 1, "the collision comes after the bump");
     assert_eq!(balance(&free, occupied), U256::ZERO, "no value moved");
@@ -1032,16 +1043,12 @@ fn test_a_creation_onto_an_occupied_address_is_counted_before_revm_refuses_it() 
 
     let limit = body + Site::Create2.bytes() - 1;
     let stopped = execute(db(), tx, EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit));
-    assert_eq!(
-        stopped.limit_exceeded,
-        Some(LimitCheck::ExceedsLimit {
-            kind: LimitKind::DataSize,
-            limit,
-            used: body + Site::Create2.bytes(),
-            frame_local: false,
-        }),
-    );
-    assert!(!stopped.result.is_success(), "the stop reverts the transaction");
+    assert!(stopped.result.is_success(), "the creator catches the stop: {:?}", stopped.result);
+    let stop = MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit };
+    assert_eq!(stopped.result.output(), Some(&Bytes::from(stop.abi_encode())), "the stop first");
+    assert_eq!(stopped.limit_exceeded, None);
+    assert_eq!(stopped.usage, free.usage, "the creator's nonce alone");
+    assert_eq!(stopped.state[&ACTOR].info.nonce, 1, "the stopped creation bumped it too");
 }
 
 /// A deposit's value moves in its first frame and is logged there, from the depositor to the

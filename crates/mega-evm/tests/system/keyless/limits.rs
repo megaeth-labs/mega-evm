@@ -1,15 +1,17 @@
 //! The limits a keyless deployment is held to, and what a stop leaves behind.
 //!
 //! The creation is an ordinary frame below its `keylessDeploy` call, so it is held to everything
-//! an ordinary creation is: its share of the data-size budget, the transaction's limits. A frame
-//! budget reverts the creation alone, and the call answers `ExecutionReverted` with the stop's
-//! revert data, the signer's nonce spent. A transaction limit stops the transaction: the call
-//! reverts with the stop and takes back everything the deployment wrote, the signer's nonce
-//! included, and the sender pays for what ran and gets the rest of its gas and its reservoir back.
+//! an ordinary creation is: its share of the data-size budget, the transaction's limits. A limit
+//! the creation crosses, its budget or the transaction's, reverts the creation alone, and the call
+//! answers `ExecutionReverted` with the stop's revert data, keeping what the creation's start
+//! wrote. A limit the call itself crosses — its budget, crossed by the nonce record a failed
+//! creation leaves it — reverts the call with the stop, which takes back everything the deployment
+//! wrote, the signer's nonce included, and the sender pays for what ran and gets the rest of its
+//! gas and its reservoir back.
 //!
-//! The stop is pinned as a column of the matrix: every transaction-level limit a creation can
-//! cross, from a signer at nonce 0 and at nonce 1, below the execution cap and above it, with and
-//! without an inspector that rewrites every frame result into a success.
+//! The creation's stop is pinned as a column of the matrix: every limit a creation can cross,
+//! from a signer at nonce 0 and at nonce 1, below the execution cap and above it, with and without
+//! an inspector that records every frame's end.
 //!
 //! The last tests pin the three places gas a mechanism grants a frame could leak back to a
 //! caller or to the sender: an answer built without a frame, the settlement of a stopped
@@ -138,35 +140,26 @@ fn test_a_transaction_whose_body_crosses_the_limit_is_rejected() {
     }
 }
 
-/// A log that crosses the transaction's data-size limit stops the transaction. The limit holds the
+/// A log that crosses the transaction's data-size limit stops the creation. The limit holds the
 /// body, the two records of the creation's start and 100 bytes more, so the body passes and the
-/// creation starts, and the constructor's `LOG0` of 2,000 bytes is what crosses: the stop reports
-/// the body, the two records and the whole log as used, the call reverts with the stop, and the
-/// deployment is taken back whole.
+/// creation starts, and the constructor's `LOG0` of 2,000 bytes is what crosses: the call reports
+/// `ExecutionReverted` with the transaction limit's stop, the transaction is not stopped, and the
+/// signer's nonce is spent, as its budget's stop leaves it.
 #[test]
-fn test_a_deployment_crossing_the_transaction_data_size_limit_stops_it() {
+fn test_a_deployment_crossing_the_transaction_data_size_limit_stops_its_creation() {
     let deployment = Deployment::new(logging(2_000));
-    let start = body_bytes(&deployment) + 2 * WRITE_RECORD_SIZE;
-    let limit = start + 100;
-    let used = start + LOG_BASE_SIZE + 2_000;
+    let limit = body_bytes(&deployment) + 2 * WRITE_RECORD_SIZE + 100;
     for gas_limit in GAS_LIMITS {
         let outcome = limited(
             &deployment,
             gas_limit,
             EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit),
         );
-        assert_eq!(stop(&outcome), MegaLimitExceeded { kind: 0, limit }, "at {gas_limit}");
-        assert_eq!(
-            outcome.limit_exceeded,
-            Some(LimitCheck::ExceedsLimit {
-                kind: LimitKind::DataSize,
-                limit,
-                used,
-                frame_local: false
-            }),
-            "at {gas_limit}: the constructor's log crosses"
-        );
-        assert_stopped_whole(&outcome, &deployment, gas_limit);
+        assert_eq!(creation_stop(&outcome), MegaLimitExceeded { kind: 0, limit }, "at {gas_limit}");
+        assert_eq!(outcome.limit_exceeded, None, "at {gas_limit}");
+        assert_eq!(nonce(&outcome, deployment.signer), 1, "at {gas_limit}");
+        assert_eq!(outcome.usage.write_records, 1, "the signer's nonce record");
+        assert!(outcome.usage.data_size <= limit, "at {gas_limit}: within the limit");
     }
 }
 
@@ -191,9 +184,11 @@ fn test_a_deployment_crossing_its_data_size_budget_reverts_alone() {
 }
 
 /// The records the creation's start makes are held before the creation is built: a transaction
-/// limit that holds one record but not two stops the deployment before its init code runs.
+/// limit that holds one record but not two stops the creation before its init code runs. The
+/// start still bumps the signer's nonce, whose record the call keeps within the limit, and the
+/// call answers the stop.
 #[test]
-fn test_the_creations_start_crossing_the_limit_stops_the_transaction() {
+fn test_the_creations_start_crossing_the_limit_stops_the_creation() {
     let deployment = Deployment::new(deploying(&runtime(1)));
     let limit = body_bytes(&deployment) + 40;
     for gas_limit in GAS_LIMITS {
@@ -202,15 +197,24 @@ fn test_the_creations_start_crossing_the_limit_stops_the_transaction() {
             gas_limit,
             EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit),
         );
-        assert_eq!(stop(&outcome), MegaLimitExceeded { kind: 0, limit });
-        assert_stopped_whole(&outcome, &deployment, gas_limit);
+        assert_eq!(creation_stop(&outcome), MegaLimitExceeded { kind: 0, limit });
+        assert_eq!(outcome.limit_exceeded, None, "at {gas_limit}");
+        assert_eq!(nonce(&outcome, deployment.signer), 1, "at {gas_limit}");
+        assert_eq!(
+            outcome.usage.data_size, limit,
+            "at {gas_limit}: the signer's nonce record, which meets the limit"
+        );
+        assert!(
+            code_hash(&outcome, deployment.address).is_none_or(|hash| hash == KECCAK_EMPTY),
+            "at {gas_limit}: no code is deployed"
+        );
     }
 }
 
 /// A failed creation leaves its creator's nonce record on the call's lane, which no check held it
 /// to: a call whose budget cannot hold that record reverts alone with its own stop, and takes the
-/// nonce back with it. The transaction is not latched; the outcome names the call's budget, whose
-/// crossing produced the result of the transaction's own frame.
+/// nonce back with it. The outcome names the call's budget, whose crossing produced the result of
+/// the transaction's own frame.
 #[test]
 fn test_the_signers_record_can_put_the_call_over_its_budget() {
     let deployment = Deployment::new(deploying(&runtime(1)));
@@ -375,7 +379,7 @@ fn test_the_unspent_forward_comes_back_on_success_and_revert_alike() {
 
 /* ---------- the stop, as a column of the matrix ---------- */
 
-/// A transaction-level limit a deployment's creation crosses.
+/// A limit a deployment's creation crosses.
 #[derive(Clone, Copy, Debug)]
 enum Crossing {
     /// The constructor's `LOG0` of 2,000 bytes crosses the data-size limit.
@@ -399,8 +403,8 @@ impl Crossing {
     }
 
     /// The limits under which a deployment of `deployment`, by a signer at either nonce, crosses
-    /// the limit, with the stop it reports: its kind, its limit, and what it counts as used where
-    /// the constructor crosses.
+    /// the limit, with the stop its creation returns: its kind, its limit, and what it counts as
+    /// used where the constructor crosses.
     fn limits(self, deployment: &Deployment) -> (EvmTxRuntimeLimits, Crossed) {
         let limits = EvmTxRuntimeLimits::no_limits();
         match self {
@@ -443,50 +447,33 @@ impl Crossed {
     const fn new(kind: LimitKind, limit: u64, used: u64) -> Self {
         Self { kind, limit, used }
     }
-
-    /// The limit check the transaction's outcome reports for the stop.
-    const fn check(self) -> LimitCheck {
-        LimitCheck::ExceedsLimit {
-            kind: self.kind,
-            limit: self.limit,
-            used: self.used,
-            frame_local: false,
-        }
-    }
 }
 
-/// Records the result of every frame it sees end, then rewrites it into a success with no output
-/// — a creation's too, whose address it revives: a tool's inspector the stop must see through.
+/// Records the result of every frame it sees end, and rewrites nothing.
 #[derive(Default)]
-struct Rewriter {
-    /// The frames that ended, deepest first: whether each was a creation, and its result before
-    /// the rewrite.
+struct Recorder {
+    /// The frames that ended, deepest first: whether each was a creation, and its result.
     ended: Vec<(bool, InstructionResult)>,
 }
 
-impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Rewriter {
+impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Recorder {
     fn call_end(&mut self, _: &mut MegaContext<DB>, _: &CallInputs, outcome: &mut CallOutcome) {
         self.ended.push((false, outcome.result.result));
-        outcome.result.result = InstructionResult::Stop;
-        outcome.result.output = Bytes::new();
     }
 
     fn create_end(
         &mut self,
         _: &mut MegaContext<DB>,
-        inputs: &CreateInputs,
+        _: &CreateInputs,
         outcome: &mut CreateOutcome,
     ) {
         self.ended.push((true, outcome.result.result));
-        outcome.result.result = InstructionResult::Return;
-        outcome.result.output = Bytes::new();
-        outcome.address = Some(inputs.created_address(1));
     }
 }
 
 /// Runs a `keylessDeploy` of `deployment` over `db` at `gas_limit` under `limits`, without an
-/// inspector and under a [`Rewriter`]: both outcomes, and the frames the rewriter saw end.
-fn plain_and_rewritten(
+/// inspector and under a [`Recorder`]: both outcomes, and the frames the recorder saw end.
+fn plain_and_recorded(
     db: MemoryDatabase,
     deployment: &Deployment,
     gas_limit: u64,
@@ -496,27 +483,26 @@ fn plain_and_rewritten(
     let mut tx = call_tx(KEYLESS_DEPLOY_ADDRESS, deployment.call_data(LARGE_OVERRIDE), U256::ZERO);
     tx.0.base.gas_limit = gas_limit;
     let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits))
-        .with_inspector(Rewriter::default());
-    let rewritten = evm.execute_transaction(tx).expect("the transaction is valid");
+        .with_inspector(Recorder::default());
+    let recorded = evm.execute_transaction(tx).expect("the transaction is valid");
     let ended = evm.inspector().ended.clone();
-    (plain, rewritten, ended)
+    (plain, recorded, ended)
 }
 
-/// The stop, as a column of the matrix: each transaction-level limit a deployment's creation can
-/// cross — data size, state gas, and gas detention's compute limit — crossed from a signer at
-/// nonce 0 and at nonce 1, below the execution cap and above it, without an inspector and under
-/// one that rewrites every frame result into a success and revives the creation.
+/// The creation's stop, as a column of the matrix: each limit a deployment's creation can cross —
+/// data size and gas detention's compute limit — crossed from a signer at nonce 0 and at nonce 1,
+/// below the execution cap and above it, without an inspector and under one that records every
+/// frame's end.
 ///
-/// Every run reverts with the stop, and the stop counts as used what the constructor's crossing
-/// brings the transaction to: the body, the start's two records and the whole log; the compute up
-/// to the limit. So the crossing is the
-/// constructor's, not the creation's start or the call's charges. Every run keeps nothing of the
-/// deployment: the signer's nonce is where it was, neither spent from 0 nor left at 2 from 1; no
-/// code, no record, and no state or history gas beyond the transaction's body; above the cap the
-/// reservoir comes back. A compute stop bills what it counts as used past the body: the call's
-/// charges, the read, and the constructor's compute up to the charge that crosses the cap. The
-/// inspector sees the creation end with the stop, then the call, and changes nothing the
-/// transaction reports.
+/// The creation reverts with the stop, which names the limit the constructor's crossing brings the
+/// transaction past: so the crossing is the constructor's, not the creation's start or the call's
+/// charges. The call answers it as `ExecutionReverted` with the stop's revert data, and keeps what
+/// the creation's start wrote and nothing else of the deployment: from nonce 0 the signer's nonce,
+/// spent, and its record; from nonce 1 nothing, the bump taken back. No code is deployed. A
+/// compute stop bills what it counts as used past the body — the call's charges, the read, and the
+/// constructor's compute up to the charge that crosses the cap — and the call charges nothing on
+/// its resume. The transaction reports no stop: the result of its own frame is the call's answer.
+/// The recorder sees the creation end with the stop, then the call return, and changes nothing.
 #[test]
 fn test_every_limit_stops_a_deployment_from_either_nonce_at_either_tier() {
     for crossing in Crossing::ALL {
@@ -530,36 +516,39 @@ fn test_every_limit_stops_a_deployment_from_either_nonce_at_either_tier() {
             };
             for gas_limit in GAS_LIMITS {
                 let row = format!("{crossing:?}, signer at {signer_nonce}, gas limit {gas_limit}");
-                let (plain, rewritten, ended) =
-                    plain_and_rewritten(db.clone(), &deployment, gas_limit, limits);
-                for (column, outcome) in [("plain", &plain), ("rewritten", &rewritten)] {
+                let (plain, recorded, ended) =
+                    plain_and_recorded(db.clone(), &deployment, gas_limit, limits);
+                for (column, outcome) in [("plain", &plain), ("recorded", &recorded)] {
                     let cell = format!("{row}, {column}");
                     assert_eq!(
-                        stop(outcome),
+                        creation_stop(outcome),
                         MegaLimitExceeded { kind: kind.as_u8(), limit },
                         "{cell}"
                     );
-                    assert_eq!(
-                        outcome.limit_exceeded,
-                        Some(expected.check()),
-                        "{cell}: the constructor crosses"
+                    assert_eq!(outcome.limit_exceeded, None, "{cell}: the call caught the stop");
+                    assert_eq!(nonce(outcome, deployment.signer), 1, "{cell}: the signer's nonce");
+                    let records = u64::from(signer_nonce == 0);
+                    assert_eq!(outcome.usage.write_records, records, "{cell}: the nonce's record");
+                    assert!(
+                        code_hash(outcome, deployment.address).is_none_or(|h| h == KECCAK_EMPTY),
+                        "{cell}: no code is deployed"
                     );
-                    assert_nothing_kept(outcome, &deployment, gas_limit, signer_nonce, &cell);
                     if kind == LimitKind::ComputeGas {
                         let reference = reference(deployment.call_data(LARGE_OVERRIDE), gas_limit);
                         let [_, regular, ..] = beyond(outcome, &reference);
                         assert_eq!(regular, used, "{cell}: computed up to the charge that crossed");
+                    } else {
+                        assert!(outcome.usage.data_size <= limit, "{cell}: within the limit");
                     }
                 }
                 assert_eq!(
                     ended,
-                    [(true, InstructionResult::Revert), (false, InstructionResult::Revert)],
-                    "{row}: the creation, then the call, each ended with the stop",
+                    [(true, InstructionResult::Revert), (false, InstructionResult::Return)],
+                    "{row}: the creation ended with the stop, then the call returned its answer",
                 );
-                assert_eq!(rewritten.result_and_state, plain.result_and_state, "{row}");
-                assert_eq!(rewritten.gas, plain.gas, "{row}");
-                assert_eq!(rewritten.usage, plain.usage, "{row}");
-                assert_eq!(rewritten.limit_exceeded, plain.limit_exceeded, "{row}");
+                assert_eq!(recorded.result_and_state, plain.result_and_state, "{row}");
+                assert_eq!(recorded.gas, plain.gas, "{row}");
+                assert_eq!(recorded.usage, plain.usage, "{row}");
             }
         }
     }

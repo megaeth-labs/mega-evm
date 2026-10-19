@@ -19,8 +19,8 @@
 //!   outside block execution, within the bounds below.
 //! - **A system transaction** — a system-address transaction, promoted to a deposit before its
 //!   first callback — runs through the same handler and the same callbacks, and may be rewritten
-//!   the same way. It is the protocol's own work, held to no per-transaction limit, so no latch
-//!   writes the stop over its results.
+//!   the same way. It is the protocol's own work, held to no per-transaction limit, so no limit
+//!   stops any of its frames.
 //! - **A pre-block system call** — the EIP-2935 and EIP-4788 calls, and the `SequencerRegistry`'s
 //!   `applyPendingChanges()` — runs on the handler's plain system-call path, as alloy-evm's
 //!   `transact_system_call` runs one: no callback, whatever inspector the EVM holds, so a block's
@@ -73,10 +73,11 @@
 //!   journal during the frame or in the callback that rewrote its result included; where revm fails
 //!   a frame the checkpoint is gone before `call_end`, so a write made there stays. The journal's
 //!   depth is left as it was.
-//! - **The latch.** Once a limit stopped the transaction, every frame's result is the stop,
-//!   whatever produced it: an inspector turns it into neither a success nor a halt.
 //!
-//! Every other rewrite is the tool's business.
+//! A limit stop is the revert of the frame that crossed the limit, and a rewrite of it is a
+//! rewrite of a failure like any other: it settles as above, and the transaction reports no stop
+//! once the result of its own frame is no longer the stop's revert. Every other rewrite is the
+//! tool's business.
 //!
 //! # What an inspector's writes to gas cannot do
 //!
@@ -516,9 +517,7 @@ pub(crate) enum ResultSource {
 ///   answered journaled nothing, so nothing is taken back for it.
 ///
 /// Every place a frame result reaches the inspector goes through here, so both cover a result
-/// a frame ran to produce and one answered without running. The latch is read after the hooks that
-/// can set it — the frame's run, detention's classification of its end, the hold on a start's
-/// upfront state gas, and the answer before building — have run.
+/// a frame ran to produce and one answered without running.
 #[inline]
 pub(crate) fn frame_end_checked<DB, ExtEnvs, INTR, INSP>(
     context: &mut MegaContext<DB, ExtEnvs>,
@@ -587,9 +586,6 @@ pub(crate) fn frame_end_checked<DB, ExtEnvs, INTR, INSP>(
 ///   its start comes back the same way;
 /// - its lane is discarded as a failure's is, so nothing it counted reaches its caller, which gets
 ///   back the history it paid for the records.
-///
-/// A latched transaction is left to the latch, which writes the stop over every result, and the
-/// stop settles as a revert.
 fn settle_kept_nothing<DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: &mut MegaContext<DB, ExtEnvs>,
     input: &FrameInput,
@@ -598,8 +594,7 @@ fn settle_kept_nothing<DB: Database, ExtEnvs: ExternalEnvTypes>(
     answered: bool,
 ) {
     carry_upfront_flags(input, result);
-    let success =
-        result.instruction_result().is_ok() && context.additional_limit.latched().is_none();
+    let success = result.instruction_result().is_ok();
     let gas = result.gas_mut();
     if answered || success {
         gas.rollback_state_gas();

@@ -228,6 +228,34 @@ pub(crate) fn assert_stopped(run: &Run, intrinsic: u64, left: u64) -> u64 {
     limit
 }
 
+/// Asserts that a frame below the transaction's own crossed the limit `left` short of it, and that
+/// the transaction's own frame, its caller, caught the stop and ran `after` on what the limit left
+/// it, the `left` the crossing charge was not made from.
+///
+/// When `after` ends within it, the transaction succeeds, billed its compute at the crossing and
+/// `after` on top: within the limit, which reports no stop. When it does not, the caller's own
+/// charge crosses the limit again, and that is the stop the transaction reports
+/// ([`assert_stopped`]). Returns the limit.
+pub(crate) fn assert_caught(run: &Run, intrinsic: u64, left: u64, after: &Charges) -> u64 {
+    if let Some(left) = after.crossing(left) {
+        return assert_stopped(run, intrinsic, left);
+    }
+    let limit = run.limit.expect("a read set a limit");
+    assert!(
+        run.outcome.result.is_success(),
+        "the caller caught the stop: {:?}",
+        run.outcome.result
+    );
+    assert_eq!(run.outcome.limit_exceeded, None, "a stop below the transaction's own frame");
+    assert_eq!(
+        run.outcome.gas.regular,
+        intrinsic + limit - left + after.total(),
+        "the transaction computed up to the charge that crossed, then what its caller ran"
+    );
+    assert!(run.outcome.gas.regular <= intrinsic + limit, "within the limit");
+    limit
+}
+
 /* ---------- where a stop lands ---------- */
 
 /// The regular charges a program makes after its read, in the order the interpreter makes them:
@@ -269,7 +297,12 @@ impl Charges {
 
     /// What `allowance` has left when the first charge it cannot pay comes: what a frame the limit
     /// left `allowance` at the read has when it crosses the limit.
-    pub(crate) fn left(&self, mut allowance: u64) -> u64 {
+    pub(crate) fn left(&self, allowance: u64) -> u64 {
+        self.crossing(allowance).expect("the program ends within the allowance")
+    }
+
+    /// [`left`](Self::left), or `None` when the program ends within `allowance`.
+    pub(crate) fn crossing(&self, mut allowance: u64) -> Option<u64> {
         for (charges, times) in &self.0 {
             let round: u64 = charges.iter().sum();
             if round == 0 {
@@ -283,13 +316,13 @@ impl Charges {
             allowance -= round * rounds;
             for charge in charges {
                 if *charge > allowance {
-                    return allowance;
+                    return Some(allowance);
                 }
                 allowance -= charge;
             }
             unreachable!("a round the allowance cannot pay whole has a charge it cannot pay");
         }
-        panic!("the program ends within the allowance")
+        None
     }
 
     /// The charges of [`spin`]'s loop in a frame whose memory holds `words` words: `JUMPDEST`, the
@@ -956,8 +989,9 @@ fn test_spending_exactly_the_cap_completes() {
 
 /// A value call's stipend is gas nobody paid, so what the callee runs on it is not compute beyond
 /// what its caller's ledger shows: a value-carrying child that reads and spins stops with the
-/// regular ledger at its compute before the charge that crossed, and so does a transaction
-/// carrying value, whose own frame is given what the transaction has left and no stipend.
+/// regular ledger at its compute before the charge that crossed, which its caller catches and
+/// ends on, and so does a transaction carrying value, whose own frame is given what the
+/// transaction has left and no stipend.
 #[test]
 fn test_a_stipend_is_not_compute() {
     let child = spin(op(BytecodeBuilder::default(), TIMESTAMP));
@@ -965,7 +999,7 @@ fn test_a_stipend_is_not_compute() {
         .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
         .push_number(1_u8)
         .push_address(CHILD)
-        .append_many([GAS, CALL, POP, STOP])
+        .append_many([GAS, CALL, STOP])
         .build();
     for gas_limit in TIERS {
         let db = MemoryDatabase::default()
@@ -975,7 +1009,7 @@ fn test_a_stipend_is_not_compute() {
         let run = execute(db, tx(CALLER, CONTRACT, gas_limit));
         // Either way the reading frame's `POP` and its loop come after the read.
         let left = Charges::default().then(&[2]).spin(0).left(CAP);
-        assert_stopped(&run, intrinsic(gas_limit), left);
+        assert_caught(&run, intrinsic(gas_limit), left, &Charges::default());
 
         let db = MemoryDatabase::default()
             .account_code(CONTRACT, spin(op(BytecodeBuilder::default(), TIMESTAMP)))
@@ -1045,10 +1079,12 @@ fn test_a_childs_read_caps_its_caller() {
     }
 }
 
-/// When a child crosses the cap, no caller resumes: the caller's code after the call — a write
-/// and a log — never runs, the child runs the last step, and every frame returns the stop.
+/// When a child crosses the cap, it reverts alone and its caller resumes, held to what the limit
+/// leaves the transaction, which is less than the charge that crossed: the caller's code after
+/// the call — a write and a log — runs until one of its charges crosses the limit again, and the
+/// caller returns the same stop, keeping nothing. The caller runs the last step.
 #[test]
-fn test_no_caller_resumes_after_the_stop() {
+fn test_a_caller_resumes_after_the_stop_held_to_what_is_left() {
     let child = spin(op(BytecodeBuilder::default(), TIMESTAMP));
     let parent = call(BytecodeBuilder::default(), CALL, CHILD)
         .sstore(U256::from(1), U256::from(1))
@@ -1063,7 +1099,10 @@ fn test_no_caller_resumes_after_the_stop() {
         let mut evm = MegaEvm::new(context(db)).with_inspector(Calls::default());
         let run = run_on(&mut evm, tx(CALLER, CONTRACT, gas_limit));
         let left = Charges::default().then(&[2]).spin(0).left(CAP);
-        let limit = assert_stopped(&run, intrinsic, left);
+        // The caller's `POP`, then its write, which the room the spin left cannot pay.
+        let after = Charges::default().then(&[2]).fresh_writes(1);
+        assert!(after.crossing(left).is_some(), "the write crosses the limit again");
+        let limit = assert_caught(&run, intrinsic, left, &after);
         assert!(run.outcome.state[&CONTRACT].storage.values().all(|slot| !slot.is_changed()));
         let calls = &evm.inspector().calls;
         assert_eq!(
@@ -1073,10 +1112,9 @@ fn test_no_caller_resumes_after_the_stop() {
                 (CONTRACT, InstructionResult::Revert, stop_data(limit)),
             ]
         );
-        assert!(!evm.inspector().opcodes.contains(&SSTORE), "the caller did not resume");
-        // A caller that resumed would fail its first charge on the withheld part, before its
-        // write, and report the same stop on the same bill: only its step shows it ran.
-        assert_eq!(evm.inspector().last_frame, Some(CHILD), "the child ran the last step");
+        assert!(evm.inspector().opcodes.contains(&SSTORE), "the caller resumed");
+        assert!(!evm.inspector().opcodes.contains(&LOG0), "and stopped at its write");
+        assert_eq!(evm.inspector().last_frame, Some(CONTRACT), "the caller ran the last step");
     }
 }
 
@@ -1095,8 +1133,14 @@ fn test_the_stop_bills_the_same_above_and_below_the_execution_cap() {
                 .account_code(CONTRACT, parent.clone())
                 .account_code(CHILD, child.clone());
             let run = execute(db, tx(CALLER, CONTRACT, *gas_limit));
+            // The child's `POP` and spin, then its caller's, which resumes on what is left.
             let left = Charges::default().then(&[2]).spin(0).left(CAP);
-            assert_stopped(&run, intrinsic(*gas_limit), left);
+            assert_caught(
+                &run,
+                intrinsic(*gas_limit),
+                left,
+                &Charges::default().then(&[2]).spin(0),
+            );
             let body_history = run.outcome.gas.history;
             let reservoir = gas_limit.saturating_sub(TX_GAS_LIMIT_CAP).saturating_sub(body_history);
             assert_eq!(run.outcome.gas.reservoir_remaining, reservoir, "the reservoir came back");

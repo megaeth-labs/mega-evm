@@ -761,8 +761,8 @@ fn test_a_deposit_that_cannot_pay_for_its_caller_is_a_failed_deposit() {
     assert_eq!(outcome.gas.gas_used, gas_limit, "a failed deposit bills its whole gas limit");
 }
 
-/// The account a deposit creates for its caller is charged before its first frame, and a stop the
-/// deposit's body latched does not waive the charge: a deposit that cannot pay for it is a failed
+/// The account a deposit creates for its caller is charged before its first frame, and a body over
+/// the data-size limit does not waive the charge: a deposit that cannot pay for it is a failed
 /// deposit, which reports the failure and not the data-size stop, and keeps its body counted.
 ///
 /// Rules: [S11], [S10.15], [S21.7]. Independence: constants — the body is `TX_BODY_SIZE`, the gas

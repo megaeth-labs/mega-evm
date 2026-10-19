@@ -28,6 +28,7 @@ use mega_evm::{
     test_utils::{op_transaction, transfer_log, BytecodeBuilder, MemoryDatabase},
     tx_body_history_bytes, EvmTxRuntimeLimits, LimitKind, MegaTransaction,
     FRAME_DATA_SHARE_DENOMINATOR, FRAME_DATA_SHARE_NUMERATOR, LOG_BASE_SIZE, TX_BODY_SIZE,
+    WRITE_RECORD_SIZE,
 };
 use revm::{
     bytecode::opcode::{
@@ -48,7 +49,7 @@ use crate::{
         assert_compute_at_stop, assert_detention_step_reads_as_out_of_gas, assert_eip3155_agrees,
         assert_every_frame_stops, assert_keyless_steps,
         assert_keyless_struct_logs_miss_the_creation, assert_ledgers,
-        assert_log_index_counts_discarded, assert_logs, assert_parent_does_not_resume,
+        assert_log_index_counts_discarded, assert_logs, assert_parent_resumed,
         assert_prestate_covers_reads, assert_root_frame_settles, assert_root_gas_is_the_gas_limit,
         call_tx, create_tx, decode_stop, eip3155_steps, eip3155_summary_gas_used, pin_tracer_views,
         step, Traced,
@@ -64,9 +65,9 @@ const CHILD: Address = address!("0x0000000000000000000000000000000000400003");
 const SCENARIOS: [&str; 15] = [
     "create",
     "data_size_first_frame_start_stop",
-    "data_size_stop_spans_frames",
+    "data_size_stop_caught_by_the_parent",
     "deposit",
-    "detention_stop_spans_frames",
+    "detention_stop_crosses_again_in_the_parent",
     "eth_transfer",
     "frame_budget_child_revert",
     "identity_precompile",
@@ -576,21 +577,27 @@ fn test_data_size_limit_stops_the_first_frame_at_its_start() {
 }
 
 /// A child's `LOG0` that crosses the transaction's data-size limit and, with it, its own frame
-/// budget. The transaction limit is the one reported, and every frame returns it: the child that
-/// crossed it, and the parent, which does not resume.
+/// budget. The transaction limit is the one the child's stop names, and only the child reverts:
+/// the parent resumes, writes a slot within what the transaction has left, and succeeds.
 #[test]
-fn test_data_size_limit_stop_spans_frames() {
-    // What the transaction may produce besides its body; the child's log is larger.
+fn test_data_size_limit_stop_is_caught_by_the_parent() {
+    // What the transaction may produce besides its body; the child's log is larger, the parent's
+    // record is not.
     let room = 100;
     let data_len = 128;
     assert!(log0_size(data_len) > room, "the log crosses the transaction's limit");
     let limit = TX_BODY_SIZE + room;
     // The child's `LOG0` charged its regular gas before its record crossed the limit; its log was
-    // never made, so it cost no history.
+    // never made, so it cost no history. The parent then drops the call's status and writes a
+    // fresh slot.
     let expected = Ledgers {
-        regular: gas::call_intrinsic(&[], false) + call_regular(false) + logging_regular(data_len),
-        state: 0,
-        history: gas::body(0),
+        regular: gas::call_intrinsic(&[], false) +
+            call_regular(false) +
+            logging_regular(data_len) +
+            BASE +
+            sstore_regular(),
+        state: gas::slot_state(),
+        history: gas::body(0) + gas::records(1),
         floor: gas::call_floor(&[], false),
     };
     // Held in passing: the 64th the parent keeps back from a forward that must cover what the
@@ -601,9 +608,25 @@ fn test_data_size_limit_stop_spans_frames() {
         call_tx(CALLER, CONTRACT, Bytes::new(), U256::ZERO, gas_limit(expected, held)),
         EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit),
     );
-    assert_every_frame_stops(&traced, LimitKind::DataSize, limit, 2);
-    assert_parent_does_not_resume(&traced);
-    pin("data_size_stop_spans_frames", &traced, expected);
+    assert!(traced.outcome.result.is_success(), "{:?}", traced.outcome.result);
+    assert_eq!(traced.outcome.limit_exceeded, None, "a stop below the transaction's own frame");
+    let root = traced.call_frame(true);
+    assert_eq!(root.error, None, "the parent succeeds");
+    let [child] = root.calls.as_slice() else { panic!("one child frame: {root:?}") };
+    assert_eq!(child.error.as_deref(), Some("execution reverted"));
+    assert_eq!(
+        decode_stop(child.output.as_ref().expect("the child's revert data")),
+        (LimitKind::DataSize, limit),
+        "the child reverts with the transaction's limit"
+    );
+    assert!(child.logs.is_empty(), "the child's log was never made");
+    assert_parent_resumed(&traced, "STOP");
+    assert_eq!(
+        traced.outcome.usage.data_size,
+        TX_BODY_SIZE + WRITE_RECORD_SIZE,
+        "the transaction keeps its body and the parent's record, within its limit"
+    );
+    pin("data_size_stop_caught_by_the_parent", &traced, expected);
 }
 
 /// A child's `LOG0` that crosses its own frame budget, 98/100 of what its parent has left, but
@@ -637,7 +660,7 @@ fn test_frame_budget_reverts_the_child_alone() {
         EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(TX_BODY_SIZE + room),
     );
     assert!(traced.outcome.result.is_success(), "{:?}", traced.outcome.result);
-    assert!(traced.outcome.limit_exceeded.is_none(), "a frame budget latches nothing");
+    assert!(traced.outcome.limit_exceeded.is_none(), "a frame budget below is no stop");
     let root = traced.call_frame(true);
     assert_eq!(root.error, None, "the parent succeeds");
     assert_eq!(root.logs.len(), 1, "the parent resumed and logged");
@@ -701,9 +724,11 @@ fn test_timestamp_detention_stop() {
 }
 
 /// A parent that reads `TIMESTAMP` and calls a child that loops: the child crosses the compute
-/// limit the parent's read set, and every frame returns the stop.
+/// limit the parent's read set and returns the stop; the parent resumes on what the limit leaves
+/// it, its `POP` and the first push of its write fit, the second push crosses the limit again,
+/// and the parent returns the same stop.
 #[test]
-fn test_detention_stop_spans_frames() {
+fn test_detention_stop_crosses_again_in_the_parent() {
     // Enough for the parent's call and a few dozen iterations of the child's loop, the last of
     // them two gas short of a round, so that its `JUMP` is the charge that crosses.
     let cap = BASE + call_regular(false) + 32 * (JUMPDEST_GAS + VERYLOW + MID) - 2;
@@ -717,9 +742,12 @@ fn test_detention_stop_spans_frames() {
     let child = BytecodeBuilder::default().append(JUMPDEST).push_number(0_u8).append(JUMP).build();
     // The compute at the read: `PUSH0`, `POP` and the `TIMESTAMP` itself.
     let limit = 3 * BASE + cap;
-    // The parent's work up to and with its call, then the child's loop up to the limit.
+    // The parent's work up to and with its call, then the child's loop up to the limit, then the
+    // parent's `POP` and the pushes of its write up to the limit.
     let before_loop = 3 * BASE + BASE + call_regular(false);
-    let compute = gas::compute_at_crossing(before_loop, limit, &[JUMPDEST_GAS, VERYLOW, MID]);
+    let at_the_child = gas::compute_at_crossing(before_loop, limit, &[JUMPDEST_GAS, VERYLOW, MID]);
+    let compute = gas::compute_at_crossing(at_the_child, limit, &[BASE, VERYLOW, VERYLOW]);
+    assert_eq!(limit - compute, 1, "the second push crosses, one gas short");
     let expected = Ledgers {
         regular: gas::call_intrinsic(&[], false) + compute,
         state: 0,
@@ -739,10 +767,10 @@ fn test_detention_stop_spans_frames() {
         EvmTxRuntimeLimits::no_limits().with_block_env_access_compute_gas_limit(cap),
     );
     assert_every_frame_stops(&traced, LimitKind::ComputeGas, limit, 2);
-    assert_parent_does_not_resume(&traced);
-    assert_detention_step_reads_as_out_of_gas(&traced, "JUMP");
+    assert_parent_resumed(&traced, "PUSH32");
+    assert_detention_step_reads_as_out_of_gas(&traced, "PUSH32");
     assert_compute_at_stop(&traced, compute);
-    pin("detention_stop_spans_frames", &traced, expected);
+    pin("detention_stop_crosses_again_in_the_parent", &traced, expected);
 }
 
 /// Gas limit above the 200M execution cap, so a fresh slot is paid from the reservoir first.

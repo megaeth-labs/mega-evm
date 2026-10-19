@@ -52,9 +52,9 @@ use revm::{
 use crate::{
     common::history,
     detention::{
-        assert_stopped, burn, cold_access, context, execute, fresh_write, fresh_write_spill,
-        intrinsic, memory_cost, op, run_on, spin, sstore_static, stop_data, tx, work, Calls,
-        Charges, Run, ABOVE, BELOW, BENEFICIARY, CALLER, CAP, CHILD, CONTRACT, TIERS,
+        assert_caught, assert_stopped, burn, cold_access, context, execute, fresh_write,
+        fresh_write_spill, intrinsic, memory_cost, op, run_on, spin, sstore_static, stop_data, tx,
+        work, Calls, Charges, Run, ABOVE, BELOW, BENEFICIARY, CALLER, CAP, CHILD, CONTRACT, TIERS,
     },
 };
 
@@ -129,6 +129,17 @@ fn call_keeping_status(code: BytecodeBuilder, to: Address, gas: Option<u32>) -> 
 /// Stores the status a call left on the stack in slot 0, and stops.
 fn store_status(code: BytecodeBuilder) -> Bytes {
     code.push_number(0_u8).append(SSTORE).stop().build()
+}
+
+/// What [`store_status`] charges once a call the limit stopped returned into it: the push of the
+/// slot, and the store of the failed call's status, zero, into the cold slot that holds zero, a
+/// write that changes nothing and pays the cold access alone.
+fn store_failed_status() -> Charges {
+    Charges::default().then(&[
+        3,
+        sstore_static(),
+        satin_gas_params().get(GasId::cold_storage_cost()),
+    ])
 }
 
 /// A piece of code that ends a frame on an out-of-gas, appended to a program.
@@ -801,10 +812,11 @@ fn call_keeping_value(code: BytecodeBuilder, to: Address) -> BytecodeBuilder {
 /* ---------- crossing the cap ---------- */
 
 /// A callee given all the gas after its caller's read, which computes past the cap, crosses it:
-/// the transaction stops at the limit, and the caller never stores the status it would have
-/// stored without the read.
+/// the callee is stopped at the limit, and its caller resumes on what the limit leaves it, which
+/// does not pay the store of the failed call's status: the caller is stopped there in turn, and
+/// never stores the status it would have stored without the read.
 #[test]
-fn test_a_callee_computing_past_the_cap_stops_the_transaction() {
+fn test_a_callee_computing_past_the_cap_is_stopped() {
     let child = work(BytecodeBuilder::default(), 10_000).stop().build();
     for gas_limit in TIERS {
         let (detained, plain) = with_and_without_read(|first| {
@@ -826,8 +838,9 @@ fn test_a_callee_computing_past_the_cap_stops_the_transaction() {
             .then(&[2, 2, 2, 2, 2, 2, 3, 2, cold_access()])
             .work(10_000, 0)
             .left(CAP);
-        assert_stopped(&detained, intrinsic(gas_limit), left);
-        assert_eq!(slot(&detained, 0), None, "the caller never resumed");
+        assert!(store_failed_status().crossing(left).is_some(), "the store crosses again");
+        assert_caught(&detained, intrinsic(gas_limit), left, &store_failed_status());
+        assert_ne!(slot(&detained, 0), Some(U256::from(1)), "the caller stored no status");
     }
 }
 
@@ -1261,8 +1274,9 @@ fn run_precompile(
 ///
 /// Priced within the allowance, it answers as without the read. Priced at the allowance exactly,
 /// it answers, and its caller's next charge — the push of its status's slot — crosses the limit.
-/// Priced a unit past it, it answers out of gas without computing, and the transaction stops,
-/// billed nothing of the allowance the precompile ran on.
+/// Priced a unit past it, it answers out of gas without computing, and is the stop, billed nothing
+/// of the allowance the precompile ran on, which its caller catches before it stores the failed
+/// call's status.
 #[test]
 fn test_a_precompile_runs_on_the_allowance() {
     for gas_limit in TIERS {
@@ -1277,8 +1291,14 @@ fn test_a_precompile_runs_on_the_allowance() {
         let allowance = CAP - to_the_call.total();
         let stopped = |run: &PrecompileRun, price: u64| {
             let input = U256::from(price).to_be_bytes::<32>();
-            let left = to_the_call.clone().then(&[price, 3]).left(CAP);
-            assert_stopped(&run.run, intrinsic_with(&input, gas_limit), left);
+            let intrinsic = intrinsic_with(&input, gas_limit);
+            if price > allowance {
+                // The precompile's price is the crossing: its call is the stop.
+                assert_caught(&run.run, intrinsic, allowance, &store_failed_status());
+            } else {
+                let left = to_the_call.clone().then(&[price, 3]).left(CAP);
+                assert_stopped(&run.run, intrinsic, left);
+            }
         };
 
         // Priced past every allowance: the stop.
@@ -1306,11 +1326,11 @@ fn test_a_precompile_runs_on_the_allowance() {
 ///
 /// - priced within the allowance, it computes on the allowance and answers as without the read;
 /// - priced past the allowance but within what its caller forwarded, it runs out of the allowance
-///   without computing, and the transaction stops at the limit — without the read it computes;
+///   without computing, and is the stop, which its caller catches — without the read it computes;
 /// - forwarded less than its price, within the allowance, it runs out of gas as without the read;
-/// - forwarded less than its price, past the allowance, it runs out of the allowance too, and the
-///   transaction stops at the limit. Without the read the call fails and its caller goes on: with
-///   no price, it cannot be told from one priced within the forward.
+/// - forwarded less than its price, past the allowance, it runs out of the allowance too, and is
+///   the stop. Without the read the call fails and burns its forward: with no price, it cannot be
+///   told from one priced within the forward.
 ///
 /// The cheap input is padded to the length of the costly one, so the two calls leave the same
 /// allowance, which the stop's bill reads out.
@@ -1327,7 +1347,8 @@ fn test_a_precompile_is_held_to_what_the_limit_leaves() {
 
         let (detained, plain) = (run(TIMESTAMP, None, &above), run(PUSH0, None, &above));
         let allowance = CAP - charges_to_the_precompile(above.len(), None).total();
-        assert_stopped(&detained.run, intrinsic_with(&above, gas_limit), allowance);
+        let intrinsic = intrinsic_with(&above, gas_limit);
+        assert_caught(&detained.run, intrinsic, allowance, &store_failed_status());
         assert_eq!(detained.ran_on, [(allowance, false)], "past the allowance, nothing computed");
         let above_price = plain.spent;
         assert!(allowance < CAP && CAP < above_price, "{allowance} {above_price}");
@@ -1358,7 +1379,7 @@ fn test_a_precompile_is_held_to_what_the_limit_leaves() {
         let (detained, plain) =
             (run(TIMESTAMP, Some(short), &above), run(PUSH0, Some(short), &above));
         let allowance = CAP - charges_to_the_precompile(above.len(), Some(short)).total();
-        assert_stopped(&detained.run, intrinsic_with(&above, gas_limit), allowance);
+        assert_caught(&detained.run, intrinsic, allowance, &store_failed_status());
         assert_eq!(detained.ran_on, [(allowance, false)], "run on the allowance");
         assert_eq!(plain.ran_on, [(u64::from(short), false)]);
         assert!(plain.run.outcome.result.is_success());
@@ -1370,15 +1391,16 @@ fn test_a_precompile_is_held_to_what_the_limit_leaves() {
 /// the gas.
 ///
 /// The built-in set the chain runs prices it before it runs: priced within what its caller
-/// forwarded, it needs gas the limit withholds, and is the stop, answered without running; priced
-/// past the forward, it runs out of gas as it does without the read, and its caller goes on. Below
+/// forwarded, it needs gas the limit withholds, and is the stop, answered without running, which
+/// its caller catches; priced past the forward, it runs out of gas as it does without the read,
+/// and its caller goes on. Below
 /// the execution cap the forward is under 100,000,000, so the two prices fall on either side of
 /// it; above the cap both are within it.
 ///
 /// A modexp a node replaced is not priced: it is run on the allowance, computes nothing, and is
 /// the stop, whatever its price. A transaction the beneficiary sends straight to it is detained
-/// from the start, so it runs on the cap itself. The same transaction from another sender
-/// computes.
+/// from the start, so it runs on the cap itself, and its stop is the transaction's. The same
+/// transaction from another sender computes.
 #[test]
 fn test_a_precompile_priced_past_the_cap_computes_nothing() {
     let mut cases = (0, 0);
@@ -1407,7 +1429,8 @@ fn test_a_precompile_priced_past_the_cap_computes_nothing() {
             let called =
                 run_precompile(db(TIMESTAMP), MODEXP, recording_modexp, tx_with(&input, gas_limit));
             let allowance = CAP - charges_to_the_precompile(input.len(), None).total();
-            assert_stopped(&called.run, intrinsic_with(&input, gas_limit), allowance);
+            let intrinsic_with = intrinsic_with(&input, gas_limit);
+            assert_caught(&called.run, intrinsic_with, allowance, &store_failed_status());
             assert_eq!(called.ran_on, [(allowance, false)], "run on the allowance");
 
             let built_in = |first| {
@@ -1422,7 +1445,7 @@ fn test_a_precompile_priced_past_the_cap_computes_nothing() {
             assert_eq!(forward, plain_forward, "the read leaves the forward as it is");
             assert!(forward > CAP, "{forward}");
             if price <= forward {
-                assert_stopped(&detained, intrinsic_with(&input, gas_limit), allowance);
+                assert_caught(&detained, intrinsic_with, allowance, &store_failed_status());
                 assert!(!ran, "answered without running");
                 assert!(plain_ran && plain.outcome.result.is_success());
                 assert_eq!(slot(&plain, 0), Some(U256::from(1)), "without the read it computes");
@@ -1471,8 +1494,9 @@ fn test_a_priced_precompile_within_the_allowance_runs_as_without_the_read() {
 
 /// A Satin address a node replaced is not priced from the built-in set, even when its precompile
 /// carries the built-in's id: forwarded less than its price and more than the allowance, the
-/// replaced modexp runs on the allowance and is the stop, where the built-in one, which the engine
-/// prices, runs out of gas as without the read, and its caller goes on.
+/// replaced modexp runs on the allowance and is the stop, which its caller catches, where the
+/// built-in one, which the engine prices, runs out of gas as without the read, and its caller goes
+/// on.
 #[test]
 fn test_a_replaced_precompile_is_not_priced_from_the_built_in_set() {
     let input = costly_modexp_input(64, 0);
@@ -1487,7 +1511,8 @@ fn test_a_replaced_precompile_is_not_priced_from_the_built_in_set() {
         let replaced =
             run_precompile(db(TIMESTAMP), MODEXP, recording_modexp, tx_with(&input, gas_limit));
         let allowance = CAP - charges_to_the_precompile(input.len(), Some(short)).total();
-        assert_stopped(&replaced.run, intrinsic_with(&input, gas_limit), allowance);
+        let intrinsic = intrinsic_with(&input, gas_limit);
+        assert_caught(&replaced.run, intrinsic, allowance, &store_failed_status());
         assert_eq!(replaced.ran_on, [(allowance, false)], "run on the allowance");
 
         let (built_in, plain) = (
@@ -1504,7 +1529,7 @@ fn test_a_replaced_precompile_is_not_priced_from_the_built_in_set() {
 /// runs on its forward and runs out of gas as without the read, and its caller goes on, as the KZG
 /// entry does — 100,000, forwarded 80,000 under a cap of 50,000. A node's own precompile, which the
 /// engine cannot price, keeps the clamp: at the pairing's price and forward, it runs on the
-/// allowance and is the stop.
+/// allowance and is the stop, which its caller catches.
 #[test]
 fn test_a_nodes_own_precompile_keeps_the_clamp_a_priced_wrapper_does_not() {
     let pairing = vec![0_u8; 3 * 192];
@@ -1546,7 +1571,8 @@ fn test_a_nodes_own_precompile_keeps_the_clamp_a_priced_wrapper_does_not() {
             .with_dyn_precompiles(HashMap::from_iter([(PRICED, priced(&runs))]));
         let own = run_on(&mut evm, tx_with(&own_input, gas_limit));
         let allowance = 100_000 - charges_to_the_precompile(32, Some(120_000)).total();
-        assert_stopped(&own, intrinsic_with(&own_input, gas_limit), allowance);
+        let intrinsic = intrinsic_with(&own_input, gas_limit);
+        assert_caught(&own, intrinsic, allowance, &store_failed_status());
         assert_eq!(*runs.lock().unwrap(), [(allowance, false)], "run on the allowance");
     }
 }
@@ -1554,10 +1580,10 @@ fn test_a_nodes_own_precompile_keeps_the_clamp_a_priced_wrapper_does_not() {
 /// A precompile priced between the allowance and its forward whose input fails a check made after
 /// its gas check: the BN254 pairing of three pairs and a stray byte, priced 147,000 for its three
 /// whole pairs, which checks the input's length after its gas. Under a cap of 100,000 it is
-/// answered without running, before the length check, and the transaction stops; without the read
-/// the length check fails the call, which burns its forward, and the caller goes on to store the
-/// failure. Under the default cap the allowance pays the price, and the call fails on its input as
-/// without the read.
+/// answered without running, before the length check, with the stop, which gives its forward back
+/// and which the caller catches before it stores the failure; without the read the length check
+/// fails the call, which burns its forward, and the caller goes on to store the failure. Under the
+/// default cap the allowance pays the price, and the call fails on its input as without the read.
 #[test]
 fn test_a_precompile_whose_input_fails_past_its_gas_check_stops_past_the_allowance() {
     let input = vec![0_u8; 3 * 192 + 1];
@@ -1574,7 +1600,8 @@ fn test_a_precompile_whose_input_fails_past_its_gas_check_stops_past_the_allowan
         };
         let ((detained, ran), (plain, plain_ran)) = (run(TIMESTAMP, 100_000), run(PUSH0, 100_000));
         let allowance = 100_000 - charges_to_the_precompile(input.len(), None).total();
-        assert_stopped(&detained, intrinsic_with(&input, gas_limit), allowance);
+        let intrinsic = intrinsic_with(&input, gas_limit);
+        assert_caught(&detained, intrinsic, allowance, &store_failed_status());
         assert!(!ran && plain_ran, "answered without running");
         assert!(plain.outcome.result.is_success());
         assert_eq!(slot(&plain, 0), Some(U256::ZERO), "without the read the call fails");
@@ -1588,8 +1615,8 @@ fn test_a_precompile_whose_input_fails_past_its_gas_check_stops_past_the_allowan
 /// `price`, after a read, against the same call without it:
 ///
 /// - forwarded all the gas under a cap that leaves it less than its price, it needs gas the limit
-///   withholds: it is answered without running, and the transaction stops, where without the read
-///   it computes;
+///   withholds: it is answered without running, with the stop, which its caller catches, where
+///   without the read it computes;
 /// - under the spec's cap, which leaves it its price, revm runs it and it charges its price, as
 ///   without the read;
 /// - forwarded one gas short of its price under a cap that leaves it less still, it runs on its
@@ -1617,7 +1644,8 @@ fn assert_held_from_its_price(to: Address, input: &[u8], price: u64) {
         let (plain, _, plain_spent, plain_ran) = run(PUSH0, cap, None);
         let allowance = cap - charges_to_the_precompile(input.len(), None).total();
         assert!(allowance < price && price <= forward, "{to}: {allowance} {price} {forward}");
-        assert_stopped(&detained, intrinsic_with(input, gas_limit), allowance);
+        let intrinsic = intrinsic_with(input, gas_limit);
+        assert_caught(&detained, intrinsic, allowance, &store_failed_status());
         assert!(!ran, "{to}: answered without running");
         assert!(plain_ran && plain.outcome.result.is_success(), "{to}");
         assert_eq!(plain_spent, price, "{to}: without the read it computes, at its price");
@@ -1685,8 +1713,9 @@ fn test_the_bls12_pairing_is_held_from_its_price() {
 /// - under a cap past the overhead and short of the `CREATE` opcode's regular gas, the refusal
 ///   answers as without the read, and the deployment stops at the opcode's charge;
 /// - under a cap past both and one gas short of what the creation computes, the creation stops at
-///   the limit where it would deploy, and the stop takes the deployment back; one gas more, and it
-///   deploys as without the read;
+///   the limit where it would deploy, and the stop takes the deployment back: the call answers
+///   `ExecutionReverted` with the stop's revert data, keeping the signer's nonce its creation's
+///   start spent, and charges nothing more; one gas more, and it deploys as without the read;
 /// - under the spec's cap, both run as without the read.
 #[test]
 fn test_a_keyless_calls_charges_are_held_to_what_the_limit_leaves() {
@@ -1767,12 +1796,19 @@ fn test_a_keyless_calls_charges_are_held_to_what_the_limit_leaves() {
             .then(&[KEYLESS_DEPLOY_OVERHEAD_GAS, create, creation - hash, hash])
             .left(cap);
         assert_eq!(left, hash - 1, "the hash of the deposited code crosses");
-        assert_stopped(&stopped, deploy_intrinsic, left);
+        let limit = assert_caught(&stopped, deploy_intrinsic, left, &Charges::default());
+        let answer = IKeylessDeploy::keylessDeployCall::abi_decode_returns(
+            stopped.outcome.result.output().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(answer.deployedAddress, Address::ZERO, "nothing deployed");
+        let reverted = IKeylessDeploy::ExecutionReverted::abi_decode(&answer.errorData).unwrap();
+        assert_eq!(reverted.output, stop_data(limit), "the creation reverted with the stop");
         assert!(
             stopped.outcome.state.get(&CREATE2_FACTORY_CONTRACT).is_none_or(|a| a.info.is_empty()),
             "the stop takes the deployment back"
         );
-        assert_eq!(nonce_of(&stopped, CREATE2_FACTORY_DEPLOYER), 0, "the signer's nonce with it");
+        assert_eq!(nonce_of(&stopped, CREATE2_FACTORY_DEPLOYER), 1, "the start spent the nonce");
         let detained = both(BENEFICIARY, 0, &deploys, cap + 1);
         assert_eq!(detained.outcome.result, deployed.outcome.result, "the creation fits");
         assert_eq!(detained.outcome.gas, deployed.outcome.gas);

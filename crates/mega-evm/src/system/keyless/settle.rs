@@ -139,7 +139,7 @@ pub(crate) fn refuses_empty_deposit(
 /// above 1, and a resubmission is refused `SignerNonceTooHigh`.
 ///
 /// It runs before the call resumes, because the record it takes back may be what put the call
-/// over its budget: the call is held to its limits again without it, and the stop it returns on
+/// over a limit: the call is held to its limits again without it, and the stop it returns on
 /// its resume, if any, is the one that stands then.
 pub(crate) fn settle<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
