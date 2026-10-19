@@ -38,7 +38,7 @@ Its byte prices are an input: the `satin-price-override` feature, off by default
 The precompile set is op-revm's Karst set with KZG point evaluation repriced to 100,000.
 It is carried as an alloy-evm `PrecompilesMap`, so a node can add or replace an address through `MegaEvmFactory::with_dyn_precompiles_builder`.
 
-The common execution layer is in place: the frame lifecycle the later mechanisms plug into, the count of data-size bytes and write records per frame, the abort protocol that stops a transaction crossing a limit with a revert, and the inspector contract: the admission gate and what a rewrite does not change.
+The common execution layer is in place: the frame lifecycle the later mechanisms plug into, the count of data-size bytes and write records per frame, the stop protocol that reverts the frame crossing a limit, which its caller may catch, and the inspector contract: the admission gate and what a rewrite does not change.
 
 The data-size limit is in place on top of it.
 A transaction is held to a data-size limit, and every frame to a budget: the transaction's own frame gets what its body leaves, and a child 98% of what its parent has left.
@@ -98,7 +98,7 @@ The call pays a fixed 100,000 gas for decoding the transaction and recovering it
 It pays for the signer's account when the creation's nonce bump is what creates it, and what a `CREATE` opcode charges its frame: its regular gas, the created account, and the two write records of the creation's start.
 It then starts the creation as the signer, below it, with `gasLimitOverride` capped to what it has left.
 From there the creation is an ordinary frame, priced, limited, journaled and traced as one, and its `ORIGIN` and `GASPRICE` are the transaction's.
-Once the creation returns the call answers in the contract's ABI — the deployed address, or the error the creation failed with; a transaction limit the deployment crosses stops the transaction and takes the deployment back whole.
+Once the creation returns the call answers in the contract's ABI — the deployed address, or the error the creation failed with; a limit the creation crosses stops the creation alone, and the call answers with the error that stop produced, while a stop of the call's own charges reverts the call and takes the deployment back whole.
 A signer is refused once its nonce is above 1.
 A deployment spends the signer's nonce from 0 to 1.
 A signer at nonce 1 stays there, as in the legacy engine, however often its deployment fails, so nobody can use up its attempts, and once it deploys, so a resubmission finds the address taken (`ContractAlreadyExists()`).
@@ -145,8 +145,9 @@ The one exception is what a frame has left when an opcode's static gas fails, wh
 The Host marks the read where it loads the value, and the most restrictive read binds.
 Every frame's spendable gas is held to what the limit leaves the transaction, and the rest is withheld, with the revm fork's withheld part of a frame's regular gas: a regular charge cannot draw it, and every other reader of the frame's gas — `GAS`, the gas a call forwards, the `SSTORE` sentry, what a callee returns — counts it.
 So a transaction that reads runs as it would without the read until a regular charge needs the withheld gas.
-That charge crossed the cap, and it is not made: the transaction is stopped with a revert carrying `MegaLimitExceeded` of kind compute, billed its compute before that charge, less than one charge short of the limit, and the sender gets back everything the frame had, the part withheld included.
-The stop reports that compute as what the transaction used.
+That charge crossed the cap, and it is not made: the frame that makes the charge is stopped with a revert carrying `MegaLimitExceeded` of kind compute, its compute counted up to that charge, less than one charge short of the limit, and its caller gets back everything the frame had, the part withheld included.
+The stop reports that compute as what was used.
+The caller resumes held to what the limit leaves it, and the transaction is stopped only when the stopped frame is its own.
 A precompile forwarded more than what the limit leaves its frame is decided from its price before it runs: priced within what the limit leaves, it runs as without the read; priced past it and within its forward, it computes nothing and is the same crossing, as is an interceptor's answer that spent more than the limit leaves; priced past its whole forward, it is a failed call its caller survives, as without the read.
 So an input priced between what the limit leaves and the forward that would fail a check made after the gas check is the crossing too, where without the read that check fails the call.
 Every precompile of the Satin set is priced, op-revm's size-limited BN254 pairing and BLS12-381 MSMs and pairing included.
@@ -158,12 +159,15 @@ The error's argument is a `uint8`: a refused `SLOTNUM` names access type 12, whi
 The two caps are runtime limits, 20,000,000 each by default; `EvmTxRuntimeLimits::no_limits()` leaves them unlimited, and a transaction whose caps are both unlimited is not detained.
 The protocol's own transactions and the system calls are not detained either.
 
-Every transaction-level limit — data size and gas detention's compute limit — stops a transaction the same way.
-The frame that crosses it reverts with `MegaLimitExceeded(kind, limit)`, and every frame above returns the same revert without running another instruction, whatever produced its result: revm, an interceptor, or an inspector that rewrites it into a success or a halt.
-The transaction settles like any EIP-8037 revert: it keeps nothing it wrote or logged, its sender pays the intrinsic gas and what ran, and gets back the rest of its regular gas and the reservoir, less the body's history.
+Every limit — the transaction's data size, a frame's data-size budget and gas detention's compute limit — stops the frame that crosses it the same way.
+That frame reverts with `MegaLimitExceeded(kind, limit)`, keeping nothing it wrote or logged, and its caller resumes as after any revert: the call fails, the stop is its return data, and the gas the frame had comes back.
+The caller is held to what the transaction has left, so a write or a charge of its own that crosses again stops it in turn, and a caller that catches the stop and ends lets the transaction succeed.
+Only a stop of the transaction's own frame is the transaction's result, and `LimitStop` reports only that one.
+It settles like any EIP-8037 revert: the transaction keeps nothing it wrote or logged, its sender pays the intrinsic gas and what ran, and gets back the rest of its regular gas and the reservoir, less the body's history.
 Nothing is rescued, because nothing was taken: detention withholds gas inside a frame's own tracker and never spends it.
-A frame budget reverts its frame alone, and its caller runs on; a real out-of-gas and a precompile given less than its price still halt and burn what their frame was given.
-`tests/satin/stops.rs` pins every limit at the transaction's own frame and three calls down, below and above the execution cap, with and without an inspector that rewrites every result.
+An inspector may rewrite a stop as it may any failure; a frame that kept nothing settles as one whatever the inspector made of its result.
+A real out-of-gas and a precompile given less than its price still halt and burn what their frame was given.
+`tests/satin/stops.rs` pins every limit crossed by the transaction's own frame and by a frame three calls down, whose callers catch the stop and succeed, below and above the execution cap, with and without an inspector that records every frame's end, and a column of stopped creations an inspector revives, which settle as frames that kept nothing.
 
 ## Quick start
 
