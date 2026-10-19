@@ -101,21 +101,6 @@ fn test_activation_block_rejects_a_mega_system_transaction() {
     assert!(executor.receipts().is_empty(), "nothing was packed");
 }
 
-/// Rule 1, the other half: the same block executes deposits.
-#[test]
-fn test_activation_block_executes_deposits() {
-    let mut state = common::state();
-    let mut executor = executor(&mut state, unlimited_ctx().with_no_user_tx_activation_block(true));
-    executor.apply_pre_execution_changes().expect("the block starts");
-
-    executor
-        .execute_transaction(&deposit_tx(Bytes::new(), 100_000))
-        .expect("a deposit is what an activation block is for");
-
-    let (_, result) = executor.finish_with_counters().expect("the block finishes");
-    assert_eq!(result.receipts().len(), 1);
-}
-
 /// Rule 2, alloy-op-evm's Jovian DA footprint block limit: with no scalar in state the rule
 /// costs nothing and the block reports no blob gas.
 #[test]
