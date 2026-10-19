@@ -88,6 +88,10 @@ pub struct AdditionalLimit {
     /// recipient, or the account it creates — charged before the first frame and given back when
     /// that frame fails.
     top_level_write_record_gas: u64,
+    /// The write records the transaction's own frame makes, as the charge of their history before
+    /// execution found them, for [`push_lane`](Self::push_lane) to check its own count against.
+    /// See [`stage_top_level_records`](Self::stage_top_level_records).
+    pending_top_level_records: Option<u64>,
     /// The history gas the running opcode charged its own frame for the records the frame it is
     /// starting will make, waiting for that frame's lane to be pushed.
     pending_frame_charge: FrameCharge,
@@ -136,6 +140,7 @@ impl AdditionalLimit {
         self.intrinsic_history_gas = 0;
         self.intrinsic_history_bytes = 0;
         self.top_level_write_record_gas = 0;
+        self.pending_top_level_records = None;
         self.pending_frame_charge = FrameCharge::NONE;
         self.pending_start_refused = None;
         self.history_gas_spent = 0;
@@ -322,6 +327,17 @@ impl AdditionalLimit {
     /// Records the history gas charged for the transaction's own write record.
     pub(crate) const fn set_top_level_write_record_gas(&mut self, gas: u64) {
         self.top_level_write_record_gas = gas;
+    }
+
+    /// Leaves the write records the transaction's own frame makes, as the charge of their history
+    /// before execution found them, for [`push_lane`](Self::push_lane) to check its own count
+    /// against when it pushes that frame's lane
+    /// ([`check_top_level_records`](Self::check_top_level_records)).
+    ///
+    /// Only a transaction that pays history is charged, and so leaves one. A first frame answered
+    /// or refused before its lane is pushed leaves it for the next transaction's reset to clear.
+    pub(crate) const fn stage_top_level_records(&mut self, records: u64) {
+        self.pending_top_level_records = Some(records);
     }
 
     /// Draws up to `amount` from the running frame's history allowance and reports what it gave;
@@ -649,15 +665,15 @@ impl AdditionalLimit {
                 if depth == 0 {
                     self.sender = inputs.caller;
                     let written_outside = target == inputs.caller || self.target_is_authority;
+                    let records = u64::from(transfers_value && !written_outside);
+                    self.check_top_level_records(records);
                     self.tracker.push(Lane::new(
                         Some(target),
                         written_outside || transfers_value,
                         budget,
                         0,
                     ));
-                    if transfers_value && !written_outside {
-                        self.tracker.record(WRITE_RECORD);
-                    }
+                    self.tracker.record(WRITE_RECORD.times(records));
                     return;
                 }
                 let records = self.records_the_caller_paid_for(input, charge.records);
@@ -685,6 +701,7 @@ impl AdditionalLimit {
                 self.tracker.record(WRITE_RECORD.times(records.on_lane));
                 if depth == 0 {
                     self.sender = inputs.caller();
+                    self.check_top_level_records(records.on_lane);
                 } else if records.caller {
                     self.tracker.record_caller(true, charge.caller);
                 }
@@ -720,6 +737,28 @@ impl AdditionalLimit {
             );
         }
         records
+    }
+
+    /// Checks the write records the transaction's own frame makes on its lane, `counted` here,
+    /// against the ones its history was charged for before execution
+    /// ([`stage_top_level_records`](Self::stage_top_level_records)).
+    ///
+    /// The two are separate answers to the same question: the charge, on the transaction, and the
+    /// count here, on the frame input revm built from it. They agree because that input carries
+    /// the transaction's own caller, target and value, and both read the same answer to whether
+    /// the target is an applied authority. An inspector that rewrites the input so that the answer
+    /// changes splits them, as it does for a frame an opcode starts
+    /// ([`records_the_caller_paid_for`](Self::records_the_caller_paid_for)). A divergence trips
+    /// here in every debug build rather than charging history for a record the data size does not
+    /// count, or counting one no history paid for.
+    fn check_top_level_records(&mut self, counted: u64) {
+        if let Some(charged) = self.pending_top_level_records.take() {
+            debug_assert_eq!(
+                charged, counted,
+                "the transaction's own frame makes other write records than its history was \
+                 charged for",
+            );
+        }
     }
 
     /// The write records starting `input` makes at a depth above the transaction's own frame, for
@@ -1131,6 +1170,64 @@ mod tests {
         let mut limit = with_the_transactions_frame();
         limit.stage_frame_charge(FrameStartRecords::NONE, 0, 0);
         limit.on_frame_init(&call_from_to(CALLEE, TARGET, U256::from(1)), 1);
+    }
+
+    /// The transaction's own frame counts on its lane the write records its history was charged
+    /// for before execution: its value's recipient, unless that is the sender or an applied
+    /// authority, and the account a creation makes.
+    #[test]
+    fn test_the_transactions_own_frame_counts_the_records_its_history_paid_for() {
+        let one = U256::from(1);
+        let rows = [
+            ("a value call", call_from_to(SENDER, CALLEE, one), false, 1),
+            ("a call without value", call_from_to(SENDER, CALLEE, U256::ZERO), false, 0),
+            ("a value call to the sender", call_from_to(SENDER, SENDER, one), false, 0),
+            ("a value call to an applied authority", call_from_to(SENDER, CALLEE, one), true, 0),
+            ("a creation", creation(SENDER, U256::ZERO), false, 1),
+            ("an endowed creation", creation(SENDER, one), false, 1),
+        ];
+        for (name, input, target_is_authority, records) in rows {
+            let authority = u64::from(target_is_authority);
+            let mut limit = AdditionalLimit::default();
+            limit.record_applied_authorities(SENDER, authority, target_is_authority);
+            limit.stage_top_level_records(records);
+            limit.on_frame_init(&input, 0);
+            assert_eq!(limit.usage().write_records, authority + records, "{name}");
+            assert_eq!(limit.pending_top_level_records, None, "{name}: taken once");
+        }
+    }
+
+    /// A transaction's own frame that would count a record its history did not pay for trips the
+    /// check, rather than counting data size no history matches.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "other write records than its history was charged for")]
+    fn test_a_top_level_record_its_history_did_not_pay_for_trips() {
+        let mut limit = AdditionalLimit::default();
+        limit.stage_top_level_records(0);
+        limit.on_frame_init(&call_from_to(SENDER, CALLEE, U256::from(1)), 0);
+    }
+
+    /// A transaction's own frame that makes no record its history was charged for trips the check,
+    /// rather than keeping history no data size matches.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "other write records than its history was charged for")]
+    fn test_a_top_level_charge_for_a_record_the_frame_does_not_make_trips() {
+        let mut limit = AdditionalLimit::default();
+        limit.stage_top_level_records(1);
+        limit.on_frame_init(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
+    }
+
+    /// A creation as the transaction's own frame is checked too: one whose history paid for no
+    /// record of the account it creates trips.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "other write records than its history was charged for")]
+    fn test_a_top_level_creation_its_history_did_not_pay_for_trips() {
+        let mut limit = AdditionalLimit::default();
+        limit.stage_top_level_records(0);
+        limit.on_frame_init(&creation(SENDER, U256::ZERO), 0);
     }
 
     /// A child frame's budget is 98% of what its parent has left, three frames down, and the
@@ -1563,7 +1660,6 @@ mod tests {
     fn test_a_destruction_counts_its_transfer_log_with_its_beneficiary() {
         let destruction = |beneficiary| StagedRecord::SelfDestruct {
             had_value: true,
-            target_exists: true,
             to_other_account: true,
             beneficiary,
         };

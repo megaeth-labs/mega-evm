@@ -93,9 +93,12 @@
 //! on the pre-block budget ([`pre_block_call_gas_limit`](crate::pre_block_call_gas_limit)), and
 //! one that does not succeed refuses the block.
 //!
-//! The executor does not read the live system address: every transaction reads it out of the
-//! registry itself when it is validated, and the pre-block step is what leaves the registry naming
-//! this block's address.
+//! The pre-block step does not read the live system address, but it is what leaves the registry
+//! naming this block's address. The executor reads the address off the block's state before every
+//! non-deposit transaction, to decide before the transaction runs whether it is a Mega System
+//! Transaction, which the data-size budget and the builder's policy do not refuse. Every
+//! transaction, a deposit included, then reads the same slot into its own journal when it is
+//! validated.
 
 #[cfg(not(feature = "std"))]
 use alloc as std;

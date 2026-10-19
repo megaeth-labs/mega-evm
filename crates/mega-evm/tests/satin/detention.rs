@@ -596,8 +596,9 @@ pub(crate) fn with_delegation(
 }
 
 /// Every read caps the transaction from where it read, not from its start: the transaction first
-/// spends more compute than the cap, then reads, then computes forever, and it stops at the first
-/// charge past its compute at the read plus the cap, having spent everything before it.
+/// spends [`WORK`] rounds of work, less compute than the cap, then reads, then computes forever,
+/// and it stops at the first charge past its compute at the read plus the cap, having spent
+/// everything before it. A spend larger than the cap before the read is the next test's.
 #[test]
 fn test_every_volatile_read_caps_the_transaction_from_where_it_read() {
     for gas_limit in TIERS {

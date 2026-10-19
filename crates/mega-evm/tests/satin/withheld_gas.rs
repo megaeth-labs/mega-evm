@@ -563,6 +563,52 @@ fn test_an_exp_that_cannot_pay_its_exponent_burns_what_its_frame_had() {
     }
 }
 
+/// A contract that returns 500 words of zeros, the memory of which it pays for.
+const RETURNS_WORDS: Address = address!("0000000000000000000000000000000000d00014");
+
+/// `RETURNDATACOPY`'s word charge is noted when it fails, as the other copies' are. It copies no
+/// more than the return data holds, so each child first gets some: a hundred children forwarded
+/// 3,500 gas each call [`RETURNS_WORDS`], which their caller warmed, then copy the 500 words it
+/// returned, a charge of 1,500 that the 1,385 they have left cannot pay. Each burns those, and the
+/// caller completes under a cap of 300,000, as without the read. Counted as compute, the hundred
+/// burns would pass the cap.
+#[test]
+fn test_a_returndatacopy_that_cannot_pay_its_words_burns_what_its_frame_had() {
+    const WORDS: u64 = 500;
+    const FORWARD: u32 = 3_500;
+    const UNDER: u64 = 300_000;
+    let returns =
+        BytecodeBuilder::default().push_number(WORDS * 32).append_many([PUSH0, RETURN]).build();
+    let child = BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
+        .push_address(RETURNS_WORDS)
+        .append_many([GAS, STATICCALL, RETURNDATASIZE, PUSH0, PUSH0, RETURNDATACOPY])
+        .build();
+    // The child's four `PUSH0`, its push of the address, `GAS` and the warm call; what the callee
+    // spends — its two pushes and its memory; then `RETURNDATASIZE`, two `PUSH0` and
+    // `RETURNDATACOPY`'s static gas.
+    let warm = crate::salt::entry(GasId::warm_storage_read_cost());
+    let left = u64::from(FORWARD) - (8 + 3 + 2 + warm) - (5 + memory_cost(WORDS)) - (2 + 4 + 3);
+    assert!(left < 3 * WORDS, "the copy is the charge the child cannot pay");
+    for gas_limit in TIERS {
+        let (detained, plain) = with_and_without_read_under(UNDER, |first| {
+            let code = op(BytecodeBuilder::default(), first)
+                .push_address(RETURNS_WORDS)
+                .append_many([EXTCODEHASH, POP]);
+            let code = calls_to_child(code, 100, FORWARD);
+            let db = MemoryDatabase::default()
+                .account_code(CONTRACT, code.stop().build())
+                .account_code(CHILD, child.clone())
+                .account_code(RETURNS_WORDS, returns.clone());
+            (db, gas_limit)
+        });
+        assert_as_without_read(&detained, &plain, "a hundred halts on RETURNDATACOPY");
+        let regular = plain.outcome.gas.regular - intrinsic(gas_limit);
+        assert!(regular - 100 * left <= UNDER, "within the cap, the burns aside");
+        assert!(regular > UNDER, "the burns counted as compute would pass the cap");
+    }
+}
+
 /// The regular gas a call to an existing contract that is not the sender pays before its first
 /// instruction, below the execution cap and above it alike: EIP-2780's base of 12,000 and 3,000
 /// for the recipient. The body's history is on the history ledger, whichever pool paid it.

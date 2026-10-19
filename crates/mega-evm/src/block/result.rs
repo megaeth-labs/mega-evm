@@ -17,8 +17,9 @@ use crate::{BlockUsage, LimitUsage, MegaGasUsage, MegaHaltReason, MegaTransactio
 /// A block's gas, on the three ledgers its transactions spend on, and the history bytes they
 /// appended.
 ///
-/// The block executor fills it transaction by transaction with [`record`](Self::record) and
-/// holds each counter to its own block limit, where it has one.
+/// The block executor fills it transaction by transaction with [`record`](Self::record). No
+/// block limit holds any of these counters: each is counted and reported. The block's gas limit
+/// is held against the gas its receipts report, which is none of these ledgers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BlockGasCounters {
     /// Regular gas: each transaction's regular ledger, at least its EIP-7623 floor.

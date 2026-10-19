@@ -27,8 +27,6 @@ pub enum StagedRecord {
     SelfDestruct {
         /// Whether the destructed account had a balance to move.
         had_value: bool,
-        /// Whether the beneficiary existed before.
-        target_exists: bool,
         /// Whether the beneficiary is another account than the destructed one.
         to_other_account: bool,
         /// The beneficiary.
@@ -186,7 +184,6 @@ mod tests {
         );
         let to_other = StagedRecord::SelfDestruct {
             had_value: true,
-            target_exists: true,
             to_other_account: true,
             beneficiary: OTHER,
         };
@@ -201,13 +198,7 @@ mod tests {
     fn test_selfdestruct_record_rules() {
         let sd = |had_value, to_other_account| {
             let beneficiary = OTHER;
-            StagedRecord::SelfDestruct {
-                had_value,
-                target_exists: true,
-                to_other_account,
-                beneficiary,
-            }
-            .effect(SENDER)
+            StagedRecord::SelfDestruct { had_value, to_other_account, beneficiary }.effect(SENDER)
         };
         assert_eq!(sd(true, true), RecordEffect::Record(WRITE_RECORD));
         assert_eq!(sd(true, false), RecordEffect::None);
@@ -215,7 +206,6 @@ mod tests {
         assert_eq!(sd(false, false), RecordEffect::None);
         let to_sender = StagedRecord::SelfDestruct {
             had_value: true,
-            target_exists: true,
             to_other_account: true,
             beneficiary: SENDER,
         };
@@ -228,7 +218,6 @@ mod tests {
     fn test_only_a_destruction_to_another_account_moves_value() {
         let sd = |had_value, to_other_account, beneficiary| StagedRecord::SelfDestruct {
             had_value,
-            target_exists: true,
             to_other_account,
             beneficiary,
         };

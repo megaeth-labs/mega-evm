@@ -288,13 +288,6 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         &self.additional_limit
     }
 
-    /// The common execution layer's state, mutably. For tests and tools that drive the abort
-    /// protocol directly.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub const fn additional_limit_mut(&mut self) -> &mut AdditionalLimit {
-        &mut self.additional_limit
-    }
-
     /// Gas detention for the running (or last) transaction: the volatile data it read and the
     /// compute limit that set. See the `access` module.
     pub const fn detention(&self) -> &Detention {
