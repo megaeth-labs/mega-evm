@@ -431,9 +431,9 @@ One dimension is limited per transaction, data size; compute is not one (see [Tw
   The transaction's data-size limit, the per-frame share, the detention caps (see [Gas Detention on Withheld Gas](#12-gas-detention-on-withheld-gas)) and the block's data-size limit (see [Block Limits](#20-block-limits)) are protocol values of the Satin spec, the same on every chain.
   They are not chain configuration: no chain configuration carries them, and a node MUST hold every Satin transaction and block to them, never to values a configuration names or a node is handed with a block.
   A later spec that changes one states its own value.
-  A transaction executed outside a block — a call, a gas estimate, a simulation — MUST be held to the same per-transaction limits and detention caps block execution holds it to.
-  That rule binds block execution and validation, the executions whose result the chain agrees on.
-  An RPC node may run a simulation such as `eth_call` under other limits as its own policy; the result of such a call is no part of the chain, and the node SHOULD keep `eth_call` and `eth_estimateGas` consistent with each other.
+  A node MUST hold the transactions of block execution and validation, the executions whose result the chain agrees on, to these values.
+  A call, a gas estimate or a simulation executed outside a block SHOULD use the same per-transaction limits and detention caps, so that its result predicts block execution.
+  A node that runs one under other limits, such as an `eth_call` with detention off, does so as its own policy: the result is no part of the chain, and the node SHOULD keep `eth_call` and `eth_estimateGas` consistent with each other.
 
 ### 11. The Revert-Class Stop
 
@@ -992,7 +992,7 @@ A node, a stateless validator and a replay tool must agree on everything below, 
   The spec fixes part of the configuration a transaction runs on, whatever a node supplies: the Satin gas schedule, EIP-8037, EIP-2780 and EIP-7708 on, the 200,000,000 execution cap, and the 512 KiB and 1 MiB code-size limits.
   A node build must not enable the `mega-evm/satin-price-override` feature (it reads `MEGA_SATIN_CPSB` / `MEGA_SATIN_CPHB` at run time).
   A node that reads the configuration before it executes anything — gas estimation reads the execution cap — must read these values, not its own.
-  The limits are fixed by the spec too (see [Resource Limits](#10-resource-limits) and [Block Limits](#20-block-limits)): a node passes none of them, neither in its chain configuration nor with a block, and the reference implementation holds a block's transactions, and an execution outside a block — a call, a gas estimate — to the same values without being told, so a node's calls and estimates stop what its blocks stop.
+  The limits are fixed by the spec too (see [Resource Limits](#10-resource-limits) and [Block Limits](#20-block-limits)): a node passes none of them, neither in its chain configuration nor with a block, and the reference implementation holds a block's transactions, and, unless the node chooses otherwise as its own policy, an execution outside a block — a call, a gas estimate — to the same values without being told, so by default a node's calls and estimates stop what its blocks stop.
 - **Precompiles.**
   A node adds or replaces a precompile only through `MegaEvm::with_dyn_precompiles` or the factory's precompile builder.
   The engine prices a call to a Satin precompile from its own table, by the precompile's identifier, so a set put in place around those two routes, through the mutable access to the precompile map that revm and alloy-evm expose, keeps the Satin prices for every entry that carries a Satin identifier: gas detention then decides a call from a price the replacing precompile does not charge.
