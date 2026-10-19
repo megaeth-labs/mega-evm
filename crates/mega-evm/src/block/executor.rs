@@ -6,16 +6,12 @@
 //!
 //! # Where the limits come from
 //!
-//! The limits every node must agree on are the chain's: the executor reads the
-//! [`ProtocolLimits`] the fork active at the block's timestamp carries
-//! ([`MegaHardforks::protocol_limits`]), installs their per-transaction half on the EVM before
-//! every transaction, and holds the block to their data-size budget. The node's context adds only
-//! the builder's policy ([`BlockLimits`]), which can tighten the budget and never loosen it; a
-//! validator leaves it at its default. A block whose schedule carries no limits at its timestamp,
-//! or limits their own check refuses
-//! ([`HardforkParams::validate`](crate::HardforkParams::validate)), is refused before anything
-//! runs, as an internal error: the schedule is the node's configuration, and a node's own schedule
-//! type may hand the executor values nothing checked at load.
+//! The limits every node must agree on are fixed per spec: the executor reads them from the
+//! spec's table ([`ProtocolLimits::for_spec`]), for the spec the EVM executes, installs their
+//! per-transaction half on the EVM before every transaction, and holds the block to their
+//! data-size budget. A node passes none of them. The node's context adds only the builder's
+//! policy ([`BlockLimits`]), which can tighten the budget and never loosen it; a validator leaves
+//! it at its default.
 //!
 //! # The block rules of the Karst base
 //!
@@ -139,7 +135,7 @@ use crate::{
         is_apply_pending_changes_due, system_contract_specs, transact_apply_pending_changes,
         transact_deploy, SequencerRegistryConfig, SystemContractDeployError,
     },
-    BlockGasCounters, BlockLimiter, BlockLimits, BucketId, ExternalEnvTypes, HardforkParams,
+    BlockGasCounters, BlockLimiter, BlockLimits, BucketId, ExternalEnvTypes,
     MegaBlockExecutionResult, MegaBlockTxResult, MegaContext, MegaEvm, MegaHardforks,
     MegaTransaction, MegaTransactionExt, ProtocolLimits,
 };
@@ -148,8 +144,8 @@ use crate::{
 ///
 /// It carries what the pre-block calls need (the parent hash and the parent beacon block root, as
 /// alloy-op-evm does), the block's own extra data, the activation-block flag and the builder's
-/// packing policy. The limits the protocol holds the block to are not here: they are the chain's
-/// ([`ProtocolLimits`]), read from the schedule.
+/// packing policy. The limits the protocol holds the block to are not here: they are fixed per
+/// spec ([`ProtocolLimits::for_spec`]).
 #[derive(Clone, Debug, Default)]
 pub struct MegaBlockExecutionCtx {
     /// The parent block's hash, which the EIP-2935 pre-block call records.
@@ -210,6 +206,8 @@ pub enum MegaBlockExecutionError {
     },
     /// The EVM runs an inspector that may rewrite what execution produces, which block execution
     /// does not admit.
+    ///
+    /// The inspector is the node's own choice, not a verdict on the block: an internal error.
     RewritingInspector,
     /// A system-contract address already holds bytecode that is not the contract this engine
     /// deploys.
@@ -225,25 +223,6 @@ pub enum MegaBlockExecutionError {
     ///
     /// A gap in the node's configuration, not a verdict on the block: an internal error.
     MissingSequencerRegistryConfig,
-    /// The schedule carries no [`ProtocolLimits`] for the block's timestamp: no `MegaETH` fork is
-    /// active there, or the fork active there carries none.
-    ///
-    /// A gap in the node's configuration, not a verdict on the block: an internal error.
-    MissingProtocolLimits {
-        /// The block's timestamp.
-        timestamp: u64,
-    },
-    /// The schedule carries [`ProtocolLimits`] for the block's timestamp that their own check
-    /// refuses ([`HardforkParams::validate`](crate::HardforkParams::validate)): limits no chain
-    /// may carry, which a schedule checked at load cannot hold.
-    ///
-    /// A gap in the node's configuration, not a verdict on the block: an internal error.
-    InvalidProtocolLimits {
-        /// The block's timestamp.
-        timestamp: u64,
-        /// What the check reported.
-        message: String,
-    },
     /// The EIP-7997 factory holds the right runtime but nonce 0.
     ZeroFactoryNonce {
         /// The factory address.
@@ -289,15 +268,6 @@ impl fmt::Display for MegaBlockExecutionError {
             Self::MissingSequencerRegistryConfig => {
                 f.write_str("Satin is scheduled but SequencerRegistryConfig is not configured")
             }
-            Self::MissingProtocolLimits { timestamp } => write!(
-                f,
-                "the schedule carries no ProtocolLimits for the block at timestamp {timestamp}"
-            ),
-            Self::InvalidProtocolLimits { timestamp, message } => write!(
-                f,
-                "the schedule's ProtocolLimits for the block at timestamp {timestamp} are \
-                 invalid: {message}"
-            ),
             Self::ZeroFactoryNonce { address } => write!(
                 f,
                 "EIP-7997 factory at {address} has matching code but nonce 0; refusing to accept a zero-nonce factory"
@@ -316,18 +286,16 @@ impl fmt::Display for MegaBlockExecutionError {
 impl core::error::Error for MegaBlockExecutionError {}
 
 impl From<MegaBlockExecutionError> for BlockExecutionError {
-    /// A block refused for what the node's configuration lacks is an internal error: a schedule
-    /// without a parameter the block needs says nothing about the block, and a node must not mark
-    /// a block invalid because its own configuration is incomplete. Every other refusal is a
-    /// verdict on the block, a validation error.
+    /// A block refused for what the node itself does is an internal error: a schedule without a
+    /// parameter the block needs, or an inspector the node runs that may rewrite execution, says
+    /// nothing about the block, and a node must not mark a block invalid because of its own
+    /// configuration. Every other refusal is a verdict on the block, a validation error.
     fn from(error: MegaBlockExecutionError) -> Self {
         match error {
             MegaBlockExecutionError::MissingSequencerRegistryConfig |
-            MegaBlockExecutionError::MissingProtocolLimits { .. } |
-            MegaBlockExecutionError::InvalidProtocolLimits { .. } => Self::other(error),
+            MegaBlockExecutionError::RewritingInspector => Self::other(error),
             MegaBlockExecutionError::UnexpectedNonDepositTxInActivationBlock |
             MegaBlockExecutionError::TransactionDaFootprintAboveGasLimit { .. } |
-            MegaBlockExecutionError::RewritingInspector |
             MegaBlockExecutionError::ForeignSystemContractCode { .. } |
             MegaBlockExecutionError::ZeroFactoryNonce { .. } |
             MegaBlockExecutionError::UsedEmptyAccount { .. } |
@@ -410,9 +378,8 @@ pub struct MegaBlockExecutor<E, R: OpReceiptBuilder, Spec> {
     /// What the block has used, and the limits it is held to. Private, so the limits cannot be
     /// changed once the executor has read them; [`limiter`](Self::limiter) reads it.
     limiter: BlockLimiter,
-    /// The limits the schedule holds this block to, read at the block's timestamp and checked;
-    /// the refusal of the block when the schedule carries none there, or limits the check refuses.
-    protocol_limits: Result<ProtocolLimits, MegaBlockExecutionError>,
+    /// The limits the protocol holds this block to: the spec's.
+    protocol_limits: ProtocolLimits,
     /// Optional observer of each pre-block state, invoked before the state is committed.
     pre_block_observer: OptionalPreBlockObserver,
 }
@@ -460,73 +427,58 @@ where
 {
     /// Creates an executor that runs `ctx`'s block on `evm`.
     ///
-    /// The limits come from `spec`, at the block environment's timestamp
-    /// ([`MegaHardforks::protocol_limits`]): their per-transaction half is installed on the EVM
-    /// here, and again before every transaction, so every route to an executor — this one and
-    /// both factory constructors — runs the block's transactions under the chain's limits,
-    /// whatever the caller did or did not apply to the EVM. The block is held to the protocol's
-    /// data-size budget, lowered to `ctx`'s building policy where that is lower.
+    /// The limits are the spec's ([`ProtocolLimits::for_spec`]), for the spec `evm` executes:
+    /// their per-transaction half is installed on the EVM here, and again before every
+    /// transaction, so every route to an executor — this one and both factory constructors — runs
+    /// the block's transactions under them, whatever the caller did or did not apply to the EVM.
+    /// The block is held to the protocol's data-size budget, lowered to `ctx`'s building policy
+    /// where that is lower.
     ///
-    /// The block's gas limit comes from the block environment, whatever `ctx` carries: it is the
-    /// number consensus holds the block to, and it is also the budget the data-availability
-    /// footprint of the block's transactions is held to.
-    ///
-    /// A schedule with no limits at the block's timestamp, or with limits their own check refuses
-    /// ([`HardforkParams::validate`](crate::HardforkParams::validate)), builds an executor all
-    /// the same, which installs nothing on the EVM; the block is refused at its first entry point
-    /// ([`MegaBlockExecutionError::MissingProtocolLimits`],
-    /// [`MegaBlockExecutionError::InvalidProtocolLimits`]). The check is made here, whatever the
-    /// schedule's type: a node's own implementation of [`MegaHardforks`] attaches its parameters
-    /// without [`MegaHardforkConfig::with_params`](crate::MegaHardforkConfig::with_params), and
-    /// [`validate_schedule`](MegaHardforks::validate_schedule) checks them only when a node calls
-    /// it.
+    /// The block's gas limit comes from the block environment, the executor's own state rather
+    /// than building policy: it is the number consensus holds the block to, and it is also the
+    /// budget the data-availability footprint of the block's transactions is held to.
     pub fn new(
         mut evm: MegaEvm<DB, INSP, ExtEnvs>,
         ctx: MegaBlockExecutionCtx,
         spec: Spec,
         receipt_builder: R,
     ) -> Self {
-        let (timestamp, block_gas_limit) = {
-            let block = evm.ctx().block();
-            (block.timestamp().saturating_to(), block.gas_limit())
-        };
-        let protocol_limits = match spec.protocol_limits(timestamp) {
-            None => Err(MegaBlockExecutionError::MissingProtocolLimits { timestamp }),
-            Some(limits) => match limits.validate() {
-                Ok(()) => Ok(limits),
-                Err(error) => Err(MegaBlockExecutionError::InvalidProtocolLimits {
-                    timestamp,
-                    message: error.message,
-                }),
-            },
-        };
-        let policy = match &protocol_limits {
-            Ok(protocol) => {
-                evm.set_tx_runtime_limits(protocol.tx_runtime_limits);
-                ctx.block_limits.within(protocol)
-            }
-            Err(_) => ctx.block_limits,
-        };
-        let limits = policy.with_block_gas_limit(block_gas_limit);
+        let block_gas_limit = evm.ctx().block().gas_limit();
+        let protocol_limits = ProtocolLimits::for_spec(evm.ctx().spec());
+        evm.set_tx_runtime_limits(protocol_limits.tx_runtime_limits);
+        let limiter = BlockLimiter::new(ctx.block_limits.within(&protocol_limits), block_gas_limit);
         Self {
             spec,
             receipt_builder,
             ctx,
             evm,
             receipts: Vec::new(),
-            limiter: limits.to_block_limiter(),
+            limiter,
             protocol_limits,
             pre_block_observer: OptionalPreBlockObserver(None),
         }
     }
 
-    /// The limits the schedule holds this block to, read at the block's timestamp; `None` when it
-    /// carries none there, or limits their own check refuses, either of which refuses the block.
-    pub const fn protocol_limits(&self) -> Option<&ProtocolLimits> {
-        match &self.protocol_limits {
-            Ok(limits) => Some(limits),
-            Err(_) => None,
-        }
+    /// The limits the protocol holds this block to: the spec's
+    /// ([`ProtocolLimits::for_spec`]).
+    pub const fn protocol_limits(&self) -> &ProtocolLimits {
+        &self.protocol_limits
+    }
+
+    /// Holds this block to `limits` in place of the spec's: a counterfactual of a tool's or a
+    /// test's, which a node executing the chain never runs.
+    ///
+    /// Their per-transaction half is installed on the EVM and before every transaction from now
+    /// on, and the block's data-size budget is theirs, lowered to the building policy where that
+    /// is lower. What the block counted so far stays counted. Behind the `test-utils` feature, so
+    /// a node build cannot reach it.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn with_protocol_limits(mut self, limits: ProtocolLimits) -> Self {
+        self.evm.set_tx_runtime_limits(limits.tx_runtime_limits);
+        self.limiter.limits.block_txs_data_limit =
+            self.ctx.block_limits.within(&limits).block_txs_data_limit;
+        self.protocol_limits = limits;
+        self
     }
 }
 
@@ -606,15 +558,6 @@ where
             output.is_deposit,
         )?;
         self.check_da_footprint(output.da_footprint)
-    }
-
-    /// The limits the schedule holds this block to, or the refusal of a block whose schedule
-    /// carries none at its timestamp, or limits their own check refuses.
-    fn require_protocol_limits(&self) -> Result<ProtocolLimits, BlockExecutionError> {
-        match &self.protocol_limits {
-            Ok(limits) => Ok(*limits),
-            Err(refusal) => Err(refusal.clone().into()),
-        }
     }
 
     /// Refuses an EVM that runs an inspector which may rewrite what execution produces.
@@ -739,7 +682,6 @@ where
     /// nothing inside the block can change it again.
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
         self.check_admission()?;
-        self.require_protocol_limits()?;
 
         // The block starts with empty block-hash and bucket records, so what they hold at the end
         // is what this block read.
@@ -771,7 +713,8 @@ where
             .fork_params::<SequencerRegistryConfig>()
             .copied()
             .ok_or(MegaBlockExecutionError::MissingSequencerRegistryConfig)?;
-        for spec in system_contract_specs(&config) {
+        let block_number = self.evm.block().number().saturating_to();
+        for spec in system_contract_specs(&config, block_number) {
             let state = transact_deploy(self.evm.db_mut(), &spec).map_err(|error| match error {
                 SystemContractDeployError::Database(error) => BlockExecutionError::other(error),
                 SystemContractDeployError::ForeignCode { address, expected, found } => {
@@ -788,7 +731,6 @@ where
             self.deliver_pre_block(PreBlockStateSource::SystemContract(spec.address), state);
         }
 
-        let block_number = self.evm.block().number().saturating_to();
         let (due, reads) = is_apply_pending_changes_due(self.evm.db_mut(), block_number)
             .map_err(BlockExecutionError::other)?;
         self.deliver_pre_block(PreBlockStateSource::PendingChanges, reads);
@@ -988,7 +930,6 @@ where
         BlockExecutionError,
     > {
         self.check_admission()?;
-        let limits = self.require_protocol_limits()?;
 
         let (tx_env, tx) = tx.into_parts();
         let inner = tx.tx();
@@ -1059,9 +1000,9 @@ where
             None
         };
 
-        // The transaction runs under the chain's limits, whatever was set on the EVM since the
+        // The transaction runs under the block's limits, whatever was set on the EVM since the
         // last one.
-        self.evm.set_tx_runtime_limits(limits.tx_runtime_limits);
+        self.evm.set_tx_runtime_limits(self.protocol_limits.tx_runtime_limits);
         let outcome = self
             .evm
             .execute_transaction(tx_env)
@@ -1087,15 +1028,10 @@ where
     /// The block's gas used is the sum of its receipts, as it has always been; the three ledgers
     /// and the data-size and write-record counts ride beside it, where no upstream type has a
     /// place for them. The blob gas used is the block's data-availability footprint.
-    ///
-    /// A block whose schedule carries no limits at its timestamp, or limits their own check
-    /// refuses, is refused here too, before the post-block balance increments: a caller that never
-    /// started the block cannot finish it either.
     pub fn finish_with_counters(
         mut self,
     ) -> Result<MegaFinishedBlock<DB, INSP, ExtEnvs, R>, BlockExecutionError> {
         self.check_admission()?;
-        self.require_protocol_limits()?;
 
         let balance_increments =
             post_block_balance_increments::<Header>(&self.spec, self.evm.block(), &[], None);
@@ -1136,17 +1072,17 @@ mod tests {
         let mut executor = MegaBlockExecutor::new(
             MegaEvm::new(ctx),
             MegaBlockExecutionCtx::default(),
-            MegaHardforkConfig::default().with_all_activated().with_params(ProtocolLimits::DEFAULT),
+            MegaHardforkConfig::default().with_all_activated(),
             alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder::default(),
         );
 
         assert_eq!(executor.evm().block().gas_limit, 30_000_000);
-        assert_eq!(executor.limiter().limits.block_gas_limit, 30_000_000);
-        assert_eq!(executor.protocol_limits(), Some(&ProtocolLimits::DEFAULT));
+        assert_eq!(executor.limiter().block_gas_limit, 30_000_000);
+        assert_eq!(executor.protocol_limits(), &ProtocolLimits::for_spec(MegaSpecId::SATIN));
         assert_eq!(
             executor.evm().tx_runtime_limits().tx_data_size_limit,
             crate::constants::TX_DATA_LIMIT,
-            "a default chain installs the production per-transaction data-size cap"
+            "the executor installs the spec's per-transaction data-size cap"
         );
         assert_eq!(executor.evm().tx_runtime_limits().frame_data_size_limit, u64::MAX);
         assert_eq!(
@@ -1157,44 +1093,45 @@ mod tests {
         assert!(executor.into_evm().is_inspecting());
     }
 
-    /// A schedule that carries no limits at the block's timestamp refuses the block before any
-    /// pre-block step runs, and refuses to finish it: the block is not executed under limits
-    /// nobody chose.
+    /// A block is held to its spec's limits whatever the node hands over: limits it set on the
+    /// EVM are replaced, a looser building policy gives way to the spec's budget, and the schedule
+    /// carries none. Only the test-and-tool override replaces them, and a policy still tightens
+    /// what it installs.
     #[test]
-    fn test_a_block_without_protocol_limits_is_refused_before_it_starts() {
-        let ctx =
-            MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN).with_block(BlockEnv {
-                timestamp: alloy_primitives::U256::from(7),
-                ..Default::default()
-            });
-        let mut executor = MegaBlockExecutor::new(
+    fn test_a_block_is_held_to_its_specs_limits_whatever_the_node_passes() {
+        let satin = ProtocolLimits::for_spec(MegaSpecId::SATIN);
+        let ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN)
+            .with_tx_runtime_limits(crate::EvmTxRuntimeLimits::no_limits());
+        let policy = BlockLimits::no_limits().with_block_txs_data_limit(u64::MAX);
+        let executor = MegaBlockExecutor::new(
             MegaEvm::new(ctx),
-            MegaBlockExecutionCtx::default(),
-            MegaHardforkConfig::default()
-                .with_all_activated()
-                .with_params(crate::system::SequencerRegistryConfig::placeholder()),
+            MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new(), policy),
+            MegaHardforkConfig::default().with_all_activated(),
             alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder::default(),
         );
+        assert_eq!(executor.protocol_limits(), &satin);
+        assert_eq!(*executor.evm().tx_runtime_limits(), satin.tx_runtime_limits);
+        assert_eq!(executor.limiter().limits.block_txs_data_limit, 13_107_200);
 
-        assert_eq!(executor.protocol_limits(), None);
-        let error = executor.apply_pre_execution_changes().expect_err("no limits, no block");
-        assert_eq!(
-            internal(&error),
-            &MegaBlockExecutionError::MissingProtocolLimits { timestamp: 7 },
-            "a gap in the node's configuration is not a verdict on the block"
-        );
-        assert_eq!(
-            error.to_string(),
-            "the schedule carries no ProtocolLimits for the block at timestamp 7"
-        );
-        assert!(executor.receipts().is_empty());
+        let counterfactual = ProtocolLimits::no_limits().with_block_txs_data_limit(7);
+        let executor = executor.with_protocol_limits(counterfactual);
+        assert_eq!(executor.protocol_limits(), &counterfactual);
+        assert_eq!(*executor.evm().tx_runtime_limits(), counterfactual.tx_runtime_limits);
+        assert_eq!(executor.limiter().limits.block_txs_data_limit, 7);
 
-        // Nor can it be finished: the post-block balance increments do not run on it.
-        let Err(error) = executor.finish() else { panic!("no limits, no finished block") };
-        assert_eq!(
-            internal(&error),
-            &MegaBlockExecutionError::MissingProtocolLimits { timestamp: 7 }
-        );
+        let tighter = MegaBlockExecutor::new(
+            MegaEvm::new(MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN)),
+            MegaBlockExecutionCtx::new(
+                B256::ZERO,
+                None,
+                Bytes::new(),
+                BlockLimits::no_limits().with_block_txs_data_limit(5),
+            ),
+            MegaHardforkConfig::default().with_all_activated(),
+            alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder::default(),
+        )
+        .with_protocol_limits(counterfactual);
+        assert_eq!(tighter.limiter().limits.block_txs_data_limit, 5, "the policy still tightens");
     }
 
     /// The `MegaBlockExecutionError` an internal error carries; panics on a validation error.
@@ -1220,7 +1157,7 @@ mod tests {
                 Bytes::new(),
                 BlockLimits::default(),
             ),
-            MegaHardforkConfig::default().with_all_activated().with_params(ProtocolLimits::DEFAULT),
+            MegaHardforkConfig::default().with_all_activated(),
             alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder::default(),
         );
 
@@ -1228,7 +1165,8 @@ mod tests {
         assert_eq!(internal(&error), &MegaBlockExecutionError::MissingSequencerRegistryConfig);
     }
 
-    /// Every refusal but a configuration gap is a verdict on the block: a validation error.
+    /// Every refusal but one for what the node itself does — a configuration gap, or an inspector
+    /// it runs — is a verdict on the block: a validation error.
     #[test]
     fn test_a_refusal_of_the_block_is_a_validation_error() {
         let address = alloy_primitives::Address::repeat_byte(1);
@@ -1238,7 +1176,6 @@ mod tests {
                 transaction_da_footprint: 2,
                 available_block_da_footprint: 1,
             },
-            MegaBlockExecutionError::RewritingInspector,
             MegaBlockExecutionError::ForeignSystemContractCode {
                 address,
                 expected: B256::ZERO,
@@ -1257,8 +1194,7 @@ mod tests {
         }
         for gap in [
             MegaBlockExecutionError::MissingSequencerRegistryConfig,
-            MegaBlockExecutionError::MissingProtocolLimits { timestamp: 1 },
-            MegaBlockExecutionError::InvalidProtocolLimits { timestamp: 1, message: String::new() },
+            MegaBlockExecutionError::RewritingInspector,
         ] {
             assert_eq!(internal(&BlockExecutionError::from(gap.clone())), &gap);
         }

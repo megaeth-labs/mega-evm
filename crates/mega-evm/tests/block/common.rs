@@ -82,36 +82,33 @@ pub(crate) fn registry_config() -> SequencerRegistryConfig {
         initial_system_address: MEGA_SYSTEM_ADDRESS,
         initial_sequencer: SEQUENCER,
         initial_admin: ADMIN,
-        initial_from_block: 1,
         min_rotation_delay: 100,
     }
 }
 
-/// A schedule that activates Satin at genesis, can seed the `SequencerRegistry`, and holds its
-/// blocks to the loosest limits a chain may carry.
+/// A schedule that activates Satin at genesis and can seed the `SequencerRegistry`.
 ///
-/// Its limits are [`ProtocolLimits::loosest`]: most block tests exercise one mechanism and take
-/// the limits out, and a test that holds a block or a transaction to a limit attaches its own
-/// ([`chain_spec_with`]). Every limit is unlimited but gas detention's caps, which no transaction
-/// of a block this size reaches, so a transaction that reads volatile data is detained and never
-/// stopped.
+/// Its blocks are held to the spec's limits ([`ProtocolLimits::for_spec`]), which no block this
+/// size reaches but gas detention's caps; a test that holds a block or a transaction to another
+/// limit replaces them ([`executor_with_limits`]).
 pub(crate) fn chain_spec() -> MegaHardforkConfig {
-    chain_spec_with(ProtocolLimits::loosest())
+    MegaHardforkConfig::default().with_all_activated().with_params(registry_config())
 }
 
-/// [`chain_spec`], holding its blocks to `limits`, which must be limits a chain may carry: the
-/// block executor refuses a block under any other.
-pub(crate) fn chain_spec_with(limits: ProtocolLimits) -> MegaHardforkConfig {
-    MegaHardforkConfig::default()
-        .with_all_activated()
-        .with_params(registry_config())
-        .with_params(limits)
+/// The loosest limits a block could be held to while a read of volatile data still detains:
+/// every limit unlimited, and gas detention's caps one below the most compute a transaction can
+/// spend, which no transaction of a block this size reaches. For a test that holds a block to
+/// one limit and no other.
+pub(crate) const fn loosest() -> ProtocolLimits {
+    ProtocolLimits::no_limits().with_tx_runtime_limits(loosest_tx())
 }
 
-/// The per-transaction half of [`ProtocolLimits::loosest`], for a test that holds a block's
-/// transactions to one limit and no other.
+/// The per-transaction half of [`loosest`].
 pub(crate) const fn loosest_tx() -> EvmTxRuntimeLimits {
-    ProtocolLimits::loosest().tx_runtime_limits
+    let cap = mega_evm::constants::MAX_TX_COMPUTE_GAS - 1;
+    EvmTxRuntimeLimits::no_limits()
+        .with_block_env_access_compute_gas_limit(cap)
+        .with_oracle_access_compute_gas_limit(cap)
 }
 
 /// The context of a block the builder packs under `policy`.
@@ -169,13 +166,13 @@ pub(crate) fn executor_with_env(
     build(state, ctx, env, chain_spec())
 }
 
-/// An executor over `state`, for a block the chain holds to `limits`, packed under no building
-/// policy.
+/// An executor over `state`, for a block held to `limits` in place of the spec's, packed under no
+/// building policy.
 pub(crate) fn executor_with_limits(
     state: &mut State<MemoryDatabase>,
     limits: ProtocolLimits,
 ) -> TestExecutor<'_> {
-    build(state, unlimited_ctx(), evm_env(), chain_spec_with(limits))
+    build(state, unlimited_ctx(), evm_env(), chain_spec()).with_protocol_limits(limits)
 }
 
 /// An executor over `state`, for a block on the chain `spec` describes.

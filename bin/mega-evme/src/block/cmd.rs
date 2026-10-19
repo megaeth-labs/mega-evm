@@ -135,11 +135,7 @@ pub async fn replay_blocks(
             // activation-block rule depend on it, so every other block replays from the cache.
             if engine == Engine::Satin &&
                 inputs.parent_timestamp.is_none() &&
-                satin::needs_parent_timestamp(
-                    inputs.chain_id,
-                    inputs.header.timestamp,
-                    limits_override,
-                )?
+                satin::needs_parent_timestamp(inputs.chain_id, inputs.header.timestamp)?
             {
                 source.complete_parent_timestamp(&mut inputs).await?;
             }

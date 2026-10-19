@@ -1,13 +1,13 @@
-//! The chain's limits and the builder's policy: the limits a block is held to are the ones its
-//! schedule carries, whatever the node puts in the block context, and a builder's policy changes
-//! which transactions it packs, never what a packed block computes.
+//! The builder's policy against the protocol's limits: a builder's policy changes which
+//! transactions it packs, never what a packed block computes, and what a block counts of its
+//! data size is what its transactions kept.
 
 use alloy_consensus::transaction::Recovered;
 use alloy_evm::block::BlockExecutor;
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    BlockLimits, LimitCheck, LimitKind, MegaHardforkConfig, MegaTransactionExt, MegaTxEnvelope,
+    BlockLimits, LimitCheck, LimitKind, MegaSpecId, MegaTransactionExt, MegaTxEnvelope,
     ProtocolLimits, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 use op_alloy_consensus::OpReceiptEnvelope;
@@ -83,91 +83,18 @@ fn tx_from(
     Recovered::new_unchecked(common::tx(0, to, input, gas_limit), sender)
 }
 
-/// A schedule that carries `limits` the way a chain configuration does: through the checked
-/// route, so the values are ones a chain may carry.
-fn chain_with(limits: ProtocolLimits) -> MegaHardforkConfig {
-    MegaHardforkConfig::default()
-        .with_all_activated()
-        .with_params(common::registry_config())
-        .with_params(limits)
+/// An executor over `state`, for a block packed under `policy` and held to `limits`: the spec's,
+/// or another set a test holds a block to in their place.
+fn executor_under(
+    state: &mut State<MemoryDatabase>,
+    policy: BlockLimits,
+    limits: ProtocolLimits,
+) -> common::TestExecutor<'_> {
+    common::executor_with_spec(state, common::block_ctx(policy), common::chain_spec())
+        .with_protocol_limits(limits)
 }
 
-/// A chain whose limits are not the defaults is held to its own: a transaction that crosses the
-/// chain's data-size limit is stopped at that limit, and the block refuses a transaction once it
-/// reached the chain's data-size budget. The node passed no limits at all.
-#[test]
-fn test_a_block_is_held_to_the_limits_its_chain_carries() {
-    // One storage write fits the transaction's data size; a second crosses it.
-    let tx_data_size_limit = TX_BODY_SIZE + WRITE_RECORD_SIZE;
-    // The stopped transaction's body and the next one's body and write fill the block.
-    let block_txs_data_limit = 2 * TX_BODY_SIZE + WRITE_RECORD_SIZE;
-    let limits = ProtocolLimits::DEFAULT
-        .with_tx_runtime_limits(
-            ProtocolLimits::DEFAULT.tx_runtime_limits.with_tx_data_size_limit(tx_data_size_limit),
-        )
-        .with_block_txs_data_limit(block_txs_data_limit);
-    assert_ne!(limits, ProtocolLimits::DEFAULT);
-
-    let mut state = State::builder().with_database(database()).build();
-    let mut executor = common::executor_with_spec(
-        &mut state,
-        common::block_ctx(BlockLimits::default()),
-        chain_with(limits),
-    );
-    assert_eq!(executor.protocol_limits(), Some(&limits));
-    assert_eq!(*executor.evm().tx_runtime_limits(), limits.tx_runtime_limits);
-    assert_eq!(executor.limiter().limits.block_txs_data_limit, block_txs_data_limit);
-    executor.apply_pre_execution_changes().expect("the block starts");
-
-    // Two writes: stopped at the chain's transaction limit, and included with the stop.
-    let outcome = executor
-        .run_transaction(&tx_from(SENDERS[0], WRITES_TWO, Bytes::new(), GAS_LIMIT))
-        .expect("the transaction runs");
-    assert_eq!(
-        outcome.inner.limit_exceeded,
-        Some(LimitCheck::ExceedsLimit {
-            kind: LimitKind::DataSize,
-            limit: tx_data_size_limit,
-            used: TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE,
-            frame_local: false,
-        })
-    );
-    executor.commit_transaction_outcome(outcome).expect("the stopped transaction is included");
-    assert_eq!(executor.limiter().usage.write_records, 0, "the stop kept no record");
-    assert_eq!(executor.limiter().usage.data_size, TX_BODY_SIZE, "but kept its body");
-
-    // One write fits, and fills the chain's data-size budget.
-    let outcome = executor
-        .run_transaction(&tx_from(SENDERS[1], WRITES_ONE, Bytes::new(), GAS_LIMIT))
-        .expect("the transaction runs");
-    assert!(outcome.inner.result.is_success(), "{:?}", outcome.inner.result);
-    executor.commit_transaction_outcome(outcome).expect("it is included");
-    assert_eq!(executor.limiter().usage.write_records, 1);
-    assert_eq!(executor.limiter().usage.data_size, block_txs_data_limit);
-
-    // The block has reached the chain's data-size budget: the next transaction is refused.
-    let err = executor
-        .run_transaction(&tx_from(SENDERS[2], WRITES_ONE, Bytes::new(), GAS_LIMIT))
-        .expect_err("the block's data size has reached the chain's limit");
-    assert!(err.to_string().contains("Block transactions data limit reached"), "{err}");
-    assert!(err.to_string().contains(&format!("limit={block_txs_data_limit}")), "{err}");
-
-    // On the default chain the same two-write transaction keeps both writes.
-    let mut state = State::builder().with_database(database()).build();
-    let mut executor = common::executor_with_spec(
-        &mut state,
-        common::unlimited_ctx(),
-        chain_with(ProtocolLimits::DEFAULT),
-    );
-    executor.apply_pre_execution_changes().expect("the block starts");
-    let outcome = executor
-        .run_transaction(&tx_from(SENDERS[0], WRITES_TWO, Bytes::new(), GAS_LIMIT))
-        .expect("the transaction runs");
-    assert!(outcome.inner.result.is_success(), "{:?}", outcome.inner.result);
-    assert_eq!(outcome.inner.limit_exceeded, None);
-}
-
-/// An Oracle hint that would cross the chain's transaction data-size limit is not forwarded, and
+/// An Oracle hint that would cross the transaction's data-size limit is not forwarded, and
 /// the block's data-size counter takes nothing for it: the stopped transaction is included with
 /// its body alone. A hint that fits is forwarded and stays in the counter.
 #[test]
@@ -189,13 +116,13 @@ fn test_a_hint_that_crosses_the_limit_adds_nothing_to_the_block_s_data_size() {
     // The limit holds the small one twice and the large one once.
     let tx_data_size_limit = TX_BODY_SIZE + 2 * large_len - 1;
     assert!(TX_BODY_SIZE + 2 * small_len <= tx_data_size_limit);
-    let limits = ProtocolLimits::DEFAULT.with_tx_runtime_limits(
-        ProtocolLimits::DEFAULT.tx_runtime_limits.with_tx_data_size_limit(tx_data_size_limit),
+    let satin = ProtocolLimits::for_spec(MegaSpecId::SATIN);
+    let limits = satin.with_tx_runtime_limits(
+        satin.tx_runtime_limits.with_tx_data_size_limit(tx_data_size_limit),
     );
 
     let mut state = State::builder().with_database(database()).build();
-    let mut executor =
-        common::executor_with_spec(&mut state, common::unlimited_ctx(), chain_with(limits));
+    let mut executor = executor_under(&mut state, BlockLimits::no_limits(), limits);
     executor.apply_pre_execution_changes().expect("the block starts");
 
     let outcome = executor
@@ -243,7 +170,7 @@ struct Block {
     slots: Vec<U256>,
 }
 
-/// Executes `candidates` in order on a fresh block of the chain `limits` describes, packed under
+/// Executes `candidates` in order on a fresh block held to `limits`, packed under
 /// `policy`: a candidate the block refuses is left out, as a builder leaves it out. Returns the
 /// block, and for each candidate whether it was packed or the refusal that left it out.
 fn build(
@@ -253,8 +180,7 @@ fn build(
 ) -> (Block, Vec<Result<(), String>>) {
     let mut state = State::builder().with_database(database()).build();
     let result = {
-        let mut executor =
-            common::executor_with_spec(&mut state, common::block_ctx(policy), chain_with(limits));
+        let mut executor = executor_under(&mut state, policy, limits);
         executor.apply_pre_execution_changes().expect("the block starts");
         let packed: Vec<_> = candidates
             .iter()
@@ -287,13 +213,14 @@ fn build(
 }
 
 /// A builder packs under its own policy — a data-availability cap on one transaction, a cap on a
-/// transaction's declared gas, and a block data-size cap below the chain's — and leaves out what
-/// it refuses. A validator re-executing the block it packed, under no policy or under a policy of
-/// its own that differs, computes the same block: the same receipts, counters and state. A
-/// validator on a chain whose limits differ does not, which is why those travel with the chain.
+/// transaction's declared gas, and a block data-size cap below the protocol's — and leaves out
+/// what it refuses. A validator re-executing the block it packed, under no policy or under a
+/// policy of its own that differs, computes the same block: the same receipts, counters and
+/// state. One holding the block to other limits does not, which is why the limits are fixed per
+/// spec rather than any node's to choose.
 #[test]
 fn test_a_builder_and_a_validator_that_differ_on_building_policy_agree_on_the_block() {
-    let limits = ProtocolLimits::DEFAULT;
+    let limits = ProtocolLimits::for_spec(MegaSpecId::SATIN);
     let writes = |sender, slot: u8, input_len: usize, gas_limit| {
         let mut input = vec![0_u8; 32];
         input[31] = slot;
@@ -311,7 +238,7 @@ fn test_a_builder_and_a_validator_that_differ_on_building_policy_agree_on_the_bl
         writes(SENDERS[2], 3, 0, gas + 1),
         // Packed: it is the transaction that reaches the builder's data-size cap.
         writes(SENDERS[3], 4, 0, gas),
-        // Refused: the block has reached the builder's data-size cap, not the chain's.
+        // Refused: the block has reached the builder's data-size cap, not the protocol's.
         writes(SENDERS[4], 5, 0, gas),
     ];
     let da_size = |index: usize| MegaTransactionExt::estimated_da_size(&candidates[index]);
@@ -355,7 +282,7 @@ fn test_a_builder_and_a_validator_that_differ_on_building_policy_agree_on_the_bl
     assert!(built.receipts.iter().all(|receipt| receipt.status()));
     assert!(
         limits.block_txs_data_limit > built.counters.1.data_size,
-        "the block is well inside the chain's own data-size budget"
+        "the block is well inside the protocol's own data-size budget"
     );
 
     let block: Vec<_> = packed.iter().map(|index| candidates[*index].clone()).collect();
@@ -370,10 +297,10 @@ fn test_a_builder_and_a_validator_that_differ_on_building_policy_agree_on_the_bl
         assert_eq!(validated, built, "{policy:?}: the validator computes the builder's block");
     }
 
-    // The same block under a chain whose limits differ computes a different result: the first
-    // transaction's write crosses that chain's data-size limit and is stopped.
-    let stricter = ProtocolLimits::DEFAULT.with_tx_runtime_limits(
-        ProtocolLimits::DEFAULT.tx_runtime_limits.with_tx_data_size_limit(TX_BODY_SIZE + 32),
+    // The same block under other limits computes a different result: the first transaction's
+    // write crosses that data-size limit and is stopped.
+    let stricter = limits.with_tx_runtime_limits(
+        limits.tx_runtime_limits.with_tx_data_size_limit(TX_BODY_SIZE + 32),
     );
     let (elsewhere, outcomes) = build(stricter, BlockLimits::default(), &block);
     assert_eq!(outcomes, [Ok(()), Ok(())], "the stopped transactions are packed all the same");

@@ -47,14 +47,13 @@ A transfer log counts what a `LOG3` of one word counts, 160 bytes, where the val
 A frame start revm refuses on its caller's account — a value the caller cannot fund, a creation whose creator's nonce cannot be bumped — counts nothing; a creation onto an occupied address is counted, and revm refuses it after the count.
 A frame that crosses its budget reverts alone; a transaction that crosses its limit is stopped with a revert carrying `MegaLimitExceeded`, and pays only for what ran.
 A record is checked before its history is charged, so a record the limit rejects costs nothing and the stop is what the transaction reports.
-`EvmTxRuntimeLimits` sets the limits on a bare EVM, where they default to none but gas detention's caps; a block executor installs the chain's, whose default holds each transaction and the block to 12.5 MiB of data size.
+The limits are fixed per spec, `ProtocolLimits::for_spec`: Satin holds each transaction and the block to 12.5 MiB of data size and a detained transaction to 20,000,000 of compute past its read, and every EVM, a bare one included, runs under them; `EvmTxRuntimeLimits` sets others on an EVM, a tool's or a test's counterfactual.
 The block's data size is a packing budget: the transaction that crosses it is packed and the next one refused.
 `MegaEvm::execute_transaction` returns the result with the gas split into its regular, state and history ledgers beside the history bytes, the usage counted and the limit that stopped the transaction, if any.
 
 Block execution is in place too: `MegaBlockExecutor` is alloy-evm's `BlockExecutor` over a `MegaEvm`, with the block rules of the Karst base — a fork's activation block admits only deposit transactions, the data-availability footprint of the block's transactions is held to the block's gas limit and reported as its blob gas, and the L1 block info is read by the first transaction that prices against it, so the block's own L1 info deposit is what the transactions after it are priced with.
-Every transaction is held to the chain's limits, and the block counts what its transactions spent on each of the three ledgers and the history bytes they appended.
-The limits that change a result are protocol values: `ProtocolLimits`, the Satin fork's parameters, which a chain configuration carries beside `SequencerRegistryConfig` and block execution reads at the block's timestamp.
-They are the per-transaction runtime limits and the block's data-size budget; their default is today's values, and `validate_schedule` refuses a schedule that activates Satin without them or with a value no chain can run on.
+Every transaction is held to the spec's limits, and the block counts what its transactions spent on each of the three ledgers and the history bytes they appended.
+The limits that change a result are protocol values fixed per spec, `ProtocolLimits::for_spec`: the per-transaction runtime limits and the block's data-size budget, the same on every chain, so no chain configuration carries them and a node passes none of them.
 The block context a node passes carries only building policy (`BlockLimits`): a transaction's declared gas, the encoded sizes and the data-availability sizes, which only a builder applies and never to a deposit, and a cap that can lower the block's data-size budget and never raise it, so a validator that leaves it at its default computes the block a builder packed under any policy.
 The execution figure a block counts for a transaction is its regular ledger — its gas less state and history, read off revm's `Gas` — at least its EIP-7623 floor.
 The block's data-size cap never refuses a deposit, which the block must include; a deposit still counts towards it.
@@ -184,15 +183,13 @@ let tx = OpTx(op_revm::OpTransaction {
 let result = evm.transact_raw(tx)?;
 ```
 
-A node executes a block through the factory, which installs the block's limits on the EVM; given the same schedule, the EVM factory runs the EVMs it creates outside block execution — an RPC call, a simulation — under the chain's limits too:
+A node executes a block through the factory, which installs the spec's limits on the EVM; the EVM factory runs the EVMs it creates outside block execution — an RPC call, a simulation — under the same limits without being told:
 
 ```rust,ignore
 use alloy_evm::block::{BlockExecutor as _, BlockExecutorFactory as _};
 use mega_evm::{BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory};
 
-// `chain_spec` is shared, an `Arc` of the node's schedule: `MegaHardforks` holds for an `Arc` of one.
-let evm_factory = MegaEvmFactory::new().with_schedule(chain_spec.clone());
-let factory = MegaBlockExecutorFactory::new(receipt_builder, chain_spec, evm_factory);
+let factory = MegaBlockExecutorFactory::new(receipt_builder, chain_spec, MegaEvmFactory::new());
 let ctx = MegaBlockExecutionCtx::new(parent_hash, parent_beacon_block_root, extra_data, BlockLimits::no_limits());
 
 let mut executor = factory.create_executor(evm, ctx);
@@ -233,10 +230,10 @@ The crate builds on Rust 1.94.
   The state a transaction adds is charged when it runs, so a new recipient or authority is not in the intrinsic gas; a deposit that fails validation is included as a failed deposit rather than refused.
 - `MegaTransactionOutcome::limit_stop()`, or `LimitStop::from_result(result, limit_exceeded)` for a result read elsewhere, gives the kind, limit and usage of the limit that stopped a transaction, for an RPC's error.
   `decode_mega_limit_exceeded` reads revert data alone; bytes that decode are no stop without the outcome's `limit_exceeded`.
-- `SatinChainConfig::from_genesis_config(config)` reads a genesis file's `config` object: `satinTime` and one flat `satin`-prefixed key per field of `SequencerRegistryConfig` and `ProtocolLimits`.
+- `SatinChainConfig::from_genesis_config(config)` reads a genesis file's `config` object: `satinTime` and one flat `satin`-prefixed key per field of `SequencerRegistryConfig`, five keys in all; the limits are the spec's, and no key names them.
   It refuses a missing, unknown or mistyped key and a value the parameters or the schedule refuse, and `hardforks()` builds the schedule; it serializes to the same keys, for a genesis generator.
   The key format is provisional.
-  `SequencerRegistryConfig` and `ProtocolLimits` also serialize on their own, camelCase with no unknown field.
+  `SequencerRegistryConfig` also serializes on its own, camelCase with no unknown field.
 
 ## Documentation
 

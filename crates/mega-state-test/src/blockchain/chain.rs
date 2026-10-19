@@ -154,25 +154,20 @@ pub fn registry_config() -> SequencerRegistryConfig {
     SequencerRegistryConfig::placeholder()
 }
 
-/// The schedule the blocks run on: every fork active from genesis, with the Satin fork's two
-/// parameters the executor requires.
-///
-/// - The `SequencerRegistry` roles are [`registry_config`]'s.
-/// - The protocol limits are the loosest a chain may carry ([`ProtocolLimits::loosest`]). The
-///   data-size limits, per transaction, per frame and per block, are unlimited. Gas detention's two
-///   caps are one below the most compute a transaction can spend under Satin's own 200,000,000
-///   execution cap; under the neutral Osaka configuration EIP-7825 caps a transaction's gas at
-///   2^24, so no transaction's compute comes near a cap, and a detained transaction runs exactly as
-///   it would undetained.
-///
-/// The executor installs those per-transaction limits before every transaction, whatever the EVM
-/// carried; the limits the gate's state-test runner installs (`no_limits()`) are not ones a chain
-/// may carry.
+/// The schedule the blocks run on: every fork active from genesis, with the `SequencerRegistry`
+/// roles of [`registry_config`], the one parameter the Satin fork requires.
 pub fn chain_spec() -> MegaHardforkConfig {
-    MegaHardforkConfig::default()
-        .with_all_activated()
-        .with_params(registry_config())
-        .with_params(ProtocolLimits::loosest())
+    MegaHardforkConfig::default().with_all_activated().with_params(registry_config())
+}
+
+/// The limits the blocks are held to in place of Satin's: none ([`ProtocolLimits::no_limits`]).
+///
+/// Equivalence mode takes out what `MegaETH` sets and Ethereum does not, its limits among them,
+/// as the gate's state-test runner does (`EvmTxRuntimeLimits::no_limits()`): no data-size limit,
+/// per transaction, per frame or per block, and no gas detention. The executor installs the
+/// per-transaction half before every transaction, whatever the EVM carried.
+pub(crate) fn limits() -> ProtocolLimits {
+    ProtocolLimits::no_limits()
 }
 
 /// The fixture's `account` as the state holds it: its code hash computed from its code, and its
@@ -247,7 +242,9 @@ pub(crate) struct Chain {
     blob_base_fee_update_fraction: u64,
     /// The schedule the blocks run on.
     spec: MegaHardforkConfig,
-    /// What the executor deploys before every block, by address.
+    /// What the executor deployed: the predeploys the first block the chain accepted created,
+    /// by address, which hold that block's number as the registry's `_initialFromBlock`. Empty
+    /// until the chain accepts a block.
     predeploys: BTreeMap<Address, SystemContractSpec>,
 }
 
@@ -281,10 +278,7 @@ impl Chain {
             chain_id,
             blob_base_fee_update_fraction,
             spec: chain_spec(),
-            predeploys: system_contract_specs(&registry_config())
-                .into_iter()
-                .map(|spec| (spec.address, spec))
-                .collect(),
+            predeploys: BTreeMap::new(),
         })
     }
 
@@ -377,7 +371,8 @@ impl Chain {
         )
         .with_no_user_tx_activation_block(only_deposits);
         let mut executor =
-            MegaBlockExecutor::new(evm, ctx, self.spec.clone(), OpAlloyReceiptBuilder::default());
+            MegaBlockExecutor::new(evm, ctx, self.spec.clone(), OpAlloyReceiptBuilder::default())
+                .with_protocol_limits(limits());
         executor.apply_pre_execution_changes().map_err(refusal)?;
         for tx in &block.body.transactions {
             let signer = tx.recover_signer().map_err(|error| Refusal {
@@ -395,6 +390,14 @@ impl Chain {
         self.head = header.hash_slow();
         self.head_timestamp = header.timestamp;
         self.hashes.insert(header.number, self.head);
+        if self.predeploys.is_empty() {
+            // The first block the chain accepts creates every predeploy its pre-state lacks: a
+            // refused block left the state as it was.
+            self.predeploys = system_contract_specs(&registry_config(), header.number)
+                .into_iter()
+                .map(|spec| (spec.address, spec))
+                .collect();
+        }
         Ok(BlockOutput {
             gas_used: result.gas_used,
             receipts_root: receipts_root(&result.receipts),
@@ -429,7 +432,7 @@ mod tests {
         let listed: BTreeSet<_> = SATIN_ACCOUNTS.iter().map(|a| a.address).collect();
         assert_eq!(listed.len(), SATIN_ACCOUNTS.len(), "an address listed twice");
         let predeploys: BTreeSet<_> =
-            system_contract_specs(&registry_config()).iter().map(|spec| spec.address).collect();
+            system_contract_specs(&registry_config(), 1).iter().map(|spec| spec.address).collect();
         let listed_predeploys: BTreeSet<_> = SATIN_ACCOUNTS
             .iter()
             .filter(|a| a.added == Added::Predeploy)
@@ -447,19 +450,18 @@ mod tests {
         );
     }
 
-    /// [S10] The parameters the chain runs on are ones a chain may carry: the executor refuses a
-    /// block under any other.
+    /// [S10] The schedule the chain runs on loads, carrying the registry's roles, and the blocks
+    /// are held to no limit: equivalence mode takes out every one `MegaETH` sets.
     ///
-    /// Expected values: constants (the loosest limits a chain may carry).
+    /// Expected values: constants (no limit at all).
     #[test]
-    fn test_the_chain_spec_carries_valid_parameters() {
-        use mega_evm::HardforkParams;
+    fn test_the_chain_spec_loads_and_the_blocks_are_held_to_no_limit() {
         let spec = chain_spec();
-        let limits = spec.protocol_limits(0).expect("limits from genesis");
-        assert_eq!(limits, ProtocolLimits::loosest());
-        assert!(limits.validate().is_ok());
         assert!(spec.fork_params::<SequencerRegistryConfig>().is_some());
         assert!(spec.validate_schedule().is_ok());
+        assert_eq!(limits(), ProtocolLimits::no_limits());
+        assert_eq!(limits().tx_runtime_limits, mega_evm::EvmTxRuntimeLimits::no_limits());
+        assert_eq!(limits().block_txs_data_limit, u64::MAX);
     }
 
     /// [S1.8] [S21.12] [S1] A block's context says whether it admits only deposits, from the
@@ -510,8 +512,7 @@ mod tests {
         };
         let satin_at_activation = MegaHardforkConfig::default()
             .with(MegaHardfork::Satin, ForkCondition::Timestamp(ACTIVATION))
-            .with_params(registry_config())
-            .with_params(ProtocolLimits::loosest());
+            .with_params(registry_config());
 
         let mut chain = Chain::new(&pre, (0, B256::ZERO), ACTIVATION - 1, 1, 5_007_716).unwrap();
         chain.spec = satin_at_activation;

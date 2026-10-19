@@ -390,14 +390,15 @@ fn test_operator_fee_is_charged_on_the_karst_formula() {
     );
 }
 
-/// The block's gas limit is the block environment's, whatever the context carries: it is the
-/// number consensus holds the block to, and the budget the footprint is held to.
+/// The block's gas limit is the block environment's: it is the number consensus holds the block
+/// to, and the budget the footprint is held to. It is the executor's state, not building policy,
+/// so no context can carry another.
 #[test]
 fn test_block_gas_limit_comes_from_the_block_environment() {
     let mut state = common::state();
-    let ctx = common::block_ctx(BlockLimits::no_limits().with_block_gas_limit(1));
-    let executor = executor(&mut state, ctx);
+    let executor = executor(&mut state, common::block_ctx(BlockLimits::no_limits()));
 
-    assert_eq!(executor.limiter().limits.block_gas_limit, BLOCK_GAS_LIMIT);
+    assert_eq!(executor.limiter().block_gas_limit, BLOCK_GAS_LIMIT);
+    assert_eq!(executor.limiter().available_gas(), BLOCK_GAS_LIMIT);
     assert_eq!(executor.limiter().available_da_footprint(), BLOCK_GAS_LIMIT);
 }

@@ -68,6 +68,8 @@ pub(crate) struct Case {
     pub db: MemoryDatabase,
     pub envs: Envs,
     pub spec: MegaHardforkConfig,
+    /// The limits the block is held to in place of the spec's, if any.
+    pub limits: Option<ProtocolLimits>,
     pub ctx: MegaBlockExecutionCtx,
     pub env: EvmEnv<MegaSpecId>,
     pub txs: Vec<Tx>,
@@ -92,6 +94,7 @@ impl Case {
             db,
             envs: Envs::new(),
             spec: common::chain_spec(),
+            limits: None,
             ctx: common::unlimited_ctx(),
             env: common::evm_env(),
             txs: Vec::new(),
@@ -133,9 +136,9 @@ impl Case {
         self
     }
 
-    /// Holds the block to `limits`.
+    /// Holds the block to `limits` in place of the spec's.
     pub(crate) fn limits(mut self, limits: ProtocolLimits) -> Self {
-        self.spec = common::chain_spec_with(limits);
+        self.limits = Some(limits);
         self
     }
 
@@ -308,6 +311,9 @@ impl Case {
             self.spec.clone(),
             OpAlloyReceiptBuilder::default(),
         );
+        if let Some(limits) = self.limits {
+            executor = executor.with_protocol_limits(limits);
+        }
         let log = record_pre_block_generic(&mut executor);
         executor.apply_pre_execution_changes().expect("the block starts");
         let pre_block = log.lock().expect("pre-block observer").clone();

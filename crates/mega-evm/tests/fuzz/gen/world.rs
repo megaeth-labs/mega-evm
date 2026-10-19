@@ -4,7 +4,7 @@
 use alloy_primitives::{Address, U256};
 use mega_evm::{
     constants::{BLOCK_ENV_ACCESS_COMPUTE_GAS, MAX_TX_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS},
-    EvmTxRuntimeLimits, ProtocolLimits, TX_BODY_SIZE, WRITE_RECORD_SIZE,
+    EvmTxRuntimeLimits, MegaSpecId, ProtocolLimits, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 use proptest::prelude::*;
 
@@ -165,7 +165,7 @@ pub(crate) enum DetentionCap {
     Medium,
     /// The spec's.
     Default,
-    /// The most a chain may set: one below what no transaction's compute reaches.
+    /// The most that still binds: one below what no transaction's compute reaches.
     Max,
 }
 
@@ -194,9 +194,10 @@ fn detention_cap() -> impl Strategy<Value = DetentionCap> {
 /// The runtime limits a transaction is held to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Limits {
-    /// The spec's: `ProtocolLimits::DEFAULT`.
+    /// The spec's: `ProtocolLimits::for_spec`.
     Default,
-    /// The loosest a chain may carry.
+    /// Every limit unlimited, and detention's caps one below what no transaction's compute
+    /// reaches, so a read of volatile data still detains.
     Loosest,
     /// A valid set of tight limits.
     Custom {
@@ -208,11 +209,14 @@ pub(crate) enum Limits {
 }
 
 impl Limits {
-    /// The limits, which a chain may carry (`ProtocolLimits::validate` accepts them).
+    /// The limits: none is zero, a transaction's data size holds its body, and detention's caps
+    /// bind.
     pub(crate) fn runtime(self) -> EvmTxRuntimeLimits {
         match self {
-            Self::Default => ProtocolLimits::DEFAULT.tx_runtime_limits,
-            Self::Loosest => ProtocolLimits::loosest().tx_runtime_limits,
+            Self::Default => ProtocolLimits::for_spec(MegaSpecId::SATIN).tx_runtime_limits,
+            Self::Loosest => EvmTxRuntimeLimits::no_limits()
+                .with_block_env_access_compute_gas_limit(MAX_TX_COMPUTE_GAS - 1)
+                .with_oracle_access_compute_gas_limit(MAX_TX_COMPUTE_GAS - 1),
             Self::Custom { data, frame_data, block_env_cap, oracle_cap } => EvmTxRuntimeLimits {
                 tx_data_size_limit: data.value(),
                 frame_data_size_limit: frame_data.map_or(u64::MAX, u64::from),

@@ -12,7 +12,7 @@ use common::blocks::{
     read_block, refused_for_block_gas, run_evme, satin_genesis, set_overhead, timestamp_of,
     write_block, BLOCKS, FACTORY, L1_BLOCK,
 };
-use mega_evm::{system::MEGA_SYSTEM_ADDRESS, ProtocolLimits};
+use mega_evm::{system::MEGA_SYSTEM_ADDRESS, MegaSpecId, ProtocolLimits};
 use mega_evme::block::PreAccount;
 use serde_json::Value;
 
@@ -230,7 +230,7 @@ async fn test_a_block_fetched_over_rpc_is_cached_and_replays_offline() {
 }
 
 /// `--override.limits` replays a Satin block under other protocol limits: the fields it names
-/// replace the chain's, and every other stays. At the protocol's defaults it changes nothing; a
+/// replace the spec's, and every other stays. At the spec's own values it changes nothing; a
 /// transaction data-size limit of the body alone stops every transaction but the protocol's own,
 /// which no per-transaction limit holds; a block data budget of one byte packs the first
 /// transaction and refuses every later one.
@@ -252,12 +252,13 @@ fn test_an_override_replays_a_satin_block_under_other_limits() {
 
     let (counterfactual, plain) = replay_under(None);
     assert!(plain["satin"].get("limits_override").is_none(), "{}", plain["satin"]);
-    let defaults = serde_json::to_string(&ProtocolLimits::DEFAULT).unwrap();
+    let satin = ProtocolLimits::for_spec(MegaSpecId::SATIN);
+    let defaults = serde_json::to_string(&satin).unwrap();
     let (on_the_defaults, overridden) = replay_under(Some(&defaults));
-    assert_eq!(on_the_defaults, counterfactual, "it runs on the defaults");
+    assert_eq!(on_the_defaults, counterfactual, "it runs on the spec's limits");
     assert_eq!(
         overridden["satin"]["limits_override"],
-        serde_json::to_value(ProtocolLimits::DEFAULT).unwrap(),
+        serde_json::to_value(satin).unwrap(),
         "the block's record says what it ran under"
     );
     let dir = cache.path().to_str().unwrap();
@@ -320,32 +321,19 @@ fn test_an_override_refuses_a_legacy_block() {
 }
 
 /// A genesis file of mainnet activating Satin at `satin_time`, with the placeholder registry
-/// seeds and the protocol's default limits but a transaction data-size limit of the body alone,
-/// in `dir`.
+/// seeds, in `dir`.
 fn mainnet_genesis(dir: &tempfile::TempDir, satin_time: u64) -> String {
     genesis_of(dir, mega_evm::MAINNET_CHAIN_ID, satin_time)
 }
 
 /// [`mainnet_genesis`] for chain `chain_id`.
 fn genesis_of(dir: &tempfile::TempDir, chain_id: u64, satin_time: u64) -> String {
-    let limits = ProtocolLimits::DEFAULT.with_tx_runtime_limits(
-        ProtocolLimits::DEFAULT.tx_runtime_limits.with_tx_data_size_limit(310),
-    );
-    let satin = mega_evm::SatinChainConfig {
-        activation_time: satin_time,
-        sequencer_registry: mega_evm::system::SequencerRegistryConfig::placeholder(),
-        protocol_limits: limits,
-    };
-    let mut config = serde_json::to_value(satin).unwrap();
-    config["chainId"] = chain_id.into();
-    let path = dir.path().join(format!("genesis-{chain_id}-{satin_time}.json"));
-    std::fs::write(&path, serde_json::json!({ "config": config }).to_string()).unwrap();
-    path.to_str().unwrap().to_string()
+    satin_genesis(dir.path(), chain_id, satin_time)
 }
 
 /// A genesis file decides which of its chain's blocks run Satin, and the schedule they run under:
 /// a recorded mainnet block, legacy by the engine's table, runs on Satin from a file's `satinTime`
-/// of zero, held to the file's limits as the chain's own rather than as an override. A block
+/// of zero, held to Satin's limits, which no file names, as the replay without the file is. A block
 /// before the file's `satinTime` would run on the legacy engine, which runs a chain on its own
 /// table and knows nothing of the file: it is refused, and so is one a forced legacy spec runs,
 /// one a forced Satin runs before the file's `satinTime`, and a block of another chain.
@@ -360,15 +348,12 @@ fn test_a_genesis_file_runs_its_chains_blocks_on_its_schedule() {
     let block = blocks_of(&records)[0];
     assert_eq!(block["engine"], "satin");
     assert!(block["satin"].get("limits_override").is_none(), "{}", block["satin"]);
-    let stopped: Vec<_> = records
-        .iter()
-        .filter(|r| r["kind"] == "tx" && !r["satin"]["limit_exceeded"].is_null())
-        .collect();
-    assert!(!stopped.is_empty(), "the file's limit stops the users' transactions");
-    for tx in stopped {
-        assert_eq!(tx["satin"]["limit_exceeded"]["kind"], "data_size", "{tx}");
-        assert_eq!(tx["satin"]["limit_exceeded"]["limit"], 310, "{tx}");
-    }
+    let txs: Vec<_> = records.iter().filter(|r| r["kind"] == "tx").collect();
+    assert!(!txs.is_empty());
+    assert!(
+        txs.iter().all(|tx| tx["satin"]["limit_exceeded"].is_null()),
+        "no transaction of the block comes near Satin's limits"
+    );
 
     let later = mainnet_genesis(&dir, u64::MAX);
     let forced = mainnet_genesis(&dir, 0);

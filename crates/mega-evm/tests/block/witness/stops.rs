@@ -9,7 +9,7 @@ use mega_evm::{
     constants::TX_GAS_LIMIT_CAP,
     system::keyless::{IKeylessDeploy, KEYLESS_DEPLOY_ADDRESS},
     test_utils::BytecodeBuilder,
-    LimitCheck, LimitKind, ProtocolLimits, TX_BODY_SIZE,
+    LimitCheck, LimitKind, TX_BODY_SIZE,
 };
 use revm::{
     bytecode::opcode::{CALL, GAS, JUMP, JUMPDEST, LOG0, MCOPY, POP, PUSH0, TIMESTAMP},
@@ -95,7 +95,7 @@ fn assert_stopped(run: &Run, index: usize, kind: LimitKind) {
 fn test_a_data_size_stop_replays() {
     let mut db = common::database();
     db.set_account_code(CONTRACT, logger(2_000));
-    let limits = ProtocolLimits::loosest()
+    let limits = common::loosest()
         .with_tx_runtime_limits(loosest_tx().with_tx_data_size_limit(TX_BODY_SIZE + 1_000));
     let replay = Case::new("data-size stop", db)
         .limits(limits)
@@ -110,10 +110,8 @@ fn test_a_data_size_stop_replays() {
 fn test_a_compute_stop_replays() {
     let mut db = common::database();
     db.set_account_code(CONTRACT, read_then_spin());
-    let replay = Case::new("compute stop", db)
-        .limits(ProtocolLimits::DEFAULT)
-        .tx(call(0, CONTRACT, Bytes::new(), 29_000_000))
-        .run();
+    let replay =
+        Case::new("compute stop", db).tx(call(0, CONTRACT, Bytes::new(), 29_000_000)).run();
     assert_stopped(&replay.recorded, 0, LimitKind::ComputeGas);
 }
 
@@ -124,7 +122,7 @@ fn test_a_compute_stop_replays() {
 fn test_a_precompile_price_crossing_replays() {
     let mut db = common::database();
     db.set_account_code(CONTRACT, read_then_ecrecover());
-    let limits = ProtocolLimits::loosest()
+    let limits = common::loosest()
         .with_tx_runtime_limits(loosest_tx().with_block_env_access_compute_gas_limit(1_000));
     let replay = Case::new("precompile crossing", db)
         .limits(limits)
@@ -140,7 +138,7 @@ fn test_a_precompile_price_crossing_replays() {
 fn test_an_answer_crossing_replays() {
     let mut env = common::evm_env();
     env.block_env.beneficiary = CALLER;
-    let limits = ProtocolLimits::loosest()
+    let limits = common::loosest()
         .with_tx_runtime_limits(loosest_tx().with_block_env_access_compute_gas_limit(1_000));
     let replay = Case::new("answer crossing", common::database())
         .env(env)
@@ -156,7 +154,7 @@ fn test_an_answer_crossing_replays() {
 fn test_a_block_budget_refusal_replays() {
     let mut db = common::database();
     db.set_account_code(CONTRACT, logger(2_000));
-    let limits = ProtocolLimits::loosest().with_block_txs_data_limit(2_500);
+    let limits = common::loosest().with_block_txs_data_limit(2_500);
     let replay = Case::new("block budget", db)
         .limits(limits)
         .tx(call(0, CONTRACT, Bytes::new(), log_gas(2_000)))
@@ -176,7 +174,7 @@ fn test_a_stop_above_the_execution_cap_replays() {
     let mut db = common::database();
     db.set_account_code(CONTRACT, slot_writer());
     // Room for the calldata but not for the slot's write record.
-    let limits = ProtocolLimits::loosest()
+    let limits = common::loosest()
         .with_tx_runtime_limits(loosest_tx().with_tx_data_size_limit(TX_BODY_SIZE + 32 + 10));
     let mut env = common::evm_env();
     env.block_env.gas_limit = TX_GAS_LIMIT_CAP + 100_000_000;

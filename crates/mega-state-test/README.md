@@ -68,7 +68,8 @@ A blockchain test is a chain: a pre-state, a genesis block, and blocks a node im
 
 Every block is decoded from its RLP, as a node receives it, and runs through `MegaBlockExecutor` on `MegaEvm` in equivalence mode's configuration — the neutral Osaka configuration, the fork's precompile set and static opcode prices — over a copy of the state the chain holds.
 The executor makes the EIP-2935 and EIP-4788 pre-block system calls and deploys Satin's system contracts before the transactions, as it does for every block; `BLOCKHASH` reads the hashes of the chain's own blocks.
-The executor requires the Satin fork's parameters, which the runner supplies with values that bind nothing on an Osaka fixture (`blockchain::chain_spec`): the loosest protocol limits a chain may carry, every limit unlimited and gas detention's caps far above the compute a transaction can spend under EIP-7825's cap, and placeholder `SequencerRegistry` roles that promote no fixture's transaction.
+The executor requires the Satin fork's parameter, which the runner supplies with a value that binds nothing on an Osaka fixture (`blockchain::chain_spec`): placeholder `SequencerRegistry` roles that promote no fixture's transaction.
+The runner holds the blocks to no protocol limit in place of Satin's, through the executor's test-and-tool override, as equivalence mode holds a state test's transaction to none.
 Each block is told whether it admits only deposits as a node works it out, from that schedule and its parent's timestamp; the schedule activates every fork at genesis, so no block the runner imports is one.
 
 ### How a block is judged

@@ -265,9 +265,14 @@ pub fn transact_deploy<DB: Database>(
 /// The seven predeploys in deploy order: Oracle, high-precision timestamp, `KeylessDeploy`,
 /// `MegaAccessControl`, `MegaLimitControl`, `SequencerRegistry`, then the EIP-7997 factory.
 ///
-/// The registry's seeded slots come from `config`. The factory has nonce 1 and no storage.
+/// The registry's seeded slots come from `config`, but for `_initialFromBlock`, which is
+/// `block_number`: the number of the block whose pre-block step runs the deploy. The seeds are
+/// written only when the deploy creates the registry, so the number they record is that of the
+/// block that created it, as the legacy engine seeded it, and the registry's historical lookups
+/// are valid from there. The factory has nonce 1 and no storage.
 pub fn system_contract_specs(
     config: &SequencerRegistryConfig,
+    block_number: u64,
 ) -> [SystemContractSpec; SYSTEM_CONTRACT_DEPLOY_COUNT] {
     [
         SystemContractSpec::new(
@@ -296,7 +301,7 @@ pub fn system_contract_specs(
             SEQUENCER_REGISTRY_CODE,
             SEQUENCER_REGISTRY_CODE_HASH,
         )
-        .with_seed(registry_seed(config)),
+        .with_seed(registry_seed(config, block_number)),
         SystemContractSpec::new(
             CREATE2_FACTORY_ADDRESS,
             CREATE2_FACTORY_CODE,
@@ -387,15 +392,15 @@ fn address_to_storage_value(address: Address) -> U256 {
     U256::from_be_bytes(address.into_word().0)
 }
 
-/// The seven bootstrap slots the `SequencerRegistry` is created with.
-fn registry_seed(config: &SequencerRegistryConfig) -> Vec<(U256, U256)> {
+/// The seven bootstrap slots the `SequencerRegistry` is created with, in block `block_number`.
+fn registry_seed(config: &SequencerRegistryConfig, block_number: u64) -> Vec<(U256, U256)> {
     Vec::from([
         (CURRENT_SYSTEM_ADDRESS, address_to_storage_value(config.initial_system_address)),
         (CURRENT_SEQUENCER, address_to_storage_value(config.initial_sequencer)),
         (ADMIN, address_to_storage_value(config.initial_admin)),
         (INITIAL_SYSTEM_ADDRESS, address_to_storage_value(config.initial_system_address)),
         (INITIAL_SEQUENCER, address_to_storage_value(config.initial_sequencer)),
-        (INITIAL_FROM_BLOCK, U256::from(config.initial_from_block)),
+        (INITIAL_FROM_BLOCK, U256::from(block_number)),
         (MIN_ROTATION_DELAY, U256::from(config.min_rotation_delay)),
     ])
 }

@@ -25,9 +25,9 @@ use crate::{
     common::{
         check_genesis_chain, op_receipt_to_tx_receipt, parse_bucket_capacity,
         parse_limits_override, print_execution_summary, print_execution_trace, print_receipt,
-        print_satin_report, satin_schedule, BuildProviderOutput, EvmeExternalEnvs, EvmeOutcome,
-        ExecutionSummary, ExternalEnvSnapshot, LimitsOverride, OpTxReceipt, RpcCacheStore,
-        SatinReport, TxOverrideArgs,
+        print_satin_report, satin_limits, satin_schedule, BuildProviderOutput, EvmeExternalEnvs,
+        EvmeOutcome, ExecutionSummary, ExternalEnvSnapshot, LimitsOverride, OpTxReceipt,
+        RpcCacheStore, SatinReport, TxOverrideArgs,
     },
     engine::Engine,
     run, EvmeState,
@@ -67,11 +67,11 @@ pub struct Cmd {
     #[arg(long = "override.spec", value_name = "SPEC")]
     pub spec_override: Option<String>,
 
-    /// Satin only: replay under these protocol limits instead of the chain's, a counterfactual. A
-    /// JSON object in the shape a chain configuration carries `ProtocolLimits` in (camelCase,
-    /// per-transaction limits under `txRuntimeLimits`), inline or in a file; the fields it names
-    /// replace the chain's, every other stays. Refused when it names an unknown field or a value
-    /// no chain may carry, and for a block that runs on the legacy engine
+    /// Satin only: replay under these protocol limits instead of the spec's, a counterfactual. A
+    /// JSON object in `ProtocolLimits`' shape (camelCase, per-transaction limits under
+    /// `txRuntimeLimits`), inline or in a file; the fields it names replace the spec's, every
+    /// other stays. Refused when it names an unknown field or a value of the wrong type, and for a
+    /// block that runs on the legacy engine
     #[arg(long = "override.limits", value_name = "JSON|FILE", value_parser = parse_limits_override)]
     pub limits_override: Option<LimitsOverride>,
 
@@ -419,7 +419,9 @@ impl Cmd {
         P: Provider<op_alloy_network::Optimism> + Clone + std::fmt::Debug,
     {
         let timestamp = ctx.block.header.timestamp();
-        let hardforks = satin_schedule(ctx.chain_id, timestamp, self.limits_override.as_ref())?;
+        let hardforks = satin_schedule(ctx.chain_id, timestamp)?;
+        let limits_override =
+            self.limits_override.as_ref().map(|limits| satin_limits(Some(limits))).transpose()?;
         debug!(chain_id = ctx.chain_id, spec = %MegaSpecId::SATIN, "Chain configuration");
 
         info!(fork_block = ctx.parent_block.header.number(), "Forking state from parent block",);
@@ -437,15 +439,13 @@ impl Cmd {
         cfg_env.chain_id = ctx.chain_id;
         let evm_env = EvmEnv::new(cfg_env, block_env);
 
-        let evm_factory = MegaEvmFactory::new()
-            .with_schedule(hardforks.clone())
-            .with_external_env_factory(external_envs);
+        let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
         let block_executor_factory = MegaBlockExecutorFactory::new(
             OpAlloyReceiptBuilder::default(),
             &hardforks,
             evm_factory,
         );
-        // The block is held to the protocol limits its schedule carries, with no building
+        // The block is held to Satin's protocol limits, or the override's, with no building
         // policy, as a validator holds it; the block's gas limit comes from its header. Whether
         // it admits only deposits comes from the schedule and the parent block's timestamp, as a
         // node works it out.
@@ -470,6 +470,9 @@ impl Cmd {
             block_ctx,
             &mut inspector,
         );
+        if let Some(limits) = limits_override {
+            block_executor = block_executor.with_protocol_limits(limits);
+        }
 
         block_executor
             .apply_pre_execution_changes()
@@ -513,9 +516,7 @@ impl Cmd {
             .map_err(|e| ReplayError::Other(format!("Block execution error: {e}")))?;
         trace!(tx_hash = %ctx.target_tx.inner.inner.tx_hash(), ?outcome, "Target transaction executed");
         let mut satin = SatinReport::of(&outcome.inner);
-        if self.limits_override.is_some() {
-            satin.limits_override = hardforks.protocol_limits(timestamp).map(Box::new);
-        }
+        satin.limits_override = limits_override.map(Box::new);
         let exec_result = outcome.inner.result.clone();
         let evm_state = outcome.inner.state.clone();
 

@@ -2,13 +2,11 @@
 //!
 //! The limits come from two places, by who must agree on them:
 //!
-//! - [`ProtocolLimits`] are the limits every node of a chain holds its blocks and transactions to,
+//! - [`ProtocolLimits`] are the limits every node holds a chain's blocks and transactions to,
 //!   because a different value is a different result: the per-transaction limits the EVM enforces
-//!   and the block's data-size budget. They are the Satin fork's parameters, read from the schedule
-//!   at the block's timestamp, and their default is [`ProtocolLimits::DEFAULT`]: data size capped
-//!   at [`TX_DATA_LIMIT`](crate::constants::TX_DATA_LIMIT) per transaction and
-//!   [`BLOCK_DATA_LIMIT`](crate::constants::BLOCK_DATA_LIMIT) per block, gas detention's caps at
-//!   the spec's, and every other limit unlimited.
+//!   and the block's data-size budget. They are fixed per spec, not configured:
+//!   [`ProtocolLimits::for_spec`] is the one table of them, which block execution, the EVM factory
+//!   and a bare [`MegaContext`](crate::MegaContext) all read.
 //! - [`BlockLimits`] is the building policy a node passes in the block execution context: the
 //!   limits only a builder applies — a transaction's declared gas, the encoded sizes and the
 //!   data-availability sizes — and a cap a builder may put on the block's data-size budget below
@@ -58,24 +56,26 @@ use alloy_primitives::TxHash;
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use std::{boxed::Box, format};
+use std::boxed::Box;
 
 use alloy_evm::block::{BlockExecutionError, BlockValidationError};
 
 use crate::{
-    constants::MAX_TX_COMPUTE_GAS, BlockGasCounters, EvmTxRuntimeLimits, HardforkParams,
-    HardforkParamsError, LimitUsage, MegaBlockLimitExceededError, MegaGasUsage, MegaHardfork,
-    MegaTxLimitExceededError, TX_BODY_SIZE,
+    constants::{
+        BLOCK_DATA_LIMIT, BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS, TX_DATA_LIMIT,
+    },
+    BlockGasCounters, EvmTxRuntimeLimits, LimitUsage, MegaBlockLimitExceededError, MegaGasUsage,
+    MegaSpecId, MegaTxLimitExceededError,
 };
 
-/// The limits the protocol holds every block and every transaction to: the Satin fork's
-/// parameters.
+/// The limits the protocol holds every block and every transaction to, fixed per spec.
 ///
-/// Each of them changes what a validator computes when it re-executes a block, so every node of
-/// a chain holds the same values, and they travel with the chain configuration, attached to the
-/// fork ([`HardforkParams`]). Block execution reads them from the schedule at the block's
-/// timestamp ([`MegaHardforks::protocol_limits`](crate::MegaHardforks::protocol_limits)); a node
-/// does not pass them with a block.
+/// Each of them changes what a validator computes when it re-executes a block, so they are not
+/// configuration: [`for_spec`](Self::for_spec) is the one table of them, keyed by the spec a block
+/// executes, and every node of every chain holds a block of that spec to the same values. Block
+/// execution, the EVM factory and a bare [`MegaContext`](crate::MegaContext) read it, so an
+/// execution outside a block — a call, a gas estimate, a simulation — is held to what block
+/// execution holds it to without being told.
 ///
 /// - [`tx_runtime_limits`](Self::tx_runtime_limits) holds each transaction's own execution: a
 ///   transaction that crosses one is stopped, or a frame reverted, and that is the result its
@@ -85,8 +85,14 @@ use crate::{
 ///   refuses a block that packs a transaction after the block reached it; a builder may pack
 ///   tighter ([`BlockLimits`]), never looser.
 ///
-/// [`Default`] is [`DEFAULT`](Self::DEFAULT): the values of [`crate::constants`], provisional
-/// until the economics sign-off fixes them.
+/// A tool or a test that runs under other values says so explicitly
+/// ([`MegaContext::with_tx_runtime_limits`](crate::MegaContext::with_tx_runtime_limits),
+/// [`MegaEvmFactory::with_tx_runtime_limits`](crate::MegaEvmFactory::with_tx_runtime_limits), and
+/// in block execution `MegaBlockExecutor::with_protocol_limits`, which exists for tests and tools
+/// only); what it computes is then a counterfactual, not the chain's result.
+///
+/// It serializes in the shape a tool takes an override in: camelCase, every field required, no
+/// other field accepted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProtocolLimits {
@@ -98,54 +104,39 @@ pub struct ProtocolLimits {
     pub block_txs_data_limit: u64,
 }
 
-impl Default for ProtocolLimits {
-    fn default() -> Self {
-        Self::DEFAULT
-    }
-}
-
 impl ProtocolLimits {
-    /// Satin's limits: each transaction holds [`TX_DATA_LIMIT`] bytes of data size and a block
-    /// [`BLOCK_DATA_LIMIT`], a read of volatile data caps the transaction's compute at
-    /// [`BLOCK_ENV_ACCESS_COMPUTE_GAS`] or [`ORACLE_ACCESS_COMPUTE_GAS`], and every other limit is
-    /// unlimited. Provisional, as the constants are.
+    /// The limits a block of `spec`, and every transaction in it, is held to.
     ///
-    /// [`TX_DATA_LIMIT`]: crate::constants::TX_DATA_LIMIT
-    /// [`BLOCK_DATA_LIMIT`]: crate::constants::BLOCK_DATA_LIMIT
-    /// [`BLOCK_ENV_ACCESS_COMPUTE_GAS`]: crate::constants::BLOCK_ENV_ACCESS_COMPUTE_GAS
-    /// [`ORACLE_ACCESS_COMPUTE_GAS`]: crate::constants::ORACLE_ACCESS_COMPUTE_GAS
-    pub const DEFAULT: Self = Self {
-        tx_runtime_limits: EvmTxRuntimeLimits::no_limits()
-            .with_tx_data_size_limit(crate::constants::TX_DATA_LIMIT)
-            .with_block_env_access_compute_gas_limit(crate::constants::BLOCK_ENV_ACCESS_COMPUTE_GAS)
-            .with_oracle_access_compute_gas_limit(crate::constants::ORACLE_ACCESS_COMPUTE_GAS),
-        block_txs_data_limit: crate::constants::BLOCK_DATA_LIMIT,
-    };
+    /// [`MegaSpecId::SATIN`]: a transaction keeps at most [`TX_DATA_LIMIT`] (13,107,200) bytes of
+    /// data size, and a block's transactions together at most [`BLOCK_DATA_LIMIT`] (13,107,200);
+    /// every frame gets 98/100 of what its parent has left, the transaction's own frame what the
+    /// transaction has left, with no further per-frame cap; a read of volatile data caps the
+    /// transaction's compute at its compute at the read plus [`BLOCK_ENV_ACCESS_COMPUTE_GAS`] or
+    /// [`ORACLE_ACCESS_COMPUTE_GAS`] (20,000,000 each). Provisional, as the constants are, until
+    /// the economics sign-off fixes them.
+    ///
+    /// Every field is written out, so a limit added later cannot be left unlimited by omission.
+    pub const fn for_spec(spec: MegaSpecId) -> Self {
+        match spec {
+            MegaSpecId::SATIN => Self {
+                tx_runtime_limits: EvmTxRuntimeLimits {
+                    tx_data_size_limit: TX_DATA_LIMIT,
+                    frame_data_size_limit: u64::MAX,
+                    block_env_access_compute_gas_limit: BLOCK_ENV_ACCESS_COMPUTE_GAS,
+                    oracle_access_compute_gas_limit: ORACLE_ACCESS_COMPUTE_GAS,
+                },
+                block_txs_data_limit: BLOCK_DATA_LIMIT,
+            },
+        }
+    }
 
     /// No limit at all, gas detention's caps included, so no transaction is detained
     /// ([`EvmTxRuntimeLimits::no_limits`]).
     ///
-    /// For tests of what refuses it: [`validate`](HardforkParams::validate) refuses it, so no
-    /// chain configuration carries it, and the block executor refuses a block under it. A test
-    /// that runs blocks without holding them to a limit uses [`loosest`](Self::loosest).
+    /// For runs that take every limit out — the execution-spec gate's equivalence mode and tests —
+    /// never for executing the chain.
     pub const fn no_limits() -> Self {
         Self { tx_runtime_limits: EvmTxRuntimeLimits::no_limits(), block_txs_data_limit: u64::MAX }
-    }
-
-    /// The loosest limits a chain may carry: every limit unlimited, and gas detention's caps at
-    /// the largest [`validate`](HardforkParams::validate) accepts, one below
-    /// [`MAX_TX_COMPUTE_GAS`].
-    ///
-    /// A read of volatile data still detains the transaction, but a cap that high stops only a
-    /// transaction that spends the most compute any can. For tests and test chains that run blocks
-    /// without holding them to a limit.
-    pub const fn loosest() -> Self {
-        let cap = MAX_TX_COMPUTE_GAS - 1;
-        Self::no_limits().with_tx_runtime_limits(
-            EvmTxRuntimeLimits::no_limits()
-                .with_block_env_access_compute_gas_limit(cap)
-                .with_oracle_access_compute_gas_limit(cap),
-        )
     }
 
     /// Sets the limits every transaction runs under.
@@ -161,74 +152,12 @@ impl ProtocolLimits {
     }
 }
 
-impl HardforkParams for ProtocolLimits {
-    const FORK: MegaHardfork = MegaHardfork::Satin;
-    const NAME: &'static str = "ProtocolLimits";
-
-    /// Refuses a value no chain can run on:
-    ///
-    /// - a limit of zero, which is what a field left out of a configuration reads as, and which
-    ///   stops or refuses every transaction that uses the dimension;
-    /// - a transaction data-size limit below [`TX_BODY_SIZE`], the bytes every transaction's body
-    ///   counts, which stops every transaction before it runs;
-    /// - a gas-detention cap at or above [`MAX_TX_COMPUTE_GAS`], the most compute a transaction can
-    ///   spend: such a cap never stops a read of volatile data, `u64::MAX` among them, and a
-    ///   chain's caps must be able to.
-    ///
-    /// `u64::MAX` is a valid value for every other limit: it leaves the dimension unlimited.
-    fn validate(&self) -> Result<(), HardforkParamsError> {
-        let EvmTxRuntimeLimits {
-            tx_data_size_limit,
-            frame_data_size_limit,
-            block_env_access_compute_gas_limit,
-            oracle_access_compute_gas_limit,
-        } = self.tx_runtime_limits;
-        let detention_caps = [
-            (
-                "tx_runtime_limits.block_env_access_compute_gas_limit",
-                block_env_access_compute_gas_limit,
-            ),
-            ("tx_runtime_limits.oracle_access_compute_gas_limit", oracle_access_compute_gas_limit),
-        ];
-        let limits = [
-            ("tx_runtime_limits.tx_data_size_limit", tx_data_size_limit),
-            ("tx_runtime_limits.frame_data_size_limit", frame_data_size_limit),
-            detention_caps[0],
-            detention_caps[1],
-            ("block_txs_data_limit", self.block_txs_data_limit),
-        ];
-
-        let invalid = |message| Err(HardforkParamsError { message });
-        for (name, limit) in limits {
-            if limit == 0 {
-                return invalid(format!("ProtocolLimits.{name} must not be zero"));
-            }
-        }
-        if tx_data_size_limit < TX_BODY_SIZE {
-            return invalid(format!(
-                "ProtocolLimits.tx_runtime_limits.tx_data_size_limit must be at least \
-                 {TX_BODY_SIZE}, the bytes every transaction's body counts"
-            ));
-        }
-        for (name, cap) in detention_caps {
-            if cap >= MAX_TX_COMPUTE_GAS {
-                return invalid(format!(
-                    "ProtocolLimits.{name} must be below {MAX_TX_COMPUTE_GAS}, the most compute \
-                     a transaction can spend: a cap there leaves a read of volatile data \
-                     undetained"
-                ));
-            }
-        }
-        Ok(())
-    }
-}
-
 /// The building policy one block is packed under: the limits only a builder applies, and the cap
 /// it may put on the block's data-size budget below the protocol's.
 ///
 /// A node passes it in the block execution context. None of it is a protocol value: the
-/// protocol's limits are [`ProtocolLimits`], which the block executor reads from the chain's
-/// schedule, and this can only make a block tighter than they do ([`within`](Self::within)). So a
+/// protocol's limits are [`ProtocolLimits`], which the block executor reads from the spec's
+/// table, and this can only make a block tighter than they do ([`within`](Self::within)). So a
 /// builder packs under it and a validator re-executing the block leaves it at [`Default`], which
 /// restricts nothing: every block a builder packed under a policy fits the protocol's limits, and
 /// a validator that applied the builder's policy too would only refuse blocks, never accept one
@@ -240,16 +169,13 @@ impl HardforkParams for ProtocolLimits {
 ///   counts calldata.
 /// - [`block_txs_data_limit`](Self::block_txs_data_limit) is the builder's cap on the protocol's
 ///   data-size budget: the block executor holds a block to the smaller of the two.
-/// - [`block_gas_limit`](Self::block_gas_limit) is the header's: the block executor always sets it
-///   from the block environment.
+///
+/// The block's gas limit is not here: it is the header's, which the block executor takes from the
+/// block environment ([`BlockLimiter::block_gas_limit`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BlockLimits {
     /// The most gas a single transaction may declare. Deposits are exempt.
     pub tx_gas_limit: u64,
-    /// The block's gas limit: a transaction is admitted only if its declared gas limit fits in
-    /// what the block has left. Also the budget the data-availability footprint of the block's
-    /// transactions is held to.
-    pub block_gas_limit: u64,
     /// The most bytes a single transaction's EIP-2718 encoding may take. Deposits are exempt.
     pub tx_encode_size_limit: u64,
     /// The most bytes the block's transaction bodies may take together, uncompressed. Deposits are
@@ -282,7 +208,6 @@ impl BlockLimits {
     pub const fn no_limits() -> Self {
         Self {
             tx_gas_limit: u64::MAX,
-            block_gas_limit: u64::MAX,
             tx_encode_size_limit: u64::MAX,
             block_txs_encode_size_limit: u64::MAX,
             tx_da_size_limit: u64::MAX,
@@ -307,15 +232,6 @@ impl BlockLimits {
     /// Sets the per-transaction gas limit.
     pub const fn with_tx_gas_limit(mut self, limit: u64) -> Self {
         self.tx_gas_limit = limit;
-        self
-    }
-
-    /// Sets the block's gas limit.
-    ///
-    /// The block executor overwrites it with the block environment's gas limit, which is the
-    /// number consensus holds the block to.
-    pub const fn with_block_gas_limit(mut self, limit: u64) -> Self {
-        self.block_gas_limit = limit;
         self
     }
 
@@ -348,11 +264,6 @@ impl BlockLimits {
         self.block_txs_data_limit = limit;
         self
     }
-
-    /// A limiter that holds a block to these limits.
-    pub const fn to_block_limiter(self) -> BlockLimiter {
-        BlockLimiter::new(self)
-    }
 }
 
 /// What one committed transaction adds to a block's counters.
@@ -383,6 +294,11 @@ pub struct BlockUsage {
 pub struct BlockLimiter {
     /// The limits this block is held to.
     pub limits: BlockLimits,
+    /// The block's gas limit, the header's: a transaction is admitted only if its declared gas
+    /// limit fits in what the block has left, and it is also the budget the data-availability
+    /// footprint of the block's transactions is held to. The block executor takes it from the
+    /// block environment; it is no building policy.
+    pub block_gas_limit: u64,
     /// The gas the block's receipts report, which is the block header's gas used.
     pub block_gas_used: u64,
     /// The gas the block's transactions spent, by ledger.
@@ -399,10 +315,12 @@ pub struct BlockLimiter {
 }
 
 impl BlockLimiter {
-    /// A limiter with every counter at zero.
-    pub const fn new(limits: BlockLimits) -> Self {
+    /// A limiter of a block whose gas limit is `block_gas_limit`, held to `limits`, with every
+    /// counter at zero.
+    pub const fn new(limits: BlockLimits, block_gas_limit: u64) -> Self {
         Self {
             limits,
+            block_gas_limit,
             block_gas_used: 0,
             gas: BlockGasCounters { execution: 0, state: 0, history: 0, history_bytes: 0 },
             usage: LimitUsage { data_size: 0, write_records: 0 },
@@ -414,13 +332,13 @@ impl BlockLimiter {
 
     /// The gas the block still has for a transaction's declared gas limit.
     pub const fn available_gas(&self) -> u64 {
-        self.limits.block_gas_limit.saturating_sub(self.block_gas_used)
+        self.block_gas_limit.saturating_sub(self.block_gas_used)
     }
 
     /// The data-availability footprint the block still has. The budget is the block's gas limit,
     /// as the fork's rule states it.
     pub const fn available_da_footprint(&self) -> u64 {
-        self.limits.block_gas_limit.saturating_sub(self.block_da_footprint_used)
+        self.block_gas_limit.saturating_sub(self.block_da_footprint_used)
     }
 
     /// Whether `tx` may execute in this block.
@@ -460,7 +378,7 @@ impl BlockLimiter {
             ));
         }
 
-        if self.block_gas_used.saturating_add(gas_limit) > self.limits.block_gas_limit {
+        if self.block_gas_used.saturating_add(gas_limit) > self.block_gas_limit {
             return Err(BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas {
                 transaction_gas_limit: gas_limit,
                 block_available_gas: self.available_gas(),
@@ -565,47 +483,61 @@ fn invalid_tx(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{MegaHardforkConfig, MegaHardforks};
+    use crate::{constants::MAX_TX_COMPUTE_GAS, TX_BODY_SIZE};
     use alloy_primitives::B256;
 
-    /// The protocol's default limits, written out so a change to one is a visible diff: today's
-    /// provisional constants, and unlimited everywhere else.
+    /// Satin's limits, written out so a change to one is a visible diff: 13,107,200 bytes of data
+    /// size per transaction and per block, no per-frame cap beyond the 98/100 share, and
+    /// detention's caps at 20,000,000 each.
+    ///
+    /// They also hold what a chain configuration's load-time check used to hold a chain's values
+    /// to: no limit is zero, a transaction's data size holds at least a body, and both detention
+    /// caps are below the most compute a transaction can spend, so a read of volatile data is
+    /// detained.
     #[test]
-    fn test_the_default_protocol_limits_are_the_provisional_constants() {
-        use crate::constants::{
-            BLOCK_DATA_LIMIT, BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS,
-            TX_DATA_LIMIT,
-        };
-        assert_eq!(ProtocolLimits::default(), ProtocolLimits::DEFAULT);
+    fn test_the_satin_limits_are_written_out() {
+        let limits = ProtocolLimits::for_spec(MegaSpecId::SATIN);
         assert_eq!(
-            ProtocolLimits::DEFAULT,
+            limits,
             ProtocolLimits {
                 tx_runtime_limits: EvmTxRuntimeLimits {
-                    tx_data_size_limit: TX_DATA_LIMIT,
+                    tx_data_size_limit: 13_107_200,
                     frame_data_size_limit: u64::MAX,
-                    block_env_access_compute_gas_limit: BLOCK_ENV_ACCESS_COMPUTE_GAS,
-                    oracle_access_compute_gas_limit: ORACLE_ACCESS_COMPUTE_GAS,
+                    block_env_access_compute_gas_limit: 20_000_000,
+                    oracle_access_compute_gas_limit: 20_000_000,
                 },
-                block_txs_data_limit: BLOCK_DATA_LIMIT,
+                block_txs_data_limit: 13_107_200,
             }
         );
-        assert_eq!(
-            ProtocolLimits::DEFAULT.tx_runtime_limits,
-            EvmTxRuntimeLimits::default().with_tx_data_size_limit(TX_DATA_LIMIT),
-            "a transaction's defaults are a bare context's, with the data-size limit"
-        );
-        assert_eq!(ProtocolLimits::DEFAULT.validate(), Ok(()));
+
+        let EvmTxRuntimeLimits {
+            tx_data_size_limit,
+            frame_data_size_limit,
+            block_env_access_compute_gas_limit,
+            oracle_access_compute_gas_limit,
+        } = limits.tx_runtime_limits;
+        for limit in [
+            tx_data_size_limit,
+            frame_data_size_limit,
+            block_env_access_compute_gas_limit,
+            oracle_access_compute_gas_limit,
+            limits.block_txs_data_limit,
+        ] {
+            assert_ne!(limit, 0);
+        }
+        assert!(tx_data_size_limit >= TX_BODY_SIZE, "a transaction's data size holds its body");
+        assert!(block_env_access_compute_gas_limit < MAX_TX_COMPUTE_GAS, "a cap that binds");
+        assert!(oracle_access_compute_gas_limit < MAX_TX_COMPUTE_GAS, "a cap that binds");
     }
 
-    /// The limits travel with a chain configuration: they survive a round trip through its JSON,
-    /// whose shape is written out here, and through a schedule, which hands back what was
-    /// attached.
+    /// The limits serialize in the shape a tool takes an override in, written out here: camelCase,
+    /// the per-transaction limits nested. A field left out is an error rather than a zero, and so
+    /// is one the type does not have.
     #[test]
     fn test_protocol_limits_round_trip() {
-        let limits = ProtocolLimits::DEFAULT
-            .with_tx_runtime_limits(
-                ProtocolLimits::DEFAULT.tx_runtime_limits.with_frame_data_size_limit(1),
-            )
+        let satin = ProtocolLimits::for_spec(MegaSpecId::SATIN);
+        let limits = satin
+            .with_tx_runtime_limits(satin.tx_runtime_limits.with_frame_data_size_limit(1))
             .with_block_txs_data_limit(7);
 
         let json = serde_json::to_string(&limits).expect("serializes");
@@ -615,129 +547,22 @@ mod tests {
         );
         assert_eq!(serde_json::from_str::<ProtocolLimits>(&json).expect("deserializes"), limits);
 
-        // A field left out is an error, not a zero; so is one the type does not have.
         let missing = json.replace(r#","blockTxsDataLimit":7"#, "");
         assert!(serde_json::from_str::<ProtocolLimits>(&missing).is_err(), "{missing}");
         let missing_tx = json.replace(r#""frameDataSizeLimit":1,"#, "");
         assert!(serde_json::from_str::<ProtocolLimits>(&missing_tx).is_err(), "{missing_tx}");
         let unknown = json.replace(r#""blockTxsDataLimit":7"#, r#""blockTxsDataLimit":7,"x":1"#);
         assert!(serde_json::from_str::<ProtocolLimits>(&unknown).is_err(), "{unknown}");
-
-        let schedule = MegaHardforkConfig::default().with_all_activated().with_params(limits);
-        assert_eq!(schedule.fork_params::<ProtocolLimits>(), Some(&limits));
-        assert_eq!(schedule.protocol_limits(0), Some(limits));
     }
 
-    /// Every limit refuses zero, the value a field left out of a configuration reads as; the
-    /// transaction's data size refuses less than a body; the detention caps refuse a value no
-    /// transaction's compute reaches, and every other limit accepts `u64::MAX`.
+    /// `no_limits` leaves every limit unlimited, detention's caps included. Every field is named,
+    /// so a limit added later cannot be left out of it.
     #[test]
-    fn test_validate_refuses_what_no_chain_can_run_on() {
-        let base = ProtocolLimits::DEFAULT;
-        let tx = |f: fn(EvmTxRuntimeLimits, u64) -> EvmTxRuntimeLimits, value| {
-            base.with_tx_runtime_limits(f(base.tx_runtime_limits, value))
-        };
-        type Set = fn(ProtocolLimits, u64) -> ProtocolLimits;
-        let fields: [(&str, Set); 5] = [
-            ("tx_runtime_limits.tx_data_size_limit", |l, v| {
-                l.with_tx_runtime_limits(l.tx_runtime_limits.with_tx_data_size_limit(v))
-            }),
-            ("tx_runtime_limits.frame_data_size_limit", |l, v| {
-                l.with_tx_runtime_limits(l.tx_runtime_limits.with_frame_data_size_limit(v))
-            }),
-            ("tx_runtime_limits.block_env_access_compute_gas_limit", |l, v| {
-                l.with_tx_runtime_limits(
-                    l.tx_runtime_limits.with_block_env_access_compute_gas_limit(v),
-                )
-            }),
-            ("tx_runtime_limits.oracle_access_compute_gas_limit", |l, v| {
-                l.with_tx_runtime_limits(
-                    l.tx_runtime_limits.with_oracle_access_compute_gas_limit(v),
-                )
-            }),
-            ("block_txs_data_limit", ProtocolLimits::with_block_txs_data_limit),
-        ];
-
-        for (name, set) in fields {
-            assert_eq!(
-                set(base, 0).validate(),
-                Err(HardforkParamsError {
-                    message: std::format!("ProtocolLimits.{name} must not be zero")
-                }),
-                "{name}"
-            );
-            assert_eq!(
-                set(base, 1).validate().is_ok(),
-                name != "tx_runtime_limits.tx_data_size_limit",
-                "{name} at one"
-            );
-            if name.ends_with("compute_gas_limit") {
-                // A cap no transaction's compute reaches is refused, the execution cap and
-                // `u64::MAX` among them; one below the most compute is accepted.
-                for cap in
-                    [MAX_TX_COMPUTE_GAS, crate::constants::TX_GAS_LIMIT_CAP, u64::MAX - 1, u64::MAX]
-                {
-                    assert_eq!(
-                        set(base, cap).validate(),
-                        Err(HardforkParamsError {
-                            message: std::format!(
-                                "ProtocolLimits.{name} must be below {MAX_TX_COMPUTE_GAS}, the \
-                                 most compute a transaction can spend: a cap there leaves a read \
-                                 of volatile data undetained"
-                            )
-                        }),
-                        "{name} at {cap}"
-                    );
-                }
-                assert_eq!(
-                    set(base, MAX_TX_COMPUTE_GAS - 1).validate(),
-                    Ok(()),
-                    "{name} just below"
-                );
-            } else {
-                assert_eq!(set(base, u64::MAX).validate(), Ok(()), "{name} may be unlimited");
-            }
-        }
-
-        // The transaction's data size holds at least a body, and exactly a body is enough.
-        assert_eq!(
-            tx(EvmTxRuntimeLimits::with_tx_data_size_limit, TX_BODY_SIZE - 1).validate(),
-            Err(HardforkParamsError {
-                message: std::format!(
-                    "ProtocolLimits.tx_runtime_limits.tx_data_size_limit must be at least \
-                     {TX_BODY_SIZE}, the bytes every transaction's body counts"
-                )
-            })
-        );
-        assert_eq!(
-            tx(EvmTxRuntimeLimits::with_tx_data_size_limit, TX_BODY_SIZE).validate(),
-            Ok(())
-        );
-
-        // The unlimited set is refused; the loosest a chain may carry is unlimited but for
-        // detention's caps, one below the most compute a transaction can spend.
-        assert!(ProtocolLimits::no_limits().validate().is_err());
-        assert_eq!(ProtocolLimits::loosest().validate(), Ok(()));
-        let cap = MAX_TX_COMPUTE_GAS - 1;
-        assert_eq!(
-            ProtocolLimits::loosest(),
-            ProtocolLimits::no_limits().with_tx_runtime_limits(
-                EvmTxRuntimeLimits::no_limits()
-                    .with_block_env_access_compute_gas_limit(cap)
-                    .with_oracle_access_compute_gas_limit(cap)
-            )
-        );
-    }
-
-    /// A schedule refuses to carry the unlimited set, so no validated chain configuration does.
-    #[test]
-    #[should_panic(expected = "Invalid params for fork Satin: \
-                    ProtocolLimits.tx_runtime_limits.block_env_access_compute_gas_limit must be \
-                    below 199987900")]
-    fn test_a_schedule_refuses_the_unlimited_protocol_limits() {
-        let _ = MegaHardforkConfig::default()
-            .with_all_activated()
-            .with_params(ProtocolLimits::no_limits());
+    fn test_no_protocol_limits_leaves_every_limit_unlimited() {
+        let ProtocolLimits { tx_runtime_limits, block_txs_data_limit } =
+            ProtocolLimits::no_limits();
+        assert_eq!(tx_runtime_limits, EvmTxRuntimeLimits::no_limits());
+        assert_eq!(block_txs_data_limit, u64::MAX);
     }
 
     /// The default building policy restricts nothing, so a validator that leaves it holds a block
@@ -748,7 +573,6 @@ mod tests {
         assert_eq!(BlockLimits::default(), BlockLimits::no_limits());
         let BlockLimits {
             tx_gas_limit,
-            block_gas_limit,
             tx_encode_size_limit,
             block_txs_encode_size_limit,
             tx_da_size_limit,
@@ -757,7 +581,6 @@ mod tests {
         } = BlockLimits::default();
         for limit in [
             tx_gas_limit,
-            block_gas_limit,
             tx_encode_size_limit,
             block_txs_encode_size_limit,
             tx_da_size_limit,
@@ -767,7 +590,9 @@ mod tests {
             assert_eq!(limit, u64::MAX);
         }
         assert_eq!(
-            BlockLimits::default().within(&ProtocolLimits::DEFAULT).block_txs_data_limit,
+            BlockLimits::default()
+                .within(&ProtocolLimits::for_spec(MegaSpecId::SATIN))
+                .block_txs_data_limit,
             crate::constants::BLOCK_DATA_LIMIT,
             "held within the protocol's, the default policy is the protocol's"
         );
@@ -778,7 +603,7 @@ mod tests {
     /// through.
     #[test]
     fn test_a_building_policy_tightens_a_budget_and_never_loosens_it() {
-        let protocol = ProtocolLimits::DEFAULT.with_block_txs_data_limit(300);
+        let protocol = ProtocolLimits::for_spec(MegaSpecId::SATIN).with_block_txs_data_limit(300);
 
         let tighter = BlockLimits::no_limits()
             .with_block_txs_data_limit(30)
@@ -786,8 +611,7 @@ mod tests {
             .with_tx_encode_size_limit(2)
             .with_block_txs_encode_size_limit(3)
             .with_tx_da_size_limit(4)
-            .with_block_da_size_limit(5)
-            .with_block_gas_limit(6);
+            .with_block_da_size_limit(5);
         assert_eq!(tighter.within(&protocol), tighter, "every cap is below the protocol's");
 
         let looser = BlockLimits::no_limits().with_block_txs_data_limit(3_000);
@@ -800,8 +624,9 @@ mod tests {
         );
     }
 
-    fn limits_with_block_gas(block_gas_limit: u64) -> BlockLimits {
-        BlockLimits::no_limits().with_block_gas_limit(block_gas_limit).with_tx_gas_limit(u64::MAX)
+    /// A limiter of a block whose gas limit is `block_gas_limit`, under no building policy.
+    fn limiter_with_block_gas(block_gas_limit: u64) -> BlockLimiter {
+        BlockLimiter::new(BlockLimits::no_limits(), block_gas_limit)
     }
 
     fn saturated_usage() -> BlockUsage {
@@ -826,7 +651,7 @@ mod tests {
     fn test_pre_execution_check_block_gas_addition_saturates() {
         // Block has very high accumulated usage and a transaction with a near-`u64::MAX`
         // gas limit; unchecked addition would wrap and accidentally pass the limit check.
-        let mut limiter = BlockLimiter::new(limits_with_block_gas(1_000_000));
+        let mut limiter = limiter_with_block_gas(1_000_000);
         limiter.block_gas_used = u64::MAX - 10;
         let result = limiter.pre_execution_check(B256::ZERO, u64::MAX, 0, 0, false);
         assert!(result.is_err(), "saturating_add must keep the rejection in place");
@@ -834,8 +659,10 @@ mod tests {
 
     #[test]
     fn test_pre_execution_check_block_tx_size_addition_saturates() {
-        let mut limiter =
-            BlockLimiter::new(BlockLimits::no_limits().with_block_txs_encode_size_limit(1_000_000));
+        let mut limiter = BlockLimiter::new(
+            BlockLimits::no_limits().with_block_txs_encode_size_limit(1_000_000),
+            u64::MAX,
+        );
         limiter.block_tx_size_used = u64::MAX - 10;
         let result = limiter.pre_execution_check(B256::ZERO, 0, u64::MAX, 0, false);
         assert!(result.is_err());
@@ -843,8 +670,10 @@ mod tests {
 
     #[test]
     fn test_pre_execution_check_block_da_size_addition_saturates() {
-        let mut limiter =
-            BlockLimiter::new(BlockLimits::no_limits().with_block_da_size_limit(1_000_000));
+        let mut limiter = BlockLimiter::new(
+            BlockLimits::no_limits().with_block_da_size_limit(1_000_000),
+            u64::MAX,
+        );
         limiter.block_da_size_used = u64::MAX - 10;
         let result = limiter.pre_execution_check(B256::ZERO, 0, 0, u64::MAX, false);
         assert!(result.is_err());
@@ -852,7 +681,7 @@ mod tests {
 
     #[test]
     fn test_post_execution_update_saturates_all_counters() {
-        let mut limiter = BlockLimiter::new(BlockLimits::no_limits());
+        let mut limiter = BlockLimiter::new(BlockLimits::no_limits(), u64::MAX);
         limiter.block_gas_used = u64::MAX - 1;
         limiter.gas = BlockGasCounters {
             execution: u64::MAX - 1,
@@ -887,7 +716,7 @@ mod tests {
     fn test_post_execution_update_skips_da_for_deposits() {
         // Deposit transactions should not advance the data-availability counters, even when the
         // value would otherwise saturate.
-        let mut limiter = BlockLimiter::new(BlockLimits::no_limits());
+        let mut limiter = BlockLimiter::new(BlockLimits::no_limits(), u64::MAX);
         limiter.block_da_size_used = 100;
         limiter.block_da_footprint_used = 200;
 
@@ -908,7 +737,7 @@ mod tests {
     #[test]
     fn test_data_size_limit_never_refuses_a_deposit_and_counts_it() {
         let mut limiter =
-            BlockLimiter::new(BlockLimits::no_limits().with_block_txs_data_limit(1_000));
+            BlockLimiter::new(BlockLimits::no_limits().with_block_txs_data_limit(1_000), u64::MAX);
         let deposit = BlockUsage {
             usage: LimitUsage { data_size: 600, write_records: 0 },
             is_deposit: true,
@@ -942,7 +771,7 @@ mod tests {
         let cases: [(&str, BlockLimiter, u64, Check); 6] = [
             (
                 "a transaction's own gas limit",
-                BlockLimiter::new(BlockLimits::no_limits().with_tx_gas_limit(LIMIT)),
+                BlockLimiter::new(BlockLimits::no_limits().with_tx_gas_limit(LIMIT), u64::MAX),
                 LIMIT,
                 |limiter, gas_limit| {
                     limiter.pre_execution_check(B256::ZERO, gas_limit, 0, 0, false)
@@ -950,10 +779,7 @@ mod tests {
             ),
             (
                 "the block's gas limit",
-                BlockLimiter {
-                    block_gas_used: USED,
-                    ..BlockLimiter::new(BlockLimits::no_limits().with_block_gas_limit(LIMIT))
-                },
+                BlockLimiter { block_gas_used: USED, ..limiter_with_block_gas(LIMIT) },
                 LIMIT - USED,
                 |limiter, gas_limit| {
                     limiter.pre_execution_check(B256::ZERO, gas_limit, 0, 0, false)
@@ -961,7 +787,10 @@ mod tests {
             ),
             (
                 "a transaction's own encoded size",
-                BlockLimiter::new(BlockLimits::no_limits().with_tx_encode_size_limit(LIMIT)),
+                BlockLimiter::new(
+                    BlockLimits::no_limits().with_tx_encode_size_limit(LIMIT),
+                    u64::MAX,
+                ),
                 LIMIT,
                 |limiter, tx_size| limiter.pre_execution_check(B256::ZERO, 0, tx_size, 0, false),
             ),
@@ -971,6 +800,7 @@ mod tests {
                     block_tx_size_used: USED,
                     ..BlockLimiter::new(
                         BlockLimits::no_limits().with_block_txs_encode_size_limit(LIMIT),
+                        u64::MAX,
                     )
                 },
                 LIMIT - USED,
@@ -978,7 +808,7 @@ mod tests {
             ),
             (
                 "a transaction's own data-availability size",
-                BlockLimiter::new(BlockLimits::no_limits().with_tx_da_size_limit(LIMIT)),
+                BlockLimiter::new(BlockLimits::no_limits().with_tx_da_size_limit(LIMIT), u64::MAX),
                 LIMIT,
                 |limiter, da_size| limiter.pre_execution_check(B256::ZERO, 0, 0, da_size, false),
             ),
@@ -986,7 +816,10 @@ mod tests {
                 "the block's data-availability size",
                 BlockLimiter {
                     block_da_size_used: USED,
-                    ..BlockLimiter::new(BlockLimits::no_limits().with_block_da_size_limit(LIMIT))
+                    ..BlockLimiter::new(
+                        BlockLimits::no_limits().with_block_da_size_limit(LIMIT),
+                        u64::MAX,
+                    )
                 },
                 LIMIT - USED,
                 |limiter, da_size| limiter.pre_execution_check(B256::ZERO, 0, 0, da_size, false),
@@ -1026,7 +859,7 @@ mod tests {
             ),
         ];
         for (name, limits, gas_limit, size) in cases {
-            let limiter = BlockLimiter::new(limits);
+            let limiter = BlockLimiter::new(limits, u64::MAX);
             // The one size feeds both the encoded and the data-availability size.
             let check = |is_deposit| {
                 limiter.pre_execution_check(B256::ZERO, gas_limit, size, size, is_deposit)
@@ -1035,7 +868,7 @@ mod tests {
             assert!(check(false).is_err(), "{name} over the policy: a transaction is refused");
         }
 
-        let limiter = BlockLimiter::new(limits_with_block_gas(100));
+        let limiter = limiter_with_block_gas(100);
         let err = limiter
             .pre_execution_check(B256::ZERO, 101, 0, 0, true)
             .expect_err("the block's gas limit holds a deposit");
@@ -1046,8 +879,10 @@ mod tests {
     /// transaction after it finds the room it used.
     #[test]
     fn test_a_deposit_counts_towards_the_blocks_encoded_size() {
-        let mut limiter =
-            BlockLimiter::new(BlockLimits::no_limits().with_block_txs_encode_size_limit(1_000));
+        let mut limiter = BlockLimiter::new(
+            BlockLimits::no_limits().with_block_txs_encode_size_limit(1_000),
+            u64::MAX,
+        );
         for _ in 0..2 {
             assert!(limiter.pre_execution_check(B256::ZERO, 0, 600, 0, true).is_ok());
             limiter.post_execution_update(&BlockUsage {
@@ -1068,7 +903,7 @@ mod tests {
     /// block used.
     #[test]
     fn test_available_gas_is_the_limit_less_what_the_block_used() {
-        let mut limiter = BlockLimiter::new(limits_with_block_gas(1_000));
+        let mut limiter = limiter_with_block_gas(1_000);
         assert_eq!(limiter.available_gas(), 1_000, "an empty block has all of it");
 
         limiter.post_execution_update(&BlockUsage { gas_used: 400, ..Default::default() });
@@ -1091,7 +926,7 @@ mod tests {
     /// no check refuses a transaction on them.
     #[test]
     fn test_state_and_history_are_counted_but_not_enforced() {
-        let mut limiter = BlockLimiter::new(BlockLimits::no_limits());
+        let mut limiter = BlockLimiter::new(BlockLimits::no_limits(), u64::MAX);
         let usage = BlockUsage {
             gas: MegaGasUsage {
                 state: 10_000,

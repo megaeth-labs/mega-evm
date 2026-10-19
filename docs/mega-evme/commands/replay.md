@@ -163,7 +163,7 @@ Any other chain runs Satin from genesis, the rung the Satin engine pins for an u
 The 1.7.1 tool ran such a chain through `Rex7`, the legacy line's unstable spec, which Satin supersedes.
 Use `--override.spec` below to replay a chain that runs a legacy spec.
 
-Given the chain's genesis file (`--genesis <FILE>`, see [A chain's genesis file](../configuration/chain-and-spec.md#a-chains-genesis-file)), the file decides instead: a block runs on Satin from the file's `satinTime`, under the registry seeds and limits the file carries, and a block before it is refused, whether it would run on the legacy engine or `--override.spec` forces Satin on it.
+Given the chain's genesis file (`--genesis <FILE>`, see [A chain's genesis file](../configuration/chain-and-spec.md#a-chains-genesis-file)), the file decides instead: a block runs on Satin from the file's `satinTime`, under the registry roles the file carries and Satin's limits, and a block before it is refused, whether it would run on the legacy engine or `--override.spec` forces Satin on it.
 A replay on another chain than the file's is refused for its chain, before any engine is picked.
 
 ### `--override.spec <SPEC>`
@@ -182,9 +182,9 @@ On an older block Satin's own deploy check refuses to overwrite them, and the re
 
 ### `--override.limits <JSON|FILE>`
 
-Replay on Satin under other protocol limits than the chain's, a counterfactual: the fields the JSON object names replace the chain's, and every other stays.
-Without it, a Satin replay of a block its chain does not run on Satin runs on Satin's default limits.
-The object's shape, the defaults and what is refused are in [Protocol limits](../configuration/chain-and-spec.md#protocol-limits).
+Replay on Satin under other protocol limits than Satin's, a counterfactual: the fields the JSON object names replace Satin's, and every other stays.
+Without it, a Satin replay runs on Satin's limits, which the spec fixes for every chain.
+The object's shape, Satin's values and what is refused are in [Protocol limits](../configuration/chain-and-spec.md#protocol-limits).
 It applies to both the transaction replay and the block replay; a replay that runs on the legacy engine is refused with it, and so is a legacy block of a block replay.
 The limits a replay ran under are reported: a transaction replay's in its `satin.limits_override`, a block's in the `satin.limits_override` of its block record, and in text mode as `limits overridden` on the block's line.
 
@@ -255,7 +255,7 @@ The exit code is 0, 1 when a block could not be replayed, or 2 when `--verify` i
 
 ### The Satin counterfactual
 
-`--override.spec Satin` runs every block as it would run on Satin: every transaction as signed, on the state its parent block left, under Satin's default protocol limits, or those `--override.limits` gives, with no building policy of a block builder applied.
+`--override.spec Satin` runs every block as it would run on Satin: every transaction as signed, on the state its parent block left, under Satin's protocol limits, or those `--override.limits` gives, with no building policy of a block builder applied.
 A transaction the Satin engine refuses (it cannot pay for its gas, or a block budget is full) is reported `refused` and left out, and the block goes on.
 A transaction signed with a gas limit sized for legacy costs can run out of gas on Satin: that is the counterfactual's answer, not a tool fault.
 Satin's pre-block changes deploy the EIP-7997 factory at `0x4e59b44847b379578588920cA78FbF26c0B4956C`, which no legacy spec reads, so a block cached from a legacy replay does not hold it; the first Satin replay of the block reads it over RPC and adds it to the cache.

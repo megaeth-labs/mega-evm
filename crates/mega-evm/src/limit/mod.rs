@@ -81,13 +81,13 @@
 //! at the SALT price of the bucket it lands in, so state growth is bounded by what it costs: the
 //! transaction's gas limit and the block's.
 //!
-//! # The defaults
+//! # The limits
 //!
-//! Every limit is unlimited unless a caller sets it, gas detention's caps aside. A block executor
-//! installs the chain's, the per-transaction half of the Satin fork's parameters
-//! ([`ProtocolLimits`](crate::ProtocolLimits)), whose default holds a transaction to
-//! [`TX_DATA_LIMIT`](crate::constants::TX_DATA_LIMIT) of data size, to detention's caps and to
-//! nothing else.
+//! They are fixed per spec: a context runs under its spec's from its creation, the per-transaction
+//! half of [`ProtocolLimits::for_spec`](crate::ProtocolLimits::for_spec), which for Satin holds a
+//! transaction to [`TX_DATA_LIMIT`](crate::constants::TX_DATA_LIMIT) of data size, every frame to
+//! its share of it, and a detained transaction to detention's caps. A block executor installs
+//! the same before every transaction. A caller that sets other limits runs a counterfactual.
 //!
 //! # The exemption
 //!
@@ -212,20 +212,16 @@ pub struct LimitUsage {
 ///
 /// [`block_env_access_compute_gas_limit`](Self::block_env_access_compute_gas_limit) and
 /// [`oracle_access_compute_gas_limit`](Self::oracle_access_compute_gas_limit) are gas detention's
-/// caps: the compute a transaction may still spend once it read volatile data. They default to
-/// the spec's, [`BLOCK_ENV_ACCESS_COMPUTE_GAS`] and [`ORACLE_ACCESS_COMPUTE_GAS`]; every other
-/// limit is unlimited unless a caller sets it. [`no_limits`](Self::no_limits) leaves every one
-/// unlimited, the caps included, and a transaction whose caps are both unlimited is not detained:
-/// limits built from it do not execute the chain.
+/// caps: the compute a transaction may still spend once it read volatile data.
+/// [`no_limits`](Self::no_limits) leaves every limit unlimited, the caps included, and a
+/// transaction whose caps are both unlimited is not detained: limits built from it do not execute
+/// the chain.
 ///
-/// Every value here changes a transaction's result, so in block execution they are the chain's:
-/// the per-transaction half of [`ProtocolLimits`](crate::ProtocolLimits), which the block executor
-/// installs before every transaction. [`MegaEvmFactory`](crate::MegaEvmFactory) resolves the same
-/// for an EVM it creates outside block execution; set on a standalone EVM, they are its caller's
-/// choice.
-///
-/// [`BLOCK_ENV_ACCESS_COMPUTE_GAS`]: crate::constants::BLOCK_ENV_ACCESS_COMPUTE_GAS
-/// [`ORACLE_ACCESS_COMPUTE_GAS`]: crate::constants::ORACLE_ACCESS_COMPUTE_GAS
+/// Every value here changes a transaction's result, so they are fixed per spec: the
+/// per-transaction half of [`ProtocolLimits::for_spec`](crate::ProtocolLimits::for_spec), which a
+/// [`MegaContext`](crate::MegaContext) runs under from its creation, the EVM factory's included,
+/// and which the block executor installs before every transaction. [`Default`] is the default
+/// spec's. A tool or a test that sets other values on an EVM runs a counterfactual.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EvmTxRuntimeLimits {
@@ -252,11 +248,10 @@ pub struct EvmTxRuntimeLimits {
 }
 
 impl Default for EvmTxRuntimeLimits {
-    /// Gas detention's caps at the spec's, every other limit unlimited.
+    /// The limits of the default spec's table: what a [`MegaContext`](crate::MegaContext) of that
+    /// spec runs under.
     fn default() -> Self {
-        Self::no_limits()
-            .with_block_env_access_compute_gas_limit(crate::constants::BLOCK_ENV_ACCESS_COMPUTE_GAS)
-            .with_oracle_access_compute_gas_limit(crate::constants::ORACLE_ACCESS_COMPUTE_GAS)
+        crate::ProtocolLimits::for_spec(crate::MegaSpecId::default()).tx_runtime_limits
     }
 }
 
@@ -266,10 +261,11 @@ impl EvmTxRuntimeLimits {
     ///
     /// It turns detention off together with every other per-transaction limit. It is what the
     /// execution-spec gate's equivalence mode installs, and what tests use to take the limits
-    /// out; the chain executes on its own ([`ProtocolLimits`](crate::ProtocolLimits)), whose
-    /// detention caps must be below
-    /// [`MAX_TX_COMPUTE_GAS`](crate::constants::MAX_TX_COMPUTE_GAS), the most compute a
+    /// out; the chain executes on its spec's ([`ProtocolLimits::for_spec`]), whose detention caps
+    /// are below [`MAX_TX_COMPUTE_GAS`](crate::constants::MAX_TX_COMPUTE_GAS), the most compute a
     /// transaction can spend.
+    ///
+    /// [`ProtocolLimits::for_spec`]: crate::ProtocolLimits::for_spec
     pub const fn no_limits() -> Self {
         Self {
             tx_data_size_limit: u64::MAX,
@@ -529,8 +525,7 @@ mod tests {
     }
 
     /// `no_limits` leaves every dimension unlimited: it is what the execution-spec gate installs
-    /// in equivalence mode, and what a bare context runs under. Every field is named, so a limit
-    /// added later cannot be left out of it.
+    /// in equivalence mode. Every field is named, so a limit added later cannot be left out of it.
     #[test]
     fn test_no_limits_leaves_every_dimension_unlimited() {
         let EvmTxRuntimeLimits {
@@ -549,16 +544,18 @@ mod tests {
         }
     }
 
-    /// The default holds gas detention's caps at the spec's and leaves every other limit
-    /// unlimited; a caller's limits change either cap alone.
+    /// The default is the default spec's table, Satin's: the data-size limit and detention's two
+    /// caps; a caller's limits change a cap alone.
     #[test]
-    fn test_the_default_caps_detention_at_the_specs_and_nothing_else() {
-        use crate::constants::{BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS};
+    fn test_the_default_is_the_specs_table() {
         let default = EvmTxRuntimeLimits::default();
-        assert_eq!(default.block_env_access_compute_gas_limit, BLOCK_ENV_ACCESS_COMPUTE_GAS);
-        assert_eq!(default.oracle_access_compute_gas_limit, ORACLE_ACCESS_COMPUTE_GAS);
+        assert_eq!(
+            default,
+            crate::ProtocolLimits::for_spec(crate::MegaSpecId::SATIN).tx_runtime_limits
+        );
         assert_eq!(
             default
+                .with_tx_data_size_limit(u64::MAX)
                 .with_block_env_access_compute_gas_limit(u64::MAX)
                 .with_oracle_access_compute_gas_limit(u64::MAX),
             EvmTxRuntimeLimits::no_limits()

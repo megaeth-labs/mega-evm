@@ -84,7 +84,7 @@ fn test_the_first_block_deploys_from_absent_accounts() {
     let replay = case().run();
     let run = &replay.recorded;
     let witness = case().channel_witness(run);
-    for spec in system_contract_specs(&common::registry_config()) {
+    for spec in system_contract_specs(&common::registry_config(), common::BLOCK_NUMBER) {
         assert_eq!(run.record.accounts.get(&spec.address), Some(&None), "{}", spec.address);
         let state = deploy_state(run, spec.address);
         assert!(state.is_created(), "{} was created", spec.address);
@@ -118,7 +118,7 @@ fn test_a_later_block_reads_the_deployed_contracts() {
     let run = &replay.recorded;
     let witness = case().channel_witness(run);
     let held: BTreeMap<Address, Bytes> = contracts().into_iter().collect();
-    for spec in system_contract_specs(&common::registry_config()) {
+    for spec in system_contract_specs(&common::registry_config(), common::BLOCK_NUMBER) {
         let code = &held[&spec.address];
         let hash = keccak256(code);
         let info = run.record.accounts.get(&spec.address).expect("read").as_ref().expect("held");

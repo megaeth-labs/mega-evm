@@ -2,18 +2,14 @@
 
 use core::any::{Any, TypeId};
 
-use alloy_evm::{
-    block::{BlockExecutionError, BlockExecutor},
-    Evm, EvmFactory,
-};
+use alloy_evm::{block::BlockExecutor, EvmFactory};
 use alloy_hardforks::{EthereumHardfork, EthereumHardforks, ForkCondition, Hardfork};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_op_hardforks::{OpHardfork, OpHardforks};
 use mega_evm::{
     chain_activation, mainnet_hardforks, system::SequencerRegistryConfig, testnet_hardforks,
-    ChainActivation, HardforkParams, MegaBlockExecutionError, MegaBlockExecutor, MegaEvmFactory,
-    MegaHardfork, MegaHardforkConfig, MegaHardforks, ProtocolLimits, ScheduleError,
-    MAINNET_CHAIN_ID, TESTNET_CHAIN_ID,
+    ChainActivation, MegaBlockExecutor, MegaEvmFactory, MegaHardfork, MegaHardforkConfig,
+    MegaHardforks, MegaSpecId, ProtocolLimits, ScheduleError, MAINNET_CHAIN_ID, TESTNET_CHAIN_ID,
 };
 
 use crate::common::{self, empty_call_gas, registry_config, user_tx};
@@ -72,20 +68,12 @@ fn test_a_schedule_missing_its_fork_params_is_refused_at_load() {
         }),
     );
 
-    // The registry's alone is not enough: Satin requires its limits too.
-    let registry_only = missing.with_params(registry_config());
-    assert_eq!(registry_only.require_params::<SequencerRegistryConfig>(), Ok(()));
-    assert_eq!(
-        registry_only.validate_schedule(),
-        Err(ScheduleError::MissingParams { fork: MegaHardfork::Satin, params: "ProtocolLimits" }),
-    );
-
-    // With both attached the schedule loads, and a block runs on it.
-    let loaded = registry_only.with_params(ProtocolLimits::DEFAULT);
-    assert_eq!(loaded.require_params::<ProtocolLimits>(), Ok(()));
+    // With the registry's attached the schedule loads, and a block runs on it: the limits are
+    // the spec's, not a parameter.
+    let loaded = missing.with_params(registry_config());
+    assert_eq!(loaded.require_params::<SequencerRegistryConfig>(), Ok(()));
     assert_eq!(loaded.validate_schedule(), Ok(()));
     assert_eq!(loaded.fork_params::<SequencerRegistryConfig>(), Some(&registry_config()));
-    assert_eq!(loaded.fork_params::<ProtocolLimits>(), Some(&ProtocolLimits::DEFAULT));
 
     let mut state = common::state();
     let mut executor = common::executor_with_spec(&mut state, common::unlimited_ctx(), loaded);
@@ -99,13 +87,12 @@ fn test_an_unscheduled_fork_needs_no_params() {
     let unscheduled = MegaHardforkConfig::default();
 
     assert_eq!(unscheduled.require_params::<SequencerRegistryConfig>(), Ok(()));
-    assert_eq!(unscheduled.require_params::<ProtocolLimits>(), Ok(()));
     assert_eq!(unscheduled.validate_schedule(), Ok(()));
 }
 
 /// A node's own schedule type: it attaches its parameters without `with_params`, and answers with
-/// whatever it holds, checked or not. This one holds `limits` for Satin and answers everything
-/// else as [`common::chain_spec`] does.
+/// whatever it holds. This one answers limits of its own for Satin, as a schedule that carried
+/// them would, and everything else as [`common::chain_spec`] does.
 struct NodeSchedule {
     inner: MegaHardforkConfig,
     limits: ProtocolLimits,
@@ -141,64 +128,17 @@ impl MegaHardforks for NodeSchedule {
     }
 }
 
-/// The refusal of this engine an internal error carries.
-fn internal(error: &BlockExecutionError) -> &MegaBlockExecutionError {
-    error
-        .as_internal()
-        .and_then(|error| error.downcast_other::<MegaBlockExecutionError>())
-        .unwrap_or_else(|| panic!("not an internal refusal of this engine: {error:?}"))
-}
-
-/// Limits their own check refuses run no block, even when they reach the block executor without
-/// the load-time check: a node's own schedule type hands them over as it holds them. The executor
-/// installs nothing on the EVM and refuses the block at every entry point — its start, a
-/// transaction, its end — as an internal error: the schedule is the node's configuration, not the
-/// block.
+/// A schedule cannot hand a block its limits: the executor holds the block to the spec's, whatever
+/// a node's own schedule type answers, so no chain configuration loosens or tightens them. The
+/// block runs, its transactions under the spec's per-transaction limits and the block under its
+/// data-size budget.
 #[test]
-fn test_limits_the_check_refuses_run_no_block() {
-    let invalid = ProtocolLimits::no_limits();
-    let schedule = NodeSchedule { inner: common::chain_spec(), limits: invalid };
-    let message = invalid.validate().expect_err("no chain may carry them").message;
-    assert_eq!(
-        schedule.validate_schedule(),
-        Err(ScheduleError::InvalidParams {
-            fork: MegaHardfork::Satin,
-            params: "ProtocolLimits",
-            message: message.clone(),
-        }),
-        "the load-time check refuses them, for a node that runs it"
-    );
-
-    let mut state = common::state();
-    let evm = MegaEvmFactory::new().create_evm(&mut state, common::evm_env());
-    let built_with = *evm.tx_runtime_limits();
-    let mut executor = MegaBlockExecutor::new(
-        evm,
-        common::unlimited_ctx(),
-        &schedule,
-        OpAlloyReceiptBuilder::default(),
-    );
-    assert_eq!(executor.protocol_limits(), None);
-    assert_eq!(*executor.evm().tx_runtime_limits(), built_with, "nothing is installed");
-
-    let refusal = MegaBlockExecutionError::InvalidProtocolLimits {
-        timestamp: common::BLOCK_TIMESTAMP,
-        message,
-    };
-    let error = executor.apply_pre_execution_changes().expect_err("the block does not start");
-    assert_eq!(internal(&error), &refusal);
-    assert!(executor.evm().db().bundle_state.state.is_empty(), "no pre-block step ran");
-    let error = executor
-        .execute_transaction(&user_tx(0, empty_call_gas()))
-        .expect_err("no transaction runs either");
-    assert_eq!(internal(&error), &refusal);
-    assert!(executor.receipts().is_empty());
-    let Err(error) = executor.finish() else { panic!("nor is the block finished") };
-    assert_eq!(internal(&error), &refusal);
-
-    // The same schedule holding limits a chain may carry runs the block.
-    let schedule = NodeSchedule { inner: common::chain_spec(), limits: ProtocolLimits::DEFAULT };
+fn test_a_schedule_cannot_hand_a_block_its_limits() {
+    let satin = ProtocolLimits::for_spec(MegaSpecId::SATIN);
+    let schedule =
+        NodeSchedule { inner: common::chain_spec(), limits: ProtocolLimits::no_limits() };
     assert_eq!(schedule.validate_schedule(), Ok(()));
+
     let mut state = common::state();
     let evm = MegaEvmFactory::new().create_evm(&mut state, common::evm_env());
     let mut executor = MegaBlockExecutor::new(
@@ -207,7 +147,9 @@ fn test_limits_the_check_refuses_run_no_block() {
         &schedule,
         OpAlloyReceiptBuilder::default(),
     );
-    assert_eq!(executor.protocol_limits(), Some(&ProtocolLimits::DEFAULT));
+    assert_eq!(executor.protocol_limits(), &satin);
+    assert_eq!(*executor.evm().tx_runtime_limits(), satin.tx_runtime_limits);
+    assert_eq!(executor.limiter().limits.block_txs_data_limit, satin.block_txs_data_limit);
     executor.apply_pre_execution_changes().expect("the block starts");
     executor.execute_transaction(&user_tx(0, empty_call_gas())).expect("the transaction executes");
 }
@@ -235,14 +177,13 @@ const OP_BASE_FORKS: [OpHardfork; 9] = [
     OpHardfork::Karst,
 ];
 
-/// A schedule that activates Satin at [`SATIN_TIME`] with both its params types attached, every
-/// base fork at genesis but `base`, which activates on `condition`.
+/// A schedule that activates Satin at [`SATIN_TIME`] with its params attached, every base fork at
+/// genesis but `base`, which activates on `condition`.
 fn base_fork_case(base: impl Hardfork, condition: ForkCondition) -> MegaHardforkConfig {
     MegaHardforkConfig::new()
         .with(MegaHardfork::Satin, ForkCondition::Timestamp(SATIN_TIME))
         .with(base, condition)
         .with_params(registry_config())
-        .with_params(ProtocolLimits::DEFAULT)
 }
 
 /// The refusal of a schedule whose `base` fork is not active when Satin activates.
@@ -323,15 +264,11 @@ fn test_engine_built_schedules_keep_their_base_forks_at_genesis() {
     for satin_time in [0, 1, SATIN_TIME] {
         let schedule = MegaHardforkConfig::new()
             .with(MegaHardfork::Satin, ForkCondition::Timestamp(satin_time))
-            .with_params(registry_config())
-            .with_params(ProtocolLimits::DEFAULT);
+            .with_params(registry_config());
         assert_eq!(schedule.validate_schedule(), Ok(()), "Satin at {satin_time}");
 
         let activation = ChainActivation { chain_id: MAINNET_CHAIN_ID, satin: Some(satin_time) };
-        let schedule = activation
-            .hardforks()
-            .with_params(registry_config())
-            .with_params(ProtocolLimits::DEFAULT);
+        let schedule = activation.hardforks().with_params(registry_config());
         assert_eq!(schedule.validate_schedule(), Ok(()), "the table's Satin at {satin_time}");
     }
 }

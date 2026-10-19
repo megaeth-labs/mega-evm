@@ -42,11 +42,12 @@ use mega_evm::{
         VolatileDataAccessType, CREATE2_FACTORY_ADDRESS, CREATE2_FACTORY_NONCE,
         SLOT_NUM_ACCESS_TYPE,
     },
-    LimitKind, ProtocolLimits, SatinPrices, VolatileDataAccess, ACCESS_LIST_ADDRESS_SIZE,
-    ACCESS_LIST_SLOT_SIZE, AUTHORIZATION_SIZE, FRAME_DATA_SHARE_DENOMINATOR,
-    FRAME_DATA_SHARE_NUMERATOR, HISTORY_GAS_PRICED, LOG_BASE_SIZE, LOG_TOPIC_SIZE, MIN_BUCKET_SIZE,
-    STATE_GAS_REPRICED, STORAGE_CALL_STIPEND_BYTES, SYSTEM_ADDRESS, TRANSFER_LOG_SIZE,
-    TX_BASE_SIZE, TX_BODY_SIZE, TX_FIXED_WRITE_RECORDS, WRITE_RECORD_SIZE,
+    LimitKind, MegaSpecId, ProtocolLimits, SatinPrices, VolatileDataAccess,
+    ACCESS_LIST_ADDRESS_SIZE, ACCESS_LIST_SLOT_SIZE, AUTHORIZATION_SIZE,
+    FRAME_DATA_SHARE_DENOMINATOR, FRAME_DATA_SHARE_NUMERATOR, HISTORY_GAS_PRICED, LOG_BASE_SIZE,
+    LOG_TOPIC_SIZE, MIN_BUCKET_SIZE, STATE_GAS_REPRICED, STORAGE_CALL_STIPEND_BYTES,
+    SYSTEM_ADDRESS, TRANSFER_LOG_SIZE, TX_BASE_SIZE, TX_BODY_SIZE, TX_FIXED_WRITE_RECORDS,
+    WRITE_RECORD_SIZE,
 };
 
 const SATIN_MD: &str = include_str!("../../../../docs/spec/upgrades/satin.md");
@@ -231,7 +232,7 @@ fn state_and_history(doc: &str) {
 }
 
 fn limits(doc: &str) {
-    let defaults = ProtocolLimits::DEFAULT;
+    let defaults = ProtocolLimits::for_spec(MegaSpecId::SATIN);
     assert_eq!(defaults.tx_runtime_limits.tx_data_size_limit, TX_DATA_LIMIT);
     assert_eq!(defaults.block_txs_data_limit, BLOCK_DATA_LIMIT);
     assert_eq!(TX_DATA_LIMIT, BLOCK_DATA_LIMIT, "the page states one data-size number for both");

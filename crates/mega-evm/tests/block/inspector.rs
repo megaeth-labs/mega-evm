@@ -14,8 +14,8 @@ use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, GasInspector, MemoryDatabase},
     transaction_body_bytes, BlockLimits, DeclaredObserver, LimitUsage, MegaBlockExecutionCtx,
-    MegaContext, MegaEvmFactory, MegaTransaction, MegaTransactionOutcome, MegaTxEnvelope,
-    PreBlockStateSource,
+    MegaBlockExecutionError, MegaContext, MegaEvmFactory, MegaTransaction, MegaTransactionOutcome,
+    MegaTxEnvelope, PreBlockStateSource,
 };
 use revm::{
     bytecode::opcode::{ADD, POP, PUSH0, SLOAD, SSTORE},
@@ -61,7 +61,9 @@ fn test_a_declared_observer_reaches_block_execution() {
 }
 
 /// An inspector that arrived without the declaration does not: block execution refuses it before
-/// the block's first call.
+/// the block's first call. The refusal is an internal error, not a verdict on the block: the
+/// inspector is the node's own choice and says nothing about the block, so a validator that runs
+/// one must not mark a valid block invalid.
 #[test]
 fn test_a_rewriting_inspector_cannot_reach_block_execution() {
     let mut state = common::state();
@@ -79,6 +81,12 @@ fn test_a_rewriting_inspector_cannot_reach_block_execution() {
     assert!(
         format!("{err}").contains("does not admit an inspector that may rewrite execution"),
         "{err}"
+    );
+    assert!(err.as_validation().is_none(), "not a verdict on the block: {err:?}");
+    assert_eq!(
+        err.as_internal().and_then(|error| error.downcast_other::<MegaBlockExecutionError>()),
+        Some(&MegaBlockExecutionError::RewritingInspector),
+        "an internal error of the node: {err:?}"
     );
 }
 

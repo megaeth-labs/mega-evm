@@ -1,6 +1,6 @@
-//! Blocks: several random transactions through `MegaBlockExecutor`, under random valid
-//! `ProtocolLimits` and a random building policy, with the block's admission rules restated and
-//! its counters summed.
+//! Blocks: several random transactions through `MegaBlockExecutor`, under random `ProtocolLimits`
+//! in place of the spec's and a random building policy, with the block's admission rules restated
+//! and its counters summed.
 //!
 //! Every transaction is built right before it runs, with its sender's live nonce, so a refusal
 //! comes from the block's rules or the transaction's own validity and not from a stale nonce.
@@ -16,7 +16,7 @@ use alloy_primitives::{keccak256, Address, Bytes, Signature, TxKind, B256, U256}
 use mega_evm::{
     system::{SequencerRegistryConfig, MEGA_SYSTEM_ADDRESS},
     test_utils::MemoryDatabase,
-    BlockGasCounters, BlockLimiter, BlockLimits, HardforkParams, LimitUsage, MegaBlockExecutionCtx,
+    BlockGasCounters, BlockLimiter, BlockLimits, LimitUsage, MegaBlockExecutionCtx,
     MegaBlockExecutor, MegaEvmFactory, MegaHardforkConfig, MegaTxEnvelope, ProtocolLimits,
     WRITE_RECORD_SIZE,
 };
@@ -215,16 +215,12 @@ impl BlockCase {
     }
 
     fn spec(&self) -> MegaHardforkConfig {
-        MegaHardforkConfig::default()
-            .with_all_activated()
-            .with_params(SequencerRegistryConfig {
-                initial_system_address: MEGA_SYSTEM_ADDRESS,
-                initial_sequencer: Address::repeat_byte(0x22),
-                initial_admin: Address::repeat_byte(0x33),
-                initial_from_block: 1,
-                min_rotation_delay: 100,
-            })
-            .with_params(self.protocol())
+        MegaHardforkConfig::default().with_all_activated().with_params(SequencerRegistryConfig {
+            initial_system_address: MEGA_SYSTEM_ADDRESS,
+            initial_sequencer: Address::repeat_byte(0x22),
+            initial_admin: Address::repeat_byte(0x33),
+            min_rotation_delay: 100,
+        })
     }
 
     fn block_env(&self) -> BlockEnv {
@@ -335,7 +331,7 @@ fn admits_before(limiter: &BlockLimiter, gas_limit: u64, tx_size: u64, is_deposi
     if !is_deposit && gas_limit > limits.tx_gas_limit {
         return false;
     }
-    if limiter.block_gas_used.saturating_add(gas_limit) > limits.block_gas_limit {
+    if limiter.block_gas_used.saturating_add(gas_limit) > limiter.block_gas_limit {
         return false;
     }
     if is_deposit {
@@ -376,10 +372,6 @@ struct BlockRun {
 /// Runs the block and checks the admission rules, the counters and the receipts along the way.
 fn run_block(case: &BlockCase) -> Result<BlockRun, proptest::test_runner::TestCaseError> {
     let protocol = case.protocol();
-    prop_check!(
-        protocol.validate().is_ok(),
-        "the generated protocol limits are valid: {protocol:?}"
-    );
     let envs: Envs = case.base.envs();
     let mut state = case.state();
     let mut cfg = revm::context::CfgEnv::new_with_spec(mega_evm::MegaSpecId::SATIN);
@@ -389,7 +381,8 @@ fn run_block(case: &BlockCase) -> Result<BlockRun, proptest::test_runner::TestCa
         .create_evm(&mut state, EvmEnv::new(cfg, case.block_env()));
     let ctx = MegaBlockExecutionCtx::new(B256::ZERO, Some(B256::ZERO), Bytes::new(), case.policy());
     let mut executor =
-        MegaBlockExecutor::new(evm, ctx, case.spec(), OpAlloyReceiptBuilder::default());
+        MegaBlockExecutor::new(evm, ctx, case.spec(), OpAlloyReceiptBuilder::default())
+            .with_protocol_limits(protocol);
     executor
         .apply_pre_execution_changes()
         .map_err(|error| fail(format!("the block does not start: {error:?}")))?;
