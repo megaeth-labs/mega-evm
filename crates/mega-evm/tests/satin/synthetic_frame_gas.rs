@@ -235,13 +235,15 @@ fn test_exceeded_tx_limit_wins_over_call_too_deep() {
     assert_eq!(outcome.result.gas.reservoir(), RESERVOIR);
 }
 
-/// A first frame answered with the stop before it runs gives the whole reservoir back, and costs
-/// the same at a gas limit under the execution cap and far above it.
+/// A first frame answered with the stop before it runs — its body fits the limit, the record and
+/// the transfer log of its value do not — gives the whole reservoir back, and costs the same at a
+/// gas limit under the execution cap and far above it.
 #[test]
 fn test_stopped_first_frame_keeps_the_reservoir_at_any_gas_limit() {
     let at = |gas_limit: u64| {
         let db = MemoryDatabase::default().account_balance(CALLER, U256::from(1_000));
-        let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(0);
+        let limits =
+            EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(mega_evm::TX_BODY_SIZE);
         let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits));
         let result =
             alloy_evm::Evm::transact_raw(&mut evm, call(CALLER, TARGET, U256::from(1), gas_limit))

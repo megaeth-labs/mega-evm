@@ -19,8 +19,8 @@ use mega_evm::{
         ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE,
     },
     test_utils::{is_transfer_log, BytecodeBuilder, MemoryDatabase},
-    LimitCheck, LimitKind, LimitUsage, MegaContext, MegaEvm, StagedRecord, TRANSFER_LOG_SIZE,
-    TX_BODY_SIZE, WRITE_RECORD_SIZE,
+    LimitUsage, MegaContext, MegaEvm, StagedRecord, TRANSFER_LOG_SIZE, TX_BODY_SIZE,
+    WRITE_RECORD_SIZE,
 };
 use revm::{
     bytecode::opcode::{
@@ -858,43 +858,40 @@ fn test_creation_stopped_at_init_bumps_the_creator_nonce() {
     assert_eq!(evm.ctx().additional_limit().usage(), records(2), "slot 1 and the creator's nonce");
 }
 
-/// Authorities whose records would cross the transaction's data-size limit are not applied: the
-/// limit is enforced before the writes it guards, and the transaction is stopped before its first
-/// frame.
+/// A transaction is held at validation to its body and a record for every entry of its
+/// authorization list, against the data-size limit: the largest transaction that fits runs with
+/// its authority applied, and with one byte of limit less it is rejected before anything is
+/// applied. The bound counts every entry, applied or not: a list naming one authority twice is held
+/// to two records, though the one authority makes one.
 #[test]
-fn test_authorities_crossing_the_cap_are_not_applied() {
+fn test_authority_records_are_held_to_the_limit_at_validation() {
     let db = || MemoryDatabase::default().account_balance(CALLER, U256::from(1_000));
-    let with_cap = |cap| {
+    let with_cap = |cap, authorizations: &[(Address, u64)]| {
         let limits = mega_evm::EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(cap);
         MegaEvm::new(context(db()).with_tx_runtime_limits(limits))
-            .execute_transaction(authorizing_call(CONTRACT, 0, &[(AUTHORITY_1, 0)]))
-            .unwrap()
+            .execute_transaction(authorizing_call(CONTRACT, 0, authorizations))
+    };
+    let refused = |cap, authorizations: &[(Address, u64)]| {
+        let error = with_cap(cap, authorizations).expect_err("rejected at validation");
+        format!("{error:?}").contains(mega_evm::TX_BODY_OVER_DATA_SIZE_LIMIT)
     };
     // The body carries the authorization tuple; the applied authority is one record on top.
     let tuple = mega_evm::AUTHORIZATION_SIZE;
-    let at_the_cap = with_cap(TX_BODY_SIZE + tuple + WRITE_RECORD_SIZE);
-    assert!(at_the_cap.result.is_success(), "records equal to the cap do not cross it");
+    let once = [(AUTHORITY_1, 0)];
+    let largest = TX_BODY_SIZE + tuple + WRITE_RECORD_SIZE;
+    let at_the_cap = with_cap(largest, &once).expect("a transaction at the limit is valid");
+    assert!(at_the_cap.result.is_success(), "{:?}", at_the_cap.result);
     assert_eq!(at_the_cap.usage, with_extra(records(1), tuple));
+    let code = at_the_cap.state[&AUTHORITY_1].info.code.as_ref();
+    assert_eq!(code.and_then(|code| code.eip7702_address()), Some(DELEGATE), "it is applied");
+    assert!(refused(largest - 1, &once), "one byte of limit less rejects it");
 
-    let limit = TX_BODY_SIZE + tuple + WRITE_RECORD_SIZE - 1;
-    let outcome = with_cap(limit);
-    assert!(!outcome.result.is_success() && !outcome.result.is_halt(), "{:?}", outcome.result);
-    assert_eq!(
-        outcome.limit_exceeded,
-        Some(LimitCheck::ExceedsLimit {
-            kind: LimitKind::DataSize,
-            limit,
-            used: limit + 1,
-            frame_local: false,
-        }),
-        "the authority record is the byte that crosses, and nothing after it is counted"
-    );
-    let authority = outcome.state.get(&AUTHORITY_1);
-    assert!(
-        authority.is_none_or(|a| a.info.nonce == 0 && a.info.is_empty_code_hash()),
-        "the delegation was not applied: {authority:?}"
-    );
-    assert_eq!(outcome.usage, with_extra(body_only(), mega_evm::AUTHORIZATION_SIZE));
+    let twice = [(AUTHORITY_1, 0), (AUTHORITY_1, 1)];
+    let bound = TX_BODY_SIZE + 2 * tuple + 2 * WRITE_RECORD_SIZE;
+    assert!(refused(bound - 1, &twice), "two entries are held to two records");
+    let ran = with_cap(bound, &twice).expect("valid at two records");
+    assert!(ran.result.is_success(), "{:?}", ran.result);
+    assert_eq!(ran.usage, with_extra(records(1), 2 * tuple), "the one authority makes one record");
 }
 
 /// A funded caller's database, for the runtime out-of-gas tests.

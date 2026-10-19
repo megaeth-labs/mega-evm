@@ -4,9 +4,10 @@
 //! child alone and its parent resumes. Crossing the transaction's own limit stops the transaction
 //! through the same latch every other transaction-level limit uses.
 //!
-//! The body is counted before any frame and kept on every path. Deployed code is counted on the
-//! creation's lane, one byte per byte, before the creation is committed, and only when revm would
-//! deposit it.
+//! The body is counted before any frame and kept on every path; validation rejects a transaction
+//! whose body, with a record for each authorization it carries, exceeds the limit. Deployed code is
+//! counted on the creation's lane, one byte per byte, before the creation is committed, and only
+//! when revm would deposit it.
 
 use alloy_evm::Evm;
 use alloy_primitives::{address, keccak256, Address, Bytes, U256};
@@ -33,7 +34,7 @@ use revm::{
 
 use crate::common::{
     account_state_gas, body_history, call, call_with_data, context, create, history,
-    history_is_free, history_rounds, slot_state_gas, state_is_free,
+    history_is_free, history_rounds, slot_state_gas,
 };
 
 const CALLER: Address = address!("0000000000000000000000000000000000300000");
@@ -285,43 +286,27 @@ fn test_calldata_counts_in_the_body() {
     assert_eq!(run(0xff), expected, "a non-zero byte");
 }
 
-/// A body that crosses the transaction limit stops the transaction before its code runs. The
-/// body stays counted: it is what crossed.
+/// A body that crosses the transaction limit is rejected at validation: the transaction never
+/// runs, so its callee's code never does either.
 #[test]
-fn test_a_body_over_the_limit_stops_before_any_frame() {
+fn test_a_body_over_the_limit_is_rejected() {
     let db = funded().account_code(
         A,
         BytecodeBuilder::default().sstore(U256::ZERO, U256::from(1)).stop().build(),
     );
-    let limit = mega_evm::TX_BODY_SIZE - 1;
-    let mut evm = MegaEvm::new(
-        context(db)
-            .with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit)),
-    )
+    let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(
+        EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(mega_evm::TX_BODY_SIZE - 1),
+    ))
     .with_inspector(Probe::default());
-    let result = evm.transact_raw(call(CALLER, A, U256::ZERO, GAS_LIMIT)).unwrap();
-
-    assert!(!result.result.is_success() && !result.result.is_halt(), "{:?}", result.result);
+    let error = evm.transact_raw(call(CALLER, A, U256::ZERO, GAS_LIMIT)).expect_err("rejected");
+    assert_body_refused(&format!("{error:?}"));
     assert_eq!(evm.inspector().steps, 0, "the callee never ran");
-    assert_eq!(
-        evm.ctx().additional_limit().latched().copied(),
-        Some(LimitCheck::ExceedsLimit {
-            kind: LimitKind::DataSize,
-            limit,
-            used: mega_evm::TX_BODY_SIZE,
-            frame_local: false,
-        })
-    );
-    assert_eq!(
-        evm.ctx().additional_limit().usage(),
-        LimitUsage { data_size: mega_evm::TX_BODY_SIZE, write_records: 0 },
-    );
-    assert!(
-        result.state.get(&A).is_none_or(|account| {
-            account.storage.get(&U256::ZERO).is_none_or(|slot| !slot.is_changed())
-        }),
-        "the callee's write was never made",
-    );
+}
+
+/// Asserts `error` is the refusal of a body whose bytes and authorization records exceed the
+/// transaction's data-size limit.
+fn assert_body_refused(error: &str) {
+    assert!(error.contains(mega_evm::TX_BODY_OVER_DATA_SIZE_LIMIT), "{error}");
 }
 
 /// Deployed code is one byte per byte on the creation, on top of the body and the created
@@ -587,10 +572,9 @@ fn assert_stopped(outcome: &MegaTransactionOutcome, limit: u64, used: u64) {
     );
 }
 
-/// Calldata is in the body. One byte over that count stops the transaction before the callee
-/// runs, so a store the callee would have made is not part of the crossing figure.
+/// Calldata is in the body. One byte over that count rejects the transaction at validation.
 #[test]
-fn test_calldata_one_byte_over_stops_before_the_callee() {
+fn test_calldata_one_byte_over_is_rejected() {
     let data = Bytes::from(vec![0xab; 50]);
     let body = mega_evm::TX_BODY_SIZE + data.len() as u64;
     let db = || {
@@ -604,13 +588,11 @@ fn test_calldata_one_byte_over_stops_before_the_callee() {
     assert!(fits.result.is_success(), "{:?}", fits.result);
     assert_eq!(fits.usage, LimitUsage { data_size: body + 40, write_records: 1 });
 
-    let over = run_at(db(), call_with_data(CALLER, A, data, GAS_LIMIT), body - 1);
-    assert_stopped(&over, body - 1, body);
-    assert_eq!(over.usage, LimitUsage { data_size: body, write_records: 0 });
-    assert!(over.result.logs().is_empty());
-    assert!(over.state.get(&A).is_none_or(|account| {
-        account.storage.get(&U256::ZERO).is_none_or(|slot| !slot.is_changed())
-    }));
+    let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(body - 1);
+    let error = MegaEvm::new(context(db()).with_tx_runtime_limits(limits))
+        .execute_transaction(call_with_data(CALLER, A, data, GAS_LIMIT))
+        .expect_err("rejected");
+    assert_body_refused(&format!("{error:?}"));
 }
 
 /// A log is 32 bytes for its address plus its data. One byte over that stops on the log: the
@@ -1317,96 +1299,35 @@ fn smallest_gas_limit(high: u64, accepted: impl Fn(u64) -> bool) -> u64 {
     high
 }
 
-/// A body over the limit is the stop at every gas limit validation accepts.
-///
-/// A gas limit that covers the intrinsic cost and no more cannot pay what the transaction's start
-/// costs past it: the account a value transfer or a creation adds, the write record of it, and an
-/// authorization's delegation. Without a limit, each of these transactions runs out of gas there,
-/// before its first frame. With the body over the limit none of those writes is made — the first
-/// frame is answered with the stop — so none is charged, and the transaction reports the stop that
-/// bound first. It pays its intrinsic cost and nothing else.
+/// A body over the limit is rejected whatever the gas limit, before its gas is looked at: at a
+/// gas limit validation would otherwise accept, below it, and above it. A body at the limit leaves
+/// validation where it is without one: the smallest gas limit it accepts is the same.
 #[test]
-fn test_a_body_over_the_limit_is_the_stop_at_the_smallest_valid_gas_limit() {
+fn test_a_body_over_the_limit_is_rejected_at_every_gas_limit() {
     type Tx = fn(u64) -> mega_evm::MegaTransaction;
     let cases: [(&str, Tx, u64); 3] = [
         ("a value transfer to a fresh account", |gas| call(CALLER, FRESH, U256::from(1), gas), 0),
         ("a creation", |gas| create(CALLER, constructor_returning(1), gas), 12),
-        ("an authorization", authorizing_call, mega_evm::AUTHORIZATION_SIZE),
+        // The authorization's record counts beside its tuple.
+        ("an authorization", authorizing_call, mega_evm::AUTHORIZATION_SIZE + WRITE_RECORD_SIZE),
     ];
     assert_eq!(constructor_returning(1).len(), 12);
     for (name, tx, extra) in cases {
-        let body = mega_evm::TX_BODY_SIZE + extra;
-        let limit = body - 1;
+        let at = mega_evm::TX_BODY_SIZE + extra;
         let valid = smallest_gas_limit(GAS_LIMIT, |gas| outcome_at(tx(gas), u64::MAX).is_some());
         assert_eq!(
-            smallest_gas_limit(GAS_LIMIT, |gas| outcome_at(tx(gas), limit).is_some()),
+            smallest_gas_limit(GAS_LIMIT, |gas| outcome_at(tx(gas), at).is_some()),
             valid,
-            "{name}: the limit does not move validation"
+            "{name}: a limit the transaction fits does not move validation"
         );
-
-        let stopped = outcome_at(tx(valid), limit).unwrap();
-        // Where a state byte and a record's history are both free the start costs nothing past
-        // the intrinsic gas, and there is no out-of-gas for the stop to stand in for. Where a
-        // history byte is cheap enough, the calldata floor lifts the smallest valid gas limit past
-        // the intrinsic cost, which the stop spends alone, and what it covers past it may pay the
-        // start.
-        let free = state_is_free() && history(WRITE_RECORD_SIZE) == 0;
-        if !free && valid == stopped.result.gas().total_gas_spent() {
-            let unlimited = outcome_at(tx(valid), u64::MAX).unwrap();
-            assert!(
-                matches!(
-                    unlimited.result,
-                    ExecutionResult::Halt {
-                        reason: MegaHaltReason::Base(HaltReason::OutOfGas(_)),
-                        ..
-                    }
-                ),
-                "{name}: without a limit the start runs out of gas, got {:?}",
-                unlimited.result
-            );
+        for gas in [0, valid - 1, valid, valid + 10_000] {
+            let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(at - 1);
+            let error = MegaEvm::new(context(funded()).with_tx_runtime_limits(limits))
+                .execute_transaction(tx(gas))
+                .expect_err("rejected");
+            assert_body_refused(&format!("{name} at {gas}: {error:?}"));
         }
-
-        assert_stopped(&stopped, limit, body);
-        assert_eq!(stopped.usage, LimitUsage { data_size: body, write_records: 0 }, "{name}");
-        assert_eq!(stopped.result.gas().tx_gas_used(), valid, "{name}: the intrinsic cost only");
-
-        // A gas limit above the smallest one pays the same: nothing past the intrinsic cost is
-        // charged, so nothing is burnt either.
-        let above = outcome_at(tx(valid + 10_000), limit).unwrap();
-        assert_stopped(&above, limit, body);
-        assert_eq!(above.result.gas().tx_gas_used(), valid, "{name}: the stop burns nothing");
     }
-}
-
-/// A creation transaction stopped at the smallest gas limit validation accepts still bumps its
-/// sender's nonce, and an authorization its body carried is not applied.
-#[test]
-fn test_a_stopped_start_bumps_a_creators_nonce_and_applies_no_authorization() {
-    let init = constructor_returning(1);
-    let limit = mega_evm::TX_BODY_SIZE + init.len() as u64 - 1;
-    let valid = smallest_gas_limit(GAS_LIMIT, |gas| {
-        outcome_at(create(CALLER, init.clone(), gas), limit).is_some()
-    });
-    let stopped = outcome_at(create(CALLER, init, valid), limit).unwrap();
-    assert!(stopped.limit_exceeded.is_some(), "{:?}", stopped.result);
-    assert_eq!(stopped.state[&CALLER].info.nonce, 1, "the sender's nonce is bumped");
-    assert!(stopped
-        .state
-        .get(&CALLER.create(0))
-        .is_none_or(|account| account.info.is_empty_code_hash() && account.info.nonce == 0));
-
-    let limit = mega_evm::TX_BODY_SIZE + mega_evm::AUTHORIZATION_SIZE - 1;
-    let valid =
-        smallest_gas_limit(GAS_LIMIT, |gas| outcome_at(authorizing_call(gas), limit).is_some());
-    let stopped = outcome_at(authorizing_call(valid), limit).unwrap();
-    assert!(stopped.limit_exceeded.is_some(), "{:?}", stopped.result);
-    assert!(
-        stopped
-            .state
-            .get(&AUTHORITY)
-            .is_none_or(|a| a.info.nonce == 0 && a.info.is_empty_code_hash()),
-        "the delegation was not applied"
-    );
 }
 
 /* ---------- the 98% share, measured in slots ---------- */
@@ -1569,10 +1490,10 @@ fn test_the_body_and_the_execution_add_up_to_the_stop() {
     }
 }
 
-/// A body over the limit is stopped before an interceptor could answer the transaction's own
-/// call: the stop is the first frame's answer, whatever the frame's target.
+/// A body over the limit is rejected before an interceptor could answer the transaction's own
+/// call, whatever the frame's target.
 #[test]
-fn test_a_body_over_the_limit_is_stopped_before_an_interceptor() {
+fn test_a_body_over_the_limit_is_rejected_before_an_interceptor() {
     use alloy_sol_types::SolCall;
     use mega_evm::system::{IMegaLimitControl, LIMIT_CONTROL_ADDRESS};
     let selector = IMegaLimitControl::remainingComputeGasCall::SELECTOR;
@@ -1581,18 +1502,11 @@ fn test_a_body_over_the_limit_is_stopped_before_an_interceptor() {
         || call_with_data(CALLER, LIMIT_CONTROL_ADDRESS, Bytes::from(selector.to_vec()), GAS_LIMIT);
     let answered = run_at(funded(), tx(), body);
     assert!(answered.result.is_success(), "the interceptor answers: {:?}", answered.result);
-    let stopped = run_at(funded(), tx(), body - 1);
-    assert_stopped(&stopped, body - 1, body);
-    assert_eq!(
-        stopped.result.output().unwrap(),
-        &LimitCheck::ExceedsLimit {
-            kind: LimitKind::DataSize,
-            limit: body - 1,
-            used: body,
-            frame_local: false,
-        }
-        .revert_data(),
-    );
+    let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(body - 1);
+    let error = MegaEvm::new(context(funded()).with_tx_runtime_limits(limits))
+        .execute_transaction(tx())
+        .expect_err("rejected");
+    assert_body_refused(&format!("{error:?}"));
 }
 
 /* ---------- the nonce record a failed creation leaves its creator ---------- */

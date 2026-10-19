@@ -91,19 +91,24 @@ fn test_an_override_is_read_from_a_file() {
     assert_eq!(from_file, inline);
 }
 
-/// `tx` takes the override too: a body one byte over the transaction data-size limit is stopped
-/// before it runs.
+/// `tx` takes the override too: a body one byte over the transaction data-size limit is rejected
+/// at validation, and a limit the body fits runs it and names the override.
 #[test]
 fn test_an_override_holds_a_satin_tx_to_other_limits() {
     let args = ["tx", "--spec", "Satin", "--input", "0x00", "--json", "--override.limits"];
-    let output = evme(&[&args[..], &[r#"{"txRuntimeLimits":{"txDataSizeLimit":310}}"#]].concat());
-    let stopped = output.json();
-    assert_eq!(stopped["success"], false);
-    assert_eq!(
-        stopped["satin"]["limit_exceeded"],
-        json!({ "kind": "data_size", "limit": 310, "used": 311 })
+    let limit = |bytes: u64| format!(r#"{{"txRuntimeLimits":{{"txDataSizeLimit":{bytes}}}}}"#);
+    let rejected = evme(&[&args[..], &[limit(310).as_str()]].concat());
+    assert_ne!(rejected.code, 0, "{}", rejected.stdout);
+    assert!(
+        rejected.stderr.contains(mega_evm::TX_BODY_OVER_DATA_SIZE_LIMIT),
+        "{}",
+        rejected.stderr
     );
-    assert_eq!(stopped["satin"]["limits_override"], defaults_with_tx_data_size(310));
+
+    let ran = evme(&[&args[..], &[limit(311).as_str()]].concat()).json();
+    assert_eq!(ran["success"], true);
+    assert_eq!(ran["satin"]["limit_exceeded"], Value::Null);
+    assert_eq!(ran["satin"]["limits_override"], defaults_with_tx_data_size(311));
 }
 
 /// The human-readable report names the limits a run was held to under an override, and says

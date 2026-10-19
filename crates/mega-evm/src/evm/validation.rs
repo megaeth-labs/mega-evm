@@ -98,8 +98,13 @@ impl IntrinsicGas {
 ///
 /// What is left to the state is left out: the sender's nonce, balance and code (EIP-3607), the
 /// system address's nonce and code for a system-address transaction, and the charges the state
-/// decides (see [`IntrinsicGas`]). A body over the transaction's data-size limit is not refused
-/// either: the limit stops such a transaction when it runs.
+/// decides (see [`IntrinsicGas`]).
+///
+/// A transaction whose body, with a write record for each entry of its authorization list, exceeds
+/// the spec's transaction data-size limit is refused
+/// ([`TX_BODY_OVER_DATA_SIZE_LIMIT`](crate::TX_BODY_OVER_DATA_SIZE_LIMIT)) before its gas is
+/// looked at, as block execution refuses it: the EVM this runs on holds the spec's limits.
+/// A system-address transaction is exempt from the limit, and from the check.
 ///
 /// `system_address` is the live system address: the one the `SequencerRegistry` names in the
 /// state the pool validates against ([`live_system_address`](crate::system::live_system_address)).

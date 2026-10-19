@@ -232,22 +232,21 @@ fn test_a_creation_an_inspector_answers_charges_nothing_it_did_not_start() {
     }
 }
 
-/// A transaction the latch stopped before its first frame is not dispatched on the inspected path
-/// either: the inspector sees the call and its stop, and no creation.
+/// A transaction whose body crosses the data-size limit is rejected at validation on the inspected
+/// path too: the inspector sees no frame, neither the call nor a creation.
 #[test]
-fn test_a_latched_transaction_is_seen_as_the_call_it_is() {
+fn test_a_rejected_transaction_is_seen_as_nothing() {
     let deployment = Deployment::new(deploying(&runtime(1)));
     for gas_limit in GAS_LIMITS {
         let limits = mega_evm::EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(100);
         let mut evm = MegaEvm::new(context(system_db()).with_tx_runtime_limits(limits))
             .with_inspector(Recorder::default());
-        let outcome = evm.execute_transaction(keyless_tx(&deployment, gas_limit)).expect("valid");
-        assert!(outcome.limit_exceeded.is_some(), "at {gas_limit}");
-        assert_eq!(
-            evm.inspector().events,
-            [Event::Call(KEYLESS_DEPLOY_ADDRESS), Event::CallEnd(InstructionResult::Revert)],
-        );
-        assert!(!outcome.state.contains_key(&deployment.signer));
+        let error = evm
+            .execute_transaction(keyless_tx(&deployment, gas_limit))
+            .expect_err("rejected at validation");
+        let error = format!("{error:?}");
+        assert!(error.contains(mega_evm::TX_BODY_OVER_DATA_SIZE_LIMIT), "at {gas_limit}: {error}");
+        assert_eq!(evm.inspector().events, [], "at {gas_limit}");
     }
 }
 

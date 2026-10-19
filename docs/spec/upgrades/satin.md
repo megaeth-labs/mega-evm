@@ -172,13 +172,16 @@ A node MUST apply [EIP-8037](https://eips.ethereum.org/EIPS/eip-8037), as Amster
 
 - **Validation.**
   A node MUST reject a transaction, before it is included:
+  - whose body, with `WRITE_RECORD_SIZE` bytes for each entry of its authorization list, exceeds the transaction's data-size limit (see [Resource Limits](#10-resource-limits)), unless it is system-originated (see [The Protocol's Own Transactions](#19-the-protocols-own-transactions)); every entry counts, whether its authorization will apply or not;
   - whose gas limit is below its intrinsic regular gas plus the history gas of its body (`CallGasCostMoreThanGasLimit`);
   - whose floor exceeds its gas limit (`GasFloorMoreThanGasLimit`);
   - whose gas limit exceeds `EXECUTION_CAP` while its intrinsic regular gas or its floor exceeds `EXECUTION_CAP` (`GasFloorMoreThanGasLimit`).
 
-  The checks MUST be made in this order, and the first that fails names the error: the gas limit against the intrinsic regular gas alone (`CallGasCostMoreThanGasLimit`, carrying the intrinsic regular gas); the floor against the gas limit (`GasFloorMoreThanGasLimit`); the execution cap (`GasFloorMoreThanGasLimit`, carrying the larger of the intrinsic regular gas and the floor, against `EXECUTION_CAP`); and last the gas limit against the intrinsic regular gas plus the history gas of the body (`CallGasCostMoreThanGasLimit`, carrying that sum).
+  The checks MUST be made in this order, and the first that fails names the error: the body and its authorization records against the data-size limit, before any gas is looked at (an invalid transaction whose reason is that the body and authorization records exceed the transaction data-size limit); the gas limit against the intrinsic regular gas alone (`CallGasCostMoreThanGasLimit`, carrying the intrinsic regular gas); the floor against the gas limit (`GasFloorMoreThanGasLimit`); the execution cap (`GasFloorMoreThanGasLimit`, carrying the larger of the intrinsic regular gas and the floor, against `EXECUTION_CAP`); and last the gas limit against the intrinsic regular gas plus the history gas of the body (`CallGasCostMoreThanGasLimit`, carrying that sum).
   So a gas limit that covers the intrinsic regular gas but neither the floor nor the body's history gas is refused for the floor.
-  A failed validation comes before any limit: a transaction whose body would cross the data-size limit and whose gas limit validation refuses is not stopped — a non-deposit transaction is rejected, and a deposit is included as a failed deposit (see [The Revert-Class Stop](#11-the-revert-class-stop)).
+  A deposit that fails any of these checks is included as a failed deposit instead (see [Transaction and Block Refusals](#21-transaction-and-block-refusals)).
+  The body and the records of the authorities a transaction applies are all it counts as data size before its first frame, so a transaction that passes validation cannot cross the data-size limit before its first frame.
+  At the spec's numbers the data-size check refuses no transaction the gas checks admit: the floor holds calldata and access list together to at most 3,124,812 bytes, and the execution cap holds the authorization list to at most 25,587 entries, so a body with its authorization records is at most 6,732,889 bytes, about half the 13,107,200-byte limit.
 
 Satin has no separate compute-gas limit: compute is regular gas, bounded by the execution cap and, after a read of volatile data, by [gas detention](#12-gas-detention-on-withheld-gas).
 
@@ -440,9 +443,8 @@ One dimension is limited per transaction, data size; compute is not one (see [Tw
 
 Every transaction-level limit — data size and gas detention's compute limit — MUST stop the transaction with a revert, never a halt.
 The stop applies to a transaction that passes validation and pays every charge made before its first frame.
-A transaction that fails validation, or that cannot pay a charge made before its first frame (see [Gas Schedule and Intrinsic Gas](#5-gas-schedule-and-intrinsic-gas)), MUST report no stop, even one its body already triggered: a non-deposit transaction that fails validation is rejected, and a deposit that fails validation — a system deposit, which the inherited rules refuse under Regolith, included — or that cannot pay a charge made before its first frame is included as a failed deposit, whatever kind of deposit it is (see [Transaction and Block Refusals](#21-transaction-and-block-refusals)).
-The body of such a deposit MUST stay counted as data size, and the stop its body triggered MUST be dropped.
-The only charge a transaction whose body already triggered a stop can fail before its first frame is the account a deposit creates for its caller: nothing else is applied or charged for it (below).
+A transaction that fails validation, or that cannot pay a charge made before its first frame (see [Gas Schedule and Intrinsic Gas](#5-gas-schedule-and-intrinsic-gas)), MUST report no stop: a non-deposit transaction that fails validation is rejected, and a deposit that fails validation — a system deposit, which the inherited rules refuse under Regolith, and a deposit whose body is over the data-size limit included — or that cannot pay a charge made before its first frame is included as a failed deposit, whatever kind of deposit it is (see [Transaction and Block Refusals](#21-transaction-and-block-refusals)).
+The body of such a deposit MUST stay counted as data size.
 For a transaction the stop applies to:
 
 1. The frame that crosses the limit MUST revert with `MegaLimitExceeded(uint8 kind, uint64 limit)` as its output.
@@ -462,9 +464,7 @@ A limit is enforced before the writes it guards:
 
 - A frame whose start would cross a limit MUST be answered with the stop before it is built, so no value moves; a stopped creation still bumps its creator's nonce.
   A frame answered without running whose answer is then rewritten to the stop (see [Gas Detention on Withheld Gas](#12-gas-detention-on-withheld-gas)) has what its start moved reverted with the frames the stop reverts — for the first frame, which no frame's revert follows, with its answer.
-- A body over the data-size limit MUST stop the transaction before its first frame runs, unless validation, or a deposit's charge for the caller account it creates, fails first (above): no authorization is applied, no record made outside a frame is charged, the first frame's start is charged nothing, and the first frame is answered with the stop.
-- EIP-7702 authorities whose records would cross the data-size limit MUST be taken back before the first frame: their nonce and delegation writes are reverted, every charge made at the start of execution for applying them, state and regular gas alike, is returned, and none of their records is kept or charged; the first frame is then answered with the stop.
-  Authorities admitted there are kept through a later stop, as above.
+- Nothing counted before the first frame — the body, and the records of the EIP-7702 authorities applied — crosses the data-size limit: validation rejects a transaction whose body, with a record for each entry of its authorization list, would (see [Two-Pool Gas](#4-two-pool-gas-eip-8037-replaces-the-dual-gas-model)).
 
 A frame budget MUST revert its frame alone, with the same revert data, and its caller continues.
 A real out-of-gas, a precompile given less than its price, and an invalid opcode still halt and consume the frame's gas.
@@ -828,6 +828,7 @@ One of those counts is limited:
 
 A transaction MUST be rejected before inclusion when:
 
+- its body, with `WRITE_RECORD_SIZE` bytes for each entry of its authorization list, exceeds the transaction's data-size limit, unless it is system-originated (see [Two-Pool Gas](#4-two-pool-gas-eip-8037-replaces-the-dual-gas-model));
 - its gas limit is below its intrinsic regular gas plus the history gas of its body (`CallGasCostMoreThanGasLimit`);
 - its floor exceeds its gas limit, or, above the execution cap, its intrinsic regular gas or floor exceeds the cap (`GasFloorMoreThanGasLimit`);
 - it is sent from the live system address and does not have the system shape (see [The Live System Address](#17-the-live-system-address));

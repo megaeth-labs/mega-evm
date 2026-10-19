@@ -4,8 +4,7 @@ use alloy_consensus::{transaction::Recovered, Transaction};
 use alloy_evm::block::BlockExecutor;
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    test_utils::BytecodeBuilder, BlockLimits, EnrichedMegaTx, LimitCheck, LimitKind,
-    MegaTransactionExt, MegaTxEnvelope,
+    test_utils::BytecodeBuilder, BlockLimits, EnrichedMegaTx, MegaTransactionExt, MegaTxEnvelope,
 };
 use op_revm::constants::{
     DA_FOOTPRINT_GAS_SCALAR_OFFSET, DA_FOOTPRINT_GAS_SCALAR_SLOT, L1_BLOCK_CONTRACT,
@@ -268,10 +267,11 @@ fn test_the_block_data_size_limit_never_refuses_a_deposit() {
     assert_eq!(result.receipts().len(), 3, "every deposit is packed, and nothing after them");
 }
 
-/// The per-transaction data-size limit is not a block limit: it stops a deposit's own execution
-/// the way it stops any transaction's, and the deposit is included with the stop as its result.
+/// The per-transaction data-size limit is not a block limit: a deposit whose body crosses it fails
+/// validation, as any transaction with that body does, and is included as a failed deposit with a
+/// failed receipt.
 #[test]
-fn test_the_transaction_data_size_limit_stops_a_deposit_that_is_still_included() {
+fn test_a_deposit_over_the_transaction_data_size_limit_is_still_included() {
     let limit = mega_evm::TX_BODY_SIZE + 10;
     let mut state = common::state();
     let mut executor = common::executor_with_limits(
@@ -284,24 +284,20 @@ fn test_the_transaction_data_size_limit_stops_a_deposit_that_is_still_included()
     let deposit = common::deposit_tx(Bytes::from(vec![0xab; 11]), 1_000_000);
     let outcome = executor.run_transaction(&deposit).expect("a deposit is not refused");
     assert!(
-        matches!(outcome.inner.result, ExecutionResult::Revert { .. }),
+        matches!(
+            outcome.inner.result,
+            ExecutionResult::Halt { reason: op_revm::OpHaltReason::FailedDeposit, .. }
+        ),
         "{:?}",
         outcome.inner.result
     );
-    let stop = outcome.inner.limit_exceeded.expect("the data-size limit stopped the deposit");
-    assert!(
-        matches!(
-            stop,
-            LimitCheck::ExceedsLimit { kind: LimitKind::DataSize, limit: l, frame_local: false, .. }
-                if l == limit
-        ),
-        "{stop:?}"
-    );
+    assert_eq!(outcome.inner.limit_exceeded, None, "the failure is what the deposit reports");
+    assert_eq!(outcome.inner.usage.data_size, limit + 1, "its body stays counted");
     executor.commit_transaction_outcome(outcome).expect("the deposit is included");
 
     let (_, result) = executor.finish_with_counters().expect("the block finishes");
     assert_eq!(result.receipts().len(), 1);
-    assert!(!result.receipts()[0].status(), "the stopped deposit's receipt reports a failure");
+    assert!(!result.receipts()[0].status(), "the failed deposit's receipt reports a failure");
 }
 
 /// With no size limit configured, a transaction of any size is admitted.

@@ -63,7 +63,7 @@ const CHILD: Address = address!("0x0000000000000000000000000000000000400003");
 /// Every scenario, by the name its snapshots are pinned under.
 const SCENARIOS: [&str; 15] = [
     "create",
-    "data_size_body_stop",
+    "data_size_first_frame_start_stop",
     "data_size_stop_spans_frames",
     "deposit",
     "detention_stop_spans_frames",
@@ -545,30 +545,34 @@ fn log0_size(data_len: u8) -> u64 {
     LOG_BASE_SIZE + u64::from(data_len)
 }
 
-/// A body over the transaction's data-size limit, at the smallest limit a chain may carry: the
-/// transaction is stopped before it runs, so its own frame is answered with the stop and runs no
-/// instruction, and the recipient is never read.
+/// A first frame whose start crosses the transaction's data-size limit, at the smallest limit
+/// validation admits the transaction under: its body fits, and the record and the transfer log of
+/// its value do not. The frame is answered with the stop before it runs, so it runs no instruction
+/// and its value never moves. A body over the limit is no scenario: validation rejects it, and a
+/// rejected transaction has no trace.
 #[test]
-fn test_data_size_limit_stops_the_body() {
+fn test_data_size_limit_stops_the_first_frame_at_its_start() {
     let limit = TX_BODY_SIZE;
-    let calldata = [0x01];
-    assert!(tx_body_history_bytes(calldata.len() as u64, 0, 0, 0) > limit, "the body crosses");
-    // The sender pays the intrinsic gas and the body's history, and nothing ran.
+    assert_eq!(tx_body_history_bytes(0, 0, 0, 0), limit, "the body fits exactly");
+    // The sender pays the intrinsic gas and the body's history, and nothing ran: the history of
+    // the recipient's record, charged before the first frame and held here, comes back with it.
+    let held = mega_evm::write_record_history_gas(1).expect("a record has a price");
     let expected = Ledgers {
-        regular: gas::call_intrinsic(&calldata, false),
+        regular: gas::call_intrinsic(&[], true),
         state: 0,
-        history: gas::body(calldata.len()),
-        floor: gas::call_floor(&calldata, false),
+        history: gas::body(0),
+        floor: gas::call_floor(&[], true),
     };
-    let data = Bytes::copy_from_slice(&calldata);
     let traced = Traced::run(
         funded().account_code(CONTRACT, BytecodeBuilder::default().stop().build()),
-        call_tx(CALLER, CONTRACT, data, U256::ZERO, gas_limit(expected, 0)),
+        call_tx(CALLER, CONTRACT, Bytes::new(), U256::from(1), gas_limit(expected, held)),
         EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit),
     );
     assert_every_frame_stops(&traced, LimitKind::DataSize, limit, 1);
     assert!(traced.inspector.traces().nodes()[0].trace.steps.is_empty(), "no instruction ran");
-    pin("data_size_body_stop", &traced, expected);
+    // The record's history was charged on the transaction's gas before the frame and comes back
+    // after the tracer read the frame, as a failed frame's spill does.
+    pin_given_back("data_size_first_frame_start_stop", &traced, expected, held);
 }
 
 /// A child's `LOG0` that crosses the transaction's data-size limit and, with it, its own frame

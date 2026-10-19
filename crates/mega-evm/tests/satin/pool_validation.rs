@@ -11,10 +11,13 @@ use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
 use mega_evm::{
     constants::TX_GAS_LIMIT_CAP,
     history_gas,
+    revm::primitives::eip2780::TX_BASE_COST,
+    satin_gas_params,
     system::{live_system_address, ORACLE_CONTRACT_ADDRESS, SYSTEM_ADDRESS_WITHOUT_SYSTEM_SHAPE},
     test_utils::{op_transaction, MemoryDatabase},
     transaction_body_bytes, validate_transaction_stateless, IntrinsicGas, MegaEvm, MegaSpecId,
-    MegaTransaction, WRITE_RECORD_SIZE,
+    MegaTransaction, ProtocolLimits, AUTHORIZATION_SIZE, TX_BODY_OVER_DATA_SIZE_LIMIT,
+    TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 use op_revm::{OpHaltReason, OpTransactionError};
 use revm::{
@@ -444,6 +447,118 @@ fn test_the_chain_id_is_checked_whatever_the_configuration_says() {
     let mut evm = MegaEvm::new(context(db(None)).with_cfg(cfg));
     let refused = ExecuteEvm::transact(&mut evm, on_another_chain()).map_err(describe);
     assert_eq!(refused.map(|_| ()), Err(error), "the EVM");
+}
+
+/// The error a transaction whose body and authorization records exceed the data-size limit is
+/// refused with.
+fn over_the_data_size_limit() -> String {
+    format!(
+        "{:?}",
+        OpTransactionError::Base(InvalidTransaction::Str(TX_BODY_OVER_DATA_SIZE_LIMIT.into()))
+    )
+}
+
+/// The data-size limit of the spec the helper validates under.
+fn spec_data_size_limit() -> u64 {
+    ProtocolLimits::for_spec(MegaSpecId::SATIN).tx_runtime_limits.tx_data_size_limit
+}
+
+/// `build` carrying `len` bytes of calldata, at the block's gas limit.
+fn with_calldata(build: Build, len: u64) -> MegaTransaction {
+    let mut tx = build(block().gas_limit);
+    tx.0.base.data = Bytes::from(vec![0x5a; len as usize]);
+    tx
+}
+
+/// A call with one authorization.
+fn one_authorization(gas_limit: u64) -> MegaTransaction {
+    authorizing_call(CALLER, EXISTING, U256::ZERO, gas_limit, DELEGATE, &[(AUTHORITY, 0)])
+}
+
+/// A transaction whose body, with a record for each entry of its authorization list, exceeds the
+/// spec's data-size limit is refused by the helper and by the EVM alike, with the same error,
+/// before its gas is looked at: no gas limit the execution cap admits carries that many bytes, so
+/// only this check can name it. At the limit the check passes and the floor refuses the
+/// transaction instead. The authorization's record counts beside its tuple: a body one record
+/// short of the limit with one authorization crosses it.
+#[test]
+fn test_the_helper_and_the_evm_refuse_a_body_over_the_limit_alike() {
+    let limit = spec_data_size_limit();
+    let error = over_the_data_size_limit();
+    let calldata_reaching = |build: Build, total: u64| {
+        let fixed = transaction_body_bytes(&build(0)) +
+            WRITE_RECORD_SIZE * build(0).0.base.authorization_list.len() as u64;
+        with_calldata(build, total - fixed)
+    };
+    for (name, build) in [("a call", call as Build), ("an authorization", one_authorization)] {
+        let over = calldata_reaching(build, limit + 1);
+        assert_eq!(helper(over.clone(), None), Err(error.clone()), "{name}: the helper");
+        assert_eq!(evm(over, None), Verdict::Refused(error.clone()), "{name}: the EVM");
+
+        let at = calldata_reaching(build, limit);
+        let refused = helper(at.clone(), None).expect_err("the floor is past the cap");
+        assert!(refused.starts_with("Base(GasFloorMoreThanGasLimit"), "{name}: {refused}");
+        assert_eq!(evm(at, None), Verdict::Refused(refused), "{name}: the EVM");
+    }
+}
+
+/// What validation's gas checks leave a transaction's body, at the spec's numbers, against the
+/// data-size limit.
+///
+/// The EIP-7623 floor, as EIP-7976 and EIP-7981 amend it, charges 64 gas for every calldata byte
+/// and every access-list byte on top of the transaction's EIP-2780 base, which is 12,000 at least;
+/// validation refuses a floor above the execution cap. So calldata and access list together are
+/// at most `(200,000,000 − 12,000) / 64 = 3,124,812` bytes, and the body counts each of those bytes
+/// once. Each authorization costs 7,816 of intrinsic regular gas on the same base, which the cap
+/// also holds: at most `(200,000,000 − 12,000) / 7,816 = 25,587` of them, each 101 bytes of the
+/// body. The body is then at most `310 + 3,124,812 + 101 × 25,587 = 5,709,409` bytes, and with a
+/// 40-byte record for each authorization at most `6,732,889`, about half the 13,107,200-byte limit.
+/// Validation's own check of the body and those records against the limit therefore refuses no
+/// transaction the gas checks admit; it binds only a limit set below that bound.
+///
+/// The bound is computed from the schedule and the byte table, and the two edges of each gas
+/// check are run through validation: the largest calldata and authorization list it admits, and
+/// one byte or one authorization more.
+#[test]
+fn test_validation_bounds_the_body_below_the_data_size_limit() {
+    let params = satin_gas_params();
+    let room = TX_GAS_LIMIT_CAP - TX_BASE_COST;
+    let floor_per_byte =
+        params.tx_floor_cost_per_token() * params.tx_token_non_zero_byte_multiplier();
+    assert_eq!(
+        floor_per_byte,
+        params.tx_floor_cost_per_token() * params.tx_floor_token_zero_byte_multiplier()
+    );
+    assert_eq!(
+        floor_per_byte,
+        params.tx_floor_cost_per_token() * params.tx_access_list_floor_byte_multiplier()
+    );
+    let per_authorization = params.tx_eip7702_per_empty_account_cost();
+    let bytes = room / floor_per_byte;
+    let authorizations = room / per_authorization;
+    let body = TX_BODY_SIZE + bytes + AUTHORIZATION_SIZE * authorizations;
+    let with_records = body + WRITE_RECORD_SIZE * authorizations;
+    assert_eq!((TX_BASE_COST, floor_per_byte, per_authorization), (12_000, 64, 7_816));
+    assert_eq!((bytes, authorizations), (3_124_812, 25_587));
+    assert_eq!((body, with_records), (5_709_409, 6_732_889));
+    assert!(with_records < spec_data_size_limit());
+    assert_eq!(spec_data_size_limit(), 13_107_200);
+
+    // A transfer to the sender itself pays the 12,000 base alone, so it reaches each edge.
+    let to_itself =
+        |gas_limit| wrap(tx(TransactionType::Legacy, CALLER, TxKind::Call(CALLER), gas_limit));
+    assert!(helper(with_calldata(to_itself, bytes), None).is_ok(), "the largest calldata");
+    let refused = helper(with_calldata(to_itself, bytes + 1), None).unwrap_err();
+    assert!(refused.starts_with("Base(GasFloorMoreThanGasLimit"), "{refused}");
+
+    let authorizing = |count: u64| {
+        let authorities: Vec<(Address, u64)> =
+            (0..count).map(|i| (Address::with_last_byte(1).create(i), 0)).collect();
+        authorizing_call(CALLER, CALLER, U256::ZERO, block().gas_limit, DELEGATE, &authorities)
+    };
+    assert!(helper(authorizing(authorizations), None).is_ok(), "the largest authorization list");
+    let refused = helper(authorizing(authorizations + 1), None).unwrap_err();
+    assert!(refused.starts_with("Base(GasFloorMoreThanGasLimit"), "{refused}");
 }
 
 /// Above the execution cap the gas limit is valid when the regular part and the floor fit under

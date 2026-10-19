@@ -435,8 +435,8 @@ impl<CTX> Inspector<CTX, EthInterpreter> for Pairs {
 }
 
 /// Every frame the inspector sees start, it sees end: a frame that ran, one answered before it
-/// ran (a value transfer the sender cannot fund, a latched transaction's first frame), and a
-/// creation.
+/// ran (a value transfer the sender cannot fund, a first frame whose start crosses the data-size
+/// limit), and a creation.
 #[test]
 fn test_frame_start_and_end_stay_paired() {
     let pairs = |db: MemoryDatabase, limits: mega_evm::EvmTxRuntimeLimits, value: u64| {
@@ -452,8 +452,9 @@ fn test_frame_start_and_end_stay_paired() {
     let creates = MemoryDatabase::default().account_code(A, create_and_store_address(&[0x00]));
     assert_eq!(pairs(creates, no_limits, 0), (1, 1, 1, 1));
     let funded = MemoryDatabase::default().account_balance(CALLER, U256::from(10));
-    let latched = no_limits.with_tx_data_size_limit(0);
-    assert_eq!(pairs(funded, latched, 1), (1, 1, 0, 0), "the stopped first frame ends too");
+    // The body fits; the record and the transfer log of the first frame's value do not.
+    let stopped_at_its_start = no_limits.with_tx_data_size_limit(mega_evm::TX_BODY_SIZE);
+    assert_eq!(pairs(funded, stopped_at_its_start, 1), (1, 1, 0, 0), "the stopped frame ends too");
 }
 
 /// Counts every callback it gets.
@@ -756,10 +757,9 @@ impl<CTX> Inspector<CTX, EthInterpreter> for SkipAllCallsInspector {
     }
 }
 
-/// A body over the data-size limit latches the transaction before it runs, and its first frame is
-/// answered with the stop — in place of the answer an inspector that answers every call gives it.
-/// The transaction is the one no inspector runs: the stop, which settles like a revert, so the
-/// sender gets back what the frame did not spend.
+/// A body over the data-size limit is rejected at validation whether or not an inspector would
+/// answer the transaction's first frame: the inspector is never asked, and the refusal is the one
+/// the transaction gets without it.
 #[test]
 fn test_intrinsic_data_size_overflow_with_inspector_early_return() {
     const LIMIT: u64 = 100;
@@ -774,32 +774,12 @@ fn test_intrinsic_data_size_overflow_with_inspector_early_return() {
 
     let plain = MegaEvm::new(context(db()).with_tx_runtime_limits(limits))
         .execute_transaction(tx.clone())
-        .unwrap();
+        .expect_err("rejected");
     let mut evm = MegaEvm::new(context(db()).with_tx_runtime_limits(limits))
         .with_inspector(SkipAllCallsInspector::default());
-    let answered = evm.execute_transaction(tx).unwrap();
+    let inspected = evm.execute_transaction(tx).expect_err("rejected");
 
-    assert_eq!(evm.inspector().answered, 1, "the inspector answered the first frame");
-    let stop = answered.limit_exceeded.expect("the transaction is stopped");
-    assert!(
-        matches!(
-            stop,
-            mega_evm::LimitCheck::ExceedsLimit {
-                kind: mega_evm::LimitKind::DataSize,
-                limit: LIMIT,
-                ..
-            }
-        ),
-        "{stop:?}"
-    );
-    assert!(
-        matches!(&answered.result, revm::context::result::ExecutionResult::Revert { output, .. }
-            if output == &stop.revert_data()),
-        "the stop, not the answer: {:?}",
-        answered.result
-    );
-    assert_eq!(answered.result, plain.result);
-    assert_eq!(answered.gas, plain.gas);
-    assert_eq!(answered.usage, plain.usage);
-    assert!(answered.gas.gas_used < TX_GAS_LIMIT / 100, "the unspent gas comes back");
+    assert_eq!(evm.inspector().answered, 0, "the inspector never saw a frame");
+    assert_eq!(format!("{inspected:?}"), format!("{plain:?}"));
+    assert!(format!("{plain:?}").contains(mega_evm::TX_BODY_OVER_DATA_SIZE_LIMIT), "{plain:?}");
 }

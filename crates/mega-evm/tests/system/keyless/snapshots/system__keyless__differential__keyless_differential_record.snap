@@ -54,7 +54,7 @@ expression: "serde_json::json!({\n    \"summary\":\n    {\n        \"cases\": ca
     "limit: frame data size, nonce 1 @ 50000000 | keccak256=0xc98f95af8aa907851995508c0d5cc6460de5d064c1374776b10b21c53ae84e78",
     "limit: the call's budget, nonce 1 @ 50000000 | keccak256=0x237868453ad21761f07e89a5e220e619f9a9c658510e4c55277639a0b7faff77",
     "limit: the creation's start, nonce 1 @ 50000000 | keccak256=0x3eb601e76f1d01426df424a9adaa7bdd66a45b3d4ae2b5b516bd59620360f189",
-    "limit: a latched body @ 50000000 | keccak256=0xd1539f048963225beb51ead7e1943bba359d1d738a9dacc3ec83b4e1ef78c3c3",
+    "limit: a body over the limit @ 50000000 | keccak256=0x1a1a367883ad87b2e98ef4e1668bc5d864bd83390282c6d5361e2dfdac20d255",
     "limit: the default limits @ 50000000 | keccak256=0x401e8a4d34c0a257a9f6d5eb3c191ef9e04259932d15df8f69ef9d284c44597d",
     "detention: a signer that is the beneficiary @ 50000000 | keccak256=0x67d17bdcceef5522f067097fb8b5bb9535b7e3c50edfc735b7a17281baa83a79",
     "detention: a signer that is the beneficiary, crossing at the CREATE charge @ 50000000 | keccak256=0xe379de5036dd99ce51c263029c8c1bd203af00fe17f91cb5516d2ca1f1963104",
@@ -119,7 +119,7 @@ expression: "serde_json::json!({\n    \"summary\":\n    {\n        \"cases\": ca
     "limit: frame data size, nonce 1 @ 400000000 | keccak256=0x74a04dcf86f23eb698a7e0061e072e519b9214aa971f7fad2ba6002ffd81e9cd",
     "limit: the call's budget, nonce 1 @ 400000000 | keccak256=0x64e03171935c601b01d6e02794c18a1fd763f0fbd5a40946bddb49590b09a986",
     "limit: the creation's start, nonce 1 @ 400000000 | keccak256=0xba9e8a4a56e111fbe0fa44a397d6ea5f4499ba7f940fdc00015d53fc7fe5b6c8",
-    "limit: a latched body @ 400000000 | keccak256=0xee30f6ee471509e3080207fae88617e89bc3fe53d1dd0f319efa262992db3b3f",
+    "limit: a body over the limit @ 400000000 | keccak256=0xa6e5f1ff16a1a5a060d22687887b468c7de56f4dcfbb698a2cd4a1b240acee4d",
     "limit: the default limits @ 400000000 | keccak256=0x53c838e3841fda75efc979f830a995785fd6053d207e339657d4326c087b15c6",
     "detention: a signer that is the beneficiary @ 400000000 | keccak256=0x6b31a69eab1eea9f014065acfc3616431a7153c9a951dbbfbb8dc4c02c496d10",
     "detention: a signer that is the beneficiary, crossing at the CREATE charge @ 400000000 | keccak256=0x60f92478d8ff556ecdfe929d40d6c79cee58cde2b8657f06c0b5023ddfae3083",
@@ -145,9 +145,9 @@ expression: "serde_json::json!({\n    \"summary\":\n    {\n        \"cases\": ca
     "rule: init code over the limit @ 2000000000 | keccak256=0x8e0e07266b270414f4eb958872388f1a26baf80ff2262daba5da7553b7435e8e"
   ],
   "summary": {
-    "bytes": 2328893,
+    "bytes": 2307176,
     "cases": 139,
-    "lines": 11240,
+    "lines": 11140,
     "runs": 556
   }
 }

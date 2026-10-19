@@ -175,7 +175,7 @@ fn block_rows(spec: Option<&str>, limits: Option<&str>) -> Vec<Value> {
 }
 
 /// The transactions checked: the first user transaction, the plain value transfer, one in the
-/// middle and the last the block ran before it refused one.
+/// middle, the first a limit stopped, and the last the block ran before it refused one.
 ///
 /// A Satin replay can refuse a transaction the chain included, for the block gas it declared, and
 /// a transaction after it is not replayed alone: the replay of its block's earlier transactions
@@ -184,7 +184,9 @@ fn checked(rows: &[Value]) -> Vec<usize> {
     let ran = rows.iter().position(|row| row["status"] == "refused").unwrap_or(rows.len());
     let rows = &rows[..ran];
     let transfer = rows.iter().position(|row| row["logs"] == 0 && row["index"] != 0).unwrap_or(1);
+    let stopped = rows.iter().position(|row| !row["satin"]["limit_exceeded"].is_null());
     let mut picks = vec![1, transfer, rows.len() / 2, rows.len() - 1];
+    picks.extend(stopped);
     picks.sort_unstable();
     picks.dedup();
     picks
@@ -196,14 +198,19 @@ async fn test_a_transaction_replayed_alone_is_the_one_the_block_replay_runs() {
     let server = Server::start(recorded).await;
     let uri = server.0.uri();
 
-    // The last leg holds both paths to a transaction data-size limit of the body alone, which
-    // stops every transaction but the protocol's own.
-    let stopping = r#"{"txRuntimeLimits":{"txDataSizeLimit":310}}"#;
+    // The last leg holds both paths to a transaction data-size limit one byte below the most a
+    // transaction of the block keeps, which stops that transaction where it crosses it.
+    let most = block_rows(Some("Satin"), None)
+        .iter()
+        .filter_map(|row| row["satin"]["data_size"].as_u64())
+        .max()
+        .expect("the block keeps data");
+    let stopping = format!(r#"{{"txRuntimeLimits":{{"txDataSizeLimit":{}}}}}"#, most - 1);
     let mut stops = 0;
     for (spec, engine, limits) in [
         (None, "legacy", None),
         (Some("Satin"), "satin", None),
-        (Some("Satin"), "satin", Some(stopping)),
+        (Some("Satin"), "satin", Some(stopping.as_str())),
     ] {
         let rows = block_rows(spec, limits);
         for index in checked(&rows) {
