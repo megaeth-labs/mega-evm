@@ -440,6 +440,72 @@ fn test_an_answered_call_leaves_its_caller_none_of_the_accounts_state_gas() {
     assert_eq!(answered.gas.state, slot, "the slot alone");
 }
 
+/* ---------- a failed creation rewritten into a success ---------- */
+
+/// Turns every failed creation result into a success at `0x…01`, as Foundry's `expectRevert` on a
+/// creation does: the revert's output and gas stay as they are, and the address is one the
+/// creation never made.
+struct RevivesCreations;
+
+impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for RevivesCreations {
+    fn create_end(&mut self, _: &mut CTX, _: &CreateInputs, outcome: &mut CreateOutcome) {
+        if !outcome.result.result.is_ok() {
+            outcome.result.result = InstructionResult::Return;
+            outcome.address = Some(Address::with_last_byte(1));
+        }
+    }
+}
+
+/// A creation whose init code fills a fresh slot, logs a word and reverts, rewritten into a
+/// success, is the failure it was to everything but the address its creator is handed: every
+/// ledger, the counts and the state are those of the run no inspector touches. The upfront charge
+/// the `CREATE` made for the account comes back, priced at the account it was made for — its bucket
+/// is crowded (`m = 3`) — and the slot, the log and the account are not kept. At the transaction's
+/// own frame and one call down, carrying no value and one wei, below and above the execution cap;
+/// run, the creation adds its account.
+#[test]
+fn test_a_failed_creation_rewritten_into_a_success_settles_as_the_failure() {
+    let writes = || BytecodeBuilder::default().sstore(U256::from(1), U256::from(1)).log3_word();
+    let (reverting, stopping) = (writes().revert().build(), writes().stop().build());
+    for (gas_limit, value) in GAS_LIMITS.into_iter().flat_map(|limit| [(limit, 0), (limit, 1)]) {
+        let creates = |init: &[u8]| {
+            BytecodeBuilder::default().create(U256::from(value), init).append(POP).stop().build()
+        };
+        let own = |init: &Bytes| {
+            let data = init.clone();
+            (Bytes::new(), tx_with_gas(TxKind::Create, data, U256::from(value), gas_limit))
+        };
+        let down = |init: &Bytes| (creates(init), to(CONTRACT, 0, Bytes::new(), gas_limit));
+        let cases: [(&str, Address, &dyn Fn(&Bytes) -> (Bytes, MegaTransaction)); 2] = [
+            ("the transaction's own", CALLER.create(0), &own),
+            ("one call down", CONTRACT.create(0), &down),
+        ];
+        for (at, created, setup) in cases {
+            let envs = || crowded_account(minimal_envs(), created, 3);
+            let case = format!("{at}, value {value}, gas limit {gas_limit}");
+            let (code, tx) = setup(&stopping);
+            let ran = plain(db(code), envs(), tx);
+            assert!(holds_something(&ran, created), "{case}: run, the creation adds its account");
+            assert_eq!(
+                ran.gas.state,
+                3 * entry(GasId::create_state_gas()) + entry(GasId::sstore_set_state_gas()),
+                "{case}: the account in its bucket and the slot"
+            );
+
+            let (code, tx) = setup(&reverting);
+            let failed = plain(db(code.clone()), envs(), tx.clone());
+            assert!(!holds_something(&failed, created), "{case}: reverting, it adds none");
+            let rewritten = inspected(db(code), envs(), tx.clone(), RevivesCreations);
+            assert!(rewritten.result.is_success(), "{case}: {:?}", rewritten.result);
+            assert!(!holds_something(&rewritten, created), "{case}: no account");
+            assert!(rewritten.result.logs().is_empty(), "{case}: no log");
+            assert_eq!(rewritten.gas, failed.gas, "{case}: every ledger");
+            assert_eq!(rewritten.usage, failed.usage, "{case}: every count");
+            assert_eq!(rewritten.state, failed.state, "{case}: the state");
+        }
+    }
+}
+
 /* ---------- a success rewritten into a failure ---------- */
 
 /// The data Foundry's `expectRevert` gives a call that did not revert.

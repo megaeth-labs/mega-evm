@@ -70,6 +70,11 @@
 //!   limit stops the transaction, and the call reverts with the stop, taking back the signer's
 //!   nonce with everything else.
 //!
+//! A creation an inspector revives — a tool's `create_end` that turns a failed creation into a
+//! success at an address of its own, as Foundry's `expectRevert` does — settles as a frame that
+//! kept nothing, and the call answers `AddressMismatch()` when that address is not the deploy
+//! address.
+//!
 //! # The error ABI
 //!
 //! The rules that produce the contract's errors are the legacy engine's, and so is the order they

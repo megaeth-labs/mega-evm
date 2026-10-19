@@ -10,8 +10,7 @@ use revm::{
         ContextError, ContextTr, FrameStack, JournalTr,
     },
     context_interface::{
-        cfg::gas::GasTracker, context::CodeDeposit,
-        journaled_state::account::JournaledAccountTr,
+        cfg::gas::GasTracker, context::CodeDeposit, journaled_state::account::JournaledAccountTr,
     },
     handler::{handle_reservoir_remaining_gas, EthFrame, FrameResult},
     interpreter::{
@@ -106,7 +105,9 @@ pub(crate) fn refuses_empty_deposit(
 ) -> bool {
     match frame {
         Some(KeylessFrame::Deploying(started))
-            if deposit.code.is_empty() && deposit.address == started.deploy_address && !destroyed =>
+            if deposit.code.is_empty() &&
+                deposit.address == started.deploy_address &&
+                !destroyed =>
         {
             started.empty_deposit_refused = true;
             true

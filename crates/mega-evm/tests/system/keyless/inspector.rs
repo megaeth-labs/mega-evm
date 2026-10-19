@@ -13,6 +13,7 @@ use revm::{
         CreateInputs, CreateOutcome, CreateScheme, Gas, InstructionResult, Interpreter,
         InterpreterResult,
     },
+    primitives::KECCAK_EMPTY,
     Database, Inspector,
 };
 use revm_inspectors::tracing::{types::CallKind, TracingInspector, TracingInspectorConfig};
@@ -335,4 +336,59 @@ fn test_a_tracer_sees_the_call_and_the_creation_it_starts() {
 /// `address` as a trace's JSON holds it.
 fn json_address(address: Address) -> serde_json::Value {
     serde_json::to_value(address).unwrap()
+}
+
+/// Revives every creation that failed, as Foundry's `expectRevert` does: the result becomes a
+/// success at `0x…01`, which is no address the deployment pinned.
+struct Revives;
+
+impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Revives {
+    fn create_end(
+        &mut self,
+        _: &mut MegaContext<DB>,
+        _: &CreateInputs,
+        outcome: &mut CreateOutcome,
+    ) {
+        if !outcome.result.result.is_ok() {
+            outcome.result.result = InstructionResult::Return;
+            outcome.address = Some(Address::with_last_byte(1));
+        }
+    }
+}
+
+/// A deployment whose creation fails and is revived by an inspector reports a creation at an
+/// address the deployment did not pin: the call reverts with `AddressMismatch()`, which a plain
+/// run never produces — it answers `ExecutionReverted`. The call's revert takes the whole
+/// deployment back, the signer's nonce bump included, which the plain run keeps.
+#[test]
+fn test_a_revived_keyless_creation_answers_address_mismatch() {
+    let deployment = Deployment::new(Bytes::from_static(&[PUSH0, PUSH0, REVERT]));
+    for gas_limit in GAS_LIMITS {
+        let plain = MegaEvm::new(context(system_db()))
+            .execute_transaction(keyless_tx(&deployment, gas_limit));
+        let plain = plain.expect("valid");
+        assert!(matches!(failure(&plain), KeylessDeployError::ExecutionReverted { .. }));
+
+        let mut evm = MegaEvm::new(context(system_db())).with_inspector(Revives);
+        let revived = evm.execute_transaction(keyless_tx(&deployment, gas_limit)).expect("valid");
+        assert_eq!(refusal(&revived), KeylessDeployError::AddressMismatch, "at {gas_limit}");
+        assert_eq!(nonce(&plain, deployment.signer), 1, "the plain run spends the nonce");
+        assert_eq!(nonce(&revived, deployment.signer), 0, "the reverted call takes the bump back");
+        assert!(code_hash(&revived, deployment.address).is_none_or(|hash| hash == KECCAK_EMPTY));
+    }
+}
+
+/// An inspector sees the creation of a deployment that returned empty code end as a revert, the
+/// outcome of the refused deposit, and the call answers `EmptyCodeDeployed`.
+#[test]
+fn test_an_inspector_sees_an_empty_code_deployment_end_as_a_revert() {
+    let deployment = Deployment::new(Bytes::new());
+    for gas_limit in GAS_LIMITS {
+        let (outcome, recorder) = inspect(&deployment, Recorder::default(), gas_limit);
+        assert!(matches!(failure(&outcome), KeylessDeployError::EmptyCodeDeployed { .. }));
+        let ends: Vec<_> =
+            recorder.events.iter().filter(|event| matches!(event, Event::CreateEnd(..))).collect();
+        let end = Event::CreateEnd(InstructionResult::Revert, Some(deployment.address));
+        assert_eq!(ends, [&end], "at {gas_limit}");
+    }
 }

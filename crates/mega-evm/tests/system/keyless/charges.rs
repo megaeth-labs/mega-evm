@@ -176,11 +176,7 @@ fn test_the_call_pays_the_create_opcodes_regular_gas() {
             assert_eq!(regular, regular_expected, "{len} bytes at {gas_limit}");
             assert_eq!(state_gas, state, "{len} bytes at {gas_limit}");
             assert_eq!(history_gas, record(), "{len} bytes at {gas_limit}");
-            assert_eq!(
-                total,
-                regular_expected + state + record(),
-                "{len} bytes at {gas_limit}"
-            );
+            assert_eq!(total, regular_expected + state + record(), "{len} bytes at {gas_limit}");
         }
     }
 }
