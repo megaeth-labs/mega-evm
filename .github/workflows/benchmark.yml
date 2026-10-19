@@ -186,8 +186,7 @@ jobs:
     needs: prepare
     runs-on: blacksmith-32vcpu-ubuntu-2404
     # Paired interleaving runs each round's measurement ~1.5x the old single
-    # pass, and re-pays per-bench setup once per round; give heavy-setup targets
-    # (block_bench / attack_replay / comp_cost) generous headroom. Lower
+    # pass, and re-pays per-bench setup once per round. Lower
     # BENCH_ROUNDS in env to trade back time.
     timeout-minutes: 180
     # This job compiles and runs untrusted PR code — keep it read-only so there
@@ -199,8 +198,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The Satin bench set: `block`, `transact`, `corpus` and `factory`,
-        # until the suite is rebuilt on Satin, which restores the full list.
+        # The Satin bench set: `block`, `corpus`, `factory` and `transact`.
         # Scheduled and comment-triggered runs use the default branch's copy of
         # this file.
         target: [block, corpus, factory, transact]

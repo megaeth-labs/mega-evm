@@ -143,7 +143,8 @@ mega-evme replay --rpc <url> --dump-fixture /tmp/tx.json 0xabc123...
 state-test --bench /tmp/tx.json
 ```
 
-`state-test --bench` reports `min` / `median` / `mean` time and throughput (Mgas/s), timing only the EVM `transact` call. A committed corpus of characteristic transactions and a base-vs-PR comparison driver build on this to track real-transaction throughput across changes; see `bench/replay/` and the `replay-bench` CI workflow.
+`state-test --bench` reports `min` / `median` / `mean` time and throughput (Mgas/s), timing only the EVM `transact` call.
+A committed corpus of characteristic transactions and a base-vs-PR comparison driver build on this to track real-transaction throughput across changes; see `bench/replay/`.
 
 ## Spec Auto-Detection
 

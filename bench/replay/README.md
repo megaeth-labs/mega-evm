@@ -6,9 +6,9 @@
   fixture and checks its recorded post-state (state/logs root, gas, status) on
   **every PR** (via `cargo test`). A change that alters execution turns this red.
 - **Performance** — `run.py` times each fixture and compares a PR against its
-  merge-base (`.github/workflows/replay-bench.yml`, on demand), so a speed-up or
-  slow-down on real workloads is visible. This is the real-workload counterpart
-  to the synthetic Criterion suite (`crates/mega-evm/benches/`).
+  merge-base, so a speed-up or slow-down on real workloads is visible. This is
+  the real-workload counterpart to the synthetic Criterion suite
+  (`crates/mega-evm/benches/`).
 
 Keeping one corpus means a fixture added for either purpose serves both.
 
@@ -125,9 +125,6 @@ Verify with `python3 bench/replay/run.py --bin pr=target/release` (bench) and
 
 - **Correctness** runs on every PR: `cargo test` (`build-and-test.yml`) executes
   `replay_corpus.rs`, which validates the recorded post-state of every fixture.
-- **Performance** runs on demand: `replay-bench.yml` (weekly / manual dispatch /
-  member `/replay-bench` PR comment) builds the PR and merge-base binaries,
-  runs the driver, and posts the comparison table (job summary + PR comment).
 
 Timing on shared runners is noisy for sub-10µs cases; read the larger cases and
 the overall trend across the corpus for real signal.
