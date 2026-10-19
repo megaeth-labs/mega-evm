@@ -80,7 +80,9 @@ pub use types::{
 
 /* Items the crate's modules share through the root, not part of the public surface */
 pub(crate) use block::transact_pre_block_call;
-pub(crate) use evm::{MegaInnerContext, MegaInstructions, PricedPrecompiles};
+pub(crate) use evm::{
+    charge_write_records_history, MegaInnerContext, MegaInstructions, PricedPrecompiles,
+};
 
 /* Re-export of upstream crates, so consumers build against the exact versions used here */
 pub use alloy_consensus;

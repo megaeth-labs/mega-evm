@@ -24,6 +24,7 @@ use revm::{
 };
 
 use crate::{
+    charge_write_records_history,
     limit::FrameStartRecords,
     synthetic_call_result,
     system::{
@@ -34,8 +35,7 @@ use crate::{
             KEYLESS_DEPLOY_CODE, KEYLESS_DEPLOY_CODE_HASH, KEYLESS_DEPLOY_OVERHEAD_GAS,
         },
     },
-    untouched_call_gas, write_record_history_gas, ExternalEnvTypes, MegaContext,
-    VolatileDataAccess,
+    untouched_call_gas, ExternalEnvTypes, MegaContext, VolatileDataAccess,
 };
 
 /// Where a `keylessDeploy` call's frame stands, from its start to its answer: what its first run
@@ -430,16 +430,13 @@ fn prepare<DB: Database, ExtEnvs: ExternalEnvTypes>(
     }
     let records = FrameStartRecords { on_lane: 1, caller: signer != ctx.tx().caller() };
     let record_charges = if ctx.prices_history() {
-        let (Some(on_lane), Some(caller)) = (
-            write_record_history_gas(records.on_lane),
-            write_record_history_gas(u64::from(records.caller)),
-        ) else {
-            return Ok(Err(Refusal::OutOfGas));
-        };
-        if !on_lane.checked_add(caller).is_some_and(|cost| gas.record_history_cost(cost)) {
-            return Ok(Err(Refusal::OutOfGas));
-        }
-        Some((on_lane, caller))
+        let charged = charge_write_records_history(
+            gas.tracker_mut(),
+            records.on_lane,
+            u64::from(records.caller),
+        );
+        let Some(charges) = charged else { return Ok(Err(Refusal::OutOfGas)) };
+        Some(charges)
     } else {
         None
     };

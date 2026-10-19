@@ -48,14 +48,15 @@ use revm::{
 
 use crate::{
     access::ComputeStop,
+    charge_write_records_history,
     evm::inspector::{
         frame_end_checked, journal_position, revert_journal_to, ResultSource, StepGuard,
         UpfrontRecord,
     },
     history_gas, synthetic_frame_result,
     system::keyless,
-    write_record_history_gas, Detention, ExternalEnvTypes, LimitCheck, LimitKind, MegaContext,
-    MegaEvm, MegaInstructions, PricedPrecompiles, VolatileDataAccess, TX_BODY_OVER_DATA_SIZE_LIMIT,
+    Detention, ExternalEnvTypes, LimitCheck, LimitKind, MegaContext, MegaEvm, MegaInstructions,
+    PricedPrecompiles, VolatileDataAccess, TX_BODY_OVER_DATA_SIZE_LIMIT,
 };
 
 /// The Satin handler.
@@ -1374,14 +1375,9 @@ fn charge_records_made_outside_a_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
         ctx.additional_limit.stage_start_refused(refused);
         !refused
     };
-    let Some(top_level) = write_record_history_gas(u64::from(top_level_record)) else {
-        return false;
-    };
-    let Some(authorities) = write_record_history_gas(applied_authorities) else { return false };
-    let Some(cost) = top_level.checked_add(authorities) else { return false };
-    if !gas.record_history_cost(cost) {
-        return false;
-    }
+    let charged =
+        charge_write_records_history(gas, u64::from(top_level_record), applied_authorities);
+    let Some((top_level, _)) = charged else { return false };
     ctx.additional_limit.set_top_level_write_record_gas(top_level);
     ctx.additional_limit.stage_top_level_records(u64::from(top_level_record));
     true

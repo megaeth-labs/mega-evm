@@ -84,8 +84,8 @@ use revm::{
 };
 
 use crate::{
-    history_gas, limit::HistoryBytes, volatile_data_access_disabled_revert_data,
-    write_record_history_gas, ExternalEnvTypes, MegaContext, VolatileDataAccess,
+    charge_write_records_history, history_gas, limit::HistoryBytes,
+    volatile_data_access_disabled_revert_data, ExternalEnvTypes, MegaContext, VolatileDataAccess,
 };
 
 use super::{caller_refuses_start, satin_gas_table, MegaInstructions};
@@ -314,16 +314,12 @@ fn charge_frame_start<DB: Database, ExtEnvs: ExternalEnvTypes>(
     if !host.prices_history() {
         return result;
     }
-    let (Some(on_lane), Some(caller)) = (
-        write_record_history_gas(records.on_lane),
-        write_record_history_gas(u64::from(records.caller)),
-    ) else {
-        return abandon_frame(interpreter, host);
-    };
-    let Some(cost) = on_lane.checked_add(caller) else { return abandon_frame(interpreter, host) };
-    if !interpreter.gas.record_history_cost(cost) {
-        return abandon_frame(interpreter, host);
-    }
+    let charged = charge_write_records_history(
+        interpreter.gas.tracker_mut(),
+        records.on_lane,
+        u64::from(records.caller),
+    );
+    let Some((on_lane, caller)) = charged else { return abandon_frame(interpreter, host) };
     inherit_reservoir(interpreter);
     host.additional_limit.stage_frame_charge(records, on_lane, caller);
     result
