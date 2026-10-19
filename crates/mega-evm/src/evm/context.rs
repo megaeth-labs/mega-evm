@@ -117,8 +117,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     ///
     /// The fields the spec fixes are set from the spec, whatever `cfg` holds: the gas schedule,
     /// the EIP-8037 and EIP-2780 switches, the execution cap, the EIP-7708 switch and its
-    /// disabling flag, the system-call state-gas margin and the two code-size limits. Every other
-    /// field (chain id, disabled checks, blob schedule) is taken from `cfg`.
+    /// disabling flag, the system-call state-gas margin, the chain-id check and the two code-size
+    /// limits. Every other field (chain id, the other disabled checks, blob schedule) is taken
+    /// from `cfg`.
     ///
     /// A context that ran the neutral configuration returns to the spec's.
     pub fn with_cfg(mut self, cfg: CfgEnv<MegaSpecId>) -> Self {
@@ -533,6 +534,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
 /// executing the chain. It reaches system calls only: every transaction's gas is split by the
 /// execution cap as before, the system-address transaction's included, which is a deposit and
 /// not a system call.
+///
+/// The chain-id check is on, whatever the caller's configuration says: a transaction that carries
+/// a chain id must carry the chain's, and one of a type other than legacy must carry one. Which
+/// transactions a chain accepts is the chain's rule, not a caller's choice.
 pub fn spec_cfg(mut cfg: CfgEnv<MegaSpecId>) -> CfgEnv<MegaSpecId> {
     cfg.gas_params = satin_gas_params();
     cfg.enable_amsterdam_eip8037 = true;
@@ -541,6 +546,7 @@ pub fn spec_cfg(mut cfg: CfgEnv<MegaSpecId>) -> CfgEnv<MegaSpecId> {
     cfg.enable_amsterdam_eip7708 = true;
     cfg.amsterdam_eip7708_disabled = false;
     cfg.system_call_state_gas_margin_in_reservoir = true;
+    cfg.tx_chain_id_check = true;
     cfg.limit_contract_code_size = Some(constants::MAX_CONTRACT_SIZE);
     cfg.limit_contract_initcode_size = Some(constants::MAX_INITCODE_SIZE);
     cfg
@@ -636,6 +642,7 @@ mod tests {
             assert!(cfg.eip7708, "EIP-7708 must be on");
             assert!(!cfg.eip7708_disabled, "EIP-7708 must not be disabled");
             assert!(cfg.margin, "a system call's gas above 30M must be its reservoir");
+            assert!(cfg.chain_id_check, "the chain id must be checked");
             assert_eq!(cfg.code_size, Some(constants::MAX_CONTRACT_SIZE), "contract size");
             assert_eq!(cfg.initcode_size, Some(constants::MAX_INITCODE_SIZE), "initcode size");
             assert_eq!(cfg.gas_params.table(), satin_gas_params().table(), "gas schedule");
@@ -650,6 +657,7 @@ mod tests {
         eip7708: bool,
         eip7708_disabled: bool,
         margin: bool,
+        chain_id_check: bool,
         code_size: Option<usize>,
         initcode_size: Option<usize>,
         gas_params: &'a GasParams,
@@ -664,6 +672,7 @@ mod tests {
                 eip7708: cfg.enable_amsterdam_eip7708,
                 eip7708_disabled: cfg.amsterdam_eip7708_disabled,
                 margin: cfg.system_call_state_gas_margin_in_reservoir,
+                chain_id_check: cfg.tx_chain_id_check,
                 code_size: cfg.limit_contract_code_size,
                 initcode_size: cfg.limit_contract_initcode_size,
                 gas_params: &cfg.gas_params,
@@ -714,6 +723,7 @@ mod tests {
             cfg.enable_amsterdam_eip7708 = false;
             cfg.amsterdam_eip7708_disabled = true;
             cfg.system_call_state_gas_margin_in_reservoir = false;
+            cfg.tx_chain_id_check = false;
             cfg.limit_contract_code_size = Some(24 * 1024);
             cfg.limit_contract_initcode_size = Some(48 * 1024);
             cfg.gas_params = GasParams::new_spec(EthSpecId::AMSTERDAM);
@@ -751,6 +761,11 @@ mod tests {
         assert_satin_cfg(&context_with(|cfg| {
             cfg.system_call_state_gas_margin_in_reservoir = false;
         }));
+    }
+
+    #[test]
+    fn test_the_chain_id_check_stays_on() {
+        assert_satin_cfg(&context_with(|cfg| cfg.tx_chain_id_check = false));
     }
 
     #[test]

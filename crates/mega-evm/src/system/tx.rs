@@ -25,9 +25,11 @@
 //! - its nonce must be the system address's, so it cannot be replayed on this one;
 //! - the system address must have no code of its own (EIP-3607).
 //!
-//! The configuration switches that turn those checks off for a user transaction
-//! (`tx_chain_id_check`, `disable_nonce_check`, `disable_eip3607`) turn them off here too: a
-//! caller simulating a transaction sees one shape of validation, not two.
+//! The chain id is checked whatever the configuration says, as it is for a user transaction: the
+//! spec fixes the check on. A system-address transaction must carry one, which a user's legacy
+//! transaction need not. The configuration switches that turn the other two checks off for a user
+//! transaction (`disable_nonce_check`, `disable_eip3607`) turn them off here too: a caller
+//! simulating a transaction sees one shape of validation, not two.
 
 use alloy_evm::Database;
 use alloy_primitives::{address, b256, Address, TxKind, B256};
@@ -154,8 +156,8 @@ pub(crate) fn originates_from_the_protocol(tx: &MegaTransaction, system_transact
 /// Called for the running transaction once validation found it is one, before
 /// op-revm validates it, so op-revm sees the promoted shape: a deposit, whose signature, nonce and
 /// fee it does not check. The checks the deposit path drops and this chain still wants are made
-/// here (see the module documentation), each under the configuration switch a user transaction
-/// obeys.
+/// here (see the module documentation): the chain id always, the nonce and the code each under
+/// the configuration switch a user transaction obeys.
 ///
 /// The system address's nonce and code are the state's: they are checked when `check_account`
 /// says so, which is always in execution. Validation without state leaves them to the state, as
@@ -170,15 +172,13 @@ where
     ERROR: From<InvalidTransaction> + From<DB::Error>,
 {
     let cfg = ctx.cfg();
-    let (chain_id, chain_id_check) = (cfg.chain_id(), cfg.tx_chain_id_check);
+    let chain_id = cfg.chain_id();
     let (eip3607_disabled, nonce_check_disabled) =
         (cfg.is_eip3607_disabled(), cfg.is_nonce_check_disabled());
-    if chain_id_check {
-        match ctx.tx().chain_id() {
-            None => return Err(InvalidTransaction::MissingChainId.into()),
-            Some(id) if id != chain_id => return Err(InvalidTransaction::InvalidChainId.into()),
-            Some(_) => {}
-        }
+    match ctx.tx().chain_id() {
+        None => return Err(InvalidTransaction::MissingChainId.into()),
+        Some(id) if id != chain_id => return Err(InvalidTransaction::InvalidChainId.into()),
+        Some(_) => {}
     }
 
     // The system address is the transaction's caller, which the transaction starts warm, so the

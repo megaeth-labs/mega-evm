@@ -704,6 +704,7 @@ An out-of-gas step halts the call, consuming its regular gas.
 - The system address is resolved per block from `SequencerRegistry.currentSystemAddress()` after the pre-block changes commit.
 - A Mega System Transaction is a legacy transaction from that address to a contract on `MEGA_SYSTEM_TX_WHITELIST`.
 - A transaction from the system address without that shape is refused, with an error that is not a transaction's: a deposit from the system address is refused the same way rather than included as a failed deposit, so a block that holds one cannot be executed.
+- A Mega System Transaction's nonce and, unless EIP-3607 is disabled, its sender's code are checked before it is promoted to a deposit; its chain id is not, as no transaction's is: the chain-id check is off in every configuration Rex6 runs.
 
 #### New behavior
 
@@ -719,7 +720,8 @@ An out-of-gas step halts the call, consuming its regular gas.
 - A transaction from the live system address without the system shape MUST be invalid, whatever its type, a deposit included: a transaction other than a deposit is rejected, and a deposit, which is never of the system shape, is included as a failed deposit, which runs no call (see [Transaction and Block Refusals](#21-transaction-and-block-refusals)).
   The Oracle authorizes writes on the sender alone, so no transaction from the system address other than a Mega System Transaction reaches the Oracle.
 - A transaction from any other address is never a Mega System Transaction, and is an ordinary transaction, validated and charged as a user's: that includes a transaction from an address a rotation retired, which is no longer the live system address.
-- A Mega System Transaction is validated (chain id, nonce, EIP-3607) and promoted to a deposit exactly as in Rex6.
+- A Mega System Transaction MUST be validated before it is promoted to a deposit, and a failure is a rejection: it MUST carry the chain's id, which a user's legacy transaction may omit and it MUST NOT; its nonce MUST be the system address's; and the system address MUST have no code, as [EIP-3607](https://eips.ethereum.org/EIPS/eip-3607) requires of any sender.
+  It is then executed as a deposit, which checks no signature, nonce or fee of its own.
 - Because a role change can only be scheduled for a later block — the registry refuses an activation block at or before the current one — and is applied by that block's pre-block call, every transaction of a block reads the address the block's pre-block step left; a call to `applyPendingChanges()` inside the block, which anyone may make, finds no change due that the pre-block step did not apply.
 - A registry read the node fails to make gives the transaction no outcome (see [Transaction and Block Refusals](#21-transaction-and-block-refusals)).
 
@@ -820,6 +822,7 @@ One of those counts is limited:
 #### Previous behavior
 
 - Rex6's refusals: the inherited validation errors, the resource-limit halts of [Resource Limits](../evm/resource-limits.md), and the fail-closed pre-block calls.
+- Rex6 checks no transaction's chain id: the chain-id check is off in every configuration it runs, and a transaction carrying another chain's id, or a typed transaction carrying none, is valid.
 
 #### New behavior
 
@@ -828,6 +831,8 @@ A transaction MUST be rejected before inclusion when:
 - its gas limit is below its intrinsic regular gas plus the history gas of its body (`CallGasCostMoreThanGasLimit`);
 - its floor exceeds its gas limit, or, above the execution cap, its intrinsic regular gas or floor exceeds the cap (`GasFloorMoreThanGasLimit`);
 - it is sent from the live system address and does not have the system shape (see [The Live System Address](#17-the-live-system-address));
+- it carries a chain id that is not the chain's, or it is not a legacy transaction and carries none; a legacy transaction without a chain id (pre-[EIP-155](https://eips.ethereum.org/EIPS/eip-155)) is valid, unless it is a Mega System Transaction (see [The Live System Address](#17-the-live-system-address)).
+  The check is part of the spec, not of a node's configuration: a node MUST make it whatever its configuration says;
 - it is a Mega System Transaction that fails the chain-id, nonce or EIP-3607 check;
 - it fails any inherited validation.
 

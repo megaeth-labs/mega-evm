@@ -430,6 +430,22 @@ fn test_the_helper_and_the_evm_refuse_another_shape_from_the_system_address() {
     assert!(helper(deposit(ROOMY), None).is_ok(), "a deposit from an address no registry names");
 }
 
+/// The chain id is checked whatever the configuration a pool hands the helper says, as it is
+/// whatever the configuration an EVM is built with says: the spec fixes the check on, and both
+/// refuse a transaction of another chain alike.
+#[test]
+fn test_the_chain_id_is_checked_whatever_the_configuration_says() {
+    let mut cfg = CfgEnv::new_with_spec(MegaSpecId::SATIN);
+    cfg.tx_chain_id_check = false;
+    let error = format!("{:?}", OpTransactionError::Base(InvalidTransaction::InvalidChainId));
+    let helper = validate_transaction_stateless(cfg.clone(), block(), on_another_chain(), None)
+        .map_err(describe);
+    assert_eq!(helper, Err(error.clone()), "the helper");
+    let mut evm = MegaEvm::new(context(db(None)).with_cfg(cfg));
+    let refused = ExecuteEvm::transact(&mut evm, on_another_chain()).map_err(describe);
+    assert_eq!(refused.map(|_| ()), Err(error), "the EVM");
+}
+
 /// Above the execution cap the gas limit is valid when the regular part and the floor fit under
 /// the cap, the rest going to the reservoir; a floor above the cap is refused, by both.
 #[test]

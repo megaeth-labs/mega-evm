@@ -549,29 +549,48 @@ fn test_a_system_address_with_code_is_refused() {
     assert!(rejected.contains("RejectCallerWithCode"), "{rejected}");
 }
 
-/// The checks a caller switches off for user transactions are switched off here too: one shape
-/// of validation, not two.
+/// Runs `tx` on `db` under the chain's configuration with `mutate` applied.
+fn run_with(
+    mutate: fn(&mut CfgEnv<mega_evm::MegaSpecId>),
+    db: MemoryDatabase,
+    tx: MegaTransaction,
+) -> Result<MegaTransactionOutcome, EVMError<core::convert::Infallible, OpTxError>> {
+    let mut cfg = CfgEnv::new_with_spec(mega_evm::MegaSpecId::SATIN);
+    cfg.chain_id = CHAIN_ID;
+    mutate(&mut cfg);
+    MegaEvm::new(context(db).with_cfg(cfg)).execute_transaction(tx)
+}
+
+/// The chain id is checked whatever the caller's configuration says: the spec fixes the check on.
+/// A transaction carrying another chain's id is refused, a system transaction as a user's, and a
+/// typed transaction must carry one; a user's legacy transaction may carry none (pre-EIP-155), a
+/// system transaction may not.
+#[test]
+fn test_the_chain_id_is_checked_whatever_the_configuration_says() {
+    let off = |cfg: &mut CfgEnv<mega_evm::MegaSpecId>| cfg.tx_chain_id_check = false;
+    let funded = || chain_db().account_balance(CALLER, U256::from(FUNDS));
+    let oracle = TxKind::Call(ORACLE_CONTRACT_ADDRESS);
+    let write = || set_slot(ORACLE_SLOT, B256::with_last_byte(0xee));
+    let refusal = |db, tx| format!("{:?}", run_with(off, db, tx).expect_err("refused"));
+
+    let foreign_system = legacy_tx_with_chain_id(MEGA_SYSTEM_ADDRESS, oracle, write(), 0, Some(1));
+    assert!(refusal(chain_db(), foreign_system).contains("InvalidChainId"));
+    let bare_system = legacy_tx_with_chain_id(MEGA_SYSTEM_ADDRESS, oracle, write(), 0, None);
+    assert!(refusal(chain_db(), bare_system).contains("MissingChainId"));
+
+    let foreign_user = legacy_tx_with_chain_id(CALLER, oracle, get_slot(), 0, Some(1));
+    assert!(refusal(funded(), foreign_user.clone()).contains("InvalidChainId"));
+    assert!(refusal(funded(), typed(foreign_user, 2)).contains("InvalidChainId"));
+    let bare_user = legacy_tx_with_chain_id(CALLER, oracle, get_slot(), 0, None);
+    assert!(refusal(funded(), typed(bare_user.clone(), 2)).contains("MissingChainId"));
+    let outcome = run_with(off, funded(), bare_user).expect("a pre-EIP-155 transaction is valid");
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+}
+
+/// The nonce and code checks a caller switches off for user transactions are switched off here
+/// too: one shape of validation, not two.
 #[test]
 fn test_the_configuration_switches_hold_for_system_transactions() {
-    let run_with = |mutate: fn(&mut CfgEnv<mega_evm::MegaSpecId>), db: MemoryDatabase, tx| {
-        let mut cfg = CfgEnv::new_with_spec(mega_evm::MegaSpecId::SATIN);
-        cfg.chain_id = CHAIN_ID;
-        mutate(&mut cfg);
-        MegaEvm::new(context(db).with_cfg(cfg)).execute_transaction(tx)
-    };
-
-    // A foreign chain id goes through when the chain-id check is off.
-    let foreign = legacy_tx_with_chain_id(
-        MEGA_SYSTEM_ADDRESS,
-        TxKind::Call(ORACLE_CONTRACT_ADDRESS),
-        set_slot(ORACLE_SLOT, B256::with_last_byte(0xee)),
-        0,
-        Some(31_337),
-    );
-    let outcome = run_with(|cfg| cfg.tx_chain_id_check = false, chain_db(), foreign)
-        .expect("the chain-id check is off");
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-
     // A stale nonce goes through when the nonce check is off.
     let db = chain_db().account_nonce(MEGA_SYSTEM_ADDRESS, 7);
     let outcome = run_with(|cfg| cfg.disable_nonce_check = true, db, system_tx(0, B256::ZERO))
