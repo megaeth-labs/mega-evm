@@ -1216,6 +1216,7 @@ fn paired_corpus() -> Vec<Paired> {
         case("an empty call", to_callee(Bytes::new()), plain(), 0, 0),
         case("three fresh slots", to_callee(storing(&[(1, 1), (2, 1), (3, 1)])), plain(), 0, 3),
         case("a slot written and restored", to_callee(storing(&[(1, 1), (1, 0)])), plain(), 0, 0),
+        case("zero written to an empty slot", to_callee(storing(&[(1, 0)])), plain(), 0, 0),
         case(
             "a slot rewritten twice",
             to_callee(storing(&[(1, 1), (1, 2), (1, 3)])),

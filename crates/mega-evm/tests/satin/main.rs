@@ -24,7 +24,6 @@ mod inspector_cheatcodes;
 mod inspector_limits;
 mod inspector_settlement;
 mod intrinsic;
-mod kv_count;
 mod limit_exemption;
 mod limit_stop;
 mod neutral;
