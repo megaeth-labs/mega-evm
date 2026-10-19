@@ -27,6 +27,5 @@ mod snapshot;
 mod stale;
 mod state_gas;
 mod system_tx_budgets;
-mod transfer_log_order;
 mod transfer_logs;
 mod witness;
