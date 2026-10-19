@@ -134,8 +134,9 @@ use crate::{
     block::{eips, read_l1_block_info},
     estimated_da_size,
     system::{
-        is_apply_pending_changes_due, system_contract_specs, transact_apply_pending_changes,
-        transact_deploy, SequencerRegistryConfig, SystemContractDeployError,
+        classify_system_transaction, is_apply_pending_changes_due, live_system_address,
+        system_contract_specs, transact_apply_pending_changes, transact_deploy,
+        SequencerRegistryConfig, SystemContractDeployError,
     },
     BlockGasCounters, BlockLimiter, BlockLimits, BucketId, ExternalEnvTypes,
     MegaBlockExecutionResult, MegaBlockTxResult, MegaContext, MegaEvm, MegaHardforks,
@@ -573,7 +574,7 @@ where
             output.gas_limit,
             output.tx_size,
             output.da_size,
-            output.is_deposit,
+            output.is_deposit || output.is_system_transaction,
         )?;
         self.check_da_footprint(output.da_footprint)
     }
@@ -612,6 +613,15 @@ where
             .basic(sender)
             .map_err(BlockExecutionError::other)?
             .unwrap_or_default())
+    }
+
+    /// Whether `tx` is a Mega System Transaction: sent from the live system address with the
+    /// system shape. A transaction from that address of another shape is not (the engine refuses
+    /// it when it validates it). A read the database cannot serve is an internal error.
+    fn is_system_transaction(&mut self, tx: &MegaTransaction) -> Result<bool, BlockExecutionError> {
+        let system_address = live_system_address(&mut *self.evm.ctx_mut().db_mut())
+            .map_err(BlockExecutionError::other)?;
+        Ok(classify_system_transaction(tx, system_address).unwrap_or(false))
     }
 
     /// Refuses an EVM that runs an inspector which may rewrite what execution produces.
@@ -1038,7 +1048,19 @@ where
         );
         let gas_limit = inner.gas_limit();
 
-        self.limiter.pre_execution_check(tx_hash, gas_limit, tx_size, da_size, is_deposit)?;
+        // A Mega System Transaction is decided before it runs, from the registry's live system
+        // address as the block's state holds it: the engine reads the same slot when it validates
+        // the transaction, and a transaction of another shape from that address is no system
+        // transaction here but refused there.
+        let is_system_transaction = !is_deposit && self.is_system_transaction(&tx_env)?;
+
+        self.limiter.pre_execution_check(
+            tx_hash,
+            gas_limit,
+            tx_size,
+            da_size,
+            is_deposit || is_system_transaction,
+        )?;
 
         // A deposit is exempt from the data-availability footprint of the block, as it is from
         // its data-availability size.
@@ -1075,6 +1097,7 @@ where
             da_size,
             da_footprint,
             is_deposit,
+            is_system_transaction,
             depositor_nonce,
             sender,
             sender_nonce: sender_before.nonce,

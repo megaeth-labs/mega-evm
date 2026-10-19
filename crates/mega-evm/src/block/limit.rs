@@ -344,8 +344,9 @@ impl BlockLimiter {
     /// Whether `tx` may execute in this block.
     ///
     /// Checks the transaction against its own limits, and against what the block has left; a
-    /// deposit is held to the block's gas limit alone — to no limit only a builder applies, and not
-    /// to the data-size limit. It reads the counters and changes nothing;
+    /// transaction that is `packing_exempt` — a deposit, or a Mega System Transaction — is held to
+    /// the block's gas limit alone, to no limit only a builder applies and not to the data-size
+    /// limit. It reads the counters and changes nothing;
     /// [`post_execution_update`](Self::post_execution_update) advances the counters once the
     /// transaction commits.
     ///
@@ -361,14 +362,17 @@ impl BlockLimiter {
         gas_limit: u64,
         tx_size: u64,
         da_size: u64,
-        is_deposit: bool,
+        packing_exempt: bool,
     ) -> Result<(), BlockExecutionError> {
         // A deposit is an L1 message the chain cannot censor: the block derived from L1 must
-        // include it, and the builder does not choose it. So no limit only a builder applies
-        // refuses it — its declared gas, its encoded size and its data-availability size, and what
-        // those add to the block — and it does not count towards the block's data-availability
-        // size. The block's gas limit, the header's, holds it as it holds every transaction.
-        if !is_deposit && gas_limit > self.limits.tx_gas_limit {
+        // include it, and the builder does not choose it. A Mega System Transaction is the
+        // protocol's own oracle update, which the sequencer must be able to include whatever the
+        // block holds. So no limit only a builder applies refuses either — its declared gas, its
+        // encoded size and its data-availability size, and what those add to the block — and the
+        // data-size budget does not refuse it. The block's gas limit, the header's, holds it as it
+        // holds every transaction; the data-availability footprint, which the executor checks
+        // beside this, holds a Mega System Transaction too, since its envelope is legacy.
+        if !packing_exempt && gas_limit > self.limits.tx_gas_limit {
             return Err(invalid_tx(
                 tx_hash,
                 MegaTxLimitExceededError::TransactionGasLimit {
@@ -388,9 +392,10 @@ impl BlockLimiter {
 
         // The packing budget below, the data size, is a dimension a transaction's own execution
         // reveals. The transaction that crossed it is already packed, so what it refuses is the
-        // next one — never a deposit, which is not the builder's to refuse either. Every committed
-        // transaction counts towards it, a deposit included, in `post_execution_update`.
-        if is_deposit {
+        // next one — never a transaction exempt as above, which is not the builder's to refuse
+        // either. Every committed transaction counts towards it, an exempt one included, in
+        // `post_execution_update`.
+        if packing_exempt {
             return Ok(());
         }
 
