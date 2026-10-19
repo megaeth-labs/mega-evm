@@ -210,6 +210,8 @@ pub enum MegaBlockExecutionError {
     },
     /// The EVM runs an inspector that may rewrite what execution produces, which block execution
     /// does not admit.
+    ///
+    /// The inspector is the node's own choice, not a verdict on the block: an internal error.
     RewritingInspector,
     /// A system-contract address already holds bytecode that is not the contract this engine
     /// deploys.
@@ -316,18 +318,18 @@ impl fmt::Display for MegaBlockExecutionError {
 impl core::error::Error for MegaBlockExecutionError {}
 
 impl From<MegaBlockExecutionError> for BlockExecutionError {
-    /// A block refused for what the node's configuration lacks is an internal error: a schedule
-    /// without a parameter the block needs says nothing about the block, and a node must not mark
-    /// a block invalid because its own configuration is incomplete. Every other refusal is a
-    /// verdict on the block, a validation error.
+    /// A block refused for what the node itself does is an internal error: a schedule without a
+    /// parameter the block needs, or an inspector the node runs that may rewrite execution, says
+    /// nothing about the block, and a node must not mark a block invalid because of its own
+    /// configuration. Every other refusal is a verdict on the block, a validation error.
     fn from(error: MegaBlockExecutionError) -> Self {
         match error {
             MegaBlockExecutionError::MissingSequencerRegistryConfig |
+            MegaBlockExecutionError::RewritingInspector |
             MegaBlockExecutionError::MissingProtocolLimits { .. } |
             MegaBlockExecutionError::InvalidProtocolLimits { .. } => Self::other(error),
             MegaBlockExecutionError::UnexpectedNonDepositTxInActivationBlock |
             MegaBlockExecutionError::TransactionDaFootprintAboveGasLimit { .. } |
-            MegaBlockExecutionError::RewritingInspector |
             MegaBlockExecutionError::ForeignSystemContractCode { .. } |
             MegaBlockExecutionError::ZeroFactoryNonce { .. } |
             MegaBlockExecutionError::UsedEmptyAccount { .. } |
@@ -1228,7 +1230,8 @@ mod tests {
         assert_eq!(internal(&error), &MegaBlockExecutionError::MissingSequencerRegistryConfig);
     }
 
-    /// Every refusal but a configuration gap is a verdict on the block: a validation error.
+    /// Every refusal but one for what the node itself does — a configuration gap, or an inspector
+    /// it runs — is a verdict on the block: a validation error.
     #[test]
     fn test_a_refusal_of_the_block_is_a_validation_error() {
         let address = alloy_primitives::Address::repeat_byte(1);
@@ -1238,7 +1241,6 @@ mod tests {
                 transaction_da_footprint: 2,
                 available_block_da_footprint: 1,
             },
-            MegaBlockExecutionError::RewritingInspector,
             MegaBlockExecutionError::ForeignSystemContractCode {
                 address,
                 expected: B256::ZERO,
@@ -1257,6 +1259,7 @@ mod tests {
         }
         for gap in [
             MegaBlockExecutionError::MissingSequencerRegistryConfig,
+            MegaBlockExecutionError::RewritingInspector,
             MegaBlockExecutionError::MissingProtocolLimits { timestamp: 1 },
             MegaBlockExecutionError::InvalidProtocolLimits { timestamp: 1, message: String::new() },
         ] {
