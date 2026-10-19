@@ -547,19 +547,19 @@ fn test_a_failed_creation_rewritten_into_a_success_settles_as_the_failure() {
         let creates = |init: &[u8]| {
             BytecodeBuilder::default().create(U256::from(value), init).append(POP).stop().build()
         };
-        let own = |init: &Bytes| {
-            let data = init.clone();
+        let own = |init: &[u8]| {
+            let data = Bytes::copy_from_slice(init);
             (Bytes::new(), tx_with_gas(TxKind::Create, data, U256::from(value), gas_limit))
         };
-        let down = |init: &Bytes| (creates(init), to(CONTRACT, 0, Bytes::new(), gas_limit));
-        let cases: [(&str, Address, &dyn Fn(&Bytes) -> (Bytes, MegaTransaction)); 2] = [
+        let down = |init: &[u8]| (creates(init), to(CONTRACT, 0, Bytes::new(), gas_limit));
+        let cases: [(&str, Address, CreationSetup<'_>); 2] = [
             ("the transaction's own", CALLER.create(0), &own),
             ("one call down", CONTRACT.create(0), &down),
         ];
         for (at, created, setup) in cases {
             let envs = || crowded_account(minimal_envs(), created, 3);
             let case = format!("{at}, value {value}, gas limit {gas_limit}");
-            let (code, tx) = setup(&stopping);
+            let (code, tx) = setup(&stopping[..]);
             let ran = plain(db(code), envs(), tx);
             assert!(holds_something(&ran, created), "{case}: run, the creation adds its account");
             assert_eq!(
@@ -568,7 +568,7 @@ fn test_a_failed_creation_rewritten_into_a_success_settles_as_the_failure() {
                 "{case}: the account in its bucket and the slot"
             );
 
-            let (code, tx) = setup(&reverting);
+            let (code, tx) = setup(&reverting[..]);
             let failed = plain(db(code.clone()), envs(), tx.clone());
             assert!(!holds_something(&failed, created), "{case}: reverting, it adds none");
             let rewritten = inspected(db(code), envs(), tx.clone(), RevivesCreations);
