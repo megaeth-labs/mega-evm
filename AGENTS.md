@@ -88,14 +88,10 @@ Git submodules are required — clone with `--recursive` or run `git submodule u
 | `mega-state-test`       | `crates/mega-state-test`  | yes    | Execution-spec runner on Satin: the state-test gate and report, the blockchain-test gate |
 | `state-test`            | `crates/state-test`       | yes    | The runner's CLI                                                                         |
 | `mega-evme`             | `bin/mega-evme`           | yes    | EVM execution CLI: Satin in-tree, legacy specs on the released 1.7.1 CLI                 |
-| `mega-t8n`              | `bin/mega-t8n`            | no     | State transition (t8n) tool; rejoins when ported to Satin                                |
 
 `mega-evme` runs a command on the engine its spec names: `Satin` on the in-tree sources, a spec from `Equivalence` to `Rex6` on the released `mega-evme` 1.7.1 and `mega-evm` 1.7.1, which it links under the aliases `mega-evme-legacy` and `mega-evm-legacy` (its `legacy` feature, on by default).
 Because it links a package of its own name, select it by manifest path, not with `-p`: `cargo test --manifest-path bin/mega-evme/Cargo.toml`.
 The legacy line's versions are pinned to the 1.7.1 release's lockfile and guarded by `bin/mega-evme/tests/legacy_line.rs`, the precompiles' backends and the encodings it shares with the engine included; the few the engine's alloy 2 line holds above the release are pinned where they are.
-
-`mega-t8n` still targets the legacy engine.
-It is outside `[workspace] members`, so no workspace command builds it; do not edit its sources until it is ported to Satin.
 
 ### Dependencies on the forks
 
@@ -458,8 +454,6 @@ Every later mechanism plugs into these; a change to one comes back to this layer
 - `fuzz/` — randomized tests: properties the engine must hold on any input, and the neutral differential against op-revm and revm's mainnet EVM (see Randomized tests below).
 - `shared/` — no target: `snapshot.rs` holds `assert_sorted_json_snapshot!`, which every target includes with `#[path = "../shared/snapshot.rs"] mod snapshot;`.
   It has no `main.rs`, so Cargo builds nothing there; the snapshot files live in `snapshots/` beside the file that asserts.
-- `_pending/` — no test any more: its `README.md` records where each legacy test the test inventory kept went, ported into one of the targets above or retired, and why.
-  It has no `main.rs`, so Cargo builds nothing there.
 - Unit tests live next to the code in `#[cfg(test)] mod tests`.
 
 ### Randomized tests (`crates/mega-evm/tests/fuzz/`)
