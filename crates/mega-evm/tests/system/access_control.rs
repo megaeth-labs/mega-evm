@@ -56,7 +56,7 @@ fn run(code: &[(Address, Bytes)]) -> Run {
     let db = code
         .iter()
         .fold(system_db(), |db, (address, code)| db.account_code(*address, code.clone()));
-    execute(db, call_tx_with_gas(PARENT, &[], U256::ZERO, GAS_LIMIT))
+    execute(db, call_tx_with_gas(PARENT, [], U256::ZERO, GAS_LIMIT))
 }
 
 /* ---------- code ---------- */
@@ -487,7 +487,7 @@ fn test_the_switch_does_not_carry_into_the_next_transaction() {
         let mut evm = MegaEvm::new(ctx);
 
         let one = evm
-            .execute_transaction(call_tx_with_gas(PARENT, &[], U256::ZERO, GAS_LIMIT))
+            .execute_transaction(call_tx_with_gas(PARENT, [], U256::ZERO, GAS_LIMIT))
             .expect("the transaction is valid");
         if halts {
             assert!(one.result.is_halt(), "{:?}", one.result);
@@ -499,7 +499,7 @@ fn test_the_switch_does_not_carry_into_the_next_transaction() {
         assert_eq!(evm.ctx().detention().accessed(), VolatileDataAccess::empty());
 
         let two = evm
-            .execute_transaction(call_tx_with_gas(SIBLING, &[], U256::ZERO, GAS_LIMIT))
+            .execute_transaction(call_tx_with_gas(SIBLING, [], U256::ZERO, GAS_LIMIT))
             .expect("the transaction is valid");
         assert!(two.result.is_success(), "halted first: {halts}: {:?}", two.result);
         assert_eq!(evm.ctx().detention().accessed(), VolatileDataAccess::TIMESTAMP);
@@ -667,7 +667,7 @@ fn test_the_switch_is_the_same_below_and_above_the_execution_cap() {
     let at = |gas_limit: u64| {
         let db =
             system_db().account_code(PARENT, parent.clone()).account_code(CHILD, reads(TIMESTAMP));
-        execute(db, call_tx_with_gas(PARENT, &[], U256::ZERO, gas_limit))
+        execute(db, call_tx_with_gas(PARENT, [], U256::ZERO, gas_limit))
     };
     let (below, above) = (at(GAS_LIMIT), at(TX_GAS_LIMIT_CAP + 100_000_000));
     for run in [&below, &above] {
