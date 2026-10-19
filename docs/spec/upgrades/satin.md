@@ -975,12 +975,13 @@ A node, a stateless validator and a replay tool must agree on everything below, 
   A node that reads the configuration before it executes anything — gas estimation reads the execution cap — must read these values, not its own.
   The limits are fixed by the spec too (see [Resource Limits](#10-resource-limits) and [Block Limits](#20-block-limits)): a node passes none of them, neither in its chain configuration nor with a block, and the reference implementation holds a block's transactions, and an execution outside a block — a call, a gas estimate — to the same values without being told, so a node's calls and estimates stop what its blocks stop.
 - **What a transaction pool can check without state.**
+  The body, with `WRITE_RECORD_SIZE` bytes for each entry of the authorization list, must fit the transaction's data-size limit, and the chain id must be the chain's, a typed transaction's included; neither depends on the node's configuration.
   The gas limit must cover the intrinsic regular gas (EIP-2780's base and recipient and value charges, calldata, access list, authorizations, init code) plus the history gas of the transaction's body, and the calldata floor; above the execution cap, the intrinsic regular gas and the floor must fit under the cap.
   The rest of the stateless validation is the base layer's.
   Whether a recipient, a created account or an authority is new is the state's to say: EIP-2780 charges it when the transaction runs, and a gas limit that cannot pay it runs out of gas rather than being refused.
   The history of the write records a transaction's start makes is charged when it runs too: one record for the recipient of its value (none for value sent to the sender itself or to an authority it applied) or the account it creates, and one for each authority that applies other than the sender.
   So the least gas limit validation admits is not what a transaction needs: at that gas limit a transfer of value to another account runs out of gas on its recipient's record, and one to a new account needs that account's state gas as well.
-  A deposit and a Mega System Transaction pay no history gas; a pool that recognizes the latter needs the live system address from the state.
+  A deposit and a Mega System Transaction pay no history gas; a pool that recognizes the latter, and refuses a transaction from the live system address without the system shape, needs the live system address from the state.
   That address changes only in a block's pre-block step and then holds for the whole block, so a pool reads it again for every block, from the state after that block's pre-block changes.
   An address read from another state treats the old system address's transactions as the protocol's and the new one's as a user's, or the reverse.
   A deposit is never refused for failing validation: one that fails validation is included as a failed deposit, which bumps its sender's nonce and uses its whole gas limit.
