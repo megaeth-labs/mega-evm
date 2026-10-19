@@ -4,7 +4,7 @@
 use alloy_evm::Evm;
 use alloy_primitives::{address, Address, Bytes, Log, U256};
 use mega_evm::{
-    test_utils::{BytecodeBuilder, GasInspector, MemoryDatabase},
+    test_utils::{transfer_log, BytecodeBuilder, GasInspector, MemoryDatabase},
     DeclaredObserver, MegaContext, MegaEvm, FORBIDDEN_CREATE_REVIVAL, TX_BODY_SIZE,
     WRITE_RECORD_SIZE,
 };
@@ -570,6 +570,35 @@ fn test_declared_observer_forwards_every_callback() {
         "every callback ran: {seen:?}"
     );
     assert_eq!(DeclaredObserver::new(Recorder::default()).into_inner(), Recorder::default());
+}
+
+/// Keeps every log handed to `Inspector::log`, the callback for a log journaled outside an
+/// instruction.
+#[derive(Debug, Default)]
+struct FrameStartLogs(Vec<Log>);
+
+impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for FrameStartLogs {
+    fn log(&mut self, _: &mut MegaContext<DB>, log: Log) {
+        self.0.push(log);
+    }
+}
+
+/// A declared observer forwards the EIP-7708 transfer logs a frame's start journals: the
+/// transaction's value into `A`, whose frame runs, and `A`'s value into `B`, an account with no
+/// code, whose frame is answered without running.
+#[test]
+fn test_declared_observer_forwards_the_transfer_logs_of_frame_starts() {
+    let db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(5))
+        .account_code(A, call_b_and_store_flag(2));
+    let mut evm = MegaEvm::new(context(db))
+        .with_trusted_inspector(DeclaredObserver::new(FrameStartLogs::default()));
+    let outcome = evm.transact_raw(call(CALLER, A, U256::from(5), gas_limit())).unwrap();
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    assert_eq!(
+        evm.inspector().0 .0,
+        vec![transfer_log(CALLER, A, U256::from(5)), transfer_log(A, B, U256::from(2))]
+    );
 }
 
 /// Edits a frame's inputs, writes to the journal, or rewrites a frame result, one per flag.
