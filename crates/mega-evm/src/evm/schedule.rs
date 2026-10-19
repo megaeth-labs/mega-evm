@@ -18,6 +18,11 @@
 //! `CREATE` opcode pays 12,000; a slot's first write 10,000 above its load; against 183,600,
 //! 183,600 and 97,920 of state gas at the minimum bucket.
 //!
+//! The static price every opcode pays before its dynamic cost is not in the schedule: revm keeps it
+//! in the instruction table, keyed on the spec. Satin's is Amsterdam's too ([`satin_gas_table`]),
+//! which differs from its Osaka base's in EIP-8038's two-read base for `EXTCODESIZE` and
+//! `EXTCODECOPY` alone.
+//!
 //! The state-gas entries are the price at the *minimum* SALT bucket. A charge is scaled from
 //! there by the capacity of the bucket it lands in, which the pricing hook does
 //! (`Host::state_gas_price`); the schedule holds the number that scaling starts from.
@@ -28,6 +33,7 @@
 
 use revm::{
     context_interface::cfg::{GasId, GasParams},
+    interpreter::instructions::{gas_table_spec, GasTable},
     primitives::{eip8037, hardfork::SpecId, OnceLock},
 };
 
@@ -85,6 +91,15 @@ pub fn satin_gas_params_history_exempt() -> GasParams {
             params
         })
         .clone()
+}
+
+/// The Satin static opcode prices: Amsterdam's.
+///
+/// Amsterdam's table differs from the Osaka base's in EIP-8038's base for `EXTCODESIZE` and
+/// `EXTCODECOPY` alone: two warm accesses, 200, because each reads the account and then its code.
+/// The dynamic cold premium is the schedule's, as for every account access.
+pub(crate) const fn satin_gas_table() -> GasTable {
+    gas_table_spec(SpecId::AMSTERDAM)
 }
 
 /// The Satin gas schedule at `prices`.
@@ -185,6 +200,21 @@ mod tests {
             let id = GasId::from_name(name).expect("a known gas id");
             assert_eq!(osaka().get(id), osaka_value, "{name} at Osaka");
             assert_eq!(satin.get(id), satin_value, "{name} at Satin");
+        }
+    }
+
+    /// The static opcode prices are Amsterdam's, which part from the Osaka base's in EIP-8038's
+    /// two-read base for `EXTCODESIZE` and `EXTCODECOPY` alone.
+    #[test]
+    fn test_the_static_prices_are_amsterdams() {
+        use revm::bytecode::opcode::{EXTCODECOPY, EXTCODESIZE};
+        let (satin, osaka) = (satin_gas_table(), gas_table_spec(SpecId::OSAKA));
+        let changed: Vec<_> =
+            (0..=u8::MAX).filter(|&op| satin[op as usize] != osaka[op as usize]).collect();
+        assert_eq!(changed, vec![EXTCODESIZE, EXTCODECOPY]);
+        for opcode in changed {
+            assert_eq!(osaka[opcode as usize], 100, "opcode {opcode:#04x} at Osaka");
+            assert_eq!(satin[opcode as usize], 200, "opcode {opcode:#04x} at Satin");
         }
     }
 

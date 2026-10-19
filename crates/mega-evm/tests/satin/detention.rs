@@ -1352,7 +1352,8 @@ fn test_a_refused_read_reverts_the_frame_and_charges_its_static_gas() {
                 .push_address(BENEFICIARY)
                 .append(EXTCODECOPY)
                 .build(),
-            3 + 2 + 2 + 3 + 100,
+            // `EXTCODECOPY`'s static gas is EIP-8038's two warm reads, the account and its code.
+            3 + 2 + 2 + 3 + 200,
             VolatileDataAccess::BENEFICIARY_BALANCE,
         ),
         (

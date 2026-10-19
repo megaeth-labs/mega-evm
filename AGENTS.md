@@ -148,6 +148,7 @@ The root `Cargo.toml` pins `revm = "=40.0.3"` and redirects all twelve revm crat
   Gas above the 200M execution cap goes to the EIP-8037 reservoir.
 - The Satin gas schedule (`evm/schedule.rs`) is Amsterdam's with two changes: the EIP-8037 state-gas entries are rebuilt from `MegaETH`'s own cost per state byte, and the code-deposit history entry, zero upstream, is priced at the cost per history byte (`HISTORY_GAS_PRICED`).
   Every regular-gas entry is Amsterdam's, EIP-8038's state-access prices included, so creating state costs the access and the write in regular gas and the new state itself in state gas alone, as upstream.
+  The static opcode prices, which revm keeps in the instruction table, are Amsterdam's too (`satin_gas_table`): they part from the Osaka base's only in EIP-8038's 200-gas base of `EXTCODESIZE` and `EXTCODECOPY`.
   It is built once per process, with a second copy that prices that entry at zero for a transaction exempt from history gas (`satin_gas_params_history_exempt`); the byte prices are an input (`evm/prices.rs`), so a measurement build can run other ones through the std-only `satin-price-override` feature or the `MEGA_SATIN_CPSB` / `MEGA_SATIN_CPHB` environment variables.
   `crates/mega-evm/tests/satin/pricing-table.md` lists every entry next to Osaka's and Amsterdam's, what nine probe transactions spent, and what two of those probes spend with the bucket they write into crowded; a test renders it and compares it to the file.
 - The instruction table adds the Amsterdam opcodes the base spec gates off (`DUPN`, `SWAPN`, `EXCHANGE`, `SLOTNUM`), before the metering wrappers go in; `CLZ` is gated on Osaka and needs no activation.
@@ -377,7 +378,7 @@ Every later mechanism plugs into these; a change to one comes back to this layer
   Two things follow from charging after revm's instruction has built the frame's input: the frame carries a copy of the caller's reservoir, taken before the charge, so the wrapper writes the post-charge reservoir back into it — a frame that inherited the earlier one would hand the charge back on return, and a frame answered without running would hand it back twice.
   And the frame is already pending as the interpreter's action, which halts on an instruction's error only when no action is pending, so a caller that cannot pay drops the pending frame before it fails; otherwise the frame starts and its records are never paid for.
   The opcodes that can read volatile data run in detention's read wrapper, around the wrapper above when they have one (see Gas detention).
-  Every other opcode runs revm's instruction unwrapped, and the static gas table is revm's.
+  Every other opcode runs revm's instruction unwrapped, and the static gas table is revm's Amsterdam one.
 - **Write records.**
   One 40-byte record per account or storage write: a slot's first change in the transaction (taken back on write-back to the original value), a value transfer's sender and recipient, a creation's creator nonce and created account, a `SELFDESTRUCT` moving value to another account, an applied EIP-7702 authority, the transaction's value recipient or created account.
   The sender's own account is part of the transaction body: it is never a record, and a frame running as the sender (through an EIP-7702 delegation) counts it as recorded.

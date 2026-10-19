@@ -21,8 +21,10 @@ use mega_evm::{
         bn254_pair::{KARST, KARST_MAX_INPUT_SIZE},
     },
     revm::{
+        bytecode::opcode::{EXTCODECOPY, EXTCODESIZE},
         context_interface::cfg::{gas::WARM_STORAGE_READ_COST, GasId, GasParams},
         handler::SYSTEM_CALL_REGULAR_GAS_LIMIT,
+        interpreter::instructions::gas_table_spec,
         precompile::secp256r1::{P256VERIFY_BASE_GAS_FEE_OSAKA, P256VERIFY_OSAKA},
         primitives::{
             eip2780::{TX_BASE_COST, TX_VALUE_COST},
@@ -170,6 +172,16 @@ fn schedule(doc: &str) {
         for (label, id) in rows {
             assert_eq!(live.get(id), spec.get(id), "{label} at the prices in effect");
         }
+    }
+
+    // The static gas of the two opcodes EIP-8038 gives two reads, which revm keeps in the
+    // instruction table rather than the schedule; the engine's table is Amsterdam's (a unit test of
+    // `evm/schedule.rs` holds it to that).
+    let row = table_row(page, "`EXTCODESIZE` and `EXTCODECOPY`, static gas");
+    let [.., before, shown] = row[..] else { panic!("an Osaka and a Satin cell") };
+    for opcode in [EXTCODESIZE, EXTCODECOPY] {
+        assert_eq!(before, grouped(gas_table_spec(SpecId::OSAKA)[opcode as usize].into()));
+        assert_eq!(shown, grouped(gas_table_spec(SpecId::AMSTERDAM)[opcode as usize].into()));
     }
 
     let base = TX_BASE_COST;
