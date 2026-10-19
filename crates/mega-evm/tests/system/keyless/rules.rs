@@ -623,9 +623,8 @@ fn test_a_failure_from_nonce_one_keeps_no_record_of_the_signer() {
 
 /// However a deployment from nonce 1 fails — its init code reverts or halts, it deploys no code,
 /// or a limit stops its creation at its start — the signer stays at 1 and its nonce record goes.
-/// The record stays only when a creation that deployed no code moved value out of the signer's
-/// account: the record then stands for that write. A deployment that deployed no code keeps the
-/// record of the account it created.
+/// A creation that deployed no code is refused its empty deposit and reverts, so it keeps neither
+/// the record of the account it created nor the value it moved.
 #[test]
 fn test_every_way_a_deployment_from_nonce_one_fails_leaves_the_nonce_at_one() {
     let one = U256::ONE;
@@ -645,12 +644,12 @@ fn test_every_way_a_deployment_from_nonce_one_fails_leaves_the_nonce_at_one() {
             EvmTxRuntimeLimits::no_limits(),
             0,
         ),
-        ("no code", Deployment::new(Bytes::new()), EvmTxRuntimeLimits::no_limits(), 1),
+        ("no code", Deployment::new(Bytes::new()), EvmTxRuntimeLimits::no_limits(), 0),
         (
             "no code carrying value",
             Deployment::with_value(Bytes::new(), one),
             EvmTxRuntimeLimits::no_limits(),
-            2,
+            0,
         ),
         (
             "stopped at its start",
@@ -787,8 +786,9 @@ fn test_a_delegated_signer_deploys() {
 /// takes back nothing — so the nonce never goes back below an account the signer created, and
 /// the signer's next creations land at fresh addresses. The signer ends at 4, and a resubmission
 /// is refused `SignerNonceTooHigh` at that nonce. A creation that reverts takes the delegation's
-/// creations back with it: the bump is the last one again, it is taken back, the signer ends at 1,
-/// and a resubmission runs and fails as the first did.
+/// creations back with it, as does a creation refused its empty deposit: the bump is the last one
+/// again, it is taken back, the signer ends at 1, and a resubmission runs and fails as the first
+/// did.
 #[test]
 fn test_nonces_a_delegated_signer_spends_in_its_deployment_stay_spent() {
     let delegate = address!("0x00000000000000000000000000000000000d1e6a");
@@ -799,7 +799,7 @@ fn test_nonces_a_delegated_signer_spends_in_its_deployment_stay_spent() {
     let with_suffix = |suffix: &[u8]| Bytes::from([&calling_the_signer[..], suffix].concat());
     let cases = [
         ("deploys", constructor(&calling_the_signer, &runtime(1)), 4),
-        ("deploys nothing", with_suffix(&[STOP]), 4),
+        ("deploys nothing", with_suffix(&[STOP]), 1),
         ("reverts", with_suffix(&[PUSH0, PUSH0, REVERT]), 1),
     ];
     for gas_limit in GAS_LIMITS {
@@ -838,10 +838,12 @@ fn test_nonces_a_delegated_signer_spends_in_its_deployment_stay_spent() {
                 );
             } else {
                 let error = failure(&again);
-                assert!(
-                    matches!(error, KeylessDeployError::ExecutionReverted { .. }),
-                    "{name}: resubmitted at {gas_limit}: {error:?}",
-                );
+                let as_first = if *name == "deploys nothing" {
+                    matches!(error, KeylessDeployError::EmptyCodeDeployed { .. })
+                } else {
+                    matches!(error, KeylessDeployError::ExecutionReverted { .. })
+                };
+                assert!(as_first, "{name}: resubmitted at {gas_limit}: {error:?}");
             }
             assert_eq!(nonce(&again, deployment.signer), *ends_at, "{name}: resubmitted");
 

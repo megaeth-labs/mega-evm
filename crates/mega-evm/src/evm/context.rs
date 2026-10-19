@@ -18,7 +18,10 @@ use crate::{
         history::transaction_body_bytes,
         schedule::{satin_gas_params, satin_gas_params_history_exempt},
     },
-    system::{self, keyless::KeylessFrame},
+    system::{
+        self,
+        keyless::{self, KeylessFrame},
+    },
     AdditionalLimit, BlockHashRecord, BucketError, BucketId, BucketMultipliers, BucketRecord,
     Detention, EmptyExternalEnv, EthSpecId, EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs,
     MegaSpecId, MegaTransaction, OracleReadRecord, ProtocolLimits, SaltEnv, VolatileDataAccess,
@@ -601,8 +604,19 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextTr for MegaContext<DB, ExtE
     /// once `return_create` made every charge for the deposit and before it commits
     /// the creation ([`AdditionalLimit::on_code_deposit`]). A crossing refuses the deposit with the
     /// stop's revert data: the creation reverts with it, on the gas it had before the deposit.
+    ///
+    /// A keyless deployment's constructor that returns empty code for the deploy address is
+    /// refused the same way, with empty revert data ([`keyless::refuses_empty_deposit`]).
     #[inline]
     fn admit_code_deposit(&mut self, deposit: &CodeDeposit<'_>) -> Result<(), Bytes> {
+        let destroyed = self
+            .journal_ref()
+            .state
+            .get(&deposit.address)
+            .is_some_and(|account| account.is_selfdestructed());
+        if keyless::refuses_empty_deposit(&mut self.keyless_frame, deposit, destroyed) {
+            return Err(Bytes::new());
+        }
         self.additional_limit.on_code_deposit(deposit)
     }
 }

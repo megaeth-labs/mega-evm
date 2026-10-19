@@ -50,6 +50,13 @@
 //!   do that, with a `CREATE` or `CREATE2`, successful or not: a signer with other code is refused
 //!   `SignerHasCode()` unless EIP-3607 is disabled. The nonce is never moved back under a later
 //!   bump, because a later bump may stand for an account.
+//! - A constructor that returns empty code for the deploy address is refused its empty deposit: the
+//!   creation reverts, taking its logs and writes with it, and the call answers
+//!   `EmptyCodeDeployed()`, so the address stays deployable. A constructor that destroys its own
+//!   account (EIP-6780) is left as it is and gets the same answer, since the account keeps no code.
+//!   A creation the constructor makes itself may return empty code. Whoever submits the signed
+//!   bytes chooses the forward through `gasLimitOverride`, so an init code that branches on its gas
+//!   cannot be made to occupy the address without code.
 //! - A signer with no account is charged its account as state gas, once, by the call: the nonce
 //!   bump creates it, and no other charge does.
 //! - The call pays what the `CREATE` opcode charges its frame: its regular gas, which stays spent,
@@ -95,7 +102,7 @@ pub use error::*;
 pub use tx::*;
 
 pub(crate) use dispatch::{is_dispatched, ready, run, runs, KeylessFrame};
-pub(crate) use settle::{returning, settle};
+pub(crate) use settle::{refuses_empty_deposit, returning, settle};
 
 use alloy_primitives::{address, Address};
 

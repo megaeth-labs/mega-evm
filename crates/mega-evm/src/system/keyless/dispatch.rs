@@ -66,6 +66,9 @@ pub(crate) struct Started {
     pub(super) signer_record_charge: u64,
     /// Whether the creation moves value out of the signer's account.
     pub(super) moves_value: bool,
+    /// Whether the deposit of empty code at the deploy address was refused, which reverts the
+    /// creation ([`refuses_empty_deposit`](settle::refuses_empty_deposit)).
+    pub(super) empty_deposit_refused: bool,
 }
 
 /// Whether `frame_init` starts a `keylessDeploy` call the dispatch takes: a `CALL` at depth 0 to
@@ -244,6 +247,7 @@ fn start<DB: Database, ExtEnvs: ExternalEnvTypes>(
         signer_account_charge: deployment.signer_account_charge,
         signer_record_charge: deployment.record_charges.map_or(0, |(_, caller)| caller),
         moves_value: !deployment.value.is_zero(),
+        empty_deposit_refused: false,
     }));
     Ok(InterpreterAction::NewFrame(FrameInput::Create(Box::new(create))))
 }

@@ -34,8 +34,8 @@ expression: "serde_json::json!({\n    \"summary\":\n    {\n        \"cases\": ca
     "a constructor that logs, nonce 1 @ 50000000 | keccak256=0xb6ef700a6325d9c8815ff9e018efb9c7d382bb5899095d5da00b2cc0839716f6",
     "a constructor that writes a slot, nonce 0 @ 50000000 | keccak256=0xbfa6ef34af45a0a0312cb4ca115c94c0a876cdda58c8ef7e7d6b065940471161",
     "a constructor that writes a slot, nonce 1 @ 50000000 | keccak256=0x9acf5dac5be41f7d6b4c85ac07976f33c6291349e201cab1bdbeaa3c467c34f0",
-    "a constructor that deploys nothing, nonce 0 @ 50000000 | keccak256=0x824cc1d3dde6587a74f80c52921c0725590df5cbdeca1de3c1bed6d7fb4fe826",
-    "a constructor that deploys nothing, nonce 1 @ 50000000 | keccak256=0x5c0e35be691c132a3d849cb98c42cbbe1fd139f2d025e3c1038a783a62f2c63a",
+    "a constructor that deploys nothing, nonce 0 @ 50000000 | keccak256=0x531eefcf5150880c80ba194dbe2a5e868729c3f543c88fd7f7504705bd9bc76b",
+    "a constructor that deploys nothing, nonce 1 @ 50000000 | keccak256=0x4d9f685c268ec904a6bfb8c32a9938d3ce19538d8686b2753815e1a36a8a14b9",
     "a constructor that destroys itself, nonce 0 @ 50000000 | keccak256=0x6c8cff34cf3f1dc6af12afbd91d52f90ab9c88aa5660515c441aa4a0ebbabd99",
     "a constructor that destroys itself, nonce 1 @ 50000000 | keccak256=0xc9c0162d7375f54e7d5764032ab322c6ef44a61a4e971b4efe2422655b1f69ff",
     "a constructor out of gas @ 50000000 | keccak256=0xe18f60b3f23b59b8ce7b590fab7cc4d6762e76aeffb6703d46ec3ec3e34c2f31",
@@ -99,8 +99,8 @@ expression: "serde_json::json!({\n    \"summary\":\n    {\n        \"cases\": ca
     "a constructor that logs, nonce 1 @ 400000000 | keccak256=0x86c8c1fc7362e9a781a7ade98698385ab55b6247df9177279df2a74ee80dc219",
     "a constructor that writes a slot, nonce 0 @ 400000000 | keccak256=0xc0fda29ea8015773f0adab78ab566a72a7c4a73b9d110cf6c4d72a2188770ee4",
     "a constructor that writes a slot, nonce 1 @ 400000000 | keccak256=0x18f60e104086e59daa0590b48bae5d1a3cb9d41fdc5614e24aec75d89071044d",
-    "a constructor that deploys nothing, nonce 0 @ 400000000 | keccak256=0xe6e82ac09111feec385d3f3137c9f4d596a87a1ac26c2a148a595b1387270e2e",
-    "a constructor that deploys nothing, nonce 1 @ 400000000 | keccak256=0xcc7f1c6b2d8efb947bb2b0130e8424964a837795f04c43ac253860f8015dc856",
+    "a constructor that deploys nothing, nonce 0 @ 400000000 | keccak256=0xd1f72f6ee711fc9503a4b53b0780eaec85e98d3207f6002ccd3e29fea9e221d6",
+    "a constructor that deploys nothing, nonce 1 @ 400000000 | keccak256=0xb64f5545ee18bc00698f819ea4d6de38b2ac13605dfd914c90d6a6792f3592e1",
     "a constructor that destroys itself, nonce 0 @ 400000000 | keccak256=0xd2329023e926cabd16a4faccdb3bad99e9b43cf5c1f2c524b3105b5b90845c28",
     "a constructor that destroys itself, nonce 1 @ 400000000 | keccak256=0x781e3037fe07e2b96090b0108bb32919cc3205cd9f77e5d8d62b6f0204dfd1ef",
     "a constructor out of gas @ 400000000 | keccak256=0x9b39a3b248277953958daaeb176f0d434e4ec69c8d3f332995172538bdec7a45",
@@ -145,9 +145,9 @@ expression: "serde_json::json!({\n    \"summary\":\n    {\n        \"cases\": ca
     "rule: init code over the limit @ 2000000000 | keccak256=0xe99b7001f5a379fdc8095ce263ef6d4c56db74f4714289ec2d8b1abf08d8042e"
   ],
   "summary": {
-    "bytes": 2166535,
+    "bytes": 2154028,
     "cases": 139,
-    "lines": 10184,
+    "lines": 10132,
     "runs": 556
   }
 }

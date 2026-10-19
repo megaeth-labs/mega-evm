@@ -1,7 +1,7 @@
 //! What a keyless deployment deploys and reports: the native creation runs the init code as any
 //! creation does, and the call answers with what it did.
 
-use alloy_primitives::{address, B256};
+use alloy_primitives::{address, hex, B256};
 use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
     system::{
@@ -235,98 +235,69 @@ fn test_keyless_deploy_empty_initcode() {
     }
 }
 
-/// [S15.20] [S15.38] [S15] A deployment whose initcode returns empty code leaves the deploy
-/// address with nonce 1 and no code, and the signer at nonce 1. A second deployment there passes
-/// step 12, which checks the code alone, and its creation collides: the call answers
-/// `ExecutionHalted` with the whole forward as `gasUsed`, the signer stays at nonce 1, the
-/// creation's bump from 1 being taken back, and the address keeps nonce 1 and no code.
-///
-/// The second transaction's ledgers, by hand and the same at both tiers: its regular gas is
-/// EIP-2780's 12,000 and 3,000 for the recipient, the calldata at 4 gas a zero byte and 16 a
-/// non-zero one, step 1's 100,000, step 14's `CREATE` charge of 12,000 (empty initcode costs
-/// nothing more), and the forward the collision spends. It charges no state gas at all: the
-/// signer, no longer empty, adds no account at step 10, and the address, not empty, adds none at
-/// step 14. Its history is its body alone, `TX_BODY_SIZE` = 310 bytes and one per byte of
-/// calldata, priced at the cost per history byte in effect: step 14 charges the history of two
-/// records, the created account's and the signer's nonce, and both come back, the nonce record with
-/// the bump and the account's with the failed creation. So, below the execution cap, the least gas
-/// limit that deploys is the intrinsic gas, 112,000, the two records and the forward, which steps
-/// 11 and 15 need left: one gas less is refused with `GasLimitTooLow`.
-///
-/// Expected values: independent (hand arithmetic over the calldata and the configured byte
-/// prices; no reference run).
+/// A deployment whose initcode returns empty code at the deploy address is refused: the creation
+/// reverts, the call answers `EmptyCodeDeployed`, and the deploy address keeps no account, so the
+/// signed bytes can still be deployed. The initcode returns empty code when it has more than
+/// 2,000,000 gas left and a one-byte runtime otherwise, so whoever submits the signed bytes first
+/// chooses the outcome through `gasLimitOverride`: the second submission, with a forward that
+/// makes the initcode deploy, finds the address free and deploys. The signer stays at nonce 1,
+/// the first creation's bump from 0 being the replay barrier and the second's from 1 taken back.
 #[test]
-fn test_a_deploy_address_left_with_a_nonce_and_no_code_collides() {
-    const FORWARD: u64 = SIGNED_GAS_LIMIT;
+fn test_an_empty_code_deployment_leaves_the_address_deployable() {
+    let gas_dependent = Bytes::from(hex!("5a621e848010600d5760015ff35b5f5ff3").to_vec());
     for gas_limit in GAS_LIMITS {
-        let deployment = Deployment::new(Bytes::new());
+        let deployment = Deployment::new(gas_dependent.clone());
         let mut db = system_db();
-        let data = deployment.call_data(FORWARD);
-        let first =
-            run_nth(db.clone(), data.clone(), gas_limit, EvmTxRuntimeLimits::no_limits(), 0);
+        let first = run_nth(
+            db.clone(),
+            deployment.call_data(5_000_000),
+            gas_limit,
+            EvmTxRuntimeLimits::no_limits(),
+            0,
+        );
         assert!(
             matches!(failure(&first), KeylessDeployError::EmptyCodeDeployed { .. }),
             "{:?}",
             first.result
         );
-        assert_eq!(nonce(&first, deployment.address), 1, "the address keeps a nonce");
-        assert_eq!(code_hash(&first, deployment.address), Some(KECCAK_EMPTY), "and no code");
-        assert_eq!(nonce(&first, deployment.signer), 1);
+        assert_eq!(nonce(&first, deployment.signer), 1, "the first bump stands");
+        assert!(
+            first.state.get(&deployment.address).is_none_or(|account| account.info.nonce == 0),
+            "the deploy address keeps no nonce"
+        );
+        assert!(
+            code_hash(&first, deployment.address).is_none_or(|hash| hash == KECCAK_EMPTY),
+            "and no code"
+        );
         db.commit(first.result_and_state.state);
 
-        let second =
-            run_nth(db.clone(), data.clone(), gas_limit, EvmTxRuntimeLimits::no_limits(), 1);
-        let ret = returned(&second);
-        assert_eq!(ret.deployedAddress, Address::ZERO, "at {gas_limit}");
-        assert_eq!(ret.gasUsed, FORWARD, "the collision spends the whole forward");
-        let KeylessDeployError::ExecutionHalted { gas_used, .. } = failure(&second) else {
-            panic!("expected ExecutionHalted: {:?}", second.result);
-        };
-        assert_eq!(gas_used, FORWARD);
-        assert_eq!(nonce(&second, deployment.signer), 1, "the bump from 1 is taken back");
-        let calldata: u64 = data.iter().map(|&byte| if byte == 0 { 4 } else { 16 }).sum();
-        let regular = 12_000 + 3_000 + calldata + 100_000 + 12_000 + FORWARD;
-        let history_bytes = 310 + data.len() as u64;
-        let history_gas = history(history_bytes);
-        assert_eq!(
-            [second.gas.regular, second.gas.state, second.gas.history, second.gas.history_bytes],
-            [regular, 0, history_gas, history_bytes],
-            "at {gas_limit}: regular, state, history, history bytes"
+        let second = run_nth(
+            db,
+            deployment.call_data(SIGNED_GAS_LIMIT),
+            gas_limit,
+            EvmTxRuntimeLimits::no_limits(),
+            1,
         );
-        assert_eq!(
-            second.result.gas().total_gas_spent(),
-            regular + history_gas,
-            "at {gas_limit}: the total"
-        );
-
-        db.commit(second.result_and_state.state);
-        let address = db.basic(deployment.address).unwrap().expect("the address keeps its account");
-        assert_eq!((address.nonce, address.code_hash), (1, KECCAK_EMPTY));
+        assert_eq!(returned(&second).deployedAddress, deployment.address, "at {gas_limit}");
+        assert_eq!(nonce(&second, deployment.signer), 1, "the second bump is taken back");
+        assert_eq!(nonce(&second, deployment.address), 1);
     }
+}
 
-    let deployment = Deployment::new(Bytes::new());
-    let data = deployment.call_data(FORWARD);
-    let mut db = system_db();
-    let first =
-        run_nth(db.clone(), data.clone(), GAS_LIMITS[0], EvmTxRuntimeLimits::no_limits(), 0);
-    db.commit(first.result_and_state.state);
-    let least = intrinsic(&data) + 100_000 + 12_000 + 2 * record() + FORWARD;
-    let enough = run_nth(db.clone(), data.clone(), least, EvmTxRuntimeLimits::no_limits(), 1);
-    let KeylessDeployError::ExecutionHalted { gas_used, .. } = failure(&enough) else {
-        panic!("expected ExecutionHalted: {:?}", enough.result);
-    };
-    assert_eq!(gas_used, FORWARD);
-    assert_eq!(
-        enough.result.gas().total_gas_spent(),
-        least - 2 * record(),
-        "the two records' history comes back"
-    );
-    let short = run_nth(db, data, least - 1, EvmTxRuntimeLimits::no_limits(), 1);
-    assert!(
-        matches!(refusal(&short), KeylessDeployError::GasLimitTooLow { .. }),
-        "{:?}",
-        short.result
-    );
+/// An empty deposit is refused at the deploy address alone: a constructor's own `CREATE` that
+/// returns empty code is admitted, and the deployment around it succeeds.
+#[test]
+fn test_a_constructors_own_creation_may_return_empty_code() {
+    for gas_limit in GAS_LIMITS {
+        // CREATE of empty init code, then the deployment's own runtime.
+        let prefix = [PUSH0, PUSH0, PUSH0, CREATE, POP];
+        let deployment = Deployment::new(constructor(&prefix, &runtime(1)));
+        let outcome = deploy(system_db(), &deployment, gas_limit);
+        assert_eq!(returned(&outcome).deployedAddress, deployment.address, "at {gas_limit}");
+        let inner = deployment.address.create(1);
+        assert_eq!(nonce(&outcome, inner), 1, "the inner creation stands, with no code");
+        assert_eq!(code_hash(&outcome, inner), Some(KECCAK_EMPTY));
+    }
 }
 
 /// Init code that destroys its own account: the value it held goes to the beneficiary, no code
@@ -526,10 +497,10 @@ fn test_keyless_deploy_emits_logs() {
     }
 }
 
-/// Init code that logs and deploys nothing keeps its log: the call reports `EmptyCodeDeployed`
-/// and the receipt carries the log, because the creation succeeded — it just left no code.
+/// Init code that logs and deploys nothing keeps no log: the call reports `EmptyCodeDeployed`, and
+/// the creation, refused its empty deposit, reverted with its log.
 #[test]
-fn test_an_empty_code_deployment_keeps_its_logs() {
+fn test_an_empty_code_deployment_keeps_no_log() {
     for gas_limit in GAS_LIMITS {
         let topic = B256::repeat_byte(0x11);
         let init_code = BytecodeBuilder::default()
@@ -543,10 +514,7 @@ fn test_an_empty_code_deployment_keeps_its_logs() {
         let deployment = Deployment::new(init_code);
         let outcome = deploy(system_db(), &deployment, gas_limit);
         assert!(matches!(failure(&outcome), KeylessDeployError::EmptyCodeDeployed { .. }));
-        let logs = outcome.result.logs();
-        assert_eq!(logs.len(), 1);
-        assert_eq!(logs[0].topics(), [topic]);
-        assert_eq!(logs[0].data.data, Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef]));
+        assert!(outcome.result.logs().is_empty());
         assert_eq!(nonce(&outcome, deployment.signer), 1);
     }
 }
