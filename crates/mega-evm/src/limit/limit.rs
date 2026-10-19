@@ -1344,6 +1344,21 @@ mod tests {
         assert_eq!(limit.stop_before_run(), None, "and the caller runs on");
     }
 
+    /// Validation admits no body whose authority records cross the data-size limit, so a debug
+    /// build trips on records that do: under a limit lowered to the body and one record, two
+    /// applied authorities cross it.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "validation admits no body whose authority records cross")]
+    fn test_authority_records_that_cross_the_limit_trip() {
+        let mut limit = AdditionalLimit::new(
+            EvmTxRuntimeLimits::no_limits()
+                .with_tx_data_size_limit(crate::TX_BODY_SIZE + WRITE_RECORD_SIZE),
+        );
+        limit.record_tx_body(crate::TX_BODY_SIZE);
+        limit.record_applied_authorities(SENDER, 2, false);
+    }
+
     /// Applied authorities are recorded for an exempt transaction, whatever they cross.
     #[test]
     fn test_an_exempt_transaction_records_its_authorities() {
