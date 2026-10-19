@@ -550,6 +550,7 @@ The reference implementation has no price for one, so it runs such a precompile 
 #### New behavior
 
 - `MegaAccessControl`'s interface, errors, and the scope of `disableVolatileDataAccess()`, `enableVolatileDataAccess()` and `isVolatileDataAccessDisabled()` are unchanged.
+- `disableVolatileDataAccess()` MUST switch access off only for a call its answer settles as a success: an answer gas detention turns into the compute stop (see [Gas Detention on Withheld Gas](#12-gas-detention-on-withheld-gas)) leaves the switch as it was.
 - A read is refused where the opcode loads the value, after it read its operands: an opcode that fails on its operands (a stack underflow, for example) fails as it would with access on.
   The load comes before the opcode pushes its result, so a read on a full stack is refused rather than overflowing it.
   A `BLOCKHASH` is refused as `BLOCKHASH` (7) whatever its operand.
