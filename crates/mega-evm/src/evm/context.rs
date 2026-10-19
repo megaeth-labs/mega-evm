@@ -1,5 +1,9 @@
 //! The execution context of the Satin engine.
 
+#[cfg(not(feature = "std"))]
+use alloc as std;
+use std::vec::Vec;
+
 use delegate::delegate;
 use op_revm::{transaction::deposit::DEPOSIT_TRANSACTION_TYPE, L1BlockInfo, OpSpecId};
 use revm::{
@@ -16,9 +20,13 @@ use crate::{
     constants,
     evm::{
         history::transaction_body_bytes,
+        inspector::UpfrontRecord,
         schedule::{satin_gas_params, satin_gas_params_history_exempt},
     },
-    system::{self, keyless::KeylessFrame},
+    system::{
+        self,
+        keyless::{self, KeylessFrame},
+    },
     AdditionalLimit, BlockHashRecord, BucketError, BucketId, BucketMultipliers, BucketRecord,
     Detention, EmptyExternalEnv, EthSpecId, EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs,
     MegaSpecId, MegaTransaction, OracleReadRecord, ProtocolLimits, SaltEnv, VolatileDataAccess,
@@ -52,6 +60,9 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes = EmptyExternalEn
     pub(crate) additional_limit: AdditionalLimit,
     /// Gas detention for the running transaction.
     pub(crate) detention: Detention,
+    /// What the calling opcode charged upfront for each running frame of an inspected transaction,
+    /// by depth, taken before the inspector could rewrite the call.
+    pub(crate) upfront_records: Vec<Option<UpfrontRecord>>,
     pub(crate) block_hash_record: BlockHashRecord,
     /// The SALT bucket multipliers the running transaction has read.
     bucket_multipliers: BucketMultipliers,
@@ -101,6 +112,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
                 ProtocolLimits::for_spec(spec).tx_runtime_limits,
             ),
             detention: Detention::default(),
+            upfront_records: Vec::new(),
             block_hash_record: BlockHashRecord::default(),
             bucket_multipliers: BucketMultipliers::default(),
             bucket_record: BucketRecord::default(),
@@ -601,8 +613,19 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextTr for MegaContext<DB, ExtE
     /// once `return_create` made every charge for the deposit and before it commits
     /// the creation ([`AdditionalLimit::on_code_deposit`]). A crossing refuses the deposit with the
     /// stop's revert data: the creation reverts with it, on the gas it had before the deposit.
+    ///
+    /// A keyless deployment's constructor that returns empty code for the deploy address is
+    /// refused the same way, with empty revert data ([`keyless::refuses_empty_deposit`]).
     #[inline]
     fn admit_code_deposit(&mut self, deposit: &CodeDeposit<'_>) -> Result<(), Bytes> {
+        let destroyed = self
+            .journal_ref()
+            .state
+            .get(&deposit.address)
+            .is_some_and(|account| account.is_selfdestructed());
+        if keyless::refuses_empty_deposit(&mut self.keyless_frame, deposit, destroyed) {
+            return Err(Bytes::new());
+        }
         self.additional_limit.on_code_deposit(deposit)
     }
 }

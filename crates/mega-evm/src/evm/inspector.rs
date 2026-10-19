@@ -52,20 +52,16 @@
 //!
 //! # What a rewrite does not change
 //!
-//! - **The refusal.** A failed contract creation rewritten into a successful one is refused: the
-//!   transaction fails with [`FORBIDDEN_CREATE_REVIVAL`] as an `EVMError::Custom`. By the time
-//!   `create_end` runs, revm has reverted the frame and deposited no code, so the rewrite would
-//!   push an address for code that does not exist. A transaction a limit stopped is the exception:
-//!   once it is latched, every frame's result is the stop whatever produced it, so a revived
-//!   creation is put back and reports the stop, and the transaction does not fail. A creation
-//!   stopped by its own frame budget latches nothing, and its revival is refused.
 //! - **A frame that kept nothing.** A frame the inspector answered in place of running never
 //!   started, and a frame that failed had its journal checkpoint reverted before the inspector saw
 //!   its result. Whatever the inspector hands the caller for either — Foundry's `expectRevert`
 //!   turns a failed call into a success — the caller sees the success, the output and the regular
 //!   gas the inspector chose, and nothing else of the frame: no state or history gas, no refund and
 //!   no write record for writes the journal does not hold, and the upfront state gas its caller's
-//!   opcode was charged for an account the frame did not add comes back.
+//!   opcode was charged for an account the frame did not add comes back, at the price of the
+//!   account it was charged for: a call whose target the inspector's `call` hook rewrote gives the
+//!   charge back as recorded before the hook ran. A creation revived this way hands its creator the
+//!   address the inspector gave, with nothing deployed there.
 //! - **A success rewritten into a failure keeps nothing either.** A frame the inspector turns from
 //!   a success into a failure — Foundry's `expectRevert` on a call that did not revert — has its
 //!   journal taken back to its checkpoint, as revm takes back a frame that fails: the frame's own,
@@ -107,12 +103,8 @@
 //!   carries. The gas of a result a frame ran to produce is the inspector's to rewrite, reservoir
 //!   included.
 
-#[cfg(not(feature = "std"))]
-use alloc as std;
-use std::{format, string::String};
-
 use revm::{
-    context::{ContextError, ContextTr, JournalTr},
+    context::{ContextTr, JournalTr},
     context_interface::{cfg::StateGasCharge, journaled_state::JournalCheckpoint, Host},
     handler::FrameResult,
     inspector::{handler::frame_end, JournalExt, NoOpInspector},
@@ -125,12 +117,6 @@ use revm::{
 };
 
 use crate::{synthetic_frame_result, ExternalEnvTypes, MegaContext};
-
-/// The message of the `EVMError::Custom` a refused creation revival fails the transaction with.
-///
-/// Public so a tool driving rewriting inspectors can tell the refusal from an execution failure.
-pub const FORBIDDEN_CREATE_REVIVAL: &str =
-    "inspector rewrote a failed contract creation into a successful one";
 
 /// A declaration, made in source about one inspector type, that none of its callbacks writes
 /// anything back to the EVM: nothing to an interpreter's gas or pending action, nothing to a
@@ -461,6 +447,51 @@ fn assert_result_unwritten(before: ResultSnapshot, result: &FrameResult, callbac
     }
 }
 
+/// What the calling opcode charged upfront for a call, as it stood before the inspector could see
+/// the call: whether it charged the new-account state gas, and for which address.
+///
+/// An inspector's `call` hook holds the call's inputs mutably, and a rewritten target would
+/// otherwise be the address the charge is given back at, priced in another SALT bucket than the one
+/// it was made in. The record is taken before `frame_start` and written into the frame's result
+/// when the frame ends, whatever produced the result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct UpfrontRecord {
+    charged_new_account_state_gas: bool,
+    charged_state_gas_address: Address,
+}
+
+impl UpfrontRecord {
+    /// The record of the call `input` starts; none for any other frame, whose creation inputs keep
+    /// what they charged and where in fields an inspector's hook cannot write.
+    pub(crate) fn of(input: &FrameInput) -> Option<Self> {
+        match input {
+            FrameInput::Call(inputs) => Some(Self {
+                charged_new_account_state_gas: inputs.charged_new_account_state_gas,
+                charged_state_gas_address: inputs.target_address,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Writes the record into `result`, the result of the call it was taken for.
+    fn write_into(self, result: &mut FrameResult) {
+        if let FrameResult::Call(outcome) = result {
+            outcome.charged_new_account_state_gas = self.charged_new_account_state_gas;
+            outcome.charged_state_gas_address = self.charged_state_gas_address;
+        }
+    }
+
+    /// `input` with the call's upfront charge as the record has it.
+    fn restore(self, input: &FrameInput) -> FrameInput {
+        let mut input = input.clone();
+        if let FrameInput::Call(inputs) = &mut input {
+            inputs.charged_new_account_state_gas = self.charged_new_account_state_gas;
+            inputs.target_address = self.charged_state_gas_address;
+        }
+        input
+    }
+}
+
 /// Where the result [`frame_end_checked`] hands the inspector came from.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum ResultSource {
@@ -475,9 +506,6 @@ pub(crate) enum ResultSource {
 
 /// Hands a frame's end to the inspector, then settles what its rewrite does not change.
 ///
-/// - **The refusal.** A creation that failed, rewritten into a success, is put back and fails the
-///   transaction with [`FORBIDDEN_CREATE_REVIVAL`] — unless the transaction is latched, where the
-///   creation is put back and reports the stop, which the latch writes over every result.
 /// - **A frame that kept nothing.** A frame the inspector answered in place of running, and a frame
 ///   that failed before the inspector saw it, made no write the journal kept. Whatever the
 ///   inspector left the result saying, it settles into its caller as such a frame does
@@ -487,12 +515,10 @@ pub(crate) enum ResultSource {
 ///   holds none of the writes the failure's settlement bills nothing for. A frame the inspector
 ///   answered journaled nothing, so nothing is taken back for it.
 ///
-/// Every place a frame result reaches the inspector goes through here, so all three cover a result
-/// a frame ran to produce and one answered without running. A frame the inspector answered with a
-/// success itself is no revival: nothing failed. The latch is read after the hooks that can set
-/// it — the frame's run, detention's classification of its end, the hold on a start's upfront state
-/// gas, and the answer before building — have run, so a creation the latch stopped is never
-/// refused.
+/// Every place a frame result reaches the inspector goes through here, so both cover a result
+/// a frame ran to produce and one answered without running. The latch is read after the hooks that
+/// can set it — the frame's run, detention's classification of its end, the hold on a start's
+/// upfront state gas, and the answer before building — have run.
 #[inline]
 pub(crate) fn frame_end_checked<DB, ExtEnvs, INTR, INSP>(
     context: &mut MegaContext<DB, ExtEnvs>,
@@ -501,6 +527,7 @@ pub(crate) fn frame_end_checked<DB, ExtEnvs, INTR, INSP>(
     frame_result: &mut FrameResult,
     depth: usize,
     source: ResultSource,
+    upfront: Option<UpfrontRecord>,
 ) where
     DB: Database,
     ExtEnvs: ExternalEnvTypes,
@@ -509,7 +536,13 @@ pub(crate) fn frame_end_checked<DB, ExtEnvs, INTR, INSP>(
 {
     let before = frame_result.instruction_result();
     frame_end(context, inspector, frame_input, frame_result);
-    refuse_create_revival(context, before, frame_result);
+    // What the opcode charged is what was recorded before the inspector saw the call, not what its
+    // hooks left in the inputs.
+    let restored = upfront.and_then(|record| {
+        record.write_into(frame_result);
+        (UpfrontRecord::of(frame_input) != Some(record)).then(|| record.restore(frame_input))
+    });
+    let frame_input = restored.as_ref().unwrap_or(frame_input);
     let answered = match source {
         ResultSource::Inspector => true,
         ResultSource::Engine(checkpoint) => {
@@ -645,22 +678,4 @@ const fn inherited_reservoir(input: &FrameInput) -> u64 {
 fn upfront_charge(input: &FrameInput) -> Option<StateGasCharge> {
     synthetic_frame_result(input, InstructionResult::Revert, Bytes::new())
         .refundable_state_gas_charge()
-}
-
-/// Puts a revived creation back to `before` and, unless the transaction is latched, records the
-/// refusal as the context's error.
-fn refuse_create_revival<DB: Database, ExtEnvs: ExternalEnvTypes>(
-    context: &mut MegaContext<DB, ExtEnvs>,
-    before: InstructionResult,
-    result: &mut FrameResult,
-) {
-    let FrameResult::Create(outcome) = result else { return };
-    if before.is_ok() || !outcome.result.result.is_ok() {
-        return;
-    }
-    outcome.result.result = before;
-    if context.additional_limit.latched().is_none() && context.error().is_ok() {
-        let message: String = format!("{FORBIDDEN_CREATE_REVIVAL}: {before:?}");
-        *context.error() = Err(ContextError::Custom(message));
-    }
 }

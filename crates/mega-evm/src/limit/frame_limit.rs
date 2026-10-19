@@ -123,7 +123,9 @@ impl Lane {
     /// is at most the share of what the caller had left.
     pub(crate) const fn hands_caller_unchecked(&self, success: bool) -> bool {
         if success {
-            self.net().exceeds_data_size(self.budget)
+            // A lane that stands in for a creation's discarded one carries its creator's nonce
+            // record, which the discard already landed on the creator.
+            self.net().exceeds_data_size(self.budget) || (!self.records_made && self.creator_record)
         } else {
             self.creator_record
         }
@@ -278,9 +280,15 @@ impl FrameLimitTracker {
     ///
     /// For a frame whose journal checkpoint was reverted and whose result then became a success
     /// all the same: the lane follows the checkpoint, not the result.
+    ///
+    /// A creation's nonce record outlives its failure, so it has landed on the creator's lane
+    /// unchecked, and the stand-in remembers it: the creator is held to its budget when the
+    /// stand-in returns, as it is when the creation fails.
     pub(crate) fn discard_running_lane(&mut self) {
         let Some(lane) = self.pop(false) else { return };
-        self.lanes.push(Lane::empty(lane.history_refund(false)));
+        let mut standing_in = Lane::empty(lane.history_refund(false));
+        standing_in.creator_record = lane.creator_record;
+        self.lanes.push(standing_in);
     }
 
     /// Takes the record of the running frame's own account back from its lane, where a child
@@ -640,7 +648,9 @@ mod tests {
         t.record_caller(true, 4);
         t.discard_running_lane();
         assert_eq!(t.net(), bytes(10).saturating_add(WRITE_RECORD));
-        assert_eq!(t.pop(true).unwrap().history_refund(true), 0);
+        let popped = t.pop(true).unwrap();
+        assert_eq!(popped.history_refund(true), 0);
+        assert!(t.hands_unchecked(&popped, true), "the creator is held to its budget with it");
 
         // With no lane to discard, nothing happens.
         let mut empty = FrameLimitTracker::default();

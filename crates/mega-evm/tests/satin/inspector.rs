@@ -5,8 +5,7 @@ use alloy_evm::Evm;
 use alloy_primitives::{address, Address, Bytes, Log, U256};
 use mega_evm::{
     test_utils::{transfer_log, BytecodeBuilder, GasInspector, MemoryDatabase},
-    DeclaredObserver, MegaContext, MegaEvm, FORBIDDEN_CREATE_REVIVAL, TX_BODY_SIZE,
-    WRITE_RECORD_SIZE,
+    DeclaredObserver, MegaContext, MegaEvm, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 use revm::{
     bytecode::opcode::{CALL, CREATE, GAS, INVALID, PUSH0, REVERT, SSTORE},
@@ -239,21 +238,24 @@ fn test_create_end_address_rewrite_reaches_the_caller_not_the_code() {
     assert!(result.state.get(&FAKE).is_none_or(|fake| fake.info.is_empty_code_hash()));
 }
 
-/// A failed creation rewritten into a success is refused: the transaction fails with the
-/// refusal.
+/// A failed creation rewritten into a success is not refused: its creator is handed the address
+/// the inspector gave, nothing is deployed there, and the creation's own writes are not kept. A
+/// creation that succeeded may be rewritten freely too.
 #[test]
-fn test_create_revival_is_refused() {
+fn test_a_revived_creation_settles_as_the_failure_it_was() {
     let db = MemoryDatabase::default()
         .account_code(A, create_and_store_address(&[PUSH0, PUSH0, REVERT]));
-    let result = run_with(db, Rewriter { create_succeeds: true, ..Default::default() }, 0);
-    match result {
-        Err(EVMError::Custom(message)) => {
-            assert!(message.starts_with(FORBIDDEN_CREATE_REVIVAL), "{message}")
-        }
-        other => panic!("expected the refusal, got {other:?}"),
-    }
+    let result = run_with(db, Rewriter { create_succeeds: true, ..Default::default() }, 0).unwrap();
+    assert!(result.result.is_success(), "{:?}", result.result);
+    let stored = result.state[&A].storage[&U256::ZERO].present_value();
+    assert_eq!(Address::from_word(stored.into()), FAKE, "the caller got the revived address");
+    assert!(result.state.get(&FAKE).is_none_or(|fake| fake.info.is_empty_code_hash()));
+    let created = A.create(0);
+    assert!(
+        result.state.get(&created).is_none_or(|account| account.info.is_empty_code_hash()),
+        "the failed creation deployed nothing"
+    );
 
-    // A creation that succeeded may be rewritten freely; the refusal is for revivals only.
     let db = MemoryDatabase::default()
         .account_code(A, create_and_store_address(&[0x60, 0x01, 0x60, 0x00, 0xf3]));
     assert!(run_with(db, Rewriter { create_succeeds: true, ..Default::default() }, 0)
@@ -262,15 +264,16 @@ fn test_create_revival_is_refused() {
         .is_success());
 }
 
-/// A creation its own frame budget stops is refused its revival too: the stop is the creation's
-/// alone and latches nothing, so the creation failed as any failed creation does. Under a
-/// data-size limit of the body and 122 bytes, the creator may keep 122 and the creation 98% of
-/// them, 119: the creation's start makes two records, 80 bytes, and the write in its init code is a
-/// third, 40 more, over its budget, which the transaction's limit still holds. Under the body and
-/// 160 bytes the budget holds it, and so does the transaction's limit once the creator stores the
-/// address, a fourth record: the same creation succeeds.
+/// A creation its own frame budget stops, revived by an inspector: the stop is the creation's alone
+/// and latches nothing, so the creation failed as any failed creation does and its revival
+/// settles as the failure — the transaction is not refused. Under a data-size limit of the body and
+/// 122 bytes, the creator may keep 122 and the creation 98% of them, 119: the creation's start
+/// makes two records, 80 bytes, and the write in its init code is a third, 40 more, over its
+/// budget, which the transaction's limit still holds. Under the body and 160 bytes the budget holds
+/// it, and so does the transaction's limit once the creator stores the address, a fourth record:
+/// the same creation succeeds.
 #[test]
-fn test_a_creation_its_frame_budget_stops_is_refused_its_revival() {
+fn test_a_creation_its_frame_budget_stops_may_be_revived() {
     // A write of 1 to slot 1, short enough for `create_and_store_address`.
     let init_code = BytecodeBuilder::default()
         .push_number(1_u8)
@@ -304,14 +307,23 @@ fn test_a_creation_its_frame_budget_stops_is_refused_its_revival() {
     assert!(!created(&stopped), "the creation failed");
 
     let limits = under(122);
-    let mut evm = MegaEvm::new(context(db()).with_tx_runtime_limits(limits))
-        .with_inspector(Rewriter { create_succeeds: true, ..Default::default() });
-    match evm.transact_raw(call(CALLER, A, U256::ZERO, gas_limit())) {
-        Err(EVMError::Custom(message)) => {
-            assert!(message.starts_with(FORBIDDEN_CREATE_REVIVAL), "{message}")
-        }
-        other => panic!("expected the refusal, got {other:?}"),
-    }
+    let revived = MegaEvm::new(context(db()).with_tx_runtime_limits(limits))
+        .with_inspector(Rewriter { create_succeeds: true, ..Default::default() })
+        .execute_transaction(call(CALLER, A, U256::ZERO, gas_limit()))
+        .unwrap();
+    assert!(revived.result.is_success(), "{:?}", revived.result);
+    assert_eq!(revived.limit_exceeded, None, "and the revival latches nothing");
+    let stored = revived.state[&A].storage[&U256::ZERO].present_value();
+    assert_eq!(Address::from_word(stored.into()), FAKE, "the creator got the revived address");
+    let created_address = A.create(0);
+    assert!(
+        revived
+            .state
+            .get(&created_address)
+            .is_none_or(|account| account.info.is_empty_code_hash() &&
+                account.storage.values().all(|slot| slot.present_value().is_zero())),
+        "the creation kept none of its writes"
+    );
 }
 
 /// A declared observer that writes back fails its declaration in a debug build.
