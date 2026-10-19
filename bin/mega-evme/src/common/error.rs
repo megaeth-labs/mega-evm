@@ -88,3 +88,72 @@ impl From<EvmDatabaseError<Self>> for EvmeError {
 
 /// Result type for the mega-evme command
 pub type Result<T> = std::result::Result<T, EvmeError>;
+
+/// Drops C0 controls and ANSI escape sequences from `text`.
+///
+/// A revert reason or an error is printed as text. Those bytes would move the cursor or restyle
+/// the terminal.
+pub(crate) fn sanitize_terminal_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            skip_ansi(&mut chars);
+            continue;
+        }
+        if c <= '\u{1f}' || c == '\u{7f}' {
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Consumes one ANSI sequence whose ESC was already read.
+fn skip_ansi(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    let Some(next) = chars.next() else { return };
+    match next {
+        // CSI: ESC [ parameters and intermediates, then one final byte.
+        '[' => {
+            for c in chars.by_ref() {
+                if ('\u{40}'..='\u{7e}').contains(&c) {
+                    break;
+                }
+            }
+        }
+        // OSC: ESC ] ... BEL, or ESC ] ... ST (ESC \).
+        ']' => {
+            while let Some(c) = chars.next() {
+                if c == '\u{7}' {
+                    break;
+                }
+                if c == '\u{1b}' {
+                    if chars.peek() == Some(&'\\') {
+                        chars.next();
+                    }
+                    break;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_terminal_text;
+
+    #[test]
+    fn test_terminal_text_drops_controls_and_ansi() {
+        assert_eq!(sanitize_terminal_text("café"), "café");
+        assert_eq!(sanitize_terminal_text("owned\r\nit"), "ownedit");
+        assert_eq!(sanitize_terminal_text("a\u{7f}b"), "ab");
+        // Clear screen and cursor home.
+        assert_eq!(sanitize_terminal_text("\u{1b}[2J\u{1b}[Hleft"), "left");
+        // An OSC title sequence, ended by BEL.
+        assert_eq!(sanitize_terminal_text("\u{1b}]0;title\u{7}left"), "left");
+        // A lone ESC and a one-byte escape drop with their follower.
+        assert_eq!(sanitize_terminal_text("\u{1b}"), "");
+        assert_eq!(sanitize_terminal_text("\u{1b}Aleft"), "left");
+    }
+}

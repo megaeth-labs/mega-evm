@@ -274,7 +274,7 @@ pub fn decode_revert_reason(output: &Bytes) -> String {
 
     // Try to decode as Revert (Error(string))
     if let Ok(revert) = Revert::abi_decode(output) {
-        return format!("Error(\"{}\")", revert.reason());
+        return format!("Error(\"{}\")", super::sanitize_terminal_text(revert.reason()));
     }
 
     // Try to decode as Panic (Panic(uint256))
@@ -478,6 +478,12 @@ mod tests {
     fn test_decode_revert_reason_raw_hex() {
         let raw = Bytes::from(vec![0xde, 0xad]);
         assert_eq!(decode_revert_reason(&raw), "0xdead");
+    }
+
+    #[test]
+    fn test_decode_revert_reason_strips_terminal_controls() {
+        let encoded = Revert::from("\u{1b}[2Jowned\nit").abi_encode();
+        assert_eq!(decode_revert_reason(&encoded.into()), "Error(\"ownedit\")");
     }
 
     #[test]

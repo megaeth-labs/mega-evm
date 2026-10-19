@@ -7,8 +7,8 @@ use mega_evm::MegaSpecId;
 
 use crate::{
     common::{
-        check_genesis_chain, parse_genesis, use_genesis, EvmeError, GenesisChain, LimitsOverride,
-        LogArgs,
+        check_genesis_chain, parse_genesis, sanitize_terminal_text, use_genesis, EvmeError,
+        GenesisChain, LimitsOverride, LogArgs,
     },
     engine::Engine,
 };
@@ -121,6 +121,7 @@ pub(crate) enum CliErrorExit {
 /// A closed pipe is [`CliErrorExit::Closed`]. Any other outcome, including a write that fails
 /// for another reason, is [`CliErrorExit::Reported`].
 pub(crate) fn write_cli_error(mut out: impl std::io::Write, message: &str) -> CliErrorExit {
+    let message = sanitize_terminal_text(message);
     match writeln!(out, "{message}") {
         Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => CliErrorExit::Closed,
         _ => CliErrorExit::Reported,
@@ -227,6 +228,16 @@ mod tests {
         let mut out = Vec::new();
         assert_eq!(write_cli_error(&mut out, "Failed to read file"), CliErrorExit::Reported);
         assert_eq!(out, b"Failed to read file\n");
+    }
+
+    #[test]
+    fn test_a_reported_error_strips_terminal_controls() {
+        let mut out = Vec::new();
+        assert_eq!(
+            write_cli_error(&mut out, "Invalid input: \u{1b}[2Jpath\r"),
+            CliErrorExit::Reported
+        );
+        assert_eq!(out, b"Invalid input: path\n");
     }
 
     #[test]
