@@ -56,7 +56,7 @@ use crate::{
         case::{case, Case},
         Flavor,
     },
-    harness::{check, prop_eq},
+    harness::{check, prop_eq, runs_at_measurement_prices},
     render::render_state,
 };
 
@@ -181,7 +181,11 @@ fn test_differential_neutral_mega_evm_matches_op_revm() {
         },
     );
     let compared = compared.load(Ordering::Relaxed);
-    assert!(compared > 0, "no case was compared with op-revm");
+    // The coverage minimum binds at the spec's byte prices. A measurement build leaves it out:
+    // the count still stands, and a class those prices leave unreachable is allowed.
+    if !runs_at_measurement_prices() {
+        assert!(compared > 0, "no case was compared with op-revm");
+    }
 }
 
 /// Under the neutral configuration of each fork, an unpriced transaction that is not a deposit
@@ -232,6 +236,10 @@ fn test_differential_neutral_mega_evm_matches_ethereum() {
         "differential_ethereum: {compared} cases compared on both forks, {rewritten} of them on \
          Amsterdam without the self-destruction their init code held"
     );
-    assert!(compared > 0, "no case was compared with Ethereum");
-    assert!(rewritten > 0, "no case was rewritten for Amsterdam");
+    // The coverage minimums bind at the spec's byte prices. A measurement build leaves them out:
+    // the counts above still stand, and a class those prices leave unreachable is allowed.
+    if !runs_at_measurement_prices() {
+        assert!(compared > 0, "no case was compared with Ethereum");
+        assert!(rewritten > 0, "no case was rewritten for Amsterdam");
+    }
 }

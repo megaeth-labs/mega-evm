@@ -189,6 +189,24 @@ pub(crate) fn check<S>(
     }
 }
 
+/// Whether this process prices bytes at something other than the constants.
+///
+/// Only a measurement build can arrange that, through the `satin-price-override` feature. A
+/// coverage minimum that a bounded run meets at the spec's prices, and a minimal case pinned at
+/// those prices, belongs to the constants: the caller leaves it out here, and this leaves the note
+/// the byte-price grid counts.
+pub(crate) fn runs_at_measurement_prices() -> bool {
+    if mega_evm::active_satin_prices().is_constants() {
+        return false;
+    }
+    mega_evm::test_utils::note_price_guard(&format!(
+        "{} or {} fixed prices other than the spec's",
+        mega_evm::CPSB_ENV_VAR,
+        mega_evm::CPHB_ENV_VAR
+    ));
+    true
+}
+
 /// Prints what a property counted along its run, one line per class under the property's name,
 /// in one write, so the tallies of properties running side by side do not interleave.
 pub(crate) fn print_tally<K: std::fmt::Display>(
