@@ -345,13 +345,58 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for GasInspect
     }
 
     fn step_end(&mut self, interp: &mut Interpreter<INTR>, _context: &mut CTX) {
-        // Update the gas_after field with the actual gas remaining after execution
-        let current = self
-            .stack
-            .last()
-            .as_ref()
-            .and_then(|c| c.borrow_mut().last_item())
-            .expect("current is not None");
+        // A step that recorded nothing — an empty stack, or a frame with no item — has no gas to
+        // update. Recording starts in `step`, so a `step_end` that arrives without one is skipped.
+        let Some(current) = self.stack.last().and_then(|frame| frame.borrow().last_item()) else {
+            return;
+        };
         current.borrow_mut().gas_after = interp.gas.remaining();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use revm::{
+        context::Context,
+        interpreter::{CreateInputs, Interpreter},
+        Inspector, MainContext,
+    };
+
+    use super::*;
+
+    fn interpreter() -> Interpreter {
+        Interpreter::default_ext()
+    }
+
+    #[test]
+    fn test_step_end_skips_a_missing_item() {
+        let mut inspector = GasInspector::new();
+        let mut interp = interpreter();
+        let mut context = Context::mainnet();
+        Inspector::<_, _>::step_end(&mut inspector, &mut interp, &mut context);
+
+        inspector.stack.push(TraceNode::new(MsgCallMeta::Create(CreateInputs::default()), None));
+        Inspector::<_, _>::step_end(&mut inspector, &mut interp, &mut context);
+        assert!(inspector.records().is_empty());
+    }
+
+    #[test]
+    fn test_step_end_writes_the_gas_left_on_the_current_item() {
+        let mut inspector = GasInspector::new();
+        let node = TraceNode::new(MsgCallMeta::Create(CreateInputs::default()), None);
+        node.borrow_mut().add_item(OpcodeGasInfo {
+            opcode: OpCode::STOP,
+            byte: OpCode::STOP.get(),
+            gas_before: 50,
+            gas_after: 50,
+            depth: 0,
+        });
+        inspector.stack.push(node.clone());
+        inspector.trace = Some(node);
+        let mut interp = interpreter();
+        let mut context = Context::mainnet();
+        Inspector::<_, _>::step_end(&mut inspector, &mut interp, &mut context);
+        assert_eq!(inspector.records()[0].gas_after, interp.gas.remaining());
+        assert_eq!(inspector.records()[0].gas_before, 50);
     }
 }
