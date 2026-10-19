@@ -1343,7 +1343,8 @@ fn record_applied_authorities<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// account it creates.
 ///
 /// The authorities' records are the transaction's own and outlive a first frame that fails; the
-/// first frame's record does not, so what it cost is kept for the settlement to give back. A first
+/// first frame's record does not, so what it cost is kept for the settlement to give back, and
+/// whether it makes one is left for that frame's lane to check its own count against. A first
 /// frame revm refuses to start on its sender's account makes no record, and is charged none
 /// ([`caller_refuses_start`]): among the transactions that pay history, that is a creation from an
 /// account whose nonce cannot be bumped, which only a caller that turned the nonce check off can
@@ -1382,6 +1383,7 @@ fn charge_records_made_outside_a_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
         return false;
     }
     ctx.additional_limit.set_top_level_write_record_gas(top_level);
+    ctx.additional_limit.stage_top_level_records(u64::from(top_level_record));
     true
 }
 
