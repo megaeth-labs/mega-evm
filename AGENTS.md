@@ -635,7 +635,7 @@ When the agent is requested to implement a new feature or bug fix, it should con
   On an idempotent no-change path (the contract is already deployed with the correct code hash) it returns `EvmState` that carries the observed account as a read-only entry: neither `touched` nor `created`.
   Returning nothing there is a bug — the account disappears from the stateless witness read set.
   On a real-change path it includes every account and storage slot it touched; present with different code is an error, not an overwrite.
-  `system/deploy.rs` holds the deploys, `block/eips.rs` the EIP-2935 and EIP-4788 calls and the post-block balance increments, `system/sequencer_registry.rs` the registry's due-change read and its `applyPendingChanges()` call, `block/l1_block_info.rs` the L1 block info read, and the block executor is what commits them.
+  `system/deploy.rs` holds the deploys, `block/eips.rs` the EIP-2935 and EIP-4788 calls, `system/sequencer_registry.rs` the registry's due-change read and its `applyPendingChanges()` call, `block/l1_block_info.rs` the L1 block info read, and the block executor is what commits them.
 - **Respect `no_std` in `mega-evm` crate.**
   Do not use `std::` directly.
   Follow the existing pattern: `#[cfg(not(feature = "std"))] use alloc as std;` then `use std::{vec::Vec, ...};`.
