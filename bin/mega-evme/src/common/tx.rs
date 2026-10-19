@@ -443,6 +443,7 @@ impl DecodedRawTx {
     pub fn override_tx_env(mut self, tx_args: &TxArgs) -> Result<Self> {
         if let Some(tx_type) = tx_args.tx_type {
             self.tx_env.tx_type = tx_type;
+            self.drop_fields_the_type_cannot_carry();
         }
         if let Some(gas) = tx_args.gas {
             self.tx_env.gas_limit = gas;
@@ -494,9 +495,29 @@ impl DecodedRawTx {
         Ok(self)
     }
 
+    /// Drops what the raw transaction carries and its new type cannot: the priority fee of a type
+    /// without one, the access list of a type without one, the authorization list of a type that
+    /// is not EIP-7702. Changing only the type then runs the transaction as that type, with what
+    /// it can carry. Fields given by a flag are set after this, so a flag that names one of them
+    /// for a type that cannot carry it is still refused.
+    fn drop_fields_the_type_cannot_carry(&mut self) {
+        let Ok(tx_type) = MegaTxType::try_from(self.tx_env.tx_type) else { return };
+        if matches!(tx_type, MegaTxType::Legacy | MegaTxType::Eip2930) {
+            self.tx_env.gas_priority_fee = None;
+        }
+        if !matches!(tx_type, MegaTxType::Eip2930 | MegaTxType::Eip1559 | MegaTxType::Eip7702) {
+            self.tx_env.access_list = Default::default();
+        }
+        if tx_type != MegaTxType::Eip7702 {
+            self.tx_env.authorization_list.clear();
+        }
+    }
+
     /// Rejects a type and field combination [`TxArgs::validate`] would reject.
     ///
-    /// The check reads the transaction after the override. It does not require `--receiver`: a
+    /// The check reads the transaction after the override, with what the old type carried and the
+    /// new one cannot already dropped, so what it finds comes from a flag. It does not require
+    /// `--receiver`: a
     /// raw transaction already has its own destination. Setting `--tx-type 126` does not fill
     /// deposit fields, so a raw transaction that is not a deposit cannot become one.
     fn reject_inconsistent_override(&self, tx_args: &TxArgs) -> Result<()> {
@@ -509,8 +530,7 @@ impl DecodedRawTx {
             ));
         }
 
-        let deposit_fields =
-            self.deposit.is_some() || tx_args.source_hash.is_some() || tx_args.mint.is_some();
+        let deposit_flags = tx_args.source_hash.is_some() || tx_args.mint.is_some();
         if tx_type == MegaTxType::Deposit && self.deposit.is_none() {
             return Err(EvmeError::InvalidInput(
                 "--tx-type 126 does not make a raw transaction a deposit; --source-hash is \
@@ -518,7 +538,14 @@ impl DecodedRawTx {
                     .to_string(),
             ));
         }
-        if tx_type != MegaTxType::Deposit && deposit_fields {
+        if tx_type != MegaTxType::Deposit && self.deposit.is_some() {
+            return Err(EvmeError::InvalidInput(format!(
+                "the raw transaction is a deposit (type 126), and --tx-type {} would make it \
+                 another type",
+                self.tx_env.tx_type
+            )));
+        }
+        if tx_type != MegaTxType::Deposit && deposit_flags {
             return Err(EvmeError::InvalidInput(
                 "--source-hash and --mint are only valid for deposit transactions (--tx-type 126)"
                     .to_string(),
@@ -737,5 +764,64 @@ mod tests {
             .expect("an EIP-1559 transaction may carry a priority fee");
         assert_eq!(decoded.tx_env.tx_type, 2);
         assert_eq!(decoded.tx_env.gas_priority_fee, Some(1));
+    }
+
+    /// A raw EIP-1559 transaction carrying a priority fee and an access list.
+    fn eip1559_raw() -> DecodedRawTx {
+        let item = AccessListItem { address: Address::repeat_byte(0x11), storage_keys: vec![] };
+        let tx_env = mega_evm::revm::context::tx::TxEnvBuilder::new()
+            .tx_type(Some(2))
+            .gas_priority_fee(Some(1))
+            .access_list(AccessList(vec![item]))
+            .build()
+            .expect("EIP-1559 transaction");
+        DecodedRawTx { tx_env, raw_bytes: Bytes::new(), deposit: None }
+    }
+
+    /// Changing only the type of a raw transaction runs it as the new type: what the old type
+    /// carried and the new one cannot is dropped, and no flag the user did not pass is blamed.
+    #[test]
+    fn test_raw_override_of_the_type_alone_drops_what_the_type_cannot_carry() {
+        for tx_type in [0, 1] {
+            let mut args = bare_args();
+            args.tx_type = Some(tx_type);
+            let decoded = eip1559_raw()
+                .override_tx_env(&args)
+                .unwrap_or_else(|e| panic!("type {tx_type} alone: {e}"));
+            assert_eq!(decoded.tx_env.tx_type, tx_type);
+            assert_eq!(decoded.tx_env.gas_priority_fee, None, "type {tx_type}");
+            // Type 1 keeps the access list its type carries; type 0 has none.
+            assert_eq!(decoded.tx_env.access_list.0.len(), usize::from(tx_type == 1));
+        }
+    }
+
+    /// A flag that names a field the new type cannot carry is still refused, and by that flag.
+    #[test]
+    fn test_raw_override_refuses_a_flag_the_new_type_cannot_carry() {
+        let mut args = bare_args();
+        args.tx_type = Some(0);
+        args.priority_fee = Some(2);
+        let err = eip1559_raw().override_tx_env(&args).expect_err("--priority-fee on type 0");
+        assert!(matches!(err, EvmeError::InvalidInput(msg) if msg.contains("--priority-fee")));
+    }
+
+    /// A raw deposit cannot change its type, and the refusal names the type flag, not the
+    /// deposit flags the user did not pass.
+    #[test]
+    fn test_raw_override_of_a_deposits_type_names_the_type_flag() {
+        let tx_env = mega_evm::revm::context::tx::TxEnvBuilder::new()
+            .tx_type(Some(126))
+            .build()
+            .expect("deposit");
+        let decoded = DecodedRawTx {
+            tx_env,
+            raw_bytes: Bytes::new(),
+            deposit: Some((B256::ZERO, None, false)),
+        };
+        let mut args = bare_args();
+        args.tx_type = Some(2);
+        let err = decoded.override_tx_env(&args).expect_err("a deposit stays a deposit");
+        let EvmeError::InvalidInput(msg) = err else { panic!("{err:?}") };
+        assert!(msg.contains("--tx-type 2") && !msg.contains("--source-hash"), "{msg}");
     }
 }
