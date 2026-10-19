@@ -43,8 +43,8 @@ The contract for a new or modified helper:
 - On an idempotent no-change path (the contract is already deployed with the correct code hash), return `EvmState` that carries the observed account as a read-only entry: neither `touched` nor `created`.
   Returning nothing here is a bug — the account disappears from the stateless witness read set.
 - On a real-change path, include every account and storage slot the helper touched.
-- Present with different code is an error, not an overwrite.
-  A system address holding foreign bytecode is a broken chain.
+- Present with different code is an error, not an overwrite, unless the code is a known older version of the contract (`SystemContractSpec::upgradable_from`): that is replaced in place, returned as a touched account that is not created and carries no storage entry, so its nonce, balance and storage stay.
+  A system address holding any other bytecode is a broken chain.
 
 The returned `EvmState` is both the commit and the witness record of that step.
 The executor hands it to the pre-block observer, then commits: the sequence the observer sees is the witness a stateless client needs.
@@ -65,7 +65,7 @@ The executor hands it to the pre-block observer, then commits: the sequence the 
   It hides the step from a witness generator.
 - Do not return nothing from a helper on a "no change needed" path.
   Return the account entries observed, even when nothing is written.
-- Do not overwrite foreign code at a system address.
+- Do not overwrite foreign code at a system address; upgrade only a version `upgradable_from` names.
 
 ## WHERE TO LOOK
 - Add a method to an intercepted contract: the contract's own module, next to the selectors it already answers, and a boundary test per `tests/system/`.

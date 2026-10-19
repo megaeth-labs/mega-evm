@@ -23,7 +23,7 @@ The per-transaction resource limits keep data size and drop the KV-update, state
 Every transaction-level limit — data size and detention's compute limit — now stops a transaction with a revert carrying `MegaLimitExceeded(kind, limit)` instead of a halt, and the sender pays only for what ran.
 Detention holds each frame's spendable regular gas inside the frame's own gas, so a transaction that read volatile data runs exactly as it would have without the read until a regular charge needs the gas it is not allowed to spend.
 
-Satin also brings EIP-7708 transfer logs, deploys a `keylessDeploy` transaction as a native creation instead of in a sandbox, runs system calls on at most 30,000,000 of regular gas with the rest as reservoir, has a system-address transaction read the live system address itself, and makes the block's data-size limit, its one block-level execution limit, a packing budget that never refuses a deposit.
+Satin also brings EIP-7708 transfer logs, deploys a `keylessDeploy` transaction as a native creation instead of in a sandbox, runs system calls on at most 30,000,000 of regular gas with the rest as reservoir, has a system-address transaction read the live system address itself, and makes the block's data-size limit, its one block-level execution limit, a packing budget that never refuses a deposit or a Mega System Transaction.
 
 Satin follows [Rex6](rex6.md) on the spec ladder, so every **Previous behavior** below is Rex6's.
 Satin does not add to the Rex6 rules one by one: it restates the execution layer, and a Rex6 rule this page does not carry over does not apply under Satin.
@@ -685,6 +685,7 @@ An out-of-gas step halts the call, consuming its regular gas.
   The service's value MUST win over whatever the slot holds at the read, a value the Oracle's own frame wrote earlier in the transaction included; with no value from the service the read answers the slot's present value, that write included.
 - Every such read MUST be charged as a cold access (2,100 gas), however often the slot was read, and the slot MUST be loaded whichever source answers, so a later write finds it warm and a stateless witness carries it.
 - A frame whose regular gas, its withheld part included, cannot pay the cold access MUST read nothing and ask nothing; a refused read asks nothing.
+- A system call MUST NOT ask the service at all: its read answers the chain's value (see [System Calls and Pre-Block Calls](#18-system-calls-and-pre-block-calls)).
 - A `sendHint` MUST reach the service synchronously, when it is called, and only when the call is forwarded gas, carries no value, and comes from a frame whose volatile-data access is on.
   A hint that fails any of those conditions is dropped and counts nothing; the call runs the Oracle's bytecode either way.
   The value condition is new.
@@ -759,7 +760,14 @@ An out-of-gas step halts the call, consuming its regular gas.
   A later block executed on the committed state reads such a slot's old value again; one executed on the earlier block's uncommitted changes, held as its prestate, reads it as zero.
   Only a genesis allocation can hold storage at an address with empty code and nonce 0.
   A chain configuration whose genesis allocation gives storage to an account with empty code and nonce 0 at a system-contract address or the factory's MUST be refused when it is loaded.
-  There is one version of each contract (the Oracle and the SequencerRegistry at version 2.0.0): an address holding other code, an address with empty code and a non-zero nonce, and a factory with the expected code and nonce 0 MUST make the block invalid.
+  The version a block deploys is the latest one of each contract (the Oracle and the SequencerRegistry at version 2.0.0).
+  An address holding the code of an older version of that contract that has been deployed on chains — the Oracle at 1.0.0 or 1.1.0, the SequencerRegistry at 1.0.0 — MUST be upgraded in place: the account's code and code hash become the latest version's, and its nonce, balance and storage stay, the block's state changes carrying the account and no slot.
+  The upgrade is the deploy step's entry in the pre-block states, and a block that finds the latest version only reads it.
+  An address holding any other code, including a known version of another contract, an address with empty code and a non-zero nonce, and a factory with the expected code and nonce 0 MUST make the block invalid.
+- **Oracle reads in a system call.**
+  A system call MUST NOT ask the oracle service: an `SLOAD` in the Oracle's own frame during one reads the slot's value on the chain, which is loaded and priced as an Oracle read is (see [Oracle Storage Reads and Hints](#16-oracle-storage-reads-and-hints)), and records no answer.
+  The pre-block calls run whatever code sits at the EIP-2935 and EIP-4788 addresses, which a chain may have set to code that reads the Oracle; a system call is a function of the state a stateless validator is given, which carries no service answer for it.
+  The rule ends with the call: the transactions of the block are answered by the service as they are outside it.
 - **Failure.**
   A pre-block call that does not succeed MUST make the block invalid, before its state is used.
   A database error the node's database declares fatal is an internal error of the node, not a verdict on the block; any other failure of a call — a non-fatal database error, another EVM error, an outcome that is not a success — makes the block invalid.
@@ -810,7 +818,10 @@ One of those counts is limited:
   Such a builder MUST NOT commit a candidate whose sender's nonce or balance — the system address's, for a Mega System Transaction — another commit moved since the candidate executed: committing it would write the sender's account over what that commit did.
   Any other state a candidate read and a commit since changed is the builder's to account for, by executing the candidate again; a candidate that read the Oracle executed before a Mega System Transaction that writes it, committed after that transaction, commits the value it read.
 - A deposit — a transaction whose envelope is a deposit — MUST NOT be refused by it, and MUST count towards it.
-  A Mega System Transaction is a legacy transaction in the block, so at block level it is held to this budget and to the data-availability limits like any non-deposit transaction.
+  A Mega System Transaction MUST NOT be refused by it either, nor by a building policy, and MUST count towards it, so the oracle update the sequencer must be able to include is never skipped for a budget the block's other transactions used up.
+  The block decides that before the transaction runs, from its envelope and the live system address (see [The Live System Address](#17-the-live-system-address)): a legacy transaction of the system shape sent from that address.
+  A transaction from that address of another shape is no Mega System Transaction here; the block treats it as any other transaction, and it is invalid as [The Live System Address](#17-the-live-system-address) states.
+  A Mega System Transaction is still held to the block gas limit, and, its envelope being legacy, to the block's data-availability footprint, which it counts towards with its data-availability size; the exemption is from the data-size budget and from building policy alone.
 - Execution, state and history gas have no block limit beyond the block gas limit; state gas prices the state a block adds, so the block gas limit bounds it.
   The block's history bytes and write records are reported, not limited.
 - The block gas limit is unchanged: a transaction's declared gas limit MUST fit in what the block has left.
@@ -818,7 +829,8 @@ One of those counts is limited:
   A node validating a block MUST hold it to that value, as the rules above state them, and to no other value.
 - A block builder MAY pack tighter, as building policy: it MAY refuse a transaction for its declared gas limit, its encoded size or its data-availability size, hold the block to an encoded-size or data-availability budget, and hold the data-size limit below the protocol's value, never above it.
   A building policy MUST NOT refuse a deposit, which the block derived from L1 must include: none of those per-transaction limits and budgets applies to one.
-  A deposit counts towards the block's encoded size and not towards its data-availability size; the block gas limit holds it as it holds every transaction.
+  It MUST NOT refuse a Mega System Transaction either: none of them applies to one, and the policy's cap on the data-size budget does not.
+  A deposit counts towards the block's encoded size and not towards its data-availability size; a Mega System Transaction counts towards both; the block gas limit holds either as it holds every transaction.
   A node validating a block MUST NOT apply a building policy, and a policy never changes what a packed block computes: it only decides which transactions the builder packs.
 - Satin sets no limit on a transaction's or a block's encoded size; a block-size rule of the base layer, where a chain adopts one, is the node's to apply and is not one of these limits.
 
@@ -902,7 +914,7 @@ The witness is defined by what the block's execution returns and exports, and a 
     The code in particular is not the code a returned state carries: a transaction that replaces an account's code — an EIP-7702 authority delegated anew — is admitted against the code the chain held, and its returned state carries the code it wrote.
 - **What the block reads, and where it lands.**
   A transaction's loads are in its returned state: its sender, its recipient or created address, every account and every slot any of its frames loads, the fee recipients, the registry's account and system-address slot every transaction reads, and a keyless deployment's signer and deploy address; the state names an account whether or not the load brought its code.
-  The pre-block phase's reads land in the pre-block states, in order: the two EIP calls' states, each system-contract deploy's read-only or created entry, the registry's pending slots the due-change decision read, the `applyPendingChanges()` call's state, and last the L1 block info.
+  The pre-block phase's reads land in the pre-block states, in order: the two EIP calls' states, each system-contract deploy's read-only, created or upgraded entry, the registry's pending slots the due-change decision read, the `applyPendingChanges()` call's state, and last the L1 block info.
   `BLOCKHASH` reads the chain's history outside the journal and its reads are exported; a SALT bucket's capacity and the oracle service's answer are read outside the database and are exported or recorded.
   The header, the chain configuration — the schedule with the sequencer registry parameters attached to it — the parent hash, the parent beacon block root, the extra data, whether the block admits only deposits (see [Base Layer](#1-base-layer-optimism-karst-ethereum-osaka)), and the block's slot number are inputs a validator is given beside the witness.
   `SLOTNUM` pushes the slot number the node supplies, so a validator MUST be given the number the building node supplied, zero included.
@@ -997,6 +1009,9 @@ A node, a stateless validator and a replay tool must agree on everything below, 
   An execution that is not told runs the block as one that admits non-deposit transactions, and accepts one in an activation block, which makes the block invalid.
 - **The L1 block information.**
   Block execution reads the L1 block contract at the block's first non-deposit transaction other than a Mega System Transaction, after the block's L1 attributes deposit wrote it, unless the node handed it the information for this block beforehand, which it then prices with, the footprint gas scalar aside; a node that hands it over must hand over what that deposit writes, so that the block's transactions are priced as [Base Layer](#1-base-layer-optimism-karst-ethereum-osaka) requires.
+- **Packing a Mega System Transaction.**
+  A block's data-size budget and a builder's policy never refuse one (see [Block Limits](#20-block-limits)), so a builder has no reason to skip it for either and requeue the transaction that triggered it; the block gas limit and the data-availability footprint still hold it, and a builder keeps room for both.
+  The execution result tells a node which transactions the block treated so: `MegaBlockTxResult::is_system_transaction`, beside `is_deposit`, which stays the envelope's.
 - **Reporting a limit stop.**
   A stop is a revert whose output is `MegaLimitExceeded(kind, limit)`, and a contract can revert with the same bytes, as can a caller that re-raises what a frame budget returned.
   Execution reports whether a transaction-level limit stopped the transaction; a node must read that report, and must not infer a stop from the output alone.
@@ -1029,7 +1044,7 @@ A node, a stateless validator and a replay tool must agree on everything below, 
 Satin changes nothing about blocks under earlier specs: a node replaying history resolves each block's spec from its timestamp and applies that spec's rules.
 Satin is a restatement rather than a delta, so a Rex6 rule this page does not carry over — the compute-gas limit, the storage-gas formulas, the sandbox, the 98/100 forwarding, the cold first touch of preload-warm addresses — does not apply to Satin blocks.
 
-The six system contracts keep their Rex6 bytecode and ABI, but for the four errors `IKeylessDeploy` no longer declares; the Satin deploy step refuses, rather than upgrades, any other code at their addresses.
+The six system contracts keep their Rex6 bytecode and ABI, but for the four errors `IKeylessDeploy` no longer declares; the Satin deploy step upgrades the older versions of the Oracle and the SequencerRegistry that chains hold in place, and refuses any other code at their addresses.
 A transaction from the live system address without the system shape is refused, as in Rex6, now as an invalid transaction: a deposit from the system address, which Rex6 refused with an error that left its block unexecutable, is a failed deposit, so the engine no longer depends on the L1 portal refusing deposits from each system address a rotation installs.
 
 The per-transaction and block limits and the detention caps are protocol values fixed by the spec, not chain configuration, so every node executing any chain holds its Satin blocks to the same ones: the data-size limits at 13,107,200 bytes and the detention caps at 20,000,000 each.
