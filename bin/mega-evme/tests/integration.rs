@@ -254,3 +254,37 @@ fn test_a_balance_override_of_a_predeploy_survives_its_deployment() {
         assert!(stdout.contains(&word(777)), "{overrides:?}: {stdout}");
     }
 }
+
+/// A pipe whose read end is already closed: a write to it fails with a broken pipe.
+fn closed_pipe() -> std::io::PipeWriter {
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    writer
+}
+
+/// A command that fails exits 1 whatever happens to the line that reports it: with stderr a
+/// closed pipe the exit status is the only failure signal left.
+#[test]
+fn test_a_failing_command_exits_1_when_stderr_is_a_closed_pipe() {
+    let output = Command::new(env!("CARGO_BIN_EXE_mega-evme"))
+        .args(["run", "--spec", "Satin", "0xef01"])
+        .stderr(closed_pipe())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+}
+
+/// A run that succeeds, with stdout a closed pipe (`mega-evme … | head -0`), ends quietly: no
+/// panic, no backtrace, and the exit status of the run.
+#[test]
+fn test_a_successful_run_does_not_panic_when_stdout_is_a_closed_pipe() {
+    let output = Command::new(env!("CARGO_BIN_EXE_mega-evme"))
+        .args(["run", "--spec", "Satin", "0x00"])
+        .stdout(closed_pipe())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(stderr, "", "a closed stdout is not an error to report");
+    assert_eq!(output.status.code(), Some(0));
+}
