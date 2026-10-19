@@ -27,9 +27,15 @@ impl MemoryDatabase {
     }
 
     /// Sets the code for an account in the database.
+    ///
+    /// The bytecode is also stored under its hash. `code_by_hash` reads that map, and a miss falls
+    /// through to empty bytecode.
     pub fn set_account_code(&mut self, address: Address, code: Bytes) {
         let bytecode = Bytecode::new_legacy(code);
         let code_hash = bytecode.hash_slow();
+        if !bytecode.is_empty() {
+            self.db.cache.contracts.entry(code_hash).or_insert_with(|| bytecode.clone());
+        }
         let account_info = self.db.load_account(address).unwrap();
         account_info.info.code = Some(bytecode);
         account_info.info.code_hash = code_hash;
@@ -206,5 +212,27 @@ impl revm::Database for ErrorInjectingDatabase {
 impl revm::DatabaseCommit for ErrorInjectingDatabase {
     fn commit(&mut self, changes: EvmState) {
         self.inner.commit(changes);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy_primitives::{address, Bytes};
+    use revm::Database;
+
+    use super::*;
+
+    #[test]
+    fn test_set_account_code_is_served_by_code_by_hash() {
+        let address = address!("00000000000000000000000000000000000000aa");
+        let code = Bytes::from_static(&[0x00]);
+        let mut db = MemoryDatabase::default().account_balance(address, U256::from(5));
+        db.set_account_code(address, code.clone());
+
+        let info = db.basic(address).unwrap().expect("the account is present");
+        assert_eq!(info.balance, U256::from(5));
+        let hash = info.code_hash;
+        assert_eq!(info.code.expect("code is stored on the account").original_bytes(), code);
+        assert_eq!(db.code_by_hash(hash).unwrap().original_bytes(), code);
     }
 }
