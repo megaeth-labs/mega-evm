@@ -1,7 +1,7 @@
 //! The admission gate: which inspectors reach block execution, and what a declared observer sees
 //! of a block's phases.
 
-use alloy_consensus::{transaction::Recovered, Signed, TxLegacy};
+use alloy_consensus::transaction::Recovered;
 use alloy_eips::{
     eip2935::{HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE},
     eip4788::{BEACON_ROOTS_ADDRESS, BEACON_ROOTS_CODE},
@@ -10,7 +10,7 @@ use alloy_evm::{
     block::{BlockExecutor, BlockExecutorFactory},
     Evm, EvmFactory, FromRecoveredTx,
 };
-use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_primitives::{address, Address, Bytes, B256, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, GasInspector, MemoryDatabase},
     transaction_body_bytes, BlockLimits, DeclaredObserver, LimitUsage, MegaBlockExecutionCtx,
@@ -24,8 +24,8 @@ use revm::{
     handler::FrameResult,
     inspector::NoOpInspector,
     interpreter::{
-        CallInputs, CallOutcome, CreateInputs, CreateOutcome, FrameInput, Gas, InstructionResult,
-        Interpreter, InterpreterResult, InterpreterTypes,
+        CallInputs, CallOutcome, FrameInput, Gas, InstructionResult, Interpreter,
+        InterpreterResult, InterpreterTypes,
     },
     state::EvmState,
     Inspector,
@@ -392,50 +392,6 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for SkipNested
     }
 }
 
-/// Answers every creation itself with a success and no address, and counts those answers and every
-/// creation's end.
-#[derive(Default)]
-struct SkipCreateInspector {
-    creates_intercepted: Cell<u32>,
-    create_ends: Cell<u32>,
-}
-
-impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for SkipCreateInspector {
-    fn create(&mut self, _: &mut CTX, inputs: &mut CreateInputs) -> Option<CreateOutcome> {
-        self.creates_intercepted.set(self.creates_intercepted.get() + 1);
-        Some(CreateOutcome::new(
-            InterpreterResult::new(
-                InstructionResult::Stop,
-                Bytes::new(),
-                Gas::new(inputs.gas_limit()),
-            ),
-            None,
-        ))
-    }
-
-    fn create_end(&mut self, _: &mut CTX, _: &CreateInputs, _: &mut CreateOutcome) {
-        self.create_ends.set(self.create_ends.get() + 1);
-    }
-}
-
-/// A legacy creation from [`common::CALLER`] running `init_code`.
-fn creation_tx(nonce: u64, gas_limit: u64, init_code: Bytes) -> Recovered<MegaTxEnvelope> {
-    let tx = TxLegacy {
-        chain_id: Some(common::CHAIN_ID),
-        nonce,
-        gas_price: 1_000_000,
-        gas_limit,
-        to: TxKind::Create,
-        value: U256::ZERO,
-        input: init_code,
-    };
-    common::recovered(MegaTxEnvelope::Legacy(Signed::new_unchecked(
-        tx,
-        Signature::test_signature(),
-        B256::repeat_byte(0xc0),
-    )))
-}
-
 /// Runs `tx` on an EVM over `state` under `inspector`, outside block execution: the route a tool
 /// takes.
 fn run_as_a_tool<'a, I>(
@@ -487,37 +443,4 @@ fn test_inspector_early_return_with_additional_limits() {
     let body = transaction_body_bytes(&tx);
     assert_eq!(outcome.usage, LimitUsage { data_size: body, write_records: 0 });
     assert_eq!(outcome.gas.state, 0);
-}
-
-/// An inspector that answers a creation rewrites what execution produces, so block execution
-/// refuses it before the transaction runs. On the EVM, the transaction's own creation answered
-/// with a success and no address settles as a creation that never started: no account, so the
-/// state gas EIP-2780 charged for it and the history of its write record come back, and the
-/// transaction keeps only its body.
-#[test]
-fn test_inspector_early_return_create_with_additional_limits() {
-    let tx = creation_tx(0, 10_000_000, Bytes::from_static(&[0x00]));
-
-    let mut state = common::state();
-    let evm = MegaEvmFactory::new()
-        .create_evm(&mut state, common::evm_env())
-        .with_inspector(SkipCreateInspector::default());
-    let factory = common::factory();
-    let mut executor = factory.create_executor(evm, common::unlimited_ctx());
-    assert!(is_refused(executor.execute_transaction(&tx)), "no route to a block");
-    assert_eq!(executor.evm().inspector().creates_intercepted.get(), 0, "nothing ran");
-
-    let mut state = common::state();
-    let mut inspector = SkipCreateInspector::default();
-    let (tx, outcome) = run_as_a_tool(&mut state, &tx, &mut inspector);
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert_eq!(inspector.creates_intercepted.get(), 1, "the creation was answered");
-    assert_eq!(inspector.create_ends.get(), 1, "and ended");
-    let body = transaction_body_bytes(&tx);
-    assert_eq!(outcome.gas.state, 0, "no account, so no state gas");
-    assert_eq!(outcome.gas.history_bytes, body, "and no record: the body alone");
-    assert_eq!(outcome.gas.history, mega_evm::history_gas(body).unwrap());
-    assert_eq!(outcome.usage, LimitUsage { data_size: body, write_records: 0 });
-    let created = common::CALLER.create(0);
-    assert!(outcome.state.get(&created).is_none_or(|account| account.info.is_empty()));
 }

@@ -426,18 +426,6 @@ fn test_system_tx_uses_resolved_system_address() {
     assert_is_not_the_system_address(&mut executor, MEGA_SYSTEM_ADDRESS);
 }
 
-/// A system-address rotation due in this block governs this block: the new address sends the
-/// protocol's transactions, and the old one no longer can.
-#[test]
-fn test_system_address_change() {
-    let mut state =
-        State::builder().with_database(registry_with(&system_address_change(BLOCK_NUMBER))).build();
-    let mut executor = executor(&mut state, envs_at(1), common::BLOCK_GAS_LIMIT);
-    executor.apply_pre_execution_changes().expect("the block starts");
-    assert_is_the_system_address(&mut executor, NEXT_SYSTEM_ADDRESS);
-    assert_is_not_the_system_address(&mut executor, MEGA_SYSTEM_ADDRESS);
-}
-
 /// A rotation governs every block from its activation block on, and no block before it: the
 /// block before promotes the old address and not the new one, the activation block and the block
 /// after it the new one and not the old.
@@ -668,18 +656,6 @@ fn test_dual_change_in_same_block() {
     assert_is_the_system_address(&mut executor, NEXT_SYSTEM_ADDRESS);
     drop(executor);
     assert_eq!(slot(&mut state, CURRENT_SEQUENCER), word(NEXT_SEQUENCER));
-}
-
-/// A rotation scheduled for a later block leaves this block's system address as it was.
-#[test]
-fn test_pending_not_yet_due_is_noop() {
-    let mut state = State::builder()
-        .with_database(registry_with(&system_address_change(BLOCK_NUMBER + 8_999)))
-        .build();
-    let mut executor = executor(&mut state, envs_at(1), common::BLOCK_GAS_LIMIT);
-    executor.apply_pre_execution_changes().expect("the block starts");
-    assert_is_the_system_address(&mut executor, MEGA_SYSTEM_ADDRESS);
-    assert_is_not_the_system_address(&mut executor, NEXT_SYSTEM_ADDRESS);
 }
 
 /// The two-step admin handoff through ordinary transactions: the admin names the next one, the

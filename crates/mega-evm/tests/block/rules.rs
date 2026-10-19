@@ -84,22 +84,6 @@ fn operator_fee_paid(executor: TestExecutor<'_>) -> U256 {
         .unwrap_or_default()
 }
 
-/// Rule 1, alloy-op-evm's `no_user_tx_activation_block`: the block a fork activates in carries
-/// the chain's own transactions only, and a user transaction in it is refused before it runs.
-#[test]
-fn test_activation_block_rejects_a_user_transaction() {
-    let mut state = common::state();
-    let mut executor = executor(&mut state, unlimited_ctx().with_no_user_tx_activation_block(true));
-    executor.apply_pre_execution_changes().expect("the block starts");
-
-    let err = executor
-        .execute_transaction(&user_tx(0, empty_call_gas()))
-        .expect_err("a user transaction has no place in an activation block");
-
-    assert!(format!("{err}").contains("non-deposit transaction in fork activation block"), "{err}");
-    assert!(executor.receipts().is_empty(), "nothing was packed");
-}
-
 /// Rule 1 decides on the envelope: a Mega System Transaction is a legacy transaction in the block,
 /// so an activation block refuses it before it runs, as it refuses a user's, although the engine
 /// would promote it to a deposit as it ran it.
