@@ -90,11 +90,10 @@
 //!
 //! # The limits
 //!
-//! They are fixed per spec: a context runs under its spec's from its creation, the per-transaction
-//! half of [`ProtocolLimits::for_spec`](crate::ProtocolLimits::for_spec), which for Satin holds a
+//! They are the per-transaction half of
+//! [`ProtocolLimits::for_spec`](crate::ProtocolLimits::for_spec), which for Satin holds a
 //! transaction to [`TX_DATA_LIMIT`](crate::constants::TX_DATA_LIMIT) of data size, every frame to
-//! its share of it, and a detained transaction to detention's caps. A block executor installs
-//! the same before every transaction. A caller that sets other limits runs a counterfactual.
+//! its share of it, and a detained transaction to detention's caps.
 //!
 //! # The exemption
 //!
@@ -152,6 +151,14 @@ pub const LOG_BASE_SIZE: u64 = 32;
 
 /// Bytes every log topic counts.
 pub const LOG_TOPIC_SIZE: u64 = 32;
+
+/// The bytes a `LOG` with `topics` topics and `data_len` bytes of data counts, which are the
+/// history bytes it appends: its own record for the address that emitted it, one per topic, and
+/// the data.
+#[inline]
+pub const fn log_history_bytes(topics: u64, data_len: u64) -> u64 {
+    LOG_BASE_SIZE.saturating_add(LOG_TOPIC_SIZE.saturating_mul(topics)).saturating_add(data_len)
+}
 
 /// Bytes an EIP-7708 transfer log counts: its address, its three topics — the event, the sender
 /// and the recipient — and one word of data, the amount. It is what a `LOG3` carrying one word
@@ -235,11 +242,9 @@ pub struct LimitUsage {
 /// transaction whose caps are both unlimited is not detained: limits built from it do not execute
 /// the chain.
 ///
-/// Every value here changes a transaction's result, so they are fixed per spec: the
-/// per-transaction half of [`ProtocolLimits::for_spec`](crate::ProtocolLimits::for_spec), which a
-/// [`MegaContext`](crate::MegaContext) runs under from its creation, the EVM factory's included,
-/// and which the block executor installs before every transaction. [`Default`] is the default
-/// spec's. A tool or a test that sets other values on an EVM runs a counterfactual.
+/// The chain's values are the per-transaction half of
+/// [`ProtocolLimits::for_spec`](crate::ProtocolLimits::for_spec), and [`Default`] is the default
+/// spec's; other values are a tool's or a test's counterfactual.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EvmTxRuntimeLimits {
@@ -496,15 +501,10 @@ impl LimitStop {
         result: &ExecutionResult<HaltReason>,
         limit_exceeded: Option<&LimitCheck>,
     ) -> Option<Self> {
-        let Some(&LimitCheck::ExceedsLimit { kind, limit, used, .. }) = limit_exceeded else {
-            return None;
-        };
+        let stop = limit_exceeded?;
+        let &LimitCheck::ExceedsLimit { kind, limit, used, .. } = stop else { return None };
         let ExecutionResult::Revert { output, .. } = result else { return None };
-        (decode_mega_limit_exceeded(output) == Some((kind, limit))).then_some(Self {
-            kind,
-            limit,
-            used,
-        })
+        (*output == stop.revert_data()).then_some(Self { kind, limit, used })
     }
 }
 

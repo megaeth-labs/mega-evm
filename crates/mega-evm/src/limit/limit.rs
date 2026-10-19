@@ -241,17 +241,6 @@ impl AdditionalLimit {
         LimitCheck::WithinLimit
     }
 
-    /// Whether [`check`](Self::check) would find nothing to stop the running frame for: the
-    /// transaction keeps no more than its limits, and the running frame no more than its budget.
-    /// An exempt transaction is stopped by nothing.
-    fn check_finds_nothing(&self) -> bool {
-        if self.is_exempt() {
-            return true;
-        }
-        !self.tracker.net().exceeds_data_size(self.limits.tx_data_size_limit) &&
-            self.tracker.current().is_none_or(|lane| !lane.net().exceeds_data_size(lane.budget))
-    }
-
     /// The stop the running frame returns instead of running another instruction: the one
     /// [`on_frame_return`](Self::on_frame_return) left for a caller its child put over a limit.
     /// Taking it clears it, which stops one frame.
@@ -286,18 +275,10 @@ impl AdditionalLimit {
         self.intrinsic_history_bytes = bytes;
     }
 
-    /// The history bytes the last settled transaction appended, whoever paid for them: its body,
-    /// one write record per account or storage write it kept, the logs it emitted and kept and
-    /// the code it deposited. The EIP-7708 transfer logs of its value movements are data size and
-    /// not history, and are not among them.
-    ///
-    /// Every one of them is priced at the cost per history byte, and
+    /// The history bytes the last settled transaction appended, whoever paid for them, which a
+    /// transaction reports as [`MegaGasUsage::history_bytes`](crate::MegaGasUsage::history_bytes);
     /// [`history_gas_spent`](Self::history_gas_spent) is what the transaction's own gas paid of
-    /// that price. The two part by what the history allowances of its value transfers paid, which
-    /// no gas ledger carries. They are the bytes the schedule prices, not the chain's physical
-    /// growth: a transaction exempt from history gas appended none that anybody priced, and
-    /// reports none, and the body counts its fixed write records whichever fee accounts are
-    /// written.
+    /// their price.
     pub const fn history_bytes(&self) -> u64 {
         self.history_bytes
     }
@@ -457,17 +438,11 @@ impl AdditionalLimit {
         (self.check(), history)
     }
 
-    /// Discards the staged record. Called by an opcode's wrapper when the opcode failed, which
-    /// takes the observed write back with it.
+    /// Discards the staged record. Called by an opcode's wrapper on entry, so a record staged
+    /// outside a wrapper cannot be committed for the wrong opcode, and when the opcode failed,
+    /// which takes the observed write back with it.
     #[inline]
     pub(crate) fn discard_staged_record(&mut self) {
-        self.staged = None;
-    }
-
-    /// Discards a record staged outside an opcode's wrapper. Called by each wrapper on entry, so
-    /// a record nobody committed cannot be committed for the wrong opcode.
-    #[inline]
-    pub(crate) fn discard_stale_record(&mut self) {
         self.staged = None;
     }
 
@@ -582,15 +557,10 @@ impl AdditionalLimit {
     /// move back. The lane follows the checkpoint from then on: a frame that fails discards both
     /// the log and its bytes.
     ///
-    /// So the count is a prediction of what revm will do, and it is called only for a start revm
-    /// makes as far as the caller's account decides it. A start revm refuses there — a value its
-    /// caller cannot fund, a creation whose creator's nonce cannot be bumped — moves and writes
-    /// nothing, and gets an empty lane instead ([`push_empty_frame`](Self::push_empty_frame)); so
-    /// does a start past the call-stack limit, which the depth guard answers before it is counted.
-    /// The one refusal decided after the count is a creation onto an occupied address: revm reads
-    /// the created address's account only once it builds the frame. Its records and transfer log
-    /// are counted, a crossing they cause stops the creation before revm could refuse it, and
-    /// without a crossing revm's refusal fails the creation and discards them.
+    /// So the count is a prediction of what revm will do ([module documentation](super)), and it
+    /// is called only for a start revm makes as far as the caller's account decides it: a start
+    /// revm refuses there, and one past the call-stack limit, which the depth guard answers before
+    /// it is counted, get an empty lane instead ([`push_empty_frame`](Self::push_empty_frame)).
     ///
     /// A crossed limit in the verdict means the frame must not run: it is answered with the stop.
     pub(crate) fn on_frame_init(&mut self, input: &FrameInput, depth: usize) -> LimitCheck {
@@ -900,7 +870,7 @@ impl AdditionalLimit {
             check.exceeded_limit().then_some(check)
         } else {
             debug_assert!(
-                self.check_finds_nothing(),
+                self.check().within_limit(),
                 "a frame's return put its caller over a limit no check held it to"
             );
             None

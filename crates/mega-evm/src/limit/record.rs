@@ -3,7 +3,7 @@
 use alloy_primitives::Address;
 use revm::interpreter::SStoreResult;
 
-use super::{LimitUsage, LOG_BASE_SIZE, LOG_TOPIC_SIZE, WRITE_RECORD};
+use super::{log_history_bytes, LimitUsage, WRITE_RECORD};
 
 /// What the Host saw an opcode do, staged until the opcode completes.
 ///
@@ -97,9 +97,7 @@ impl StagedRecord {
                 }
             }
             Self::Log { topics, data_len } => RecordEffect::Record(LimitUsage {
-                data_size: LOG_BASE_SIZE
-                    .saturating_add(LOG_TOPIC_SIZE.saturating_mul(*topics as u64))
-                    .saturating_add(*data_len),
+                data_size: log_history_bytes(u64::from(*topics), *data_len),
                 write_records: 0,
             }),
             Self::SelfDestruct { had_value, to_other_account, beneficiary, .. } => {

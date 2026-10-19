@@ -45,29 +45,6 @@ impl<T: Clone> Pointer<T> {
     }
 }
 
-/// A path to a specific node in the trace tree.
-///
-/// Each element represents the child index at that level of the tree.
-/// For example, `vec![0, 2, 1]` means: first child -> third child -> second child.
-pub type NodeLocation = Vec<usize>;
-
-/// A location of an item within a node's sections.
-///
-/// `(section_index, item_index)` where sections are interleaved with child calls.
-pub type ItemLocation = (usize, usize);
-
-/// A complete location representing a specific item in the trace tree.
-///
-/// Combines a node location (path through call tree) with an item location
-/// (position within that node's items).
-#[derive(Debug)]
-pub struct TraceLocation {
-    /// Path to the node containing the item.
-    pub call: NodeLocation,
-    /// Position of the item within the node.
-    pub item: ItemLocation,
-}
-
 /// A node in a hierarchical trace tree structure.
 ///
 /// This represents a call frame (either a message call or contract creation) and maintains
@@ -149,63 +126,6 @@ impl<ITEM, META> Pointer<TraceNode<ITEM, META>> {
         items.extend(self.borrow().sections[self.borrow().childrens.len()].iter().cloned());
         items
     }
-
-    /// Retrieves a node at the specified location in the tree.
-    ///
-    /// Returns `None` if the location is invalid (out of bounds).
-    pub fn get_node(&self, location: NodeLocation) -> Option<Self> {
-        if location.is_empty() {
-            Some(self.clone())
-        } else {
-            self.borrow().childrens[location[0]].get_node(location[1..].to_vec())
-        }
-    }
-
-    /// Retrieves an item at the specified location within this node.
-    ///
-    /// Returns `None` if the location is invalid (out of bounds).
-    pub fn get_item(&self, location: ItemLocation) -> Option<Pointer<ITEM>> {
-        self.borrow().sections.get(location.0).and_then(|section| section.get(location.1)).cloned()
-    }
-
-    /// Retrieves an item using a complete trace location (node path + item position).
-    ///
-    /// Returns `None` if either the node location or item location is invalid.
-    pub fn get_item_nested(&self, location: TraceLocation) -> Option<Pointer<ITEM>> {
-        self.get_node(location.call).and_then(|n| n.get_item(location.item))
-    }
-
-    /// Iterates over all items in the tree in chronological order.
-    ///
-    /// For each item, calls the provided function with:
-    /// - The node location (path to the node containing the item)
-    /// - The node itself
-    /// - The item location within the node
-    /// - The item
-    pub fn iterate_with<F>(&self, mut f: F)
-    where
-        F: FnMut(NodeLocation, Self, ItemLocation, Pointer<ITEM>),
-    {
-        self.iterate_with_inner(&mut f, vec![]);
-    }
-
-    /// Internal helper for recursive iteration maintaining the current node location.
-    fn iterate_with_inner<F>(&self, f: &mut F, node_location: NodeLocation)
-    where
-        F: FnMut(NodeLocation, Self, ItemLocation, Pointer<ITEM>),
-    {
-        let sections = &self.borrow().sections;
-        for (section_idx, section) in sections.iter().enumerate() {
-            for (item_idx, item) in section.iter().enumerate() {
-                f(node_location.clone(), self.clone(), (section_idx, item_idx), item.clone());
-            }
-            if section_idx < sections.len() - 1 {
-                let mut child_node_location = node_location.clone();
-                child_node_location.push(section_idx);
-                self.borrow().childrens[section_idx].iterate_with_inner(f, child_node_location);
-            }
-        }
-    }
 }
 
 /// Represents gas information for a single opcode execution.
@@ -277,12 +197,6 @@ impl GasInspector {
     /// Creates a new enabled `GasInspector`.
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Clears all recorded gas information.
-    pub fn clear(&mut self) {
-        self.trace = None;
-        self.stack = vec![];
     }
 
     /// Returns a flattened view of all opcode records in chronological order.

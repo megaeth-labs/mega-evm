@@ -312,14 +312,7 @@ where
             oracle_reads: self.inner.ctx.oracle_reads().reads().to_vec(),
         })
     }
-}
 
-impl<DB, INSP, ExtEnvs> MegaEvm<DB, INSP, ExtEnvs>
-where
-    DB: Database,
-    INSP: Inspector<MegaContext<DB, ExtEnvs>, EthInterpreter>,
-    ExtEnvs: ExternalEnvTypes,
-{
     /// Runs `tx` through the inspector when one is enabled, without committing.
     fn run_transaction(
         &mut self,

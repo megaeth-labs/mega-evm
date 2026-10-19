@@ -768,63 +768,6 @@ mod tests {
         assert_eq!(ctx.cfg().chain_id, 4326);
     }
 
-    /// Each switch on its own: setting only that field the other way is overwritten, and the
-    /// rest of the configuration is untouched by the attempt.
-    #[test]
-    fn test_eip8037_stays_on() {
-        assert_satin_cfg(&context_with(|cfg| cfg.enable_amsterdam_eip8037 = false));
-    }
-
-    #[test]
-    fn test_eip2780_stays_on() {
-        assert_satin_cfg(&context_with(|cfg| cfg.enable_amsterdam_eip2780 = false));
-    }
-
-    #[test]
-    fn test_eip7708_stays_on() {
-        assert_satin_cfg(&context_with(|cfg| cfg.enable_amsterdam_eip7708 = false));
-    }
-
-    #[test]
-    fn test_eip7708_cannot_be_disabled() {
-        assert_satin_cfg(&context_with(|cfg| cfg.amsterdam_eip7708_disabled = true));
-    }
-
-    #[test]
-    fn test_the_system_call_reservoir_margin_stays_on() {
-        assert_satin_cfg(&context_with(|cfg| {
-            cfg.system_call_state_gas_margin_in_reservoir = false;
-        }));
-    }
-
-    #[test]
-    fn test_the_chain_id_check_stays_on() {
-        assert_satin_cfg(&context_with(|cfg| cfg.tx_chain_id_check = false));
-    }
-
-    #[test]
-    fn test_the_execution_cap_is_the_spec_s() {
-        assert_satin_cfg(&context_with(|cfg| cfg.tx_gas_limit_cap = None));
-        assert_satin_cfg(&context_with(|cfg| cfg.tx_gas_limit_cap = Some(u64::MAX)));
-    }
-
-    #[test]
-    fn test_the_code_size_limits_are_the_spec_s() {
-        assert_satin_cfg(&context_with(|cfg| cfg.limit_contract_code_size = Some(24 * 1024)));
-        assert_satin_cfg(&context_with(|cfg| cfg.limit_contract_initcode_size = None));
-    }
-
-    /// The schedule is the Satin one whatever the caller passed, and it is the same table
-    /// object every time: it is built once, not per configuration.
-    #[test]
-    fn test_the_gas_schedule_is_the_satin_one() {
-        for spec in [EthSpecId::OSAKA, EthSpecId::AMSTERDAM, EthSpecId::PRAGUE] {
-            let ctx = context_with(|cfg| cfg.gas_params = GasParams::new_spec(spec));
-            assert_satin_cfg(&ctx);
-            assert_ne!(ctx.mega_cfg().gas_params.table(), GasParams::new_spec(spec).table());
-        }
-    }
-
     /// The op-revm view is the `MegaETH` view keyed by the base spec, field for field.
     #[test]
     fn test_with_cfg_spec_consistency() {

@@ -24,9 +24,9 @@
 //! build can run other byte prices without touching this table. [`SLOT_STATE_GAS`] and
 //! [`ACCOUNT_STATE_GAS`] are two of those products written out: the tests assert the schedule
 //! against them, and changing one of the two moves a test rather than a price.
-//! [`TX_DATA_LIMIT`], [`BLOCK_DATA_LIMIT`] and the two detention caps are Satin's protocol limits,
-//! [`ProtocolLimits::for_spec`](crate::ProtocolLimits::for_spec): fixed per spec, not configured by
-//! a chain. No limit holds state growth: state gas prices it.
+//! [`TX_DATA_LIMIT`], [`BLOCK_DATA_LIMIT`] and the two detention caps are Satin's protocol limits
+//! ([`ProtocolLimits::for_spec`](crate::ProtocolLimits::for_spec)). No limit holds state growth:
+//! state gas prices it.
 
 use revm::{
     context_interface::cfg::gas::WARM_STORAGE_READ_COST,
@@ -108,10 +108,8 @@ mod tests {
         assert_eq!(TX_GAS_LIMIT_CAP, 200_000_000);
         assert_eq!(MAX_CONTRACT_SIZE, 524_288);
         assert_eq!(MAX_INITCODE_SIZE, 1_048_576);
-        assert_eq!(TX_DATA_LIMIT, 13_107_200);
-        assert_eq!(BLOCK_DATA_LIMIT, 13_107_200);
-        assert_eq!(BLOCK_ENV_ACCESS_COMPUTE_GAS, 20_000_000);
-        assert_eq!(ORACLE_ACCESS_COMPUTE_GAS, 20_000_000);
+        // The data-size limits and the detention caps are written out with the protocol limits
+        // that read them, in `ProtocolLimits::for_spec`'s own test.
         assert_eq!(MAX_TX_COMPUTE_GAS, 199_987_900);
     }
 }

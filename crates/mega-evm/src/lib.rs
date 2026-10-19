@@ -47,17 +47,16 @@ pub use block::{
 #[cfg(feature = "satin-price-override")]
 pub use evm::install_satin_prices;
 pub use evm::{
-    active_satin_prices, history_gas, kzg_point_evaluation, log_history_bytes, name,
-    satin_gas_params, satin_gas_params_at, satin_gas_params_history_exempt, satin_precompiles,
-    satin_precompiles_map, settle_frame_result, spec_cfg, storage_call_stipend,
-    synthetic_call_result, synthetic_frame_result, transaction_body_bytes, tx_body_history_bytes,
-    untouched_call_gas, untouched_create_gas, validate_transaction_stateless, with_pools_of,
-    write_record_history_gas, BlockHashRecord, BucketRecord, BytePrice, DeclaredObserver,
-    DynPrecompilesBuilder, EthSpecId, IntrinsicGas, MegaContext, MegaEvm, MegaEvmError,
-    MegaEvmFactory, MegaGasUsage, MegaHandler, MegaSpecId, MegaTransactionOutcome, OpSpecId,
-    OracleRead, OracleReadRecord, ParseMegaSpecError, SatinPriceError, SatinPrices,
-    TrustedObserver, CPHB_ENV_VAR, CPSB_ENV_VAR, HISTORY_GAS_PRICED, LEGACY_SPEC_NAMES,
-    STATE_GAS_REPRICED, STORAGE_CALL_STIPEND_BYTES,
+    active_satin_prices, history_gas, kzg_point_evaluation, name, satin_gas_params,
+    satin_gas_params_at, satin_gas_params_history_exempt, satin_precompiles, satin_precompiles_map,
+    settle_frame_result, spec_cfg, storage_call_stipend, synthetic_call_result,
+    synthetic_frame_result, transaction_body_bytes, tx_body_history_bytes, untouched_call_gas,
+    untouched_create_gas, validate_transaction_stateless, with_pools_of, write_record_history_gas,
+    BlockHashRecord, BucketRecord, BytePrice, DeclaredObserver, DynPrecompilesBuilder, EthSpecId,
+    IntrinsicGas, MegaContext, MegaEvm, MegaEvmError, MegaEvmFactory, MegaGasUsage, MegaHandler,
+    MegaSpecId, MegaTransactionOutcome, OpSpecId, OracleRead, OracleReadRecord, ParseMegaSpecError,
+    SatinPriceError, SatinPrices, TrustedObserver, CPHB_ENV_VAR, CPSB_ENV_VAR, HISTORY_GAS_PRICED,
+    LEGACY_SPEC_NAMES, STATE_GAS_REPRICED, STORAGE_CALL_STIPEND_BYTES,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use external::{
@@ -68,8 +67,8 @@ pub use external::{
     ExternalEnvTypes, ExternalEnvs, OracleEnv, SaltEnv, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS,
 };
 pub use limit::{
-    decode_mega_limit_exceeded, AdditionalLimit, EvmTxRuntimeLimits, LimitCheck, LimitKind,
-    LimitStop, LimitUsage, MegaLimitExceeded, StagedRecord, ACCESS_LIST_ADDRESS_SIZE,
+    decode_mega_limit_exceeded, log_history_bytes, AdditionalLimit, EvmTxRuntimeLimits, LimitCheck,
+    LimitKind, LimitStop, LimitUsage, MegaLimitExceeded, StagedRecord, ACCESS_LIST_ADDRESS_SIZE,
     ACCESS_LIST_SLOT_SIZE, AUTHORIZATION_SIZE, FRAME_DATA_SHARE_DENOMINATOR,
     FRAME_DATA_SHARE_NUMERATOR, LOG_BASE_SIZE, LOG_TOPIC_SIZE, TRANSFER_LOG_SIZE, TX_BASE_SIZE,
     TX_BODY_OVER_DATA_SIZE_LIMIT, TX_BODY_SIZE, TX_FIXED_WRITE_RECORDS, WRITE_RECORD_SIZE,
@@ -80,7 +79,9 @@ pub use types::{
 
 /* Items the crate's modules share through the root, not part of the public surface */
 pub(crate) use block::transact_pre_block_call;
-pub(crate) use evm::{MegaInnerContext, MegaInstructions, PricedPrecompiles};
+pub(crate) use evm::{
+    charge_write_records_history, MegaInnerContext, MegaInstructions, PricedPrecompiles,
+};
 
 /* Re-export of upstream crates, so consumers build against the exact versions used here */
 pub use alloy_consensus;

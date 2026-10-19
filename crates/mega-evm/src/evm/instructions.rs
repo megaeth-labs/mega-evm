@@ -84,8 +84,8 @@ use revm::{
 };
 
 use crate::{
-    history_gas, limit::HistoryBytes, volatile_data_access_disabled_revert_data,
-    write_record_history_gas, ExternalEnvTypes, MegaContext, VolatileDataAccess,
+    charge_write_records_history, history_gas, limit::HistoryBytes,
+    volatile_data_access_disabled_revert_data, ExternalEnvTypes, MegaContext, VolatileDataAccess,
 };
 
 use super::{caller_refuses_start, satin_gas_table, MegaInstructions};
@@ -165,7 +165,7 @@ fn commit_after<const FROM_ALLOWANCE: bool, DB: Database, ExtEnvs: ExternalEnvTy
     inner: InstructionFn<DB, ExtEnvs>,
 ) -> InstructionExecResult {
     let InstructionContext { interpreter, host } = context;
-    host.additional_limit.discard_stale_record();
+    host.additional_limit.discard_staged_record();
     let result = inner(InstructionContext { interpreter: &mut *interpreter, host: &mut *host });
     let completed = match result {
         Ok(()) => true,
@@ -314,16 +314,12 @@ fn charge_frame_start<DB: Database, ExtEnvs: ExternalEnvTypes>(
     if !host.prices_history() {
         return result;
     }
-    let (Some(on_lane), Some(caller)) = (
-        write_record_history_gas(records.on_lane),
-        write_record_history_gas(u64::from(records.caller)),
-    ) else {
-        return abandon_frame(interpreter, host);
-    };
-    let Some(cost) = on_lane.checked_add(caller) else { return abandon_frame(interpreter, host) };
-    if !interpreter.gas.record_history_cost(cost) {
-        return abandon_frame(interpreter, host);
-    }
+    let charged = charge_write_records_history(
+        interpreter.gas.tracker_mut(),
+        records.on_lane,
+        u64::from(records.caller),
+    );
+    let Some((on_lane, caller)) = charged else { return abandon_frame(interpreter, host) };
     inherit_reservoir(interpreter);
     host.additional_limit.stage_frame_charge(records, on_lane, caller);
     result
@@ -514,11 +510,11 @@ fn forwarded_gas(input: &FrameInput, call_stipend: u64) -> u64 {
     }
 }
 
-/// Defines an opcode that reads a block-environment field, as revm's instruction in
-/// [`read_volatile`].
-macro_rules! block_env_read {
-    ($($name:ident => $inner:path, $opcode:literal;)*) => {$(
-        #[doc = concat!("`", $opcode, "`, committing the read of the field.")]
+/// Defines an opcode that reads volatile data — a block-environment field, an account or a slot —
+/// as revm's instruction in [`read_volatile`].
+macro_rules! volatile_read {
+    ($($name:ident => $inner:path, $opcode:literal, $what:literal;)*) => {$(
+        #[doc = concat!("`", $opcode, "`, committing the read of ", $what, ".")]
         fn $name<DB: Database, ExtEnvs: ExternalEnvTypes>(
             context: Ctx<'_, DB, ExtEnvs>,
         ) -> InstructionExecResult {
@@ -527,15 +523,21 @@ macro_rules! block_env_read {
     )*};
 }
 
-block_env_read! {
-    coinbase => block_info::coinbase, "COINBASE";
-    timestamp => block_info::timestamp, "TIMESTAMP";
-    number => block_info::block_number, "NUMBER";
-    difficulty => block_info::difficulty, "PREVRANDAO";
-    gaslimit => block_info::gaslimit, "GASLIMIT";
-    basefee => block_info::basefee, "BASEFEE";
-    blobbasefee => block_info::blob_basefee, "BLOBBASEFEE";
-    slotnum => block_info::slot_num_enabled, "SLOTNUM";
+volatile_read! {
+    coinbase => block_info::coinbase, "COINBASE", "the field";
+    timestamp => block_info::timestamp, "TIMESTAMP", "the field";
+    number => block_info::block_number, "NUMBER", "the field";
+    difficulty => block_info::difficulty, "PREVRANDAO", "the field";
+    gaslimit => block_info::gaslimit, "GASLIMIT", "the field";
+    basefee => block_info::basefee, "BASEFEE", "the field";
+    blobbasefee => block_info::blob_basefee, "BLOBBASEFEE", "the field";
+    slotnum => block_info::slot_num_enabled, "SLOTNUM", "the field";
+    balance => host::balance, "BALANCE", "the block beneficiary's account";
+    selfbalance => host::selfbalance, "SELFBALANCE", "the block beneficiary's account";
+    extcodesize => host::extcodesize, "EXTCODESIZE", "the block beneficiary's account";
+    extcodecopy => host::extcodecopy, "EXTCODECOPY", "the block beneficiary's account";
+    extcodehash => host::extcodehash, "EXTCODEHASH", "the block beneficiary's account";
+    sload => host::sload, "SLOAD", "the Oracle's storage";
 }
 
 /// `BLOCKHASH`, committing the read of the block number and of the hash.
@@ -550,28 +552,6 @@ fn blockhash<DB: Database, ExtEnvs: ExternalEnvTypes>(
         host.detention.name_refusal(VolatileDataAccess::BLOCK_HASH);
         result
     })
-}
-
-/// Defines an opcode that loads an account or a slot, as revm's instruction in
-/// [`read_volatile`].
-macro_rules! state_read {
-    ($($name:ident => $inner:path, $opcode:literal, $what:literal;)*) => {$(
-        #[doc = concat!("`", $opcode, "`, committing the read of ", $what, ".")]
-        fn $name<DB: Database, ExtEnvs: ExternalEnvTypes>(
-            context: Ctx<'_, DB, ExtEnvs>,
-        ) -> InstructionExecResult {
-            read_volatile(context, $inner)
-        }
-    )*};
-}
-
-state_read! {
-    balance => host::balance, "BALANCE", "the block beneficiary's account";
-    selfbalance => host::selfbalance, "SELFBALANCE", "the block beneficiary's account";
-    extcodesize => host::extcodesize, "EXTCODESIZE", "the block beneficiary's account";
-    extcodecopy => host::extcodecopy, "EXTCODECOPY", "the block beneficiary's account";
-    extcodehash => host::extcodehash, "EXTCODEHASH", "the block beneficiary's account";
-    sload => host::sload, "SLOAD", "the Oracle's storage";
 }
 
 /// Defines an opcode whose own charge no other wrapper sees, as revm's instruction with what the
