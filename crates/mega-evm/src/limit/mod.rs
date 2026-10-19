@@ -152,6 +152,14 @@ pub const LOG_BASE_SIZE: u64 = 32;
 /// Bytes every log topic counts.
 pub const LOG_TOPIC_SIZE: u64 = 32;
 
+/// The bytes a `LOG` with `topics` topics and `data_len` bytes of data counts, which are the
+/// history bytes it appends: its own record for the address that emitted it, one per topic, and
+/// the data.
+#[inline]
+pub const fn log_history_bytes(topics: u64, data_len: u64) -> u64 {
+    LOG_BASE_SIZE.saturating_add(LOG_TOPIC_SIZE.saturating_mul(topics)).saturating_add(data_len)
+}
+
 /// Bytes an EIP-7708 transfer log counts: its address, its three topics — the event, the sender
 /// and the recipient — and one word of data, the amount. It is what a `LOG3` carrying one word
 /// counts, by the same rule.

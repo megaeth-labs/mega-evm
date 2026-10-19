@@ -3,8 +3,7 @@
 use alloy_primitives::Address;
 use revm::interpreter::SStoreResult;
 
-use super::{LimitUsage, WRITE_RECORD};
-use crate::log_history_bytes;
+use super::{log_history_bytes, LimitUsage, WRITE_RECORD};
 
 /// What the Host saw an opcode do, staged until the opcode completes.
 ///

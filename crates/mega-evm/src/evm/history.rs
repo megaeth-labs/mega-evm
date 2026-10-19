@@ -59,13 +59,6 @@ pub(crate) fn charge_write_records_history(
     gas.record_history_cost(cost).then_some((first, second))
 }
 
-/// The history bytes a `LOG` with `topics` topics and `data_len` bytes of data appends: its own
-/// record for the address that emitted it, one per topic, and the data.
-#[inline]
-pub const fn log_history_bytes(topics: u64, data_len: u64) -> u64 {
-    LOG_BASE_SIZE.saturating_add(LOG_TOPIC_SIZE.saturating_mul(topics)).saturating_add(data_len)
-}
-
 /// The history bytes the allowance of a value-transferring call covers: one three-topic event
 /// carrying a single word, which is what a `receive()` hook emits.
 pub const STORAGE_CALL_STIPEND_BYTES: u64 = LOG_BASE_SIZE + 3 * LOG_TOPIC_SIZE + 32;
@@ -131,7 +124,10 @@ pub const fn tx_body_history_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{constants::COST_PER_HISTORY_BYTE, evm::prices::runs_at_measurement_prices};
+    use crate::{
+        constants::COST_PER_HISTORY_BYTE, evm::prices::runs_at_measurement_prices,
+        log_history_bytes,
+    };
 
     /// The byte counts of the three sites that count bytes rather than records.
     #[test]
@@ -346,19 +342,24 @@ mod tests {
     /// charge the gas cannot pay, and a set with no price, charge nothing.
     #[test]
     fn test_two_sets_of_write_records_are_charged_in_one() {
+        let mut gas = GasTracker::new(u64::MAX, u64::MAX, 0);
+        assert_eq!(charge_write_records_history(&mut gas, 1, u64::MAX), None, "no price");
+        assert_eq!((gas.remaining(), gas.history_gas_spent()), (u64::MAX, 0));
+
         let one = write_record_history_gas(1).expect("a record has a price");
         let two = write_record_history_gas(2).expect("two records have a price");
         let mut gas = GasTracker::new(one + two, one + two, 0);
         assert_eq!(charge_write_records_history(&mut gas, 1, 2), Some((one, two)));
         assert_eq!((gas.remaining(), gas.history_gas_spent()), (0, (one + two) as i64));
 
-        if one + two > 0 {
-            let mut short = GasTracker::new(one + two, one + two - 1, 0);
-            assert_eq!(charge_write_records_history(&mut short, 1, 2), None);
-            assert_eq!((short.remaining(), short.history_gas_spent()), (one + two - 1, 0));
+        // A charge of nothing is always paid: there is no charge the gas cannot pay.
+        if one + two == 0 {
+            #[cfg(feature = "satin-price-override")]
+            crate::test_utils::note_price_guard("MEGA_SATIN_CPHB prices a history byte at nothing");
+            return;
         }
-        let mut gas = GasTracker::new(u64::MAX, u64::MAX, 0);
-        assert_eq!(charge_write_records_history(&mut gas, 1, u64::MAX), None, "no price");
-        assert_eq!((gas.remaining(), gas.history_gas_spent()), (u64::MAX, 0));
+        let mut short = GasTracker::new(one + two, one + two - 1, 0);
+        assert_eq!(charge_write_records_history(&mut short, 1, 2), None);
+        assert_eq!((short.remaining(), short.history_gas_spent()), (one + two - 1, 0));
     }
 }
