@@ -51,7 +51,8 @@ SUPPRESS="${SUPPRESS:-$ROOT_DIR/mutants/suppressions.toml}"
 # `:(glob)` magic lets `**/` match no directory, so the files at the top of src/
 # are in; git's default pathspec would need a second `/` there and leave them out.
 SRC_PATHSPEC=':(glob)crates/mega-evm/src/**/*.rs'
-JOBS="${JOBS:-$(nproc)}"
+# macOS has no nproc. The count then comes from sysctl, then from POSIX getconf.
+JOBS="${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN)}"
 PKG_ARGS=(--package mega-evm)
 CONFIG_ARGS=()
 
