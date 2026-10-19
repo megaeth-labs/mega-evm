@@ -243,21 +243,3 @@ file = "crates/mega-evm/src/test_utils/scenario.rs"
 mutant = "delete field gas_limit from struct BlockEnv expression in Scenario::block"
 justification = "Equivalent: the field writes u64::MAX and revm 40's BlockEnv::default() already has gas_limit: u64::MAX, so the struct is identical with or without it. test_block_is_fixed_except_for_the_beneficiary pins the value, so the mutant becomes killable the moment the upstream default moves."
 reviewer = "RealiCZ"
-
-# ─────────────────────────────────────────────────────────────────────────────
-# crates/mega-evm/src/ survivors of the common execution layer.
-
-# --- AdditionalLimit::discard_stale_record (equivalent) ---------------------------------
-# Every wrapper discards a record staged before its opcode on entry. The three wrapped opcodes
-# each stage their own record through the Host whenever they complete (SSTORE through
-# sstore_skip_cold_load, LOG through log, SELFDESTRUCT through selfdestruct), which overwrites a
-# stale one, and a failing opcode's wrapper discards whatever is staged. So a stale record can
-# never be committed with or without the entry discard; it is the contract's guard for a future
-# wrapped opcode that completes without a Host call.
-[[suppress]]
-kind = "line"
-category = "equivalent"
-file = "crates/mega-evm/src/limit/limit.rs"
-mutant = "replace AdditionalLimit::discard_stale_record with ()"
-justification = "Equivalent: each wrapped opcode (SSTORE, LOG0-4, SELFDESTRUCT) stages its own record through the Host whenever it completes, overwriting a stale one, and a failing opcode's wrapper discards the staged record, so no stale record can be committed with or without the entry discard (test_wrapper_discards_a_stale_record_on_entry shows the stale log is not counted either way)."
-reviewer = "RealiCZ"

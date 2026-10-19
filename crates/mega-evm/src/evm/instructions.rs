@@ -165,7 +165,7 @@ fn commit_after<const FROM_ALLOWANCE: bool, DB: Database, ExtEnvs: ExternalEnvTy
     inner: InstructionFn<DB, ExtEnvs>,
 ) -> InstructionExecResult {
     let InstructionContext { interpreter, host } = context;
-    host.additional_limit.discard_stale_record();
+    host.additional_limit.discard_staged_record();
     let result = inner(InstructionContext { interpreter: &mut *interpreter, host: &mut *host });
     let completed = match result {
         Ok(()) => true,
