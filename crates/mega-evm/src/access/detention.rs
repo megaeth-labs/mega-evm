@@ -146,9 +146,11 @@ impl FrameFigures {
 ///
 /// The stipend stays outside compute on purpose: compute is regular gas drawn from the
 /// transaction's own pools. A callee may run up to 2,300 gas on each value call's stipend beyond
-/// the compute counted, and each value call costs its caller at least 9,100 of compute — the
-/// 11,300 of the value transfer less the 2,300 stipend it carries, and a warm access of 100 — so
-/// the gas run after a read is at most about 25% (2,300 / 9,100) more than the cap.
+/// the compute counted. A value call costs its caller 9,100 of compute — the 11,300 of the value
+/// transfer less the 2,300 stipend it carries, and a warm access of 100 — and a callee that leaves
+/// the stipend unspent returns it, which lowers the caller's spent regular gas: a warm value call
+/// to an empty account counts 9,100 − 2,300 = 6,800. So the gas run after a read is at most about
+/// 34% (2,300 / 6,800) more than the cap.
 ///
 /// A keyless deployment's call is the transaction's own frame, and runs no code: it charges its
 /// own work — the overhead of decoding the signed transaction and recovering its signer, and the

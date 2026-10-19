@@ -54,7 +54,7 @@ Protocol-level changes outside the verifiable execution layer (e.g., networking,
 EQUIVALENCE → MINI_REX → MINI_REX_1 → MINI_REX_2 → REX → REX1 → REX2 → REX3 → REX4 → REX5 → REX6 → SATIN
 ```
 
-Each newer behavior-introducing spec includes all previous behaviors.
+Each newer behavior-introducing spec includes all previous behaviors, except where a spec replaces them: SATIN restates the execution layer and replaces many of REX6's rules (see the [Satin upgrade page](upgrades/satin.md)).
 The alias rungs `MINI_REX_1` (behavior: `EQUIVALENCE`) and `MINI_REX_2` (behavior: `MINI_REX`) are the exception: an alias rung introduces no behavior of its own and instead executes exactly its target's earlier behavior (see [Alias Specs](#alias-specs-behavior-vs-position)).
 Every spec through REX6 builds on Optimism Isthmus (Ethereum Prague) as the base layer; SATIN builds on Optimism Karst (Ethereum Osaka).
 All specs through REX6 are frozen; SATIN is **unstable** and under active development.

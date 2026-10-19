@@ -12,6 +12,9 @@ Two scopes, mutated and gated separately:
 
 The two scopes are disjoint; a mutant belongs to exactly one of them.
 
+The infrastructure job runs nightly, and on a pull request only when it changes `.cargo/mutants-infra.toml`, the scenario runner, `scripts/mutation_test.sh` or `scripts/mutation_gate.py` (the `infra` path filter in `.github/workflows/mutation.yml`).
+It never reads `.cargo/mutants.toml`, and a change to `mutants/suppressions.toml` alone does not start it on a pull request: the suppression-hygiene job and the nightly run cover that file.
+
 ## Layout
 
 | Path | Purpose |
