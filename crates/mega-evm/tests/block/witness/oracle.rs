@@ -8,6 +8,7 @@
 //! is a value the slot can hold at that read: a transaction answered two values for one slot
 //! replays from its record alone.
 
+use alloy_eips::eip2935::HISTORY_STORAGE_ADDRESS;
 use alloy_primitives::{address, Bytes, TxKind, B256, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
@@ -16,10 +17,10 @@ use mega_evm::{
         ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE,
     },
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    MegaHaltReason, OracleRead,
+    MegaHaltReason, OracleRead, PreBlockStateSource,
 };
 use revm::{
-    bytecode::opcode::{CALL, GAS, INVALID, POP, PUSH0},
+    bytecode::opcode::{CALL, GAS, INVALID, MLOAD, POP, PUSH0, SSTORE},
     context::result::ExecutionResult,
 };
 
@@ -399,5 +400,83 @@ fn test_the_high_precision_timestamp_replays() {
     assert!(
         run.record.storage.contains_key(&(ORACLE_CONTRACT_ADDRESS, U256::ZERO)),
         "the Oracle's slot 0 is loaded from the chain"
+    );
+}
+
+/// Code for the EIP-2935 address that reads the Oracle's [`SLOT`] and stores what it was told in
+/// its own slot 0, so the pre-block call leaves the value it read in the state.
+fn reads_the_oracle_and_stores_it() -> Bytes {
+    let read = get_slot();
+    BytecodeBuilder::default()
+        .mstore(0, &read)
+        .push_number(32_u8)
+        .push_number(0x200_u16)
+        .push_number(read.len() as u64)
+        .append_many([PUSH0, PUSH0])
+        .push_address(ORACLE_CONTRACT_ADDRESS)
+        .append_many([GAS, CALL, POP])
+        .push_number(0x200_u16)
+        .append(MLOAD)
+        .append(PUSH0)
+        .append(SSTORE)
+        .stop()
+        .build()
+}
+
+/// A pre-block system call is a function of the chain's state: an Oracle read it makes takes the
+/// chain's slot and never asks the oracle service, whose answer no witness would carry. The block
+/// replays from its witness with and without a service, and the service is never asked.
+#[test]
+fn test_a_pre_block_oracle_read_takes_chain_storage_and_replays() {
+    let case = || {
+        let mut db = db().account_storage(ORACLE_CONTRACT_ADDRESS, SLOT, STATE_VALUE);
+        db.set_account_code(HISTORY_STORAGE_ADDRESS, reads_the_oracle_and_stores_it());
+        Case::new("pre-block oracle read", db)
+            .envs(Envs::new().with_oracle_storage(SLOT, SERVICE_VALUE))
+    };
+    let replay = case().run();
+    let run = &replay.recorded;
+
+    let (_, state) = run
+        .pre_block
+        .iter()
+        .find(|(source, _)| *source == PreBlockStateSource::Eip2935)
+        .expect("the EIP-2935 call ran");
+    let stored =
+        state.get(&HISTORY_STORAGE_ADDRESS).expect("the contract wrote").storage.get(&U256::ZERO);
+    assert_eq!(
+        stored.map(|slot| slot.present_value),
+        Some(STATE_VALUE),
+        "chain storage, not the service"
+    );
+    assert!(run.executed_oracle_reads.is_empty(), "the service was not asked");
+    assert!(run.record.oracle_reads.is_empty());
+    assert_eq!(
+        run.record.storage.get(&(ORACLE_CONTRACT_ADDRESS, SLOT)),
+        Some(&STATE_VALUE),
+        "the chain's slot is read, so it is in the witness"
+    );
+
+    let without = case().replay_channels(run, Oracle::Absent);
+    assert_same_run("pre-block oracle read, no service", run, &without);
+}
+
+/// The system call's rule does not outlive it: a transaction of the same block that reads the
+/// Oracle is answered by the service and records the read.
+#[test]
+fn test_a_pre_block_oracle_read_leaves_the_blocks_transactions_unchanged() {
+    let mut db = db().account_storage(ORACLE_CONTRACT_ADDRESS, SLOT, STATE_VALUE);
+    db.set_account_code(HISTORY_STORAGE_ADDRESS, reads_the_oracle_and_stores_it());
+    let replay = Case::new("pre-block read, then a transaction's", db)
+        .envs(Envs::new().with_oracle_storage(SLOT, SERVICE_VALUE))
+        .tx(call(0, ORACLE_CONTRACT_ADDRESS, get_slot(), gas(36)))
+        .run();
+    let run = &replay.recorded;
+    assert_eq!(returned(run, 0), SERVICE_VALUE, "the transaction is answered by the service");
+    assert_eq!(run.tx(0).oracle_reads, vec![SLOT_READ]);
+    assert_eq!(
+        run.executed_oracle_reads,
+        vec![SLOT_READ],
+        "and it is the only read the service saw"
     );
 }

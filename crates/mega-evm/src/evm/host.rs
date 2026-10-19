@@ -346,6 +346,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// and it is in the transaction's state, which a stateless witness is built from, even when
     /// the environment's value was the one used.
     ///
+    /// A system call does not ask the environment, whatever it holds: its read answers the chain's
+    /// slot, so the call is a function of the state a stateless validator is given (see
+    /// [`MegaContext::is_system_call`]).
+    ///
     /// A frame whose regular gas, the part detention withholds included, cannot pay the cold
     /// access reads nothing and asks nothing, as revm's own skipped cold load does. A detained
     /// frame that holds the gas but may not spend it does read and ask, and the charge then stops
@@ -372,8 +376,15 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
             false,
         )?
         .data;
-        let answer = self.external_envs().oracle_env.get_oracle_storage(key);
-        self.oracle_reads.record(key, answer);
+        // A system call reads the chain: it asks the service nothing and records no answer, and
+        // the read is priced and loaded as any other.
+        let answer = if self.is_system_call() {
+            None
+        } else {
+            let answer = self.external_envs().oracle_env.get_oracle_storage(key);
+            self.oracle_reads.record(key, answer);
+            answer
+        };
         self.detention.observe(VolatileDataAccess::ORACLE);
         Ok(StateLoad::new(answer.unwrap_or(loaded), true))
     }
