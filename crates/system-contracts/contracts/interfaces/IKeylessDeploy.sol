@@ -26,9 +26,9 @@ interface IKeylessDeploy {
     /// @notice Failed to recover signer from signature (invalid signature).
     error InvalidSignature();
 
-    /// @notice The signer does not have enough balance to cover the sandbox transaction's
-    ///         pre-execution debit. Pre-Rex5 specs require `gas_limit × gas_price + value`;
-    ///         Rex5+ requires `value` only because the sandbox transaction runs fee-free.
+    /// @notice The signer does not have enough balance to fund the deployment's value.
+    /// @dev The deployment pays no gas out of the signer's balance, so the value is all the
+    ///      signer must hold.
     error InsufficientBalance();
 
     /// @notice The deploy address already has code (contract already exists).
@@ -38,27 +38,19 @@ interface IKeylessDeploy {
     /// @param signerNonce The on-chain nonce of the recovered signer.
     error SignerNonceTooHigh(uint64 signerNonce);
 
-    /// @notice The sandbox execution reverted.
-    /// @param gasUsed The amount of gas used before reverting.
-    /// @param output The revert output data.
+    /// @notice The deployment's creation reverted.
+    /// @param gasUsed The gas the creation spent.
+    /// @param output The creation's revert data.
     error ExecutionReverted(uint64 gasUsed, bytes output);
 
-    /// @notice The sandbox execution halted (out of gas, stack overflow, etc.).
-    /// @param gasUsed The amount of gas used before halting.
+    /// @notice The deployment's creation halted (out of gas, an invalid opcode, code the creation
+    ///         refuses, etc.).
+    /// @param gasUsed The gas the creation spent.
     error ExecutionHalted(uint64 gasUsed);
 
-    /// @notice Rex5 preflight rejected the call because the parent transaction's remaining budget
-    ///         for a resource dimension is smaller than the sandbox's known pre-frame intrinsic usage.
-    /// @dev Emitted as a Revert by the Rust interceptor when the preflight check fails.
-    ///      Not used by the on-chain KeylessDeploy bytecode.
-    /// @param kind The resource dimension that exceeded (0=DataSize, 1=KVUpdate, 2=ComputeGas,
-    ///        3=StateGrowth).
-    /// @param limit The parent's remaining limit for that dimension.
-    /// @param used The sandbox's known pre-frame intrinsic usage for that dimension.
-    error ParentBudgetExceeded(uint8 kind, uint64 limit, uint64 used);
-
-    /// @notice Contract creation succeeded but returned empty bytecode.
-    /// @param gasUsed The amount of gas used.
+    /// @notice The deployment's creation completed but left no code at the deploy address: its
+    ///         init code returned empty code, or the created contract destroyed itself.
+    /// @param gasUsed The gas the creation spent.
     error EmptyCodeDeployed(uint64 gasUsed);
 
     /// @notice Contract creation succeeded but no address was returned.
@@ -76,46 +68,27 @@ interface IKeylessDeploy {
     /// @param providedGasLimit The gas limit override provided by the caller.
     error GasLimitTooLow(uint64 txGasLimit, uint64 providedGasLimit);
 
-    /// @notice The remaining compute gas is insufficient to pay for the keyless deploy overhead.
-    /// @param limit The configured compute gas limit.
-    /// @param used The compute gas usage.
-    error InsufficientComputeGas(uint64 limit, uint64 used);
-
-    /// @notice The init code of the keyless deployment transaction exceeds the configured
-    ///         maximum initcode size for the current spec.
-    /// @dev REX5+: enforced by the Rust interceptor before the sandbox is constructed, because
-    ///      the deposit-style sandbox bypasses op-revm's `validate_env` (which would otherwise
-    ///      apply the same limit via revm's EIP-3860 check).
+    /// @notice The init code of the keyless deployment transaction exceeds the maximum initcode
+    ///         size (EIP-3860).
+    /// @dev No validation of the outer transaction holds the carried init code to the limit, so
+    ///      the deployment checks it itself.
     /// @param size The init code length in bytes.
-    /// @param max The configured maximum init code size (from `cfg().max_initcode_size()`).
+    /// @param max The maximum init code size.
     error InitCodeTooLarge(uint64 size, uint64 max);
 
-    /// @notice The recovered signer of the keyless deployment transaction has non-empty,
-    ///         non-EIP-7702 code in parent state, so it cannot originate transactions per
-    ///         EIP-3607.
-    /// @dev REX5+: enforced by the Rust interceptor because the deposit-style sandbox
-    ///      bypasses op-revm's `validate_account_nonce_and_code` check.
+    /// @notice The recovered signer of the keyless deployment transaction has code other than an
+    ///         EIP-7702 delegation, so it cannot originate transactions per EIP-3607.
+    /// @dev The signer is not the outer transaction's sender, so no validation of the outer
+    ///      transaction checks it; the deployment does, unless the node disables EIP-3607.
     error SignerHasCode();
 
-    /// @notice Internal sandbox failure (DB I/O, header validation, etc.).
-    /// @dev Selector-only: precompile return data is consensus-affecting, so the wire
-    ///      must not pin consensus to upstream revm/op-revm `Display` impls.
-    error InternalError();
-
-    /// @notice Sandbox rejected the inner transaction as a tx-validation error — any
-    /// `IsTxError::is_tx_error() == true` outcome of the sandbox `transact_raw` call.
-    /// Behaviorally identical to `InternalError` (outer call reverts, signer is not
-    /// charged because `pre_execution()` never ran); a dedicated selector lets
-    /// relayer-side decoders distinguish this from a genuine internal failure.
-    /// @dev Selector-only for the same consensus-decoupling reason as `InternalError`.
-    error InvalidTransaction();
-
-    /// @notice The call was not intercepted by the EVM (called on unsupported network).
+    /// @notice The call was not intercepted by the EVM: it is not the transaction's own call, or
+    ///         the network does not intercept it.
     error NotIntercepted();
 
     /// @notice Deploys a contract using a pre-EIP-155 signed transaction with a custom gas limit.
     /// @dev The keyless deployment transaction must be a valid RLP-encoded legacy transaction:
-    ///      - nonce: any value
+    ///      - nonce: must be 0
     ///      - gasPrice: any value (typically 100 gwei for Nick's Method)
     ///      - gasLimit: any value (must be <= gasLimitOverride)
     ///      - to: must be empty (contract creation)
@@ -125,9 +98,9 @@ interface IKeylessDeploy {
     ///      - r: signature component
     ///      - s: signature component
     /// @param keylessDeploymentTransaction The RLP-encoded pre-EIP-155 signed transaction.
-    /// @param gasLimitOverride The gas limit for the inner deployment transaction.
-    ///        Must be >= the gas limit in the keyless transaction.
-    /// @return gasUsed The amount of gas used by the deployment transaction execution.
+    /// @param gasLimitOverride The gas forwarded to the deployment's creation, capped to the gas the
+    ///        call has left. Must be >= the gas limit in the keyless transaction.
+    /// @return gasUsed The gas the deployment's creation spent.
     ///         Uses uint64 to match the EVM's native gas accounting type (max ~18 exagas).
     /// @return deployedAddress The address of the deployed contract (zero if execution failed).
     /// @return errorData ABI-encoded error if execution failed, empty bytes on success.

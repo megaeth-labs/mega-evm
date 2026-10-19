@@ -12,6 +12,7 @@ mod detention;
 mod differential;
 mod dispatch;
 mod frame;
+mod interface;
 mod inspector;
 mod limits;
 mod precedence;

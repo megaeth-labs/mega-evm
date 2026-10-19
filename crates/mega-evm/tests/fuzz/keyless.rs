@@ -55,30 +55,18 @@ fn error_name(data: &[u8]) -> &'static str {
         SignerNonceTooHigh,
         ExecutionReverted,
         ExecutionHalted,
-        ParentBudgetExceeded,
         EmptyCodeDeployed,
         NoContractCreated,
         AddressMismatch,
         GasLimitTooLow,
-        InsufficientComputeGas,
         InitCodeTooLarge,
         SignerHasCode,
-        InternalError,
-        InvalidTransaction,
         NotIntercepted,
     )
 }
 
 /// The errors the spec says no deployment produces.
-const NEVER_PRODUCED: [&str; 7] = [
-    "ParentBudgetExceeded",
-    "InvalidTransaction",
-    "InsufficientComputeGas",
-    "InternalError",
-    "AddressMismatch",
-    "NoContractCreated",
-    "NotIntercepted",
-];
+const NEVER_PRODUCED: [&str; 3] = ["AddressMismatch", "NoContractCreated", "NotIntercepted"];
 
 /// What the generator's fields say of a keyless call, rule by rule.
 struct Rules {
