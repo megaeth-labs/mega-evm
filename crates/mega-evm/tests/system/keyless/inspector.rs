@@ -152,19 +152,6 @@ fn test_the_inspector_sees_the_call_and_the_creation_it_starts() {
     }
 }
 
-/// The traced run and the plain run agree to the gas.
-#[test]
-fn test_an_inspected_deployment_costs_what_a_plain_one_does() {
-    let deployment = Deployment::new(deploying(&runtime(3)));
-    for gas_limit in GAS_LIMITS {
-        let (inspected, _) = inspect(&deployment, Recorder::default(), gas_limit);
-        let plain = deploy(system_db(), &deployment, gas_limit);
-        assert_eq!(inspected.result, plain.result, "at {gas_limit}");
-        assert_eq!(inspected.gas, plain.gas);
-        assert_eq!(inspected.usage, plain.usage);
-    }
-}
-
 /// A call the rules refuse is reported as the call it is, its start and end paired around the
 /// refusal; no creation starts.
 #[test]

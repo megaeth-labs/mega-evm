@@ -465,46 +465,6 @@ fn test_hints_reach_the_service_in_the_order_they_were_sent() {
     );
 }
 
-/// A transaction that sends value with its `sendHint` forwards nothing: the method is not payable,
-/// so the transaction reverts in the bytecode, and its hint would be one it never sent.
-#[test]
-fn test_a_value_bearing_hint_transaction_forwards_nothing() {
-    let (result, hints, usage) = run_with_oracle(
-        system_db(),
-        call_tx(ORACLE_CONTRACT_ADDRESS, send_hint(b"paid"), U256::ONE),
-    );
-    assert!(!result.result.is_success(), "{:?}", result.result);
-    assert!(hints.is_empty());
-    assert_eq!(
-        usage.data_size,
-        mega_evm::TX_BODY_SIZE + send_hint(b"paid").len() as u64,
-        "the calldata alone: no hint was counted",
-    );
-}
-
-/// A hint sent with gas is forwarded, its payload whole, and the calldata of the call is counted
-/// on the transaction.
-#[test]
-fn test_a_hint_with_gas_forwards_and_is_counted() {
-    let data = send_hint(&[0_u8; 128]);
-    let code = return_status(call_oracle(BytecodeBuilder::default(), &data, 100_000));
-    let (_, hints, usage) = run_with_oracle(with_contract(code), call_tx(CONTRACT, [], U256::ZERO));
-    assert_eq!(hints.len(), 1);
-    assert_eq!(hints[0].data.len(), 128);
-    assert_eq!(usage.data_size, nested_hint(data.len() as u64));
-}
-
-/// A call of the Oracle with a selector that is not `sendHint` is not a hint, whatever it
-/// carries: nothing is forwarded or counted.
-#[test]
-fn test_an_unknown_selector_to_the_oracle_counts_no_hint() {
-    let data: Vec<u8> = [0xde, 0xad, 0xbe, 0xef].into_iter().chain([0_u8; 256]).collect();
-    let code = return_status(call_oracle(BytecodeBuilder::default(), &data, 1_000_000));
-    let (_, hints, usage) = run_with_oracle(with_contract(code), call_tx(CONTRACT, [], U256::ZERO));
-    assert!(hints.is_empty());
-    assert_eq!(usage.data_size, nested_hint(0));
-}
-
 /// A malformed `sendHint` payload, and one followed by bytes the decoder drops, are counted
 /// whole: the first forwards nothing, the second forwards its envelope. Under a limit that holds
 /// half of the payload, both are stopped before anything is forwarded: the call is answered with

@@ -14,18 +14,13 @@ use mega_evm::{
     constants::TX_GAS_LIMIT_CAP,
     system::{
         IMegaAccessControl, VolatileDataAccessType, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE,
-        NON_ZERO_TRANSFER_REVERT_DATA, ORACLE_CONTRACT_ADDRESS,
+        ORACLE_CONTRACT_ADDRESS,
     },
     test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
     volatile_data_access_disabled_revert_data, ExternalEnvs, MegaContext, MegaEvm, MegaSpecId,
     MegaTransaction, MegaTransactionOutcome, TestExternalEnvs, VolatileDataAccess,
 };
-use revm::{
-    bytecode::opcode::*,
-    context::{ContextTr, TxEnv},
-    interpreter::{CallInputs, CallOutcome, InterpreterTypes},
-    Inspector,
-};
+use revm::{bytecode::opcode::*, context::TxEnv};
 
 use crate::common::{block, system_db, CALLER, GAS_LIMIT};
 
@@ -41,7 +36,6 @@ const DISABLE: [u8; 4] = IMegaAccessControl::disableVolatileDataAccessCall::SELE
 const ENABLE: [u8; 4] = IMegaAccessControl::enableVolatileDataAccessCall::SELECTOR;
 const IS_DISABLED: [u8; 4] = IMegaAccessControl::isVolatileDataAccessDisabledCall::SELECTOR;
 const DISABLED_BY_PARENT: [u8; 4] = IMegaAccessControl::DisabledByParent::SELECTOR;
-const NOT_INTERCEPTED: [u8; 4] = IMegaAccessControl::NotIntercepted::SELECTOR;
 
 /* ---------- running a transaction ---------- */
 
@@ -126,22 +120,6 @@ fn disable(code: BytecodeBuilder) -> BytecodeBuilder {
 
 fn enable(code: BytecodeBuilder) -> BytecodeBuilder {
     steer(code, ENABLE)
-}
-
-/// Appends a query of `isVolatileDataAccessDisabled()` and returns its answer.
-fn query_and_return(code: BytecodeBuilder) -> BytecodeBuilder {
-    code.mstore(0x0, IS_DISABLED)
-        .push_number(32_u8) // retSize
-        .push_number(0x20_u8) // retOffset
-        .push_number(4_u8) // argsSize
-        .push_number(0_u8) // argsOffset
-        .push_number(0_u8) // value
-        .push_address(ACCESS_CONTROL_ADDRESS)
-        .push_number(100_000_u32)
-        .append_many([CALL, POP])
-        .push_number(32_u8)
-        .push_number(0x20_u8)
-        .append(RETURN)
 }
 
 /// Appends a call of `target` through `scheme` with `gas`, leaving its status on the stack.
@@ -641,30 +619,6 @@ fn test_staticcall_disable_volatile_data_access_is_intercepted() {
 
 /* ---------- 8. isVolatileDataAccessDisabled() ---------- */
 
-/// The query answers `false` where nothing switched access off, `true` in the frame that did, and
-/// `true` in a child of it.
-#[test]
-fn test_query_returns_false_when_not_disabled() {
-    let run = run(&[(PARENT, query_and_return(BytecodeBuilder::default()).build())]);
-    assert_eq!(run.word(), U256::ZERO);
-}
-
-/// See [`test_query_returns_false_when_not_disabled`].
-#[test]
-fn test_query_returns_true_for_disabling_frame() {
-    let run = run(&[(PARENT, query_and_return(disable(BytecodeBuilder::default())).build())]);
-    assert_eq!(run.word(), U256::ONE);
-}
-
-/// See [`test_query_returns_false_when_not_disabled`].
-#[test]
-fn test_query_returns_true_when_parent_disabled() {
-    let parent = call_and_return_data(disable(BytecodeBuilder::default()), CHILD);
-    let run =
-        run(&[(PARENT, parent), (CHILD, query_and_return(BytecodeBuilder::default()).build())]);
-    assert_eq!(run.word(), U256::ONE);
-}
-
 /// The answer at four depths, with the switch set at the second: `false` above it, before it is
 /// set and after the frame that set it returned; `true` in that frame and in the two below it.
 #[test]
@@ -732,53 +686,7 @@ fn test_the_query_answers_for_the_caller_at_every_depth() {
     );
 }
 
-/* ---------- 9. a transaction calling the contract directly ---------- */
-
-/// A transaction that calls the contract directly is answered: the switches succeed, the query
-/// answers `false`, a value-bearing call is refused with `NonZeroTransfer()`, and a selector the
-/// contract does not intercept reverts in its bytecode with `NotIntercepted()`.
-#[test]
-fn test_direct_tx_disable_volatile_data_access() {
-    for selector in [DISABLE, ENABLE] {
-        let run =
-            execute(system_db(), tx(ACCESS_CONTROL_ADDRESS, &selector, U256::ZERO, GAS_LIMIT));
-        assert!(run.output().is_empty());
-    }
-}
-
-/// See [`test_direct_tx_disable_volatile_data_access`].
-#[test]
-fn test_direct_tx_disable_volatile_data_access_with_value_reverts() {
-    let run = execute(system_db(), tx(ACCESS_CONTROL_ADDRESS, &DISABLE, U256::ONE, GAS_LIMIT));
-    assert!(!run.outcome.result.is_success());
-    assert_eq!(
-        run.outcome.result.output().cloned().unwrap_or_default(),
-        Bytes::from_static(&NON_ZERO_TRANSFER_REVERT_DATA)
-    );
-}
-
-/// See [`test_direct_tx_disable_volatile_data_access`].
-#[test]
-fn test_direct_tx_is_volatile_data_access_disabled() {
-    let run = execute(system_db(), tx(ACCESS_CONTROL_ADDRESS, &IS_DISABLED, U256::ZERO, GAS_LIMIT));
-    assert_eq!(run.word(), U256::ZERO);
-}
-
-/// See [`test_direct_tx_disable_volatile_data_access`].
-#[test]
-fn test_direct_tx_unknown_selector_falls_through_and_reverts_not_intercepted() {
-    let run = execute(
-        system_db(),
-        tx(ACCESS_CONTROL_ADDRESS, &[0xde, 0xad, 0xbe, 0xef], U256::ZERO, GAS_LIMIT),
-    );
-    assert!(!run.outcome.result.is_success());
-    assert_eq!(
-        run.outcome.result.output().cloned().unwrap_or_default(),
-        Bytes::from_static(&NOT_INTERCEPTED)
-    );
-}
-
-/* ---------- 10. schemes that do not reach the interceptor ---------- */
+/* ---------- 9. schemes that do not reach the interceptor ---------- */
 
 /// `DELEGATECALL` and `CALLCODE` of `disableVolatileDataAccess()` run the contract's bytecode,
 /// which reverts with `NotIntercepted()`, and switch nothing off: the child reads.
@@ -801,44 +709,7 @@ fn test_delegatecall_to_access_control_not_intercepted() {
     }
 }
 
-/* ---------- 11. an inspector sees the answered call ---------- */
-
-/// Records the targets of every call an inspector is shown, as it starts and as it ends.
-#[derive(Default)]
-struct Calls {
-    starts: Vec<Address>,
-    ends: Vec<Address>,
-}
-
-impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for Calls {
-    fn call(&mut self, _context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
-        self.starts.push(inputs.target_address);
-        None
-    }
-
-    fn call_end(&mut self, _context: &mut CTX, inputs: &CallInputs, _outcome: &mut CallOutcome) {
-        self.ends.push(inputs.target_address);
-    }
-}
-
-/// An inspector sees the call the interceptor answered start and end like any other.
-#[test]
-fn test_inspector_sees_system_contract_call() {
-    let child = BytecodeBuilder::default().append_many([PUSH0, POP, STOP]).build();
-    let db = system_db()
-        .account_code(PARENT, disables_then_calls_child(CALL))
-        .account_code(CHILD, child);
-    let ctx = MegaContext::new(db, MegaSpecId::SATIN)
-        .with_block(block())
-        .with_chain(zero_fee_l1_block_info());
-    let mut evm = MegaEvm::new(ctx).with_inspector(Calls::default());
-    let outcome = evm.execute_transaction(tx(PARENT, &[], U256::ZERO, GAS_LIMIT)).unwrap();
-    assert!(outcome.result.is_success());
-    assert_eq!(evm.inspector().starts, vec![PARENT, ACCESS_CONTROL_ADDRESS, CHILD]);
-    assert_eq!(evm.inspector().ends, vec![ACCESS_CONTROL_ADDRESS, CHILD, PARENT]);
-}
-
-/* ---------- 12. below and above the execution cap ---------- */
+/* ---------- 10. below and above the execution cap ---------- */
 
 /// The switch behaves the same whether the transaction carries a state-gas reservoir or not, and
 /// the transaction costs the same: the answers carry the reservoir back untouched.

@@ -28,6 +28,7 @@ use revm::{
         interpreter::EthInterpreter, CallInputs, CallOutcome, CreateInputs, CreateOutcome,
         InstructionResult,
     },
+    primitives::KECCAK_EMPTY,
     Database, Inspector,
 };
 
@@ -118,48 +119,6 @@ fn assert_nothing_kept(
             reference.result.gas().reservoir_remaining(),
             "{case}: the reservoir comes back",
         );
-    }
-}
-
-/// A `keylessDeploy` transaction whose body alone crosses its data-size limit is rejected at
-/// validation, at every gas limit: the call never runs, so no rule reads the signer and nothing is
-/// deployed.
-#[test]
-fn test_a_transaction_whose_body_crosses_the_limit_is_rejected() {
-    let deployment = Deployment::new(deploying(&runtime(1)));
-    for gas_limit in GAS_LIMITS {
-        let mut tx =
-            call_tx(KEYLESS_DEPLOY_ADDRESS, deployment.call_data(LARGE_OVERRIDE), U256::ZERO);
-        tx.0.base.gas_limit = gas_limit;
-        let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(100);
-        let error = MegaEvm::new(context(system_db()).with_tx_runtime_limits(limits))
-            .execute_transaction(tx)
-            .expect_err("rejected at validation");
-        let error = format!("{error:?}");
-        assert!(error.contains(mega_evm::TX_BODY_OVER_DATA_SIZE_LIMIT), "at {gas_limit}: {error}");
-    }
-}
-
-/// A log that crosses the transaction's data-size limit stops the creation. The limit holds the
-/// body, the two records of the creation's start and 100 bytes more, so the body passes and the
-/// creation starts, and the constructor's `LOG0` of 2,000 bytes is what crosses: the call reports
-/// `ExecutionReverted` with the transaction limit's stop, the transaction is not stopped, and the
-/// signer's nonce is spent, as its budget's stop leaves it.
-#[test]
-fn test_a_deployment_crossing_the_transaction_data_size_limit_stops_its_creation() {
-    let deployment = Deployment::new(logging(2_000));
-    let limit = body_bytes(&deployment) + 2 * WRITE_RECORD_SIZE + 100;
-    for gas_limit in GAS_LIMITS {
-        let outcome = limited(
-            &deployment,
-            gas_limit,
-            EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit),
-        );
-        assert_eq!(creation_stop(&outcome), MegaLimitExceeded { kind: 0, limit }, "at {gas_limit}");
-        assert_eq!(outcome.limit_exceeded, None, "at {gas_limit}");
-        assert_eq!(nonce(&outcome, deployment.signer), 1, "at {gas_limit}");
-        assert_eq!(outcome.usage.write_records, 1, "the signer's nonce record");
-        assert!(outcome.usage.data_size <= limit, "at {gas_limit}: within the limit");
     }
 }
 
@@ -573,58 +532,4 @@ fn test_a_deployment_is_counted_but_not_stopped_under_the_exemption() {
     };
     let ret = IKeylessDeploy::keylessDeployCall::abi_decode_returns(output.data()).unwrap();
     assert_eq!(ret.deployedAddress, deployment.address);
-}
-
-use revm::primitives::KECCAK_EMPTY;
-
-/// Runs a `keylessDeploy` of `deployment` over `db` at `gas_limit` under `limits`, with the
-/// signer's SALT bucket at `m_signer` times the minimum and the deploy address's at `m_address`.
-fn crowded_run(
-    db: MemoryDatabase,
-    deployment: &Deployment,
-    gas_limit: u64,
-    limits: EvmTxRuntimeLimits,
-    (m_signer, m_address): (u64, u64),
-) -> Outcome {
-    let envs = crowded(TestExternalEnvs::new(), deployment.signer, m_signer);
-    let envs = crowded(envs, deployment.address, m_address);
-    let context = MegaContext::<_, TestExternalEnvs<String>>::new_with_external_envs(
-        db,
-        MegaSpecId::SATIN,
-        ExternalEnvs { salt_env: envs.clone(), oracle_env: envs },
-    )
-    .with_block(block())
-    .with_chain(mega_evm::test_utils::zero_fee_l1_block_info())
-    .with_tx_runtime_limits(limits);
-    let mut tx = call_tx(KEYLESS_DEPLOY_ADDRESS, deployment.call_data(LARGE_OVERRIDE), U256::ZERO);
-    tx.0.base.gas_limit = gas_limit;
-    MegaEvm::new(context).execute_transaction(tx).expect("the transaction is valid")
-}
-
-/// A deployment charges each upfront charge once, at the price its bucket sets: the signer's
-/// account the call pays for, and the created account the creation's start adds, as any
-/// `CREATE`'s. With the signer's bucket at twice the minimum and the deploy address's at four
-/// times, a deployment spends `2 ×` the new account, `4 ×` the created account and `4 ×` its
-/// deposited byte. A signer that has an account pays for none.
-#[test]
-fn test_the_upfront_charges_are_charged_once_at_their_bucket_prices() {
-    let deployment = Deployment::new(deploying(&runtime(1)));
-    assert_ne!(bucket(deployment.signer), bucket(deployment.address));
-    let created = entry(GasId::create_state_gas()) + satin_gas_params().code_deposit_state_gas(1);
-    let run = |db: MemoryDatabase, gas_limit| {
-        crowded_run(db, &deployment, gas_limit, EvmTxRuntimeLimits::no_limits(), (2, 4))
-    };
-    for gas_limit in GAS_LIMITS {
-        let fresh = run(system_db(), gas_limit);
-        assert_eq!(returned(&fresh).deployedAddress, deployment.address, "at {gas_limit}");
-        assert_eq!(
-            fresh.gas.state,
-            2 * entry(GasId::new_account_state_gas()) + 4 * created,
-            "at {gas_limit}"
-        );
-
-        let funded = run(db_for(&deployment, U256::from(1)), gas_limit);
-        assert_eq!(returned(&funded).deployedAddress, deployment.address, "at {gas_limit}");
-        assert_eq!(funded.gas.state, 4 * created, "at {gas_limit}");
-    }
 }

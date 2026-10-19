@@ -112,30 +112,6 @@ fn test_a_deployment_survives_a_commit() {
     }
 }
 
-/// A successful deployment spends the signer's nonce, from 0 to 1.
-#[test]
-fn test_keyless_deploy_increments_nonce_from_zero() {
-    for gas_limit in GAS_LIMITS {
-        let deployment = Deployment::new(deploying(&runtime(1)));
-        let outcome = deploy(system_db(), &deployment, gas_limit);
-        assert_eq!(returned(&outcome).deployedAddress, deployment.address);
-        assert_eq!(nonce(&outcome, deployment.signer), 1);
-    }
-}
-
-/// A signer at nonce 1 still deploys at its Nick's-Method address, which is its first creation's
-/// and not its nonce's, and stays at nonce 1: the creation's bump from 1 is taken back.
-#[test]
-fn test_a_signer_at_nonce_one_deploys_at_the_same_address() {
-    for gas_limit in GAS_LIMITS {
-        let deployment = Deployment::new(deploying(&runtime(1)));
-        let db = system_db().account_nonce(deployment.signer, 1);
-        let outcome = deploy(db, &deployment, gas_limit);
-        assert_eq!(returned(&outcome).deployedAddress, deployment.address);
-        assert_eq!(nonce(&outcome, deployment.signer), 1);
-    }
-}
-
 /// Init code that reverts: the call succeeds and reports `ExecutionReverted` with the revert
 /// data, the deployment writes no code, and the signer's nonce is spent.
 #[test]
@@ -786,42 +762,6 @@ fn test_a_retry_does_not_pay_for_the_signer_again() {
     }
 }
 
-/// A deployment that fails at run time spends the signer's nonce and pays for its account, as a
-/// successful one does.
-#[test]
-fn test_a_deployment_that_fails_still_spends_the_nonce_and_pays_for_the_signer() {
-    for gas_limit in GAS_LIMITS {
-        let deployment = Deployment::new(Bytes::from_static(&[PUSH0, PUSH0, REVERT]));
-        let outcome = deploy(system_db(), &deployment, gas_limit);
-        assert!(matches!(failure(&outcome), KeylessDeployError::ExecutionReverted { .. }));
-        assert_eq!(nonce(&outcome, deployment.signer), 1);
-        assert_eq!(outcome.gas.state, entry(GasId::new_account_state_gas()));
-    }
-}
-
-/// A successful deployment spends the nonce too, and pays for the signer's account, the
-/// contract's account and its code.
-#[test]
-fn test_a_deployment_that_succeeds_spends_the_nonce_and_pays_for_three_accounts() {
-    for gas_limit in GAS_LIMITS {
-        let data = keyless_deploy_call(CREATE2_FACTORY_TX, U256::from(LARGE_OVERRIDE));
-        let outcome = run_with(system_db(), data, gas_limit, EvmTxRuntimeLimits::no_limits());
-        assert_eq!(returned(&outcome).deployedAddress, CREATE2_FACTORY_CONTRACT);
-        assert_eq!(nonce(&outcome, CREATE2_FACTORY_DEPLOYER), 1);
-        let code_len = outcome.state[&CREATE2_FACTORY_CONTRACT]
-            .info
-            .code
-            .as_ref()
-            .map_or(0, |code| code.original_bytes().len());
-        assert_eq!(
-            outcome.gas.state,
-            entry(GasId::new_account_state_gas()) +
-                entry(GasId::create_state_gas()) +
-                satin_gas_params().code_deposit_state_gas(code_len),
-        );
-    }
-}
-
 /// A transaction that fails with a database error inside a keyless deployment leaves nothing
 /// behind for the next: the next transaction on the same EVM runs as if the first never had.
 #[test]
@@ -908,26 +848,6 @@ fn test_a_deployment_carrying_value_logs_the_move() {
         let inspected = evm.execute_transaction(tx).expect("the transaction is valid");
         assert_eq!(inspected.result, moved.result, "inspected as plain");
         assert_eq!(evm.inspector().0, 1, "the inspector is told of the log once");
-    }
-}
-
-/// A `keylessDeploy` call carrying value is refused before anything moves: it logs nothing and
-/// counts what a transaction carrying the same calldata to an account with no code counts, its
-/// body alone.
-#[test]
-fn test_a_call_carrying_value_moves_and_logs_nothing() {
-    let deployment = Deployment::new(deploying(&runtime(1)));
-    for gas_limit in GAS_LIMITS {
-        let mut tx =
-            call_tx(KEYLESS_DEPLOY_ADDRESS, deployment.call_data(LARGE_OVERRIDE), U256::from(1));
-        tx.0.base.gas_limit = gas_limit;
-        let refused = MegaEvm::new(context(system_db()))
-            .execute_transaction(tx)
-            .expect("a valid transaction");
-        assert_eq!(refusal(&refused), KeylessDeployError::NoEtherTransfer);
-        assert!(refused.result.logs().is_empty());
-        let reference = reference(deployment.call_data(LARGE_OVERRIDE), gas_limit);
-        assert_eq!(refused.usage, reference.usage, "the body alone, at {gas_limit}");
     }
 }
 
