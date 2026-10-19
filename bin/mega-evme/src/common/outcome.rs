@@ -60,7 +60,8 @@ pub struct SatinReport {
     pub data_size: u64,
     /// Account and storage write records the transaction kept: its KV count.
     pub write_records: u64,
-    /// The transaction-level limit that stopped the transaction, if one did.
+    /// The limit that stopped the transaction, if one did: the crossing that produced the result
+    /// of its own frame, a transaction-level limit or that frame's own data-size budget.
     pub limit_exceeded: Option<LimitStop>,
     /// The protocol limits the run was held to, in the shape `--override.limits` takes them;
     /// present only when that flag replaced the schedule's, so the record of a counterfactual
@@ -69,7 +70,7 @@ pub struct SatinReport {
     pub limits_override: Option<Box<ProtocolLimits>>,
 }
 
-/// A transaction-level limit that stopped a Satin transaction.
+/// A limit that stopped a Satin transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct LimitStop {
     /// The dimension: `data_size` or `compute_gas`.

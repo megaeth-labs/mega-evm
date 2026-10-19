@@ -434,7 +434,8 @@ fn test_each_site_counts_its_transfer_log() {
 /// A frame budget holds the move at exactly its bytes, and one byte short of them stops the frame
 /// that moves the value before anything moves, frame-locally: the caller resumes — the relay and
 /// the actor return the stop as their output — and nothing is latched. The transaction's own
-/// frame has no caller, so its stop reverts the transaction, still without a latch.
+/// frame has no caller, so its stop reverts the transaction, still without a latch, and the
+/// outcome names it, the crossing that produced that frame's result.
 ///
 /// A `LOG3` of one word where the transfer log is, after the same bytes of records, stops the
 /// same frame at the same budget with the same revert.
@@ -457,7 +458,17 @@ fn test_each_site_stops_one_byte_short_of_its_frame_budget() {
                 assert_reservoir_paid(&case, gas_limit, &fits);
 
                 let (over, body) = run(cap - 1);
-                assert_eq!(over.limit_exceeded, None, "{case}: a frame budget latches nothing");
+                let own_frames = (site.depth() == 0).then_some(LimitCheck::ExceedsLimit {
+                    kind: LimitKind::DataSize,
+                    limit: site.bytes() - 1,
+                    used: site.bytes(),
+                    frame_local: true,
+                });
+                assert_eq!(
+                    over.limit_exceeded, own_frames,
+                    "{case}: a frame budget latches nothing; the outcome names the transaction's \
+                     own frame's"
+                );
                 assert_eq!(
                     over.result.is_success(),
                     site.depth() > 0,

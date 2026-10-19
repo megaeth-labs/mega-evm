@@ -45,9 +45,11 @@ pub struct MegaTransactionOutcome {
     /// The data-size bytes and write records the transaction kept. The KV count a node reports
     /// is [`LimitUsage::write_records`].
     pub usage: LimitUsage,
-    /// The transaction-level limit that stopped the transaction, if one did. The result is then a
-    /// revert whose output is its [`MegaLimitExceeded`](crate::MegaLimitExceeded); this, not the
-    /// output, tells a limit stop from a contract reverting with the same bytes.
+    /// The crossing that produced the result of the transaction's own frame, if one did: a
+    /// transaction-level limit, or that frame's own data-size budget. The result is then a revert
+    /// whose output is its [`MegaLimitExceeded`](crate::MegaLimitExceeded); this, not the output,
+    /// tells a limit stop from a contract reverting with the same bytes, or re-raising those a
+    /// frame below it was stopped with.
     pub limit_exceeded: Option<LimitCheck>,
     /// The reads of the Oracle's storage the transaction made through the oracle service, in
     /// order, each with the service's answer. The answers are in no database: a node building a
@@ -57,8 +59,8 @@ pub struct MegaTransactionOutcome {
 }
 
 impl MegaTransactionOutcome {
-    /// The transaction-level limit that stopped the transaction, if one did, read off the result
-    /// and [`limit_exceeded`](Self::limit_exceeded) together ([`LimitStop::from_result`]).
+    /// The limit that stopped the transaction, if one did, read off the result and
+    /// [`limit_exceeded`](Self::limit_exceeded) together ([`LimitStop::from_result`]).
     pub fn limit_stop(&self) -> Option<LimitStop> {
         LimitStop::from_result(&self.result, self.limit_exceeded.as_ref())
     }

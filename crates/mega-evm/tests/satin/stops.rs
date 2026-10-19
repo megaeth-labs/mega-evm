@@ -1313,8 +1313,9 @@ fn test_detention_plus_intrinsic_data_size_overflow() {
 }
 
 /// The transaction's own frame crossing its frame budget — a frame cap of a hundred records' bytes,
-/// crossed by the 101st write — reverts it alone: a revert, not a halt, and no latch. The body is
-/// all the transaction keeps.
+/// crossed by the 101st write — reverts it alone: a revert, not a halt, and no latch. The outcome
+/// names the frame budget, whose crossing produced the frame's result. The body is all the
+/// transaction keeps.
 #[test]
 fn test_data_size_top_level_exceed_is_frame_local_revert() {
     let cap = 100 * WRITE_RECORD_SIZE;
@@ -1326,7 +1327,7 @@ fn test_data_size_top_level_exceed_is_frame_local_revert() {
     let stop = LimitCheck::ExceedsLimit {
         kind: LimitKind::DataSize,
         limit: cap,
-        used: 0,
+        used: 101 * WRITE_RECORD_SIZE,
         frame_local: true,
     };
     assert!(
@@ -1335,7 +1336,7 @@ fn test_data_size_top_level_exceed_is_frame_local_revert() {
         "{:?}",
         outcome.result
     );
-    assert_eq!(outcome.limit_exceeded, None, "a frame budget latches nothing");
+    assert_eq!(outcome.limit_exceeded, Some(stop), "the frame budget, which latches nothing");
     assert_eq!(outcome.usage, LimitUsage { data_size: TX_BODY_SIZE, write_records: 0 });
 }
 

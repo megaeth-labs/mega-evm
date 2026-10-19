@@ -795,7 +795,7 @@ fn before_frame_run<DB: Database, ExtEnvs: ExternalEnvTypes>(
     let stop = ctx.additional_limit.stop_before_run()?;
     Some(InterpreterAction::new_return(
         InstructionResult::Revert,
-        stop.revert_data(),
+        ctx.additional_limit.note_frame_stop(&stop),
         frame.interpreter.gas,
     ))
 }
@@ -986,14 +986,7 @@ fn stop_at_the_compute_limit<DB: Database, ExtEnvs: ExternalEnvTypes>(
 ) {
     let stop = ctx.additional_limit.latch(LimitKind::ComputeGas, stop.limit, stop.used);
     result.result = InstructionResult::Revert;
-    result.output = stop.revert_data();
-}
-
-/// The result of a frame a limit stopped before it ran: a revert with the stop's
-/// [`MegaLimitExceeded`](crate::MegaLimitExceeded) output, as a
-/// [`synthetic_frame_result`] that settles like a frame revm ran.
-fn stopped_frame_result(frame_init: &FrameInit, check: &LimitCheck) -> FrameResult {
-    synthetic_frame_result(&frame_init.frame_input, InstructionResult::Revert, check.revert_data())
+    result.output = ctx.additional_limit.note_frame_stop(&stop);
 }
 
 impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
@@ -1095,7 +1088,9 @@ where
     output
 }
 
-/// Answers a frame a limit stops before it is built with the stop.
+/// Answers a frame a limit stops before it is built with the stop: a revert with the stop's
+/// [`MegaLimitExceeded`](crate::MegaLimitExceeded) output, as a [`synthetic_frame_result`] that
+/// settles like a frame revm ran.
 ///
 /// A creation still bumps its creator's nonce, as one that starts and reverts does: a nested
 /// creation's caller sees an ordinary failed creation, and a creation transaction whose own frame
@@ -1108,7 +1103,8 @@ fn stop_before_building<DB: Database, ExtEnvs: ExternalEnvTypes>(
     if let FrameInput::Create(inputs) = &frame_init.frame_input {
         let _ = ctx.journal_mut().load_account_mut(inputs.caller())?.data.bump_nonce();
     }
-    Ok(stopped_frame_result(frame_init, check))
+    let output = ctx.additional_limit.note_frame_stop(check);
+    Ok(synthetic_frame_result(&frame_init.frame_input, InstructionResult::Revert, output))
 }
 
 /// The depth guard: a frame past the call-stack limit, of any call scheme or a creation, answered

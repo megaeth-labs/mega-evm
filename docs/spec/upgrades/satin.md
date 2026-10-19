@@ -999,7 +999,7 @@ A node, a stateless validator and a replay tool must agree on everything below, 
   Block execution reads the L1 block contract at the block's first non-deposit transaction other than a Mega System Transaction, after the block's L1 attributes deposit wrote it, unless the node handed it the information for this block beforehand, which it then prices with, the footprint gas scalar aside; a node that hands it over must hand over what that deposit writes, so that the block's transactions are priced as [Base Layer](#1-base-layer-optimism-karst-ethereum-osaka) requires.
 - **Reporting a limit stop.**
   A stop is a revert whose output is `MegaLimitExceeded(kind, limit)`, and a contract can revert with the same bytes, as can a caller that re-raises what a frame budget returned.
-  Execution reports whether a transaction-level limit stopped the transaction; a node must read that report, and must not infer a stop from the output alone.
+  Execution reports the crossing that produced the result of the transaction's own frame — a transaction-level limit, or that frame's own data-size budget — and none when that result is not the stop's revert; a node must read that report, and must not infer a stop from the output alone.
 - **The chain configuration.**
   A genesis file's `config` object carries Satin as five flat keys beside the other forks': `satinTime`, the activation timestamp, and one key per parameter of the `SequencerRegistry`'s bootstrap, the `satin` prefix before the parameter's own name.
 

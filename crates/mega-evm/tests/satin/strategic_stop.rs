@@ -84,9 +84,9 @@ fn run(
     limits: EvmTxRuntimeLimits,
     tx: MegaTransaction,
 ) -> (MegaTransactionOutcome, Option<LimitCheck>) {
-    let outcome =
-        MegaEvm::new(context(db).with_tx_runtime_limits(limits)).execute_transaction(tx).unwrap();
-    let latched = outcome.limit_exceeded;
+    let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits));
+    let outcome = evm.execute_transaction(tx).unwrap();
+    let latched = evm.ctx().additional_limit().latched().copied();
     (outcome, latched)
 }
 
@@ -413,7 +413,9 @@ fn test_frame_budget_reverts_the_frame_without_a_latch() {
     assert!(evm.inspector().steps.contains(&SSTORE));
 }
 
-/// A frame budget crossed by the outermost frame reverts the transaction, still without a latch.
+/// A frame budget crossed by the outermost frame reverts the transaction, still without a latch,
+/// and the outcome names it: it produced the result of the transaction's own frame. The third
+/// write's record crosses the 100 bytes.
 #[test]
 fn test_frame_budget_of_the_outermost_frame_reverts_the_transaction() {
     let db = MemoryDatabase::default().account_code(A, writer());
@@ -421,6 +423,15 @@ fn test_frame_budget_of_the_outermost_frame_reverts_the_transaction() {
     let (result, latched) = run(db, limits, call(CALLER, A, U256::ZERO, GAS_LIMIT));
     assert_stopped(&result.result, LimitKind::DataSize, 100);
     assert_eq!(latched, None);
+    assert_eq!(
+        result.limit_exceeded,
+        Some(LimitCheck::ExceedsLimit {
+            kind: LimitKind::DataSize,
+            limit: 100,
+            used: 3 * mega_evm::WRITE_RECORD_SIZE,
+            frame_local: true,
+        })
+    );
 }
 
 /// A later latch does not replace the first.

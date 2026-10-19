@@ -47,7 +47,7 @@ expression: "serde_json::json!({\n    \"summary\":\n    {\n        \"cases\": ca
     "limit: tx data size, nonce 0 @ 50000000 | keccak256=0xe5a85d4a5f38d6569e457dde46f70db7838931066734a95d4ce985e0af1be6fe",
     "limit: compute, nonce 0 @ 50000000 | keccak256=0xd91672a0f776b4b01b4c54a205975842a12a0d08f84b1f2cc59ff34d00e2dcd1",
     "limit: frame data size, nonce 0 @ 50000000 | keccak256=0x9e2e2b613e18eabd9a69df5ddd3204e0f8d663621abcedef4e8367f0db09baa9",
-    "limit: the call's budget, nonce 0 @ 50000000 | keccak256=0x0b9b31acdbcea6a806758f08e66adb2b7b778ab768f5a4bb354372fc54880906",
+    "limit: the call's budget, nonce 0 @ 50000000 | keccak256=0x6c591038e8021803ab4a3f338e45878adf3917f1345899376d715e746d8d2f64",
     "limit: the creation's start, nonce 0 @ 50000000 | keccak256=0x36d1e1a02051c45ed2d2bc37f4ccf3e4412b6364719379ca04d5d8f7b9998e75",
     "limit: tx data size, nonce 1 @ 50000000 | keccak256=0x6b8eebabd8d3fcbd5b0818ae5b46baac7003acd121fcf3fdbcd099e427f962e3",
     "limit: compute, nonce 1 @ 50000000 | keccak256=0xd4610d96c0de527b350b7f42ac8a72c35739d446fc9b4cc5c153e9fdad9db98c",
@@ -112,7 +112,7 @@ expression: "serde_json::json!({\n    \"summary\":\n    {\n        \"cases\": ca
     "limit: tx data size, nonce 0 @ 400000000 | keccak256=0xd08485624ea66a59035df2ec07d48b0f1f8e746d47bc28222204228d817a45c8",
     "limit: compute, nonce 0 @ 400000000 | keccak256=0x5e279e739f45646a28f43cdc5de6f3a94e2b001b02c9d57efa1e28c93c725ee0",
     "limit: frame data size, nonce 0 @ 400000000 | keccak256=0xfe881a80d9f1ea7971209d7555df06b46c5657581f03b17ba771a2c62a2c0875",
-    "limit: the call's budget, nonce 0 @ 400000000 | keccak256=0x64add35b8681692ee85350fe74c0b39f1f489ed818d4cc035ba17ab135a99d41",
+    "limit: the call's budget, nonce 0 @ 400000000 | keccak256=0x1b9c5fa7ce5f8c7720eb855681d2ce4c242161487366162aa11f92a0fe795f0f",
     "limit: the creation's start, nonce 0 @ 400000000 | keccak256=0x0ea4b2447d26ed38b67a1e79426749eab40fac12eb1ce1ddf7efa7c3ba149771",
     "limit: tx data size, nonce 1 @ 400000000 | keccak256=0xd890d497c20becb59f0448eb4391a0de3c89409eb070fcfbbac7be8246079a61",
     "limit: compute, nonce 1 @ 400000000 | keccak256=0x3bc6806aec67f41243a06e52022e09f6e722fe1aa69e543200f3a799f1044321",
@@ -145,7 +145,7 @@ expression: "serde_json::json!({\n    \"summary\":\n    {\n        \"cases\": ca
     "rule: init code over the limit @ 2000000000 | keccak256=0x8e0e07266b270414f4eb958872388f1a26baf80ff2262daba5da7553b7435e8e"
   ],
   "summary": {
-    "bytes": 2373404,
+    "bytes": 2373696,
     "cases": 139,
     "lines": 11444,
     "runs": 556

@@ -34,7 +34,8 @@ pub struct OutcomeView {
     pub result_gas: ResultGasView,
     /// The data-size bytes and write records the transaction kept.
     pub usage: UsageView,
-    /// The transaction-level limit that stopped the transaction, if one did.
+    /// The limit that stopped the transaction, if one did: the crossing that produced the result
+    /// of its own frame, a transaction-level limit or that frame's own data-size budget.
     pub limit_stop: Option<LimitStopView>,
     /// The reads of the Oracle's storage through the oracle service, in order.
     pub oracle_reads: Vec<OracleReadView>,
@@ -233,7 +234,7 @@ impl UsageView {
     }
 }
 
-/// A transaction-level limit that stopped the transaction.
+/// A limit that stopped the transaction.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct LimitStopView {
     /// The dimension crossed, as [`LimitKind`](crate::LimitKind)'s `Debug` prints it.

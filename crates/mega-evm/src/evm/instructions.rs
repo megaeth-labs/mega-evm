@@ -79,13 +79,13 @@ use revm::{
         FrameInput, Gas, Instruction, InstructionContext, InstructionExecResult, InstructionResult,
         Interpreter, InterpreterAction,
     },
-    primitives::hardfork::SpecId,
+    primitives::{hardfork::SpecId, Bytes},
     Database,
 };
 
 use crate::{
     history_gas, limit::HistoryBytes, volatile_data_access_disabled_revert_data,
-    write_record_history_gas, ExternalEnvTypes, LimitCheck, MegaContext, VolatileDataAccess,
+    write_record_history_gas, ExternalEnvTypes, MegaContext, VolatileDataAccess,
 };
 
 use super::{caller_refuses_start, satin_gas_table, MegaInstructions};
@@ -177,7 +177,7 @@ fn commit_after<const FROM_ALLOWANCE: bool, DB: Database, ExtEnvs: ExternalEnvTy
     }
     let (check, history) = host.additional_limit.commit_staged_record();
     if check.exceeded_limit() {
-        return Err(stop_frame(interpreter, &check));
+        return Err(stop_frame(interpreter, host.additional_limit.note_frame_stop(&check)));
     }
     if host.prices_history() {
         let settled = settle_history::<FROM_ALLOWANCE, _, _>(interpreter, host, history);
@@ -225,25 +225,18 @@ fn settle_history<const FROM_ALLOWANCE: bool, DB: Database, ExtEnvs: ExternalEnv
     }
 }
 
-/// Stops the running frame with the revert a crossed limit asks for: its output is
-/// [`MegaLimitExceeded`](crate::MegaLimitExceeded) and its gas is the frame's, so the caller gets
-/// the unspent part back.
+/// Stops the running frame with the revert a crossed limit asks for: its output is the stop's
+/// [`MegaLimitExceeded`](crate::MegaLimitExceeded), `output`, and its gas is the frame's, so the
+/// caller gets the unspent part back.
 #[cold]
 #[inline(never)]
-fn stop_frame(
-    interpreter: &mut Interpreter<EthInterpreter>,
-    check: &LimitCheck,
-) -> InstructionResult {
+fn stop_frame(interpreter: &mut Interpreter<EthInterpreter>, output: Bytes) -> InstructionResult {
     if interpreter.bytecode.action().is_some() {
         // A `SELFDESTRUCT` or a return the opcode already set gives way to the stop.
         let _ = interpreter.take_next_action();
     }
     let result = InstructionResult::Revert;
-    interpreter.bytecode.set_action(InterpreterAction::new_return(
-        result,
-        check.revert_data(),
-        interpreter.gas,
-    ));
+    interpreter.bytecode.set_action(InterpreterAction::new_return(result, output, interpreter.gas));
     result
 }
 

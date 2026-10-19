@@ -308,7 +308,7 @@ where
             result_and_state,
             gas,
             usage: layer.usage(),
-            limit_exceeded: layer.latched().copied(),
+            limit_exceeded: layer.limit_exceeded().copied(),
             oracle_reads: self.inner.ctx.oracle_reads().reads().to_vec(),
         })
     }
