@@ -4,15 +4,15 @@
 //!
 //! - [`ProtocolLimits`] are the limits every node of a chain holds its blocks and transactions to,
 //!   because a different value is a different result: the per-transaction limits the EVM enforces
-//!   and the block's two budgets. They are the Satin fork's parameters, read from the schedule at
-//!   the block's timestamp, and their default is [`ProtocolLimits::DEFAULT`]: data size capped at
-//!   [`TX_DATA_LIMIT`](crate::constants::TX_DATA_LIMIT) per transaction and
+//!   and the block's data-size budget. They are the Satin fork's parameters, read from the schedule
+//!   at the block's timestamp, and their default is [`ProtocolLimits::DEFAULT`]: data size capped
+//!   at [`TX_DATA_LIMIT`](crate::constants::TX_DATA_LIMIT) per transaction and
 //!   [`BLOCK_DATA_LIMIT`](crate::constants::BLOCK_DATA_LIMIT) per block, gas detention's caps at
 //!   the spec's, and every other limit unlimited.
 //! - [`BlockLimits`] is the building policy a node passes in the block execution context: the
 //!   limits only a builder applies — a transaction's declared gas, the encoded sizes and the
-//!   data-availability sizes — and caps a builder may put on the block's budgets below the
-//!   protocol's. It never loosens a protocol limit ([`BlockLimits::within`]), and a validator
+//!   data-availability sizes — and a cap a builder may put on the block's data-size budget below
+//!   the protocol's. It never loosens a protocol limit ([`BlockLimits::within`]), and a validator
 //!   leaves it at its default, which restricts nothing.
 //!
 //! [`BlockLimiter`] is the state one block keeps while it executes, held to both.
@@ -23,22 +23,22 @@
 //! its own gas limit, encoded size and data-availability size, and what each of those would add
 //! to the block.
 //!
-//! A limit only known after execution — the execution ledger and the data-size bytes a transaction
-//! kept — is accumulated when the transaction commits. The transaction that crosses such a limit
-//! is therefore still packed, and the ones after it are refused; this is what keeps a block full
-//! rather than dropping the work already done. A block whose counter has reached its limit refuses
-//! every later transaction before it starts — a deposit excepted — so the overshoot is bounded by
-//! one transaction per dimension, besides what deposits add.
+//! The one limit only known after execution — the data-size bytes a transaction kept — is
+//! accumulated when the transaction commits. The transaction that crosses it is therefore still
+//! packed, and the ones after it are refused; this is what keeps a block full rather than dropping
+//! the work already done. A block whose counter has reached its limit refuses every later
+//! transaction before it starts — a deposit excepted — so the overshoot is bounded by one
+//! transaction, besides what deposits add.
 //!
 //! # Deposits
 //!
 //! A deposit is an L1 message the chain cannot censor: the block derived from L1 must include it,
 //! and the builder does not choose it. So no limit only a builder applies refuses a deposit — its
 //! declared gas, its encoded size and its data-availability size, and what those add to the block
-//! — and a deposit does not count towards the block's data-availability size. The execution-gas
-//! and data-size limits are packing budgets for the transactions the builder chooses, so neither
-//! refuses a deposit either. A deposit still counts towards both, and towards the block's encoded
-//! size, so the transactions after it find the room it used. The one limit that holds a deposit is
+//! — and a deposit does not count towards the block's data-availability size. The data-size limit
+//! is a packing budget for the transactions the builder chooses, so it does not refuse a deposit
+//! either. A deposit still counts towards it, and towards the block's encoded size, so the
+//! transactions after it find the room it used. The one limit that holds a deposit is
 //! the block's gas limit, which is the header's.
 //!
 //! The per-transaction limits the block installs on the EVM are not block limits: they hold a
@@ -47,9 +47,9 @@
 //!
 //! # Which dimensions are enforced
 //!
-//! Of the three gas ledgers the block counts ([`BlockGasCounters`]), execution has a block limit.
-//! State and history have none: state gas prices the state a block adds, so the block's gas limit
-//! bounds it; the history bytes beside the history ledger are reported, not limited. The
+//! The three gas ledgers the block counts ([`BlockGasCounters`]) have no block limit beside the
+//! block's gas limit, the header's: state gas prices the state a block adds, so the block's gas
+//! limit bounds it, and the history bytes beside the history ledger are reported, not limited. The
 //! write-record count, which is the block's KV count, is reported and has no limit: every record
 //! weighs forty bytes of data size, so a block held to
 //! [`BLOCK_DATA_LIMIT`](crate::constants::BLOCK_DATA_LIMIT) keeps at most 327,680 records.
@@ -81,8 +81,8 @@ use crate::{
 ///   transaction that crosses one is stopped, or a frame reverted, and that is the result its
 ///   receipt records. There is no tighter setting a builder could run a transaction under and still
 ///   agree with a validator; a builder that wants to avoid such a transaction leaves it out.
-/// - The two block budgets hold what a block's transactions spend and keep together. A validator
-///   refuses a block that packs a transaction after the block reached one; a builder may pack
+/// - The block's data-size budget holds what a block's transactions keep together. A validator
+///   refuses a block that packs a transaction after the block reached it; a builder may pack
 ///   tighter ([`BlockLimits`]), never looser.
 ///
 /// [`Default`] is [`DEFAULT`](Self::DEFAULT): the values of [`crate::constants`], provisional
@@ -93,9 +93,6 @@ pub struct ProtocolLimits {
     /// The limits every transaction runs under, which the block executor installs on the EVM:
     /// data size, per transaction and per frame, and gas detention's two caps.
     pub tx_runtime_limits: EvmTxRuntimeLimits,
-    /// The most execution gas a block's transactions may spend together. The transaction that
-    /// reaches it is packed; after it, only a deposit is.
-    pub block_execution_gas_limit: u64,
     /// The most data-size bytes a block's transactions may keep together. The transaction that
     /// reaches it is packed; after it, only a deposit is.
     pub block_txs_data_limit: u64,
@@ -122,7 +119,6 @@ impl ProtocolLimits {
             .with_tx_data_size_limit(crate::constants::TX_DATA_LIMIT)
             .with_block_env_access_compute_gas_limit(crate::constants::BLOCK_ENV_ACCESS_COMPUTE_GAS)
             .with_oracle_access_compute_gas_limit(crate::constants::ORACLE_ACCESS_COMPUTE_GAS),
-        block_execution_gas_limit: u64::MAX,
         block_txs_data_limit: crate::constants::BLOCK_DATA_LIMIT,
     };
 
@@ -133,11 +129,7 @@ impl ProtocolLimits {
     /// chain configuration carries it, and the block executor refuses a block under it. A test
     /// that runs blocks without holding them to a limit uses [`loosest`](Self::loosest).
     pub const fn no_limits() -> Self {
-        Self {
-            tx_runtime_limits: EvmTxRuntimeLimits::no_limits(),
-            block_execution_gas_limit: u64::MAX,
-            block_txs_data_limit: u64::MAX,
-        }
+        Self { tx_runtime_limits: EvmTxRuntimeLimits::no_limits(), block_txs_data_limit: u64::MAX }
     }
 
     /// The loosest limits a chain may carry: every limit unlimited, and gas detention's caps at
@@ -159,12 +151,6 @@ impl ProtocolLimits {
     /// Sets the limits every transaction runs under.
     pub const fn with_tx_runtime_limits(mut self, limits: EvmTxRuntimeLimits) -> Self {
         self.tx_runtime_limits = limits;
-        self
-    }
-
-    /// Sets the block's execution-gas limit.
-    pub const fn with_block_execution_gas_limit(mut self, limit: u64) -> Self {
-        self.block_execution_gas_limit = limit;
         self
     }
 
@@ -209,7 +195,6 @@ impl HardforkParams for ProtocolLimits {
             ("tx_runtime_limits.frame_data_size_limit", frame_data_size_limit),
             detention_caps[0],
             detention_caps[1],
-            ("block_execution_gas_limit", self.block_execution_gas_limit),
             ("block_txs_data_limit", self.block_txs_data_limit),
         ];
 
@@ -253,8 +238,8 @@ impl HardforkParams for ProtocolLimits {
 ///   data-availability size limits are the builder's alone: the protocol holds a transaction's
 ///   declared gas to the block's gas limit, and what a block writes to its data-size budget, which
 ///   counts calldata.
-/// - The two block budgets are the builder's caps on the protocol's: the block executor holds a
-///   block to the smaller of the two.
+/// - [`block_txs_data_limit`](Self::block_txs_data_limit) is the builder's cap on the protocol's
+///   data-size budget: the block executor holds a block to the smaller of the two.
 /// - [`block_gas_limit`](Self::block_gas_limit) is the header's: the block executor always sets it
 ///   from the block environment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -275,13 +260,6 @@ pub struct BlockLimits {
     /// The most data-availability bytes the block's transactions may take together. Deposits are
     /// exempt and do not count towards it.
     pub block_da_size_limit: u64,
-    /// The most execution gas the block's transactions may spend together. The transaction that
-    /// reaches it is packed; after it, only a deposit is, which it never refuses and which counts
-    /// towards it.
-    ///
-    /// A builder's cap: the block is held to the smaller of this and
-    /// [`ProtocolLimits::block_execution_gas_limit`].
-    pub block_execution_gas_limit: u64,
     /// The most data-size bytes the block's transactions may keep together. The transaction that
     /// reaches it is packed; after it, only a deposit is, which it never refuses and which counts
     /// towards it.
@@ -309,22 +287,18 @@ impl BlockLimits {
             block_txs_encode_size_limit: u64::MAX,
             tx_da_size_limit: u64::MAX,
             block_da_size_limit: u64::MAX,
-            block_execution_gas_limit: u64::MAX,
             block_txs_data_limit: u64::MAX,
         }
     }
 
-    /// These limits held within `protocol`: each of the block's two budgets is the smaller of
-    /// this policy's cap and the protocol's limit, so a builder's setting can tighten a budget and
-    /// never loosen one. The limits only a builder applies are kept as they are.
+    /// These limits held within `protocol`: the block's data-size budget is the smaller of this
+    /// policy's cap and the protocol's limit, so a builder's setting can tighten the budget and
+    /// never loosen it. The limits only a builder applies are kept as they are.
     ///
     /// A cap above the protocol's limit gives way to it without a word; a node that wants to
     /// refuse or report such a setting compares the two itself.
     pub fn within(self, protocol: &ProtocolLimits) -> Self {
         Self {
-            block_execution_gas_limit: self
-                .block_execution_gas_limit
-                .min(protocol.block_execution_gas_limit),
             block_txs_data_limit: self.block_txs_data_limit.min(protocol.block_txs_data_limit),
             ..self
         }
@@ -366,12 +340,6 @@ impl BlockLimits {
     /// Sets the block's data-availability size limit.
     pub const fn with_block_da_size_limit(mut self, limit: u64) -> Self {
         self.block_da_size_limit = limit;
-        self
-    }
-
-    /// Caps the block's execution gas.
-    pub const fn with_block_execution_gas_limit(mut self, limit: u64) -> Self {
-        self.block_execution_gas_limit = limit;
         self
     }
 
@@ -458,10 +426,10 @@ impl BlockLimiter {
     /// Whether `tx` may execute in this block.
     ///
     /// Checks the transaction against its own limits, and against what the block has left; a
-    /// deposit is held to the block's gas limit alone — to no limit only a builder applies, and to
-    /// neither the execution-gas nor the data-size limit. It reads the counters and changes
-    /// nothing; [`post_execution_update`](Self::post_execution_update) advances the counters once
-    /// the transaction commits.
+    /// deposit is held to the block's gas limit alone — to no limit only a builder applies, and not
+    /// to the data-size limit. It reads the counters and changes nothing;
+    /// [`post_execution_update`](Self::post_execution_update) advances the counters once the
+    /// transaction commits.
     ///
     /// # Errors
     ///
@@ -551,16 +519,6 @@ impl BlockLimiter {
             ));
         }
 
-        if self.gas.execution >= self.limits.block_execution_gas_limit {
-            return Err(invalid_tx(
-                tx_hash,
-                MegaBlockLimitExceededError::ExecutionGasLimit {
-                    block_used: self.gas.execution,
-                    limit: self.limits.block_execution_gas_limit,
-                },
-            ));
-        }
-
         if self.usage.data_size >= self.limits.block_txs_data_limit {
             return Err(invalid_tx(
                 tx_hash,
@@ -571,8 +529,8 @@ impl BlockLimiter {
             ));
         }
 
-        // `self.gas.state`, `self.gas.history` and `self.usage.write_records` are accumulated and
-        // not checked: none of them has a block limit.
+        // `self.gas` and `self.usage.write_records` are accumulated and not checked: none of them
+        // has a block limit.
 
         Ok(())
     }
@@ -628,7 +586,6 @@ mod tests {
                     block_env_access_compute_gas_limit: BLOCK_ENV_ACCESS_COMPUTE_GAS,
                     oracle_access_compute_gas_limit: ORACLE_ACCESS_COMPUTE_GAS,
                 },
-                block_execution_gas_limit: u64::MAX,
                 block_txs_data_limit: BLOCK_DATA_LIMIT,
             }
         );
@@ -649,13 +606,12 @@ mod tests {
             .with_tx_runtime_limits(
                 ProtocolLimits::DEFAULT.tx_runtime_limits.with_frame_data_size_limit(1),
             )
-            .with_block_execution_gas_limit(5)
             .with_block_txs_data_limit(7);
 
         let json = serde_json::to_string(&limits).expect("serializes");
         assert_eq!(
             json,
-            r#"{"txRuntimeLimits":{"txDataSizeLimit":13107200,"frameDataSizeLimit":1,"blockEnvAccessComputeGasLimit":20000000,"oracleAccessComputeGasLimit":20000000},"blockExecutionGasLimit":5,"blockTxsDataLimit":7}"#
+            r#"{"txRuntimeLimits":{"txDataSizeLimit":13107200,"frameDataSizeLimit":1,"blockEnvAccessComputeGasLimit":20000000,"oracleAccessComputeGasLimit":20000000},"blockTxsDataLimit":7}"#
         );
         assert_eq!(serde_json::from_str::<ProtocolLimits>(&json).expect("deserializes"), limits);
 
@@ -682,7 +638,7 @@ mod tests {
             base.with_tx_runtime_limits(f(base.tx_runtime_limits, value))
         };
         type Set = fn(ProtocolLimits, u64) -> ProtocolLimits;
-        let fields: [(&str, Set); 6] = [
+        let fields: [(&str, Set); 5] = [
             ("tx_runtime_limits.tx_data_size_limit", |l, v| {
                 l.with_tx_runtime_limits(l.tx_runtime_limits.with_tx_data_size_limit(v))
             }),
@@ -699,7 +655,6 @@ mod tests {
                     l.tx_runtime_limits.with_oracle_access_compute_gas_limit(v),
                 )
             }),
-            ("block_execution_gas_limit", ProtocolLimits::with_block_execution_gas_limit),
             ("block_txs_data_limit", ProtocolLimits::with_block_txs_data_limit),
         ];
 
@@ -798,7 +753,6 @@ mod tests {
             block_txs_encode_size_limit,
             tx_da_size_limit,
             block_da_size_limit,
-            block_execution_gas_limit,
             block_txs_data_limit,
         } = BlockLimits::default();
         for limit in [
@@ -808,7 +762,6 @@ mod tests {
             block_txs_encode_size_limit,
             tx_da_size_limit,
             block_da_size_limit,
-            block_execution_gas_limit,
             block_txs_data_limit,
         ] {
             assert_eq!(limit, u64::MAX);
@@ -820,16 +773,14 @@ mod tests {
         );
     }
 
-    /// A builder's cap on a block budget holds the block only where it is below the protocol's
-    /// limit: it tightens, and never loosens. The limits only a builder applies pass through.
+    /// A builder's cap on the block's data-size budget holds the block only where it is below the
+    /// protocol's limit: it tightens, and never loosens. The limits only a builder applies pass
+    /// through.
     #[test]
     fn test_a_building_policy_tightens_a_budget_and_never_loosens_it() {
-        let protocol = ProtocolLimits::DEFAULT
-            .with_block_execution_gas_limit(100)
-            .with_block_txs_data_limit(300);
+        let protocol = ProtocolLimits::DEFAULT.with_block_txs_data_limit(300);
 
         let tighter = BlockLimits::no_limits()
-            .with_block_execution_gas_limit(10)
             .with_block_txs_data_limit(30)
             .with_tx_gas_limit(1)
             .with_tx_encode_size_limit(2)
@@ -839,15 +790,9 @@ mod tests {
             .with_block_gas_limit(6);
         assert_eq!(tighter.within(&protocol), tighter, "every cap is below the protocol's");
 
-        let looser = BlockLimits::no_limits()
-            .with_block_execution_gas_limit(1_000)
-            .with_block_txs_data_limit(3_000);
+        let looser = BlockLimits::no_limits().with_block_txs_data_limit(3_000);
         let held = looser.within(&protocol);
-        assert_eq!(
-            (held.block_execution_gas_limit, held.block_txs_data_limit),
-            (100, 300),
-            "a cap above the protocol's gives way to it"
-        );
+        assert_eq!(held.block_txs_data_limit, 300, "a cap above the protocol's gives way to it");
         assert_eq!(
             BlockLimits { tx_gas_limit: 7, ..held },
             BlockLimits { tx_gas_limit: 7, ..BlockLimits::no_limits().within(&protocol) },
@@ -955,55 +900,6 @@ mod tests {
         assert_eq!(limiter.block_da_size_used, 100);
         assert_eq!(limiter.block_da_footprint_used, 200);
         assert_eq!(limiter.block_tx_size_used, 7, "a deposit still counts as a transaction body");
-    }
-
-    /// The execution ledger is the one gas dimension with a block limit: the transaction that
-    /// crosses it is already packed, and the next one is refused.
-    #[test]
-    fn test_execution_gas_limit_refuses_the_transaction_after_the_crossing() {
-        let mut limiter =
-            BlockLimiter::new(BlockLimits::no_limits().with_block_execution_gas_limit(1_000));
-
-        limiter.post_execution_update(&BlockUsage {
-            gas: MegaGasUsage { regular: 999, ..Default::default() },
-            ..Default::default()
-        });
-        assert!(limiter.pre_execution_check(B256::ZERO, 0, 0, 0, false).is_ok());
-
-        limiter.post_execution_update(&BlockUsage {
-            gas: MegaGasUsage { regular: 1, ..Default::default() },
-            ..Default::default()
-        });
-        let err = limiter
-            .pre_execution_check(B256::ZERO, 0, 0, 0, false)
-            .expect_err("the block's execution gas has reached its limit");
-        assert!(std::format!("{err}").contains("Block execution gas limit reached"), "{err}");
-    }
-
-    /// A deposit is never refused by the execution-gas limit, however far past it the block is,
-    /// and still counts towards it: an ordinary transaction after the deposits finds the room
-    /// they used.
-    #[test]
-    fn test_execution_gas_limit_never_refuses_a_deposit_and_counts_it() {
-        let mut limiter =
-            BlockLimiter::new(BlockLimits::no_limits().with_block_execution_gas_limit(1_000));
-        let deposit = BlockUsage {
-            gas: MegaGasUsage { regular: 600, ..Default::default() },
-            is_deposit: true,
-            ..Default::default()
-        };
-
-        // Two deposits cross the limit between them, and a third finds the block past it.
-        for _ in 0..3 {
-            assert!(limiter.pre_execution_check(B256::ZERO, 0, 0, 0, true).is_ok());
-            limiter.post_execution_update(&deposit);
-        }
-        assert_eq!(limiter.gas.execution, 1_800, "every deposit counts");
-
-        let err = limiter
-            .pre_execution_check(B256::ZERO, 0, 0, 0, false)
-            .expect_err("the deposits used the room an ordinary transaction would need");
-        assert!(std::format!("{err}").contains("block_used=1800"), "{err}");
     }
 
     /// A deposit is never refused by the block's data-size limit, however far past it the block

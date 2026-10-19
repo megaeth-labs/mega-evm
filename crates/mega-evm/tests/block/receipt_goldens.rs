@@ -3,7 +3,7 @@
 //! A receipt's `cumulative_gas_used` is the running sum of [`mega_evm::MegaGasUsage::gas_used`].
 //! That figure is what the transaction spent from both pools — regular, state and history gas
 //! together — after the refund, and at least the EIP-7623 floor. It is also the block header's
-//! gas used. The execution-gas ledger the block limit counts, `max(regular, floor)`, is not it.
+//! gas used. The execution ledger the block counts, `max(regular, floor)`, is not it.
 //!
 //! The encoded receipt carries the status, that cumulative gas, the logs bloom and the logs.
 //! It does not carry revert data. The limit stop's `MegaLimitExceeded` payload is on the

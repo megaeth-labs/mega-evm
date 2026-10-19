@@ -235,7 +235,6 @@ fn limits(doc: &str) {
     assert_eq!(defaults.tx_runtime_limits.tx_data_size_limit, TX_DATA_LIMIT);
     assert_eq!(defaults.block_txs_data_limit, BLOCK_DATA_LIMIT);
     assert_eq!(TX_DATA_LIMIT, BLOCK_DATA_LIMIT, "the page states one data-size number for both");
-    assert_eq!(defaults.block_execution_gas_limit, u64::MAX);
     assert_eq!(
         defaults.tx_runtime_limits.block_env_access_compute_gas_limit,
         BLOCK_ENV_ACCESS_COMPUTE_GAS

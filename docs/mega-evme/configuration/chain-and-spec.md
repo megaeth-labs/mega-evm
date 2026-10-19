@@ -100,7 +100,6 @@ The whole shape, at the defaults:
     "blockEnvAccessComputeGasLimit": 20000000,
     "oracleAccessComputeGasLimit": 20000000
   },
-  "blockExecutionGasLimit": 18446744073709551615,
   "blockTxsDataLimit": 13107200
 }
 ```

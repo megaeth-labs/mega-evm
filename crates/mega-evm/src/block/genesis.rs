@@ -28,7 +28,7 @@ use crate::{
 pub const SATIN_TIME_KEY: &str = "satinTime";
 
 /// Every Satin key of a chain configuration, in the order [`SatinChainConfig`] writes them.
-pub const SATIN_CHAIN_CONFIG_KEYS: [&str; 12] = [
+pub const SATIN_CHAIN_CONFIG_KEYS: [&str; 11] = [
     SATIN_TIME_KEY,
     "satinInitialSystemAddress",
     "satinInitialSequencer",
@@ -39,7 +39,6 @@ pub const SATIN_CHAIN_CONFIG_KEYS: [&str; 12] = [
     "satinFrameDataSizeLimit",
     "satinBlockEnvAccessComputeGasLimit",
     "satinOracleAccessComputeGasLimit",
-    "satinBlockExecutionGasLimit",
     "satinBlockTxsDataLimit",
 ];
 
@@ -76,7 +75,6 @@ const ARBITRARY_PRECISION_NUMBER: &str = "$serde_json::private::Number";
 /// | `satinFrameDataSizeLimit`            | integer            | [`EvmTxRuntimeLimits::frame_data_size_limit`]                 |
 /// | `satinBlockEnvAccessComputeGasLimit` | integer            | [`EvmTxRuntimeLimits::block_env_access_compute_gas_limit`]    |
 /// | `satinOracleAccessComputeGasLimit`   | integer            | [`EvmTxRuntimeLimits::oracle_access_compute_gas_limit`]       |
-/// | `satinBlockExecutionGasLimit`        | integer            | [`ProtocolLimits::block_execution_gas_limit`]                 |
 /// | `satinBlockTxsDataLimit`             | integer            | [`ProtocolLimits::block_txs_data_limit`]                      |
 ///
 /// Each key is the `satin` prefix before the field's key in the JSON of its params type, so the
@@ -177,7 +175,6 @@ impl SatinChainConfig {
                     .u64("satinBlockEnvAccessComputeGasLimit")?,
                 oracle_access_compute_gas_limit: keys.u64("satinOracleAccessComputeGasLimit")?,
             },
-            block_execution_gas_limit: keys.u64("satinBlockExecutionGasLimit")?,
             block_txs_data_limit: keys.u64("satinBlockTxsDataLimit")?,
         };
         let config = Self { activation_time, sequencer_registry, protocol_limits };
@@ -230,15 +227,14 @@ impl Serialize for SatinChainConfig {
             initial_from_block,
             min_rotation_delay,
         } = sequencer_registry;
-        let ProtocolLimits { tx_runtime_limits, block_execution_gas_limit, block_txs_data_limit } =
-            protocol_limits;
+        let ProtocolLimits { tx_runtime_limits, block_txs_data_limit } = protocol_limits;
         let EvmTxRuntimeLimits {
             tx_data_size_limit,
             frame_data_size_limit,
             block_env_access_compute_gas_limit,
             oracle_access_compute_gas_limit,
         } = tx_runtime_limits;
-        let [time, system_address, sequencer, admin, from_block, rotation_delay, tx_data, frame_data, block_env, oracle, block_execution, block_data] =
+        let [time, system_address, sequencer, admin, from_block, rotation_delay, tx_data, frame_data, block_env, oracle, block_data] =
             SATIN_CHAIN_CONFIG_KEYS;
         let mut map = serializer.serialize_map(Some(SATIN_CHAIN_CONFIG_KEYS.len()))?;
         map.serialize_entry(time, activation_time)?;
@@ -251,7 +247,6 @@ impl Serialize for SatinChainConfig {
         map.serialize_entry(frame_data, frame_data_size_limit)?;
         map.serialize_entry(block_env, block_env_access_compute_gas_limit)?;
         map.serialize_entry(oracle, oracle_access_compute_gas_limit)?;
-        map.serialize_entry(block_execution, block_execution_gas_limit)?;
         map.serialize_entry(block_data, block_txs_data_limit)?;
         map.end()
     }
@@ -509,7 +504,6 @@ mod tests {
                     block_env_access_compute_gas_limit: 11,
                     oracle_access_compute_gas_limit: 12,
                 },
-                block_execution_gas_limit: 13,
                 block_txs_data_limit: u64::MAX,
             },
         }
@@ -544,7 +538,7 @@ mod tests {
         let json = serde_json::to_string(&config()).unwrap();
         assert_eq!(
             json,
-            r#"{"satinTime":1800000000,"satinInitialSystemAddress":"0x1111111111111111111111111111111111111111","satinInitialSequencer":"0x2222222222222222222222222222222222222222","satinInitialAdmin":"0x3333333333333333333333333333333333333333","satinInitialFromBlock":4,"satinMinRotationDelay":5,"satinTxDataSizeLimit":1000006,"satinFrameDataSizeLimit":7,"satinBlockEnvAccessComputeGasLimit":11,"satinOracleAccessComputeGasLimit":12,"satinBlockExecutionGasLimit":13,"satinBlockTxsDataLimit":18446744073709551615}"#
+            r#"{"satinTime":1800000000,"satinInitialSystemAddress":"0x1111111111111111111111111111111111111111","satinInitialSequencer":"0x2222222222222222222222222222222222222222","satinInitialAdmin":"0x3333333333333333333333333333333333333333","satinInitialFromBlock":4,"satinMinRotationDelay":5,"satinTxDataSizeLimit":1000006,"satinFrameDataSizeLimit":7,"satinBlockEnvAccessComputeGasLimit":11,"satinOracleAccessComputeGasLimit":12,"satinBlockTxsDataLimit":18446744073709551615}"#
         );
         let mut written: Vec<String> =
             serde_json::from_str::<serde_json::Map<String, Value>>(&json)
@@ -725,10 +719,7 @@ mod tests {
         );
 
         let invalid = SatinChainConfig {
-            protocol_limits: ProtocolLimits {
-                block_execution_gas_limit: 0,
-                ..config().protocol_limits
-            },
+            protocol_limits: ProtocolLimits { block_txs_data_limit: 0, ..config().protocol_limits },
             ..config()
         };
         assert!(matches!(invalid.hardforks(), Err(ScheduleError::InvalidParams { .. })));

@@ -248,15 +248,13 @@ fn test_the_pre_block_calls_are_held_to_no_limit() {
 
 /// The pre-block calls count towards none of the block's counters or budgets. With the EIP-2935
 /// and EIP-4788 contracts' own code in state, both calls write their contracts' storage; after the
-/// pre-block phase every counter of the block is still zero, and a block whose two budgets are one
-/// unit each — execution gas and data size, each reached by anything counted — still admits its
-/// first transaction.
+/// pre-block phase every counter of the block is still zero, and a block whose data-size budget is
+/// one byte — reached by anything counted — still admits its first transaction.
 ///
 /// Rule [S19.7]. Expected values `independent`: zeros, and the first transaction admitted.
 #[test]
 fn test_the_pre_block_calls_count_towards_no_counter_or_budget() {
-    let policy =
-        BlockLimits::no_limits().with_block_execution_gas_limit(1).with_block_txs_data_limit(1);
+    let policy = BlockLimits::no_limits().with_block_txs_data_limit(1);
     let ctx =
         MegaBlockExecutionCtx::new(PARENT_HASH, Some(PARENT_BEACON_ROOT), Bytes::new(), policy);
     let mut db = common::database();

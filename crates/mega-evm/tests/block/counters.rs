@@ -5,7 +5,7 @@ use alloy_evm::block::BlockExecutor;
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
     test_utils::{transfer_log, BytecodeBuilder},
-    BlockGasCounters, BlockLimits, MegaTxEnvelope,
+    BlockGasCounters, MegaTxEnvelope,
 };
 use revm::{
     bytecode::opcode::{CALL, LOG0, LOG3, POP, PUSH0},
@@ -102,90 +102,6 @@ fn test_the_result_carries_the_counters_and_the_footprint() {
     assert_eq!(result.blob_gas_used, footprint);
     assert_eq!(result.receipts().len(), 1);
     assert!(result.usage.write_records > 0, "the transaction wrote to state");
-}
-
-/// The execution-gas dimension of the block: the transaction that crosses the limit is packed,
-/// and the next one is refused before it runs.
-#[test]
-fn test_the_execution_limit_packs_the_crossing_transaction_and_skips_the_next() {
-    let mut state = state_with_writer();
-
-    // What one of these transactions spends on the execution ledger, so the block below has room
-    // for exactly one of them.
-    let spent = {
-        let mut probe_state = state_with_writer();
-        let mut probe = executor(&mut probe_state, common::unlimited_ctx());
-        probe.apply_pre_execution_changes().expect("the block starts");
-        probe.execute_transaction(&user_tx(0, 1_000_000)).expect("the probe executes");
-        probe.gas().execution
-    };
-    assert!(spent > 0);
-
-    let mut executor = executor(
-        &mut state,
-        common::block_ctx(BlockLimits::no_limits().with_block_execution_gas_limit(spent - 1)),
-    );
-    executor.apply_pre_execution_changes().expect("the block starts");
-
-    executor
-        .execute_transaction(&user_tx(0, 1_000_000))
-        .expect("the transaction that crosses the limit is still packed");
-    assert!(executor.gas().execution > spent - 1, "the block has crossed its limit");
-
-    let err = executor
-        .execute_transaction(&user_tx(1, 1_000_000))
-        .expect_err("the block has no execution gas left");
-    assert!(format!("{err}").contains("Block execution gas limit reached"), "{err}");
-
-    let (_, result) = executor.finish_with_counters().expect("the block finishes");
-    assert_eq!(result.receipts().len(), 1);
-}
-
-/// A deposit is not a transaction the builder chose: the block derived from L1 must include it,
-/// so the execution-gas limit never refuses one, however far past it the block is. It still
-/// counts, so an ordinary transaction after the deposits finds the room they used.
-#[test]
-fn test_a_deposit_is_never_refused_by_the_execution_limit() {
-    let deposit = || common::deposit_tx_to(RECIPIENT, Bytes::new(), 1_000_000);
-
-    // What one deposit spends on the execution ledger, so two of them cross the limit below.
-    let spent = {
-        let mut probe_state = state_with_writer();
-        let mut probe = executor(&mut probe_state, common::unlimited_ctx());
-        probe.apply_pre_execution_changes().expect("the block starts");
-        probe.execute_transaction(&deposit()).expect("the probe executes");
-        probe.gas().execution
-    };
-    assert!(spent > 0);
-
-    let mut state = state_with_writer();
-    let mut executor = executor(
-        &mut state,
-        common::block_ctx(
-            BlockLimits::no_limits().with_block_execution_gas_limit(spent + spent / 2),
-        ),
-    );
-    executor.apply_pre_execution_changes().expect("the block starts");
-
-    executor.execute_transaction(&deposit()).expect("the block has room");
-    executor.execute_transaction(&deposit()).expect("the deposit that crosses the limit");
-    assert_eq!(executor.gas().execution, 2 * spent, "two deposits crossed the limit between them");
-
-    executor
-        .execute_transaction(&deposit())
-        .expect("a deposit is included whatever the block's execution gas");
-    assert_eq!(executor.gas().execution, 3 * spent, "and it counts");
-
-    // Each deposit bumped the sender's nonce, so this one is valid and refused for room alone.
-    let err = executor
-        .execute_transaction(&user_tx(3, 1_000_000))
-        .expect_err("an ordinary transaction finds no execution gas left");
-    assert!(format!("{err}").contains("Block execution gas limit reached"), "{err}");
-    assert!(format!("{err}").contains(&format!("block_used={}", 3 * spent)), "{err}");
-
-    let (_, result) = executor.finish_with_counters().expect("the block finishes");
-    assert_eq!(result.receipts().len(), 3);
-    assert_eq!(result.gas.execution, 3 * spent);
 }
 
 /// The state and history ledgers are counted, and with no limit configured nothing refuses a

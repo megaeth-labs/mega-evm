@@ -113,7 +113,7 @@ fn block_tx() -> impl Strategy<Value = BlockTx> {
         })
 }
 
-/// One of the block's two protocol budgets.
+/// The block's protocol budget.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Budget {
     Unlimited,
@@ -147,13 +147,11 @@ fn budget(
     ]
 }
 
-/// The block's protocol budgets and the builder's policy.
+/// The block's protocol budget and the builder's policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Budgets {
-    pub(crate) execution: Budget,
     pub(crate) data: Budget,
-    /// The policy's caps on the same two, which only tighten.
-    pub(crate) policy_execution: Budget,
+    /// The policy's cap on the same, which only tightens.
     pub(crate) policy_data: Budget,
     /// The policy's cap on a transaction's declared gas.
     pub(crate) policy_tx_gas: Option<u32>,
@@ -165,8 +163,8 @@ pub(crate) struct Budgets {
 
 fn budgets() -> impl Strategy<Value = Budgets> {
     (
-        (budget(20_000..=200_000, 500_000..=5_000_000), budget(300..=600, 1_000..=5_000)),
-        (budget(20_000..=200_000, 500_000..=5_000_000), budget(300..=600, 1_000..=5_000)),
+        budget(300..=600, 1_000..=5_000),
+        budget(300..=600, 1_000..=5_000),
         proptest::option::weighted(
             0.3,
             prop_oneof![Just(100_000u32), Just(1_000_000), Just(50_000_000)],
@@ -174,10 +172,8 @@ fn budgets() -> impl Strategy<Value = Budgets> {
         proptest::option::weighted(0.3, prop_oneof![Just(80u16), Just(150), Just(2_000)]),
         proptest::option::weighted(0.3, prop_oneof![Just(200u16), Just(500), Just(5_000)]),
     )
-        .prop_map(|((execution, data), (pe, pd), tx_gas, tx_size, block_size)| Budgets {
-            execution,
+        .prop_map(|(data, pd, tx_gas, tx_size, block_size)| Budgets {
             data,
-            policy_execution: pe,
             policy_data: pd,
             policy_tx_gas: tx_gas,
             policy_tx_size: tx_size,
@@ -203,7 +199,6 @@ impl BlockCase {
     fn protocol(&self) -> ProtocolLimits {
         ProtocolLimits {
             tx_runtime_limits: self.base.world.limits.runtime(),
-            block_execution_gas_limit: self.budgets.execution.value(),
             block_txs_data_limit: self.budgets.data.value(),
         }
     }
@@ -214,7 +209,6 @@ impl BlockCase {
             tx_gas_limit: b.policy_tx_gas.map_or(u64::MAX, u64::from),
             tx_encode_size_limit: b.policy_tx_size.map_or(u64::MAX, u64::from),
             block_txs_encode_size_limit: b.policy_block_size.map_or(u64::MAX, u64::from),
-            block_execution_gas_limit: b.policy_execution.value(),
             block_txs_data_limit: b.policy_data.value(),
             ..BlockLimits::no_limits()
         }
@@ -334,7 +328,7 @@ impl BlockCase {
 
 /// Whether the block admits a transaction of `gas_limit` and `tx_size` before it runs, by the
 /// limiter's rules: a deposit is held to the header's gas limit alone; any other transaction to
-/// the policy's per-transaction caps and to the two packing budgets, which refuse the next
+/// the policy's per-transaction caps and to the data-size packing budget, which refuses the next
 /// transaction once reached.
 fn admits_before(limiter: &BlockLimiter, gas_limit: u64, tx_size: u64, is_deposit: bool) -> bool {
     let limits = &limiter.limits;
@@ -349,7 +343,6 @@ fn admits_before(limiter: &BlockLimiter, gas_limit: u64, tx_size: u64, is_deposi
     }
     tx_size <= limits.tx_encode_size_limit &&
         tx_size.saturating_add(limiter.block_tx_size_used) <= limits.block_txs_encode_size_limit &&
-        limiter.gas.execution < limits.block_execution_gas_limit &&
         limiter.usage.data_size < limits.block_txs_data_limit
 }
 
