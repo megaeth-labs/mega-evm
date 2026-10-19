@@ -17,7 +17,7 @@ mod common;
 
 use std::sync::Arc;
 
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{address, Address, B256, U256};
 use common::blocks::{
     cache_copy_for_satin, code_of, fixtures, is_deposit, overhead_slot, read_block, run_evme,
     satin_genesis, timestamp_of, FACTORY, L1_BLOCK,
@@ -177,9 +177,11 @@ fn block_rows(spec: Option<&str>, limits: Option<&str>) -> Vec<Value> {
 /// The transactions checked: the first user transaction, the plain value transfer, one in the
 /// middle and the last the block ran before it refused one.
 ///
-/// A Satin replay can refuse a transaction the chain included, for the block gas it declared, and
-/// a transaction after it is not replayed alone: the replay of its block's earlier transactions
-/// meets the refusal and fails.
+/// A Satin replay can refuse a transaction the chain included, for the block gas it declared.
+/// The selection stops there: a later transaction of the same block may itself be refused for
+/// the gas it declared, and this comparison is about transactions the block included. A replay
+/// of one transaction skips a predecessor the executor refuses and still runs, which
+/// [`test_a_replay_skips_a_refused_predecessor_and_keeps_its_state`] holds.
 fn checked(rows: &[Value]) -> Vec<usize> {
     let ran = rows.iter().position(|row| row["status"] == "refused").unwrap_or(rows.len());
     let rows = &rows[..ran];
@@ -293,4 +295,128 @@ async fn test_a_transaction_replay_refuses_a_user_transaction_in_an_activation_b
             assert_eq!(user.code, 0, "the block after: {}{}", user.stderr, user.stdout);
         }
     }
+}
+
+/// A replay of one transaction runs it on the state the block's included predecessors left,
+/// and skips a predecessor the block executor refuses.
+///
+/// The recorded block supplies the parent state and the header. Its transactions are replaced
+/// by three calls: a value transfer, a call whose gas limit is below Satin's intrinsic cost, and
+/// a later transfer that spends part of what the first one credited. The middle call is the
+/// refusal. The last one succeeds only when the first one's credit is in the state it runs on,
+/// and its receipt index counts the included predecessor alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_replay_skips_a_refused_predecessor_and_keeps_its_state() {
+    const PAYER: Address = address!("0x1111111111111111111111111111111111111111");
+    const REFUSED: Address = address!("0x2222222222222222222222222222222222222222");
+    const RECIPIENT: Address = address!("0x3333333333333333333333333333333333333333");
+    /// One ether, the value the included predecessor credits.
+    const GIFT: u128 = 1_000_000_000_000_000_000;
+    /// Room above a value transfer that creates an account, at the spec's byte prices.
+    const GAS: u64 = 5_000_000;
+
+    let mut recorded = read_block(fixtures(), BLOCK);
+    let ether = U256::from(GIFT);
+    recorded
+        .prestate
+        .accounts
+        .insert(PAYER, PreAccount { balance: ether * U256::from(10), ..PreAccount::default() });
+    recorded
+        .prestate
+        .accounts
+        .insert(REFUSED, PreAccount { balance: ether, ..PreAccount::default() });
+    recorded.prestate.accounts.insert(RECIPIENT, PreAccount::default());
+
+    let block_hash = recorded.block["hash"].clone();
+    let block_number = recorded.block["number"].clone();
+    let tx = |hash: &str, index: u64, from: Address, to: Address, gas: u64, value: U256| {
+        json!({
+            "type": "0x2",
+            "chainId": "0x10e6",
+            "nonce": "0x0",
+            "gas": format!("0x{gas:x}"),
+            "maxFeePerGas": "0xf4240",
+            "maxPriorityFeePerGas": "0x0",
+            "to": to,
+            "value": format!("0x{value:x}"),
+            "accessList": [],
+            "input": "0x",
+            "r": "0x64c0524917585101b7ffb2286d4de676ca987554b33c6f9a37e7ad7508bfbb84",
+            "s": "0xe5199cacc6e07c6a9f8c74d0b06f964ce36dd362199b1c19d866f1a6f52d510",
+            "yParity": "0x1",
+            "v": "0x1",
+            "hash": hash,
+            "blockHash": block_hash,
+            "blockNumber": block_number,
+            "transactionIndex": format!("0x{index:x}"),
+            "from": from,
+            "gasPrice": "0xf4240",
+        })
+    };
+    let target = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    recorded.block["transactions"] = json!([
+        tx(
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            0,
+            PAYER,
+            RECIPIENT,
+            GAS,
+            ether,
+        ),
+        tx(
+            "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            1,
+            REFUSED,
+            RECIPIENT,
+            1,
+            U256::ZERO,
+        ),
+        tx(target, 2, RECIPIENT, PAYER, GAS, U256::from(1)),
+    ]);
+
+    let server = Server::start(recorded).await;
+    let uri = server.0.uri();
+    let run = run_evme(&[
+        "replay",
+        target,
+        "--rpc",
+        &uri,
+        "--rpc.no-cache-file",
+        "--rpc.max-retries",
+        "0",
+        "--override.spec",
+        "Satin",
+        "--json",
+        "--dump",
+    ]);
+    assert_eq!(run.code, 0, "{}{}", run.stderr, run.stdout);
+    let summary: Value = serde_json::from_str(&run.stdout).unwrap();
+    assert_eq!(summary["success"], true, "{summary}");
+    // The refused predecessor is not an included transaction. The value transfer is.
+    assert_eq!(summary["receipt"]["transactionIndex"], "0x1", "{summary}");
+    let cumulative = u64::from_str_radix(
+        summary["receipt"]["cumulativeGasUsed"].as_str().unwrap().trim_start_matches("0x"),
+        16,
+    )
+    .unwrap();
+    assert!(cumulative > summary["gas_used"].as_u64().unwrap(), "{summary}");
+
+    let state = &summary["state"];
+    let account = |address: Address| &state[&address.to_string()];
+    let balance = |address: Address| -> U256 {
+        account(address)["balance"].as_str().unwrap().parse().unwrap()
+    };
+    let nonce = |address: Address| {
+        u64::from_str_radix(
+            account(address)["nonce"].as_str().unwrap().trim_start_matches("0x"),
+            16,
+        )
+        .unwrap()
+    };
+    // The payer's nonce is the included predecessor's bump. The recipient spends one wei of the
+    // ether that predecessor credited and keeps the rest.
+    assert_eq!(nonce(PAYER), 1, "{state}");
+    assert_eq!(nonce(RECIPIENT), 1, "{state}");
+    let left = balance(RECIPIENT);
+    assert!(left < ether && left > ether - U256::from(10u64.pow(16)), "{left} {state}");
 }
