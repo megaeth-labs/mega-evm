@@ -509,9 +509,8 @@ impl DecodedRawTx {
             ));
         }
 
-        let deposit_fields = self.deposit.is_some() ||
-            tx_args.source_hash.is_some() ||
-            tx_args.mint.is_some();
+        let deposit_fields =
+            self.deposit.is_some() || tx_args.source_hash.is_some() || tx_args.mint.is_some();
         if tx_type == MegaTxType::Deposit && self.deposit.is_none() {
             return Err(EvmeError::InvalidInput(
                 "--tx-type 126 does not make a raw transaction a deposit; --source-hash is \

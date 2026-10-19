@@ -676,9 +676,7 @@ fn preceding_transactions(
         }
         preceding.push(hash);
     }
-    Err(ReplayError::Other(format!(
-        "transaction {target_hash} is not in block {block_number}"
-    )))
+    Err(ReplayError::Other(format!("transaction {target_hash} is not in block {block_number}")))
 }
 
 /// Build a [`BlockEnv`] from the RPC block header.
