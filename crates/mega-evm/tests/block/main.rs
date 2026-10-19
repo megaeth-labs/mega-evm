@@ -3,6 +3,7 @@
 mod activation;
 mod block_hashes;
 mod bucket_ids;
+mod building_policy;
 mod common;
 mod counters;
 mod deploy;
@@ -13,7 +14,6 @@ mod external_envs;
 mod factory;
 mod inspector;
 mod limits;
-mod protocol_limits;
 mod receipt_goldens;
 mod receipts;
 mod rules;

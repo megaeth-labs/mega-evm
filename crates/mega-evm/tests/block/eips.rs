@@ -24,7 +24,7 @@ use mega_evm::{
     pre_block_call_gas_limit,
     test_utils::{BytecodeBuilder, ErrorInjectingDatabase, MemoryDatabase},
     BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardforkConfig,
-    MegaSpecId, PreBlockStateSource, ProtocolLimits,
+    MegaSpecId, PreBlockStateSource,
 };
 use revm::{
     bytecode::opcode::{CALLDATALOAD, MLOAD, SSTORE},
@@ -215,15 +215,19 @@ fn test_the_pre_block_calls_are_held_to_no_limit() {
         ("a frame's data size", loosest.with_frame_data_size_limit(1)),
         ("both limits at once", every),
     ] {
-        let spec =
-            common::chain_spec_with(ProtocolLimits::loosest().with_tx_runtime_limits(limits));
+        let limits = common::loosest().with_tx_runtime_limits(limits);
         let mut db = common::database();
         db.set_account_code(HISTORY_STORAGE_ADDRESS, recorder_writing_twice());
         db.set_account_code(BEACON_ROOTS_ADDRESS, recorder_writing_twice());
         let mut state = State::builder().with_database(db).build();
         let states = {
-            let mut executor =
-                executor_with_env_and_spec(&mut state, ctx(), env_at_block(BLOCK_NUMBER), spec);
+            let mut executor = executor_with_env_and_spec(
+                &mut state,
+                ctx(),
+                env_at_block(BLOCK_NUMBER),
+                common::chain_spec(),
+            )
+            .with_protocol_limits(limits);
             let log = record_pre_block(&mut executor);
             executor
                 .apply_pre_execution_changes()

@@ -13,7 +13,7 @@ use alloy_op_hardforks::OpHardfork;
 use alloy_primitives::{Bytes, U256};
 use mega_evm::{
     BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutionError, MegaHardfork, MegaHardforkConfig,
-    MegaHardforks, ProtocolLimits,
+    MegaHardforks,
 };
 
 use crate::common::{
@@ -28,13 +28,12 @@ const ACTIVATION: u64 = common::BLOCK_TIMESTAMP;
 /// forks in their order without that fork activating in the blocks the case runs.
 const LATER: u64 = ACTIVATION + 1_000;
 
-/// A schedule with every Ethereum and Optimism fork up to Karst at genesis, Satin at `satin`, the
-/// registry parameters and the loosest limits a chain may carry.
+/// A schedule with every Ethereum and Optimism fork up to Karst at genesis, Satin at `satin` and
+/// the registry parameters.
 fn schedule(satin: u64) -> MegaHardforkConfig {
     MegaHardforkConfig::default()
         .with(MegaHardfork::Satin, ForkCondition::Timestamp(satin))
         .with_params(registry_config())
-        .with_params(ProtocolLimits::loosest())
 }
 
 /// The context of the block at `timestamp`, whose parent is at `parent_timestamp`, as a node

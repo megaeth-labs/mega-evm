@@ -887,15 +887,19 @@ fn test_a_callers_limits_set_the_caps() {
 }
 
 /// The default runtime limits detain: [`EvmTxRuntimeLimits::default`], and the transaction half
-/// of [`ProtocolLimits::DEFAULT`] that a block executor installs, hold each kind of read to the
-/// spec's cap. It is `no_limits` that turns detention off, with every other per-transaction limit.
+/// of [`ProtocolLimits::for_spec`] that a context starts with and a block executor installs, hold
+/// each kind of read to the spec's cap. It is `no_limits` that turns detention off, with every
+/// other per-transaction limit.
 #[test]
 fn test_the_default_limits_detain() {
     let oracle = BytecodeBuilder::default().append_many([PUSH0, SLOAD, POP, STOP]).build();
     let timestamp = op(BytecodeBuilder::default(), TIMESTAMP).stop().build();
     let reads_oracle =
         call(BytecodeBuilder::default(), CALL, ORACLE_CONTRACT_ADDRESS).stop().build();
-    for limits in [EvmTxRuntimeLimits::default(), ProtocolLimits::DEFAULT.tx_runtime_limits] {
+    for limits in [
+        EvmTxRuntimeLimits::default(),
+        ProtocolLimits::for_spec(MegaSpecId::SATIN).tx_runtime_limits,
+    ] {
         let run_under = |limits: EvmTxRuntimeLimits, code: &Bytes| {
             let db = MemoryDatabase::default()
                 .account_code(CONTRACT, code.clone())

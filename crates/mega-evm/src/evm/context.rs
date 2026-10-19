@@ -21,7 +21,7 @@ use crate::{
     system::{self, keyless::KeylessFrame},
     AdditionalLimit, BlockHashRecord, BucketError, BucketId, BucketMultipliers, BucketRecord,
     Detention, EmptyExternalEnv, EthSpecId, EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs,
-    MegaSpecId, MegaTransaction, OracleReadRecord, SaltEnv, VolatileDataAccess,
+    MegaSpecId, MegaTransaction, OracleReadRecord, ProtocolLimits, SaltEnv, VolatileDataAccess,
 };
 
 /// The revm context the Satin engine runs on: op-revm's context shape with the `MegaETH`
@@ -75,13 +75,17 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes = EmptyExternalEn
 
 impl<DB: Database> MegaContext<DB, EmptyExternalEnv> {
     /// Creates a context over `db` that executes `spec`, without external environments.
+    ///
+    /// It runs every transaction under `spec`'s limits ([`ProtocolLimits::for_spec`]), as block
+    /// execution does; [`with_tx_runtime_limits`](Self::with_tx_runtime_limits) replaces them.
     pub fn new(db: DB, spec: MegaSpecId) -> Self {
         Self::new_with_external_envs(db, spec, ExternalEnvs::default())
     }
 }
 
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
-    /// Creates a context over `db` that executes `spec` with the given external environments.
+    /// Creates a context over `db` that executes `spec` with the given external environments,
+    /// under `spec`'s limits ([`ProtocolLimits::for_spec`]).
     pub fn new_with_external_envs(
         db: DB,
         spec: MegaSpecId,
@@ -93,7 +97,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
             inner,
             cfg,
             external_envs,
-            additional_limit: AdditionalLimit::default(),
+            additional_limit: AdditionalLimit::new(
+                ProtocolLimits::for_spec(spec).tx_runtime_limits,
+            ),
             detention: Detention::default(),
             block_hash_record: BlockHashRecord::default(),
             bucket_multipliers: BucketMultipliers::default(),
@@ -215,7 +221,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         &self.external_envs
     }
 
-    /// Enforces `limits` on every transaction from now on.
+    /// Enforces `limits` on every transaction from now on, in place of the spec's: a tool's or a
+    /// test's counterfactual.
     pub fn with_tx_runtime_limits(mut self, limits: EvmTxRuntimeLimits) -> Self {
         self.additional_limit.set_limits(limits);
         self
@@ -676,6 +683,23 @@ mod tests {
         let ctx = MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN);
         assert_eq!(ctx.spec(), MegaSpecId::SATIN);
         assert_satin_cfg(&ctx);
+    }
+
+    /// A bare context runs under its spec's limits, the data-size limit included, as block
+    /// execution does: no caller has to hand them over. A caller's limits replace them, and a
+    /// configuration does not.
+    #[test]
+    fn test_a_bare_context_runs_under_the_specs_limits() {
+        let satin = ProtocolLimits::for_spec(MegaSpecId::SATIN).tx_runtime_limits;
+        let ctx = MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN);
+        assert_eq!(*ctx.additional_limit().limits(), satin);
+        assert_eq!(ctx.additional_limit().limits().tx_data_size_limit, 13_107_200);
+
+        let ctx = ctx.with_cfg(CfgEnv::new_with_spec(MegaSpecId::SATIN));
+        assert_eq!(*ctx.additional_limit().limits(), satin, "a configuration sets no limit");
+
+        let ctx = ctx.with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits());
+        assert_eq!(*ctx.additional_limit().limits(), EvmTxRuntimeLimits::no_limits());
     }
 
     /// A caller's configuration cannot switch off what the spec fixes; every other field is

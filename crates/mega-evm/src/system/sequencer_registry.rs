@@ -65,9 +65,9 @@ pub const PLACEHOLDER_MIN_ROTATION_DELAY: u64 = 10;
 /// has no setter for `_minRotationDelay`, so a matching-code registry cannot be repaired later
 /// through this helper: the delay must be seeded here, and it must not be zero.
 ///
-/// It travels with the chain configuration as [`ProtocolLimits`](crate::ProtocolLimits) does: a
-/// JSON object with camelCase keys, every field required and no other accepted. Deserializing does
-/// not validate; whoever loads it runs [`HardforkParams::validate`], as the chain-config parser and
+/// It travels with the chain configuration: a JSON object with camelCase keys, every field required
+/// and no other accepted. Deserializing does not validate; whoever loads it runs
+/// [`HardforkParams::validate`], as the chain-config parser and
 /// [`validate_schedule`](crate::MegaHardforks::validate_schedule) do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

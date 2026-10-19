@@ -20,26 +20,21 @@ use serde::{
 };
 
 use crate::{
-    system::SequencerRegistryConfig, EvmTxRuntimeLimits, HardforkParams, MegaHardfork,
-    MegaHardforkConfig, MegaHardforks, ProtocolLimits, ScheduleError,
+    system::SequencerRegistryConfig, HardforkParams, MegaHardfork, MegaHardforkConfig,
+    MegaHardforks, ScheduleError,
 };
 
 /// The key of Satin's activation timestamp.
 pub const SATIN_TIME_KEY: &str = "satinTime";
 
 /// Every Satin key of a chain configuration, in the order [`SatinChainConfig`] writes them.
-pub const SATIN_CHAIN_CONFIG_KEYS: [&str; 11] = [
+pub const SATIN_CHAIN_CONFIG_KEYS: [&str; 6] = [
     SATIN_TIME_KEY,
     "satinInitialSystemAddress",
     "satinInitialSequencer",
     "satinInitialAdmin",
     "satinInitialFromBlock",
     "satinMinRotationDelay",
-    "satinTxDataSizeLimit",
-    "satinFrameDataSizeLimit",
-    "satinBlockEnvAccessComputeGasLimit",
-    "satinOracleAccessComputeGasLimit",
-    "satinBlockTxsDataLimit",
 ];
 
 /// The prefix every Satin key starts with, compared without regard to case.
@@ -49,7 +44,10 @@ const PREFIX: &str = "satin";
 const ARBITRARY_PRECISION_NUMBER: &str = "$serde_json::private::Number";
 
 /// A chain's Satin configuration, as its genesis file's `config` object carries it: when Satin
-/// activates, and the two params types it requires.
+/// activates, and the params type it requires.
+///
+/// The limits a chain's blocks and transactions are held to are not configuration: they are fixed
+/// per spec ([`ProtocolLimits::for_spec`](crate::ProtocolLimits::for_spec)), and no key names them.
 ///
 /// **The key format is provisional.** It is fixed when a network first publishes a genesis file
 /// that carries it; until then a change to it is a change to this parser and to every genesis
@@ -71,14 +69,9 @@ const ARBITRARY_PRECISION_NUMBER: &str = "$serde_json::private::Number";
 /// | `satinInitialAdmin`                  | address            | [`SequencerRegistryConfig::initial_admin`]                    |
 /// | `satinInitialFromBlock`              | integer            | [`SequencerRegistryConfig::initial_from_block`]               |
 /// | `satinMinRotationDelay`              | integer            | [`SequencerRegistryConfig::min_rotation_delay`]               |
-/// | `satinTxDataSizeLimit`               | integer            | [`EvmTxRuntimeLimits::tx_data_size_limit`]                    |
-/// | `satinFrameDataSizeLimit`            | integer            | [`EvmTxRuntimeLimits::frame_data_size_limit`]                 |
-/// | `satinBlockEnvAccessComputeGasLimit` | integer            | [`EvmTxRuntimeLimits::block_env_access_compute_gas_limit`]    |
-/// | `satinOracleAccessComputeGasLimit`   | integer            | [`EvmTxRuntimeLimits::oracle_access_compute_gas_limit`]       |
-/// | `satinBlockTxsDataLimit`             | integer            | [`ProtocolLimits::block_txs_data_limit`]                      |
 ///
 /// Each key is the `satin` prefix before the field's key in the JSON of its params type, so the
-/// flat names follow the types' own serde names. An integer is a JSON number that fits in 64
+/// flat names follow the type's own serde names. An integer is a JSON number that fits in 64
 /// unsigned bits, `u64::MAX` included, which a writer must emit exactly; an address is a hex
 /// string.
 ///
@@ -126,8 +119,6 @@ pub struct SatinChainConfig {
     pub activation_time: u64,
     /// The `SequencerRegistry`'s bootstrap roles.
     pub sequencer_registry: SequencerRegistryConfig,
-    /// The limits the protocol holds blocks and transactions to.
-    pub protocol_limits: ProtocolLimits,
 }
 
 impl SatinChainConfig {
@@ -138,7 +129,7 @@ impl SatinChainConfig {
     /// `serde_json::Value`.
     ///
     /// `Ok(None)` when the configuration does not activate Satin; otherwise the configuration,
-    /// with both params types valid and the schedule it makes one
+    /// with its params valid and the schedule it makes one
     /// [`validate_schedule`](MegaHardforks::validate_schedule) accepts.
     ///
     /// # Errors
@@ -167,23 +158,13 @@ impl SatinChainConfig {
             initial_from_block: keys.u64("satinInitialFromBlock")?,
             min_rotation_delay: keys.u64("satinMinRotationDelay")?,
         };
-        let protocol_limits = ProtocolLimits {
-            tx_runtime_limits: EvmTxRuntimeLimits {
-                tx_data_size_limit: keys.u64("satinTxDataSizeLimit")?,
-                frame_data_size_limit: keys.u64("satinFrameDataSizeLimit")?,
-                block_env_access_compute_gas_limit: keys
-                    .u64("satinBlockEnvAccessComputeGasLimit")?,
-                oracle_access_compute_gas_limit: keys.u64("satinOracleAccessComputeGasLimit")?,
-            },
-            block_txs_data_limit: keys.u64("satinBlockTxsDataLimit")?,
-        };
-        let config = Self { activation_time, sequencer_registry, protocol_limits };
+        let config = Self { activation_time, sequencer_registry };
         config.hardforks()?;
         Ok(Some(config))
     }
 
     /// The hardfork schedule this configuration makes: [`MegaHardforkConfig::new`]'s base forks,
-    /// Satin at [`activation_time`](Self::activation_time), and both params types attached.
+    /// Satin at [`activation_time`](Self::activation_time), and its params attached.
     ///
     /// The base forks, every OP and Ethereum fork up to Karst, are at genesis here whatever the
     /// genesis file times them at, so the schedule passes the base-fork check of
@@ -197,11 +178,9 @@ impl SatinChainConfig {
     /// [`validate_schedule`](MegaHardforks::validate_schedule) refuses.
     pub fn hardforks(&self) -> Result<MegaHardforkConfig, ScheduleError> {
         checked(&self.sequencer_registry)?;
-        checked(&self.protocol_limits)?;
         let schedule = MegaHardforkConfig::new()
             .with(MegaHardfork::Satin, ForkCondition::Timestamp(self.activation_time))
-            .with_params(self.sequencer_registry)
-            .with_params(self.protocol_limits);
+            .with_params(self.sequencer_registry);
         schedule.validate_schedule()?;
         Ok(schedule)
     }
@@ -219,7 +198,7 @@ fn checked<P: HardforkParams>(params: &P) -> Result<(), ScheduleError> {
 impl Serialize for SatinChainConfig {
     /// Writes the flat keys, in [`SATIN_CHAIN_CONFIG_KEYS`] order.
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let Self { activation_time, sequencer_registry, protocol_limits } = self;
+        let Self { activation_time, sequencer_registry } = self;
         let SequencerRegistryConfig {
             initial_system_address,
             initial_sequencer,
@@ -227,14 +206,7 @@ impl Serialize for SatinChainConfig {
             initial_from_block,
             min_rotation_delay,
         } = sequencer_registry;
-        let ProtocolLimits { tx_runtime_limits, block_txs_data_limit } = protocol_limits;
-        let EvmTxRuntimeLimits {
-            tx_data_size_limit,
-            frame_data_size_limit,
-            block_env_access_compute_gas_limit,
-            oracle_access_compute_gas_limit,
-        } = tx_runtime_limits;
-        let [time, system_address, sequencer, admin, from_block, rotation_delay, tx_data, frame_data, block_env, oracle, block_data] =
+        let [time, system_address, sequencer, admin, from_block, rotation_delay] =
             SATIN_CHAIN_CONFIG_KEYS;
         let mut map = serializer.serialize_map(Some(SATIN_CHAIN_CONFIG_KEYS.len()))?;
         map.serialize_entry(time, activation_time)?;
@@ -243,11 +215,6 @@ impl Serialize for SatinChainConfig {
         map.serialize_entry(admin, initial_admin)?;
         map.serialize_entry(from_block, initial_from_block)?;
         map.serialize_entry(rotation_delay, min_rotation_delay)?;
-        map.serialize_entry(tx_data, tx_data_size_limit)?;
-        map.serialize_entry(frame_data, frame_data_size_limit)?;
-        map.serialize_entry(block_env, block_env_access_compute_gas_limit)?;
-        map.serialize_entry(oracle, oracle_access_compute_gas_limit)?;
-        map.serialize_entry(block_data, block_txs_data_limit)?;
         map.end()
     }
 }
@@ -479,7 +446,7 @@ impl Keys {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{constants::MAX_TX_COMPUTE_GAS, MegaSpecId, TX_BODY_SIZE};
+    use crate::MegaSpecId;
     use alloy_primitives::address;
     use serde_json::{json, Value};
 
@@ -496,15 +463,6 @@ mod tests {
                 initial_admin: address!("0x3333333333333333333333333333333333333333"),
                 initial_from_block: 4,
                 min_rotation_delay: 5,
-            },
-            protocol_limits: ProtocolLimits {
-                tx_runtime_limits: EvmTxRuntimeLimits {
-                    tx_data_size_limit: 1_000_006,
-                    frame_data_size_limit: 7,
-                    block_env_access_compute_gas_limit: 11,
-                    oracle_access_compute_gas_limit: 12,
-                },
-                block_txs_data_limit: u64::MAX,
             },
         }
     }
@@ -538,7 +496,7 @@ mod tests {
         let json = serde_json::to_string(&config()).unwrap();
         assert_eq!(
             json,
-            r#"{"satinTime":1800000000,"satinInitialSystemAddress":"0x1111111111111111111111111111111111111111","satinInitialSequencer":"0x2222222222222222222222222222222222222222","satinInitialAdmin":"0x3333333333333333333333333333333333333333","satinInitialFromBlock":4,"satinMinRotationDelay":5,"satinTxDataSizeLimit":1000006,"satinFrameDataSizeLimit":7,"satinBlockEnvAccessComputeGasLimit":11,"satinOracleAccessComputeGasLimit":12,"satinBlockTxsDataLimit":18446744073709551615}"#
+            r#"{"satinTime":1800000000,"satinInitialSystemAddress":"0x1111111111111111111111111111111111111111","satinInitialSequencer":"0x2222222222222222222222222222222222222222","satinInitialAdmin":"0x3333333333333333333333333333333333333333","satinInitialFromBlock":4,"satinMinRotationDelay":5}"#
         );
         let mut written: Vec<String> =
             serde_json::from_str::<serde_json::Map<String, Value>>(&json)
@@ -574,7 +532,6 @@ mod tests {
         }
         let mut names = Vec::new();
         leaves(&serde_json::to_value(config().sequencer_registry).unwrap(), &mut names);
-        leaves(&serde_json::to_value(config().protocol_limits).unwrap(), &mut names);
         let mut flat: Vec<String> = names
             .iter()
             .map(|name| format!("{PREFIX}{}{}", name[..1].to_uppercase(), &name[1..]))
@@ -586,8 +543,8 @@ mod tests {
         assert_eq!(flat, keys);
     }
 
-    /// The schedule the configuration makes runs Satin from its activation, with the two params
-    /// types attached, and passes the schedule's own check.
+    /// The schedule the configuration makes runs Satin from its activation, with its params
+    /// attached, and passes the schedule's own check.
     #[test]
     fn test_the_schedule_activates_satin_with_its_params() {
         let schedule = config().hardforks().unwrap();
@@ -597,7 +554,6 @@ mod tests {
             schedule.fork_params::<SequencerRegistryConfig>(),
             Some(&config().sequencer_registry)
         );
-        assert_eq!(schedule.protocol_limits(ACTIVATION), Some(config().protocol_limits));
         assert_eq!(schedule.validate_schedule(), Ok(()));
     }
 
@@ -627,9 +583,16 @@ mod tests {
 
     /// A key that starts with `satin`, in any case, and is not one of the keys is refused, so a
     /// misspelling cannot stand in for the key it meant; a key that does not is another fork's.
+    /// The limit keys of the provisional format's earlier version are refused the same way: the
+    /// limits are the spec's, and a file that still names one does not load.
     #[test]
     fn test_an_unknown_satin_key_is_refused() {
         for unknown in [
+            "satinTxDataSizeLimit",
+            "satinFrameDataSizeLimit",
+            "satinBlockEnvAccessComputeGasLimit",
+            "satinOracleAccessComputeGasLimit",
+            "satinBlockTxsDataLimit",
             "satinTxDataSizeLimt",
             "SatinTime",
             "SATINTIME",
@@ -664,11 +627,11 @@ mod tests {
             ("satinTime", json!("1800000000"), integer),
             ("satinTime", json!(-1), integer),
             ("satinTime", json!(1.5), integer),
-            ("satinTxDataSizeLimit", json!(1e20), integer),
-            ("satinTxDataSizeLimit", json!(null), integer),
-            ("satinTxDataSizeLimit", json!(true), integer),
-            ("satinTxDataSizeLimit", json!([1]), integer),
-            ("satinTxDataSizeLimit", json!({ "value": 1 }), integer),
+            ("satinMinRotationDelay", json!(1e20), integer),
+            ("satinMinRotationDelay", json!(null), integer),
+            ("satinMinRotationDelay", json!(true), integer),
+            ("satinMinRotationDelay", json!([1]), integer),
+            ("satinMinRotationDelay", json!({ "value": 1 }), integer),
             ("satinInitialFromBlock", json!("0x4"), integer),
             ("satinInitialAdmin", json!(3), address),
             ("satinInitialAdmin", json!("0x33"), address),
@@ -711,15 +674,12 @@ mod tests {
             )
         );
         assert_eq!(refused("satinMinRotationDelay", json!(0)).0, "SequencerRegistryConfig");
-        assert_eq!(refused("satinBlockTxsDataLimit", json!(0)).0, "ProtocolLimits");
-        assert_eq!(refused("satinTxDataSizeLimit", json!(TX_BODY_SIZE - 1)).0, "ProtocolLimits");
-        assert_eq!(
-            refused("satinBlockEnvAccessComputeGasLimit", json!(MAX_TX_COMPUTE_GAS)).0,
-            "ProtocolLimits"
-        );
 
         let invalid = SatinChainConfig {
-            protocol_limits: ProtocolLimits { block_txs_data_limit: 0, ..config().protocol_limits },
+            sequencer_registry: SequencerRegistryConfig {
+                min_rotation_delay: 0,
+                ..config().sequencer_registry
+            },
             ..config()
         };
         assert!(matches!(invalid.hardforks(), Err(ScheduleError::InvalidParams { .. })));
@@ -803,8 +763,8 @@ mod tests {
     #[test]
     fn test_the_errors_name_the_key() {
         assert_eq!(
-            SatinChainConfigError::MissingKey("satinTxDataSizeLimit").to_string(),
-            "the chain configuration lacks `satinTxDataSizeLimit`"
+            SatinChainConfigError::MissingKey("satinMinRotationDelay").to_string(),
+            "the chain configuration lacks `satinMinRotationDelay`"
         );
         assert_eq!(
             SatinChainConfigError::UnknownKey("satinTme".into()).to_string(),

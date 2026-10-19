@@ -15,12 +15,12 @@
 //! | the block beneficiary's account | `BALANCE`, `SELFBALANCE`, `EXTCODESIZE`, `EXTCODECOPY`, `EXTCODEHASH`, the four calls (and the EIP-7702 delegate they follow), `SELFDESTRUCT` as either end; a transaction whose sender or recipient is the beneficiary or whose recipient delegates to it, an applied EIP-7702 authority that is, and a keyless deployment's signer that is | [`block_env_access_compute_gas_limit`](crate::EvmTxRuntimeLimits::block_env_access_compute_gas_limit) |
 //! | the Oracle's storage | `SLOAD` in the Oracle's own frame | [`oracle_access_compute_gas_limit`](crate::EvmTxRuntimeLimits::oracle_access_compute_gas_limit) |
 //!
-//! The caps are runtime limits ([`EvmTxRuntimeLimits`](crate::EvmTxRuntimeLimits)): the spec's,
+//! The caps are runtime limits ([`EvmTxRuntimeLimits`](crate::EvmTxRuntimeLimits)), fixed per spec
+//! ([`ProtocolLimits::for_spec`](crate::ProtocolLimits::for_spec)): for Satin
 //! [`BLOCK_ENV_ACCESS_COMPUTE_GAS`](crate::constants::BLOCK_ENV_ACCESS_COMPUTE_GAS) and
-//! [`ORACLE_ACCESS_COMPUTE_GAS`](crate::constants::ORACLE_ACCESS_COMPUTE_GAS), by default. In block
-//! execution they are the chain's ([`ProtocolLimits`](crate::ProtocolLimits)), which must be
-//! below [`MAX_TX_COMPUTE_GAS`](crate::constants::MAX_TX_COMPUTE_GAS), the most compute a
-//! transaction can spend; a standalone EVM's caller may set either. A cap of `u64::MAX` caps
+//! [`ORACLE_ACCESS_COMPUTE_GAS`](crate::constants::ORACLE_ACCESS_COMPUTE_GAS), both below
+//! [`MAX_TX_COMPUTE_GAS`](crate::constants::MAX_TX_COMPUTE_GAS), the most compute a transaction
+//! can spend; a tool or a test may set either on an EVM. A cap of `u64::MAX` caps
 //! nothing, and a transaction whose caps are both unlimited — under
 //! [`no_limits`](crate::EvmTxRuntimeLimits::no_limits), as the execution-spec gate runs — is not
 //! detained. `no_limits` turns detention off together with every other per-transaction limit: it is

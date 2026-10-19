@@ -13,21 +13,20 @@
 //! | [`TX_GAS_LIMIT_CAP`] | 200,000,000 | execution cap: regular gas one transaction may spend | the spec configuration |
 //! | [`MAX_CONTRACT_SIZE`] | 524,288 | the most bytes a deployed contract may hold | the spec configuration |
 //! | [`MAX_INITCODE_SIZE`] | 1,048,576 | the most bytes an initcode may hold | the spec configuration |
-//! | [`TX_DATA_LIMIT`] | 13,107,200 | data size one transaction may produce (as Rex6) | the default protocol limits |
-//! | [`BLOCK_DATA_LIMIT`] | 13,107,200 | data size one block may produce (as Rex6) | the default protocol limits |
-//! | [`BLOCK_ENV_ACCESS_COMPUTE_GAS`] | 20,000,000 | compute a transaction may still spend once it read the block environment or the beneficiary (as Rex6) | the default detention cap of the runtime limits and of the protocol limits |
-//! | [`ORACLE_ACCESS_COMPUTE_GAS`] | 20,000,000 | compute a transaction may still spend once it read the Oracle's storage (as Rex6) | the default detention cap of the runtime limits and of the protocol limits |
-//! | [`MAX_TX_COMPUTE_GAS`] | 199,987,900 | the most compute one transaction can spend: the execution cap less EIP-2780's base cost and one warm account access | the protocol limits, whose detention caps must be below it |
+//! | [`TX_DATA_LIMIT`] | 13,107,200 | data size one transaction may produce (as Rex6) | Satin's protocol limits |
+//! | [`BLOCK_DATA_LIMIT`] | 13,107,200 | data size one block may produce (as Rex6) | Satin's protocol limits |
+//! | [`BLOCK_ENV_ACCESS_COMPUTE_GAS`] | 20,000,000 | compute a transaction may still spend once it read the block environment or the beneficiary (as Rex6) | Satin's protocol limits |
+//! | [`ORACLE_ACCESS_COMPUTE_GAS`] | 20,000,000 | compute a transaction may still spend once it read the Oracle's storage (as Rex6) | Satin's protocol limits |
+//! | [`MAX_TX_COMPUTE_GAS`] | 199,987,900 | the most compute one transaction can spend: the execution cap less EIP-2780's base cost and one warm account access | tests of the protocol limits, whose detention caps are below it |
 //!
 //! The Satin gas schedule builds its state-gas entries from the EIP-8037 byte counts at
 //! [`COST_PER_STATE_BYTE`], read through [`SatinPrices`](crate::SatinPrices) so a measurement
 //! build can run other byte prices without touching this table. [`SLOT_STATE_GAS`] and
 //! [`ACCOUNT_STATE_GAS`] are two of those products written out: the tests assert the schedule
 //! against them, and changing one of the two moves a test rather than a price.
-//! [`TX_DATA_LIMIT`], [`BLOCK_DATA_LIMIT`] and the two detention caps are the defaults of the
-//! Satin fork's parameters, [`ProtocolLimits::DEFAULT`](crate::ProtocolLimits::DEFAULT): a chain
-//! carries its own in its configuration, and block execution reads them from there. No limit holds
-//! state growth: state gas prices it.
+//! [`TX_DATA_LIMIT`], [`BLOCK_DATA_LIMIT`] and the two detention caps are Satin's protocol limits,
+//! [`ProtocolLimits::for_spec`](crate::ProtocolLimits::for_spec): fixed per spec, not configured by
+//! a chain. No limit holds state growth: state gas prices it.
 
 use revm::{
     context_interface::cfg::gas::WARM_STORAGE_READ_COST,
@@ -91,7 +90,7 @@ pub const ORACLE_ACCESS_COMPUTE_GAS: u64 = 20_000_000;
 /// transaction pays, and the account whose code the frame runs — a recipient other than the sender
 /// at the cold rate, the delegate of a sender that calls itself at least at the warm one, 100,
 /// which EIP-8038 leaves where it was. A gas-detention cap at or above this never stops a
-/// transaction, however early it read, so a chain's caps must be below it.
+/// transaction, however early it read, so a spec's caps are below it.
 pub const MAX_TX_COMPUTE_GAS: u64 =
     TX_GAS_LIMIT_CAP - eip2780::TX_BASE_COST - WARM_STORAGE_READ_COST;
 

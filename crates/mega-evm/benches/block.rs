@@ -7,8 +7,8 @@
 //!   block after activation: the state the previous block's pre-block changes left;
 //! - with the EIP-2935 and EIP-4788 contracts' own code, so the pre-block calls record the parent
 //!   hash and the beacon root;
-//! - under the chain's default limits, `ProtocolLimits::DEFAULT`: the production data-size limits
-//!   and gas detention's caps, with no building policy on top (`BlockLimits::default()`);
+//! - under the spec's limits, `ProtocolLimits::for_spec`: the production data-size limits and gas
+//!   detention's caps, with no building policy on top (`BlockLimits::default()`);
 //! - from a fresh `State` over that database, as a node starts each block.
 //!
 //! Two workloads of `N` transactions each, whose per-transaction work beyond the transaction
@@ -44,7 +44,7 @@ use mega_evm::{
     system::{SequencerRegistryConfig, SYSTEM_CONTRACT_DEPLOY_COUNT},
     test_utils::{BytecodeBuilder, MemoryDatabase},
     BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardforkConfig,
-    MegaSpecId, MegaTxEnvelope, PreBlockStateSource, ProtocolLimits,
+    MegaSpecId, MegaTxEnvelope, PreBlockStateSource,
 };
 use revm::{
     bytecode::opcode::{CALLDATALOAD, SSTORE},
@@ -173,7 +173,6 @@ fn chain_spec() -> MegaHardforkConfig {
     MegaHardforkConfig::default()
         .with_all_activated()
         .with_params(SequencerRegistryConfig::placeholder())
-        .with_params(ProtocolLimits::DEFAULT)
 }
 
 /// Runs the pre-block changes of block `number` on `db` and returns what they handed their

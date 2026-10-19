@@ -1,9 +1,9 @@
 //! `--override.limits` on `run` and `tx`: a Satin transaction held to protocol limits other than
-//! the chain's, the fields the override names replacing the chain's and every other staying.
+//! the spec's, the fields the override names replacing the spec's and every other staying.
 
 use std::process::Command;
 
-use mega_evm::{ProtocolLimits, TX_BODY_SIZE, WRITE_RECORD_SIZE};
+use mega_evm::{MegaSpecId, ProtocolLimits, TX_BODY_SIZE, WRITE_RECORD_SIZE};
 use serde_json::{json, Value};
 
 /// Two fresh `SSTORE`s, keeping two write records: 310 bytes of body and 40 per record.
@@ -47,16 +47,16 @@ fn run_two_writes(limits: Option<&str>) -> Value {
     evme(&args).json()
 }
 
-/// The protocol's default limits with `txDataSizeLimit` at `limit`, as a report carries them.
+/// Satin's limits with `txDataSizeLimit` at `limit`, as a report carries them.
 fn defaults_with_tx_data_size(limit: u64) -> Value {
-    let mut limits = serde_json::to_value(ProtocolLimits::DEFAULT).unwrap();
+    let mut limits = serde_json::to_value(ProtocolLimits::for_spec(MegaSpecId::SATIN)).unwrap();
     limits["txRuntimeLimits"]["txDataSizeLimit"] = json!(limit);
     limits
 }
 
 /// Without an override the run keeps both writes; an override of the transaction data size stops
 /// it at the second write, and takes both back. A run under an override reports the limits it ran
-/// under, and one on the schedule's limits reports none.
+/// under, and one on the spec's limits reports none.
 #[test]
 fn test_an_override_holds_a_satin_run_to_other_limits() {
     let kept = run_two_writes(None);
@@ -126,25 +126,26 @@ fn test_the_report_names_an_override() {
     assert!(!plain.stdout.contains("Limits Override"), "{}", plain.stdout);
 }
 
-/// An override is held to what a chain configuration is: an unknown field, a value of the wrong
-/// type or one the limits' own check refuses is an error, with nothing on stdout.
+/// An override is held to the limits' shape: an unknown field or a value of the wrong type is an
+/// error, with nothing on stdout. Any value of the right type is a counterfactual the tool runs,
+/// a limit of zero included.
 #[test]
-fn test_an_override_no_chain_may_carry_is_refused() {
+fn test_an_override_of_the_wrong_shape_is_refused() {
+    let run = |limits: &str| {
+        evme(&["run", "0x00", "--spec", "Satin", "--json", "--override.limits", limits])
+    };
     let refused = |limits: &str, code: i32, message: &str| {
-        let output =
-            evme(&["run", "0x00", "--spec", "Satin", "--json", "--override.limits", limits]);
+        let output = run(limits);
         assert_eq!(output.code, code, "{limits}: {}", output.stderr);
         assert!(output.stdout.is_empty(), "{limits}: {}", output.stdout);
         assert!(output.stderr.contains(message), "{limits}: {}", output.stderr);
     };
     refused(r#"{"txDataSizeLimit":350}"#, 1, "unknown field `txDataSizeLimit`");
-    refused(
-        r#"{"txRuntimeLimits":{"frameDataSizeLimit":0}}"#,
-        1,
-        "tx_runtime_limits.frame_data_size_limit must not be zero",
-    );
     refused(r#"{"blockTxsDataLimit":"1"}"#, 1, "--override.limits: invalid type");
     refused("[1]", 2, "must be a JSON object");
+
+    let zero = run(r#"{"txRuntimeLimits":{"frameDataSizeLimit":0}}"#).json();
+    assert_eq!(zero["satin"]["limits_override"]["txRuntimeLimits"]["frameDataSizeLimit"], 0);
 }
 
 /// A command on a legacy spec, the default one included, is refused with the override before it
@@ -176,16 +177,12 @@ fn test_an_override_is_refused_on_a_legacy_spec() {
     }
 }
 
-/// A genesis file for chain `chain_id` activating Satin at `satin_time`, with the protocol's
-/// default limits but a transaction data-size limit of the body and one record, in `dir`.
-fn genesis_with_one_record(dir: &tempfile::TempDir, chain_id: u64, satin_time: u64) -> String {
-    let limits = ProtocolLimits::DEFAULT.with_tx_runtime_limits(
-        ProtocolLimits::DEFAULT.tx_runtime_limits.with_tx_data_size_limit(ONE_RECORD),
-    );
+/// A genesis file for chain `chain_id` activating Satin at `satin_time`, with the placeholder
+/// registry seeds, in `dir`.
+fn genesis(dir: &tempfile::TempDir, chain_id: u64, satin_time: u64) -> String {
     let satin = mega_evm::SatinChainConfig {
         activation_time: satin_time,
         sequencer_registry: mega_evm::system::SequencerRegistryConfig::placeholder(),
-        protocol_limits: limits,
     };
     let mut config = serde_json::to_value(satin).unwrap();
     config["chainId"] = json!(chain_id);
@@ -194,35 +191,35 @@ fn genesis_with_one_record(dir: &tempfile::TempDir, chain_id: u64, satin_time: u
     path.to_str().unwrap().to_string()
 }
 
-/// A Satin run given its chain's genesis file is held to the limits the file carries, as the
-/// chain's own and not as an override: the second write crosses the file's data-size limit of one
-/// record.
-/// `run` and `tx` run Satin under the file without being told `--spec Satin`.
+/// A genesis file configures a chain, not its limits: a Satin run given its chain's file is held to
+/// Satin's limits, and keeps both writes. `run` and `tx` run Satin under the file without being
+/// told `--spec Satin`.
 #[test]
-fn test_a_genesis_file_holds_a_satin_run_to_its_limits() {
+fn test_a_genesis_file_runs_satin_under_the_specs_limits() {
     let dir = tempfile::tempdir().unwrap();
-    let genesis = genesis_with_one_record(&dir, 6342, 0);
+    let genesis = genesis(&dir, 6342, 0);
     let run = |extra: &[&str]| {
         let args = [&["run", TWO_WRITES, "--json", "--genesis", &genesis], extra];
         evme(&args.concat())
     };
     for spec in [&["--spec", "Satin"][..], &[]] {
-        let stopped = run(spec).json();
-        assert_eq!(
-            stopped["satin"]["limit_exceeded"],
-            json!({ "kind": "data_size", "limit": ONE_RECORD, "used": TWO_RECORDS }),
-            "{spec:?}"
-        );
-        assert!(stopped["satin"].get("limits_override").is_none(), "{}", stopped["satin"]);
+        let kept = run(spec).json();
+        assert_eq!(kept["success"], true, "{spec:?}");
+        assert_eq!(kept["satin"]["data_size"], TWO_RECORDS, "{spec:?}");
+        assert_eq!(kept["satin"]["limit_exceeded"], Value::Null, "{spec:?}");
+        assert!(kept["satin"].get("limits_override").is_none(), "{}", kept["satin"]);
     }
     let tx = evme(&["tx", "--input", "0x00", "--json", "--genesis", &genesis]).json();
     assert_eq!(tx["success"], true);
     assert_eq!(tx["satin"]["data_size"], 311, "a Satin report: {tx}");
 
-    // An override still replaces what it names, over the file's limits.
-    let limits = format!(r#"{{"txRuntimeLimits":{{"txDataSizeLimit":{TWO_RECORDS}}}}}"#);
-    let overridden = run(&["--override.limits", &limits]);
-    assert_eq!(overridden.json()["satin"]["limit_exceeded"], Value::Null);
+    // An override replaces what it names under the file too.
+    let limits = format!(r#"{{"txRuntimeLimits":{{"txDataSizeLimit":{ONE_RECORD}}}}}"#);
+    let overridden = run(&["--override.limits", &limits]).json();
+    assert_eq!(
+        overridden["satin"]["limit_exceeded"],
+        json!({ "kind": "data_size", "limit": ONE_RECORD, "used": TWO_RECORDS })
+    );
 
     // The file is its chain's: a run on another chain is refused.
     let other = run(&["--chain-id", "6343"]);
@@ -232,12 +229,12 @@ fn test_a_genesis_file_holds_a_satin_run_to_its_limits() {
 
 /// A run the file cannot configure is refused rather than run on the engine's own schedule: one
 /// before the file's `satinTime`, and one on a file without Satin keys. From the file's
-/// `satinTime` on, the run takes the file's limits.
+/// `satinTime` on, the run is made.
 #[test]
 fn test_a_genesis_file_refuses_a_run_it_cannot_configure() {
     const SATIN_TIME: &str = "1800000000";
     let dir = tempfile::tempdir().unwrap();
-    let later = genesis_with_one_record(&dir, 6342, SATIN_TIME.parse().unwrap());
+    let later = genesis(&dir, 6342, SATIN_TIME.parse().unwrap());
     let without_satin = dir.path().join("without-satin.json");
     std::fs::write(&without_satin, json!({ "config": { "chainId": 6342 } }).to_string()).unwrap();
     let without_satin = without_satin.to_str().unwrap();
@@ -261,11 +258,10 @@ fn test_a_genesis_file_refuses_a_run_it_cannot_configure() {
     }
 
     let from =
-        evme(&["run", TWO_WRITES, "--json", "--genesis", &later, "--block.timestamp", SATIN_TIME]);
-    assert_eq!(
-        from.json()["satin"]["limit_exceeded"],
-        json!({ "kind": "data_size", "limit": ONE_RECORD, "used": TWO_RECORDS })
-    );
+        evme(&["run", TWO_WRITES, "--json", "--genesis", &later, "--block.timestamp", SATIN_TIME])
+            .json();
+    assert_eq!(from["success"], true);
+    assert_eq!(from["satin"]["data_size"], TWO_RECORDS);
 }
 
 /// The file applies to Satin only: a command on a legacy spec is refused with it, as with an
@@ -274,7 +270,7 @@ fn test_a_genesis_file_refuses_a_run_it_cannot_configure() {
 #[test]
 fn test_a_genesis_file_is_refused_on_a_legacy_spec() {
     let dir = tempfile::tempdir().unwrap();
-    let genesis = genesis_with_one_record(&dir, 6342, 0);
+    let genesis = genesis(&dir, 6342, 0);
     for command in [&["run", "0x00"][..], &["tx", "--input", "0x00"]] {
         let args = [command, &["--spec", "Rex6", "--genesis", &genesis]].concat();
         let output = evme(&args);

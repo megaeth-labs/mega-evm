@@ -20,7 +20,7 @@ use alloy_primitives::{address, hex, logs_bloom, Address, Bytes, Signature, TxKi
 use alloy_sol_types::SolError;
 use mega_evm::{
     test_utils::is_transfer_log, LimitCheck, LimitKind, MegaLimitExceeded, MegaTxEnvelope,
-    ProtocolLimits, TX_BODY_SIZE,
+    TX_BODY_SIZE,
 };
 use op_alloy_consensus::{OpReceiptEnvelope, TxDeposit};
 use revm::{context::result::ExecutionResult, database::State};
@@ -174,7 +174,7 @@ fn test_a_blocks_receipts_pin_their_bytes_bloom_and_cumulative_gas() {
     let mut state = state();
     let mut executor = common::executor_with_limits(
         &mut state,
-        ProtocolLimits::loosest()
+        common::loosest()
             .with_tx_runtime_limits(common::loosest_tx().with_tx_data_size_limit(DATA_SIZE_LIMIT)),
     );
     executor.apply_pre_execution_changes().expect("the block starts");
