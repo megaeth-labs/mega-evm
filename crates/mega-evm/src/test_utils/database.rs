@@ -167,12 +167,20 @@ pub struct ErrorInjectingDatabase {
     /// independently of `basic()` (mirrors a node missing a contract's code), to exercise the
     /// `load_code = true` inspect paths in isolation.
     pub fail_on_code_by_hash: Option<B256>,
+    /// When set, `block_hash()` calls for this block number return an error.
+    pub fail_on_block_hash: Option<u64>,
 }
 
 impl ErrorInjectingDatabase {
     /// Creates a new `ErrorInjectingDatabase` wrapping the given [`MemoryDatabase`].
     pub fn new(inner: MemoryDatabase) -> Self {
-        Self { inner, fail_on_account: None, fail_on_storage: None, fail_on_code_by_hash: None }
+        Self {
+            inner,
+            fail_on_account: None,
+            fail_on_storage: None,
+            fail_on_code_by_hash: None,
+            fail_on_block_hash: None,
+        }
     }
 }
 
@@ -205,6 +213,9 @@ impl revm::Database for ErrorInjectingDatabase {
     }
 
     fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
+        if self.fail_on_block_hash == Some(number) {
+            return Err(InjectedDbError(format!("injected block_hash() error for {number}")));
+        }
         self.inner.block_hash(number).map_err(|e| match e {})
     }
 }
@@ -234,5 +245,15 @@ mod tests {
         let hash = info.code_hash;
         assert_eq!(info.code.expect("code is stored on the account").original_bytes(), code);
         assert_eq!(db.code_by_hash(hash).unwrap().original_bytes(), code);
+    }
+
+    #[test]
+    fn test_block_hash_can_fail_for_one_number() {
+        let mut db = ErrorInjectingDatabase::new(MemoryDatabase::default());
+        let served = db.block_hash(1).unwrap();
+        db.fail_on_block_hash = Some(7);
+        let err = db.block_hash(7).unwrap_err();
+        assert!(err.to_string().contains("injected block_hash() error for 7"), "{err}");
+        assert_eq!(db.block_hash(1).unwrap(), served);
     }
 }
