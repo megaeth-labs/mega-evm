@@ -6,7 +6,10 @@ use alloy_provider::Provider;
 use alloy_rpc_types_eth::Block;
 use clap::Parser;
 use mega_evm::{
-    alloy_evm::{block::BlockExecutor, Evm, EvmEnv},
+    alloy_evm::{
+        block::{BlockExecutionError, BlockExecutor},
+        Evm, EvmEnv,
+    },
     alloy_op_evm::block::OpAlloyReceiptBuilder,
     revm::{
         context::{result::ExecutionResult, BlockEnv, CfgEnv, ContextTr},
@@ -478,9 +481,10 @@ impl Cmd {
             .apply_pre_execution_changes()
             .map_err(|e| ReplayError::Other(format!("Block execution error: {e}")))?;
 
-        // Execute preceding transactions. One the block refuses is skipped, as a block import
-        // records the refusal and continues, and the target runs on the state the included ones
-        // left. The receipt index counts only those included transactions.
+        // Execute preceding transactions. A validation error is a refusal: a block import
+        // records it and continues, and the target runs on the state the included ones left.
+        // A database failure or an internal error stops the replay. The receipt index counts
+        // only the included transactions.
         info!(preceding_count = ctx.preceding_tx_hashes.len(), "Executing preceding transactions",);
         let mut included_preceding = 0u64;
         let mut log_index_base = 0u64;
@@ -493,15 +497,23 @@ impl Cmd {
                 .ok_or(ReplayError::TransactionNotFound(*tx_hash))?;
             let outcome = match block_executor.run_transaction(tx.as_recovered()) {
                 Ok(outcome) => outcome,
-                Err(e) => {
-                    warn!(tx_hash = %tx_hash, error = %e, "Skipping refused preceding transaction");
-                    continue;
-                }
+                Err(e) => match predecessor_error(&e) {
+                    PredecessorError::Skip => {
+                        warn!(tx_hash = %tx_hash, error = %e, "Skipping refused preceding transaction");
+                        continue;
+                    }
+                    PredecessorError::Propagate(error) => return Err(error),
+                },
             };
             trace!(tx_hash = %tx_hash, ?outcome, "Preceding transaction executed");
             if let Err(e) = block_executor.commit_transaction_outcome(outcome) {
-                warn!(tx_hash = %tx_hash, error = %e, "Skipping refused preceding transaction");
-                continue;
+                match predecessor_error(&e) {
+                    PredecessorError::Skip => {
+                        warn!(tx_hash = %tx_hash, error = %e, "Skipping refused preceding transaction");
+                        continue;
+                    }
+                    PredecessorError::Propagate(error) => return Err(error),
+                }
             }
             included_preceding += 1;
             log_index_base += block_executor
@@ -649,6 +661,28 @@ impl Cmd {
             }
         }
         Ok(())
+    }
+}
+
+/// What the preceding-transaction loop does with an execution error.
+#[derive(Debug)]
+enum PredecessorError {
+    /// A validation error: the block refused the transaction, and the replay continues.
+    Skip,
+    /// A database failure or an internal error. The replay stops.
+    Propagate(ReplayError),
+}
+
+/// Classifies `error` for the preceding-transaction loop.
+///
+/// A validation error is a refusal a block import records and continues past.
+/// A database failure or an internal error stops the replay, so the target runs on the state
+/// the included predecessors left.
+fn predecessor_error(error: &BlockExecutionError) -> PredecessorError {
+    if error.as_validation().is_some() {
+        PredecessorError::Skip
+    } else {
+        PredecessorError::Propagate(ReplayError::Other(format!("Block execution error: {error}")))
     }
 }
 
@@ -920,6 +954,33 @@ mod tests {
             inspector.config().record_stack_snapshots,
             revm_inspectors::tracing::StackSnapshotType::None
         );
+    }
+
+    #[test]
+    fn test_a_predecessor_error_skips_a_refusal_and_propagates_an_internal_error() {
+        use mega_evm::alloy_evm::block::BlockValidationError;
+
+        let refusal = BlockExecutionError::from(BlockValidationError::BlockGasExceeded);
+        assert!(
+            matches!(predecessor_error(&refusal), PredecessorError::Skip),
+            "a validation error is a refusal: {refusal}"
+        );
+
+        let internal = BlockExecutionError::msg("database read failed");
+        match predecessor_error(&internal) {
+            PredecessorError::Propagate(ReplayError::Other(message)) => {
+                assert_eq!(message, format!("Block execution error: {internal}"));
+            }
+            other => panic!("an internal error propagates: {other:?}"),
+        }
+
+        let other = BlockExecutionError::other(std::io::Error::other("rpc failed"));
+        match predecessor_error(&other) {
+            PredecessorError::Propagate(ReplayError::Other(message)) => {
+                assert_eq!(message, format!("Block execution error: {other}"));
+            }
+            other => panic!("an internal error propagates: {other:?}"),
+        }
     }
 
     #[test]

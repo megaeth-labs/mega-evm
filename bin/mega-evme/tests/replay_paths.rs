@@ -420,3 +420,81 @@ async fn test_a_replay_skips_a_refused_predecessor_and_keeps_its_state() {
     let left = balance(RECIPIENT);
     assert!(left < ether && left > ether - U256::from(10u64.pow(16)), "{left} {state}");
 }
+
+/// A predecessor whose account the RPC cache cannot serve is a database failure.
+///
+/// The mock answers an unrecorded account with an error. That is not a validation refusal, so
+/// the replay stops instead of running the target on the parent state.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_replay_stops_when_a_predecessor_account_cannot_be_read() {
+    const PAYER: Address = address!("0x1111111111111111111111111111111111111111");
+    const MISSING: Address = address!("0x4444444444444444444444444444444444444444");
+    const RECIPIENT: Address = address!("0x3333333333333333333333333333333333333333");
+    const GAS: u64 = 5_000_000;
+
+    let mut recorded = read_block(fixtures(), BLOCK);
+    assert!(
+        !recorded.prestate.accounts.contains_key(&MISSING) && MISSING != FACTORY,
+        "the predecessor's sender has to be an account the cache cannot serve"
+    );
+    recorded
+        .prestate
+        .accounts
+        .insert(PAYER, PreAccount { balance: U256::from(10u128.pow(18)), ..PreAccount::default() });
+    recorded.prestate.accounts.insert(RECIPIENT, PreAccount::default());
+
+    let block_hash = recorded.block["hash"].clone();
+    let block_number = recorded.block["number"].clone();
+    let tx = |hash: &str, index: u64, from: Address, to: Address| {
+        json!({
+            "type": "0x2",
+            "chainId": "0x10e6",
+            "nonce": "0x0",
+            "gas": format!("0x{GAS:x}"),
+            "maxFeePerGas": "0xf4240",
+            "maxPriorityFeePerGas": "0x0",
+            "to": to,
+            "value": "0x0",
+            "accessList": [],
+            "input": "0x",
+            "r": "0x64c0524917585101b7ffb2286d4de676ca987554b33c6f9a37e7ad7508bfbb84",
+            "s": "0xe5199cacc6e07c6a9f8c74d0b06f964ce36dd362199b1c19d866f1a6f52d510",
+            "yParity": "0x1",
+            "v": "0x1",
+            "hash": hash,
+            "blockHash": block_hash,
+            "blockNumber": block_number,
+            "transactionIndex": format!("0x{index:x}"),
+            "from": from,
+            "gasPrice": "0xf4240",
+        })
+    };
+    let target = "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    recorded.block["transactions"] = json!([
+        tx(
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            0,
+            MISSING,
+            RECIPIENT,
+        ),
+        tx(target, 1, PAYER, RECIPIENT),
+    ]);
+
+    let server = Server::start(recorded).await;
+    let uri = server.0.uri();
+    let run = run_evme(&[
+        "replay",
+        target,
+        "--rpc",
+        &uri,
+        "--rpc.no-cache-file",
+        "--rpc.max-retries",
+        "0",
+        "--override.spec",
+        "Satin",
+    ]);
+    assert_ne!(run.code, 0, "a failed predecessor read is not skipped: {}", run.stdout);
+    let output = format!("{}{}", run.stdout, run.stderr);
+    assert!(output.contains("Block execution error"), "{output}");
+    assert!(output.contains("account not recorded"), "{output}");
+}
