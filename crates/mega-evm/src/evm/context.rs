@@ -384,8 +384,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
 
     /// Prepares the common execution layer for a new transaction, which is a system-address
     /// transaction or not as `system_transaction` says. The handler calls it first thing, once
-    /// validation has read the live system address for a transaction of the system shape, so the
-    /// layer is prepared before anything else of the transaction runs.
+    /// validation has read the live system address, so the layer is prepared before anything
+    /// else of the transaction runs.
     pub(crate) fn on_new_tx(&mut self, system_transaction: bool) {
         self.prepare(system::originates_from_the_protocol(&self.inner.tx, system_transaction));
     }

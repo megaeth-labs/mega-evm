@@ -16,6 +16,13 @@
 //! and they pin both sides, so a divergence is never silently absorbed. Later changes (the
 //! limits) add their own.
 //!
+//! Every Satin transaction also reads the live system address when it is validated, which leaves
+//! the `SequencerRegistry`'s account and its system-address slot in its returned state as a
+//! read-only entry that op-revm's has no counterpart for. A commit skips an account nothing
+//! touched, so the entry changes no committed state; each comparison of the two states takes it
+//! out first ([`take_system_address_read`]), which fails when the entry is missing or is more than
+//! the read, so the difference is pinned on every case rather than absorbed.
+//!
 //! SALT pricing multiplies a state gas charge by the capacity of the bucket it lands in, and
 //! op-revm has no SALT to read. Every baseline case runs without a SALT environment, where every
 //! bucket is minimal and the multiplier is one, so the baseline holds; the last case crowds one
@@ -30,8 +37,8 @@ use mega_evm::{
     },
     satin_gas_params,
     test_utils::{
-        note_price_guard, op_transaction, transfer_log, zero_fee_l1_block_info, BytecodeBuilder,
-        MemoryDatabase,
+        note_price_guard, op_transaction, take_system_address_read, transfer_log,
+        zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase,
     },
     MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransactionOutcome, TX_BODY_SIZE,
     WRITE_RECORD_SIZE,
@@ -134,9 +141,9 @@ fn both_evms(
 /// against the EIP-7623 floor, so a floor that binds op-revm's receipt need not bind Satin's;
 /// the whole `ResultGas` is still compared, with the two fields history moves rebuilt.
 ///
-/// The state is compared as it is, which holds because these transactions carry no gas price: a
-/// priced transaction pays the extra gas out of the sender's balance
-/// ([`test_fees_match_op_revm`]).
+/// The state is compared with the read of the live system address taken out, which holds because
+/// these transactions carry no gas price: a priced transaction pays the extra gas out of the
+/// sender's balance ([`test_fees_match_op_revm`]).
 fn assert_same_but_history(mega: &MegaTransactionOutcome, op: &Outcome) {
     let history = mega.gas.history;
     assert!(history >= body_history(0), "every Satin transaction pays for its own body");
@@ -162,7 +169,14 @@ fn assert_same_but_history(mega: &MegaTransactionOutcome, op: &Outcome) {
     assert_eq!(mega.result.logs(), op.result.logs(), "logs");
     assert_eq!(mega.result.output(), op.result.output(), "output");
     assert_eq!(mega.result.is_success(), op.result.is_success(), "success");
-    assert_eq!(mega.state, op.state, "state");
+    assert_eq!(but_the_system_address_read(&mega.state), op.state, "state");
+}
+
+/// `state` with the read of the live system address every Satin transaction makes taken out.
+fn but_the_system_address_read(state: &EvmState) -> EvmState {
+    let mut state = state.clone();
+    take_system_address_read(&mut state);
+    state
 }
 
 /// Asserts the two outcomes agree field by field, then as a whole so a field added later is
@@ -768,7 +782,7 @@ fn test_a_crowded_salt_bucket_is_where_satin_leaves_op_revm() {
     // moves the gas ledgers and nothing else.
     assert_eq!(mega.result.logs(), op.result.logs(), "logs");
     assert_eq!(mega.result.output(), op.result.output(), "output");
-    assert_eq!(mega.state, op.state, "state");
+    assert_eq!(but_the_system_address_read(&mega.state), op.state, "state");
 }
 
 /// A transaction that runs out of gas in the runtime gas phase, before its first frame — here on
@@ -823,7 +837,7 @@ fn test_an_out_of_gas_before_the_first_frame_matches_op_revm() {
     assert_eq!(mega.gas.state, 0, "the account was not created");
     // With no gas price the fee is nothing, so the two states are the same: the sender's nonce
     // moved and nothing else.
-    assert_eq!(mega.state, op.state, "state");
+    assert_eq!(but_the_system_address_read(&mega.state), op.state, "state");
     assert_eq!(mega.state[&CALLER].info.nonce, 1);
 }
 

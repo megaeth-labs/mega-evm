@@ -384,7 +384,7 @@ fn test_the_bootstrap_block_promotes_the_seeded_system_address() {
 /// Once the registry is in place, no pre-block step carries the system address's slot: the
 /// deploy leaves the registry as a read-only entry without storage, and the read of the pending
 /// changes reads the pending slots alone. The slot is in the system-address transaction's own
-/// state instead, read-only and cold, as its validation read it.
+/// state instead, read-only and warm, as its validation read it.
 #[test]
 fn test_the_slot_is_in_the_system_transactions_state_not_the_pre_block_witness() {
     let mut state = State::builder().with_database(registry_with(&[])).build();
@@ -401,7 +401,7 @@ fn test_the_slot_is_in_the_system_transactions_state_not_the_pre_block_witness()
     let outcome = assert_is_the_system_address(&mut executor, MEGA_SYSTEM_ADDRESS);
     assert_carries_the_system_address_read(&outcome.inner.state, MEGA_SYSTEM_ADDRESS);
     let registry = &outcome.inner.state[&SEQUENCER_REGISTRY_ADDRESS];
-    assert!(registry.storage[&CURRENT_SYSTEM_ADDRESS].is_cold, "the read left the slot cold");
+    assert!(!registry.storage[&CURRENT_SYSTEM_ADDRESS].is_cold, "the read warmed the slot");
 }
 
 /// A system-address transaction is recognised by the address read out of the registry: from it,

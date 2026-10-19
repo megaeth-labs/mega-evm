@@ -16,6 +16,12 @@
 //! there as long as `no_limits` leaves it unlimited, which the limit module's own test pins field
 //! by field.
 //!
+//! Every Satin transaction reads the live system address when it is validated, under the neutral
+//! configuration too, which leaves the `SequencerRegistry`'s account and one slot in its returned
+//! state, read-only: an engine that makes no such read returns no such entry, and a comparison
+//! with one takes it out first ([`take_system_address_read`]). A commit skips an account nothing
+//! touched, so the entry parts no committed state.
+//!
 //! Satin's base spec is Osaka, and a configuration cannot take a rule the base spec gates on its
 //! own id away or add one: an Osaka rule stays on under an older fork's fixtures, and an
 //! Amsterdam rule gated on the spec id stays off under Amsterdam's. So only Osaka and the fork
@@ -30,9 +36,13 @@ use revm::{
     interpreter::instructions::{gas_table_spec, GasTable},
     precompile::{PrecompileSpecId, Precompiles},
     primitives::eip7954,
+    state::{Account, EvmState},
 };
 
-use crate::{EthSpecId, ExternalEnvTypes, MegaEvm, MegaSpecId};
+use crate::{
+    system::{storage_slots::CURRENT_SYSTEM_ADDRESS, SEQUENCER_REGISTRY_ADDRESS},
+    EthSpecId, ExternalEnvTypes, MegaEvm, MegaSpecId,
+};
 
 /// The configuration `fork`'s fixtures run under on Satin's machinery, or `None` for a fork
 /// Satin's Osaka base cannot be configured to.
@@ -111,6 +121,28 @@ pub fn neutralize_evm<DB: Database, INSP, ExtEnvs: ExternalEnvTypes>(
     let (_, instructions, _, _) = evm.all_mut();
     *instructions.gas_table_mut() = gas_table;
     Some(())
+}
+
+/// Takes out of a Satin transaction's returned `state` the entry its validation's read of the live
+/// system address left, and answers it: the `SequencerRegistry`'s account and its
+/// `_currentSystemAddress` slot, loaded and never written. What is left is what an engine that
+/// makes no such read returns for the same transaction, op-revm's or Ethereum's.
+///
+/// # Panics
+///
+/// When `state` holds no entry for the registry, or one that is more than the read: the account
+/// touched, another slot loaded, or the slot changed. Each is a difference of its own, which a
+/// comparison must not take out with the read.
+pub fn take_system_address_read(state: &mut EvmState) -> Account {
+    let registry =
+        state.remove(&SEQUENCER_REGISTRY_ADDRESS).expect("every transaction reads the registry");
+    assert!(!registry.is_touched(), "the registry was written, not only read: {registry:?}");
+    assert!(
+        registry.storage.keys().eq([&CURRENT_SYSTEM_ADDRESS]),
+        "the registry holds more than the system address's slot: {registry:?}"
+    );
+    assert!(!registry.storage[&CURRENT_SYSTEM_ADDRESS].is_changed(), "the slot was written");
+    registry
 }
 
 #[cfg(test)]

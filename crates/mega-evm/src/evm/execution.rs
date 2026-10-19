@@ -57,8 +57,8 @@ use crate::{
     },
     history_gas, synthetic_frame_result,
     system::keyless,
-    write_record_history_gas, Detention, ExternalEnvTypes, JournalInspectTr, LimitCheck, LimitKind,
-    MegaContext, MegaEvm, MegaInstructions, PricedPrecompiles, VolatileDataAccess,
+    write_record_history_gas, Detention, ExternalEnvTypes, LimitCheck, LimitKind, MegaContext,
+    MegaEvm, MegaInstructions, PricedPrecompiles, VolatileDataAccess,
 };
 
 /// The Satin handler.
@@ -96,23 +96,27 @@ where
     ERROR: EvmTrError<EVM> + From<OpTransactionError> + FromStringError + IsTxError,
     FRAME: FrameTr<FrameResult = FrameResult, FrameInit = FrameInit>,
 {
-    /// [`validate_env`](Handler::validate_env) once it is decided whether the transaction is a
-    /// system-address transaction: prepares the common execution layer for it, validates a
+    /// [`validate_env`](Handler::validate_env) once the live system address is known: decides
+    /// whether the transaction is a system-address transaction — of the system shape, from
+    /// `system_address` — and prepares the common execution layer for it, validates a
     /// system-address transaction and promotes it to a deposit, then validates the transaction as
     /// op-revm does.
     ///
-    /// The handler decides it from the live system address it reads out of the state, and checks
-    /// the system address's nonce and code. What validates a transaction without state
+    /// The handler reads the address out of the state, and checks the system address's nonce and
+    /// code. What validates a transaction without state
     /// ([`validate_transaction_stateless`](crate::validate_transaction_stateless)) is given the
     /// address and leaves the account to the state, as it leaves every sender's
     /// (`check_system_account` false); every other step is this one.
     pub(crate) fn validate_env_as(
         &self,
         evm: &mut EVM,
-        system_transaction: bool,
+        system_address: Option<Address>,
         check_system_account: bool,
     ) -> Result<(), ERROR> {
         let ctx = evm.ctx_mut();
+        let system_transaction = system_address.is_some_and(|address| {
+            crate::system::is_mega_system_transaction_with(ctx.tx(), address)
+        });
         ctx.on_new_tx(system_transaction);
         if system_transaction {
             crate::system::validate_and_promote::<_, _, ERROR>(ctx, check_system_account)?;
@@ -196,19 +200,19 @@ where
         Ok(Some(PreExecutionOutput { eip7702_refund, checkpoint }))
     }
 
-    /// Decides whether the transaction is a system-address transaction and prepares the common
-    /// execution layer for it, then validates a system-address transaction and promotes it to a
-    /// deposit, then validates the transaction as op-revm does — as a deposit, when it was
-    /// promoted.
+    /// Reads the live system address out of the registry, then decides whether the transaction
+    /// is a system-address transaction and prepares the common execution layer for it, then
+    /// validates a system-address transaction and promotes it to a deposit, then validates the
+    /// transaction as op-revm does — as a deposit, when it was promoted.
     ///
     /// This is the handler's first phase, so the layer is prepared before anything else of the
     /// transaction runs, and a read the database cannot serve fails the transaction through the
-    /// handler's error path, which discards what the journal loaded. Only a transaction of the
-    /// system shape reads the live system address, from the journal and without warming it; every
-    /// other transaction pays the shape test, a comparison or two on its own fields.
+    /// handler's error path, which discards what the journal loaded. Every transaction reads the
+    /// live system address, whatever its shape, and the read leaves the registry's account and
+    /// its slot warm for the rest of the transaction, as EIP-3651 leaves the block beneficiary.
     fn validate_env(&self, evm: &mut Self::Evm) -> Result<(), Self::Error> {
-        let system_transaction = crate::system::is_live_system_transaction(evm.ctx_mut())?;
-        self.validate_env_as(evm, system_transaction, true)
+        let system_address = crate::system::load_system_address(evm.ctx_mut().journal_mut())?;
+        self.validate_env_as(evm, system_address, true)
     }
 
     /// Notes whether this transaction's caller is an account executing it creates, then deducts
@@ -1272,8 +1276,8 @@ fn unbuilt_first_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// deposit-like transaction is a deposit by then. Every other transaction pays a fee its caller
 /// must hold, so it has an account already.
 ///
-/// The read does not warm the account: the transaction's own touches of it pay what they would
-/// have paid without the check.
+/// The read loads the caller as op-revm's deduction then does: the transaction's caller starts
+/// warm, so the read changes nothing the transaction pays.
 fn deposit_creates_caller<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
 ) -> Result<bool, DB::Error> {
@@ -1281,7 +1285,7 @@ fn deposit_creates_caller<DB: Database, ExtEnvs: ExternalEnvTypes>(
         return Ok(false);
     }
     let caller = ctx.tx().caller();
-    Ok(ctx.journal_mut().inspect_account(caller, false)?.info.is_empty())
+    Ok(ctx.journal_mut().load_account(caller)?.data.info.is_empty())
 }
 
 /// Charges the state gas of the account a deposit-like transaction creates for its caller, as

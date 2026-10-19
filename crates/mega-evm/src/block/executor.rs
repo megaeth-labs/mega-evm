@@ -91,9 +91,9 @@
 //! on the pre-block budget ([`pre_block_call_gas_limit`](crate::pre_block_call_gas_limit)), and
 //! one that does not succeed refuses the block.
 //!
-//! The executor does not read the live system address: a transaction of the system shape reads it
-//! out of the registry itself when it is validated, and the pre-block step is what leaves the
-//! registry naming this block's address.
+//! The executor does not read the live system address: every transaction reads it out of the
+//! registry itself when it is validated, and the pre-block step is what leaves the registry naming
+//! this block's address.
 
 #[cfg(not(feature = "std"))]
 use alloc as std;

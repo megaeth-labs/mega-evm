@@ -8,11 +8,12 @@
 //!
 //! A system-address transaction has a fixed shape
 //! ([`has_system_transaction_shape`]): a legacy transaction calling a contract on
-//! [`MEGA_SYSTEM_TX_WHITELIST`]. Validation tests the shape first, on the transaction's own
-//! fields, and only a transaction that has it reads the live system address out of the registry
-//! and compares it with its caller ([`is_live_system_transaction`]). A transaction of any other
-//! shape reads nothing and is never a system-address transaction, whoever sent it: one from the
-//! system address is an ordinary transaction, validated and charged as a user's is.
+//! [`MEGA_SYSTEM_TX_WHITELIST`]. Every transaction reads the live system address out of the
+//! registry when it is validated
+//! ([`load_system_address`](crate::system::load_system_address)), and one of the system shape
+//! whose caller is that address is a system-address transaction. A transaction of any other
+//! shape is never one, whoever sent it: one from the system address is an ordinary transaction,
+//! validated and charged as a user's is.
 //!
 //! "Ordinary" is the engine's view, not the contracts': the Oracle's `onlySystemAddress` tests
 //! the sender alone. So a non-legacy transaction signed by the system key to the Oracle is
@@ -35,23 +36,21 @@
 use alloy_evm::Database;
 use alloy_primitives::{address, b256, Address, TxKind, B256};
 use revm::{
-    context::{ContextTr, Transaction},
+    context::{ContextTr, JournalTr, Transaction},
     context_interface::{cfg::Cfg, result::InvalidTransaction},
     handler::pre_execution::validate_account_nonce_and_code,
 };
 
 use crate::{
-    system::{inspect_system_address, ORACLE_CONTRACT_ADDRESS},
-    types::MegaTransaction,
-    ExternalEnvTypes, JournalInspectTr, MegaContext,
+    system::ORACLE_CONTRACT_ADDRESS, types::MegaTransaction, ExternalEnvTypes, MegaContext,
 };
 
 /// The system address the unknown-chain placeholder schedule seeds the `SequencerRegistry` with.
 ///
 /// A system-address transaction is executed as a deposit: no nonce check of op-revm's own and no
 /// fee. Which address sends them is the registry's to say, and it can be rotated through the
-/// registry: the engine reads the live one out of the registry for every transaction of the
-/// system shape ([`has_system_transaction_shape`]), and never falls back to this address.
+/// registry: the engine reads the live one out of the registry for every transaction, and never
+/// falls back to this address.
 pub const MEGA_SYSTEM_ADDRESS: Address = address!("0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d");
 
 /// The contracts a system-address transaction may call. It may call nothing else and create
@@ -89,40 +88,14 @@ pub fn check_if_mega_system_transaction(
 /// [`MEGA_SYSTEM_TX_WHITELIST`]. A creation never has it: the protocol maintains the contracts it
 /// deployed, it does not deploy new ones this way.
 ///
-/// It decides whether a transaction reads the live system address at all, so it looks at the
-/// transaction's own fields only: the type, then the destination against the one-entry whitelist.
-/// A transaction that fails it, which is almost every transaction, reads nothing.
+/// It looks at the transaction's own fields only: the type, then the destination against the
+/// one-entry whitelist.
 pub fn has_system_transaction_shape(tx_type: u8, tx_kind: TxKind) -> bool {
     tx_type == 0x0 &&
         match tx_kind {
             TxKind::Create => false,
             TxKind::Call(address) => MEGA_SYSTEM_TX_WHITELIST.contains(&address),
         }
-}
-
-/// Whether the running transaction is a system-address transaction: it has the system shape
-/// ([`has_system_transaction_shape`]) and its caller is the live system address, read out of the
-/// `SequencerRegistry` in the journal without warming it.
-///
-/// A transaction of any other shape reads nothing. The registry cannot change its system address
-/// inside a block after the pre-block step — a change is scheduled for a later block and applied
-/// by that block's pre-block call — so every transaction of a block reads the same address, the
-/// one the block's pre-block step left, and an EVM run outside block execution reads the one in
-/// the state it runs on. A registry that names no trusted address (see the registry's reader)
-/// makes no transaction a system-address transaction.
-///
-/// # Errors
-///
-/// The database's, when the registry's account or its slot cannot be read.
-pub(crate) fn is_live_system_transaction<DB: Database, ExtEnvs: ExternalEnvTypes>(
-    ctx: &mut MegaContext<DB, ExtEnvs>,
-) -> Result<bool, DB::Error> {
-    let tx = ctx.tx();
-    if !has_system_transaction_shape(tx.tx_type(), tx.kind()) {
-        return Ok(false);
-    }
-    let caller = tx.caller();
-    Ok(inspect_system_address(ctx.journal_mut())? == Some(caller))
 }
 
 /// Whether `tx` was produced by the protocol itself rather than by a user, when `system_address`
@@ -152,7 +125,7 @@ pub(crate) fn originates_from_the_protocol(tx: &MegaTransaction, system_transact
 
 /// Validates a system-address transaction and promotes it to a deposit.
 ///
-/// Called for the running transaction once [`is_live_system_transaction`] said it is one, before
+/// Called for the running transaction once validation found it is one, before
 /// op-revm validates it, so op-revm sees the promoted shape: a deposit, whose signature, nonce and
 /// fee it does not check. The checks the deposit path drops and this chain still wants are made
 /// here (see the module documentation), each under the configuration switch a user transaction
@@ -182,13 +155,12 @@ where
         }
     }
 
-    // Read the system address without warming it: validation must not leave the account in the
-    // EIP-2929 access list, which would make the transaction's first touch of it cheaper than
-    // the same transaction from anyone else. Its code is loaded, so EIP-3607 sees a lazy
-    // database's code too.
+    // The system address is the transaction's caller, which the transaction starts warm, so the
+    // load changes nothing it pays. Its code is loaded, so EIP-3607 sees a lazy database's code
+    // too.
     if check_account {
         let (system_address, tx_nonce) = (ctx.tx().caller(), ctx.tx().nonce());
-        let account = ctx.journal_mut().inspect_account(system_address, true)?;
+        let account = ctx.journal_mut().load_account_with_code(system_address)?.data;
         validate_account_nonce_and_code(
             &account.info,
             tx_nonce,

@@ -22,7 +22,7 @@ use revm::{
         transaction::{AccessList, AccessListItem},
         CfgEnv, TxEnv,
     },
-    database::State,
+    database::{states::bundle_state::BundleRetention, State},
     DatabaseCommit,
 };
 
@@ -269,47 +269,55 @@ fn test_another_shape_from_the_system_address_is_an_ordinary_transaction() {
     }
 }
 
-/// A transaction without the system shape never reads the registry, whoever sends it: a database
-/// that cannot serve the registry's account does not stop it, and its state holds nothing of the
-/// registry. A legacy call to the Oracle has the shape, and its validation reads the registry,
-/// here into the database's error.
+/// Every transaction reads the registry when it is validated, whatever its shape and whoever
+/// sends it: its returned state holds the registry's account, untouched, and the system-address
+/// slot, unchanged, and a database that cannot serve the registry's account or that slot fails it
+/// with the database's error, a deposit included.
 #[test]
-fn test_a_transaction_of_another_shape_never_reads_the_registry() {
-    let db = || {
-        let mut db = ErrorInjectingDatabase::new(
-            chain_db()
-                .account_code(OFF_WHITELIST, Bytes::from_static(&[STOP]))
-                .account_balance(MEGA_SYSTEM_ADDRESS, U256::from(FUNDS))
-                .account_balance(CALLER, U256::from(FUNDS)),
-        );
-        db.fail_on_account = Some(SEQUENCER_REGISTRY_ADDRESS);
-        db
+fn test_every_transaction_reads_the_registry() {
+    let funded = || {
+        chain_db()
+            .account_code(OFF_WHITELIST, Bytes::from_static(&[STOP]))
+            .account_balance(CALLER, U256::from(FUNDS))
     };
-    for caller in [MEGA_SYSTEM_ADDRESS, CALLER] {
-        for (shape, tx) in other_shapes(caller) {
-            let outcome = MegaEvm::new(chain_context(db()))
-                .execute_transaction(tx)
-                .expect("the registry is never read");
-            assert!(outcome.result.is_success(), "{shape}: {:?}", outcome.result);
-            assert!(!outcome.state.contains_key(&SEQUENCER_REGISTRY_ADDRESS), "{shape}");
+    let shaped = legacy_tx(CALLER, TxKind::Call(ORACLE_CONTRACT_ADDRESS), get_slot(), 0);
+    let deposit = deposit_tx(CALLER, TxKind::Call(OFF_WHITELIST), U256::ZERO, 0);
+    let transactions = other_shapes(CALLER)
+        .into_iter()
+        .chain([("the system shape", shaped), ("a deposit", deposit)]);
+    for (shape, tx) in transactions {
+        let outcome = MegaEvm::new(chain_context(funded()))
+            .execute_transaction(tx.clone())
+            .expect("an ordinary transaction");
+        assert!(outcome.result.is_success(), "{shape}: {:?}", outcome.result);
+        let registry = &outcome.state[&SEQUENCER_REGISTRY_ADDRESS];
+        assert!(!registry.is_touched(), "{shape}: a read-only entry");
+        let slot = &registry.storage[&CURRENT_SYSTEM_ADDRESS];
+        assert!(!slot.is_changed(), "{shape}");
+        assert_eq!(slot.present_value(), U256::from_be_slice(MEGA_SYSTEM_ADDRESS.as_slice()));
+
+        let mut account = ErrorInjectingDatabase::new(funded());
+        account.fail_on_account = Some(SEQUENCER_REGISTRY_ADDRESS);
+        let mut slot = ErrorInjectingDatabase::new(funded());
+        slot.fail_on_storage = Some((SEQUENCER_REGISTRY_ADDRESS, CURRENT_SYSTEM_ADDRESS));
+        for db in [account, slot] {
+            let error = MegaEvm::new(chain_context(db))
+                .execute_transaction(tx.clone())
+                .expect_err("the registry is read");
+            assert!(matches!(error, EVMError::Database(_)), "{shape}: {error:?}");
         }
     }
-
-    let shaped = legacy_tx(CALLER, TxKind::Call(ORACLE_CONTRACT_ADDRESS), get_slot(), 0);
-    let error = MegaEvm::new(chain_context(db()))
-        .execute_transaction(shaped)
-        .expect_err("the shaped transaction reads the registry");
-    assert!(matches!(error, EVMError::Database(_)), "{error:?}");
 }
 
-/// The read of the live system address warms nothing. A user's legacy call to the Oracle's
-/// `setSlots` has the system shape, so its validation reads the registry's slot and finds the
-/// caller is not the system address; the Oracle then asks the registry for the system address
-/// itself, and that `SLOAD` pays the cold price, as it does for the same call as an EIP-2930
-/// transaction, which reads nothing at validation: the two spend the same gas on every ledger.
-/// Only an access list that names the slot makes the `SLOAD` warm.
+/// Every transaction starts with the registry's account and its system-address slot warm, as
+/// EIP-3651 starts the block beneficiary warm: validation reads the live system address for every
+/// transaction, whatever its shape. A user's call to the Oracle's `setSlots` makes the Oracle ask
+/// the registry for the system address itself, and that `SLOAD` pays the warm price, as a legacy
+/// call, as an EIP-2930 call, and as one whose access list names the slot alike: the shape of the
+/// envelope changes nothing the transaction pays, and the access list adds only its own
+/// intrinsic cost.
 #[test]
-fn test_the_read_leaves_the_slot_and_the_registry_cold() {
+fn test_every_transaction_warms_the_registry_and_its_slot() {
     let run = |tx: MegaTransaction| {
         let mut evm =
             MegaEvm::new(chain_context(chain_db().account_balance(CALLER, U256::from(FUNDS))))
@@ -336,22 +344,55 @@ fn test_the_read_leaves_the_slot_and_the_registry_cold() {
         )
     };
 
-    let (shaped, cold) = run(write());
-    assert!(
-        shaped.state[&SEQUENCER_REGISTRY_ADDRESS].storage.contains_key(&CURRENT_SYSTEM_ADDRESS),
-        "the shaped transaction read the slot",
-    );
-    let (unshaped, unread) = run(typed(write(), 1));
-    assert_eq!(cold, unread, "the SLOAD after the read costs what it costs without one");
-    assert_eq!(shaped.gas, unshaped.gas, "and so does the whole transaction");
+    let warm = mega_evm::satin_gas_params().warm_storage_read_cost();
 
-    let mut warmed = typed(write(), 1);
-    warmed.0.base.access_list = AccessList(vec![AccessListItem {
+    let (shaped, legacy) = run(write());
+    let (unshaped, typed_call) = run(typed(write(), 1));
+    for (shape, outcome) in [("legacy", &shaped), ("EIP-2930", &unshaped)] {
+        let registry = &outcome.state[&SEQUENCER_REGISTRY_ADDRESS];
+        assert!(!registry.is_touched(), "{shape}: the read writes nothing");
+        assert!(registry.storage.contains_key(&CURRENT_SYSTEM_ADDRESS), "{shape}: the slot");
+    }
+    assert_eq!(legacy, warm, "the legacy call's SLOAD is warm");
+    assert_eq!(typed_call, warm, "and so is the EIP-2930 call's");
+    assert_eq!(shaped.gas, unshaped.gas, "the two spend the same gas on every ledger");
+
+    let mut listed = typed(write(), 1);
+    listed.0.base.access_list = AccessList(vec![AccessListItem {
         address: SEQUENCER_REGISTRY_ADDRESS,
         storage_keys: vec![B256::from(CURRENT_SYSTEM_ADDRESS)],
     }]);
-    let (_, warm) = run(warmed);
-    assert!(warm < cold, "a warm SLOAD ({warm}) is cheaper than the cold one ({cold})");
+    let (_, listed) = run(listed);
+    assert_eq!(listed, warm, "an access list naming the slot makes it no warmer");
+}
+
+/// The registry's account and slot every transaction reads are an untouched entry of its state,
+/// and a commit skips an account nothing touched: committing a transaction writes nothing of the
+/// registry, whether the state holds a registry or not, so the state root moves as it would
+/// without the read.
+#[test]
+fn test_committing_a_transaction_writes_nothing_of_the_registry() {
+    for (holds, db) in [("a registry", chain_db()), ("no registry", MemoryDatabase::default())] {
+        let db = db
+            .account_balance(CALLER, U256::from(FUNDS))
+            .account_code(OFF_WHITELIST, Bytes::from_static(&[STOP]));
+        let mut state = State::builder().with_database(db).with_bundle_update().build();
+        let mut evm = MegaEvm::new(chain_context(&mut state));
+        let tx = legacy_tx(CALLER, TxKind::Call(OFF_WHITELIST), Bytes::new(), 0);
+        let outcome = evm.execute_transaction(tx).expect("an ordinary transaction");
+        assert!(outcome.result.is_success(), "{holds}: {:?}", outcome.result);
+        assert!(outcome.state.contains_key(&SEQUENCER_REGISTRY_ADDRESS), "{holds}: it was read");
+        drop(evm);
+        state.commit(outcome.state.clone());
+
+        state.merge_transitions(BundleRetention::Reverts);
+        let bundle = state.take_bundle();
+        assert!(bundle.state.contains_key(&CALLER), "{holds}: the commit wrote the sender");
+        assert!(
+            !bundle.state.contains_key(&SEQUENCER_REGISTRY_ADDRESS),
+            "{holds}: and nothing of the registry"
+        );
+    }
 }
 
 /// The whitelist holds for the system address alone: anyone else may call anything, and pays
@@ -805,10 +846,9 @@ fn test_a_deposit_that_creates_a_contract_pays_for_its_caller_too() {
 }
 
 /// A transaction that already carries the system source hash is a deposit by type, so it does
-/// not have the system shape: it reads nothing of the registry and runs as the deposit it is, as
-/// one carrying the hash from any other caller does (see
-/// `test_a_deposit_from_another_caller_is_untouched`). No promotion is made for it, so none of the
-/// promotion's checks runs: its nonce is not the system address's.
+/// not have the system shape: it runs as the deposit it is, as one carrying the hash from any
+/// other caller does (see `test_a_deposit_from_another_caller_is_untouched`). No promotion is made
+/// for it, so none of the promotion's checks runs: its nonce is not the system address's.
 ///
 /// A block's transactions are decoded from their legacy encoding, which carries no source hash,
 /// so this is the shape a caller hands the engine directly, not one a block holds.
@@ -817,10 +857,8 @@ fn test_a_transaction_that_arrives_promoted_runs_as_a_deposit() {
     let mut tx =
         legacy_tx(MEGA_SYSTEM_ADDRESS, TxKind::Call(ORACLE_CONTRACT_ADDRESS), get_slot(), 7);
     tx.0.deposit.source_hash = MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
-    let mut db = ErrorInjectingDatabase::new(chain_db());
-    db.fail_on_storage = Some((SEQUENCER_REGISTRY_ADDRESS, CURRENT_SYSTEM_ADDRESS));
-    let outcome = MegaEvm::new(chain_context(db))
+    let outcome = MegaEvm::new(chain_context(chain_db()))
         .execute_transaction(tx)
-        .expect("validation reads nothing of the registry");
+        .expect("a deposit is not refused");
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
 }

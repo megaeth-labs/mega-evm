@@ -53,9 +53,9 @@ pub use evm::{
     synthetic_call_result, synthetic_frame_result, transaction_body_bytes, tx_body_history_bytes,
     untouched_call_gas, untouched_create_gas, validate_transaction_stateless, with_pools_of,
     write_record_history_gas, BlockHashRecord, BucketRecord, BytePrice, DeclaredObserver,
-    DynPrecompilesBuilder, EthSpecId, IntrinsicGas, JournalInspectTr, MegaContext, MegaEvm,
-    MegaEvmError, MegaEvmFactory, MegaGasUsage, MegaHandler, MegaSpecId, MegaTransactionOutcome,
-    OpSpecId, OracleRead, OracleReadRecord, ParseMegaSpecError, SatinPriceError, SatinPrices,
+    DynPrecompilesBuilder, EthSpecId, IntrinsicGas, MegaContext, MegaEvm, MegaEvmError,
+    MegaEvmFactory, MegaGasUsage, MegaHandler, MegaSpecId, MegaTransactionOutcome, OpSpecId,
+    OracleRead, OracleReadRecord, ParseMegaSpecError, SatinPriceError, SatinPrices,
     TrustedObserver, CPHB_ENV_VAR, CPSB_ENV_VAR, FORBIDDEN_CREATE_REVIVAL, HISTORY_GAS_PRICED,
     LEGACY_SPEC_NAMES, STATE_GAS_REPRICED, STORAGE_CALL_STIPEND_BYTES,
 };

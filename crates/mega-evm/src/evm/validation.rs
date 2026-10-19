@@ -14,10 +14,7 @@ use revm::{
     interpreter::interpreter::EthInterpreter,
 };
 
-use crate::{
-    system::is_mega_system_transaction_with, MegaContext, MegaEvm, MegaEvmError, MegaHandler,
-    MegaSpecId, MegaTransaction,
-};
+use crate::{MegaContext, MegaEvm, MegaEvmError, MegaHandler, MegaSpecId, MegaTransaction};
 
 /// The gas a transaction's gas limit must cover before it runs, by ledger, as the EVM charges it
 /// when it validates the transaction.
@@ -134,13 +131,11 @@ pub fn validate_transaction_stateless(
     tx: MegaTransaction,
     system_address: Option<Address>,
 ) -> Result<IntrinsicGas, MegaEvmError<Infallible>> {
-    let system_transaction =
-        system_address.is_some_and(|address| is_mega_system_transaction_with(&tx, address));
     let ctx =
         MegaContext::new(EmptyDB::default(), cfg.spec).with_cfg(cfg).with_block(block).with_tx(tx);
     let mut evm = MegaEvm::new(ctx);
     let handler = MegaHandler::<_, MegaEvmError<Infallible>, EthFrame<EthInterpreter>>::new();
-    handler.validate_env_as(&mut evm, system_transaction, false)?;
+    handler.validate_env_as(&mut evm, system_address, false)?;
     let gas = handler.validate_initial_tx_gas(&mut evm)?;
     let history = evm.ctx().additional_limit.intrinsic_history_gas();
     Ok(IntrinsicGas {
