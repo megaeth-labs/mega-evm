@@ -34,8 +34,8 @@ use revm::{
 };
 
 use crate::common::{
-    account_state_gas, body_history, call, call_with_data, context, create, execute_under, history,
-    history_is_free, history_rounds, slot_state_gas,
+    account_state_gas, body_history, call, call_with_data, constructor_returning, context, create,
+    execute_under, history, history_is_free, history_rounds, share, slot_state_gas,
 };
 
 const CALLER: Address = address!("0000000000000000000000000000000000300000");
@@ -50,12 +50,6 @@ const GAS_LIMIT: u64 = 20_000_000;
 /// the frame three calls down to keep `bytes`, after each caller kept a 64th of what it forwards.
 fn gas_for_history(bytes: u64) -> u64 {
     GAS_LIMIT + 2 * history(bytes)
-}
-
-/// 98% of `remaining`, the share a child frame is given.
-fn share(remaining: u64) -> u64 {
-    (u128::from(remaining) * u128::from(FRAME_DATA_SHARE_NUMERATOR) /
-        u128::from(FRAME_DATA_SHARE_DENOMINATOR)) as u64
 }
 
 /// The least a parent must have left for the child's share of it to hold `bytes`: a limit that
@@ -226,11 +220,6 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Probe {
     ) {
         self.creates.push((outcome.result.result, outcome.result.output.clone()));
     }
-}
-
-/// Init code that returns `size` zero bytes as the deployed contract.
-fn constructor_returning(size: u64) -> Bytes {
-    BytecodeBuilder::default().push_number(size).push_number(0_u8).append(RETURN).build()
 }
 
 /// Init code that reverts with `len` bytes and deploys nothing.

@@ -21,8 +21,8 @@ use revm::{
 };
 
 use crate::common::{
-    account_state_gas, call, call_with_data, context, create, history, runs_at_measurement_prices,
-    slot_state_gas,
+    account_state_gas, call, call_with_data, context, create, deploying, history,
+    runs_at_measurement_prices, slot_state_gas,
 };
 
 const CALLER: Address = address!("0000000000000000000000000000000000900000");
@@ -191,11 +191,6 @@ fn test_deployed_code_draws_state_gas_by_the_byte() {
 
     assert_eq!(empty.state, ACCOUNT_STATE_GAS);
     assert_eq!(thirty_two.state - empty.state, 32 * 1_530, "32 bytes at the state byte price");
-}
-
-/// Init code that returns `len` bytes of zeros as the deployed code.
-fn deploying(len: u64) -> Bytes {
-    BytecodeBuilder::default().push_number(len).append_many([PUSH0, RETURN]).build()
 }
 
 /// A creation that reverts deposits nothing, so it draws no state gas at all: neither the

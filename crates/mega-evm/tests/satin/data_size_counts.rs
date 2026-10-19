@@ -16,13 +16,15 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{
-        CALL, CREATE, DELEGATECALL, GAS, INVALID, LOG0, LOG1, POP, PUSH0, RETURN, SELFDESTRUCT,
-        SLOAD, SSTORE, STATICCALL, STOP,
+        CALL, CREATE, DELEGATECALL, GAS, INVALID, LOG0, LOG1, POP, PUSH0, SELFDESTRUCT, SLOAD,
+        SSTORE, STATICCALL, STOP,
     },
     context::result::ExecutionResult,
 };
 
-use crate::common::{call, call_with_data, context, create, execute, execute_under};
+use crate::common::{
+    call, call_with_data, constructor_returning, context, create, execute, execute_under,
+};
 
 const CALLER: Address = address!("0000000000000000000000000000000000400000");
 const CALLEE: Address = address!("0000000000000000000000000000000000400001");
@@ -49,11 +51,6 @@ const fn records(records: u64) -> LimitUsage {
 /// `records` write records and the transfer logs of `moves` value movements.
 const fn records_and_moves(records: u64, moves: u64) -> LimitUsage {
     kept(0, records * WRITE_RECORD_SIZE + moves * TRANSFER_LOG_SIZE, records)
-}
-
-/// Init code that returns `size` zero bytes as the deployed contract.
-fn constructor_returning(size: u64) -> Bytes {
-    BytecodeBuilder::default().push_number(size).push_number(0_u8).append(RETURN).build()
 }
 
 /// A contract that `CREATE`s `init` and stops.

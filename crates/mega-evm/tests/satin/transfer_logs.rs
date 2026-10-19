@@ -35,8 +35,8 @@ use mega_evm::{
     },
     test_utils::{is_transfer_log, op_transaction, transfer_log, BytecodeBuilder, MemoryDatabase},
     transaction_body_bytes, EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, MegaContext,
-    MegaEvm, MegaLimitExceeded, MegaTransaction, MegaTransactionOutcome,
-    FRAME_DATA_SHARE_DENOMINATOR, FRAME_DATA_SHARE_NUMERATOR, TRANSFER_LOG_SIZE, WRITE_RECORD_SIZE,
+    MegaEvm, MegaLimitExceeded, MegaTransaction, MegaTransactionOutcome, TRANSFER_LOG_SIZE,
+    WRITE_RECORD_SIZE,
 };
 use revm::{
     bytecode::opcode::{
@@ -51,7 +51,7 @@ use revm::{
     Database, Inspector,
 };
 
-use crate::common::{account_state_gas, context, execute_under, history_rounds};
+use crate::common::{account_state_gas, context, execute_under, history_rounds, share};
 
 const CALLER: Address = address!("0000000000000000000000000000000000d00000");
 /// The contract a nested site's transaction calls: it calls [`ACTOR`] and returns what that
@@ -275,12 +275,6 @@ impl Site {
             }
         }
     }
-}
-
-/// 98% of `remaining`, the share a child frame is given.
-fn share(remaining: u64) -> u64 {
-    (u128::from(remaining) * u128::from(FRAME_DATA_SHARE_NUMERATOR) /
-        u128::from(FRAME_DATA_SHARE_DENOMINATOR)) as u64
 }
 
 /// The budget of a frame at `depth` under a frame cap of `cap`, when no frame above it has kept

@@ -15,7 +15,7 @@
 //! Each case runs on Osaka's configuration and on Amsterdam's.
 
 use alloy_op_evm::OpTx;
-use alloy_primitives::{address, hex, Address, Bytes, TxKind, U256};
+use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
     test_utils::{
         neutral_cfg, neutralize_evm, op_transaction, take_system_address_read,
@@ -41,6 +41,8 @@ use revm::{
     state::EvmState,
     ExecuteEvm, Journal, MainBuilder, MainContext,
 };
+
+use crate::precompile_gas::kzg_input;
 
 const CALLER: Address = address!("0x4000000000000000000000000000000000000001");
 const CALLEE: Address = address!("0x5000000000000000000000000000000000000001");
@@ -339,25 +341,6 @@ fn test_neutral_extcodesize_matches_ethereum() {
         assert!(outcome.0.result.is_success());
         assert_same(fork, outcome);
     }
-}
-
-/// The c-kzg test vector `verify_kzg_proof_case_correct_proof_4_4`, as the precompile takes it:
-/// `versioned_hash ++ z ++ y ++ commitment ++ proof`.
-fn kzg_input() -> Vec<u8> {
-    let commitment = hex!(
-        "8f59a8d2a1a625a17f3fea0fe5eb8c896db3764f3185481bc22f91b4aaffcca2\
-         5f26936857bc3a7c2539ea8ec3a952b7"
-    );
-    let mut input =
-        revm::precompile::kzg_point_evaluation::kzg_to_versioned_hash(&commitment).to_vec();
-    input.extend(hex!("73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000000"));
-    input.extend(hex!("1522a4a7f34e1ea350ae07c29c96c7e79655aa926122e95fe69fcbd932ca49e9"));
-    input.extend(commitment);
-    input.extend(hex!(
-        "a62ad71d14c5719385c0686f1871430475bf3a00f0aa3f7b8dd99a9abc216074\
-         4faf0070725e00b60ad9a026a15b1a8c"
-    ));
-    input
 }
 
 /// A KZG point evaluation forwarded 60,000 gas succeeds, as upstream prices it at 50,000: the

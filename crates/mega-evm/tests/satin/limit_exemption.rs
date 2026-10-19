@@ -11,7 +11,7 @@
 
 use alloy_evm::Evm;
 use alloy_op_evm::OpTx;
-use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
+use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
     system::{MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS},
     test_utils::{op_transaction, BytecodeBuilder, MemoryDatabase},
@@ -22,7 +22,7 @@ use revm::{
     context::TxEnv,
 };
 
-use crate::common::{context, execute_under, slot_state_gas};
+use crate::common::{context, deposit, execute_under, slot_state_gas};
 
 const CALLER: Address = address!("0000000000000000000000000000000000b00000");
 /// A contract the program calls, which writes a slot of its own.
@@ -74,13 +74,6 @@ fn call_from(caller: Address, to: Address) -> MegaTransaction {
         gas_limit: GAS_LIMIT,
         ..Default::default()
     }))
-}
-
-/// `tx` as a user's deposit: no fee, and a source hash a user's transaction could carry.
-fn deposit(mut tx: MegaTransaction) -> MegaTransaction {
-    tx.0.deposit.source_hash = B256::repeat_byte(0x11);
-    tx.0.base.gas_price = 0;
-    tx
 }
 
 /// Every per-transaction limit the program crosses, one at a time, and all of them together.

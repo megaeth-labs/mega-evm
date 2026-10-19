@@ -11,11 +11,11 @@ use mega_evm::{
     WRITE_RECORD_SIZE,
 };
 use revm::{
-    bytecode::opcode::{CALL, CREATE, GAS, LOG0, POP, PUSH0, PUSH1, RETURN, REVERT, STOP},
+    bytecode::opcode::{CALL, CREATE, GAS, LOG0, POP, PUSH0, PUSH1, REVERT, STOP},
     context_interface::cfg::GasId,
 };
 
-use crate::common::{call, call_with_data, create, execute, runs_at_measurement_prices};
+use crate::common::{call, call_with_data, create, deploying, execute, runs_at_measurement_prices};
 
 const CALLER: Address = address!("0000000000000000000000000000000000200000");
 const CALLEE: Address = address!("0000000000000000000000000000000000200001");
@@ -34,11 +34,6 @@ const fn body(bytes: u64) -> u64 {
 
 fn funded() -> MemoryDatabase {
     MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18)))
-}
-
-/// Init code that deploys `len` zero bytes: `PUSH len; PUSH0; RETURN`.
-fn deploying(len: u64) -> Bytes {
-    BytecodeBuilder::default().push_number(len).append_many([PUSH0, RETURN]).build()
 }
 
 /// Init code that reverts without deploying anything.
