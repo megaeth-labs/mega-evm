@@ -49,17 +49,14 @@ use revm::{
 
 use crate::{
     access::ComputeStop,
-    evm::{
-        history::transaction_body_bytes,
-        inspector::{
-            frame_end_checked, journal_position, revert_journal_to, ResultSource, StepGuard,
-            UpfrontRecord,
-        },
+    evm::inspector::{
+        frame_end_checked, journal_position, revert_journal_to, ResultSource, StepGuard,
+        UpfrontRecord,
     },
     history_gas, synthetic_frame_result,
     system::keyless,
-    write_record_history_gas, Detention, ExternalEnvTypes, JournalInspectTr, LimitCheck, LimitKind,
-    MegaContext, MegaEvm, MegaInstructions, PricedPrecompiles, VolatileDataAccess,
+    write_record_history_gas, Detention, ExternalEnvTypes, LimitCheck, LimitKind, MegaContext,
+    MegaEvm, MegaInstructions, PricedPrecompiles, VolatileDataAccess, TX_BODY_OVER_DATA_SIZE_LIMIT,
 };
 
 /// The Satin handler.
@@ -97,25 +94,30 @@ where
     ERROR: EvmTrError<EVM> + From<OpTransactionError> + FromStringError + IsTxError,
     FRAME: FrameTr<FrameResult = FrameResult, FrameInit = FrameInit>,
 {
-    /// [`validate_env`](Handler::validate_env) once it is decided whether the transaction is a
-    /// system-address transaction: prepares the common execution layer for it, validates a
-    /// system-address transaction and promotes it to a deposit, then validates the transaction as
-    /// op-revm does.
+    /// [`validate_env`](Handler::validate_env) once the live system address is known: decides
+    /// whether the transaction is a system-address transaction — of the system shape, from
+    /// `system_address` — and prepares the common execution layer for it, refuses a transaction
+    /// from `system_address` without the system shape, validates a system-address transaction and
+    /// promotes it to a deposit, then validates the transaction as op-revm does.
     ///
-    /// The handler decides it from the live system address it reads out of the state, and checks
-    /// the system address's nonce and code. What validates a transaction without state
+    /// The layer is prepared before the refusal, so a deposit the refusal turns into a failed
+    /// deposit reports its body as data size, as a deposit that fails any other check does.
+    ///
+    /// The handler reads the address out of the state, and checks the system address's nonce and
+    /// code. What validates a transaction without state
     /// ([`validate_transaction_stateless`](crate::validate_transaction_stateless)) is given the
     /// address and leaves the account to the state, as it leaves every sender's
     /// (`check_system_account` false); every other step is this one.
     pub(crate) fn validate_env_as(
         &self,
         evm: &mut EVM,
-        system_transaction: bool,
+        system_address: Option<Address>,
         check_system_account: bool,
     ) -> Result<(), ERROR> {
         let ctx = evm.ctx_mut();
-        ctx.on_new_tx(system_transaction);
-        if system_transaction {
+        let verdict = crate::system::classify_system_transaction(ctx.tx(), system_address);
+        ctx.on_new_tx(verdict == Ok(true));
+        if verdict? {
             crate::system::validate_and_promote::<_, _, ERROR>(ctx, check_system_account)?;
         }
         self.op.validate_env(evm)
@@ -142,10 +144,6 @@ where
     /// own caller pays once, because by the time EIP-2780 looks at the recipient the account
     /// exists.
     ///
-    /// When those records would cross a limit, the limit is enforced before the writes it
-    /// guards: the authorizations are taken back with the gas they charged, and the transaction,
-    /// latched, is stopped at its first frame.
-    ///
     /// The two kinds of write record made outside any frame are charged their history here, where
     /// they are made: one per applied authority, and the one the transaction's own frame makes —
     /// the recipient of its value, or the account it creates. Neither is known at validation: an
@@ -153,12 +151,12 @@ where
     /// authorities that did. A transaction that cannot pay for them runs out of gas before its
     /// first frame, the way one that cannot pay its authorizations does.
     ///
-    /// A transaction whose body crossed the data-size limit is latched before it runs, and its
-    /// first frame will be answered with the stop. Nothing after the caller's account is applied
-    /// or charged for it: the authorizations would be taken back, and the records made outside a
-    /// frame are records the limit rejects. So no charge made for them can run the transaction
-    /// out of gas, and the stop that bound first is what it reports. The caller's account is
-    /// charged all the same, because it exists whatever the transaction does.
+    /// Validation refused every transaction whose body, with a record for each entry of its
+    /// authorization list, crosses the data-size limit, so neither the body nor the authorities'
+    /// records cross it here. A transaction already latched when it reaches this phase has nothing
+    /// applied or charged after the caller's account, and its first frame is answered with the
+    /// stop; the caller's account is charged all the same, because it exists whatever the
+    /// transaction does.
     fn pre_execution(
         &self,
         evm: &mut Self::Evm,
@@ -178,38 +176,31 @@ where
         if evm.ctx_ref().additional_limit.latched().is_some() {
             return Ok(Some(PreExecutionOutput { eip7702_refund: 0, checkpoint }));
         }
-        let gas_before = *gas;
         let Some(eip7702_refund) = self.apply_eip7702_auth_list(evm, gas)? else {
             runtime_oog_unwind(evm.ctx(), checkpoint)?;
             return Ok(None);
         };
-        let authorities = record_applied_authorities(evm.ctx_mut(), checkpoint.journal_i);
-        if authorities.check.exceeded_limit() {
-            evm.ctx().journal_mut().checkpoint_revert(checkpoint);
-            *gas = gas_before;
-            let checkpoint = evm.ctx().journal_mut().checkpoint();
-            return Ok(Some(PreExecutionOutput { eip7702_refund: 0, checkpoint }));
-        }
-        if !charge_records_made_outside_a_frame(evm.ctx_mut(), gas, authorities.applied) {
+        let applied = record_applied_authorities(evm.ctx_mut(), checkpoint.journal_i);
+        if !charge_records_made_outside_a_frame(evm.ctx_mut(), gas, applied) {
             runtime_oog_unwind(evm.ctx(), checkpoint)?;
             return Ok(None);
         }
         Ok(Some(PreExecutionOutput { eip7702_refund, checkpoint }))
     }
 
-    /// Decides whether the transaction is a system-address transaction and prepares the common
-    /// execution layer for it, then validates a system-address transaction and promotes it to a
-    /// deposit, then validates the transaction as op-revm does — as a deposit, when it was
-    /// promoted.
+    /// Reads the live system address out of the registry, then decides whether the transaction
+    /// is a system-address transaction and prepares the common execution layer for it, then
+    /// validates a system-address transaction and promotes it to a deposit, then validates the
+    /// transaction as op-revm does — as a deposit, when it was promoted.
     ///
     /// This is the handler's first phase, so the layer is prepared before anything else of the
     /// transaction runs, and a read the database cannot serve fails the transaction through the
-    /// handler's error path, which discards what the journal loaded. Only a transaction of the
-    /// system shape reads the live system address, from the journal and without warming it; every
-    /// other transaction pays the shape test, a comparison or two on its own fields.
+    /// handler's error path, which discards what the journal loaded. Every transaction reads the
+    /// live system address, whatever its shape, and the read leaves the registry's account and
+    /// its slot warm for the rest of the transaction, as EIP-3651 leaves the block beneficiary.
     fn validate_env(&self, evm: &mut Self::Evm) -> Result<(), Self::Error> {
-        let system_transaction = crate::system::is_live_system_transaction(evm.ctx_mut())?;
-        self.validate_env_as(evm, system_transaction, true)
+        let system_address = crate::system::load_system_address(evm.ctx_mut().journal_mut())?;
+        self.validate_env_as(evm, system_address, true)
     }
 
     /// Notes whether this transaction's caller is an account executing it creates, then deducts
@@ -246,15 +237,27 @@ where
     /// A transaction exempt from history gas carries none of it
     /// ([`MegaContext::prices_history`](crate::MegaContext::prices_history)), so its intrinsic gas
     /// is revm's own.
+    ///
+    /// Before any of it, the body and a write record for each entry of the authorization list are
+    /// held to the transaction's data-size limit, on the body count the common execution layer
+    /// keeps, the one the history gas prices: a transaction over it is refused
+    /// ([`TX_BODY_OVER_DATA_SIZE_LIMIT`]), whatever its gas, a deposit included, which op-revm
+    /// then includes as a failed deposit. Those are the only bytes a transaction counts before its
+    /// first frame, so one that passes cannot cross the limit there. A system-originated
+    /// transaction is exempt from the limit, and from the check.
     fn validate_initial_tx_gas(
         &self,
         evm: &mut Self::Evm,
     ) -> Result<InitialAndFloorGas, Self::Error> {
+        let authorizations = evm.ctx_ref().tx().authorization_list_len() as u64;
+        if !evm.ctx_ref().additional_limit.admits_tx_body(authorizations) {
+            return Err(InvalidTransaction::Str(TX_BODY_OVER_DATA_SIZE_LIMIT.into()).into());
+        }
         let mut gas = self.op.validate_initial_tx_gas(evm)?;
         if !evm.ctx_ref().prices_history() {
             return Ok(gas);
         }
-        let bytes = transaction_body_bytes(evm.ctx_ref().tx());
+        let bytes = evm.ctx_ref().additional_limit.body_bytes();
         // A byte count with no price saturates, which no gas limit covers: the transaction is
         // rejected for not covering its own intrinsic gas.
         let history = history_gas(bytes).unwrap_or(u64::MAX);
@@ -393,11 +396,10 @@ where
     }
 
     /// op-revm's error handling, which answers a deposit's transaction error with a failed-deposit
-    /// halt and discards everything the deposit did. The halt is what the transaction reports, so
-    /// the common execution layer drops a stop the deposit's body may have latched before the
-    /// error, and nothing else: what the deposit counted stands, the body and the Oracle hints it
-    /// forwarded before it halted. Any other error refuses the transaction, and the layer's state
-    /// is reset by the next one.
+    /// halt and discards everything the deposit did. The halt is what the transaction reports, and
+    /// no stop is left standing beside it; what the deposit counted stands, the body and the
+    /// Oracle hints it forwarded before it halted. Any other error refuses the transaction, and
+    /// the layer's state is reset by the next one.
     fn catch_error(
         &self,
         evm: &mut Self::Evm,
@@ -1281,8 +1283,8 @@ fn unbuilt_first_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// deposit-like transaction is a deposit by then. Every other transaction pays a fee its caller
 /// must hold, so it has an account already.
 ///
-/// The read does not warm the account: the transaction's own touches of it pay what they would
-/// have paid without the check.
+/// The read loads the caller as op-revm's deduction then does: the transaction's caller starts
+/// warm, so the read changes nothing the transaction pays.
 fn deposit_creates_caller<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
 ) -> Result<bool, DB::Error> {
@@ -1290,7 +1292,7 @@ fn deposit_creates_caller<DB: Database, ExtEnvs: ExternalEnvTypes>(
         return Ok(false);
     }
     let caller = ctx.tx().caller();
-    Ok(ctx.journal_mut().inspect_account(caller, false)?.info.is_empty())
+    Ok(ctx.journal_mut().load_account(caller)?.data.info.is_empty())
 }
 
 /// Charges the state gas of the account a deposit-like transaction creates for its caller, as
@@ -1383,15 +1385,15 @@ fn caller_refuses<DB: revm::Database, ExtEnvs: ExternalEnvTypes>(
 }
 
 /// Records the account writes of the EIP-7702 authorities applied since journal entry
-/// `journal_i`: each applied authorization bumps its authority's nonce once, so the distinct
-/// authorities other than the sender are the accounts written. The sender's write is part of the
-/// transaction body.
+/// `journal_i`, and answers how many there are: each applied authorization bumps its authority's
+/// nonce once, so the distinct authorities other than the sender are the accounts written. The
+/// sender's write is part of the transaction body.
 fn record_applied_authorities<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     journal_i: usize,
-) -> AppliedAuthorities {
+) -> u64 {
     if ctx.tx().tx_type() != TransactionType::Eip7702 {
-        return AppliedAuthorities { check: LimitCheck::WithinLimit, applied: 0 };
+        return 0;
     }
     let caller = ctx.tx().caller();
     let target = ctx.tx().kind().to().copied();
@@ -1407,23 +1409,12 @@ fn record_applied_authorities<DB: Database, ExtEnvs: ExternalEnvTypes>(
     let target_is_authority =
         target.is_some_and(|target| authorities.binary_search(&target).is_ok());
     let applied = authorities.len() as u64;
-    let check =
-        ctx.additional_limit.record_applied_authorities(caller, applied, target_is_authority);
-    if check.exceeded_limit() {
-        return AppliedAuthorities { check, applied: 0 };
-    }
+    ctx.additional_limit.record_applied_authorities(caller, applied, target_is_authority);
     // An applied authority that is the block beneficiary wrote the beneficiary's account.
     if authorities.binary_search(&ctx.block().beneficiary).is_ok() {
         ctx.detention.mark_before_execution(VolatileDataAccess::BENEFICIARY_BALANCE);
     }
-    AppliedAuthorities { check, applied }
-}
-
-/// What [`record_applied_authorities`] found: the verdict of the limit check, and how many
-/// authorities were applied — none, when the check stopped them.
-struct AppliedAuthorities {
-    check: LimitCheck,
-    applied: u64,
+    applied
 }
 
 /// Charges the history of the write records a transaction makes outside any frame: one per

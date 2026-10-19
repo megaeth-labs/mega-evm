@@ -119,23 +119,22 @@ fn assert_nothing_kept(
     }
 }
 
-/// A transaction whose body alone crosses its data-size limit is stopped before its first frame,
-/// and that frame is not a deployment: the call is answered with the stop, and no rule reads the
-/// signer.
+/// A `keylessDeploy` transaction whose body alone crosses its data-size limit is rejected at
+/// validation, at every gas limit: the call never runs, so no rule reads the signer and nothing is
+/// deployed.
 #[test]
-fn test_a_transaction_latched_by_its_body_deploys_nothing() {
+fn test_a_transaction_whose_body_crosses_the_limit_is_rejected() {
     let deployment = Deployment::new(deploying(&runtime(1)));
     for gas_limit in GAS_LIMITS {
-        let outcome = limited(
-            &deployment,
-            gas_limit,
-            EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(100),
-        );
-        assert_eq!(stop(&outcome), MegaLimitExceeded { kind: 0, limit: 100 }, "at {gas_limit}");
-        assert!(!outcome.state.contains_key(&deployment.signer), "no rule read the signer");
-        let [total, ..] =
-            beyond(&outcome, &reference(deployment.call_data(LARGE_OVERRIDE), gas_limit));
-        assert_eq!(total, 0, "not even the overhead is charged");
+        let mut tx =
+            call_tx(KEYLESS_DEPLOY_ADDRESS, deployment.call_data(LARGE_OVERRIDE), U256::ZERO);
+        tx.0.base.gas_limit = gas_limit;
+        let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(100);
+        let error = MegaEvm::new(context(system_db()).with_tx_runtime_limits(limits))
+            .execute_transaction(tx)
+            .expect_err("rejected at validation");
+        let error = format!("{error:?}");
+        assert!(error.contains(mega_evm::TX_BODY_OVER_DATA_SIZE_LIMIT), "at {gas_limit}: {error}");
     }
 }
 

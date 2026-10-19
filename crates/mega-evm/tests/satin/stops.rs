@@ -1191,29 +1191,19 @@ fn test_detained_gas_is_restored() {
     );
 }
 
-/// A body over the transaction's data-size limit stops the transaction before its first frame: a
-/// revert carrying the stop, not a halt, billed the intrinsic gas alone.
+/// A body over the transaction's data-size limit is rejected at validation: the transaction is
+/// not stopped, it never runs.
 #[test]
 fn test_data_limit_just_exceed() {
     let limit = TX_BODY_SIZE - 1;
-    let db = || MemoryDatabase::default().account_code(A, writer(1));
-    let outcome =
-        execute(db(), EvmTxRuntimeLimits::default().with_tx_data_size_limit(limit), BELOW);
-    let stop = LimitCheck::ExceedsLimit {
-        kind: LimitKind::DataSize,
-        limit,
-        used: TX_BODY_SIZE,
-        frame_local: false,
-    };
-    assert!(
-        matches!(&outcome.result, ExecutionResult::Revert { output, .. }
-            if output == &stop.revert_data()),
-        "{:?}",
-        outcome.result
-    );
-    assert_eq!(outcome.limit_exceeded, Some(stop));
-    assert_eq!(outcome.usage, LimitUsage { data_size: TX_BODY_SIZE, write_records: 0 });
-    assert_eq!(outcome.gas.gas_used, intrinsic(BELOW).gas.gas_used, "nothing ran");
+    let db = MemoryDatabase::default().account_code(A, writer(1));
+    let error = MegaEvm::new(
+        context(db)
+            .with_tx_runtime_limits(EvmTxRuntimeLimits::default().with_tx_data_size_limit(limit)),
+    )
+    .execute_transaction(call(CALLER, A, U256::ZERO, BELOW))
+    .expect_err("rejected");
+    assert!(format!("{error:?}").contains(mega_evm::TX_BODY_OVER_DATA_SIZE_LIMIT), "{error:?}");
 }
 
 /// A library's write, one call down, crosses a limit one byte above the body: the stop is a
@@ -1296,36 +1286,30 @@ fn test_state_revert_when_exceeding_limit() {
 }
 
 /// A transaction detained from its start — its sender is the block's beneficiary — whose body
-/// crosses the data-size limit is the data-size stop, billed its intrinsic gas: detention adds
-/// nothing to what it pays, which is what the same transaction pays within the limits.
+/// crosses the data-size limit is rejected at validation, as the same transaction undetained is:
+/// detention changes nothing about what validation refuses.
 #[test]
 fn test_detention_plus_intrinsic_data_size_overflow() {
     let db =
         || MemoryDatabase::default().account_code(A, BytecodeBuilder::default().stop().build());
-    let run = |limits| {
-        let mut evm = MegaEvm::new(context(db()).with_tx_runtime_limits(limits));
-        let outcome = evm.execute_transaction(call(BENEFICIARY, A, U256::ZERO, roomy())).unwrap();
-        (outcome, evm.ctx().detention().compute_limit())
+    let run = |limits, sender| {
+        MegaEvm::new(context(db()).with_tx_runtime_limits(limits)).execute_transaction(call(
+            sender,
+            A,
+            U256::ZERO,
+            roomy(),
+        ))
     };
-    let (within_limits, detained) = run(EvmTxRuntimeLimits::default());
-    assert_eq!(detained, Some(CAP), "the beneficiary's transaction is detained from its start");
+    let mut evm = MegaEvm::new(context(db()));
+    let within_limits = evm.execute_transaction(call(BENEFICIARY, A, U256::ZERO, roomy())).unwrap();
+    assert_eq!(evm.ctx().detention().compute_limit(), Some(CAP), "detained from its start");
     assert!(within_limits.result.is_success(), "{:?}", within_limits.result);
-    let (stopped, detained) = run(EvmTxRuntimeLimits::default().with_tx_data_size_limit(100));
-    assert_eq!(detained, Some(CAP), "the stopped one too");
-    let stop = LimitCheck::ExceedsLimit {
-        kind: LimitKind::DataSize,
-        limit: 100,
-        used: TX_BODY_SIZE,
-        frame_local: false,
-    };
-    assert!(
-        matches!(&stopped.result, ExecutionResult::Revert { output, .. }
-            if output == &stop.revert_data()),
-        "{:?}",
-        stopped.result
-    );
-    assert_eq!(stopped.limit_exceeded, Some(stop));
-    assert_eq!(stopped.gas, within_limits.gas, "the intrinsic gas alone, the reservoir back");
+
+    let over = EvmTxRuntimeLimits::default().with_tx_data_size_limit(100);
+    let detained = run(over, BENEFICIARY).expect_err("rejected");
+    let undetained = run(over, CALLER).expect_err("rejected");
+    assert!(format!("{detained:?}").contains(mega_evm::TX_BODY_OVER_DATA_SIZE_LIMIT));
+    assert_eq!(format!("{detained:?}"), format!("{undetained:?}"));
 }
 
 /// The transaction's own frame crossing its frame budget — a frame cap of a hundred records' bytes,

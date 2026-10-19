@@ -54,9 +54,11 @@
 //! cannot refuse, and must not accept such an outcome silently either: a debug build makes the
 //! same check there and panics.
 //!
-//! Neither path checks the state a candidate executed against. A candidate executed before
-//! another commit changed that state is stale whatever the counters say, and executing it again
-//! is the builder's responsibility.
+//! The checked commit also holds an outcome to the state its sender had when it executed: one
+//! whose sender's nonce or balance another commit moved since is refused
+//! ([`MegaBlockExecutionError::StaleOutcome`]), and the trait's commit asserts the same in a debug
+//! build. Any other state the candidate read is not checked: a candidate executed before another
+//! commit changed it is the builder's to execute again.
 //!
 //! # The pre-block observer
 //!
@@ -91,9 +93,9 @@
 //! on the pre-block budget ([`pre_block_call_gas_limit`](crate::pre_block_call_gas_limit)), and
 //! one that does not succeed refuses the block.
 //!
-//! The executor does not read the live system address: a transaction of the system shape reads it
-//! out of the registry itself when it is validated, and the pre-block step is what leaves the
-//! registry naming this block's address.
+//! The executor does not read the live system address: every transaction reads it out of the
+//! registry itself when it is validated, and the pre-block step is what leaves the registry naming
+//! this block's address.
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
@@ -111,7 +113,7 @@ use alloy_evm::{
     Database, Evm, FromRecoveredTx, FromTxWithEncoded, RecoveredTx,
 };
 use alloy_op_evm::block::{receipt_builder::OpReceiptBuilder, OpTxEnv};
-use alloy_primitives::{Address, Bytes, B256};
+use alloy_primitives::{Address, Bytes, TxHash, B256};
 use op_alloy_consensus::OpDepositReceipt;
 use op_revm::{
     constants::L1_BLOCK_CONTRACT, transaction::deposit::DEPOSIT_TRANSACTION_TYPE, L1BlockInfo,
@@ -119,7 +121,7 @@ use op_revm::{
 use revm::{
     context::{result::ResultAndState, Block, ContextTr},
     database::DatabaseCommitExt,
-    state::EvmState,
+    state::{AccountInfo, EvmState},
     DatabaseCommit, Inspector,
 };
 
@@ -241,6 +243,16 @@ pub enum MegaBlockExecutionError {
         /// What the call ended with: its result, or the error that stopped it.
         message: String,
     },
+    /// An outcome handed to a delayed commit executed against another nonce or balance of its
+    /// sender than the block holds now: a commit since its execution moved them.
+    ///
+    /// The builder's to execute again, not a verdict on the block: an internal error.
+    StaleOutcome {
+        /// The transaction whose outcome is stale.
+        tx_hash: TxHash,
+        /// Its sender.
+        sender: Address,
+    },
 }
 
 impl fmt::Display for MegaBlockExecutionError {
@@ -279,6 +291,11 @@ impl fmt::Display for MegaBlockExecutionError {
             Self::ApplyPendingChangesFailed { message } => {
                 write!(f, "the SequencerRegistry's pending changes could not be applied: {message}")
             }
+            Self::StaleOutcome { tx_hash, sender } => write!(
+                f,
+                "stale outcome of transaction {tx_hash}: it executed against another nonce or \
+                 balance of its sender {sender} than the block holds now"
+            ),
         }
     }
 }
@@ -293,7 +310,8 @@ impl From<MegaBlockExecutionError> for BlockExecutionError {
     fn from(error: MegaBlockExecutionError) -> Self {
         match error {
             MegaBlockExecutionError::MissingSequencerRegistryConfig |
-            MegaBlockExecutionError::RewritingInspector => Self::other(error),
+            MegaBlockExecutionError::RewritingInspector |
+            MegaBlockExecutionError::StaleOutcome { .. } => Self::other(error),
             MegaBlockExecutionError::UnexpectedNonDepositTxInActivationBlock |
             MegaBlockExecutionError::TransactionDaFootprintAboveGasLimit { .. } |
             MegaBlockExecutionError::ForeignSystemContractCode { .. } |
@@ -560,6 +578,42 @@ where
         self.check_da_footprint(output.da_footprint)
     }
 
+    /// Whether `output` executed against the nonce and balance its sender has in the block's state
+    /// now: a delayed commit's check that no commit since its execution moved them.
+    ///
+    /// A commit writes the sender's account as the transaction left it. An outcome executed before
+    /// another commit moved the sender — a second transaction at the same nonce, a value or a fee
+    /// credited to the sender — would write that account over what the other commit did: the
+    /// sender debited once for two transactions, or a credit lost. Every other read the outcome
+    /// made is not checked; that the state it read is still the block's is the builder's to keep.
+    /// It reads the sender's account and changes nothing.
+    fn check_sender_unchanged<T>(
+        &mut self,
+        output: &MegaBlockTxResult<T>,
+    ) -> Result<(), BlockExecutionError> {
+        let now = self.sender_account(output.sender)?;
+        if (now.nonce, now.balance) != (output.sender_nonce, output.sender_balance) {
+            return Err(MegaBlockExecutionError::StaleOutcome {
+                tx_hash: output.tx_hash,
+                sender: output.sender,
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    /// The account of `sender` as the block's state holds it now, empty when it holds none. A read
+    /// the database cannot serve is an internal error: it says nothing about the block.
+    fn sender_account(&mut self, sender: Address) -> Result<AccountInfo, BlockExecutionError> {
+        Ok(self
+            .evm
+            .ctx_mut()
+            .db_mut()
+            .basic(sender)
+            .map_err(BlockExecutionError::other)?
+            .unwrap_or_default())
+    }
+
     /// Refuses an EVM that runs an inspector which may rewrite what execution produces.
     ///
     /// Checked at every entry point rather than once, because the inspector can be enabled after
@@ -787,13 +841,15 @@ where
     /// [`commit_transaction_outcome`](MegaBlockExecutor::commit_transaction_outcome), which
     /// refuses an outcome the block no longer has room for.
     ///
-    /// Neither commit checks the state `output` executed against: an outcome executed before
-    /// another commit changed that state is the caller's to execute again.
+    /// [`commit_transaction_outcome`](MegaBlockExecutor::commit_transaction_outcome) also refuses
+    /// an outcome whose sender's nonce or balance another commit moved since it executed; any
+    /// other state the outcome read is the caller's to keep fresh.
     ///
     /// # Panics
     ///
-    /// In a debug build, when the block no longer has room for `output` — a caller that broke the
-    /// contract, which would otherwise pack the block past a limit.
+    /// In a debug build, when the block no longer has room for `output`, or when its sender's
+    /// nonce or balance moved since it executed — a caller that broke the contract, which would
+    /// otherwise pack the block past a limit or commit a stale outcome.
     fn commit_transaction(&mut self, output: Self::Result) -> GasOutput {
         debug_assert!(
             self.check_room(&output).is_ok(),
@@ -801,6 +857,13 @@ where
              commit_transaction_outcome refuses: {}",
             self.check_room(&output).expect_err("the check just failed"),
         );
+        #[cfg(debug_assertions)]
+        if let Err(stale) = self.check_sender_unchanged(&output) {
+            panic!(
+                "commit_transaction was handed a stale outcome, which commit_transaction_outcome \
+                 refuses: {stale}"
+            );
+        }
         self.limiter.post_execution_update(&output.block_usage());
 
         let MegaBlockTxResult { tx_type, is_deposit, depositor_nonce, inner, .. } = output;
@@ -907,15 +970,21 @@ where
     /// everything the block holds a transaction to is checked once more — its data-availability
     /// footprint included — and nothing changes before the check passes.
     ///
-    /// The check covers the block's counters, not the state `output` executed against. A
-    /// candidate executed before another commit changed that state is stale whatever the counters
-    /// say, and executing it again is the builder's responsibility.
+    /// The state `output` executed against may have moved too. The sender's account is checked
+    /// ([`MegaBlockExecutionError::StaleOutcome`]): an outcome whose sender's nonce or balance
+    /// another commit moved since it executed — the system address's, for a system-address
+    /// transaction — is refused, since committing it would write the sender's account over what
+    /// that commit did. Any other read the outcome made is not checked, and executing a candidate
+    /// again when another commit moved what it read is the builder's responsibility: a builder
+    /// that executes an Oracle-reading transaction, then executes and commits the system-address
+    /// transaction that writes the Oracle before it, commits both.
     pub fn commit_transaction_outcome(
         &mut self,
         output: MegaBlockTxResult<<R::Transaction as TransactionEnvelope>::TxType>,
     ) -> Result<GasOutput, BlockExecutionError> {
         self.check_admission()?;
         self.check_room(&output)?;
+        self.check_sender_unchanged(&output)?;
         Ok(self.commit_transaction(output))
     }
 
@@ -981,24 +1050,14 @@ where
             footprint
         };
 
-        // Read before execution, so committing the transaction cannot fail. Satin executes only at
-        // or after Karst, which includes Regolith, and the schedule check refuses a schedule in
-        // which Regolith is not active when Satin activates: every deposit receipt carries the
-        // depositor's nonce.
-        let depositor_nonce = if is_deposit {
-            let sender = *tx.signer();
-            Some(
-                self.evm
-                    .ctx_mut()
-                    .db_mut()
-                    .basic(sender)
-                    .map_err(BlockExecutionError::other)?
-                    .unwrap_or_default()
-                    .nonce,
-            )
-        } else {
-            None
-        };
+        // The sender's account as the transaction executes against it, read before execution: a
+        // delayed commit checks it against the state then, and committing the transaction cannot
+        // fail. Satin executes only at or after Karst, which includes Regolith, and the schedule
+        // check refuses a schedule in which Regolith is not active when Satin activates: every
+        // deposit receipt carries the depositor's nonce.
+        let sender = *tx.signer();
+        let sender_before = self.sender_account(sender)?;
+        let depositor_nonce = is_deposit.then_some(sender_before.nonce);
 
         // The transaction runs under the block's limits, whatever was set on the EVM since the
         // last one.
@@ -1017,6 +1076,9 @@ where
             da_footprint,
             is_deposit,
             depositor_nonce,
+            sender,
+            sender_nonce: sender_before.nonce,
+            sender_balance: sender_before.balance,
             inner: outcome,
         };
         Ok(result)

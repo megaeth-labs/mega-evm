@@ -464,15 +464,35 @@ impl AdditionalLimit {
     /// its authorizations and its access list.
     ///
     /// The bytes are the transaction's, recorded before any frame, so a revert does not take them
-    /// back, and neither does an out-of-gas before the first frame. A body that crosses the
-    /// transaction limit latches it, and the first frame is then answered with the stop.
-    pub(crate) fn record_tx_body(&mut self, bytes: u64) -> LimitCheck {
+    /// back, and neither does an out-of-gas before the first frame. The count is all it does:
+    /// validation holds the body to the limit ([`admits_tx_body`](Self::admits_tx_body)) on this
+    /// same count, and refuses a transaction it does not admit, so a transaction that runs never
+    /// crosses the limit with its body.
+    pub(crate) fn record_tx_body(&mut self, bytes: u64) {
         self.body_bytes = bytes;
-        if bytes == 0 {
-            return LimitCheck::WithinLimit;
+        if bytes != 0 {
+            self.tracker.record_tx(LimitUsage { data_size: bytes, write_records: 0 });
         }
-        self.tracker.record_tx(LimitUsage { data_size: bytes, write_records: 0 });
-        self.check()
+    }
+
+    /// The data-size bytes of the running transaction's body, as
+    /// [`record_tx_body`](Self::record_tx_body) counted them.
+    pub(crate) const fn body_bytes(&self) -> u64 {
+        self.body_bytes
+    }
+
+    /// Whether the running transaction's body, with one write record for each of its
+    /// `authorizations`, fits its data-size limit: what validation holds a transaction to.
+    ///
+    /// Every entry of the authorization list counts, whether it will apply or not, so the figure is
+    /// an upper bound on what the transaction counts before its first frame — the body, then one
+    /// record for each distinct authority that applies — and a transaction validation admits
+    /// cannot cross the limit there. An exempt transaction is held to nothing.
+    pub(crate) fn admits_tx_body(&self, authorizations: u64) -> bool {
+        self.exempt ||
+            !LimitUsage { data_size: self.body_bytes, write_records: 0 }
+                .saturating_add(WRITE_RECORD.times(authorizations))
+                .exceeds_data_size(self.limits.tx_data_size_limit)
     }
 
     /// Counts the `bytes` of an Oracle hint, the payload a `sendHint` call hands to the node's
@@ -508,29 +528,22 @@ impl AdditionalLimit {
     /// `authorities` distinct accounts, `target_is_authority` if the transaction's call target is
     /// one of them, from the transaction's `sender`.
     ///
-    /// The data-size limit is checked before the records are made: a crossing latches the
-    /// transaction and records nothing, and the caller takes the authorizations back with the gas
-    /// they charged, so the writes the limit guards never happen. The first frame is then answered
-    /// with the stop without running.
+    /// The records cannot cross the data-size limit: validation admitted the body with a record for
+    /// every entry of the authorization list ([`admits_tx_body`](Self::admits_tx_body)), and only
+    /// an entry can apply. A debug build asserts it.
     pub(crate) fn record_applied_authorities(
         &mut self,
         sender: Address,
         authorities: u64,
         target_is_authority: bool,
-    ) -> LimitCheck {
+    ) {
         self.sender = sender;
-        let records = WRITE_RECORD.times(authorities);
-        let (used, limit) =
-            (self.tracker.net().saturating_add(records), self.limits.tx_data_size_limit);
-        if used.exceeds_data_size(limit) {
-            let check = self.latch(LimitKind::DataSize, limit, used.data_size);
-            if check.exceeded_limit() {
-                return check;
-            }
-        }
         self.target_is_authority = target_is_authority;
-        self.tracker.record(records);
-        LimitCheck::WithinLimit
+        self.tracker.record(WRITE_RECORD.times(authorities));
+        debug_assert!(
+            self.exempt || !self.tracker.net().exceeds_data_size(self.limits.tx_data_size_limit),
+            "validation admits no body whose authority records cross the data-size limit"
+        );
     }
 
     /* Frame lanes */
@@ -867,12 +880,9 @@ impl AdditionalLimit {
     /// records go too, and the halt stays a halt. The body is not one of those records. It is put
     /// back after the reset.
     ///
-    /// A latch goes with the reset. Only the body's can be set by then: authorities whose records
-    /// cross the limit are taken back before anything else is charged, and a latched transaction's
-    /// runtime phase charges nothing but the account a deposit-like transaction creates for its
-    /// caller. That account exists whatever the transaction does, so a transaction that cannot pay
-    /// for it is out of gas with or without a stop, and it reports the halt. An exemption stays:
-    /// it is the transaction's, not its frames'.
+    /// A latch goes with the reset, so the halt is what the transaction reports; nothing counted
+    /// before the first frame sets one, validation having held the body and the authorities'
+    /// records to the limit. An exemption stays: it is the transaction's, not its frames'.
     pub(crate) fn on_last_frame_return(&mut self, result: &mut FrameResult) {
         if !self.frame_began {
             let body = self.body_bytes;
@@ -894,8 +904,8 @@ impl AdditionalLimit {
 
     /// Settles a transaction the handler answered with a result after an error: op-revm's failed
     /// deposit, which reports a halt whether the deposit was refused before it ran or halted after
-    /// its frames ran. The halt is what the transaction reports, so a stop its body latched before
-    /// op-revm refused it is cleared.
+    /// its frames ran. The halt is what the transaction reports, so no stop is left standing
+    /// beside it.
     ///
     /// Nothing counted is touched. A deposit refused before it ran counted its body alone. One
     /// that halted had its frames' lanes discarded as any failed frame's are, which leaves the
@@ -1044,7 +1054,7 @@ mod tests {
         let kept = |limit: &AdditionalLimit| limit.usage().data_size;
 
         let mut limit = AdditionalLimit::new(limits);
-        assert_eq!(limit.record_tx_body(40), LimitCheck::WithinLimit);
+        limit.record_tx_body(40);
         assert_eq!(limit.record_hint_bytes(60), LimitCheck::WithinLimit, "it fits exactly");
         assert_eq!(kept(&limit), 100);
         assert_eq!(limit.latched(), None);
@@ -1060,7 +1070,7 @@ mod tests {
 
         let mut exempt = AdditionalLimit::new(limits);
         exempt.exempt();
-        assert_eq!(exempt.record_tx_body(40), LimitCheck::WithinLimit);
+        exempt.record_tx_body(40);
         assert_eq!(exempt.record_hint_bytes(61), LimitCheck::WithinLimit);
         assert_eq!(kept(&exempt), 101, "an exempt transaction's hint is counted");
         assert_eq!(exempt.latched(), None);
@@ -1261,23 +1271,51 @@ mod tests {
         EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(0).with_frame_data_size_limit(0)
     }
 
-    /// Counts a body and a value call's two records, and reports each verdict.
+    /// Counts a body, then starts the transaction's frame and a value call's, and reports the
+    /// verdicts of the two starts.
     fn count_a_transaction(limit: &mut AdditionalLimit) -> [LimitCheck; 2] {
-        let body = limit.record_tx_body(crate::TX_BODY_SIZE);
-        limit.on_frame_init(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
+        limit.record_tx_body(crate::TX_BODY_SIZE);
+        let first = limit.on_frame_init(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
         let records = limit.on_frame_init(&call_from_to(CALLEE, TARGET, U256::from(1)), 1);
-        [body, records]
+        [first, records]
     }
 
-    /// A transaction that is not exempt is stopped by the first limit it crosses: its body latches
-    /// it.
+    /// A transaction that is not exempt is stopped by the first limit it crosses: counting the
+    /// body checks nothing, and the first check, at its frame's start, latches it.
     #[test]
     fn test_a_transaction_that_is_not_exempt_is_stopped() {
         let mut limit = AdditionalLimit::new(zero_limits());
-        let [body, ..] = count_a_transaction(&mut limit);
-        assert!(body.exceeded_limit() && !body.is_frame_local());
-        assert_eq!(limit.latched(), Some(&body));
+        let [first, ..] = count_a_transaction(&mut limit);
+        assert!(first.exceeded_limit() && !first.is_frame_local());
+        assert_eq!(limit.latched(), Some(&first));
         assert!(!limit.is_exempt());
+    }
+
+    /// Validation admits a body whose bytes, with one record for each entry of the authorization
+    /// list, are within the transaction's limit, and nothing over it; an exempt transaction
+    /// whatever it carries.
+    #[test]
+    fn test_validation_admits_a_body_and_its_authority_records_within_the_limit() {
+        let body = crate::TX_BODY_SIZE + 2 * crate::AUTHORIZATION_SIZE;
+        let at = body + 2 * WRITE_RECORD_SIZE;
+        let layer = |limit: u64, exempt: bool| {
+            let mut layer = AdditionalLimit::new(
+                EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit),
+            );
+            if exempt {
+                layer.exempt();
+            }
+            layer.record_tx_body(body);
+            layer
+        };
+        assert!(layer(at, false).admits_tx_body(2), "at the limit");
+        assert!(!layer(at - 1, false).admits_tx_body(2), "one byte over it");
+        assert!(layer(at - 1, false).admits_tx_body(1), "one record fewer");
+        assert!(!layer(body - 1, false).admits_tx_body(0), "the body alone over it");
+        assert!(layer(0, true).admits_tx_body(2), "an exempt transaction");
+        assert_eq!(layer(at, false).body_bytes(), body);
+        assert_eq!(layer(at, false).usage().data_size, body, "the body is counted");
+        assert_eq!(layer(0, false).latched(), None, "and counting it latches nothing");
     }
 
     /// An exempt transaction is stopped by no limit, in any dimension, at the transaction or at a
@@ -1311,8 +1349,8 @@ mod tests {
     fn test_an_exempt_transaction_records_its_authorities() {
         let mut limit = AdditionalLimit::new(zero_limits());
         limit.exempt();
-        let check = limit.record_applied_authorities(SENDER, 2, false);
-        assert!(!check.exceeded_limit(), "{check:?}");
+        limit.record_applied_authorities(SENDER, 2, false);
+        assert_eq!(limit.latched(), None);
         assert_eq!(limit.usage(), WRITE_RECORD.times(2));
     }
 
@@ -1332,8 +1370,8 @@ mod tests {
 
         limit.reset();
         assert!(!limit.is_exempt());
-        let [body, ..] = count_a_transaction(&mut limit);
-        assert!(body.exceeded_limit(), "after a reset the body latches again");
+        let [first, ..] = count_a_transaction(&mut limit);
+        assert!(first.exceeded_limit(), "after a reset the transaction is held to its limits");
     }
 
     /// A layer whose transaction's value movements journal transfer logs, under `limits`.

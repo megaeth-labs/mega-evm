@@ -483,6 +483,10 @@ pub(crate) fn assert_root_gas_is_the_gas_limit(traced: &Traced) {
 /// itself, not through the journal, to price a transaction's L1 fee. Block execution hands
 /// exactly those keys to the witness as a pre-block read (`read_l1_block_info`). The excuse is
 /// those keys, read or not, and nothing else.
+///
+/// An account the engine read without its code — the `SequencerRegistry`'s, which every
+/// transaction's validation reads by its code hash — is named with the code the pre-state holds,
+/// which the prestate tracer reads itself, as a witness carries it.
 pub(crate) fn assert_prestate_covers_reads(traced: &Traced) {
     let PreStateFrame::Default(PreStateMode(prestate)) = traced.prestate(false) else {
         panic!("the default prestate mode");
@@ -499,7 +503,15 @@ pub(crate) fn assert_prestate_covers_reads(traced: &Traced) {
     for (address, served) in reads.accounts.iter().filter(|(a, _)| **a != L1_BLOCK_CONTRACT) {
         let served = served.clone().unwrap_or_default();
         let code = (served.code_hash != KECCAK_EMPTY).then(|| {
-            reads.codes.get(&served.code_hash).expect("served code is recorded").original_bytes()
+            reads
+                .codes
+                .get(&served.code_hash)
+                .cloned()
+                .unwrap_or_else(|| {
+                    let held = traced.pre_db.clone().basic(*address).expect("the pre-state");
+                    held.and_then(|info| info.code).expect("the pre-state holds the code")
+                })
+                .original_bytes()
         });
         let expected = AccountState::from_account_info(served.nonce, served.balance, code);
         let traced = &prestate[address];

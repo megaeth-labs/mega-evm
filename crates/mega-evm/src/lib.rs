@@ -53,9 +53,9 @@ pub use evm::{
     synthetic_call_result, synthetic_frame_result, transaction_body_bytes, tx_body_history_bytes,
     untouched_call_gas, untouched_create_gas, validate_transaction_stateless, with_pools_of,
     write_record_history_gas, BlockHashRecord, BucketRecord, BytePrice, DeclaredObserver,
-    DynPrecompilesBuilder, EthSpecId, IntrinsicGas, JournalInspectTr, MegaContext, MegaEvm,
-    MegaEvmError, MegaEvmFactory, MegaGasUsage, MegaHandler, MegaSpecId, MegaTransactionOutcome,
-    OpSpecId, OracleRead, OracleReadRecord, ParseMegaSpecError, SatinPriceError, SatinPrices,
+    DynPrecompilesBuilder, EthSpecId, IntrinsicGas, MegaContext, MegaEvm, MegaEvmError,
+    MegaEvmFactory, MegaGasUsage, MegaHandler, MegaSpecId, MegaTransactionOutcome, OpSpecId,
+    OracleRead, OracleReadRecord, ParseMegaSpecError, SatinPriceError, SatinPrices,
     TrustedObserver, CPHB_ENV_VAR, CPSB_ENV_VAR, HISTORY_GAS_PRICED, LEGACY_SPEC_NAMES,
     STATE_GAS_REPRICED, STORAGE_CALL_STIPEND_BYTES,
 };
@@ -72,7 +72,7 @@ pub use limit::{
     LimitStop, LimitUsage, MegaLimitExceeded, StagedRecord, ACCESS_LIST_ADDRESS_SIZE,
     ACCESS_LIST_SLOT_SIZE, AUTHORIZATION_SIZE, FRAME_DATA_SHARE_DENOMINATOR,
     FRAME_DATA_SHARE_NUMERATOR, LOG_BASE_SIZE, LOG_TOPIC_SIZE, TRANSFER_LOG_SIZE, TX_BASE_SIZE,
-    TX_BODY_SIZE, TX_FIXED_WRITE_RECORDS, WRITE_RECORD_SIZE,
+    TX_BODY_OVER_DATA_SIZE_LIMIT, TX_BODY_SIZE, TX_FIXED_WRITE_RECORDS, WRITE_RECORD_SIZE,
 };
 pub use types::{
     MegaHaltReason, MegaTransaction, MegaTransactionError, MegaTxEnvelope, MegaTxType,

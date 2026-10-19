@@ -16,7 +16,8 @@
 //! on; a deployment from nonce 0 and from nonce 1, one that moves value, one by a delegated
 //! signer, a constructor that reverts, halts, logs, writes, and destroys itself; the limits a
 //! deployment crosses, from either nonce; gas detention holding the call and its creation; a
-//! latched body; a system call; and the calls that are not dispatched. Each at a gas limit below
+//! body over the limit, which validation rejects; a system call; and the calls that are not
+//! dispatched. Each at a gas limit below
 //! the execution cap and one above it, where it can run there.
 
 use std::fmt::Write as _;
@@ -598,7 +599,7 @@ fn scenarios() -> Vec<Scenario> {
             );
         }
         all.push(
-            Scenario::deploying("limit: a latched body", system_db(), &small, gas_limit)
+            Scenario::deploying("limit: a body over the limit", system_db(), &small, gas_limit)
                 .limits(EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(100)),
         );
         all.push(

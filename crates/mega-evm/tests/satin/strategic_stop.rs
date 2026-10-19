@@ -477,22 +477,24 @@ fn test_the_latch_does_not_outlive_its_transaction() {
     assert!(!stopped(&evm));
 }
 
-/// A creation transaction stopped before its first frame still bumps the sender's nonce, like any
-/// included creation transaction: it cannot be replayed.
+/// A creation transaction stopped before its first frame runs — its body fits the limit, the record
+/// of the account it creates does not — still bumps the sender's nonce, like any included creation
+/// transaction: it cannot be replayed.
 #[test]
 fn test_create_transaction_stopped_before_its_first_frame_bumps_the_nonce() {
-    let tx = crate::common::create(CALLER, writer(), GAS_LIMIT);
-    let (result, latched) = run(MemoryDatabase::default(), cap(39), tx);
-    assert_stopped(&result.result, LimitKind::DataSize, mega_evm::TX_BODY_SIZE + 39);
+    let init_code = writer();
+    let room = init_code.len() as u64 + mega_evm::WRITE_RECORD_SIZE - 1;
+    let tx = crate::common::create(CALLER, init_code.clone(), GAS_LIMIT);
+    let (result, latched) = run(MemoryDatabase::default(), cap(room), tx);
+    assert_stopped(&result.result, LimitKind::DataSize, mega_evm::TX_BODY_SIZE + room);
     assert!(latched.is_some());
     assert_eq!(result.state[&CALLER].info.nonce, 1, "the sender's nonce is bumped");
     assert!(result.state.get(&CALLER.create(0)).is_none_or(|a| a.info.is_empty_code_hash()));
     assert!(result.result.gas().tx_gas_used() < GAS_LIMIT / 2, "the stop burns nothing");
 
     // The stopped creation's result carries the reservoir back.
-    let init_code = writer();
     let tx = crate::common::create(CALLER, init_code.clone(), 1_000_000_000);
-    let (result, _) = run(MemoryDatabase::default(), cap(39), tx);
+    let (result, _) = run(MemoryDatabase::default(), cap(room), tx);
     assert_eq!(
         result.result.gas().reservoir_remaining(),
         1_000_000_000 - TX_GAS_LIMIT_CAP - create_body_history(init_code.len() as u64),

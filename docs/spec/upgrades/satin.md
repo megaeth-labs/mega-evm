@@ -172,13 +172,16 @@ A node MUST apply [EIP-8037](https://eips.ethereum.org/EIPS/eip-8037), as Amster
 
 - **Validation.**
   A node MUST reject a transaction, before it is included:
+  - whose body, with `WRITE_RECORD_SIZE` bytes for each entry of its authorization list, exceeds the transaction's data-size limit (see [Resource Limits](#10-resource-limits)), unless it is system-originated (see [The Protocol's Own Transactions](#19-the-protocols-own-transactions)); every entry counts, whether its authorization will apply or not;
   - whose gas limit is below its intrinsic regular gas plus the history gas of its body (`CallGasCostMoreThanGasLimit`);
   - whose floor exceeds its gas limit (`GasFloorMoreThanGasLimit`);
   - whose gas limit exceeds `EXECUTION_CAP` while its intrinsic regular gas or its floor exceeds `EXECUTION_CAP` (`GasFloorMoreThanGasLimit`).
 
-  The checks MUST be made in this order, and the first that fails names the error: the gas limit against the intrinsic regular gas alone (`CallGasCostMoreThanGasLimit`, carrying the intrinsic regular gas); the floor against the gas limit (`GasFloorMoreThanGasLimit`); the execution cap (`GasFloorMoreThanGasLimit`, carrying the larger of the intrinsic regular gas and the floor, against `EXECUTION_CAP`); and last the gas limit against the intrinsic regular gas plus the history gas of the body (`CallGasCostMoreThanGasLimit`, carrying that sum).
+  The checks MUST be made in this order, and the first that fails names the error: the body and its authorization records against the data-size limit, before any gas is looked at (an invalid transaction whose reason is that the body and authorization records exceed the transaction data-size limit); the gas limit against the intrinsic regular gas alone (`CallGasCostMoreThanGasLimit`, carrying the intrinsic regular gas); the floor against the gas limit (`GasFloorMoreThanGasLimit`); the execution cap (`GasFloorMoreThanGasLimit`, carrying the larger of the intrinsic regular gas and the floor, against `EXECUTION_CAP`); and last the gas limit against the intrinsic regular gas plus the history gas of the body (`CallGasCostMoreThanGasLimit`, carrying that sum).
   So a gas limit that covers the intrinsic regular gas but neither the floor nor the body's history gas is refused for the floor.
-  A failed validation comes before any limit: a transaction whose body would cross the data-size limit and whose gas limit validation refuses is not stopped — a non-deposit transaction is rejected, and a deposit is included as a failed deposit (see [The Revert-Class Stop](#11-the-revert-class-stop)).
+  A deposit that fails any of these checks is included as a failed deposit instead (see [Transaction and Block Refusals](#21-transaction-and-block-refusals)).
+  The body and the records of the authorities a transaction applies are all it counts as data size before its first frame, so a transaction that passes validation cannot cross the data-size limit before its first frame.
+  At the spec's numbers the data-size check refuses no transaction the gas checks admit: the floor holds calldata and access list together to at most 3,124,812 bytes, and the execution cap holds the authorization list to at most 25,587 entries, so a body with its authorization records is at most 6,732,889 bytes, about half the 13,107,200-byte limit.
 
 Satin has no separate compute-gas limit: compute is regular gas, bounded by the execution cap and, after a read of volatile data, by [gas detention](#12-gas-detention-on-withheld-gas).
 
@@ -261,6 +264,7 @@ Deposited code MUST be charged, once the creation's code passed its checks and i
 A creation that cannot pay any of the four runs out of gas and leaves no code.
 
 A node MUST charge account access to the addresses the inherited rules treat as warm from the start of a transaction — precompiles, the block beneficiary and access-list addresses listed without storage keys — as warm, as [EIP-2929](https://eips.ethereum.org/EIPS/eip-2929) has it: Rex6's cold charge on the first `CALL`-family or `SELFDESTRUCT`-beneficiary touch of such an address does not apply.
+The `SequencerRegistry`'s account and its `_currentSystemAddress` slot MUST be warm from the start of every transaction as well, the slot as an access-list storage key is: validation reads both for every transaction (see [The Live System Address](#17-the-live-system-address)).
 
 ### 6. State Gas and SALT Pricing
 
@@ -439,9 +443,8 @@ One dimension is limited per transaction, data size; compute is not one (see [Tw
 
 Every transaction-level limit — data size and gas detention's compute limit — MUST stop the transaction with a revert, never a halt.
 The stop applies to a transaction that passes validation and pays every charge made before its first frame.
-A transaction that fails validation, or that cannot pay a charge made before its first frame (see [Gas Schedule and Intrinsic Gas](#5-gas-schedule-and-intrinsic-gas)), MUST report no stop, even one its body already triggered: a non-deposit transaction that fails validation is rejected, and a deposit that fails validation — a system deposit, which the inherited rules refuse under Regolith, included — or that cannot pay a charge made before its first frame is included as a failed deposit, whatever kind of deposit it is (see [Transaction and Block Refusals](#21-transaction-and-block-refusals)).
-The body of such a deposit MUST stay counted as data size, and the stop its body triggered MUST be dropped.
-The only charge a transaction whose body already triggered a stop can fail before its first frame is the account a deposit creates for its caller: nothing else is applied or charged for it (below).
+A transaction that fails validation, or that cannot pay a charge made before its first frame (see [Gas Schedule and Intrinsic Gas](#5-gas-schedule-and-intrinsic-gas)), MUST report no stop: a non-deposit transaction that fails validation is rejected, and a deposit that fails validation — a system deposit, which the inherited rules refuse under Regolith, and a deposit whose body is over the data-size limit included — or that cannot pay a charge made before its first frame is included as a failed deposit, whatever kind of deposit it is (see [Transaction and Block Refusals](#21-transaction-and-block-refusals)).
+The body of such a deposit MUST stay counted as data size.
 For a transaction the stop applies to:
 
 1. The frame that crosses the limit MUST revert with `MegaLimitExceeded(uint8 kind, uint64 limit)` as its output.
@@ -461,9 +464,7 @@ A limit is enforced before the writes it guards:
 
 - A frame whose start would cross a limit MUST be answered with the stop before it is built, so no value moves; a stopped creation still bumps its creator's nonce.
   A frame answered without running whose answer is then rewritten to the stop (see [Gas Detention on Withheld Gas](#12-gas-detention-on-withheld-gas)) has what its start moved reverted with the frames the stop reverts — for the first frame, which no frame's revert follows, with its answer.
-- A body over the data-size limit MUST stop the transaction before its first frame runs, unless validation, or a deposit's charge for the caller account it creates, fails first (above): no authorization is applied, no record made outside a frame is charged, the first frame's start is charged nothing, and the first frame is answered with the stop.
-- EIP-7702 authorities whose records would cross the data-size limit MUST be taken back before the first frame: their nonce and delegation writes are reverted, every charge made at the start of execution for applying them, state and regular gas alike, is returned, and none of their records is kept or charged; the first frame is then answered with the stop.
-  Authorities admitted there are kept through a later stop, as above.
+- Nothing counted before the first frame — the body, and the records of the EIP-7702 authorities applied — crosses the data-size limit: validation rejects a transaction whose body, with a record for each entry of its authorization list, would (see [Two-Pool Gas](#4-two-pool-gas-eip-8037-replaces-the-dual-gas-model)).
 
 A frame budget MUST revert its frame alone, with the same revert data, and its caller continues.
 A real out-of-gas, a precompile given less than its price, and an invalid opcode still halt and consume the frame's gas.
@@ -639,7 +640,8 @@ An out-of-gas step halts the call, consuming its regular gas.
 | 15   | `min(gasLimitOverride, remaining gas)` still covers the signed gas limit                                                                                                                                                                                                          | `GasLimitTooLow(uint64,uint64)`                                  |
 
 - Steps 1 to 13 keep the legacy engine's order, so a call several rules refuse reports the Rex6 error.
-- The deploy-address read of step 12 MUST read the account into the transaction's state without warming it — an address not yet loaded is loaded cold, one already loaded keeps its warmth — and without loading its code: the creation's own access to the address is priced as the inherited creation rules price it.
+- The read of the signer's account that steps 8 to 10 and 13 check, and the deploy-address read of step 12, MUST load the account into the transaction's state as an account access loads it, warm, the deploy address without its code.
+  Neither read is charged, and no charge the call or its creation makes depends on either account's warmth: the creation loads both again when it starts, as a creation loads its creator and the address it creates.
 - Step 12 checks the deploy address's code alone: an address that holds a nonce but no code passes it, and the creation then collides there, as any creation onto an occupied address does, and fails, the call answering `ExecutionHalted` with the creation's whole forward spent and the signer's nonce kept or taken back as below.
   Besides a genesis allocation, no deployment leaves such an account: a creation at the deploy address that returns empty code is refused its empty deposit and reverts, as one that reverted, halted or was stopped does, so the address stays deployable.
   A constructor that destroyed its own account leaves none either, and a creation the constructor itself makes may return empty code.
@@ -703,19 +705,26 @@ An out-of-gas step halts the call, consuming its regular gas.
 
 - The system address is resolved per block from `SequencerRegistry.currentSystemAddress()` after the pre-block changes commit.
 - A Mega System Transaction is a legacy transaction from that address to a contract on `MEGA_SYSTEM_TX_WHITELIST`.
-- A transaction from the system address without that shape is refused.
+- A transaction from the system address without that shape is refused, with an error that is not a transaction's: a deposit from the system address is refused the same way rather than included as a failed deposit, so a block that holds one cannot be executed.
+- A Mega System Transaction's nonce and, unless EIP-3607 is disabled, its sender's code are checked before it is promoted to a deposit; its chain id is not, as no transaction's is: the chain-id check is off in every configuration Rex6 runs.
 
 #### New behavior
 
-- A transaction MUST be tested for the system shape on its own fields first: type `0x0`, a call (not a creation) to an address on `MEGA_SYSTEM_TX_WHITELIST` (the Oracle).
-- A transaction MUST read the registry only when it has that shape: when the registry's code hash is that of the code this spec deploys, the node reads `_currentSystemAddress` from the transaction's own state, cold, and compares it with the caller.
+- The system shape is tested on the transaction's own fields: type `0x0`, a call (not a creation) to an address on `MEGA_SYSTEM_TX_WHITELIST` (the Oracle).
+- Every transaction MUST read the registry when it is validated, whatever its shape and whoever sent it: the node loads the registry's account and, from the transaction's own state, its `_currentSystemAddress` slot.
+  When the registry's code hash is that of the code this spec deploys and the slot holds a non-zero address, that address is the live system address.
   The read compares the registry's code hash and MUST NOT load or run the registry's code.
-  This read lands in the transaction's returned state, and so in the block's witness, whatever the pre-block states also hold of the registry; it does not load the registry's code, but the witness carries that code as it carries the code of every account the block loads (see [The Stateless Witness](#22-the-stateless-witness)), and the Oracle's own check of its caller runs it.
-- A registry that is absent, holds other code, or names the zero address MUST make no transaction a Mega System Transaction.
-- A transaction of any other shape reads nothing and is never a Mega System Transaction, whoever sent it.
-  A transaction from the system address without the shape is an ordinary transaction, validated and charged as a user's.
-  The Oracle authorizes writes on the sender alone, so such a transaction to the Oracle succeeds as a user transaction: it pays fees, is held to every per-transaction limit, is detained, is priced by bucket, and pays history gas.
-- A Mega System Transaction is validated (chain id, nonce, EIP-3607) and promoted to a deposit exactly as in Rex6.
+  The account and the slot MUST be warm for the rest of the transaction, as the block beneficiary is under [EIP-3651](https://eips.ethereum.org/EIPS/eip-3651), whatever the registry holds: an access to either costs every transaction the same, whatever its envelope.
+  The read is not charged and writes nothing, so committing the transaction leaves the registry as it was.
+  It lands in the transaction's returned state, and so in the block's witness, whatever the pre-block states also hold of the registry; it does not load the registry's code, but the witness carries that code as it carries the code of every account the block loads (see [The Stateless Witness](#22-the-stateless-witness)), and the Oracle's own check of its caller runs it.
+- A transaction of the system shape whose caller is the live system address is a Mega System Transaction.
+  A registry that is absent, holds other code, or names the zero address names no live system address, and MUST make no transaction a Mega System Transaction.
+- A transaction from the live system address without the system shape MUST be invalid, whatever its type, a deposit included: a transaction other than a deposit is rejected, and a deposit, which is never of the system shape, is included as a failed deposit, which runs no call (see [Transaction and Block Refusals](#21-transaction-and-block-refusals)).
+  That includes a deposit carrying the source hash the promotion stamps, which a block never holds: a Mega System Transaction is promoted from its legacy envelope, and one handed to a node already promoted is a failed deposit.
+  The Oracle authorizes writes on the sender alone, so no transaction from the system address other than a Mega System Transaction reaches the Oracle.
+- A transaction from any other address is never a Mega System Transaction, and is an ordinary transaction, validated and charged as a user's: that includes a transaction from an address a rotation retired, which is no longer the live system address.
+- A Mega System Transaction MUST be validated before it is promoted to a deposit, and a failure is a rejection: it MUST carry the chain's id, which a user's legacy transaction may omit and it MUST NOT; its nonce MUST be the system address's; and the system address MUST have no code, as [EIP-3607](https://eips.ethereum.org/EIPS/eip-3607) requires of any sender.
+  It is then executed as a deposit, which checks no signature, nonce or fee of its own.
 - Because a role change can only be scheduled for a later block — the registry refuses an activation block at or before the current one — and is applied by that block's pre-block call, every transaction of a block reads the address the block's pre-block step left; a call to `applyPendingChanges()` inside the block, which anyone may make, finds no change due that the pre-block step did not apply.
 - A registry read the node fails to make gives the transaction no outcome (see [Transaction and Block Refusals](#21-transaction-and-block-refusals)).
 
@@ -798,6 +807,8 @@ One of those counts is limited:
 
 - It is a packing budget: the transaction that reaches the limit MUST be included, and later transactions MUST be skipped.
   A builder that executes several candidates before it commits one MUST hold each to the block's counters again when it commits it, together with the block gas limit and the data-availability footprint; a validator commits every transaction before it executes the next, so for it the second check finds what the first found.
+  Such a builder MUST NOT commit a candidate whose sender's nonce or balance — the system address's, for a Mega System Transaction — another commit moved since the candidate executed: committing it would write the sender's account over what that commit did.
+  Any other state a candidate read and a commit since changed is the builder's to account for, by executing the candidate again; a candidate that read the Oracle executed before a Mega System Transaction that writes it, committed after that transaction, commits the value it read.
 - A deposit — a transaction whose envelope is a deposit — MUST NOT be refused by it, and MUST count towards it.
   A Mega System Transaction is a legacy transaction in the block, so at block level it is held to this budget and to the data-availability limits like any non-deposit transaction.
 - Execution, state and history gas have no block limit beyond the block gas limit; state gas prices the state a block adds, so the block gas limit bounds it.
@@ -816,13 +827,18 @@ One of those counts is limited:
 #### Previous behavior
 
 - Rex6's refusals: the inherited validation errors, the resource-limit halts of [Resource Limits](../evm/resource-limits.md), and the fail-closed pre-block calls.
+- Rex6 checks no transaction's chain id: the chain-id check is off in every configuration it runs, and a transaction carrying another chain's id, or a typed transaction carrying none, is valid.
 
 #### New behavior
 
 A transaction MUST be rejected before inclusion when:
 
+- its body, with `WRITE_RECORD_SIZE` bytes for each entry of its authorization list, exceeds the transaction's data-size limit, unless it is system-originated (see [Two-Pool Gas](#4-two-pool-gas-eip-8037-replaces-the-dual-gas-model));
 - its gas limit is below its intrinsic regular gas plus the history gas of its body (`CallGasCostMoreThanGasLimit`);
 - its floor exceeds its gas limit, or, above the execution cap, its intrinsic regular gas or floor exceeds the cap (`GasFloorMoreThanGasLimit`);
+- it is sent from the live system address and does not have the system shape (see [The Live System Address](#17-the-live-system-address));
+- it carries a chain id that is not the chain's, or it is not a legacy transaction and carries none; a legacy transaction without a chain id (pre-[EIP-155](https://eips.ethereum.org/EIPS/eip-155)) is valid, unless it is a Mega System Transaction (see [The Live System Address](#17-the-live-system-address)).
+  The check is part of the spec, not of a node's configuration: a node MUST make it whatever its configuration says;
 - it is a Mega System Transaction that fails the chain-id, nonce or EIP-3607 check;
 - it fails any inherited validation.
 
@@ -846,7 +862,7 @@ A block is not invalid for a transaction a building policy would have skipped.
 
 A transaction MUST be included with a failed receipt when it reverts, halts, or is stopped by a limit (see [The Revert-Class Stop](#11-the-revert-class-stop)).
 A failed bucket-capacity read or database read is a fault of the node, never an outcome of the transaction, for a deposit as for any transaction: the transaction gets no outcome and MUST NOT be settled, as a failed deposit or otherwise.
-The node MUST report the failure as an internal error with its cause: a failed bucket-capacity read always; a failed database read the transaction's execution makes when the node's database declares the error fatal, and otherwise as an invalid-block verdict, as for a pre-block call (see [System Calls and Pre-Block Calls](#18-system-calls-and-pre-block-calls)); and a failed read block execution makes for the transaction outside its execution — the L1 block contract's account and footprint gas scalar before a non-deposit transaction, a deposit sender's nonce before the deposit runs — always, as a pre-block deploy's is.
+The node MUST report the failure as an internal error with its cause: a failed bucket-capacity read always; a failed database read the transaction's execution makes when the node's database declares the error fatal, and otherwise as an invalid-block verdict, as for a pre-block call (see [System Calls and Pre-Block Calls](#18-system-calls-and-pre-block-calls)); and a failed read block execution makes for the transaction outside its execution — the L1 block contract's account and footprint gas scalar before a non-deposit transaction, a transaction's sender's account before the transaction runs — always, as a pre-block deploy's is.
 A node that meets the failure cannot execute the block past that transaction: it reaches no verdict on the block, except that a non-fatal database error met inside the transaction's execution is reported as an invalid block (above); a builder, which has no outcome to include for that transaction, MAY leave a non-deposit transaction out of the block it builds, but a deposit MUST be included, so the block that must hold it cannot be built while the read fails.
 
 A block MUST be invalid when:
@@ -875,7 +891,7 @@ The witness is defined by what the block's execution returns and exports, and a 
   - the hash of every block `BLOCKHASH` read, which the block's execution exports;
   - the capacity of every SALT bucket the block's execution exports;
   - the oracle service's answer to every oracle read the block's included transactions recorded, in block order.
-    A transaction loads every account and slot its execution reads from the state: in its validation (the registry's account and slot a transaction of the system shape reads included), in its fee settlement, and in any of its frames, a frame that reverted or halted included, and a frame of a deposit that failed.
+    A transaction loads every account and slot its execution reads from the state: in its validation (the registry's account and system-address slot every transaction reads included), in its fee settlement, and in any of its frames, a frame that reverted or halted included, and a frame of a deposit that failed.
     A failed frame's writes are taken back, not its reads; a failed deposit takes back everything but its sender's nonce bump and mint, not its reads; and a validator re-executing the transaction makes the same reads in the same frames.
     The one exception is the L1 block info the transaction is priced against, which the pre-block phase loads for the whole block (see the L1 block info, below).
     A read that gas or a limit skipped loads nothing (see the reads a validator makes again, below).
@@ -885,7 +901,7 @@ The witness is defined by what the block's execution returns and exports, and a 
     A slot of an account the chain does not hold before the block is not recorded: such an account has no storage, and a validator MUST answer every slot of it with zero without looking it up.
     The code in particular is not the code a returned state carries: a transaction that replaces an account's code — an EIP-7702 authority delegated anew — is admitted against the code the chain held, and its returned state carries the code it wrote.
 - **What the block reads, and where it lands.**
-  A transaction's loads are in its returned state: its sender, its recipient or created address, every account and every slot any of its frames loads, the fee recipients, the registry's account and system-address slot a transaction of the system shape reads, and a keyless deployment's signer and deploy address; the state names an account whether or not the load brought its code.
+  A transaction's loads are in its returned state: its sender, its recipient or created address, every account and every slot any of its frames loads, the fee recipients, the registry's account and system-address slot every transaction reads, and a keyless deployment's signer and deploy address; the state names an account whether or not the load brought its code.
   The pre-block phase's reads land in the pre-block states, in order: the two EIP calls' states, each system-contract deploy's read-only or created entry, the registry's pending slots the due-change decision read, the `applyPendingChanges()` call's state, and last the L1 block info.
   `BLOCKHASH` reads the chain's history outside the journal and its reads are exported; a SALT bucket's capacity and the oracle service's answer are read outside the database and are exported or recorded.
   The header, the chain configuration — the schedule with the sequencer registry parameters attached to it — the parent hash, the parent beacon block root, the extra data, whether the block admits only deposits (see [Base Layer](#1-base-layer-optimism-karst-ethereum-osaka)), and the block's slot number are inputs a validator is given beside the witness.
@@ -962,12 +978,13 @@ A node, a stateless validator and a replay tool must agree on everything below, 
   A node that reads the configuration before it executes anything — gas estimation reads the execution cap — must read these values, not its own.
   The limits are fixed by the spec too (see [Resource Limits](#10-resource-limits) and [Block Limits](#20-block-limits)): a node passes none of them, neither in its chain configuration nor with a block, and the reference implementation holds a block's transactions, and an execution outside a block — a call, a gas estimate — to the same values without being told, so a node's calls and estimates stop what its blocks stop.
 - **What a transaction pool can check without state.**
+  The body, with `WRITE_RECORD_SIZE` bytes for each entry of the authorization list, must fit the transaction's data-size limit, and the chain id must be the chain's, a typed transaction's included; neither depends on the node's configuration.
   The gas limit must cover the intrinsic regular gas (EIP-2780's base and recipient and value charges, calldata, access list, authorizations, init code) plus the history gas of the transaction's body, and the calldata floor; above the execution cap, the intrinsic regular gas and the floor must fit under the cap.
   The rest of the stateless validation is the base layer's.
   Whether a recipient, a created account or an authority is new is the state's to say: EIP-2780 charges it when the transaction runs, and a gas limit that cannot pay it runs out of gas rather than being refused.
   The history of the write records a transaction's start makes is charged when it runs too: one record for the recipient of its value (none for value sent to the sender itself or to an authority it applied) or the account it creates, and one for each authority that applies other than the sender.
   So the least gas limit validation admits is not what a transaction needs: at that gas limit a transfer of value to another account runs out of gas on its recipient's record, and one to a new account needs that account's state gas as well.
-  A deposit and a Mega System Transaction pay no history gas; a pool that recognizes the latter needs the live system address from the state.
+  A deposit and a Mega System Transaction pay no history gas; a pool that recognizes the latter, and refuses a transaction from the live system address without the system shape, needs the live system address from the state.
   That address changes only in a block's pre-block step and then holds for the whole block, so a pool reads it again for every block, from the state after that block's pre-block changes.
   An address read from another state treats the old system address's transactions as the protocol's and the new one's as a user's, or the reverse.
   A deposit is never refused for failing validation: one that fails validation is included as a failed deposit, which bumps its sender's nonce and uses its whole gas limit.
@@ -1013,7 +1030,7 @@ Satin changes nothing about blocks under earlier specs: a node replaying history
 Satin is a restatement rather than a delta, so a Rex6 rule this page does not carry over — the compute-gas limit, the storage-gas formulas, the sandbox, the 98/100 forwarding, the cold first touch of preload-warm addresses — does not apply to Satin blocks.
 
 The six system contracts keep their Rex6 bytecode and ABI, but for the four errors `IKeylessDeploy` no longer declares; the Satin deploy step refuses, rather than upgrades, any other code at their addresses.
-A system-address transaction without the system shape is now executed as a user transaction instead of being refused; only the holder of the system key can send one.
+A transaction from the live system address without the system shape is refused, as in Rex6, now as an invalid transaction: a deposit from the system address, which Rex6 refused with an error that left its block unexecutable, is a failed deposit, so the engine no longer depends on the L1 portal refusing deposits from each system address a rotation installs.
 
 The per-transaction and block limits and the detention caps are protocol values fixed by the spec, not chain configuration, so every node executing any chain holds its Satin blocks to the same ones: the data-size limits at 13,107,200 bytes and the detention caps at 20,000,000 each.
 No chain can set a limit that stops the block's L1 attributes deposit, whose data size is its body, its calldata and a write record for each slot of the L1 block contract it changes: 526 bytes on recorded mainnet blocks within one L1 origin.

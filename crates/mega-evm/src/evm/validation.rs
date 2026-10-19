@@ -14,10 +14,7 @@ use revm::{
     interpreter::interpreter::EthInterpreter,
 };
 
-use crate::{
-    system::is_mega_system_transaction_with, MegaContext, MegaEvm, MegaEvmError, MegaHandler,
-    MegaSpecId, MegaTransaction,
-};
+use crate::{MegaContext, MegaEvm, MegaEvmError, MegaHandler, MegaSpecId, MegaTransaction};
 
 /// The gas a transaction's gas limit must cover before it runs, by ledger, as the EVM charges it
 /// when it validates the transaction.
@@ -101,13 +98,20 @@ impl IntrinsicGas {
 ///
 /// What is left to the state is left out: the sender's nonce, balance and code (EIP-3607), the
 /// system address's nonce and code for a system-address transaction, and the charges the state
-/// decides (see [`IntrinsicGas`]). A body over the transaction's data-size limit is not refused
-/// either: the limit stops such a transaction when it runs.
+/// decides (see [`IntrinsicGas`]).
+///
+/// A transaction whose body, with a write record for each entry of its authorization list, exceeds
+/// the spec's transaction data-size limit is refused
+/// ([`TX_BODY_OVER_DATA_SIZE_LIMIT`](crate::TX_BODY_OVER_DATA_SIZE_LIMIT)) before its gas is
+/// looked at, as block execution refuses it: the EVM this runs on holds the spec's limits.
+/// A system-address transaction is exempt from the limit, and from the check.
 ///
 /// `system_address` is the live system address: the one the `SequencerRegistry` names in the
 /// state the pool validates against ([`live_system_address`](crate::system::live_system_address)).
-/// A transaction of the system shape from it is a system-address transaction; with `None`, no
-/// transaction is.
+/// A transaction of the system shape from it is a system-address transaction, and one of another
+/// shape from it is refused
+/// ([`SYSTEM_ADDRESS_WITHOUT_SYSTEM_SHAPE`](crate::system::SYSTEM_ADDRESS_WITHOUT_SYSTEM_SHAPE));
+/// with `None`, no transaction is either.
 ///
 /// The address changes only in a block's pre-block step, which applies a change the registry's
 /// admin scheduled in an earlier block, and it then holds for every transaction of that block. So
@@ -134,13 +138,11 @@ pub fn validate_transaction_stateless(
     tx: MegaTransaction,
     system_address: Option<Address>,
 ) -> Result<IntrinsicGas, MegaEvmError<Infallible>> {
-    let system_transaction =
-        system_address.is_some_and(|address| is_mega_system_transaction_with(&tx, address));
     let ctx =
         MegaContext::new(EmptyDB::default(), cfg.spec).with_cfg(cfg).with_block(block).with_tx(tx);
     let mut evm = MegaEvm::new(ctx);
     let handler = MegaHandler::<_, MegaEvmError<Infallible>, EthFrame<EthInterpreter>>::new();
-    handler.validate_env_as(&mut evm, system_transaction, false)?;
+    handler.validate_env_as(&mut evm, system_address, false)?;
     let gas = handler.validate_initial_tx_gas(&mut evm)?;
     let history = evm.ctx().additional_limit.intrinsic_history_gas();
     Ok(IntrinsicGas {

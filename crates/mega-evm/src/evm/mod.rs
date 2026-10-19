@@ -26,7 +26,6 @@ pub use execution::*;
 pub use factory::*;
 pub use frame::*;
 pub use history::*;
-pub use host::*;
 pub use inspector::*;
 pub use precompiles::*;
 pub use prices::*;

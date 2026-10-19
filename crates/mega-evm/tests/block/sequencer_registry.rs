@@ -10,10 +10,10 @@
 
 use std::sync::{Arc, Mutex};
 
-use alloy_consensus::transaction::Recovered;
+use alloy_consensus::{transaction::Recovered, Sealed, Signed, TxEip1559};
 use alloy_evm::{block::BlockExecutor, EvmEnv, EvmFactory, ToTxEnv};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
-use alloy_primitives::{address, keccak256, Address, Bytes, B256, U256};
+use alloy_primitives::{address, keccak256, Address, Bytes, Signature, TxKind, B256, U256};
 use alloy_sol_types::{SolCall, SolValue};
 use mega_evm::{
     system::{
@@ -24,14 +24,19 @@ use mega_evm::{
         },
         IOracle, ISequencerRegistry, SequencerRegistryConfig, MEGA_SYSTEM_ADDRESS,
         ORACLE_CONTRACT_ADDRESS, SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE,
-        SEQUENCER_REGISTRY_CODE_HASH,
+        SEQUENCER_REGISTRY_CODE_HASH, SYSTEM_ADDRESS_WITHOUT_SYSTEM_SHAPE,
     },
     test_utils::MemoryDatabase,
     BlockLimits, ExternalEnvFactory, MegaBlockExecutionCtx, MegaBlockExecutor, MegaContext,
     MegaEvm, MegaEvmFactory, MegaHardforkConfig, MegaTxEnvelope, PreBlockStateSource,
     TestExternalEnvs, MIN_BUCKET_SIZE,
 };
-use revm::{database::State, inspector::NoOpInspector, state::EvmState, Database};
+use op_alloy_consensus::TxDeposit;
+use op_revm::OpHaltReason;
+use revm::{
+    context::result::ExecutionResult, database::State, inspector::NoOpInspector, state::EvmState,
+    Database,
+};
 
 use crate::common::{self, pre_block_states, PreBlockLog, BLOCK_NUMBER};
 
@@ -384,7 +389,7 @@ fn test_the_bootstrap_block_promotes_the_seeded_system_address() {
 /// Once the registry is in place, no pre-block step carries the system address's slot: the
 /// deploy leaves the registry as a read-only entry without storage, and the read of the pending
 /// changes reads the pending slots alone. The slot is in the system-address transaction's own
-/// state instead, read-only and cold, as its validation read it.
+/// state instead, read-only and warm, as its validation read it.
 #[test]
 fn test_the_slot_is_in_the_system_transactions_state_not_the_pre_block_witness() {
     let mut state = State::builder().with_database(registry_with(&[])).build();
@@ -401,7 +406,7 @@ fn test_the_slot_is_in_the_system_transactions_state_not_the_pre_block_witness()
     let outcome = assert_is_the_system_address(&mut executor, MEGA_SYSTEM_ADDRESS);
     assert_carries_the_system_address_read(&outcome.inner.state, MEGA_SYSTEM_ADDRESS);
     let registry = &outcome.inner.state[&SEQUENCER_REGISTRY_ADDRESS];
-    assert!(registry.storage[&CURRENT_SYSTEM_ADDRESS].is_cold, "the read left the slot cold");
+    assert!(!registry.storage[&CURRENT_SYSTEM_ADDRESS].is_cold, "the read warmed the slot");
 }
 
 /// A system-address transaction is recognised by the address read out of the registry: from it,
@@ -512,6 +517,130 @@ fn test_an_evm_outside_block_execution_promotes_the_rotated_address() {
             .with_external_env_factory(envs.clone())
             .create_evm(&mut state, common::evm_env()),
     );
+}
+
+/// A deposit from `sender` to the Oracle's `setSlots`, minting `mint` to it: a write the Oracle
+/// accepts from the live system address, if the call ran.
+fn oracle_write_deposit_from(sender: Address, mint: u128) -> Recovered<MegaTxEnvelope> {
+    let input =
+        IOracle::setSlotsCall { slots: vec![U256::ZERO], values: vec![B256::repeat_byte(7)] }
+            .abi_encode();
+    let deposit = TxDeposit {
+        source_hash: B256::repeat_byte(0xd0),
+        from: sender,
+        to: TxKind::Call(ORACLE_CONTRACT_ADDRESS),
+        mint,
+        value: U256::ZERO,
+        gas_limit: gas_limit(input.len()),
+        is_system_transaction: false,
+        input: input.into(),
+    };
+    Recovered::new_unchecked(
+        MegaTxEnvelope::Deposit(Sealed::new_unchecked(deposit, B256::repeat_byte(0xd1))),
+        sender,
+    )
+}
+
+/// An EIP-1559 call from `sender` to the Oracle's `getSlot(0)`, which has no system shape. It
+/// tips its whole fee cap, so it pays a fee on a block with no base fee.
+fn typed_oracle_call_from(sender: Address) -> Recovered<MegaTxEnvelope> {
+    let input = IOracle::getSlotCall { slot: U256::ZERO }.abi_encode();
+    let tx = TxEip1559 {
+        chain_id: common::CHAIN_ID,
+        nonce: 0,
+        gas_limit: gas_limit(input.len()),
+        max_fee_per_gas: 1_000_000,
+        max_priority_fee_per_gas: 1_000_000,
+        to: TxKind::Call(ORACLE_CONTRACT_ADDRESS),
+        value: U256::ZERO,
+        access_list: Default::default(),
+        input: input.into(),
+    };
+    Recovered::new_unchecked(
+        MegaTxEnvelope::Eip1559(Signed::new_unchecked(
+            tx,
+            Signature::test_signature(),
+            B256::repeat_byte(0xe1),
+        )),
+        sender,
+    )
+}
+
+/// A deposit is never of the system shape, so one from the live system address is invalid, and
+/// the block includes it as a failed deposit: its sender's nonce moves by one and its mint is
+/// credited, and its call, a write the Oracle accepts from the system address, never runs. That
+/// holds for the address the registry names and for the one a rotation due in the block names.
+#[test]
+fn test_a_deposit_from_the_live_system_address_is_a_failed_deposit() {
+    const MINT: u128 = 9_000;
+    let cases = [
+        ("the registry's address", Vec::new(), MEGA_SYSTEM_ADDRESS),
+        ("after a rotation", system_address_change(BLOCK_NUMBER).to_vec(), NEXT_SYSTEM_ADDRESS),
+    ];
+    for (case, slots, sender) in cases {
+        let mut state = State::builder().with_database(registry_with(&slots)).build();
+        let mut executor = executor(&mut state, envs_at(1), common::BLOCK_GAS_LIMIT);
+        executor.apply_pre_execution_changes().expect("the block starts");
+        let outcome = executor
+            .run_transaction(&oracle_write_deposit_from(sender, MINT))
+            .expect("a deposit is included");
+        assert!(
+            matches!(
+                outcome.result,
+                ExecutionResult::Halt { reason: OpHaltReason::FailedDeposit, .. }
+            ),
+            "{case}: {:?}",
+            outcome.result
+        );
+        executor.commit_transaction(outcome);
+        drop(executor);
+
+        let account = state.basic(sender).unwrap().expect("the deposit created its sender");
+        assert_eq!(account.nonce, 1, "{case}: the nonce moves by one");
+        assert_eq!(account.balance, U256::from(MINT), "{case}: the mint is credited");
+        let oracle = state.storage(ORACLE_CONTRACT_ADDRESS, U256::ZERO).unwrap();
+        assert_eq!(oracle, U256::ZERO, "{case}: the Oracle is not written");
+    }
+}
+
+/// A transaction from the live system address without the system shape is invalid: the block
+/// refuses an EIP-1559 call from it, before or after a rotation, however much the address holds.
+/// The address a rotation retired is an ordinary sender: the same call from it runs, and pays its
+/// fee.
+#[test]
+fn test_a_typed_transaction_from_the_live_system_address_is_invalid() {
+    let funds = U256::from(10u64.pow(18));
+    let cases = [
+        ("the registry's address", Vec::new(), MEGA_SYSTEM_ADDRESS, None),
+        (
+            "after a rotation",
+            system_address_change(BLOCK_NUMBER).to_vec(),
+            NEXT_SYSTEM_ADDRESS,
+            Some(MEGA_SYSTEM_ADDRESS),
+        ),
+    ];
+    for (case, slots, live, retired) in cases {
+        let db = registry_with(&slots)
+            .account_balance(MEGA_SYSTEM_ADDRESS, funds)
+            .account_balance(NEXT_SYSTEM_ADDRESS, funds);
+        let mut state = State::builder().with_database(db).build();
+        let mut executor = executor(&mut state, envs_at(1), common::BLOCK_GAS_LIMIT);
+        executor.apply_pre_execution_changes().expect("the block starts");
+
+        let error = executor
+            .run_transaction(&typed_oracle_call_from(live))
+            .expect_err("the live system address sends the system shape alone");
+        assert!(error.to_string().contains(SYSTEM_ADDRESS_WITHOUT_SYSTEM_SHAPE), "{case}: {error}");
+
+        if let Some(retired) = retired {
+            let outcome = executor
+                .run_transaction(&typed_oracle_call_from(retired))
+                .expect("the retired address is an ordinary sender");
+            assert!(outcome.result.is_success(), "{case}: {:?}", outcome.result);
+            assert!(!executor.evm().ctx().is_system_originated(), "{case}");
+            assert!(outcome.inner.state[&retired].info.balance < funds, "{case}: it pays its fee");
+        }
+    }
 }
 
 /// A sequencer rotation leaves the system address as it was.

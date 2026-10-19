@@ -60,11 +60,13 @@
 //! rejects is not kept, so it is not charged, and the stop is what its frame reports. At a frame
 //! start the order is the other way round — the caller pays for the records at its opcode, before
 //! the frame starts and its records are counted — so a caller that cannot pay runs out of gas
-//! first. A body over the limit latches the transaction before it runs, and then nothing is
-//! charged for what the stop takes back: no authorization is applied, no record made outside a
-//! frame is charged, the first frame's start is charged nothing, and the first frame is answered
-//! with the stop. The account a deposit-like transaction creates for its caller is charged all the
-//! same, because it exists whatever the transaction does.
+//! first.
+//!
+//! Nothing counted before the first frame crosses the limit: validation refuses a transaction
+//! whose body, with a record for each entry of its authorization list, exceeds it
+//! ([`TX_BODY_OVER_DATA_SIZE_LIMIT`]), and those are all a transaction counts before its first
+//! frame — the body, and one record for each distinct authority that applies. A deposit refused
+//! that way is included as a failed deposit, which keeps its body counted.
 //!
 //! # Write records
 //!
@@ -171,6 +173,16 @@ pub const TX_BODY_SIZE: u64 = TX_BASE_SIZE + WRITE_RECORD_SIZE * TX_FIXED_WRITE_
 
 /// Bytes one EIP-7702 authorization counts: the authorization tuple and its signature.
 pub const AUTHORIZATION_SIZE: u64 = 101;
+
+/// The message of the [`InvalidTransaction::Str`](revm::context::result::InvalidTransaction::Str)
+/// a transaction is refused with when its body, with one [`WRITE_RECORD_SIZE`] record for each
+/// entry of its authorization list, exceeds the transaction's data-size limit.
+///
+/// A transaction other than a deposit is rejected with it, by a pool as by block execution; a
+/// deposit, which op-revm does not refuse for a transaction error, is included as a failed deposit
+/// instead.
+pub const TX_BODY_OVER_DATA_SIZE_LIMIT: &str =
+    "transaction body and authorization records exceed the transaction data-size limit";
 
 /// Bytes one access-list address counts: the address itself.
 pub const ACCESS_LIST_ADDRESS_SIZE: u64 = 20;

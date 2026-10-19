@@ -9,7 +9,7 @@ use alloy_evm::Database;
 use alloy_primitives::{Address, Bytes, U256};
 use alloy_sol_types::SolCall;
 use revm::{
-    context::{Cfg, ContextError, ContextTr, Transaction},
+    context::{Cfg, ContextError, ContextTr, JournalTr, Transaction},
     context_interface::{
         cfg::{GasId, StateGasCharge, StateGasSite},
         Host,
@@ -34,7 +34,7 @@ use crate::{
             KEYLESS_DEPLOY_CODE, KEYLESS_DEPLOY_CODE_HASH, KEYLESS_DEPLOY_OVERHEAD_GAS,
         },
     },
-    untouched_call_gas, write_record_history_gas, ExternalEnvTypes, JournalInspectTr, MegaContext,
+    untouched_call_gas, write_record_history_gas, ExternalEnvTypes, MegaContext,
     VolatileDataAccess,
 };
 
@@ -183,8 +183,8 @@ pub(crate) fn run<DB: Database, ExtEnvs: ExternalEnvTypes>(
 ///    the signer's SALT bucket. A call that cannot pay runs out of gas.
 /// 10. `gasLimitOverride`, capped to what the call has left, still covers the signed gas limit
 ///     (`GasLimitTooLow`).
-/// 11. The deploy address holds no code (`ContractAlreadyExists()`), read cold and without its
-///     code, so the address is in the transaction's state and in a witness without its bytecode.
+/// 11. The deploy address holds no code (`ContractAlreadyExists()`), read without its code, so the
+///     address is in the transaction's state and in a witness without its bytecode.
 /// 12. The signer can fund the transaction's value (`InsufficientBalance()`).
 /// 13. What the `CREATE` opcode charges its frame for the creation's start, in the opcode's order:
 ///     its regular gas — the schedule's `create` entry and EIP-3860's cost per word of init code —
@@ -368,7 +368,15 @@ fn prepare<DB: Database, ExtEnvs: ExternalEnvTypes>(
     let deploy_address = calculate_keyless_deploy_address(signer);
 
     let checks_code = !ctx.cfg().is_eip3607_disabled();
-    let signer_info = ctx.journal_mut().inspect_account(signer, checks_code)?.info.clone();
+    let journal = ctx.journal_mut();
+    let signer_info = if checks_code {
+        journal.load_account_with_code(signer)?
+    } else {
+        journal.load_account(signer)?
+    }
+    .data
+    .info
+    .clone();
     // A signer that is the block beneficiary: the rules read the beneficiary's account through
     // the journal, where the Host marks nothing, and the creation runs for it as a `CREATE` runs
     // in a frame of it, which a read of the account started. The call is the transaction's own
@@ -398,7 +406,7 @@ fn prepare<DB: Database, ExtEnvs: ExternalEnvTypes>(
         }
     }
     forward!();
-    if ctx.journal_mut().inspect_account_code_hash(deploy_address)? != KECCAK_EMPTY {
+    if ctx.journal_mut().load_account(deploy_address)?.data.info.code_hash != KECCAK_EMPTY {
         refuse!(KeylessDeployError::ContractAlreadyExists);
     }
     if signer_info.balance < tx.value {

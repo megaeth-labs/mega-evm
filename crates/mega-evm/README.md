@@ -107,11 +107,11 @@ The exception is a signer whose own code spends a nonce in the constructor that 
 A `keylessDeploy` call a contract makes is not a deployment: it runs the method body, which reverts with `NotIntercepted()`.
 
 The system address sends the protocol's own transactions: a legacy transaction from it to a whitelisted contract is validated — the chain id, the nonce and EIP-3607 — and promoted to a deposit, which pays no fee and rewards none.
-It is the address the `SequencerRegistry` holds, and the transaction reads it itself: a transaction of that shape reads the registry's `_currentSystemAddress` from the journal when it is validated, without warming it, and compares it with its caller.
-Every other transaction reads nothing, and one of another shape from the system address is an ordinary transaction.
+It is the address the `SequencerRegistry` holds, and every transaction reads it itself when it is validated: it loads the registry's account and `_currentSystemAddress`, which stay warm for the rest of the transaction, so an access to either costs the same whatever the envelope.
+A transaction of that shape from that address is a system-address transaction; one of another shape from it is invalid, and a deposit from it, which never has the shape, is a failed deposit.
 The registry cannot change the address inside a block after its pre-block call, so every transaction of a block reads the address a rotation due in the block left, and an EVM a node builds outside block execution — an RPC call, the replay of a block's transactions for a trace — reads the one in the state it runs on, with nothing to set.
 A registry that is absent, holds other code or names a zero address promotes nothing.
-The read is in the system-address transaction's own state and witness; the pre-block steps no longer carry it.
+The read is in every transaction's own state and witness; the pre-block steps no longer carry it.
 The account such a transaction creates for its caller is charged the account-creation state gas exactly once.
 
 History gas is in place: every byte a transaction appends to the chain is priced at MegaETH's cost per history byte, and the byte counts are the ones the data-size limit meters, so a record's history bytes are its own data size.

@@ -230,10 +230,12 @@ async fn test_a_block_fetched_over_rpc_is_cached_and_replays_offline() {
 }
 
 /// `--override.limits` replays a Satin block under other protocol limits: the fields it names
-/// replace the spec's, and every other stays. At the spec's own values it changes nothing; a
-/// transaction data-size limit of the body alone stops every transaction but the protocol's own,
-/// which no per-transaction limit holds; a block data budget of one byte packs the first
-/// transaction and refuses every later one.
+/// replace the spec's, and every other stays. At the spec's own values it changes nothing; under a
+/// transaction data-size limit of what the block's L1 attributes deposit keeps, every transaction
+/// that keeps more without the override is held to it — stopped where it crosses it, or refused at
+/// validation when its body alone does — but the protocol's own, which no per-transaction limit
+/// holds, and which run past it; a block data budget of one byte packs the first transaction and
+/// refuses every later one.
 #[test]
 fn test_an_override_replays_a_satin_block_under_other_limits() {
     let cache = cache_copy_for_satin();
@@ -272,29 +274,44 @@ fn test_an_override_replays_a_satin_block_under_other_limits() {
 
     let recorded = read_block(cache.path(), number);
     let sent = recorded.block["transactions"].as_array().unwrap();
+    let limit = counterfactual[0]["satin"]["data_size"].as_u64().unwrap();
     let (stopped, stopped_block) =
-        replay_under(Some(r#"{"txRuntimeLimits":{"txDataSizeLimit":310}}"#));
+        replay_under(Some(&format!(r#"{{"txRuntimeLimits":{{"txDataSizeLimit":{limit}}}}}"#)));
     assert_eq!(
         stopped_block["satin"]["limits_override"]["txRuntimeLimits"]["txDataSizeLimit"],
-        310
+        limit
     );
     let (mut protocols, mut others) = (0, 0);
-    for (tx, sent) in stopped.iter().zip(sent) {
-        let stop = &tx["satin"]["limit_exceeded"];
+    for ((tx, sent), unlimited) in stopped.iter().zip(sent).zip(&counterfactual) {
         let from: Address = sent["from"].as_str().unwrap().parse().unwrap();
+        let kept = unlimited["satin"]["data_size"].as_u64();
         if from == MEGA_SYSTEM_ADDRESS {
-            protocols += 1;
+            // The protocol's transactions carry gas limits close to the block's, so the gas the
+            // block has left may refuse one, as it may without the override; no limit does.
+            if tx["status"] == "refused" {
+                let reason = tx["reason"].as_str().unwrap();
+                assert!(reason.contains("blocks available gas"), "{reason}");
+                continue;
+            }
             assert!(
-                stop.is_null(),
+                tx["satin"]["limit_exceeded"].is_null(),
                 "the protocol's transaction {} is held to no limit",
                 tx["index"]
             );
-            assert!(tx["satin"]["data_size"].as_u64().unwrap() > 310);
-        } else {
+            if tx["satin"]["data_size"].as_u64().unwrap() > limit {
+                protocols += 1;
+            }
+        } else if kept.is_some_and(|kept| kept > limit) {
             others += 1;
+            if tx["status"] == "refused" {
+                let reason = tx["reason"].as_str().unwrap();
+                assert!(reason.contains(mega_evm::TX_BODY_OVER_DATA_SIZE_LIMIT), "{reason}");
+                continue;
+            }
+            let stop = &tx["satin"]["limit_exceeded"];
             assert_eq!(stop["kind"], "data_size", "{tx}");
-            assert_eq!(stop["limit"], 310, "{tx}");
-            assert_eq!(stop["used"], tx["satin"]["data_size"], "{tx}");
+            assert_eq!(stop["limit"], limit, "{tx}");
+            assert!(stop["used"].as_u64().unwrap() > limit, "{tx}");
         }
     }
     assert!(protocols > 0 && others > 0, "{protocols} {others}");

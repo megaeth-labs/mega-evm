@@ -16,7 +16,8 @@ use alloy_primitives::{address, Address, Bytes, B256, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, LimitCheck, LimitKind, MegaEvm, MegaTransaction, MegaTransactionOutcome,
-    AUTHORIZATION_SIZE, TRANSFER_LOG_SIZE, TX_BODY_SIZE, WRITE_RECORD_SIZE,
+    AUTHORIZATION_SIZE, TRANSFER_LOG_SIZE, TX_BODY_OVER_DATA_SIZE_LIMIT, TX_BODY_SIZE,
+    WRITE_RECORD_SIZE,
 };
 use revm::bytecode::opcode::{
     CALL, CREATE, CREATE2, DELEGATECALL, GAS, INVALID, POP, PUSH0, PUSH1, REVERT, SELFDESTRUCT,
@@ -417,13 +418,12 @@ fn test_an_authority_that_is_the_recipient_pays_for_one_account() {
     assert_eq!(unauthorized.gas.state, account, "the same transfer without it pays the account");
 }
 
-/// Authorities whose records cross the data-size limit are not applied, whether they are new or
-/// exist already: the limit is enforced before the writes it guards, the gas they charged — their
-/// state gas included — is taken back, and the transaction is stopped at its first frame. Taking
-/// them back forgoes the refund an authority that existed would have earned: two transactions that
-/// differ in that alone spend the same gas.
+/// A transaction whose authorities' records would cross the data-size limit is rejected at
+/// validation, whether the authorities are new or exist already: validation holds the body and a
+/// record for each entry of the authorization list to the limit, before anything is applied or
+/// charged. At the limit, both apply.
 #[test]
-fn test_authorities_crossing_the_data_size_limit_are_not_applied() {
+fn test_authorities_whose_records_would_cross_the_data_size_limit_reject_the_transaction() {
     let both = [(Some(AUTHORITY_1), 0, 0), (Some(AUTHORITY_2), 0, 0)];
     let fresh = || funded().account_code(A, Bytes::from_static(&[STOP]));
     let existing = || {
@@ -432,33 +432,20 @@ fn test_authorities_crossing_the_data_size_limit_are_not_applied() {
             .account_balance(AUTHORITY_2, U256::from(1))
     };
     let body = TX_BODY_SIZE + 2 * AUTHORIZATION_SIZE;
-    // (case, database, the data-size limit their two records cross)
-    let cases: [(&str, MemoryDatabase, u64); 2] = [
-        ("two existing authorities", existing(), body + WRITE_RECORD_SIZE),
-        ("two new authorities", fresh(), body + 2 * WRITE_RECORD_SIZE - 1),
-    ];
-    for (name, db, limit) in cases {
-        let stopped = run_under_data_size(db, authorizing(A, U256::ZERO, &both), limit);
-        assert_data_size_stopped(name, &stopped, limit, body + 2 * WRITE_RECORD_SIZE);
-        assert_eq!(stopped.gas.state, 0, "{name}: their state gas was taken back");
-        assert_eq!(stopped.usage.write_records, 0, "{name}: no record of them is kept");
-        for authority in [AUTHORITY_1, AUTHORITY_2] {
-            let account = stopped.state.get(&authority);
-            assert!(
-                account.is_none_or(|a| a.info.nonce == 0 && a.info.is_empty_code_hash()),
-                "{name}: {authority} was not delegated: {account:?}"
-            );
+    let at = body + 2 * WRITE_RECORD_SIZE;
+    for (name, db) in [("two existing authorities", existing()), ("two new authorities", fresh())] {
+        for limit in [body, at - 1] {
+            let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit);
+            let error = MegaEvm::new(context(db.clone()).with_tx_runtime_limits(limits))
+                .execute_transaction(authorizing(A, U256::ZERO, &both))
+                .expect_err("rejected at validation");
+            let error = format!("{error:?}");
+            assert!(error.contains(TX_BODY_OVER_DATA_SIZE_LIMIT), "{name} at {limit}: {error}");
         }
+        let applied = run_under_data_size(db, authorizing(A, U256::ZERO, &both), at);
+        assert!(applied.result.is_success(), "{name}: {:?}", applied.result);
+        assert_eq!(applied.usage.write_records, 2, "{name}: both apply at the limit");
     }
-
-    let spent = |db: MemoryDatabase| {
-        run_under_data_size(db, authorizing(A, U256::ZERO, &both), body).gas.gas_used
-    };
-    assert_eq!(spent(existing()), spent(fresh()), "no refund for an authority never applied");
-
-    let applied = run(fresh(), authorizing(A, U256::ZERO, &both));
-    assert!(applied.result.is_success(), "without the limit they apply: {:?}", applied.result);
-    assert_eq!(applied.usage.write_records, 2);
 }
 
 /// A stop takes back what the frames did and keeps what was applied before the first frame. An
