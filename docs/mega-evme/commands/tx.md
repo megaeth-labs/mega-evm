@@ -32,7 +32,8 @@ mega-evme tx 0x02f8... --input 0xdeadbeef
 If `RAW_TX` is omitted, `mega-evme` builds the transaction entirely from CLI flags.
 The default sender is `0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266` and the default gas limit is `10000000`.
 
-> **Note:** If the chain ID embedded in the raw transaction doesn't match `--chain-id`, `mega-evme` logs a warning but still proceeds.
+> **Note:** On Satin, a raw transaction whose embedded chain ID is not `--chain-id` is refused (`InvalidChainId`), whatever the configuration says, and a typed one must carry a chain ID; a legacy transaction without one (pre-EIP-155) runs.
+> On a legacy spec, `mega-evme` logs a warning and proceeds, as the legacy engine checks no chain ID.
 
 ## Fork Mode
 
