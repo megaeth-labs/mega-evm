@@ -49,6 +49,9 @@ pub(crate) struct FuzzConfig {
     pub(crate) seed: u64,
     /// Whether the long mode is on.
     pub(crate) long: bool,
+    /// Whether this is the reproducible default run: the bounded mode, the default seed and the
+    /// property's own bounded case count.
+    default_run: bool,
 }
 
 impl FuzzConfig {
@@ -110,7 +113,17 @@ impl FuzzConfig {
             None if long => clock(),
             None => DEFAULT_SEED,
         };
-        Self { cases, seed, long }
+        let default_run = !long && seed == DEFAULT_SEED && cases == bounded_cases;
+        Self { cases, seed, long, default_run }
+    }
+
+    /// Whether a coverage claim ("the generators reach every class") is checkable on this run.
+    ///
+    /// Only the default run draws the same cases on every machine, so only there can a claim about
+    /// what the generators reach be verified once and then held; any other seed or count draws
+    /// cases nobody has checked, and a class may legitimately be missed.
+    pub(crate) fn requires_coverage(&self) -> bool {
+        self.default_run
     }
 
     /// The RNG the cases are drawn from: `ChaCha` seeded from the seed, so the same seed draws the
@@ -207,6 +220,31 @@ pub(crate) fn runs_at_measurement_prices() -> bool {
     true
 }
 
+/// Holds a property's coverage claim: `missing` lists the classes its run did not reach.
+///
+/// On the default run (see [`FuzzConfig::requires_coverage`]) and at the spec's byte prices a
+/// missing class panics. On any other run, and at other byte prices, where a class can be
+/// unreachable, the classes are printed as a note and the property passes.
+pub(crate) fn require_coverage(name: &str, bounded_cases: u32, missing: &[String]) {
+    // Called first so a measurement build always leaves its price-guard note.
+    let measurement_prices = runs_at_measurement_prices();
+    if missing.is_empty() {
+        return;
+    }
+    let config = FuzzConfig::from_env(bounded_cases);
+    assert!(
+        !config.requires_coverage() || measurement_prices,
+        "{name}: not reached: {}",
+        missing.join("; ")
+    );
+    eprintln!(
+        "{name}: note: not reached on this run (seed {}, {} cases): {}",
+        config.seed,
+        config.cases,
+        missing.join("; ")
+    );
+}
+
 /// Prints what a property counted along its run, one line per class under the property's name,
 /// in one write, so the tallies of properties running side by side do not interleave.
 pub(crate) fn print_tally<K: std::fmt::Display>(
@@ -271,14 +309,19 @@ mod tests {
                 for seed in unset_or_empty {
                     assert_eq!(
                         config(long_off, cases, seed),
-                        FuzzConfig { cases: BOUNDED, seed: DEFAULT_SEED, long: false },
+                        FuzzConfig {
+                            cases: BOUNDED,
+                            seed: DEFAULT_SEED,
+                            long: false,
+                            default_run: true
+                        },
                         "the bounded mode: {long_off:?} {cases:?} {seed:?}"
                     );
                 }
             }
             assert_eq!(
                 config(long_off, Some("5000"), Some("9")),
-                FuzzConfig { cases: 5_000, seed: 9, long: false },
+                FuzzConfig { cases: 5_000, seed: 9, long: false, default_run: false },
                 "the bounded mode takes a case count and a seed"
             );
         }
@@ -287,27 +330,49 @@ mod tests {
                 for seed in unset_or_empty {
                     assert_eq!(
                         config(long_on, cases, seed),
-                        FuzzConfig { cases: BOUNDED * LONG_MULTIPLIER, seed: CLOCK, long: true },
+                        FuzzConfig {
+                            cases: BOUNDED * LONG_MULTIPLIER,
+                            seed: CLOCK,
+                            long: true,
+                            default_run: false
+                        },
                         "the long mode: {long_on:?} {cases:?} {seed:?}"
                     );
                 }
                 assert_eq!(
                     config(long_on, cases, Some("9")),
-                    FuzzConfig { cases: BOUNDED * LONG_MULTIPLIER, seed: 9, long: true },
+                    FuzzConfig {
+                        cases: BOUNDED * LONG_MULTIPLIER,
+                        seed: 9,
+                        long: true,
+                        default_run: false
+                    },
                     "a named seed replaces the clock's"
                 );
             }
             assert_eq!(
                 config(long_on, Some("20000"), None),
-                FuzzConfig { cases: 20_000, seed: CLOCK, long: true },
+                FuzzConfig { cases: 20_000, seed: CLOCK, long: true, default_run: false },
                 "a named case count is the count: the multiplier does not apply to it"
             );
             assert_eq!(
                 config(long_on, Some(" 20000 "), Some(" 9 ")),
-                FuzzConfig { cases: 20_000, seed: 9, long: true },
+                FuzzConfig { cases: 20_000, seed: 9, long: true, default_run: false },
                 "surrounding blanks are ignored"
             );
         }
+    }
+
+    /// Coverage is required only for the default bounded run.
+    #[test]
+    fn test_coverage_is_required_only_on_the_default_run() {
+        assert!(config(None, None, None).requires_coverage());
+        assert!(config(Some("0"), Some(""), Some("")).requires_coverage());
+        assert!(config(None, Some("256"), Some("0")).requires_coverage(), "named, but the default");
+        assert!(!config(None, None, Some("5")).requires_coverage(), "a named seed");
+        assert!(!config(None, Some("10"), None).requires_coverage(), "a named count");
+        assert!(!config(Some("1"), None, None).requires_coverage(), "the long mode");
+        assert!(!config(Some("1"), None, Some("0")).requires_coverage(), "long, seed 0");
     }
 
     #[test]
