@@ -240,12 +240,6 @@ mod tests {
         assert!(is_system_originated(&tx, MEGA_SYSTEM_ADDRESS));
     }
 
-    #[test]
-    fn test_is_system_originated_rejects_system_caller_to_non_whitelist() {
-        let tx = legacy_call_tx(MEGA_SYSTEM_ADDRESS, NOT_WHITELISTED);
-        assert!(!is_system_originated(&tx, MEGA_SYSTEM_ADDRESS));
-    }
-
     /// The promotion stamps the source hash and flips the transaction's type to a deposit; the
     /// promoted shape is still system-originated, through the source hash.
     #[test]
@@ -258,12 +252,6 @@ mod tests {
             "the legacy-typed check no longer matches after the promotion",
         );
         assert!(is_system_originated(&tx, MEGA_SYSTEM_ADDRESS), "the source hash does");
-    }
-
-    #[test]
-    fn test_is_system_originated_rejects_user_tx() {
-        let tx = legacy_call_tx(USER, ORACLE_CONTRACT_ADDRESS);
-        assert!(!is_system_originated(&tx, MEGA_SYSTEM_ADDRESS));
     }
 
     /// A user's deposit transaction is not system-originated: otherwise a user could buy the

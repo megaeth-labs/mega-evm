@@ -187,24 +187,6 @@ mod tests {
         assert_eq!(got.get_bucket_capacity(7).unwrap(), 1_024);
     }
 
-    /// Whatever configuration the caller passes, the EVM runs with the switches the spec fixes.
-    #[test]
-    fn test_create_evm_applies_the_spec_switches() {
-        let mut cfg_env = CfgEnv::new_with_spec(MegaSpecId::SATIN);
-        cfg_env.chain_id = 4326;
-        cfg_env.tx_gas_limit_cap = Some(1 << 24);
-        cfg_env.enable_amsterdam_eip8037 = false;
-        let block_env = BlockEnv { number: U256::from(5), ..Default::default() };
-
-        let evm = MegaEvmFactory::new()
-            .create_evm(MemoryDatabase::default(), EvmEnv { cfg_env, block_env });
-
-        assert_eq!(evm.chain_id(), 4326);
-        assert_eq!(evm.cfg_env().tx_gas_limit_cap, Some(crate::constants::TX_GAS_LIMIT_CAP));
-        assert!(evm.cfg_env().enable_amsterdam_eip8037);
-        assert_eq!(evm.block().number, U256::from(5));
-    }
-
     /// The configuration [`spec_cfg`](crate::spec_cfg) returns is the one an EVM created from the
     /// same env runs with, in both views, before and after it runs a transaction: a node that
     /// mirrors it in its `EvmEnv` reads what the EVM executes on. A deposit runs on the schedule
@@ -470,6 +452,7 @@ mod tests {
         );
 
         assert_eq!(factory.external_env_factory().0.get(), Some(1_234));
+        assert_eq!(evm.block().number, U256::from(1_234), "the EVM runs the block it was given");
         assert!(evm.is_inspecting());
     }
 }

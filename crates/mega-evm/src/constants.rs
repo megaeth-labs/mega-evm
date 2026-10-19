@@ -108,10 +108,8 @@ mod tests {
         assert_eq!(TX_GAS_LIMIT_CAP, 200_000_000);
         assert_eq!(MAX_CONTRACT_SIZE, 524_288);
         assert_eq!(MAX_INITCODE_SIZE, 1_048_576);
-        assert_eq!(TX_DATA_LIMIT, 13_107_200);
-        assert_eq!(BLOCK_DATA_LIMIT, 13_107_200);
-        assert_eq!(BLOCK_ENV_ACCESS_COMPUTE_GAS, 20_000_000);
-        assert_eq!(ORACLE_ACCESS_COMPUTE_GAS, 20_000_000);
+        // The data-size limits and the detention caps are written out with the protocol limits
+        // that read them, in `ProtocolLimits::for_spec`'s own test.
         assert_eq!(MAX_TX_COMPUTE_GAS, 199_987_900);
     }
 }
