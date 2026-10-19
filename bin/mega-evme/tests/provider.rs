@@ -282,6 +282,33 @@ async fn test_build_provider_tolerates_missing_or_corrupt_cache_file() {
     assert!(cache_store.cache().expect("real store").get(&B256::ZERO).is_none());
 }
 
+/// `--rpc.clear-cache` deletes the on-disk file even when `--rpc.cache-size 0` disables the
+/// cache. The next run that turns the cache back on must not reload it.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_clear_cache_deletes_the_file_when_the_cache_is_disabled() {
+    let server = MockRpcServer::start().await;
+    server.respond_eth_chain_id(4326, 1).await;
+
+    let dir = tempdir().expect("tempdir");
+    let cache_file = dir.path().join("rpc-cache-4326.json");
+    std::fs::write(&cache_file, b"{}").expect("write seed");
+
+    let args = RpcArgs::parse_from([
+        "mega-evme",
+        "--rpc",
+        &server.uri(),
+        "--rpc.cache-size",
+        "0",
+        "--rpc.cache-dir",
+        dir.path().to_str().unwrap(),
+        "--rpc.clear-cache",
+    ]);
+    let BuildProviderOutput { cache_store, .. } =
+        args.build_provider().await.expect("build_provider");
+    assert!(cache_store.is_noop(), "cache_size == 0 stays a no-op store");
+    assert!(!cache_file.exists(), "clear-cache must delete the file while the cache is disabled");
+}
+
 /// `--rpc.clear-cache` must remove the file before load so the new session
 /// starts empty even when a previous file existed.
 #[tokio::test(flavor = "multi_thread")]

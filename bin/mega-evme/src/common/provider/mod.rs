@@ -158,8 +158,13 @@ impl RpcArgs {
         // 1. Resolve chain id (always needed by downstream consumers).
         let chain_id = self.resolve_chain_id(url.clone()).await?;
 
-        // 2. Fast path: cache fully disabled.
+        // 2. Fast path: cache fully disabled. A clear still deletes the on-disk file: leaving
+        // it would reload the wiped entries the next time the cache is turned back on.
         if self.cache_size == 0 {
+            if self.clear_cache && !self.no_cache_file {
+                let path = resolve_cache_path(self.cache_dir.as_deref(), chain_id)?;
+                clear_cache_file(&path)?;
+            }
             let provider = build_bare_op_provider(self.build_retry_client(url));
             info!(
                 rpc_url = %rpc_url_str,
@@ -188,16 +193,7 @@ impl RpcArgs {
         let cache_store = match cache_path {
             Some(path) => {
                 if self.clear_cache {
-                    if let Err(e) = fs::remove_file(&path) {
-                        if e.kind() != std::io::ErrorKind::NotFound {
-                            return Err(EvmeError::RpcError(format!(
-                                "Failed to clear RPC cache at {}: {e}",
-                                path.display(),
-                            )));
-                        }
-                    } else {
-                        info!(path = %path.display(), "Cleared existing RPC cache");
-                    }
+                    clear_cache_file(&path)?;
                 }
                 if let Some(parent) = path.parent() {
                     if let Err(e) = fs::create_dir_all(parent) {
@@ -465,6 +461,21 @@ fn build_bare_op_provider(client: RpcClient) -> OpProvider {
             .network::<op_alloy_network::Optimism>()
             .connect_client(client),
     )
+}
+
+/// Deletes `path` when `--rpc.clear-cache` asked for it. A missing file is already clear.
+fn clear_cache_file(path: &Path) -> Result<()> {
+    if let Err(e) = fs::remove_file(path) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(EvmeError::RpcError(format!(
+                "Failed to clear RPC cache at {}: {e}",
+                path.display(),
+            )));
+        }
+    } else {
+        info!(path = %path.display(), "Cleared existing RPC cache");
+    }
+    Ok(())
 }
 
 /// Resolve the absolute cache file path for `chain_id`.
