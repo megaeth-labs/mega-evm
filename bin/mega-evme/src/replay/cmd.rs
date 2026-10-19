@@ -303,7 +303,7 @@ impl Cmd {
             .get_transaction_by_hash(tx_hash)
             .await
             .map_err(|e| ReplayError::RpcError(format!("Failed to fetch transaction: {e}")))?
-            .ok_or_else(|| ReplayError::TransactionNotFound(tx_hash))?;
+            .ok_or(ReplayError::TransactionNotFound(tx_hash))?;
         debug!(block_number = ?target_tx.block_number, "Transaction found");
 
         let (state_base_block, block_number, is_pending) = if let Some(n) = target_tx.block_number {
