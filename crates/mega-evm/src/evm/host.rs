@@ -307,7 +307,6 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
         }
         self.additional_limit.stage_record(StagedRecord::SelfDestruct {
             had_value: load.data.had_value,
-            target_exists: load.data.target_exists,
             to_other_account: target != address,
             beneficiary: target,
         });
@@ -436,7 +435,6 @@ mod tests {
             ctx.additional_limit.staged_record(),
             Some(&StagedRecord::SelfDestruct {
                 had_value: true,
-                target_exists: false,
                 to_other_account: true,
                 beneficiary: BENEFICIARY,
             })

@@ -1563,7 +1563,6 @@ mod tests {
     fn test_a_destruction_counts_its_transfer_log_with_its_beneficiary() {
         let destruction = |beneficiary| StagedRecord::SelfDestruct {
             had_value: true,
-            target_exists: true,
             to_other_account: true,
             beneficiary,
         };

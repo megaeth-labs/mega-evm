@@ -19,8 +19,8 @@
 //! beneficiary for the forty bytes of one write record.
 //!
 //! A commit that crosses a limit stops the opcode's frame with a revert whose output is
-//! [`MegaLimitExceeded`](crate::MegaLimitExceeded) (see [`AdditionalLimit`](crate::AdditionalLimit)
-//! for the abort protocol). A history charge the frame
+//! [`MegaLimitExceeded`](crate::MegaLimitExceeded), and its caller resumes as after any revert
+//! (see [`AdditionalLimit`](crate::AdditionalLimit) for the stop). A history charge the frame
 //! cannot pay is an ordinary out-of-gas, which burns the frame's gas the way any other does.
 //!
 //! The other four run in a wrapper that charges their frame for the write records the frame it
