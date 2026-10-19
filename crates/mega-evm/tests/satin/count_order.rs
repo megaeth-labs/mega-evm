@@ -9,12 +9,11 @@ use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolError;
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, LimitKind, LimitUsage, MegaEvm, MegaLimitExceeded, TX_BODY_SIZE,
-    WRITE_RECORD_SIZE,
+    EvmTxRuntimeLimits, LimitKind, LimitUsage, MegaLimitExceeded, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 use revm::bytecode::opcode::{CALL, GAS, PUSH0, RETURN, RETURNDATACOPY, RETURNDATASIZE};
 
-use crate::common::{call, context};
+use crate::common::{call, execute_under};
 
 const CALLER: Address = address!("0000000000000000000000000000000000f20000");
 /// The transaction's own frame: two fresh slots, then a call to [`B`], whose output it returns.
@@ -63,9 +62,7 @@ fn test_a_record_crossing_both_counts_is_reported_for_the_transaction() {
     let b = BytecodeBuilder::default().sstore(U256::from(1), U256::from(1)).stop().build();
     for (row, limits, named) in rows {
         let db = MemoryDatabase::default().account_code(A, a.clone()).account_code(B, b.clone());
-        let outcome = MegaEvm::new(context(db).with_tx_runtime_limits(limits))
-            .execute_transaction(call(CALLER, A, U256::ZERO, GAS_LIMIT))
-            .expect("the transaction is valid");
+        let outcome = execute_under(db, call(CALLER, A, U256::ZERO, GAS_LIMIT), limits);
         let revert_data: Bytes =
             MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit: named }
                 .abi_encode()

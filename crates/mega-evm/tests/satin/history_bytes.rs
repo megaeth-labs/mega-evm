@@ -44,7 +44,9 @@ use revm::{
     Inspector,
 };
 
-use crate::common::{call, call_with_data, context, create, execute, runs_at_measurement_prices};
+use crate::common::{
+    call, call_with_data, context, create, execute, execute_under, runs_at_measurement_prices,
+};
 
 const CALLER: Address = address!("0000000000000000000000000000000000a00000");
 const CALLEE: Address = address!("0000000000000000000000000000000000a00001");
@@ -696,9 +698,7 @@ fn test_the_bytes_on_the_edge_paths_are_the_history_gas_at_the_price() {
         // case would pin the body's stop rather than its own.
         assert!(limit > TX_BODY_SIZE, "{name}: the body fits under the limit");
         for gas_limit in GAS_LIMITS {
-            let outcome = MegaEvm::new(context(db()).with_tx_runtime_limits(limited_to(limit)))
-                .execute_transaction(tx(gas_limit))
-                .expect("the transaction is valid");
+            let outcome = execute_under(db(), tx(gas_limit), limited_to(limit));
             assert_eq!(
                 outcome.limit_exceeded.is_some(),
                 stopped,

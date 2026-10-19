@@ -34,7 +34,7 @@ use revm::{
 };
 
 use crate::common::{
-    account_state_gas, body_history, call, call_with_data, context, create, history,
+    account_state_gas, body_history, call, call_with_data, context, create, execute_under, history,
     history_is_free, history_rounds, slot_state_gas,
 };
 
@@ -1087,9 +1087,7 @@ fn child_outcome(
         .account_code(B, code.clone())
         .account_balance(B, U256::from(1));
     let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(data_limit);
-    MegaEvm::new(context(db).with_tx_runtime_limits(limits))
-        .execute_transaction(call(CALLER, A, U256::ZERO, gas_limit))
-        .expect("the transaction is valid")
+    execute_under(db, call(CALLER, A, U256::ZERO, gas_limit), limits)
 }
 
 /// What `B`'s write did, read off `A`'s answer: a stop of `B`, a halt of `B`, or a success. `A`

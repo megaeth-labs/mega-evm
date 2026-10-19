@@ -36,7 +36,8 @@ use revm::bytecode::opcode::{
 };
 
 use crate::common::{
-    body_history, call, context, history, runs_at_measurement_prices, slot_state_gas, state_is_free,
+    body_history, call, context, execute, history, runs_at_measurement_prices, slot_state_gas,
+    state_is_free,
 };
 
 const CALLER: Address = address!("0000000000000000000000000000000000500000");
@@ -97,10 +98,6 @@ fn events(outcome: &MegaTransactionOutcome) -> Vec<&alloy_primitives::Log> {
     outcome.result.logs().iter().filter(|log| !is_transfer_log(log)).collect()
 }
 
-fn run(db: MemoryDatabase, tx: MegaTransaction) -> MegaTransactionOutcome {
-    MegaEvm::new(context(db)).execute_transaction(tx).expect("the transaction is valid")
-}
-
 fn run_limited(
     db: MemoryDatabase,
     limits: EvmTxRuntimeLimits,
@@ -136,7 +133,7 @@ fn test_a_transfer_can_emit_one_event_because_of_the_allowance() {
     }
     let sender = call_with(CALL, RECEIVER, 1, TRANSFER_GAS).append(STOP).build();
     let receiver = event().append(STOP).build();
-    let outcome = run(db(sender, receiver), call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
+    let outcome = execute(db(sender, receiver), call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
 
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
     assert_eq!(events(&outcome).len(), 1, "the hook emitted its event");
@@ -162,7 +159,7 @@ fn test_the_allowance_buys_one_event_and_no_more() {
     // The caller records whether the transfer succeeded, then stops.
     let sender = call_with(CALL, RECEIVER, 1, TRANSFER_GAS).append(STOP).build();
     let two_events = event().append_many(event().build().iter().copied()).append(STOP).build();
-    let outcome = run(db(sender, two_events), call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
+    let outcome = execute(db(sender, two_events), call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
 
     assert!(outcome.result.is_success(), "the caller survives the hook's failure");
     assert!(outcome.result.logs().is_empty(), "the hook ran out and kept neither event");
@@ -198,7 +195,7 @@ fn run_hook(hook: Bytes, gas: u64, slot_zero: U256) -> MegaTransactionOutcome {
         U256::ZERO,
         slot_zero,
     );
-    run(db, call(CALLER, SENDER, U256::ZERO, GAS_LIMIT))
+    execute(db, call(CALLER, SENDER, U256::ZERO, GAS_LIMIT))
 }
 
 /// A hook that counts `n` down to zero and stops: `PUSH2 n`, then `n` turns of `JUMPDEST; PUSH1 1;
@@ -384,7 +381,7 @@ fn test_a_top_level_transfer_gets_no_allowance() {
     let receiver = event().append(STOP).build();
     let mut tx = call(CALLER, RECEIVER, U256::from(1), GAS_LIMIT);
     tx.0.base.value = U256::from(1);
-    let outcome = run(db(Bytes::new(), receiver), tx);
+    let outcome = execute(db(Bytes::new(), receiver), tx);
 
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
     assert_eq!(
@@ -406,8 +403,8 @@ fn test_a_call_without_value_gets_no_allowance() {
     let without = call_with(CALL, RECEIVER, 0, 1_000_000).append(STOP).build();
     let event_history = STORAGE_CALL_STIPEND_BYTES * COST_PER_HISTORY_BYTE;
 
-    let paid = run(db(without, receiver.clone()), call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
-    let granted = run(db(with_value, receiver), call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
+    let paid = execute(db(without, receiver.clone()), call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
+    let granted = execute(db(with_value, receiver), call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
 
     assert!(paid.result.is_success() && granted.result.is_success());
     assert_eq!(paid.gas.history, body() + event_history, "no transfer, no allowance");
@@ -429,7 +426,7 @@ fn test_callcode_is_granted_one_and_delegatecall_is_not() {
     let event_history = STORAGE_CALL_STIPEND_BYTES * COST_PER_HISTORY_BYTE;
     let at = |scheme, value| {
         let sender = call_with(scheme, RECEIVER, value, 1_000_000).append(STOP).build();
-        run(db(sender, receiver.clone()), call(CALLER, SENDER, U256::ZERO, GAS_LIMIT))
+        execute(db(sender, receiver.clone()), call(CALLER, SENDER, U256::ZERO, GAS_LIMIT))
     };
 
     let call_code = at(CALLCODE, 1);
@@ -489,12 +486,12 @@ fn test_an_intercepted_call_neither_takes_nor_adds_an_allowance() {
             .account_code(ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE)
     };
 
-    let one = run(with_controls(one_event), call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
+    let one = execute(with_controls(one_event), call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
     assert!(one.result.is_success(), "{:?}", one.result);
     assert_eq!(events(&one).len(), 1, "the receiver still had its allowance");
     assert_eq!(one.gas.history, body() + 2 * record(), "the refusal cost no history");
 
-    let two = run(with_controls(two_events), call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
+    let two = execute(with_controls(two_events), call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
     assert!(two.result.is_success(), "the caller survives");
     assert!(two.result.logs().is_empty(), "the refusal left no second allowance behind");
 }
@@ -570,9 +567,12 @@ fn test_an_unspent_allowance_does_not_return_to_the_caller() {
         return;
     }
     let sender = call_with(CALL, RECEIVER, 1, TRANSFER_GAS).append(STOP).build();
-    let silent = run(db(sender.clone(), Bytes::new()), call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
-    let logging =
-        run(db(sender, event().append(STOP).build()), call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
+    let silent =
+        execute(db(sender.clone(), Bytes::new()), call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
+    let logging = execute(
+        db(sender, event().append(STOP).build()),
+        call(CALLER, SENDER, U256::ZERO, GAS_LIMIT),
+    );
 
     assert!(silent.result.is_success() && logging.result.is_success());
     assert_eq!(silent.gas.history, body() + 2 * record(), "no allowance came back as history");
@@ -606,7 +606,7 @@ fn test_a_chain_of_transfers_grants_each_frame_its_own_allowance() {
     let db = db(call_with(CALL, MIDDLE, 1, 1_000_000).append(STOP).build(), hop(None))
         .account_balance(MIDDLE, U256::from(1))
         .account_code(MIDDLE, hop(Some(RECEIVER)));
-    let outcome = run(db, call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
+    let outcome = execute(db, call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
 
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
     assert_eq!(events(&outcome).len(), 2, "both hops emitted their event");
@@ -675,7 +675,7 @@ fn test_the_gap_the_allowance_opens_between_bytes_and_gas_is_pinned() {
         .account_balance(CALLER, U256::from(10u64.pow(18)))
         .account_balance(SENDER, U256::from(10u64.pow(9)))
         .account_code(SENDER, self_calling_loop());
-    let outcome = run(db, call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
+    let outcome = execute(db, call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
 
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
     assert_eq!(outcome.result.logs().len(), GRANTS as usize, "every frame emitted its event");
@@ -760,9 +760,11 @@ fn test_a_drained_allowance_is_not_refunded_by_a_revert() {
     let drained_then_reverts = event().append_many([PUSH0, PUSH0]).append(0xFD).build();
     let reverts = BytecodeBuilder::default().append_many([PUSH0, PUSH0]).append(0xFD).build();
 
-    let drained =
-        run(db(sender.clone(), drained_then_reverts), call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
-    let quiet = run(db(sender, reverts), call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
+    let drained = execute(
+        db(sender.clone(), drained_then_reverts),
+        call(CALLER, SENDER, U256::ZERO, GAS_LIMIT),
+    );
+    let quiet = execute(db(sender, reverts), call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
 
     assert!(drained.result.is_success(), "the caller survives the revert");
     assert_eq!(drained.gas.history, body(), "the reverted frame's records went with it");
@@ -785,8 +787,10 @@ fn test_a_transfer_forwarding_no_gas_still_buys_its_event() {
         return;
     }
     let sender = call_with(CALL, RECEIVER, 1, 0).append(STOP).build();
-    let outcome =
-        run(db(sender, event().append(STOP).build()), call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
+    let outcome = execute(
+        db(sender, event().append(STOP).build()),
+        call(CALLER, SENDER, U256::ZERO, GAS_LIMIT),
+    );
 
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
     assert_eq!(events(&outcome).len(), 1, "the hook emitted its event");

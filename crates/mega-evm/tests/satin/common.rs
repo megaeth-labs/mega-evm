@@ -6,8 +6,8 @@ use alloy_primitives::{Address, Bytes, TxKind, U256};
 use mega_evm::{
     active_satin_prices,
     test_utils::{note_price_guard, op_transaction, zero_fee_l1_block_info},
-    LimitUsage, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MegaTransactionOutcome,
+    EvmTxRuntimeLimits, LimitUsage, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
+    MegaTransaction, MegaTransactionOutcome,
 };
 use revm::{
     context::{result::ResultAndState, BlockEnv, TxEnv},
@@ -105,6 +105,17 @@ pub(crate) fn execute<DB: alloy_evm::Database>(
     tx: MegaTransaction,
 ) -> MegaTransactionOutcome {
     MegaEvm::new(context(db)).execute_transaction(tx).expect("the transaction is valid")
+}
+
+/// Runs `tx` on a fresh Satin EVM over `db` held to `limits` and returns its outcome.
+pub(crate) fn execute_under<DB: alloy_evm::Database>(
+    db: DB,
+    tx: MegaTransaction,
+    limits: EvmTxRuntimeLimits,
+) -> MegaTransactionOutcome {
+    MegaEvm::new(context(db).with_tx_runtime_limits(limits))
+        .execute_transaction(tx)
+        .expect("the transaction is valid")
 }
 
 /// Whether this process prices bytes at something other than the constants the spec fixes.

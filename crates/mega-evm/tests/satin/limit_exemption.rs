@@ -15,15 +15,14 @@ use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
 use mega_evm::{
     system::{MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS},
     test_utils::{op_transaction, BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, LimitKind, MegaEvm, MegaTransaction, MegaTransactionOutcome, TX_BODY_SIZE,
-    WRITE_RECORD_SIZE,
+    EvmTxRuntimeLimits, LimitKind, MegaEvm, MegaTransaction, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 use revm::{
     bytecode::opcode::{CALL, GAS, LOG0, POP, PUSH0},
     context::TxEnv,
 };
 
-use crate::common::{context, slot_state_gas};
+use crate::common::{context, execute_under, slot_state_gas};
 
 const CALLER: Address = address!("0000000000000000000000000000000000b00000");
 /// A contract the program calls, which writes a slot of its own.
@@ -94,29 +93,19 @@ fn limits() -> [(&'static str, EvmTxRuntimeLimits); 3] {
     ]
 }
 
-fn execute(
-    db: MemoryDatabase,
-    tx: MegaTransaction,
-    limits: EvmTxRuntimeLimits,
-) -> MegaTransactionOutcome {
-    MegaEvm::new(context(db).with_tx_runtime_limits(limits))
-        .execute_transaction(tx)
-        .expect("the transaction is valid")
-}
-
 /// A system transaction over any of the limits, or all of them, runs as it does without one, and
 /// reports what it used: its body, three slots' records and state gas, and the log.
 #[test]
 fn test_a_system_transaction_is_held_to_no_limit() {
     let tx = || call_from(MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS);
-    let free = execute(db(), tx(), EvmTxRuntimeLimits::no_limits());
+    let free = execute_under(db(), tx(), EvmTxRuntimeLimits::no_limits());
     assert!(free.result.is_success(), "{:?}", free.result);
     assert_eq!(free.usage.write_records, 3, "three slots");
     assert_eq!(free.usage.data_size, TX_BODY_SIZE + 3 * WRITE_RECORD_SIZE + 32 + 64);
     assert!(free.gas.state >= 3 * slot_state_gas(), "at least its three slots' state gas");
 
     for (name, limits) in limits() {
-        let outcome = execute(db(), tx(), limits);
+        let outcome = execute_under(db(), tx(), limits);
         assert!(outcome.result.is_success(), "{name}: {:?}", outcome.result);
         assert_eq!(outcome.limit_exceeded, None, "{name}");
         assert_eq!(outcome.usage, free.usage, "{name}: its usage is counted all the same");
@@ -167,7 +156,7 @@ fn test_a_deposit_and_a_user_call_to_a_system_contract_are_held_to_the_limits() 
         ("a user's call to a system contract", call_from(CALLER, ORACLE_CONTRACT_ADDRESS)),
     ];
     for (name, tx) in cases {
-        let outcome = execute(db(), tx, limits);
+        let outcome = execute_under(db(), tx, limits);
         let stop = outcome.limit_exceeded.unwrap_or_else(|| panic!("{name}: stopped"));
         assert!(
             matches!(stop, mega_evm::LimitCheck::ExceedsLimit { kind: LimitKind::DataSize, .. }),

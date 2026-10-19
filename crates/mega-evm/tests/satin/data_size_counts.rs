@@ -22,7 +22,7 @@ use revm::{
     context::result::ExecutionResult,
 };
 
-use crate::common::{call, call_with_data, context, create, execute};
+use crate::common::{call, call_with_data, context, create, execute, execute_under};
 
 const CALLER: Address = address!("0000000000000000000000000000000000400000");
 const CALLEE: Address = address!("0000000000000000000000000000000000400001");
@@ -380,16 +380,11 @@ fn test_a_limit_equal_to_what_is_kept_does_not_stop() {
     let db = || funded().account_code(CALLEE, BytecodeBuilder::default().stop().build());
     for calldata in [0_usize, 500] {
         let limit = TX_BODY_SIZE + calldata as u64;
-        let outcome = MegaEvm::new(context(db()).with_tx_runtime_limits(
+        let outcome = execute_under(
+            db(),
+            call_with_data(CALLER, CALLEE, Bytes::from(vec![0xab; calldata]), GAS_LIMIT),
             EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit),
-        ))
-        .execute_transaction(call_with_data(
-            CALLER,
-            CALLEE,
-            Bytes::from(vec![0xab; calldata]),
-            GAS_LIMIT,
-        ))
-        .unwrap();
+        );
         assert!(outcome.result.is_success(), "{calldata} bytes: {:?}", outcome.result);
         assert_eq!(outcome.usage.data_size, limit);
         assert_eq!(outcome.limit_exceeded, None);

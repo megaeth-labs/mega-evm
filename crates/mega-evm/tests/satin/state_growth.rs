@@ -25,8 +25,8 @@ use revm::bytecode::opcode::{
 };
 
 use crate::common::{
-    account_state_gas, authorizing_call, body_history, call, context, history, slot_state_gas,
-    state_is_free,
+    account_state_gas, authorizing_call, body_history, call, context, execute_under, history,
+    slot_state_gas, state_is_free,
 };
 
 const CALLER: Address = address!("0000000000000000000000000000000000600000");
@@ -49,17 +49,9 @@ fn funded() -> MemoryDatabase {
         .account_code(BURNER, Bytes::from_static(&[INVALID]))
 }
 
-fn run_under(
-    db: MemoryDatabase,
-    tx: MegaTransaction,
-    limits: EvmTxRuntimeLimits,
-) -> MegaTransactionOutcome {
-    MegaEvm::new(context(db).with_tx_runtime_limits(limits)).execute_transaction(tx).unwrap()
-}
-
 /// Runs `tx` over `db` under no limit.
 fn run(db: MemoryDatabase, tx: MegaTransaction) -> MegaTransactionOutcome {
-    run_under(db, tx, EvmTxRuntimeLimits::no_limits())
+    execute_under(db, tx, EvmTxRuntimeLimits::no_limits())
 }
 
 /// Runs `tx` over `db` under a transaction data-size limit of `limit`.
@@ -68,7 +60,7 @@ fn run_under_data_size(
     tx: MegaTransaction,
     limit: u64,
 ) -> MegaTransactionOutcome {
-    run_under(db, tx, EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit))
+    execute_under(db, tx, EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit))
 }
 
 /// The outcome was stopped by the transaction's data-size limit `limit`, crossed at `used`: a

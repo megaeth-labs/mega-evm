@@ -19,7 +19,9 @@ use revm::{
 };
 use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 
-use crate::common::{account_state_gas, body_history, call, context, history, slot_state_gas};
+use crate::common::{
+    account_state_gas, body_history, call, context, execute_under, history, slot_state_gas,
+};
 
 const CALLER: Address = address!("0000000000000000000000000000000000400000");
 const A: Address = address!("00000000000000000000000000000000000000A1");
@@ -285,11 +287,8 @@ fn test_a_creation_its_frame_budget_stops_may_be_revived() {
     let under = |bytes: u64| {
         mega_evm::EvmTxRuntimeLimits::default().with_tx_data_size_limit(TX_BODY_SIZE + bytes)
     };
-    let plain = |bytes: u64| {
-        MegaEvm::new(context(db()).with_tx_runtime_limits(under(bytes)))
-            .execute_transaction(call(CALLER, A, U256::ZERO, gas_limit()))
-            .unwrap()
-    };
+    let plain =
+        |bytes: u64| execute_under(db(), call(CALLER, A, U256::ZERO, gas_limit()), under(bytes));
     let created = |outcome: &mega_evm::MegaTransactionOutcome| {
         outcome.state[&A]
             .storage

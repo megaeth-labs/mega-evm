@@ -22,7 +22,7 @@ use revm::{
     Inspector,
 };
 
-use crate::common::{call, context, create, history};
+use crate::common::{call, context, create, execute_under, history};
 
 const CALLER: Address = address!("0000000000000000000000000000000000570000");
 const A: Address = address!("0000000000000000000000000000000000570001");
@@ -30,9 +30,7 @@ const B: Address = address!("0000000000000000000000000000000000570002");
 
 /// Runs a call from `CALLER` to `A` over `db` under `limits`.
 fn execute(db: MemoryDatabase, limits: EvmTxRuntimeLimits) -> MegaTransactionOutcome {
-    MegaEvm::new(context(db).with_tx_runtime_limits(limits))
-        .execute_transaction(call(CALLER, A, U256::ZERO, 10_000_000))
-        .expect("the transaction is valid")
+    execute_under(db, call(CALLER, A, U256::ZERO, 10_000_000), limits)
 }
 
 /// The output of a transaction that reverted.

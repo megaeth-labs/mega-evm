@@ -27,7 +27,9 @@ use revm::{
     Database, Inspector,
 };
 
-use crate::common::{call, context, history, runs_at_measurement_prices, slot_state_gas};
+use crate::common::{
+    call, context, execute_under, history, runs_at_measurement_prices, slot_state_gas,
+};
 
 const CALLER: Address = address!("0000000000000000000000000000000000200000");
 const A: Address = address!("00000000000000000000000000000000000000A0");
@@ -86,7 +88,7 @@ fn run(
     limits: EvmTxRuntimeLimits,
     tx: MegaTransaction,
 ) -> MegaTransactionOutcome {
-    MegaEvm::new(context(db).with_tx_runtime_limits(limits)).execute_transaction(tx).unwrap()
+    execute_under(db, tx, limits)
 }
 
 /// The history gas an empty transaction body costs, which every transaction here pays before its
