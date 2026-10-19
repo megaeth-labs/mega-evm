@@ -18,7 +18,7 @@ use mega_evme::common::{BuildProviderOutput, EvmeError, RpcArgs};
 use tempfile::tempdir;
 
 mod common;
-use common::{test_rpc_args, test_rpc_args_cached, MockRpcServer};
+use common::{rpc_cache_path, test_rpc_args, test_rpc_args_cached, MockRpcServer};
 
 // ─── CLI parsing ─────────────────────────────────────────────────────────────
 
@@ -137,7 +137,10 @@ async fn test_build_provider_with_cache_names_file_from_fetched_chain_id() {
     let BuildProviderOutput { cache_store, .. } =
         args.build_provider().await.expect("build_provider");
     assert!(!cache_store.is_noop(), "cache_size > 0 + cache_dir must produce a real store");
-    assert_eq!(cache_store.cache_path(), Some(dir.path().join("rpc-cache-4326.json").as_path()));
+    assert_eq!(
+        cache_store.cache_path(),
+        Some(rpc_cache_path(dir.path(), 4326, &server.uri()).as_path())
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -150,6 +153,27 @@ async fn test_build_provider_invalid_url() {
         }
         other => panic!("expected EvmeError::RpcError, got {other:?}"),
     }
+}
+
+/// A chain-id failure reports the endpoint without the URL's userinfo.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_chain_id_error_omits_rpc_userinfo() {
+    let server = MockRpcServer::start().await;
+    server.respond_status_always(500).await;
+    let url = server.uri().replacen("http://", "http://alice:secret@", 1);
+    let args = RpcArgs::parse_from([
+        "mega-evme",
+        "--rpc",
+        &url,
+        "--rpc.cache-size",
+        "0",
+        "--rpc.max-retries",
+        "0",
+    ]);
+    let err = args.build_provider().await.expect_err("chain id fetch fails");
+    let msg = err.to_string();
+    assert!(msg.contains("Failed to fetch chain ID"), "{msg}");
+    assert!(!msg.contains("secret") && !msg.contains("alice"), "{msg}");
 }
 
 // ─── Chain-id resolution ─────────────────────────────────────────────────────
@@ -179,8 +203,8 @@ async fn test_build_provider_fetches_chain_id_from_rpc() {
         args.build_provider().await.expect("build_provider");
     assert_eq!(
         cache_store.cache_path(),
-        Some(dir.path().join("rpc-cache-4326.json").as_path()),
-        "cache file must be named after the fetched chain id",
+        Some(rpc_cache_path(dir.path(), 4326, &server.uri()).as_path()),
+        "cache file must be named after the fetched chain id and the endpoint",
     );
     assert_eq!(chain_id, 4326, "chain_id must match the fetched value");
     assert!(
@@ -242,7 +266,7 @@ async fn test_atomic_save_round_trip() {
     cache_store.cache().expect("real store").put(key, value.clone()).expect("seed put");
     cache_store.persist().expect("persist");
 
-    let cache_file = dir.path().join("rpc-cache-4326.json");
+    let cache_file = rpc_cache_path(dir.path(), 4326, &server.uri());
     assert!(cache_file.exists(), "save must produce the target file");
 
     // Atomic save uses a temp file in the same parent dir; nothing should remain.
@@ -276,7 +300,8 @@ async fn test_build_provider_tolerates_missing_or_corrupt_cache_file() {
     assert!(cache_store.cache().expect("real store").get(&B256::ZERO).is_none());
 
     // Corrupt file — load fails, cache starts empty.
-    std::fs::write(dir.path().join("rpc-cache-42.json"), b"not json").expect("write corrupt");
+    std::fs::write(rpc_cache_path(dir.path(), 42, &server.uri()), b"not json")
+        .expect("write corrupt");
     let BuildProviderOutput { cache_store, .. } =
         args.build_provider().await.expect("corrupt file");
     assert!(cache_store.cache().expect("real store").get(&B256::ZERO).is_none());
@@ -290,7 +315,7 @@ async fn test_clear_cache_deletes_the_file_when_the_cache_is_disabled() {
     server.respond_eth_chain_id(4326, 1).await;
 
     let dir = tempdir().expect("tempdir");
-    let cache_file = dir.path().join("rpc-cache-4326.json");
+    let cache_file = rpc_cache_path(dir.path(), 4326, &server.uri());
     std::fs::write(&cache_file, b"{}").expect("write seed");
 
     let args = RpcArgs::parse_from([
@@ -317,7 +342,7 @@ async fn test_build_provider_clear_cache_deletes_file_before_load() {
     server.respond_eth_chain_id(99, 1).await;
 
     let dir = tempdir().expect("tempdir");
-    let cache_file = dir.path().join("rpc-cache-99.json");
+    let cache_file = rpc_cache_path(dir.path(), 99, &server.uri());
 
     // Phase 1: populate and persist to disk.
     let seed_args = test_rpc_args_cached(&server.uri(), dir.path(), None);
@@ -370,7 +395,7 @@ async fn test_build_provider_clear_cache_hard_errors_on_unlink_failure() {
     let dir = tempdir().expect("tempdir");
     let chain_id: u64 = 88;
     // Seed a "polluted" cache file the user would want to wipe.
-    let cache_file = dir.path().join(format!("rpc-cache-{chain_id}.json"));
+    let cache_file = rpc_cache_path(dir.path(), chain_id, &server.uri());
     std::fs::write(&cache_file, r#"{"polluted":"content"}"#).expect("write seed");
 
     // Revoke write permission on the parent dir so `remove_file` fails.
@@ -430,7 +455,7 @@ async fn test_build_provider_auto_creates_cache_dir() {
     assert!(fresh_dir.exists(), "build_provider must create the cache directory");
     store.persist().expect("persist");
     assert!(
-        fresh_dir.join("rpc-cache-4326.json").exists(),
+        rpc_cache_path(&fresh_dir, 4326, &server.uri()).exists(),
         "persist must write the per-chain file",
     );
 }

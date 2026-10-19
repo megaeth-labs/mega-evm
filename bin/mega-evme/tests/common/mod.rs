@@ -104,10 +104,24 @@ impl MockRpcServer {
             .await;
     }
 
+    /// Drops every mounted mock and the recorded requests.
+    pub(crate) async fn reset(&self) {
+        self.server.reset().await;
+    }
+
     /// Total number of POSTs the server has received since it started.
     pub(crate) async fn received_request_count(&self) -> usize {
         self.server.received_requests().await.expect("received_requests").len()
     }
+}
+
+/// The on-disk cache file `build_provider` uses for `url` on `chain_id` under `dir`.
+pub(crate) fn rpc_cache_path(
+    dir: &std::path::Path,
+    chain_id: u64,
+    url: &str,
+) -> std::path::PathBuf {
+    dir.join(mega_evme::rpc_cache_file_name(chain_id, url))
 }
 
 /// Build [`RpcArgs`] for a test pointed at `url` with the on-disk cache disabled.

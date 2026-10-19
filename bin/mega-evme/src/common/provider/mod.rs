@@ -101,10 +101,11 @@ pub struct RpcArgs {
     #[arg(id = "cache_size", long = "rpc.cache-size", default_value_t = 10_000)]
     pub cache_size: u32,
 
-    /// Directory for per-chain RPC cache files.
+    /// Directory for per-endpoint RPC cache files.
     ///
-    /// Each chain's cache is stored as `{cache_dir}/rpc-cache-{chain_id}.json`. Different chains
-    /// cannot share a file, so cross-chain contamination is impossible by construction.
+    /// Each endpoint of a chain is stored as `{cache_dir}/rpc-cache-{chain_id}-{endpoint}.json`,
+    /// where `{endpoint}` is a short hash of the URL with any userinfo removed. The name does
+    /// not contain the URL, and two endpoints of one chain do not share a file.
     ///
     /// Defaults to the platform cache directory (`$XDG_CACHE_HOME/mega-evme/rpc` on
     /// Linux, `~/Library/Caches/mega-evme/rpc` on macOS). Pass `--rpc.no-cache-file`
@@ -152,7 +153,7 @@ impl RpcArgs {
         })?;
 
         let url: alloy_transport_http::reqwest::Url = rpc_url_str.parse().map_err(|e| {
-            EvmeError::RpcError(format!("Invalid RPC URL '{}': {}", rpc_url_str, e))
+            EvmeError::RpcError(format!("Invalid RPC URL '{}': {e}", redact_rpc_url(rpc_url_str)))
         })?;
 
         // 1. Resolve chain id (always needed by downstream consumers).
@@ -162,12 +163,12 @@ impl RpcArgs {
         // it would reload the wiped entries the next time the cache is turned back on.
         if self.cache_size == 0 {
             if self.clear_cache && !self.no_cache_file {
-                let path = resolve_cache_path(self.cache_dir.as_deref(), chain_id)?;
+                let path = resolve_cache_path(self.cache_dir.as_deref(), chain_id, rpc_url_str)?;
                 clear_cache_file(&path)?;
             }
             let provider = build_bare_op_provider(self.build_retry_client(url));
             info!(
-                rpc_url = %rpc_url_str,
+                rpc_url = %redact_rpc_url(rpc_url_str),
                 max_retries = self.max_retries,
                 backoff_ms = self.backoff_ms,
                 "Built RPC provider (cache disabled)",
@@ -184,7 +185,7 @@ impl RpcArgs {
         let cache_path = if self.no_cache_file {
             None
         } else {
-            Some(resolve_cache_path(self.cache_dir.as_deref(), chain_id)?)
+            Some(resolve_cache_path(self.cache_dir.as_deref(), chain_id, rpc_url_str)?)
         };
 
         // 4. Build the cache layer and (optionally) the disk store.
@@ -227,7 +228,7 @@ impl RpcArgs {
             .connect_client(client);
 
         info!(
-            rpc_url = %rpc_url_str,
+            rpc_url = %redact_rpc_url(rpc_url_str),
             cache_size = self.cache_size,
             max_retries = self.max_retries,
             backoff_ms = self.backoff_ms,
@@ -259,7 +260,7 @@ impl RpcArgs {
             )
         })?;
         let url: alloy_transport_http::reqwest::Url = rpc_url_str.parse().map_err(|e| {
-            EvmeError::RpcError(format!("Invalid RPC URL '{}': {}", rpc_url_str, e))
+            EvmeError::RpcError(format!("Invalid RPC URL '{}': {e}", redact_rpc_url(rpc_url_str)))
         })?;
         let chain_id = self.resolve_chain_id(url.clone()).await?;
         Ok((build_bare_op_provider(self.build_retry_client(url)), chain_id))
@@ -320,7 +321,7 @@ impl RpcArgs {
         let rpc_url_str = self.rpc_url.as_ref().expect("capture mode requires --rpc");
 
         let url: alloy_transport_http::reqwest::Url = rpc_url_str.parse().map_err(|e| {
-            EvmeError::RpcError(format!("Invalid RPC URL '{}': {}", rpc_url_str, e))
+            EvmeError::RpcError(format!("Invalid RPC URL '{}': {e}", redact_rpc_url(rpc_url_str)))
         })?;
 
         // Load existing envelope if the file exists.
@@ -353,7 +354,10 @@ impl RpcArgs {
 
         // Resolve chain_id through the caching provider (hits network, response captured).
         let chain_id = provider.get_chain_id().await.map_err(|e| {
-            EvmeError::RpcError(format!("Failed to fetch chain ID from '{}': {e}", rpc_url_str))
+            EvmeError::RpcError(format!(
+                "Failed to fetch chain ID from '{}': {e}",
+                redact_rpc_url(rpc_url_str)
+            ))
         })?;
 
         // Validate chain_id match, then merge existing entries into the cache.
@@ -374,7 +378,7 @@ impl RpcArgs {
         }
 
         info!(
-            rpc_url = %rpc_url_str,
+            rpc_url = %redact_rpc_url(rpc_url_str),
             path = %path.display(),
             chain_id,
             "Built RPC provider (capture to cache file)",
@@ -424,10 +428,10 @@ impl RpcArgs {
     /// Resolve the chain ID by issuing `eth_chainId` against a throwaway
     /// cache-less provider using the configured retry policy.
     async fn resolve_chain_id(&self, url: alloy_transport_http::reqwest::Url) -> Result<u64> {
-        let url_str = url.as_str().to_string();
+        let url_str = redact_rpc_url(url.as_str());
         let bare = build_bare_op_provider(self.build_retry_client(url));
         bare.get_chain_id().await.map_err(|e| {
-            EvmeError::RpcError(format!("Failed to fetch chain ID from '{}': {}", url_str, e))
+            EvmeError::RpcError(format!("Failed to fetch chain ID from '{}': {e}", url_str))
         })
     }
 }
@@ -463,6 +467,33 @@ fn build_bare_op_provider(client: RpcClient) -> OpProvider {
     )
 }
 
+/// The URL with any userinfo removed, for a log line, an error, or a cache file name.
+///
+/// A string that does not parse still drops a `scheme://userinfo@` prefix, so a rejected URL
+/// does not echo a password.
+pub(crate) fn redact_rpc_url(raw: &str) -> String {
+    match raw.parse::<alloy_transport_http::reqwest::Url>() {
+        Ok(mut url) => {
+            let _ = url.set_password(None);
+            let _ = url.set_username("");
+            url.to_string()
+        }
+        Err(_) => {
+            let Some(scheme) = raw.find("://") else { return raw.to_string() };
+            let rest = &raw[scheme + 3..];
+            let Some(at) = rest.find('@') else { return raw.to_string() };
+            format!("{}{}", &raw[..=scheme + 2], &rest[at + 1..])
+        }
+    }
+}
+
+/// `rpc-cache-{chain_id}-{endpoint}.json`. `{endpoint}` is eight hex characters of the
+/// keccak of the URL with userinfo removed.
+pub fn rpc_cache_file_name(chain_id: u64, rpc_url: &str) -> String {
+    let digest = alloy_primitives::keccak256(redact_rpc_url(rpc_url).as_bytes());
+    format!("rpc-cache-{chain_id}-{}.json", alloy_primitives::hex::encode(&digest[..4]))
+}
+
 /// Deletes `path` when `--rpc.clear-cache` asked for it. A missing file is already clear.
 fn clear_cache_file(path: &Path) -> Result<()> {
     if let Err(e) = fs::remove_file(path) {
@@ -485,7 +516,11 @@ fn clear_cache_file(path: &Path) -> Result<()> {
 /// on Linux, `~/Library/Caches/mega-evme/rpc` on macOS, `%LOCALAPPDATA%\mega-evme\rpc` on
 /// Windows. If the platform has no cache directory we error out and ask the user to
 /// either pass `--rpc.cache-dir` or `--rpc.no-cache-file`.
-fn resolve_cache_path(user_cache_dir: Option<&Path>, chain_id: u64) -> Result<PathBuf> {
+fn resolve_cache_path(
+    user_cache_dir: Option<&Path>,
+    chain_id: u64,
+    rpc_url: &str,
+) -> Result<PathBuf> {
     let dir = match user_cache_dir {
         Some(dir) => dir.to_path_buf(),
         None => dirs::cache_dir()
@@ -499,7 +534,7 @@ fn resolve_cache_path(user_cache_dir: Option<&Path>, chain_id: u64) -> Result<Pa
             .join("mega-evme")
             .join("rpc"),
     };
-    Ok(dir.join(format!("rpc-cache-{chain_id}.json")))
+    Ok(dir.join(rpc_cache_file_name(chain_id, rpc_url)))
 }
 
 #[cfg(test)]
@@ -508,25 +543,45 @@ mod tests {
 
     use super::*;
 
-    /// Explicit `--rpc.cache-dir` is used verbatim; the file is `<chain_id>.json` inside it.
+    /// Explicit `--rpc.cache-dir` is used verbatim. The file names the chain and a hash of the
+    /// endpoint, and the hash does not change when only the userinfo does.
     #[test]
     fn test_resolve_cache_path_with_explicit_dir() {
         let dir = PathBuf::from("/some/user/dir");
-        // 4326 = MegaETH mainnet.
-        let path = resolve_cache_path(Some(&dir), 4326).expect("resolve");
-        assert_eq!(path, PathBuf::from("/some/user/dir/rpc-cache-4326.json"));
+        let url = "http://alice:secret@example.com/rpc";
+        let path = resolve_cache_path(Some(&dir), 4326, url).expect("resolve");
+        let name = rpc_cache_file_name(4326, url);
+        assert_eq!(path, dir.join(&name));
+        assert!(name.starts_with("rpc-cache-4326-"), "{name}");
+        assert!(!name.contains("secret") && !name.contains("alice") && !name.contains("example"));
+        assert_eq!(name, rpc_cache_file_name(4326, "http://example.com/rpc"));
+        assert_ne!(name, rpc_cache_file_name(4326, "http://other.example/rpc"));
+    }
+
+    #[test]
+    fn test_redact_rpc_url_strips_userinfo() {
+        assert_eq!(
+            redact_rpc_url("http://alice:secret@example.com/rpc"),
+            redact_rpc_url("http://example.com/rpc")
+        );
+        assert!(!redact_rpc_url("http://alice:secret@example.com/rpc").contains("secret"));
+        let broken = redact_rpc_url("http://alice:secret@not a url");
+        assert!(!broken.contains("secret") && !broken.contains("alice"), "{broken}");
+        assert_eq!(redact_rpc_url("not a url"), "not a url");
     }
 
     /// No explicit dir falls back to `dirs::cache_dir()` on platforms that have one.
-    /// The path ends in `mega-evme/rpc/rpc-cache-<chain_id>.json`.
+    /// The path ends in `mega-evme/rpc/` and the endpoint's file name.
     #[test]
     fn test_resolve_cache_path_default_is_under_platform_cache() {
         let Some(expected_root) = dirs::cache_dir() else {
             // Skip on exotic platforms where no cache directory is available.
             return;
         };
-        let path = resolve_cache_path(None, 11_155_420).expect("resolve");
-        let expected = expected_root.join("mega-evme").join("rpc").join("rpc-cache-11155420.json");
+        let url = "https://example.test/rpc";
+        let path = resolve_cache_path(None, 11_155_420, url).expect("resolve");
+        let expected =
+            expected_root.join("mega-evme").join("rpc").join(rpc_cache_file_name(11_155_420, url));
         assert_eq!(path, expected);
     }
 }

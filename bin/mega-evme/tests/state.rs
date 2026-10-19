@@ -15,7 +15,7 @@ use mega_evme::common::{PreStateArgs, RpcArgs};
 use tempfile::tempdir;
 
 mod common;
-use common::{test_rpc_args, test_rpc_args_cached, MockRpcServer};
+use common::{rpc_cache_path, test_rpc_args, test_rpc_args_cached, MockRpcServer};
 
 // ─── Synthetic branch wiring tests (no network required) ─────────────────────
 
@@ -36,10 +36,8 @@ async fn test_create_initial_state_non_fork_store_is_noop() {
 
     assert!(cache_store.is_noop(), "non-fork must wire a no-op cache store");
     cache_store.persist().expect("persist");
-    assert!(
-        !dir.path().join("rpc-cache-4326.json").exists(),
-        "non-fork persist must not produce any cache file",
-    );
+    let left: Vec<_> = std::fs::read_dir(dir.path()).expect("read_dir").collect();
+    assert!(left.is_empty(), "non-fork persist must not produce any cache file");
 }
 
 /// Fork mode with `--fork.block N` constructs the state without hitting the
@@ -68,7 +66,7 @@ async fn test_create_initial_state_fork_store_persists_cache() {
     assert!(!cache_store.is_noop(), "fork + cache_dir must wire a real store");
     cache_store.persist().expect("persist");
     assert!(
-        dir.path().join("rpc-cache-4326.json").exists(),
+        rpc_cache_path(dir.path(), 4326, &server.uri()).exists(),
         "fork persist must write the cache file",
     );
 }
@@ -103,15 +101,18 @@ async fn test_storage_cache_hit_round_trip_via_mock() {
     let storage_hex = "0x000000000000000000000000000000000000000000000000000000000000002a";
     let expected_value = U256::from(0x2a);
 
+    // One endpoint for both phases: the cache file is named from the URL, so a second
+    // mock would be a different file.
+    let server = MockRpcServer::start().await;
+    let rpc_url = server.uri();
+    server.respond_eth_chain_id(chain_id, 1).await;
+    server.respond_jsonrpc_result(storage_hex, 2).await;
+
     // ── Phase 1: mock returns the storage value, populate cache, persist. ──
     let phase1_value = {
-        let server = MockRpcServer::start().await;
-        server.respond_eth_chain_id(chain_id, 1).await;
-        server.respond_jsonrpc_result(storage_hex, 2).await;
-
         let prestate_args =
             PreStateArgs::parse_from(["mega-evme", "--fork", "--fork.block", &block_number_str]);
-        let rpc_args = test_rpc_args_cached(&server.uri(), dir.path(), None);
+        let rpc_args = test_rpc_args_cached(&rpc_url, dir.path(), None);
         let sender = Address::ZERO;
 
         let (state, cache_store) = prestate_args
@@ -131,21 +132,20 @@ async fn test_storage_cache_hit_round_trip_via_mock() {
 
     assert_eq!(phase1_value, expected_value, "phase 1 must parse the mock's hex result");
     assert!(
-        dir.path().join(format!("rpc-cache-{chain_id}.json")).exists(),
+        rpc_cache_path(dir.path(), chain_id, &rpc_url).exists(),
         "phase 1 persist must produce the cache file",
     );
 
-    // ── Phase 2: only eth_chainId mock, same cache directory. ──────────────
+    // ── Phase 2: only eth_chainId left mounted, same endpoint and directory. ──
     let phase2_value = {
-        // Only `eth_chainId` is mounted: any other outbound request would be
-        // answered by wiremock's default 404 handler, which `storage_ref`
-        // would then surface as an error.
-        let server = MockRpcServer::start().await;
+        // Any request other than `eth_chainId` is answered by wiremock's default 404,
+        // which `storage_ref` would surface as an error.
+        server.reset().await;
         server.respond_eth_chain_id(chain_id, 1).await;
 
         let prestate_args =
             PreStateArgs::parse_from(["mega-evme", "--fork", "--fork.block", &block_number_str]);
-        let rpc_args = test_rpc_args_cached(&server.uri(), dir.path(), None);
+        let rpc_args = test_rpc_args_cached(&rpc_url, dir.path(), None);
         let sender = Address::ZERO;
 
         let (state, _cache_store) = prestate_args
@@ -226,7 +226,7 @@ async fn test_create_initial_state_fork_real_rpc_smoke() {
     cache_store.persist().expect("persist");
 
     // MegaETH mainnet chain id is 4326, so the cache filename is fixed.
-    let cache_file = dir.path().join("rpc-cache-4326.json");
+    let cache_file = rpc_cache_path(dir.path(), 4326, &rpc_url);
     assert!(cache_file.exists(), "cache file must exist after persist");
     let metadata = std::fs::metadata(&cache_file).expect("metadata");
     assert!(metadata.len() > 0, "cache file must be non-empty after a real query");
@@ -290,7 +290,7 @@ async fn test_create_initial_state_fork_real_rpc_storage_cache_hit() {
         value
     };
 
-    let cache_file = dir.path().join("rpc-cache-4326.json");
+    let cache_file = rpc_cache_path(dir.path(), 4326, &rpc_url);
     assert!(cache_file.exists(), "cache file must exist after phase 1 persist");
     let metadata = std::fs::metadata(&cache_file).expect("metadata");
     assert!(metadata.len() > 0, "cache file must be non-empty after phase 1");
