@@ -6,8 +6,8 @@ This file provides guidance to AI agents (e.g., claude code, codex, cursor, etc.
 
 MegaEVM (mega-evm) — a specialized EVM implementation for MegaETH, built on **revm** and **op-revm** by customizing the hooks revm exposes through its traits.
 
-This branch (`satin`) builds **Satin**, the new engine: a single spec on the MegaETH fork of revm 40.0.3 and the MegaETH fork of op-revm 20.0.0.
-Today's `main` is the legacy engine; Satin is the only active spec.
+This branch (`satin`) builds **Satin**, the new engine's first spec, on the MegaETH fork of revm 40.0.3 and the MegaETH fork of op-revm 20.0.0.
+Today's `main` is the legacy engine; the specs after Satin are added to this engine (see Spec System below).
 The legacy engine (specs `Equivalence` through `Rex6`, the 1.x crate line on crates.io revm 27) is frozen and is not edited here.
 Satin follows Rex6 on the spec ladder and is the one unstable spec.
 
@@ -110,14 +110,16 @@ The root `Cargo.toml` pins `revm = "=40.0.3"` and redirects all twelve revm crat
 
 ### Spec System (`MegaSpecId`)
 
-`MegaSpecId` has a single rung, `SATIN`, running on `OpSpecId::KARST` (Ethereum `OSAKA`).
-`MegaHardfork` has the single fork `Satin`, which activates `SATIN`.
+`MegaSpecId` has one rung so far, `SATIN`, running on `OpSpecId::KARST` (Ethereum `OSAKA`).
+`MegaHardfork` has one fork so far, `Satin`, which activates `SATIN`.
 
 - `SATIN` is the unstable spec under active development: it has no activation timestamp yet (`block/chain.rs` lists the two chains with the Satin timestamp unset), and its behavior may change until it is sealed.
 - Display and `FromStr` use `"Satin"`; serde uses the variant name `"SATIN"`.
 - The legacy spec names (`Equivalence` … `Rex6`) parse to `ParseMegaSpecError::Legacy`; they are never mapped to Satin.
-- There are no spec gates: a single-spec engine has nothing to gate.
-  The spec that follows Satin introduces the first `is_enabled`-style gate.
+- There are no spec gates yet: with one rung there is nothing to gate.
+- The next spec is added as the legacy engine added Rex1 (#115, eleven files): a `MegaSpecId` variant after `SATIN` with its name and its `into_op_spec` arm; a `MegaHardfork` variant that activates it, with any params type it carries registered in `validate_schedule`; an `is_enabled`-style ordering on `MegaSpecId` and a gate at every site whose behavior changes; the constants it changes, keyed by spec; and its upgrade page under `docs/spec/upgrades/`.
+  From then on Satin's behavior is fixed: a gate keeps Satin's path as it is.
+  The extension points it builds on are already in place: the spec argument the factory and the context take, the fork's params types, and `into_op_spec`.
 
 ### Core Source Layout (`crates/mega-evm/src/`)
 
@@ -576,8 +578,9 @@ When the agent is requested to implement a new feature or bug fix, it should con
 
 ## Caveats for Agents
 
-- **Satin is the only active spec; the legacy engine is frozen.**
-  Do not add legacy specs, alias rungs or spec gates to this crate, and do not port a legacy mechanism the legacy test inventory retired.
+- **Satin is the unstable spec; the legacy engine is frozen.**
+  Do not add legacy specs or alias rungs to this crate, and do not port a legacy mechanism the legacy test inventory retired.
+  Spec gates come with the next spec (see Spec System), not before.
   Behavior of the legacy specs is changed only on the legacy line, never here.
 - **Keep each change in the module that owns it.**
   The module table says where each mechanism lives; a change that needs another module's interface extends that module rather than re-implementing it in its own.
