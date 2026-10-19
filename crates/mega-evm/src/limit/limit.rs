@@ -778,7 +778,7 @@ impl AdditionalLimit {
     /// the signer ([`set_frame_creator`](Self::set_frame_creator)). A signer that is the
     /// transaction's sender has no such record, its account being the body's.
     ///
-    /// A stop the record left the frame, by putting it over its budget, goes with it: the frame is
+    /// A stop the record left the frame, by putting it over a limit, goes with it: the frame is
     /// held to its limits again without the record. Returns whether a record was taken back.
     pub(crate) fn take_back_creator_record(&mut self) -> bool {
         let sender = self.sender;

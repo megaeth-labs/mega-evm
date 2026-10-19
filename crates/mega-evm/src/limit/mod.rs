@@ -489,7 +489,7 @@ impl LimitStop {
     ///
     /// `Some` when both say so: `limit_exceeded` names a crossing, and `result` is a revert whose
     /// output is that limit's [`MegaLimitExceeded`]. The output alone never makes a stop. A
-    /// contract can revert with the same bytes, and a frame a frame budget stopped below the
+    /// contract can revert with the same bytes, and a frame a limit stopped below the
     /// transaction's own reverts with them while its caller runs on and may re-raise them:
     /// `limit_exceeded` is then `None`, and so is this.
     pub fn from_result<HaltReason>(

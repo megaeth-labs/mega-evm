@@ -1,5 +1,5 @@
 ---
-description: Satin network upgrade (unstable) — MegaETH's execution rules restated on Optimism Karst (Ethereum Osaka) — EIP-8037 regular and state gas under a 200,000,000 execution cap with a state-gas reservoir, a history-gas ledger for the bytes a transaction appends, SALT-scaled state gas, per-transaction limits that stop a transaction with a revert, gas detention on withheld gas, EIP-7708 transfer logs, keyless deployment as a native creation, system calls on a split budget, the live system address read by the transaction itself, the block's data-size limit as a packing budget, and the witness a stateless validator re-executes a block from.
+description: Satin network upgrade (unstable) — MegaETH's execution rules restated on Optimism Karst (Ethereum Osaka) — EIP-8037 regular and state gas under a 200,000,000 execution cap with a state-gas reservoir, a history-gas ledger for the bytes a transaction appends, SALT-scaled state gas, limits that stop the frame that crosses them with a revert, gas detention on withheld gas, EIP-7708 transfer logs, keyless deployment as a native creation, system calls on a split budget, the live system address read by the transaction itself, the block's data-size limit as a packing budget, and the witness a stateless validator re-executes a block from.
 ---
 
 # Satin Network Upgrade
@@ -458,7 +458,7 @@ For a transaction the stop applies to:
 3. What the frame counted MUST be discarded with it, so the caller resumes within every limit.
    A caller that carries on is held to what the transaction has left: a write or a charge of its own that crosses a limit again MUST stop the caller's frame in turn.
    A transaction therefore never keeps more data size than its limit, and never computes past gas detention's limit but by what [Gas Detention on Withheld Gas](#12-gas-detention-on-withheld-gas) allows.
-4. A caller that catches the stop ends as it ends: a transaction whose frames catch every stop below its own frame can succeed, keeping what its frames did and nothing of a frame that was stopped.
+4. A caller that catches the stop MUST run on as after any failed call: a transaction whose frames catch every stop below its own frame MAY succeed, keeping what its frames did and nothing of a frame that was stopped.
 5. A stop of the transaction's own frame is the transaction's result.
    The transaction MUST settle like an EIP-8037 revert: every write and log its frames made MUST be reverted, the value its first frame carried and that frame's write record included; the sender pays the intrinsic gas, the body's history gas, the charges of what it keeps from before the first frame (below), and what ran; the unspent regular gas and the reservoir return to the sender.
    The transaction is included with a failed receipt, and its usage counts towards the block's counters.
