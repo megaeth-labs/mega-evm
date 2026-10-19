@@ -434,6 +434,54 @@ fn test_remaining_compute_gas_answers_a_constructor_its_allowance() {
     }
 }
 
+/// Records every answer `remainingComputeGas()` gives, next to the regular gas its caller has
+/// spent in all when it resumes.
+#[derive(Debug, Default)]
+struct AnswerAndSpent {
+    pending: Option<u64>,
+    pairs: Vec<(u64, u64)>,
+}
+
+impl<CTX> Inspector<CTX, EthInterpreter> for AnswerAndSpent {
+    fn step(&mut self, interp: &mut Interpreter<EthInterpreter>, _context: &mut CTX) {
+        if let Some(answer) = self.pending.take() {
+            self.pairs.push((answer, interp.gas.total_gas_spent()));
+        }
+    }
+
+    fn call_end(&mut self, _context: &mut CTX, inputs: &CallInputs, outcome: &mut CallOutcome) {
+        if inputs.target_address == LIMIT_CONTROL_ADDRESS && outcome.result.is_ok() {
+            self.pending = Some(U256::from_be_slice(&outcome.result.output).to::<u64>());
+        }
+    }
+}
+
+/// From a sender that is the beneficiary, detained from its start, `remainingComputeGas()` read
+/// from the constructor answers exactly the cap less every regular charge the transaction has made
+/// by then: the call's overhead, the regular gas of the `CREATE` opcode that started the
+/// constructor, and what the constructor itself has spent. The deployment's charges count against
+/// the cap the transaction's detention holds, as an ordinary creation transaction's frames do.
+#[test]
+fn test_remaining_compute_gas_in_a_constructor_is_the_cap_less_the_deployments_charges() {
+    let query = IMegaLimitControl::remainingComputeGasCall::SELECTOR;
+    let prefix = static_calls(BytecodeBuilder::default(), LIMIT_CONTROL_ADDRESS, &query);
+    let init_code = constructor(&prefix.build_vec(), &runtime(1));
+    let deployment = Deployment::new(init_code.clone());
+    let charges = KEYLESS_DEPLOY_OVERHEAD_GAS + create_regular(init_code.len());
+    for gas_limit in GAS_LIMITS {
+        let ctx = context_in(db_for(&deployment, U256::ZERO), RELAYER, capped(CAP));
+        let mut evm = MegaEvm::new(ctx).with_inspector(AnswerAndSpent::default());
+        let outcome = evm
+            .execute_transaction(keyless_tx(deployment.call_data(LARGE_OVERRIDE), gas_limit))
+            .expect("the transaction is valid");
+        assert_eq!(returned(&outcome).deployedAddress, deployment.address);
+        let pairs = evm.inspector().pairs.clone();
+        let [(answer, spent)] = pairs[..] else { panic!("one answer: {pairs:?}") };
+        assert!(spent > 0, "the constructor has spent gas by then");
+        assert_eq!(answer, CAP - charges - spent, "at {gas_limit}");
+    }
+}
+
 /* ---------- the Oracle ---------- */
 
 /// A context over `db` whose oracle service answers `envs`, under the default limits with the
