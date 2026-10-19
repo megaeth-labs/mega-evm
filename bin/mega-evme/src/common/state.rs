@@ -321,6 +321,13 @@ impl PreStateArgs {
             Ok((state, cache_store))
         } else {
             debug!("Creating local state");
+            if let Some((address, code_hash)) = unloaded_code(&prestate).next() {
+                return Err(EvmeError::InvalidInput(format!(
+                    "Prestate account {address} has `code: null` and codeHash {code_hash}, and \
+                     nothing to load its code from: put the code in the prestate file or run \
+                     with '--fork'"
+                )));
+            }
             let mut state = EvmeState::new_empty(prestate, block_hashes);
             state.overlays = overlays;
             Ok((state, RpcCacheStore::noop()))
@@ -330,8 +337,8 @@ impl PreStateArgs {
 
 /// One CLI override of an account the prestate file does not already hold.
 ///
-/// Applied on read, on top of the backend account or of an entry added to the prestate later, so a balance or one storage slot does not
-/// replace the rest of a forked account.
+/// Applied on read, on top of the backend account or of an entry added to the prestate later, so a
+/// balance or one storage slot does not replace the rest of a forked account.
 #[derive(Debug, Default, Clone)]
 struct AccountOverlay {
     /// Replaces the balance when set. Applied before [`Self::faucet`].
@@ -538,6 +545,15 @@ impl AccountState {
     }
 }
 
+/// The accounts of `prestate` that name their code by hash only: `code: null` in the file, with a
+/// hash that is not the empty code's.
+fn unloaded_code(prestate: &EvmState) -> impl Iterator<Item = (Address, B256)> + '_ {
+    prestate.iter().filter_map(|(address, account)| {
+        (account.info.code.is_none() && account.info.code_hash != revm::primitives::KECCAK_EMPTY)
+            .then_some((*address, account.info.code_hash))
+    })
+}
+
 /// Fills bytecode into journal accounts that were loaded without it.
 ///
 /// A dump records `code: null` together with the account's hash when the code was never fetched.
@@ -733,12 +749,32 @@ where
         let db = CacheDB::new(wrapped_db);
 
         // Extract code hash → bytecode mappings from prestate
-        let code_map: HashMap<_, _> = prestate
+        let mut code_map: HashMap<_, _> = prestate
             .values()
             .filter_map(|account| {
                 account.info.code.clone().map(|code| (account.info.code_hash, code))
             })
             .collect();
+
+        // An account the file names by code hash only keeps its entry, and its code is fetched
+        // from the fork here: the fork's database cannot serve a code hash on its own, and the
+        // prestate entry hides the account from the fork's cache.
+        for (address, code_hash) in unloaded_code(&prestate) {
+            let fetched = db
+                .basic_ref(address)
+                .map_err(|e| {
+                    EvmeError::RpcError(format!("Failed to fetch account {}: {:?}", address, e))
+                })?
+                .filter(|info| info.code_hash == code_hash)
+                .and_then(|info| info.code);
+            let Some(code) = fetched else {
+                return Err(EvmeError::InvalidInput(format!(
+                    "Prestate account {address} has `code: null` and codeHash {code_hash}, but \
+                     the fork holds no code with that hash at the account"
+                )));
+            };
+            code_map.insert(code_hash, code);
+        }
 
         Ok(Self {
             backend: EvmeBackend::Forked(Box::new(db)),
@@ -886,9 +922,15 @@ where
     fn basic_ref(&self, address: Address) -> std::result::Result<Option<AccountInfo>, Self::Error> {
         // Check prestate overrides first. An overlay applies on top of an entry too: `run` and
         // `tx` add entries (the receiver's code, the predeploys) after the overlays were taken.
+        // This read is for a consumer that wants the account whole (a state dump), so it carries
+        // the code of an account the file names by hash only.
         if let Some(account) = self.prestate.get(&address) {
             trace!(address = %address, account = ?account, "Loaded account basic from prestate");
-            return self.apply_account_overlay(address, Some(account.info.clone()));
+            let mut info = account.info.clone();
+            if info.code.is_none() {
+                info.code = self.code_map.get(&info.code_hash).cloned();
+            }
+            return self.apply_account_overlay(address, Some(info));
         }
 
         // Query backend database
