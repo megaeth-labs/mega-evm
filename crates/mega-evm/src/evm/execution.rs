@@ -522,8 +522,10 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             &mut frame_init,
             refused,
         );
-        // Where the frame's start begins, for an answer the engine then stops.
-        let start = journal_position(ctx);
+        // Where the frame's start begins, for an answer the engine then stops. Only gas detention
+        // turns an answer into the stop, and only once a read set its limit, which a frame's start
+        // reads nothing to set.
+        let start = ctx.detention.compute_limit().is_some().then(|| journal_position(ctx));
         let outcome = if hold == PrecompileHold::Crossing {
             Err(crossing_answer(&frame_init.frame_input))
         } else {
@@ -550,7 +552,13 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
                 }
                 let succeeded = result.instruction_result().is_ok();
                 settle_answer(ctx, depth, gas_limit, &mut result);
-                take_back_a_stopped_answer(ctx, start, succeeded, &result);
+                match start {
+                    Some(start) => take_back_a_stopped_answer(ctx, start, succeeded, &result),
+                    None => debug_assert!(
+                        !succeeded || result.instruction_result().is_ok(),
+                        "an answer became the stop with no compute limit set"
+                    ),
+                }
                 Ok(ItemOrResult::Result(result))
             }
         }
