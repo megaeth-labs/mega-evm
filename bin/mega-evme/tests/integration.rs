@@ -288,3 +288,42 @@ fn test_a_successful_run_does_not_panic_when_stdout_is_a_closed_pipe() {
     assert_eq!(stderr, "", "a closed stdout is not an error to report");
     assert_eq!(output.status.code(), Some(0));
 }
+
+/// Bytecode that reverts with `Error(reason)`.
+fn revert_with(reason: &str) -> String {
+    use alloy_sol_types::{Revert, SolError};
+
+    let data = Revert::from(reason).abi_encode();
+    let mut code = Vec::new();
+    for (i, chunk) in data.chunks(32).enumerate() {
+        let mut word = [0u8; 32];
+        word[..chunk.len()].copy_from_slice(chunk);
+        // PUSH32 word, PUSH2 offset, MSTORE.
+        code.push(0x7f);
+        code.extend_from_slice(&word);
+        code.push(0x61);
+        code.extend_from_slice(&((i * 32) as u16).to_be_bytes());
+        code.push(0x52);
+    }
+    // PUSH2 length, PUSH0, REVERT.
+    code.push(0x61);
+    code.extend_from_slice(&(data.len() as u16).to_be_bytes());
+    code.extend_from_slice(&[0x5f, 0xfd]);
+    alloy_primitives::hex::encode_prefixed(code)
+}
+
+/// A revert reason is attacker-chosen text. The terminal output drops what would drive the
+/// terminal and keeps its lines; the JSON output carries the reason's characters, escaped.
+#[test]
+fn test_a_revert_reason_is_filtered_for_the_terminal_and_not_in_json() {
+    let reason = "one\n\u{9b}2Jtwo\ttab\u{1b}[H";
+    let code = revert_with(reason);
+
+    let human = run_ok(&["run", "--spec", "Satin", &code]);
+    assert!(human.contains("Revert Reason:    Error(\"one\n2Jtwo\ttab\")"), "{human}");
+    assert!(!human.contains('\u{9b}') && !human.contains('\u{1b}'), "{human:?}");
+
+    let json: serde_json::Value =
+        serde_json::from_str(&run_ok(&["run", "--spec", "Satin", &code, "--json"])).unwrap();
+    assert_eq!(json["revert_reason"], format!("Error(\"{reason}\")"));
+}

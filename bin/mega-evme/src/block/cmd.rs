@@ -185,7 +185,7 @@ pub async fn replay_blocks(
                         serde_json::json!({ "kind": "block", "block": number, "error": message })
                     );
                 } else {
-                    println!("block {number}  error: {message}");
+                    println!("block {number}  error: {}", crate::sanitize_terminal_text(&message));
                 }
                 summary.failed.push((number, message));
             }

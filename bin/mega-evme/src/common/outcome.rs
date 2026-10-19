@@ -230,7 +230,10 @@ pub fn print_execution_summary(
             println!("Status:           Reverted");
             println!("Gas Used:         {}", gas_used);
             println!("Execution Time:   {:?}", exec_time);
-            println!("Revert Reason:    {}", decode_revert_reason(output));
+            println!(
+                "Revert Reason:    {}",
+                super::sanitize_terminal_text(&decode_revert_reason(output))
+            );
         }
         ExecutionResult::Halt { reason, .. } => {
             println!("Status:           Halted");
@@ -267,6 +270,9 @@ pub fn print_satin_report(report: &SatinReport) {
 /// - `Error(string)` via `alloy_sol_types::Revert`
 /// - `Panic(uint256)` via `alloy_sol_types::Panic`
 /// - Raw hex fallback
+///
+/// The text is the reason's own characters. A terminal printer filters it with
+/// [`sanitize_terminal_text`](super::sanitize_terminal_text); JSON output escapes it.
 pub fn decode_revert_reason(output: &Bytes) -> String {
     if output.is_empty() {
         return "(empty)".to_string();
@@ -274,7 +280,7 @@ pub fn decode_revert_reason(output: &Bytes) -> String {
 
     // Try to decode as Revert (Error(string))
     if let Ok(revert) = Revert::abi_decode(output) {
-        return format!("Error(\"{}\")", super::sanitize_terminal_text(revert.reason()));
+        return format!("Error(\"{}\")", revert.reason());
     }
 
     // Try to decode as Panic (Panic(uint256))
@@ -481,9 +487,9 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_revert_reason_strips_terminal_controls() {
+    fn test_decode_revert_reason_keeps_the_reasons_characters() {
         let encoded = Revert::from("\u{1b}[2Jowned\nit").abi_encode();
-        assert_eq!(decode_revert_reason(&encoded.into()), "Error(\"ownedit\")");
+        assert_eq!(decode_revert_reason(&encoded.into()), "Error(\"\u{1b}[2Jowned\nit\")");
     }
 
     #[test]
