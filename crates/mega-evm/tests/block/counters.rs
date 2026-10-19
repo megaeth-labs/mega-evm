@@ -241,8 +241,7 @@ fn test_a_floor_bound_transaction_adds_its_floor_to_the_block() {
 /// ledger takes the body's history and nothing for the record the frame never made.
 #[test]
 fn test_an_out_of_gas_before_the_first_frame_bills_the_whole_gas_limit_to_the_block() {
-    use alloy_consensus::{Signed, TxLegacy};
-    use alloy_primitives::{Signature, TxKind, B256};
+    use alloy_primitives::TxKind;
     use op_revm::constants::{BASE_FEE_RECIPIENT, L1_FEE_RECIPIENT, OPERATOR_FEE_RECIPIENT};
     use revm::Database as _;
 
@@ -253,19 +252,15 @@ fn test_an_out_of_gas_before_the_first_frame_bills_the_whole_gas_limit_to_the_bl
     const FRESH: Address = address!("0x3000000000000000000000000000000000000005");
     const GAS_PRICE: u128 = 1_000_000;
     let transfer = |gas_limit: u64| {
-        common::recovered(MegaTxEnvelope::Legacy(Signed::new_unchecked(
-            TxLegacy {
-                chain_id: Some(common::CHAIN_ID),
-                nonce: 0,
-                gas_price: GAS_PRICE,
-                gas_limit,
-                to: TxKind::Call(FRESH),
-                value: U256::from(1),
-                input: Bytes::new(),
-            },
-            Signature::test_signature(),
-            B256::repeat_byte(1),
-        )))
+        common::legacy_from(
+            common::CALLER,
+            0,
+            TxKind::Call(FRESH),
+            U256::from(1),
+            Bytes::new(),
+            gas_limit,
+            GAS_PRICE,
+        )
     };
 
     // What the transfer spends when it has room, on a block of its own: one gas less falls short

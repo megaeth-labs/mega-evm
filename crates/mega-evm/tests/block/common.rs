@@ -238,22 +238,35 @@ pub(crate) fn empty_call_gas() -> u64 {
     100_000 + body_history(0)
 }
 
+/// A legacy transaction from `sender`.
+///
+/// The hash is derived from the sender and the nonce. Nothing in these tests pins it: a receipt
+/// carries none, and a block that executes two transactions from one sender at one nonce tells
+/// them apart by the sender's account, which is what the stale-outcome check reads.
+pub(crate) fn legacy_from(
+    sender: Address,
+    nonce: u64,
+    kind: TxKind,
+    value: U256,
+    input: Bytes,
+    gas_limit: u64,
+    gas_price: u128,
+) -> Recovered<MegaTxEnvelope> {
+    let tx =
+        TxLegacy { chain_id: Some(CHAIN_ID), nonce, gas_price, gas_limit, to: kind, value, input };
+    let hash = B256::from(alloy_primitives::keccak256(
+        [sender.as_slice(), &nonce.to_be_bytes(), &[0u8]].concat(),
+    ));
+    Recovered::new_unchecked(
+        MegaTxEnvelope::Legacy(Signed::new_unchecked(tx, Signature::test_signature(), hash)),
+        sender,
+    )
+}
+
 /// A legacy transaction from [`CALLER`].
 pub(crate) fn tx(nonce: u64, to: Address, input: Bytes, gas_limit: u64) -> MegaTxEnvelope {
-    let tx_legacy = TxLegacy {
-        chain_id: Some(CHAIN_ID),
-        nonce,
-        gas_price: 1_000_000,
-        gas_limit,
-        to: TxKind::Call(to),
-        value: U256::ZERO,
-        input,
-    };
-    MegaTxEnvelope::Legacy(Signed::new_unchecked(
-        tx_legacy,
-        Signature::test_signature(),
-        B256::repeat_byte(nonce as u8 + 1),
-    ))
+    legacy_from(CALLER, nonce, TxKind::Call(to), U256::ZERO, input, gas_limit, 1_000_000)
+        .into_inner()
 }
 
 /// A legacy transaction from [`CALLER`], with its sender recovered.

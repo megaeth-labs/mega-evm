@@ -8,9 +8,9 @@
 //! transaction executed, then the system-address transaction that writes the Oracle executed and
 //! committed first — relies on.
 
-use alloy_consensus::{transaction::Recovered, Signed, TxLegacy};
+use alloy_consensus::transaction::Recovered;
 use alloy_evm::block::BlockExecutor;
-use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
     system::{IOracle, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS},
@@ -45,29 +45,19 @@ fn legacy(
     to: Address,
     value: u64,
     input: Bytes,
-    hash: u8,
 ) -> Recovered<MegaTxEnvelope> {
-    let tx = TxLegacy {
-        chain_id: Some(common::CHAIN_ID),
-        nonce,
-        gas_price: 1_000_000,
-        gas_limit: gas_limit(input.len() as u64),
-        to: TxKind::Call(to),
-        value: U256::from(value),
-        input,
-    };
-    let signed = Signed::new_unchecked(tx, Signature::test_signature(), B256::repeat_byte(hash));
-    Recovered::new_unchecked(MegaTxEnvelope::Legacy(signed), sender)
+    let limit = gas_limit(input.len() as u64);
+    common::legacy_from(sender, nonce, TxKind::Call(to), U256::from(value), input, limit, 1_000_000)
 }
 
 /// A system-address transaction at `nonce` writing `value` into the Oracle's slot 0.
-fn oracle_write(nonce: u64, value: u8, hash: u8) -> Recovered<MegaTxEnvelope> {
+fn oracle_write(nonce: u64, value: u8) -> Recovered<MegaTxEnvelope> {
     let input = IOracle::setSlotsCall {
         slots: vec![U256::ZERO],
         values: vec![B256::with_last_byte(value)],
     }
     .abi_encode();
-    legacy(MEGA_SYSTEM_ADDRESS, nonce, ORACLE_CONTRACT_ADDRESS, 0, input.into(), hash)
+    legacy(MEGA_SYSTEM_ADDRESS, nonce, ORACLE_CONTRACT_ADDRESS, 0, input.into())
 }
 
 /// The block's state: the test callers funded.
@@ -93,8 +83,8 @@ fn test_a_second_outcome_at_the_same_nonce_is_refused() {
     let mut executor = common::executor(&mut state, common::unlimited_ctx());
     executor.apply_pre_execution_changes().expect("the block starts");
 
-    let to_b = executor.run_transaction(&legacy(CALLER, 0, PAYEE_B, 7, Bytes::new(), 0x11));
-    let to_c = executor.run_transaction(&legacy(CALLER, 0, PAYEE_C, 9, Bytes::new(), 0x12));
+    let to_b = executor.run_transaction(&legacy(CALLER, 0, PAYEE_B, 7, Bytes::new()));
+    let to_c = executor.run_transaction(&legacy(CALLER, 0, PAYEE_C, 9, Bytes::new()));
     let (to_b, to_c) = (to_b.expect("executes"), to_c.expect("executes"));
     executor.commit_transaction_outcome(to_b).expect("fresh");
     let err = executor.commit_transaction_outcome(to_c).expect_err("stale");
@@ -117,10 +107,9 @@ fn test_an_outcome_whose_senders_balance_moved_is_refused() {
     let mut executor = common::executor(&mut state, common::unlimited_ctx());
     executor.apply_pre_execution_changes().expect("the block starts");
 
-    let waiting =
-        executor.run_transaction(&legacy(SENDER, 0, PAYEE_B, 1, Bytes::new(), 0x21)).unwrap();
+    let waiting = executor.run_transaction(&legacy(SENDER, 0, PAYEE_B, 1, Bytes::new())).unwrap();
     let pays_the_sender =
-        executor.run_transaction(&legacy(CALLER, 0, SENDER, 5, Bytes::new(), 0x22)).unwrap();
+        executor.run_transaction(&legacy(CALLER, 0, SENDER, 5, Bytes::new())).unwrap();
     executor.commit_transaction_outcome(pays_the_sender).expect("fresh");
     let err = executor.commit_transaction_outcome(waiting).expect_err("stale");
     assert_stale(&err, SENDER);
@@ -134,8 +123,8 @@ fn test_a_second_system_transaction_at_the_same_nonce_is_refused() {
     let mut executor = common::executor(&mut state, common::unlimited_ctx());
     executor.apply_pre_execution_changes().expect("the block starts");
 
-    let first = executor.run_transaction(&oracle_write(0, 1, 0x31)).unwrap();
-    let second = executor.run_transaction(&oracle_write(0, 2, 0x32)).unwrap();
+    let first = executor.run_transaction(&oracle_write(0, 1)).unwrap();
+    let second = executor.run_transaction(&oracle_write(0, 2)).unwrap();
     assert!(first.result.is_success() && second.result.is_success());
     executor.commit_transaction_outcome(first).expect("fresh");
     let err = executor.commit_transaction_outcome(second).expect_err("stale");
@@ -154,9 +143,9 @@ fn test_the_system_transaction_first_flow_commits() {
     executor.apply_pre_execution_changes().expect("the block starts");
 
     let read = IOracle::getSlotCall { slot: U256::ZERO }.abi_encode();
-    let reads = legacy(CALLER, 0, ORACLE_CONTRACT_ADDRESS, 0, read.into(), 0x41);
+    let reads = legacy(CALLER, 0, ORACLE_CONTRACT_ADDRESS, 0, read.into());
     let reads = executor.run_transaction(&reads).expect("executes");
-    let writes = executor.run_transaction(&oracle_write(0, 3, 0x42)).expect("executes");
+    let writes = executor.run_transaction(&oracle_write(0, 3)).expect("executes");
     assert!(reads.result.is_success() && writes.result.is_success());
     executor.commit_transaction_outcome(writes).expect("the system transaction commits first");
     executor.commit_transaction_outcome(reads).expect("and the reading transaction after it");
@@ -180,8 +169,8 @@ fn test_the_trait_commit_trips_on_a_stale_outcome() {
     let mut executor = common::executor(&mut state, common::unlimited_ctx());
     executor.apply_pre_execution_changes().expect("the block starts");
 
-    let to_b = executor.run_transaction(&legacy(CALLER, 0, PAYEE_B, 7, Bytes::new(), 0x51));
-    let to_c = executor.run_transaction(&legacy(CALLER, 0, PAYEE_C, 9, Bytes::new(), 0x52));
+    let to_b = executor.run_transaction(&legacy(CALLER, 0, PAYEE_B, 7, Bytes::new()));
+    let to_c = executor.run_transaction(&legacy(CALLER, 0, PAYEE_C, 9, Bytes::new()));
     BlockExecutor::commit_transaction(&mut executor, to_b.unwrap());
     let to_c = to_c.unwrap();
     let tripped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
