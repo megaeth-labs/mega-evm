@@ -475,8 +475,12 @@ impl Cmd {
             .apply_pre_execution_changes()
             .map_err(|e| ReplayError::Other(format!("Block execution error: {e}")))?;
 
-        // Execute preceding transactions
+        // Execute preceding transactions. One the block refuses is skipped, as a block import
+        // records the refusal and continues, and the target runs on the state the included ones
+        // left. The receipt index counts only those included transactions.
         info!(preceding_count = ctx.preceding_tx_hashes.len(), "Executing preceding transactions",);
+        let mut included_preceding = 0u64;
+        let mut log_index_base = 0u64;
         for tx_hash in &ctx.preceding_tx_hashes {
             debug!(tx_hash = %tx_hash, "Executing preceding transaction");
             let tx = provider
@@ -484,13 +488,24 @@ impl Cmd {
                 .await
                 .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?
                 .ok_or(ReplayError::TransactionNotFound(*tx_hash))?;
-            let outcome = block_executor
-                .run_transaction(tx.as_recovered())
-                .map_err(|e| ReplayError::Other(format!("Block execution error: {e}")))?;
+            let outcome = match block_executor.run_transaction(tx.as_recovered()) {
+                Ok(outcome) => outcome,
+                Err(e) => {
+                    warn!(tx_hash = %tx_hash, error = %e, "Skipping refused preceding transaction");
+                    continue;
+                }
+            };
             trace!(tx_hash = %tx_hash, ?outcome, "Preceding transaction executed");
-            block_executor
-                .commit_transaction_outcome(outcome)
-                .map_err(|e| ReplayError::Other(format!("Block execution error: {e}")))?;
+            if let Err(e) = block_executor.commit_transaction_outcome(outcome) {
+                warn!(tx_hash = %tx_hash, error = %e, "Skipping refused preceding transaction");
+                continue;
+            }
+            included_preceding += 1;
+            log_index_base += block_executor
+                .receipts()
+                .last()
+                .map(|receipt| receipt.logs().len() as u64)
+                .unwrap_or(0);
         }
 
         // Execute target transaction.
@@ -573,7 +588,8 @@ impl Cmd {
             gas_used,
             Some(ctx.target_tx.inner.inner.tx_hash()),
             Some(ctx.block.hash()),
-            ctx.preceding_tx_hashes.len() as u64,
+            included_preceding,
+            log_index_base,
         );
 
         Ok(ReplayOutcome {

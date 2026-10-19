@@ -168,8 +168,9 @@ impl Cmd {
             contract_address,
             effective_gas_price,
             outcome.exec_result.tx_gas_used(),
+            tx.enveloped_tx.as_ref().map(alloy_primitives::keccak256),
             None,
-            None,
+            0,
             0,
         );
 

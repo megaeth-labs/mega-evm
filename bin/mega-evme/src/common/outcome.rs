@@ -5,7 +5,7 @@ use std::{path::Path, time::Duration};
 use super::{EvmeError, StateDumpArgs, TraceArgs};
 
 use alloy_consensus::{Eip658Value, Receipt};
-use alloy_primitives::{hex, Address, BlockHash, Bytes, TxHash, B256};
+use alloy_primitives::{hex, Address, BlockHash, Bytes, TxHash};
 use alloy_rpc_types_eth::TransactionReceipt;
 use alloy_sol_types::{Panic, Revert, SolError};
 use clap::Parser;
@@ -159,20 +159,24 @@ pub fn op_receipt_to_tx_receipt(
     contract_address: Option<Address>,
     effective_gas_price: u128,
     gas_used: u64,
-    transaction_hash: Option<TxHash>, // only used for replay command where tx hash is known
-    block_hash: Option<BlockHash>,    // only used for replay command where block hash is known
+    transaction_hash: Option<TxHash>,
+    block_hash: Option<BlockHash>,
     transaction_index: u64,
+    // Block-level index of this receipt's first log. Zero for a lone `tx`. A replay passes the
+    // number of logs the included preceding transactions emitted.
+    log_index_base: u64,
 ) -> OpTxReceipt {
     // Map logs to include block/tx metadata
-    let mut log_index = 0;
+    let tx_hash = transaction_hash.unwrap_or_default();
+    let mut log_index = log_index_base;
     let inner = receipt.clone().map_logs(|log| {
         let log = alloy_rpc_types_eth::Log {
             inner: log,
             block_hash: None,
             block_number: Some(block_number),
             block_timestamp: Some(block_timestamp),
-            transaction_hash: Some(B256::ZERO),
-            transaction_index: Some(0),
+            transaction_hash: Some(tx_hash),
+            transaction_index: Some(transaction_index),
             log_index: Some(log_index),
             removed: false,
         };
@@ -182,7 +186,7 @@ pub fn op_receipt_to_tx_receipt(
 
     TransactionReceipt {
         inner,
-        transaction_hash: transaction_hash.unwrap_or_default(),
+        transaction_hash: tx_hash,
         transaction_index: Some(transaction_index),
         block_hash,
         block_number: Some(block_number),
@@ -474,5 +478,47 @@ mod tests {
     fn test_decode_revert_reason_raw_hex() {
         let raw = Bytes::from(vec![0xde, 0xad]);
         assert_eq!(decode_revert_reason(&raw), "0xdead");
+    }
+
+    #[test]
+    fn test_receipt_logs_carry_the_transaction_and_block_index() {
+        use alloy_primitives::{Address, Log, LogData, B256};
+
+        let tx_hash = B256::repeat_byte(0xab);
+        let log = Log {
+            address: Address::repeat_byte(0x11),
+            data: LogData::new_unchecked(vec![], Bytes::new()),
+        };
+        let receipt = Receipt {
+            status: Eip658Value::Eip658(true),
+            cumulative_gas_used: 21_000,
+            logs: vec![log.clone(), log],
+        };
+        let envelope = OpReceiptEnvelope::Legacy(receipt.with_bloom());
+        let mapped = op_receipt_to_tx_receipt(
+            &envelope,
+            10,
+            20,
+            Address::ZERO,
+            None,
+            None,
+            1,
+            21_000,
+            Some(tx_hash),
+            Some(B256::repeat_byte(0xcd)),
+            3,
+            10,
+        );
+
+        assert_eq!(mapped.transaction_hash, tx_hash);
+        assert_eq!(mapped.transaction_index, Some(3));
+        let logs = mapped.inner.logs();
+        assert_eq!(logs.len(), 2);
+        assert_eq!(logs[0].transaction_hash, Some(tx_hash));
+        assert_eq!(logs[1].transaction_hash, Some(tx_hash));
+        assert_eq!(logs[0].transaction_index, Some(3));
+        assert_eq!(logs[1].transaction_index, Some(3));
+        assert_eq!(logs[0].log_index, Some(10));
+        assert_eq!(logs[1].log_index, Some(11));
     }
 }
