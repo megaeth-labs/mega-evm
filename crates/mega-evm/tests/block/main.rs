@@ -13,6 +13,7 @@ mod eips;
 mod external_envs;
 mod factory;
 mod inspector;
+mod l1_attributes;
 mod limits;
 mod receipt_goldens;
 mod receipts;
