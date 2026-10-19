@@ -261,6 +261,7 @@ Deposited code MUST be charged, once the creation's code passed its checks and i
 A creation that cannot pay any of the four runs out of gas and leaves no code.
 
 A node MUST charge account access to the addresses the inherited rules treat as warm from the start of a transaction — precompiles, the block beneficiary and access-list addresses listed without storage keys — as warm, as [EIP-2929](https://eips.ethereum.org/EIPS/eip-2929) has it: Rex6's cold charge on the first `CALL`-family or `SELFDESTRUCT`-beneficiary touch of such an address does not apply.
+The `SequencerRegistry`'s account and its `_currentSystemAddress` slot MUST be warm from the start of every transaction as well, the slot as an access-list storage key is: validation reads both for every transaction (see [The Live System Address](#17-the-live-system-address)).
 
 ### 6. State Gas and SALT Pricing
 
@@ -639,7 +640,8 @@ An out-of-gas step halts the call, consuming its regular gas.
 | 15   | `min(gasLimitOverride, remaining gas)` still covers the signed gas limit                                                                                                                                                                                                          | `GasLimitTooLow(uint64,uint64)`                                  |
 
 - Steps 1 to 13 keep the legacy engine's order, so a call several rules refuse reports the Rex6 error.
-- The deploy-address read of step 12 MUST read the account into the transaction's state without warming it — an address not yet loaded is loaded cold, one already loaded keeps its warmth — and without loading its code: the creation's own access to the address is priced as the inherited creation rules price it.
+- The read of the signer's account that steps 8 to 10 and 13 check, and the deploy-address read of step 12, MUST load the account into the transaction's state as an account access loads it, warm, the deploy address without its code.
+  Neither read is charged, and no charge the call or its creation makes depends on either account's warmth: the creation loads both again when it starts, as a creation loads its creator and the address it creates.
 - Step 12 checks the deploy address's code alone: an address that holds a nonce but no code passes it, and the creation then collides there, as any creation onto an occupied address does, and fails, the call answering `ExecutionHalted` with the creation's whole forward spent and the signer's nonce kept or taken back as below.
   Besides a genesis allocation, only a creation at the deploy address that completed leaves such an account: a deployment whose creation completed without leaving code — its initcode returned empty code — leaves the address with a non-zero nonce (1, plus one for each creation its constructor made) and no code, so every later deployment there collides; a creation that reverted, halted or was stopped leaves none, and a constructor that destroyed its own account leaves none either, so the address stays deployable.
   The only creations at the deploy address are those whose address is derived from the signer and nonce 0: the signed deployment, which anyone may submit while the signer's nonce is 0 or 1, and a creation transaction the signer's own key sends at nonce 0.
@@ -705,12 +707,16 @@ An out-of-gas step halts the call, consuming its regular gas.
 
 #### New behavior
 
-- A transaction MUST be tested for the system shape on its own fields first: type `0x0`, a call (not a creation) to an address on `MEGA_SYSTEM_TX_WHITELIST` (the Oracle).
-- A transaction MUST read the registry only when it has that shape: when the registry's code hash is that of the code this spec deploys, the node reads `_currentSystemAddress` from the transaction's own state, cold, and compares it with the caller.
+- The system shape is tested on the transaction's own fields: type `0x0`, a call (not a creation) to an address on `MEGA_SYSTEM_TX_WHITELIST` (the Oracle).
+- Every transaction MUST read the registry when it is validated, whatever its shape and whoever sent it: the node loads the registry's account and, from the transaction's own state, its `_currentSystemAddress` slot.
+  When the registry's code hash is that of the code this spec deploys and the slot holds a non-zero address, that address is the live system address.
   The read compares the registry's code hash and MUST NOT load or run the registry's code.
-  This read lands in the transaction's returned state, and so in the block's witness, whatever the pre-block states also hold of the registry; it does not load the registry's code, but the witness carries that code as it carries the code of every account the block loads (see [The Stateless Witness](#22-the-stateless-witness)), and the Oracle's own check of its caller runs it.
-- A registry that is absent, holds other code, or names the zero address MUST make no transaction a Mega System Transaction.
-- A transaction of any other shape reads nothing and is never a Mega System Transaction, whoever sent it.
+  The account and the slot MUST be warm for the rest of the transaction, as the block beneficiary is under [EIP-3651](https://eips.ethereum.org/EIPS/eip-3651), whatever the registry holds: an access to either costs every transaction the same, whatever its envelope.
+  The read is not charged and writes nothing, so committing the transaction leaves the registry as it was.
+  It lands in the transaction's returned state, and so in the block's witness, whatever the pre-block states also hold of the registry; it does not load the registry's code, but the witness carries that code as it carries the code of every account the block loads (see [The Stateless Witness](#22-the-stateless-witness)), and the Oracle's own check of its caller runs it.
+- A transaction of the system shape whose caller is the live system address is a Mega System Transaction.
+  A registry that is absent, holds other code, or names the zero address names no live system address, and MUST make no transaction a Mega System Transaction.
+- A transaction of any other shape is never a Mega System Transaction, whoever sent it.
   A transaction from the system address without the shape is an ordinary transaction, validated and charged as a user's.
   The Oracle authorizes writes on the sender alone, so such a transaction to the Oracle succeeds as a user transaction: it pays fees, is held to every per-transaction limit, is detained, is priced by bucket, and pays history gas.
 - A Mega System Transaction is validated (chain id, nonce, EIP-3607) and promoted to a deposit exactly as in Rex6.
@@ -873,7 +879,7 @@ The witness is defined by what the block's execution returns and exports, and a 
   - the hash of every block `BLOCKHASH` read, which the block's execution exports;
   - the capacity of every SALT bucket the block's execution exports;
   - the oracle service's answer to every oracle read the block's included transactions recorded, in block order.
-    A transaction loads every account and slot its execution reads from the state: in its validation (the registry's account and slot a transaction of the system shape reads included), in its fee settlement, and in any of its frames, a frame that reverted or halted included, and a frame of a deposit that failed.
+    A transaction loads every account and slot its execution reads from the state: in its validation (the registry's account and system-address slot every transaction reads included), in its fee settlement, and in any of its frames, a frame that reverted or halted included, and a frame of a deposit that failed.
     A failed frame's writes are taken back, not its reads; a failed deposit takes back everything but its sender's nonce bump and mint, not its reads; and a validator re-executing the transaction makes the same reads in the same frames.
     The one exception is the L1 block info the transaction is priced against, which the pre-block phase loads for the whole block (see the L1 block info, below).
     A read that gas or a limit skipped loads nothing (see the reads a validator makes again, below).
@@ -883,7 +889,7 @@ The witness is defined by what the block's execution returns and exports, and a 
     A slot of an account the chain does not hold before the block is not recorded: such an account has no storage, and a validator MUST answer every slot of it with zero without looking it up.
     The code in particular is not the code a returned state carries: a transaction that replaces an account's code — an EIP-7702 authority delegated anew — is admitted against the code the chain held, and its returned state carries the code it wrote.
 - **What the block reads, and where it lands.**
-  A transaction's loads are in its returned state: its sender, its recipient or created address, every account and every slot any of its frames loads, the fee recipients, the registry's account and system-address slot a transaction of the system shape reads, and a keyless deployment's signer and deploy address; the state names an account whether or not the load brought its code.
+  A transaction's loads are in its returned state: its sender, its recipient or created address, every account and every slot any of its frames loads, the fee recipients, the registry's account and system-address slot every transaction reads, and a keyless deployment's signer and deploy address; the state names an account whether or not the load brought its code.
   The pre-block phase's reads land in the pre-block states, in order: the two EIP calls' states, each system-contract deploy's read-only or created entry, the registry's pending slots the due-change decision read, the `applyPendingChanges()` call's state, and last the L1 block info.
   `BLOCKHASH` reads the chain's history outside the journal and its reads are exported; a SALT bucket's capacity and the oracle service's answer are read outside the database and are exported or recorded.
   The header, the chain configuration — the schedule with the sequencer registry parameters attached to it — the parent hash, the parent beacon block root, the extra data, whether the block admits only deposits (see [Base Layer](#1-base-layer-optimism-karst-ethereum-osaka)), and the block's slot number are inputs a validator is given beside the witness.
