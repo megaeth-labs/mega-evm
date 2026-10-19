@@ -2,11 +2,8 @@
 //!
 //! The limits come from two places, by who must agree on them:
 //!
-//! - [`ProtocolLimits`] are the limits every node holds a chain's blocks and transactions to,
-//!   because a different value is a different result: the per-transaction limits the EVM enforces
-//!   and the block's data-size budget. They are fixed per spec, not configured:
-//!   [`ProtocolLimits::for_spec`] is the one table of them, which block execution, the EVM factory
-//!   and a bare [`MegaContext`](crate::MegaContext) all read.
+//! - [`ProtocolLimits`] are the limits every node holds a chain's blocks and transactions to, fixed
+//!   per spec: the per-transaction limits the EVM enforces and the block's data-size budget.
 //! - [`BlockLimits`] is the building policy a node passes in the block execution context: the
 //!   limits only a builder applies — a transaction's declared gas, the encoded sizes and the
 //!   data-availability sizes — and a cap a builder may put on the block's data-size budget below
@@ -38,6 +35,11 @@
 //! either. A deposit still counts towards it, and towards the block's encoded size, so the
 //! transactions after it find the room it used. The one limit that holds a deposit is
 //! the block's gas limit, which is the header's.
+//!
+//! A Mega System Transaction, the protocol's own oracle update, which the sequencer must be able
+//! to include whatever the block holds, is refused by none of those limits either and counts as a
+//! deposit does. Its envelope is legacy, so it also counts towards the block's data-availability
+//! size, and the data-availability footprint, which the executor checks, holds it.
 //!
 //! The per-transaction limits the block installs on the EVM are not block limits: they hold a
 //! deposit's own execution the way they hold any transaction's, and a deposit that crosses one is
@@ -362,14 +364,8 @@ impl BlockLimiter {
         da_size: u64,
         packing_exempt: bool,
     ) -> Result<(), BlockExecutionError> {
-        // A deposit is an L1 message the chain cannot censor: the block derived from L1 must
-        // include it, and the builder does not choose it. A Mega System Transaction is the
-        // protocol's own oracle update, which the sequencer must be able to include whatever the
-        // block holds. So no limit only a builder applies refuses either — its declared gas, its
-        // encoded size and its data-availability size, and what those add to the block — and the
-        // data-size budget does not refuse it. The block's gas limit, the header's, holds it as it
-        // holds every transaction; the data-availability footprint, which the executor checks
-        // beside this, holds a Mega System Transaction too, since its envelope is legacy.
+        // A packing-exempt transaction is held to the block's gas limit alone (see the module's
+        // documentation on deposits).
         if !packing_exempt && gas_limit > self.limits.tx_gas_limit {
             return Err(invalid_tx(
                 tx_hash,
@@ -388,11 +384,8 @@ impl BlockLimiter {
             .into());
         }
 
-        // The packing budget below, the data size, is a dimension a transaction's own execution
-        // reveals. The transaction that crossed it is already packed, so what it refuses is the
-        // next one — never a transaction exempt as above, which is not the builder's to refuse
-        // either. Every committed transaction counts towards it, an exempt one included, in
-        // `post_execution_update`.
+        // Nothing below refuses a packing-exempt transaction; `post_execution_update` still counts
+        // it.
         if packing_exempt {
             return Ok(());
         }

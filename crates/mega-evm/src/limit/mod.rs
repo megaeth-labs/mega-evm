@@ -90,11 +90,10 @@
 //!
 //! # The limits
 //!
-//! They are fixed per spec: a context runs under its spec's from its creation, the per-transaction
-//! half of [`ProtocolLimits::for_spec`](crate::ProtocolLimits::for_spec), which for Satin holds a
+//! They are the per-transaction half of
+//! [`ProtocolLimits::for_spec`](crate::ProtocolLimits::for_spec), which for Satin holds a
 //! transaction to [`TX_DATA_LIMIT`](crate::constants::TX_DATA_LIMIT) of data size, every frame to
-//! its share of it, and a detained transaction to detention's caps. A block executor installs
-//! the same before every transaction. A caller that sets other limits runs a counterfactual.
+//! its share of it, and a detained transaction to detention's caps.
 //!
 //! # The exemption
 //!
@@ -235,11 +234,9 @@ pub struct LimitUsage {
 /// transaction whose caps are both unlimited is not detained: limits built from it do not execute
 /// the chain.
 ///
-/// Every value here changes a transaction's result, so they are fixed per spec: the
-/// per-transaction half of [`ProtocolLimits::for_spec`](crate::ProtocolLimits::for_spec), which a
-/// [`MegaContext`](crate::MegaContext) runs under from its creation, the EVM factory's included,
-/// and which the block executor installs before every transaction. [`Default`] is the default
-/// spec's. A tool or a test that sets other values on an EVM runs a counterfactual.
+/// The chain's values are the per-transaction half of
+/// [`ProtocolLimits::for_spec`](crate::ProtocolLimits::for_spec), and [`Default`] is the default
+/// spec's; other values are a tool's or a test's counterfactual.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EvmTxRuntimeLimits {

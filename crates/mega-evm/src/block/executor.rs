@@ -6,12 +6,11 @@
 //!
 //! # Where the limits come from
 //!
-//! The limits every node must agree on are fixed per spec: the executor reads them from the
-//! spec's table ([`ProtocolLimits::for_spec`]), for the spec the EVM executes, installs their
-//! per-transaction half on the EVM before every transaction, and holds the block to their
-//! data-size budget. A node passes none of them. The node's context adds only the builder's
-//! policy ([`BlockLimits`]), which can tighten the budget and never loosen it; a validator leaves
-//! it at its default.
+//! The executor reads the limits every node must agree on from [`ProtocolLimits::for_spec`], for
+//! the spec the EVM executes, installs their per-transaction half on the EVM before every
+//! transaction, and holds the block to their data-size budget. A node passes none of them. The
+//! node's context adds only the builder's policy ([`BlockLimits`]), which can tighten the budget
+//! and never loosen it; a validator leaves it at its default.
 //!
 //! # The block rules of the Karst base
 //!
@@ -150,8 +149,7 @@ use crate::{
 ///
 /// It carries what the pre-block calls need (the parent hash and the parent beacon block root, as
 /// alloy-op-evm does), the block's own extra data, the activation-block flag and the builder's
-/// packing policy. The limits the protocol holds the block to are not here: they are fixed per
-/// spec ([`ProtocolLimits::for_spec`]).
+/// packing policy.
 #[derive(Clone, Debug, Default)]
 pub struct MegaBlockExecutionCtx {
     /// The parent block's hash, which the EIP-2935 pre-block call records.

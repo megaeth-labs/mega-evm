@@ -44,9 +44,6 @@ const ARBITRARY_PRECISION_NUMBER: &str = "$serde_json::private::Number";
 /// A chain's Satin configuration, as its genesis file's `config` object carries it: when Satin
 /// activates, and the params type it requires.
 ///
-/// The limits a chain's blocks and transactions are held to are not configuration: they are fixed
-/// per spec ([`ProtocolLimits::for_spec`](crate::ProtocolLimits::for_spec)), and no key names them.
-///
 /// **The key format is provisional.** It is fixed when a network first publishes a genesis file
 /// that carries it; until then a change to it is a change to this parser and to every genesis
 /// file written against it.
@@ -94,14 +91,8 @@ const ARBITRARY_PRECISION_NUMBER: &str = "$serde_json::private::Number";
 ///
 /// The parser reads no other fork's key. Satin runs on the OP Karst fork and the Ethereum forks
 /// Karst includes, Osaka among them, and [`hardforks`](Self::hardforks) schedules those at genesis.
-/// A node's own schedule times those forks from the file, and the timing must hold both ways.
-/// Every one of them must be active at `satinTime`: the engine executes every Satin block on
-/// Karst, so a configuration that activates Satin before one of them has the node and the engine
-/// apply different rules to the same block, and
-/// [`validate_schedule`](MegaHardforks::validate_schedule) refuses such a schedule. Jovian, Karst
-/// and Osaka must not activate before `satinTime` either, since the chain runs its pre-Satin
-/// engine until then; that half is the node's to check, as this engine does not execute those
-/// blocks.
+/// A node's own schedule times those forks from the file, and holds them to both halves of the
+/// timing rule [`validate_schedule`](MegaHardforks::validate_schedule) states.
 ///
 /// A flat key is one entry of the object, so a checker that freezes a configuration key by key
 /// freezes each parameter on its own and names it when it changes. It does not stop a key being

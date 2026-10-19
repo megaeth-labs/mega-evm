@@ -24,9 +24,9 @@
 //! build can run other byte prices without touching this table. [`SLOT_STATE_GAS`] and
 //! [`ACCOUNT_STATE_GAS`] are two of those products written out: the tests assert the schedule
 //! against them, and changing one of the two moves a test rather than a price.
-//! [`TX_DATA_LIMIT`], [`BLOCK_DATA_LIMIT`] and the two detention caps are Satin's protocol limits,
-//! [`ProtocolLimits::for_spec`](crate::ProtocolLimits::for_spec): fixed per spec, not configured by
-//! a chain. No limit holds state growth: state gas prices it.
+//! [`TX_DATA_LIMIT`], [`BLOCK_DATA_LIMIT`] and the two detention caps are Satin's protocol limits
+//! ([`ProtocolLimits::for_spec`](crate::ProtocolLimits::for_spec)). No limit holds state growth:
+//! state gas prices it.
 
 use revm::{
     context_interface::cfg::gas::WARM_STORAGE_READ_COST,

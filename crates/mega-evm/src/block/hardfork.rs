@@ -211,9 +211,7 @@ pub trait MegaHardforks: OpHardforks {
     /// - The parameters every scheduled fork requires are attached, and their values pass their
     ///   type's own checks ([`require_params`](Self::require_params)). Satin requires
     ///   [`SequencerRegistryConfig`](crate::system::SequencerRegistryConfig) so the registry can be
-    ///   seeded at the first block. The limits blocks and transactions are held to are not
-    ///   parameters: they are fixed per spec
-    ///   ([`ProtocolLimits::for_spec`](crate::ProtocolLimits::for_spec)).
+    ///   seeded at the first block.
     ///
     /// There is no ordering or gap check: a single fork has nothing to be out of order with. The
     /// spec that follows Satin brings the ladder back, and with it those checks.
@@ -235,12 +233,10 @@ pub trait MegaHardforks: OpHardforks {
 }
 
 /// Refuses a schedule that activates Satin at a timestamp at which a fork it runs on is not
-/// active.
+/// active: the half of the timing rule
+/// [`validate_schedule`](MegaHardforks::validate_schedule) states that the engine checks.
 ///
-/// Satin executes every block on Optimism Karst, whose Ethereum base is Osaka, so the forks up
-/// to Karst and Osaka must be active by the time Satin activates: otherwise the engine and the
-/// rest of the node, which reads the schedule, apply different rules to the same block. The
-/// forks checked are those a schedule activates by timestamp, the Ethereum forks from Shanghai
+/// The forks checked are those a schedule activates by timestamp, the Ethereum forks from Shanghai
 /// to Osaka and the Optimism forks from Regolith to Karst, each read as block execution reads
 /// it: active at Satin's activation timestamp. A fork scheduled by block number or total
 /// difficulty instead, or not at all, is not active at any timestamp, and is refused. The forks
@@ -248,10 +244,6 @@ pub trait MegaHardforks: OpHardforks {
 /// timestamp cannot be compared with, and every one of them precedes the first fork scheduled
 /// by timestamp; they are not checked. A schedule that does not activate Satin is not checked
 /// either.
-///
-/// This is half of the timing rule. The other half — that Jovian, Karst and Osaka do not
-/// activate before Satin, since the chain runs its pre-Satin engine on its pre-Satin base until
-/// then — is the node's to check: this engine does not execute those blocks.
 fn require_base_forks<H: MegaHardforks + ?Sized>(schedule: &H) -> Result<(), ScheduleError> {
     let ForkCondition::Timestamp(satin_time) = schedule.mega_fork_activation(MegaHardfork::Satin)
     else {
