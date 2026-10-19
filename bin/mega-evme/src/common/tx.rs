@@ -367,9 +367,7 @@ impl TxArgs {
 
         Ok(tx)
     }
-}
 
-impl TxArgs {
     /// The hash of the transaction [`Self::create_tx`] builds, when it has one.
     ///
     /// A deposit is unsigned, so the hash of its encoding is its hash. Any other type would be
@@ -542,9 +540,9 @@ impl DecodedRawTx {
     ///
     /// The check reads the transaction after the override, with what the old type carried and the
     /// new one cannot already dropped, so what it finds comes from a flag. It does not require
-    /// `--receiver`: a
-    /// raw transaction already has its own destination. Setting `--tx-type 126` does not fill
-    /// deposit fields, so a raw transaction that is not a deposit cannot become one.
+    /// `--receiver`: a raw transaction already has its own destination. Setting `--tx-type 126`
+    /// does not fill deposit fields, so a raw transaction that is not a deposit cannot become
+    /// one.
     fn reject_inconsistent_override(&self, tx_args: &TxArgs) -> Result<()> {
         let tx_type = MegaTxType::try_from(self.tx_env.tx_type)
             .map_err(|_| EvmeError::UnsupportedTxType(self.tx_env.tx_type))?;

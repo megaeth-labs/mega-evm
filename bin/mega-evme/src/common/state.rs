@@ -921,8 +921,7 @@ where
     type Error = EvmeError;
 
     fn basic_ref(&self, address: Address) -> std::result::Result<Option<AccountInfo>, Self::Error> {
-        // Check prestate overrides first. An overlay applies on top of an entry too: `run` and
-        // `tx` add entries (the receiver's code, the predeploys) after the overlays were taken.
+        // Check prestate overrides first; the overlay applies as it does in `basic`.
         // This read is for a consumer that wants the account whole (a state dump), so it carries
         // the code of an account the file names by hash only.
         if let Some(account) = self.prestate.get(&address) {
