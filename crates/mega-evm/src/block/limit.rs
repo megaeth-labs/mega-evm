@@ -364,8 +364,8 @@ impl BlockLimiter {
         da_size: u64,
         packing_exempt: bool,
     ) -> Result<(), BlockExecutionError> {
-        // A packing-exempt transaction is held to the block's gas limit alone (see the module's
-        // documentation on deposits).
+        // Of the limits checked here, a packing-exempt transaction is held to the block's gas limit
+        // alone (see the module's documentation on deposits).
         if !packing_exempt && gas_limit > self.limits.tx_gas_limit {
             return Err(invalid_tx(
                 tx_hash,

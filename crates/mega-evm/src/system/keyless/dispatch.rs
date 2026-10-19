@@ -435,8 +435,10 @@ fn prepare<DB: Database, ExtEnvs: ExternalEnvTypes>(
             records.on_lane,
             u64::from(records.caller),
         );
-        let Some(charges) = charged else { return Ok(Err(Refusal::OutOfGas)) };
-        Some(charges)
+        if charged.is_none() {
+            return Ok(Err(Refusal::OutOfGas));
+        }
+        charged
     } else {
         None
     };
