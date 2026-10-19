@@ -34,7 +34,6 @@
 
 use alloy_evm::Database;
 use alloy_primitives::{address, b256, Address, TxKind, B256};
-use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 use revm::{
     context::{ContextTr, Transaction},
     context_interface::{cfg::Cfg, result::InvalidTransaction},
@@ -126,12 +125,6 @@ pub(crate) fn is_live_system_transaction<DB: Database, ExtEnvs: ExternalEnvTypes
     Ok(inspect_system_address(ctx.journal_mut())? == Some(caller))
 }
 
-/// Whether `tx` is executed on the deposit path: a deposit transaction, or a system-address
-/// transaction, which is promoted to one.
-pub fn is_deposit_like_transaction(tx: &MegaTransaction, system_address: Address) -> bool {
-    tx.tx_type() == DEPOSIT_TRANSACTION_TYPE || is_mega_system_transaction_with(tx, system_address)
-}
-
 /// Whether `tx` was produced by the protocol itself rather than by a user, when `system_address`
 /// is the live system address.
 ///
@@ -216,6 +209,7 @@ where
 mod tests {
     use super::*;
     use alloy_primitives::TxKind;
+    use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 
     const EIP_SYSTEM_ADDRESS: Address = alloy_eips::eip4788::SYSTEM_ADDRESS;
     const USER: Address = address!("0x0000000000000000000000000000000000009999");
@@ -271,14 +265,13 @@ mod tests {
         assert!(!is_system_originated(&tx, MEGA_SYSTEM_ADDRESS));
     }
 
-    /// A user's deposit transaction is deposit-like but not system-originated: otherwise a user
-    /// could buy the protocol's exemptions by sending one.
+    /// A user's deposit transaction is not system-originated: otherwise a user could buy the
+    /// protocol's exemptions by sending one.
     #[test]
     fn test_is_system_originated_rejects_user_deposit_tx() {
         let mut tx = legacy_call_tx(USER, ORACLE_CONTRACT_ADDRESS);
         tx.deposit.source_hash = B256::repeat_byte(0x11);
         assert_eq!(tx.tx_type(), DEPOSIT_TRANSACTION_TYPE);
-        assert!(is_deposit_like_transaction(&tx, MEGA_SYSTEM_ADDRESS));
         assert!(!is_system_originated(&tx, MEGA_SYSTEM_ADDRESS));
     }
 

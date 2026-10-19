@@ -962,20 +962,6 @@ where
         self.execute(tx, Some(reported))
     }
 
-    /// Alias of [`run_transaction`](Self::run_transaction).
-    pub fn execute_mega_transaction<Tx>(
-        &mut self,
-        tx: Tx,
-    ) -> Result<
-        MegaBlockTxResult<<R::Transaction as TransactionEnvelope>::TxType>,
-        BlockExecutionError,
-    >
-    where
-        Tx: ExecutableTx<Self> + MegaTransactionExt,
-    {
-        self.run_transaction(tx)
-    }
-
     /// Re-checks the block's admission and commits `output`.
     ///
     /// This is the commit for a builder that executes several candidates and then chooses among
