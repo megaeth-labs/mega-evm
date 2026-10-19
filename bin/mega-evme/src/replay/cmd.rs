@@ -9,10 +9,12 @@ use mega_evm::{
     alloy_evm::{block::BlockExecutor, Evm, EvmEnv},
     alloy_op_evm::block::OpAlloyReceiptBuilder,
     revm::{
-        context::{result::ExecutionResult, BlockEnv, CfgEnv},
+        context::{result::ExecutionResult, BlockEnv, CfgEnv, ContextTr},
         database::{states::bundle_state::BundleRetention, StateBuilder},
-        primitives::eip4844,
-        DatabaseRef,
+        inspector::JournalExt,
+        interpreter::{CallInputs, CallOutcome, CreateInputs, CreateOutcome, Interpreter},
+        primitives::{eip4844, Address, Log},
+        DatabaseRef, Inspector,
     },
     BlockLimits, DeclaredObserver, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory,
     MegaHardforks, MegaSpecId,
@@ -460,7 +462,9 @@ impl Cmd {
 
         let start = Instant::now();
         // The tracer reads and writes nothing back, so block execution admits it declared.
-        let mut inspector = DeclaredObserver::new(self.trace_args.create_inspector());
+        // It is attached only for `--trace`: otherwise preceding transactions would be recorded
+        // and then discarded.
+        let mut inspector = DeclaredObserver::new(ReplayTracer::from_args(&self.trace_args));
         let mut state =
             StateBuilder::new().with_database(&mut database).with_bundle_update().build();
         let mut block_executor = block_executor_factory.create_executor_with_trusted_inspector(
@@ -521,7 +525,9 @@ impl Cmd {
             .unwrap_or(0);
 
         // The trace covers the target transaction only.
-        block_executor.evm_mut().inspector_mut().0.fuse();
+        if let ReplayTracer::On(tracer) = &mut block_executor.evm_mut().inspector_mut().0 {
+            tracer.fuse();
+        }
         let outcome = block_executor
             .run_transaction(wrapped_tx)
             .map_err(|e| ReplayError::Other(format!("Block execution error: {e}")))?;
@@ -555,13 +561,14 @@ impl Cmd {
             state: evm_state.clone(),
         };
 
-        let trace_data = self.trace_args.is_tracing_enabled().then(|| {
-            self.trace_args.generate_trace(
-                &block_executor.inspector().0,
+        let trace_data = match &block_executor.inspector().0 {
+            ReplayTracer::On(tracer) => Some(self.trace_args.generate_trace(
+                tracer,
                 &result_and_state,
                 block_executor.evm().db(),
-            )
-        });
+            )),
+            ReplayTracer::Off => None,
+        };
 
         let gas_output = block_executor
             .commit_transaction_outcome(outcome)
@@ -712,6 +719,87 @@ fn retrieve_block_env(block: &Block<Transaction>) -> Result<BlockEnv> {
     Ok(block_env)
 }
 
+/// The tracer a replay attaches. Absent unless `--trace` is set.
+enum ReplayTracer {
+    On(revm_inspectors::tracing::TracingInspector),
+    Off,
+}
+
+impl ReplayTracer {
+    fn from_args(args: &run::TraceArgs) -> Self {
+        if args.is_tracing_enabled() {
+            Self::On(args.create_inspector())
+        } else {
+            Self::Off
+        }
+    }
+}
+
+impl<CTX> Inspector<CTX> for ReplayTracer
+where
+    CTX: ContextTr<Journal: JournalExt>,
+{
+    fn step(&mut self, interp: &mut Interpreter, context: &mut CTX) {
+        if let Self::On(inspector) = self {
+            inspector.step(interp, context);
+        }
+    }
+
+    fn step_end(&mut self, interp: &mut Interpreter, context: &mut CTX) {
+        if let Self::On(inspector) = self {
+            inspector.step_end(interp, context);
+        }
+    }
+
+    fn log(&mut self, context: &mut CTX, log: Log) {
+        if let Self::On(inspector) = self {
+            inspector.log(context, log);
+        }
+    }
+
+    fn call(&mut self, context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
+        if let Self::On(inspector) = self {
+            inspector.call(context, inputs)
+        } else {
+            None
+        }
+    }
+
+    fn call_end(&mut self, context: &mut CTX, inputs: &CallInputs, outcome: &mut CallOutcome) {
+        if let Self::On(inspector) = self {
+            inspector.call_end(context, inputs, outcome);
+        }
+    }
+
+    fn create(&mut self, context: &mut CTX, inputs: &mut CreateInputs) -> Option<CreateOutcome> {
+        if let Self::On(inspector) = self {
+            inspector.create(context, inputs)
+        } else {
+            None
+        }
+    }
+
+    fn create_end(
+        &mut self,
+        context: &mut CTX,
+        inputs: &CreateInputs,
+        outcome: &mut CreateOutcome,
+    ) {
+        if let Self::On(inspector) = self {
+            inspector.create_end(context, inputs, outcome);
+        }
+    }
+
+    fn selfdestruct(&mut self, contract: Address, target: Address, value: U256) {
+        if let Self::On(inspector) = self {
+            // The hook takes no context, so the inspector's generic impl cannot be inferred.
+            <revm_inspectors::tracing::TracingInspector as Inspector<
+                mega_evm::MegaContext<revm::database::EmptyDB>,
+            >>::selfdestruct(inspector, contract, target, value);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -812,6 +900,26 @@ mod tests {
         )
         .expect_err("the transaction names a different block");
         assert!(matches!(err, ReplayError::Other(_)));
+    }
+
+    #[test]
+    fn test_replay_attaches_a_tracer_only_when_trace_is_set() {
+        let off = run::TraceArgs::try_parse_from(["mega-evme"]).expect("defaults parse");
+        assert!(matches!(ReplayTracer::from_args(&off), ReplayTracer::Off));
+
+        let on = run::TraceArgs::try_parse_from([
+            "mega-evme",
+            "--trace",
+            "--trace.opcode.disable-stack",
+        ])
+        .expect("trace flags parse");
+        let ReplayTracer::On(inspector) = ReplayTracer::from_args(&on) else {
+            panic!("--trace attaches a tracer");
+        };
+        assert_eq!(
+            inspector.config().record_stack_snapshots,
+            revm_inspectors::tracing::StackSnapshotType::None
+        );
     }
 
     #[test]
