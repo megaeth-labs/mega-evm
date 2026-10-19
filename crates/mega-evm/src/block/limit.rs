@@ -169,16 +169,13 @@ impl ProtocolLimits {
 ///   counts calldata.
 /// - [`block_txs_data_limit`](Self::block_txs_data_limit) is the builder's cap on the protocol's
 ///   data-size budget: the block executor holds a block to the smaller of the two.
-/// - [`block_gas_limit`](Self::block_gas_limit) is the header's: the block executor always sets it
-///   from the block environment.
+///
+/// The block's gas limit is not here: it is the header's, which the block executor takes from the
+/// block environment ([`BlockLimiter::block_gas_limit`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BlockLimits {
     /// The most gas a single transaction may declare. Deposits are exempt.
     pub tx_gas_limit: u64,
-    /// The block's gas limit: a transaction is admitted only if its declared gas limit fits in
-    /// what the block has left. Also the budget the data-availability footprint of the block's
-    /// transactions is held to.
-    pub block_gas_limit: u64,
     /// The most bytes a single transaction's EIP-2718 encoding may take. Deposits are exempt.
     pub tx_encode_size_limit: u64,
     /// The most bytes the block's transaction bodies may take together, uncompressed. Deposits are
@@ -211,7 +208,6 @@ impl BlockLimits {
     pub const fn no_limits() -> Self {
         Self {
             tx_gas_limit: u64::MAX,
-            block_gas_limit: u64::MAX,
             tx_encode_size_limit: u64::MAX,
             block_txs_encode_size_limit: u64::MAX,
             tx_da_size_limit: u64::MAX,
@@ -236,15 +232,6 @@ impl BlockLimits {
     /// Sets the per-transaction gas limit.
     pub const fn with_tx_gas_limit(mut self, limit: u64) -> Self {
         self.tx_gas_limit = limit;
-        self
-    }
-
-    /// Sets the block's gas limit.
-    ///
-    /// The block executor overwrites it with the block environment's gas limit, which is the
-    /// number consensus holds the block to.
-    pub const fn with_block_gas_limit(mut self, limit: u64) -> Self {
-        self.block_gas_limit = limit;
         self
     }
 
@@ -277,11 +264,6 @@ impl BlockLimits {
         self.block_txs_data_limit = limit;
         self
     }
-
-    /// A limiter that holds a block to these limits.
-    pub const fn to_block_limiter(self) -> BlockLimiter {
-        BlockLimiter::new(self)
-    }
 }
 
 /// What one committed transaction adds to a block's counters.
@@ -312,6 +294,11 @@ pub struct BlockUsage {
 pub struct BlockLimiter {
     /// The limits this block is held to.
     pub limits: BlockLimits,
+    /// The block's gas limit, the header's: a transaction is admitted only if its declared gas
+    /// limit fits in what the block has left, and it is also the budget the data-availability
+    /// footprint of the block's transactions is held to. The block executor takes it from the
+    /// block environment; it is no building policy.
+    pub block_gas_limit: u64,
     /// The gas the block's receipts report, which is the block header's gas used.
     pub block_gas_used: u64,
     /// The gas the block's transactions spent, by ledger.
@@ -328,10 +315,12 @@ pub struct BlockLimiter {
 }
 
 impl BlockLimiter {
-    /// A limiter with every counter at zero.
-    pub const fn new(limits: BlockLimits) -> Self {
+    /// A limiter of a block whose gas limit is `block_gas_limit`, held to `limits`, with every
+    /// counter at zero.
+    pub const fn new(limits: BlockLimits, block_gas_limit: u64) -> Self {
         Self {
             limits,
+            block_gas_limit,
             block_gas_used: 0,
             gas: BlockGasCounters { execution: 0, state: 0, history: 0, history_bytes: 0 },
             usage: LimitUsage { data_size: 0, write_records: 0 },
@@ -343,13 +332,13 @@ impl BlockLimiter {
 
     /// The gas the block still has for a transaction's declared gas limit.
     pub const fn available_gas(&self) -> u64 {
-        self.limits.block_gas_limit.saturating_sub(self.block_gas_used)
+        self.block_gas_limit.saturating_sub(self.block_gas_used)
     }
 
     /// The data-availability footprint the block still has. The budget is the block's gas limit,
     /// as the fork's rule states it.
     pub const fn available_da_footprint(&self) -> u64 {
-        self.limits.block_gas_limit.saturating_sub(self.block_da_footprint_used)
+        self.block_gas_limit.saturating_sub(self.block_da_footprint_used)
     }
 
     /// Whether `tx` may execute in this block.
@@ -389,7 +378,7 @@ impl BlockLimiter {
             ));
         }
 
-        if self.block_gas_used.saturating_add(gas_limit) > self.limits.block_gas_limit {
+        if self.block_gas_used.saturating_add(gas_limit) > self.block_gas_limit {
             return Err(BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas {
                 transaction_gas_limit: gas_limit,
                 block_available_gas: self.available_gas(),
@@ -584,7 +573,6 @@ mod tests {
         assert_eq!(BlockLimits::default(), BlockLimits::no_limits());
         let BlockLimits {
             tx_gas_limit,
-            block_gas_limit,
             tx_encode_size_limit,
             block_txs_encode_size_limit,
             tx_da_size_limit,
@@ -593,7 +581,6 @@ mod tests {
         } = BlockLimits::default();
         for limit in [
             tx_gas_limit,
-            block_gas_limit,
             tx_encode_size_limit,
             block_txs_encode_size_limit,
             tx_da_size_limit,
@@ -624,8 +611,7 @@ mod tests {
             .with_tx_encode_size_limit(2)
             .with_block_txs_encode_size_limit(3)
             .with_tx_da_size_limit(4)
-            .with_block_da_size_limit(5)
-            .with_block_gas_limit(6);
+            .with_block_da_size_limit(5);
         assert_eq!(tighter.within(&protocol), tighter, "every cap is below the protocol's");
 
         let looser = BlockLimits::no_limits().with_block_txs_data_limit(3_000);
@@ -638,8 +624,9 @@ mod tests {
         );
     }
 
-    fn limits_with_block_gas(block_gas_limit: u64) -> BlockLimits {
-        BlockLimits::no_limits().with_block_gas_limit(block_gas_limit).with_tx_gas_limit(u64::MAX)
+    /// A limiter of a block whose gas limit is `block_gas_limit`, under no building policy.
+    fn limiter_with_block_gas(block_gas_limit: u64) -> BlockLimiter {
+        BlockLimiter::new(BlockLimits::no_limits(), block_gas_limit)
     }
 
     fn saturated_usage() -> BlockUsage {
@@ -664,7 +651,7 @@ mod tests {
     fn test_pre_execution_check_block_gas_addition_saturates() {
         // Block has very high accumulated usage and a transaction with a near-`u64::MAX`
         // gas limit; unchecked addition would wrap and accidentally pass the limit check.
-        let mut limiter = BlockLimiter::new(limits_with_block_gas(1_000_000));
+        let mut limiter = limiter_with_block_gas(1_000_000);
         limiter.block_gas_used = u64::MAX - 10;
         let result = limiter.pre_execution_check(B256::ZERO, u64::MAX, 0, 0, false);
         assert!(result.is_err(), "saturating_add must keep the rejection in place");
@@ -672,8 +659,10 @@ mod tests {
 
     #[test]
     fn test_pre_execution_check_block_tx_size_addition_saturates() {
-        let mut limiter =
-            BlockLimiter::new(BlockLimits::no_limits().with_block_txs_encode_size_limit(1_000_000));
+        let mut limiter = BlockLimiter::new(
+            BlockLimits::no_limits().with_block_txs_encode_size_limit(1_000_000),
+            u64::MAX,
+        );
         limiter.block_tx_size_used = u64::MAX - 10;
         let result = limiter.pre_execution_check(B256::ZERO, 0, u64::MAX, 0, false);
         assert!(result.is_err());
@@ -681,8 +670,10 @@ mod tests {
 
     #[test]
     fn test_pre_execution_check_block_da_size_addition_saturates() {
-        let mut limiter =
-            BlockLimiter::new(BlockLimits::no_limits().with_block_da_size_limit(1_000_000));
+        let mut limiter = BlockLimiter::new(
+            BlockLimits::no_limits().with_block_da_size_limit(1_000_000),
+            u64::MAX,
+        );
         limiter.block_da_size_used = u64::MAX - 10;
         let result = limiter.pre_execution_check(B256::ZERO, 0, 0, u64::MAX, false);
         assert!(result.is_err());
@@ -690,7 +681,7 @@ mod tests {
 
     #[test]
     fn test_post_execution_update_saturates_all_counters() {
-        let mut limiter = BlockLimiter::new(BlockLimits::no_limits());
+        let mut limiter = BlockLimiter::new(BlockLimits::no_limits(), u64::MAX);
         limiter.block_gas_used = u64::MAX - 1;
         limiter.gas = BlockGasCounters {
             execution: u64::MAX - 1,
@@ -725,7 +716,7 @@ mod tests {
     fn test_post_execution_update_skips_da_for_deposits() {
         // Deposit transactions should not advance the data-availability counters, even when the
         // value would otherwise saturate.
-        let mut limiter = BlockLimiter::new(BlockLimits::no_limits());
+        let mut limiter = BlockLimiter::new(BlockLimits::no_limits(), u64::MAX);
         limiter.block_da_size_used = 100;
         limiter.block_da_footprint_used = 200;
 
@@ -746,7 +737,7 @@ mod tests {
     #[test]
     fn test_data_size_limit_never_refuses_a_deposit_and_counts_it() {
         let mut limiter =
-            BlockLimiter::new(BlockLimits::no_limits().with_block_txs_data_limit(1_000));
+            BlockLimiter::new(BlockLimits::no_limits().with_block_txs_data_limit(1_000), u64::MAX);
         let deposit = BlockUsage {
             usage: LimitUsage { data_size: 600, write_records: 0 },
             is_deposit: true,
@@ -780,7 +771,7 @@ mod tests {
         let cases: [(&str, BlockLimiter, u64, Check); 6] = [
             (
                 "a transaction's own gas limit",
-                BlockLimiter::new(BlockLimits::no_limits().with_tx_gas_limit(LIMIT)),
+                BlockLimiter::new(BlockLimits::no_limits().with_tx_gas_limit(LIMIT), u64::MAX),
                 LIMIT,
                 |limiter, gas_limit| {
                     limiter.pre_execution_check(B256::ZERO, gas_limit, 0, 0, false)
@@ -788,10 +779,7 @@ mod tests {
             ),
             (
                 "the block's gas limit",
-                BlockLimiter {
-                    block_gas_used: USED,
-                    ..BlockLimiter::new(BlockLimits::no_limits().with_block_gas_limit(LIMIT))
-                },
+                BlockLimiter { block_gas_used: USED, ..limiter_with_block_gas(LIMIT) },
                 LIMIT - USED,
                 |limiter, gas_limit| {
                     limiter.pre_execution_check(B256::ZERO, gas_limit, 0, 0, false)
@@ -799,7 +787,10 @@ mod tests {
             ),
             (
                 "a transaction's own encoded size",
-                BlockLimiter::new(BlockLimits::no_limits().with_tx_encode_size_limit(LIMIT)),
+                BlockLimiter::new(
+                    BlockLimits::no_limits().with_tx_encode_size_limit(LIMIT),
+                    u64::MAX,
+                ),
                 LIMIT,
                 |limiter, tx_size| limiter.pre_execution_check(B256::ZERO, 0, tx_size, 0, false),
             ),
@@ -809,6 +800,7 @@ mod tests {
                     block_tx_size_used: USED,
                     ..BlockLimiter::new(
                         BlockLimits::no_limits().with_block_txs_encode_size_limit(LIMIT),
+                        u64::MAX,
                     )
                 },
                 LIMIT - USED,
@@ -816,7 +808,7 @@ mod tests {
             ),
             (
                 "a transaction's own data-availability size",
-                BlockLimiter::new(BlockLimits::no_limits().with_tx_da_size_limit(LIMIT)),
+                BlockLimiter::new(BlockLimits::no_limits().with_tx_da_size_limit(LIMIT), u64::MAX),
                 LIMIT,
                 |limiter, da_size| limiter.pre_execution_check(B256::ZERO, 0, 0, da_size, false),
             ),
@@ -824,7 +816,10 @@ mod tests {
                 "the block's data-availability size",
                 BlockLimiter {
                     block_da_size_used: USED,
-                    ..BlockLimiter::new(BlockLimits::no_limits().with_block_da_size_limit(LIMIT))
+                    ..BlockLimiter::new(
+                        BlockLimits::no_limits().with_block_da_size_limit(LIMIT),
+                        u64::MAX,
+                    )
                 },
                 LIMIT - USED,
                 |limiter, da_size| limiter.pre_execution_check(B256::ZERO, 0, 0, da_size, false),
@@ -864,7 +859,7 @@ mod tests {
             ),
         ];
         for (name, limits, gas_limit, size) in cases {
-            let limiter = BlockLimiter::new(limits);
+            let limiter = BlockLimiter::new(limits, u64::MAX);
             // The one size feeds both the encoded and the data-availability size.
             let check = |is_deposit| {
                 limiter.pre_execution_check(B256::ZERO, gas_limit, size, size, is_deposit)
@@ -873,7 +868,7 @@ mod tests {
             assert!(check(false).is_err(), "{name} over the policy: a transaction is refused");
         }
 
-        let limiter = BlockLimiter::new(limits_with_block_gas(100));
+        let limiter = limiter_with_block_gas(100);
         let err = limiter
             .pre_execution_check(B256::ZERO, 101, 0, 0, true)
             .expect_err("the block's gas limit holds a deposit");
@@ -884,8 +879,10 @@ mod tests {
     /// transaction after it finds the room it used.
     #[test]
     fn test_a_deposit_counts_towards_the_blocks_encoded_size() {
-        let mut limiter =
-            BlockLimiter::new(BlockLimits::no_limits().with_block_txs_encode_size_limit(1_000));
+        let mut limiter = BlockLimiter::new(
+            BlockLimits::no_limits().with_block_txs_encode_size_limit(1_000),
+            u64::MAX,
+        );
         for _ in 0..2 {
             assert!(limiter.pre_execution_check(B256::ZERO, 0, 600, 0, true).is_ok());
             limiter.post_execution_update(&BlockUsage {
@@ -906,7 +903,7 @@ mod tests {
     /// block used.
     #[test]
     fn test_available_gas_is_the_limit_less_what_the_block_used() {
-        let mut limiter = BlockLimiter::new(limits_with_block_gas(1_000));
+        let mut limiter = limiter_with_block_gas(1_000);
         assert_eq!(limiter.available_gas(), 1_000, "an empty block has all of it");
 
         limiter.post_execution_update(&BlockUsage { gas_used: 400, ..Default::default() });
@@ -929,7 +926,7 @@ mod tests {
     /// no check refuses a transaction on them.
     #[test]
     fn test_state_and_history_are_counted_but_not_enforced() {
-        let mut limiter = BlockLimiter::new(BlockLimits::no_limits());
+        let mut limiter = BlockLimiter::new(BlockLimits::no_limits(), u64::MAX);
         let usage = BlockUsage {
             gas: MegaGasUsage {
                 state: 10_000,

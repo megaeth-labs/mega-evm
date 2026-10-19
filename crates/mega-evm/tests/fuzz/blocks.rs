@@ -332,7 +332,7 @@ fn admits_before(limiter: &BlockLimiter, gas_limit: u64, tx_size: u64, is_deposi
     if !is_deposit && gas_limit > limits.tx_gas_limit {
         return false;
     }
-    if limiter.block_gas_used.saturating_add(gas_limit) > limits.block_gas_limit {
+    if limiter.block_gas_used.saturating_add(gas_limit) > limiter.block_gas_limit {
         return false;
     }
     if is_deposit {

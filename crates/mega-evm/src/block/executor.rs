@@ -446,15 +446,14 @@ where
         let block_gas_limit = evm.ctx().block().gas_limit();
         let protocol_limits = ProtocolLimits::for_spec(evm.ctx().spec());
         evm.set_tx_runtime_limits(protocol_limits.tx_runtime_limits);
-        let limits =
-            ctx.block_limits.within(&protocol_limits).with_block_gas_limit(block_gas_limit);
+        let limiter = BlockLimiter::new(ctx.block_limits.within(&protocol_limits), block_gas_limit);
         Self {
             spec,
             receipt_builder,
             ctx,
             evm,
             receipts: Vec::new(),
-            limiter: limits.to_block_limiter(),
+            limiter,
             protocol_limits,
             pre_block_observer: OptionalPreBlockObserver(None),
         }
@@ -1078,7 +1077,7 @@ mod tests {
         );
 
         assert_eq!(executor.evm().block().gas_limit, 30_000_000);
-        assert_eq!(executor.limiter().limits.block_gas_limit, 30_000_000);
+        assert_eq!(executor.limiter().block_gas_limit, 30_000_000);
         assert_eq!(executor.protocol_limits(), &ProtocolLimits::for_spec(MegaSpecId::SATIN));
         assert_eq!(
             executor.evm().tx_runtime_limits().tx_data_size_limit,
