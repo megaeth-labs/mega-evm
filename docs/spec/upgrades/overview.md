@@ -153,7 +153,7 @@ Not yet scheduled
 {% endtabs %}
 
 Unstable; under active development.
-Optimism Karst (Ethereum Osaka) base, [EIP-8037](https://eips.ethereum.org/EIPS/eip-8037) regular gas under a 200,000,000 execution cap with a state-gas reservoir, SALT-scaled state gas, history gas per byte appended, per-transaction limits that stop a transaction with a revert, gas detention on withheld gas, [EIP-7708](https://eips.ethereum.org/EIPS/eip-7708) transfer logs, native [KeylessDeploy](../system-contracts/keyless-deploy.md) creation, system calls on 30,000,000 regular gas plus reservoir, the live system address read by the transaction, block limits as packing budgets, and the EIP-7997 factory.
+Optimism Karst (Ethereum Osaka) base, [EIP-8037](https://eips.ethereum.org/EIPS/eip-8037) regular gas under a 200,000,000 execution cap with a state-gas reservoir, SALT-scaled state gas, history gas per byte appended, limits that stop the frame that crosses them with a revert, gas detention on withheld gas, [EIP-7708](https://eips.ethereum.org/EIPS/eip-7708) transfer logs, native [KeylessDeploy](../system-contracts/keyless-deploy.md) creation, system calls on 30,000,000 regular gas plus reservoir, the live system address read by the transaction, the block's data-size limit as a packing budget, and the EIP-7997 factory.
 
 ## How to Read These Pages
 
