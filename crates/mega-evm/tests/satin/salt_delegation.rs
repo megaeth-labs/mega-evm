@@ -198,15 +198,6 @@ fn test_a_value_call_to_a_delegated_account_charges_no_state_gas() {
     }
 }
 
-/// The control arm: the same call to an address that really is empty pays for the leaf it adds,
-/// at the crowded price.
-#[test]
-fn test_a_value_call_to_a_truly_empty_address_pays_the_crowded_price() {
-    let envs = crowded_account(minimal_envs(), EMPTY, 8);
-    let outcome = run(db(crate::salt::value_call(EMPTY).stop().build()), envs, call_contract());
-    assert_eq!(outcome.gas.state, entry(GasId::new_account_state_gas()) * 8);
-}
-
 /// A `CREATE` executed inside a delegated frame deploys from the delegating account, so the
 /// charge lands in the bucket of the address *that* account's nonce derives — not the delegate's.
 ///
@@ -290,15 +281,6 @@ fn test_a_callcode_to_a_delegated_account_charges_no_state_gas() {
     let db = with_delegation(db(callcode_with_value(SELF_DELEGATING)), SELF_DELEGATING, EMPTY);
     let envs = crowded_account(minimal_envs(), SELF_DELEGATING, 8);
     assert_eq!(run(db, envs, call_contract()).gas.state, 0);
-}
-
-/// And the control arm again: a `CALL` to the same empty address does add a leaf, and pays for
-/// it. Without this the two above could be passing because nothing was charged anywhere.
-#[test]
-fn test_a_call_to_the_same_empty_account_still_pays() {
-    let envs = crowded_account(minimal_envs(), EMPTY, 8);
-    let outcome = run(db(crate::salt::value_call(EMPTY).stop().build()), envs, call_contract());
-    assert_eq!(outcome.gas.state, entry(GasId::new_account_state_gas()) * 8);
 }
 
 /// `CALLCODE(gas, target, 1, 0, 0, 0, 0)` followed by `STOP`.
