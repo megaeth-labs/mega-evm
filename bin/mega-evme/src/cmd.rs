@@ -68,10 +68,7 @@ pub async fn run_cli(args: Vec<OsString>) -> Result<(), Error> {
     let spec_is_default = spec_is_default(&matches);
     let mut cmd = MainCmd::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     if let Some(genesis) = &cmd.genesis {
-        if let Err(e) = use_genesis(genesis.clone()) {
-            eprintln!("{e}");
-            std::process::exit(1);
-        }
+        use_genesis(genesis.clone())?;
         // The file configures Satin alone, so a `run` or `tx` that left `--spec` out runs it.
         if spec_is_default {
             cmd.command.set_spec(MegaSpecId::SATIN.to_string());
@@ -80,58 +77,63 @@ pub async fn run_cli(args: Vec<OsString>) -> Result<(), Error> {
     // The chain is checked before the engine is picked: a run on another chain than the file's is
     // refused for its chain, whatever its spec.
     if let Some(chain_id) = cmd.command.chain_id() {
-        if let Err(e) = check_genesis_chain(chain_id) {
-            eprintln!("{e}");
-            std::process::exit(1);
-        }
+        check_genesis_chain(chain_id)?;
     }
 
     // Whole-block replay runs here for both engines, choosing one per block.
     let engine = match &cmd.command {
         Commands::Replay(replay) if replay.replays_blocks() => Ok(Engine::Satin),
         command => command.engine().await,
-    };
-    let engine = match engine {
-        Ok(engine) => engine,
-        Err(e) => {
-            eprintln!("{e}");
-            std::process::exit(1);
-        }
-    };
+    }?;
     match engine {
         // The released CLI knows no such flag: its engine holds a transaction to its spec's own
         // limits. Refused here rather than left to its parser.
-        Engine::Legacy if cmd.command.limits_override().is_some() => {
-            eprintln!(
-                "{}",
-                EvmeError::InvalidInput(
-                    "--override.limits applies to Satin only: the legacy engine holds a \
-                     transaction to its spec's own limits"
-                        .to_string()
-                )
-            );
-            std::process::exit(1);
-        }
-        Engine::Legacy if cmd.genesis.is_some() => {
-            eprintln!(
-                "{}",
-                EvmeError::InvalidInput(
-                    "--genesis applies to Satin only: the legacy engine runs a chain on its own \
-                     table"
-                        .to_string()
-                )
-            );
-            std::process::exit(1);
-        }
+        Engine::Legacy if cmd.command.limits_override().is_some() => Err(EvmeError::InvalidInput(
+            "--override.limits applies to Satin only: the legacy engine holds a \
+             transaction to its spec's own limits"
+                .to_string(),
+        )
+        .into()),
+        Engine::Legacy if cmd.genesis.is_some() => Err(EvmeError::InvalidInput(
+            "--genesis applies to Satin only: the legacy engine runs a chain on its own \
+             table"
+                .to_string(),
+        )
+        .into()),
         Engine::Legacy => {
-            if let Err(e) = crate::engine::run_legacy(args, spec_is_default).await {
-                eprintln!("{e}");
-                std::process::exit(1);
-            }
-            Ok(())
+            crate::engine::run_legacy(args, spec_is_default).await.map_err(Into::into)
         }
         Engine::Satin => cmd.run().await,
     }
+}
+
+/// How a command error leaves the process after [`write_cli_error`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CliErrorExit {
+    /// The message reached the writer. The process exits 1.
+    Reported,
+    /// The writer is closed. The process exits 0, so a closed pipe is not a panic.
+    Closed,
+}
+
+/// Writes `message` as one line.
+///
+/// A closed pipe is [`CliErrorExit::Closed`]. Any other outcome, including a write that fails
+/// for another reason, is [`CliErrorExit::Reported`].
+pub(crate) fn write_cli_error(mut out: impl std::io::Write, message: &str) -> CliErrorExit {
+    match writeln!(out, "{message}") {
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => CliErrorExit::Closed,
+        _ => CliErrorExit::Reported,
+    }
+}
+
+/// Prints `err` to stderr and exits. A closed stderr exits 0.
+pub fn report_cli_error(err: &Error) -> ! {
+    let code = match write_cli_error(std::io::stderr().lock(), &err.to_string()) {
+        CliErrorExit::Closed => 0,
+        CliErrorExit::Reported => 1,
+    };
+    std::process::exit(code);
 }
 
 /// Whether `run`'s or `tx`'s `--spec` was left at its default. Always `false` for `replay`, which
@@ -197,8 +199,45 @@ impl MainCmd {
         };
         result.map_err(Error::from).inspect_err(|e| {
             error!(err = ?e, "Error executing command");
-            eprintln!("{e}");
-            std::process::exit(1);
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{self, Write};
+
+    use super::{write_cli_error, CliErrorExit};
+
+    /// A writer that refuses every write with `kind`.
+    struct Refuse(io::ErrorKind);
+
+    impl Write for Refuse {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(self.0, "refused"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_a_command_error_is_one_line_on_the_writer() {
+        let mut out = Vec::new();
+        assert_eq!(write_cli_error(&mut out, "Failed to read file"), CliErrorExit::Reported);
+        assert_eq!(out, b"Failed to read file\n");
+    }
+
+    #[test]
+    fn test_a_closed_pipe_is_a_clean_exit() {
+        assert_eq!(
+            write_cli_error(Refuse(io::ErrorKind::BrokenPipe), "Failed to read file"),
+            CliErrorExit::Closed
+        );
+        assert_eq!(
+            write_cli_error(Refuse(io::ErrorKind::PermissionDenied), "Failed to read file"),
+            CliErrorExit::Reported
+        );
     }
 }

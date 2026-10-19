@@ -68,6 +68,10 @@ pub enum EvmeError {
     /// Other error
     #[error("Other error: {0}")]
     Other(String),
+
+    /// A failure the released CLI returned, already rendered the way that CLI prints it on stderr.
+    #[error("{0}")]
+    ReleasedCli(String),
 }
 
 // Implement DBErrorMarker to allow EvmeError to be used as Database error type

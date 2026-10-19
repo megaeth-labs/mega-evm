@@ -139,9 +139,9 @@ fn assert_superset(satin: &serde_json::Value, legacy: &serde_json::Value, name: 
     }
 }
 
-/// An error prints as the engine that ran the command prints it: on a legacy spec exactly as the
-/// 1.7.1 binary did (its `Debug` form to stdout, then `Error: ...` to stderr), on Satin once, to
-/// stderr, as a message. Both exit with code 1.
+/// An error prints once, on stderr, and stdout stays empty. A legacy spec keeps the line the
+/// 1.7.1 binary printed on stderr (`Error:` plus the error's `Debug`). Satin prints the error's
+/// message. Both exit with code 1.
 #[cfg(feature = "legacy")]
 #[test]
 fn test_errors_print_as_their_engine_prints_them() {
@@ -153,8 +153,9 @@ fn test_errors_print_as_their_engine_prints_them() {
 
     let (code, stdout, stderr) = run(&["run", "--codefile", "/nonexistent/code.hex"]);
     assert_eq!(code, Some(1));
-    assert!(stdout.starts_with("Evme(FileRead(Os {"), "{stdout}");
+    assert_eq!(stdout, "");
     assert!(stderr.starts_with("Error: Evme(FileRead(Os {"), "{stderr}");
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
 
     let (code, stdout, stderr) =
         run(&["run", "--codefile", "/nonexistent/code.hex", "--spec", "Satin"]);

@@ -97,11 +97,10 @@ pub async fn run_legacy(mut args: Vec<OsString>, add_default_spec: bool) -> Resu
         args = with_default_spec(args);
     }
     if let Err(e) = mega_evme_legacy::cmd::MainCmd::parse_from(args).run().await {
-        // What the 1.7.1 binary's `main` does with an error its command returns: print it to
-        // stdout, then return it from `main`, which prints it to stderr and exits with code 1.
-        println!("{e:?}");
-        eprintln!("Error: {e:?}");
-        std::process::exit(1);
+        // The released CLI's `main` prints this on stderr (`Error:` plus the error's `Debug`)
+        // and also echoes the `Debug` form to stdout. The text comes back unchanged; this
+        // process prints it once, with every other command error.
+        return Err(EvmeError::ReleasedCli(format!("Error: {e:?}")));
     }
     Ok(())
 }
