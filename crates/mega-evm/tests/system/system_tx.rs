@@ -1,24 +1,25 @@
 //! The system-address transaction: what it may do, what it pays, and what still validates it.
 
 use alloy_evm::Evm;
-use alloy_op_evm::OpTx;
+use alloy_op_evm::{OpTx, OpTxError};
 use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
     system::{
         is_mega_system_transaction_with, IOracle, ISequencerRegistry, MEGA_SYSTEM_ADDRESS,
         MEGA_SYSTEM_TRANSACTION_SOURCE_HASH, ORACLE_CONTRACT_ADDRESS, SEQUENCER_REGISTRY_ADDRESS,
+        SYSTEM_ADDRESS_WITHOUT_SYSTEM_SHAPE,
     },
     test_utils::{op_transaction, ErrorInjectingDatabase, GasInspector, MemoryDatabase},
     EvmTxRuntimeLimits, LimitUsage, MegaContext, MegaEvm, MegaHaltReason, MegaTransaction,
     MegaTransactionOutcome,
 };
 use mega_system_contracts::sequencer_registry::storage_slots::CURRENT_SYSTEM_ADDRESS;
-use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
+use op_revm::{transaction::deposit::DEPOSIT_TRANSACTION_TYPE, OpTransactionError};
 use revm::{
     bytecode::opcode::{SLOAD, STOP},
     context::{
-        result::{EVMError, ExecutionResult},
+        result::{EVMError, ExecutionResult, InvalidTransaction},
         transaction::{AccessList, AccessListItem},
         CfgEnv, TxEnv,
     },
@@ -27,7 +28,7 @@ use revm::{
 };
 
 use crate::common::{
-    account_state_gas, block, body_history, context, state_is_free, system_db, CALLER, GAS_LIMIT,
+    account_state_gas, block, context, state_is_free, system_db, CALLER, GAS_LIMIT,
 };
 
 /// The chain the tests run on.
@@ -247,26 +248,56 @@ fn other_shapes(caller: Address) -> [(&'static str, MegaTransaction); 4] {
     ]
 }
 
-/// A transaction from the system address that does not have the system shape — off the
-/// whitelist, a creation, another type than legacy — is an ordinary transaction: it is not
-/// promoted, so an empty system address cannot pay its fee, and a funded one pays its fee and
-/// its history like any sender.
+/// A transaction from the live system address that does not have the system shape — off the
+/// whitelist, a creation, another type than legacy — is invalid: refused with the same error
+/// whether or not the system address could pay its fee, and changing nothing.
 #[test]
-fn test_another_shape_from_the_system_address_is_an_ordinary_transaction() {
+fn test_another_shape_from_the_live_system_address_is_invalid() {
     let db = || chain_db().account_code(OFF_WHITELIST, Bytes::from_static(&[STOP]));
     for (shape, tx) in other_shapes(MEGA_SYSTEM_ADDRESS) {
-        let refused = rejection(db(), tx.clone());
-        assert!(refused.contains("LackOfFundForMaxFee"), "{shape}: {refused}");
-
-        let mut evm = MegaEvm::new(chain_context(
-            db().account_balance(MEGA_SYSTEM_ADDRESS, U256::from(FUNDS)),
-        ));
-        let outcome = evm.execute_transaction(tx).expect("an ordinary transaction");
-        assert!(outcome.result.is_success(), "{shape}: {:?}", outcome.result);
-        assert!(!evm.ctx().is_system_originated(), "{shape}");
-        assert!(outcome.state[&MEGA_SYSTEM_ADDRESS].info.balance < U256::from(FUNDS), "{shape}");
-        assert!(outcome.gas.history >= body_history(0), "{shape} pays history");
+        for db in [db(), db().account_balance(MEGA_SYSTEM_ADDRESS, U256::from(FUNDS))] {
+            let error = MegaEvm::new(chain_context(db))
+                .execute_transaction(tx.clone())
+                .expect_err("the system address sends the system shape alone");
+            let EVMError::Transaction(OpTxError(OpTransactionError::Base(
+                InvalidTransaction::Str(message),
+            ))) = &error
+            else {
+                panic!("{shape}: not the shape's refusal: {error:?}");
+            };
+            assert_eq!(message, SYSTEM_ADDRESS_WITHOUT_SYSTEM_SHAPE, "{shape}");
+        }
     }
+}
+
+/// A deposit is never of the system shape, so one from the live system address is invalid too,
+/// and op-revm includes a deposit that fails validation as a failed deposit: its sender's nonce
+/// moves by one and its mint is credited, and nothing else happens — its call to the Oracle, which
+/// would accept a write from the system address, never runs.
+#[test]
+fn test_a_deposit_from_the_live_system_address_is_a_failed_deposit() {
+    const MINT: u128 = 7_000;
+    let mut tx =
+        deposit_tx(MEGA_SYSTEM_ADDRESS, TxKind::Call(ORACLE_CONTRACT_ADDRESS), U256::ZERO, MINT);
+    tx.0.base.data = set_slot(ORACLE_SLOT, B256::with_last_byte(0x77));
+    let mut state = State::builder().with_database(chain_db()).build();
+    let mut evm = MegaEvm::new(chain_context(&mut state));
+    let outcome = evm.execute_transaction(tx).expect("a deposit is not refused");
+    assert!(
+        matches!(
+            outcome.result,
+            ExecutionResult::Halt { reason: MegaHaltReason::FailedDeposit, .. }
+        ),
+        "{:?}",
+        outcome.result
+    );
+    drop(evm);
+    state.commit(outcome.state.clone());
+
+    assert_eq!(nonce_of(&mut state, MEGA_SYSTEM_ADDRESS), 1, "the nonce moves by one");
+    let balance = revm::Database::basic(&mut state, MEGA_SYSTEM_ADDRESS).unwrap().unwrap().balance;
+    assert_eq!(balance, U256::from(MINT), "the mint is credited");
+    assert_eq!(oracle_slot(&mut state, ORACLE_SLOT), U256::ZERO, "the Oracle is not written");
 }
 
 /// Every transaction reads the registry when it is validated, whatever its shape and whoever
@@ -846,19 +877,27 @@ fn test_a_deposit_that_creates_a_contract_pays_for_its_caller_too() {
 }
 
 /// A transaction that already carries the system source hash is a deposit by type, so it does
-/// not have the system shape: it runs as the deposit it is, as one carrying the hash from any
-/// other caller does (see `test_a_deposit_from_another_caller_is_untouched`). No promotion is made
-/// for it, so none of the promotion's checks runs: its nonce is not the system address's.
+/// not have the system shape: from the live system address it is a failed deposit, as every
+/// deposit from that address is (see
+/// `test_a_deposit_from_the_live_system_address_is_a_failed_deposit`). No promotion is made for
+/// it, so none of the promotion's checks runs: its nonce is not the system address's.
 ///
 /// A block's transactions are decoded from their legacy encoding, which carries no source hash,
 /// so this is the shape a caller hands the engine directly, not one a block holds.
 #[test]
-fn test_a_transaction_that_arrives_promoted_runs_as_a_deposit() {
+fn test_a_transaction_that_arrives_promoted_is_a_failed_deposit() {
     let mut tx =
         legacy_tx(MEGA_SYSTEM_ADDRESS, TxKind::Call(ORACLE_CONTRACT_ADDRESS), get_slot(), 7);
     tx.0.deposit.source_hash = MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
     let outcome = MegaEvm::new(chain_context(chain_db()))
         .execute_transaction(tx)
         .expect("a deposit is not refused");
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    assert!(
+        matches!(
+            outcome.result,
+            ExecutionResult::Halt { reason: MegaHaltReason::FailedDeposit, .. }
+        ),
+        "{:?}",
+        outcome.result
+    );
 }

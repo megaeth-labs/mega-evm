@@ -11,7 +11,7 @@ use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
 use mega_evm::{
     constants::TX_GAS_LIMIT_CAP,
     history_gas,
-    system::{live_system_address, ORACLE_CONTRACT_ADDRESS},
+    system::{live_system_address, ORACLE_CONTRACT_ADDRESS, SYSTEM_ADDRESS_WITHOUT_SYSTEM_SHAPE},
     test_utils::{op_transaction, MemoryDatabase},
     transaction_body_bytes, validate_transaction_stateless, IntrinsicGas, MegaEvm, MegaSpecId,
     MegaTransaction, WRITE_RECORD_SIZE,
@@ -132,6 +132,22 @@ fn system_shape_from_a_user(gas_limit: u64) -> MegaTransaction {
 
 fn another_shape_from_the_system_address(gas_limit: u64) -> MegaTransaction {
     to_the_oracle(SYSTEM, TransactionType::Eip1559, gas_limit)
+}
+
+fn off_the_whitelist_from_the_system_address(gas_limit: u64) -> MegaTransaction {
+    wrap(tx(TransactionType::Legacy, SYSTEM, TxKind::Call(EXISTING), gas_limit))
+}
+
+fn creation_from_the_system_address(gas_limit: u64) -> MegaTransaction {
+    let mut creation = create(gas_limit);
+    creation.0.base.caller = SYSTEM;
+    creation
+}
+
+fn deposit_from_the_system_address(gas_limit: u64) -> MegaTransaction {
+    let mut deposit = deposit_with_calldata(gas_limit);
+    deposit.0.base.caller = SYSTEM;
+    deposit
 }
 
 /// A database holding what the transactions touch: a funded caller, an existing recipient, the
@@ -274,12 +290,12 @@ fn test_the_helper_and_the_evm_agree_on_what_they_admit() {
         Row::new("a deposit whose floor binds", deposit_with_calldata, None).deposit_like(),
         Row::new("a system-address transaction", system_transaction, Some(SYSTEM)).deposit_like(),
         Row::new("the system shape from a user", system_shape_from_a_user, Some(SYSTEM)),
-        Row::new(
-            "another shape from the system address",
-            another_shape_from_the_system_address,
-            Some(SYSTEM),
-        ),
         Row::new("the system shape with no registry", system_transaction, None),
+        Row::new(
+            "another shape from an address no registry names",
+            another_shape_from_the_system_address,
+            None,
+        ),
     ];
     for row in rows {
         let gas = row.agree();
@@ -315,13 +331,12 @@ fn test_what_the_intrinsic_gas_is_made_of() {
     assert!(helper(call, None).regular < helper(value_to_existing, None).regular);
 
     // A deposit and a system-address transaction pay no history; the same transaction from
-    // anyone else, or of another shape, or with no registry naming its sender, does.
+    // anyone else, or with no registry naming its sender, does.
     assert_eq!(helper(deposit_with_calldata, None).history, 0);
     assert_eq!(helper(system_transaction, Some(SYSTEM)).history, 0);
     // A body priced at a fraction of a gas may round to nothing.
     if !history_is_free() && !history_rounds() {
         assert!(helper(system_shape_from_a_user, Some(SYSTEM)).history > 0);
-        assert!(helper(another_shape_from_the_system_address, Some(SYSTEM)).history > 0);
         assert!(helper(system_transaction, None).history > 0);
     }
 
@@ -385,6 +400,34 @@ fn test_the_helper_and_the_evm_agree_on_what_they_refuse() {
         assert_eq!(helper(build(), None), Err(error.clone()), "the helper");
         assert_eq!(evm(build(), None), Verdict::Refused(error), "the EVM");
     }
+}
+
+/// A transaction from the live system address without the system shape is refused by the helper
+/// and the EVM alike, with the same error; a deposit from it is one the helper says would fail and
+/// the EVM includes as a failed deposit. The same transactions from an address no registry names
+/// are ordinary ones, which the helper admits.
+#[test]
+fn test_the_helper_and_the_evm_refuse_another_shape_from_the_system_address() {
+    let error = format!(
+        "{:?}",
+        OpTransactionError::Base(InvalidTransaction::Str(
+            SYSTEM_ADDRESS_WITHOUT_SYSTEM_SHAPE.into()
+        ))
+    );
+    let rows: [(&str, Build); 3] = [
+        ("an EIP-1559 call to the Oracle", another_shape_from_the_system_address),
+        ("a legacy call off the whitelist", off_the_whitelist_from_the_system_address),
+        ("a legacy creation", creation_from_the_system_address),
+    ];
+    for (name, build) in rows {
+        assert_eq!(helper(build(ROOMY), Some(SYSTEM)), Err(error.clone()), "{name}: the helper");
+        assert_eq!(evm(build(ROOMY), Some(SYSTEM)), Verdict::Refused(error.clone()), "{name}");
+        assert!(helper(build(ROOMY), None).is_ok(), "{name}: from an address no registry names");
+    }
+    let deposit = deposit_from_the_system_address;
+    assert_eq!(helper(deposit(ROOMY), Some(SYSTEM)), Err(error), "a deposit: the helper");
+    assert_eq!(evm(deposit(ROOMY), Some(SYSTEM)), Verdict::FailedDeposit, "a deposit: the EVM");
+    assert!(helper(deposit(ROOMY), None).is_ok(), "a deposit from an address no registry names");
 }
 
 /// Above the execution cap the gas limit is valid when the regular part and the floor fit under

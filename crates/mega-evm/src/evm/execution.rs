@@ -98,9 +98,12 @@ where
 {
     /// [`validate_env`](Handler::validate_env) once the live system address is known: decides
     /// whether the transaction is a system-address transaction — of the system shape, from
-    /// `system_address` — and prepares the common execution layer for it, validates a
-    /// system-address transaction and promotes it to a deposit, then validates the transaction as
-    /// op-revm does.
+    /// `system_address` — and prepares the common execution layer for it, refuses a transaction
+    /// from `system_address` without the system shape, validates a system-address transaction and
+    /// promotes it to a deposit, then validates the transaction as op-revm does.
+    ///
+    /// The layer is prepared before the refusal, so a deposit the refusal turns into a failed
+    /// deposit reports its body as data size, as a deposit that fails any other check does.
     ///
     /// The handler reads the address out of the state, and checks the system address's nonce and
     /// code. What validates a transaction without state
@@ -114,11 +117,9 @@ where
         check_system_account: bool,
     ) -> Result<(), ERROR> {
         let ctx = evm.ctx_mut();
-        let system_transaction = system_address.is_some_and(|address| {
-            crate::system::is_mega_system_transaction_with(ctx.tx(), address)
-        });
-        ctx.on_new_tx(system_transaction);
-        if system_transaction {
+        let verdict = crate::system::classify_system_transaction(ctx.tx(), system_address);
+        ctx.on_new_tx(verdict == Ok(true));
+        if verdict? {
             crate::system::validate_and_promote::<_, _, ERROR>(ctx, check_system_account)?;
         }
         self.op.validate_env(evm)

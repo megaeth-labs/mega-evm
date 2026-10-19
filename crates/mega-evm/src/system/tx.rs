@@ -11,16 +11,12 @@
 //! [`MEGA_SYSTEM_TX_WHITELIST`]. Every transaction reads the live system address out of the
 //! registry when it is validated
 //! ([`load_system_address`](crate::system::load_system_address)), and one of the system shape
-//! whose caller is that address is a system-address transaction. A transaction of any other
-//! shape is never one, whoever sent it: one from the system address is an ordinary transaction,
-//! validated and charged as a user's is.
-//!
-//! "Ordinary" is the engine's view, not the contracts': the Oracle's `onlySystemAddress` tests
-//! the sender alone. So a non-legacy transaction signed by the system key to the Oracle is
-//! accepted by the Oracle, and its writes land, executed as a user's transaction: it pays fees,
-//! is held to every per-transaction limit, is detained, is priced by bucket, and pays history.
-//! Both the legacy engine and this one refused it at validation before the shape test came
-//! first.
+//! whose caller is that address is a system-address transaction. A transaction from that address
+//! of any other shape is invalid ([`SYSTEM_ADDRESS_WITHOUT_SYSTEM_SHAPE`]): the Oracle's
+//! `onlySystemAddress` tests the sender alone, so the system key must send nothing the Oracle
+//! would accept as an ordinary transaction. A deposit is never of the system shape, so a deposit
+//! from the address is invalid too, and op-revm includes it as a failed deposit, which runs no
+//! call. Every other sender is an ordinary one, an address a rotation retired included.
 //!
 //! A deposit is unvalidated by construction, so the engine validates what still matters itself
 //! before promoting the transaction ([`validate_and_promote`]):
@@ -56,6 +52,15 @@ pub const MEGA_SYSTEM_ADDRESS: Address = address!("0xA887dCB9D5f39Ef79272801d05A
 /// The contracts a system-address transaction may call. It may call nothing else and create
 /// nothing.
 pub const MEGA_SYSTEM_TX_WHITELIST: &[Address] = &[ORACLE_CONTRACT_ADDRESS];
+
+/// The message of the [`InvalidTransaction::Str`] a transaction is refused with when it is sent
+/// from the live system address without the system shape ([`has_system_transaction_shape`]).
+///
+/// A transaction other than a deposit is rejected with it, by a pool as by block execution; a
+/// deposit, which op-revm does not refuse for a transaction error, is included as a failed
+/// deposit instead, which bumps its sender's nonce, keeps its mint and runs nothing.
+pub const SYSTEM_ADDRESS_WITHOUT_SYSTEM_SHAPE: &str =
+    "a transaction from the system address must be a legacy call to a whitelisted contract";
 
 /// The `source_hash` of a promoted system-address transaction,
 /// `keccak256("MEGA_SYSTEM_TRANSACTION")`.
@@ -96,6 +101,27 @@ pub fn has_system_transaction_shape(tx_type: u8, tx_kind: TxKind) -> bool {
             TxKind::Create => false,
             TxKind::Call(address) => MEGA_SYSTEM_TX_WHITELIST.contains(&address),
         }
+}
+
+/// Whether `tx` is a system-address transaction when `system_address` is the live system address,
+/// or the error it is refused with when it is sent from the live system address without the
+/// system shape ([`SYSTEM_ADDRESS_WITHOUT_SYSTEM_SHAPE`]).
+///
+/// The system key sends the system shape and nothing else: whatever else it signs — a typed
+/// transaction, a call off the whitelist, a creation — is invalid, and so is a deposit from the
+/// address, which is never of the system shape, and which op-revm then includes as a failed
+/// deposit. An address the registry no longer names, or never named, is an ordinary sender.
+pub(crate) fn classify_system_transaction(
+    tx: &MegaTransaction,
+    system_address: Option<Address>,
+) -> Result<bool, InvalidTransaction> {
+    if system_address != Some(tx.caller()) {
+        return Ok(false);
+    }
+    if !has_system_transaction_shape(tx.tx_type(), tx.kind()) {
+        return Err(InvalidTransaction::Str(SYSTEM_ADDRESS_WITHOUT_SYSTEM_SHAPE.into()));
+    }
+    Ok(true)
 }
 
 /// Whether `tx` was produced by the protocol itself rather than by a user, when `system_address`

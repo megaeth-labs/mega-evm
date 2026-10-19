@@ -103,8 +103,10 @@ impl IntrinsicGas {
 ///
 /// `system_address` is the live system address: the one the `SequencerRegistry` names in the
 /// state the pool validates against ([`live_system_address`](crate::system::live_system_address)).
-/// A transaction of the system shape from it is a system-address transaction; with `None`, no
-/// transaction is.
+/// A transaction of the system shape from it is a system-address transaction, and one of another
+/// shape from it is refused
+/// ([`SYSTEM_ADDRESS_WITHOUT_SYSTEM_SHAPE`](crate::system::SYSTEM_ADDRESS_WITHOUT_SYSTEM_SHAPE));
+/// with `None`, no transaction is either.
 ///
 /// The address changes only in a block's pre-block step, which applies a change the registry's
 /// admin scheduled in an earlier block, and it then holds for every transaction of that block. So

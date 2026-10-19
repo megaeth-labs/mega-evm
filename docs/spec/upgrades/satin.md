@@ -703,7 +703,7 @@ An out-of-gas step halts the call, consuming its regular gas.
 
 - The system address is resolved per block from `SequencerRegistry.currentSystemAddress()` after the pre-block changes commit.
 - A Mega System Transaction is a legacy transaction from that address to a contract on `MEGA_SYSTEM_TX_WHITELIST`.
-- A transaction from the system address without that shape is refused.
+- A transaction from the system address without that shape is refused, with an error that is not a transaction's: a deposit from the system address is refused the same way rather than included as a failed deposit, so a block that holds one cannot be executed.
 
 #### New behavior
 
@@ -716,9 +716,9 @@ An out-of-gas step halts the call, consuming its regular gas.
   It lands in the transaction's returned state, and so in the block's witness, whatever the pre-block states also hold of the registry; it does not load the registry's code, but the witness carries that code as it carries the code of every account the block loads (see [The Stateless Witness](#22-the-stateless-witness)), and the Oracle's own check of its caller runs it.
 - A transaction of the system shape whose caller is the live system address is a Mega System Transaction.
   A registry that is absent, holds other code, or names the zero address names no live system address, and MUST make no transaction a Mega System Transaction.
-- A transaction of any other shape is never a Mega System Transaction, whoever sent it.
-  A transaction from the system address without the shape is an ordinary transaction, validated and charged as a user's.
-  The Oracle authorizes writes on the sender alone, so such a transaction to the Oracle succeeds as a user transaction: it pays fees, is held to every per-transaction limit, is detained, is priced by bucket, and pays history gas.
+- A transaction from the live system address without the system shape MUST be invalid, whatever its type, a deposit included: a transaction other than a deposit is rejected, and a deposit, which is never of the system shape, is included as a failed deposit, which runs no call (see [Transaction and Block Refusals](#21-transaction-and-block-refusals)).
+  The Oracle authorizes writes on the sender alone, so no transaction from the system address other than a Mega System Transaction reaches the Oracle.
+- A transaction from any other address is never a Mega System Transaction, and is an ordinary transaction, validated and charged as a user's: that includes a transaction from an address a rotation retired, which is no longer the live system address.
 - A Mega System Transaction is validated (chain id, nonce, EIP-3607) and promoted to a deposit exactly as in Rex6.
 - Because a role change can only be scheduled for a later block — the registry refuses an activation block at or before the current one — and is applied by that block's pre-block call, every transaction of a block reads the address the block's pre-block step left; a call to `applyPendingChanges()` inside the block, which anyone may make, finds no change due that the pre-block step did not apply.
 - A registry read the node fails to make gives the transaction no outcome (see [Transaction and Block Refusals](#21-transaction-and-block-refusals)).
@@ -827,6 +827,7 @@ A transaction MUST be rejected before inclusion when:
 
 - its gas limit is below its intrinsic regular gas plus the history gas of its body (`CallGasCostMoreThanGasLimit`);
 - its floor exceeds its gas limit, or, above the execution cap, its intrinsic regular gas or floor exceeds the cap (`GasFloorMoreThanGasLimit`);
+- it is sent from the live system address and does not have the system shape (see [The Live System Address](#17-the-live-system-address));
 - it is a Mega System Transaction that fails the chain-id, nonce or EIP-3607 check;
 - it fails any inherited validation.
 
@@ -1017,7 +1018,7 @@ Satin changes nothing about blocks under earlier specs: a node replaying history
 Satin is a restatement rather than a delta, so a Rex6 rule this page does not carry over — the compute-gas limit, the storage-gas formulas, the sandbox, the 98/100 forwarding, the cold first touch of preload-warm addresses — does not apply to Satin blocks.
 
 The six system contracts keep their Rex6 bytecode and ABI, but for the four errors `IKeylessDeploy` no longer declares; the Satin deploy step refuses, rather than upgrades, any other code at their addresses.
-A system-address transaction without the system shape is now executed as a user transaction instead of being refused; only the holder of the system key can send one.
+A transaction from the live system address without the system shape is refused, as in Rex6, now as an invalid transaction: a deposit from the system address, which Rex6 refused with an error that left its block unexecutable, is a failed deposit, so the engine no longer depends on the L1 portal refusing deposits from each system address a rotation installs.
 
 The per-transaction and block limits and the detention caps are protocol values fixed by the spec, not chain configuration, so every node executing any chain holds its Satin blocks to the same ones: the data-size limits at 13,107,200 bytes and the detention caps at 20,000,000 each.
 No chain can set a limit that stops the block's L1 attributes deposit, whose data size is its body, its calldata and a write record for each slot of the L1 block contract it changes: 526 bytes on recorded mainnet blocks within one L1 origin.

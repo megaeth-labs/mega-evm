@@ -37,7 +37,7 @@ pub use timestamp::*;
 pub use tx::*;
 
 pub(crate) use intercept::intercept;
-pub(crate) use tx::validate_and_promote;
+pub(crate) use tx::{classify_system_transaction, validate_and_promote};
 
 #[cfg(test)]
 mod tests {
