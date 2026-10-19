@@ -217,10 +217,10 @@ pub trait MegaHardforks: OpHardforks {
     ///   total-difficulty condition would silently never activate the fork.
     /// - Every fork Satin runs on that the schedule activates by timestamp — the Ethereum forks
     ///   from Shanghai to Osaka and the Optimism forks from Regolith to Karst — is active at
-    ///   Satin's activation, so the engine and the rest of the node, which reads the same
-    ///   schedule, do not apply different rules to one block. The other half of that timing rule,
-    ///   that Jovian, Karst and Osaka do not activate before Satin, is the node's to check: before
-    ///   Satin the chain runs its pre-Satin engine, which this crate does not execute.
+    ///   Satin's activation, so the engine and the rest of the node, which reads the same schedule,
+    ///   do not apply different rules to one block. The other half of that timing rule, that
+    ///   Jovian, Karst and Osaka do not activate before Satin, is the node's to check: before Satin
+    ///   the chain runs its pre-Satin engine, which this crate does not execute.
     /// - The parameters every scheduled fork requires are attached, and their values pass their
     ///   type's own checks ([`require_params`](Self::require_params)). Satin requires
     ///   [`SequencerRegistryConfig`](crate::system::SequencerRegistryConfig) so the registry can be

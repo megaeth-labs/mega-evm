@@ -883,10 +883,10 @@ where
                         logs: ctx.result.into_logs(),
                     };
 
-                    // Satin executes only at or after Karst, which includes Canyon, and the schedule
-                    // check refuses a schedule in which Canyon is not active when Satin activates:
-                    // every deposit receipt carries Canyon's receipt version, which says how the
-                    // receipt hash is computed.
+                    // Satin executes only at or after Karst, which includes Canyon, and the
+                    // schedule check refuses a schedule in which Canyon is not active when Satin
+                    // activates: every deposit receipt carries Canyon's receipt version, which
+                    // says how the receipt hash is computed.
                     self.receipt_builder.build_deposit_receipt(OpDepositReceipt {
                         inner: receipt,
                         deposit_nonce: depositor_nonce,
