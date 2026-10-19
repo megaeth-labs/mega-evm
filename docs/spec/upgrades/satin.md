@@ -966,6 +966,7 @@ A node, a stateless validator and a replay tool must agree on everything below, 
 
 - **The execution configuration.**
   The spec fixes part of the configuration a transaction runs on, whatever a node supplies: the Satin gas schedule, EIP-8037, EIP-2780 and EIP-7708 on, the 200,000,000 execution cap, and the 512 KiB and 1 MiB code-size limits.
+  A node build must not enable the `mega-evm/satin-price-override` feature (it reads `MEGA_SATIN_CPSB` / `MEGA_SATIN_CPHB` at run time).
   A node that reads the configuration before it executes anything — gas estimation reads the execution cap — must read these values, not its own.
   The per-transaction limits and detention caps are the chain's, and an execution outside a block uses them only if it is built on the chain's schedule: the reference implementation builds such an execution on the protocol's defaults when it is given no schedule, a schedule that carries no values at the block's timestamp, or one whose values fail the load-time checks, where block execution refuses the block instead.
   A node that loads its configuration under those checks and builds every execution on it never meets the last two cases for a block in which Satin is active, and its calls and estimates stop what its blocks stop.
