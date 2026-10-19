@@ -23,7 +23,7 @@ use crate::{
         tx::{DeployAddress, Encoding, InitSize, Override, Shape, SignerCode},
         Value,
     },
-    harness::{check, fail, print_tally, prop_check, prop_eq, runs_at_measurement_prices},
+    harness::{check, fail, print_tally, prop_check, prop_eq, require_coverage},
     render::render_outcome,
 };
 
@@ -293,35 +293,36 @@ fn test_property_a_keyless_deployment_follows_its_rules() {
     });
     let tally = tally.into_inner().unwrap();
     print_tally("keyless_deployment_follows_its_rules", tally.iter().map(|(k, n)| (k, *n)));
-    // A bounded run at the spec's byte prices reaches every class below. At another price a class
-    // can be unreachable — a large initcode is refused before `InitCodeTooLarge` — so the tally
-    // above stands and the minimum binds only at the constants. The signer's own code spending a
-    // nonce needs a delegated signer whose code bumps a nonce, which these cases do not draw, so
-    // that class is checked when a case reaches it and is not required here.
-    if !runs_at_measurement_prices() {
-        for class in [
-            "refused NoEtherTransfer",
-            "refused MalformedEncoding",
-            "refused NotContractCreation",
-            "refused NotPreEIP155",
-            "refused NonZeroTxNonce",
-            "refused InitCodeTooLarge",
-            "refused GasLimitTooLow",
-            "refused InvalidSignature",
-            "refused SignerNonceTooHigh",
-            "refused SignerHasCode",
-            "refused ContractAlreadyExists",
-            "refused InsufficientBalance",
-            "refused MegaLimitExceeded",
-            "deployed",
-            "the creation fails: ExecutionReverted",
-            "the creation fails: ExecutionHalted",
-            "the creation fails: EmptyCodeDeployed",
-            "  the creation's bump is taken back from nonce 1",
-            "  init code at the initcode size limit started its creation",
-        ] {
-            let hits = tally.get(class).copied().unwrap_or(0);
-            assert!(hits > 0, "{class} was never reached\n{tally:#?}");
-        }
-    }
+    // The default bounded run at the spec's byte prices reaches every class below, and fails if
+    // one is missed. Any other run (a named seed or count, the long mode) draws cases nobody has
+    // checked, so a missed class is printed as a note; at another byte price a class can be
+    // unreachable — a large initcode is refused before `InitCodeTooLarge`. The signer's own code
+    // spending a nonce needs a delegated signer whose code bumps a nonce, which these cases do
+    // not draw, so that class is checked when a case reaches it and is not required here.
+    let missing: Vec<String> = [
+        "refused NoEtherTransfer",
+        "refused MalformedEncoding",
+        "refused NotContractCreation",
+        "refused NotPreEIP155",
+        "refused NonZeroTxNonce",
+        "refused InitCodeTooLarge",
+        "refused GasLimitTooLow",
+        "refused InvalidSignature",
+        "refused SignerNonceTooHigh",
+        "refused SignerHasCode",
+        "refused ContractAlreadyExists",
+        "refused InsufficientBalance",
+        "refused MegaLimitExceeded",
+        "deployed",
+        "the creation fails: ExecutionReverted",
+        "the creation fails: ExecutionHalted",
+        "the creation fails: EmptyCodeDeployed",
+        "  the creation's bump is taken back from nonce 1",
+        "  init code at the initcode size limit started its creation",
+    ]
+    .into_iter()
+    .filter(|class| tally.get(*class).copied().unwrap_or(0) == 0)
+    .map(str::to_string)
+    .collect();
+    require_coverage("keyless_deployment_follows_its_rules", CASES, &missing);
 }
