@@ -160,13 +160,13 @@ The output uses the same JSON format as prestate files, so you can feed it direc
 Each top-level key is a checksummed or lowercase hex address.
 The value is an account object with these fields:
 
-| Field      | Type         | Description                       |
-| ---------- | ------------ | --------------------------------- |
-| `balance`  | hex quantity | Account balance in wei            |
-| `nonce`    | hex quantity | Transaction nonce                 |
-| `code`     | hex bytes    | Deployed bytecode (`0x` for EOAs) |
-| `codeHash` | hex bytes    | Keccak256 hash of `code`          |
-| `storage`  | object       | Map of storage slot to value      |
+| Field      | Type                | Description                                                                 |
+| ---------- | ------------------- | --------------------------------------------------------------------------- |
+| `balance`  | hex quantity        | Account balance in wei                                                      |
+| `nonce`    | hex quantity        | Transaction nonce                                                           |
+| `code`     | hex bytes or `null` | Deployed bytecode (`0x` for EOAs); `null` names the code by `codeHash` only |
+| `codeHash` | hex bytes           | Keccak256 hash of `code`                                                    |
+| `storage`  | object              | Map of storage slot to value                                                |
 
 Example:
 
@@ -200,6 +200,22 @@ All numeric values use Ethereum quantity encoding:
 - No leading zeros, except `0x0` for zero.
 - `balance` is in wei.
 - Storage keys and values are 32-byte hex strings (zero-padded to 64 hex characters).
+
+An account with `"code": null` and a `codeHash` that is not the empty code's names its code by hash only.
+A state dump writes such an account when the code was never fetched, and loads the code into the dump first whenever the database has it.
+Loading a file that holds one:
+
+- With `--fork`, the code is fetched from the RPC endpoint at the account's address and checked against `codeHash`.
+  A code that does not match is an error.
+- Without `--fork`, there is nothing to fetch it from, and the file is refused with an error naming the account.
+  Put the code in the file, or run with `--fork`.
+
+A `code` that is present is checked against `codeHash` and refused if they differ.
+
+### Overrides
+
+`--balance`, `--faucet` and `--storage` name one field of an account and leave the others as the prestate or the fork holds them.
+They hold for an account `run` or `tx` adds code to afterwards: the `run` receiver and the system contracts.
 
 ## RPC Cache and Retry
 

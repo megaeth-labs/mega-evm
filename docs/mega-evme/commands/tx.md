@@ -85,6 +85,18 @@ The output includes the same fields as [`run --json`](run.md#json-output) (with 
 | --------- | ---------------- | --------------------------------------------------------------------------- |
 | `receipt` | `object \| null` | Full transaction receipt with status, logs, gas usage, and contract address |
 
+The receipt's `transactionHash`, and the `transactionHash` of each of its logs, is the hash of the transaction that ran:
+
+- A raw transaction run as it is signed prints its own hash.
+- A deposit built from flags prints the hash of its encoding, which holds `--source-hash` and `--mint`, so deposits that differ in either print different hashes.
+- Any other transaction built from flags prints the zero hash.
+  `mega-evme` signs nothing, so there is no hash for it to print.
+- A raw transaction that a flag changed prints the zero hash, because the signed bytes no longer encode what ran.
+
+`transactionIndex` is 0 and `logIndex` counts from 0, as the transaction is alone in its block.
+Changing only the type of a raw transaction (`--tx-type`) runs it as that type: the priority fee, access list and authorization list the new type cannot carry are dropped.
+A flag that names one of them for a type that cannot carry it is refused.
+
 ```bash
 mega-evme tx --fork --rpc https://mainnet.megaeth.com/rpc \
   --sender.balance 1ether \

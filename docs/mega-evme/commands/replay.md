@@ -43,7 +43,7 @@ mega-evme replay --rpc https://mainnet.megaeth.com/rpc <TX_HASH>
 `mega-evme replay` supports a transport-level JSON-RPC fixture mechanism that records every request/response pair to a single file and serves them back on later runs without touching the network.
 It is useful for pinning a reproducible replay (e.g. for regression tests, debugging sessions, or offline review) and for running `replay` in environments that cannot reach the RPC endpoint.
 
-Unlike the generic [RPC Cache](../configuration/state-management.md#rpc-cache-and-retry), which is keyed on a small allow-list of cacheable methods and stored per chain under the platform cache directory, the cache file covers every single (non-batch) JSON-RPC call issued during the replay and lives at a user-chosen path.
+Unlike the generic [RPC Cache](../configuration/state-management.md#rpc-cache-and-retry), which is keyed on a small allow-list of cacheable methods and stored per endpoint under the platform cache directory, the cache file covers every single (non-batch) JSON-RPC call issued during the replay and lives at a user-chosen path.
 
 The mechanism has two modes, selected by two mutually exclusive flags.
 
@@ -54,6 +54,8 @@ Capture mode. Requires `--rpc`.
 On the first run, every JSON-RPC request and response issued while serving the replay is captured in memory and the complete envelope is written to `<PATH>` atomically on clean exit.
 On subsequent runs the existing file is loaded, its entries are merged into the in-memory transport cache, and only missing requests are fetched from the RPC endpoint.
 The updated set of entries is persisted back to the same file on clean exit.
+`mega-evme` reads back at most 64 MiB of cache file, so it writes no more than that: a capture that would grow the file past the limit fails with an error and leaves the file as it was.
+Capture into a new file, or delete the old one.
 
 The file also embeds an external-environment snapshot — currently the set of `--bucket-capacity` values in effect — so the captured fixture is self-contained.
 If `--bucket-capacity` is not passed on a subsequent run, the previous envelope's values are reused; passing `--bucket-capacity` overrides them.
@@ -88,6 +90,12 @@ Replay the captured transaction fully offline:
 ```bash
 mega-evme replay --rpc.replay-file ./fixtures/tx.json 0xabc123...
 ```
+
+## The Receipt of a Replayed Transaction
+
+`replay <TX_HASH>` runs the transactions the block included before the target, then the target, and prints the target's receipt.
+A transaction the block executor refuses is skipped, and the receipt's `transactionIndex` counts the transactions that were included.
+Each log carries its transaction's index and hash, and its `logIndex` counts from the first log of the block: the logs of the earlier transactions that were included come first.
 
 ## Self-Validating Fixture Dump
 
