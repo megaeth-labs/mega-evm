@@ -269,9 +269,7 @@ impl BlockLimits {
 /// What one committed transaction adds to a block's counters.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BlockUsage {
-    /// The gas the receipt reports.
-    pub gas_used: u64,
-    /// The gas by ledger.
+    /// The gas by ledger, and the gas the receipt reports ([`MegaGasUsage::gas_used`]).
     pub gas: MegaGasUsage,
     /// The data-size bytes and write records the transaction kept.
     pub usage: LimitUsage,
@@ -323,7 +321,7 @@ impl BlockLimiter {
             block_gas_limit,
             block_gas_used: 0,
             gas: BlockGasCounters { execution: 0, state: 0, history: 0, history_bytes: 0 },
-            usage: LimitUsage { data_size: 0, write_records: 0 },
+            usage: LimitUsage::ZERO,
             block_tx_size_used: 0,
             block_da_size_used: 0,
             block_da_footprint_used: 0,
@@ -463,11 +461,9 @@ impl BlockLimiter {
     /// Every counter saturates: a block that has already crossed a limit stays crossed, and the
     /// check before the next transaction sees it.
     pub fn post_execution_update(&mut self, usage: &BlockUsage) {
-        self.block_gas_used = self.block_gas_used.saturating_add(usage.gas_used);
+        self.block_gas_used = self.block_gas_used.saturating_add(usage.gas.gas_used);
         self.gas.record(&usage.gas);
-        self.usage.data_size = self.usage.data_size.saturating_add(usage.usage.data_size);
-        self.usage.write_records =
-            self.usage.write_records.saturating_add(usage.usage.write_records);
+        self.usage = self.usage.saturating_add(usage.usage);
         self.block_tx_size_used = self.block_tx_size_used.saturating_add(usage.tx_size);
         if !usage.is_deposit {
             self.block_da_size_used = self.block_da_size_used.saturating_add(usage.da_size);
@@ -636,8 +632,8 @@ mod tests {
 
     fn saturated_usage() -> BlockUsage {
         BlockUsage {
-            gas_used: u64::MAX,
             gas: MegaGasUsage {
+                gas_used: u64::MAX,
                 regular: u64::MAX,
                 state: u64::MAX,
                 history: u64::MAX,
@@ -911,7 +907,10 @@ mod tests {
         let mut limiter = limiter_with_block_gas(1_000);
         assert_eq!(limiter.available_gas(), 1_000, "an empty block has all of it");
 
-        limiter.post_execution_update(&BlockUsage { gas_used: 400, ..Default::default() });
+        limiter.post_execution_update(&BlockUsage {
+            gas: MegaGasUsage { gas_used: 400, ..Default::default() },
+            ..Default::default()
+        });
         assert_eq!(limiter.available_gas(), 600);
 
         let err = limiter
@@ -923,7 +922,10 @@ mod tests {
         );
 
         // The block cannot owe gas: a counter past the limit reports nothing left.
-        limiter.post_execution_update(&BlockUsage { gas_used: u64::MAX, ..Default::default() });
+        limiter.post_execution_update(&BlockUsage {
+            gas: MegaGasUsage { gas_used: u64::MAX, ..Default::default() },
+            ..Default::default()
+        });
         assert_eq!(limiter.available_gas(), 0);
     }
 

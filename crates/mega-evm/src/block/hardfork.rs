@@ -477,8 +477,10 @@ impl MegaHardforkConfig {
     }
 
     /// Attaches `params` to their fork's entry, replacing a value of the same type and keeping
-    /// the values of every other type.
-    fn attach<P: HardforkParams>(mut self, params: P) -> Self {
+    /// the values of every other type. The value is not checked: a caller that does not go
+    /// through [`with_params`](Self::with_params) checks the schedule it builds
+    /// ([`validate_schedule`](MegaHardforks::validate_schedule)).
+    pub(super) fn attach<P: HardforkParams>(mut self, params: P) -> Self {
         let entry = self
             .entries
             .iter_mut()

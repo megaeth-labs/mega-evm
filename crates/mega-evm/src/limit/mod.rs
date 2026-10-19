@@ -496,15 +496,10 @@ impl LimitStop {
         result: &ExecutionResult<HaltReason>,
         limit_exceeded: Option<&LimitCheck>,
     ) -> Option<Self> {
-        let Some(&LimitCheck::ExceedsLimit { kind, limit, used, .. }) = limit_exceeded else {
-            return None;
-        };
+        let stop = limit_exceeded?;
+        let &LimitCheck::ExceedsLimit { kind, limit, used, .. } = stop else { return None };
         let ExecutionResult::Revert { output, .. } = result else { return None };
-        (decode_mega_limit_exceeded(output) == Some((kind, limit))).then_some(Self {
-            kind,
-            limit,
-            used,
-        })
+        (*output == stop.revert_data()).then_some(Self { kind, limit, used })
     }
 }
 

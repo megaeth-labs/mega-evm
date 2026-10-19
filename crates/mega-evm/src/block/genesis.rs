@@ -20,8 +20,7 @@ use serde::{
 };
 
 use crate::{
-    system::SequencerRegistryConfig, HardforkParams, MegaHardfork, MegaHardforkConfig,
-    MegaHardforks, ScheduleError,
+    system::SequencerRegistryConfig, MegaHardfork, MegaHardforkConfig, MegaHardforks, ScheduleError,
 };
 
 /// The key of Satin's activation timestamp.
@@ -86,12 +85,12 @@ const ARBITRARY_PRECISION_NUMBER: &str = "$serde_json::private::Number";
 ///   does, and so does a node that serializes its chain-config type — reads the last value and
 ///   refuses nothing.
 /// - A value of the wrong type is refused, naming its key; a value its params type refuses
-///   ([`HardforkParams::validate`]) is refused, and so is a schedule
-///   [`validate_schedule`](MegaHardforks::validate_schedule) refuses. One object is read as an
-///   integer: `{"$serde_json::private::Number": "<digits>"}`, the form `serde_json` hands a number
-///   over in when its `arbitrary_precision` feature is on. A deserializer shows that form and the
-///   same object written into the file alike, so both are read as the number; every reader parses
-///   here, so every reader reads it the same.
+///   ([`HardforkParams::validate`](crate::HardforkParams::validate)) is refused, and so is a
+///   schedule [`validate_schedule`](MegaHardforks::validate_schedule) refuses. One object is read
+///   as an integer: `{"$serde_json::private::Number": "<digits>"}`, the form `serde_json` hands a
+///   number over in when its `arbitrary_precision` feature is on. A deserializer shows that form
+///   and the same object written into the file alike, so both are read as the number; every reader
+///   parses here, so every reader reads it the same.
 ///
 /// The parser reads no other fork's key. Satin runs on the OP Karst fork and the Ethereum forks
 /// Karst includes, Osaka among them, and [`hardforks`](Self::hardforks) schedules those at genesis.
@@ -171,25 +170,16 @@ impl SatinChainConfig {
     ///
     /// # Errors
     ///
-    /// A params value its type refuses ([`HardforkParams::validate`]), or a schedule
+    /// A params value its type refuses
+    /// ([`HardforkParams::validate`](crate::HardforkParams::validate)), or a schedule
     /// [`validate_schedule`](MegaHardforks::validate_schedule) refuses.
     pub fn hardforks(&self) -> Result<MegaHardforkConfig, ScheduleError> {
-        checked(&self.sequencer_registry)?;
         let schedule = MegaHardforkConfig::new()
             .with(MegaHardfork::Satin, ForkCondition::Timestamp(self.activation_time))
-            .with_params(self.sequencer_registry);
+            .attach(self.sequencer_registry);
         schedule.validate_schedule()?;
         Ok(schedule)
     }
-}
-
-/// Refuses `params` its type refuses, as [`MegaHardforks::require_params`] reports it.
-fn checked<P: HardforkParams>(params: &P) -> Result<(), ScheduleError> {
-    params.validate().map_err(|error| ScheduleError::InvalidParams {
-        fork: P::FORK,
-        params: P::NAME,
-        message: error.message,
-    })
 }
 
 impl Serialize for SatinChainConfig {

@@ -277,7 +277,6 @@ impl<T> MegaBlockTxResult<T> {
     /// What this transaction adds to the block's counters.
     pub const fn block_usage(&self) -> BlockUsage {
         BlockUsage {
-            gas_used: self.inner.gas.gas_used,
             gas: self.inner.gas,
             usage: self.inner.usage,
             tx_size: self.tx_size,
