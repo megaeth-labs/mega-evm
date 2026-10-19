@@ -1469,9 +1469,10 @@ fn test_a_refused_read_reverts_the_frame_and_charges_its_static_gas() {
     }
 }
 
-/// The refusal of a `SLOTNUM` names access type 12, one past the contract's enum; the others name
-/// their enum variant, `BLOCKHASH`'s the hash it reads (7), as on the legacy engine, although
-/// revm's instruction loads the block number first.
+/// The refusal names its enum variant, `BLOCKHASH`'s the hash it reads (7), as on the legacy
+/// engine, although revm's instruction loads the block number first. The `SLOTNUM` refusal, access
+/// type 12, one past the contract's enum, is pinned by the access-control tests and the decoder's
+/// unit test.
 #[test]
 fn test_the_refusal_names_the_access_type() {
     use mega_evm::system::{IMegaAccessControl, VolatileDataAccessType};
@@ -1488,14 +1489,6 @@ fn test_the_refusal_names_the_access_type() {
         );
     }
     assert_eq!(VolatileDataAccessType::BlockHash as u8, 7);
-    let slot_num = volatile_data_access_disabled_revert_data(VolatileDataAccess::SLOT_NUM);
-    assert_eq!(&slot_num[..4], IMegaAccessControl::VolatileDataAccessDisabled::SELECTOR.as_slice());
-    assert_eq!(U256::from_be_slice(&slot_num[4..]), U256::from(12));
-    assert_eq!(mega_evm::system::SLOT_NUM_ACCESS_TYPE, 12);
-    assert_eq!(
-        mega_evm::decode_volatile_data_access_disabled(&slot_num),
-        Some(VolatileDataAccess::SLOT_NUM)
-    );
 }
 
 /// The switch holds for the frame it is off from and every frame below, and a frame above it

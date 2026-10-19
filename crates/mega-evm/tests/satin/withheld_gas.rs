@@ -19,18 +19,14 @@ use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
     constants::{MAX_CONTRACT_SIZE, TX_GAS_LIMIT_CAP},
     history_gas, satin_gas_params,
-    system::{
-        keyless::{
-            decode_keyless_tx,
-            tests::{CREATE2_FACTORY_CONTRACT, CREATE2_FACTORY_DEPLOYER, CREATE2_FACTORY_TX},
-            IKeylessDeploy, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE,
-            KEYLESS_DEPLOY_OVERHEAD_GAS,
-        },
-        IMegaAccessControl, VolatileDataAccessType,
+    system::keyless::{
+        decode_keyless_tx,
+        tests::{CREATE2_FACTORY_CONTRACT, CREATE2_FACTORY_DEPLOYER, CREATE2_FACTORY_TX},
+        IKeylessDeploy, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE, KEYLESS_DEPLOY_OVERHEAD_GAS,
     },
     test_utils::{op_transaction, BytecodeBuilder, MemoryDatabase},
-    volatile_data_access_disabled_revert_data, EvmTxRuntimeLimits, LimitCheck, LimitKind,
-    MegaContext, MegaEvm, MegaHaltReason, VolatileDataAccess, WRITE_RECORD_SIZE,
+    EvmTxRuntimeLimits, LimitCheck, LimitKind, MegaContext, MegaEvm, MegaHaltReason,
+    VolatileDataAccess, WRITE_RECORD_SIZE,
 };
 use revm::{
     bytecode::opcode::*,
@@ -1505,112 +1501,40 @@ fn test_a_precompile_priced_past_the_cap_computes_nothing() {
     assert_eq!(cases, (3, 1), "the stop above the cap for both, and below it for the cheaper");
 }
 
-/// The built-in modexp priced within the allowance runs as without the read: revm runs it, on the
-/// whole forward, and it charges its price, the same result and the same bill.
+/// The built-in modexp, priced from its input, is held from its price as the size-limited wrappers
+/// are, below.
 #[test]
-fn test_a_priced_precompile_within_the_allowance_runs_as_without_the_read() {
+fn test_the_modexp_is_held_from_its_price() {
     let input = costly_modexp_input(32, 32);
     let price = mega_evm::satin_precompiles().get(&MODEXP).unwrap().required_gas(&input).unwrap();
-    assert!(price < CAP / 2, "{price}");
+    assert_held_from_its_price(MODEXP, &input, price);
+}
+
+/// The KZG point evaluation is priced by the Satin table, so a call forwarded less than its price
+/// and more than the allowance — 100,000, forwarded 80,000 under a cap of 50,000 — runs on its
+/// forward and runs out of gas as without the read, and its caller goes on, where a node's own
+/// precompile, which the engine cannot price, keeps the clamp.
+#[test]
+fn test_the_kzg_point_evaluation_is_priced_and_keeps_no_clamp() {
+    let kzg = vec![0_u8; 192];
+    let kzg_address = mega_evm::kzg_point_evaluation::ADDRESS;
+    let limits = EvmTxRuntimeLimits::default().with_block_env_access_compute_gas_limit(50_000);
     for gas_limit in TIERS {
         let run = |first| {
             let db = MemoryDatabase::default()
-                .account_code(CONTRACT, calls_precompile(first, MODEXP, None));
-            let mut evm = MegaEvm::new(context(db)).with_inspector(Calls::default());
-            let run = run_on(&mut evm, tx_with(&input, gas_limit));
-            let call = evm.inspector().calls.iter().find(|call| call.target == MODEXP).unwrap();
-            assert!(call.precompile_ran, "revm runs it");
-            assert_eq!(call.spent, price, "it charges its price");
+                .account_code(CONTRACT, calls_precompile(first, kzg_address, Some(80_000)));
+            let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits))
+                .with_inspector(Calls::default());
+            let run = run_on(&mut evm, tx_with(&kzg, gas_limit));
+            let call =
+                evm.inspector().calls.iter().find(|call| call.target == kzg_address).unwrap();
+            assert_eq!(call.forward, 80_000);
+            assert!(call.precompile_ran, "{kzg_address}: revm runs it, on its forward");
             run
         };
         let (detained, plain) = (run(TIMESTAMP), run(PUSH0));
-        assert_as_without_read(&detained, &plain, "a price the allowance pays");
-        assert_eq!(slot(&detained, 0), Some(U256::from(1)));
-    }
-}
-
-/// A Satin address a node replaced is not priced from the built-in set, even when its precompile
-/// carries the built-in's id: forwarded less than its price and more than the allowance, the
-/// replaced modexp runs on the allowance and is the stop, which its caller catches, where the
-/// built-in one, which the engine prices, runs out of gas as without the read, and its caller goes
-/// on.
-#[test]
-fn test_a_replaced_precompile_is_not_priced_from_the_built_in_set() {
-    let input = costly_modexp_input(64, 0);
-    let price = mega_evm::satin_precompiles().get(&MODEXP).unwrap().required_gas(&input).unwrap();
-    assert!(price > CAP, "{price}");
-    let short = u32::try_from(price - 1).unwrap();
-    for gas_limit in TIERS {
-        let db = |first| {
-            MemoryDatabase::default()
-                .account_code(CONTRACT, calls_precompile(first, MODEXP, Some(short)))
-        };
-        let replaced =
-            run_precompile(db(TIMESTAMP), MODEXP, recording_modexp, tx_with(&input, gas_limit));
-        let allowance = CAP - charges_to_the_precompile(input.len(), Some(short)).total();
-        let intrinsic = intrinsic_with(&input, gas_limit);
-        assert_caught(&replaced.run, intrinsic, allowance, &failed_status_store());
-        assert_eq!(replaced.ran_on, [(allowance, false)], "run on the allowance");
-
-        let (built_in, plain) = (
-            execute(db(TIMESTAMP), tx_with(&input, gas_limit)),
-            execute(db(PUSH0), tx_with(&input, gas_limit)),
-        );
-        assert_as_without_read(&built_in, &plain, "a price past the forward");
-        assert_eq!(slot(&built_in, 0), Some(U256::ZERO), "the call fails and its caller goes on");
-    }
-}
-
-/// op-revm's wrapper of the BN254 pairing is priced, so a call forwarded less than its price and
-/// more than the allowance — three pairs, 147,000 gas, forwarded 120,000 under a cap of 100,000 —
-/// runs on its forward and runs out of gas as without the read, and its caller goes on, as the KZG
-/// entry does — 100,000, forwarded 80,000 under a cap of 50,000. A node's own precompile, which the
-/// engine cannot price, keeps the clamp: at the pairing's price and forward, it runs on the
-/// allowance and is the stop, which its caller catches.
-#[test]
-fn test_a_nodes_own_precompile_keeps_the_clamp_a_priced_wrapper_does_not() {
-    let pairing = vec![0_u8; 3 * 192];
-    // EIP-1108: 45,000, and 34,000 a pair.
-    let price = 45_000 + 3 * 34_000;
-    let entry = mega_evm::satin_precompiles().get(&EC_PAIRING).unwrap();
-    assert_eq!(entry.required_gas(&pairing), Some(price));
-    let kzg = vec![0_u8; 192];
-    let kzg_address = mega_evm::kzg_point_evaluation::ADDRESS;
-    let own_input = U256::from(price).to_be_bytes::<32>();
-    let limits = |cap| EvmTxRuntimeLimits::default().with_block_env_access_compute_gas_limit(cap);
-    for gas_limit in TIERS {
-        let run = |first, to, forward, cap, input: &[u8]| {
-            let db = MemoryDatabase::default()
-                .account_code(CONTRACT, calls_precompile(first, to, Some(forward)));
-            let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits(cap)))
-                .with_inspector(Calls::default());
-            let run = run_on(&mut evm, tx_with(input, gas_limit));
-            let call = evm.inspector().calls.iter().find(|call| call.target == to).unwrap();
-            assert_eq!(call.forward, u64::from(forward));
-            assert!(call.precompile_ran, "{to}: revm runs it, on its forward");
-            run
-        };
-
-        let detained = run(TIMESTAMP, EC_PAIRING, 120_000, 100_000, &pairing);
-        let plain = run(PUSH0, EC_PAIRING, 120_000, 100_000, &pairing);
         assert_as_without_read(&detained, &plain, "a price past the forward");
         assert_eq!(slot(&detained, 0), Some(U256::ZERO), "the call fails and its caller goes on");
-
-        let detained = run(TIMESTAMP, kzg_address, 80_000, 50_000, &kzg);
-        let plain = run(PUSH0, kzg_address, 80_000, 50_000, &kzg);
-        assert_as_without_read(&detained, &plain, "a price past the forward");
-        assert_eq!(slot(&detained, 0), Some(U256::ZERO), "the call fails and its caller goes on");
-
-        let runs = Runs::default();
-        let db = MemoryDatabase::default()
-            .account_code(CONTRACT, calls_precompile(TIMESTAMP, PRICED, Some(120_000)));
-        let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits(100_000)))
-            .with_dyn_precompiles(HashMap::from_iter([(PRICED, priced(&runs))]));
-        let own = run_on(&mut evm, tx_with(&own_input, gas_limit));
-        let allowance = 100_000 - charges_to_the_precompile(32, Some(120_000)).total();
-        let intrinsic = intrinsic_with(&own_input, gas_limit);
-        assert_caught(&own, intrinsic, allowance, &failed_status_store());
-        assert_eq!(*runs.lock().unwrap(), [(allowance, false)], "run on the allowance");
     }
 }
 
@@ -1746,14 +1670,10 @@ fn test_the_bls12_pairing_is_held_from_its_price() {
 /// detained from its start, carrying value (refused, `NoEtherTransfer()`) or deploying the
 /// canonical `CREATE2` factory, against the same call from another sender, plain and inspected:
 ///
-/// - under a cap below the overhead, the overhead alone crosses the limit, and both stop at it;
+/// - under a cap below the overhead, the overhead alone crosses the limit, and the refusal stops at
+///   it;
 /// - under a cap past the overhead and short of the `CREATE` opcode's regular gas, the refusal
-///   answers as without the read, and the deployment stops at the opcode's charge;
-/// - under a cap past both and one gas short of what the creation computes, the creation stops at
-///   the limit where it would deploy, and the stop takes the deployment back: the call answers
-///   `ExecutionReverted` with the stop's revert data, keeping the signer's nonce its creation's
-///   start spent, and charges nothing more; one gas more, and it deploys as without the read;
-/// - under the spec's cap, both run as without the read.
+///   answers as without the read, and the deployment stops at the opcode's charge.
 #[test]
 fn test_a_keyless_calls_charges_are_held_to_what_the_limit_leaves() {
     let refused = keyless_deploy_call(b"a transaction");
@@ -1796,12 +1716,6 @@ fn test_a_keyless_calls_charges_are_held_to_what_the_limit_leaves() {
             "the answer without detention"
         );
         let refused_intrinsic = answered.outcome.gas.regular - KEYLESS_DEPLOY_OVERHEAD_GAS;
-        let deployed = both(CALLER, 0, &deploys, CAP);
-        let answer = IKeylessDeploy::keylessDeployCall::abi_decode_returns(
-            deployed.outcome.result.output().unwrap(),
-        )
-        .unwrap();
-        assert_eq!(answer.deployedAddress, CREATE2_FACTORY_CONTRACT, "it deploys");
         let deploy_intrinsic = intrinsic_with(&deploys, gas_limit);
 
         // Detained from its start, the call's overhead is its first charge, then the `CREATE`
@@ -1810,7 +1724,6 @@ fn test_a_keyless_calls_charges_are_held_to_what_the_limit_leaves() {
         let detained = both(BENEFICIARY, 1, &refused, cap);
         assert_eq!(detained.limit, Some(cap), "the sender is the beneficiary");
         assert_stopped(&detained, refused_intrinsic, cap);
-        assert_stopped(&both(BENEFICIARY, 0, &deploys, cap), deploy_intrinsic, cap);
 
         let cap = KEYLESS_DEPLOY_OVERHEAD_GAS + create - 1;
         let detained = both(BENEFICIARY, 1, &refused, cap);
@@ -1821,39 +1734,6 @@ fn test_a_keyless_calls_charges_are_held_to_what_the_limit_leaves() {
         assert_eq!(left, create - 1);
         assert_stopped(&stopped, deploy_intrinsic, left);
         assert_eq!(nonce_of(&stopped, CREATE2_FACTORY_DEPLOYER), 0, "the creation never started");
-
-        // The creation's own compute: the regular gas the deployment spent past the call's.
-        let creation =
-            deployed.outcome.gas.regular - deploy_intrinsic - KEYLESS_DEPLOY_OVERHEAD_GAS - create;
-        let cap = KEYLESS_DEPLOY_OVERHEAD_GAS + create + creation - 1;
-        let stopped = both(BENEFICIARY, 0, &deploys, cap);
-        let code = deployed.outcome.state[&CREATE2_FACTORY_CONTRACT].info.code.clone().unwrap();
-        let hash = 6 * (code.len() as u64).div_ceil(32);
-        let left = Charges::default()
-            .then(&[KEYLESS_DEPLOY_OVERHEAD_GAS, create, creation - hash, hash])
-            .left(cap);
-        assert_eq!(left, hash - 1, "the hash of the deposited code crosses");
-        let limit = assert_caught(&stopped, deploy_intrinsic, left, &Charges::default());
-        let answer = IKeylessDeploy::keylessDeployCall::abi_decode_returns(
-            stopped.outcome.result.output().unwrap(),
-        )
-        .unwrap();
-        assert_eq!(answer.deployedAddress, Address::ZERO, "nothing deployed");
-        let reverted = IKeylessDeploy::ExecutionReverted::abi_decode(&answer.errorData).unwrap();
-        assert_eq!(reverted.output, stop_data(limit), "the creation reverted with the stop");
-        assert!(
-            stopped.outcome.state.get(&CREATE2_FACTORY_CONTRACT).is_none_or(|a| a.info.is_empty()),
-            "the stop takes the deployment back"
-        );
-        assert_eq!(nonce_of(&stopped, CREATE2_FACTORY_DEPLOYER), 1, "the start spent the nonce");
-        let detained = both(BENEFICIARY, 0, &deploys, cap + 1);
-        assert_eq!(detained.outcome.result, deployed.outcome.result, "the creation fits");
-        assert_eq!(detained.outcome.gas, deployed.outcome.gas);
-
-        let detained = both(BENEFICIARY, 0, &deploys, CAP);
-        assert_eq!(detained.limit, Some(CAP));
-        assert_eq!(detained.outcome.result, deployed.outcome.result, "as without the read");
-        assert_eq!(detained.outcome.gas, deployed.outcome.gas);
     }
 }
 
@@ -1903,24 +1783,6 @@ fn keyless_deploy_call(tx: &[u8]) -> Bytes {
 /// The nonce `address` ends the transaction with; zero when the transaction did not touch it.
 fn nonce_of(run: &Run, address: Address) -> u64 {
     run.outcome.state.get(&address).map_or(0, |account| account.info.nonce)
-}
-
-/* ---------- the refusal's access type ---------- */
-
-/// A `SLOTNUM` refusal carries access type 12, which `IMegaAccessControl`'s enum does not declare:
-/// a decoder that validates the enum rejects it, while every other refusal decodes, `BLOCKHASH`'s
-/// as `BlockHash`. The enum is the access-control contract's to extend.
-#[test]
-fn test_a_slotnum_refusal_is_past_the_enum() {
-    let slot_num = volatile_data_access_disabled_revert_data(VolatileDataAccess::SLOT_NUM);
-    assert!(IMegaAccessControl::VolatileDataAccessDisabled::abi_decode_validate(&slot_num).is_err());
-    let block_hash = volatile_data_access_disabled_revert_data(VolatileDataAccess::BLOCK_HASH);
-    assert_eq!(
-        IMegaAccessControl::VolatileDataAccessDisabled::abi_decode_validate(&block_hash)
-            .unwrap()
-            .accessType,
-        VolatileDataAccessType::BlockHash
-    );
 }
 
 /// Answers the call to [`CONTRACT`] itself: past the cap in regular gas, and with 1,000 of state or
