@@ -11,7 +11,7 @@
 
 use std::{
     fmt, fs,
-    io::Write as _,
+    io::{Read, Write as _},
     path::{Path, PathBuf},
 };
 
@@ -252,12 +252,44 @@ impl CacheFileEnvelope {
 
     /// Read and validate an envelope from `path`.
     pub(super) fn load(path: &Path) -> Result<Self> {
-        let content = fs::read_to_string(path).map_err(|e| {
+        let file = fs::File::open(path).map_err(|e| {
             EvmeError::FixtureError(format!(
                 "Failed to read RPC cache file {}: {e}",
                 path.display()
             ))
         })?;
+        let len = file
+            .metadata()
+            .map_err(|e| {
+                EvmeError::FixtureError(format!(
+                    "Failed to read RPC cache file {}: {e}",
+                    path.display()
+                ))
+            })?
+            .len();
+        if len > crate::common::hex::MAX_TEXT_INPUT_BYTES {
+            return Err(EvmeError::FixtureError(format!(
+                "RPC cache file {} is {len} bytes; the limit is {} bytes",
+                path.display(),
+                crate::common::hex::MAX_TEXT_INPUT_BYTES,
+            )));
+        }
+        let mut content = String::new();
+        file.take(crate::common::hex::MAX_TEXT_INPUT_BYTES + 1)
+            .read_to_string(&mut content)
+            .map_err(|e| {
+                EvmeError::FixtureError(format!(
+                    "Failed to read RPC cache file {}: {e}",
+                    path.display()
+                ))
+            })?;
+        if content.len() as u64 > crate::common::hex::MAX_TEXT_INPUT_BYTES {
+            return Err(EvmeError::FixtureError(format!(
+                "RPC cache file {} exceeds the {} byte limit",
+                path.display(),
+                crate::common::hex::MAX_TEXT_INPUT_BYTES,
+            )));
+        }
         let envelope: Self = serde_json::from_str(&content).map_err(|e| {
             EvmeError::FixtureError(format!(
                 "Failed to parse RPC cache file {}: {e}",
@@ -391,5 +423,18 @@ mod tests {
         let err = CacheFileEnvelope::load(&p3).expect_err("missing version");
         let msg = format!("{err}");
         assert!(msg.contains("parse"), "error should mention parse: {msg}");
+    }
+
+    #[test]
+    fn test_envelope_rejects_an_oversized_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("big.json");
+        let limit = crate::common::hex::MAX_TEXT_INPUT_BYTES;
+        fs::File::create(&path).expect("create").set_len(limit + 1).expect("set_len");
+        let err = CacheFileEnvelope::load(&path).expect_err("over the limit");
+        let msg = err.to_string();
+        assert!(msg.contains(&limit.to_string()), "{msg}");
+        assert!(msg.contains(&(limit + 1).to_string()), "{msg}");
+        assert!(!msg.contains("parse"), "{msg}");
     }
 }
