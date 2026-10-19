@@ -934,7 +934,6 @@ impl AdditionalLimit {
             let body = self.body_bytes;
             self.tracker.reset();
             self.standing = LimitCheck::WithinLimit;
-            self.limit_exceeded = None;
             self.tracker.record_tx(LimitUsage { data_size: body, write_records: 0 });
             return;
         }
@@ -962,7 +961,6 @@ impl AdditionalLimit {
     /// input and decoding it is work done whether or not it decodes.
     pub(crate) const fn on_transaction_error(&mut self) {
         self.standing = LimitCheck::WithinLimit;
-        self.limit_exceeded = None;
     }
 }
 
