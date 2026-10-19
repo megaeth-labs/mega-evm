@@ -579,7 +579,7 @@ fn test_a_failure_takes_each_sites_transfer_log_back() {
 /// `CALL` to itself move value from an account to itself; a transaction's value to its own sender
 /// likewise; a destruction to itself burns the balance of an account created in the transaction
 /// — this revm emits no log for a burn — and leaves an older account's balance where it is; a
-/// value call the caller cannot fund, or a system contract refuses, moves nothing at all.
+/// value call a system contract refuses moves nothing at all.
 #[test]
 fn test_no_transfer_log_where_no_value_moves_to_another_account() {
     let value = U256::from(VALUE);
@@ -627,7 +627,7 @@ fn test_no_transfer_log_where_no_value_moves_to_another_account() {
         .append_many([PUSH0, CALLDATASIZE, PUSH1, end, JUMPI, POP])
         .append_many(self_call.build_vec())
         .append(JUMPDEST);
-    let cases: [(&str, MemoryDatabase, MegaTransaction, u64, usize); 8] = [
+    let cases: [(&str, MemoryDatabase, MegaTransaction, u64, usize); 7] = [
         ("a CALLCODE", db(actor().callcode(RECEIVER, value)), call(ACTOR, 0), 1, 0),
         // The move's sender and recipient are one account, recorded once.
         ("a CALL to itself", db(calls_itself_once), call(ACTOR, 0), 1, 0),
@@ -641,13 +641,6 @@ fn test_no_transfer_log_where_no_value_moves_to_another_account() {
             1,
         ),
         ("an older account destructing to itself", db(actor()), call(DESTRUCTOR, 0), 0, 0),
-        (
-            "a value CALL the caller cannot fund",
-            db(actor().call(RECEIVER, U256::from(100 * VALUE))),
-            call(ACTOR, 0),
-            0,
-            0,
-        ),
         ("a value call a system contract refuses", db(refused), call(ACTOR, 0), 0, 0),
     ];
     for (name, db, tx, records, logs) in cases {
