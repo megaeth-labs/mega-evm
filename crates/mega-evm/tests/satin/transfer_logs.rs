@@ -35,8 +35,8 @@ use mega_evm::{
     },
     test_utils::{is_transfer_log, op_transaction, transfer_log, BytecodeBuilder, MemoryDatabase},
     transaction_body_bytes, EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, MegaContext,
-    MegaEvm, MegaLimitExceeded, MegaTransaction, MegaTransactionOutcome,
-    FRAME_DATA_SHARE_DENOMINATOR, FRAME_DATA_SHARE_NUMERATOR, TRANSFER_LOG_SIZE, WRITE_RECORD_SIZE,
+    MegaEvm, MegaLimitExceeded, MegaTransaction, MegaTransactionOutcome, TRANSFER_LOG_SIZE,
+    WRITE_RECORD_SIZE,
 };
 use revm::{
     bytecode::opcode::{
@@ -51,7 +51,7 @@ use revm::{
     Database, Inspector,
 };
 
-use crate::common::{account_state_gas, context, history_rounds};
+use crate::common::{account_state_gas, context, execute_under, history_rounds, share};
 
 const CALLER: Address = address!("0000000000000000000000000000000000d00000");
 /// The contract a nested site's transaction calls: it calls [`ACTOR`] and returns what that
@@ -277,12 +277,6 @@ impl Site {
     }
 }
 
-/// 98% of `remaining`, the share a child frame is given.
-fn share(remaining: u64) -> u64 {
-    (u128::from(remaining) * u128::from(FRAME_DATA_SHARE_NUMERATOR) /
-        u128::from(FRAME_DATA_SHARE_DENOMINATOR)) as u64
-}
-
 /// The budget of a frame at `depth` under a frame cap of `cap`, when no frame above it has kept
 /// anything yet.
 fn budget(depth: u32, cap: u64) -> u64 {
@@ -295,16 +289,6 @@ fn cap_for(depth: u32, bytes: u64) -> u64 {
     assert_eq!(budget(depth, cap), bytes, "a cap that gives exactly the bytes");
     assert_eq!(budget(depth, cap - 1), bytes - 1, "and one byte less under one less");
     cap
-}
-
-fn execute(
-    db: MemoryDatabase,
-    tx: MegaTransaction,
-    limits: EvmTxRuntimeLimits,
-) -> MegaTransactionOutcome {
-    MegaEvm::new(context(db).with_tx_runtime_limits(limits))
-        .execute_transaction(tx)
-        .expect("the transaction is valid")
 }
 
 /// A deposit from [`DEPOSITOR`] of `value`, with `mint` credited to it before any frame.
@@ -423,7 +407,7 @@ fn test_each_site_counts_its_transfer_log() {
             let case = format!("{site:?} at {gas_limit}");
             let (db, tx) = site.program(Variant::Plain, gas_limit);
             let body = transaction_body_bytes(&tx);
-            let outcome = execute(db, tx, EvmTxRuntimeLimits::no_limits());
+            let outcome = execute_under(db, tx, EvmTxRuntimeLimits::no_limits());
 
             assert_completed(&case, site, Variant::Plain, &outcome, body);
             assert_reservoir_paid(&case, gas_limit, &outcome);
@@ -450,7 +434,7 @@ fn test_each_site_stops_one_byte_short_of_its_frame_budget() {
                     let (db, tx) = site.program(variant, gas_limit);
                     let body = transaction_body_bytes(&tx);
                     let limits = EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(cap);
-                    (execute(db, tx, limits), body)
+                    (execute_under(db, tx, limits), body)
                 };
 
                 let (fits, body) = run(cap);
@@ -516,7 +500,7 @@ fn test_each_site_stops_one_byte_short_of_the_transaction_limit() {
                     let body = transaction_body_bytes(&tx);
                     let limit = body + site.bytes() - over;
                     let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit);
-                    (execute(db, tx, limits), body, limit)
+                    (execute_under(db, tx, limits), body, limit)
                 };
 
                 let (outcome, body, limit) = run(1);
@@ -575,7 +559,7 @@ fn test_a_failure_takes_each_sites_transfer_log_back() {
             let case = format!("{site:?} at {gas_limit}");
             let (db, tx) = site.program(Variant::TakenBack, gas_limit);
             let body = transaction_body_bytes(&tx);
-            let outcome = execute(db, tx, EvmTxRuntimeLimits::no_limits());
+            let outcome = execute_under(db, tx, EvmTxRuntimeLimits::no_limits());
 
             assert_eq!(outcome.limit_exceeded, None, "{case}");
             assert!(!outcome.result.is_halt(), "{case}: {:?}", outcome.result);
@@ -595,7 +579,7 @@ fn test_a_failure_takes_each_sites_transfer_log_back() {
 /// `CALL` to itself move value from an account to itself; a transaction's value to its own sender
 /// likewise; a destruction to itself burns the balance of an account created in the transaction
 /// — this revm emits no log for a burn — and leaves an older account's balance where it is; a
-/// value call the caller cannot fund, or a system contract refuses, moves nothing at all.
+/// value call a system contract refuses moves nothing at all.
 #[test]
 fn test_no_transfer_log_where_no_value_moves_to_another_account() {
     let value = U256::from(VALUE);
@@ -643,7 +627,7 @@ fn test_no_transfer_log_where_no_value_moves_to_another_account() {
         .append_many([PUSH0, CALLDATASIZE, PUSH1, end, JUMPI, POP])
         .append_many(self_call.build_vec())
         .append(JUMPDEST);
-    let cases: [(&str, MemoryDatabase, MegaTransaction, u64, usize); 8] = [
+    let cases: [(&str, MemoryDatabase, MegaTransaction, u64, usize); 7] = [
         ("a CALLCODE", db(actor().callcode(RECEIVER, value)), call(ACTOR, 0), 1, 0),
         // The move's sender and recipient are one account, recorded once.
         ("a CALL to itself", db(calls_itself_once), call(ACTOR, 0), 1, 0),
@@ -657,18 +641,11 @@ fn test_no_transfer_log_where_no_value_moves_to_another_account() {
             1,
         ),
         ("an older account destructing to itself", db(actor()), call(DESTRUCTOR, 0), 0, 0),
-        (
-            "a value CALL the caller cannot fund",
-            db(actor().call(RECEIVER, U256::from(100 * VALUE))),
-            call(ACTOR, 0),
-            0,
-            0,
-        ),
         ("a value call a system contract refuses", db(refused), call(ACTOR, 0), 0, 0),
     ];
     for (name, db, tx, records, logs) in cases {
         let body = transaction_body_bytes(&tx);
-        let outcome = execute(db, tx, EvmTxRuntimeLimits::no_limits());
+        let outcome = execute_under(db, tx, EvmTxRuntimeLimits::no_limits());
         assert!(outcome.result.is_success(), "{name}: {:?}", outcome.result);
         assert_eq!(outcome.result.logs().len(), logs, "{name}: the logs");
         assert_eq!(transfer_logs(&outcome).len(), logs, "{name}: the transfer logs");
@@ -681,7 +658,7 @@ fn test_no_transfer_log_where_no_value_moves_to_another_account() {
             "{name}",
         );
     }
-    let burned = execute(
+    let burned = execute_under(
         db(actor().create(value, &burner)),
         call(ACTOR, 0),
         EvmTxRuntimeLimits::no_limits(),
@@ -689,7 +666,7 @@ fn test_no_transfer_log_where_no_value_moves_to_another_account() {
     let created = ACTOR.create(burned.state[&ACTOR].info.nonce - 1);
     assert_eq!(balance(&burned, created), U256::ZERO, "the endowment was burned");
     assert_eq!(balance(&burned, ACTOR), U256::from(9 * VALUE));
-    let older = execute(db(actor()), call(DESTRUCTOR, 0), EvmTxRuntimeLimits::no_limits());
+    let older = execute_under(db(actor()), call(DESTRUCTOR, 0), EvmTxRuntimeLimits::no_limits());
     assert_eq!(balance(&older, DESTRUCTOR), value, "an older account keeps its balance");
 }
 
@@ -735,21 +712,22 @@ fn test_a_value_call_its_caller_cannot_fund_runs_as_without_a_limit() {
         let frame_budget =
             EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(cap_for(1, bytes - 1));
 
-        let free = execute(db(VALUE - 1, &actor), tx.clone(), EvmTxRuntimeLimits::no_limits());
+        let free =
+            execute_under(db(VALUE - 1, &actor), tx.clone(), EvmTxRuntimeLimits::no_limits());
         assert!(free.result.is_success(), "{name}: {:?}", free.result);
         assert_eq!(free.result.output(), Some(&Bytes::new()), "{name}: the refusal's empty data");
         assert!(free.result.logs().is_empty(), "{name}");
         assert_eq!(free.usage, LimitUsage { data_size: body, write_records: 0 }, "{name}");
         assert_eq!(balance(&free, ACTOR), U256::from(VALUE - 1), "{name}: nothing moved");
         for limits in [tx_limit, frame_budget] {
-            let limited = execute(db(VALUE - 1, &actor), tx.clone(), limits);
+            let limited = execute_under(db(VALUE - 1, &actor), tx.clone(), limits);
             assert_eq!(limited.limit_exceeded, None, "{name} under {limits:?}");
             assert_eq!(limited.result, free.result, "{name} under {limits:?}");
             assert_eq!(limited.usage, free.usage, "{name} under {limits:?}");
             assert_eq!(limited.gas, free.gas, "{name} under {limits:?}");
         }
 
-        let stopped = execute(db(VALUE, &actor), tx.clone(), tx_limit);
+        let stopped = execute_under(db(VALUE, &actor), tx.clone(), tx_limit);
         let stop = MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit: body + bytes - 1 };
         assert_eq!(
             stopped.result.output(),
@@ -757,7 +735,7 @@ fn test_a_value_call_its_caller_cannot_fund_runs_as_without_a_limit() {
             "{name}: funded to the last wei, the move is counted, and stopped at the limit",
         );
         assert_eq!(stopped.limit_exceeded, None, "{name}: the actor caught the stop");
-        let stopped = execute(db(VALUE, &actor), tx.clone(), frame_budget);
+        let stopped = execute_under(db(VALUE, &actor), tx.clone(), frame_budget);
         let stop = MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit: bytes - 1 };
         assert_eq!(
             stopped.result.output(),
@@ -802,9 +780,9 @@ fn test_a_value_call_its_caller_cannot_fund_is_charged_nothing() {
     assert!(actor_gas / 64 < records, "the actor keeps less than the records cost");
     let gas_limit = 21_000 + history_gas(transaction_body_bytes(&tx(0))).unwrap() + actor_gas;
 
-    let refused = execute(db(VALUE - 1), tx(gas_limit), EvmTxRuntimeLimits::no_limits());
+    let refused = execute_under(db(VALUE - 1), tx(gas_limit), EvmTxRuntimeLimits::no_limits());
     assert!(refused.result.is_success(), "{:?}", refused.result);
-    let funded = execute(db(VALUE), tx(gas_limit), EvmTxRuntimeLimits::no_limits());
+    let funded = execute_under(db(VALUE), tx(gas_limit), EvmTxRuntimeLimits::no_limits());
     assert!(funded.result.is_halt(), "{:?}", funded.result);
     let body = transaction_body_bytes(&tx(gas_limit));
     assert_eq!(
@@ -873,7 +851,7 @@ fn test_a_start_answered_before_its_init_leaves_no_refusal_for_the_next() {
     let limits = EvmTxRuntimeLimits::no_limits()
         .with_frame_data_size_limit(cap_for(1, 2 * WRITE_RECORD_SIZE - 1));
 
-    let answer = execute(
+    let answer = execute_under(
         db(answered_call(BytecodeBuilder::default()).append(POP).return_returndata()),
         tx.clone(),
         limits,
@@ -892,7 +870,7 @@ fn test_a_start_answered_before_its_init_leaves_no_refusal_for_the_next() {
         ),
     ];
     for (name, actor) in cases {
-        let outcome = execute(db(actor), tx.clone(), limits);
+        let outcome = execute_under(db(actor), tx.clone(), limits);
         assert_eq!(
             outcome.result.output(),
             Some(&Bytes::from(U256::ZERO.to_be_bytes::<32>())),
@@ -927,7 +905,7 @@ fn test_an_answer_a_transaction_leaves_is_not_taken_by_the_next() {
     let user_deposit = || deposit(TxKind::Call(RECEIVER), 1_000, 400);
     let body = transaction_body_bytes(&user_deposit());
 
-    let alone = execute(db.clone(), user_deposit(), EvmTxRuntimeLimits::no_limits());
+    let alone = execute_under(db.clone(), user_deposit(), EvmTxRuntimeLimits::no_limits());
     let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits()));
     let first = evm.execute_transaction(answered).expect("the transaction is valid");
     assert!(first.result.is_success(), "{:?}", first.result);
@@ -1029,7 +1007,7 @@ fn test_a_creation_onto_an_occupied_address_is_counted_before_revm_refuses_it() 
     }));
     let body = transaction_body_bytes(&tx);
 
-    let free = execute(db(), tx.clone(), EvmTxRuntimeLimits::no_limits());
+    let free = execute_under(db(), tx.clone(), EvmTxRuntimeLimits::no_limits());
     assert!(free.result.is_success(), "{:?}", free.result);
     assert_eq!(free.result.output(), Some(&Bytes::new()), "the collision's empty data");
     assert!(free.result.logs().is_empty(), "no transfer log");
@@ -1042,7 +1020,8 @@ fn test_a_creation_onto_an_occupied_address_is_counted_before_revm_refuses_it() 
     );
 
     let limit = body + Site::Create2.bytes() - 1;
-    let stopped = execute(db(), tx, EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit));
+    let stopped =
+        execute_under(db(), tx, EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit));
     assert!(stopped.result.is_success(), "the creator catches the stop: {:?}", stopped.result);
     let stop = MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit };
     assert_eq!(stopped.result.output(), Some(&Bytes::from(stop.abi_encode())), "the stop first");
@@ -1061,7 +1040,7 @@ fn test_a_deposits_value_is_logged_and_its_mint_is_not() {
 
     let tx = deposit(TxKind::Call(RECEIVER), 1_000, 400);
     let body = transaction_body_bytes(&tx);
-    let outcome = execute(db(), tx, EvmTxRuntimeLimits::no_limits());
+    let outcome = execute_under(db(), tx, EvmTxRuntimeLimits::no_limits());
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
     assert_eq!(
         outcome.result.logs(),
@@ -1075,14 +1054,17 @@ fn test_a_deposits_value_is_logged_and_its_mint_is_not() {
     );
     assert_eq!((outcome.gas.history, outcome.gas.history_bytes), (0, 0), "a deposit pays none");
 
-    let minted =
-        execute(db(), deposit(TxKind::Call(RECEIVER), 1_000, 0), EvmTxRuntimeLimits::no_limits());
+    let minted = execute_under(
+        db(),
+        deposit(TxKind::Call(RECEIVER), 1_000, 0),
+        EvmTxRuntimeLimits::no_limits(),
+    );
     assert!(minted.result.is_success(), "{:?}", minted.result);
     assert!(minted.result.logs().is_empty(), "a mint alone is logged nowhere");
     assert_eq!(balance(&minted, DEPOSITOR), U256::from(1_000));
 
     let limit = body + WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE - 1;
-    let stopped = execute(
+    let stopped = execute_under(
         db(),
         deposit(TxKind::Call(RECEIVER), 1_000, 400),
         EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit),
@@ -1107,7 +1089,7 @@ fn test_a_deposit_its_depositor_cannot_fund_fails_as_without_a_limit() {
     for kind in [TxKind::Call(RECEIVER), TxKind::Create] {
         let tx = deposit(kind, 1_000, 5_000);
         let body = transaction_body_bytes(&tx);
-        let free = execute(db(), tx.clone(), EvmTxRuntimeLimits::no_limits());
+        let free = execute_under(db(), tx.clone(), EvmTxRuntimeLimits::no_limits());
         assert!(free.result.is_halt(), "{kind:?}: {:?}", free.result);
         assert_eq!(
             free.result.tx_gas_used(),
@@ -1118,7 +1100,7 @@ fn test_a_deposit_its_depositor_cannot_fund_fails_as_without_a_limit() {
 
         let limit = body + WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE - 1;
         let limited =
-            execute(db(), tx, EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit));
+            execute_under(db(), tx, EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit));
         assert_eq!(limited.limit_exceeded, None, "{kind:?}");
         assert_eq!(limited.result, free.result, "{kind:?}");
         assert_eq!(limited.usage, free.usage, "{kind:?}");
@@ -1149,7 +1131,7 @@ fn test_a_creation_whose_nonce_cannot_be_bumped_keeps_nothing() {
         EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit),
     ] {
         let db = MemoryDatabase::default().account_nonce(DEPOSITOR, u64::MAX);
-        let outcome = execute(db, tx.clone(), limits);
+        let outcome = execute_under(db, tx.clone(), limits);
         assert!(created_nothing(&outcome), "{limits:?}: {:?}", outcome.result);
         assert_eq!(outcome.limit_exceeded, None, "{limits:?}");
         assert_eq!(outcome.usage, LimitUsage { data_size: body, write_records: 0 }, "{limits:?}");
@@ -1199,7 +1181,7 @@ fn test_a_system_transactions_value_is_logged_and_no_limit_stops_it() {
         }))
     };
 
-    let quiet = execute(db(), system(0), EvmTxRuntimeLimits::no_limits());
+    let quiet = execute_under(db(), system(0), EvmTxRuntimeLimits::no_limits());
     assert!(quiet.result.is_success(), "{:?}", quiet.result);
     assert!(quiet.result.logs().is_empty(), "a valueless system transaction logs nothing");
 
@@ -1209,7 +1191,7 @@ fn test_a_system_transactions_value_is_logged_and_no_limit_stops_it() {
         EvmTxRuntimeLimits::no_limits(),
         EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(0).with_frame_data_size_limit(0),
     ] {
-        let outcome = execute(db(), tx.clone(), limits);
+        let outcome = execute_under(db(), tx.clone(), limits);
         assert!(outcome.result.is_success(), "{:?}", outcome.result);
         assert_eq!(outcome.limit_exceeded, None);
         assert_eq!(
@@ -1267,7 +1249,7 @@ fn test_transfer_logs_keep_execution_order() {
         gas_limit,
         ..Default::default()
     }));
-    let outcome = execute(db, tx, EvmTxRuntimeLimits::no_limits());
+    let outcome = execute_under(db, tx, EvmTxRuntimeLimits::no_limits());
     assert!(outcome.result.is_success(), "SELFDESTRUCT: {:?}", outcome.result);
     assert_eq!(
         outcome.result.logs(),
@@ -1295,7 +1277,7 @@ fn test_transfer_logs_keep_execution_order() {
         gas_limit,
         ..Default::default()
     }));
-    let outcome = execute(db, tx, EvmTxRuntimeLimits::no_limits());
+    let outcome = execute_under(db, tx, EvmTxRuntimeLimits::no_limits());
     assert!(outcome.result.is_success(), "CREATE: {:?}", outcome.result);
     assert_eq!(
         outcome.result.logs(),

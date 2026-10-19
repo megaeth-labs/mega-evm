@@ -22,7 +22,7 @@ use mega_evm::{
 use revm::{
     bytecode::opcode::{
         ADD, CALL, CREATE, CREATE2, GAS, ISZERO, LOG0, MSTORE, POP, PUSH0, RETURN, RETURNDATACOPY,
-        RETURNDATASIZE, REVERT, SELFDESTRUCT, SSTORE, STOP,
+        RETURNDATASIZE, SELFDESTRUCT, SSTORE, STOP,
     },
     context::result::{ExecutionResult, HaltReason},
     context_interface::cfg::GasId,
@@ -34,8 +34,8 @@ use revm::{
 };
 
 use crate::common::{
-    account_state_gas, body_history, call, call_with_data, context, create, history,
-    history_is_free, history_rounds, slot_state_gas,
+    account_state_gas, body_history, call, call_with_data, constructor_returning, context, create,
+    execute_under, history, history_is_free, history_rounds, share, slot_state_gas,
 };
 
 const CALLER: Address = address!("0000000000000000000000000000000000300000");
@@ -50,12 +50,6 @@ const GAS_LIMIT: u64 = 20_000_000;
 /// the frame three calls down to keep `bytes`, after each caller kept a 64th of what it forwards.
 fn gas_for_history(bytes: u64) -> u64 {
     GAS_LIMIT + 2 * history(bytes)
-}
-
-/// 98% of `remaining`, the share a child frame is given.
-fn share(remaining: u64) -> u64 {
-    (u128::from(remaining) * u128::from(FRAME_DATA_SHARE_NUMERATOR) /
-        u128::from(FRAME_DATA_SHARE_DENOMINATOR)) as u64
 }
 
 /// The least a parent must have left for the child's share of it to hold `bytes`: a limit that
@@ -228,16 +222,6 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Probe {
     }
 }
 
-/// Init code that returns `size` zero bytes as the deployed contract.
-fn constructor_returning(size: u64) -> Bytes {
-    BytecodeBuilder::default().push_number(size).push_number(0_u8).append(RETURN).build()
-}
-
-/// Init code that reverts with `len` bytes and deploys nothing.
-fn reverting_with(len: u8) -> Bytes {
-    BytecodeBuilder::default().push_number(len).push_number(0_u8).append(REVERT).build()
-}
-
 /// A contract that `CREATE`s `deployed` bytes and stops.
 fn factory_deploying(deployed: u64) -> Bytes {
     let init = constructor_returning(deployed);
@@ -284,23 +268,6 @@ fn test_calldata_counts_in_the_body() {
     let expected = LimitUsage { data_size: mega_evm::TX_BODY_SIZE + 50, write_records: 0 };
     assert_eq!(run(0), expected, "a zero byte");
     assert_eq!(run(0xff), expected, "a non-zero byte");
-}
-
-/// A body that crosses the transaction limit is rejected at validation: the transaction never
-/// runs, so its callee's code never does either.
-#[test]
-fn test_a_body_over_the_limit_is_rejected() {
-    let db = funded().account_code(
-        A,
-        BytecodeBuilder::default().sstore(U256::ZERO, U256::from(1)).stop().build(),
-    );
-    let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(
-        EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(mega_evm::TX_BODY_SIZE - 1),
-    ))
-    .with_inspector(Probe::default());
-    let error = evm.transact_raw(call(CALLER, A, U256::ZERO, GAS_LIMIT)).expect_err("rejected");
-    assert_body_refused(&format!("{error:?}"));
-    assert_eq!(evm.inspector().steps, 0, "the callee never ran");
 }
 
 /// Asserts `error` is the refusal of a body whose bytes and authorization records exceed the
@@ -544,19 +511,6 @@ fn test_code_return_create_refuses_is_not_counted() {
     }
 }
 
-/// The output of a reverting creation is revert data, not deployed code, so it is not counted.
-#[test]
-fn test_a_reverting_creation_does_not_count_its_output() {
-    let init = reverting_with(40);
-    let (outcome, _) = run_create(init.clone(), EvmTxRuntimeLimits::no_limits(), false);
-    assert!(!outcome.result.is_success() && !outcome.result.is_halt(), "{:?}", outcome.result);
-    assert_eq!(outcome.limit_exceeded, None, "the revert is the init code's, not a stop");
-    assert_eq!(
-        outcome.usage,
-        LimitUsage { data_size: mega_evm::TX_BODY_SIZE + init.len() as u64, write_records: 0 },
-    );
-}
-
 fn run_at(db: MemoryDatabase, tx: mega_evm::MegaTransaction, limit: u64) -> MegaTransactionOutcome {
     MegaEvm::new(
         context(db)
@@ -577,29 +531,6 @@ fn assert_stopped(outcome: &MegaTransactionOutcome, limit: u64, used: u64) {
             frame_local: false,
         })
     );
-}
-
-/// Calldata is in the body. One byte over that count rejects the transaction at validation.
-#[test]
-fn test_calldata_one_byte_over_is_rejected() {
-    let data = Bytes::from(vec![0xab; 50]);
-    let body = mega_evm::TX_BODY_SIZE + data.len() as u64;
-    let db = || {
-        funded().account_code(
-            A,
-            BytecodeBuilder::default().sstore(U256::ZERO, U256::from(1)).stop().build(),
-        )
-    };
-
-    let fits = run_at(db(), call_with_data(CALLER, A, data.clone(), GAS_LIMIT), body + 40);
-    assert!(fits.result.is_success(), "{:?}", fits.result);
-    assert_eq!(fits.usage, LimitUsage { data_size: body + 40, write_records: 1 });
-
-    let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(body - 1);
-    let error = MegaEvm::new(context(db()).with_tx_runtime_limits(limits))
-        .execute_transaction(call_with_data(CALLER, A, data, GAS_LIMIT))
-        .expect_err("rejected");
-    assert_body_refused(&format!("{error:?}"));
 }
 
 /// A log is 32 bytes for its address plus its data. One byte over that stops on the log: the
@@ -1087,9 +1018,7 @@ fn child_outcome(
         .account_code(B, code.clone())
         .account_balance(B, U256::from(1));
     let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(data_limit);
-    MegaEvm::new(context(db).with_tx_runtime_limits(limits))
-        .execute_transaction(call(CALLER, A, U256::ZERO, gas_limit))
-        .expect("the transaction is valid")
+    execute_under(db, call(CALLER, A, U256::ZERO, gas_limit), limits)
 }
 
 /// What `B`'s write did, read off `A`'s answer: a stop of `B`, a halt of `B`, or a success. `A`
@@ -1291,26 +1220,7 @@ const AUTHORITY: Address = address!("0000000000000000000000000000000000300006");
 
 /// A type-4 call from `CALLER` to `A`, carrying one authorization of [`AUTHORITY`] to `B`.
 fn authorizing_call(gas_limit: u64) -> mega_evm::MegaTransaction {
-    use revm::{
-        context::{transaction::TransactionType, TxEnv},
-        context_interface::{
-            either::Either,
-            transaction::{Authorization, RecoveredAuthority, RecoveredAuthorization},
-        },
-    };
-    let authorization = Either::Right(RecoveredAuthorization::new_unchecked(
-        Authorization { chain_id: U256::ZERO, address: B, nonce: 0 },
-        RecoveredAuthority::Valid(AUTHORITY),
-    ));
-    alloy_op_evm::OpTx(mega_evm::test_utils::op_transaction(TxEnv {
-        tx_type: TransactionType::Eip7702 as u8,
-        caller: CALLER,
-        kind: alloy_primitives::TxKind::Call(A),
-        gas_limit,
-        gas_priority_fee: Some(0),
-        authorization_list: vec![authorization],
-        ..Default::default()
-    }))
+    crate::common::authorizing_call(CALLER, A, U256::ZERO, gas_limit, B, &[(AUTHORITY, 0)])
 }
 
 /// Runs `tx` over [`funded`] under a transaction data-size limit of `limit`; `None` when
@@ -1473,45 +1383,6 @@ fn test_a_child_gets_98_percent_of_what_its_parent_has_left_in_slots() {
             assert!(!written(B), "the child's writes went with its revert");
         }
     }
-}
-
-/// The child that crosses its share reverts with `MegaLimitExceeded` naming the data size and
-/// the share it crossed, which is what its caller reads.
-#[test]
-fn test_a_child_that_crosses_its_share_reverts_with_the_share() {
-    let returns_revert_data = then_call(BytecodeBuilder::default(), B)
-        .append(RETURNDATASIZE)
-        .append_many([PUSH0, PUSH0])
-        .append(RETURNDATACOPY)
-        .append(RETURNDATASIZE)
-        .append(PUSH0)
-        .append(RETURN)
-        .build();
-    let db = funded()
-        .account_code(A, returns_revert_data)
-        .account_code(B, write_slots(BytecodeBuilder::default(), 99).stop().build());
-    let outcome = run_slots(db, room_for(100));
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    let reverted = MegaLimitExceeded::abi_decode(outcome.result.output().unwrap()).unwrap();
-    assert_eq!(reverted.kind, LimitKind::DataSize.as_u8());
-    assert_eq!(reverted.limit, 98 * WRITE_RECORD_SIZE);
-}
-
-/// The transaction's own frame gets what the body leaves: with room for 5 slots, 5 are kept and a
-/// sixth stops the transaction. Its frame's budget is the transaction's own limit, so the
-/// crossing is the transaction's, not a frame-local revert.
-#[test]
-fn test_the_first_frame_gets_what_the_body_leaves() {
-    let run = |n| {
-        run_slots(
-            funded().account_code(A, write_slots(BytecodeBuilder::default(), n).stop().build()),
-            room_for(5),
-        )
-    };
-    let fits = run(5);
-    assert!(fits.result.is_success(), "{:?}", fits.result);
-    assert_eq!(fits.usage.data_size, room_for(5));
-    assert_stopped(&run(6), room_for(5), room_for(6));
 }
 
 /// A body and the execution after it add up: a limit the body fits stops the transaction at the

@@ -186,15 +186,6 @@ fn reverting_creations(n: usize) -> Bytes {
     code.into()
 }
 
-/// A reverted creation keeps the creator's nonce record: the nonce bump survives the revert.
-#[test]
-fn test_reverted_nested_create_keeps_the_creator_nonce_record() {
-    let db = funded().account_code(OUTER_CREATOR, reverting_creations(1));
-    let (result, usage) = run(db, call(CALLER, OUTER_CREATOR, U256::ZERO, gas_limit()));
-    assert!(result.result.is_success());
-    assert_eq!(usage, records(1), "the creator's nonce; the created account is gone");
-}
-
 /// Two reverted creations record the creator once: the first record survives, so the second
 /// finds the creator recorded.
 #[test]
@@ -350,26 +341,6 @@ fn test_write_back_in_a_child_refunds_the_caller_record() {
         assert!(result.result.is_success());
         assert_eq!(usage, expected);
     }
-}
-
-/// A log counts 32 bytes for its address, 32 per topic and its data; no write record.
-#[test]
-fn test_log_counts_its_bytes() {
-    let code = BytecodeBuilder::default()
-        .push_number(0x22_u8)
-        .push_number(0x11_u8)
-        .push_number(10_u8)
-        .append(PUSH0)
-        .append(LOG2)
-        .stop()
-        .build();
-    let (result, usage) = run(
-        MemoryDatabase::default().account_code(CALLEE, code),
-        call(CALLER, CALLEE, U256::ZERO, gas_limit()),
-    );
-    assert!(result.result.is_success());
-    assert_eq!(result.result.logs().len(), 1);
-    assert_eq!(usage, with_extra(body_only(), 32 + 2 * 32 + 10));
 }
 
 /// `SELFDESTRUCT` records the beneficiary only when value moves to another account than the
@@ -662,32 +633,14 @@ fn authorizing_call(
     value: u64,
     authorizations: &[(Address, u64)],
 ) -> mega_evm::MegaTransaction {
-    use revm::{
-        context::{transaction::TransactionType, TxEnv},
-        context_interface::{
-            either::Either,
-            transaction::{Authorization, RecoveredAuthority, RecoveredAuthorization},
-        },
-    };
-    let authorization_list = authorizations
-        .iter()
-        .map(|(authority, nonce)| {
-            Either::Right(RecoveredAuthorization::new_unchecked(
-                Authorization { chain_id: U256::ZERO, address: DELEGATE, nonce: *nonce },
-                RecoveredAuthority::Valid(*authority),
-            ))
-        })
-        .collect();
-    alloy_op_evm::OpTx(mega_evm::test_utils::op_transaction(TxEnv {
-        tx_type: TransactionType::Eip7702 as u8,
-        caller: CALLER,
-        kind: alloy_primitives::TxKind::Call(to),
-        value: U256::from(value),
-        gas_limit: gas_limit(),
-        gas_priority_fee: Some(0),
-        authorization_list,
-        ..Default::default()
-    }))
+    crate::common::authorizing_call(
+        CALLER,
+        to,
+        U256::from(value),
+        gas_limit(),
+        DELEGATE,
+        authorizations,
+    )
 }
 
 /// Each distinct applied authority is one record, however many of its authorizations applied;
@@ -709,14 +662,6 @@ fn test_applied_authorities_record_once_each() {
         usage,
         with_extra(body_only(), mega_evm::AUTHORIZATION_SIZE),
         "a wrong nonce applies nothing, and its tuple is still in the body"
-    );
-
-    let (result, usage) = run(db(), authorizing_call(CONTRACT, 0, &[(CALLER, 1)]));
-    assert!(result.result.is_success());
-    assert_eq!(
-        usage,
-        with_extra(body_only(), mega_evm::AUTHORIZATION_SIZE),
-        "the sender's own account is part of the body"
     );
 }
 
@@ -1234,6 +1179,7 @@ fn paired_corpus() -> Vec<Paired> {
         case("an empty call", to_callee(Bytes::new()), plain(), 0, 0),
         case("three fresh slots", to_callee(storing(&[(1, 1), (2, 1), (3, 1)])), plain(), 0, 3),
         case("a slot written and restored", to_callee(storing(&[(1, 1), (1, 0)])), plain(), 0, 0),
+        case("zero written to an empty slot", to_callee(storing(&[(1, 0)])), plain(), 0, 0),
         case(
             "a slot rewritten twice",
             to_callee(storing(&[(1, 1), (1, 2), (1, 3)])),

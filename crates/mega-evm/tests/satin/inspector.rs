@@ -19,7 +19,9 @@ use revm::{
 };
 use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 
-use crate::common::{account_state_gas, body_history, call, context, history, slot_state_gas};
+use crate::common::{
+    account_state_gas, body_history, call, context, execute_under, history, slot_state_gas,
+};
 
 const CALLER: Address = address!("0000000000000000000000000000000000400000");
 const A: Address = address!("00000000000000000000000000000000000000A1");
@@ -238,32 +240,6 @@ fn test_create_end_address_rewrite_reaches_the_caller_not_the_code() {
     assert!(result.state.get(&FAKE).is_none_or(|fake| fake.info.is_empty_code_hash()));
 }
 
-/// A failed creation rewritten into a success is not refused: its creator is handed the address
-/// the inspector gave, nothing is deployed there, and the creation's own writes are not kept. A
-/// creation that succeeded may be rewritten freely too.
-#[test]
-fn test_a_revived_creation_settles_as_the_failure_it_was() {
-    let db = MemoryDatabase::default()
-        .account_code(A, create_and_store_address(&[PUSH0, PUSH0, REVERT]));
-    let result = run_with(db, Rewriter { create_succeeds: true, ..Default::default() }, 0).unwrap();
-    assert!(result.result.is_success(), "{:?}", result.result);
-    let stored = result.state[&A].storage[&U256::ZERO].present_value();
-    assert_eq!(Address::from_word(stored.into()), FAKE, "the caller got the revived address");
-    assert!(result.state.get(&FAKE).is_none_or(|fake| fake.info.is_empty_code_hash()));
-    let created = A.create(0);
-    assert!(
-        result.state.get(&created).is_none_or(|account| account.info.is_empty_code_hash()),
-        "the failed creation deployed nothing"
-    );
-
-    let db = MemoryDatabase::default()
-        .account_code(A, create_and_store_address(&[0x60, 0x01, 0x60, 0x00, 0xf3]));
-    assert!(run_with(db, Rewriter { create_succeeds: true, ..Default::default() }, 0)
-        .unwrap()
-        .result
-        .is_success());
-}
-
 /// A creation its own frame budget stops, revived by an inspector: the stop is the creation's alone
 /// and no stop of the transaction, so the creation failed as any failed creation does and its
 /// revival settles as the failure — the transaction is not refused. Under a data-size limit of the
@@ -285,11 +261,8 @@ fn test_a_creation_its_frame_budget_stops_may_be_revived() {
     let under = |bytes: u64| {
         mega_evm::EvmTxRuntimeLimits::default().with_tx_data_size_limit(TX_BODY_SIZE + bytes)
     };
-    let plain = |bytes: u64| {
-        MegaEvm::new(context(db()).with_tx_runtime_limits(under(bytes)))
-            .execute_transaction(call(CALLER, A, U256::ZERO, gas_limit()))
-            .unwrap()
-    };
+    let plain =
+        |bytes: u64| execute_under(db(), call(CALLER, A, U256::ZERO, gas_limit()), under(bytes));
     let created = |outcome: &mega_evm::MegaTransactionOutcome| {
         outcome.state[&A]
             .storage

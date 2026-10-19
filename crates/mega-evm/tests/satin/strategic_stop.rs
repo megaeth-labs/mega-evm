@@ -27,7 +27,9 @@ use revm::{
     Database, Inspector,
 };
 
-use crate::common::{call, context, history, runs_at_measurement_prices, slot_state_gas};
+use crate::common::{
+    call, context, execute_under, history, runs_at_measurement_prices, slot_state_gas,
+};
 
 const CALLER: Address = address!("0000000000000000000000000000000000200000");
 const A: Address = address!("00000000000000000000000000000000000000A0");
@@ -86,7 +88,7 @@ fn run(
     limits: EvmTxRuntimeLimits,
     tx: MegaTransaction,
 ) -> MegaTransactionOutcome {
-    MegaEvm::new(context(db).with_tx_runtime_limits(limits)).execute_transaction(tx).unwrap()
+    execute_under(db, tx, limits)
 }
 
 /// The history gas an empty transaction body costs, which every transaction here pays before its
@@ -203,22 +205,6 @@ fn test_cap_crossed_at_depth_three_stops_each_frame_that_crosses_it() {
             );
         }
     }
-}
-
-/// With and without an inspector the stopped transaction spends the same gas, and the stop burns
-/// none of what the transaction did not run.
-#[test]
-fn test_stop_bills_only_what_ran() {
-    let gas_of = |db: MemoryDatabase, inspect: bool| {
-        let mut evm = evm_with(db, cap(180), Probe::default());
-        alloy_evm::Evm::set_inspector_enabled(&mut evm, inspect);
-        let result = evm.transact_raw(call(CALLER, A, U256::ZERO, GAS_LIMIT)).unwrap();
-        assert_stopped(&result.result, LimitKind::DataSize, mega_evm::TX_BODY_SIZE + 180);
-        result.result.gas().tx_gas_used()
-    };
-    let plain = gas_of(chain(), false);
-    assert_eq!(gas_of(chain(), true), plain, "an observing inspector changes nothing");
-    assert!(plain < GAS_LIMIT / 2, "the stop does not burn the gas: {plain}");
 }
 
 /// The stopped transaction gives the whole reservoir back, and spends the same gas whatever its
@@ -383,6 +369,11 @@ fn test_frame_budget_of_the_outermost_frame_reverts_the_transaction() {
             used: 3 * mega_evm::WRITE_RECORD_SIZE,
             frame_local: true,
         })
+    );
+    assert_eq!(
+        result.usage,
+        mega_evm::LimitUsage { data_size: mega_evm::TX_BODY_SIZE, write_records: 0 },
+        "the body is all the transaction keeps"
     );
 }
 

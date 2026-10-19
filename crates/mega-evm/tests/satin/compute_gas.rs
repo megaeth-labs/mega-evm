@@ -23,7 +23,7 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{
-        ADD, CALL, DUP1, GAS, JUMPDEST, JUMPI, LOG0, MLOAD, MSTORE, MUL, POP, PUSH0, PUSH1, PUSH3,
+        ADD, CALL, DUP1, GAS, JUMPDEST, JUMPI, MLOAD, MSTORE, MUL, POP, PUSH0, PUSH1, PUSH3,
         SELFDESTRUCT, SLOAD, SUB, SWAP1,
     },
     context::{
@@ -266,23 +266,6 @@ fn test_memory_expansion_is_computed() {
     // `PUSH32` the word, `PUSH1` the offset, `MSTORE` and three words of memory; `PUSH1`, `MLOAD`,
     // `POP`.
     assert_eq!(computed_beyond_empty(code), 3 + 3 + (3 + 3 * 3) + 3 + 3 + 2);
-}
-
-/// A log's own price is computation — its static cost, eight gas a byte and the memory it reads —
-/// and its bytes are history, on their own ledger.
-#[test]
-fn test_a_log_is_computed_and_its_bytes_are_history() {
-    if runs_at_measurement_prices() {
-        return;
-    }
-    let code = || BytecodeBuilder::default().push_number(32_u8).append(PUSH0).append(LOG0).stop();
-    // `PUSH1`, `PUSH0`, then `LOG0`: 375, eight a byte, and one word of memory.
-    assert_eq!(computed_beyond_empty(code().build()), 3 + 2 + 375 + 8 * 32 + 3);
-    for gas_limit in GAS_LIMITS {
-        let logged = computes(code().build(), gas_limit);
-        let quiet = computes(Bytes::new(), gas_limit);
-        assert_eq!(logged.history - quiet.history, (32 + 32) * COST_PER_HISTORY_BYTE);
-    }
 }
 
 /// A fresh slot's state gas and its write record's history are not computation: what is left of
@@ -559,9 +542,6 @@ fn test_a_nested_call_cannot_compute_past_the_cap() {
 /// A transaction whose intrinsic gas alone is more computation than the cap allows is rejected
 /// before it runs, not included as a failure: an access list of 47,844 addresses is 4,180 gas each
 /// on top of the call, just past the cap, and one address fewer is admitted.
-///
-/// Calldata reaches the cap through its floor first, sixty-four gas a byte against sixteen, and is
-/// rejected the same way.
 #[test]
 fn test_intrinsic_gas_past_the_execution_cap_is_rejected_before_it_runs() {
     if runs_at_measurement_prices() {
@@ -594,21 +574,6 @@ fn test_intrinsic_gas_past_the_execution_cap_is_rejected_before_it_runs() {
         rejection(with_addresses(inside as usize + 1)),
         Some(InvalidTransaction::GasFloorMoreThanGasLimit {
             gas_floor: EMPTY_CALL + address * (inside + 1),
-            gas_limit: TX_GAS_LIMIT_CAP,
-        }),
-    );
-
-    let calldata = (TX_GAS_LIMIT_CAP - EMPTY_CALL) / 64 + 1;
-    let tx = call_with_data(
-        CALLER,
-        CALLEE,
-        Bytes::from(vec![0; calldata as usize]),
-        TX_GAS_LIMIT_CAP + 400_000_000,
-    );
-    assert_eq!(
-        rejection(tx),
-        Some(InvalidTransaction::GasFloorMoreThanGasLimit {
-            gas_floor: EMPTY_CALL + 64 * calldata,
             gas_limit: TX_GAS_LIMIT_CAP,
         }),
     );

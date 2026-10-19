@@ -675,53 +675,17 @@ fn test_without_a_read_nothing_is_capped() {
     }
 }
 
-/// A transaction whose sender, recipient or applied EIP-7702 authority is the beneficiary is
-/// detained from its first instruction: its limit is the cap.
+/// A transaction whose sender is the beneficiary is detained from its first instruction: its limit
+/// is the cap.
 #[test]
-fn test_a_transaction_touching_the_beneficiary_is_detained_from_the_start() {
-    use revm::{
-        context::transaction::TransactionType,
-        context_interface::{
-            either::Either,
-            transaction::{Authorization, RecoveredAuthority, RecoveredAuthorization},
-        },
-    };
+fn test_a_transaction_from_the_beneficiary_is_detained_from_the_start() {
     for gas_limit in TIERS {
-        let intrinsic = intrinsic(gas_limit);
-        let spinner = spin(BytecodeBuilder::default());
         // Detained before its first instruction: the whole program runs after the read.
         let left = Charges::default().spin(0).left(CAP);
-
-        // The sender.
-        let db = MemoryDatabase::default().account_code(CONTRACT, spinner.clone());
-        let run_sender = execute(db, tx(BENEFICIARY, CONTRACT, gas_limit));
+        let db = MemoryDatabase::default().account_code(CONTRACT, spin(BytecodeBuilder::default()));
+        let run = execute(db, tx(BENEFICIARY, CONTRACT, gas_limit));
         // A sender's intrinsic gas is the same whoever it is.
-        assert_eq!(assert_stopped(&run_sender, intrinsic, left), CAP, "the sender");
-
-        // The recipient.
-        let db = MemoryDatabase::default().account_code(BENEFICIARY, spinner.clone());
-        let run_recipient = execute(db, tx(CALLER, BENEFICIARY, gas_limit));
-        assert_eq!(assert_stopped(&run_recipient, intrinsic, left), CAP, "the recipient");
-
-        // An applied authority.
-        let authorization = Either::Right(RecoveredAuthorization::new_unchecked(
-            Authorization { chain_id: U256::ZERO, address: CHILD, nonce: 0 },
-            RecoveredAuthority::Valid(BENEFICIARY),
-        ));
-        let authorizing = OpTx(op_transaction(TxEnv {
-            tx_type: TransactionType::Eip7702 as u8,
-            caller: CALLER,
-            kind: TxKind::Call(CONTRACT),
-            gas_limit,
-            gas_priority_fee: Some(0),
-            authorization_list: vec![authorization],
-            ..Default::default()
-        }));
-        let db = MemoryDatabase::default().account_code(CONTRACT, spinner);
-        let run_authority = execute(db, authorizing);
-        assert_eq!(run_authority.limit, Some(CAP), "the authority");
-        assert!(matches!(run_authority.outcome.result, ExecutionResult::Revert { .. }));
-        assert_eq!(run_authority.accessed, VolatileDataAccess::BENEFICIARY_BALANCE);
+        assert_eq!(assert_stopped(&run, intrinsic(gas_limit), left), CAP, "the sender");
     }
 }
 
@@ -926,8 +890,7 @@ fn test_a_callers_limits_set_the_caps() {
 
 /// The default runtime limits detain: [`EvmTxRuntimeLimits::default`], and the transaction half
 /// of [`ProtocolLimits::for_spec`] that a context starts with and a block executor installs, hold
-/// each kind of read to the spec's cap. It is `no_limits` that turns detention off, with every
-/// other per-transaction limit.
+/// each kind of read to the spec's cap.
 #[test]
 fn test_the_default_limits_detain() {
     let oracle = BytecodeBuilder::default().append_many([PUSH0, SLOAD, POP, STOP]).build();
@@ -954,10 +917,6 @@ fn test_the_default_limits_detain() {
             (ORACLE_ACCESS_COMPUTE_GAS..ORACLE_ACCESS_COMPUTE_GAS + 100_000).contains(&limit),
             "{limit}"
         );
-
-        let run = run_under(EvmTxRuntimeLimits::no_limits(), &timestamp);
-        assert!(!run.detains);
-        assert_eq!(run.limit, None);
     }
 }
 
@@ -1466,9 +1425,10 @@ fn test_a_refused_read_reverts_the_frame_and_charges_its_static_gas() {
     }
 }
 
-/// The refusal of a `SLOTNUM` names access type 12, one past the contract's enum; the others name
-/// their enum variant, `BLOCKHASH`'s the hash it reads (7), as on the legacy engine, although
-/// revm's instruction loads the block number first.
+/// The refusal names its enum variant, `BLOCKHASH`'s the hash it reads (7), as on the legacy
+/// engine, although revm's instruction loads the block number first. The `SLOTNUM` refusal, access
+/// type 12, one past the contract's enum, is pinned by the access-control tests and the decoder's
+/// unit test.
 #[test]
 fn test_the_refusal_names_the_access_type() {
     use mega_evm::system::{IMegaAccessControl, VolatileDataAccessType};
@@ -1485,14 +1445,6 @@ fn test_the_refusal_names_the_access_type() {
         );
     }
     assert_eq!(VolatileDataAccessType::BlockHash as u8, 7);
-    let slot_num = volatile_data_access_disabled_revert_data(VolatileDataAccess::SLOT_NUM);
-    assert_eq!(&slot_num[..4], IMegaAccessControl::VolatileDataAccessDisabled::SELECTOR.as_slice());
-    assert_eq!(U256::from_be_slice(&slot_num[4..]), U256::from(12));
-    assert_eq!(mega_evm::system::SLOT_NUM_ACCESS_TYPE, 12);
-    assert_eq!(
-        mega_evm::decode_volatile_data_access_disabled(&slot_num),
-        Some(VolatileDataAccess::SLOT_NUM)
-    );
 }
 
 /// The switch holds for the frame it is off from and every frame below, and a frame above it

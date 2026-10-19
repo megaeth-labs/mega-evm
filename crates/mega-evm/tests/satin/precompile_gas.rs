@@ -43,7 +43,7 @@ const PROOF: [u8; 48] = hex!(
 );
 
 /// The precompile's input: `versioned_hash ++ z ++ y ++ commitment ++ proof`.
-fn kzg_input() -> Vec<u8> {
+pub(crate) fn kzg_input() -> Vec<u8> {
     let mut input = kzg_to_versioned_hash(&COMMITMENT).to_vec();
     input.extend_from_slice(&Z);
     input.extend_from_slice(&Y);

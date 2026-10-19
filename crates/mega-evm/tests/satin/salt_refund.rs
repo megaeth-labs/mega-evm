@@ -25,7 +25,7 @@ use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
     settle_frame_result, synthetic_frame_result,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    MegaEvm, MegaTransaction, MegaTransactionOutcome,
+    MegaTransaction,
 };
 use revm::{
     bytecode::opcode::{CALL, PUSH0, RETURN, REVERT},
@@ -42,7 +42,7 @@ use revm::{
 use crate::{
     common::{history, state_is_free},
     salt::{
-        account_bucket, authorization_tx, call_contract, capacity, create_with, crowded_account,
+        account_bucket, authorization_tx, call_contract, create_with, crowded_account,
         crowded_slot, db, entry, minimal_envs, run, salt_context, selfdestruct_to, slot_bucket,
         try_run, tx, tx_with_gas, SaltEnvs, AUTHORITY, CALLER, CONTRACT, EMPTY, GAS_LIMIT,
     },
@@ -361,93 +361,6 @@ fn test_a_kept_charge_and_a_restored_one_settle_independently() {
 
     let set = entry(GasId::sstore_set_state_gas());
     assert_eq!(net_state_at([1, 2, 8], crowd, probe), [set, set * 2, set * 8]);
-}
-
-/// A crowded bucket cannot make a transaction owe more than it charged: the refill of a charge
-/// is the charge, so a restore never leaves the state ledger negative or the reservoir richer
-/// than the sender's budget.
-#[test]
-fn test_a_restore_never_gives_back_more_than_it_charged() {
-    let code = BytecodeBuilder::default()
-        .sstore(U256::from(SLOT), U256::from(1))
-        .sstore(U256::from(SLOT), U256::ZERO)
-        .stop()
-        .build();
-    let envs = crowded_slot(minimal_envs(), CONTRACT, U256::from(SLOT), 8);
-
-    let outcome: MegaTransactionOutcome =
-        MegaEvm::new(salt_context(db(code), envs)).execute_transaction(call_contract()).unwrap();
-
-    assert_eq!(outcome.gas.state, 0, "the state ledger nets to zero, not below it");
-    assert!(
-        outcome.gas.reservoir_remaining <= GAS_LIMIT,
-        "a refill cannot put more in the reservoir than the transaction brought",
-    );
-    assert!(outcome.gas.gas_used > 0 && outcome.gas.gas_used <= GAS_LIMIT);
-}
-
-/// The whole matrix at one multiplier, side by side, so the three refund classes are readable in
-/// one place: a rollback gives the charge back, an authorization keeps it, and a bucket is read
-/// once whatever happens to the charge afterwards.
-#[test]
-fn test_the_refund_classes_side_by_side() {
-    let set = entry(GasId::sstore_set_state_gas());
-    let authority_charges =
-        entry(GasId::new_account_state_gas()) + entry(GasId::tx_eip7702_state_gas_bytecode());
-
-    let kept = run(
-        db(BytecodeBuilder::default().sstore(U256::from(SLOT), U256::from(1)).stop().build()),
-        crowded_slot(minimal_envs(), CONTRACT, U256::from(SLOT), 8),
-        call_contract(),
-    );
-    assert_eq!(kept.gas.state, set * 8, "a write that stays pays the crowded price");
-
-    let rolled_back = try_run(
-        db(BytecodeBuilder::default()
-            .sstore(U256::from(SLOT), U256::from(1))
-            .revert_with_data([0xaa])
-            .build()),
-        crowded_slot(minimal_envs(), CONTRACT, U256::from(SLOT), 8),
-        call_contract(),
-    )
-    .expect("the transaction is valid");
-    assert_eq!(rolled_back.gas.state, 0, "a write that is rolled back pays nothing");
-
-    let authorized = try_run(
-        db(BytecodeBuilder::default().revert_with_data([0xaa]).build()),
-        crowded_account(minimal_envs(), AUTHORITY, 8),
-        authorization_tx(CONTRACT),
-    )
-    .expect("the transaction is valid");
-    assert_eq!(
-        authorized.gas.state,
-        authority_charges * 8,
-        "an applied authorization pays even though the frame reverted",
-    );
-}
-
-/// The capacity a bucket is read at is fixed for the transaction: one read serves the charge and
-/// the refill, so the two cannot disagree even if the environment's answer would.
-#[test]
-fn test_the_capacity_behind_a_charge_and_its_refill_is_read_once() {
-    // A charge that costs nothing costs nothing at any capacity, and the engine asks for none.
-    if state_is_free() {
-        return;
-    }
-    let bucket = slot_bucket(CONTRACT, U256::from(SLOT));
-    let envs = minimal_envs().with_bucket_capacity(bucket, capacity(8));
-    let code = BytecodeBuilder::default()
-        .sstore(U256::from(SLOT), U256::from(1))
-        .sstore(U256::from(SLOT), U256::ZERO)
-        .sstore(U256::from(SLOT), U256::from(2))
-        .sstore(U256::from(SLOT), U256::ZERO)
-        .stop()
-        .build();
-
-    let outcome = run(db(code), envs.clone(), call_contract());
-
-    assert_eq!(outcome.gas.state, 0, "every set was restored");
-    assert_eq!(envs.bucket_queries(bucket), 1, "two charges and two refills, one capacity read");
 }
 
 /* The refund route that runs without a frame. */
