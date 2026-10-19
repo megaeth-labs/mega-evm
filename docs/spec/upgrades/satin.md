@@ -1020,9 +1020,11 @@ A node, a stateless validator and a replay tool must agree on everything below, 
   Addresses are hex strings.
   The key format is provisional until a network publishes a genesis file carrying it.
 
-  The Satin keys do not time the forks Satin runs on: Optimism Karst and the Ethereum forks it includes, Osaka among them, are timed by the configuration's own keys for them.
-  Every Satin block executes on Karst's rules, so a node must check, when it loads the configuration, that each of those forks is active at `satinTime`, and refuse the configuration otherwise: a Satin block before one of them would be executed on rules the node's own schedule does not apply to it.
-  The check is for a reader that times the base forks from the file; the reference implementation leaves it to the node: it reads only the chain id and the Satin keys, schedules every base fork from genesis, and runs every Satin block on Karst's rules — the pre-block calls the node's schedule gates among them — whatever the file times Karst at.
+  The Satin keys do not time the forks Satin runs on: Optimism Karst and the Ethereum forks it includes, Osaka among them, are timed by the configuration's own keys for them, and a node must check their timing against `satinTime` both ways when it loads the configuration.
+  Each of those forks must be active by `satinTime`: every Satin block executes on Karst's rules, and a Satin block before one of them would be executed on rules the node's own schedule does not apply to it.
+  The reference implementation's schedule check refuses a schedule in which an Ethereum fork from Shanghai to Osaka or an Optimism fork from Regolith to Karst is not active at `satinTime`, so a node that runs that check on the schedule it builds from the file has this half.
+  Jovian, Karst and Osaka must not activate before `satinTime` either, since every earlier block executes on Rex6's rules, which build on Isthmus whatever the configuration times those forks at; their times in the configuration must equal `satinTime`, and a node must refuse a configuration that activates one of them earlier, a half the reference implementation does not check.
+  The reference implementation reads only the chain id and the Satin keys, schedules every base fork from genesis, and runs every Satin block on Karst's rules — the pre-block calls the node's schedule gates among them — whatever the file times Karst at.
 
 ## Safety and Compatibility
 

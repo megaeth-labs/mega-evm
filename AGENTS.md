@@ -628,6 +628,8 @@ When the agent is requested to implement a new feature or bug fix, it should con
   The fork-requires-params rule is registered in `MegaHardforks::validate_schedule` too — one `require_params::<P>()` per params type — so a schedule that activates the fork without its params, or with params their `validate()` refuses, is rejected at load time.
   A fork may carry several params types (Satin carries `SequencerRegistryConfig` and `ProtocolLimits`): a schedule keeps one value per type, and `MegaHardforks::fork_params_any` answers by fork and `TypeId`.
   A field added to Satin's params needs its flat genesis key: a test of `block/genesis.rs` fails until `SatinChainConfig` reads and writes it.
+  `validate_schedule` also refuses a schedule in which a fork Satin runs on and the schedule activates by timestamp (Ethereum Shanghai to Osaka, Optimism Regolith to Karst) is not active at Satin's activation (`ScheduleError::InactiveBaseFork`); the engine's own schedules put those forks at genesis and pass.
+  That Jovian, Karst and Osaka do not activate before Satin is the node's to check, not the engine's.
 - **Keep the workspace on its declared minimum toolchain (1.94).**
   CI's msrv job checks the workspace on 1.94.0, every feature on, with the lock as it is.
   A dependency whose newer releases declare a newer compiler (alloy 2.2 and later declare 1.94.1) stays on the newest release the declared version builds: `.cargo/config.toml` sets the resolver's `incompatible-rust-versions = "fallback"`, so a `cargo update` run in the repository picks it.
