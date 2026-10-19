@@ -152,9 +152,7 @@ impl RpcArgs {
             EvmeError::InvalidInput("No RPC URL provided. Pass '--rpc <URL>'.".to_string())
         })?;
 
-        let url: alloy_transport_http::reqwest::Url = rpc_url_str.parse().map_err(|e| {
-            EvmeError::RpcError(format!("Invalid RPC URL '{}': {e}", redact_rpc_url(rpc_url_str)))
-        })?;
+        let url = parse_rpc_url(rpc_url_str)?;
 
         // 1. Resolve chain id (always needed by downstream consumers).
         let chain_id = self.resolve_chain_id(url.clone()).await?;
@@ -259,9 +257,7 @@ impl RpcArgs {
                     .to_string(),
             )
         })?;
-        let url: alloy_transport_http::reqwest::Url = rpc_url_str.parse().map_err(|e| {
-            EvmeError::RpcError(format!("Invalid RPC URL '{}': {e}", redact_rpc_url(rpc_url_str)))
-        })?;
+        let url = parse_rpc_url(rpc_url_str)?;
         let chain_id = self.resolve_chain_id(url.clone()).await?;
         Ok((build_bare_op_provider(self.build_retry_client(url)), chain_id))
     }
@@ -320,9 +316,7 @@ impl RpcArgs {
         let path = self.capture_file.as_ref().expect("capture mode requires --rpc.capture-file");
         let rpc_url_str = self.rpc_url.as_ref().expect("capture mode requires --rpc");
 
-        let url: alloy_transport_http::reqwest::Url = rpc_url_str.parse().map_err(|e| {
-            EvmeError::RpcError(format!("Invalid RPC URL '{}': {e}", redact_rpc_url(rpc_url_str)))
-        })?;
+        let url = parse_rpc_url(rpc_url_str)?;
 
         // Load existing envelope if the file exists.
         let existing_envelope = if path.exists() {
@@ -469,22 +463,40 @@ fn build_bare_op_provider(client: RpcClient) -> OpProvider {
 
 /// The URL with any userinfo removed, for a log line, an error, or a cache file name.
 ///
-/// A string that does not parse still drops a `scheme://userinfo@` prefix, so a rejected URL
-/// does not echo a password.
+/// Userinfo is the part of the authority before its last `@`, as the URL standard reads it, so a
+/// password holding an `@` goes whole. It is removed from the text itself, so it holds for a URL
+/// written without its scheme (`user:password@host`) and for one that does not parse. Credentials
+/// anywhere else in the URL, such as an API key in the path or the query, are not recognised and
+/// stay.
 pub(crate) fn redact_rpc_url(raw: &str) -> String {
-    match raw.parse::<alloy_transport_http::reqwest::Url>() {
-        Ok(mut url) => {
-            let _ = url.set_password(None);
-            let _ = url.set_username("");
-            url.to_string()
-        }
-        Err(_) => {
-            let Some(scheme) = raw.find("://") else { return raw.to_string() };
-            let rest = &raw[scheme + 3..];
-            let Some(at) = rest.find('@') else { return raw.to_string() };
-            format!("{}{}", &raw[..=scheme + 2], &rest[at + 1..])
-        }
+    let (scheme, rest) = raw.find("://").map_or(("", raw), |at| raw.split_at(at + 3));
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let stripped = match rest[..authority_end].rfind('@') {
+        Some(at) => format!("{scheme}{}", &rest[at + 1..]),
+        None => return normalized(raw),
+    };
+    normalized(&stripped)
+}
+
+/// `raw` as the URL parser writes it, or unchanged when it does not parse.
+fn normalized(raw: &str) -> String {
+    raw.parse::<alloy_transport_http::reqwest::Url>()
+        .map_or_else(|_| raw.to_string(), |u| u.to_string())
+}
+
+/// Parses `--rpc`. The transport speaks HTTP, so any other scheme is refused here, before the URL
+/// reaches a library whose error text would repeat it whole.
+fn parse_rpc_url(raw: &str) -> Result<alloy_transport_http::reqwest::Url> {
+    let url: alloy_transport_http::reqwest::Url = raw.parse().map_err(|e| {
+        EvmeError::RpcError(format!("Invalid RPC URL '{}': {e}", redact_rpc_url(raw)))
+    })?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(EvmeError::InvalidInput(format!(
+            "Invalid RPC URL '{}': it has to start with http:// or https://",
+            redact_rpc_url(raw)
+        )));
     }
+    Ok(url)
 }
 
 /// `rpc-cache-{chain_id}-{endpoint}.json`. `{endpoint}` is eight hex characters of the
@@ -568,6 +580,46 @@ mod tests {
         let broken = redact_rpc_url("http://alice:secret@not a url");
         assert!(!broken.contains("secret") && !broken.contains("alice"), "{broken}");
         assert_eq!(redact_rpc_url("not a url"), "not a url");
+    }
+
+    /// A URL written without its scheme parses as a scheme named after the user. Its userinfo
+    /// goes all the same.
+    #[test]
+    fn test_redact_rpc_url_strips_userinfo_of_a_url_without_a_scheme() {
+        assert_eq!(redact_rpc_url("alice:s3cret@rpc.example.com"), "rpc.example.com");
+        assert_eq!(
+            redact_rpc_url("alice:s3cret@rpc.example.com:8545/path"),
+            "rpc.example.com:8545/path"
+        );
+        assert_eq!(redact_rpc_url("rpc.example.com"), "rpc.example.com");
+        assert_eq!(redact_rpc_url("localhost:8545"), "localhost:8545");
+    }
+
+    /// The userinfo ends at the last `@` of the authority, so an `@` in the password does not
+    /// leave its tail behind, whether the URL parses or not.
+    #[test]
+    fn test_redact_rpc_url_strips_a_password_holding_an_at_sign() {
+        assert_eq!(
+            redact_rpc_url("http://alice:p@ss@example.com/rpc"),
+            redact_rpc_url("http://example.com/rpc")
+        );
+        let broken = redact_rpc_url("http://alice:p@ss@bad host/");
+        assert_eq!(broken, "http://bad host/");
+        assert_eq!(redact_rpc_url("alice:p@ss@example.com"), "example.com");
+        // An `@` after the authority belongs to the path or the query.
+        assert_eq!(redact_rpc_url("http://example.com/a@b"), "http://example.com/a@b");
+        assert_eq!(redact_rpc_url("http://example.com/?mail=a@b"), "http://example.com/?mail=a@b");
+    }
+
+    /// Only HTTP is spoken, and the refusal of another scheme names the URL without its userinfo.
+    #[test]
+    fn test_parse_rpc_url_refuses_another_scheme_without_the_userinfo() {
+        let error = parse_rpc_url("alice:s3cret@rpc.example.com").unwrap_err().to_string();
+        assert!(error.contains("http://") && !error.contains("s3cret"), "{error}");
+        let error = parse_rpc_url("ftp://alice:s3cret@example.com").unwrap_err().to_string();
+        assert!(!error.contains("s3cret"), "{error}");
+        assert!(parse_rpc_url("http://alice:s3cret@example.com").is_ok());
+        assert!(parse_rpc_url("https://example.com").is_ok());
     }
 
     /// No explicit dir falls back to `dirs::cache_dir()` on platforms that have one.

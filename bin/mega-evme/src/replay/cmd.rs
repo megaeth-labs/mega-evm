@@ -281,7 +281,7 @@ impl Cmd {
             info!(path = %path.display(), "Provider mode: offline replay from cache file");
             self.rpc_args.build_replay_provider().await?
         } else if let Some(rpc) = &self.rpc_args.rpc_url {
-            info!(rpc = %rpc, "Provider mode: online RPC");
+            info!(rpc = %crate::redact_rpc_url(rpc), "Provider mode: online RPC");
             self.rpc_args.build_provider().await?
         } else {
             return Err(ReplayError::Other(

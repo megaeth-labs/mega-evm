@@ -327,3 +327,28 @@ fn test_a_revert_reason_is_filtered_for_the_terminal_and_not_in_json() {
         serde_json::from_str(&run_ok(&["run", "--spec", "Satin", &code, "--json"])).unwrap();
     assert_eq!(json["revert_reason"], format!("Error(\"{reason}\")"));
 }
+
+/// No place the tool writes the `--rpc` URL carries its userinfo: not the log of a replay, not an
+/// error, whether the URL is complete, holds an `@` in its password, or lacks its scheme.
+#[test]
+fn test_the_rpc_url_userinfo_reaches_no_output() {
+    for url in [
+        "http://alice:s3cret@127.0.0.1:9/",
+        "http://alice:s3c@ret@127.0.0.1:9/",
+        "alice:s3cret@127.0.0.1:9",
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_mega-evme"))
+            .args(["replay", &format!("0x{}", "11".repeat(32)), "--override.spec", "Satin"])
+            .args(["--rpc", url, "--rpc.max-retries", "0", "--rpc.no-cache-file", "-vvv"])
+            .output()
+            .unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.status.code(), Some(1), "{url}: {text}");
+        assert!(!text.contains("s3c") && !text.contains("ret@"), "{url}: {text}");
+        assert!(!text.contains("alice"), "{url}: {text}");
+    }
+}
