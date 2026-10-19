@@ -82,7 +82,6 @@ pub(crate) fn registry_config() -> SequencerRegistryConfig {
         initial_system_address: MEGA_SYSTEM_ADDRESS,
         initial_sequencer: SEQUENCER,
         initial_admin: ADMIN,
-        initial_from_block: 1,
         min_rotation_delay: 100,
     }
 }

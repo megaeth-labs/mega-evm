@@ -32,10 +32,13 @@ fn config() -> SequencerRegistryConfig {
         initial_system_address: MEGA_SYSTEM_ADDRESS,
         initial_sequencer: SEQUENCER,
         initial_admin: ADMIN_ADDR,
-        initial_from_block: 7,
         min_rotation_delay: 100,
     }
 }
+
+/// The number of the block whose pre-block step runs the deploys here, which the registry's
+/// `_initialFromBlock` records.
+const BLOCK: u64 = 7;
 
 fn oracle_spec() -> SystemContractSpec {
     SystemContractSpec::new(
@@ -58,7 +61,7 @@ fn test_the_factory_code_hashes_to_its_pinned_hash() {
 /// Expected values: constants (the addresses and code hashes are the production constants).
 #[test]
 fn test_the_spec_list_is_the_seven_predeploys_in_order() {
-    let specs = system_contract_specs(&config());
+    let specs = system_contract_specs(&config(), BLOCK);
     assert_eq!(specs.len(), SYSTEM_CONTRACT_DEPLOY_COUNT);
     assert_eq!(
         [
@@ -116,7 +119,7 @@ fn test_the_spec_list_is_the_seven_predeploys_in_order() {
 #[test]
 fn test_a_fresh_deploy_creates_the_account_and_seeds_storage() {
     let mut db = MemoryDatabase::default();
-    let specs = system_contract_specs(&config());
+    let specs = system_contract_specs(&config(), BLOCK);
     let registry = &specs[5];
     let factory = &specs[6];
 
@@ -147,7 +150,7 @@ fn test_a_fresh_deploy_creates_the_account_and_seeds_storage() {
         account.storage.get(&INITIAL_SEQUENCER).unwrap().present_value,
         U256::from_be_bytes(SEQUENCER.into_word().0)
     );
-    assert_eq!(account.storage.get(&INITIAL_FROM_BLOCK).unwrap().present_value, U256::from(7));
+    assert_eq!(account.storage.get(&INITIAL_FROM_BLOCK).unwrap().present_value, U256::from(BLOCK));
     assert_eq!(
         account.storage.get(&MIN_ROTATION_DELAY).unwrap().present_value,
         U256::from(config().min_rotation_delay)
@@ -204,7 +207,7 @@ fn test_matching_factory_code_at_nonce_zero_is_an_error() {
     let mut db = MemoryDatabase::default();
     db.set_account_code(CREATE2_FACTORY_ADDRESS, CREATE2_FACTORY_CODE);
     db.set_account_nonce(CREATE2_FACTORY_ADDRESS, 0);
-    let factory = &system_contract_specs(&config())[6];
+    let factory = &system_contract_specs(&config(), BLOCK)[6];
     assert!(factory.require_nonzero_nonce);
 
     let error = transact_deploy(&mut db, factory).expect_err("nonce 0 is invalid for the factory");
@@ -224,7 +227,7 @@ fn test_matching_factory_code_keeps_a_nonce_greater_than_one() {
     let mut db = MemoryDatabase::default();
     db.set_account_code(CREATE2_FACTORY_ADDRESS, CREATE2_FACTORY_CODE);
     db.set_account_nonce(CREATE2_FACTORY_ADDRESS, 7);
-    let factory = &system_contract_specs(&config())[6];
+    let factory = &system_contract_specs(&config(), BLOCK)[6];
 
     let state = transact_deploy(&mut db, factory).expect("nonce 7 is a valid factory");
     let account = state.get(&CREATE2_FACTORY_ADDRESS).unwrap();
@@ -262,7 +265,7 @@ fn test_an_empty_account_at_the_address_is_a_fresh_deploy() {
     let mut db = MemoryDatabase::default();
     db.set_account_balance(SEQUENCER_REGISTRY_ADDRESS, U256::from(1_000));
 
-    let spec = system_contract_specs(&config())
+    let spec = system_contract_specs(&config(), BLOCK)
         .into_iter()
         .find(|spec| spec.address == SEQUENCER_REGISTRY_ADDRESS)
         .unwrap();
@@ -283,7 +286,7 @@ fn test_an_empty_account_with_a_used_nonce_is_an_error() {
     db.set_account_balance(SEQUENCER_REGISTRY_ADDRESS, U256::from(1_000));
     db.set_account_nonce(SEQUENCER_REGISTRY_ADDRESS, 42);
 
-    let spec = system_contract_specs(&config())
+    let spec = system_contract_specs(&config(), BLOCK)
         .into_iter()
         .find(|spec| spec.address == SEQUENCER_REGISTRY_ADDRESS)
         .unwrap();

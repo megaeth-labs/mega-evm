@@ -242,7 +242,9 @@ pub(crate) struct Chain {
     blob_base_fee_update_fraction: u64,
     /// The schedule the blocks run on.
     spec: MegaHardforkConfig,
-    /// What the executor deploys before every block, by address.
+    /// What the executor deployed: the predeploys the first block the chain accepted created,
+    /// by address, which hold that block's number as the registry's `_initialFromBlock`. Empty
+    /// until the chain accepts a block.
     predeploys: BTreeMap<Address, SystemContractSpec>,
 }
 
@@ -276,10 +278,7 @@ impl Chain {
             chain_id,
             blob_base_fee_update_fraction,
             spec: chain_spec(),
-            predeploys: system_contract_specs(&registry_config())
-                .into_iter()
-                .map(|spec| (spec.address, spec))
-                .collect(),
+            predeploys: BTreeMap::new(),
         })
     }
 
@@ -391,6 +390,14 @@ impl Chain {
         self.head = header.hash_slow();
         self.head_timestamp = header.timestamp;
         self.hashes.insert(header.number, self.head);
+        if self.predeploys.is_empty() {
+            // The first block the chain accepts creates every predeploy its pre-state lacks: a
+            // refused block left the state as it was.
+            self.predeploys = system_contract_specs(&registry_config(), header.number)
+                .into_iter()
+                .map(|spec| (spec.address, spec))
+                .collect();
+        }
         Ok(BlockOutput {
             gas_used: result.gas_used,
             receipts_root: receipts_root(&result.receipts),
@@ -425,7 +432,7 @@ mod tests {
         let listed: BTreeSet<_> = SATIN_ACCOUNTS.iter().map(|a| a.address).collect();
         assert_eq!(listed.len(), SATIN_ACCOUNTS.len(), "an address listed twice");
         let predeploys: BTreeSet<_> =
-            system_contract_specs(&registry_config()).iter().map(|spec| spec.address).collect();
+            system_contract_specs(&registry_config(), 1).iter().map(|spec| spec.address).collect();
         let listed_predeploys: BTreeSet<_> = SATIN_ACCOUNTS
             .iter()
             .filter(|a| a.added == Added::Predeploy)

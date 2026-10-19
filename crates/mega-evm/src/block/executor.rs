@@ -713,7 +713,8 @@ where
             .fork_params::<SequencerRegistryConfig>()
             .copied()
             .ok_or(MegaBlockExecutionError::MissingSequencerRegistryConfig)?;
-        for spec in system_contract_specs(&config) {
+        let block_number = self.evm.block().number().saturating_to();
+        for spec in system_contract_specs(&config, block_number) {
             let state = transact_deploy(self.evm.db_mut(), &spec).map_err(|error| match error {
                 SystemContractDeployError::Database(error) => BlockExecutionError::other(error),
                 SystemContractDeployError::ForeignCode { address, expected, found } => {
@@ -730,7 +731,6 @@ where
             self.deliver_pre_block(PreBlockStateSource::SystemContract(spec.address), state);
         }
 
-        let block_number = self.evm.block().number().saturating_to();
         let (due, reads) = is_apply_pending_changes_due(self.evm.db_mut(), block_number)
             .map_err(BlockExecutionError::other)?;
         self.deliver_pre_block(PreBlockStateSource::PendingChanges, reads);

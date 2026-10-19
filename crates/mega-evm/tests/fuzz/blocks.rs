@@ -219,7 +219,6 @@ impl BlockCase {
             initial_system_address: MEGA_SYSTEM_ADDRESS,
             initial_sequencer: Address::repeat_byte(0x22),
             initial_admin: Address::repeat_byte(0x33),
-            initial_from_block: 1,
             min_rotation_delay: 100,
         })
     }

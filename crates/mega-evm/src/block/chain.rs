@@ -79,7 +79,7 @@ pub fn testnet_hardforks() -> MegaHardforkConfig {
 /// The schedule an unknown chain runs: every fork up to [`FALLBACK_RUNG`], active at genesis.
 ///
 /// Satin requires a [`SequencerRegistryConfig`]. An unknown chain has no published roles, so
-/// every role is seeded with [`MEGA_SYSTEM_ADDRESS`], `_initialFromBlock` is zero, and
+/// every role is seeded with [`MEGA_SYSTEM_ADDRESS`], and
 /// `_minRotationDelay` is [`crate::system::PLACEHOLDER_MIN_ROTATION_DELAY`]. The placeholder
 /// only matters when bootstrapping a fresh registry: on a chain whose registry is already
 /// deployed, the live roles are read from storage.
@@ -173,7 +173,6 @@ mod tests {
         assert_eq!(params.initial_system_address, MEGA_SYSTEM_ADDRESS);
         assert_eq!(params.initial_sequencer, MEGA_SYSTEM_ADDRESS);
         assert_eq!(params.initial_admin, MEGA_SYSTEM_ADDRESS);
-        assert_eq!(params.initial_from_block, 0);
         assert_eq!(params.min_rotation_delay, PLACEHOLDER_MIN_ROTATION_DELAY);
         assert_ne!(params.min_rotation_delay, 0);
     }

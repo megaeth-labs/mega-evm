@@ -331,7 +331,6 @@ mod tests {
                 initial_system_address: alloy_primitives::Address::repeat_byte(0x11),
                 initial_sequencer: alloy_primitives::Address::repeat_byte(0x22),
                 initial_admin: alloy_primitives::Address::repeat_byte(0x33),
-                initial_from_block: 1,
                 min_rotation_delay: 100,
             },
         };

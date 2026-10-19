@@ -60,10 +60,11 @@ pub const PLACEHOLDER_MIN_ROTATION_DELAY: u64 = 10;
 
 /// Bootstrap configuration for the `SequencerRegistry`, attached to Satin via [`HardforkParams`].
 ///
-/// These values seed the registry's storage on a fresh deploy. After that the live roles are
-/// whatever the contract holds, rotated by the `applyPendingChanges()` pre-block call. The contract
-/// has no setter for `_minRotationDelay`, so a matching-code registry cannot be repaired later
-/// through this helper: the delay must be seeded here, and it must not be zero.
+/// These values seed the registry's storage on a fresh deploy, beside `_initialFromBlock`, which is
+/// the number of the block that creates the registry and no configuration's to choose. After that
+/// the live roles are whatever the contract holds, rotated by the `applyPendingChanges()` pre-block
+/// call. The contract has no setter for `_minRotationDelay`, so a matching-code registry cannot be
+/// repaired later through this helper: the delay must be seeded here, and it must not be zero.
 ///
 /// It travels with the chain configuration: a JSON object with camelCase keys, every field required
 /// and no other accepted. Deserializing does not validate; whoever loads it runs
@@ -78,8 +79,6 @@ pub struct SequencerRegistryConfig {
     pub initial_sequencer: Address,
     /// Seeded into `_admin`.
     pub initial_admin: Address,
-    /// Seeded into `_initialFromBlock`: the first block at which historical lookups are valid.
-    pub initial_from_block: u64,
     /// Seeded into `_minRotationDelay`. Must be nonzero: a zero delay disables the reaction
     /// window the field exists to guarantee.
     pub min_rotation_delay: u64,
@@ -87,7 +86,7 @@ pub struct SequencerRegistryConfig {
 
 impl SequencerRegistryConfig {
     /// Placeholder roles for a chain that has none published: [`MEGA_SYSTEM_ADDRESS`] for every
-    /// address, block zero, and [`PLACEHOLDER_MIN_ROTATION_DELAY`].
+    /// address, and [`PLACEHOLDER_MIN_ROTATION_DELAY`].
     ///
     /// The unknown-chain fallback schedule uses this so a local chain can start. A real network
     /// attaches the roles governance chose.
@@ -96,7 +95,6 @@ impl SequencerRegistryConfig {
             initial_system_address: MEGA_SYSTEM_ADDRESS,
             initial_sequencer: MEGA_SYSTEM_ADDRESS,
             initial_admin: MEGA_SYSTEM_ADDRESS,
-            initial_from_block: 0,
             min_rotation_delay: PLACEHOLDER_MIN_ROTATION_DELAY,
         }
     }
@@ -612,13 +610,12 @@ mod tests {
             initial_system_address: NEXT_SYSTEM_ADDRESS,
             initial_sequencer: NEXT_SEQUENCER,
             initial_admin: CURRENT_SEQUENCER_ADDRESS,
-            initial_from_block: 7,
             min_rotation_delay: 11,
         };
         let json = serde_json::to_string(&config).expect("serializes");
         assert_eq!(
             json,
-            r#"{"initialSystemAddress":"0x1111111111111111111111111111111111111111","initialSequencer":"0x2222222222222222222222222222222222222222","initialAdmin":"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","initialFromBlock":7,"minRotationDelay":11}"#
+            r#"{"initialSystemAddress":"0x1111111111111111111111111111111111111111","initialSequencer":"0x2222222222222222222222222222222222222222","initialAdmin":"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","minRotationDelay":11}"#
         );
         assert_eq!(serde_json::from_str::<SequencerRegistryConfig>(&json).unwrap(), config);
         assert_eq!(config.validate(), Ok(()));

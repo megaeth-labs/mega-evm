@@ -565,7 +565,8 @@ where
     pub fn deploy_system_contracts(&mut self) {
         use mega_evm::system::{system_contract_specs, SequencerRegistryConfig};
 
-        for contract in system_contract_specs(&SequencerRegistryConfig::placeholder()) {
+        // The block number only seeds the registry's storage, which this does not install.
+        for contract in system_contract_specs(&SequencerRegistryConfig::placeholder(), 0) {
             self.set_account_code(contract.address, Bytecode::new_raw(contract.code));
             if contract.nonce != 0 {
                 self.set_account_nonce(contract.address, contract.nonce);

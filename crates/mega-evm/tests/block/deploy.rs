@@ -29,7 +29,7 @@ use revm::{
 
 use crate::common::{
     self, executor, executor_with_spec, pre_block_states, record_pre_block, recovered,
-    registry_config, tx, unlimited_ctx, ADMIN, SEQUENCER,
+    registry_config, tx, unlimited_ctx, ADMIN, BLOCK_NUMBER, SEQUENCER,
 };
 
 fn expected_hashes() -> [(Address, B256); SYSTEM_CONTRACT_DEPLOY_COUNT] {
@@ -71,7 +71,13 @@ fn assert_pre_block_order(outcomes: &[(PreBlockStateSource, revm::state::EvmStat
     assert_eq!(outcomes[3 + SYSTEM_CONTRACT_DEPLOY_COUNT].0, PreBlockStateSource::L1BlockInfo);
 }
 
-fn assert_registry_account_seed(account: &Account, config: &SequencerRegistryConfig) {
+/// The registry's seeded slots: the roles `config` names, and `_initialFromBlock` the number of
+/// the block that created the registry, `created_in`.
+fn assert_registry_account_seed(
+    account: &Account,
+    config: &SequencerRegistryConfig,
+    created_in: u64,
+) {
     let addr_val = |address: Address| U256::from_be_bytes(address.into_word().0);
     let slot = |key: U256| account.storage.get(&key).expect("seeded").present_value;
     assert_eq!(slot(CURRENT_SYSTEM_ADDRESS), addr_val(config.initial_system_address));
@@ -79,11 +85,16 @@ fn assert_registry_account_seed(account: &Account, config: &SequencerRegistryCon
     assert_eq!(slot(ADMIN_SLOT), addr_val(config.initial_admin));
     assert_eq!(slot(INITIAL_SYSTEM_ADDRESS), addr_val(config.initial_system_address));
     assert_eq!(slot(INITIAL_SEQUENCER), addr_val(config.initial_sequencer));
-    assert_eq!(slot(INITIAL_FROM_BLOCK), U256::from(config.initial_from_block));
+    assert_eq!(slot(INITIAL_FROM_BLOCK), U256::from(created_in));
     assert_eq!(slot(MIN_ROTATION_DELAY), U256::from(config.min_rotation_delay));
 }
 
-fn assert_registry_seed(state: &mut State<MemoryDatabase>, config: &SequencerRegistryConfig) {
+/// [`assert_registry_account_seed`], on the state a block committed.
+fn assert_registry_seed(
+    state: &mut State<MemoryDatabase>,
+    config: &SequencerRegistryConfig,
+    created_in: u64,
+) {
     let addr_val = |address: Address| U256::from_be_bytes(address.into_word().0);
     assert_eq!(
         state.storage(SEQUENCER_REGISTRY_ADDRESS, CURRENT_SYSTEM_ADDRESS).unwrap(),
@@ -107,7 +118,7 @@ fn assert_registry_seed(state: &mut State<MemoryDatabase>, config: &SequencerReg
     );
     assert_eq!(
         state.storage(SEQUENCER_REGISTRY_ADDRESS, INITIAL_FROM_BLOCK).unwrap(),
-        U256::from(config.initial_from_block)
+        U256::from(created_in)
     );
     assert_eq!(
         state.storage(SEQUENCER_REGISTRY_ADDRESS, MIN_ROTATION_DELAY).unwrap(),
@@ -142,13 +153,13 @@ fn test_the_first_block_deploys_every_system_contract() {
         assert_eq!(account.info.code_hash, hash, "{address} has the wrong code");
         assert_eq!(account.info.nonce, 1, "{address} is a created contract");
         if address == SEQUENCER_REGISTRY_ADDRESS {
-            assert_registry_account_seed(account, &config);
+            assert_registry_account_seed(account, &config, BLOCK_NUMBER);
         } else {
             assert!(account.storage.is_empty(), "{address} has no seeded storage");
         }
     }
     assert_deployed(&mut state);
-    assert_registry_seed(&mut state, &config);
+    assert_registry_seed(&mut state, &config, BLOCK_NUMBER);
     assert_eq!(config.initial_system_address, MEGA_SYSTEM_ADDRESS);
     assert_eq!(config.initial_sequencer, SEQUENCER);
     assert_eq!(config.initial_admin, ADMIN);
@@ -185,7 +196,34 @@ fn test_the_second_block_is_seven_read_only_entries() {
         assert_eq!(account.info.code_hash, hash);
     }
     assert_deployed(&mut state);
-    assert_registry_seed(&mut state, &registry_config());
+    assert_registry_seed(&mut state, &registry_config(), BLOCK_NUMBER);
+}
+
+/// The registry's `_initialFromBlock` is the number of the block that creates it, whatever that
+/// number is, as the legacy engine seeded it: its historical lookups are valid from there, and
+/// below it they revert. A later block finds the registry and keeps the seed.
+#[test]
+fn test_the_registry_is_seeded_with_the_number_of_the_block_that_creates_it() {
+    let env_at = |number: u64| {
+        let mut env = common::evm_env();
+        env.block_env.number = U256::from(number);
+        env
+    };
+    let created_in = BLOCK_NUMBER + 7;
+    let mut state = common::state();
+    {
+        let mut executor =
+            common::executor_with_env(&mut state, unlimited_ctx(), env_at(created_in));
+        executor.apply_pre_execution_changes().expect("the block deploys the registry");
+    }
+    assert_registry_seed(&mut state, &registry_config(), created_in);
+
+    {
+        let mut executor =
+            common::executor_with_env(&mut state, unlimited_ctx(), env_at(created_in + 1));
+        executor.apply_pre_execution_changes().expect("a later block finds it deployed");
+    }
+    assert_registry_seed(&mut state, &registry_config(), created_in);
 }
 
 /// [S18.12] [S18] An account a genesis allocation gave storage but no code, at a predeploy

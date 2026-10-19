@@ -28,12 +28,11 @@ use crate::{
 pub const SATIN_TIME_KEY: &str = "satinTime";
 
 /// Every Satin key of a chain configuration, in the order [`SatinChainConfig`] writes them.
-pub const SATIN_CHAIN_CONFIG_KEYS: [&str; 6] = [
+pub const SATIN_CHAIN_CONFIG_KEYS: [&str; 5] = [
     SATIN_TIME_KEY,
     "satinInitialSystemAddress",
     "satinInitialSequencer",
     "satinInitialAdmin",
-    "satinInitialFromBlock",
     "satinMinRotationDelay",
 ];
 
@@ -67,7 +66,6 @@ const ARBITRARY_PRECISION_NUMBER: &str = "$serde_json::private::Number";
 /// | `satinInitialSystemAddress`          | address            | [`SequencerRegistryConfig::initial_system_address`]           |
 /// | `satinInitialSequencer`              | address            | [`SequencerRegistryConfig::initial_sequencer`]                |
 /// | `satinInitialAdmin`                  | address            | [`SequencerRegistryConfig::initial_admin`]                    |
-/// | `satinInitialFromBlock`              | integer            | [`SequencerRegistryConfig::initial_from_block`]               |
 /// | `satinMinRotationDelay`              | integer            | [`SequencerRegistryConfig::min_rotation_delay`]               |
 ///
 /// Each key is the `satin` prefix before the field's key in the JSON of its params type, so the
@@ -155,7 +153,6 @@ impl SatinChainConfig {
             initial_system_address: keys.address("satinInitialSystemAddress")?,
             initial_sequencer: keys.address("satinInitialSequencer")?,
             initial_admin: keys.address("satinInitialAdmin")?,
-            initial_from_block: keys.u64("satinInitialFromBlock")?,
             min_rotation_delay: keys.u64("satinMinRotationDelay")?,
         };
         let config = Self { activation_time, sequencer_registry };
@@ -203,17 +200,14 @@ impl Serialize for SatinChainConfig {
             initial_system_address,
             initial_sequencer,
             initial_admin,
-            initial_from_block,
             min_rotation_delay,
         } = sequencer_registry;
-        let [time, system_address, sequencer, admin, from_block, rotation_delay] =
-            SATIN_CHAIN_CONFIG_KEYS;
+        let [time, system_address, sequencer, admin, rotation_delay] = SATIN_CHAIN_CONFIG_KEYS;
         let mut map = serializer.serialize_map(Some(SATIN_CHAIN_CONFIG_KEYS.len()))?;
         map.serialize_entry(time, activation_time)?;
         map.serialize_entry(system_address, initial_system_address)?;
         map.serialize_entry(sequencer, initial_sequencer)?;
         map.serialize_entry(admin, initial_admin)?;
-        map.serialize_entry(from_block, initial_from_block)?;
         map.serialize_entry(rotation_delay, min_rotation_delay)?;
         map.end()
     }
@@ -461,7 +455,6 @@ mod tests {
                 initial_system_address: address!("0x1111111111111111111111111111111111111111"),
                 initial_sequencer: address!("0x2222222222222222222222222222222222222222"),
                 initial_admin: address!("0x3333333333333333333333333333333333333333"),
-                initial_from_block: 4,
                 min_rotation_delay: 5,
             },
         }
@@ -496,7 +489,7 @@ mod tests {
         let json = serde_json::to_string(&config()).unwrap();
         assert_eq!(
             json,
-            r#"{"satinTime":1800000000,"satinInitialSystemAddress":"0x1111111111111111111111111111111111111111","satinInitialSequencer":"0x2222222222222222222222222222222222222222","satinInitialAdmin":"0x3333333333333333333333333333333333333333","satinInitialFromBlock":4,"satinMinRotationDelay":5}"#
+            r#"{"satinTime":1800000000,"satinInitialSystemAddress":"0x1111111111111111111111111111111111111111","satinInitialSequencer":"0x2222222222222222222222222222222222222222","satinInitialAdmin":"0x3333333333333333333333333333333333333333","satinMinRotationDelay":5}"#
         );
         let mut written: Vec<String> =
             serde_json::from_str::<serde_json::Map<String, Value>>(&json)
@@ -583,11 +576,13 @@ mod tests {
 
     /// A key that starts with `satin`, in any case, and is not one of the keys is refused, so a
     /// misspelling cannot stand in for the key it meant; a key that does not is another fork's.
-    /// The limit keys of the provisional format's earlier version are refused the same way: the
-    /// limits are the spec's, and a file that still names one does not load.
+    /// The keys of the provisional format's earlier version are refused the same way: the limits
+    /// are the spec's and `_initialFromBlock` the creating block's number, and a file that still
+    /// names one does not load.
     #[test]
     fn test_an_unknown_satin_key_is_refused() {
         for unknown in [
+            "satinInitialFromBlock",
             "satinTxDataSizeLimit",
             "satinFrameDataSizeLimit",
             "satinBlockEnvAccessComputeGasLimit",
@@ -632,7 +627,7 @@ mod tests {
             ("satinMinRotationDelay", json!(true), integer),
             ("satinMinRotationDelay", json!([1]), integer),
             ("satinMinRotationDelay", json!({ "value": 1 }), integer),
-            ("satinInitialFromBlock", json!("0x4"), integer),
+            ("satinMinRotationDelay", json!("0x4"), integer),
             ("satinInitialAdmin", json!(3), address),
             ("satinInitialAdmin", json!("0x33"), address),
             ("satinInitialAdmin", json!("0xzz33333333333333333333333333333333333333"), address),
