@@ -6,12 +6,13 @@
 //! and every deposit still counts towards it, so the ordinary transactions after the deposits find
 //! the room they used.
 
-use alloy_consensus::{transaction::Recovered, Signed, TxLegacy};
+use alloy_consensus::{transaction::Recovered, Sealed, Signed, TxLegacy};
 use alloy_evm::block::BlockExecutor;
 use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
 use mega_evm::{
     test_utils::BytecodeBuilder, BlockGasCounters, BlockLimits, LimitUsage, MegaTxEnvelope,
 };
+use op_alloy_consensus::TxDeposit;
 use revm::{
     bytecode::opcode::{CALLDATALOAD, PUSH0, SSTORE},
     database::State,
@@ -48,6 +49,9 @@ fn state() -> State<mega_evm::test_utils::MemoryDatabase> {
         .build();
     db.set_account_code(WRITER, writer);
     db.set_account_balance(SENDER, U256::from(1_000_000_000_000_000_u64));
+    for slot in 1..=3 {
+        db.set_account_balance(depositor(slot), U256::from(1));
+    }
     State::builder().with_database(db).build()
 }
 
@@ -58,9 +62,27 @@ fn input(slot: u64) -> Bytes {
     Bytes::from(input)
 }
 
+/// The depositor of the deposit that fills `slot`, an account the state holds: one per deposit,
+/// so deposits executed as candidates before any of them commits do not depend on each other's
+/// commit, which the checked commit would refuse.
+fn depositor(slot: u64) -> Address {
+    Address::with_last_byte(0xd0 + slot as u8)
+}
+
 /// A deposit that fills the fresh `slot`: execution gas, state gas, data size and a write record.
 fn deposit(slot: u64) -> Recovered<MegaTxEnvelope> {
-    common::deposit_tx_to(WRITER, input(slot), gas_limit())
+    let deposit = TxDeposit {
+        source_hash: B256::ZERO,
+        from: depositor(slot),
+        to: TxKind::Call(WRITER),
+        mint: 0,
+        value: U256::ZERO,
+        gas_limit: gas_limit(),
+        is_system_transaction: false,
+        input: input(slot),
+    };
+    let sealed = Sealed::new_unchecked(deposit, B256::repeat_byte(0xd0 + slot as u8));
+    Recovered::new_unchecked(MegaTxEnvelope::Deposit(sealed), depositor(slot))
 }
 
 /// An ordinary transaction that fills the fresh `slot`, so the data-size limit has something to

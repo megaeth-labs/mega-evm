@@ -9,7 +9,7 @@ use alloy_evm::{
     block::{BlockExecutionResult, TxResult},
     InvalidTxError,
 };
-use alloy_primitives::TxHash;
+use alloy_primitives::{Address, TxHash, U256};
 use revm::context::result::{InvalidTransaction, ResultAndState};
 
 use crate::{BlockUsage, LimitUsage, MegaGasUsage, MegaHaltReason, MegaTransactionOutcome};
@@ -252,6 +252,15 @@ pub struct MegaBlockTxResult<T> {
     /// The nonce the depositor had before execution, which the deposit receipt reports. `Some`
     /// only for a deposit.
     pub depositor_nonce: Option<u64>,
+    /// The transaction's sender: the system address, for a system-address transaction.
+    pub sender: Address,
+    /// The sender's nonce as the transaction executed against it, which a delayed commit checks
+    /// against the block's state then
+    /// ([`commit_transaction_outcome`](crate::MegaBlockExecutor::commit_transaction_outcome)).
+    pub sender_nonce: u64,
+    /// The sender's balance as the transaction executed against it, which a delayed commit checks
+    /// as it checks the nonce.
+    pub sender_balance: U256,
     /// The execution result, the post-state and what `MegaETH` counted, as execution produced
     /// them.
     pub inner: MegaTransactionOutcome,

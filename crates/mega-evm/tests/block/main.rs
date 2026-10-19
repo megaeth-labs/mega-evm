@@ -24,6 +24,7 @@ mod sequencer_registry;
 mod sequences;
 #[path = "../shared/snapshot.rs"]
 mod snapshot;
+mod stale;
 mod state_gas;
 mod transfer_log_order;
 mod transfer_logs;
