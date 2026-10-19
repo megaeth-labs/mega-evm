@@ -633,7 +633,7 @@ async fn test_a_replayed_log_carries_the_block_level_index() {
 }
 
 /// A state dump of a replay carries the code of an account an included predecessor wrote and the
-/// target only touched, which the block's state holds without its code.
+/// target only touched: the block's state keeps the code of every account it holds.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_a_replay_dump_carries_the_code_of_a_predecessors_account() {
     // PUSH1 1 PUSH0 SSTORE STOP: writes slot 0.

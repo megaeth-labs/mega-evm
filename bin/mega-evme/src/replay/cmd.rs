@@ -549,12 +549,7 @@ impl Cmd {
             satin.limits_override = hardforks.protocol_limits(timestamp).map(Box::new);
         }
         let exec_result = outcome.inner.result.clone();
-        let mut evm_state = outcome.inner.state.clone();
-        if self.dump_args.dump {
-            crate::materialize_dumped_code(block_executor.evm().db(), &mut evm_state).map_err(
-                |e| ReplayError::Other(format!("Failed to load code for the state dump: {e}")),
-            )?;
-        }
+        let evm_state = outcome.inner.state.clone();
 
         match &exec_result {
             ExecutionResult::Success { .. } => {
