@@ -112,7 +112,7 @@ mod tests {
     };
     use alloy_primitives::{Bytes, B256, U256};
     use core::convert::Infallible;
-    use revm::interpreter::{CallInput, CallScheme, CallValue, InstructionResult};
+    use revm::interpreter::{CallInput, CallScheme, CallValue};
 
     const CONTRACT: Address = address!("00000000000000000000000000000000000c0001");
     const FORWARD: u64 = 100_000;

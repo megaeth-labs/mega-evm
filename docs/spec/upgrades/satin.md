@@ -550,7 +550,7 @@ The reference implementation has no price for one, so it runs such a precompile 
 #### New behavior
 
 - `MegaAccessControl`'s interface, errors, and the scope of `disableVolatileDataAccess()`, `enableVolatileDataAccess()` and `isVolatileDataAccessDisabled()` are unchanged.
-- `disableVolatileDataAccess()` MUST switch access off only for a call its answer settles as a success: an answer gas detention turns into the compute stop (see [Gas Detention on Withheld Gas](#12-gas-detention-on-withheld-gas)) leaves the switch as it was.
+- `disableVolatileDataAccess()` switches access off once its answer is settled; an answer gas detention turns into the compute stop (see [Gas Detention on Withheld Gas](#12-gas-detention-on-withheld-gas)) MUST leave the switch as it was.
 - A read is refused where the opcode loads the value, after it read its operands: an opcode that fails on its operands (a stack underflow, for example) fails as it would with access on.
   The load comes before the opcode pushes its result, so a read on a full stack is refused rather than overflowing it.
   A `BLOCKHASH` is refused as `BLOCKHASH` (7) whatever its operand.
@@ -666,7 +666,7 @@ An out-of-gas step halts the call, consuming its regular gas.
 - **Limits.**
   A frame budget the creation crosses reverts the creation, and the call answers `ExecutionReverted` with the stop's revert data.
   A transaction-level limit stops the transaction: the call reverts with the stop, and the deployment — the signer's nonce included — is taken back.
-  When the signer's nonce record, which survives a failed creation, takes the call over its own frame budget, the call reverts with that stop and the deployment, the nonce included, is taken back without stopping the transaction.
+  When the signer's nonce record, which survives a failed creation, takes the call over its own frame budget, the call reverts with that stop and the deployment, the nonce included, is taken back; no transaction-level limit is crossed, and since the call is the transaction's own frame, the stop reported for the transaction is that budget's.
 - The contract's interface no longer declares the four errors only Rex6 and earlier produced: `ParentBudgetExceeded(uint8,uint64,uint64)`, `InvalidTransaction()`, `InsufficientComputeGas(uint64,uint64)` and `InternalError()`.
   A node MUST NOT produce them: a failed database read or SALT lookup gives the transaction no outcome, as [Transaction and Block Refusals](#21-transaction-and-block-refusals) says.
   `AddressMismatch()` and `NoContractCreated()` remain as answers to a creation reported at another address or at none, which no deployment reaches.

@@ -212,7 +212,7 @@ pub struct Detention {
     /// The depth of the frame an answer being settled switches volatile-data access off for, if
     /// it does: applied once the answer settles without a crossing. See
     /// [`disable_access_on_answer`](Self::disable_access_on_answer).
-    answer_switches_off: Option<usize>,
+    answer_disables_from: Option<usize>,
     /// What the transaction read.
     accessed: VolatileDataAccess,
     /// The most compute the transaction may reach, once it read volatile data.
@@ -246,7 +246,7 @@ impl Detention {
         self.block_env_cap = block_env_cap;
         self.oracle_cap = oracle_cap;
         self.refusing = false;
-        self.answer_switches_off = None;
+        self.answer_disables_from = None;
         #[cfg(any(test, feature = "test-utils"))]
         {
             self.disabled_from = self.disabled_from_at_start;
@@ -614,7 +614,7 @@ impl Detention {
         gas_limit: u64,
     ) -> Option<ComputeStop> {
         let stop = self.classify_answer(result, depth, gas_limit);
-        if let Some(caller) = self.answer_switches_off.take() {
+        if let Some(caller) = self.answer_disables_from.take() {
             if stop.is_none() {
                 self.disable_access(caller);
             }
@@ -756,7 +756,7 @@ impl Detention {
     /// that becomes the stop did not succeed, and the frame that catches it resumes with the
     /// switch as it was.
     pub(crate) const fn disable_access_on_answer(&mut self, depth: usize) {
-        self.answer_switches_off = Some(depth);
+        self.answer_disables_from = Some(depth);
     }
 
     /// Switches volatile-data access back on for the frame at `depth`, and reports whether it

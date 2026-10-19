@@ -470,11 +470,11 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     /// forwarded ([`hold_precompile`]).
     ///
     /// Step 1 is the pre-frame check: it answers a frame nothing may start. No limit has a part in
-    /// it: validation admits no transaction a limit would stop before its first frame. The frame's
-    /// own writes
-    /// are counted after the interceptor, because an intercepted frame's writes are the
-    /// interceptor's to count. A `keylessDeploy` call's frame is built as any call's, and its
-    /// creation is started by its first run, through this same frame start, as its child.
+    /// it: validation admits no transaction a limit would stop before its first frame, and once a
+    /// limit stops a transaction no caller resumes to start another. The frame's own writes are
+    /// counted after the interceptor, because an intercepted frame's writes are the interceptor's
+    /// to count. A `keylessDeploy` call's frame is built as any call's, and its creation is started
+    /// by its first run, through this same frame start, as its child.
     ///
     /// A frame answered before revm builds it gets an empty lane, so the lanes stay aligned with
     /// the results [`frame_return_result`](EvmTr::frame_return_result) pops. A creation answered

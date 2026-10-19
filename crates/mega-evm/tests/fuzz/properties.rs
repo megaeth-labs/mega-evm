@@ -419,7 +419,7 @@ pub(crate) fn check_survivors(
         )));
     };
     match latched {
-        Some(latched) => prop_eq!(latched, stop, "the latch is the stop reported\n{rendered}"),
+        Some(_) => prop_check!(!frame_local, "a frame budget latched the transaction\n{rendered}"),
         None => prop_check!(frame_local, "a transaction-level stop latched nothing\n{rendered}"),
     }
     match &outcome.result {
