@@ -1,17 +1,9 @@
 use alloy_primitives::{hex::FromHexError, BlockNumber, TxHash, B256};
-use alloy_provider::transport::TransportError;
-use mega_evm::{
-    alloy_evm::block::BlockExecutionError,
-    revm::{bytecode::BytecodeDecodeError, database_interface::bal::EvmDatabaseError},
-};
+use mega_evm::revm::{bytecode::BytecodeDecodeError, database_interface::bal::EvmDatabaseError};
 
 /// Error types for the replay command
 #[derive(Debug, thiserror::Error)]
 pub enum EvmeError {
-    /// RPC transport error
-    #[error("RPC transport error: {0}")]
-    RpcTransportError(TransportError),
-
     /// Transaction not found
     #[error("Transaction not found: {0}")]
     TransactionNotFound(TxHash),
@@ -19,10 +11,6 @@ pub enum EvmeError {
     /// Block not found
     #[error("Block not found: {0}")]
     BlockNotFound(BlockNumber),
-
-    /// Block execution error
-    #[error("Block execution error: {0}")]
-    BlockExecutionError(#[from] BlockExecutionError),
 
     /// Invalid bytecode
     #[error("Invalid bytecode: {0}")]
