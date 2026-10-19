@@ -30,7 +30,8 @@ Subcommands:
         report saying why, when the results cannot be scored.
 
   orphans     --suppressions <toml> --universe <file>
-        Flag suppressions that match no live mutant.
+        Flag suppressions that match no live mutant, and a locator-less line
+        suppression that matches more than one.
 
 The results a run leaves are read fail-closed, on the contract cargo-mutants 27
 keeps and scripts/umutate.py keeps with it. Before it tests anything the
@@ -306,15 +307,41 @@ def cmd_note_empty(args: argparse.Namespace) -> int:
     return 0
 
 
+def line_suppressions(path: str | None) -> list[dict]:
+    """The line-scoped suppression entries, or none when no file is given."""
+    if not path:
+        return []
+    _, line_supp = load_suppressions(Path(path))
+    return line_supp
+
+
 def suppressed_names(path: str | None) -> set[str]:
     """The mutants line-scoped suppressions name.
 
     A line suppression matches either the bare mutation text (`mutant` written
     without a locator) or the full `file:line:col: text` line. The latter lets
     two mutants that share identical source text be suppressed independently.
+    A bare text that is the body of more than one mutant fails the gate.
     """
-    _, line_supp = load_suppressions(Path(path)) if path else ([], [])
-    return {e["mutant"].strip() for e in line_supp if "mutant" in e}
+    return {e["mutant"].strip() for e in line_suppressions(path) if "mutant" in e}
+
+
+def locatorless_matching_several(entries: list[dict], mutants: list[str]) -> list[str]:
+    """Locator-less line suppressions whose text is the body of more than one mutant.
+
+    A bare `mutant` matches every mutant with that text. Two of them have to be
+    named with their `file:line:col` locators, or one suppression hides both.
+    """
+    counts = Counter(mutant_body(name) for name in mutants)
+    found: list[str] = []
+    for entry in entries:
+        text = str(entry.get("mutant", "")).strip()
+        # A locator is `file:line:col: text`; the bare text has no `: `.
+        if not text or ": " in text:
+            continue
+        if counts[text] > 1 and text not in found:
+            found.append(text)
+    return found
 
 
 def is_suppressed(name: str, supp: set[str]) -> bool:
@@ -366,6 +393,21 @@ def cmd_report(args: argparse.Namespace) -> int:
         write_report(f"## 🧬 Mutation testing — ✅ PASS\n\n{note}.\n", args)
         return 0
 
+    line_supp = line_suppressions(args.suppressions)
+    ambiguous = locatorless_matching_several(
+        line_supp, [*run.caught, *run.missed, *run.timeout, *run.unviable]
+    )
+    if ambiguous:
+        listed = "\n".join(f"- `{text}`" for text in ambiguous)
+        write_report(
+            "## 🧬 Mutation testing — ❌ FAIL\n\n"
+            "A locator-less line suppression matches more than one mutant.\n"
+            "Name each with its `file:line:col` locator.\n\n"
+            f"{listed}\n",
+            args,
+        )
+        return 1
+
     caught, missed, timeout = list(run.caught), list(run.missed), []
     rechecked: dict[str, list[str]] = {"caught": [], "missed": [], "timeout": [], "absent": []}
     if recheck is not None:
@@ -384,7 +426,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     else:
         timeout = list(run.timeout)
 
-    supp = suppressed_names(args.suppressions)
+    supp = {e["mutant"].strip() for e in line_supp if "mutant" in e}
 
     def partition(items: list[str]) -> tuple[list[str], list[str]]:
         sup, real = [], []
@@ -511,14 +553,21 @@ def cmd_orphans(args: argparse.Namespace) -> int:
         m = e.get("mutant", "").strip()
         if m and m not in bodies and m not in full:
             orphans.append(f'[line] {e.get("file", "?")}: "{m[:90]}"')
+    ambiguous = locatorless_matching_several(line, universe)
 
     total = len(func) + len(line)
+    if ambiguous:
+        print(f"❌ {len(ambiguous)} locator-less line suppression(s) each match more than one mutant.")
+        print("Name each with its file:line:col locator:")
+        for text in ambiguous:
+            print(f'  - "{text[:90]}"')
     if orphans:
         print(f"❌ {len(orphans)}/{total} suppressions are stale (no live mutant matches).")
         print("Remove or update these — a suppression that matches nothing is a "
               "silent blind spot:")
         for o in orphans:
             print(f"  - {o}")
+    if orphans or ambiguous:
         return 1
     print(f"✅ all {total} suppressions match a live mutant.")
     return 0
