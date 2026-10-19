@@ -10,6 +10,11 @@
 //! chain can build on. A database error the database calls fatal is not a verdict on the block:
 //! it is an internal error. Every pre-block call runs through [`transact_pre_block_call`], which
 //! holds that rule for all of them.
+//!
+//! The executor's own reads of the block's state outside a call (the system-contract deploys, the
+//! registry's due check, the L1 block info, a sender's account) follow the convention of
+//! `alloy-op-evm`'s executor for its reads: any database error is an internal error, fatal or
+//! not.
 
 #[cfg(not(feature = "std"))]
 use alloc as std;

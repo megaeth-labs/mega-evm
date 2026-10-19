@@ -316,10 +316,22 @@ fn test_an_override_replays_a_satin_block_under_other_limits() {
     }
     assert!(protocols > 0 && others > 0, "{protocols} {others}");
 
+    // The budget refuses every transaction after the one that reaches it but the protocol's own:
+    // a Mega System Transaction is never refused by it.
     let (packed, block) = replay_under(Some(r#"{"blockTxsDataLimit":1}"#));
-    assert_eq!(block["refused"], block["transactions"].as_u64().unwrap() - 1);
+    let is_protocols = |index: usize| {
+        let from: Address = sent[index]["from"].as_str().unwrap().parse().unwrap();
+        from == MEGA_SYSTEM_ADDRESS
+    };
+    let protocol_txs = (1..packed.len()).filter(|&index| is_protocols(index)).count();
+    assert!(protocol_txs > 0, "the block holds Mega System Transactions");
+    assert_eq!(block["refused"], block["transactions"].as_u64().unwrap() - 1 - protocol_txs as u64,);
     assert_eq!(packed[0], counterfactual[0], "the transaction that reaches the budget is packed");
-    for tx in &packed[1..] {
+    for (index, tx) in packed.iter().enumerate().skip(1) {
+        if is_protocols(index) {
+            assert_ne!(tx["status"], "refused", "the budget does not refuse the protocol's: {tx}");
+            continue;
+        }
         assert_eq!(tx["status"], "refused", "{tx}");
         let reason = tx["reason"].as_str().unwrap();
         assert!(reason.contains("Block transactions data limit reached"), "{reason}");

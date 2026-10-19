@@ -382,6 +382,40 @@ fn test_foreign_code_at_a_system_address_fails_the_block() {
     }
 }
 
+/// A chain that holds an older version of a contract is upgraded by the block's deploy step, in
+/// place: the step delivers the account as a change to the pre-block observer, and the block's
+/// state holds the newer code with the storage the contract had.
+#[test]
+fn test_an_older_oracle_is_upgraded_by_the_pre_block_step_with_its_storage() {
+    const SLOT: U256 = U256::from_limbs([0x51, 0, 0, 0]);
+    let value = U256::from(0xfeed_u64);
+    let mut db = common::database();
+    db.set_account_code(ORACLE_CONTRACT_ADDRESS, mega_system_contracts::oracle::V1_1_0_CODE);
+    db.set_account_nonce(ORACLE_CONTRACT_ADDRESS, 3);
+    db.set_account_storage(ORACLE_CONTRACT_ADDRESS, SLOT, value);
+    let mut state = State::builder().with_database(db).build();
+    let mut executor = executor(&mut state, unlimited_ctx());
+    let log = record_pre_block(&mut executor);
+
+    executor.apply_pre_execution_changes().expect("the block starts");
+    drop(executor);
+
+    let states = pre_block_states(&log);
+    let (_, upgrade) = states
+        .iter()
+        .find(|(source, _)| *source == PreBlockStateSource::SystemContract(ORACLE_CONTRACT_ADDRESS))
+        .expect("the Oracle's step is delivered");
+    let account = upgrade.get(&ORACLE_CONTRACT_ADDRESS).expect("the Oracle is in its state");
+    assert!(account.is_touched() && !account.is_created());
+    assert_eq!(account.info.code_hash, ORACLE_CONTRACT_CODE_HASH);
+    assert!(account.storage.is_empty());
+
+    let info = state.basic(ORACLE_CONTRACT_ADDRESS).unwrap().expect("the Oracle is there");
+    assert_eq!(info.code_hash, ORACLE_CONTRACT_CODE_HASH, "the block holds the newer code");
+    assert_eq!(info.nonce, 3, "the nonce is kept");
+    assert_eq!(state.storage(ORACLE_CONTRACT_ADDRESS, SLOT).unwrap(), value, "the storage is kept");
+}
+
 /// A scheduled Satin without registry params fails at load, and a block built from one anyway
 /// fails when it tries to deploy.
 #[test]

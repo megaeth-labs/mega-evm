@@ -1,7 +1,7 @@
 //! The system-contract deploy helper: the spec list, a fresh deploy, the idempotent read, and
 //! foreign code.
 
-use alloy_primitives::{address, keccak256, Address, Bytes, U256};
+use alloy_primitives::{address, keccak256, Address, Bytes, B256, U256};
 use mega_evm::{
     system::{
         check_genesis_account,
@@ -22,7 +22,7 @@ use mega_evm::{
     test_utils::{ErrorInjectingDatabase, MemoryDatabase},
     HardforkParams,
 };
-use revm::{primitives::KECCAK_EMPTY, DatabaseCommit};
+use revm::{primitives::KECCAK_EMPTY, Database, DatabaseCommit};
 
 const SEQUENCER: Address = address!("0x2222222222222222222222222222222222222222");
 const ADMIN_ADDR: Address = address!("0x3333333333333333333333333333333333333333");
@@ -418,4 +418,130 @@ fn test_other_genesis_accounts_pass_the_check() {
         Ok(()),
         "other code, which the deploy refuses at the block"
     );
+}
+
+/// The older versions of the contracts the deploy upgrades in place, with the address each lives
+/// at and the version Satin deploys there.
+fn known_older_versions() -> Vec<(&'static str, Address, Bytes, B256, B256)> {
+    use mega_system_contracts::{oracle, sequencer_registry};
+    vec![
+        (
+            "Oracle 1.0.0",
+            ORACLE_CONTRACT_ADDRESS,
+            oracle::V1_0_0_CODE,
+            oracle::V1_0_0_CODE_HASH,
+            ORACLE_CONTRACT_CODE_HASH,
+        ),
+        (
+            "Oracle 1.1.0",
+            ORACLE_CONTRACT_ADDRESS,
+            oracle::V1_1_0_CODE,
+            oracle::V1_1_0_CODE_HASH,
+            ORACLE_CONTRACT_CODE_HASH,
+        ),
+        (
+            "SequencerRegistry 1.0.0",
+            SEQUENCER_REGISTRY_ADDRESS,
+            sequencer_registry::V1_0_0_CODE,
+            sequencer_registry::V1_0_0_CODE_HASH,
+            SEQUENCER_REGISTRY_CODE_HASH,
+        ),
+    ]
+}
+
+/// The spec of `address` in the list the block deploys.
+fn spec_at(address: Address) -> SystemContractSpec {
+    system_contract_specs(&config(), BLOCK)
+        .into_iter()
+        .find(|spec| spec.address == address)
+        .expect("the address is a predeploy")
+}
+
+/// Every older version the contracts shipped is replaced in place by the deploy: the code and its
+/// hash are the newer version's, the nonce and the balance stay, and the storage stays — the
+/// returned state writes no slot, marks the account touched and not created, so the state layer
+/// neither clears nor rewrites what the contract holds.
+#[test]
+fn test_a_known_older_version_is_upgraded_in_place_with_its_storage() {
+    const SLOT: U256 = U256::from_limbs([0x51, 0, 0, 0]);
+    let value = U256::from(0xfeed_u64);
+    for (name, address, old_code, old_hash, new_hash) in known_older_versions() {
+        let mut db = MemoryDatabase::default();
+        db.set_account_code(address, old_code);
+        db.set_account_nonce(address, 9);
+        db.set_account_balance(address, U256::from(77));
+        db.set_account_storage(address, SLOT, value);
+
+        let state = transact_deploy(&mut db, &spec_at(address))
+            .unwrap_or_else(|error| panic!("{name} is upgraded: {error}"));
+        let account = state.get(&address).expect("the upgrade is in the witness");
+        assert!(account.is_touched(), "{name}: the upgrade is a change");
+        assert!(!account.is_created(), "{name}: a created mark would clear the storage");
+        assert_eq!(account.info.code_hash, new_hash, "{name}");
+        assert_ne!(account.info.code_hash, old_hash, "{name}");
+        assert_eq!(account.info.nonce, 9, "{name}: the nonce stays");
+        assert_eq!(account.info.balance, U256::from(77), "{name}: the balance stays");
+        assert!(account.storage.is_empty(), "{name}: no slot is written or cleared");
+
+        db.commit(state);
+        let held = Database::basic(&mut db, address).unwrap().expect("the account stays");
+        assert_eq!(held.code_hash, new_hash, "{name}: the committed code is the newer one");
+        assert_eq!(held.nonce, 9, "{name}");
+        assert_eq!(
+            Database::storage(&mut db, address, SLOT).unwrap(),
+            value,
+            "{name}: storage kept"
+        );
+
+        let again = transact_deploy(&mut db, &spec_at(address)).expect("the second deploy reads");
+        assert!(!again.get(&address).unwrap().is_touched(), "{name}: the upgrade is done once");
+    }
+}
+
+/// The version Satin deploys is left alone, whatever the older ones do: a read-only entry, no
+/// change.
+#[test]
+fn test_the_current_version_is_not_upgraded() {
+    for (name, address, ..) in known_older_versions() {
+        let spec = spec_at(address);
+        let mut db = MemoryDatabase::default();
+        db.set_account_code(address, spec.code.clone());
+        let state = transact_deploy(&mut db, &spec).expect("the current version deploys");
+        let account = state.get(&address).unwrap();
+        assert!(!account.is_touched() && !account.is_created(), "{name}");
+        assert_eq!(account.info.code_hash, spec.code_hash, "{name}");
+    }
+}
+
+/// Code that is not a known version stays an error, whatever it resembles: an older version with
+/// one byte changed, and a known version of another contract at the address.
+#[test]
+fn test_unknown_code_is_still_refused_and_a_version_of_another_contract_is_unknown() {
+    use mega_system_contracts::{oracle, sequencer_registry};
+    let mut near_miss = oracle::V1_1_0_CODE.to_vec();
+    *near_miss.last_mut().unwrap() ^= 1;
+    let cases = [
+        ("a near miss of Oracle 1.1.0", ORACLE_CONTRACT_ADDRESS, Bytes::from(near_miss)),
+        (
+            "the registry's 1.0.0 at the Oracle's address",
+            ORACLE_CONTRACT_ADDRESS,
+            sequencer_registry::V1_0_0_CODE,
+        ),
+        (
+            "the Oracle's 1.0.0 at the registry's address",
+            SEQUENCER_REGISTRY_ADDRESS,
+            oracle::V1_0_0_CODE,
+        ),
+    ];
+    for (name, address, code) in cases {
+        let mut db = MemoryDatabase::default();
+        db.set_account_code(address, code.clone());
+        let error = transact_deploy(&mut db, &spec_at(address)).expect_err(name);
+        match error {
+            SystemContractDeployError::ForeignCode { found, .. } => {
+                assert_eq!(found, keccak256(&code), "{name}")
+            }
+            other => panic!("{name}: expected ForeignCode, got {other}"),
+        }
+    }
 }

@@ -74,6 +74,9 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes = EmptyExternalEn
     /// Whether the running transaction is the protocol's own, decided when it is validated. See
     /// [`MegaContext::is_system_originated`].
     system_originated: bool,
+    /// Whether the running execution is a system call rather than a transaction. See
+    /// [`MegaContext::is_system_call`].
+    system_call: bool,
     /// Whether the running transaction pays history gas. See [`MegaContext::prices_history`].
     prices_history: bool,
     /// Where the running transaction's `keylessDeploy` call stands, from the start of its frame
@@ -118,6 +121,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
             bucket_record: BucketRecord::default(),
             oracle_reads: OracleReadRecord::default(),
             system_originated: false,
+            system_call: false,
             prices_history: true,
             keyless_frame: None,
             #[cfg(any(test, feature = "test-utils"))]
@@ -401,6 +405,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// else of the transaction runs.
     pub(crate) fn on_new_tx(&mut self, system_transaction: bool) {
         self.prepare(system::originates_from_the_protocol(&self.inner.tx, system_transaction));
+        self.system_call = false;
     }
 
     /// Prepares the context for a system call. Every system-call entry point of
@@ -411,6 +416,19 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// not a transaction anybody sent.
     pub(crate) fn on_new_system_call(&mut self) {
         self.prepare(true);
+        self.system_call = true;
+    }
+
+    /// Whether the running execution is a system call: the protocol's own call, such as a
+    /// pre-block call, rather than a transaction of the block.
+    ///
+    /// A system call is a function of the chain's state alone, so it never asks the oracle
+    /// service: the service's answers reach a stateless validator through the included
+    /// transactions' records, and a system call has none. Set when the call is prepared and
+    /// cleared when the next transaction is, so it cannot outlive the call.
+    #[inline]
+    pub(crate) const fn is_system_call(&self) -> bool {
+        self.system_call
     }
 
     /// Prepares the common execution layer for a transaction or a system call that is, or is not,
@@ -929,6 +947,24 @@ mod tests {
         ctx.oracle_reads.record(U256::from(42), None);
         ctx.on_new_system_call();
         assert!(ctx.oracle_reads().is_empty(), "so does a system call");
+    }
+
+    /// The system-call mark is the call's own: it is set when a system call is prepared and
+    /// cleared by the next transaction, a Mega System Transaction included.
+    #[test]
+    fn test_the_system_call_mark_does_not_outlive_the_call() {
+        let mut ctx = MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN);
+        assert!(!ctx.is_system_call());
+
+        ctx.on_new_system_call();
+        assert!(ctx.is_system_call());
+
+        ctx.on_new_tx(false);
+        assert!(!ctx.is_system_call(), "a transaction is not a system call");
+
+        ctx.on_new_system_call();
+        ctx.on_new_tx(true);
+        assert!(!ctx.is_system_call(), "nor is a system transaction, which the protocol sends");
     }
 
     /// Two contexts may read one SALT environment — a node builds an EVM per transaction over
