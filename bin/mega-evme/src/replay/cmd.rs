@@ -6,13 +6,18 @@ use alloy_provider::Provider;
 use alloy_rpc_types_eth::Block;
 use clap::Parser;
 use mega_evm::{
-    alloy_evm::{block::BlockExecutor, Evm, EvmEnv},
+    alloy_evm::{
+        block::{BlockExecutionError, BlockExecutor},
+        Evm, EvmEnv,
+    },
     alloy_op_evm::block::OpAlloyReceiptBuilder,
     revm::{
-        context::{result::ExecutionResult, BlockEnv, CfgEnv},
+        context::{result::ExecutionResult, BlockEnv, CfgEnv, ContextTr},
         database::{states::bundle_state::BundleRetention, StateBuilder},
-        primitives::eip4844,
-        DatabaseRef,
+        inspector::JournalExt,
+        interpreter::{CallInputs, CallOutcome, CreateInputs, CreateOutcome, Interpreter},
+        primitives::{eip4844, Address, Log},
+        DatabaseRef, Inspector,
     },
     BlockLimits, DeclaredObserver, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory,
     MegaHardforks, MegaSpecId,
@@ -276,7 +281,7 @@ impl Cmd {
             info!(path = %path.display(), "Provider mode: offline replay from cache file");
             self.rpc_args.build_replay_provider().await?
         } else if let Some(rpc) = &self.rpc_args.rpc_url {
-            info!(rpc = %rpc, "Provider mode: online RPC");
+            info!(rpc = %crate::redact_rpc_url(rpc), "Provider mode: online RPC");
             self.rpc_args.build_provider().await?
         } else {
             return Err(ReplayError::Other(
@@ -301,7 +306,7 @@ impl Cmd {
             .get_transaction_by_hash(tx_hash)
             .await
             .map_err(|e| ReplayError::RpcError(format!("Failed to fetch transaction: {e}")))?
-            .ok_or_else(|| ReplayError::TransactionNotFound(tx_hash))?;
+            .ok_or(ReplayError::TransactionNotFound(tx_hash))?;
         debug!(block_number = ?target_tx.block_number, "Transaction found");
 
         let (state_base_block, block_number, is_pending) = if let Some(n) = target_tx.block_number {
@@ -331,15 +336,14 @@ impl Cmd {
             .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?
             .ok_or(ReplayError::BlockNotFound(block_number))?;
 
-        let mut preceding_tx_hashes = vec![];
-        if !is_pending {
-            for hash in block.transactions.hashes() {
-                if hash == tx_hash {
-                    break;
-                }
-                preceding_tx_hashes.push(hash);
-            }
-        }
+        let preceding_tx_hashes = preceding_transactions(
+            tx_hash,
+            target_tx.block_number,
+            target_tx.block_hash,
+            block.number(),
+            block.hash(),
+            block.transactions.hashes(),
+        )?;
 
         debug!(chain_id, preceding_count = preceding_tx_hashes.len(), "Replay context ready");
 
@@ -461,7 +465,9 @@ impl Cmd {
 
         let start = Instant::now();
         // The tracer reads and writes nothing back, so block execution admits it declared.
-        let mut inspector = DeclaredObserver::new(self.trace_args.create_inspector());
+        // It is attached only for `--trace`: otherwise preceding transactions would be recorded
+        // and then discarded.
+        let mut inspector = DeclaredObserver::new(ReplayTracer::from_args(&self.trace_args));
         let mut state =
             StateBuilder::new().with_database(&mut database).with_bundle_update().build();
         let mut block_executor = block_executor_factory.create_executor_with_trusted_inspector(
@@ -478,8 +484,13 @@ impl Cmd {
             .apply_pre_execution_changes()
             .map_err(|e| ReplayError::Other(format!("Block execution error: {e}")))?;
 
-        // Execute preceding transactions
+        // Execute preceding transactions. A validation error is a refusal: a block import
+        // records it and continues, and the target runs on the state the included ones left.
+        // A database failure or an internal error stops the replay. The receipt index counts
+        // only the included transactions.
         info!(preceding_count = ctx.preceding_tx_hashes.len(), "Executing preceding transactions",);
+        let mut included_preceding = 0u64;
+        let mut log_index_base = 0u64;
         for tx_hash in &ctx.preceding_tx_hashes {
             debug!(tx_hash = %tx_hash, "Executing preceding transaction");
             let tx = provider
@@ -487,13 +498,32 @@ impl Cmd {
                 .await
                 .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?
                 .ok_or(ReplayError::TransactionNotFound(*tx_hash))?;
-            let outcome = block_executor
-                .run_transaction(tx.as_recovered())
-                .map_err(|e| ReplayError::Other(format!("Block execution error: {e}")))?;
+            let outcome = match block_executor.run_transaction(tx.as_recovered()) {
+                Ok(outcome) => outcome,
+                Err(e) => match predecessor_error(&e) {
+                    PredecessorError::Skip => {
+                        warn!(tx_hash = %tx_hash, error = %e, "Skipping refused preceding transaction");
+                        continue;
+                    }
+                    PredecessorError::Propagate(error) => return Err(error),
+                },
+            };
             trace!(tx_hash = %tx_hash, ?outcome, "Preceding transaction executed");
-            block_executor
-                .commit_transaction_outcome(outcome)
-                .map_err(|e| ReplayError::Other(format!("Block execution error: {e}")))?;
+            if let Err(e) = block_executor.commit_transaction_outcome(outcome) {
+                match predecessor_error(&e) {
+                    PredecessorError::Skip => {
+                        warn!(tx_hash = %tx_hash, error = %e, "Skipping refused preceding transaction");
+                        continue;
+                    }
+                    PredecessorError::Propagate(error) => return Err(error),
+                }
+            }
+            included_preceding += 1;
+            log_index_base += block_executor
+                .receipts()
+                .last()
+                .map(|receipt| receipt.logs().len() as u64)
+                .unwrap_or(0);
         }
 
         // Execute target transaction.
@@ -510,7 +540,9 @@ impl Cmd {
             .unwrap_or(0);
 
         // The trace covers the target transaction only.
-        block_executor.evm_mut().inspector_mut().0.fuse();
+        if let ReplayTracer::On(tracer) = &mut block_executor.evm_mut().inspector_mut().0 {
+            tracer.fuse();
+        }
         let outcome = block_executor
             .run_transaction(wrapped_tx)
             .map_err(|e| ReplayError::Other(format!("Block execution error: {e}")))?;
@@ -537,13 +569,14 @@ impl Cmd {
             state: evm_state.clone(),
         };
 
-        let trace_data = self.trace_args.is_tracing_enabled().then(|| {
-            self.trace_args.generate_trace(
-                &block_executor.inspector().0,
+        let trace_data = match &block_executor.inspector().0 {
+            ReplayTracer::On(tracer) => Some(self.trace_args.generate_trace(
+                tracer,
                 &result_and_state,
                 block_executor.evm().db(),
-            )
-        });
+            )),
+            ReplayTracer::Off => None,
+        };
 
         let gas_output = block_executor
             .commit_transaction_outcome(outcome)
@@ -574,7 +607,8 @@ impl Cmd {
             gas_used,
             Some(ctx.target_tx.inner.inner.tx_hash()),
             Some(ctx.block.hash()),
-            ctx.preceding_tx_hashes.len() as u64,
+            included_preceding,
+            log_index_base,
         );
 
         Ok(ReplayOutcome {
@@ -626,6 +660,62 @@ impl Cmd {
     }
 }
 
+/// What the preceding-transaction loop does with an execution error.
+#[derive(Debug)]
+enum PredecessorError {
+    /// A validation error: the block refused the transaction, and the replay continues.
+    Skip,
+    /// A database failure or an internal error. The replay stops.
+    Propagate(ReplayError),
+}
+
+/// Classifies `error` for the preceding-transaction loop.
+///
+/// A validation error is a refusal a block import records and continues past.
+/// A database failure or an internal error stops the replay, so the target runs on the state
+/// the included predecessors left.
+fn predecessor_error(error: &BlockExecutionError) -> PredecessorError {
+    if error.as_validation().is_some() {
+        PredecessorError::Skip
+    } else {
+        PredecessorError::Propagate(ReplayError::Other(format!("Block execution error: {error}")))
+    }
+}
+
+/// Hashes of the transactions before `target_hash` in the fetched block.
+///
+/// A pending transaction has no block yet, so it has no predecessors here. A mined transaction
+/// must name this block's number and hash, and the hash must occur in the block. Otherwise every
+/// transaction in the block would be treated as preceding and the target would still run.
+fn preceding_transactions(
+    target_hash: B256,
+    target_block_number: Option<u64>,
+    target_block_hash: Option<B256>,
+    block_number: u64,
+    block_hash: B256,
+    hashes: impl IntoIterator<Item = B256>,
+) -> Result<Vec<B256>> {
+    let Some(tx_block_number) = target_block_number else {
+        return Ok(Vec::new());
+    };
+    if tx_block_number != block_number || target_block_hash != Some(block_hash) {
+        let tx_block_hash =
+            target_block_hash.map(|hash| hash.to_string()).unwrap_or_else(|| "none".to_string());
+        return Err(ReplayError::Other(format!(
+            "transaction {target_hash} belongs to block {tx_block_number} ({tx_block_hash}), \
+             not block {block_number} ({block_hash})"
+        )));
+    }
+    let mut preceding = Vec::new();
+    for hash in hashes {
+        if hash == target_hash {
+            return Ok(preceding);
+        }
+        preceding.push(hash);
+    }
+    Err(ReplayError::Other(format!("transaction {target_hash} is not in block {block_number}")))
+}
+
 /// Build a [`BlockEnv`] from the RPC block header.
 ///
 /// Reads `excess_blob_gas` directly from the header rather than using a
@@ -657,6 +747,87 @@ fn retrieve_block_env(block: &Block<Transaction>) -> Result<BlockEnv> {
 
     trace!(block_env = ?block_env, "Block environment retrieved");
     Ok(block_env)
+}
+
+/// The tracer a replay attaches. Absent unless `--trace` is set.
+enum ReplayTracer {
+    On(revm_inspectors::tracing::TracingInspector),
+    Off,
+}
+
+impl ReplayTracer {
+    fn from_args(args: &run::TraceArgs) -> Self {
+        if args.is_tracing_enabled() {
+            Self::On(args.create_inspector())
+        } else {
+            Self::Off
+        }
+    }
+}
+
+impl<CTX> Inspector<CTX> for ReplayTracer
+where
+    CTX: ContextTr<Journal: JournalExt>,
+{
+    fn step(&mut self, interp: &mut Interpreter, context: &mut CTX) {
+        if let Self::On(inspector) = self {
+            inspector.step(interp, context);
+        }
+    }
+
+    fn step_end(&mut self, interp: &mut Interpreter, context: &mut CTX) {
+        if let Self::On(inspector) = self {
+            inspector.step_end(interp, context);
+        }
+    }
+
+    fn log(&mut self, context: &mut CTX, log: Log) {
+        if let Self::On(inspector) = self {
+            inspector.log(context, log);
+        }
+    }
+
+    fn call(&mut self, context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
+        if let Self::On(inspector) = self {
+            inspector.call(context, inputs)
+        } else {
+            None
+        }
+    }
+
+    fn call_end(&mut self, context: &mut CTX, inputs: &CallInputs, outcome: &mut CallOutcome) {
+        if let Self::On(inspector) = self {
+            inspector.call_end(context, inputs, outcome);
+        }
+    }
+
+    fn create(&mut self, context: &mut CTX, inputs: &mut CreateInputs) -> Option<CreateOutcome> {
+        if let Self::On(inspector) = self {
+            inspector.create(context, inputs)
+        } else {
+            None
+        }
+    }
+
+    fn create_end(
+        &mut self,
+        context: &mut CTX,
+        inputs: &CreateInputs,
+        outcome: &mut CreateOutcome,
+    ) {
+        if let Self::On(inspector) = self {
+            inspector.create_end(context, inputs, outcome);
+        }
+    }
+
+    fn selfdestruct(&mut self, contract: Address, target: Address, value: U256) {
+        if let Self::On(inspector) = self {
+            // The hook takes no context, so the inspector's generic impl cannot be inferred.
+            <revm_inspectors::tracing::TracingInspector as Inspector<
+                mega_evm::MegaContext<revm::database::EmptyDB>,
+            >>::selfdestruct(inspector, contract, target, value);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -708,5 +879,117 @@ mod tests {
             ),
             other => panic!("unexpected error variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_preceding_transactions_stop_at_the_target() {
+        let target = B256::repeat_byte(1);
+        let earlier = B256::repeat_byte(2);
+        let block_hash = B256::repeat_byte(4);
+        let got = preceding_transactions(
+            target,
+            Some(9),
+            Some(block_hash),
+            9,
+            block_hash,
+            [earlier, target, B256::repeat_byte(3)],
+        )
+        .expect("target is in the block");
+        assert_eq!(got, vec![earlier]);
+    }
+
+    #[test]
+    fn test_preceding_transactions_reject_a_missing_target() {
+        let target = B256::repeat_byte(1);
+        let block_hash = B256::repeat_byte(4);
+        let err = preceding_transactions(
+            target,
+            Some(9),
+            Some(block_hash),
+            9,
+            block_hash,
+            [B256::repeat_byte(2)],
+        )
+        .expect_err("the target hash never occurs");
+        match err {
+            ReplayError::Other(msg) => assert!(msg.contains("not in block"), "{msg}"),
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_preceding_transactions_reject_a_different_block() {
+        let target = B256::repeat_byte(1);
+        let err = preceding_transactions(
+            target,
+            Some(9),
+            Some(B256::repeat_byte(4)),
+            8,
+            B256::repeat_byte(5),
+            [target],
+        )
+        .expect_err("the transaction names a different block");
+        assert!(matches!(err, ReplayError::Other(_)));
+    }
+
+    #[test]
+    fn test_replay_attaches_a_tracer_only_when_trace_is_set() {
+        let off = run::TraceArgs::try_parse_from(["mega-evme"]).expect("defaults parse");
+        assert!(matches!(ReplayTracer::from_args(&off), ReplayTracer::Off));
+
+        let on = run::TraceArgs::try_parse_from([
+            "mega-evme",
+            "--trace",
+            "--trace.opcode.disable-stack",
+        ])
+        .expect("trace flags parse");
+        let ReplayTracer::On(inspector) = ReplayTracer::from_args(&on) else {
+            panic!("--trace attaches a tracer");
+        };
+        assert_eq!(
+            inspector.config().record_stack_snapshots,
+            revm_inspectors::tracing::StackSnapshotType::None
+        );
+    }
+
+    #[test]
+    fn test_a_predecessor_error_skips_a_refusal_and_propagates_an_internal_error() {
+        use mega_evm::alloy_evm::block::BlockValidationError;
+
+        let refusal = BlockExecutionError::from(BlockValidationError::BlockGasExceeded);
+        assert!(
+            matches!(predecessor_error(&refusal), PredecessorError::Skip),
+            "a validation error is a refusal: {refusal}"
+        );
+
+        let internal = BlockExecutionError::msg("database read failed");
+        match predecessor_error(&internal) {
+            PredecessorError::Propagate(ReplayError::Other(message)) => {
+                assert_eq!(message, format!("Block execution error: {internal}"));
+            }
+            other => panic!("an internal error propagates: {other:?}"),
+        }
+
+        let other = BlockExecutionError::other(std::io::Error::other("rpc failed"));
+        match predecessor_error(&other) {
+            PredecessorError::Propagate(ReplayError::Other(message)) => {
+                assert_eq!(message, format!("Block execution error: {other}"));
+            }
+            other => panic!("an internal error propagates: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_preceding_transactions_skip_a_pending_transaction() {
+        let got = preceding_transactions(
+            B256::repeat_byte(1),
+            None,
+            None,
+            9,
+            B256::repeat_byte(4),
+            [B256::repeat_byte(2)],
+        )
+        .expect("a pending transaction has no predecessors");
+        assert!(got.is_empty());
     }
 }

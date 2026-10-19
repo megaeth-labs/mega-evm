@@ -221,10 +221,8 @@ impl EnvArgs {
     /// ([`ChainArgs::protocol_limits`]), as a node's EVM factory holds an EVM it builds outside
     /// block execution.
     ///
-    /// The `system_address` defaults to `MEGA_SYSTEM_ADDRESS`. For `run`/`tx` modes this is
-    /// correct: these paths don't go through the block executor and don't resolve from
-    /// `SequencerRegistry`. If fork-state simulation with a changed sequencer is needed,
-    /// a `--system-address` CLI override can be added in the future.
+    /// This function does not set a system address. A transaction of the system shape reads the
+    /// live address from the `SequencerRegistry` in the database it runs on.
     pub fn create_evm_context<DB: Database>(
         &self,
         db: DB,

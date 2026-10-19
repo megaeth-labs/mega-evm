@@ -63,7 +63,7 @@ impl Cmd {
 
         // Step 1: Create transaction
         info!("Creating transaction");
-        let tx = if let Some(ref raw) = self.raw {
+        let (tx, tx_hash) = if let Some(ref raw) = self.raw {
             let raw_bytes = load_hex(Some(raw.clone()), None)?.unwrap_or_default();
             let decoded = DecodedRawTx::from_raw(raw_bytes)?.override_tx_env(&self.tx_args)?;
             if let Some(decoded_chain_id) = decoded.tx_env.chain_id.filter(|id| *id != chain_id) {
@@ -73,9 +73,12 @@ impl Cmd {
                     "Raw transaction carries another chain's id, which Satin refuses"
                 );
             }
-            decoded.into_tx()
+            let tx_hash = decoded.tx_hash();
+            (decoded.into_tx(), tx_hash)
         } else {
-            self.tx_args.create_tx(chain_id)?
+            let tx = self.tx_args.create_tx(chain_id)?;
+            let tx_hash = self.tx_args.tx_hash(&tx);
+            (tx, tx_hash)
         };
 
         debug!(
@@ -102,8 +105,11 @@ impl Cmd {
         info!("Executing transaction");
         let evm_context = self.env_args.create_evm_context(&mut state)?;
         let start = Instant::now();
-        let (exec_result, evm_state, trace_data, mut satin) =
+        let (exec_result, mut evm_state, trace_data, mut satin) =
             self.trace_args.execute_transaction(evm_context, tx.clone())?;
+        if self.dump_args.dump {
+            crate::materialize_dumped_code(&state, &mut evm_state)?;
+        }
         satin.limits_override = self.env_args.limits_override_in_force()?;
         let exec_time = start.elapsed();
 
@@ -132,7 +138,7 @@ impl Cmd {
 
         // Step 4: Output results (including state dump if requested)
         trace!("Writing output results");
-        self.output_results(&outcome, &tx)?;
+        self.output_results(&outcome, &tx, tx_hash)?;
 
         // Step 5: Persist the RPC cache (clean-exit only).
         cache_store.persist()?;
@@ -141,7 +147,12 @@ impl Cmd {
     }
 
     /// Output execution results
-    fn output_results(&self, outcome: &EvmeOutcome, tx: &MegaTransaction) -> Result<()> {
+    fn output_results(
+        &self,
+        outcome: &EvmeOutcome,
+        tx: &MegaTransaction,
+        tx_hash: Option<alloy_primitives::B256>,
+    ) -> Result<()> {
         let tx_type = MegaTxType::try_from(tx.base.tx_type)
             .map_err(|_| EvmeError::UnsupportedTxType(tx.base.tx_type))?;
         let sender = tx.base.caller;
@@ -168,8 +179,9 @@ impl Cmd {
             contract_address,
             effective_gas_price,
             outcome.exec_result.tx_gas_used(),
+            tx_hash,
             None,
-            None,
+            0,
             0,
         );
 

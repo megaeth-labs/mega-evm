@@ -4,10 +4,12 @@
 //! This binary is intentionally minimal: parse CLI arguments, install the panic
 //! hook, hand the arguments to the engine the spec names, and exit.
 
-use mega_evme::{cmd::Error, set_thread_panic_hook};
+use mega_evme::set_thread_panic_hook;
 
 #[tokio::main(flavor = "multi_thread")]
-async fn main() -> std::result::Result<(), Error> {
+async fn main() {
     set_thread_panic_hook();
-    mega_evme::cmd::run_cli(std::env::args_os().collect()).await.inspect_err(|e| println!("{e:?}"))
+    if let Err(error) = mega_evme::cmd::run_cli(std::env::args_os().collect()).await {
+        mega_evme::cmd::report_cli_error(&error);
+    }
 }

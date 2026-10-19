@@ -214,8 +214,33 @@ impl PreStateArgs {
         Ok(entries)
     }
 
-    /// Load prestate as [`EvmState`] from file if provided
+    /// Load prestate as [`EvmState`] from file if provided.
+    ///
+    /// Balance, storage, sender and faucet overrides that name an account the file already holds
+    /// are applied to that account. Overrides of any other account are not inserted here: a
+    /// default account would hide the rest of a forked account. [`Self::create_initial_state`]
+    /// applies those as field overlays on top of the backend.
     pub fn load_prestate(&self, sender: &Address) -> Result<EvmState> {
+        let (mut accounts, overlays) = self.prepare_prestate(sender)?;
+        for (address, overlay) in overlays {
+            let account = accounts.entry(address).or_default();
+            if let Some(balance) = overlay.balance {
+                account.info.balance = balance;
+            }
+            if !overlay.faucet.is_zero() {
+                account.info.balance =
+                    checked_faucet(account.info.balance, overlay.faucet, address)?;
+            }
+            account.storage.extend(overlay.storage);
+        }
+        Ok(accounts)
+    }
+
+    /// The file accounts, plus field overlays for addresses the file does not hold.
+    fn prepare_prestate(
+        &self,
+        sender: &Address,
+    ) -> Result<(EvmState, HashMap<Address, AccountOverlay>)> {
         let mut prestate = if let Some(pre_state_path) = &self.prestate {
             info!(prestate_path = ?pre_state_path, "Loading prestate from file");
             let prestate_content = std::fs::read_to_string(pre_state_path)?;
@@ -236,37 +261,30 @@ impl PreStateArgs {
             debug!("No prestate file provided");
             HashMap::default()
         };
+        let mut overlays: HashMap<Address, AccountOverlay> = HashMap::default();
 
-        // Apply balance overrides
         for (address, balance) in self.parse_balance()? {
             info!(address = %address, balance = %balance, "Overriding balance");
-            prestate.entry(address).or_default().info.balance = balance;
+            set_balance_override(&mut prestate, &mut overlays, address, balance);
         }
 
-        // Apply storage overrides
         for (address, slot, value) in self.parse_storage()? {
             info!(address = %address, slot = %slot, value = %value, "Overriding storage");
-            prestate
-                .entry(address)
-                .or_default()
-                .storage
-                .insert(slot, EvmStorageSlot::new(value, TransactionId::ZERO));
+            set_storage_override(&mut prestate, &mut overlays, address, slot, value);
         }
 
-        // Set balance for the sender if specified (overrides prestate)
         if let Some(sender_balance_str) = &self.sender_balance {
             let sender_balance = parse_ether_value(sender_balance_str)?;
             info!(sender = %sender, sender_balance = %sender_balance, "Overriding sender balance");
-            prestate.entry(*sender).or_default().info.set_balance(sender_balance);
+            set_balance_override(&mut prestate, &mut overlays, *sender, sender_balance);
         }
 
-        // Apply faucet balances
         for (address, balance) in self.parse_faucet()? {
             info!(address = %address, balance = %balance, "Faucet: adding balance");
-            prestate.entry(address).or_default().info.balance += balance;
+            add_faucet(&mut prestate, &mut overlays, address, balance)?;
         }
 
-        Ok(prestate)
+        Ok((prestate, overlays))
     }
 
     /// Build the initial execution state and the clean-exit RPC cache store.
@@ -280,7 +298,7 @@ impl PreStateArgs {
         sender: &Address,
         rpc_args: &super::RpcArgs,
     ) -> Result<(EvmeState<Optimism, super::OpProvider>, RpcCacheStore)> {
-        let prestate = self.load_prestate(sender)?;
+        let (prestate, overlays) = self.prepare_prestate(sender)?;
         let block_hashes = self.parse_block_hashes()?;
 
         if self.fork {
@@ -297,14 +315,87 @@ impl PreStateArgs {
             }
             let super::BuildProviderOutput { provider, cache_store, .. } =
                 rpc_args.build_provider().await?;
-            let state =
+            let mut state =
                 EvmeState::new_forked(provider, self.fork_block, prestate, block_hashes).await?;
+            state.overlays = overlays;
             Ok((state, cache_store))
         } else {
             debug!("Creating local state");
-            Ok((EvmeState::new_empty(prestate, block_hashes), RpcCacheStore::noop()))
+            if let Some((address, code_hash)) = unloaded_code(&prestate).next() {
+                return Err(EvmeError::InvalidInput(format!(
+                    "Prestate account {address} has `code: null` and codeHash {code_hash}, and \
+                     nothing to load its code from: put the code in the prestate file or run \
+                     with '--fork'"
+                )));
+            }
+            let mut state = EvmeState::new_empty(prestate, block_hashes);
+            state.overlays = overlays;
+            Ok((state, RpcCacheStore::noop()))
         }
     }
+}
+
+/// One CLI override of an account the prestate file does not already hold.
+///
+/// Applied on read, on top of the backend account or of an entry added to the prestate later, so a
+/// balance or one storage slot does not replace the rest of a forked account.
+#[derive(Debug, Default, Clone)]
+struct AccountOverlay {
+    /// Replaces the balance when set. Applied before [`Self::faucet`].
+    balance: Option<U256>,
+    /// Added to the resolved balance.
+    faucet: U256,
+    /// Slots that replace the underlying value. Other slots stay with the account.
+    storage: HashMap<U256, EvmStorageSlot>,
+}
+
+fn set_balance_override(
+    prestate: &mut EvmState,
+    overlays: &mut HashMap<Address, AccountOverlay>,
+    address: Address,
+    balance: U256,
+) {
+    if let Some(account) = prestate.get_mut(&address) {
+        account.info.balance = balance;
+    } else {
+        overlays.entry(address).or_default().balance = Some(balance);
+    }
+}
+
+fn set_storage_override(
+    prestate: &mut EvmState,
+    overlays: &mut HashMap<Address, AccountOverlay>,
+    address: Address,
+    slot: U256,
+    value: U256,
+) {
+    let stored = EvmStorageSlot::new(value, TransactionId::ZERO);
+    if let Some(account) = prestate.get_mut(&address) {
+        account.storage.insert(slot, stored);
+    } else {
+        overlays.entry(address).or_default().storage.insert(slot, stored);
+    }
+}
+
+fn add_faucet(
+    prestate: &mut EvmState,
+    overlays: &mut HashMap<Address, AccountOverlay>,
+    address: Address,
+    amount: U256,
+) -> Result<()> {
+    if let Some(account) = prestate.get_mut(&address) {
+        account.info.balance = checked_faucet(account.info.balance, amount, address)?;
+    } else {
+        let overlay = overlays.entry(address).or_default();
+        overlay.faucet = checked_faucet(overlay.faucet, amount, address)?;
+    }
+    Ok(())
+}
+
+fn checked_faucet(balance: U256, add: U256, address: Address) -> Result<U256> {
+    balance.checked_add(add).ok_or_else(|| {
+        EvmeError::InvalidInput(format!("Faucet overflows the balance of {address}"))
+    })
 }
 
 /// State dump configuration arguments
@@ -409,29 +500,43 @@ impl AccountState {
     }
 
     /// Converts into [`Account`].
+    ///
+    /// Code present in the dump is checked against `code_hash`.
+    /// Code left out stays unloaded: the stored hash is kept and `code` stays `None`. Empty
+    /// bytecode is not substituted for it. [`PreStateArgs::create_initial_state`] fetches such an
+    /// account's code from the fork, or refuses the file when there is no fork.
     pub fn into_account(self) -> Result<Account> {
-        let code = self.code.unwrap_or_default();
-        let bytecode = if code.is_empty() {
-            Bytecode::default()
-        } else {
-            Bytecode::new_raw_checked(code).map_err(EvmeError::InvalidBytecode)?
-        };
-        let computed_hash = bytecode.hash_slow();
-        if let Some(code_hash) = self.code_hash {
-            if computed_hash != code_hash {
-                return Err(EvmeError::CodeHashMismatch {
-                    expected: code_hash,
-                    computed: computed_hash,
-                });
+        let info = match self.code {
+            Some(code) => {
+                let bytecode = if code.is_empty() {
+                    Bytecode::default()
+                } else {
+                    Bytecode::new_raw_checked(code).map_err(EvmeError::InvalidBytecode)?
+                };
+                let computed_hash = bytecode.hash_slow();
+                if let Some(code_hash) = self.code_hash {
+                    if computed_hash != code_hash {
+                        return Err(EvmeError::CodeHashMismatch {
+                            expected: code_hash,
+                            computed: computed_hash,
+                        });
+                    }
+                }
+                AccountInfo::new(
+                    self.balance.unwrap_or_default(),
+                    self.nonce.unwrap_or_default(),
+                    computed_hash,
+                    bytecode,
+                )
             }
-        }
-
-        let info = AccountInfo::new(
-            self.balance.unwrap_or_default(),
-            self.nonce.unwrap_or_default(),
-            computed_hash,
-            bytecode,
-        );
+            None => AccountInfo {
+                balance: self.balance.unwrap_or_default(),
+                nonce: self.nonce.unwrap_or_default(),
+                code_hash: self.code_hash.unwrap_or(revm::primitives::KECCAK_EMPTY),
+                account_id: None,
+                code: None,
+            },
+        };
         let storage = self
             .storage
             .unwrap_or_default()
@@ -439,6 +544,42 @@ impl AccountState {
             .map(|(slot, value)| (slot, EvmStorageSlot::new(value, TransactionId::ZERO)));
         Ok(Account::from(info).with_storage(storage))
     }
+}
+
+/// The accounts of `prestate` that name their code by hash only: `code: null` in the file, with a
+/// hash that is not the empty code's.
+fn unloaded_code(prestate: &EvmState) -> impl Iterator<Item = (Address, B256)> + '_ {
+    prestate.iter().filter_map(|(address, account)| {
+        (account.info.code.is_none() && account.info.code_hash != revm::primitives::KECCAK_EMPTY)
+            .then_some((*address, account.info.code_hash))
+    })
+}
+
+/// Fills bytecode into journal accounts that were loaded without it.
+///
+/// A dump records `code: null` together with the account's hash when the code was never fetched.
+/// Loading it here, while the database is still open, puts the bytes in the dump so a later run
+/// can execute them without that database. The bytes come from `basic_ref`. A hash that does not
+/// match is left unloaded.
+pub(crate) fn materialize_dumped_code<DB: DatabaseRef>(
+    db: &DB,
+    state: &mut EvmState,
+) -> std::result::Result<(), DB::Error> {
+    for (address, account) in state.iter_mut() {
+        if account.info.code.is_some() || account.info.code_hash == revm::primitives::KECCAK_EMPTY {
+            continue;
+        }
+        let Some(info) = db.basic_ref(*address)? else {
+            continue;
+        };
+        if info.code_hash != account.info.code_hash {
+            continue;
+        }
+        if let Some(code) = info.code {
+            account.info.code = Some(code);
+        }
+    }
+    Ok(())
 }
 
 /// Whether an account an RPC endpoint reported is one that does not exist.
@@ -476,6 +617,9 @@ where
     backend: EvmeBackend<N, P>,
     /// Prestate overrides (accounts that override the database)
     prestate: EvmState,
+    /// Field overrides for accounts the prestate file does not hold. Applied on top of the
+    /// backend so one named field does not hide the rest of a forked account.
+    overlays: HashMap<Address, AccountOverlay>,
     /// Code hash to bytecode map (extracted from prestate accounts)
     code_map: HashMap<alloy_primitives::B256, Bytecode>,
     /// Block hash overrides (block number -> block hash)
@@ -497,43 +641,13 @@ where
             })
             .collect();
 
-        Self { backend: EvmeBackend::Empty(EmptyDB::default()), prestate, code_map, block_hashes }
-    }
-
-    /// Inserts an account override
-    /// This will override the existing account if it exists.
-    pub fn insert_account(&mut self, address: Address, account: Account) {
-        // Add code to code_map if present
-        if let Some(ref code) = account.info.code {
-            self.code_map.insert(account.info.code_hash, code.clone());
+        Self {
+            backend: EvmeBackend::Empty(EmptyDB::default()),
+            prestate,
+            overlays: HashMap::default(),
+            code_map,
+            block_hashes,
         }
-        self.prestate.insert(address, account);
-    }
-
-    /// Inserts storage overrides for an account
-    pub fn insert_storage(&mut self, address: Address, storage: HashMap<U256, EvmStorageSlot>) {
-        self.prestate.entry(address).or_default().storage.extend(storage);
-    }
-
-    /// Inserts an account with storage.
-    /// This will override the existing account if it exists.
-    pub fn insert_account_with_storage(
-        &mut self,
-        address: Address,
-        info: AccountInfo,
-        storage: HashMap<U256, EvmStorageSlot>,
-    ) {
-        // Add code to code_map if present
-        if let Some(ref code) = info.code {
-            self.code_map.insert(info.code_hash, code.clone());
-        }
-        let account = Account::from(info).with_storage(storage.into_iter());
-        self.prestate.insert(address, account);
-    }
-
-    /// Set the balance for an account.
-    pub fn set_account_balance(&mut self, address: Address, balance: U256) {
-        self.prestate.entry(address).or_default().info.balance = balance;
     }
 
     /// Set the nonce for an account.
@@ -545,15 +659,6 @@ where
     pub fn set_account_code(&mut self, address: Address, code: Bytecode) {
         self.code_map.insert(code.hash_slow(), code.clone());
         self.prestate.entry(address).or_default().info.set_code(code);
-    }
-
-    /// Set the storage for an account.
-    pub fn set_account_storage(&mut self, address: Address, storage: HashMap<U256, U256>) {
-        self.prestate.entry(address).or_default().storage.extend(
-            storage
-                .into_iter()
-                .map(|(slot, value)| (slot, EvmStorageSlot::new(value, TransactionId::ZERO))),
-        );
     }
 
     /// Installs the code of Satin's predeploys: the six system contracts and the EIP-7997 factory.
@@ -572,6 +677,40 @@ where
                 self.set_account_nonce(contract.address, contract.nonce);
             }
         }
+    }
+
+    /// Replaces the balance and adds the faucet on top of `info`. A storage-only overlay leaves
+    /// the account as the backend reported it.
+    fn apply_account_overlay(
+        &self,
+        address: Address,
+        info: Option<AccountInfo>,
+    ) -> Result<Option<AccountInfo>> {
+        let Some(overlay) = self.overlays.get(&address) else {
+            return Ok(info);
+        };
+        if overlay.balance.is_none() && overlay.faucet.is_zero() {
+            return Ok(info);
+        }
+        let mut info = info.unwrap_or_default();
+        if let Some(balance) = overlay.balance {
+            info.balance = balance;
+        }
+        if !overlay.faucet.is_zero() {
+            info.balance = checked_faucet(info.balance, overlay.faucet, address)?;
+        }
+        Ok(Some(info))
+    }
+
+    /// The overridden value of one slot, when this address has a field overlay for it.
+    fn overlay_slot(&self, address: Address, index: U256) -> Option<U256> {
+        self.overlays
+            .get(&address)
+            .and_then(|overlay| overlay.storage.get(&index))
+            .map(|slot| {
+                trace!(address = %address, index = %index, slot = %slot.present_value, "Loaded storage from field overlay");
+                slot.present_value
+            })
     }
 }
 
@@ -612,14 +751,40 @@ where
         let db = CacheDB::new(wrapped_db);
 
         // Extract code hash → bytecode mappings from prestate
-        let code_map: HashMap<_, _> = prestate
+        let mut code_map: HashMap<_, _> = prestate
             .values()
             .filter_map(|account| {
                 account.info.code.clone().map(|code| (account.info.code_hash, code))
             })
             .collect();
 
-        Ok(Self { backend: EvmeBackend::Forked(Box::new(db)), prestate, code_map, block_hashes })
+        // An account the file names by code hash only keeps its entry, and its code is fetched
+        // from the fork here: the fork's database cannot serve a code hash on its own, and the
+        // prestate entry hides the account from the fork's cache.
+        for (address, code_hash) in unloaded_code(&prestate) {
+            let fetched = db
+                .basic_ref(address)
+                .map_err(|e| {
+                    EvmeError::RpcError(format!("Failed to fetch account {}: {:?}", address, e))
+                })?
+                .filter(|info| info.code_hash == code_hash)
+                .and_then(|info| info.code);
+            let Some(code) = fetched else {
+                return Err(EvmeError::InvalidInput(format!(
+                    "Prestate account {address} has `code: null` and codeHash {code_hash}, but \
+                     the fork holds no code with that hash at the account"
+                )));
+            };
+            code_map.insert(code_hash, code);
+        }
+
+        Ok(Self {
+            backend: EvmeBackend::Forked(Box::new(db)),
+            prestate,
+            overlays: HashMap::default(),
+            code_map,
+            block_hashes,
+        })
     }
 }
 
@@ -631,27 +796,29 @@ where
     type Error = EvmeError;
 
     fn basic(&mut self, address: Address) -> std::result::Result<Option<AccountInfo>, Self::Error> {
-        // Check prestate overrides first
+        // Check prestate overrides first. An overlay applies on top of an entry too: `run` and
+        // `tx` add entries (the receiver's code, the predeploys) after the overlays were taken.
         if let Some(account) = self.prestate.get(&address) {
             trace!(address = %address, account = ?account, "Loaded account basic from prestate");
-            return Ok(Some(account.info.clone()));
+            return self.apply_account_overlay(address, Some(account.info.clone()));
         }
 
         // Query backend database
-        match &mut self.backend {
+        let account = match &mut self.backend {
             EvmeBackend::Empty(db) => {
                 let account = db.basic(address).unwrap();
                 trace!(address = %address, account = ?account, "Loaded account basic from empty state");
-                Ok(account)
+                account
             }
             EvmeBackend::Forked(db) => {
                 let account = db.basic(address).map_err(|e| {
                     EvmeError::RpcError(format!("Failed to fetch account {}: {:?}", address, e))
                 })?;
                 trace!(address = %address, account = ?account, "Loaded account basic from forked state");
-                Ok(account.filter(|info| !rpc_reads_as_absent(info)))
+                account.filter(|info| !rpc_reads_as_absent(info))
             }
-        }
+        };
+        self.apply_account_overlay(address, account)
     }
 
     fn code_by_hash(
@@ -685,6 +852,9 @@ where
     }
 
     fn storage(&mut self, address: Address, index: U256) -> std::result::Result<U256, Self::Error> {
+        if let Some(value) = self.overlay_slot(address, index) {
+            return Ok(value);
+        }
         // Check storage overrides first
         if let Some(account) = self.prestate.get(&address) {
             if let Some(slot) = account.storage.get(&index) {
@@ -752,27 +922,34 @@ where
     type Error = EvmeError;
 
     fn basic_ref(&self, address: Address) -> std::result::Result<Option<AccountInfo>, Self::Error> {
-        // Check prestate overrides first
+        // Check prestate overrides first; the overlay applies as it does in `basic`.
+        // This read is for a consumer that wants the account whole (a state dump), so it carries
+        // the code of an account the file names by hash only.
         if let Some(account) = self.prestate.get(&address) {
             trace!(address = %address, account = ?account, "Loaded account basic from prestate");
-            return Ok(Some(account.info.clone()));
+            let mut info = account.info.clone();
+            if info.code.is_none() {
+                info.code = self.code_map.get(&info.code_hash).cloned();
+            }
+            return self.apply_account_overlay(address, Some(info));
         }
 
         // Query backend database
-        match &self.backend {
+        let account = match &self.backend {
             EvmeBackend::Empty(db) => {
                 let account = db.basic_ref(address).unwrap();
                 trace!(address = %address, account = ?account, "Loaded account basic from empty state");
-                Ok(account)
+                account
             }
             EvmeBackend::Forked(db) => {
                 let account = db.basic_ref(address).map_err(|e| {
                     EvmeError::RpcError(format!("Failed to fetch account {}: {:?}", address, e))
                 })?;
                 trace!(address = %address, account = ?account, "Loaded account basic from forked state");
-                Ok(account.filter(|info| !rpc_reads_as_absent(info)))
+                account.filter(|info| !rpc_reads_as_absent(info))
             }
-        }
+        };
+        self.apply_account_overlay(address, account)
     }
 
     fn code_by_hash_ref(
@@ -806,6 +983,9 @@ where
     }
 
     fn storage_ref(&self, address: Address, index: U256) -> std::result::Result<U256, Self::Error> {
+        if let Some(value) = self.overlay_slot(address, index) {
+            return Ok(value);
+        }
         // Check storage overrides first
         if let Some(account) = self.prestate.get(&address) {
             if let Some(slot) = account.storage.get(&index) {
@@ -862,5 +1042,53 @@ where
                 Ok(hash)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy_provider::DynProvider;
+    use op_alloy_network::Optimism;
+
+    use super::*;
+
+    fn lazy_account(hash: B256) -> Account {
+        Account::from(AccountInfo {
+            balance: U256::from(5u64),
+            nonce: 3,
+            code_hash: hash,
+            account_id: None,
+            code: None,
+        })
+    }
+
+    #[test]
+    fn test_lazy_code_reload_keeps_the_hash() {
+        let hash = B256::repeat_byte(0xab);
+        let loaded = AccountState::from_account(lazy_account(hash)).into_account().unwrap();
+        assert!(loaded.info.code.is_none());
+        assert_eq!(loaded.info.code_hash, hash);
+        assert_eq!(loaded.info.balance, U256::from(5u64));
+        assert_eq!(loaded.info.nonce, 3);
+    }
+
+    #[test]
+    fn test_dump_loads_unfetched_code() {
+        let bytecode = Bytecode::new_raw(Bytes::from_static(&[0x60, 0x00, 0x56]));
+        let hash = bytecode.hash_slow();
+        let address = Address::repeat_byte(0x11);
+        let mut db: EvmeState<Optimism, DynProvider<Optimism>> =
+            EvmeState::new_empty(EvmState::default(), HashMap::default());
+        db.set_account_code(address, bytecode.clone());
+
+        let mut state = EvmState::default();
+        state.insert(address, lazy_account(hash));
+        let other = Address::repeat_byte(0x22);
+        state.insert(other, lazy_account(B256::repeat_byte(0xcd)));
+
+        materialize_dumped_code(&db, &mut state).unwrap();
+
+        assert_eq!(state.get(&address).unwrap().info.code.as_ref(), Some(&bytecode));
+        assert!(state.get(&other).unwrap().info.code.is_none());
     }
 }

@@ -29,7 +29,8 @@ pub use common::*;
 
 /// Install a thread panic hook that prints a custom backtrace and exits with a
 /// non-zero status. Lets failing tests and CLI runs surface a useful trace
-/// without relying on `RUST_BACKTRACE`.
+/// without relying on `RUST_BACKTRACE`. A panic of `println!` on a closed stdout is no failure
+/// of the run: the hook exits 0 without a trace.
 pub fn set_thread_panic_hook() {
     use std::{
         backtrace::Backtrace,
@@ -38,6 +39,18 @@ pub fn set_thread_panic_hook() {
     };
     let orig_hook = take_hook();
     set_hook(Box::new(move |panic_info| {
+        // `println!` panics when stdout is a closed pipe (`mega-evme … | head`). The reader went
+        // away on purpose, so the run ends quietly with the status it had reached: it was
+        // printing its result, so it succeeded.
+        let message = panic_info
+            .payload()
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic_info.payload().downcast_ref::<&str>().copied())
+            .unwrap_or_default();
+        if message.starts_with("failed printing to stdout: Broken pipe") {
+            exit(0);
+        }
         // Raw stderr rather than `tracing`: the subscriber may not be
         // installed yet when a panic fires during CLI startup.
         eprintln!("Custom backtrace: {}", Backtrace::capture());
