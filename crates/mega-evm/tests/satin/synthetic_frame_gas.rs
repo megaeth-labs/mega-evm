@@ -223,7 +223,7 @@ fn test_inspect_frame_init_depth_guard_overrides_inspector() {
 #[test]
 fn test_exceeded_tx_limit_wins_over_call_too_deep() {
     let mut evm = MegaEvm::new(context(MemoryDatabase::default()));
-    let stop = evm.ctx_mut().additional_limit_mut().latch(LimitKind::KVUpdate, 0, 1);
+    let stop = evm.ctx_mut().additional_limit_mut().latch(LimitKind::DataSize, 0, 1);
     let result = EvmTr::frame_init(&mut evm, call_frame_init(CALL_STACK_LIMIT as usize + 1))
         .expect("frame_init does not fail");
     let ItemOrResult::Result(FrameResult::Call(outcome)) = result else {

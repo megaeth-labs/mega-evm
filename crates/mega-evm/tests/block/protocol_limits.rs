@@ -94,16 +94,18 @@ fn chain_with(limits: ProtocolLimits) -> MegaHardforkConfig {
 
 /// A chain whose limits are not the defaults is held to its own: a transaction that crosses the
 /// chain's data-size limit is stopped at that limit, and the block refuses a transaction once it
-/// reached the chain's KV budget. The node passed no limits at all.
+/// reached the chain's data-size budget. The node passed no limits at all.
 #[test]
 fn test_a_block_is_held_to_the_limits_its_chain_carries() {
     // One storage write fits the transaction's data size; a second crosses it.
     let tx_data_size_limit = TX_BODY_SIZE + WRITE_RECORD_SIZE;
+    // The stopped transaction's body and the next one's body and write fill the block.
+    let block_txs_data_limit = 2 * TX_BODY_SIZE + WRITE_RECORD_SIZE;
     let limits = ProtocolLimits::DEFAULT
         .with_tx_runtime_limits(
             ProtocolLimits::DEFAULT.tx_runtime_limits.with_tx_data_size_limit(tx_data_size_limit),
         )
-        .with_block_kv_update_limit(1);
+        .with_block_txs_data_limit(block_txs_data_limit);
     assert_ne!(limits, ProtocolLimits::DEFAULT);
 
     let mut state = State::builder().with_database(database()).build();
@@ -114,7 +116,7 @@ fn test_a_block_is_held_to_the_limits_its_chain_carries() {
     );
     assert_eq!(executor.protocol_limits(), Some(&limits));
     assert_eq!(*executor.evm().tx_runtime_limits(), limits.tx_runtime_limits);
-    assert_eq!(executor.limiter().limits.block_kv_update_limit, 1);
+    assert_eq!(executor.limiter().limits.block_txs_data_limit, block_txs_data_limit);
     executor.apply_pre_execution_changes().expect("the block starts");
 
     // Two writes: stopped at the chain's transaction limit, and included with the stop.
@@ -132,21 +134,23 @@ fn test_a_block_is_held_to_the_limits_its_chain_carries() {
     );
     executor.commit_transaction_outcome(outcome).expect("the stopped transaction is included");
     assert_eq!(executor.limiter().usage.write_records, 0, "the stop kept no record");
+    assert_eq!(executor.limiter().usage.data_size, TX_BODY_SIZE, "but kept its body");
 
-    // One write fits, and fills the chain's KV budget.
+    // One write fits, and fills the chain's data-size budget.
     let outcome = executor
         .run_transaction(&tx_from(SENDERS[1], WRITES_ONE, Bytes::new(), GAS_LIMIT))
         .expect("the transaction runs");
     assert!(outcome.inner.result.is_success(), "{:?}", outcome.inner.result);
     executor.commit_transaction_outcome(outcome).expect("it is included");
     assert_eq!(executor.limiter().usage.write_records, 1);
+    assert_eq!(executor.limiter().usage.data_size, block_txs_data_limit);
 
-    // The block has reached the chain's KV budget: the next transaction is refused.
+    // The block has reached the chain's data-size budget: the next transaction is refused.
     let err = executor
         .run_transaction(&tx_from(SENDERS[2], WRITES_ONE, Bytes::new(), GAS_LIMIT))
-        .expect_err("the block's write records have reached the chain's limit");
-    assert!(err.to_string().contains("Block KV update limit reached"), "{err}");
-    assert!(err.to_string().contains("limit=1"), "{err}");
+        .expect_err("the block's data size has reached the chain's limit");
+    assert!(err.to_string().contains("Block transactions data limit reached"), "{err}");
+    assert!(err.to_string().contains(&format!("limit={block_txs_data_limit}")), "{err}");
 
     // On the default chain the same two-write transaction keeps both writes.
     let mut state = State::builder().with_database(database()).build();

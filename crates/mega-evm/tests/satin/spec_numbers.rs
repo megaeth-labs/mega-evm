@@ -235,11 +235,6 @@ fn limits(doc: &str) {
     assert_eq!(defaults.tx_runtime_limits.tx_data_size_limit, TX_DATA_LIMIT);
     assert_eq!(defaults.block_txs_data_limit, BLOCK_DATA_LIMIT);
     assert_eq!(TX_DATA_LIMIT, BLOCK_DATA_LIMIT, "the page states one data-size number for both");
-    assert_eq!(defaults.tx_runtime_limits.tx_kv_update_limit, u64::MAX);
-    assert_eq!(defaults.tx_runtime_limits.tx_state_gas_limit, u64::MAX);
-    assert_eq!(defaults.block_execution_gas_limit, u64::MAX);
-    assert_eq!(defaults.block_state_gas_limit, u64::MAX);
-    assert_eq!(defaults.block_kv_update_limit, u64::MAX);
     assert_eq!(
         defaults.tx_runtime_limits.block_env_access_compute_gas_limit,
         BLOCK_ENV_ACCESS_COMPUTE_GAS
@@ -253,20 +248,26 @@ fn limits(doc: &str) {
         "the page states one detention cap for both"
     );
 
+    // Data size is the one dimension limited per transaction and per block: no table row names a
+    // limit on KV updates, state gas or execution gas.
     let resources = section(doc, "### 10. Resource Limits", "### 11. The Revert-Class");
     assert!(
-        table_row(resources, "KV updates").iter().any(|cell| cell.starts_with("Unlimited")),
-        "the KV limit"
+        table_row(resources, "Data size")[2].contains(&grouped(TX_DATA_LIMIT)),
+        "the transaction's data-size limit"
     );
-    assert!(
-        table_row(resources, "State gas").iter().any(|cell| cell.starts_with("Unlimited")),
-        "the state-gas limit"
-    );
-
     let blocks = section(doc, "### 20. Block Limits", "### 21. Transaction and Block");
-    assert_eq!(*table_row(blocks, "Execution gas").last().unwrap(), "Unlimited");
-    assert_eq!(*table_row(blocks, "State gas").last().unwrap(), "Unlimited");
-    assert_eq!(*table_row(blocks, "KV updates").last().unwrap(), "Unlimited");
+    for (page, removed) in [
+        (resources, "KV updates"),
+        (resources, "State growth"),
+        (blocks, "Execution gas"),
+        (blocks, "State gas"),
+        (blocks, "KV updates"),
+    ] {
+        assert!(
+            !page.lines().any(|line| line.contains(removed) && line.contains('|')),
+            "no table row limits {removed}"
+        );
+    }
     assert_eq!(
         *table_row(blocks, "Data size").last().unwrap(),
         format!("{} bytes", grouped(BLOCK_DATA_LIMIT))
@@ -276,7 +277,7 @@ fn limits(doc: &str) {
     require(
         safety,
         &format!(
-            "the data-size limits at {} bytes, and the detention caps at {} each",
+            "the data-size limits at {} bytes and the detention caps at {} each",
             grouped(TX_DATA_LIMIT),
             grouped(BLOCK_ENV_ACCESS_COMPUTE_GAS)
         ),
@@ -369,15 +370,19 @@ fn detention_and_stops(doc: &str) {
     );
 
     let stops = section(doc, "### 11. The Revert-Class", "### 12. Gas Detention");
-    let kinds = [
-        (LimitKind::DataSize, "Data size"),
-        (LimitKind::KVUpdate, "KV updates"),
-        (LimitKind::ComputeGas, "Compute (gas detention)"),
-        (LimitKind::StateGrowth, "State growth"),
-    ];
+    let kinds =
+        [(LimitKind::DataSize, "Data size"), (LimitKind::ComputeGas, "Compute (gas detention)")];
     for (kind, name) in kinds {
         let cells = row_with_first(stops, &kind.as_u8().to_string());
         assert_eq!(cells[1], name, "kind {}", kind.as_u8());
+    }
+    for retired in [1_u8, 3] {
+        assert_eq!(LimitKind::from_u8(retired), None, "kind {retired} names no dimension");
+        let first = retired.to_string();
+        assert!(
+            stops.lines().map(cells).all(|cells| cells.first() != Some(&first.as_str())),
+            "the page lists no kind {retired}"
+        );
     }
 
     let access = section(doc, "### 13. Volatile-Data", "### 14. EIP-7708");

@@ -1,5 +1,5 @@
-//! Every stop class through the harness: a transaction stopped by the data-size, KV, state-gas
-//! and compute limits, a crossing at a precompile's price, a crossing in an answer, and a block
+//! Every stop class through the harness: a transaction stopped by the data-size and compute
+//! limits, a crossing at a precompile's price, a crossing in an answer, and a block
 //! budget refusing a later transaction. A stop is what the block records, so a validator must
 //! produce the same stop from the same witness.
 
@@ -12,10 +12,7 @@ use mega_evm::{
     LimitCheck, LimitKind, ProtocolLimits, TX_BODY_SIZE,
 };
 use revm::{
-    bytecode::opcode::{
-        ADD, CALL, DUP1, GAS, JUMP, JUMPDEST, LOG0, MCOPY, POP, PUSH0, SLOAD, SSTORE, SWAP1,
-        TIMESTAMP,
-    },
+    bytecode::opcode::{CALL, GAS, JUMP, JUMPDEST, LOG0, MCOPY, POP, PUSH0, TIMESTAMP},
     context::result::ExecutionResult,
 };
 
@@ -41,30 +38,6 @@ fn log_gas(data_size: usize) -> u64 {
         common::body_history(0) +
         mega_evm::history_gas(mega_evm::log_history_bytes(0, data_size as u64))
             .expect("the log has a price")
-}
-
-/// Code that adds one to each of the slots `1..=writes`.
-fn incrementer(writes: u64) -> Bytes {
-    let mut code = BytecodeBuilder::default();
-    for slot in 1..=writes {
-        code = code
-            .push_number(slot)
-            .append(DUP1)
-            .append(SLOAD)
-            .push_number(1_u8)
-            .append(ADD)
-            .append(SWAP1)
-            .append(SSTORE);
-    }
-    code.stop().build()
-}
-
-/// A gas limit for a call to the incrementer of `writes` slots.
-fn increment_gas(writes: u64) -> u64 {
-    10_000_000 +
-        writes * common::slot_state_gas() +
-        common::body_history(0) +
-        mega_evm::write_record_history_gas(writes).expect("the records have a price")
 }
 
 /// Code that reads the block's timestamp, then copies memory forever.
@@ -129,40 +102,6 @@ fn test_a_data_size_stop_replays() {
         .tx(call(0, CONTRACT, Bytes::new(), log_gas(2_000)))
         .run();
     assert_stopped(&replay.recorded, 0, LimitKind::DataSize);
-}
-
-/// A transaction stopped by the KV limit.
-#[test]
-fn test_a_kv_stop_replays() {
-    let mut db = common::database();
-    db.set_account_code(CONTRACT, incrementer(3));
-    let limits =
-        ProtocolLimits::loosest().with_tx_runtime_limits(loosest_tx().with_tx_kv_update_limit(1));
-    let replay = Case::new("kv stop", db)
-        .limits(limits)
-        .tx(call(0, CONTRACT, Bytes::new(), increment_gas(3)))
-        .run();
-    assert_stopped(&replay.recorded, 0, LimitKind::KVUpdate);
-    assert!(replay.recorded.record.storage.len() >= 2, "the slots read before the stop");
-}
-
-/// A transaction stopped by the state-gas limit, whose crossing write was priced through SALT:
-/// the bucket of the slot that crossed is in the export, as a validator asks about it too.
-#[test]
-fn test_a_state_gas_stop_replays() {
-    if common::state_is_free() {
-        return;
-    }
-    let mut db = common::database();
-    db.set_account_code(CONTRACT, incrementer(2));
-    let limits = ProtocolLimits::loosest()
-        .with_tx_runtime_limits(loosest_tx().with_tx_state_gas_limit(common::slot_state_gas()));
-    let replay = Case::new("state-gas stop", db)
-        .limits(limits)
-        .tx(call(0, CONTRACT, Bytes::new(), increment_gas(2)))
-        .run();
-    assert_stopped(&replay.recorded, 0, LimitKind::StateGrowth);
-    assert_eq!(replay.recorded.bucket_ids.len(), 2, "both slots were priced before the stop");
 }
 
 /// A transaction stopped by gas detention at the compute cap: a regular charge crossed the

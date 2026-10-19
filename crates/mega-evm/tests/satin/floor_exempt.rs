@@ -160,7 +160,7 @@ const LONG: u64 = 40_000;
 /// and with [`LONG`] calldata, where the floor binds and is the gas used. Each runs below the
 /// execution cap and above it: where the floor binds it is drawn from the whole gas limit, the
 /// reservoir included, so the gas used is the floor at either gas limit. The figure the block
-/// counts towards its execution-gas limit is the regular ledger at least the floor.
+/// counts on its execution ledger is the regular ledger at least the floor.
 ///
 /// Rules: [S4.19], [S4.22], [S4.23], [S5.5], [S7.34], [S7.36], [S7.37], [S5], [S7]. Independence:
 /// independent — the floor's base and rate, the intrinsic costs and the memory the code expands
@@ -208,7 +208,7 @@ fn test_the_floor_of_an_exempt_transaction() {
                 assert_eq!(
                     gas.block_execution_gas(),
                     gas.regular.max(floor),
-                    "{case}: what the block counts towards its execution-gas limit"
+                    "{case}: what the block counts on its execution ledger"
                 );
             }
         }

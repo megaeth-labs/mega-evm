@@ -1,10 +1,10 @@
 //! Who is held to no per-transaction limit: a transaction the protocol itself sent, and a system
 //! call.
 //!
-//! The data-size limit, the KV limit, the state-gas limit and the frame budgets of the first two
-//! hold what users do. The protocol's own work — the maintenance a system transaction performs,
-//! the calls the protocol makes before a block's transactions — must not fail on them, as it pays
-//! no history gas for the same reason. What it uses is counted all the same, and reported.
+//! The data-size limit and its frame budgets hold what users do. The protocol's own work — the
+//! maintenance a system transaction performs, the calls the protocol makes before a block's
+//! transactions — must not fail on them, as it pays no history gas for the same reason. What it
+//! uses is counted all the same, and reported.
 //!
 //! A user's deposit is not the protocol's work: it is held to every limit, and so is a user's
 //! transaction that calls a system contract.
@@ -23,7 +23,7 @@ use revm::{
     context::TxEnv,
 };
 
-use crate::common::{context, slot_state_gas, state_is_free};
+use crate::common::{context, slot_state_gas};
 
 const CALLER: Address = address!("0000000000000000000000000000000000b00000");
 /// A contract the program calls, which writes a slot of its own.
@@ -85,22 +85,12 @@ fn deposit(mut tx: MegaTransaction) -> MegaTransaction {
 }
 
 /// Every per-transaction limit the program crosses, one at a time, and all of them together.
-fn limits() -> [(&'static str, EvmTxRuntimeLimits); 6] {
+fn limits() -> [(&'static str, EvmTxRuntimeLimits); 3] {
     let none = EvmTxRuntimeLimits::no_limits();
     [
         ("the transaction's data size", none.with_tx_data_size_limit(TX_BODY_SIZE)),
         ("a frame's data size", none.with_frame_data_size_limit(WRITE_RECORD_SIZE)),
-        ("the transaction's KV count", none.with_tx_kv_update_limit(1)),
-        ("a frame's KV count", none.with_frame_kv_update_limit(1)),
-        ("the transaction's state gas", none.with_tx_state_gas_limit(1)),
-        (
-            "every limit at zero",
-            none.with_tx_data_size_limit(0)
-                .with_frame_data_size_limit(0)
-                .with_tx_kv_update_limit(0)
-                .with_frame_kv_update_limit(0)
-                .with_tx_state_gas_limit(0),
-        ),
+        ("every limit at zero", none.with_tx_data_size_limit(0).with_frame_data_size_limit(0)),
     ]
 }
 
@@ -167,53 +157,20 @@ fn test_a_system_call_is_held_to_no_limit() {
     }
 }
 
-/// A user's deposit is held to the limits: over the KV count or the state gas, it is stopped.
-/// So is a user's transaction to the contract a system transaction may call.
+/// A user's deposit is held to the limits: over the data size, it is stopped. So is a user's
+/// transaction to the contract a system transaction may call.
 #[test]
 fn test_a_deposit_and_a_user_call_to_a_system_contract_are_held_to_the_limits() {
-    let none = EvmTxRuntimeLimits::no_limits();
+    let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(TX_BODY_SIZE);
     let cases = [
-        (
-            "a deposit",
-            deposit(call_from(CALLER, CONTRACT)),
-            none.with_tx_kv_update_limit(0),
-            LimitKind::KVUpdate,
-        ),
-        (
-            "a deposit",
-            deposit(call_from(CALLER, CONTRACT)),
-            none.with_tx_state_gas_limit(0),
-            LimitKind::StateGrowth,
-        ),
-        (
-            "a user's call to a system contract",
-            call_from(CALLER, ORACLE_CONTRACT_ADDRESS),
-            none.with_tx_data_size_limit(TX_BODY_SIZE),
-            LimitKind::DataSize,
-        ),
-        (
-            "a user's call to a system contract",
-            call_from(CALLER, ORACLE_CONTRACT_ADDRESS),
-            none.with_tx_kv_update_limit(0),
-            LimitKind::KVUpdate,
-        ),
-        (
-            "a user's call to a system contract",
-            call_from(CALLER, ORACLE_CONTRACT_ADDRESS),
-            none.with_tx_state_gas_limit(0),
-            LimitKind::StateGrowth,
-        ),
+        ("a deposit", deposit(call_from(CALLER, CONTRACT))),
+        ("a user's call to a system contract", call_from(CALLER, ORACLE_CONTRACT_ADDRESS)),
     ];
-    for (name, tx, limits, kind) in cases {
-        // A transaction that adds no state gas, where a state byte is free, crosses no state-gas
-        // limit.
-        if kind == LimitKind::StateGrowth && state_is_free() {
-            continue;
-        }
+    for (name, tx) in cases {
         let outcome = execute(db(), tx, limits);
-        let stop = outcome.limit_exceeded.unwrap_or_else(|| panic!("{name}, {kind:?}: stopped"));
+        let stop = outcome.limit_exceeded.unwrap_or_else(|| panic!("{name}: stopped"));
         assert!(
-            matches!(stop, mega_evm::LimitCheck::ExceedsLimit { kind: k, .. } if k == kind),
+            matches!(stop, mega_evm::LimitCheck::ExceedsLimit { kind: LimitKind::DataSize, .. }),
             "{name}: {stop:?}"
         );
         assert!(

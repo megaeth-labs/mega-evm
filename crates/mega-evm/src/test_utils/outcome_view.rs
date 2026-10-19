@@ -628,10 +628,10 @@ mod tests {
     #[test]
     fn test_a_revert_names_its_reason() {
         let reason = |output: Bytes| ResultView::new(&revert(output)).reason;
-        let stop = MegaLimitExceeded { kind: LimitKind::KVUpdate.as_u8(), limit: 7 };
+        let stop = MegaLimitExceeded { kind: LimitKind::ComputeGas.as_u8(), limit: 7 };
         assert_eq!(
             reason(stop.abi_encode().into()).as_deref(),
-            Some("MegaLimitExceeded(KVUpdate, 7)")
+            Some("MegaLimitExceeded(ComputeGas, 7)")
         );
         let error = Revert { reason: "boom".into() };
         assert_eq!(reason(error.abi_encode().into()).as_deref(), Some("revert: boom"));
@@ -711,7 +711,7 @@ mod tests {
             ("limit stop: none", |o| o.limit_exceeded = None),
             ("limit stop: kind", |o| {
                 if let Some(LimitCheck::ExceedsLimit { kind, .. }) = &mut o.limit_exceeded {
-                    *kind = LimitKind::KVUpdate;
+                    *kind = LimitKind::ComputeGas;
                 }
             }),
             ("limit stop: limit", |o| {

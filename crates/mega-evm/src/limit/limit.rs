@@ -16,9 +16,9 @@ use super::{
 use crate::storage_call_stipend;
 
 /// What the common execution layer tracks for the running transaction: the per-frame lanes of
-/// data-size bytes and write records, the state gas the transaction holds outside each frame, the
-/// record the Host staged for the running opcode, and where the transaction stands with its
-/// limits — within them or latched by one — and whether it is exempt from all of them.
+/// data-size bytes and write records, the record the Host staged for the running opcode, and where
+/// the transaction stands with its limits — within them or latched by one — and whether it is
+/// exempt from all of them.
 ///
 /// It lives on the [`MegaContext`](crate::MegaContext), is reset before each transaction and
 /// system call, and is driven by the Host (staging), the opcode wrappers (commit and discard)
@@ -204,17 +204,18 @@ impl AdditionalLimit {
         self.standing
     }
 
-    /// Checks the limits after the running frame counted something: what the transaction keeps
-    /// against its limits (latching on a crossing), then what the running frame keeps against its
-    /// budget. In each, data size comes before the write records.
+    /// Checks the data-size limit after the running frame counted something: what the
+    /// transaction keeps against its limit (latching on a crossing), then what the running frame
+    /// keeps against its budget.
     fn check(&mut self) -> LimitCheck {
-        if let Some((kind, limit, used)) = self.tracker.net().crossing(self.limits.tx_usage_limit())
-        {
-            return self.latch(kind, limit, used);
+        let (kept, limit) = (self.tracker.net(), self.limits.tx_data_size_limit);
+        if kept.exceeds_data_size(limit) {
+            return self.latch(LimitKind::DataSize, limit, kept.data_size);
         }
         if let Some(lane) = self.tracker.current() {
-            if let Some((kind, limit, used)) = lane.net().crossing(lane.budget) {
-                return self.crossed(kind, limit, used, true);
+            let (kept, budget) = (lane.net(), lane.budget);
+            if kept.exceeds_data_size(budget) {
+                return self.crossed(LimitKind::DataSize, budget, kept.data_size, true);
             }
         }
         LimitCheck::WithinLimit
@@ -229,8 +230,8 @@ impl AdditionalLimit {
         if self.is_exempt() || self.latched().is_some() {
             return true;
         }
-        self.tracker.net().crossing(self.limits.tx_usage_limit()).is_none() &&
-            self.tracker.current().is_none_or(|lane| lane.net().crossing(lane.budget).is_none())
+        !self.tracker.net().exceeds_data_size(self.limits.tx_data_size_limit) &&
+            self.tracker.current().is_none_or(|lane| !lane.net().exceeds_data_size(lane.budget))
     }
 
     /// The stop the running frame returns instead of running another instruction: the latched
@@ -491,9 +492,10 @@ impl AdditionalLimit {
     /// nothing of a log that crossed the limit.
     pub(crate) fn record_hint_bytes(&mut self, bytes: u64) -> LimitCheck {
         let hint = LimitUsage { data_size: bytes, write_records: 0 };
-        let reached = self.tracker.net().saturating_add(hint);
-        if let Some((kind, limit, used)) = reached.crossing(self.limits.tx_usage_limit()) {
-            let stop = self.latch(kind, limit, used);
+        let (reached, limit) =
+            (self.tracker.net().saturating_add(hint), self.limits.tx_data_size_limit);
+        if reached.exceeds_data_size(limit) {
+            let stop = self.latch(LimitKind::DataSize, limit, reached.data_size);
             if stop.exceeded_limit() {
                 return stop;
             }
@@ -504,28 +506,24 @@ impl AdditionalLimit {
 
     /// Records the account writes of the applied EIP-7702 authorities other than the sender:
     /// `authorities` distinct accounts, `target_is_authority` if the transaction's call target is
-    /// one of them, from the transaction's `sender`, which has been charged `state_gas` so far.
+    /// one of them, from the transaction's `sender`.
     ///
-    /// The limits are checked before the records are made — the state gas the authorities were
-    /// charged first, then their records: a crossing latches the transaction and records nothing,
-    /// and the caller takes the authorizations back with the gas they charged, so the writes the
-    /// limit guards never happen. The first frame is then answered with the stop without running.
+    /// The data-size limit is checked before the records are made: a crossing latches the
+    /// transaction and records nothing, and the caller takes the authorizations back with the gas
+    /// they charged, so the writes the limit guards never happen. The first frame is then answered
+    /// with the stop without running.
     pub(crate) fn record_applied_authorities(
         &mut self,
         sender: Address,
         authorities: u64,
         target_is_authority: bool,
-        state_gas: i64,
     ) -> LimitCheck {
         self.sender = sender;
-        let check = self.check_state_gas(state_gas);
-        if check.exceeded_limit() {
-            return check;
-        }
         let records = WRITE_RECORD.times(authorities);
-        let used = self.tracker.net().saturating_add(records);
-        if let Some((kind, limit, used)) = used.crossing(self.limits.tx_usage_limit()) {
-            let check = self.latch(kind, limit, used);
+        let (used, limit) =
+            (self.tracker.net().saturating_add(records), self.limits.tx_data_size_limit);
+        if used.exceeds_data_size(limit) {
+            let check = self.latch(LimitKind::DataSize, limit, used.data_size);
             if check.exceeded_limit() {
                 return check;
             }
@@ -533,43 +531,6 @@ impl AdditionalLimit {
         self.target_is_authority = target_is_authority;
         self.tracker.record(records);
         LimitCheck::WithinLimit
-    }
-
-    /* The state-gas limit */
-
-    /// Holds the state gas the transaction holds to its limit, the running frame — or, outside
-    /// any frame, the transaction — holding `running`, and latches the transaction when it is
-    /// crossed.
-    ///
-    /// Called where state gas has just been charged, so a charge the frame could not pay is an
-    /// out-of-gas whatever the limit: the limit holds what was paid. What a frame refilled, and
-    /// what a failed frame rolled back, is out of what it holds, so a write taken back gives its
-    /// room back.
-    pub(crate) fn check_state_gas(&mut self, running: i64) -> LimitCheck {
-        let used = self.tracker.state_gas_held(running);
-        let limit = self.limits.tx_state_gas_limit;
-        if used > limit {
-            return self.latch(LimitKind::StateGrowth, limit, used);
-        }
-        LimitCheck::WithinLimit
-    }
-
-    /// Records the state gas the transaction was charged before its first frame, `spent`, which
-    /// the first frame's lane holds outside it, and holds to the limit the part of it that stands
-    /// whatever the first frame does, `stands`: all of it but the account EIP-2780 charges the
-    /// first frame's start for, which is held once revm has decided the frame, as every frame's
-    /// upfront charge is. A crossing latches the transaction, and its first frame is answered with
-    /// the stop before it is built.
-    pub(crate) fn on_state_gas_before_frames(&mut self, stands: i64, spent: i64) {
-        self.tracker.set_state_gas_before_frames(spent);
-        self.check_state_gas(stands);
-    }
-
-    /// Records the state gas `held` by the running frame as it suspends on a child, which the
-    /// child's lane counts as held outside it.
-    #[inline]
-    pub(crate) fn on_frame_suspend(&mut self, held: i64) {
-        self.tracker.set_state_gas_at_suspension(held);
     }
 
     /* Frame lanes */
@@ -620,9 +581,8 @@ impl AdditionalLimit {
         self.check()
     }
 
-    /// Holds the code a creation deposits to the limits, and names the stop when it crosses one:
-    /// first the state gas `return_create` charged for the bytes, then the bytes themselves,
-    /// counted on the creation's own lane.
+    /// Holds the code a creation deposits to the data-size limit, and names the stop when it
+    /// crosses it: the bytes are counted on the creation's own lane.
     ///
     /// Called through
     /// [`ContextTr::admit_code_deposit`](revm::context::ContextTr::admit_code_deposit), which
@@ -638,20 +598,13 @@ impl AdditionalLimit {
     /// code, code it refuses, and a creation that cannot pay one of the deposit's charges, which
     /// runs out of gas whatever the limit. Empty code deposits nothing and is held to nothing.
     ///
-    /// The state gas is held with what the creation already holds, and before the bytes, as it is
-    /// wherever both cross at one site. A deposit the schedule charges no state gas for adds none,
-    /// and holding what the creation already held finds nothing its own charges did not. The same
-    /// bytes are history beside the write records, counted here on the same lane, so the
+    /// The same bytes are history beside the write records, counted here on the same lane, so the
     /// history a transaction reports it appended and the data size it kept move together: a
     /// creation that deposits nothing, or whose deposit fails, appends neither.
     pub(crate) fn on_code_deposit(&mut self, deposit: &CodeDeposit<'_>) -> Result<(), Bytes> {
         let bytes = deposit.code.len() as u64;
         if bytes == 0 {
             return Ok(());
-        }
-        let check = self.check_state_gas(deposit.gas_after.state_gas_spent());
-        if check.exceeded_limit() {
-            return Err(check.revert_data());
         }
         debug_assert!(self.tracker.current().is_some(), "a creation returns on its own lane");
         self.tracker.record(LimitUsage { data_size: bytes, write_records: 0 });
@@ -663,27 +616,19 @@ impl AdditionalLimit {
         Ok(())
     }
 
-    /// The budget of the frame about to start, in data-size bytes and in write records.
+    /// The data-size budget of the frame about to start.
     ///
-    /// In each dimension the transaction's own frame gets what the transaction has left, and never
-    /// more than the frame cap
-    /// ([`frame_data_size_limit`](EvmTxRuntimeLimits::frame_data_size_limit),
-    /// [`frame_kv_update_limit`](EvmTxRuntimeLimits::frame_kv_update_limit)). A child gets
-    /// [`FRAME_DATA_SHARE_NUMERATOR`] / [`FRAME_DATA_SHARE_DENOMINATOR`] of what its parent has
-    /// left, under the same cap. What the parent has left is its budget minus what it has already
-    /// kept, so a parent that has spent part of its budget forwards a smaller share.
-    fn frame_budget(&self) -> LimitUsage {
+    /// The transaction's own frame gets what the transaction has left, and never more than the
+    /// frame cap ([`frame_data_size_limit`](EvmTxRuntimeLimits::frame_data_size_limit)). A child
+    /// gets [`FRAME_DATA_SHARE_NUMERATOR`] / [`FRAME_DATA_SHARE_DENOMINATOR`] of what its parent
+    /// has left, under the same cap. What the parent has left is its budget minus what it has
+    /// already kept, so a parent that has spent part of its budget forwards a smaller share.
+    fn frame_budget(&self) -> u64 {
         let forwarded = match self.tracker.current() {
-            Some(caller) => {
-                let remaining = caller.remaining_budget();
-                LimitUsage {
-                    data_size: share_of_remaining(remaining.data_size),
-                    write_records: share_of_remaining(remaining.write_records),
-                }
-            }
-            None => self.limits.tx_usage_limit().saturating_sub(self.tracker.net()),
+            Some(caller) => share_of_remaining(caller.remaining_budget()),
+            None => self.limits.tx_data_size_limit.saturating_sub(self.tracker.net().data_size),
         };
-        forwarded.min(self.limits.frame_usage_limit())
+        forwarded.min(self.limits.frame_data_size_limit)
     }
 
     fn push_lane(&mut self, input: &FrameInput, depth: usize) {
@@ -1194,79 +1139,46 @@ mod tests {
     }
 
     /// A child frame's budget is 98% of what its parent has left, three frames down, and the
-    /// transaction's own frame gets what the transaction has left — in data-size bytes and in
-    /// write records alike, each from its own limit.
+    /// transaction's own frame gets what the transaction has left.
     #[test]
     fn test_a_child_frame_gets_98_percent_of_what_its_parent_has_left() {
-        let tx_limit = LimitUsage { data_size: 10_000, write_records: 1_000 };
-        let mut limit = AdditionalLimit::new(
-            EvmTxRuntimeLimits::no_limits()
-                .with_tx_data_size_limit(tx_limit.data_size)
-                .with_tx_kv_update_limit(tx_limit.write_records),
-        );
+        let mut limit =
+            AdditionalLimit::new(EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(10_000));
         limit.tracker.record_tx(LimitUsage { data_size: 310, write_records: 0 });
-        let share = |usage: LimitUsage| LimitUsage {
-            data_size: share_of_remaining(usage.data_size),
-            write_records: share_of_remaining(usage.write_records),
-        };
 
         limit.on_frame_init(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
-        let first = LimitUsage { data_size: 10_000 - 310, write_records: 1_000 };
+        let first = 10_000 - 310;
         assert_eq!(limit.tracker.current().unwrap().budget, first);
 
         limit.on_frame_init(&call_from_to(CALLEE, TARGET, U256::ZERO), 1);
-        let child = share(first);
-        assert_eq!(child, LimitUsage { data_size: 9_496, write_records: 980 });
+        let child = share_of_remaining(first);
+        assert_eq!(child, 9_496);
         assert_eq!(limit.tracker.current().unwrap().budget, child);
 
         limit.on_frame_init(&call_from_to(TARGET, SENDER, U256::ZERO), 2);
-        let grandchild = share(child);
+        let grandchild = share_of_remaining(child);
         assert_eq!(limit.tracker.current().unwrap().budget, grandchild);
 
         limit.on_frame_init(&call_from_to(SENDER, CALLEE, U256::ZERO), 3);
         assert_eq!(
             limit.tracker.current().unwrap().budget,
-            share(grandchild),
+            share_of_remaining(grandchild),
             "the fourth frame, at depth 3, still takes 98% of what is left"
         );
     }
 
-    /// Each frame cap binds when it is tighter than the share of what the parent has left, in its
-    /// own dimension and in no other.
+    /// The frame cap binds when it is tighter than the share of what the parent has left.
     #[test]
     fn test_the_frame_cap_binds_when_it_is_tighter_than_the_share() {
         let mut limit = AdditionalLimit::new(
             EvmTxRuntimeLimits::no_limits()
                 .with_tx_data_size_limit(u64::MAX)
-                .with_frame_data_size_limit(100)
-                .with_tx_kv_update_limit(1_000),
+                .with_frame_data_size_limit(100),
         );
         limit.on_frame_init(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
-        assert_eq!(
-            limit.tracker.current().unwrap().budget,
-            LimitUsage { data_size: 100, write_records: 1_000 }
-        );
+        assert_eq!(limit.tracker.current().unwrap().budget, 100);
         limit.on_frame_init(&call_from_to(CALLEE, TARGET, U256::ZERO), 1);
-        assert_eq!(
-            limit.tracker.current().unwrap().budget,
-            LimitUsage { data_size: 98, write_records: 980 }
-        );
-
-        let mut limit = AdditionalLimit::new(
-            EvmTxRuntimeLimits::no_limits()
-                .with_tx_data_size_limit(1_000)
-                .with_frame_kv_update_limit(10),
-        );
-        limit.on_frame_init(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
-        assert_eq!(
-            limit.tracker.current().unwrap().budget,
-            LimitUsage { data_size: 1_000, write_records: 10 }
-        );
-        limit.on_frame_init(&call_from_to(CALLEE, TARGET, U256::ZERO), 1);
-        assert_eq!(
-            limit.tracker.current().unwrap().budget,
-            LimitUsage { data_size: 980, write_records: 9 }
-        );
+        assert_eq!(limit.tracker.current().unwrap().budget, 98);
     }
 
     /// A layer with a frame cap of 100 bytes and the transaction's own frame started, which is
@@ -1278,7 +1190,7 @@ mod tests {
         limit.on_frame_init(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
         let child = call_from_to(CALLEE, TARGET, U256::ZERO);
         limit.on_frame_init(&child, 1);
-        assert_eq!(limit.tracker.current().unwrap().budget.data_size, 98);
+        assert_eq!(limit.tracker.current().unwrap().budget, 98);
         (limit, child)
     }
 
@@ -1314,7 +1226,7 @@ mod tests {
     #[should_panic(expected = "no check held it to")]
     fn test_a_success_that_hands_its_caller_more_than_its_share_trips() {
         let (mut limit, child) = with_a_child_of_a_capped_frame();
-        limit.tracker.current_mut().unwrap().budget = crate::limit::UNLIMITED;
+        limit.tracker.current_mut().unwrap().budget = u64::MAX;
         limit.tracker.record(LimitUsage { data_size: 101, write_records: 0 });
         let mut result =
             crate::synthetic_frame_result(&child, InstructionResult::Stop, Bytes::new());
@@ -1346,20 +1258,15 @@ mod tests {
 
     /// Limits every dimension holds at zero: anything a transaction counts crosses one.
     fn zero_limits() -> EvmTxRuntimeLimits {
-        EvmTxRuntimeLimits::no_limits()
-            .with_tx_data_size_limit(0)
-            .with_frame_data_size_limit(0)
-            .with_tx_kv_update_limit(0)
-            .with_frame_kv_update_limit(0)
-            .with_tx_state_gas_limit(0)
+        EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(0).with_frame_data_size_limit(0)
     }
 
-    /// Counts a body, a value call's two records and some state gas, and reports each verdict.
-    fn count_a_transaction(limit: &mut AdditionalLimit) -> [LimitCheck; 3] {
+    /// Counts a body and a value call's two records, and reports each verdict.
+    fn count_a_transaction(limit: &mut AdditionalLimit) -> [LimitCheck; 2] {
         let body = limit.record_tx_body(crate::TX_BODY_SIZE);
         limit.on_frame_init(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
         let records = limit.on_frame_init(&call_from_to(CALLEE, TARGET, U256::from(1)), 1);
-        [body, records, limit.check_state_gas(1_000)]
+        [body, records]
     }
 
     /// A transaction that is not exempt is stopped by the first limit it crosses: its body latches
@@ -1380,7 +1287,7 @@ mod tests {
     fn test_an_exempt_transaction_is_stopped_by_no_limit() {
         let mut limit = AdditionalLimit::new(zero_limits());
         limit.exempt();
-        assert_eq!(count_a_transaction(&mut limit), [LimitCheck::WithinLimit; 3]);
+        assert_eq!(count_a_transaction(&mut limit), [LimitCheck::WithinLimit; 2]);
         assert_eq!(limit.latch(LimitKind::DataSize, 0, 1), LimitCheck::WithinLimit);
         assert_eq!(limit.latched(), None);
         assert_eq!(limit.stop_before_run(), None);
@@ -1404,7 +1311,7 @@ mod tests {
     fn test_an_exempt_transaction_records_its_authorities() {
         let mut limit = AdditionalLimit::new(zero_limits());
         limit.exempt();
-        let check = limit.record_applied_authorities(SENDER, 2, false, 1_000);
+        let check = limit.record_applied_authorities(SENDER, 2, false);
         assert!(!check.exceeded_limit(), "{check:?}");
         assert_eq!(limit.usage(), WRITE_RECORD.times(2));
     }

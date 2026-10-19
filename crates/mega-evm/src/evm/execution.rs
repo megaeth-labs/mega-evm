@@ -182,8 +182,7 @@ where
             runtime_oog_unwind(evm.ctx(), checkpoint)?;
             return Ok(None);
         };
-        let authorities =
-            record_applied_authorities(evm.ctx_mut(), checkpoint.journal_i, gas.state_gas_spent());
+        let authorities = record_applied_authorities(evm.ctx_mut(), checkpoint.journal_i);
         if authorities.check.exceeded_limit() {
             evm.ctx().journal_mut().checkpoint_revert(checkpoint);
             *gas = gas_before;
@@ -281,14 +280,6 @@ where
     /// them would only matter to a gas limit that cannot pay them, which would then report an
     /// out-of-gas in place of the stop that bound first. The input carries no charged flag, so
     /// the stop's settlement gives nothing back that was not charged.
-    ///
-    /// Once revm has prepared the first frame, the state gas the transaction has been charged is
-    /// all it holds outside its frames: the account a deposit-like transaction creates for its
-    /// caller, the applied authorities, and the new account EIP-2780 charges the first frame's
-    /// start for. The first two stand whatever the first frame does, and are held to the
-    /// state-gas limit here: a crossing latches the transaction, and the frame is answered with the
-    /// stop before it is built. The third is the first frame's upfront charge, held as every
-    /// frame's is, once revm has decided the frame ([`hold_upfront_state_gas`]).
     fn first_frame_input(
         &mut self,
         evm: &mut Self::Evm,
@@ -297,7 +288,6 @@ where
         if evm.ctx_ref().additional_limit.latched().is_some() {
             return Ok(Some(unbuilt_first_frame(evm.ctx_ref(), gas)));
         }
-        let stands = gas.state_gas_spent();
         let Some(frame) = self.op.first_frame_input(evm, gas)? else {
             // The runtime gas phase could not pay for the first frame's start: EIP-2780's charge
             // for the account the frame adds, a call's recipient or a creation's account, or the
@@ -311,8 +301,6 @@ where
             evm.ctx_mut().additional_limit.set_top_level_write_record_gas(0);
             return Ok(None);
         };
-        let spent = gas.state_gas_spent();
-        evm.ctx_mut().additional_limit.on_state_gas_before_frames(stands, spent);
         evm.ctx_mut().mark_beneficiary_delegate();
         Ok(Some(frame))
     }
@@ -483,17 +471,13 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     ///    answers the frame with the stop before it runs. A start revm refuses on its caller's
     ///    account ([`caller_refuses_start`]) makes no write and journals no transfer log, so it
     ///    gets an empty lane and nothing is counted;
-    /// 6. revm builds the frame, or answers it;
-    /// 7. the state gas the caller was charged upfront for the frame's start is held to the
-    ///    state-gas limit, unless revm refused the frame and so gives it back
-    ///    ([`hold_upfront_state_gas`]); for the transaction's own frame, the account EIP-2780
-    ///    charges its start for. A success answer of the transaction's own frame rewritten into the
-    ///    stop has its journal taken back to where its start began, since no caller's revert will
-    ///    take back what the answer wrote.
+    /// 6. revm builds the frame, or answers it. A success answer of the transaction's own frame
+    ///    rewritten into the stop has its journal taken back to where its start began, since no
+    ///    caller's revert will take back what the answer wrote ([`take_back_a_stopped_answer`]).
     ///
     /// A frame answered at step 3, 4 or 6 — a `keylessDeploy` call carrying value, an
     /// interceptor's answer, a precompile's, revm's for a call it did not start — is held to the
-    /// compute limit before step 7, as a frame that ran would be ([`settle_answer`]). A precompile,
+    /// compute limit, as a frame that ran would be ([`settle_answer`]). A precompile,
     /// which revm runs at step 6, is decided from its price before it runs when the engine can
     /// price it, and answered without running when that price crosses the compute limit; one it
     /// cannot price is run on the gas the limit leaves the frame rather than on all its caller
@@ -507,10 +491,6 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     /// A frame answered before revm builds it gets an empty lane, so the lanes stay aligned with
     /// the results [`frame_return_result`](EvmTr::frame_return_result) pops. A creation answered
     /// with a stop still bumps its creator's nonce, as one that starts and reverts does.
-    ///
-    /// The frame's lane holds outside it what its caller held when it suspended on this frame
-    /// ([`after_frame_run`]), which the state-gas limit adds what the frame charges to. An
-    /// interceptor's answer is held as revm's own is at step 7.
     #[inline]
     fn frame_init(
         &mut self,
@@ -529,7 +509,6 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         if let Some(mut result) = answer {
             self.inner.ctx.additional_limit.push_empty_frame();
             settle_answer(&mut self.inner.ctx, depth, gas_limit, &mut result);
-            hold_upfront_state_gas(&mut self.inner.ctx, Some(&mut result));
             return Ok(ItemOrResult::Result(result));
         }
         record_caller(&mut self.inner.ctx, &mut self.inner.frame_stack, depth);
@@ -574,7 +553,6 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         match outcome {
             Ok(address) => {
                 ctx.additional_limit.set_frame_address(address);
-                hold_upfront_state_gas(ctx, None);
                 if keyless {
                     ctx.keyless_frame = Some(keyless::KeylessFrame::Built);
                 }
@@ -586,7 +564,6 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
                 }
                 let succeeded = result.instruction_result().is_ok();
                 settle_answer(ctx, depth, gas_limit, &mut result);
-                hold_upfront_state_gas(ctx, Some(&mut result));
                 if let Some(start) = start {
                     take_back_a_stopped_answer(ctx, start, succeeded, &result);
                 }
@@ -830,8 +807,7 @@ fn before_frame_run<DB: Database, ExtEnvs: ExternalEnvTypes>(
 }
 
 /// Settles gas detention once the frame ran: a frame that suspends on a child keeps its compute
-/// for the child's start to add to the transaction's, and its state gas on its lane for the
-/// child's to hold outside it; a frame that returns is classified.
+/// for the child's start to add to the transaction's; a frame that returns is classified.
 ///
 /// The frame's result is read here, after revm processed its last action — `return_create`
 /// included, whose deposit and hash charges are the creating frame's own compute — and before
@@ -851,7 +827,6 @@ fn after_frame_run<DB: Database, ExtEnvs: ExternalEnvTypes, E>(
     match next {
         Ok(ItemOrResult::Item(_)) => {
             ctx.detention.on_frame_suspend(&frame.interpreter.gas, frame.depth);
-            ctx.additional_limit.on_frame_suspend(frame.interpreter.gas.state_gas_spent());
         }
         Ok(ItemOrResult::Result(result)) => {
             let instruction_result = result.instruction_result();
@@ -1070,43 +1045,6 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     }
 }
 
-/// Holds the state gas the caller was charged upfront for the frame that is starting — the new
-/// account a value `CALL` adds, a creation's account, or, for the transaction's own frame, the
-/// recipient or created account EIP-2780 charges the transaction for — to the state-gas limit,
-/// once revm has decided the frame. `answer` is the frame's result when it was answered without
-/// running; a frame revm built has none yet.
-///
-/// revm's `CALL`, `CREATE` and `CREATE2`, and its EIP-2780 phase for the first frame, make that
-/// charge before anything knows whether the frame can start, and a frame that adds no account
-/// gives it back when its answer returns ([`FrameResult::refundable_state_gas_charge`]): a value
-/// call its caller cannot fund, a call past the call-stack limit, an answer that fails. Such a
-/// charge is never held. A charge that stands — the frame is built, or answered with a success, as
-/// a value call to an account with no code is — is held, and a crossing latches the transaction: a
-/// built frame returns the stop before its first instruction, and an answer is rewritten to it
-/// here, so an inspector sees the answer the caller gets. The writes the frame's start made go with
-/// the frames the stop reverts; an answer of the transaction's own frame, which no frame's revert
-/// follows, is taken back by its start ([`take_back_a_stopped_answer`]). A built frame that later
-/// fails gives the charge back too, but by then it has started, and a crossing inside a frame that
-/// later fails is a crossing.
-///
-/// The frame's own lane is on top by now, and holds outside it what its caller held, the charge
-/// included; the frame itself holds nothing yet. Every other charge was held where it was made, so
-/// only the upfront one can cross here.
-fn hold_upfront_state_gas<DB: Database, ExtEnvs: ExternalEnvTypes>(
-    ctx: &mut MegaContext<DB, ExtEnvs>,
-    answer: Option<&mut FrameResult>,
-) {
-    let Some(answer) = answer else {
-        ctx.additional_limit.check_state_gas(0);
-        return;
-    };
-    if answer.refundable_state_gas_charge().is_none() &&
-        ctx.additional_limit.check_state_gas(0).exceeded_limit()
-    {
-        ctx.additional_limit.apply_latch(answer);
-    }
-}
-
 /// Takes the journal back to `start`, where the transaction's own frame began, when revm answered
 /// that frame with a success (`succeeded`) that the engine then rewrote into `result`, the stop.
 ///
@@ -1150,8 +1088,7 @@ where
 /// is held to the compute limit ([`settle_answer`]). Then the inspector is told the frame ended,
 /// and the answer settles as a frame that kept nothing: the frame never started, so no value moved
 /// and no account was added, and the upfront state gas its caller's opcode was charged comes back
-/// whatever the answer ([`frame_end_checked`]). That charge never stands, so it is not held to the
-/// state-gas limit.
+/// whatever the answer ([`frame_end_checked`]).
 fn answered_without_running<DB: Database, ExtEnvs: ExternalEnvTypes, INSP>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     inspector: &mut INSP,
@@ -1440,14 +1377,9 @@ fn caller_refuses<DB: revm::Database, ExtEnvs: ExternalEnvTypes>(
 /// `journal_i`: each applied authorization bumps its authority's nonce once, so the distinct
 /// authorities other than the sender are the accounts written. The sender's write is part of the
 /// transaction body.
-///
-/// `state_gas` is what the transaction has been charged before its first frame, the authorities'
-/// new accounts and delegations included, which the state-gas limit holds before the records are
-/// counted.
 fn record_applied_authorities<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     journal_i: usize,
-    state_gas: i64,
 ) -> AppliedAuthorities {
     if ctx.tx().tx_type() != TransactionType::Eip7702 {
         return AppliedAuthorities { check: LimitCheck::WithinLimit, applied: 0 };
@@ -1466,12 +1398,8 @@ fn record_applied_authorities<DB: Database, ExtEnvs: ExternalEnvTypes>(
     let target_is_authority =
         target.is_some_and(|target| authorities.binary_search(&target).is_ok());
     let applied = authorities.len() as u64;
-    let check = ctx.additional_limit.record_applied_authorities(
-        caller,
-        applied,
-        target_is_authority,
-        state_gas,
-    );
+    let check =
+        ctx.additional_limit.record_applied_authorities(caller, applied, target_is_authority);
     if check.exceeded_limit() {
         return AppliedAuthorities { check, applied: 0 };
     }
@@ -1539,59 +1467,39 @@ fn charge_records_made_outside_a_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        test_utils::MemoryDatabase, EvmTxRuntimeLimits, LimitKind, MegaLimitExceeded, MegaSpecId,
-    };
+    use crate::{test_utils::MemoryDatabase, MegaSpecId};
     use alloy_primitives::{address, U256};
-    use alloy_sol_types::SolError;
     use revm::interpreter::gas::WithheldCrossing;
 
     const CALLER: Address = address!("00000000000000000000000000000000000e0001");
     const TARGET: Address = address!("00000000000000000000000000000000000e0002");
 
-    /// A `CALL` from `caller` to `target` of `value` wei, which its opcode charged a new account
-    /// for when `charged`.
-    fn call(caller: Address, target: Address, value: u64, charged: bool) -> FrameInput {
+    /// A `CALL` of one wei to `TARGET`, which its opcode charged a new account for.
+    fn value_call() -> FrameInput {
         FrameInput::Call(Box::new(CallInputs {
             input: CallInput::Bytes(Bytes::new()),
             return_memory_offset: 0..0,
             gas_limit: 100_000,
             reservoir: 0,
-            bytecode_address: target,
+            bytecode_address: TARGET,
             known_bytecode: Default::default(),
-            target_address: target,
-            caller,
-            value: CallValue::Transfer(U256::from(value)),
+            target_address: TARGET,
+            caller: CALLER,
+            value: CallValue::Transfer(U256::from(1)),
             scheme: CallScheme::Call,
             is_static: false,
-            charged_new_account_state_gas: charged,
+            charged_new_account_state_gas: true,
         }))
     }
 
-    /// A `CALL` of one wei to `TARGET`, which its opcode charged a new account for.
-    fn value_call() -> FrameInput {
-        call(CALLER, TARGET, 1, true)
-    }
-
     /// A `CREATE` its opcode charged the created account for.
+    #[cfg(debug_assertions)]
     fn creation() -> FrameInput {
         let mut inputs =
             CreateInputs::new(CALLER, CreateScheme::Create, U256::ZERO, Bytes::new(), 100_000, 0);
         inputs.set_charged_create_state_gas(true);
         inputs.set_charged_state_gas_address(TARGET);
         FrameInput::Create(Box::new(inputs))
-    }
-
-    /// A context under a state-gas limit of 99, with the transaction's own frame on the call stack
-    /// holding 100 — the upfront charge of the frame it starts — and the lane of that frame
-    /// pushed.
-    fn starting_a_frame_charged_100() -> MegaContext<MemoryDatabase> {
-        let mut ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN)
-            .with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits().with_tx_state_gas_limit(99));
-        let _ = ctx.additional_limit.on_frame_init(&call(CALLER, CALLER, 0, false), 0);
-        ctx.additional_limit.on_frame_suspend(100);
-        ctx.additional_limit.push_empty_frame();
-        ctx
     }
 
     /// A context whose transaction read the block environment before its first frame under a cap
@@ -1800,19 +1708,25 @@ mod tests {
         }
     }
 
-    /// A frame revm refuses — past the call-stack limit, which no transaction reaches under the
-    /// execution cap — gives its caller's upfront charge back, so the charge is not held, for a
-    /// call and a creation alike; the answer stays what it was.
+    /// The transaction's own frame answered with a success that the engine then rewrote into the
+    /// stop has what its start wrote taken back to where its start began. An answer revm made a
+    /// failure took its writes back itself, and one the engine did not rewrite keeps them.
     #[test]
-    fn test_a_refused_frame_is_not_held_for_its_upfront_charge() {
-        for input in [value_call(), creation()] {
-            let mut ctx = starting_a_frame_charged_100();
-            let mut refused =
-                synthetic_frame_result(&input, InstructionResult::CallTooDeep, Bytes::new());
-            assert!(refused.refundable_state_gas_charge().is_some(), "{input:?}");
-            hold_upfront_state_gas(&mut ctx, Some(&mut refused));
-            assert_eq!(ctx.additional_limit.latched(), None, "{input:?}");
-            assert_eq!(refused.instruction_result(), InstructionResult::CallTooDeep);
+    fn test_a_success_answer_rewritten_into_the_stop_is_taken_back() {
+        for (succeeded, result, taken_back) in [
+            (true, InstructionResult::Revert, true),
+            (true, InstructionResult::Stop, false),
+            (false, InstructionResult::Revert, false),
+        ] {
+            let case = format!("succeeded {succeeded}, now {result:?}");
+            let mut ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
+            let start = journal_position(&mut ctx);
+            // What the answer wrote: a bump of the recipient's nonce.
+            let _ = ctx.journal_mut().load_account_mut(TARGET).unwrap().data.bump_nonce();
+            let answer = synthetic_frame_result(&value_call(), result, Bytes::new());
+            take_back_a_stopped_answer(&mut ctx, start, succeeded, &answer);
+            let nonce = ctx.journal_ref().state.get(&TARGET).map_or(0, |a| a.info.nonce);
+            assert_eq!(nonce, u64::from(!taken_back), "{case}");
         }
     }
 
@@ -1885,31 +1799,5 @@ mod tests {
         assert_start_as_counted(&ctx, (true, false, 0), Some(&failed));
         let answered = synthetic_frame_result(&value_call(), InstructionResult::Stop, Bytes::new());
         assert_start_as_counted(&ctx, (false, false, 0), Some(&answered));
-    }
-
-    /// A charge that stands is held: a frame revm built latches the transaction, and a success
-    /// answer carrying the charge latches it and is rewritten to the stop.
-    #[test]
-    fn test_a_charge_that_stands_is_held() {
-        let stop = LimitCheck::ExceedsLimit {
-            kind: LimitKind::StateGrowth,
-            limit: 99,
-            used: 100,
-            frame_local: false,
-        };
-        let mut ctx = starting_a_frame_charged_100();
-        hold_upfront_state_gas(&mut ctx, None);
-        assert_eq!(ctx.additional_limit.latched(), Some(&stop), "a built frame");
-
-        let mut ctx = starting_a_frame_charged_100();
-        let mut answered =
-            synthetic_frame_result(&value_call(), InstructionResult::Stop, Bytes::new());
-        hold_upfront_state_gas(&mut ctx, Some(&mut answered));
-        assert_eq!(ctx.additional_limit.latched(), Some(&stop), "a success answer");
-        assert_eq!(answered.instruction_result(), InstructionResult::Revert);
-        assert_eq!(
-            answered.interpreter_result().output,
-            Bytes::from(MegaLimitExceeded { kind: 3, limit: 99 }.abi_encode()),
-        );
     }
 }

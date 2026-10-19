@@ -4,10 +4,9 @@
 use alloy_primitives::{Address, U256};
 use mega_evm::{
     constants::{BLOCK_ENV_ACCESS_COMPUTE_GAS, MAX_TX_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS},
-    satin_gas_params, EvmTxRuntimeLimits, ProtocolLimits, TX_BODY_SIZE, WRITE_RECORD_SIZE,
+    EvmTxRuntimeLimits, ProtocolLimits, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 use proptest::prelude::*;
-use revm::context_interface::cfg::GasId;
 
 use super::{word, Who, Word, BENEFICIARY, SYSTEM_ADDRESS};
 
@@ -155,36 +154,6 @@ impl DataLimit {
     }
 }
 
-/// The transaction's state-gas limit, in slots at the byte prices in effect.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum StateLimit {
-    /// One gas: crossed by the first charge, unless a state byte costs nothing.
-    One,
-    /// Half a fresh slot.
-    HalfSlot,
-    /// One fresh slot.
-    Slot,
-    /// Three fresh slots.
-    ThreeSlots,
-    /// A hundred.
-    HundredSlots,
-    Unlimited,
-}
-
-impl StateLimit {
-    fn value(self) -> u64 {
-        let slot = satin_gas_params().get(GasId::sstore_set_state_gas());
-        match self {
-            Self::One => 1,
-            Self::HalfSlot => (slot / 2).max(1),
-            Self::Slot => slot.max(1),
-            Self::ThreeSlots => (3 * slot).max(1),
-            Self::HundredSlots => (100 * slot).max(1),
-            Self::Unlimited => u64::MAX,
-        }
-    }
-}
-
 /// A gas detention cap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DetentionCap {
@@ -233,9 +202,6 @@ pub(crate) enum Limits {
     Custom {
         data: DataLimit,
         frame_data: Option<u16>,
-        kv: Option<u8>,
-        frame_kv: Option<u8>,
-        state: StateLimit,
         block_env_cap: DetentionCap,
         oracle_cap: DetentionCap,
     },
@@ -247,27 +213,21 @@ impl Limits {
         match self {
             Self::Default => ProtocolLimits::DEFAULT.tx_runtime_limits,
             Self::Loosest => ProtocolLimits::loosest().tx_runtime_limits,
-            Self::Custom { data, frame_data, kv, frame_kv, state, block_env_cap, oracle_cap } => {
-                EvmTxRuntimeLimits {
-                    tx_data_size_limit: data.value(),
-                    frame_data_size_limit: frame_data.map_or(u64::MAX, u64::from),
-                    tx_kv_update_limit: kv.map_or(u64::MAX, u64::from),
-                    frame_kv_update_limit: frame_kv.map_or(u64::MAX, u64::from),
-                    tx_state_gas_limit: state.value(),
-                    block_env_access_compute_gas_limit: block_env_cap
-                        .value(BLOCK_ENV_ACCESS_COMPUTE_GAS),
-                    oracle_access_compute_gas_limit: oracle_cap.value(ORACLE_ACCESS_COMPUTE_GAS),
-                }
-            }
+            Self::Custom { data, frame_data, block_env_cap, oracle_cap } => EvmTxRuntimeLimits {
+                tx_data_size_limit: data.value(),
+                frame_data_size_limit: frame_data.map_or(u64::MAX, u64::from),
+                block_env_access_compute_gas_limit: block_env_cap
+                    .value(BLOCK_ENV_ACCESS_COMPUTE_GAS),
+                oracle_access_compute_gas_limit: oracle_cap.value(ORACLE_ACCESS_COMPUTE_GAS),
+            },
         }
     }
 }
 
 pub(crate) fn limits() -> impl Strategy<Value = Limits> {
     let custom = (
-        // The data size is checked before the records wherever both cross, so a KV stop needs a
-        // data-size limit with room: the roomy ones are drawn as often as the tight ones, and the
-        // KV limit is mostly one or two records.
+        // The roomy data-size limits are drawn as often as the tight ones, so the compute stop is
+        // reached too.
         prop_oneof![
             1 => Just(DataLimit::Body),
             2 => Just(DataLimit::BodyPlusRecord),
@@ -276,21 +236,14 @@ pub(crate) fn limits() -> impl Strategy<Value = Limits> {
             3 => Just(DataLimit::Unlimited),
         ],
         proptest::option::weighted(0.3, prop_oneof![Just(1u16), Just(40), Just(200), Just(2_000)]),
-        proptest::option::weighted(0.5, prop_oneof![3 => 1u8..=2, 2 => 3u8..=6]),
-        proptest::option::weighted(0.3, 1u8..=3),
-        prop_oneof![
-            1 => Just(StateLimit::One),
-            1 => Just(StateLimit::HalfSlot),
-            2 => Just(StateLimit::Slot),
-            2 => Just(StateLimit::ThreeSlots),
-            1 => Just(StateLimit::HundredSlots),
-            3 => Just(StateLimit::Unlimited),
-        ],
         detention_cap(),
         detention_cap(),
     )
-        .prop_map(|(data, frame_data, kv, frame_kv, state, block_env_cap, oracle_cap)| {
-            Limits::Custom { data, frame_data, kv, frame_kv, state, block_env_cap, oracle_cap }
+        .prop_map(|(data, frame_data, block_env_cap, oracle_cap)| Limits::Custom {
+            data,
+            frame_data,
+            block_env_cap,
+            oracle_cap,
         });
     prop_oneof![3 => Just(Limits::Default), 2 => Just(Limits::Loosest), 5 => custom]
 }

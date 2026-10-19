@@ -410,8 +410,7 @@ mod tests {
         ProtocolLimits::DEFAULT.with_tx_runtime_limits(
             ProtocolLimits::DEFAULT
                 .tx_runtime_limits
-                .with_tx_data_size_limit(crate::TX_BODY_SIZE + 40)
-                .with_tx_kv_update_limit(7),
+                .with_tx_data_size_limit(crate::TX_BODY_SIZE + 40),
         )
     }
 

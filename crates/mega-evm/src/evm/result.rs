@@ -193,12 +193,7 @@ mod tests {
     /// dimension.
     #[test]
     fn test_limit_stops_are_reverts_with_mega_limit_exceeded() {
-        for kind in [
-            LimitKind::DataSize,
-            LimitKind::KVUpdate,
-            LimitKind::ComputeGas,
-            LimitKind::StateGrowth,
-        ] {
+        for kind in [LimitKind::DataSize, LimitKind::ComputeGas] {
             let stop = LimitCheck::ExceedsLimit { kind, limit: 100, used: 101, frame_local: false };
             let decoded = MegaLimitExceeded::abi_decode(&stop.revert_data()).unwrap();
             assert_eq!(LimitKind::from_u8(decoded.kind), Some(kind));

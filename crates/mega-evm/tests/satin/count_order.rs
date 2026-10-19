@@ -1,10 +1,9 @@
-//! The order the four counts are checked in, when one record crosses several at once.
+//! The order the two data-size counts are checked in, when one record crosses both at once.
 //!
-//! A record is counted on the transaction and on the frame that makes it, and each has a
-//! data-size and a KV-update count: the transaction against its limits, the frame against its
-//! budget. The counts are checked transaction data size, transaction KV updates, frame data size,
-//! frame KV updates, and the first one crossed is the one reported. A transaction limit stops the
-//! transaction; a frame budget reverts its frame alone, and the caller goes on.
+//! A record is counted on the transaction and on the frame that makes it: the transaction against
+//! its limit, the frame against its budget. The transaction is checked first, and the first count
+//! crossed is the one reported. A transaction limit stops the transaction; a frame budget reverts
+//! its frame alone, and the caller goes on.
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolError;
@@ -35,55 +34,35 @@ enum Reported {
     Frame(LimitKind, u64),
 }
 
-/// One record that crosses several of the four counts at once is reported for the first of them
-/// in the order transaction data size, transaction KV updates, frame data size, frame KV updates:
-/// a record that crosses the frame's data-size budget and the transaction's KV limit stops the
-/// transaction for KV updates, and one that crosses both of the frame's budgets reverts the frame
-/// for its data size.
+/// One record that crosses the transaction's data-size limit and its frame's budget at once is
+/// reported for the transaction's limit, which is checked first.
 ///
-/// [`A`] keeps two records, so the transaction has 310 + 2 × 40 = 390 bytes and 2 records when
-/// [`B`] makes the record that crosses, which brings it to 430 bytes and 3 records, and [`B`]'s
-/// own count to 40 bytes and 1 record. `A`'s budget is what the transaction has left, under the
-/// per-frame caps; `B`'s is 98/100 of what `A` has left, rounded down. With a per-frame data-size
-/// cap of 120, `A` has 120 − 80 = 40 bytes left and `B` gets 39; with a transaction KV limit or a
-/// per-frame KV cap of 2, `A` has no record left and `B` gets none. A transaction data-size limit
-/// of 390 leaves `A` 80 bytes, and `B` none.
+/// [`A`] keeps two records, so the transaction has 310 + 2 × 40 = 390 bytes when [`B`] makes the
+/// record that crosses, which brings it to 430 bytes, and [`B`]'s own count to 40 bytes. `A`'s
+/// budget is what the transaction has left, under the per-frame cap; `B`'s is 98/100 of what `A`
+/// has left, rounded down. With a per-frame cap of 120, `A` has 120 − 80 = 40 bytes left and `B`
+/// gets 39. A transaction limit of 390 leaves `A` 80 bytes, and `B` none.
 ///
-/// The rows that cross one count alone show that each count the ordered rows rank is crossed.
+/// The row that crosses the frame's budget alone shows that the count the first row ranks second
+/// is crossed.
 ///
-/// Rules: [S10.47], [S10.48], [S10.31], [S10.33], [S10.34], [S10]. Independence: constants — the
-/// usages and budgets are hand arithmetic from `TX_BODY_SIZE`, `WRITE_RECORD_SIZE` and the 98/100
-/// share.
+/// Rules: [S10.48], [S10.31], [S10.33], [S10.34], [S10]. Independence: constants — the usages and
+/// budgets are hand arithmetic from `TX_BODY_SIZE`, `WRITE_RECORD_SIZE` and the 98/100 share.
 #[test]
-fn test_a_record_crossing_several_counts_is_reported_for_the_first_in_order() {
+fn test_a_record_crossing_both_counts_is_reported_for_the_transaction() {
     let unlimited = EvmTxRuntimeLimits::no_limits();
     let before = TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE;
     let after = before + WRITE_RECORD_SIZE;
-    let rows: [(&str, EvmTxRuntimeLimits, Reported); 5] = [
+    let rows: [(&str, EvmTxRuntimeLimits, Reported); 2] = [
         (
-            "all four: the transaction's data size",
-            unlimited.with_tx_data_size_limit(before).with_tx_kv_update_limit(2),
+            "the transaction's limit and the frame's budget: the transaction's limit",
+            unlimited.with_tx_data_size_limit(before).with_frame_data_size_limit(120),
             Reported::Transaction(LimitKind::DataSize, before, after),
         ),
         (
-            "the transaction's KV updates and both frame budgets: the transaction's KV updates",
-            unlimited.with_tx_kv_update_limit(2).with_frame_data_size_limit(120),
-            Reported::Transaction(LimitKind::KVUpdate, 2, 3),
-        ),
-        (
-            "both frame budgets: the frame's data size",
-            unlimited.with_frame_data_size_limit(120).with_frame_kv_update_limit(2),
-            Reported::Frame(LimitKind::DataSize, 39),
-        ),
-        (
-            "the frame's data-size budget alone",
+            "the frame's budget alone",
             unlimited.with_frame_data_size_limit(120),
             Reported::Frame(LimitKind::DataSize, 39),
-        ),
-        (
-            "the frame's KV budget alone",
-            unlimited.with_frame_kv_update_limit(2),
-            Reported::Frame(LimitKind::KVUpdate, 0),
         ),
     ];
     let a = BytecodeBuilder::default()

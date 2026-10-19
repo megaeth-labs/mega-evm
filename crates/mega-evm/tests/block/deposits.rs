@@ -1,10 +1,10 @@
-//! A deposit is never refused by a block's packing budgets.
+//! A deposit is never refused by a block's packing budget.
 //!
-//! The execution-gas, state-gas, data-size and KV limits of a block budget the transactions its
-//! builder chooses. A deposit is not chosen: the block derived from L1 must include it. So none
-//! of the four refuses a deposit — not before it executes, not after, and not when an outcome
-//! executed earlier is committed through either commit path — and every deposit still counts
-//! towards all four, so the ordinary transactions after the deposits find the room they used.
+//! The data-size limit of a block budgets the transactions its builder chooses. A deposit is not
+//! chosen: the block derived from L1 must include it. So it never refuses a deposit — not before it
+//! executes, and not when an outcome executed earlier is committed through either commit path —
+//! and every deposit still counts towards it, so the ordinary transactions after the deposits find
+//! the room they used.
 
 use alloy_consensus::{transaction::Recovered, Signed, TxLegacy};
 use alloy_evm::block::BlockExecutor;
@@ -58,14 +58,13 @@ fn input(slot: u64) -> Bytes {
     Bytes::from(input)
 }
 
-/// A deposit that fills the fresh `slot`: execution gas, state gas, data size and a write record,
-/// all four.
+/// A deposit that fills the fresh `slot`: execution gas, state gas, data size and a write record.
 fn deposit(slot: u64) -> Recovered<MegaTxEnvelope> {
     common::deposit_tx_to(WRITER, input(slot), gas_limit())
 }
 
-/// An ordinary transaction that fills the fresh `slot`, so each of the four limits has something
-/// to refuse it on.
+/// An ordinary transaction that fills the fresh `slot`, so the data-size limit has something to
+/// refuse it on.
 fn ordinary(slot: u64) -> Recovered<MegaTxEnvelope> {
     let tx = TxLegacy {
         chain_id: Some(CHAIN_ID),
@@ -99,50 +98,6 @@ fn one_deposit() -> (BlockGasCounters, LimitUsage) {
     (gas, usage)
 }
 
-/// The block limits the test holds a block to.
-#[derive(Clone, Copy, Debug)]
-enum Cap {
-    ExecutionGas,
-    StateGas,
-    DataSize,
-    KvUpdates,
-    All,
-}
-
-impl Cap {
-    /// Limits with room for a deposit and a half on this cap, so the second deposit crosses it. A
-    /// deposit keeps one record, so on the write records that is room for one.
-    fn limits(self, gas: &BlockGasCounters, usage: &LimitUsage) -> BlockLimits {
-        let half_again = |one: u64| one + one / 2;
-        let limits = BlockLimits::no_limits();
-        let execution = limits.with_block_execution_gas_limit(half_again(gas.execution));
-        let state = limits.with_block_state_gas_limit(half_again(gas.state));
-        let data = limits.with_block_txs_data_limit(half_again(usage.data_size));
-        let kv = limits.with_block_kv_update_limit(half_again(usage.write_records));
-        match self {
-            Self::ExecutionGas => execution,
-            Self::StateGas => state,
-            Self::DataSize => data,
-            Self::KvUpdates => kv,
-            Self::All => execution
-                .with_block_state_gas_limit(half_again(gas.state))
-                .with_block_txs_data_limit(half_again(usage.data_size))
-                .with_block_kv_update_limit(half_again(usage.write_records)),
-        }
-    }
-
-    /// What the refusal of the ordinary transaction names. With all four limits reached, the
-    /// execution-gas limit is the first the block checks.
-    const fn refusal(self) -> &'static str {
-        match self {
-            Self::ExecutionGas | Self::All => "Block execution gas limit reached",
-            Self::StateGas => "Block state gas limit reached",
-            Self::DataSize => "Block transactions data limit reached",
-            Self::KvUpdates => "Block KV update limit reached",
-        }
-    }
-}
-
 /// How the deposits reach the block.
 #[derive(Clone, Copy, Debug)]
 enum Route {
@@ -156,91 +111,85 @@ enum Route {
     TraitCommit,
 }
 
-/// Deposits cross each block limit and are included all the same, through every route; each one
-/// counts towards all four dimensions; and an ordinary transaction after them is refused — before
-/// it executes, and, as a candidate executed before the deposits committed, at its commit.
+/// Deposits cross the block's data-size limit and are included all the same, through every route;
+/// each one counts towards it, towards the gas ledgers and towards the write records; and an
+/// ordinary transaction after them is refused — before it executes, and, as a candidate executed
+/// before the deposits committed, at its commit.
 #[test]
 fn test_no_block_limit_refuses_a_deposit_and_every_deposit_counts() {
+    const REFUSAL: &str = "Block transactions data limit reached";
     let (gas, usage) = one_deposit();
-    for cap in [Cap::ExecutionGas, Cap::StateGas, Cap::DataSize, Cap::KvUpdates, Cap::All] {
-        // A deposit that adds no state gas cannot cross a state-gas cap, and the ordinary
-        // transaction after it adds none to be refused for.
-        if matches!(cap, Cap::StateGas) && common::state_is_free() {
-            continue;
-        }
-        for route in [Route::OneByOne, Route::CheckedCommit, Route::TraitCommit] {
-            let name = format!("{cap:?} by {route:?}");
-            let limits = cap.limits(&gas, &usage);
-            let mut state = state();
-            let mut executor = executor(&mut state, common::block_ctx(limits));
-            executor.apply_pre_execution_changes().expect("the block starts");
+    // Room for a deposit and a half, so the second deposit crosses it.
+    let limits =
+        BlockLimits::no_limits().with_block_txs_data_limit(usage.data_size + usage.data_size / 2);
+    for route in [Route::OneByOne, Route::CheckedCommit, Route::TraitCommit] {
+        let name = format!("{route:?}");
+        let mut state = state();
+        let mut executor = executor(&mut state, common::block_ctx(limits));
+        executor.apply_pre_execution_changes().expect("the block starts");
 
-            let mut late_candidate = None;
-            match route {
-                Route::OneByOne => {
-                    for slot in 1..=3 {
+        let mut late_candidate = None;
+        match route {
+            Route::OneByOne => {
+                for slot in 1..=3 {
+                    executor
+                        .execute_transaction(&deposit(slot))
+                        .unwrap_or_else(|err| panic!("{name}: deposit {slot}: {err}"));
+                }
+            }
+            Route::CheckedCommit | Route::TraitCommit => {
+                let deposits: Vec<_> = (1..=3)
+                    .map(|slot| {
                         executor
-                            .execute_transaction(&deposit(slot))
+                            .run_transaction(&deposit(slot))
+                            .unwrap_or_else(|err| panic!("{name}: deposit {slot}: {err}"))
+                    })
+                    .collect();
+                late_candidate = Some(
+                    executor
+                        .run_transaction(&ordinary(100))
+                        .unwrap_or_else(|err| panic!("{name}: nothing has committed: {err}")),
+                );
+                for (slot, outcome) in (1..).zip(deposits) {
+                    assert_eq!(outcome.gas.state, gas.state, "{name}: deposit {slot}");
+                    if matches!(route, Route::CheckedCommit) {
+                        executor
+                            .commit_transaction_outcome(outcome)
                             .unwrap_or_else(|err| panic!("{name}: deposit {slot}: {err}"));
-                    }
-                }
-                Route::CheckedCommit | Route::TraitCommit => {
-                    let deposits: Vec<_> = (1..=3)
-                        .map(|slot| {
-                            executor
-                                .run_transaction(&deposit(slot))
-                                .unwrap_or_else(|err| panic!("{name}: deposit {slot}: {err}"))
-                        })
-                        .collect();
-                    late_candidate = Some(
-                        executor
-                            .run_transaction(&ordinary(100))
-                            .unwrap_or_else(|err| panic!("{name}: nothing has committed: {err}")),
-                    );
-                    for (slot, outcome) in (1..).zip(deposits) {
-                        assert_eq!(outcome.gas.state, gas.state, "{name}: deposit {slot}");
-                        if matches!(route, Route::CheckedCommit) {
-                            executor
-                                .commit_transaction_outcome(outcome)
-                                .unwrap_or_else(|err| panic!("{name}: deposit {slot}: {err}"));
-                        } else {
-                            BlockExecutor::commit_transaction(&mut executor, outcome);
-                        }
+                    } else {
+                        BlockExecutor::commit_transaction(&mut executor, outcome);
                     }
                 }
             }
-
-            assert_eq!(executor.gas().execution, 3 * gas.execution, "{name}: execution counted");
-            assert_eq!(executor.gas().state, 3 * gas.state, "{name}: state counted");
-            assert_eq!(
-                executor.limiter().usage.data_size,
-                3 * usage.data_size,
-                "{name}: data size counted"
-            );
-            assert_eq!(executor.limiter().usage.write_records, 3, "{name}: write records counted");
-            assert!(
-                executor.gas().execution > limits.block_execution_gas_limit ||
-                    executor.gas().state > limits.block_state_gas_limit ||
-                    executor.limiter().usage.data_size > limits.block_txs_data_limit ||
-                    executor.limiter().usage.write_records > limits.block_kv_update_limit,
-                "{name}: the deposits crossed the limit",
-            );
-
-            let err = executor
-                .execute_transaction(&ordinary(101))
-                .expect_err("an ordinary transaction finds the room the deposits used");
-            assert!(format!("{err}").contains(cap.refusal()), "{name}: {err}");
-            if let Some(candidate) = late_candidate {
-                let err = executor
-                    .commit_transaction_outcome(candidate)
-                    .expect_err("a candidate executed before the deposits committed");
-                assert!(format!("{err}").contains(cap.refusal()), "{name}: at commit: {err}");
-            }
-
-            let (_, result) = executor.finish_with_counters().expect("the block finishes");
-            assert_eq!(result.receipts().len(), 3, "{name}: the three deposits and nothing else");
-            assert_eq!(result.gas.execution, 3 * gas.execution, "{name}");
-            assert_eq!(result.gas.state, 3 * gas.state, "{name}");
         }
+
+        assert_eq!(executor.gas().execution, 3 * gas.execution, "{name}: execution counted");
+        assert_eq!(executor.gas().state, 3 * gas.state, "{name}: state counted");
+        assert_eq!(
+            executor.limiter().usage.data_size,
+            3 * usage.data_size,
+            "{name}: data size counted"
+        );
+        assert_eq!(executor.limiter().usage.write_records, 3, "{name}: write records counted");
+        assert!(
+            executor.limiter().usage.data_size > limits.block_txs_data_limit,
+            "{name}: the deposits crossed the limit",
+        );
+
+        let err = executor
+            .execute_transaction(&ordinary(101))
+            .expect_err("an ordinary transaction finds the room the deposits used");
+        assert!(format!("{err}").contains(REFUSAL), "{name}: {err}");
+        if let Some(candidate) = late_candidate {
+            let err = executor
+                .commit_transaction_outcome(candidate)
+                .expect_err("a candidate executed before the deposits committed");
+            assert!(format!("{err}").contains(REFUSAL), "{name}: at commit: {err}");
+        }
+
+        let (_, result) = executor.finish_with_counters().expect("the block finishes");
+        assert_eq!(result.receipts().len(), 3, "{name}: the three deposits and nothing else");
+        assert_eq!(result.gas.execution, 3 * gas.execution, "{name}");
+        assert_eq!(result.gas.state, 3 * gas.state, "{name}");
     }
 }

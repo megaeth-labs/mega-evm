@@ -399,11 +399,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// The SALT bucket multipliers and the oracle reads go with it: they are what one transaction
     /// read, so the next one reads its own.
     ///
-    /// A system-originated transaction is exempt from every per-transaction limit — the data size,
-    /// the KV count, the state gas, and the frame budgets of the first two — before anything is
-    /// counted, its body included: the protocol's own work must not fail on a resource limit, as
-    /// it pays no history gas for the same reason. What it uses is counted all the same. A user's
-    /// deposit is not system-originated and is held to every one of them.
+    /// A system-originated transaction is exempt from every per-transaction limit — the data size
+    /// and its frame budgets — before anything is counted, its body included: the protocol's own
+    /// work must not fail on a resource limit, as it pays no history gas for the same reason. What
+    /// it uses is counted all the same. A user's deposit is not system-originated and is held
+    /// to every one of them.
     fn prepare(&mut self, system_originated: bool) {
         self.additional_limit.reset();
         self.additional_limit.set_transfer_logs(emits_transfer_logs(&self.inner.cfg));
@@ -590,8 +590,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextTr for MegaContext<DB, ExtE
         }
     }
 
-    /// Holds the code a creation deposits to the state-gas and data-size limits, and counts its
-    /// history bytes, once `return_create` made every charge for the deposit and before it commits
+    /// Holds the code a creation deposits to the data-size limit, and counts its history bytes,
+    /// once `return_create` made every charge for the deposit and before it commits
     /// the creation ([`AdditionalLimit::on_code_deposit`]). A crossing refuses the deposit with the
     /// stop's revert data: the creation reverts with it, on the gas it had before the deposit.
     #[inline]

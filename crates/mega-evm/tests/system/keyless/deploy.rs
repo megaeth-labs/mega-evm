@@ -246,13 +246,12 @@ fn test_keyless_deploy_empty_initcode() {
 /// non-zero one, step 1's 100,000, step 14's `CREATE` charge of 12,000 (empty initcode costs
 /// nothing more), and the forward the collision spends. It charges no state gas at all: the
 /// signer, no longer empty, adds no account at step 10, and the address, not empty, adds none at
-/// step 14 — so a state-growth limit of 1 gas does not stop it. Its history is its body alone,
-/// `TX_BODY_SIZE` = 310 bytes and one per byte of calldata, priced at the cost per history byte in
-/// effect: step 14 charges the history of two records, the created account's and the signer's
-/// nonce, and both come back, the nonce record with the bump and the account's with the failed
-/// creation. So, below the execution cap, the least gas limit that deploys is the intrinsic gas,
-/// 112,000, the two records and the forward, which steps 11 and 15 need left: one gas less is
-/// refused with `GasLimitTooLow`.
+/// step 14. Its history is its body alone, `TX_BODY_SIZE` = 310 bytes and one per byte of
+/// calldata, priced at the cost per history byte in effect: step 14 charges the history of two
+/// records, the created account's and the signer's nonce, and both come back, the nonce record with
+/// the bump and the account's with the failed creation. So, below the execution cap, the least gas
+/// limit that deploys is the intrinsic gas, 112,000, the two records and the forward, which steps
+/// 11 and 15 need left: one gas less is refused with `GasLimitTooLow`.
 ///
 /// Expected values: independent (hand arithmetic over the calldata and the configured byte
 /// prices; no reference run).
@@ -275,8 +274,8 @@ fn test_a_deploy_address_left_with_a_nonce_and_no_code_collides() {
         assert_eq!(nonce(&first, deployment.signer), 1);
         db.commit(first.result_and_state.state);
 
-        let no_state = EvmTxRuntimeLimits::no_limits().with_tx_state_gas_limit(1);
-        let second = run_nth(db.clone(), data.clone(), gas_limit, no_state, 1);
+        let second =
+            run_nth(db.clone(), data.clone(), gas_limit, EvmTxRuntimeLimits::no_limits(), 1);
         let ret = returned(&second);
         assert_eq!(ret.deployedAddress, Address::ZERO, "at {gas_limit}");
         assert_eq!(ret.gasUsed, FORWARD, "the collision spends the whole forward");

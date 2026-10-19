@@ -298,7 +298,7 @@ mod tests {
             MAINNET_CHAIN_ID,
             0,
             Some(&overriding(
-                r#"{"txRuntimeLimits":{"txDataSizeLimit":350},"blockKvUpdateLimit":7}"#,
+                r#"{"txRuntimeLimits":{"txDataSizeLimit":350},"blockTxsDataLimit":7}"#,
             )),
         )
         .unwrap();
@@ -306,7 +306,7 @@ mod tests {
             .with_tx_runtime_limits(
                 ProtocolLimits::DEFAULT.tx_runtime_limits.with_tx_data_size_limit(350),
             )
-            .with_block_kv_update_limit(7);
+            .with_block_txs_data_limit(7);
         assert_eq!(schedule.protocol_limits(0), Some(expected));
     }
 
@@ -333,8 +333,8 @@ mod tests {
         };
         let unknown = refused(r#"{"txDataSizeLimit":350}"#);
         assert!(unknown.contains("unknown field `txDataSizeLimit`"), "{unknown}");
-        let zero = refused(r#"{"txRuntimeLimits":{"txKvUpdateLimit":0}}"#);
-        assert!(zero.contains("tx_kv_update_limit must not be zero"), "{zero}");
+        let zero = refused(r#"{"txRuntimeLimits":{"frameDataSizeLimit":0}}"#);
+        assert!(zero.contains("frame_data_size_limit must not be zero"), "{zero}");
         let uncapped =
             refused(r#"{"txRuntimeLimits":{"oracleAccessComputeGasLimit":18446744073709551615}}"#);
         assert!(uncapped.contains("oracle_access_compute_gas_limit"), "{uncapped}");
@@ -343,7 +343,8 @@ mod tests {
     }
 
     /// A genesis file whose `config` carries `chainId` and the Satin keys: Satin at
-    /// [`ACTIVATION`], registry seeds that are not the placeholder's, and a KV limit of one.
+    /// [`ACTIVATION`], registry seeds that are not the placeholder's, and a frame data-size cap of
+    /// one record.
     fn genesis_file(dir: &tempfile::TempDir, chain_id: u64) -> (String, SatinChainConfig) {
         let satin = SatinChainConfig {
             activation_time: ACTIVATION,
@@ -355,7 +356,7 @@ mod tests {
                 min_rotation_delay: 100,
             },
             protocol_limits: ProtocolLimits::DEFAULT.with_tx_runtime_limits(
-                ProtocolLimits::DEFAULT.tx_runtime_limits.with_tx_kv_update_limit(1),
+                ProtocolLimits::DEFAULT.tx_runtime_limits.with_frame_data_size_limit(40),
             ),
         };
         let mut config = serde_json::to_value(satin).unwrap();
@@ -457,7 +458,7 @@ mod tests {
     /// The flag takes an object inline or from a file, and nothing but an object.
     #[test]
     fn test_the_override_parses_inline_or_from_a_file() {
-        let inline = r#" {"blockKvUpdateLimit": 7}"#;
+        let inline = r#" {"blockTxsDataLimit": 7}"#;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("limits.json");
         std::fs::write(&path, inline).unwrap();
