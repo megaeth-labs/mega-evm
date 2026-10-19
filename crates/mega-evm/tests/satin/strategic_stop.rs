@@ -386,6 +386,11 @@ fn test_frame_budget_of_the_outermost_frame_reverts_the_transaction() {
             frame_local: true,
         })
     );
+    assert_eq!(
+        result.usage,
+        mega_evm::LimitUsage { data_size: mega_evm::TX_BODY_SIZE, write_records: 0 },
+        "the body is all the transaction keeps"
+    );
 }
 
 /// The layer's state belongs to one transaction: the stop it reported and the usage counted do

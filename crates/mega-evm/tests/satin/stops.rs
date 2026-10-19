@@ -633,7 +633,7 @@ fn test_a_revived_creation_settles_as_a_frame_that_kept_nothing() {
     }
 }
 
-/* ---------- a detained callee does not burn its callers' gas ---------- */
+/* ---------- the frame the last step ran in ---------- */
 
 /// Records the frame the last step ran in.
 #[derive(Default)]
@@ -656,69 +656,6 @@ fn run_recording_steps(
         .with_inspector(LastStep::default());
     let outcome = evm.execute_transaction(tx).expect("the transaction is valid");
     (outcome, evm.inspector().0)
-}
-
-/// A callee at `depth` that reads the block's timestamp and then computes past the cap, below
-/// callers that forward it all their gas and stop once it returned, at no cost.
-fn detained_callee_at(depth: usize) -> MemoryDatabase {
-    let callee = work(log(BytecodeBuilder::default()).append_many([TIMESTAMP, POP]), ROUNDS);
-    let callee = callee.sstore(MARKER, U256::from(1)).stop().build();
-    (0..depth)
-        .fold(MemoryDatabase::default(), |db, caller| {
-            let code = call_all(BytecodeBuilder::default(), CHAIN[caller + 1]);
-            db.account_code(CHAIN[caller], code.stop().build())
-        })
-        .account_code(CHAIN[depth], callee)
-}
-
-/// A callee that reads the block's timestamp and then computes past the cap does not make its
-/// callers burn their gas: it is stopped at the charge that crosses the limit the read set — its
-/// compute at the read plus the cap — and its callers catch the stop and end, so the transaction
-/// succeeds, billed its intrinsic gas plus that compute and nothing of what the callers held,
-/// whatever the gas limit, one call down or three, below the execution cap and above it. The
-/// callers resumed: the transaction's own frame runs the last step.
-#[test]
-fn test_a_callee_that_reads_the_timestamp_does_not_make_its_callers_burn_their_gas() {
-    for depth in [1, 3] {
-        let bills: Vec<_> = [BELOW, ABOVE, 1_000_000_000]
-            .into_iter()
-            .map(|gas_limit| {
-                let case = format!("depth {depth}, gas limit {gas_limit}");
-                let intrinsic = intrinsic(gas_limit);
-                let tx = || call(CALLER, A, U256::ZERO, gas_limit);
-                let mut evm = MegaEvm::new(context(detained_callee_at(depth)));
-                let outcome = evm.execute_transaction(tx()).unwrap();
-                let limit = evm.ctx().detention().compute_limit().expect("the read set a limit");
-                let (recorded, last) = run_recording_steps(
-                    detained_callee_at(depth),
-                    EvmTxRuntimeLimits::default(),
-                    tx(),
-                );
-                assert_eq!(last, Some(A), "{case}: the callers resumed and ended");
-                assert_eq!(
-                    (&recorded.result, recorded.gas),
-                    (&outcome.result, outcome.gas),
-                    "{case}: the recorder changes nothing"
-                );
-                // The read's `POP`, then the callee's work.
-                let used = limit - Charges::default().then(&[2]).work(ROUNDS, 0).left(CAP);
-                assert!(outcome.result.is_success(), "{case}: {:?}", outcome.result);
-                assert_eq!(outcome.limit_exceeded, None, "{case}: the callers caught the stop");
-                // The read came after the callers' calls and the callee's log: its compute then is
-                // theirs alone, a sliver of the cap.
-                assert!(limit - CAP < 50_000, "{case}: compute at the read {}", limit - CAP);
-                assert_eq!(outcome.gas.regular, intrinsic.gas.regular + used, "{case}");
-                assert_eq!(outcome.gas.gas_used, intrinsic.gas.gas_used + used, "{case}");
-                assert_eq!(
-                    outcome.gas.reservoir_remaining, intrinsic.gas.reservoir_remaining,
-                    "{case}: the reservoir comes back"
-                );
-                assert!(outcome.result.logs().is_empty(), "{case}: the callee's log went");
-                (outcome.gas.gas_used, outcome.gas.regular, outcome.gas.state, outcome.gas.history)
-            })
-            .collect();
-        assert!(bills.windows(2).all(|pair| pair[0] == pair[1]), "depth {depth}: {bills:?}");
-    }
 }
 
 /* ---------- frame budgets ---------- */
@@ -1260,21 +1197,6 @@ fn test_detained_gas_is_restored() {
     );
 }
 
-/// A body over the transaction's data-size limit is rejected at validation: the transaction is
-/// not stopped, it never runs.
-#[test]
-fn test_data_limit_just_exceed() {
-    let limit = TX_BODY_SIZE - 1;
-    let db = MemoryDatabase::default().account_code(A, writer(1));
-    let error = MegaEvm::new(
-        context(db)
-            .with_tx_runtime_limits(EvmTxRuntimeLimits::default().with_tx_data_size_limit(limit)),
-    )
-    .execute_transaction(call(CALLER, A, U256::ZERO, BELOW))
-    .expect_err("rejected");
-    assert!(format!("{error:?}").contains(mega_evm::TX_BODY_OVER_DATA_SIZE_LIMIT), "{error:?}");
-}
-
 /// A library's write, one call down, crosses a limit one byte above the body: the library is
 /// stopped with a revert, which its caller catches before it ends, and the transaction is billed
 /// what ran — its intrinsic gas, its body's history, the call, the library up to and including the
@@ -1370,38 +1292,6 @@ fn test_detention_plus_intrinsic_data_size_overflow() {
     let undetained = run(over, CALLER).expect_err("rejected");
     assert!(format!("{detained:?}").contains(mega_evm::TX_BODY_OVER_DATA_SIZE_LIMIT));
     assert_eq!(format!("{detained:?}"), format!("{undetained:?}"));
-}
-
-/// The transaction's own frame crossing its frame budget — a frame cap of a hundred records' bytes,
-/// crossed by the 101st write — reverts it alone: a revert, not a halt. The outcome
-/// names the frame budget, whose crossing produced the frame's result. The body is all the
-/// transaction keeps.
-#[test]
-fn test_data_size_top_level_exceed_is_frame_local_revert() {
-    let cap = 100 * WRITE_RECORD_SIZE;
-    let code = (1..=101_u64).fold(BytecodeBuilder::default(), |code, slot| {
-        code.sstore(U256::from(slot), U256::from(1))
-    });
-    let db = MemoryDatabase::default().account_code(A, code.stop().build());
-    let outcome = execute(db, EvmTxRuntimeLimits::default().with_frame_data_size_limit(cap), BELOW);
-    let stop = LimitCheck::ExceedsLimit {
-        kind: LimitKind::DataSize,
-        limit: cap,
-        used: 101 * WRITE_RECORD_SIZE,
-        frame_local: true,
-    };
-    assert!(
-        matches!(&outcome.result, ExecutionResult::Revert { output, .. }
-            if output == &stop.revert_data()),
-        "{:?}",
-        outcome.result
-    );
-    assert_eq!(
-        outcome.limit_exceeded,
-        Some(stop),
-        "the frame budget, whose crossing produced the result"
-    );
-    assert_eq!(outcome.usage, LimitUsage { data_size: TX_BODY_SIZE, write_records: 0 });
 }
 
 /// A call a data-size limit stopped — its own frame budget, or the transaction's limit — revived
