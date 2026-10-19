@@ -695,7 +695,7 @@ An out-of-gas step halts the call, consuming its regular gas.
   Every admitted input stays counted, whatever the calling frame or the transaction does afterwards — a revert, a halt, a later stop, a failed deposit — and that includes an input that fails to decode, which reaches no service.
   Two reasons keep the count, each on its own: a payload forwarded to the service cannot be taken back, and admitting an input and decoding it is work the node has done whether or not the input decodes.
 - A hint whose input length would take the transaction's data size over its data-size limit MUST NOT be forwarded and MUST NOT be counted.
-  The limit stops the transaction, and the stop reports the data size the hint would have reached.
+  The `sendHint` call MUST be answered with the stop, without running the Oracle's bytecode: the limit stops the transaction, and the stop reports the data size the hint would have reached.
   The data size the stopped transaction keeps, which the block's data-size budget counts, holds none of the hint's bytes: the payload never left the node, so it is taken back as a log that crosses the limit is.
   The check is against the transaction's limit alone, because a hint's bytes are on no frame's budget.
 
