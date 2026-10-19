@@ -416,7 +416,7 @@ One dimension is limited per transaction, data size; compute is not one (see [Tw
   The KV count is the write-record count; every record weighs `WRITE_RECORD_SIZE` bytes of data size, counted and taken back with it, so `KV × 40 ≤ data size` at every point.
   No limit holds the KV count: the data-size limit bounds it — a transaction keeps fewer than 327,680 write records (13,107,200 / 40) — and history gas prices every record (see [History Gas](#7-history-gas)).
 - **Frame budgets.**
-  The transaction's own frame MUST get what the transaction has left once its body and pre-frame records are counted; every child MUST get `FRAME_SHARE_NUMERATOR / FRAME_SHARE_DENOMINATOR` = 98/100 of what its parent has left, rounded down.
+  The transaction's own frame MUST get what the transaction has left once its body and pre-frame records are counted; every child MUST get `FRAME_DATA_SHARE_NUMERATOR / FRAME_DATA_SHARE_DENOMINATOR` = 98/100 of what its parent has left, rounded down.
   Satin sets no further per-frame cap.
   A frame that crosses its budget MUST revert with `MegaLimitExceeded(kind, budget)` and its caller continues.
   The budget keeps a caller's own work within reach of what it calls: a child inherits its caller's whole reservoir and history gas draws the reservoir first, so EIP-150's 63/64 forwarding does not bound the bytes a child can append, and without a budget a callee could take the transaction to its limit and leave its caller, which can catch the stop (see [The Revert-Class Stop](#11-the-revert-class-stop)), nothing to carry on with.
@@ -652,7 +652,7 @@ An out-of-gas step halts the call, consuming its regular gas.
 | 14   | Charge what a `CREATE` charges its frame: 12,000 plus EIP-3860's initcode cost, the created account's state gas if the deploy address is empty, and the history gas of the created account's record and, unless the signer is the transaction's sender, the signer's nonce record | Out-of-gas                                                       |
 | 15   | `min(gasLimitOverride, remaining gas)` still covers the signed gas limit                                                                                                                                                                                                          | `GasLimitTooLow(uint64,uint64)`                                  |
 
-- Steps 1 to 13 keep the legacy engine's order, so a call several rules refuse reports the Rex6 error.
+- Steps 1 to 13 keep Rex6's order, so a call several rules refuse reports the Rex6 error.
 - The read of the signer's account that steps 8 to 10 and 13 check, and the deploy-address read of step 12, MUST load the account into the transaction's state as an account access loads it, warm, the deploy address without its code.
   Neither read is charged, and no charge the call or its creation makes depends on either account's warmth: the creation loads both again when it starts, as a creation loads its creator and the address it creates.
 - Step 12 checks the deploy address's code alone: an address that holds a nonce but no code passes it, and the creation then collides there, as any creation onto an occupied address does, and fails, the call answering `ExecutionHalted` with the creation's whole forward spent and the signer's nonce kept or taken back as below.
@@ -999,7 +999,7 @@ A `receive()` hook reached through Solidity's `transfer()` can emit one three-to
 A node, a stateless validator and a replay tool must agree on everything below, or they execute different chains.
 
 - **The execution configuration.**
-  The spec fixes part of the configuration a transaction runs on, whatever a node supplies: the Satin gas schedule, EIP-8037, EIP-2780 and EIP-7708 on, the 200,000,000 execution cap, and the 512 KiB and 1 MiB code-size limits.
+  The spec fixes part of the configuration a transaction runs on, whatever a node supplies: the Satin gas schedule, EIP-8037, EIP-2780 and EIP-7708 on, the 200,000,000 execution cap, the chain-id check on, and the 512 KiB and 1 MiB code-size limits.
   A node build must not enable the `mega-evm/satin-price-override` feature (it reads `MEGA_SATIN_CPSB` / `MEGA_SATIN_CPHB` at run time).
   A node that reads the configuration before it executes anything — gas estimation reads the execution cap — must read these values, not its own.
   The limits are fixed by the spec too (see [Resource Limits](#10-resource-limits) and [Block Limits](#20-block-limits)): a node passes none of them, neither in its chain configuration nor with a block, and the reference implementation holds a block's transactions, and, unless the node chooses otherwise as its own policy, an execution outside a block — a call, a gas estimate — to the same values without being told, so by default a node's calls and estimates stop what its blocks stop.
@@ -1009,6 +1009,8 @@ A node, a stateless validator and a replay tool must agree on everything below, 
 - **What a transaction pool can check without state.**
   The body, with `WRITE_RECORD_SIZE` bytes for each entry of the authorization list, must fit the transaction's data-size limit, and the chain id must be the chain's, a typed transaction's included; neither depends on the node's configuration.
   The gas limit must cover the intrinsic regular gas (EIP-2780's base and recipient and value charges, calldata, access list, authorizations, init code) plus the history gas of the transaction's body, and the calldata floor; above the execution cap, the intrinsic regular gas and the floor must fit under the cap.
+  A transaction from the live system address without the system shape is refused too.
+  The reference implementation reports the body-size refusal (`TX_BODY_OVER_DATA_SIZE_LIMIT`) and the system-shape refusal as invalid-transaction errors with fixed messages, which a pool maps to its own error.
   The rest of the stateless validation is the base layer's.
   Whether a recipient, a created account or an authority is new is the state's to say: EIP-2780 charges it when the transaction runs, and a gas limit that cannot pay it runs out of gas rather than being refused.
   The history of the write records a transaction's start makes is charged when it runs too: one record for the recipient of its value (none for value sent to the sender itself or to an authority it applied) or the account it creates, and one for each authority that applies other than the sender.
@@ -1027,13 +1029,19 @@ A node, a stateless validator and a replay tool must agree on everything below, 
   An execution that is not told runs the block as one that admits non-deposit transactions, and accepts one in an activation block, which makes the block invalid.
 - **The L1 block information.**
   Block execution reads the L1 block contract at the block's first non-deposit transaction other than a Mega System Transaction, after the block's L1 attributes deposit wrote it, unless the node handed it the information for this block beforehand, which it then prices with, the footprint gas scalar aside; a node that hands it over must hand over what that deposit writes, so that the block's transactions are priced as [Base Layer](#1-base-layer-optimism-karst-ethereum-osaka) requires.
+- **System-contract versions.**
+  A block's pre-block step upgrades in place the Oracle at 1.0.0 or 1.1.0 and the `SequencerRegistry` at 1.0.0, keeping nonce, balance and storage, and makes the block invalid at an address holding any other code (see [System Calls and Pre-Block Calls](#18-system-calls-and-pre-block-calls)).
+  So a chain that holds code at a system-contract address or at the factory's address before Satin activates must hold a version listed there, or the activation block cannot be executed.
+- **Committing a delayed outcome.**
+  A builder that executes a transaction and commits it after other commits MUST commit through the checked commit (`commit_transaction_outcome`), which refuses an outcome whose sender's nonce or balance another commit moved (see [Block Limits](#20-block-limits)).
+  The refusal is an internal error of the node (`MegaBlockExecutionError::StaleOutcome`), not a verdict on the block or the transaction: the builder executes the transaction again.
 - **Packing a Mega System Transaction.**
   A block's data-size budget and a builder's policy never refuse one (see [Block Limits](#20-block-limits)), so a builder has no reason to skip it for either and requeue the transaction that triggered it; the block gas limit and the data-availability footprint still hold it, and a builder keeps room for both.
   The execution result tells a node which transactions the block treated so: `MegaBlockTxResult::is_system_transaction`, beside `is_deposit`, which stays the envelope's.
 - **Reporting a limit stop.**
   A stop is a revert whose output is `MegaLimitExceeded(kind, limit)`, and a contract can revert with the same bytes, as can a caller that re-raises the stop a frame below it returned.
   Execution reports the crossing that produced the result of the transaction's own frame — the transaction's data-size limit, gas detention's compute limit, or that frame's own data-size budget — and none when that result is not the stop's revert; a node must read that report, and must not infer a stop from the output alone.
-  A stop a caller caught produced no result of the transaction's own frame: the transaction reports none, and it can succeed, so a node maps an RPC error or a builder's handling of a stopped transaction from that report alone.
+  A stop a caller caught produced no result of the transaction's own frame: the transaction reports none, and it can succeed, so a node maps an RPC error or a builder's handling of a stopped transaction from that report alone (`LimitStop::from_result`, or `MegaTransactionOutcome::limit_stop`), never from the output bytes.
 - **The chain configuration.**
   A genesis file's `config` object carries Satin as five flat keys beside the other forks': `satinTime`, the activation timestamp, and one key per parameter of the `SequencerRegistry`'s bootstrap, the `satin` prefix before the parameter's own name.
 
