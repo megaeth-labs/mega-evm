@@ -99,9 +99,7 @@ impl FuzzConfig {
             Some(v) => {
                 let cases: u32 =
                     v.parse().unwrap_or_else(|_| panic!("{CASES_ENV_VAR}={v:?} is not a number"));
-                if cases == 0 {
-                    panic!("{CASES_ENV_VAR} must name at least one case");
-                }
+                assert!(cases != 0, "{CASES_ENV_VAR} must name at least one case");
                 cases
             }
             None if long => bounded_cases.saturating_mul(LONG_MULTIPLIER),
