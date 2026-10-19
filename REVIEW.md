@@ -29,9 +29,8 @@ Defer to the baseline for everything not listed here; the rules below take prece
   A record, a charge or a read mark made before the opcode can still fail counts a write that never happened.
   Check that every exit path of a wrapped instruction (stack underflow, out of gas, decode failure, a failed inner call) leaves the staged record discarded and nothing counted.
 - **A limit is enforced before the write it guards.**
-  A transaction-level limit stops the transaction with a revert carrying `MegaLimitExceeded`, through the latch, never with a halt; the stopped transaction keeps the gas its frames hold, and nothing is taken from the sender on a stop.
-  A frame budget reverts its frame alone.
-  Flag a stop that surfaces as a halt, a limit that is checked after the state change it guards, and a frame, interceptor or inspector answer that escapes the latch's rewrite.
+  A limit — the transaction's or a frame's budget — stops the frame that crosses it with a revert carrying `MegaLimitExceeded`, never with a halt, and its caller resumes within every limit; a stop of the transaction's own frame keeps the gas its frames hold, and nothing is taken from the sender on a stop.
+  Flag a stop that surfaces as a halt, a limit that is checked after the state change it guards, a stopped frame whose writes, logs or counted bytes survive into its caller, and an answer the engine turns into the stop whose journal is not taken back.
   The outcome's `limit_exceeded`, not the output bytes, tells a stop from a contract that reverts with the same bytes.
 - **Lanes, pools and ledgers stay aligned with frames.**
   `frame_init` pushes one lane per frame result revm returns, including a frame answered without running; a synthetic frame result carries the caller's pools (`synthetic_frame_result`), never `Gas::new(limit)`.
