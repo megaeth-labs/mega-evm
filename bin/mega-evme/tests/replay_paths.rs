@@ -15,7 +15,10 @@
 
 mod common;
 
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 use alloy_primitives::{address, Address, B256, U256};
 use common::blocks::{
@@ -33,6 +36,8 @@ struct Recording {
     block: CachedBlock,
     /// The parent block's timestamp; the block's own when not given.
     parent_timestamp: Option<u64>,
+    /// Code a test added to the recording, by hash.
+    codes: HashMap<B256, Vec<u8>>,
 }
 
 impl Recording {
@@ -105,7 +110,11 @@ impl Recording {
                     "eth_getTransactionCount" => json!(format!("0x{:x}", account.nonce)),
                     _ => json!(account
                         .code_hash
-                        .map(|hash| alloy_primitives::hex::encode_prefixed(code_of(hash)))
+                        .map(|hash| {
+                            let code =
+                                self.codes.get(&hash).cloned().unwrap_or_else(|| code_of(hash));
+                            alloy_primitives::hex::encode_prefixed(code)
+                        })
                         .unwrap_or_else(|| "0x".to_string())),
                 })
             }
@@ -149,9 +158,18 @@ impl Server {
 
     /// A server whose parent block is at `parent_timestamp`, or at the block's own timestamp.
     async fn with_parent_at(block: CachedBlock, parent_timestamp: Option<u64>) -> Self {
+        Self::with_codes(block, parent_timestamp, HashMap::default()).await
+    }
+
+    /// A server that also serves `codes`, by hash, for accounts a test added to the block.
+    async fn with_codes(
+        block: CachedBlock,
+        parent_timestamp: Option<u64>,
+        codes: HashMap<B256, Vec<u8>>,
+    ) -> Self {
         let server = MockServer::start().await;
         Mock::given(matchers::method("POST"))
-            .respond_with(Recording { block, parent_timestamp })
+            .respond_with(Recording { block, parent_timestamp, codes })
             .mount(&server)
             .await;
         Self(Arc::new(server))
@@ -497,4 +515,146 @@ async fn test_a_replay_stops_when_a_predecessor_account_cannot_be_read() {
     let output = format!("{}{}", run.stdout, run.stderr);
     assert!(output.contains("Block execution error"), "{output}");
     assert!(output.contains("account not recorded"), "{output}");
+}
+
+/// A block of calls from one payer to contracts the test adds to the recorded block's parent
+/// state, and the server that serves it. Each call is `(to, gas)`; the payer's nonce counts up.
+struct SyntheticBlock {
+    server: Server,
+    /// Hash of the `index`-th call.
+    hashes: Vec<String>,
+}
+
+const PAYER: Address = address!("0x1111111111111111111111111111111111111111");
+
+impl SyntheticBlock {
+    /// `contracts` are `(address, code, storage)` added to the parent state.
+    async fn start(
+        contracts: &[(Address, Vec<u8>, BTreeMap<B256, U256>)],
+        calls: &[Address],
+    ) -> Self {
+        const GAS: u64 = 5_000_000;
+        let mut recorded = read_block(fixtures(), BLOCK);
+        recorded.prestate.accounts.insert(
+            PAYER,
+            PreAccount { balance: U256::from(10u128.pow(18)), ..PreAccount::default() },
+        );
+        let mut codes = HashMap::new();
+        for (address, code, storage) in contracts {
+            let code_hash = alloy_primitives::keccak256(code);
+            codes.insert(code_hash, code.clone());
+            recorded.prestate.accounts.insert(
+                *address,
+                PreAccount {
+                    code_hash: Some(code_hash),
+                    storage: storage.clone(),
+                    ..Default::default()
+                },
+            );
+        }
+        let block_hash = recorded.block["hash"].clone();
+        let block_number = recorded.block["number"].clone();
+        let hashes: Vec<String> =
+            (0..calls.len()).map(|i| format!("0x{:064x}", 0xa0 + i)).collect();
+        recorded.block["transactions"] = Value::Array(
+            calls
+                .iter()
+                .enumerate()
+                .map(|(index, to)| {
+                    json!({
+                        "type": "0x2",
+                        "chainId": "0x10e6",
+                        "nonce": format!("0x{index:x}"),
+                        "gas": format!("0x{GAS:x}"),
+                        "maxFeePerGas": "0xf4240",
+                        "maxPriorityFeePerGas": "0x0",
+                        "to": to,
+                        "value": "0x0",
+                        "accessList": [],
+                        "input": "0x",
+                        "r": "0x64c0524917585101b7ffb2286d4de676ca987554b33c6f9a37e7ad7508bfbb84",
+                        "s": "0xe5199cacc6e07c6a9f8c74d0b06f964ce36dd362199b1c19d866f1a6f52d510",
+                        "yParity": "0x1",
+                        "v": "0x1",
+                        "hash": hashes[index],
+                        "blockHash": block_hash,
+                        "blockNumber": block_number,
+                        "transactionIndex": format!("0x{index:x}"),
+                        "from": PAYER,
+                        "gasPrice": "0xf4240",
+                    })
+                })
+                .collect(),
+        );
+        Self { server: Server::with_codes(recorded, None, codes).await, hashes }
+    }
+
+    /// Replays the `index`-th call alone on Satin, with `--dump`.
+    fn replay(&self, index: usize) -> Value {
+        let uri = self.server.0.uri();
+        let run = run_evme(&[
+            "replay",
+            &self.hashes[index],
+            "--rpc",
+            &uri,
+            "--rpc.no-cache-file",
+            "--rpc.max-retries",
+            "0",
+            "--override.spec",
+            "Satin",
+            "--json",
+            "--dump",
+        ]);
+        assert_eq!(run.code, 0, "{}{}", run.stderr, run.stdout);
+        serde_json::from_str(&run.stdout).unwrap()
+    }
+}
+
+/// A replay of one transaction numbers its logs in the block: after the logs of the included
+/// predecessors it ran first, and its receipt carries the transaction's index and hash.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_replayed_log_carries_the_block_level_index() {
+    // PUSH0 PUSH0 LOG0 PUSH0 PUSH0 LOG0 STOP: two logs per call.
+    let logger = address!("0x5555555555555555555555555555555555555555");
+    let code = vec![0x5f, 0x5f, 0xa0, 0x5f, 0x5f, 0xa0, 0x00];
+    let block =
+        SyntheticBlock::start(&[(logger, code, BTreeMap::new())], &[logger, logger, logger]).await;
+
+    for (index, first_log) in [(0usize, 0u64), (1, 2), (2, 4)] {
+        let summary = block.replay(index);
+        let logs = summary["receipt"]["logs"].as_array().unwrap();
+        assert_eq!(logs.len(), 2, "{summary}");
+        for (i, log) in logs.iter().enumerate() {
+            assert_eq!(log["logIndex"], format!("0x{:x}", first_log + i as u64), "tx {index}");
+            assert_eq!(log["transactionIndex"], format!("0x{index:x}"), "tx {index}");
+            assert_eq!(log["transactionHash"], block.hashes[index], "tx {index}");
+        }
+    }
+}
+
+/// A state dump of a replay carries the code of an account an included predecessor wrote and the
+/// target only touched, which the block's state holds without its code.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_replay_dump_carries_the_code_of_a_predecessors_account() {
+    // PUSH1 1 PUSH0 SSTORE STOP: writes slot 0.
+    let storer = address!("0x6666666666666666666666666666666666666666");
+    let storer_code = vec![0x60, 0x01, 0x5f, 0x55, 0x00];
+    // PUSH20 <storer> BALANCE POP STOP: touches the storer's account and loads no code.
+    let toucher = address!("0x7777777777777777777777777777777777777777");
+    let mut toucher_code = vec![0x73];
+    toucher_code.extend_from_slice(storer.as_slice());
+    toucher_code.extend_from_slice(&[0x31, 0x50, 0x00]);
+    let slots = BTreeMap::from([(B256::ZERO, U256::ZERO)]);
+    let block = SyntheticBlock::start(
+        &[(storer, storer_code.clone(), slots), (toucher, toucher_code, BTreeMap::new())],
+        &[storer, toucher],
+    )
+    .await;
+
+    let summary = block.replay(1);
+    assert_eq!(
+        summary["state"][storer.to_string()]["code"],
+        alloy_primitives::hex::encode_prefixed(&storer_code),
+        "{summary}"
+    );
 }
