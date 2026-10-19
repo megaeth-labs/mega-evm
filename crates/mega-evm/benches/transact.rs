@@ -14,11 +14,13 @@
 //!   history, priced once before the first frame runs.
 //! - `intercepted_calls`: 200 `STATICCALL`s to `MegaAccessControl`'s
 //!   `isVolatileDataAccessDisabled`, which the interceptor answers: the dispatch and the synthetic
-//!   result, 200 times.
+//!   result, 200 times. The caller returns the AND of the success bits.
 //! - `system_address_misses`: the same 200 calls with a selector the contract does not intercept,
-//!   so each pays the dispatch's address match and selector peek and then runs the bytecode.
+//!   so each pays the dispatch's address match and selector peek and then runs the bytecode. Each
+//!   call reverts, and the caller returns that.
 //! - `remaining_compute_gas`: 200 `STATICCALL`s to `MegaLimitControl`'s `remainingComputeGas`,
-//!   which the interceptor answers from the caller's gas and gas detention's allowance.
+//!   which the interceptor answers from the caller's gas and gas detention's allowance. The caller
+//!   returns the AND of the success bits.
 //! - `oracle_reads`: a transaction to the Oracle, whose code loads 200 of its slots: each load
 //!   reads the database through the journal, asks the oracle service, finds nothing and is priced
 //!   cold, and gas detention marks and commits it. op-revm reads the same 200 slots from the
@@ -321,10 +323,10 @@ fn salt_context(
         .with_chain(zero_fee_l1_block_info())
 }
 
-/// `STATICCALL`s the system contract at `target` with `selector` `REPEAT` times, discarding the
-/// answers.
+/// `STATICCALL`s the system contract at `target` with `selector` `REPEAT` times and returns the
+/// AND of the success bits.
 fn system_caller_code(target: Address, selector: [u8; 4]) -> Bytes {
-    let mut code = BytecodeBuilder::default().mstore(0x0, selector);
+    let mut code = BytecodeBuilder::default().mstore(0x0, selector).push_number(1_u64);
     for _ in 0..REPEAT {
         code = code
             .push_number(0_u64) // retSize
@@ -334,9 +336,9 @@ fn system_caller_code(target: Address, selector: [u8; 4]) -> Bytes {
             .push_address(target)
             .push_number(100_000_u64)
             .append(STATICCALL)
-            .append(POP);
+            .append(mega_evm::revm::bytecode::opcode::AND);
     }
-    code.stop().build()
+    code.return_top().build()
 }
 
 fn call_tx(to: Address, data: Bytes, gas_limit: u64) -> OpTransaction<TxEnv> {
@@ -473,6 +475,16 @@ fn bench_transact(c: &mut Criterion) {
                     "every transfer log was counted, which is what this arm measures",
                 );
             }
+            "intercepted_calls" | "remaining_compute_gas" => assert_eq!(
+                satin.result.output().cloned().unwrap_or_default(),
+                Bytes::copy_from_slice(&U256::from(1).to_be_bytes::<32>()),
+                "{workload}: every call succeeded",
+            ),
+            "system_address_misses" => assert_eq!(
+                satin.result.output().cloned().unwrap_or_default(),
+                Bytes::from_static(&[0; 32]),
+                "system_address_misses: every unknown selector reverted",
+            ),
             _ => {}
         }
         group.bench_function(format!("{workload}/satin"), |b| {
