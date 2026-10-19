@@ -17,7 +17,11 @@
 #                         missed.txt OR timeout.txt. Use for a single surviving
 #                         mutant inside an otherwise-tested function, or to accept
 #                         a genuinely non-terminating/equivalent timed-out mutant.
-#                         `mutant` is the literal text (without "file:line:col: ").
+#                         `mutant` is the literal text (without "file:line:col: "),
+#                         or, when several mutants share that text, the full
+#                         "file:line:col: text" line of each one suppressed: a
+#                         bare text that matches more than one mutant fails the
+#                         gate.
 #
 # Every entry also carries:
 #   category = "equivalent" | "dead"
@@ -58,24 +62,32 @@ mutant = "replace <impl ExternalEnvFactory for EmptyExternalEnv>::external_envs 
 justification = "EmptyExternalEnv is a unit struct; real body builds ExternalEnvs{salt_env:EmptyExternalEnv, oracle_env:EmptyExternalEnv}; from(Default::default()) resolves to Default for ExternalEnvs<EmptyExternalEnv> producing identical fields. Value-identical, no observable behavioral difference."
 reviewer = "improve-mutation-score (William Aaron Cheung)"
 
-# --- DeterministicHasher::write line-125 `|` combine (equivalent) ------------------
-# `let combined = (value[0] as u128) | ((value[1] as u128) << 64);` where
-# `value: [u64; 2] = read_small(data)`. The first operand `value[0] as u128` is a u64 widened
-# to u128, so it occupies ONLY bits 0..63 (bits 64..127 are always zero). The second operand
-# `(value[1] as u128) << 64` occupies ONLY bits 64..127 (bits 0..63 are always zero). The two
+# --- DeterministicHasher::write `|` combines, lines 120 and 125 (equivalent) --------------
+# Both combines have one shape, `(lo as u128) | ((hi as u128) << 64)` with `lo` and `hi` u64:
+# line 120 over `front`/`back` (the mid branch, 9..=16 bytes) and line 125 over
+# `value: [u64; 2] = read_small(data)` (the small branch, 0..=8 bytes). The first operand is a
+# u64 widened to u128, so it occupies ONLY bits 0..63 (bits 64..127 are always zero). The second
+# operand `(hi as u128) << 64` occupies ONLY bits 64..127 (bits 0..63 are always zero). The two
 # operands therefore have DISJOINT set bits for every possible input, so `a | b == a ^ b`
-# identically — `|` and `^` agree on all inputs at this site. This is structurally guaranteed
+# identically — `|` and `^` agree on all inputs at both sites. This is structurally guaranteed
 # by the u64->u128 widening + 64-bit shift, independent of the bytes hashed, so no reachable
 # input distinguishes `|` from `^` here. (Pinning a specific bucket id, e.g. for "hello",
 # cannot kill it: the combined value — and thus the hash and bucket id — is identical under
-# the mutant.) The sibling line-120 `|` combine over `front`/`back<<64` is the same shape but
-# is already pinned by `ahash_bucket_id_mid_input_is_pinned`; line 125 is the small-input
-# branch and is the equivalent one.
+# the mutant.) The `|` -> `&` mutants at the same two sites are not equivalent and are not
+# suppressed.
 [[suppress]]
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
-mutant = "replace | with ^ in <impl core::hash::Hasher for DeterministicHasher>::write"
+mutant = "crates/mega-evm/src/external/hasher/fallback.rs:120:48: replace | with ^ in <impl core::hash::Hasher for DeterministicHasher>::write"
+justification = "Equivalent: `(front as u128) | ((back as u128) << 64)` ORs a u64-widened low half (bits 0..63 only) with a u64-widened high half shifted into bits 64..127 only. The operands have disjoint set bits by construction for every input, so | == ^ identically; no reachable input distinguishes them."
+reviewer = "RealiCZ"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/external/hasher/fallback.rs"
+mutant = "crates/mega-evm/src/external/hasher/fallback.rs:125:47: replace | with ^ in <impl core::hash::Hasher for DeterministicHasher>::write"
 justification = "Equivalent: `(value[0] as u128) | ((value[1] as u128) << 64)` ORs a u64-widened low half (bits 0..63 only) with a u64-widened high half shifted into bits 64..127 only. The operands have disjoint set bits by construction for every input, so | == ^ identically; no reachable input distinguishes them."
 reviewer = "improve-mutation-score (William Aaron Cheung)"
 
@@ -167,17 +179,16 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 #     NO loop pass runs and no extra update happens.
 # Both paths therefore feed the identical little-endian u128 to a single large_update, yielding
 # the identical buffer and bucket id. (Pinning a len-16 input cannot kill it; the test
-# ahash_bucket_id_len16 was removed for this reason.) The two SIBLING `> 16` -> `>= 16` mutants
+# ahash_bucket_id_len16 was removed for this reason.) The two SIBLING `>` -> `>=` mutants
 # that share this same mutant text — line 108 (`> 8`) and the line-112 loop guard — are NOT
-# equivalent and are killed by ahash_bucket_id_len8_boundary_is_pinned /
-# ahash_bucket_id_len32_loop_boundary_is_pinned; cargo-mutants reports them CAUGHT, so only the
-# line-109 survivor reaches this filter.
+# equivalent: under them a len-8 and a len-32 input hash to other bucket ids. They are not
+# suppressed; this entry names the line-109 mutant alone.
 [[suppress]]
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
-mutant = "replace > with >= in <impl core::hash::Hasher for DeterministicHasher>::write"
-justification = "Equivalent (line 109 `> 16`): the > vs >= boundary only differs at len == 16, where both the mid branch (front | (back<<64)) and the large branch (read_last_u128, with no loop pass since 16 is not > 16) feed the identical le_u128(bytes[0..16]) to a single large_update. Same buffer, same bucket id; no input distinguishes them. The line-108 and line-112 mutants sharing this text are non-equivalent and are caught by the len-8 / len-32 tests."
+mutant = "crates/mega-evm/src/external/hasher/fallback.rs:109:27: replace > with >= in <impl core::hash::Hasher for DeterministicHasher>::write"
+justification = "Equivalent (line 109 `> 16`): the > vs >= boundary only differs at len == 16, where both the mid branch (front | (back<<64)) and the large branch (read_last_u128, with no loop pass since 16 is not > 16) feed the identical le_u128(bytes[0..16]) to a single large_update. Same buffer, same bucket id; no input distinguishes them. The line-108 and line-112 mutants sharing this text are non-equivalent and are not suppressed."
 reviewer = "improve-mutation-score (William Aaron Cheung)"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -237,33 +248,10 @@ reviewer = "RealiCZ"
 # ─────────────────────────────────────────────────────────────────────────────
 # crates/mega-evm/src/ survivors of the common execution layer.
 
-# --- inspect_frame_init: logs journaled by frame init (dead while EIP-7708 is off) --------
-# `inspect_frame_init` mirrors revm's: after `frame_init`, the logs journaled since `logs_i`
-# (EIP-7708 transfer logs, a precompile's logs) go to the inspector's `log` callback. Satin's
-# spec configuration fixes EIP-7708 off (`MegaContext::with_cfg`), and op-revm's precompile set
-# journals no log, so frame init never journals one: the length comparisons are always false
-# and `inspect_logs` is never entered. Flipping `!=` to `==` would call `inspect_logs` over an
-# empty range, a no-op; stubbing it changes nothing reachable. Live again when the Satin gas
-# table switches EIP-7708 on, at which point a transfer-log test kills them.
-[[suppress]]
-kind = "line"
-category = "dead"
-file = "crates/mega-evm/src/evm/execution.rs"
-mutant = "replace != with == in <impl InspectorEvmTr for MegaEvm<DB, INSP, ExtEnvs>>::inspect_frame_init"
-justification = "Dead in Satin: frame init journals no log (EIP-7708 is fixed off by the spec configuration, op-revm's precompiles journal none), so both `logs().len() != logs_i` comparisons are always false; with `==` the call hands the inspector an empty range, a no-op. Becomes live, and killable, when EIP-7708 is switched on."
-reviewer = "RealiCZ"
-
-[[suppress]]
-kind = "line"
-category = "dead"
-file = "crates/mega-evm/src/evm/execution.rs"
-mutant = "replace inspect_logs with ()"
-justification = "Dead in Satin: only called for logs journaled by frame init, which Satin never journals (EIP-7708 fixed off, no logging precompile). Becomes live, and killable, when EIP-7708 is switched on."
-reviewer = "RealiCZ"
-
 # --- DeclaredObserver::log forwarding (dead while EIP-7708 is off) ----------------------
 # revm hands a log to `Inspector::log` (without an interpreter) only from the frame-init path
-# above; every log an opcode emits goes to `log_full`, which the forwarding test covers.
+# (`inspect_frame_init`); every log an opcode emits goes to `log_full`, which the forwarding
+# test covers.
 [[suppress]]
 kind = "line"
 category = "dead"
