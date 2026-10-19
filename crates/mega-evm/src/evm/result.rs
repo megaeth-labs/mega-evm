@@ -145,9 +145,13 @@ impl MegaGasUsage {
 mod tests {
     use super::*;
     use crate::{LimitCheck, LimitKind, MegaHaltReason, MegaLimitExceeded};
+    use alloy_primitives::{Address, Bytes};
     use alloy_sol_types::SolError;
     use op_revm::OpHaltReason;
-    use revm::context::result::{HaltReason as EthHaltReason, OutOfGasError};
+    use revm::{
+        context::result::{ExecutionResult, HaltReason as EthHaltReason, OutOfGasError},
+        state::{Account, EvmState},
+    };
 
     fn result_gas(total: u64, state: u64, refunded: u64, floor: u64) -> ResultGas {
         ResultGas::default()
@@ -201,6 +205,27 @@ mod tests {
             assert_eq!(LimitKind::from_u8(decoded.kind), Some(kind));
             assert_eq!(decoded.limit, 100);
         }
+    }
+
+    /// An outcome reads and writes through to the result and the state it carries.
+    #[test]
+    fn test_an_outcome_derefs_to_its_result_and_state() {
+        let result = ExecutionResult::Revert {
+            gas: result_gas(21_000, 0, 0, 0),
+            logs: Vec::new(),
+            output: Bytes::new(),
+        };
+        let mut outcome = MegaTransactionOutcome {
+            result_and_state: ResultAndState::new(result, EvmState::default()),
+            gas: MegaGasUsage::default(),
+            usage: LimitUsage::ZERO,
+            limit_exceeded: None,
+            oracle_reads: Vec::new(),
+        };
+        assert!(!outcome.result.is_success());
+
+        outcome.state.insert(Address::ZERO, Account::default());
+        assert!(outcome.result_and_state.state.contains_key(&Address::ZERO));
     }
 
     /// The one halt reason op-revm adds, a failed deposit, has no Ethereum counterpart.
