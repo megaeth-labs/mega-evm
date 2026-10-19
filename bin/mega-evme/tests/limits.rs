@@ -3,7 +3,7 @@
 
 use std::process::Command;
 
-use mega_evm::ProtocolLimits;
+use mega_evm::{ProtocolLimits, TX_BODY_SIZE, WRITE_RECORD_SIZE};
 use serde_json::{json, Value};
 
 /// Two fresh `SSTORE`s, keeping two write records: 310 bytes of body and 40 per record.
@@ -11,7 +11,10 @@ const TWO_WRITES: &str = "0x60016000556001600155";
 
 /// A transaction data-size limit with room for the body and one write record, which the second of
 /// [`TWO_WRITES`] crosses.
-const ONE_RECORD: u64 = 350;
+const ONE_RECORD: u64 = TX_BODY_SIZE + WRITE_RECORD_SIZE;
+
+/// What [`TWO_WRITES`] keeps: the body and its two write records.
+const TWO_RECORDS: u64 = ONE_RECORD + WRITE_RECORD_SIZE;
 
 struct Output {
     code: i32,
@@ -207,7 +210,7 @@ fn test_a_genesis_file_holds_a_satin_run_to_its_limits() {
         let stopped = run(spec).json();
         assert_eq!(
             stopped["satin"]["limit_exceeded"],
-            json!({ "kind": "data_size", "limit": ONE_RECORD, "used": 390 }),
+            json!({ "kind": "data_size", "limit": ONE_RECORD, "used": TWO_RECORDS }),
             "{spec:?}"
         );
         assert!(stopped["satin"].get("limits_override").is_none(), "{}", stopped["satin"]);
@@ -217,7 +220,8 @@ fn test_a_genesis_file_holds_a_satin_run_to_its_limits() {
     assert_eq!(tx["satin"]["data_size"], 311, "a Satin report: {tx}");
 
     // An override still replaces what it names, over the file's limits.
-    let overridden = run(&["--override.limits", r#"{"txRuntimeLimits":{"txDataSizeLimit":390}}"#]);
+    let limits = format!(r#"{{"txRuntimeLimits":{{"txDataSizeLimit":{TWO_RECORDS}}}}}"#);
+    let overridden = run(&["--override.limits", &limits]);
     assert_eq!(overridden.json()["satin"]["limit_exceeded"], Value::Null);
 
     // The file is its chain's: a run on another chain is refused.
@@ -260,7 +264,7 @@ fn test_a_genesis_file_refuses_a_run_it_cannot_configure() {
         evme(&["run", TWO_WRITES, "--json", "--genesis", &later, "--block.timestamp", SATIN_TIME]);
     assert_eq!(
         from.json()["satin"]["limit_exceeded"],
-        json!({ "kind": "data_size", "limit": ONE_RECORD, "used": 390 })
+        json!({ "kind": "data_size", "limit": ONE_RECORD, "used": TWO_RECORDS })
     );
 }
 

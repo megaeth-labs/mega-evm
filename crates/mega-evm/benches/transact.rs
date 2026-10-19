@@ -61,9 +61,7 @@
 //! Every workload is run once before it is measured, and the run is held to what it must draw:
 //! each pays its body's history, the logging one pays for the bytes its logs append and the
 //! calldata one for the bytes it carries, and the data-size one keeps exactly the bytes and
-//! records it is sized for, and stops at its last log one byte short of them; the state-limit one
-//! keeps exactly the state gas and records its limits allow, and stops at its last slot one gas
-//! short of them. A workload that
+//! records it is sized for, and stops at its last log one byte short of them. A workload that
 //! stopped drawing what it is here to measure would otherwise still benchmark, and measure the
 //! wrong thing.
 #![allow(missing_docs)]

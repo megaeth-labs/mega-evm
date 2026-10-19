@@ -57,12 +57,11 @@ fn then_call(builder: BytecodeBuilder, target: Address, value: u8) -> BytecodeBu
         .append(POP)
 }
 
-fn run_under(
-    db: MemoryDatabase,
-    tx: MegaTransaction,
-    limits: EvmTxRuntimeLimits,
-) -> MegaTransactionOutcome {
-    MegaEvm::new(context(db).with_tx_runtime_limits(limits)).execute_transaction(tx).unwrap()
+/// Runs `tx` over `db` under no limit.
+fn run(db: MemoryDatabase, tx: MegaTransaction) -> MegaTransactionOutcome {
+    MegaEvm::new(context(db).with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits()))
+        .execute_transaction(tx)
+        .unwrap()
 }
 
 /// `n` records and the body, with nothing else counted.
@@ -118,11 +117,7 @@ fn test_the_kv_count_is_the_write_records_kept() {
         ),
     ];
     for (name, code, kept, transfer_logs) in cases {
-        let outcome = run_under(
-            funded().account_code(A, code),
-            call(CALLER, A, U256::ZERO, GAS_LIMIT),
-            EvmTxRuntimeLimits::no_limits(),
-        );
+        let outcome = run(funded().account_code(A, code), call(CALLER, A, U256::ZERO, GAS_LIMIT));
         assert!(outcome.result.is_success(), "{name}: {:?}", outcome.result);
         let transfer_log_bytes = transfer_logs * mega_evm::TRANSFER_LOG_SIZE;
         let expected = records(kept);
@@ -133,11 +128,7 @@ fn test_the_kv_count_is_the_write_records_kept() {
         );
     }
 
-    let transfer = run_under(
-        funded(),
-        call(CALLER, B, U256::from(1), GAS_LIMIT),
-        EvmTxRuntimeLimits::no_limits(),
-    );
+    let transfer = run(funded(), call(CALLER, B, U256::from(1), GAS_LIMIT));
     assert!(transfer.result.is_success());
     assert_eq!(
         transfer.usage,
@@ -153,10 +144,9 @@ fn test_the_kv_count_is_the_write_records_kept() {
 /// count is what it writes.
 #[test]
 fn test_calldata_is_not_a_record() {
-    let outcome = run_under(
+    let outcome = run(
         funded().account_code(A, slots(1)),
         call_with_data(CALLER, A, Bytes::from(vec![0xab; 1_000]), GAS_LIMIT),
-        EvmTxRuntimeLimits::no_limits(),
     );
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
     assert_eq!(outcome.usage.write_records, 1);

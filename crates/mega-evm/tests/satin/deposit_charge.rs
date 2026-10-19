@@ -552,7 +552,7 @@ fn test_a_creation_one_gas_short_of_its_history_runs_out_of_gas_with_the_state_g
     assert_eq!(enough, INIT_EXECUTION + 600 + 4_896_000 + 281_600);
 }
 
-/* ---------- the limits stand aside ---------- */
+/* ---------- the limit stands aside ---------- */
 
 /// Under a frame cap the creation's code crosses, the creation forwarded exactly enough is
 /// stopped alone — it reverts with the stop's revert data, and its caller goes on — and the one

@@ -18,9 +18,9 @@
 //! a log pays for its address, its topics and its data, a storage write or a destructed account's
 //! beneficiary for the forty bytes of one write record.
 //!
-//! A commit that crosses a limit stops the opcode's frame with a revert whose
-//! output is [`MegaLimitExceeded`](crate::MegaLimitExceeded) (see
-//! [`AdditionalLimit`](crate::AdditionalLimit) for the abort protocol). A history charge the frame
+//! A commit that crosses a limit stops the opcode's frame with a revert whose output is
+//! [`MegaLimitExceeded`](crate::MegaLimitExceeded) (see [`AdditionalLimit`](crate::AdditionalLimit)
+//! for the abort protocol). A history charge the frame
 //! cannot pay is an ordinary out-of-gas, which burns the frame's gas the way any other does.
 //!
 //! The other four run in a wrapper that charges their frame for the write records the frame it
@@ -156,8 +156,8 @@ pub(crate) fn mega_instructions<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// staged write back with it.
 ///
 /// The record is held to the data-size limit first, and only then is its history charged. A record
-/// a limit rejects is not kept, so its history is not a charge and the stop is what the frame
-/// reports. A record the limits accept is charged, and a charge the frame cannot pay is an
+/// the limit rejects is not kept, so its history is not a charge and the stop is what the frame
+/// reports. A record the limit accepts is charged, and a charge the frame cannot pay is an
 /// out-of-gas.
 #[inline(always)]
 fn commit_after<const FROM_ALLOWANCE: bool, DB: Database, ExtEnvs: ExternalEnvTypes>(
@@ -293,9 +293,7 @@ fn selfdestruct<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// out-of-gas, which takes the frame the opcode was suspending on with it ([`abandon_frame`]).
 ///
 /// revm's instruction has also charged the caller the state gas of the account the frame would
-/// add — a value transfer's new recipient, a created account. That charge is held to the state-gas
-/// limit when revm has decided the frame, not here: a frame revm refuses gives it back, and a
-/// limit that held it would stop the transaction for an account nobody adds.
+/// add — a value transfer's new recipient, a created account; a frame revm refuses gives it back.
 ///
 /// The frame inherits the reservoir the charge left, not the one the caller held before it
 /// ([`inherit_reservoir`]).

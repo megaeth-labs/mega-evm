@@ -1669,11 +1669,10 @@ fn assert_answered_cell(answered: Answered, gas_limit: u64) {
 /// A frame three calls down that is answered without running, and whose answer crosses a limit,
 /// stops the transaction as a frame that ran there does: an answer past what the compute limit
 /// leaves the frame, and a precompile run on that allowance and priced past it. Below the execution
-/// cap and
-/// above it, with and without an inspector that rewrites every frame result into a success, the
-/// answer is the stop, every caller returns it without running on, and the transaction settles
-/// like any stop: it bills what ran, keeps the body's history and nothing else, and gets its
-/// reservoir back.
+/// cap and above it, with and without an inspector that rewrites every frame result into a
+/// success, the answer is the stop, every caller returns it without running on, and the
+/// transaction settles like any stop: it bills what ran, keeps the body's history and nothing
+/// else, and gets its reservoir back.
 #[test]
 fn test_an_answer_three_calls_down_stops_the_transaction_at_either_tier() {
     for answered in [Answered::PastTheAllowance, Answered::Precompile] {

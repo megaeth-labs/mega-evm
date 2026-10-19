@@ -123,7 +123,7 @@ impl Lane {
     /// is at most the share of what the caller had left.
     pub(crate) const fn hands_caller_unchecked(&self, success: bool) -> bool {
         if success {
-            self.net().exceeds(self.budget)
+            self.net().exceeds_data_size(self.budget)
         } else {
             self.creator_record
         }
@@ -578,7 +578,7 @@ mod tests {
             let lane = t.pop(success).unwrap();
             assert_eq!(lane.hands_caller_unchecked(success), unchecked, "{case}");
             let handed = t.net();
-            let past_budget = handed.exceeds(budget);
+            let past_budget = handed.exceeds_data_size(budget);
             if success {
                 assert_eq!(past_budget, unchecked, "{case}: a success hands over what it kept");
             } else {

@@ -1,4 +1,4 @@
-//! A deposit is never refused by a block's packing budgets.
+//! A deposit is never refused by a block's packing budget.
 //!
 //! The data-size limit of a block budgets the transactions its builder chooses. A deposit is not
 //! chosen: the block derived from L1 must include it. So it never refuses a deposit — not before it

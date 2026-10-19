@@ -4,7 +4,7 @@
 
 use alloy_consensus::{transaction::Recovered, Signed, TxLegacy};
 use alloy_evm::block::BlockExecutor;
-use alloy_primitives::{Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_primitives::{Bytes, Signature, TxKind, B256, U256};
 use mega_evm::{constants::TX_GAS_LIMIT_CAP, test_utils::BytecodeBuilder, MegaTxEnvelope};
 use revm::{
     bytecode::opcode::{CALLDATALOAD, PUSH0, SSTORE},
@@ -34,34 +34,22 @@ fn state() -> State<mega_evm::test_utils::MemoryDatabase> {
     State::builder().with_database(db).build()
 }
 
-/// A transaction from `caller` to `to`, carrying `input`.
-fn tx_from(
-    caller: Address,
-    nonce: u64,
-    to: Address,
-    input: Bytes,
-    gas_limit: u64,
-) -> Recovered<MegaTxEnvelope> {
+/// A transaction from [`CALLER`] that fills `slot`, or leaves it as it is when it is already set.
+fn writes(nonce: u64, slot: u64, gas_limit: u64) -> Recovered<MegaTxEnvelope> {
     let tx = TxLegacy {
         chain_id: Some(CHAIN_ID),
         nonce,
         gas_price: 1_000_000,
         gas_limit,
-        to: TxKind::Call(to),
+        to: TxKind::Call(CONTRACT),
         value: U256::ZERO,
-        input,
+        input: Bytes::from(U256::from(slot).to_be_bytes::<32>()),
     };
-    let hash = B256::from(U256::from(nonce) + (U256::from_be_slice(caller.as_slice()) << 64));
+    let hash = B256::from(U256::from(nonce) + (U256::from_be_slice(CALLER.as_slice()) << 64));
     Recovered::new_unchecked(
         MegaTxEnvelope::Legacy(Signed::new_unchecked(tx, Signature::test_signature(), hash)),
-        caller,
+        CALLER,
     )
-}
-
-/// A transaction from [`CALLER`] that fills `slot`, or leaves it as it is when it is already set.
-fn writes(nonce: u64, slot: u64, gas_limit: u64) -> Recovered<MegaTxEnvelope> {
-    let input = Bytes::from(U256::from(slot).to_be_bytes::<32>());
-    tx_from(CALLER, nonce, CONTRACT, input, gas_limit)
 }
 
 /// Above the execution cap the reservoir pays the state gas, and the block counts it all the same:

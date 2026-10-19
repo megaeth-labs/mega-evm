@@ -209,12 +209,12 @@ impl AdditionalLimit {
     /// keeps against its budget.
     fn check(&mut self) -> LimitCheck {
         let (kept, limit) = (self.tracker.net(), self.limits.tx_data_size_limit);
-        if kept.exceeds(limit) {
+        if kept.exceeds_data_size(limit) {
             return self.latch(LimitKind::DataSize, limit, kept.data_size);
         }
         if let Some(lane) = self.tracker.current() {
             let (kept, budget) = (lane.net(), lane.budget);
-            if kept.exceeds(budget) {
+            if kept.exceeds_data_size(budget) {
                 return self.crossed(LimitKind::DataSize, budget, kept.data_size, true);
             }
         }
@@ -230,8 +230,8 @@ impl AdditionalLimit {
         if self.is_exempt() || self.latched().is_some() {
             return true;
         }
-        !self.tracker.net().exceeds(self.limits.tx_data_size_limit) &&
-            self.tracker.current().is_none_or(|lane| !lane.net().exceeds(lane.budget))
+        !self.tracker.net().exceeds_data_size(self.limits.tx_data_size_limit) &&
+            self.tracker.current().is_none_or(|lane| !lane.net().exceeds_data_size(lane.budget))
     }
 
     /// The stop the running frame returns instead of running another instruction: the latched
@@ -494,7 +494,7 @@ impl AdditionalLimit {
         let hint = LimitUsage { data_size: bytes, write_records: 0 };
         let (reached, limit) =
             (self.tracker.net().saturating_add(hint), self.limits.tx_data_size_limit);
-        if reached.exceeds(limit) {
+        if reached.exceeds_data_size(limit) {
             let stop = self.latch(LimitKind::DataSize, limit, reached.data_size);
             if stop.exceeded_limit() {
                 return stop;
@@ -522,7 +522,7 @@ impl AdditionalLimit {
         let records = WRITE_RECORD.times(authorities);
         let (used, limit) =
             (self.tracker.net().saturating_add(records), self.limits.tx_data_size_limit);
-        if used.exceeds(limit) {
+        if used.exceeds_data_size(limit) {
             let check = self.latch(LimitKind::DataSize, limit, used.data_size);
             if check.exceeded_limit() {
                 return check;

@@ -1475,7 +1475,6 @@ mod tests {
     const TARGET: Address = address!("00000000000000000000000000000000000e0002");
 
     /// A `CALL` of one wei to `TARGET`, which its opcode charged a new account for.
-    #[cfg(debug_assertions)]
     fn value_call() -> FrameInput {
         FrameInput::Call(Box::new(CallInputs {
             input: CallInput::Bytes(Bytes::new()),
@@ -1706,6 +1705,28 @@ mod tests {
             let clamped = PrecompileHold::Clamped(NonZeroU64::new(299_000).unwrap());
             assert_eq!(held, clamped, "{to}");
             assert_eq!(ran_on, 1_000, "{to}: run on the allowance");
+        }
+    }
+
+    /// The transaction's own frame answered with a success that the engine then rewrote into the
+    /// stop has what its start wrote taken back to where its start began. An answer revm made a
+    /// failure took its writes back itself, and one the engine did not rewrite keeps them.
+    #[test]
+    fn test_a_success_answer_rewritten_into_the_stop_is_taken_back() {
+        for (succeeded, result, taken_back) in [
+            (true, InstructionResult::Revert, true),
+            (true, InstructionResult::Stop, false),
+            (false, InstructionResult::Revert, false),
+        ] {
+            let case = format!("succeeded {succeeded}, now {result:?}");
+            let mut ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
+            let start = journal_position(&mut ctx);
+            // What the answer wrote: a bump of the recipient's nonce.
+            let _ = ctx.journal_mut().load_account_mut(TARGET).unwrap().data.bump_nonce();
+            let answer = synthetic_frame_result(&value_call(), result, Bytes::new());
+            take_back_a_stopped_answer(&mut ctx, start, succeeded, &answer);
+            let nonce = ctx.journal_ref().state.get(&TARGET).map_or(0, |a| a.info.nonce);
+            assert_eq!(nonce, u64::from(!taken_back), "{case}");
         }
     }
 

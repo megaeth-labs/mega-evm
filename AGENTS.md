@@ -195,7 +195,8 @@ The root `Cargo.toml` pins `revm = "=40.0.3"` and redirects all twelve revm crat
   The legacy engine's KV updates (1) and state growth (3) name no dimension: `LimitKind::from_u8` answers `None` for them.
 - No limit holds the write records a transaction keeps — its KV count, one record per kept account or storage write, deduplicated per frame and taken back with a write-back or a failed frame — and the count is still reported, in the outcome's usage and the block's.
   The sender's account and the fee accounts are the body's, not records, so a transaction that writes nothing counts none.
-  A record is forty bytes of data size, counted and taken back with them, so `KV × 40 ≤ data size` holds after every instruction (`tests/satin/write_records.rs`), and history gas prices every record: at the production data-size caps a transaction or a block keeps at most 327,680 records.
+  A record is forty bytes of data size, counted and taken back with them, so `KV × 40 ≤ data size` holds after every instruction (`tests/satin/write_records.rs`), and at the production data-size caps a transaction or a block keeps at most 327,680 records.
+  History gas prices every record.
 - No limit holds a transaction's state growth: EIP-8037 charges state gas for exactly the state a transaction adds, at the price of the SALT bucket it lands in, so what bounds it is what it costs — the transaction's gas limit and the block's (`tests/satin/state_growth.rs`).
 - The limits that change a result are protocol values, carried by the Satin fork's parameters: `ProtocolLimits` (`block/limit.rs`), attached to the schedule with `MegaHardforkConfig::with_params` and read at the block's timestamp with `MegaHardforks::protocol_limits`.
   It holds the four per-transaction limits (`tx_runtime_limits`: data size per transaction, its frame cap, detention's two caps) and the block's data-size budget; `ProtocolLimits::DEFAULT` is today's values, provisional with the constants.

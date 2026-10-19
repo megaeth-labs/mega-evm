@@ -9,12 +9,13 @@
 //! The limits every node must agree on are the chain's: the executor reads the
 //! [`ProtocolLimits`] the fork active at the block's timestamp carries
 //! ([`MegaHardforks::protocol_limits`]), installs their per-transaction half on the EVM before
-//! every transaction, and holds the block to their three budgets. The node's context adds only the
-//! builder's policy ([`BlockLimits`]), which can tighten a budget and never loosen one; a validator
-//! leaves it at its default. A block whose schedule carries no limits at its timestamp, or limits
-//! their own check refuses ([`HardforkParams::validate`](crate::HardforkParams::validate)), is
-//! refused before anything runs, as an internal error: the schedule is the node's configuration,
-//! and a node's own schedule type may hand the executor values nothing checked at load.
+//! every transaction, and holds the block to their data-size budget. The node's context adds only
+//! the builder's policy ([`BlockLimits`]), which can tighten the budget and never loosen it; a
+//! validator leaves it at its default. A block whose schedule carries no limits at its timestamp,
+//! or limits their own check refuses
+//! ([`HardforkParams::validate`](crate::HardforkParams::validate)), is refused before anything
+//! runs, as an internal error: the schedule is the node's configuration, and a node's own schedule
+//! type may hand the executor values nothing checked at load.
 //!
 //! # The block rules of the Karst base
 //!
@@ -163,8 +164,8 @@ pub struct MegaBlockExecutionCtx {
     /// [`MegaHardforks::admits_only_deposits`], which needs the parent block's timestamp; `false`
     /// skips the rule.
     pub no_user_tx_activation_block: bool,
-    /// The builder's packing policy: the limits only a builder applies, and caps on the block's
-    /// budgets below the protocol's ([`BlockLimits`]).
+    /// The builder's packing policy: the limits only a builder applies, and a cap on the block's
+    /// data-size budget below the protocol's ([`BlockLimits`]).
     ///
     /// A builder sets it; a validator re-executing a block leaves the default, which restricts
     /// nothing, so the block is held to the protocol's limits alone.
@@ -464,7 +465,7 @@ where
     /// here, and again before every transaction, so every route to an executor — this one and
     /// both factory constructors — runs the block's transactions under the chain's limits,
     /// whatever the caller did or did not apply to the EVM. The block is held to the protocol's
-    /// budgets, each lowered to `ctx`'s building policy where that is lower.
+    /// data-size budget, lowered to `ctx`'s building policy where that is lower.
     ///
     /// The block's gas limit comes from the block environment, whatever `ctx` carries: it is the
     /// number consensus holds the block to, and it is also the budget the data-availability
@@ -962,8 +963,7 @@ where
     /// This is the commit for a builder that executes several candidates and then chooses among
     /// them: the block's counters may have moved between a candidate executing and its commit, so
     /// everything the block holds a transaction to is checked once more — its data-availability
-    /// footprint and the state gas it adds included — and nothing changes before the check
-    /// passes.
+    /// footprint included — and nothing changes before the check passes.
     ///
     /// The check covers the block's counters, not the state `output` executed against. A
     /// candidate executed before another commit changed that state is stale whatever the counters

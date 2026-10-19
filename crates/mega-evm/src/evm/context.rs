@@ -590,8 +590,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextTr for MegaContext<DB, ExtE
         }
     }
 
-    /// Holds the code a creation deposits to the state-gas and data-size limits, and counts its
-    /// history bytes, once `return_create` made every charge for the deposit and before it commits
+    /// Holds the code a creation deposits to the data-size limit, and counts its history bytes,
+    /// once `return_create` made every charge for the deposit and before it commits
     /// the creation ([`AdditionalLimit::on_code_deposit`]). A crossing refuses the deposit with the
     /// stop's revert data: the creation reverts with it, on the gas it had before the deposit.
     #[inline]

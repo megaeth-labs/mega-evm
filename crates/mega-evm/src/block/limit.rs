@@ -223,8 +223,8 @@ impl HardforkParams for ProtocolLimits {
     }
 }
 
-/// The building policy one block is packed under: the limits only a builder applies, and the
-/// caps it may put on the block's budgets below the protocol's.
+/// The building policy one block is packed under: the limits only a builder applies, and the cap
+/// it may put on the block's data-size budget below the protocol's.
 ///
 /// A node passes it in the block execution context. None of it is a protocol value: the
 /// protocol's limits are [`ProtocolLimits`], which the block executor reads from the chain's
@@ -468,10 +468,10 @@ impl BlockLimiter {
             .into());
         }
 
-        // The packing budgets below are the dimensions a transaction's own execution reveals. The
-        // transaction that crossed one is already packed, so what they refuse is the next one —
-        // never a deposit, which is not the builder's to refuse either. Every committed
-        // transaction counts towards them, a deposit included, in `post_execution_update`.
+        // The packing budget below, the data size, is a dimension a transaction's own execution
+        // reveals. The transaction that crossed it is already packed, so what it refuses is the
+        // next one — never a deposit, which is not the builder's to refuse either. Every committed
+        // transaction counts towards it, a deposit included, in `post_execution_update`.
         if is_deposit {
             return Ok(());
         }

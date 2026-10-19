@@ -81,6 +81,8 @@
 //! at the SALT price of the bucket it lands in, so state growth is bounded by what it costs: the
 //! transaction's gas limit and the block's.
 //!
+//! # The defaults
+//!
 //! Every limit is unlimited unless a caller sets it, gas detention's caps aside. A block executor
 //! installs the chain's, the per-transaction half of the Satin fork's parameters
 //! ([`ProtocolLimits`](crate::ProtocolLimits)), whose default holds a transaction to
@@ -316,7 +318,7 @@ impl LimitUsage {
     pub const ZERO: Self = Self { data_size: 0, write_records: 0 };
 
     /// Whether `self` keeps more data-size bytes than `limit`, the one dimension a limit holds.
-    pub(crate) const fn exceeds(self, limit: u64) -> bool {
+    pub(crate) const fn exceeds_data_size(self, limit: u64) -> bool {
         self.data_size > limit
     }
 
