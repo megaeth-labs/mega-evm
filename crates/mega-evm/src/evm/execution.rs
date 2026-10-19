@@ -1396,9 +1396,10 @@ mod tests {
     use crate::{test_utils::MemoryDatabase, MegaSpecId};
     use alloy_primitives::{address, U256};
     use revm::interpreter::{
-        gas::WithheldCrossing, CallInput, CallInputs, CallValue, CreateInputs, CreateScheme,
-        SharedMemory,
+        gas::WithheldCrossing, CallInput, CallInputs, CallValue, SharedMemory,
     };
+    #[cfg(debug_assertions)]
+    use revm::interpreter::{CreateInputs, CreateScheme};
     use std::boxed::Box;
 
     const CALLER: Address = address!("00000000000000000000000000000000000e0001");
