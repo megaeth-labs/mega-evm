@@ -331,15 +331,14 @@ impl Cmd {
             .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?
             .ok_or(ReplayError::BlockNotFound(block_number))?;
 
-        let mut preceding_tx_hashes = vec![];
-        if !is_pending {
-            for hash in block.transactions.hashes() {
-                if hash == tx_hash {
-                    break;
-                }
-                preceding_tx_hashes.push(hash);
-            }
-        }
+        let preceding_tx_hashes = preceding_transactions(
+            tx_hash,
+            target_tx.block_number,
+            target_tx.block_hash,
+            block.number(),
+            block.hash(),
+            block.transactions.hashes(),
+        )?;
 
         debug!(chain_id, preceding_count = preceding_tx_hashes.len(), "Replay context ready");
 
@@ -646,6 +645,42 @@ impl Cmd {
     }
 }
 
+/// Hashes of the transactions before `target_hash` in the fetched block.
+///
+/// A pending transaction has no block yet, so it has no predecessors here. A mined transaction
+/// must name this block's number and hash, and the hash must occur in the block. Otherwise every
+/// transaction in the block would be treated as preceding and the target would still run.
+fn preceding_transactions(
+    target_hash: B256,
+    target_block_number: Option<u64>,
+    target_block_hash: Option<B256>,
+    block_number: u64,
+    block_hash: B256,
+    hashes: impl IntoIterator<Item = B256>,
+) -> Result<Vec<B256>> {
+    let Some(tx_block_number) = target_block_number else {
+        return Ok(Vec::new());
+    };
+    if tx_block_number != block_number || target_block_hash != Some(block_hash) {
+        let tx_block_hash =
+            target_block_hash.map(|hash| hash.to_string()).unwrap_or_else(|| "none".to_string());
+        return Err(ReplayError::Other(format!(
+            "transaction {target_hash} belongs to block {tx_block_number} ({tx_block_hash}), \
+             not block {block_number} ({block_hash})"
+        )));
+    }
+    let mut preceding = Vec::new();
+    for hash in hashes {
+        if hash == target_hash {
+            return Ok(preceding);
+        }
+        preceding.push(hash);
+    }
+    Err(ReplayError::Other(format!(
+        "transaction {target_hash} is not in block {block_number}"
+    )))
+}
+
 /// Build a [`BlockEnv`] from the RPC block header.
 ///
 /// Reads `excess_blob_gas` directly from the header rather than using a
@@ -728,5 +763,70 @@ mod tests {
             ),
             other => panic!("unexpected error variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_preceding_transactions_stop_at_the_target() {
+        let target = B256::repeat_byte(1);
+        let earlier = B256::repeat_byte(2);
+        let block_hash = B256::repeat_byte(4);
+        let got = preceding_transactions(
+            target,
+            Some(9),
+            Some(block_hash),
+            9,
+            block_hash,
+            [earlier, target, B256::repeat_byte(3)],
+        )
+        .expect("target is in the block");
+        assert_eq!(got, vec![earlier]);
+    }
+
+    #[test]
+    fn test_preceding_transactions_reject_a_missing_target() {
+        let target = B256::repeat_byte(1);
+        let block_hash = B256::repeat_byte(4);
+        let err = preceding_transactions(
+            target,
+            Some(9),
+            Some(block_hash),
+            9,
+            block_hash,
+            [B256::repeat_byte(2)],
+        )
+        .expect_err("the target hash never occurs");
+        match err {
+            ReplayError::Other(msg) => assert!(msg.contains("not in block"), "{msg}"),
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_preceding_transactions_reject_a_different_block() {
+        let target = B256::repeat_byte(1);
+        let err = preceding_transactions(
+            target,
+            Some(9),
+            Some(B256::repeat_byte(4)),
+            8,
+            B256::repeat_byte(5),
+            [target],
+        )
+        .expect_err("the transaction names a different block");
+        assert!(matches!(err, ReplayError::Other(_)));
+    }
+
+    #[test]
+    fn test_preceding_transactions_skip_a_pending_transaction() {
+        let got = preceding_transactions(
+            B256::repeat_byte(1),
+            None,
+            None,
+            9,
+            B256::repeat_byte(4),
+            [B256::repeat_byte(2)],
+        )
+        .expect("a pending transaction has no predecessors");
+        assert!(got.is_empty());
     }
 }
