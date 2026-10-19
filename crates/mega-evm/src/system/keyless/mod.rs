@@ -65,15 +65,16 @@
 //!
 //! # The error ABI
 //!
-//! The contract's errors are unchanged, and so are the rules that produce them and the order they
-//! are checked in, so a call several rules refuse reports the legacy engine's error. Four have
-//! no producer here: `ParentBudgetExceeded` and `InvalidTransaction` were the sandbox's, which had
-//! a budget of its own to preflight and a transaction of its own to validate;
-//! `InsufficientComputeGas` was the compute-gas limit's, which is the execution cap on the regular
-//! pool here, so a call that cannot pay the overhead runs out of gas; and `InternalError` was a
-//! failed read, which fails the transaction with its cause here, as it does at every other site.
-//! `AddressMismatch` and `NoContractCreated` stay as the answers to a creation revm reports at an
-//! address other than the pinned one, which no deployment reaches.
+//! The rules that produce the contract's errors are the legacy engine's, and so is the order they
+//! are checked in, so a call several rules refuse reports the legacy engine's error. The interface
+//! no longer declares the four errors only the legacy engine produced: `ParentBudgetExceeded` and
+//! `InvalidTransaction` were the sandbox's, which had a budget of its own to preflight and a
+//! transaction of its own to validate; `InsufficientComputeGas` was the compute-gas limit's, which
+//! is the execution cap on the regular pool here, so a call that cannot pay the overhead runs out
+//! of gas; and `InternalError` was a failed read, which fails the transaction with its cause here,
+//! as it does at every other site. Dropping them changes no deployed byte: the contract's bytecode
+//! never names them. `AddressMismatch` and `NoContractCreated` stay as the answers to a creation
+//! revm reports at an address other than the pinned one, which no deployment reaches.
 //!
 //! # The contract
 //!

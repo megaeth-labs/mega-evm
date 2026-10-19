@@ -540,7 +540,7 @@ fn test_run_transaction_rejects_understated_cached_da_size() {
 /// The common case of the same path: figures that agree with the transaction are used as they
 /// are, and the outcome carries them.
 #[test]
-fn test_execute_mega_transaction_succeeds_with_accurate_cache() {
+fn test_run_transaction_succeeds_with_accurate_cache() {
     let mut state = common::state();
     let mut executor = executor(&mut state, common::unlimited_ctx());
     executor.apply_pre_execution_changes().expect("the block starts");
@@ -551,7 +551,7 @@ fn test_execute_mega_transaction_succeeds_with_accurate_cache() {
     let enriched = EnrichedMegaTx::new_slow(Recovered::new_unchecked(&envelope, CALLER));
 
     let outcome = executor
-        .execute_mega_transaction(&enriched)
+        .run_transaction(&enriched)
         .expect("figures that agree with the transaction are used as they are");
 
     assert_eq!(outcome.da_size, expected_da_size);

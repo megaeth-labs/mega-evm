@@ -412,10 +412,6 @@ pub struct MegaBlockExecutor<E, R: OpReceiptBuilder, Spec> {
     /// The limits the schedule holds this block to, read at the block's timestamp and checked;
     /// the refusal of the block when the schedule carries none there, or limits the check refuses.
     protocol_limits: Result<ProtocolLimits, MegaBlockExecutionError>,
-    /// Whether Canyon is active, which decides whether a deposit receipt carries a version.
-    is_canyon: bool,
-    /// Whether Regolith is active, which decides whether a deposit receipt carries a nonce.
-    is_regolith: bool,
     /// Optional observer of each pre-block state, invoked before the state is committed.
     pre_block_observer: OptionalPreBlockObserver,
 }
@@ -512,8 +508,6 @@ where
         };
         let limits = policy.with_block_gas_limit(block_gas_limit);
         Self {
-            is_canyon: spec.is_canyon_active_at_timestamp(timestamp),
-            is_regolith: spec.is_regolith_active_at_timestamp(timestamp),
             spec,
             receipt_builder,
             ctx,
@@ -889,12 +883,14 @@ where
                         logs: ctx.result.into_logs(),
                     };
 
+                    // Satin executes only at or after Karst, which includes Canyon, and the
+                    // schedule check refuses a schedule in which Canyon is not active when Satin
+                    // activates: every deposit receipt carries Canyon's receipt version, which
+                    // says how the receipt hash is computed.
                     self.receipt_builder.build_deposit_receipt(OpDepositReceipt {
                         inner: receipt,
                         deposit_nonce: depositor_nonce,
-                        // Canyon introduced the deposit receipt version, which says how the
-                        // receipt hash is computed.
-                        deposit_receipt_version: (is_deposit && self.is_canyon).then_some(1),
+                        deposit_receipt_version: is_deposit.then_some(1),
                     })
                 }
             },
@@ -960,20 +956,6 @@ where
     {
         let reported = (tx.tx_hash(), tx.tx_size(), tx.estimated_da_size());
         self.execute(tx, Some(reported))
-    }
-
-    /// Alias of [`run_transaction`](Self::run_transaction).
-    pub fn execute_mega_transaction<Tx>(
-        &mut self,
-        tx: Tx,
-    ) -> Result<
-        MegaBlockTxResult<<R::Transaction as TransactionEnvelope>::TxType>,
-        BlockExecutionError,
-    >
-    where
-        Tx: ExecutableTx<Self> + MegaTransactionExt,
-    {
-        self.run_transaction(tx)
     }
 
     /// Re-checks the block's admission and commits `output`.
@@ -1059,8 +1041,11 @@ where
             footprint
         };
 
-        // Read before execution, so committing the transaction cannot fail.
-        let depositor_nonce = if is_deposit && self.is_regolith {
+        // Read before execution, so committing the transaction cannot fail. Satin executes only at
+        // or after Karst, which includes Regolith, and the schedule check refuses a schedule in
+        // which Regolith is not active when Satin activates: every deposit receipt carries the
+        // depositor's nonce.
+        let depositor_nonce = if is_deposit {
             let sender = *tx.signer();
             Some(
                 self.evm

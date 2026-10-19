@@ -13,6 +13,7 @@ mod differential;
 mod dispatch;
 mod frame;
 mod inspector;
+mod interface;
 mod limits;
 mod precedence;
 mod rules;

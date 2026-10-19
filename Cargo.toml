@@ -1,7 +1,5 @@
 
 [workspace]
-# `bin/mega-t8n` still targets the legacy engine; its sources are kept untouched and it
-# rejoins the workspace when it is ported to Satin, as `bin/mega-evme` has.
 members = [
     "bin/mega-evme",
     "crates/mega-evm",

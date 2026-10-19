@@ -670,9 +670,11 @@ An out-of-gas step halts the call, consuming its regular gas.
   A frame budget the creation crosses reverts the creation, and the call answers `ExecutionReverted` with the stop's revert data.
   A transaction-level limit stops the transaction: the call reverts with the stop, and the deployment — the signer's nonce included — is taken back.
   When the signer's nonce record, which survives a failed creation, takes the call over its own frame budget, the call reverts with that stop and the deployment, the nonce included, is taken back without stopping the transaction.
-- Of the contract's errors, `ParentBudgetExceeded(uint8,uint64,uint64)`, `InvalidTransaction()`, `InsufficientComputeGas(uint64,uint64)` and `InternalError()` MUST NOT be produced: a failed database read or SALT lookup gives the transaction no outcome, as [Transaction and Block Refusals](#21-transaction-and-block-refusals) says.
+- The contract's interface no longer declares the four errors only Rex6 and earlier produced: `ParentBudgetExceeded(uint8,uint64,uint64)`, `InvalidTransaction()`, `InsufficientComputeGas(uint64,uint64)` and `InternalError()`.
+  A node MUST NOT produce them: a failed database read or SALT lookup gives the transaction no outcome, as [Transaction and Block Refusals](#21-transaction-and-block-refusals) says.
   `AddressMismatch()` and `NoContractCreated()` remain as answers to a creation reported at another address or at none, which no deployment reaches.
-- The `KeylessDeploy` contract, its interface and its errors are unchanged.
+  [KeylessDeploy](../system-contracts/keyless-deploy.md) lists the errors the interface declares.
+- The `KeylessDeploy` contract's bytecode and code hash are unchanged: the bytecode names none of the removed errors.
 
 ### 16. Oracle Storage Reads and Hints
 
@@ -954,6 +956,7 @@ The call pays 183,600 × `m` of state gas for an empty signer's account, where R
 A signer at nonce 1 stays at 1 whether its deployment succeeds or fails, so an attempt by anyone whose creation reverts, halts or is stopped cannot make its address undeployable; only a delegated signer whose own code spends a nonce during the creation moves past it.
 A creation that completes with empty code is the exception: it occupies the deploy address as an ordinary creation does — the address keeps an account with a non-zero nonce and no code — and every later deployment there answers `ExecutionHalted` on the collision.
 Whether a constructor completes with empty code is the signed initcode's own behaviour on what it runs in, and whoever submits the deployment chooses part of that: the gas forwarded above the signed gas limit, the outer transaction, and the block and state it runs in.
+`IKeylessDeploy` no longer declares `ParentBudgetExceeded`, `InvalidTransaction`, `InsufficientComputeGas` and `InternalError`, so a decoder built from the Satin interface does not name them in `errorData` a Rex6 block produced.
 
 A `receive()` hook reached through Solidity's `transfer()` can emit one three-topic event with one word of data from the history allowance; a second event must be paid from the 2,300-gas stipend and cannot be.
 
@@ -1017,16 +1020,18 @@ A node, a stateless validator and a replay tool must agree on everything below, 
   Addresses are hex strings.
   The key format is provisional until a network publishes a genesis file carrying it.
 
-  The Satin keys do not time the forks Satin runs on: Optimism Karst and the Ethereum forks it includes, Osaka among them, are timed by the configuration's own keys for them.
-  Every Satin block executes on Karst's rules, so a node must check, when it loads the configuration, that each of those forks is active at `satinTime`, and refuse the configuration otherwise: a Satin block before one of them would be executed on rules the node's own schedule does not apply to it.
-  The check is for a reader that times the base forks from the file; the reference implementation leaves it to the node: it reads only the chain id and the Satin keys, schedules every base fork from genesis, and runs every Satin block on Karst's rules — the pre-block calls the node's schedule gates among them — whatever the file times Karst at.
+  The Satin keys do not time the forks Satin runs on: Optimism Karst and the Ethereum forks it includes, Osaka among them, are timed by the configuration's own keys for them, and a node must check their timing against `satinTime` both ways when it loads the configuration.
+  Each of those forks must be active by `satinTime`: every Satin block executes on Karst's rules, and a Satin block before one of them would be executed on rules the node's own schedule does not apply to it.
+  The reference implementation's schedule check refuses a schedule in which an Ethereum fork from Shanghai to Osaka or an Optimism fork from Regolith to Karst is not active at `satinTime`, so a node that runs that check on the schedule it builds from the file has this half.
+  Jovian, Karst and Osaka must not activate before `satinTime` either, since every earlier block executes on Rex6's rules, which build on Isthmus whatever the configuration times those forks at; their times in the configuration must equal `satinTime`, and a node must refuse a configuration that activates one of them earlier, a half the reference implementation does not check.
+  The reference implementation reads only the chain id and the Satin keys, schedules every base fork from genesis, and runs every Satin block on Karst's rules — the pre-block calls the node's schedule gates among them — whatever the file times Karst at.
 
 ## Safety and Compatibility
 
 Satin changes nothing about blocks under earlier specs: a node replaying history resolves each block's spec from its timestamp and applies that spec's rules.
 Satin is a restatement rather than a delta, so a Rex6 rule this page does not carry over — the compute-gas limit, the storage-gas formulas, the sandbox, the 98/100 forwarding, the cold first touch of preload-warm addresses — does not apply to Satin blocks.
 
-The six system contracts keep their Rex6 bytecode and ABI; the Satin deploy step refuses, rather than upgrades, any other code at their addresses.
+The six system contracts keep their Rex6 bytecode and ABI, but for the four errors `IKeylessDeploy` no longer declares; the Satin deploy step refuses, rather than upgrades, any other code at their addresses.
 A system-address transaction without the system shape is now executed as a user transaction instead of being refused; only the holder of the system key can send one.
 
 The per-transaction and block limits and the detention caps are protocol values: the chain configuration carries them as parameters of the Satin hardfork, so every node executing a chain holds its blocks to the same ones, and a configuration that activates Satin without them does not load.

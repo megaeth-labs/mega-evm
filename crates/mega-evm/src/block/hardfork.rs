@@ -21,6 +21,29 @@ use auto_impl::auto_impl;
 
 use crate::{MegaSpecId, ProtocolLimits};
 
+/// The Ethereum forks Satin runs on that a schedule activates by timestamp: every one from the
+/// first after the Merge up to Osaka.
+const SATIN_BASE_ETHEREUM_FORKS: [EthereumHardfork; 4] = [
+    EthereumHardfork::Shanghai,
+    EthereumHardfork::Cancun,
+    EthereumHardfork::Prague,
+    EthereumHardfork::Osaka,
+];
+
+/// The Optimism forks Satin runs on that a schedule activates by timestamp: every one from the
+/// first after Bedrock up to Karst.
+const SATIN_BASE_OP_FORKS: [OpHardfork; 9] = [
+    OpHardfork::Regolith,
+    OpHardfork::Canyon,
+    OpHardfork::Ecotone,
+    OpHardfork::Fjord,
+    OpHardfork::Granite,
+    OpHardfork::Holocene,
+    OpHardfork::Isthmus,
+    OpHardfork::Jovian,
+    OpHardfork::Karst,
+];
+
 hardfork! {
     /// `MegaETH` network upgrades that schedule a Satin-engine spec. It is expected to mix with
     /// `EthereumHardfork` and `OpHardfork`.
@@ -192,6 +215,12 @@ pub trait MegaHardforks: OpHardforks {
     /// - Every registered `MegaETH` fork activates by [`ForkCondition::Timestamp`] (or is
     ///   [`ForkCondition::Never`]). Resolution is timestamp-scoped, so a block-number or
     ///   total-difficulty condition would silently never activate the fork.
+    /// - Every fork Satin runs on that the schedule activates by timestamp — the Ethereum forks
+    ///   from Shanghai to Osaka and the Optimism forks from Regolith to Karst — is active at
+    ///   Satin's activation, so the engine and the rest of the node, which reads the same schedule,
+    ///   do not apply different rules to one block. The other half of that timing rule, that
+    ///   Jovian, Karst and Osaka do not activate before Satin, is the node's to check: before Satin
+    ///   the chain runs its pre-Satin engine, which this crate does not execute.
     /// - The parameters every scheduled fork requires are attached, and their values pass their
     ///   type's own checks ([`require_params`](Self::require_params)). Satin requires
     ///   [`SequencerRegistryConfig`](crate::system::SequencerRegistryConfig) so the registry can be
@@ -208,12 +237,54 @@ pub trait MegaHardforks: OpHardforks {
             }
         }
 
+        require_base_forks(self)?;
+
         // Required parameters, one `self.require_params::<P>()?` per params type.
         self.require_params::<crate::system::SequencerRegistryConfig>()?;
         self.require_params::<ProtocolLimits>()?;
 
         Ok(())
     }
+}
+
+/// Refuses a schedule that activates Satin at a timestamp at which a fork it runs on is not
+/// active.
+///
+/// Satin executes every block on Optimism Karst, whose Ethereum base is Osaka, so the forks up
+/// to Karst and Osaka must be active by the time Satin activates: otherwise the engine and the
+/// rest of the node, which reads the schedule, apply different rules to the same block. The
+/// forks checked are those a schedule activates by timestamp, the Ethereum forks from Shanghai
+/// to Osaka and the Optimism forks from Regolith to Karst, each read as block execution reads
+/// it: active at Satin's activation timestamp. A fork scheduled by block number or total
+/// difficulty instead, or not at all, is not active at any timestamp, and is refused. The forks
+/// up to the Merge, and Bedrock, are scheduled by block number or total difficulty, which a
+/// timestamp cannot be compared with, and every one of them precedes the first fork scheduled
+/// by timestamp; they are not checked. A schedule that does not activate Satin is not checked
+/// either.
+///
+/// This is half of the timing rule. The other half — that Jovian, Karst and Osaka do not
+/// activate before Satin, since the chain runs its pre-Satin engine on its pre-Satin base until
+/// then — is the node's to check: this engine does not execute those blocks.
+fn require_base_forks<H: MegaHardforks + ?Sized>(schedule: &H) -> Result<(), ScheduleError> {
+    let ForkCondition::Timestamp(satin_time) = schedule.mega_fork_activation(MegaHardfork::Satin)
+    else {
+        return Ok(());
+    };
+    let ethereum = SATIN_BASE_ETHEREUM_FORKS
+        .iter()
+        .map(|fork| (fork.name(), schedule.ethereum_fork_activation(*fork)));
+    let op =
+        SATIN_BASE_OP_FORKS.iter().map(|fork| (fork.name(), schedule.op_fork_activation(*fork)));
+    for (base, condition) in ethereum.chain(op) {
+        if !condition.active_at_timestamp(satin_time) {
+            return Err(ScheduleError::InactiveBaseFork {
+                fork: MegaHardfork::Satin,
+                activation: satin_time,
+                base,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// A schedule a chain cannot run, as [`MegaHardforks::validate_schedule`] reports it.
@@ -224,6 +295,15 @@ pub enum ScheduleError {
     NonTimestampActivation {
         /// The fork with the wrong condition.
         fork: MegaHardfork,
+    },
+    /// A fork a scheduled `MegaETH` fork runs on is not active when that fork activates.
+    InactiveBaseFork {
+        /// The scheduled fork.
+        fork: MegaHardfork,
+        /// The timestamp it activates at.
+        activation: BlockTimestamp,
+        /// The fork it runs on that is not active then, as [`Hardfork::name`] names it.
+        base: &'static str,
     },
     /// A scheduled fork requires parameters that the schedule does not carry.
     MissingParams {
@@ -248,6 +328,13 @@ impl fmt::Display for ScheduleError {
         match self {
             Self::NonTimestampActivation { fork } => {
                 write!(f, "hardfork {fork:?} must activate by timestamp, not block number or TTD")
+            }
+            Self::InactiveBaseFork { fork, activation, base } => {
+                write!(
+                    f,
+                    "hardfork {fork:?} activates at timestamp {activation}, where the {base} fork \
+                     it runs on is not active"
+                )
             }
             Self::MissingParams { fork, params } => {
                 write!(

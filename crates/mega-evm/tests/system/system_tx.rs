@@ -6,15 +6,15 @@ use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
     system::{
-        is_deposit_like_transaction, is_mega_system_transaction_with, IOracle, ISequencerRegistry,
-        MEGA_SYSTEM_ADDRESS, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH, ORACLE_CONTRACT_ADDRESS,
-        SEQUENCER_REGISTRY_ADDRESS,
+        is_mega_system_transaction_with, IOracle, ISequencerRegistry, MEGA_SYSTEM_ADDRESS,
+        MEGA_SYSTEM_TRANSACTION_SOURCE_HASH, ORACLE_CONTRACT_ADDRESS, SEQUENCER_REGISTRY_ADDRESS,
     },
     test_utils::{op_transaction, ErrorInjectingDatabase, GasInspector, MemoryDatabase},
     EvmTxRuntimeLimits, LimitUsage, MegaContext, MegaEvm, MegaHaltReason, MegaTransaction,
     MegaTransactionOutcome,
 };
 use mega_system_contracts::sequencer_registry::storage_slots::CURRENT_SYSTEM_ADDRESS;
+use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 use revm::{
     bytecode::opcode::{SLOAD, STOP},
     context::{
@@ -155,7 +155,6 @@ fn test_a_system_transaction_is_promoted_to_a_deposit() {
     let mut evm = MegaEvm::new(chain_context(chain_db()));
     let tx = system_tx(0, B256::with_last_byte(0x11));
     assert!(is_mega_system_transaction_with(&tx, MEGA_SYSTEM_ADDRESS));
-    assert!(is_deposit_like_transaction(&tx, MEGA_SYSTEM_ADDRESS));
 
     assert!(evm.transact_raw(tx).expect("the transaction is valid").result.is_success());
     assert_eq!(
@@ -380,7 +379,7 @@ fn test_a_user_deposit_is_not_a_system_transaction() {
     let mut tx = legacy_tx(CALLER, TxKind::Call(OFF_WHITELIST), Bytes::new(), 0);
     tx.0.deposit.source_hash = B256::repeat_byte(0x11);
 
-    assert!(is_deposit_like_transaction(&tx, MEGA_SYSTEM_ADDRESS));
+    assert_eq!(revm::context::Transaction::tx_type(&tx), DEPOSIT_TRANSACTION_TYPE);
     assert!(!is_mega_system_transaction_with(&tx, MEGA_SYSTEM_ADDRESS));
     let outcome = run_outcome(db, tx);
     assert!(outcome.result.is_success(), "{:?}", outcome.result);

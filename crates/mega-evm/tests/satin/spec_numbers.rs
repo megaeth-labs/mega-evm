@@ -36,7 +36,8 @@ use mega_evm::{
     satin_gas_params, satin_gas_params_at, satin_precompiles,
     system::{
         keyless::{KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_OVERHEAD_GAS},
-        CREATE2_FACTORY_ADDRESS, CREATE2_FACTORY_NONCE, SLOT_NUM_ACCESS_TYPE,
+        VolatileDataAccessType, CREATE2_FACTORY_ADDRESS, CREATE2_FACTORY_NONCE,
+        SLOT_NUM_ACCESS_TYPE,
     },
     LimitKind, ProtocolLimits, SatinPrices, VolatileDataAccess, ACCESS_LIST_ADDRESS_SIZE,
     ACCESS_LIST_SLOT_SIZE, AUTHORIZATION_SIZE, FRAME_DATA_SHARE_DENOMINATOR,
@@ -386,8 +387,8 @@ fn detention_and_stops(doc: &str) {
         access,
         &format!(
             "Values {} (`Difficulty`) and {} (`BlobHash`) are not produced.",
-            VolatileDataAccess::DIFFICULTY.as_u8(),
-            VolatileDataAccess::BLOB_HASH.as_u8()
+            VolatileDataAccessType::Difficulty as u8,
+            VolatileDataAccessType::BlobHash as u8
         ),
     );
 }

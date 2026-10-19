@@ -115,11 +115,15 @@ const ARBITRARY_PRECISION_NUMBER: &str = "$serde_json::private::Number";
 ///   here, so every reader reads it the same.
 ///
 /// The parser reads no other fork's key. Satin runs on the OP Karst fork and the Ethereum forks
-/// Karst includes, Osaka among them, and [`hardforks`](Self::hardforks) schedules those at genesis;
-/// a node, whose own schedule times those forks, must check when it loads the configuration that
-/// every one of them is active at `satinTime`, and refuse it otherwise. The engine executes every
-/// Satin block on Karst, so a configuration that activates Satin before one of them has the node
-/// and the engine apply different rules to the same block.
+/// Karst includes, Osaka among them, and [`hardforks`](Self::hardforks) schedules those at genesis.
+/// A node's own schedule times those forks from the file, and the timing must hold both ways.
+/// Every one of them must be active at `satinTime`: the engine executes every Satin block on
+/// Karst, so a configuration that activates Satin before one of them has the node and the engine
+/// apply different rules to the same block, and
+/// [`validate_schedule`](MegaHardforks::validate_schedule) refuses such a schedule. Jovian, Karst
+/// and Osaka must not activate before `satinTime` either, since the chain runs its pre-Satin
+/// engine until then; that half is the node's to check, as this engine does not execute those
+/// blocks.
 ///
 /// A flat key is one entry of the object, so a checker that freezes a configuration key by key
 /// freezes each parameter on its own and names it when it changes. It does not stop a key being
@@ -200,8 +204,10 @@ impl SatinChainConfig {
     /// Satin at [`activation_time`](Self::activation_time), and both params types attached.
     ///
     /// The base forks, every OP and Ethereum fork up to Karst, are at genesis here whatever the
-    /// genesis file times them at: a node checks the file's own times against `satinTime` (see
-    /// the [format](Self)).
+    /// genesis file times them at, so the schedule passes the base-fork check of
+    /// [`validate_schedule`](MegaHardforks::validate_schedule) whenever Satin activates: a node
+    /// checks the file's own times against `satinTime` on its own schedule (see the
+    /// [format](Self)).
     ///
     /// # Errors
     ///

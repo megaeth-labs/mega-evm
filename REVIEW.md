@@ -184,7 +184,7 @@ These checks guard every change to the Satin engine.
 
 ## Dev tools and test infrastructure
 
-Applies to `bin/mega-evme`, `bin/mega-t8n`, `crates/mega-state-test`, `crates/state-test`, test utilities and benches — not consensus code, but `mega-state-test` is a published library and tool output feeds fixtures and indexers. Default severity cap `[Minor]`; raise only when the defect reaches that published API or corrupts a downstream fixture.
+Applies to `bin/mega-evme`, `crates/mega-state-test`, `crates/state-test`, test utilities and benches — not consensus code, but `mega-state-test` is a published library and tool output feeds fixtures and indexers. Default severity cap `[Minor]`; raise only when the defect reaches that published API or corrupts a downstream fixture.
 
 - An input-handling path (fixture, CLI flag, file path, RPC response) must fail with a structured error instead of aborting the process: a panic, unchecked index or overflow on **untrusted** input is the defect, as is `process::exit` from a library path — an idiomatic `unwrap` on a known-good value is not. A batch loop records a per-item rejection rather than aborting and dropping the rest.
 - A computed output field — state root, receipt field, contract address, log index, provenance — must carry its real value or an explicit error; substituting a zero, `None`, `default()` or a silently clamped bound reports success for a result the tool never computed. Serialized output must be deterministically ordered, and an advertised flag must not be a stub returning `Ok(())`.

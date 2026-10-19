@@ -6,8 +6,8 @@ This file provides guidance to AI agents (e.g., claude code, codex, cursor, etc.
 
 MegaEVM (mega-evm) — a specialized EVM implementation for MegaETH, built on **revm** and **op-revm** by customizing the hooks revm exposes through its traits.
 
-This branch (`satin`) builds **Satin**, the new engine: a single spec on the MegaETH fork of revm 40.0.3 and the MegaETH fork of op-revm 20.0.0.
-Today's `main` is the legacy engine; Satin is the only active spec.
+This branch (`satin`) builds **Satin**, the new engine's first spec, on the MegaETH fork of revm 40.0.3 and the MegaETH fork of op-revm 20.0.0.
+Today's `main` is the legacy engine; the specs after Satin are added to this engine (see Spec System below).
 The legacy engine (specs `Equivalence` through `Rex6`, the 1.x crate line on crates.io revm 27) is frozen and is not edited here.
 Satin follows Rex6 on the spec ladder and is the one unstable spec.
 
@@ -88,14 +88,10 @@ Git submodules are required — clone with `--recursive` or run `git submodule u
 | `mega-state-test`       | `crates/mega-state-test`  | yes    | Execution-spec runner on Satin: the state-test gate and report, the blockchain-test gate |
 | `state-test`            | `crates/state-test`       | yes    | The runner's CLI                                                                         |
 | `mega-evme`             | `bin/mega-evme`           | yes    | EVM execution CLI: Satin in-tree, legacy specs on the released 1.7.1 CLI                 |
-| `mega-t8n`              | `bin/mega-t8n`            | no     | State transition (t8n) tool; rejoins when ported to Satin                                |
 
 `mega-evme` runs a command on the engine its spec names: `Satin` on the in-tree sources, a spec from `Equivalence` to `Rex6` on the released `mega-evme` 1.7.1 and `mega-evm` 1.7.1, which it links under the aliases `mega-evme-legacy` and `mega-evm-legacy` (its `legacy` feature, on by default).
 Because it links a package of its own name, select it by manifest path, not with `-p`: `cargo test --manifest-path bin/mega-evme/Cargo.toml`.
 The legacy line's versions are pinned to the 1.7.1 release's lockfile and guarded by `bin/mega-evme/tests/legacy_line.rs`, the precompiles' backends and the encodings it shares with the engine included; the few the engine's alloy 2 line holds above the release are pinned where they are.
-
-`mega-t8n` still targets the legacy engine.
-It is outside `[workspace] members`, so no workspace command builds it; do not edit its sources until it is ported to Satin.
 
 ### Dependencies on the forks
 
@@ -114,14 +110,16 @@ The root `Cargo.toml` pins `revm = "=40.0.3"` and redirects all twelve revm crat
 
 ### Spec System (`MegaSpecId`)
 
-`MegaSpecId` has a single rung, `SATIN`, running on `OpSpecId::KARST` (Ethereum `OSAKA`).
-`MegaHardfork` has the single fork `Satin`, which activates `SATIN`.
+`MegaSpecId` has one rung so far, `SATIN`, running on `OpSpecId::KARST` (Ethereum `OSAKA`).
+`MegaHardfork` has one fork so far, `Satin`, which activates `SATIN`.
 
 - `SATIN` is the unstable spec under active development: it has no activation timestamp yet (`block/chain.rs` lists the two chains with the Satin timestamp unset), and its behavior may change until it is sealed.
 - Display and `FromStr` use `"Satin"`; serde uses the variant name `"SATIN"`.
 - The legacy spec names (`Equivalence` … `Rex6`) parse to `ParseMegaSpecError::Legacy`; they are never mapped to Satin.
-- There are no spec gates: a single-spec engine has nothing to gate.
-  The spec that follows Satin introduces the first `is_enabled`-style gate.
+- There are no spec gates yet: with one rung there is nothing to gate.
+- The next spec is added as the legacy engine added Rex1 (#115, eleven files): a `MegaSpecId` variant after `SATIN` with its name and its `into_op_spec` arm; a `MegaHardfork` variant that activates it, with any params type it carries registered in `validate_schedule`; an `is_enabled`-style ordering on `MegaSpecId` and a gate at every site whose behavior changes; the constants it changes, keyed by spec; and its upgrade page under `docs/spec/upgrades/`.
+  From then on Satin's behavior is fixed: a gate keeps Satin's path as it is.
+  The extension points it builds on are already in place: the spec argument the factory and the context take, the fork's params types, and `into_op_spec`.
 
 ### Core Source Layout (`crates/mega-evm/src/`)
 
@@ -267,7 +265,8 @@ The root `Cargo.toml` pins `revm = "=40.0.3"` and redirects all twelve revm crat
   The bump's write record and its history go back with it, unless the creation succeeded and moved value out of the signer, whose account then keeps a write of its own.
   A signer whose own code spends a nonce in the constructor that survives it keeps every bump, ends above 1, and every later deployment of it is refused `SignerNonceTooHigh`; on a default configuration only a delegated signer's code can do that, with a `CREATE` or `CREATE2`, successful or not.
   The nonce is never moved back under a later bump, because a later bump may stand for an account.
-  `ParentBudgetExceeded`, `InvalidTransaction`, `InsufficientComputeGas` and `InternalError` stay in the ABI with no producer: the sandbox's preflight and validation are gone, the overhead is regular gas a call that cannot pay runs out of, and a failed read or SALT lookup fails the transaction with its cause.
+  `ParentBudgetExceeded`, `InvalidTransaction`, `InsufficientComputeGas` and `InternalError` are gone from the Rust enum and from `IKeylessDeploy.sol`, which changes no deployed byte: the sandbox's preflight and validation are gone, the overhead is regular gas a call that cannot pay runs out of, and a failed read or SALT lookup fails the transaction with its cause.
+  `tests/system/keyless/interface.rs` holds the generated binding's errors to the set `docs/spec/system-contracts/keyless-deploy.md` lists for Satin.
 - The system address may send transactions the protocol pays nothing for (`system/tx.rs`): a legacy transaction from it to a whitelisted contract is validated — the chain id, the nonce, EIP-3607 — and promoted to a deposit by the engine as it runs it (the block decides on the legacy envelope: see the block executor above), and the account a deposit-like transaction creates for its caller is charged the account-creation state gas once.
   Which address that is, the `SequencerRegistry` says, and the transaction reads it itself (`system::is_live_system_transaction`, called first thing in `MegaHandler::validate_env`): only a transaction of the system shape — a legacy call to a whitelisted contract, tested on its own fields — reads `_currentSystemAddress` from the journal, cold and without the registry's code, and compares it with its caller.
   A transaction of any other shape reads nothing and is never a system-address transaction, whoever sent it: one from the system address is an ordinary transaction, validated and charged as a user's is, where the legacy engine refused it.
@@ -458,8 +457,6 @@ Every later mechanism plugs into these; a change to one comes back to this layer
 - `fuzz/` — randomized tests: properties the engine must hold on any input, and the neutral differential against op-revm and revm's mainnet EVM (see Randomized tests below).
 - `shared/` — no target: `snapshot.rs` holds `assert_sorted_json_snapshot!`, which every target includes with `#[path = "../shared/snapshot.rs"] mod snapshot;`.
   It has no `main.rs`, so Cargo builds nothing there; the snapshot files live in `snapshots/` beside the file that asserts.
-- `_pending/` — no test any more: its `README.md` records where each legacy test the test inventory kept went, ported into one of the targets above or retired, and why.
-  It has no `main.rs`, so Cargo builds nothing there.
 - Unit tests live next to the code in `#[cfg(test)] mod tests`.
 
 ### Randomized tests (`crates/mega-evm/tests/fuzz/`)
@@ -581,11 +578,15 @@ When the agent is requested to implement a new feature or bug fix, it should con
 
 ## Caveats for Agents
 
-- **Satin is the only active spec; the legacy engine is frozen.**
-  Do not add legacy specs, alias rungs or spec gates to this crate, and do not port a legacy mechanism the legacy test inventory retired.
+- **Satin is the unstable spec; the legacy engine is frozen.**
+  Do not add legacy specs or alias rungs to this crate, and do not port a legacy mechanism the legacy test inventory retired.
+  Spec gates come with the next spec (see Spec System), not before.
   Behavior of the legacy specs is changed only on the legacy line, never here.
 - **Keep each change in the module that owns it.**
   The module table says where each mechanism lives; a change that needs another module's interface extends that module rather than re-implementing it in its own.
+- **Export from the crate root by name.**
+  `lib.rs` lists every item of the public surface explicitly, and the few `pub(crate)` items the modules share through the root; there are no glob exports and no short aliases.
+  A new `pub` item is added to that list or made `pub(crate)`: the `unreachable_pub` lint flags one that is neither.
 - **Always test logic changes.**
   Any logic change or modification to mega-evm should be equipped with tests if there is no specific reason of not adding tests.
   The agent should always consider accompanying tests or suggest to add additional tests.
@@ -633,6 +634,8 @@ When the agent is requested to implement a new feature or bug fix, it should con
   The fork-requires-params rule is registered in `MegaHardforks::validate_schedule` too — one `require_params::<P>()` per params type — so a schedule that activates the fork without its params, or with params their `validate()` refuses, is rejected at load time.
   A fork may carry several params types (Satin carries `SequencerRegistryConfig` and `ProtocolLimits`): a schedule keeps one value per type, and `MegaHardforks::fork_params_any` answers by fork and `TypeId`.
   A field added to Satin's params needs its flat genesis key: a test of `block/genesis.rs` fails until `SatinChainConfig` reads and writes it.
+  `validate_schedule` also refuses a schedule in which a fork Satin runs on and the schedule activates by timestamp (Ethereum Shanghai to Osaka, Optimism Regolith to Karst) is not active at Satin's activation (`ScheduleError::InactiveBaseFork`); the engine's own schedules put those forks at genesis and pass.
+  That Jovian, Karst and Osaka do not activate before Satin is the node's to check, not the engine's.
 - **Keep the workspace on its declared minimum toolchain (1.94).**
   CI's msrv job checks the workspace on 1.94.0, every feature on, with the lock as it is.
   A dependency whose newer releases declare a newer compiler (alloy 2.2 and later declare 1.94.1) stays on the newest release the declared version builds: `.cargo/config.toml` sets the resolver's `incompatible-rust-versions = "fallback"`, so a `cargo update` run in the repository picks it.
@@ -641,7 +644,7 @@ When the agent is requested to implement a new feature or bug fix, it should con
   On an idempotent no-change path (the contract is already deployed with the correct code hash) it returns `EvmState` that carries the observed account as a read-only entry: neither `touched` nor `created`.
   Returning nothing there is a bug — the account disappears from the stateless witness read set.
   On a real-change path it includes every account and storage slot it touched; present with different code is an error, not an overwrite.
-  `system/deploy.rs` holds the deploys, `block/eips.rs` the EIP-2935 and EIP-4788 calls and the post-block balance increments, `system/sequencer_registry.rs` the registry's due-change read and its `applyPendingChanges()` call, `block/l1_block_info.rs` the L1 block info read, and the block executor is what commits them.
+  `system/deploy.rs` holds the deploys, `block/eips.rs` the EIP-2935 and EIP-4788 calls, `system/sequencer_registry.rs` the registry's due-change read and its `applyPendingChanges()` call, `block/l1_block_info.rs` the L1 block info read, and the block executor is what commits them.
 - **Respect `no_std` in `mega-evm` crate.**
   Do not use `std::` directly.
   Follow the existing pattern: `#[cfg(not(feature = "std"))] use alloc as std;` then `use std::{vec::Vec, ...};`.
