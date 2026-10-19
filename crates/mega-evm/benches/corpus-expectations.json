@@ -1,0 +1,131 @@
+[
+  {
+    "scenario": "sstore_set_spills",
+    "txs": [
+      {
+        "outcome": "success",
+        "gas_used": 382917
+      }
+    ]
+  },
+  {
+    "scenario": "create_success",
+    "txs": [
+      {
+        "outcome": "success",
+        "gas_used": 363381
+      }
+    ]
+  },
+  {
+    "scenario": "nested_call_revert_with_spill",
+    "txs": [
+      {
+        "outcome": "success",
+        "gas_used": 183060
+      }
+    ]
+  },
+  {
+    "scenario": "two_txs_sequential",
+    "txs": [
+      {
+        "outcome": "success",
+        "gas_used": 382917
+      },
+      {
+        "outcome": "success",
+        "gas_used": 62117
+      }
+    ]
+  },
+  {
+    "scenario": "system_call",
+    "txs": [
+      {
+        "outcome": "success",
+        "gas_used": 220051
+      }
+    ]
+  },
+  {
+    "scenario": "test_calldata_floor_with_sstore_fork_Amsterdam_state_test",
+    "txs": [
+      {
+        "outcome": "success",
+        "gas_used": 182450
+      }
+    ]
+  },
+  {
+    "scenario": "test_nested_state_gas_refund_consumed_at_depth_fork_Amsterdam_state_test_consume_deepest_depth_10_sstore_restoration",
+    "txs": [
+      {
+        "outcome": "success",
+        "gas_used": 305844
+      }
+    ]
+  },
+  {
+    "scenario": "eip7702_delegate_new_authority",
+    "txs": [
+      {
+        "outcome": "success",
+        "gas_used": 520385
+      }
+    ]
+  },
+  {
+    "scenario": "access_list_warm_slots_and_account",
+    "txs": [
+      {
+        "outcome": "success",
+        "gas_used": 181749
+      }
+    ]
+  },
+  {
+    "scenario": "selfdestruct_created_in_same_tx_to_existing_account",
+    "txs": [
+      {
+        "outcome": "success",
+        "gas_used": 372085
+      }
+    ]
+  },
+  {
+    "scenario": "logs_all_topic_counts",
+    "txs": [
+      {
+        "outcome": "success",
+        "gas_used": 98665
+      }
+    ]
+  },
+  {
+    "scenario": "precompile_ecrecover",
+    "txs": [
+      {
+        "outcome": "success",
+        "gas_used": 399062
+      },
+      {
+        "outcome": "success",
+        "gas_used": 80157
+      }
+    ]
+  },
+  {
+    "scenario": "precompile_modexp",
+    "txs": [
+      {
+        "outcome": "success",
+        "gas_used": 392802
+      },
+      {
+        "outcome": "success",
+        "gas_used": 90338
+      }
+    ]
+  }
+]
