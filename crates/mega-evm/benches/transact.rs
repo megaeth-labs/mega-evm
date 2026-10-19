@@ -14,13 +14,11 @@
 //!   history, priced once before the first frame runs.
 //! - `intercepted_calls`: 200 `STATICCALL`s to `MegaAccessControl`'s
 //!   `isVolatileDataAccessDisabled`, which the interceptor answers: the dispatch and the synthetic
-//!   result, 200 times. The caller returns the AND of the success bits.
+//!   result, 200 times.
 //! - `system_address_misses`: the same 200 calls with a selector the contract does not intercept,
-//!   so each pays the dispatch's address match and selector peek and then runs the bytecode. Each
-//!   call reverts, and the caller returns that.
+//!   so each pays the dispatch's address match and selector peek and then runs the bytecode.
 //! - `remaining_compute_gas`: 200 `STATICCALL`s to `MegaLimitControl`'s `remainingComputeGas`,
-//!   which the interceptor answers from the caller's gas and gas detention's allowance. The caller
-//!   returns the AND of the success bits.
+//!   which the interceptor answers from the caller's gas and gas detention's allowance.
 //! - `oracle_reads`: a transaction to the Oracle, whose code loads 200 of its slots: each load
 //!   reads the database through the journal, asks the oracle service, finds nothing and is priced
 //!   cold, and gas detention marks and commits it. op-revm reads the same 200 slots from the
@@ -99,7 +97,7 @@ use mega_evm::{
 use op_revm::{L1BlockInfo, OpEvm, OpSpecId, OpTransaction};
 use revm::{
     bytecode::opcode::{
-        ADDRESS, BALANCE, CALL, CALLDATACOPY, CALLDATALOAD, CODECOPY, DUP1, EXP, GAS, ISZERO,
+        ADD, ADDRESS, BALANCE, CALL, CALLDATACOPY, CALLDATALOAD, CODECOPY, DUP1, EXP, GAS, ISZERO,
         JUMPDEST, JUMPI, KECCAK256, LOG0, LOG2, MCOPY, MSTORE, NUMBER, POP, PUSH0, PUSH1,
         RETURNDATACOPY, SLOAD, SSTORE, STATICCALL, STOP, SUB, SWAP1, TIMESTAMP,
     },
@@ -123,6 +121,11 @@ const VOLATILE: Address = address!("0x000000000000000000000000000000000010000b")
 const HASHER: Address = address!("0x000000000000000000000000000000000010000c");
 const VALUE_CALLER: Address = address!("0x000000000000000000000000000000000010000d");
 const QUERIER: Address = address!("0x000000000000000000000000000000000010000e");
+/// The callers of the three system-call workloads again, summing the success bits of their calls
+/// where the measured ones discard them. Run once by the checks, never measured.
+const INTERCEPTED_COUNT: Address = address!("0x0000000000000000000000000000000000100010");
+const MISSING_COUNT: Address = address!("0x0000000000000000000000000000000000100011");
+const QUERIER_COUNT: Address = address!("0x0000000000000000000000000000000000100012");
 
 /// The block beneficiary of the benchmark's block, `BlockEnv`'s default.
 const BENEFICIARY: Address = Address::ZERO;
@@ -323,10 +326,22 @@ fn salt_context(
         .with_chain(zero_fee_l1_block_info())
 }
 
-/// `STATICCALL`s the system contract at `target` with `selector` `REPEAT` times and returns the
-/// AND of the success bits.
+/// `STATICCALL`s the system contract at `target` with `selector` `REPEAT` times, discarding the
+/// answers.
 fn system_caller_code(target: Address, selector: [u8; 4]) -> Bytes {
-    let mut code = BytecodeBuilder::default().mstore(0x0, selector).push_number(1_u64);
+    system_calls(target, selector, false)
+}
+
+/// The same calls, returning how many of them succeeded.
+fn system_caller_count_code(target: Address, selector: [u8; 4]) -> Bytes {
+    system_calls(target, selector, true)
+}
+
+fn system_calls(target: Address, selector: [u8; 4], count: bool) -> Bytes {
+    let mut code = BytecodeBuilder::default().mstore(0x0, selector);
+    if count {
+        code = code.push_number(0_u64);
+    }
     for _ in 0..REPEAT {
         code = code
             .push_number(0_u64) // retSize
@@ -336,9 +351,13 @@ fn system_caller_code(target: Address, selector: [u8; 4]) -> Bytes {
             .push_address(target)
             .push_number(100_000_u64)
             .append(STATICCALL)
-            .append(mega_evm::revm::bytecode::opcode::AND);
+            .append(if count { ADD } else { POP });
     }
-    code.return_top().build()
+    if count {
+        code.return_top().build()
+    } else {
+        code.stop().build()
+    }
 }
 
 fn call_tx(to: Address, data: Bytes, gas_limit: u64) -> OpTransaction<TxEnv> {
@@ -387,6 +406,18 @@ fn bench_transact(c: &mut Criterion) {
         .account_code(INTERCEPTED, system_caller_code(ACCESS_CONTROL_ADDRESS, IS_DISABLED))
         .account_code(MISSING, system_caller_code(ACCESS_CONTROL_ADDRESS, UNKNOWN_SELECTOR))
         .account_code(QUERIER, system_caller_code(LIMIT_CONTROL_ADDRESS, REMAINING_COMPUTE_GAS))
+        .account_code(
+            INTERCEPTED_COUNT,
+            system_caller_count_code(ACCESS_CONTROL_ADDRESS, IS_DISABLED),
+        )
+        .account_code(
+            MISSING_COUNT,
+            system_caller_count_code(ACCESS_CONTROL_ADDRESS, UNKNOWN_SELECTOR),
+        )
+        .account_code(
+            QUERIER_COUNT,
+            system_caller_count_code(LIMIT_CONTROL_ADDRESS, REMAINING_COMPUTE_GAS),
+        )
         .account_code(LIMITED, limited_code())
         .account_balance(VALUE_CALLER, U256::from(REPEAT))
         .account_code(VALUE_CALLER, value_caller_code())
@@ -475,16 +506,25 @@ fn bench_transact(c: &mut Criterion) {
                     "every transfer log was counted, which is what this arm measures",
                 );
             }
-            "intercepted_calls" | "remaining_compute_gas" => assert_eq!(
-                satin.result.output().cloned().unwrap_or_default(),
-                Bytes::copy_from_slice(&U256::from(1).to_be_bytes::<32>()),
-                "{workload}: every call succeeded",
-            ),
-            "system_address_misses" => assert_eq!(
-                satin.result.output().cloned().unwrap_or_default(),
-                Bytes::from_static(&[0; 32]),
-                "system_address_misses: every unknown selector reverted",
-            ),
+            "intercepted_calls" | "system_address_misses" | "remaining_compute_gas" => {
+                // The measured callers discard the answers; the same calls, summed, show what
+                // they answered: every interceptor's answer succeeds, and every call that falls
+                // through to the contract's own code reverts.
+                let counter = match workload {
+                    "intercepted_calls" => INTERCEPTED_COUNT,
+                    "system_address_misses" => MISSING_COUNT,
+                    _ => QUERIER_COUNT,
+                };
+                let succeeded = if workload == "system_address_misses" { 0 } else { REPEAT };
+                let counted = MegaEvm::new(mega_context(db.clone()))
+                    .execute_transaction(OpTx(call_tx(counter, Bytes::new(), 30_000_000)))
+                    .unwrap();
+                assert_eq!(
+                    counted.result.output().cloned().unwrap_or_default(),
+                    Bytes::copy_from_slice(&U256::from(succeeded).to_be_bytes::<32>()),
+                    "{workload}: {succeeded} of the {REPEAT} calls succeed",
+                );
+            }
             _ => {}
         }
         group.bench_function(format!("{workload}/satin"), |b| {
