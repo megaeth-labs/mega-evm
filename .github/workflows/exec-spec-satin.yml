@@ -89,13 +89,27 @@ jobs:
             echo "run=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # The paths the push trigger filters on; the two lists stay equal. A rename lists both of
-          # its paths, so a file moved out of a covered path counts.
-          covered='^(Cargo\.lock|Cargo\.toml|rust-toolchain\.toml|\.github/workflows/exec-spec-satin\.yml)$|^crates/(mega-evm|mega-state-test|state-test|system-contracts)/'
-          if git diff --name-only --no-renames 'HEAD^1' HEAD | grep -qE "$covered"; then
-            run=true
-          else
+          # The paths the push trigger filters on; the two lists stay equal.
+          # Exit 0: nothing covered changed. Exit 1: a covered path changed. Any other exit fails
+          # the step. `--no-renames` counts a file moved out of a covered path as a deletion there.
+          if git diff --quiet --no-renames 'HEAD^1' HEAD -- \
+            Cargo.lock \
+            Cargo.toml \
+            rust-toolchain.toml \
+            'crates/mega-evm/**' \
+            'crates/mega-state-test/**' \
+            'crates/state-test/**' \
+            'crates/system-contracts/**' \
+            .github/workflows/exec-spec-satin.yml
+          then
             run=false
+          else
+            status=$?
+            if [ "$status" -ne 1 ]; then
+              echo "::error::git diff exited $status" >&2
+              exit "$status"
+            fi
+            run=true
           fi
           echo "the gate runs: $run"
           echo "run=$run" >> "$GITHUB_OUTPUT"

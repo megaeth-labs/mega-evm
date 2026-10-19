@@ -105,6 +105,87 @@ fn test_an_out_of_gas_before_the_first_frame_burns_the_whole_gas_limit() {
     assert_eq!(outcome.usage.write_records, 0, "{rendered}");
 }
 
+/// The same out-of-gas, with a non-zero operator fee scalar and constant.
+///
+/// The fee is `gas × scalar × 100 + constant` on the gas the receipt counts, less any reservoir.
+/// Handing the first frame's record history back a second time leaves that gas in the reservoir,
+/// and the fee is then computed on less than the gas the halt burned. An empty envelope pays no
+/// operator fee whatever the parameters, so the transaction carries one byte that is not a deposit.
+/// The recipient account is created empty: the frame never runs, so the value does not move.
+#[test]
+fn test_an_out_of_gas_before_the_first_frame_pays_the_operator_fee_on_the_whole_gas_limit() {
+    if runs_at_measurement_prices() {
+        return;
+    }
+    use alloy_primitives::{Bytes, U256};
+    use op_revm::constants::{OPERATOR_FEE_JOVIAN_MULTIPLIER, OPERATOR_FEE_RECIPIENT};
+
+    const SCALAR: u64 = 2;
+    const CONSTANT: u64 = 50;
+
+    let case = Case {
+        world: plain_world(),
+        tx: Tx {
+            shape: Shape::Call { to: Who::Fresh, data_len: 0, access_list: vec![] },
+            value: Value::One,
+            gas: GasTier::Tiny,
+            price: Price::Free,
+            nonce_ok: true,
+        },
+        main: stop(),
+        a: stop(),
+        b: stop(),
+    };
+    let mut evm = case.evm();
+    evm.ctx_mut().modify_chain(|chain| {
+        // A block number the info does not name makes op-revm load the info from the database,
+        // which has no scalars, and the parameters above would not be the ones the fee uses.
+        chain.l2_block = Some(case.block().number);
+        chain.operator_fee_scalar = Some(U256::from(SCALAR));
+        chain.operator_fee_constant = Some(U256::from(CONSTANT));
+    });
+    let mut tx = case.transaction();
+    tx.0.enveloped_tx = Some(Bytes::from_static(&[0x01]));
+
+    let execution = Case::execute_on(&mut evm, tx);
+    let outcome = execution.as_ref().expect("the transaction is valid");
+    let rendered = render(&execution);
+    assert!(outcome.result.is_halt(), "{rendered}");
+    let gas = outcome.result.gas();
+    let gas_limit = GasTier::Tiny.limit();
+    assert_eq!(gas.total_gas_spent(), gas_limit, "the whole gas limit burns\n{rendered}");
+    assert_eq!(gas.reservoir_remaining(), 0, "nothing comes back from a reservoir\n{rendered}");
+    assert_eq!(outcome.gas.gas_used, gas_limit, "{rendered}");
+    let body = mega_evm::transaction_body_bytes(&case.transaction());
+    assert_eq!(outcome.gas.history_bytes, body, "the body alone is kept\n{rendered}");
+    assert_eq!(
+        outcome.gas.history,
+        mega_evm::history_gas(body).expect("the body has a price"),
+        "the history ledger reads the body\n{rendered}"
+    );
+    assert_eq!(outcome.usage.write_records, 0, "{rendered}");
+
+    let fee =
+        U256::from(gas_limit) * U256::from(SCALAR) * U256::from(OPERATOR_FEE_JOVIAN_MULTIPLIER) +
+            U256::from(CONSTANT);
+    let caller = case.tx.sender();
+    assert_eq!(
+        outcome.state[&caller].info.balance,
+        case.world.caller.balance.wei() - fee,
+        "the sender pays the operator fee on the whole gas limit, and the value does not move\n{rendered}"
+    );
+    assert_eq!(
+        outcome.state[&OPERATOR_FEE_RECIPIENT].info.balance, fee,
+        "the operator fee recipient is paid that fee\n{rendered}"
+    );
+    let fresh = outcome.state.get(&Who::Fresh.address()).expect("the recipient account is created");
+    assert_eq!(
+        fresh.info.balance,
+        U256::ZERO,
+        "the recipient is created empty: the frame never runs, so the value does not move\n{rendered}"
+    );
+}
+
 /// A system deposit, which Regolith refuses, with a body over the data-size limit: op-revm
 /// answers the refusal with a failed-deposit halt, and the outcome reports the halt and no stop,
 /// as an out-of-gas before the first frame does; the body is what the deposit kept.

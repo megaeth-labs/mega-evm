@@ -291,5 +291,33 @@ fn test_property_a_keyless_deployment_follows_its_rules() {
         }
         Ok(())
     });
-    print_tally("keyless_deployment_follows_its_rules", tally.into_inner().unwrap());
+    let tally = tally.into_inner().unwrap();
+    print_tally("keyless_deployment_follows_its_rules", tally.iter().map(|(k, n)| (k, *n)));
+    // A bounded run reaches every class below. The signer's own code spending a nonce needs a
+    // delegated signer whose code bumps a nonce, which these cases do not draw, so that class is
+    // checked when a case reaches it and is not required here.
+    for class in [
+        "refused NoEtherTransfer",
+        "refused MalformedEncoding",
+        "refused NotContractCreation",
+        "refused NotPreEIP155",
+        "refused NonZeroTxNonce",
+        "refused InitCodeTooLarge",
+        "refused GasLimitTooLow",
+        "refused InvalidSignature",
+        "refused SignerNonceTooHigh",
+        "refused SignerHasCode",
+        "refused ContractAlreadyExists",
+        "refused InsufficientBalance",
+        "refused MegaLimitExceeded",
+        "deployed",
+        "the creation fails: ExecutionReverted",
+        "the creation fails: ExecutionHalted",
+        "the creation fails: EmptyCodeDeployed",
+        "  the creation's bump is taken back from nonce 1",
+        "  init code at the initcode size limit started its creation",
+    ] {
+        let hits = tally.get(class).copied().unwrap_or(0);
+        assert!(hits > 0, "{class} was never reached\n{tally:#?}");
+    }
 }

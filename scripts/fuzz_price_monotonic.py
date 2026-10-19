@@ -13,7 +13,8 @@ the cost per history byte rises; its history bytes must be the same, since they 
 the path differs, a dearer byte may have stopped the transaction sooner, and nothing is implied.
 
 Usage: fuzz_price_monotonic.py <record at the lower prices> <record at the higher prices>
-Exits 1 on the first violation, or when the two records do not line up.
+Exits 1 on the first violation, when the two records do not line up, or when no case was
+on the same path at both prices.
 """
 import sys
 
@@ -64,6 +65,8 @@ def main():
             sys.exit(f"case {index}: history gas fell from {a['history']} to {b['history']} as the cost per history byte rose")
         if a["history_bytes"] != b["history_bytes"]:
             sys.exit(f"case {index}: the history bytes moved from {a['history_bytes']} to {b['history_bytes']} on the same path")
+    if same_path == 0:
+        sys.exit(f"{len(low)} cases, none on the same path at both prices")
     print(f"{len(low)} cases, {same_path} on the same path at both prices: state and history gas are monotone")
 
 
