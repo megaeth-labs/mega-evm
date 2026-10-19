@@ -434,9 +434,9 @@ where
     /// The block is held to the protocol's data-size budget, lowered to `ctx`'s building policy
     /// where that is lower.
     ///
-    /// The block's gas limit comes from the block environment, whatever `ctx` carries: it is the
-    /// number consensus holds the block to, and it is also the budget the data-availability
-    /// footprint of the block's transactions is held to.
+    /// The block's gas limit comes from the block environment, the executor's own state rather
+    /// than building policy: it is the number consensus holds the block to, and it is also the
+    /// budget the data-availability footprint of the block's transactions is held to.
     pub fn new(
         mut evm: MegaEvm<DB, INSP, ExtEnvs>,
         ctx: MegaBlockExecutionCtx,

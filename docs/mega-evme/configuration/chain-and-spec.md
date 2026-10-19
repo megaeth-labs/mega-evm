@@ -10,12 +10,12 @@ The `replay` command auto-detects the spec from the chain ID and block timestamp
 
 ## Options
 
-| Flag                             | Default     | Aliases     | Description                                                                                |
-| -------------------------------- | ----------- | ----------- | ------------------------------------------------------------------------------------------ |
-| `--spec <SPEC>`                  | `Rex6`      | —           | MegaETH spec to use; `Satin` by default under `--genesis`                                  |
-| `--chain-id <ID>`                | `6342`      | `--chainid` | Chain ID                                                                                   |
-| `--override.limits <JSON\|FILE>` | the chain's | —           | Satin only: protocol limits to run under instead, see [Protocol limits](#protocol-limits)  |
-| `--genesis <FILE>`               | —           | —           | Satin only: the chain's genesis file, see [A chain's genesis file](#a-chains-genesis-file) |
+| Flag                             | Default    | Aliases     | Description                                                                                |
+| -------------------------------- | ---------- | ----------- | ------------------------------------------------------------------------------------------ |
+| `--spec <SPEC>`                  | `Rex6`     | —           | MegaETH spec to use; `Satin` by default under `--genesis`                                  |
+| `--chain-id <ID>`                | `6342`     | `--chainid` | Chain ID                                                                                   |
+| `--override.limits <JSON\|FILE>` | the spec's | —           | Satin only: protocol limits to run under instead, see [Protocol limits](#protocol-limits)  |
+| `--genesis <FILE>`               | —          | —           | Satin only: the chain's genesis file, see [A chain's genesis file](#a-chains-genesis-file) |
 
 ## Available Specs
 
@@ -71,26 +71,23 @@ A legacy run has no `satin` field.
 
 ### Protocol limits
 
-A Satin run is held to the protocol limits of the chain it names, read from the chain's schedule at the block's timestamp, as a node holds a block of that chain.
-On a chain whose schedule runs Satin at that timestamp, these are the chain's own limits.
-Any other Satin run is a counterfactual: MegaETH mainnet and testnet, which do not schedule Satin yet, the default chain `6342`, and any chain the tool does not know run on Satin's default limits.
+A Satin run is held to Satin's protocol limits, which the spec fixes and no chain configures, as a node holds a Satin block of any chain.
 
-| Limit                                                                    | Default    |
+| Limit                                                                    | Value      |
 | ------------------------------------------------------------------------ | ---------- |
 | A transaction's data size (`txDataSizeLimit`)                            | 13,107,200 |
 | A block's data size (`blockTxsDataLimit`)                                | 13,107,200 |
 | Compute after a block-environment read (`blockEnvAccessComputeGasLimit`) | 20,000,000 |
 | Compute after an Oracle read (`oracleAccessComputeGasLimit`)             | 20,000,000 |
-| Every other limit                                                        | unlimited  |
+| A frame's data size beyond its share (`frameDataSizeLimit`)              | unlimited  |
 
-The defaults are provisional, as Satin is.
-A chain whose schedule runs Satin but does not carry its limits is refused: the tool does not guess a chain's limits.
+The values are provisional, as Satin is.
 `run` and `tx` hold the transaction to the per-transaction limits; `replay` holds a whole block to them and to the block's budgets.
 
 `--override.limits` runs under other limits, a counterfactual.
-It takes a JSON object in the shape a chain configuration carries the limits in, inline or as the path of a file.
-The fields it names replace the chain's, and every other stays.
-The whole shape, at the defaults:
+It takes a JSON object in the limits' shape, inline or as the path of a file.
+The fields it names replace Satin's, and every other stays.
+The whole shape, at Satin's values:
 
 ```json
 {
@@ -104,8 +101,8 @@ The whole shape, at the defaults:
 }
 ```
 
-`18446744073709551615` (`u64::MAX`) leaves a limit unlimited.
-The limits an override leaves are held to what a chain configuration is: an unknown field, a zero limit, a transaction data-size limit below the 310 bytes every transaction's body counts, or a compute cap no transaction reaches is refused.
+`18446744073709551615` (`u64::MAX`) leaves a limit unlimited, and both compute caps at it leave a transaction undetained.
+An override is refused when it names an unknown field or gives a value that is not a 64-bit integer; any other value is run, since an override is a counterfactual.
 A transaction a limit stops reports it in `satin.limit_exceeded`.
 Its `used` is the usage where the limit was crossed.
 A run under an override reports the limits it was held to in `satin.limits_override`, the merged object whole, so a counterfactual's output says what it ran under; in text mode they follow the Satin numbers as `Limits Override:`.
@@ -113,10 +110,11 @@ A command on a legacy spec is refused with `--override.limits`: the legacy engin
 
 ### A chain's genesis file
 
-A chain the tool does not know, a devnet for one, is replayed as its nodes run it only with its own Satin configuration: which blocks run Satin, the `SequencerRegistry` seeds its first Satin block deploys, and its protocol limits.
+A chain the tool does not know, a devnet for one, is replayed as its nodes run it only with its own Satin configuration: which blocks run Satin, and the `SequencerRegistry` roles its first Satin block deploys.
 `--genesis <FILE>` takes them from the chain's genesis file, on every command, `replay` included.
 The file's `config` object (or a file that is the `config` object) is read for its `chainId` and its Satin keys, with the parser the node and the stateless validator read them with, so a key the node refuses is refused here too.
-For that chain the file replaces the tool's table: a block runs Satin from the file's `satinTime`, under the registry seeds and the limits the file carries, as the chain's own limits and not as an override.
+For that chain the file replaces the tool's table: a block runs Satin from the file's `satinTime`, under the registry roles the file carries.
+The file names no limit: a Satin run under it is held to Satin's, as every Satin run is.
 Every command under it holds to one rule: a run the file cannot configure is refused, never run on the tool's own table.
 
 - A command on another chain than the file's `chainId` is refused first, whatever its spec.
@@ -126,7 +124,7 @@ Every command under it holds to one rule: a run the file cannot configure is ref
   For `run` and `tx` the run's timestamp is `--block.timestamp`, `1` by default, so a file that activates Satin later needs a `--block.timestamp` at or after its `satinTime`.
   For `replay` it is the block's: a block before the file's `satinTime` would run on the legacy engine and is refused, and so is one `--override.spec Satin` forces there.
 
-`--override.limits` still replaces the fields it names, over the file's limits.
+`--override.limits` still replaces the fields it names.
 
 ## Examples
 

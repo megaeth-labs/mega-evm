@@ -336,7 +336,7 @@ Chain Options:
           Chain ID [default: 6342] [aliases: --chainid]
 
       --override.limits <JSON|FILE>
-          Satin only: run under these protocol limits instead of the chain's, a counterfactual. A JSON object in the shape a chain configuration carries `ProtocolLimits` in (camelCase, per-transaction limits under `txRuntimeLimits`), inline or in a file; the fields it names replace the chain's, every other stays. Refused when it names an unknown field or a value no chain may carry
+          Satin only: run under these protocol limits instead of the spec's, a counterfactual. A JSON object in `ProtocolLimits`' shape (camelCase, per-transaction limits under `txRuntimeLimits`), inline or in a file; the fields it names replace the spec's, every other stays. Refused when it names an unknown field or a value of the wrong type
 
 Block Options:
       --block.number <BLOCK_NUMBER>          Block number [default: 1]
