@@ -493,29 +493,42 @@ impl AccountState {
     }
 
     /// Converts into [`Account`].
+    ///
+    /// Code present in the dump is checked against `code_hash`.
+    /// Code left out stays unloaded: the stored hash is kept and `code` stays `None`, so a lazy
+    /// account can be loaded again. Empty bytecode is not substituted for it.
     pub fn into_account(self) -> Result<Account> {
-        let code = self.code.unwrap_or_default();
-        let bytecode = if code.is_empty() {
-            Bytecode::default()
-        } else {
-            Bytecode::new_raw_checked(code).map_err(EvmeError::InvalidBytecode)?
-        };
-        let computed_hash = bytecode.hash_slow();
-        if let Some(code_hash) = self.code_hash {
-            if computed_hash != code_hash {
-                return Err(EvmeError::CodeHashMismatch {
-                    expected: code_hash,
-                    computed: computed_hash,
-                });
+        let info = match self.code {
+            Some(code) => {
+                let bytecode = if code.is_empty() {
+                    Bytecode::default()
+                } else {
+                    Bytecode::new_raw_checked(code).map_err(EvmeError::InvalidBytecode)?
+                };
+                let computed_hash = bytecode.hash_slow();
+                if let Some(code_hash) = self.code_hash {
+                    if computed_hash != code_hash {
+                        return Err(EvmeError::CodeHashMismatch {
+                            expected: code_hash,
+                            computed: computed_hash,
+                        });
+                    }
+                }
+                AccountInfo::new(
+                    self.balance.unwrap_or_default(),
+                    self.nonce.unwrap_or_default(),
+                    computed_hash,
+                    bytecode,
+                )
             }
-        }
-
-        let info = AccountInfo::new(
-            self.balance.unwrap_or_default(),
-            self.nonce.unwrap_or_default(),
-            computed_hash,
-            bytecode,
-        );
+            None => AccountInfo {
+                balance: self.balance.unwrap_or_default(),
+                nonce: self.nonce.unwrap_or_default(),
+                code_hash: self.code_hash.unwrap_or(revm::primitives::KECCAK_EMPTY),
+                account_id: None,
+                code: None,
+            },
+        };
         let storage = self
             .storage
             .unwrap_or_default()
@@ -523,6 +536,33 @@ impl AccountState {
             .map(|(slot, value)| (slot, EvmStorageSlot::new(value, TransactionId::ZERO)));
         Ok(Account::from(info).with_storage(storage))
     }
+}
+
+/// Fills bytecode into journal accounts that were loaded without it.
+///
+/// A dump records `code: null` together with the account's hash when the code was never fetched.
+/// Loading it here, while the database is still open, puts the bytes in the dump so a later run
+/// can execute them without that database. The bytes come from `basic_ref`. A hash that does not
+/// match is left unloaded.
+pub(crate) fn materialize_dumped_code<DB: DatabaseRef>(
+    db: &DB,
+    state: &mut EvmState,
+) -> std::result::Result<(), DB::Error> {
+    for (address, account) in state.iter_mut() {
+        if account.info.code.is_some() || account.info.code_hash == revm::primitives::KECCAK_EMPTY {
+            continue;
+        }
+        let Some(info) = db.basic_ref(*address)? else {
+            continue;
+        };
+        if info.code_hash != account.info.code_hash {
+            continue;
+        }
+        if let Some(code) = info.code {
+            account.info.code = Some(code);
+        }
+    }
+    Ok(())
 }
 
 /// Whether an account an RPC endpoint reported is one that does not exist.
@@ -1002,5 +1042,53 @@ where
                 Ok(hash)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy_provider::DynProvider;
+    use op_alloy_network::Optimism;
+
+    use super::*;
+
+    fn lazy_account(hash: B256) -> Account {
+        Account::from(AccountInfo {
+            balance: U256::from(5u64),
+            nonce: 3,
+            code_hash: hash,
+            account_id: None,
+            code: None,
+        })
+    }
+
+    #[test]
+    fn test_lazy_code_reload_keeps_the_hash() {
+        let hash = B256::repeat_byte(0xab);
+        let loaded = AccountState::from_account(lazy_account(hash)).into_account().unwrap();
+        assert!(loaded.info.code.is_none());
+        assert_eq!(loaded.info.code_hash, hash);
+        assert_eq!(loaded.info.balance, U256::from(5u64));
+        assert_eq!(loaded.info.nonce, 3);
+    }
+
+    #[test]
+    fn test_dump_loads_unfetched_code() {
+        let bytecode = Bytecode::new_raw(Bytes::from_static(&[0x60, 0x00, 0x56]));
+        let hash = bytecode.hash_slow();
+        let address = Address::repeat_byte(0x11);
+        let mut db: EvmeState<Optimism, DynProvider<Optimism>> =
+            EvmeState::new_empty(EvmState::default(), HashMap::default());
+        db.set_account_code(address, bytecode.clone());
+
+        let mut state = EvmState::default();
+        state.insert(address, lazy_account(hash));
+        let other = Address::repeat_byte(0x22);
+        state.insert(other, lazy_account(B256::repeat_byte(0xcd)));
+
+        materialize_dumped_code(&db, &mut state).unwrap();
+
+        assert_eq!(state.get(&address).unwrap().info.code.as_ref(), Some(&bytecode));
+        assert!(state.get(&other).unwrap().info.code.is_none());
     }
 }

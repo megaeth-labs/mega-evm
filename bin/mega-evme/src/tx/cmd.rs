@@ -102,8 +102,11 @@ impl Cmd {
         info!("Executing transaction");
         let evm_context = self.env_args.create_evm_context(&mut state)?;
         let start = Instant::now();
-        let (exec_result, evm_state, trace_data, mut satin) =
+        let (exec_result, mut evm_state, trace_data, mut satin) =
             self.trace_args.execute_transaction(evm_context, tx.clone())?;
+        if self.dump_args.dump {
+            crate::materialize_dumped_code(&state, &mut evm_state)?;
+        }
         satin.limits_override = self.env_args.limits_override_in_force()?;
         let exec_time = start.elapsed();
 
