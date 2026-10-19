@@ -1289,26 +1289,7 @@ const AUTHORITY: Address = address!("0000000000000000000000000000000000300006");
 
 /// A type-4 call from `CALLER` to `A`, carrying one authorization of [`AUTHORITY`] to `B`.
 fn authorizing_call(gas_limit: u64) -> mega_evm::MegaTransaction {
-    use revm::{
-        context::{transaction::TransactionType, TxEnv},
-        context_interface::{
-            either::Either,
-            transaction::{Authorization, RecoveredAuthority, RecoveredAuthorization},
-        },
-    };
-    let authorization = Either::Right(RecoveredAuthorization::new_unchecked(
-        Authorization { chain_id: U256::ZERO, address: B, nonce: 0 },
-        RecoveredAuthority::Valid(AUTHORITY),
-    ));
-    alloy_op_evm::OpTx(mega_evm::test_utils::op_transaction(TxEnv {
-        tx_type: TransactionType::Eip7702 as u8,
-        caller: CALLER,
-        kind: alloy_primitives::TxKind::Call(A),
-        gas_limit,
-        gas_priority_fee: Some(0),
-        authorization_list: vec![authorization],
-        ..Default::default()
-    }))
+    crate::common::authorizing_call(CALLER, A, U256::ZERO, gas_limit, B, &[(AUTHORITY, 0)])
 }
 
 /// Runs `tx` over [`funded`] under a transaction data-size limit of `limit`; `None` when

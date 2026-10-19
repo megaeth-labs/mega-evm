@@ -662,32 +662,14 @@ fn authorizing_call(
     value: u64,
     authorizations: &[(Address, u64)],
 ) -> mega_evm::MegaTransaction {
-    use revm::{
-        context::{transaction::TransactionType, TxEnv},
-        context_interface::{
-            either::Either,
-            transaction::{Authorization, RecoveredAuthority, RecoveredAuthorization},
-        },
-    };
-    let authorization_list = authorizations
-        .iter()
-        .map(|(authority, nonce)| {
-            Either::Right(RecoveredAuthorization::new_unchecked(
-                Authorization { chain_id: U256::ZERO, address: DELEGATE, nonce: *nonce },
-                RecoveredAuthority::Valid(*authority),
-            ))
-        })
-        .collect();
-    alloy_op_evm::OpTx(mega_evm::test_utils::op_transaction(TxEnv {
-        tx_type: TransactionType::Eip7702 as u8,
-        caller: CALLER,
-        kind: alloy_primitives::TxKind::Call(to),
-        value: U256::from(value),
-        gas_limit: gas_limit(),
-        gas_priority_fee: Some(0),
-        authorization_list,
-        ..Default::default()
-    }))
+    crate::common::authorizing_call(
+        CALLER,
+        to,
+        U256::from(value),
+        gas_limit(),
+        DELEGATE,
+        authorizations,
+    )
 }
 
 /// Each distinct applied authority is one record, however many of its authorizations applied;
