@@ -13,10 +13,10 @@
 //! checked: each bloom is its logs', each cumulative step is that transaction's `gas_used`, and
 //! the receipts root is the ordered trie of the encodings.
 
-use alloy_consensus::{transaction::Recovered, Sealed, Signed, TxLegacy, TxReceipt};
+use alloy_consensus::{transaction::Recovered, Sealed, TxReceipt};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_evm::block::BlockExecutor;
-use alloy_primitives::{address, hex, logs_bloom, Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_primitives::{address, hex, logs_bloom, Address, Bytes, TxKind, B256, U256};
 use alloy_sol_types::SolError;
 use mega_evm::{
     test_utils::is_transfer_log, LimitCheck, LimitKind, MegaLimitExceeded, MegaTxEnvelope,
@@ -86,25 +86,8 @@ fn legacy(
     value: u64,
     input: Bytes,
     gas_limit: u64,
-    hash_byte: u8,
 ) -> Recovered<MegaTxEnvelope> {
-    let tx = TxLegacy {
-        chain_id: Some(common::CHAIN_ID),
-        nonce,
-        gas_price: 1_000_000,
-        gas_limit,
-        to,
-        value: U256::from(value),
-        input,
-    };
-    Recovered::new_unchecked(
-        MegaTxEnvelope::Legacy(Signed::new_unchecked(
-            tx,
-            Signature::test_signature(),
-            B256::repeat_byte(hash_byte),
-        )),
-        CALLER,
-    )
+    common::legacy_from(CALLER, nonce, to, U256::from(value), input, gas_limit, 1_000_000)
 }
 
 /// A deposit from [`DEPOSITOR`] to [`CONTRACT`].
@@ -192,7 +175,7 @@ fn test_a_blocks_receipts_pin_their_bytes_bloom_and_cumulative_gas() {
     );
     let txs = [
         depositor_tx(),
-        legacy(0, TxKind::Call(PAYEE), 1, Bytes::new(), room(0, 4, new_account_state_gas()), 0x11),
+        legacy(0, TxKind::Call(PAYEE), 1, Bytes::new(), room(0, 4, new_account_state_gas())),
         // The first frame's input charges the account the value would create in the empty
         // `CONTRACT` before the stop gives it back.
         legacy(
@@ -201,16 +184,14 @@ fn test_a_blocks_receipts_pin_their_bytes_bloom_and_cumulative_gas() {
             1,
             stop_input,
             room(STOP_CALLDATA as u64, 1, new_account_state_gas()),
-            0x22,
         ),
-        legacy(2, TxKind::Call(REVERTER), 0, Bytes::new(), room(0, 2, 0), 0x33),
+        legacy(2, TxKind::Call(REVERTER), 0, Bytes::new(), room(0, 2, 0)),
         legacy(
             3,
             TxKind::Create,
             0,
             Bytes::from_static(EMPTY_INIT),
             room(EMPTY_INIT.len() as u64, 4, new_account_state_gas()),
-            0x44,
         ),
         system_tx(),
     ];

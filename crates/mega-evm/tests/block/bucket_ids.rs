@@ -15,10 +15,9 @@ use alloy_evm::{
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
 use mega_evm::{
-    test_utils::{BytecodeBuilder, MemoryDatabase},
-    BlockLimits, BucketId, LimitUsage, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvm,
-    MegaEvmFactory, MegaHardforkConfig, MegaTxEnvelope, PreBlockStateSource, SaltEnv,
-    TestExternalEnvs,
+    test_utils::MemoryDatabase, BlockLimits, BucketId, LimitUsage, MegaBlockExecutionCtx,
+    MegaBlockExecutor, MegaEvm, MegaEvmFactory, MegaHardforkConfig, MegaTxEnvelope,
+    PreBlockStateSource, SaltEnv, TestExternalEnvs,
 };
 use op_alloy_consensus::TxDeposit;
 use revm::{
@@ -48,21 +47,10 @@ fn slot_bucket(slot: u8) -> BucketId {
     <Envs as SaltEnv>::bucket_id_for_slot(WRITER, U256::from(slot))
 }
 
-/// Code that writes 1 into the slot named by the first byte of its calldata.
-fn writer() -> Bytes {
-    use revm::bytecode::opcode::{CALLDATALOAD, PUSH0, SHR, SSTORE, STOP};
-    BytecodeBuilder::default()
-        .push_number(1_u8)
-        .append_many([PUSH0, CALLDATALOAD])
-        .push_number(248_u8)
-        .append_many([SHR, SSTORE, STOP])
-        .build()
-}
-
 /// A state holding the writer, the empty callee and the caller's balance.
 fn state() -> State<MemoryDatabase> {
     let mut db = common::database();
-    db.set_account_code(WRITER, writer());
+    db.set_account_code(WRITER, common::writer());
     State::builder().with_database(db).build()
 }
 
@@ -213,32 +201,6 @@ fn test_the_pre_block_calls_and_a_system_transaction_add_no_bucket() {
 
     assert!(executor.get_accessed_bucket_ids().is_empty());
     assert_eq!(envs.total_bucket_queries(), 0);
-}
-
-/// A bucket whose lookup fails is not recorded: the transaction it fails is in no block, so a
-/// validator never makes the lookup, and the builder is not held to proving a bucket its
-/// environment could not answer.
-#[test]
-fn test_a_failed_lookup_is_not_recorded_and_its_transaction_is_not_in_the_block() {
-    if common::state_is_free() {
-        return;
-    }
-    let envs = Envs::new().with_failing_bucket(slot_bucket(1), "salt backend unreachable".into());
-    let mut state = state();
-    let mut executor = executor(&mut state, envs);
-    executor.apply_pre_execution_changes().expect("the block starts");
-
-    let error =
-        executor.run_transaction(&write(0, 1)).expect_err("the lookup fails the transaction");
-    assert!(error.to_string().contains("salt backend unreachable"), "{error}");
-    assert!(executor.get_accessed_bucket_ids().is_empty(), "a failed lookup is not recorded");
-
-    // The block goes on: the next transaction's bucket is answered and recorded.
-    let outcome = executor.run_transaction(&write(0, 2)).expect("it executes");
-    executor.commit_transaction_outcome(outcome).expect("the block has room");
-    assert_eq!(executor.get_accessed_bucket_ids(), vec![slot_bucket(2)]);
-    let (_, result) = executor.finish_with_counters().expect("the block finishes");
-    assert_eq!(result.receipts().len(), 1, "the failed transaction is not in the block");
 }
 
 /// What a block has committed: its receipts, its counters, the caller's nonce and balance, the

@@ -23,19 +23,15 @@ use crate::common::{self, BLOCK_NUMBER};
 /// The system address a pending change rotates to.
 const NEXT_SYSTEM_ADDRESS: Address = address!("0x3000000000000000000000000000000000000003");
 
-fn word(address: Address) -> U256 {
-    U256::from_be_bytes(address.into_word().0)
-}
-
 /// A database holding a deployed registry naming [`MEGA_SYSTEM_ADDRESS`], with a system-address
 /// change to [`NEXT_SYSTEM_ADDRESS`] due at `activation`.
 fn registry_rotating_at(activation: u64) -> MemoryDatabase {
     let mut db = common::database();
     db.set_account_code(SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE);
     for (slot, value) in [
-        (CURRENT_SYSTEM_ADDRESS, word(MEGA_SYSTEM_ADDRESS)),
-        (CURRENT_SEQUENCER, word(common::SEQUENCER)),
-        (PENDING_SYSTEM_ADDRESS, word(NEXT_SYSTEM_ADDRESS)),
+        (CURRENT_SYSTEM_ADDRESS, common::word(MEGA_SYSTEM_ADDRESS)),
+        (CURRENT_SEQUENCER, common::word(common::SEQUENCER)),
+        (PENDING_SYSTEM_ADDRESS, common::word(NEXT_SYSTEM_ADDRESS)),
         (SYSTEM_ADDRESS_ACTIVATION_BLOCK, U256::from(activation)),
     ] {
         db.set_account_storage(SEQUENCER_REGISTRY_ADDRESS, slot, value);
@@ -86,7 +82,7 @@ fn test_a_rotation_and_a_system_transaction_replay() {
     assert!(registry_slots(SYSTEM_ADDRESS_ACTIVATION_BLOCK), "the due role's activation block");
     assert_eq!(
         run.record.storage.get(&(SEQUENCER_REGISTRY_ADDRESS, CURRENT_SYSTEM_ADDRESS)),
-        Some(&word(MEGA_SYSTEM_ADDRESS)),
+        Some(&common::word(MEGA_SYSTEM_ADDRESS)),
         "the chain's live address, read by the call that rotated it; the transaction read the \
          rotated one from the block's own writes"
     );

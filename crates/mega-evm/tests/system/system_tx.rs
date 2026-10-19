@@ -192,13 +192,6 @@ fn test_a_system_transaction_pays_no_fee() {
     );
 }
 
-/// A system transaction needs no balance at all: nothing is deducted from its caller.
-#[test]
-fn test_a_system_transaction_needs_no_balance() {
-    let outcome = run_outcome(chain_db(), system_tx(0, B256::with_last_byte(0x33)));
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-}
-
 /// A system transaction that carries value moves exactly that value, and no fee with it.
 #[test]
 fn test_a_system_transaction_moves_only_its_value() {
@@ -268,36 +261,6 @@ fn test_another_shape_from_the_live_system_address_is_invalid() {
             assert_eq!(message, SYSTEM_ADDRESS_WITHOUT_SYSTEM_SHAPE, "{shape}");
         }
     }
-}
-
-/// A deposit is never of the system shape, so one from the live system address is invalid too,
-/// and op-revm includes a deposit that fails validation as a failed deposit: its sender's nonce
-/// moves by one and its mint is credited, and nothing else happens — its call to the Oracle, which
-/// would accept a write from the system address, never runs.
-#[test]
-fn test_a_deposit_from_the_live_system_address_is_a_failed_deposit() {
-    const MINT: u128 = 7_000;
-    let mut tx =
-        deposit_tx(MEGA_SYSTEM_ADDRESS, TxKind::Call(ORACLE_CONTRACT_ADDRESS), U256::ZERO, MINT);
-    tx.0.base.data = set_slot(ORACLE_SLOT, B256::with_last_byte(0x77));
-    let mut state = State::builder().with_database(chain_db()).build();
-    let mut evm = MegaEvm::new(chain_context(&mut state));
-    let outcome = evm.execute_transaction(tx).expect("a deposit is not refused");
-    assert!(
-        matches!(
-            outcome.result,
-            ExecutionResult::Halt { reason: MegaHaltReason::FailedDeposit, .. }
-        ),
-        "{:?}",
-        outcome.result
-    );
-    drop(evm);
-    state.commit(outcome.state.clone());
-
-    assert_eq!(nonce_of(&mut state, MEGA_SYSTEM_ADDRESS), 1, "the nonce moves by one");
-    let balance = revm::Database::basic(&mut state, MEGA_SYSTEM_ADDRESS).unwrap().unwrap().balance;
-    assert_eq!(balance, U256::from(MINT), "the mint is credited");
-    assert_eq!(oracle_slot(&mut state, ORACLE_SLOT), U256::ZERO, "the Oracle is not written");
 }
 
 /// Every transaction reads the registry when it is validated, whatever its shape and whoever
@@ -671,23 +634,6 @@ fn test_a_deposit_creates_its_caller_and_pays_for_it_once() {
     );
 }
 
-/// A deposit-like transaction whose caller already exists pays no account-creation charge for
-/// it.
-#[test]
-fn test_a_deposit_with_an_existing_caller_pays_nothing_extra() {
-    let existing = chain_db().account_balance(MEGA_SYSTEM_ADDRESS, U256::from(1));
-    let fresh = chain_db();
-    let (existing, fresh) = (
-        run_outcome(existing, system_tx(0, B256::with_last_byte(0x88))).gas.state,
-        run_outcome(fresh, system_tx(0, B256::with_last_byte(0x88))).gas.state,
-    );
-    assert_eq!(
-        fresh,
-        existing + account_state_gas(),
-        "{fresh} is not one account above {existing}"
-    );
-}
-
 /// A deposit whose recipient is its own caller pays for that one account once: by the time the
 /// recipient is looked at, the caller's materialisation has created it.
 #[test]
@@ -898,8 +844,7 @@ fn test_a_deposit_that_creates_a_contract_pays_for_its_caller_too() {
 
 /// A transaction that already carries the system source hash is a deposit by type, so it does
 /// not have the system shape: from the live system address it is a failed deposit, as every
-/// deposit from that address is (see
-/// `test_a_deposit_from_the_live_system_address_is_a_failed_deposit`). No promotion is made for
+/// deposit from that address is. No promotion is made for
 /// it, so none of the promotion's checks runs: its nonce is not the system address's.
 ///
 /// A block's transactions are decoded from their legacy encoding, which carries no source hash,

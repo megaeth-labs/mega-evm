@@ -37,20 +37,13 @@ use revm::{
 };
 
 use super::*;
-use crate::common::{call_tx, context, CALLER as RELAYER};
+use crate::common::{context, keyless_tx, AnswerAndResume, Run, CALLER as RELAYER};
 
 /// The block beneficiary of the cases where nobody in the transaction is the beneficiary.
 const BENEFICIARY: Address = address!("0x0000000000000000000000000000000000beef02");
 
 /// The cap a read of the block environment sets, by default.
 const CAP: u64 = BLOCK_ENV_ACCESS_COMPUTE_GAS;
-
-/// What a transaction did, and what gas detention made of it.
-struct Run {
-    outcome: MegaTransactionOutcome,
-    limit: Option<u64>,
-    accessed: VolatileDataAccess,
-}
 
 /// The default runtime limits, with the block-environment cap at `cap`.
 fn capped(cap: u64) -> EvmTxRuntimeLimits {
@@ -64,13 +57,6 @@ fn context_in(
     limits: EvmTxRuntimeLimits,
 ) -> MegaContext<MemoryDatabase> {
     context(db).with_block(BlockEnv { beneficiary, ..block() }).with_tx_runtime_limits(limits)
-}
-
-/// The `keylessDeploy` transaction `data` from the relayer at `gas_limit`.
-fn keyless_tx(data: Bytes, gas_limit: u64) -> MegaTransaction {
-    let mut tx = call_tx(KEYLESS_DEPLOY_ADDRESS, data, U256::ZERO);
-    tx.0.base.gas_limit = gas_limit;
-    tx
 }
 
 /// Runs `tx` in `ctx`, through an inspector when `inspected`.
@@ -394,28 +380,6 @@ fn test_a_constructor_that_switches_volatile_access_off_is_refused_its_own_read(
         let run = run_both(&deployment, gas_limit, capped(CAP));
         assert_eq!(refused_read(&run.outcome), VolatileDataAccess::TIMESTAMP);
         assert_eq!((run.limit, run.accessed), (None, VolatileDataAccess::empty()));
-    }
-}
-
-/// Records every answer `remainingComputeGas()` gives, next to the spendable regular gas its
-/// caller resumes with: what a regular charge of the caller could draw at its next instruction.
-#[derive(Debug, Default)]
-struct AnswerAndResume {
-    pending: Option<u64>,
-    pairs: Vec<(u64, u64)>,
-}
-
-impl<CTX> Inspector<CTX, EthInterpreter> for AnswerAndResume {
-    fn step(&mut self, interp: &mut Interpreter<EthInterpreter>, _context: &mut CTX) {
-        if let Some(answer) = self.pending.take() {
-            self.pairs.push((answer, interp.gas.tracker().spendable()));
-        }
-    }
-
-    fn call_end(&mut self, _context: &mut CTX, inputs: &CallInputs, outcome: &mut CallOutcome) {
-        if inputs.target_address == LIMIT_CONTROL_ADDRESS && outcome.result.is_ok() {
-            self.pending = Some(U256::from_be_slice(&outcome.result.output).to::<u64>());
-        }
     }
 }
 

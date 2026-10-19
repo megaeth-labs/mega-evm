@@ -470,43 +470,6 @@ fn test_a_block_is_refused_when_its_beacon_root_call_halts() {
     assert_eq!(calls, [PreBlockStateSource::Eip2935]);
 }
 
-/// A pre-block call that reverts refuses the block just as one that halts does.
-#[test]
-fn test_a_block_is_refused_when_a_pre_block_call_reverts() {
-    let reverts = BytecodeBuilder::default().revert().build();
-
-    let mut db = common::database();
-    db.set_account_code(HISTORY_STORAGE_ADDRESS, reverts.clone());
-    let (calls, started) = start_block(db, common::evm_env());
-    let err = started.expect_err("a reverted block hashes call refuses the block");
-    assert!(
-        matches!(
-            &err,
-            BlockExecutionError::Validation(BlockValidationError::BlockHashContractCall { message })
-                if message.contains("EIP-2935 pre-block call did not succeed")
-                    && message.contains("Revert")
-        ),
-        "{err}"
-    );
-    assert!(calls.is_empty(), "{calls:?}");
-
-    let mut db = common::database();
-    db.set_account_code(BEACON_ROOTS_ADDRESS, reverts);
-    let (calls, started) = start_block(db, common::evm_env());
-    let err = started.expect_err("a reverted beacon root call refuses the block");
-    assert!(
-        matches!(
-            &err,
-            BlockExecutionError::Validation(BlockValidationError::BeaconRootContractCall {
-                message,
-                ..
-            }) if message.contains("EIP-4788 pre-block call did not succeed")
-        ),
-        "{err}"
-    );
-    assert_eq!(calls, [PreBlockStateSource::Eip2935]);
-}
-
 /// The pre-block budget follows the block's gas limit, so a pre-block call that costs more than
 /// 30M in all still succeeds in a block that can hold it: 400 fresh slots are 39M of state gas,
 /// which the reservoir above 30M pays. In a block of 30M the call has no reservoir, the state

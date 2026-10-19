@@ -6,9 +6,9 @@
 //! and every deposit still counts towards it, so the ordinary transactions after the deposits find
 //! the room they used.
 
-use alloy_consensus::{transaction::Recovered, Sealed, Signed, TxLegacy};
+use alloy_consensus::{transaction::Recovered, Sealed};
 use alloy_evm::block::BlockExecutor;
-use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
 use mega_evm::{
     test_utils::BytecodeBuilder, BlockGasCounters, BlockLimits, LimitUsage, MegaTxEnvelope,
 };
@@ -18,7 +18,7 @@ use revm::{
     database::State,
 };
 
-use crate::common::{self, executor, CHAIN_ID};
+use crate::common::{self, executor};
 
 /// Sets the slot the first calldata word names to one.
 const WRITER: Address = address!("0x1000000000000000000000000000000000000d01");
@@ -88,22 +88,14 @@ fn deposit(slot: u64) -> Recovered<MegaTxEnvelope> {
 /// An ordinary transaction that fills the fresh `slot`, so the data-size limit has something to
 /// refuse it on.
 fn ordinary(slot: u64) -> Recovered<MegaTxEnvelope> {
-    let tx = TxLegacy {
-        chain_id: Some(CHAIN_ID),
-        nonce: 0,
-        gas_price: 1_000_000,
-        gas_limit: gas_limit(),
-        to: TxKind::Call(WRITER),
-        value: U256::ZERO,
-        input: input(slot),
-    };
-    Recovered::new_unchecked(
-        MegaTxEnvelope::Legacy(Signed::new_unchecked(
-            tx,
-            Signature::test_signature(),
-            B256::repeat_byte(0x0d),
-        )),
+    common::legacy_from(
         SENDER,
+        0,
+        TxKind::Call(WRITER),
+        U256::ZERO,
+        input(slot),
+        gas_limit(),
+        1_000_000,
     )
 }
 

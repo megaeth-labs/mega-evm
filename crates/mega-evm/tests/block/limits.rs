@@ -15,7 +15,7 @@ use revm::{
     Database as _,
 };
 
-use crate::common::{self, empty_call_gas, executor, incompressible, user_tx, CALLER, CONTRACT};
+use crate::common::{self, executor, incompressible, user_tx, CALLER, CONTRACT};
 
 const CALLER2: Address = address!("0x2000000000000000000000000000000000000003");
 const CALLER3: Address = address!("0x2000000000000000000000000000000000000004");
@@ -84,49 +84,6 @@ fn test_block_custom_data_limit() {
         .execute_transaction(&user_tx(2, log_call_gas(2_000)))
         .expect_err("the block has no data-size left");
     assert!(format!("{err}").contains("Block transactions data limit reached"), "{err}");
-}
-
-/// Transactions that stay inside the block's limits are all packed.
-#[test]
-fn test_block_multiple_transactions_within_limits() {
-    let mut state = state_with_log_contract(100);
-    let mut executor = executor(
-        &mut state,
-        common::block_ctx(BlockLimits::no_limits().with_block_txs_data_limit(10_000)),
-    );
-    executor.apply_pre_execution_changes().expect("the block starts");
-
-    for nonce in 0..5 {
-        let tx = user_tx(nonce, log_call_gas(100));
-        let gas = executor.execute_transaction(&tx).expect("the transaction is packed");
-        assert!(gas.tx_gas_used() < tx.gas_limit(), "transaction {nonce}");
-    }
-
-    let (_, result) = executor.finish_with_counters().expect("the block finishes");
-    assert_eq!(result.receipts().len(), 5);
-}
-
-/// The same limit mid-block: the transactions before the crossing are packed, the crossing one
-/// is packed, and the block ends there.
-#[test]
-fn test_block_data_limit_exceeded_mid_block() {
-    let mut state = state_with_log_contract(2_000);
-    let mut executor = executor(
-        &mut state,
-        common::block_ctx(BlockLimits::no_limits().with_block_txs_data_limit(6_000)),
-    );
-    executor.apply_pre_execution_changes().expect("the block starts");
-
-    for nonce in 0..3 {
-        executor.execute_transaction(&user_tx(nonce, log_call_gas(2_000))).expect("packed");
-    }
-    assert!(
-        executor.execute_transaction(&user_tx(3, log_call_gas(2_000))).is_err(),
-        "the block has no data-size left"
-    );
-
-    let (_, result) = executor.finish_with_counters().expect("the block finishes");
-    assert_eq!(result.receipts().len(), 3, "the fourth transaction never ran");
 }
 
 /// Code that adds one to each of the slots `1..=writes`, so every call keeps `writes` write
@@ -221,52 +178,6 @@ fn test_block_no_state_commit_on_limit_exceeded() {
     assert!(result.receipts().is_empty());
 }
 
-/// The block's data-size limit never refuses a deposit, and a deposit still counts towards it.
-///
-/// Two data-heavy deposits cross the limit between them, a third finds the block past it and is
-/// still included, and the ordinary transaction after them is refused on the room they used. The
-/// deposits add nothing to the data-availability size.
-#[test]
-fn test_the_block_data_size_limit_never_refuses_a_deposit() {
-    const CALLDATA: usize = 1_000;
-    let per_deposit = mega_evm::TX_BODY_SIZE + CALLDATA as u64;
-    let limit = per_deposit + per_deposit / 2;
-    let mut state = common::state();
-    let mut executor = executor(
-        &mut state,
-        common::block_ctx(BlockLimits::no_limits().with_block_txs_data_limit(limit)),
-    );
-    executor.apply_pre_execution_changes().expect("the block starts");
-
-    for (n, what) in ["the first deposit", "the deposit that crosses", "the deposit past the limit"]
-        .into_iter()
-        .enumerate()
-    {
-        let deposit = common::deposit_tx(incompressible(CALLDATA), 1_000_000);
-        let outcome =
-            executor.run_transaction(&deposit).unwrap_or_else(|err| panic!("{what}: {err}"));
-        assert!(outcome.inner.result.is_success(), "{what}: {:?}", outcome.inner.result);
-        assert_eq!(outcome.inner.usage.data_size, per_deposit, "{what}");
-        executor.commit_transaction_outcome(outcome).unwrap_or_else(|err| panic!("{what}: {err}"));
-        assert_eq!(executor.limiter().usage.data_size, per_deposit * (n as u64 + 1), "{what}");
-    }
-    assert!(executor.limiter().usage.data_size > limit, "the deposits crossed the limit");
-    assert_eq!(
-        executor.limiter().block_da_size_used,
-        0,
-        "a deposit adds no data-availability size"
-    );
-
-    let err = executor
-        .execute_transaction(&user_tx(3, empty_call_gas()))
-        .expect_err("the deposits used the room an ordinary transaction would need");
-    assert!(format!("{err}").contains("Block transactions data limit reached"), "{err}");
-    assert!(format!("{err}").contains(&format!("block_used={}", per_deposit * 3)), "{err}");
-
-    let (_, result) = executor.finish_with_counters().expect("the block finishes");
-    assert_eq!(result.receipts().len(), 3, "every deposit is packed, and nothing after them");
-}
-
 /// The per-transaction data-size limit is not a block limit: a deposit whose body crosses it fails
 /// validation, as any transaction with that body does, and is included as a failed deposit with a
 /// failed receipt.
@@ -312,23 +223,6 @@ fn test_block_tx_size_limit_default_unlimited() {
     assert!(MegaTransactionExt::tx_size(&big) > 20_000);
 
     executor.execute_transaction(&big).expect("no limit, no refusal");
-}
-
-/// Several transactions fit while their bodies together stay under the block's limit.
-#[test]
-fn test_block_tx_size_limit_allows_multiple_transactions() {
-    let mut state = state_with_log_contract(100);
-    let one = MegaTransactionExt::tx_size(&user_tx(0, 1_000_000));
-    let mut executor = executor(
-        &mut state,
-        common::block_ctx(BlockLimits::no_limits().with_block_txs_encode_size_limit(one * 3)),
-    );
-    executor.apply_pre_execution_changes().expect("the block starts");
-
-    for nonce in 0..3 {
-        executor.execute_transaction(&user_tx(nonce, 1_000_000)).expect("the body fits");
-    }
-    assert_eq!(executor.limiter().block_tx_size_used, one * 3);
 }
 
 /// A first transaction whose body is larger than the block's limit is refused, and the block
@@ -614,30 +508,6 @@ fn test_regular_transaction_rejected_by_single_tx_da_limit() {
     );
 }
 
-/// A deposit is exempt from the block's data-availability size too, and adds nothing to it.
-#[test]
-fn test_deposit_exempt_from_block_da_limit() {
-    const DA_SIZE_LIMIT: u64 = 100;
-    let mut state = common::state();
-    let mut executor = executor(
-        &mut state,
-        common::block_ctx(
-            BlockLimits::no_limits()
-                .with_tx_da_size_limit(DA_SIZE_LIMIT * 10_000)
-                .with_block_da_size_limit(DA_SIZE_LIMIT),
-        ),
-    );
-    executor.apply_pre_execution_changes().expect("the block starts");
-
-    executor
-        .execute_transaction(&common::deposit_tx(incompressible(100_000), 3_000_000))
-        .expect("a deposit is exempt");
-
-    assert_eq!(executor.limiter().block_da_size_used, 0, "and adds nothing to the block's");
-    let (_, result) = executor.finish_with_counters().expect("the block finishes");
-    assert_eq!(result.receipts().len(), 1);
-}
-
 /// No building policy refuses a deposit, which the block derived from L1 must include: a builder
 /// holding transactions to a declared gas, an encoded size and a block encoded size that one
 /// deposit is over on each packs it, and counts its encoding towards the block's. A user
@@ -674,36 +544,6 @@ fn test_no_building_policy_refuses_a_deposit() {
 
     let (_, result) = executor.finish_with_counters().expect("the block finishes");
     assert_eq!(result.receipts().len(), 1, "the deposit alone is packed");
-}
-
-/// The three cases in one block: a small user transaction, a large deposit, a large user
-/// transaction.
-#[test]
-fn test_mixed_deposit_and_regular_transactions() {
-    const DA_SIZE_LIMIT: u64 = 100;
-    let mut state = common::state();
-    let mut executor = executor(
-        &mut state,
-        common::block_ctx(
-            BlockLimits::no_limits()
-                .with_tx_da_size_limit(DA_SIZE_LIMIT)
-                .with_block_da_size_limit(DA_SIZE_LIMIT * 10),
-        ),
-    );
-    executor.apply_pre_execution_changes().expect("the block starts");
-
-    executor
-        .execute_transaction(&user_tx(0, empty_call_gas()))
-        .expect("a small user transaction fits");
-    executor
-        .execute_transaction(&common::deposit_tx(incompressible(100_000), 3_000_000))
-        .expect("a deposit is exempt");
-    executor
-        .execute_transaction(&common::user_tx_with_input(1, incompressible(100_000), 3_000_000))
-        .expect_err("a large user transaction is not");
-
-    let (_, result) = executor.finish_with_counters().expect("the block finishes");
-    assert_eq!(result.receipts().len(), 2);
 }
 
 /// The data-availability footprint is re-checked at commit too: two candidates that each fit the

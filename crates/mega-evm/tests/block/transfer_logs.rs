@@ -6,10 +6,10 @@
 //! its mint is not; a system transaction, as the sequencer builds it, moves no value and logs no
 //! transfer.
 
-use alloy_consensus::{transaction::Recovered, Sealed, Signed, TxLegacy, TxReceipt};
+use alloy_consensus::{transaction::Recovered, Sealed, TxReceipt};
 use alloy_evm::block::BlockExecutor;
 use alloy_primitives::{
-    address, keccak256, logs_bloom, Address, BloomInput, Bytes, Log, Signature, TxKind, B256, U256,
+    address, keccak256, logs_bloom, Address, BloomInput, Bytes, Log, TxKind, B256, U256,
 };
 use alloy_sol_types::SolCall;
 use mega_evm::{
@@ -27,7 +27,7 @@ use revm::{
     Database,
 };
 
-use crate::common::{self, executor, CALLER, CHAIN_ID};
+use crate::common::{self, executor, CALLER};
 
 /// An account with no code.
 const PAYEE: Address = address!("0x7000000000000000000000000000000000000001");
@@ -79,21 +79,7 @@ fn legacy(
     value: u64,
     input: Bytes,
 ) -> Recovered<MegaTxEnvelope> {
-    let tx = TxLegacy {
-        chain_id: Some(CHAIN_ID),
-        nonce,
-        gas_price: 1_000_000,
-        gas_limit: gas_limit(),
-        to,
-        value: U256::from(value),
-        input,
-    };
-    let signed = Signed::new_unchecked(
-        tx,
-        Signature::test_signature(),
-        B256::repeat_byte(nonce as u8 + 0x10),
-    );
-    Recovered::new_unchecked(MegaTxEnvelope::Legacy(signed), signer)
+    common::legacy_from(signer, nonce, to, U256::from(value), input, gas_limit(), 1_000_000)
 }
 
 /// A deposit from [`DEPOSITOR`] to [`PAYEE`] minting `mint` and moving `value`.
@@ -283,22 +269,14 @@ fn test_a_value_left_on_a_destroyed_account_is_burned_without_a_log() {
         3 * common::new_account_state_gas() +
         common::body_history(0) +
         64 * mega_evm::write_record_history_gas(2).expect("two records have a price");
-    let tx = TxLegacy {
-        chain_id: Some(CHAIN_ID),
-        nonce: 0,
-        gas_price: 1_000_000,
-        gas_limit,
-        to: TxKind::Call(FACTORY),
-        value: U256::ZERO,
-        input: Bytes::new(),
-    };
-    let tx = Recovered::new_unchecked(
-        MegaTxEnvelope::Legacy(Signed::new_unchecked(
-            tx,
-            Signature::test_signature(),
-            B256::repeat_byte(0xb0),
-        )),
+    let tx = common::legacy_from(
         CALLER,
+        0,
+        TxKind::Call(FACTORY),
+        U256::ZERO,
+        Bytes::new(),
+        gas_limit,
+        1_000_000,
     );
     let outcome = executor.run_transaction(&tx).expect("it executes");
     assert!(outcome.result.is_success(), "{:?}", outcome.result);

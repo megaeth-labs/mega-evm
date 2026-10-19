@@ -2,9 +2,9 @@
 //! block limit holds it: state gas prices the state a block adds, so the block's gas limit bounds
 //! it.
 
-use alloy_consensus::{transaction::Recovered, Signed, TxLegacy};
+use alloy_consensus::transaction::Recovered;
 use alloy_evm::block::BlockExecutor;
-use alloy_primitives::{Bytes, Signature, TxKind, B256, U256};
+use alloy_primitives::{Bytes, TxKind, U256};
 use mega_evm::{constants::TX_GAS_LIMIT_CAP, test_utils::BytecodeBuilder, MegaTxEnvelope};
 use revm::{
     bytecode::opcode::{CALLDATALOAD, PUSH0, SSTORE},
@@ -12,7 +12,7 @@ use revm::{
     database::State,
 };
 
-use crate::common::{self, CALLER, CHAIN_ID, CONTRACT};
+use crate::common::{self, CALLER, CONTRACT};
 
 /// Above the execution cap, where the reservoir pays state gas first.
 const ABOVE_CAP: u64 = TX_GAS_LIMIT_CAP + 100_000_000;
@@ -36,19 +36,14 @@ fn state() -> State<mega_evm::test_utils::MemoryDatabase> {
 
 /// A transaction from [`CALLER`] that fills `slot`, or leaves it as it is when it is already set.
 fn writes(nonce: u64, slot: u64, gas_limit: u64) -> Recovered<MegaTxEnvelope> {
-    let tx = TxLegacy {
-        chain_id: Some(CHAIN_ID),
-        nonce,
-        gas_price: 1_000_000,
-        gas_limit,
-        to: TxKind::Call(CONTRACT),
-        value: U256::ZERO,
-        input: Bytes::from(U256::from(slot).to_be_bytes::<32>()),
-    };
-    let hash = B256::from(U256::from(nonce) + (U256::from_be_slice(CALLER.as_slice()) << 64));
-    Recovered::new_unchecked(
-        MegaTxEnvelope::Legacy(Signed::new_unchecked(tx, Signature::test_signature(), hash)),
+    common::legacy_from(
         CALLER,
+        nonce,
+        TxKind::Call(CONTRACT),
+        U256::ZERO,
+        Bytes::from(U256::from(slot).to_be_bytes::<32>()),
+        gas_limit,
+        1_000_000,
     )
 }
 

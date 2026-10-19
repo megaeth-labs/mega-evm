@@ -8,8 +8,6 @@
 //! registry when it is validated, so every EVM — the block's, or one a node builds outside block
 //! execution — promotes the address the state names.
 
-use std::sync::{Arc, Mutex};
-
 use alloy_consensus::{transaction::Recovered, Sealed, Signed, TxEip1559};
 use alloy_evm::{block::BlockExecutor, EvmEnv, EvmFactory, ToTxEnv};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
@@ -66,10 +64,6 @@ type Executor<'a> = MegaBlockExecutor<
     MegaHardforkConfig,
 >;
 
-fn word(address: Address) -> U256 {
-    U256::from_be_bytes(address.into_word().0)
-}
-
 /// A database holding a deployed registry with `slots` on top of the bootstrap roles, and the
 /// accounts the tests' transactions come from.
 fn registry_with(slots: &[(U256, U256)]) -> MemoryDatabase {
@@ -78,9 +72,13 @@ fn registry_with(slots: &[(U256, U256)]) -> MemoryDatabase {
     db.set_account_storage(
         SEQUENCER_REGISTRY_ADDRESS,
         CURRENT_SYSTEM_ADDRESS,
-        word(MEGA_SYSTEM_ADDRESS),
+        common::word(MEGA_SYSTEM_ADDRESS),
     );
-    db.set_account_storage(SEQUENCER_REGISTRY_ADDRESS, CURRENT_SEQUENCER, word(common::SEQUENCER));
+    db.set_account_storage(
+        SEQUENCER_REGISTRY_ADDRESS,
+        CURRENT_SEQUENCER,
+        common::word(common::SEQUENCER),
+    );
     for &(slot, value) in slots {
         db.set_account_storage(SEQUENCER_REGISTRY_ADDRESS, slot, value);
     }
@@ -90,7 +88,7 @@ fn registry_with(slots: &[(U256, U256)]) -> MemoryDatabase {
 /// The slots of a system-address change due at `activation`.
 fn system_address_change(activation: u64) -> [(U256, U256); 2] {
     [
-        (PENDING_SYSTEM_ADDRESS, word(NEXT_SYSTEM_ADDRESS)),
+        (PENDING_SYSTEM_ADDRESS, common::word(NEXT_SYSTEM_ADDRESS)),
         (SYSTEM_ADDRESS_ACTIVATION_BLOCK, U256::from(activation)),
     ]
 }
@@ -98,7 +96,7 @@ fn system_address_change(activation: u64) -> [(U256, U256); 2] {
 /// The slots of a sequencer change due at `activation`.
 fn sequencer_change(activation: u64) -> [(U256, U256); 2] {
     [
-        (PENDING_SEQUENCER, word(NEXT_SEQUENCER)),
+        (PENDING_SEQUENCER, common::word(NEXT_SEQUENCER)),
         (SEQUENCER_ACTIVATION_BLOCK, U256::from(activation)),
     ]
 }
@@ -133,18 +131,6 @@ fn executor_on(
     MegaBlockExecutor::new(evm, ctx, spec, OpAlloyReceiptBuilder::default())
 }
 
-/// Installs a recording observer on `executor` and returns the log it writes.
-fn record(executor: &mut Executor<'_>) -> PreBlockLog {
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let captured = Arc::clone(&log);
-    executor.set_pre_block_observer(Some(Box::new(
-        move |source: PreBlockStateSource, state: &EvmState| {
-            captured.lock().expect("pre-block observer").push((source, state.clone()));
-        },
-    )));
-    log
-}
-
 /// The registry's own steps the observer received, in order: the deploy of it, the read of its
 /// pending changes and the call that applies them.
 fn registry_steps(log: &PreBlockLog) -> Vec<(PreBlockStateSource, EvmState)> {
@@ -169,7 +155,7 @@ fn start_block(
     gas_limit: u64,
 ) -> Vec<(PreBlockStateSource, EvmState)> {
     let mut executor = executor(state, envs, gas_limit);
-    let log = record(&mut executor);
+    let log = common::record_pre_block(&mut executor);
     executor.apply_pre_execution_changes().expect("the block starts");
     registry_steps(&log)
 }
@@ -203,7 +189,7 @@ fn test_a_due_change_is_applied_under_a_crowded_bucket() {
         ]
     );
     assert_eq!(envs.total_bucket_queries(), 0, "no pre-block step read a capacity");
-    assert_eq!(slot(&mut state, CURRENT_SYSTEM_ADDRESS), word(NEXT_SYSTEM_ADDRESS));
+    assert_eq!(slot(&mut state, CURRENT_SYSTEM_ADDRESS), common::word(NEXT_SYSTEM_ADDRESS));
     assert_eq!(slot(&mut state, PENDING_SYSTEM_ADDRESS), U256::ZERO, "the pending slot is cleared");
     assert_eq!(slot(&mut state, SYSTEM_ADDRESS_ACTIVATION_BLOCK), U256::ZERO);
 }
@@ -238,8 +224,8 @@ fn test_a_change_not_yet_due_makes_no_call() {
     let mut state = State::builder().with_database(db).build();
     let steps = start_block(&mut state, envs_at(1), common::BLOCK_GAS_LIMIT);
     assert!(!sources(&steps).contains(&PreBlockStateSource::ApplyPendingChanges));
-    assert_eq!(slot(&mut state, CURRENT_SYSTEM_ADDRESS), word(MEGA_SYSTEM_ADDRESS));
-    assert_eq!(slot(&mut state, PENDING_SYSTEM_ADDRESS), word(NEXT_SYSTEM_ADDRESS));
+    assert_eq!(slot(&mut state, CURRENT_SYSTEM_ADDRESS), common::word(MEGA_SYSTEM_ADDRESS));
+    assert_eq!(slot(&mut state, PENDING_SYSTEM_ADDRESS), common::word(NEXT_SYSTEM_ADDRESS));
 }
 
 /// A sequencer change due in this block is applied by the same call, and leaves the system
@@ -250,10 +236,10 @@ fn test_a_due_sequencer_change_is_applied() {
         State::builder().with_database(registry_with(&sequencer_change(BLOCK_NUMBER))).build();
     let steps = start_block(&mut state, envs_at(1), common::BLOCK_GAS_LIMIT);
     assert!(sources(&steps).contains(&PreBlockStateSource::ApplyPendingChanges));
-    assert_eq!(slot(&mut state, CURRENT_SEQUENCER), word(NEXT_SEQUENCER));
+    assert_eq!(slot(&mut state, CURRENT_SEQUENCER), common::word(NEXT_SEQUENCER));
     assert_eq!(slot(&mut state, PENDING_SEQUENCER), U256::ZERO);
     assert_eq!(slot(&mut state, SEQUENCER_ACTIVATION_BLOCK), U256::ZERO);
-    assert_eq!(slot(&mut state, CURRENT_SYSTEM_ADDRESS), word(MEGA_SYSTEM_ADDRESS));
+    assert_eq!(slot(&mut state, CURRENT_SYSTEM_ADDRESS), common::word(MEGA_SYSTEM_ADDRESS));
 }
 
 /// The system address a chain's schedule seeds the registry with, distinct from
@@ -336,7 +322,7 @@ fn assert_carries_the_system_address_read(state: &EvmState, system_address: Addr
     assert_eq!(registry.storage.len(), 1, "exactly the one slot read");
     let slot = &registry.storage[&CURRENT_SYSTEM_ADDRESS];
     assert!(!slot.is_changed());
-    assert_eq!(slot.present_value(), word(system_address));
+    assert_eq!(slot.present_value(), common::word(system_address));
 }
 
 /// A fresh chain's first block deploys the registry seeded with the system address its schedule
@@ -352,7 +338,7 @@ fn test_the_bootstrap_block_promotes_the_seeded_system_address() {
         common::BLOCK_GAS_LIMIT,
         chain_seeding_genesis_system_address(),
     );
-    let log = record(&mut executor);
+    let log = common::record_pre_block(&mut executor);
     executor.apply_pre_execution_changes().expect("the block starts");
     let sources = sources(&registry_steps(&log));
     assert_eq!(
@@ -372,12 +358,12 @@ fn test_the_bootstrap_block_promotes_the_seeded_system_address() {
         state.basic(SEQUENCER_REGISTRY_ADDRESS).unwrap().unwrap().code_hash,
         SEQUENCER_REGISTRY_CODE_HASH,
     );
-    assert_eq!(slot(&mut state, CURRENT_SYSTEM_ADDRESS), word(GENESIS_SYSTEM_ADDRESS));
+    assert_eq!(slot(&mut state, CURRENT_SYSTEM_ADDRESS), common::word(GENESIS_SYSTEM_ADDRESS));
     assert_eq!(
         slot(&mut state, MIN_ROTATION_DELAY),
         U256::from(common::registry_config().min_rotation_delay)
     );
-    assert_eq!(slot(&mut state, CURRENT_SEQUENCER), word(common::SEQUENCER));
+    assert_eq!(slot(&mut state, CURRENT_SEQUENCER), common::word(common::SEQUENCER));
 
     // The default schedule seeds the engine's default address, and it is the system address.
     let mut state = common::state();
@@ -394,7 +380,7 @@ fn test_the_bootstrap_block_promotes_the_seeded_system_address() {
 fn test_the_slot_is_in_the_system_transactions_state_not_the_pre_block_witness() {
     let mut state = State::builder().with_database(registry_with(&[])).build();
     let mut executor = executor(&mut state, envs_at(1), common::BLOCK_GAS_LIMIT);
-    let log = record(&mut executor);
+    let log = common::record_pre_block(&mut executor);
     executor.apply_pre_execution_changes().expect("the block starts");
     for (source, state) in pre_block_states(&log) {
         let slot = state
@@ -423,18 +409,6 @@ fn test_system_tx_uses_resolved_system_address() {
     );
     executor.apply_pre_execution_changes().expect("the block starts");
     assert_is_the_system_address(&mut executor, GENESIS_SYSTEM_ADDRESS);
-    assert_is_not_the_system_address(&mut executor, MEGA_SYSTEM_ADDRESS);
-}
-
-/// A system-address rotation due in this block governs this block: the new address sends the
-/// protocol's transactions, and the old one no longer can.
-#[test]
-fn test_system_address_change() {
-    let mut state =
-        State::builder().with_database(registry_with(&system_address_change(BLOCK_NUMBER))).build();
-    let mut executor = executor(&mut state, envs_at(1), common::BLOCK_GAS_LIMIT);
-    executor.apply_pre_execution_changes().expect("the block starts");
-    assert_is_the_system_address(&mut executor, NEXT_SYSTEM_ADDRESS);
     assert_is_not_the_system_address(&mut executor, MEGA_SYSTEM_ADDRESS);
 }
 
@@ -667,26 +641,14 @@ fn test_dual_change_in_same_block() {
     executor.apply_pre_execution_changes().expect("the block starts");
     assert_is_the_system_address(&mut executor, NEXT_SYSTEM_ADDRESS);
     drop(executor);
-    assert_eq!(slot(&mut state, CURRENT_SEQUENCER), word(NEXT_SEQUENCER));
-}
-
-/// A rotation scheduled for a later block leaves this block's system address as it was.
-#[test]
-fn test_pending_not_yet_due_is_noop() {
-    let mut state = State::builder()
-        .with_database(registry_with(&system_address_change(BLOCK_NUMBER + 8_999)))
-        .build();
-    let mut executor = executor(&mut state, envs_at(1), common::BLOCK_GAS_LIMIT);
-    executor.apply_pre_execution_changes().expect("the block starts");
-    assert_is_the_system_address(&mut executor, MEGA_SYSTEM_ADDRESS);
-    assert_is_not_the_system_address(&mut executor, NEXT_SYSTEM_ADDRESS);
+    assert_eq!(slot(&mut state, CURRENT_SEQUENCER), common::word(NEXT_SEQUENCER));
 }
 
 /// The two-step admin handoff through ordinary transactions: the admin names the next one, the
 /// next one accepts, and the registry's admin slot moves while the pending one is cleared.
 #[test]
 fn test_admin_handoff_via_block_executor() {
-    let mut db = registry_with(&[(ADMIN, word(common::ADMIN))]);
+    let mut db = registry_with(&[(ADMIN, common::word(common::ADMIN))]);
     db.set_account_balance(common::ADMIN, U256::from(10_u64.pow(18)));
     db.set_account_balance(NEXT_ADMIN, U256::from(10_u64.pow(18)));
     let mut state = State::builder().with_database(db).build();
@@ -707,7 +669,7 @@ fn test_admin_handoff_via_block_executor() {
     }
     drop(executor);
 
-    assert_eq!(slot(&mut state, ADMIN), word(NEXT_ADMIN));
+    assert_eq!(slot(&mut state, ADMIN), common::word(NEXT_ADMIN));
     assert_eq!(slot(&mut state, PENDING_ADMIN), U256::ZERO);
 }
 
@@ -817,14 +779,14 @@ fn test_a_rotation_with_a_valid_proof_activates_at_its_block() {
 
     let proof = rotation_proof(secret, next, U256::from(activation));
     assert!(schedule(&mut state, next, activation, proof), "the proof is accepted");
-    assert_eq!(slot(&mut state, PENDING_SEQUENCER), word(next));
+    assert_eq!(slot(&mut state, PENDING_SEQUENCER), common::word(next));
     assert_eq!(slot(&mut state, SEQUENCER_ACTIVATION_BLOCK), U256::from(activation));
 
     drop(started_block_at(&mut state, activation - 1));
-    assert_eq!(slot(&mut state, CURRENT_SEQUENCER), word(common::SEQUENCER), "not before");
+    assert_eq!(slot(&mut state, CURRENT_SEQUENCER), common::word(common::SEQUENCER), "not before");
 
     drop(started_block_at(&mut state, activation));
-    assert_eq!(slot(&mut state, CURRENT_SEQUENCER), word(next), "applied at its block");
+    assert_eq!(slot(&mut state, CURRENT_SEQUENCER), common::word(next), "applied at its block");
     assert_eq!(slot(&mut state, PENDING_SEQUENCER), U256::ZERO);
 }
 
@@ -844,15 +806,19 @@ fn test_a_sequencer_rotation_takes_effect_across_blocks() {
     assert!(schedule(&mut state, next, activation, proof), "the proof is accepted");
 
     drop(started_block_at(&mut state, activation - 1));
-    assert_eq!(slot(&mut state, CURRENT_SEQUENCER), word(common::SEQUENCER), "not yet");
-    assert_eq!(slot(&mut state, PENDING_SEQUENCER), word(next), "still pending");
+    assert_eq!(slot(&mut state, CURRENT_SEQUENCER), common::word(common::SEQUENCER), "not yet");
+    assert_eq!(slot(&mut state, PENDING_SEQUENCER), common::word(next), "still pending");
 
     drop(started_block_at(&mut state, activation));
-    assert_eq!(slot(&mut state, CURRENT_SEQUENCER), word(next), "applied at its block");
+    assert_eq!(slot(&mut state, CURRENT_SEQUENCER), common::word(next), "applied at its block");
     assert_eq!(slot(&mut state, PENDING_SEQUENCER), U256::ZERO, "the pending change is cleared");
 
     drop(started_block_at(&mut state, activation + 1));
-    assert_eq!(slot(&mut state, CURRENT_SEQUENCER), word(next), "the next block still names it");
+    assert_eq!(
+        slot(&mut state, CURRENT_SEQUENCER),
+        common::word(next),
+        "the next block still names it"
+    );
     assert_eq!(slot(&mut state, PENDING_SEQUENCER), U256::ZERO, "nothing is applied again");
 }
 

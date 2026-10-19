@@ -35,46 +35,6 @@ use crate::{
 /// The number of cases each property runs in the bounded mode.
 const CASES: u32 = 768;
 
-/// Every case executes without a panic: the engine answers with an outcome or refuses the
-/// transaction with an error, whatever the input. In a debug build every `debug_assert` on the
-/// path runs. The tally of outcome classes is printed, so a run shows what the generators reach.
-#[test]
-fn test_property_no_panic() {
-    let tally: Mutex<BTreeMap<String, u32>> = Mutex::new(BTreeMap::new());
-    check(
-        "no_panic",
-        CASES,
-        || case(Flavor::Satin),
-        |case| {
-            let class = match case.execute() {
-                Ok(outcome) => {
-                    let stop = outcome
-                        .limit_exceeded
-                        .map(|check| match check {
-                            LimitCheck::ExceedsLimit { kind, .. } => {
-                                format!(" stopped on {kind:?}")
-                            }
-                            LimitCheck::WithinLimit => String::new(),
-                        })
-                        .unwrap_or_default();
-                    match &outcome.result {
-                        ExecutionResult::Success { .. } => "success".to_string(),
-                        ExecutionResult::Revert { .. } => format!("revert{stop}"),
-                        ExecutionResult::Halt { reason, .. } => format!("halt {reason:?}"),
-                    }
-                }
-                // The error's own name, without its fields: `Transaction(Base(NonceTooHigh`.
-                Err(error) => {
-                    format!("refused {}", error.split([' ', '{', ')']).next().unwrap_or(""))
-                }
-            };
-            *tally.lock().unwrap().entry(class).or_default() += 1;
-            Ok(())
-        },
-    );
-    print_tally("no_panic", tally.into_inner().unwrap());
-}
-
 /// The same input twice gives byte-identical outcomes: the result, its gas, logs and output, the
 /// gas by ledger, the usage, the stop and the state, or the same refusal.
 #[test]

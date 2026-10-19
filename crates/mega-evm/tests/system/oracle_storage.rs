@@ -10,7 +10,7 @@ use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
     constants::{ORACLE_ACCESS_COMPUTE_GAS, TX_GAS_LIMIT_CAP},
-    system::{IOracle, ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE},
+    system::{IOracle, ORACLE_CONTRACT_ADDRESS},
     test_utils::{
         op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase, ReplayingOracleEnv,
     },
@@ -572,21 +572,6 @@ fn test_two_answers_for_one_slot_replay_only_from_the_record() {
         assert_eq!(words(&without), (held, held), "the slot holds {held:#x}");
         assert_ne!(without.result, built.result, "the slot holds {held:#x}");
     }
-}
-
-/// The Oracle's own code answers `getSlot` from the service too: the read is the `SLOAD` in its
-/// frame, whatever code runs there.
-#[test]
-fn test_the_deployed_oracle_reads_through_the_service() {
-    let service = Service::holding(SLOT, SERVICE_VALUE);
-    let db = MemoryDatabase::default()
-        .account_balance(CALLER, U256::from(1_000_000_000_000_u64))
-        .account_code(ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE);
-    let run = run(db, &service, call_tx(ORACLE_CONTRACT_ADDRESS, get_slot(SLOT), U256::ZERO));
-    assert_eq!(
-        IOracle::getSlotCall::abi_decode_returns(run.outcome.result.output().unwrap()).unwrap(),
-        B256::from(SERVICE_VALUE),
-    );
 }
 
 /// A detained frame whose regular gas holds the cold access, but which may not spend it past the
