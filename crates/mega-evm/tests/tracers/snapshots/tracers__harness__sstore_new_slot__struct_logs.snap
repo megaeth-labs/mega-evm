@@ -4,13 +4,13 @@ expression: "&traced.struct_logs()"
 ---
 {
   "failed": false,
-  "gas": 165826,
+  "gas": 155826,
   "returnValue": "0x",
   "structLogs": [
     {
       "pc": 0,
       "op": "PUSH32",
-      "gas": 1123546,
+      "gas": 1113546,
       "gasCost": 3,
       "depth": 1,
       "stack": [],
@@ -19,7 +19,7 @@ expression: "&traced.struct_logs()"
     {
       "pc": 33,
       "op": "PUSH32",
-      "gas": 1123543,
+      "gas": 1113543,
       "gasCost": 3,
       "depth": 1,
       "stack": [
@@ -30,8 +30,8 @@ expression: "&traced.struct_logs()"
     {
       "pc": 66,
       "op": "SSTORE",
-      "gas": 1123540,
-      "gasCost": 123540,
+      "gas": 1113540,
+      "gasCost": 113540,
       "depth": 1,
       "stack": [
         "0x1",

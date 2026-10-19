@@ -9,7 +9,7 @@
   ],
   "expected": {
     "success": true,
-    "gas_used": 165826,
+    "gas_used": 155826,
     "logs_count": 0,
     "state": {
       "0x0000000000000000000000000000000000000000": {
@@ -51,7 +51,7 @@
       }
     },
     "satin": {
-      "regular_gas": 37106,
+      "regular_gas": 27106,
       "state_gas": 97920,
       "history_gas": 30800,
       "history_bytes": 350,

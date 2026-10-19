@@ -119,6 +119,27 @@ impl Run {
     }
 }
 
+/// The reason the block executor gives a transaction whose declared gas limit is more than the
+/// gas its block has left.
+const NO_BLOCK_GAS: &str = "is more than blocks available gas";
+
+/// How many transactions `records`, a replay of one block, shows refused, every one of them for
+/// the gas it declared and the block no longer had.
+///
+/// The recorded transactions declare gas limits close to their block's own, and a Satin replay of
+/// a recorded block spends more gas than the chain did, so a transaction late in the block can
+/// find too little gas left to be included. That is the one refusal a replay whose schedule has
+/// every fork active at the block can make; any other fails the assertion.
+pub(crate) fn refused_for_block_gas(records: &[Value]) -> usize {
+    let refused: Vec<&Value> =
+        records.iter().filter(|r| r["kind"] == "tx" && r["status"] == "refused").collect();
+    for record in &refused {
+        let reason = record["reason"].as_str().unwrap_or_default();
+        assert!(reason.contains(NO_BLOCK_GAS), "a refusal for more than block gas: {record}");
+    }
+    refused.len()
+}
+
 /// Runs `mega-evme` with `args` on a thread of its own, so a test's runtime can serve it a mock.
 pub(crate) fn run_evme<S: AsRef<str>>(args: &[S]) -> Run {
     let args: Vec<String> = args.iter().map(|a| a.as_ref().to_string()).collect();

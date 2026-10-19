@@ -253,7 +253,14 @@ fn render_blocks(out: &mut String) {
         let sum = |f: &dyn Fn(&TxPair) -> u64| txs.iter().map(|p| f(p)).sum::<u64>();
         let legacy_gas = sum(&|p| u64_of(&p.legacy["gas_used"]));
         let satin_gas = sum(&|p| u64_of(&p.satin["gas_used"]));
-        let state_gas = sum(&|p| u64_of(&p.satin["satin"]["state_gas"]));
+        // A transaction the block refused ran nothing and has no ledgers.
+        let state_gas = sum(&|p| {
+            if p.satin["status"] == "refused" {
+                0
+            } else {
+                u64_of(&p.satin["satin"]["state_gas"])
+            }
+        });
         let status = txs.iter().filter(|p| is_success(&p.legacy) != is_success(&p.satin)).count();
         let legacy_logs = sum(&|p| u64_of(&p.legacy["logs"]));
         let satin_logs = sum(&|p| u64_of(&p.satin["logs"]));
@@ -289,8 +296,8 @@ fn render() -> String {
     .unwrap();
     writeln!(out, "What the Satin columns show:\n").unwrap();
     for line in [
-        "- **Regular**: execution, at the Satin schedule (Amsterdam's, with the entries EIP-8038 \
-         repriced back at Osaka's) and EIP-2780's intrinsic cost.",
+        "- **Regular**: execution, at the Satin schedule (Amsterdam's, EIP-8038's state-access \
+         prices included) and EIP-2780's intrinsic cost.",
         "- **State**: EIP-8037 state gas for the state a transaction adds (a slot, an account, \
          deployed code), at the cost per state byte.",
         "- **History**: gas for the bytes a transaction appends to history (its body, one \

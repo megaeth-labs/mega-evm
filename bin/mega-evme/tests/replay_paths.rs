@@ -175,8 +175,14 @@ fn block_rows(spec: Option<&str>, limits: Option<&str>) -> Vec<Value> {
 }
 
 /// The transactions checked: the first user transaction, the plain value transfer, one in the
-/// middle and the last.
+/// middle and the last the block ran before it refused one.
+///
+/// A Satin replay can refuse a transaction the chain included, for the block gas it declared, and
+/// a transaction after it is not replayed alone: the replay of its block's earlier transactions
+/// meets the refusal and fails.
 fn checked(rows: &[Value]) -> Vec<usize> {
+    let ran = rows.iter().position(|row| row["status"] == "refused").unwrap_or(rows.len());
+    let rows = &rows[..ran];
     let transfer = rows.iter().position(|row| row["logs"] == 0 && row["index"] != 0).unwrap_or(1);
     let mut picks = vec![1, transfer, rows.len() / 2, rows.len() - 1];
     picks.sort_unstable();

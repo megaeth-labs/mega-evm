@@ -21,7 +21,7 @@ use mega_evm::{
         bn254_pair::{KARST, KARST_MAX_INPUT_SIZE},
     },
     revm::{
-        context_interface::cfg::{gas::WARM_STORAGE_READ_COST, GasId},
+        context_interface::cfg::{gas::WARM_STORAGE_READ_COST, GasId, GasParams},
         handler::SYSTEM_CALL_REGULAR_GAS_LIMIT,
         precompile::secp256r1::{P256VERIFY_BASE_GAS_FEE_OSAKA, P256VERIFY_OSAKA},
         primitives::{
@@ -31,6 +31,7 @@ use mega_evm::{
                 AUTH_BASE_BYTES, CODE_DEPOSIT_PER_BYTE, NEW_ACCOUNT_BYTES, SSTORE_SET_BYTES,
             },
             eip8038::COLD_ACCOUNT_ACCESS,
+            hardfork::SpecId,
         },
     },
     satin_gas_params, satin_gas_params_at, satin_precompiles,
@@ -123,8 +124,8 @@ fn schedule(doc: &str) {
     let rows = [
         ("Warm storage read", GasId::warm_storage_read_cost()),
         ("Cold account access, additional", GasId::cold_account_additional_cost()),
-        ("Cold storage access, additional", GasId::cold_storage_additional_cost()),
-        ("Cold `SLOAD`", GasId::cold_storage_cost()),
+        ("Cold storage access of an `SLOAD`, additional", GasId::cold_storage_additional_cost()),
+        ("Cold storage access of an `SSTORE`", GasId::cold_storage_cost()),
         ("Value transfer of a call", GasId::transfer_value_cost()),
         ("New account of a call", GasId::new_account_cost()),
         ("New account of `SELFDESTRUCT`", GasId::new_account_cost_for_selfdestruct()),
@@ -154,8 +155,11 @@ fn schedule(doc: &str) {
         ("Floor tokens per zero calldata byte", GasId::tx_floor_token_zero_byte_multiplier()),
         ("Floor tokens per access-list byte", GasId::tx_access_list_floor_byte_multiplier()),
     ];
+    let osaka = GasParams::new_spec(SpecId::OSAKA);
     for (label, id) in rows {
-        let shown = *table_row(page, label).last().expect("a satin cell");
+        let row = table_row(page, label);
+        let [.., before, shown] = row[..] else { panic!("{label}: an Osaka and a Satin cell") };
+        assert_eq!(before, grouped(osaka.get(id)), "{label} at Osaka");
         assert_eq!(shown, grouped(spec.get(id)), "{label}");
         if !byte_priced(id) {
             assert_eq!(satin_gas_params().get(id), spec.get(id), "{label} is not a byte price");

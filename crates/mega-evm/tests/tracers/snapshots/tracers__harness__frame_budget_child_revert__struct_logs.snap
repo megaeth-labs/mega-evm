@@ -4,13 +4,13 @@ expression: "&traced.struct_logs()"
 ---
 {
   "failed": false,
-  "gas": 49819,
+  "gas": 50219,
   "returnValue": "0x",
   "structLogs": [
     {
       "pc": 0,
       "op": "PUSH0",
-      "gas": 1007567,
+      "gas": 1007967,
       "gasCost": 2,
       "depth": 1,
       "stack": [],
@@ -19,7 +19,7 @@ expression: "&traced.struct_logs()"
     {
       "pc": 1,
       "op": "PUSH0",
-      "gas": 1007565,
+      "gas": 1007965,
       "gasCost": 2,
       "depth": 1,
       "stack": [
@@ -30,7 +30,7 @@ expression: "&traced.struct_logs()"
     {
       "pc": 2,
       "op": "PUSH0",
-      "gas": 1007563,
+      "gas": 1007963,
       "gasCost": 2,
       "depth": 1,
       "stack": [
@@ -42,7 +42,7 @@ expression: "&traced.struct_logs()"
     {
       "pc": 3,
       "op": "PUSH0",
-      "gas": 1007561,
+      "gas": 1007961,
       "gasCost": 2,
       "depth": 1,
       "stack": [
@@ -55,7 +55,7 @@ expression: "&traced.struct_logs()"
     {
       "pc": 4,
       "op": "PUSH32",
-      "gas": 1007559,
+      "gas": 1007959,
       "gasCost": 3,
       "depth": 1,
       "stack": [
@@ -69,7 +69,7 @@ expression: "&traced.struct_logs()"
     {
       "pc": 37,
       "op": "PUSH20",
-      "gas": 1007556,
+      "gas": 1007956,
       "gasCost": 3,
       "depth": 1,
       "stack": [
@@ -84,7 +84,7 @@ expression: "&traced.struct_logs()"
     {
       "pc": 58,
       "op": "GAS",
-      "gas": 1007553,
+      "gas": 1007953,
       "gasCost": 2,
       "depth": 1,
       "stack": [
@@ -100,8 +100,8 @@ expression: "&traced.struct_logs()"
     {
       "pc": 59,
       "op": "CALL",
-      "gas": 1007551,
-      "gasCost": 991849,
+      "gas": 1007951,
+      "gasCost": 992249,
       "depth": 1,
       "stack": [
         "0x0",
@@ -110,7 +110,7 @@ expression: "&traced.struct_logs()"
         "0x0",
         "0x0",
         "0x400003",
-        "0xf5fbf"
+        "0xf614f"
       ],
       "refund": 0
     },

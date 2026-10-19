@@ -52,8 +52,33 @@ pub(crate) const ABOVE: u64 = TX_GAS_LIMIT_CAP + 100_000_000;
 pub(crate) const TIERS: [u64; 2] = [BELOW, ABOVE];
 
 /// The compute of a write to a fresh, cold slot as [`BytecodeBuilder::sstore`] makes it: its two
-/// pushes and `SSTORE`'s 22,100.
-pub(crate) const FRESH_WRITE: u64 = 3 + 3 + 22_100;
+/// pushes and `SSTORE`'s static and dynamic gas, 12,106 at the schedule's prices.
+pub(crate) fn fresh_write() -> u64 {
+    3 + 3 + sstore_static() + fresh_sstore()
+}
+
+/// `SSTORE`'s static gas, which it charges before its dynamic gas.
+pub(crate) fn sstore_static() -> u64 {
+    crate::salt::entry(GasId::sstore_static())
+}
+
+/// `SSTORE`'s dynamic gas on a fresh, cold slot: the cold access and the storage write.
+pub(crate) fn fresh_sstore() -> u64 {
+    crate::salt::entry(GasId::cold_storage_cost()) +
+        crate::salt::entry(GasId::sstore_set_without_load_cost())
+}
+
+/// What a call reaching a cold account pays for the access: the warm base and the cold surcharge,
+/// 3,000 at the schedule's prices.
+pub(crate) fn cold_access() -> u64 {
+    crate::salt::entry(GasId::warm_storage_read_cost()) +
+        crate::salt::entry(GasId::cold_account_additional_cost())
+}
+
+/// What a call carrying value pays for the transfer, the callee's stipend included.
+pub(crate) fn value_transfer() -> u64 {
+    crate::salt::entry(GasId::transfer_value_cost())
+}
 
 /// What a write to a fresh slot costs beside its compute: the slot's state gas and its record's
 /// history, at the prices the schedule was built with.
@@ -303,7 +328,7 @@ impl Charges {
     /// two pushes, then `SSTORE`'s static gas and its dynamic gas, the cold access and the set.
     /// Their state and history gas are not compute.
     pub(crate) fn fresh_writes(self, count: u64) -> Self {
-        self.repeat(&[3, 3, 100, 22_000], count)
+        self.repeat(&[3, 3, sstore_static(), fresh_sstore()], count)
     }
 }
 
@@ -786,10 +811,20 @@ fn test_the_most_restrictive_limit_binds_whatever_the_order() {
                 // The `POP`, the work, then the call to the Oracle — five pushes, its address,
                 // `GAS` and the cold access — the Oracle's push, cold `SLOAD` and `POP`, and the
                 // caller's `POP`.
-                Charges::default()
-                    .then(&[2])
-                    .work(300, 0)
-                    .then(&[2, 2, 2, 2, 2, 3, 2, 2_600, 2, 2_100, 2, 2])
+                Charges::default().then(&[2]).work(300, 0).then(&[
+                    2,
+                    2,
+                    2,
+                    2,
+                    2,
+                    3,
+                    2,
+                    cold_access(),
+                    2,
+                    2_100,
+                    2,
+                    2,
+                ])
             } else {
                 // The Oracle's `POP` and its caller's, the work, then `TIMESTAMP` and its `POP`.
                 Charges::default().then(&[2, 2]).work(300, 0).then(&[2, 2])
@@ -958,7 +993,7 @@ fn test_a_call_that_reads_counts_from_what_its_caller_paid() {
         // PUSH0 x4, PUSH0, PUSH20, GAS and a warm CALL.
         (false, 2 * 4 + 2 + 3 + 2 + 100),
         // PUSH0 x4, PUSH1, PUSH20, GAS, a warm CALL and the value transfer.
-        (true, 2 * 4 + 3 + 3 + 2 + 100 + 9_000),
+        (true, 2 * 4 + 3 + 3 + 2 + 100 + value_transfer()),
     ] {
         let code = BytecodeBuilder::default().append_many([PUSH0, PUSH0, PUSH0, PUSH0]);
         let code = if value { code.push_number(1_u8) } else { code.append(PUSH0) };
@@ -1110,32 +1145,34 @@ fn test_running_out_of_the_frames_own_gas_still_halts() {
 }
 
 /// Writes after a read are held to the cap by the regular gas they spend. With room in the
-/// reservoir for their state and history gas, a thousand fresh slots — 22,106,000 of compute —
-/// cross it and stop the transaction, at the first write's charge past it. Without a reservoir,
+/// reservoir for their state and history gas, one fresh slot more than the cap's compute pays for
+/// — 1,653 at the schedule's prices, 20,011,218 of compute — crosses it and stops the transaction,
+/// at the first write's charge past it. Without a reservoir,
 /// and with less gas than the writes spend before their compute reaches the cap, the writes drain
 /// the withheld gas first and the frame runs out of its own gas where it would have undetained: it
 /// halts.
 #[test]
 fn test_writes_after_a_read_stop_at_the_cap_or_run_out_of_their_own_gas() {
+    let slots = CAP / fresh_write() + 1;
     let mut code = op(BytecodeBuilder::default(), TIMESTAMP);
-    for slot in 1..=1_000_u64 {
+    for slot in 1..=slots {
         code = code.sstore(U256::from(slot), U256::from(1));
     }
     let code = code.stop().build();
 
     // A reservoir that pays every write's state gas and history.
-    let gas_limit = TX_GAS_LIMIT_CAP + 1_000 * fresh_write_spill();
+    let gas_limit = TX_GAS_LIMIT_CAP + slots * fresh_write_spill();
     let run = execute(
         MemoryDatabase::default().account_code(CONTRACT, code.clone()),
         tx(CALLER, CONTRACT, gas_limit),
     );
-    let left = Charges::default().then(&[2]).fresh_writes(1_000).left(CAP);
+    let left = Charges::default().then(&[2]).fresh_writes(slots).left(CAP);
     assert_stopped(&run, intrinsic(gas_limit), left);
 
     // The cap, and half of what the writes that fit in it spill: more than the cap, so the read
     // withholds gas, and less than those writes spend, so the gas runs out before the compute
     // reaches the cap. Below the execution cap either way.
-    let gas_limit = BELOW.min(CAP + CAP / FRESH_WRITE * fresh_write_spill() / 2);
+    let gas_limit = BELOW.min(CAP + CAP / fresh_write() * fresh_write_spill() / 2);
     let run = execute(
         MemoryDatabase::default().account_code(CONTRACT, code),
         tx(CALLER, CONTRACT, gas_limit),
@@ -1152,20 +1189,21 @@ fn test_writes_after_a_read_stop_at_the_cap_or_run_out_of_their_own_gas() {
 ///
 /// - The Oracle's slot is cold and the frame cannot pay the cold access, so the Host does not load
 ///   it. (The block beneficiary is always warm, so its load cannot be skipped this way.)
-/// - A value transfer to the empty beneficiary loads it, then cannot pay the new account, and the
+/// - A value transfer to the empty beneficiary loads it, then cannot pay the transfer, and the
 ///   `CALL` fails.
 #[test]
 fn test_a_failed_load_caps_nothing() {
     // The push and SLOAD's static 100 leave less than the 2,000 more a cold slot costs.
     let oracle = BytecodeBuilder::default().append_many([PUSH0, SLOAD, STOP]).build();
-    // 9,000 for the transfer and 25,000 for the new account do not fit in 30,000.
+    // The child's pushes and the warm access leave less than the value transfer.
     let child = BytecodeBuilder::default()
         .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
         .push_number(1_u8)
         .push_address(BENEFICIARY)
         .append_many([PUSH0, CALL, STOP])
         .build();
-    for (callee, gas) in [(ORACLE_CONTRACT_ADDRESS, 2_000_u32), (CHILD, 30_000)] {
+    let transfer = u32::try_from(value_transfer()).expect("the transfer's price fits a PUSH4");
+    for (callee, gas) in [(ORACLE_CONTRACT_ADDRESS, 2_000_u32), (CHILD, transfer)] {
         let parent = BytecodeBuilder::default()
             .append_many([PUSH0, PUSH0, PUSH0, PUSH0, PUSH0])
             .push_address(callee)
@@ -1450,7 +1488,7 @@ fn test_the_switch_is_scoped_to_its_subtree() {
 /// its own regular gas with the forward counted back, the gas `GAS` reads after the call plus the
 /// `POP` and the `GAS` it costs to read it; after the read, the cap less what the caller spent
 /// since the read — the read's `POP`, the calldata's `MSTORE` with its push and its memory, the
-/// call's five pushes and its `GAS`, and the cold access to the contract: 2,631.
+/// call's five pushes and its `GAS`, and the cold access to the contract: 3,031.
 #[test]
 fn test_an_interceptors_answer_does_not_lift_the_cap() {
     let calldata = IMegaLimitControl::remainingComputeGasCall {}.abi_encode();
@@ -1475,10 +1513,13 @@ fn test_an_interceptors_answer_does_not_lift_the_cap() {
             MemoryDatabase::default().account_code(CONTRACT, code),
             tx(CALLER, CONTRACT, gas_limit),
         );
-        // The 2,631 spent up to the call's cold access; the answer, which spends nothing; the
-        // `POP`, the push, `MLOAD`, the push and a fresh, cold slot's write; then the loop, in a
-        // memory of one word.
-        let left = Charges::default().then(&[2_631, 2, 3, 3, 3, 100, 22_000]).spin(1).left(CAP);
+        // What is spent up to the call's cold access, 31 and the access itself; the answer, which
+        // spends nothing; the `POP`, the push, `MLOAD`, the push and a fresh, cold slot's write;
+        // then the loop, in a memory of one word.
+        let left = Charges::default()
+            .then(&[31 + cold_access(), 2, 3, 3, 3, sstore_static(), fresh_sstore()])
+            .spin(1)
+            .left(CAP);
         assert_stopped(&run, intrinsic, left);
 
         // The answer and the gas the caller holds after the call, read without the loop, after
@@ -1513,7 +1554,7 @@ fn test_an_interceptors_answer_does_not_lift_the_cap() {
         let (undetained, held_without_the_read) = answer(PUSH0);
         assert_eq!(held, held_without_the_read, "the forward came back whole");
         assert_eq!(undetained, held + U256::from(2 + 2), "the caller's own gas: POP and GAS");
-        assert_eq!(detained, U256::from(CAP - 2_631), "what the cap leaves");
+        assert_eq!(detained, U256::from(CAP - 31 - cold_access()), "what the cap leaves");
     }
 }
 
@@ -1558,8 +1599,8 @@ fn test_state_and_history_gas_are_not_compute() {
     if spill == 0 {
         return;
     }
-    let slots = (CAP / FRESH_WRITE).min((BELOW - 1_000_000) / (FRESH_WRITE + spill));
-    assert!(slots * (FRESH_WRITE + spill) > CAP, "counted as compute, the writes cross the cap");
+    let slots = (CAP / fresh_write()).min((BELOW - 1_000_000) / (fresh_write() + spill));
+    assert!(slots * (fresh_write() + spill) > CAP, "counted as compute, the writes cross the cap");
     let mut code = op(BytecodeBuilder::default(), TIMESTAMP);
     for slot in 1..=slots {
         code = code.sstore(U256::from(slot), U256::from(1));
@@ -1573,7 +1614,7 @@ fn test_state_and_history_gas_are_not_compute() {
     // The body and each slot's record are charges of their own, each priced on its own.
     let history = history_gas(TX_BODY_SIZE).expect("the body has a price") +
         slots * history_gas(WRITE_RECORD_SIZE).expect("a record has a price");
-    let compute = 2 + 2 + slots * FRESH_WRITE;
+    let compute = 2 + 2 + slots * fresh_write();
     assert!(compute < CAP, "the writes' compute fits under the cap");
     let written: Vec<SlotView> = (1..=slots)
         .map(|slot| SlotView {
@@ -1624,8 +1665,8 @@ fn test_gas_spilled_before_the_read_is_not_compute() {
         );
         let left = Charges::default().then(&[2]).spin(0).left(CAP);
         let limit = assert_stopped(&run, intrinsic(gas_limit), left);
-        // Two pushes and a fresh slot's 22,100 of regular gas, a hundred times, then TIMESTAMP.
-        assert_eq!(limit - CAP, 100 * (3 + 3 + 22_100) + 2, "{gas_limit}");
+        // Two pushes and a fresh slot's regular gas, a hundred times, then TIMESTAMP.
+        assert_eq!(limit - CAP, 100 * fresh_write() + 2, "{gas_limit}");
     }
 }
 

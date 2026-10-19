@@ -4,15 +4,15 @@ expression: "&traced.call_frame(true)"
 ---
 {
   "from": "0x0000000000000000000000000000000000400000",
-  "gas": "0x18e592",
-  "gasUsed": "0x12f5c",
+  "gas": "0x18c86f",
+  "gasUsed": "0x112d8",
   "to": "0x0000000000000000000000000000000000400002",
   "input": "0x",
   "calls": [
     {
       "from": "0x0000000000000000000000000000000000400002",
-      "gas": "0x17bbba",
-      "gasUsed": "0x1e593",
+      "gas": "0x1794aa",
+      "gasUsed": "0x1be83",
       "to": "0x0000000000000000000000000000000000400003",
       "input": "0x",
       "error": "execution reverted",

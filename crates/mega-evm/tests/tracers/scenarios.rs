@@ -700,8 +700,9 @@ fn test_timestamp_detention_stop() {
 /// limit the parent's read set, and every frame returns the stop.
 #[test]
 fn test_detention_stop_spans_frames() {
-    // Enough for the parent's call and a few dozen iterations of the child's loop.
-    let cap = 3_000;
+    // Enough for the parent's call and a few dozen iterations of the child's loop, the last of
+    // them two gas short of a round, so that its `JUMP` is the charge that crosses.
+    let cap = BASE + call_regular(false) + 32 * (JUMPDEST_GAS + VERYLOW + MID) - 2;
     let parent = BytecodeBuilder::default()
         .append_many([PUSH0, POP, TIMESTAMP, POP])
         .call(CHILD, U256::ZERO)

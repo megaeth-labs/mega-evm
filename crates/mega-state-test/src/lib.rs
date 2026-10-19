@@ -9,8 +9,8 @@
 //!   passes, is skipped for a [reason the reference runner shares](skips), or fails on a
 //!   [registered deviation](deviations) — a place Satin differs from Ethereum on purpose.
 //! - **Satin** — the same fixtures under Satin's own configuration, counted by outcome. It is a
-//!   report: Satin prices state, history and the access entries it pressed back on purpose, so
-//!   almost every stateful fixture differs, and the count is what is worth watching.
+//!   report: Satin prices state and history on purpose, and state access as Amsterdam does
+//!   (EIP-8038), so almost every stateful fixture differs, and the count is what is worth watching.
 //!
 //! The fixture types are the revm fork's own ([`types`]), the ones its reference runner reads, so
 //! the two runners parse, skip and count the same population.

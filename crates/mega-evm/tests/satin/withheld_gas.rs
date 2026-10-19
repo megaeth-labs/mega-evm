@@ -52,9 +52,9 @@ use revm::{
 use crate::{
     common::history,
     detention::{
-        assert_stopped, burn, context, execute, fresh_write_spill, intrinsic, memory_cost, op,
-        run_on, spin, stop_data, tx, work, Calls, Charges, Run, ABOVE, BELOW, BENEFICIARY, CALLER,
-        CAP, CHILD, CONTRACT, FRESH_WRITE, TIERS,
+        assert_stopped, burn, cold_access, context, execute, fresh_write, fresh_write_spill,
+        intrinsic, memory_cost, op, run_on, spin, sstore_static, stop_data, tx, work, Calls,
+        Charges, Run, ABOVE, BELOW, BENEFICIARY, CALLER, CAP, CHILD, CONTRACT, TIERS,
     },
 };
 
@@ -213,7 +213,7 @@ fn test_a_bounded_callee_writes_what_it_writes_without_the_read() {
         .sstore(U256::from(3), U256::from(1))
         .stop()
         .build();
-    let bound = u32::try_from(3 * FRESH_WRITE + fresh_write_spill()).expect("a bound in a push");
+    let bound = u32::try_from(3 * fresh_write() + fresh_write_spill()).expect("a bound in a push");
     // Where a write spills nothing, the bound pays all three below the cap too.
     let below = u64::from(fresh_write_spill() == 0);
     for (gas_limit, status) in [(BELOW, below), (ABOVE, 1)] {
@@ -254,14 +254,15 @@ fn test_the_sstore_sentry_reads_the_whole_regular_gas() {
 /// At the settlement the withheld gas is unspent gas: it goes back to the sender with the rest of
 /// the unspent gas, and it is not part of the gas used that caps the EIP-3529 refund at a fifth.
 ///
-/// After its read, under a cap of 1,000,000, the transaction writes eight fresh slots, each back
+/// After its read, under a cap of 1,000,000, the transaction writes sixteen fresh slots, each back
 /// to zero at once, so most of its regular gas is withheld when it ends. Each fresh, cold write
-/// costs its two pushes and `SSTORE`'s 100, 2,100 cold and 19,900 for the set; each write back,
+/// costs its two pushes and `SSTORE`'s 100, 2,000 cold and 10,000 for the write; each write back,
 /// its pushes and the warm 100; the slot's state gas and its record's history come back with the
 /// write back. So the transaction spends its intrinsic 15,000, its body's history, the read and
-/// its `POP` and eight times 22,106 + 106, and its refund counter holds eight times the 19,900 a
-/// restored fresh slot refunds — more than a fifth of what it spent, so the refund is that fifth.
-/// Counted as used, the withheld gas would lift the cap above the counter.
+/// its `POP` and sixteen times 12,106 + 106, and its refund counter holds sixteen times the 10,000
+/// a restored fresh slot refunds — more than a fifth of what it spent, at a history byte of up to
+/// 1,000 gas, so the refund is that fifth. Counted as used, the withheld gas would lift the cap
+/// above the counter.
 ///
 /// The sender pays what the receipt reports at the gas price, and the beneficiary is credited it;
 /// the same transaction without the read settles the same way.
@@ -272,11 +273,10 @@ fn test_the_sstore_sentry_reads_the_whole_regular_gas() {
 #[test]
 fn test_the_settlement_counts_the_withheld_gas_as_unspent() {
     const SETTLED_CAP: u64 = 1_000_000;
-    const SLOTS: u64 = 8;
+    const SLOTS: u64 = 16;
     const GAS_PRICE: u128 = 2;
-    const FRESH_WRITE: u64 = 3 + 3 + 100 + 2_100 + 19_900;
-    const WRITE_BACK: u64 = 3 + 3 + 100;
-    const RESTORED_SLOT_REFUND: u64 = 19_900;
+    let write_back = 3 + 3 + sstore_static();
+    let restored_slot_refund = crate::salt::entry(GasId::sstore_set_refund());
     let limits = EvmTxRuntimeLimits::default().with_block_env_access_compute_gas_limit(SETTLED_CAP);
     let funds = U256::from(10u64.pow(18));
     for gas_limit in TIERS {
@@ -298,12 +298,12 @@ fn test_the_settlement_counts_the_withheld_gas_as_unspent() {
             history(mega_evm::TX_BODY_SIZE) +
             2 +
             2 +
-            SLOTS * (FRESH_WRITE + WRITE_BACK);
+            SLOTS * (fresh_write() + write_back);
         let refund = spent / 5;
-        assert!(SLOTS * RESTORED_SLOT_REFUND > refund, "the cap binds the refund counter");
+        assert!(SLOTS * restored_slot_refund > refund, "the cap binds the refund counter");
         let withheld_at_least = gas_limit.min(TX_GAS_LIMIT_CAP) - spent - (2 + SETTLED_CAP);
         assert!(
-            (spent + withheld_at_least) / 5 > SLOTS * RESTORED_SLOT_REFUND,
+            (spent + withheld_at_least) / 5 > SLOTS * restored_slot_refund,
             "counted as used, the withheld gas would lift the cap above the counter"
         );
         let gas_used = spent - refund;
@@ -604,7 +604,7 @@ fn test_a_halt_on_a_static_charge_counts_what_its_frame_had_as_compute() {
         let mut since_read = 2;
         let crossing = 'calls: {
             for call in 0..50 {
-                let access = if call == 0 { 2_600 } else { 100 };
+                let access = if call == 0 { cold_access() } else { 100 };
                 for charge in [2, 2, 2, 2, 2, 3, 3, access] {
                     if since_read + charge > 200_000 {
                         break 'calls since_read;
@@ -677,23 +677,23 @@ struct Overshoot {
 ///
 /// Every halt here is a `SELFDESTRUCT`, whose static gas of 5,000 is the largest. The charges,
 /// from the read on: `TIMESTAMP` 2, which is the compute at the read, then `POP` 2; a call is five
-/// `PUSH0` at 2, a `PUSH20` and a `PUSH4` at 3, and its cold access of 2,600; a callee forwarded
+/// `PUSH0` at 2, a `PUSH20` and a `PUSH4` at 3, and its cold access of 3,000; a callee forwarded
 /// 5,002 runs a `PUSH20` of 3 and halts on its `SELFDESTRUCT` with 4,999 left, all of which is
-/// compute. So a call to a halting callee is 2,616 of compute in its caller and the 5,002 it
+/// compute. So a call to a halting callee is 3,016 of compute in its caller and the 5,002 it
 /// forwarded.
 ///
-/// - **One frame.** The callee's halt brings the compute from 2,623 to 7,622; under a cap of 3,000
-///   the limit is 3,002, so the halt overshoots it by 4,620, less than 5,000. The caller's `POP` is
-///   its next charge and the crossing: the stop reports 7,622, and the bill is the intrinsic gas
+/// - **One frame.** The callee's halt brings the compute from 3,023 to 8,022; under a cap of 3,400
+///   the limit is 3,402, so the halt overshoots it by 4,620, less than 5,000. The caller's `POP` is
+///   its next charge and the crossing: the stop reports 8,022, and the bill is the intrinsic gas
 ///   and that compute, without the `POP`.
 /// - **A chain of two.** [`HALTING_MIDDLE`] is forwarded 12,000, calls [`CHILD`] with 5,002 —
-///   compute 5,236 at its `CALL`, 5,239 after the child's `PUSH20` — and keeps 12,000 − 2,616 −
-///   5,002 = 4,382. The child's halt brings the compute to 10,238, 4,996 past a limit of 5,242 (a
-///   cap of 5,240); the middle frame's next opcode is a `SELFDESTRUCT` its 4,382 cannot pay, so it
-///   halts too and adds them: 14,620, 9,378 past the limit, more than either halt could add alone.
+///   compute 6,036 at its `CALL`, 6,039 after the child's `PUSH20` — and keeps 12,000 − 3,016 −
+///   5,002 = 3,982. The child's halt brings the compute to 11,038, 4,996 past a limit of 6,042 (a
+///   cap of 6,040); the middle frame's next opcode is a `SELFDESTRUCT` its 3,982 cannot pay, so it
+///   halts too and adds them: 15,020, 8,978 past the limit, more than either halt could add alone.
 ///   The caller's `POP` is the crossing.
 /// - **No charge after.** The one-frame case ending on `STOP`, which charges nothing, after the
-///   call: the transaction succeeds, its compute 7,622, past the limit of 3,002.
+///   call: the transaction succeeds, its compute 8,022, past the limit of 3,402.
 ///
 /// Each case runs below the execution cap and above it, and is billed the same in both; without
 /// the read the program completes and is billed its whole compute.
@@ -707,32 +707,34 @@ fn test_a_static_gas_halt_takes_the_compute_past_the_limit() {
     // The middle frame's `SELFDESTRUCT` names the status its call left as the beneficiary.
     let middle =
         call_forwarding(BytecodeBuilder::default(), CHILD, 5_002).append(SELFDESTRUCT).build();
+    // The cold access the call to the first callee pays, which every case's caps are set above.
+    let call = 2 + 2 + 10 + 3 + 3 + cold_access();
     let cases = [
         Overshoot {
             name: "one frame",
             after_read: |code| call_forwarding(code.append(POP), CHILD, 5_002).append(POP).stop(),
-            cap: 3_000,
-            compute: 2 + 2 + 10 + 3 + 3 + 2_600 + 5_002,
+            cap: 3_400,
+            compute: call + 5_002,
             stopped: true,
-            plain_compute: 2 + 2 + 10 + 3 + 3 + 2_600 + 5_002 + 2,
+            plain_compute: call + 5_002 + 2,
         },
         Overshoot {
             name: "a chain of two",
             after_read: |code| {
                 call_forwarding(code.append(POP), HALTING_MIDDLE, 12_000).append(POP).stop()
             },
-            cap: 5_240,
-            compute: 2 + 2 + 10 + 3 + 3 + 2_600 + 12_000,
+            cap: 6_040,
+            compute: call + 12_000,
             stopped: true,
-            plain_compute: 2 + 2 + 10 + 3 + 3 + 2_600 + 12_000 + 2,
+            plain_compute: call + 12_000 + 2,
         },
         Overshoot {
             name: "no charge after",
             after_read: |code| call_forwarding(code.append(POP), CHILD, 5_002).stop(),
-            cap: 3_000,
-            compute: 2 + 2 + 10 + 3 + 3 + 2_600 + 5_002,
+            cap: 3_400,
+            compute: call + 5_002,
             stopped: false,
-            plain_compute: 2 + 2 + 10 + 3 + 3 + 2_600 + 5_002,
+            plain_compute: call + 5_002,
         },
     ];
     for gas_limit in TIERS {
@@ -820,8 +822,10 @@ fn test_a_callee_computing_past_the_cap_stops_the_transaction() {
         assert_eq!(slot(&plain, 0), Some(U256::from(1)), "the callee completes without the read");
         // The read's `POP`, the call's five pushes, its address, `GAS` and cold access, then the
         // callee's work, in its own memory.
-        let left =
-            Charges::default().then(&[2, 2, 2, 2, 2, 2, 3, 2, 2_600]).work(10_000, 0).left(CAP);
+        let left = Charges::default()
+            .then(&[2, 2, 2, 2, 2, 2, 3, 2, cold_access()])
+            .work(10_000, 0)
+            .left(CAP);
         assert_stopped(&detained, intrinsic(gas_limit), left);
         assert_eq!(slot(&detained, 0), None, "the caller never resumed");
     }
@@ -856,7 +860,7 @@ fn test_the_stop_reports_its_compute_whatever_a_callee_burned() {
             // The read's `POP`, the call's five pushes, its address, the forward's push and cold
             // access, what the callee computed, the caller's `POP`, then its loop.
             let left = Charges::default()
-                .then(&[2, 2, 2, 2, 2, 2, 3, 3, 2_600, *computed, 2])
+                .then(&[2, 2, 2, 2, 2, 2, 3, 3, cold_access(), *computed, 2])
                 .spin(0)
                 .left(CAP);
             let used = limit - left;
@@ -905,8 +909,10 @@ fn test_a_halt_burns_what_its_frame_had_when_it_halted() {
         // work; then the caller's `POP` and loop.
         let callee = Charges::default().then(&[3, 2, 30 + 6 + 3, 2]).burn(10_000).total();
         assert_eq!(call.spent, callee, "the callee spent its charges before the invalid opcode");
-        let left =
-            Charges::default().then(&[2, 2, 2, 2, 2, 2, 3, 3, 2_600, callee, 2]).spin(0).left(CAP);
+        let left = Charges::default()
+            .then(&[2, 2, 2, 2, 2, 2, 3, 3, cold_access(), callee, 2])
+            .spin(0)
+            .left(CAP);
         let burned = run.outcome.gas.regular - intrinsic(gas_limit) - (limit - left);
         assert_eq!(burned, 5_000_000 - call.spent, "the callee burned what it had at the halt");
     }

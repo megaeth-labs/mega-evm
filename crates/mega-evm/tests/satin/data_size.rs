@@ -794,14 +794,14 @@ fn gas_where_the_write_is_counted(code: &Bytes, data_limit: u64) -> u64 {
 /// | the call's intrinsic regular gas | 15,000 |
 /// | the body's history: 310 bytes at 88 | 27,280 |
 /// | two `PUSH32` | 6 |
-/// | the `SSTORE`'s regular gas: 100 static, 2,100 cold, 19,900 set | 22,100 |
+/// | the `SSTORE`'s regular gas: 100 static, 2,000 cold, 10,000 set | 12,100 |
 /// | the `SSTORE`'s state gas: a slot's 64 bytes at 1,530 | 97,920 |
-/// | **total** | **162,306** |
+/// | **total** | **152,306** |
 ///
 /// Below it the transaction runs out of gas before the store completes, whatever the data-size
 /// limit. The record's history — 40 bytes at 88, 3,520 — is not part of it: it is charged after
 /// the record is counted, and only for a record the limit keeps.
-const FRESH_SLOT_COUNTED_AT: u64 = 162_306;
+const FRESH_SLOT_COUNTED_AT: u64 = 152_306;
 
 /// A write meets two limits, and the one that binds first is the one reported.
 ///
@@ -881,7 +881,7 @@ fn test_the_fresh_slot_boundary_is_the_sum_of_its_parts() {
     }
     assert_eq!(counted_at, FRESH_SLOT_COUNTED_AT);
     assert_eq!(empty_call.gas.gas_used, 15_000 + 310 * 88);
-    assert_eq!((store_regular, store_state), (22_100, 97_920));
+    assert_eq!((store_regular, store_state), (12_100, 97_920));
     assert_eq!(store_state, mega_evm::constants::SLOT_STATE_GAS);
     assert_eq!(record_history, WRITE_RECORD_SIZE * mega_evm::constants::COST_PER_HISTORY_BYTE);
 }
@@ -940,10 +940,11 @@ fn test_a_frame_start_is_charged_before_its_records_are_counted() {
 /// limit stops the transaction at the start; under a limit they fit, the frame starts.
 ///
 /// The gas limit is the call's intrinsic 15,000, the body's history, the caller's sixteen gas of
-/// pushes, the `CALL`'s 9,000 for the value, 2,600 for the cold recipient and 25,000 for the new
-/// account, the recipient's state gas (charged before the split), and what the caller must hold
-/// at the split for its 64th to be the records' price less one: `64 (price − 1) + 63`
-/// (`constants`: the two byte prices in effect; 713,055 at the spec's prices).
+/// pushes, the `CALL`'s regular gas — the value transfer, the cold recipient and the new account,
+/// 11,300, 3,000 and nothing at the schedule's prices — the recipient's state gas (charged before
+/// the split), and what the caller must hold at the split for its 64th to be the records' price
+/// less one: `64 (price − 1) + 63` (`constants`: the two byte prices in effect; 690,755 at the
+/// spec's prices).
 #[test]
 fn test_a_caller_one_gas_short_of_its_records_runs_out_of_gas_under_a_limit_they_would_cross() {
     // Records that cost nothing leave no price to be short of, and records priced at a fraction
@@ -953,12 +954,13 @@ fn test_a_caller_one_gas_short_of_its_records_runs_out_of_gas_under_a_limit_they
     }
     let records = history(2 * WRITE_RECORD_SIZE);
     let held_at_the_split = 64 * (records - 1) + 63;
-    let gas_limit = 15_000 +
-        body_history(0) +
-        16 +
-        (9_000 + 2_600 + 25_000) +
-        account_state_gas() +
-        held_at_the_split;
+    let params = mega_evm::satin_gas_params();
+    let value_call = params.get(GasId::transfer_value_cost()) +
+        params.get(GasId::warm_storage_read_cost()) +
+        params.get(GasId::cold_account_additional_cost()) +
+        params.get(GasId::new_account_cost());
+    let gas_limit =
+        15_000 + body_history(0) + 16 + value_call + account_state_gas() + held_at_the_split;
     let start = START_ON_THE_CALLER + START_ON_THE_FRAME;
     let crosses = mega_evm::TX_BODY_SIZE + start - 1;
     let fits = start_fits();
@@ -1002,7 +1004,7 @@ fn test_a_caller_one_gas_short_of_its_records_runs_out_of_gas_under_a_limit_they
         return;
     }
     assert_eq!(records, 2 * 40 * 88);
-    assert_eq!(gas_limit, 713_055);
+    assert_eq!(gas_limit, 690_755);
 }
 
 /* ---------- a child frame's write, and the order where the reservoir runs out ---------- */
@@ -1188,7 +1190,7 @@ fn test_a_record_a_limit_refuses_is_not_charged_where_the_reservoir_has_one_gas_
         (
             "a SELFDESTRUCT that moves value",
             selfdestruct_to_c(),
-            3 + (5_000 + 2_600 + 25_000),
+            3 + (5_000 + params.selfdestruct_cost(true, true)),
             account_state_gas(),
             WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE,
             WRITE_RECORD_SIZE,

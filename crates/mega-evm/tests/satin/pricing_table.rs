@@ -140,10 +140,10 @@ fn render() -> String {
     out.push_str("## Schedule entries\n\n");
     out.push_str(
         "Every named entry of the schedule, at the Osaka price, at the Amsterdam (glamsterdam \
-         devnet-8) price and at the Satin price. Satin is Amsterdam with the EIP-8038 repricing \
-         pressed back to Osaka, the EIP-8037 state entries rebuilt at `MegaETH`'s cost per state \
-         byte, and deposited code priced at `MegaETH`'s cost per history byte; the `Satin` column \
-         differs from `Amsterdam` in exactly the entries where one of those three applies.\n\n",
+         devnet-8) price and at the Satin price. Satin is Amsterdam with the EIP-8037 state \
+         entries rebuilt at `MegaETH`'s cost per state byte and deposited code priced at \
+         `MegaETH`'s cost per history byte; the `Satin` column differs from `Amsterdam` in \
+         exactly the entries where one of those two applies.\n\n",
     );
     out.push_str("| Gas id | Osaka | Amsterdam | Satin |\n|---|---:|---:|---:|\n");
     for slot in 0..=u8::MAX {
@@ -305,31 +305,13 @@ fn test_the_table_shows_where_satin_differs_from_amsterdam() {
         })
         .collect();
 
-    // The pressed-back entries whose Osaka and Amsterdam prices are not the same number. The
-    // other three of the seventeen — `warm_storage_read_cost`, `sstore_static` and
-    // `cold_storage_additional_cost` — EIP-8038 left where they were, so pressing them back
-    // moves nothing. The state entries are rebuilt rather than copied, and land on Amsterdam's
-    // numbers because the provisional cost per state byte is the one Glamsterdam uses. The
-    // history entry is the one Satin adds: upstream prices no history byte at all.
+    // Every regular entry is Amsterdam's. The state entries are rebuilt rather than copied, and
+    // land on Amsterdam's numbers because the provisional cost per state byte is the one
+    // Glamsterdam uses. The history entry is the one Satin adds: upstream prices no history byte
+    // at all.
     assert_eq!(
         differing,
-        [
-            "create",
-            "transfer_value_cost",
-            "cold_account_additional_cost",
-            "new_account_cost",
-            "sstore_set_without_load_cost",
-            "sstore_reset_without_cold_load_cost",
-            "sstore_clearing_slot_refund",
-            "cold_storage_cost",
-            "new_account_cost_for_selfdestruct",
-            "tx_access_list_address_cost",
-            "tx_access_list_storage_key_cost",
-            "tx_create_cost",
-            "sstore_set_refund",
-            "sstore_reset_refund",
-            "code_deposit_history_gas",
-        ],
+        ["code_deposit_history_gas"],
         "the entries Satin prices differently from Amsterdam"
     );
 }

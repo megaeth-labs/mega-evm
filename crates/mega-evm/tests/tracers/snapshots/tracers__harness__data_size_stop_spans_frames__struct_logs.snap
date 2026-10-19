@@ -4,13 +4,13 @@ expression: "&traced.struct_logs()"
 ---
 {
   "failed": true,
-  "gas": 46312,
+  "gas": 46712,
   "returnValue": "0x84b902670000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000019a",
   "structLogs": [
     {
       "pc": 0,
       "op": "PUSH0",
-      "gas": 1004055,
+      "gas": 1004455,
       "gasCost": 2,
       "depth": 1,
       "stack": [],
@@ -19,7 +19,7 @@ expression: "&traced.struct_logs()"
     {
       "pc": 1,
       "op": "PUSH0",
-      "gas": 1004053,
+      "gas": 1004453,
       "gasCost": 2,
       "depth": 1,
       "stack": [
@@ -30,7 +30,7 @@ expression: "&traced.struct_logs()"
     {
       "pc": 2,
       "op": "PUSH0",
-      "gas": 1004051,
+      "gas": 1004451,
       "gasCost": 2,
       "depth": 1,
       "stack": [
@@ -42,7 +42,7 @@ expression: "&traced.struct_logs()"
     {
       "pc": 3,
       "op": "PUSH0",
-      "gas": 1004049,
+      "gas": 1004449,
       "gasCost": 2,
       "depth": 1,
       "stack": [
@@ -55,7 +55,7 @@ expression: "&traced.struct_logs()"
     {
       "pc": 4,
       "op": "PUSH32",
-      "gas": 1004047,
+      "gas": 1004447,
       "gasCost": 3,
       "depth": 1,
       "stack": [
@@ -69,7 +69,7 @@ expression: "&traced.struct_logs()"
     {
       "pc": 37,
       "op": "PUSH20",
-      "gas": 1004044,
+      "gas": 1004444,
       "gasCost": 3,
       "depth": 1,
       "stack": [
@@ -84,7 +84,7 @@ expression: "&traced.struct_logs()"
     {
       "pc": 58,
       "op": "GAS",
-      "gas": 1004041,
+      "gas": 1004441,
       "gasCost": 2,
       "depth": 1,
       "stack": [
@@ -100,8 +100,8 @@ expression: "&traced.struct_logs()"
     {
       "pc": 59,
       "op": "CALL",
-      "gas": 1004039,
-      "gasCost": 988392,
+      "gas": 1004439,
+      "gasCost": 988792,
       "depth": 1,
       "stack": [
         "0x0",
@@ -110,7 +110,7 @@ expression: "&traced.struct_logs()"
         "0x0",
         "0x0",
         "0x400003",
-        "0xf5207"
+        "0xf5397"
       ],
       "refund": 0
     },
