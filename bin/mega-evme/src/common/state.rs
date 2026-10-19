@@ -502,8 +502,9 @@ impl AccountState {
     /// Converts into [`Account`].
     ///
     /// Code present in the dump is checked against `code_hash`.
-    /// Code left out stays unloaded: the stored hash is kept and `code` stays `None`, so a lazy
-    /// account can be loaded again. Empty bytecode is not substituted for it.
+    /// Code left out stays unloaded: the stored hash is kept and `code` stays `None`. Empty
+    /// bytecode is not substituted for it. [`PreStateArgs::create_initial_state`] fetches such an
+    /// account's code from the fork, or refuses the file when there is no fork.
     pub fn into_account(self) -> Result<Account> {
         let info = match self.code {
             Some(code) => {

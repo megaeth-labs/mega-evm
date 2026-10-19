@@ -29,7 +29,8 @@ pub use common::*;
 
 /// Install a thread panic hook that prints a custom backtrace and exits with a
 /// non-zero status. Lets failing tests and CLI runs surface a useful trace
-/// without relying on `RUST_BACKTRACE`.
+/// without relying on `RUST_BACKTRACE`. A panic of `println!` on a closed stdout is no failure
+/// of the run: the hook exits 0 without a trace.
 pub fn set_thread_panic_hook() {
     use std::{
         backtrace::Backtrace,
