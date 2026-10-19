@@ -163,11 +163,6 @@ impl<Error: Unpin + Clone + Display + 'static, Hasher: BucketHasher>
         self.recorded_hints.borrow().clone()
     }
 
-    /// Clears all recorded hints.
-    pub fn clear_recorded_hints(&self) {
-        self.recorded_hints.borrow_mut().clear();
-    }
-
     /// Configures a bucket to have a specific capacity.
     ///
     /// This affects the gas multiplier calculation for operations on accounts or storage
@@ -194,14 +189,6 @@ impl<Error: Unpin + Clone + Display + 'static, Hasher: BucketHasher>
         self
     }
 
-    /// Removes all configured bucket capacities.
-    ///
-    /// After calling this, all buckets will return the configured `default_bucket_capacity` if
-    /// set, otherwise [`MIN_BUCKET_SIZE`](crate::MIN_BUCKET_SIZE).
-    pub fn clear_bucket_capacity(&self) {
-        self.bucket_capacity.borrow_mut().clear();
-    }
-
     /// Makes the capacity query of `bucket_id` fail with `error`, whatever capacity it carries.
     ///
     /// This is what an unreachable SALT backend looks like to the engine: the state gas charge
@@ -220,11 +207,6 @@ impl<Error: Unpin + Clone + Display + 'static, Hasher: BucketHasher>
     /// How many capacity queries every bucket has received together.
     pub fn total_bucket_queries(&self) -> u32 {
         self.bucket_queries.borrow().values().sum()
-    }
-
-    /// Forgets the capacity queries counted so far.
-    pub fn clear_bucket_queries(&self) {
-        self.bucket_queries.borrow_mut().clear();
     }
 
     /// Configures a storage slot in the oracle contract to have a specific value.
