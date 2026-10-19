@@ -72,7 +72,7 @@ pub struct SatinReport {
 /// A transaction-level limit that stopped a Satin transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct LimitStop {
-    /// The dimension: `data_size`, `kv_update`, `compute_gas` or `state_growth`.
+    /// The dimension: `data_size`, `compute_gas` or `state_growth`.
     pub kind: &'static str,
     /// The limit crossed, in the dimension's unit.
     pub limit: u64,
@@ -110,7 +110,6 @@ impl SatinReport {
 pub const fn limit_kind_name(kind: LimitKind) -> &'static str {
     match kind {
         LimitKind::DataSize => "data_size",
-        LimitKind::KVUpdate => "kv_update",
         LimitKind::ComputeGas => "compute_gas",
         LimitKind::StateGrowth => "state_growth",
     }

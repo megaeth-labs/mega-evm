@@ -629,7 +629,9 @@ fn test_a_failure_from_nonce_one_keeps_no_record_of_the_signer() {
 #[test]
 fn test_every_way_a_deployment_from_nonce_one_fails_leaves_the_nonce_at_one() {
     let one = U256::ONE;
-    let kv_share_of_one = EvmTxRuntimeLimits::no_limits().with_tx_kv_update_limit(2);
+    // The call's lane gets 39 bytes, and its creation 98% of that: less than its start's two
+    // records.
+    let a_share_short_of_the_start = EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(39);
     let cases = [
         (
             "revert carrying value",
@@ -650,7 +652,12 @@ fn test_every_way_a_deployment_from_nonce_one_fails_leaves_the_nonce_at_one() {
             EvmTxRuntimeLimits::no_limits(),
             2,
         ),
-        ("stopped at its start", Deployment::new(deploying(&runtime(1))), kv_share_of_one, 0),
+        (
+            "stopped at its start",
+            Deployment::new(deploying(&runtime(1))),
+            a_share_short_of_the_start,
+            0,
+        ),
     ];
     for gas_limit in GAS_LIMITS {
         for (name, deployment, limits, records) in &cases {

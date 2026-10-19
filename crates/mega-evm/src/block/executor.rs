@@ -9,7 +9,7 @@
 //! The limits every node must agree on are the chain's: the executor reads the
 //! [`ProtocolLimits`] the fork active at the block's timestamp carries
 //! ([`MegaHardforks::protocol_limits`]), installs their per-transaction half on the EVM before
-//! every transaction, and holds the block to their four budgets. The node's context adds only the
+//! every transaction, and holds the block to their three budgets. The node's context adds only the
 //! builder's policy ([`BlockLimits`]), which can tighten a budget and never loosen one; a validator
 //! leaves it at its default. A block whose schedule carries no limits at its timestamp, or limits
 //! their own check refuses ([`HardforkParams::validate`](crate::HardforkParams::validate)), is

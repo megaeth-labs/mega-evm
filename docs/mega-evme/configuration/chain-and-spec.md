@@ -63,7 +63,7 @@ On Satin, every output field keeps its legacy name and meaning, and one field is
 | `floor_gas`           | The EIP-7623 floor the receipt's gas used cannot fall below                                                                   |
 | `data_size`           | Data-size bytes the transaction kept                                                                                          |
 | `write_records`       | Account and storage write records it kept: its KV count                                                                       |
-| `limit_exceeded`      | `null`, or the limit that stopped it: `kind` (`data_size`, `kv_update`, `compute_gas`, `state_growth`), `limit`, `used`       |
+| `limit_exceeded`      | `null`, or the limit that stopped it: `kind` (`data_size`, `compute_gas`, `state_growth`), `limit`, `used`                    |
 | `limits_override`     | Present only under `--override.limits`: the protocol limits the run was held to, in the shape the flag takes                  |
 
 In text mode the same numbers follow the summary under `=== Satin Gas ===`.
@@ -97,16 +97,13 @@ The whole shape, at the defaults:
   "txRuntimeLimits": {
     "txDataSizeLimit": 13107200,
     "frameDataSizeLimit": 18446744073709551615,
-    "txKvUpdateLimit": 18446744073709551615,
-    "frameKvUpdateLimit": 18446744073709551615,
     "txStateGasLimit": 18446744073709551615,
     "blockEnvAccessComputeGasLimit": 20000000,
     "oracleAccessComputeGasLimit": 20000000
   },
   "blockExecutionGasLimit": 18446744073709551615,
   "blockStateGasLimit": 18446744073709551615,
-  "blockTxsDataLimit": 13107200,
-  "blockKvUpdateLimit": 18446744073709551615
+  "blockTxsDataLimit": 13107200
 }
 ```
 
@@ -149,8 +146,8 @@ mega-evme run 0x600160005260... --chain-id 1
 # The same bytecode on Satin
 mega-evme run 0x600160005260... --spec Satin
 
-# On Satin, with a transaction allowed to keep one write record
-mega-evme run 0x600160005260... --spec Satin --override.limits '{"txRuntimeLimits":{"txKvUpdateLimit":1}}'
+# On Satin, with a transaction allowed to keep its body and one write record
+mega-evme run 0x600160005260... --spec Satin --override.limits '{"txRuntimeLimits":{"txDataSizeLimit":350}}'
 
 # A devnet block, replayed on the devnet's own Satin configuration
 mega-evme replay --block 12 --rpc http://localhost:8545 --genesis devnet/genesis.json

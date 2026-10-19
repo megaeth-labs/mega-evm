@@ -204,8 +204,8 @@ pub(crate) fn run<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// # The creation
 ///
 /// The creation is started as the signer's, at the signer's Nick's-Method address
-/// (`CreateScheme::Custom`), as the call's child: its share of the data-size and KV budgets, its
-/// records, its forward and the reservoir it inherits, the state-gas limit, the latch. The call's
+/// (`CreateScheme::Custom`), as the call's child: its share of the data-size budget, its records,
+/// its forward and the reservoir it inherits, the state-gas limit, the latch. The call's
 /// lane runs as the signer, whose nonce the creation's start writes. The call's journal checkpoint
 /// was taken when revm built its frame, so a call that is stopped takes that write back with the
 /// rest.

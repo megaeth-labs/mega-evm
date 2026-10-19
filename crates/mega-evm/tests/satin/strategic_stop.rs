@@ -427,7 +427,7 @@ fn test_frame_budget_of_the_outermost_frame_reverts_the_transaction() {
 #[test]
 fn test_first_latch_wins() {
     let mut layer = mega_evm::AdditionalLimit::default();
-    let first = layer.latch(LimitKind::KVUpdate, 1, 2);
+    let first = layer.latch(LimitKind::ComputeGas, 1, 2);
     let second = layer.latch(LimitKind::DataSize, 3, 4);
     assert_eq!(first, second);
     assert_eq!(layer.latched(), Some(&first));

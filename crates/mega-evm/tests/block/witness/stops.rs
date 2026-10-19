@@ -131,21 +131,6 @@ fn test_a_data_size_stop_replays() {
     assert_stopped(&replay.recorded, 0, LimitKind::DataSize);
 }
 
-/// A transaction stopped by the KV limit.
-#[test]
-fn test_a_kv_stop_replays() {
-    let mut db = common::database();
-    db.set_account_code(CONTRACT, incrementer(3));
-    let limits =
-        ProtocolLimits::loosest().with_tx_runtime_limits(loosest_tx().with_tx_kv_update_limit(1));
-    let replay = Case::new("kv stop", db)
-        .limits(limits)
-        .tx(call(0, CONTRACT, Bytes::new(), increment_gas(3)))
-        .run();
-    assert_stopped(&replay.recorded, 0, LimitKind::KVUpdate);
-    assert!(replay.recorded.record.storage.len() >= 2, "the slots read before the stop");
-}
-
 /// A transaction stopped by the state-gas limit, whose crossing write was priced through SALT:
 /// the bucket of the slot that crossed is in the export, as a validator asks about it too.
 #[test]

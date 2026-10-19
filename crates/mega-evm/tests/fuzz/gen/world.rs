@@ -233,8 +233,6 @@ pub(crate) enum Limits {
     Custom {
         data: DataLimit,
         frame_data: Option<u16>,
-        kv: Option<u8>,
-        frame_kv: Option<u8>,
         state: StateLimit,
         block_env_cap: DetentionCap,
         oracle_cap: DetentionCap,
@@ -247,12 +245,10 @@ impl Limits {
         match self {
             Self::Default => ProtocolLimits::DEFAULT.tx_runtime_limits,
             Self::Loosest => ProtocolLimits::loosest().tx_runtime_limits,
-            Self::Custom { data, frame_data, kv, frame_kv, state, block_env_cap, oracle_cap } => {
+            Self::Custom { data, frame_data, state, block_env_cap, oracle_cap } => {
                 EvmTxRuntimeLimits {
                     tx_data_size_limit: data.value(),
                     frame_data_size_limit: frame_data.map_or(u64::MAX, u64::from),
-                    tx_kv_update_limit: kv.map_or(u64::MAX, u64::from),
-                    frame_kv_update_limit: frame_kv.map_or(u64::MAX, u64::from),
                     tx_state_gas_limit: state.value(),
                     block_env_access_compute_gas_limit: block_env_cap
                         .value(BLOCK_ENV_ACCESS_COMPUTE_GAS),
@@ -265,9 +261,8 @@ impl Limits {
 
 pub(crate) fn limits() -> impl Strategy<Value = Limits> {
     let custom = (
-        // The data size is checked before the records wherever both cross, so a KV stop needs a
-        // data-size limit with room: the roomy ones are drawn as often as the tight ones, and the
-        // KV limit is mostly one or two records.
+        // The roomy data-size limits are drawn as often as the tight ones, so the other stops are
+        // reached too.
         prop_oneof![
             1 => Just(DataLimit::Body),
             2 => Just(DataLimit::BodyPlusRecord),
@@ -276,8 +271,6 @@ pub(crate) fn limits() -> impl Strategy<Value = Limits> {
             3 => Just(DataLimit::Unlimited),
         ],
         proptest::option::weighted(0.3, prop_oneof![Just(1u16), Just(40), Just(200), Just(2_000)]),
-        proptest::option::weighted(0.5, prop_oneof![3 => 1u8..=2, 2 => 3u8..=6]),
-        proptest::option::weighted(0.3, 1u8..=3),
         prop_oneof![
             1 => Just(StateLimit::One),
             1 => Just(StateLimit::HalfSlot),
@@ -289,8 +282,12 @@ pub(crate) fn limits() -> impl Strategy<Value = Limits> {
         detention_cap(),
         detention_cap(),
     )
-        .prop_map(|(data, frame_data, kv, frame_kv, state, block_env_cap, oracle_cap)| {
-            Limits::Custom { data, frame_data, kv, frame_kv, state, block_env_cap, oracle_cap }
+        .prop_map(|(data, frame_data, state, block_env_cap, oracle_cap)| Limits::Custom {
+            data,
+            frame_data,
+            state,
+            block_env_cap,
+            oracle_cap,
         });
     prop_oneof![3 => Just(Limits::Default), 2 => Just(Limits::Loosest), 5 => custom]
 }

@@ -1,10 +1,10 @@
 //! A deposit is never refused by a block's packing budgets.
 //!
-//! The execution-gas, state-gas, data-size and KV limits of a block budget the transactions its
+//! The execution-gas, state-gas and data-size limits of a block budget the transactions its
 //! builder chooses. A deposit is not chosen: the block derived from L1 must include it. So none
-//! of the four refuses a deposit — not before it executes, not after, and not when an outcome
+//! of the three refuses a deposit — not before it executes, not after, and not when an outcome
 //! executed earlier is committed through either commit path — and every deposit still counts
-//! towards all four, so the ordinary transactions after the deposits find the room they used.
+//! towards all three, so the ordinary transactions after the deposits find the room they used.
 
 use alloy_consensus::{transaction::Recovered, Signed, TxLegacy};
 use alloy_evm::block::BlockExecutor;
@@ -58,13 +58,12 @@ fn input(slot: u64) -> Bytes {
     Bytes::from(input)
 }
 
-/// A deposit that fills the fresh `slot`: execution gas, state gas, data size and a write record,
-/// all four.
+/// A deposit that fills the fresh `slot`: execution gas, state gas, data size and a write record.
 fn deposit(slot: u64) -> Recovered<MegaTxEnvelope> {
     common::deposit_tx_to(WRITER, input(slot), gas_limit())
 }
 
-/// An ordinary transaction that fills the fresh `slot`, so each of the four limits has something
+/// An ordinary transaction that fills the fresh `slot`, so each of the three limits has something
 /// to refuse it on.
 fn ordinary(slot: u64) -> Recovered<MegaTxEnvelope> {
     let tx = TxLegacy {
@@ -105,40 +104,34 @@ enum Cap {
     ExecutionGas,
     StateGas,
     DataSize,
-    KvUpdates,
     All,
 }
 
 impl Cap {
-    /// Limits with room for a deposit and a half on this cap, so the second deposit crosses it. A
-    /// deposit keeps one record, so on the write records that is room for one.
+    /// Limits with room for a deposit and a half on this cap, so the second deposit crosses it.
     fn limits(self, gas: &BlockGasCounters, usage: &LimitUsage) -> BlockLimits {
         let half_again = |one: u64| one + one / 2;
         let limits = BlockLimits::no_limits();
         let execution = limits.with_block_execution_gas_limit(half_again(gas.execution));
         let state = limits.with_block_state_gas_limit(half_again(gas.state));
         let data = limits.with_block_txs_data_limit(half_again(usage.data_size));
-        let kv = limits.with_block_kv_update_limit(half_again(usage.write_records));
         match self {
             Self::ExecutionGas => execution,
             Self::StateGas => state,
             Self::DataSize => data,
-            Self::KvUpdates => kv,
             Self::All => execution
                 .with_block_state_gas_limit(half_again(gas.state))
-                .with_block_txs_data_limit(half_again(usage.data_size))
-                .with_block_kv_update_limit(half_again(usage.write_records)),
+                .with_block_txs_data_limit(half_again(usage.data_size)),
         }
     }
 
-    /// What the refusal of the ordinary transaction names. With all four limits reached, the
+    /// What the refusal of the ordinary transaction names. With all three limits reached, the
     /// execution-gas limit is the first the block checks.
     const fn refusal(self) -> &'static str {
         match self {
             Self::ExecutionGas | Self::All => "Block execution gas limit reached",
             Self::StateGas => "Block state gas limit reached",
             Self::DataSize => "Block transactions data limit reached",
-            Self::KvUpdates => "Block KV update limit reached",
         }
     }
 }
@@ -157,12 +150,13 @@ enum Route {
 }
 
 /// Deposits cross each block limit and are included all the same, through every route; each one
-/// counts towards all four dimensions; and an ordinary transaction after them is refused — before
-/// it executes, and, as a candidate executed before the deposits committed, at its commit.
+/// counts towards all three dimensions, and towards the write records; and an ordinary transaction
+/// after them is refused — before it executes, and, as a candidate executed before the deposits
+/// committed, at its commit.
 #[test]
 fn test_no_block_limit_refuses_a_deposit_and_every_deposit_counts() {
     let (gas, usage) = one_deposit();
-    for cap in [Cap::ExecutionGas, Cap::StateGas, Cap::DataSize, Cap::KvUpdates, Cap::All] {
+    for cap in [Cap::ExecutionGas, Cap::StateGas, Cap::DataSize, Cap::All] {
         // A deposit that adds no state gas cannot cross a state-gas cap, and the ordinary
         // transaction after it adds none to be refused for.
         if matches!(cap, Cap::StateGas) && common::state_is_free() {
@@ -221,8 +215,7 @@ fn test_no_block_limit_refuses_a_deposit_and_every_deposit_counts() {
             assert!(
                 executor.gas().execution > limits.block_execution_gas_limit ||
                     executor.gas().state > limits.block_state_gas_limit ||
-                    executor.limiter().usage.data_size > limits.block_txs_data_limit ||
-                    executor.limiter().usage.write_records > limits.block_kv_update_limit,
+                    executor.limiter().usage.data_size > limits.block_txs_data_limit,
                 "{name}: the deposits crossed the limit",
             );
 

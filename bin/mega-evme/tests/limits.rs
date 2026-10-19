@@ -9,6 +9,10 @@ use serde_json::{json, Value};
 /// Two fresh `SSTORE`s, keeping two write records: 310 bytes of body and 40 per record.
 const TWO_WRITES: &str = "0x60016000556001600155";
 
+/// A transaction data-size limit with room for the body and one write record, which the second of
+/// [`TWO_WRITES`] crosses.
+const ONE_RECORD: u64 = 350;
+
 struct Output {
     code: i32,
     stdout: String,
@@ -47,9 +51,9 @@ fn defaults_with_tx_data_size(limit: u64) -> Value {
     limits
 }
 
-/// Without an override the run keeps both writes; an override of the transaction data size or of
-/// its write records stops it at the second write, and takes both back. A run under an override
-/// reports the limits it ran under, and one on the schedule's limits reports none.
+/// Without an override the run keeps both writes; an override of the transaction data size stops
+/// it at the second write, and takes both back. A run under an override reports the limits it ran
+/// under, and one on the schedule's limits reports none.
 #[test]
 fn test_an_override_holds_a_satin_run_to_other_limits() {
     let kept = run_two_writes(None);
@@ -67,12 +71,6 @@ fn test_an_override_holds_a_satin_run_to_other_limits() {
     );
     assert_eq!(data_size["satin"]["write_records"], 0, "the stop takes the writes back");
     assert_eq!(data_size["satin"]["limits_override"], defaults_with_tx_data_size(350));
-
-    let records = run_two_writes(Some(r#"{"txRuntimeLimits":{"txKvUpdateLimit":1}}"#));
-    assert_eq!(
-        records["satin"]["limit_exceeded"],
-        json!({ "kind": "kv_update", "limit": 1, "used": 2 })
-    );
 }
 
 /// The override is read from a file as it is given inline.
@@ -138,9 +136,9 @@ fn test_an_override_no_chain_may_carry_is_refused() {
     };
     refused(r#"{"txDataSizeLimit":350}"#, 1, "unknown field `txDataSizeLimit`");
     refused(
-        r#"{"txRuntimeLimits":{"txKvUpdateLimit":0}}"#,
+        r#"{"txRuntimeLimits":{"frameDataSizeLimit":0}}"#,
         1,
-        "tx_runtime_limits.tx_kv_update_limit must not be zero",
+        "tx_runtime_limits.frame_data_size_limit must not be zero",
     );
     refused(r#"{"blockTxsDataLimit":"1"}"#, 1, "--override.limits: invalid type");
     refused("[1]", 2, "must be a JSON object");
@@ -176,10 +174,10 @@ fn test_an_override_is_refused_on_a_legacy_spec() {
 }
 
 /// A genesis file for chain `chain_id` activating Satin at `satin_time`, with the protocol's
-/// default limits but a KV limit of one, in `dir`.
+/// default limits but a transaction data-size limit of the body and one record, in `dir`.
 fn genesis_with_one_record(dir: &tempfile::TempDir, chain_id: u64, satin_time: u64) -> String {
     let limits = ProtocolLimits::DEFAULT.with_tx_runtime_limits(
-        ProtocolLimits::DEFAULT.tx_runtime_limits.with_tx_kv_update_limit(1),
+        ProtocolLimits::DEFAULT.tx_runtime_limits.with_tx_data_size_limit(ONE_RECORD),
     );
     let satin = mega_evm::SatinChainConfig {
         activation_time: satin_time,
@@ -194,7 +192,8 @@ fn genesis_with_one_record(dir: &tempfile::TempDir, chain_id: u64, satin_time: u
 }
 
 /// A Satin run given its chain's genesis file is held to the limits the file carries, as the
-/// chain's own and not as an override: the second write crosses the file's KV limit of one.
+/// chain's own and not as an override: the second write crosses the file's data-size limit of one
+/// record.
 /// `run` and `tx` run Satin under the file without being told `--spec Satin`.
 #[test]
 fn test_a_genesis_file_holds_a_satin_run_to_its_limits() {
@@ -208,7 +207,7 @@ fn test_a_genesis_file_holds_a_satin_run_to_its_limits() {
         let stopped = run(spec).json();
         assert_eq!(
             stopped["satin"]["limit_exceeded"],
-            json!({ "kind": "kv_update", "limit": 1, "used": 2 }),
+            json!({ "kind": "data_size", "limit": ONE_RECORD, "used": 390 }),
             "{spec:?}"
         );
         assert!(stopped["satin"].get("limits_override").is_none(), "{}", stopped["satin"]);
@@ -218,7 +217,7 @@ fn test_a_genesis_file_holds_a_satin_run_to_its_limits() {
     assert_eq!(tx["satin"]["data_size"], 311, "a Satin report: {tx}");
 
     // An override still replaces what it names, over the file's limits.
-    let overridden = run(&["--override.limits", r#"{"txRuntimeLimits":{"txKvUpdateLimit":5}}"#]);
+    let overridden = run(&["--override.limits", r#"{"txRuntimeLimits":{"txDataSizeLimit":390}}"#]);
     assert_eq!(overridden.json()["satin"]["limit_exceeded"], Value::Null);
 
     // The file is its chain's: a run on another chain is refused.
@@ -261,7 +260,7 @@ fn test_a_genesis_file_refuses_a_run_it_cannot_configure() {
         evme(&["run", TWO_WRITES, "--json", "--genesis", &later, "--block.timestamp", SATIN_TIME]);
     assert_eq!(
         from.json()["satin"]["limit_exceeded"],
-        json!({ "kind": "kv_update", "limit": 1, "used": 2 })
+        json!({ "kind": "data_size", "limit": ONE_RECORD, "used": 390 })
     );
 }
 

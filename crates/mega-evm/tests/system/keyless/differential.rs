@@ -606,24 +606,6 @@ fn scenarios() -> Vec<Scenario> {
             );
             all.push(
                 Scenario::deploying(
-                    format!("limit: tx KV, nonce {nonce}"),
-                    db(&slot),
-                    &slot,
-                    gas_limit,
-                )
-                .limits(EvmTxRuntimeLimits::no_limits().with_tx_kv_update_limit(2)),
-            );
-            all.push(
-                Scenario::deploying(
-                    format!("limit: frame KV, nonce {nonce}"),
-                    db(&slot),
-                    &slot,
-                    gas_limit,
-                )
-                .limits(EvmTxRuntimeLimits::no_limits().with_frame_kv_update_limit(3)),
-            );
-            all.push(
-                Scenario::deploying(
                     format!("limit: the creation's start, nonce {nonce}"),
                     db(&small),
                     &small,

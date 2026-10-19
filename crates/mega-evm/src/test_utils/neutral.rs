@@ -11,8 +11,8 @@
 //! The resource limits `MegaETH` sets are not part of the configuration: they live on the EVM's
 //! common execution layer, and the gate's runner installs
 //! [`EvmTxRuntimeLimits::no_limits`](crate::EvmTxRuntimeLimits::no_limits) in equivalence mode,
-//! under which neither the data-size, the KV nor the state-gas limit binds, at the transaction or
-//! at a frame, and gas detention's caps are unlimited, so no transaction is detained. A limit
+//! under which neither the data-size nor the state-gas limit binds, at the transaction or at a
+//! frame, and gas detention's caps are unlimited, so no transaction is detained. A limit
 //! added later is unlimited there as long as `no_limits` leaves it unlimited, which the limit
 //! module's own test pins field by field.
 //!

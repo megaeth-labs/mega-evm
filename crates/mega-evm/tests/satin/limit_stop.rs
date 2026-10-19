@@ -41,8 +41,7 @@ fn reverted_with(outcome: &MegaTransactionOutcome) -> &Bytes {
 /// stop's, the outcome names no limit, and no stop is read.
 #[test]
 fn test_a_contract_reverting_with_a_stops_bytes_is_no_stop() {
-    let kinds =
-        [LimitKind::DataSize, LimitKind::KVUpdate, LimitKind::ComputeGas, LimitKind::StateGrowth];
+    let kinds = [LimitKind::DataSize, LimitKind::ComputeGas, LimitKind::StateGrowth];
     for kind in kinds {
         let data =
             LimitCheck::ExceedsLimit { kind, limit: 7, used: 8, frame_local: false }.revert_data();

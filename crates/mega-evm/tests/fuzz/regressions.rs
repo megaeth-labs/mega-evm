@@ -202,8 +202,6 @@ fn test_a_failed_deposit_reports_no_stop() {
     world.limits = Limits::Custom {
         data: DataLimit::Body,
         frame_data: None,
-        kv: None,
-        frame_kv: None,
         state: StateLimit::Unlimited,
         block_env_cap: DetentionCap::Default,
         oracle_cap: DetentionCap::Default,

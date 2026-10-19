@@ -198,12 +198,10 @@ fn test_the_pre_block_calls_record_the_parent_hash_and_the_beacon_root() {
 /// smallest value a chain may carry for each limit, which their bodies, their writes and their
 /// state gas cross, both calls still record.
 ///
-/// Each contract writes two slots, so each call keeps two write records, past a KV count of one
-/// at the transaction and at the frame; the body (`TX_BODY_SIZE` and 32 bytes of calldata) crosses
-/// the transaction's data size, a record the frame's, and a fresh slot the state gas. The states
-/// the observer receives show the two writes; a limit of zero, which would let one write cross,
-/// is not a limit a chain may carry. Each limit is set alone as well as all together: data size is
-/// checked before the write records, so with every limit set the KV counts are never reached.
+/// Each contract writes two slots, so each call keeps two write records: the body (`TX_BODY_SIZE`
+/// and 32 bytes of calldata) crosses the transaction's data size, a record the frame's, and a fresh
+/// slot the state gas. The states the observer receives show the two writes. Each limit is set
+/// alone as well as all together.
 ///
 /// Rule [S19.3]. Expected values `independent`: the parent hash and the beacon root are the
 /// block's own inputs, and the crossings are counted here from the writes the calls made.
@@ -213,14 +211,10 @@ fn test_the_pre_block_calls_are_held_to_no_limit() {
     let every = loosest
         .with_tx_data_size_limit(mega_evm::TX_BODY_SIZE)
         .with_frame_data_size_limit(1)
-        .with_tx_kv_update_limit(1)
-        .with_frame_kv_update_limit(1)
         .with_tx_state_gas_limit(1);
     for (name, limits) in [
         ("the transaction's data size", loosest.with_tx_data_size_limit(mega_evm::TX_BODY_SIZE)),
         ("a frame's data size", loosest.with_frame_data_size_limit(1)),
-        ("the transaction's KV count", loosest.with_tx_kv_update_limit(1)),
-        ("a frame's KV count", loosest.with_frame_kv_update_limit(1)),
         ("the transaction's state gas", loosest.with_tx_state_gas_limit(1)),
         ("every limit at once", every),
     ] {
@@ -257,9 +251,9 @@ fn test_the_pre_block_calls_are_held_to_no_limit() {
 
 /// The pre-block calls count towards none of the block's counters or budgets. With the EIP-2935
 /// and EIP-4788 contracts' own code in state, both calls write their contracts' storage; after the
-/// pre-block phase every counter of the block is still zero, and a block whose four budgets are
-/// one unit each — execution gas, state gas, data size and KV updates, each reached by anything
-/// counted — still admits its first transaction.
+/// pre-block phase every counter of the block is still zero, and a block whose three budgets are
+/// one unit each — execution gas, state gas and data size, each reached by anything counted —
+/// still admits its first transaction.
 ///
 /// Rule [S19.7]. Expected values `independent`: zeros, and the first transaction admitted.
 #[test]
@@ -267,8 +261,7 @@ fn test_the_pre_block_calls_count_towards_no_counter_or_budget() {
     let policy = BlockLimits::no_limits()
         .with_block_execution_gas_limit(1)
         .with_block_state_gas_limit(1)
-        .with_block_txs_data_limit(1)
-        .with_block_kv_update_limit(1);
+        .with_block_txs_data_limit(1);
     let ctx =
         MegaBlockExecutionCtx::new(PARENT_HASH, Some(PARENT_BEACON_ROOT), Bytes::new(), policy);
     let mut db = common::database();

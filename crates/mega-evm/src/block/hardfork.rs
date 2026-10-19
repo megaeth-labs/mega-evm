@@ -860,7 +860,7 @@ mod tests {
     /// on, and none before it or on a schedule that carries none.
     #[test]
     fn test_protocol_limits_are_the_active_forks_params() {
-        let limits = ProtocolLimits::default().with_block_kv_update_limit(7);
+        let limits = ProtocolLimits::default().with_block_txs_data_limit(7);
         let config = MegaHardforkConfig::default()
             .with(MegaHardfork::Satin, ForkCondition::Timestamp(100))
             .with_params(limits);

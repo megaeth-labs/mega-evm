@@ -356,8 +356,6 @@ fn test_a_system_call_with_a_reservoir_stays_exempt() {
         EvmTxRuntimeLimits::no_limits()
             .with_tx_data_size_limit(0)
             .with_frame_data_size_limit(0)
-            .with_tx_kv_update_limit(0)
-            .with_frame_kv_update_limit(0)
             .with_tx_state_gas_limit(0)
             .with_block_env_access_compute_gas_limit(0),
     );

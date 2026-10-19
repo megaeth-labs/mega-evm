@@ -41,10 +41,10 @@
 //!   checked against a limit it is about to reach (`satin`); the same one byte short of it, so the
 //!   last log crosses and the transaction is stopped (`stopped`); and through op-revm, which has no
 //!   limit to check (`op_revm`).
-//! - `state_limits`: the same transaction under a state-gas limit and a KV limit equal to exactly
-//!   the state gas and the write records it keeps, so every fresh slot is held to both as it is
-//!   written (`satin`); and under a state-gas limit one gas short, so the last slot crosses and the
-//!   transaction is stopped (`stopped`). Its op-revm baseline is `data_size_limit/op_revm`.
+//! - `state_limits`: the same transaction under a state-gas limit equal to exactly the state gas it
+//!   keeps, so every fresh slot is held to it as it is written (`satin`); and under a state-gas
+//!   limit one gas short, so the last slot crosses and the transaction is stopped (`stopped`). Its
+//!   op-revm baseline is `data_size_limit/op_revm`.
 //! - `keyless_deploy`: a `keylessDeploy` of the canonical `CREATE2` factory, which Satin runs as a
 //!   native creation below the call (`satin`), next to op-revm running the same init code as a
 //!   creation transaction (`op_revm`). The gap is what the keyless path adds to a creation:
@@ -546,19 +546,16 @@ fn bench_transact(c: &mut Criterion) {
         );
     });
 
-    // The state-limit arms: the same transaction under a state-gas and a KV limit it exactly
-    // reaches, and under a state-gas limit one gas short of it.
+    // The state-limit arms: the same transaction under a state-gas limit it exactly reaches, and
+    // under one gas short of it.
     let state_gas = MegaEvm::new(mega_context(db.clone()))
         .execute_transaction(OpTx(limited_tx.clone()))
         .unwrap()
         .gas
         .state;
     let state_limited = |limit| {
-        mega_context(db.clone()).with_tx_runtime_limits(
-            EvmTxRuntimeLimits::default()
-                .with_tx_state_gas_limit(limit)
-                .with_tx_kv_update_limit(REPEAT),
-        )
+        mega_context(db.clone())
+            .with_tx_runtime_limits(EvmTxRuntimeLimits::default().with_tx_state_gas_limit(limit))
     };
     let at_limit = MegaEvm::new(state_limited(state_gas))
         .execute_transaction(OpTx(limited_tx.clone()))

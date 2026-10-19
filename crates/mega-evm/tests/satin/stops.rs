@@ -1,7 +1,7 @@
 //! The revert-class stop, pinned as a matrix.
 //!
-//! A transaction-level limit — data size, KV updates, state gas, or gas detention's compute limit —
-//! stops the transaction with a revert. The frame that crosses it reverts with
+//! A transaction-level limit — data size, state gas, or gas detention's compute limit — stops the
+//! transaction with a revert. The frame that crosses it reverts with
 //! `MegaLimitExceeded(kind, limit)`, the transaction is latched, and every frame above returns the
 //! same revert without running another instruction, whatever produced its result. The transaction
 //! settles like an EIP-8037 revert: the sender pays for what ran, and its unspent regular gas and
@@ -91,13 +91,12 @@ const TWIN_REVERT: u64 = 4;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Limit {
     DataSize,
-    KvUpdates,
     StateGas,
     Compute,
 }
 
 impl Limit {
-    const ALL: [Self; 4] = [Self::DataSize, Self::KvUpdates, Self::StateGas, Self::Compute];
+    const ALL: [Self; 3] = [Self::DataSize, Self::StateGas, Self::Compute];
 
     /// Whether a transaction can cross this limit at the byte prices in effect: where a state byte
     /// is free no transaction adds state gas, and the state-gas limit has nothing to hold.
@@ -108,7 +107,6 @@ impl Limit {
     const fn kind(self) -> LimitKind {
         match self {
             Self::DataSize => LimitKind::DataSize,
-            Self::KvUpdates => LimitKind::KVUpdate,
             Self::StateGas => LimitKind::StateGrowth,
             Self::Compute => LimitKind::ComputeGas,
         }
@@ -448,9 +446,6 @@ fn limits_of(limit: Limit, crossing: usize, slot: u64) -> (EvmTxRuntimeLimits, O
                 TX_BODY_SIZE + frames * LOG_BASE_SIZE + (OWN_SLOTS + 1) * WRITE_RECORD_SIZE - 1;
             (EvmTxRuntimeLimits::default().with_tx_data_size_limit(value), Some(value))
         }
-        Limit::KvUpdates => {
-            (EvmTxRuntimeLimits::default().with_tx_kv_update_limit(OWN_SLOTS), Some(OWN_SLOTS))
-        }
         Limit::StateGas => {
             let value = (OWN_SLOTS + 1) * slot - 1;
             (EvmTxRuntimeLimits::default().with_tx_state_gas_limit(value), Some(value))
@@ -513,7 +508,6 @@ fn creation_limits(creation: Creation, limit: Limit, gas_limit: u64) -> EvmTxRun
     if matches!(creation, Creation::NestedStart) {
         return match limit {
             Limit::DataSize => limits.with_tx_data_size_limit(TX_BODY_SIZE),
-            Limit::KvUpdates => limits.with_tx_kv_update_limit(0),
             Limit::StateGas => limits.with_tx_state_gas_limit(0),
             Limit::Compute => unreachable!("a start charges no compute past the cap"),
         };
@@ -526,7 +520,6 @@ fn creation_limits(creation: Creation, limit: Limit, gas_limit: u64) -> EvmTxRun
     assert!(unlimited.result.is_success(), "{creation:?}, {limit:?}: {:?}", unlimited.result);
     match limit {
         Limit::DataSize => limits.with_tx_data_size_limit(unlimited.usage.data_size - 1),
-        Limit::KvUpdates => limits.with_tx_kv_update_limit(unlimited.usage.write_records - 1),
         Limit::StateGas => limits.with_tx_state_gas_limit(unlimited.gas.state - 1),
         Limit::Compute => limits,
     }
@@ -538,17 +531,12 @@ fn creation_limits(creation: Creation, limit: Limit, gas_limit: u64) -> EvmTxRun
 /// init code crosses a limit, a nested creation whose init code crosses one, and a nested creation
 /// whose start crosses one each report the stop on the bill they have without the inspector,
 /// below the execution cap and above it.
-///
-/// A nested creation's init code cannot be the first to cross the KV limit. A record is one unit,
-/// so the record that crosses the transaction's limit comes when the creation already holds all
-/// the transaction had left, and its budget — 98% of that, rounded down — is less unless nothing
-/// was left, when the start's own records cross: the budget stops the creation alone first.
 #[test]
 fn test_a_revived_creation_reports_the_stop() {
     let cases = [
         (Creation::Transaction, Limit::ALL.as_slice()),
-        (Creation::Nested, [Limit::DataSize, Limit::StateGas, Limit::Compute].as_slice()),
-        (Creation::NestedStart, [Limit::DataSize, Limit::KvUpdates, Limit::StateGas].as_slice()),
+        (Creation::Nested, Limit::ALL.as_slice()),
+        (Creation::NestedStart, [Limit::DataSize, Limit::StateGas].as_slice()),
     ];
     for (creation, limits) in cases {
         for &limit in limits.iter().filter(|limit| limit.crossable()) {
@@ -780,60 +768,43 @@ fn slot_of(outcome: &MegaTransactionOutcome, account: Address, slot: U256) -> U2
         .map_or(U256::ZERO, |slot| slot.present_value())
 }
 
-/// A frame three calls below the transaction's own that crosses its budget — in data size or in
-/// write records — reverts alone with `MegaLimitExceeded(kind, budget)`, where the budget is what
-/// the shares left it. Its caller resumes and reads the stop, every frame above runs on, nothing is
-/// latched and the transaction succeeds, below and above the execution cap.
+/// A frame three calls below the transaction's own that crosses its data-size budget reverts alone
+/// with `MegaLimitExceeded(0, budget)`, where the budget is what the shares left it. Its caller
+/// resumes and reads the stop, every frame above runs on, nothing is latched and the transaction
+/// succeeds, below and above the execution cap.
 #[test]
 fn test_a_frame_budget_crossed_three_calls_down_reverts_that_frame_alone() {
     // The transaction's own frame gets the room above the body; each relay logs before it calls,
     // which counts 32 bytes and no write record.
     const ROOM: u64 = 1_000;
-    let data_budget = share(share(share(ROOM - LOG_BASE_SIZE) - LOG_BASE_SIZE) - LOG_BASE_SIZE);
-    const RECORDS: u64 = 100;
-    let record_budget = share(share(share(RECORDS)));
-    let rows = [
-        (
-            LimitKind::DataSize,
-            EvmTxRuntimeLimits::default().with_tx_data_size_limit(TX_BODY_SIZE + ROOM),
-            data_budget,
-            // D's log and its writes cross its budget long before the transaction's limit.
-            writer(data_budget / WRITE_RECORD_SIZE + 1),
-        ),
-        (
-            LimitKind::KVUpdate,
-            EvmTxRuntimeLimits::default().with_tx_kv_update_limit(RECORDS),
-            record_budget,
-            writer(record_budget + 1),
-        ),
-    ];
-    for (kind, limits, budget, d) in rows {
-        for gas_limit in TIERS {
-            let case = format!("{kind:?}, gas limit {gas_limit}");
-            let outcome = execute(resuming_chain(d.clone()), limits, gas_limit);
-            assert!(outcome.result.is_success(), "{case}: {:?}", outcome.result);
-            assert_eq!(outcome.limit_exceeded, None, "{case}: a frame budget latches nothing");
+    let budget = share(share(share(ROOM - LOG_BASE_SIZE) - LOG_BASE_SIZE) - LOG_BASE_SIZE);
+    let kind = LimitKind::DataSize;
+    let limits = EvmTxRuntimeLimits::default().with_tx_data_size_limit(TX_BODY_SIZE + ROOM);
+    // D's log and its writes cross its budget long before the transaction's limit.
+    let d = writer(budget / WRITE_RECORD_SIZE + 1);
+    for gas_limit in TIERS {
+        let case = format!("gas limit {gas_limit}");
+        let outcome = execute(resuming_chain(d.clone()), limits, gas_limit);
+        assert!(outcome.result.is_success(), "{case}: {:?}", outcome.result);
+        assert_eq!(outcome.limit_exceeded, None, "{case}: a frame budget latches nothing");
 
-            // C read D's stop: a failed call returning `MegaLimitExceeded(kind, budget)`.
-            assert_eq!(slot_of(&outcome, C, STATUS), U256::ZERO, "{case}: D reverted");
-            assert_eq!(slot_of(&outcome, C, RETURNED), U256::from(68), "{case}");
-            assert_eq!(slot_of(&outcome, C, STOP_KIND), U256::from(kind.as_u8()), "{case}");
-            assert_eq!(slot_of(&outcome, C, STOP_LIMIT), U256::from(budget), "{case}");
-            // Every caller ran on, D kept nothing.
-            for frame in [A, B] {
-                assert_eq!(slot_of(&outcome, frame, STATUS), U256::from(1), "{case}: {frame}");
-            }
-            for frame in [A, B, C] {
-                assert_eq!(slot_of(&outcome, frame, MARKER), U256::from(1), "{case}: {frame}");
-            }
-            let d_kept = outcome
-                .state
-                .get(&D)
-                .is_some_and(|d| d.storage.values().any(|slot| slot.is_changed()));
-            assert!(!d_kept, "{case}: D kept a write");
-            let loggers: Vec<_> = outcome.result.logs().iter().map(|log| log.address).collect();
-            assert_eq!(loggers, [A, B, C], "{case}: D's log went with its frame");
+        // C read D's stop: a failed call returning `MegaLimitExceeded(kind, budget)`.
+        assert_eq!(slot_of(&outcome, C, STATUS), U256::ZERO, "{case}: D reverted");
+        assert_eq!(slot_of(&outcome, C, RETURNED), U256::from(68), "{case}");
+        assert_eq!(slot_of(&outcome, C, STOP_KIND), U256::from(kind.as_u8()), "{case}");
+        assert_eq!(slot_of(&outcome, C, STOP_LIMIT), U256::from(budget), "{case}");
+        // Every caller ran on, D kept nothing.
+        for frame in [A, B] {
+            assert_eq!(slot_of(&outcome, frame, STATUS), U256::from(1), "{case}: {frame}");
         }
+        for frame in [A, B, C] {
+            assert_eq!(slot_of(&outcome, frame, MARKER), U256::from(1), "{case}: {frame}");
+        }
+        let d_kept =
+            outcome.state.get(&D).is_some_and(|d| d.storage.values().any(|slot| slot.is_changed()));
+        assert!(!d_kept, "{case}: D kept a write");
+        let loggers: Vec<_> = outcome.result.logs().iter().map(|log| log.address).collect();
+        assert_eq!(loggers, [A, B, C], "{case}: D's log went with its frame");
     }
 }
 
@@ -843,7 +814,6 @@ fn test_a_frame_budget_crossed_three_calls_down_reverts_that_frame_alone() {
 fn armed() -> EvmTxRuntimeLimits {
     EvmTxRuntimeLimits::default()
         .with_tx_data_size_limit(TX_DATA_LIMIT)
-        .with_tx_kv_update_limit(1_000)
         .with_tx_state_gas_limit(TX_GAS_LIMIT_CAP)
 }
 
@@ -1346,54 +1316,6 @@ fn test_state_revert_when_exceeding_limit() {
     assert_eq!(outcome.usage, LimitUsage { data_size: TX_BODY_SIZE, write_records: 0 });
     assert!(outcome.state.get(&A).is_none_or(|a| a.storage.is_empty() && a.info.balance.is_zero()));
     assert_eq!(outcome.state[&CALLER].info.balance, U256::from(10_000), "the value did not move");
-}
-
-/// Data size is held before write records where one site crosses both: the first frame's start,
-/// whose recipient's record and transfer log are counted together, and a fresh slot's write after
-/// a log. Under a data-size limit the site crosses and a KV limit of nothing, the data-size limit
-/// is the stop reported. Under the KV limit alone the KV limit stops the transaction on the same
-/// bill, so at the same site: each row crosses both there, and the order is what decides.
-///
-/// Rules: [S10.47]. Independence: constants — the limits and the usage are the byte table's
-/// sizes.
-#[test]
-fn test_check_limit_priority_data_size_before_kv_update() {
-    let stop =
-        |kind, limit, used| LimitCheck::ExceedsLimit { kind, limit, used, frame_local: false };
-    // (site, the value the transaction carries, the data size the site brings it to)
-    let rows = [
-        (
-            "a value transfer's start",
-            U256::from(1),
-            TX_BODY_SIZE + WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE,
-        ),
-        ("a fresh slot after a log", U256::ZERO, TX_BODY_SIZE + LOG_BASE_SIZE + WRITE_RECORD_SIZE),
-    ];
-    for (site, value, used) in rows {
-        let run = |limits: EvmTxRuntimeLimits| {
-            let db = MemoryDatabase::default()
-                .account_code(A, writer(1))
-                .account_balance(CALLER, U256::from(1));
-            MegaEvm::new(context(db).with_tx_runtime_limits(limits))
-                .execute_transaction(call(CALLER, A, value, BELOW))
-                .expect("the transaction is valid")
-        };
-        let kv_alone = run(EvmTxRuntimeLimits::default().with_tx_kv_update_limit(0));
-        assert_eq!(
-            kv_alone.limit_exceeded,
-            Some(stop(LimitKind::KVUpdate, 0, 1)),
-            "{site}: its record crosses the KV limit"
-        );
-        let both = run(EvmTxRuntimeLimits::default()
-            .with_tx_data_size_limit(used - 1)
-            .with_tx_kv_update_limit(0));
-        assert_eq!(
-            both.limit_exceeded,
-            Some(stop(LimitKind::DataSize, used - 1, used)),
-            "{site}: the data size is held first"
-        );
-        assert_eq!(kv_alone.gas, both.gas, "{site}: both limits stop it at the same site");
-    }
 }
 
 /// A transaction detained from its start — its sender is the block's beneficiary — whose body

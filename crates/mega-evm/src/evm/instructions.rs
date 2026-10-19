@@ -162,7 +162,7 @@ pub(crate) fn mega_instructions<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// The state gas the opcode charged is held to the state-gas limit first — `SSTORE` charges a
 /// fresh slot's and `SELFDESTRUCT` a new beneficiary's inside revm's instruction — and a crossing
 /// stops the frame and discards the record with the write. Then the record is held to the
-/// data-size and KV limits, and only then is its history charged. A record a limit rejects is not
+/// data-size limit, and only then is its history charged. A record a limit rejects is not
 /// kept, so its history is not a charge and the stop is what the frame reports. A record the
 /// limits accept is charged, and a charge the frame cannot pay is an out-of-gas.
 #[inline(always)]

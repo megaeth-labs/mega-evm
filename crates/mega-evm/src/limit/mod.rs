@@ -3,7 +3,7 @@
 //! The common execution layer defines what a limit reports when it is crossed: the dimension
 //! ([`LimitKind`]), the verdict of a check ([`LimitCheck`]) and the revert data a stopped frame
 //! returns ([`MegaLimitExceeded`]). The mechanisms that meter a dimension fill these in: the
-//! data-size limit, the KV limit and the state-gas limit below, and detention for compute gas.
+//! data-size limit below, and detention for compute gas.
 //!
 //! Gas detention caps compute, [`LimitKind::ComputeGas`]: its state lives beside this module, in
 //! [`Detention`](crate::Detention), because what it meters is gas rather than anything the lanes
@@ -11,7 +11,7 @@
 //! through the same latch ([`AdditionalLimit::latch`]), with the compute the transaction may reach
 //! as the limit, and its compute at the crossing as what was used ([`LimitCheck::ExceedsLimit`]).
 //!
-//! It also counts what those limits meter at the sites the data-size limit counts: data-size
+//! It also counts what the data-size limit meters, at the sites the bytes are made: data-size
 //! bytes and write records, on a lane per frame ([`AdditionalLimit`]). The Host stages what it
 //! observes ([`StagedRecord`]) and the opcode commits it once it completed.
 //!
@@ -66,20 +66,14 @@
 //! with the stop. The account a deposit-like transaction creates for its caller is charged all the
 //! same, because it exists whatever the transaction does.
 //!
-//! # The KV limit
+//! # Write records
 //!
-//! The KV count is the write-record count the lanes keep: one record per account or storage write
-//! the transaction keeps, deduplicated per frame, taken back with a slot written back to its
-//! original value and with the frame that fails. The sender's account and the accounts fees are
-//! credited to are the body's, not records. [`EvmTxRuntimeLimits::tx_kv_update_limit`] holds it
-//! by the data-size limit's rules in its own unit: the transaction's own frame gets what the
-//! transaction has left, a child the same share of what its parent has left, under
-//! [`EvmTxRuntimeLimits::frame_kv_update_limit`]; a frame over its budget reverts alone and a
-//! transaction over its limit is stopped. Every check holds the data size before the records.
-//!
-//! A record weighs [`WRITE_RECORD_SIZE`] bytes of data size, counted and taken back with them, so
-//! the KV count never weighs more than the data size, and a KV limit binds only below the
-//! data-size limit's fortieth.
+//! The write-record count the lanes keep is the KV count a node reports: one record per account
+//! or storage write the transaction keeps, deduplicated per frame, taken back with a slot written
+//! back to its original value and with the frame that fails. The sender's account and the accounts
+//! fees are credited to are the body's, not records. No limit holds the count: a record weighs
+//! [`WRITE_RECORD_SIZE`] bytes of data size, counted and taken back with them, so the data-size
+//! limit bounds the records, and history gas prices each of them.
 //!
 //! # The state-gas limit
 //!
@@ -129,11 +123,11 @@
 //! transaction ([`crate::system::is_system_originated`]) and a system call — the pre-block calls
 //! among them — are exempt ([`AdditionalLimit::is_exempt`]), sticky for the transaction, and the
 //! one place every stop comes from answers that they are within the limits whatever they cross:
-//! the data size, the KV count, the state gas and the frame budgets of the first two. It is the set
-//! that pays no history gas, exempt for the same reason: the protocol's maintenance must not fail
-//! on a resource limit. What such a transaction uses is counted all the same and reported in its
-//! usage and in the block's counters, as a deposit's is. A user's deposit is not in the set and is
-//! held to every limit.
+//! the data size, the state gas and the data-size frame budgets. It is the set that pays no
+//! history gas, exempt for the same reason: the protocol's maintenance must not fail on a resource
+//! limit. What such a transaction uses is counted all the same and reported in its usage and in the
+//! block's counters, as a deposit's is. A user's deposit is not in the set and is held to every
+//! limit.
 //!
 //! # The byte table
 //!
@@ -225,9 +219,9 @@ pub const FRAME_DATA_SHARE_DENOMINATOR: u64 = 100;
 
 /// What a transaction or a frame counts: data-size bytes and write records.
 ///
-/// The write-record count is the KV count a node reports, and the KV limit holds it; it has no
-/// tracker of its own. Every record weighs [`WRITE_RECORD_SIZE`] bytes of data size and is taken
-/// back with them, so `write_records × WRITE_RECORD_SIZE` never exceeds `data_size`.
+/// The write-record count is the KV count a node reports; no limit holds it. Every record weighs
+/// [`WRITE_RECORD_SIZE`] bytes of data size and is taken back with them, so
+/// `write_records × WRITE_RECORD_SIZE` never exceeds `data_size`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct LimitUsage {
     /// Data-size bytes.
@@ -236,18 +230,14 @@ pub struct LimitUsage {
     pub write_records: u64,
 }
 
-/// Limits one transaction's data size, write records, state gas and compute after a read of
-/// volatile data.
+/// Limits one transaction's data size, state gas and compute after a read of volatile data.
 ///
-/// [`tx_data_size_limit`](Self::tx_data_size_limit) and
-/// [`tx_kv_update_limit`](Self::tx_kv_update_limit) stop the transaction. A frame's own budget in
-/// each dimension is derived from them: the transaction's frame gets what the transaction has
-/// left, and each child gets [`FRAME_DATA_SHARE_NUMERATOR`] / [`FRAME_DATA_SHARE_DENOMINATOR`] of
-/// what its parent has left. Crossing a frame budget reverts that frame alone.
+/// [`tx_data_size_limit`](Self::tx_data_size_limit) stops the transaction. A frame's own budget is
+/// derived from it: the transaction's frame gets what the transaction has left, and each child gets
+/// [`FRAME_DATA_SHARE_NUMERATOR`] / [`FRAME_DATA_SHARE_DENOMINATOR`] of what its parent has left.
+/// Crossing a frame budget reverts that frame alone.
 ///
-/// [`frame_data_size_limit`](Self::frame_data_size_limit) and
-/// [`frame_kv_update_limit`](Self::frame_kv_update_limit) are a further cap on every frame's
-/// budget.
+/// [`frame_data_size_limit`](Self::frame_data_size_limit) is a further cap on every frame's budget.
 ///
 /// [`tx_state_gas_limit`](Self::tx_state_gas_limit) holds the transaction's state gas and stops
 /// the transaction; it has no frame budget.
@@ -276,12 +266,6 @@ pub struct EvmTxRuntimeLimits {
     /// A cap on every frame's data-size budget, applied after the share of what its parent has
     /// left. Crossing it reverts the frame alone.
     pub frame_data_size_limit: u64,
-    /// The most write records the transaction may keep: its KV count. Crossing it stops the
-    /// transaction.
-    pub tx_kv_update_limit: u64,
-    /// A cap on every frame's write-record budget, applied after the share of what its parent has
-    /// left. Crossing it reverts the frame alone.
-    pub frame_kv_update_limit: u64,
     /// The most EIP-8037 state gas the transaction may hold, net of what it refilled and of what
     /// its failed frames rolled back: the limit on the state it grows. Crossing it stops the
     /// transaction.
@@ -330,8 +314,6 @@ impl EvmTxRuntimeLimits {
         Self {
             tx_data_size_limit: u64::MAX,
             frame_data_size_limit: u64::MAX,
-            tx_kv_update_limit: u64::MAX,
-            frame_kv_update_limit: u64::MAX,
             tx_state_gas_limit: u64::MAX,
             block_env_access_compute_gas_limit: u64::MAX,
             oracle_access_compute_gas_limit: u64::MAX,
@@ -347,18 +329,6 @@ impl EvmTxRuntimeLimits {
     /// Caps every frame's data-size budget at `limit`.
     pub const fn with_frame_data_size_limit(mut self, limit: u64) -> Self {
         self.frame_data_size_limit = limit;
-        self
-    }
-
-    /// Sets the transaction's KV limit: the most write records it may keep.
-    pub const fn with_tx_kv_update_limit(mut self, limit: u64) -> Self {
-        self.tx_kv_update_limit = limit;
-        self
-    }
-
-    /// Caps every frame's write-record budget at `limit`.
-    pub const fn with_frame_kv_update_limit(mut self, limit: u64) -> Self {
-        self.frame_kv_update_limit = limit;
         self
     }
 
@@ -380,19 +350,6 @@ impl EvmTxRuntimeLimits {
         self.oracle_access_compute_gas_limit = limit;
         self
     }
-
-    /// The transaction's limits on what it keeps, one per dimension of [`LimitUsage`].
-    pub(crate) const fn tx_usage_limit(&self) -> LimitUsage {
-        LimitUsage { data_size: self.tx_data_size_limit, write_records: self.tx_kv_update_limit }
-    }
-
-    /// The caps on every frame's budget, one per dimension of [`LimitUsage`].
-    pub(crate) const fn frame_usage_limit(&self) -> LimitUsage {
-        LimitUsage {
-            data_size: self.frame_data_size_limit,
-            write_records: self.frame_kv_update_limit,
-        }
-    }
 }
 
 /// One write record.
@@ -403,32 +360,13 @@ pub(crate) const WRITE_RECORD: LimitUsage =
 pub(crate) const TRANSFER_LOG: LimitUsage =
     LimitUsage { data_size: TRANSFER_LOG_SIZE, write_records: 0 };
 
-/// A budget with no bound in either dimension.
-pub(crate) const UNLIMITED: LimitUsage =
-    LimitUsage { data_size: u64::MAX, write_records: u64::MAX };
-
 impl LimitUsage {
     /// Nothing counted.
     pub const ZERO: Self = Self { data_size: 0, write_records: 0 };
 
-    /// The first dimension in which `self` is over `limit` — data size, then write records — with
-    /// the limit crossed and the usage that crossed it; `None` when both hold.
-    pub(crate) const fn crossing(self, limit: Self) -> Option<(LimitKind, u64, u64)> {
-        if self.data_size > limit.data_size {
-            return Some((LimitKind::DataSize, limit.data_size, self.data_size));
-        }
-        if self.write_records > limit.write_records {
-            return Some((LimitKind::KVUpdate, limit.write_records, self.write_records));
-        }
-        None
-    }
-
-    /// Each counter the smaller of the two.
-    pub(crate) fn min(self, other: Self) -> Self {
-        Self {
-            data_size: self.data_size.min(other.data_size),
-            write_records: self.write_records.min(other.write_records),
-        }
+    /// Whether `self` keeps more data-size bytes than `limit`, the one dimension a limit holds.
+    pub(crate) const fn exceeds(self, limit: u64) -> bool {
+        self.data_size > limit
     }
 
     /// Both counters added, saturating.
@@ -469,14 +407,12 @@ alloy_sol_types::sol! {
 /// A resource dimension a limit meters.
 ///
 /// The discriminants are the `kind` of [`MegaLimitExceeded`] and keep the values the legacy engine
-/// encoded, so a contract that decodes the legacy revert data decodes Satin's.
+/// encoded, so a contract that decodes the legacy revert data decodes Satin's. The legacy engine's
+/// key-value updates, `1`, name no dimension: no limit holds the write records.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LimitKind {
     /// Bytes of data a transaction produces; metered by the data-size limit.
     DataSize,
-    /// Key-value updates: the write records a transaction keeps, one per account or storage
-    /// write; metered by the KV limit.
-    KVUpdate,
     /// Compute gas, the regular gas a transaction spends; capped by detention.
     ComputeGas,
     /// Net new state, metered in EIP-8037 state gas by the state-gas limit: the `limit` of its
@@ -490,7 +426,6 @@ impl LimitKind {
     pub const fn as_u8(&self) -> u8 {
         match self {
             Self::DataSize => 0,
-            Self::KVUpdate => 1,
             Self::ComputeGas => 2,
             Self::StateGrowth => 3,
         }
@@ -500,7 +435,6 @@ impl LimitKind {
     pub const fn from_u8(kind: u8) -> Option<Self> {
         match kind {
             0 => Some(Self::DataSize),
-            1 => Some(Self::KVUpdate),
             2 => Some(Self::ComputeGas),
             3 => Some(Self::StateGrowth),
             _ => None,
@@ -583,7 +517,7 @@ impl LimitCheck {
 pub struct LimitStop {
     /// The dimension crossed.
     pub kind: LimitKind,
-    /// The limit crossed, in the dimension's unit: bytes, write records, or gas.
+    /// The limit crossed, in the dimension's unit: bytes or gas.
     pub limit: u64,
     /// The usage that crossed it (see [`LimitCheck::ExceedsLimit`]).
     pub used: u64,
@@ -661,8 +595,6 @@ mod tests {
         let EvmTxRuntimeLimits {
             tx_data_size_limit,
             frame_data_size_limit,
-            tx_kv_update_limit,
-            frame_kv_update_limit,
             tx_state_gas_limit,
             block_env_access_compute_gas_limit,
             oracle_access_compute_gas_limit,
@@ -670,8 +602,6 @@ mod tests {
         for limit in [
             tx_data_size_limit,
             frame_data_size_limit,
-            tx_kv_update_limit,
-            frame_kv_update_limit,
             tx_state_gas_limit,
             block_env_access_compute_gas_limit,
             oracle_access_compute_gas_limit,
@@ -742,15 +672,14 @@ mod tests {
         assert!(frame_local.exceeded_limit());
     }
 
-    /// Every discriminant survives the round trip, and an unknown one maps to nothing.
+    /// The kinds keep the legacy engine's wire encoding: every discriminant survives the round
+    /// trip, and the legacy engine's key-value updates, `1`, name no dimension, nor does an
+    /// unknown kind.
     #[test]
-    fn test_limit_kind_u8_roundtrip() {
-        for (kind, expected) in [
-            (LimitKind::DataSize, 0),
-            (LimitKind::KVUpdate, 1),
-            (LimitKind::ComputeGas, 2),
-            (LimitKind::StateGrowth, 3),
-        ] {
+    fn test_limit_kind_keeps_its_wire_encoding() {
+        for (kind, expected) in
+            [(LimitKind::DataSize, 0), (LimitKind::ComputeGas, 2), (LimitKind::StateGrowth, 3)]
+        {
             assert_eq!(kind.as_u8(), expected, "{kind:?}");
             assert_eq!(
                 LimitKind::from_u8(kind.as_u8()),
@@ -758,7 +687,9 @@ mod tests {
                 "round-trip failed for {kind:?}"
             );
         }
-        assert_eq!(LimitKind::from_u8(4), None);
+        for retired in [1, 4, u8::MAX] {
+            assert_eq!(LimitKind::from_u8(retired), None, "{retired}");
+        }
     }
 
     /// Every kind's revert data decodes to its kind and limit, and nothing else decodes: another
@@ -766,18 +697,14 @@ mod tests {
     /// bytes.
     #[test]
     fn test_decode_mega_limit_exceeded_accepts_exactly_the_stops_encoding() {
-        let kinds = [
-            LimitKind::DataSize,
-            LimitKind::KVUpdate,
-            LimitKind::ComputeGas,
-            LimitKind::StateGrowth,
-        ];
+        let kinds = [LimitKind::DataSize, LimitKind::ComputeGas, LimitKind::StateGrowth];
         for kind in kinds {
             let stop = LimitCheck::ExceedsLimit { kind, limit: 7, used: 8, frame_local: false };
             assert_eq!(decode_mega_limit_exceeded(&stop.revert_data()), Some((kind, 7)));
         }
 
         let encoded = |kind: u8| MegaLimitExceeded { kind, limit: 7 }.abi_encode();
+        assert_eq!(decode_mega_limit_exceeded(&encoded(1)), None, "a kind no dimension has");
         assert_eq!(decode_mega_limit_exceeded(&encoded(4)), None, "a kind no dimension has");
         assert_eq!(decode_mega_limit_exceeded(&encoded(u8::MAX)), None);
         let mut wide = encoded(0);
@@ -802,7 +729,7 @@ mod tests {
         use revm::context::result::{HaltReason, ResultGas, SuccessReason};
 
         let check = LimitCheck::ExceedsLimit {
-            kind: LimitKind::KVUpdate,
+            kind: LimitKind::DataSize,
             limit: 3,
             used: 4,
             frame_local: false,
@@ -812,7 +739,7 @@ mod tests {
             logs: Default::default(),
             output,
         };
-        let stop = LimitStop { kind: LimitKind::KVUpdate, limit: 3, used: 4 };
+        let stop = LimitStop { kind: LimitKind::DataSize, limit: 3, used: 4 };
 
         assert_eq!(LimitStop::from_result(&revert(check.revert_data()), Some(&check)), Some(stop));
         assert_eq!(
@@ -821,7 +748,7 @@ mod tests {
             "the same bytes without the check: a contract's own revert"
         );
         let frame_local = LimitCheck::ExceedsLimit {
-            kind: LimitKind::KVUpdate,
+            kind: LimitKind::DataSize,
             limit: 3,
             used: 4,
             frame_local: true,
@@ -832,7 +759,7 @@ mod tests {
             "a frame budget stops no transaction"
         );
         let other_limit = LimitCheck::ExceedsLimit {
-            kind: LimitKind::KVUpdate,
+            kind: LimitKind::DataSize,
             limit: 9,
             used: 10,
             frame_local: false,

@@ -1535,8 +1535,8 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for KvWeighsNoMore
 /// what it keeps parts from the records by exactly the bytes that are not records: the body, the
 /// logs — the transfer logs among them — the deployed code and the hint's payload.
 ///
-/// So a KV limit binds only below the data-size limit's fortieth: at the production data-size
-/// caps a transaction keeps at most 327,680 records, whatever its KV limit.
+/// So the data-size limit bounds the records: at the production data-size caps a transaction keeps
+/// at most 327,680 of them.
 #[test]
 fn test_the_kv_count_never_weighs_more_than_the_data_size() {
     assert_eq!(mega_evm::constants::TX_DATA_LIMIT / WRITE_RECORD_SIZE, 327_680);

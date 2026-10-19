@@ -1,8 +1,8 @@
 //! The limits a keyless deployment is held to, and what a stop leaves behind.
 //!
 //! The creation is an ordinary frame below its `keylessDeploy` call, so it is held to everything
-//! an ordinary creation is: its share of the data-size and KV budgets, the transaction's limits,
-//! the state-gas limit. A frame budget reverts the creation alone, and the call answers
+//! an ordinary creation is: its share of the data-size budget, the transaction's limits, the
+//! state-gas limit. A frame budget reverts the creation alone, and the call answers
 //! `ExecutionReverted` with the stop's revert data, the signer's nonce spent. A transaction limit
 //! stops the transaction: the call reverts with the stop and takes back everything the
 //! deployment wrote, the signer's nonce included, and the sender pays for what ran and gets the
@@ -248,48 +248,6 @@ fn test_a_failure_from_nonce_one_leaves_the_call_within_its_budget() {
     }
 }
 
-/// A transaction KV limit reaches the creation as its share: 98% of what the call has left,
-/// rounded down. A limit of two leaves the creation one, and the two records its start makes cross
-/// it: the creation is stopped before its init code runs, alone, and the signer's nonce is spent.
-/// Records come one at a time, so inside the creation its share always binds before the
-/// transaction's limit does.
-#[test]
-fn test_a_kv_limit_below_the_creations_start_stops_the_creation_at_its_start() {
-    let deployment = Deployment::new(filling_a_slot());
-    for gas_limit in GAS_LIMITS {
-        let outcome = limited(
-            &deployment,
-            gas_limit,
-            EvmTxRuntimeLimits::no_limits().with_tx_kv_update_limit(2),
-        );
-        assert_eq!(creation_stop(&outcome), MegaLimitExceeded { kind: 1, limit: 1 });
-        let KeylessDeployError::ExecutionReverted { gas_used, .. } = failure(&outcome) else {
-            unreachable!()
-        };
-        assert_eq!(gas_used, 0, "the init code never ran");
-        assert_eq!(outcome.limit_exceeded, None);
-        assert_eq!(nonce(&outcome, deployment.signer), 1, "a stopped creation spends the nonce");
-        assert_eq!(outcome.usage.write_records, 1);
-    }
-}
-
-/// And a KV budget of three gives the creation two records — its start's — so the slot it fills
-/// reverts it alone.
-#[test]
-fn test_a_deployment_crossing_its_kv_budget_reverts_alone() {
-    let deployment = Deployment::new(filling_a_slot());
-    for gas_limit in GAS_LIMITS {
-        let outcome = limited(
-            &deployment,
-            gas_limit,
-            EvmTxRuntimeLimits::no_limits().with_frame_kv_update_limit(3),
-        );
-        assert_eq!(creation_stop(&outcome), MegaLimitExceeded { kind: 1, limit: 2 });
-        assert_eq!(outcome.limit_exceeded, None);
-        assert_eq!(nonce(&outcome, deployment.signer), 1);
-    }
-}
-
 /// The state gas of the creation's start — the signer's account and the created account — is held
 /// once the creation is built, as a `CREATE`'s upfront charge is: a limit below it stops the
 /// transaction before the init code runs.
@@ -363,10 +321,9 @@ fn test_a_deployment_within_every_limit_deploys() {
     let deployment = Deployment::new(filling_a_slot());
     let upfront = entry(GasId::new_account_state_gas()) + entry(GasId::create_state_gas());
     // The creation gets 98% of what the call has left, rounded down: room for its three records
-    // and its byte of code, and for its three records.
+    // and its byte of code.
     let limits = EvmTxRuntimeLimits::no_limits()
         .with_tx_data_size_limit(body_bytes(&deployment) + 3 * 40 + 1 + 10)
-        .with_tx_kv_update_limit(4)
         .with_tx_state_gas_limit(
             upfront +
                 entry(GasId::sstore_set_state_gas()) +

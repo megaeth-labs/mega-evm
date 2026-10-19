@@ -113,7 +113,7 @@ fn block_tx() -> impl Strategy<Value = BlockTx> {
         })
 }
 
-/// One of the block's four protocol budgets.
+/// One of the block's three protocol budgets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Budget {
     Unlimited,
@@ -153,12 +153,10 @@ pub(crate) struct Budgets {
     pub(crate) execution: Budget,
     pub(crate) state: Budget,
     pub(crate) data: Budget,
-    pub(crate) kv: Budget,
-    /// The policy's caps on the same four, which only tighten.
+    /// The policy's caps on the same three, which only tighten.
     pub(crate) policy_execution: Budget,
     pub(crate) policy_state: Budget,
     pub(crate) policy_data: Budget,
-    pub(crate) policy_kv: Budget,
     /// The policy's cap on a transaction's declared gas.
     pub(crate) policy_tx_gas: Option<u32>,
     /// The policy's cap on a transaction's encoded size, in bytes.
@@ -173,13 +171,11 @@ fn budgets() -> impl Strategy<Value = Budgets> {
             budget(20_000..=200_000, 500_000..=5_000_000),
             budget(1_000..=200_000, 300_000..=2_000_000),
             budget(300..=600, 1_000..=5_000),
-            budget(1..=3, 4..=12),
         ),
         (
             budget(20_000..=200_000, 500_000..=5_000_000),
             budget(1_000..=200_000, 300_000..=2_000_000),
             budget(300..=600, 1_000..=5_000),
-            budget(1..=3, 4..=12),
         ),
         proptest::option::weighted(
             0.3,
@@ -188,23 +184,19 @@ fn budgets() -> impl Strategy<Value = Budgets> {
         proptest::option::weighted(0.3, prop_oneof![Just(80u16), Just(150), Just(2_000)]),
         proptest::option::weighted(0.3, prop_oneof![Just(200u16), Just(500), Just(5_000)]),
     )
-        .prop_map(
-            |((execution, state, data, kv), (pe, ps, pd, pk), tx_gas, tx_size, block_size)| {
-                Budgets {
-                    execution,
-                    state,
-                    data,
-                    kv,
-                    policy_execution: pe,
-                    policy_state: ps,
-                    policy_data: pd,
-                    policy_kv: pk,
-                    policy_tx_gas: tx_gas,
-                    policy_tx_size: tx_size,
-                    policy_block_size: block_size,
-                }
-            },
-        )
+        .prop_map(|((execution, state, data), (pe, ps, pd), tx_gas, tx_size, block_size)| {
+            Budgets {
+                execution,
+                state,
+                data,
+                policy_execution: pe,
+                policy_state: ps,
+                policy_data: pd,
+                policy_tx_gas: tx_gas,
+                policy_tx_size: tx_size,
+                policy_block_size: block_size,
+            }
+        })
 }
 
 /// A block: a world with its programs (the case's transaction is not used), the transactions, the
@@ -228,7 +220,6 @@ impl BlockCase {
             block_execution_gas_limit: self.budgets.execution.value(),
             block_state_gas_limit: self.budgets.state.value(),
             block_txs_data_limit: self.budgets.data.value(),
-            block_kv_update_limit: self.budgets.kv.value(),
         }
     }
 
@@ -241,7 +232,6 @@ impl BlockCase {
             block_execution_gas_limit: b.policy_execution.value(),
             block_state_gas_limit: b.policy_state.value(),
             block_txs_data_limit: b.policy_data.value(),
-            block_kv_update_limit: b.policy_kv.value(),
             ..BlockLimits::no_limits()
         }
     }
@@ -360,7 +350,7 @@ impl BlockCase {
 
 /// Whether the block admits a transaction of `gas_limit` and `tx_size` before it runs, by the
 /// limiter's rules: a deposit is held to the header's gas limit alone; any other transaction to
-/// the policy's per-transaction caps and to the four packing budgets, which refuse the next
+/// the policy's per-transaction caps and to the three packing budgets, which refuse the next
 /// transaction once reached.
 fn admits_before(limiter: &BlockLimiter, gas_limit: u64, tx_size: u64, is_deposit: bool) -> bool {
     let limits = &limiter.limits;
@@ -376,8 +366,7 @@ fn admits_before(limiter: &BlockLimiter, gas_limit: u64, tx_size: u64, is_deposi
     tx_size <= limits.tx_encode_size_limit &&
         tx_size.saturating_add(limiter.block_tx_size_used) <= limits.block_txs_encode_size_limit &&
         limiter.gas.execution < limits.block_execution_gas_limit &&
-        limiter.usage.data_size < limits.block_txs_data_limit &&
-        limiter.usage.write_records < limits.block_kv_update_limit
+        limiter.usage.data_size < limits.block_txs_data_limit
 }
 
 /// Whether the block still admits an executed transaction that adds `state_gas`: the state-gas
