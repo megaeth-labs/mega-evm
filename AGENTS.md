@@ -584,6 +584,9 @@ When the agent is requested to implement a new feature or bug fix, it should con
   Behavior of the legacy specs is changed only on the legacy line, never here.
 - **Keep each change in the module that owns it.**
   The module table says where each mechanism lives; a change that needs another module's interface extends that module rather than re-implementing it in its own.
+- **Export from the crate root by name.**
+  `lib.rs` lists every item of the public surface explicitly, and the few `pub(crate)` items the modules share through the root; there are no glob exports and no short aliases.
+  A new `pub` item is added to that list or made `pub(crate)`: the `unreachable_pub` lint flags one that is neither.
 - **Always test logic changes.**
   Any logic change or modification to mega-evm should be equipped with tests if there is no specific reason of not adding tests.
   The agent should always consider accompanying tests or suggest to add additional tests.
