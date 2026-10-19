@@ -474,14 +474,6 @@ impl UpfrontRecord {
         }
     }
 
-    /// Writes the record into `result`, the result of the call it was taken for.
-    fn write_into(self, result: &mut FrameResult) {
-        if let FrameResult::Call(outcome) = result {
-            outcome.charged_new_account_state_gas = self.charged_new_account_state_gas;
-            outcome.charged_state_gas_address = self.charged_state_gas_address;
-        }
-    }
-
     /// `input` with the call's upfront charge as the record has it.
     fn restore(self, input: &FrameInput) -> FrameInput {
         let mut input = input.clone();
@@ -538,10 +530,12 @@ pub(crate) fn frame_end_checked<DB, ExtEnvs, INTR, INSP>(
     // What the opcode charged is what was recorded before the inspector saw the call, not what its
     // hooks left in the inputs.
     let restored = upfront.and_then(|record| {
-        record.write_into(frame_result);
         (UpfrontRecord::of(frame_input) != Some(record)).then(|| record.restore(frame_input))
     });
     let frame_input = restored.as_ref().unwrap_or(frame_input);
+    if upfront.is_some() {
+        carry_upfront_flags(frame_input, frame_result);
+    }
     let answered = match source {
         ResultSource::Inspector => true,
         ResultSource::Engine(checkpoint) => {

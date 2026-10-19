@@ -671,7 +671,7 @@ where
 
     /// revm's inspected frame start, with the lanes kept aligned: a frame the inspector answers
     /// itself never reaches [`EvmTr::frame_init`], so an empty lane stands in for it, and its
-    /// answer settles as a frame that never started ([`answered_without_running`]).
+    /// answer settles as a frame that never started ([`answered_by_inspector`]).
     ///
     /// A frame nothing may start, one past the call-stack limit, is answered by
     /// [`EvmTr::frame_init`], after the inspector's `frame_start`, as every frame revm does not
@@ -1044,8 +1044,13 @@ fn take_back_a_stopped_answer<DB: Database, ExtEnvs: ExternalEnvTypes>(
     }
 }
 
-/// Settles `output`, the answer the inspector gave the frame `frame_init` starts in its place.
-/// The depth guard still holds: an answer cannot reach past the call-stack limit.
+/// Settles `output`, the answer an inspector gave the frame `frame_init` starts in its place, as
+/// [`EvmTr::frame_init`] settles an answer: the depth guard still holds, so an answer cannot reach
+/// past the call-stack limit; an empty lane stands in for the frame, and the answer is held to the
+/// compute limit ([`settle_answer`]). Then the inspector is told the frame ended, and the answer
+/// settles as a frame that kept nothing: the frame never started, so no value moved and no account
+/// was added, and the upfront state gas its caller's opcode was charged comes back whatever the
+/// answer ([`frame_end_checked`]).
 fn answered_by_inspector<DB: Database, ExtEnvs: ExternalEnvTypes, INSP>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     inspector: &mut INSP,
@@ -1056,26 +1061,7 @@ fn answered_by_inspector<DB: Database, ExtEnvs: ExternalEnvTypes, INSP>(
 where
     INSP: Inspector<MegaContext<DB, ExtEnvs>, EthInterpreter>,
 {
-    let output = call_too_deep(frame_init).unwrap_or(output);
-    answered_without_running(ctx, inspector, frame_init, output, upfront)
-}
-
-/// Settles `output`, the answer an inspector gave the frame `frame_init` starts in its place, as
-/// [`EvmTr::frame_init`] settles an answer: an empty lane stands in for the frame, and the answer
-/// is held to the compute limit ([`settle_answer`]). Then the inspector is told the frame ended,
-/// and the answer settles as a frame that kept nothing: the frame never started, so no value moved
-/// and no account was added, and the upfront state gas its caller's opcode was charged comes back
-/// whatever the answer ([`frame_end_checked`]).
-fn answered_without_running<DB: Database, ExtEnvs: ExternalEnvTypes, INSP>(
-    ctx: &mut MegaContext<DB, ExtEnvs>,
-    inspector: &mut INSP,
-    frame_init: &FrameInit,
-    mut output: FrameResult,
-    upfront: Option<UpfrontRecord>,
-) -> FrameResult
-where
-    INSP: Inspector<MegaContext<DB, ExtEnvs>, EthInterpreter>,
-{
+    let mut output = call_too_deep(frame_init).unwrap_or(output);
     ctx.additional_limit.push_empty_frame();
     let gas_limit = input_gas_limit(&frame_init.frame_input);
     settle_answer(ctx, frame_init.depth, gas_limit, &mut output);

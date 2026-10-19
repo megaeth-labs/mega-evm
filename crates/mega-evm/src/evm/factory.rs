@@ -126,11 +126,15 @@ impl<ExtEnvFactory: ExternalEnvFactory> alloy_evm::EvmFactory for MegaEvmFactory
         let external_envs =
             self.external_env_factory.external_envs(block_env.number.saturating_to());
         let spec = cfg_env.spec;
-        let limits = self.tx_runtime_limits(spec);
         let ctx = MegaContext::new_with_external_envs(db, spec, external_envs)
             .with_cfg(cfg_env)
-            .with_block(block_env)
-            .with_tx_runtime_limits(limits);
+            .with_block(block_env);
+        // The context runs under its spec's limits from its creation; the factory's, when set,
+        // replace them.
+        let ctx = match self.tx_runtime_limits {
+            Some(limits) => ctx.with_tx_runtime_limits(limits),
+            None => ctx,
+        };
         let evm = MegaEvm::new(ctx);
         match &self.dyn_precompiles_builder {
             Some(builder) => evm.with_dyn_precompiles(builder(spec)),
