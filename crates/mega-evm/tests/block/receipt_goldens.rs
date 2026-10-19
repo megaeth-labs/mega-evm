@@ -193,7 +193,16 @@ fn test_a_blocks_receipts_pin_their_bytes_bloom_and_cumulative_gas() {
     let txs = [
         depositor_tx(),
         legacy(0, TxKind::Call(PAYEE), 1, Bytes::new(), room(0, 4, new_account_state_gas()), 0x11),
-        legacy(1, TxKind::Call(CONTRACT), 1, stop_input, room(STOP_CALLDATA as u64, 1, 0), 0x22),
+        // The first frame's input charges the account the value would create in the empty
+        // `CONTRACT` before the stop gives it back.
+        legacy(
+            1,
+            TxKind::Call(CONTRACT),
+            1,
+            stop_input,
+            room(STOP_CALLDATA as u64, 1, new_account_state_gas()),
+            0x22,
+        ),
         legacy(2, TxKind::Call(REVERTER), 0, Bytes::new(), room(0, 2, 0), 0x33),
         legacy(
             3,
