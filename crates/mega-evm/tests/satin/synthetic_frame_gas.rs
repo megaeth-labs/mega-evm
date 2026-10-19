@@ -23,7 +23,7 @@ use mega_evm::{
         ORACLE_CONTRACT_CODE,
     },
     test_utils::MemoryDatabase,
-    EvmTxRuntimeLimits, LimitKind, LimitUsage, MegaEvm,
+    EvmTxRuntimeLimits, LimitUsage, MegaEvm,
 };
 use revm::{
     context::{result::ExecutionResult, ContextTr, JournalTr},
@@ -216,23 +216,6 @@ fn test_inspect_frame_init_depth_guard_overrides_inspector() {
         (1, 1),
         "call and call_end pair"
     );
-}
-
-/// A latched transaction's frame is answered with the stop, even past the call-stack limit: the
-/// latch is checked first, and its answer carries the reservoir too.
-#[test]
-fn test_exceeded_tx_limit_wins_over_call_too_deep() {
-    let mut evm = MegaEvm::new(context(MemoryDatabase::default()));
-    let stop = evm.ctx_mut().additional_limit_mut().latch(LimitKind::DataSize, 0, 1);
-    let result = EvmTr::frame_init(&mut evm, call_frame_init(CALL_STACK_LIMIT as usize + 1))
-        .expect("frame_init does not fail");
-    let ItemOrResult::Result(FrameResult::Call(outcome)) = result else {
-        panic!("a latched transaction's frame is answered");
-    };
-    assert_eq!(outcome.result.result, InstructionResult::Revert, "the stop, not CallTooDeep");
-    assert_eq!(outcome.result.output, stop.revert_data());
-    assert_eq!(outcome.result.gas.remaining(), GAS_LIMIT);
-    assert_eq!(outcome.result.gas.reservoir(), RESERVOIR);
 }
 
 /// A first frame answered with the stop before it runs — its body fits the limit, the record and

@@ -554,6 +554,7 @@ The reference implementation has no price for one, so it runs such a precompile 
 #### New behavior
 
 - `MegaAccessControl`'s interface, errors, and the scope of `disableVolatileDataAccess()`, `enableVolatileDataAccess()` and `isVolatileDataAccessDisabled()` are unchanged.
+- `disableVolatileDataAccess()` switches access off once its answer is settled; an answer gas detention turns into the compute stop (see [Gas Detention on Withheld Gas](#12-gas-detention-on-withheld-gas)) MUST leave the switch as it was.
 - A read is refused where the opcode loads the value, after it read its operands: an opcode that fails on its operands (a stack underflow, for example) fails as it would with access on.
   The load comes before the opcode pushes its result, so a read on a full stack is refused rather than overflowing it.
   A `BLOCKHASH` is refused as `BLOCKHASH` (7) whatever its operand.
@@ -669,7 +670,7 @@ An out-of-gas step halts the call, consuming its regular gas.
 - **Limits.**
   A frame budget the creation crosses reverts the creation, and the call answers `ExecutionReverted` with the stop's revert data.
   A transaction-level limit stops the transaction: the call reverts with the stop, and the deployment — the signer's nonce included — is taken back.
-  When the signer's nonce record, which survives a failed creation, takes the call over its own frame budget, the call reverts with that stop and the deployment, the nonce included, is taken back without stopping the transaction.
+  When the signer's nonce record, which survives a failed creation, takes the call over its own frame budget, the call reverts with that stop and the deployment, the nonce included, is taken back; no transaction-level limit is crossed, and since the call is the transaction's own frame, the stop reported for the transaction is that budget's.
 - The contract's interface no longer declares the four errors only Rex6 and earlier produced: `ParentBudgetExceeded(uint8,uint64,uint64)`, `InvalidTransaction()`, `InsufficientComputeGas(uint64,uint64)` and `InternalError()`.
   A node MUST NOT produce them: a failed database read or SALT lookup gives the transaction no outcome, as [Transaction and Block Refusals](#21-transaction-and-block-refusals) says.
   `AddressMismatch()` and `NoContractCreated()` remain as answers to a creation reported at another address or at none, which no deployment reaches.
@@ -700,7 +701,7 @@ An out-of-gas step halts the call, consuming its regular gas.
   Every admitted input stays counted, whatever the calling frame or the transaction does afterwards — a revert, a halt, a later stop, a failed deposit — and that includes an input that fails to decode, which reaches no service.
   Two reasons keep the count, each on its own: a payload forwarded to the service cannot be taken back, and admitting an input and decoding it is work the node has done whether or not the input decodes.
 - A hint whose input length would take the transaction's data size over its data-size limit MUST NOT be forwarded and MUST NOT be counted.
-  The limit stops the transaction, and the stop reports the data size the hint would have reached.
+  The `sendHint` call MUST be answered with the stop, without running the Oracle's bytecode: the limit stops the transaction, and the stop reports the data size the hint would have reached.
   The data size the stopped transaction keeps, which the block's data-size budget counts, holds none of the hint's bytes: the payload never left the node, so it is taken back as a log that crosses the limit is.
   The check is against the transaction's limit alone, because a hint's bytes are on no frame's budget.
 
@@ -1022,7 +1023,7 @@ A node, a stateless validator and a replay tool must agree on everything below, 
   The execution result tells a node which transactions the block treated so: `MegaBlockTxResult::is_system_transaction`, beside `is_deposit`, which stays the envelope's.
 - **Reporting a limit stop.**
   A stop is a revert whose output is `MegaLimitExceeded(kind, limit)`, and a contract can revert with the same bytes, as can a caller that re-raises what a frame budget returned.
-  Execution reports whether a transaction-level limit stopped the transaction; a node must read that report, and must not infer a stop from the output alone.
+  Execution reports the crossing that produced the result of the transaction's own frame — a transaction-level limit, or that frame's own data-size budget — and none when that result is not the stop's revert; a node must read that report, and must not infer a stop from the output alone.
 - **The chain configuration.**
   A genesis file's `config` object carries Satin as five flat keys beside the other forks': `satinTime`, the activation timestamp, and one key per parameter of the `SequencerRegistry`'s bootstrap, the `satin` prefix before the parameter's own name.
 

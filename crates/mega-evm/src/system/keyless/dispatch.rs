@@ -78,8 +78,8 @@ pub(crate) struct Started {
 /// read off its own return data. A call a contract makes, and a selector the contract does not
 /// declare, run the deployed bytecode: a `keylessDeploy` call reaches the method body and its
 /// `NotIntercepted()`, and an undeclared selector finds no function and no fallback, so it reverts
-/// with empty data. A transaction the latch already stopped never reaches the dispatch: its frame
-/// is answered with the stop before.
+/// with empty data. Nothing stops a transaction before its first frame, so the dispatch never sees
+/// a stopped transaction.
 ///
 /// The depth is tested first: every frame below the transaction's own leaves after one
 /// comparison.

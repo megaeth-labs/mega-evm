@@ -140,7 +140,8 @@ fn rules(case: &Case) -> Rules {
 /// - a call those rules admit reverts only with `GasLimitTooLow`, when what it has left no longer
 ///   covers the signed gas limit, with `ContractAlreadyExists` when the deploy address holds a
 ///   contract, with `InsufficientBalance` when the signer cannot fund the carried value, or with
-///   the stop of its own frame budget;
+///   the stop of its own frame budget, which is the transaction's own frame's and so a limit stop
+///   of the transaction;
 /// - a call that succeeds started its creation, so no rule refused it, and answers the deploy
 ///   address with no error when the address holds code afterwards, and otherwise the zero address
 ///   with `ExecutionReverted`, `ExecutionHalted` or `EmptyCodeDeployed`, the address then holding
@@ -194,6 +195,17 @@ fn test_property_a_keyless_deployment_follows_its_rules() {
                 );
                 count("the call runs out of gas".to_string());
             }
+            ExecutionResult::Revert { output, .. }
+                if outcome.limit_exceeded.is_some_and(|stop| stop.is_frame_local()) =>
+            {
+                prop_eq!(error_name(output), "MegaLimitExceeded", "its budget's stop\n{rendered}");
+                prop_eq!(
+                    rules.refused,
+                    None,
+                    "the call's own budget stops only a call no rule refuses\n{rendered}"
+                );
+                count("the call's own frame budget stops it".to_string());
+            }
             ExecutionResult::Revert { .. } if outcome.limit_exceeded.is_some() => {
                 count("a limit stops the transaction".to_string());
             }
@@ -221,7 +233,6 @@ fn test_property_a_keyless_deployment_follows_its_rules() {
                     ),
                     None => prop_check!(
                         error == "GasLimitTooLow" ||
-                            error == "MegaLimitExceeded" ||
                             (error == "ContractAlreadyExists" && rules.exists) ||
                             (error == "InsufficientBalance" && rules.underfunded),
                         "the call is refused {error}, which no rule gives it\n{rendered}"
@@ -312,7 +323,7 @@ fn test_property_a_keyless_deployment_follows_its_rules() {
         "refused SignerHasCode",
         "refused ContractAlreadyExists",
         "refused InsufficientBalance",
-        "refused MegaLimitExceeded",
+        "the call's own frame budget stops it",
         "deployed",
         "the creation fails: ExecutionReverted",
         "the creation fails: ExecutionHalted",

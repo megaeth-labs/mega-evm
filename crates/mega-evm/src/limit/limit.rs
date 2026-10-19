@@ -60,6 +60,13 @@ pub struct AdditionalLimit {
     /// The stop the frame a child returned into must return instead of running on, when what the
     /// child left it put it over a limit. See [`on_frame_return`](Self::on_frame_return).
     resume_stop: Option<LimitCheck>,
+    /// The crossing the result of the frame returning next was made of, noted where the stop
+    /// became that result ([`note_frame_stop`](Self::note_frame_stop)) and taken when the frame
+    /// returns.
+    frame_stop: Option<LimitCheck>,
+    /// The crossing that produced the result of the transaction's own frame, if one did. See
+    /// [`limit_exceeded`](Self::limit_exceeded).
+    limit_exceeded: Option<LimitCheck>,
     /// Whether the transaction's call target is an applied EIP-7702 authority, whose account
     /// write the transaction's lane already counts.
     target_is_authority: bool,
@@ -124,6 +131,8 @@ impl AdditionalLimit {
         self.standing = LimitCheck::WithinLimit;
         self.exempt = false;
         self.resume_stop = None;
+        self.frame_stop = None;
+        self.limit_exceeded = None;
         self.target_is_authority = false;
         self.sender = Address::ZERO;
         self.frame_began = false;
@@ -161,6 +170,33 @@ impl AdditionalLimit {
             latched @ LimitCheck::ExceedsLimit { .. } => Some(latched),
             LimitCheck::WithinLimit => None,
         }
+    }
+
+    /// The crossing that produced the result of the transaction's own frame, if one did: what
+    /// [`MegaTransactionOutcome::limit_exceeded`](crate::MegaTransactionOutcome) reports.
+    ///
+    /// It is a transaction-level limit the transaction latched, whose stop every frame returns, or
+    /// the frame's own data-size budget. A crossing below the transaction's own frame that its
+    /// caller survives produced no result of the transaction's own frame, and neither did a stop an
+    /// inspector rewrote into another result: the frame's result must still be the stop's revert.
+    ///
+    /// It is the running transaction's, or the last one's until the next transaction or system
+    /// call starts: each resets it first.
+    pub const fn limit_exceeded(&self) -> Option<&LimitCheck> {
+        self.limit_exceeded.as_ref()
+    }
+
+    /// Notes `stop` as the crossing the result of the frame returning next is made of, and gives
+    /// the [`MegaLimitExceeded`](crate::MegaLimitExceeded) revert data that frame stops with.
+    ///
+    /// Every site that turns a crossing into a frame's result takes the revert data from here, and
+    /// the frame returns before any other does: so the stop is the returning frame's when
+    /// [`on_frame_return`](Self::on_frame_return) takes it, and the transaction's when that frame
+    /// is the transaction's own ([`limit_exceeded`](Self::limit_exceeded)).
+    pub(crate) fn note_frame_stop(&mut self, stop: &LimitCheck) -> Bytes {
+        debug_assert!(stop.exceeded_limit(), "only a crossing stops a frame");
+        self.frame_stop = Some(*stop);
+        stop.revert_data()
     }
 
     /// Whether the running transaction is exempt from every per-transaction limit.
@@ -624,7 +660,7 @@ impl AdditionalLimit {
         self.tracker.record_log_and_code_bytes(bytes);
         let check = self.check();
         if check.exceeded_limit() {
-            return Err(check.revert_data());
+            return Err(self.note_frame_stop(&check));
         }
         Ok(())
     }
@@ -846,11 +882,21 @@ impl AdditionalLimit {
     /// the transaction's own frame, which has no caller to hold. A debug build asserts that the
     /// check would have found nothing to stop.
     ///
+    /// The crossing the result is made of — the latch, which wrote over whatever the frame
+    /// returned, or the stop noted for the frame ([`note_frame_stop`](Self::note_frame_stop)) — is
+    /// the transaction's [`limit_exceeded`](Self::limit_exceeded) when the frame is the
+    /// transaction's own and its result is still the stop's revert.
+    ///
     /// Returns the history gas the caller paid for records this frame did not keep, which the
     /// caller gets back once the frame has merged into it.
     #[must_use = "the history of the records the frame did not keep goes back to its caller"]
     pub(crate) fn on_frame_return(&mut self, result: &mut FrameResult) -> u64 {
         self.apply_latch(result);
+        let noted = self.frame_stop.take();
+        if self.tracker.depth() == 1 {
+            self.limit_exceeded =
+                self.latched().copied().or(noted).filter(|stop| is_the_revert_of(result, stop));
+        }
         // A charge an opcode of this frame made for a child that never started died with that
         // opcode, which failed after making it.
         self.pending_frame_charge = FrameCharge::NONE;
@@ -930,6 +976,13 @@ const fn share_of_remaining(remaining: u64) -> u64 {
     const _: () = assert!(N < D && D.is_multiple_of(D - N));
     const K: u64 = D / (D - N);
     remaining - remaining.div_ceil(K)
+}
+
+/// Whether `result` is the revert `stop` makes a frame return: a revert whose output is the
+/// stop's [`MegaLimitExceeded`](crate::MegaLimitExceeded).
+fn is_the_revert_of(result: &FrameResult, stop: &LimitCheck) -> bool {
+    let result = result.interpreter_result();
+    result.result == InstructionResult::Revert && result.output == stop.revert_data()
 }
 
 /// Whether starting `input` moves value from one account to another, which is what revm journals
@@ -1342,6 +1395,21 @@ mod tests {
         let _ = limit.on_frame_return(&mut result);
         assert_eq!(result.instruction_result(), InstructionResult::Stop, "nothing is rewritten");
         assert_eq!(limit.stop_before_run(), None, "and the caller runs on");
+    }
+
+    /// Validation admits no body whose authority records cross the data-size limit, so a debug
+    /// build trips on records that do: under a limit lowered to the body and one record, two
+    /// applied authorities cross it.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "validation admits no body whose authority records cross")]
+    fn test_authority_records_that_cross_the_limit_trip() {
+        let mut limit = AdditionalLimit::new(
+            EvmTxRuntimeLimits::no_limits()
+                .with_tx_data_size_limit(crate::TX_BODY_SIZE + WRITE_RECORD_SIZE),
+        );
+        limit.record_tx_body(crate::TX_BODY_SIZE);
+        limit.record_applied_authorities(SENDER, 2, false);
     }
 
     /// Applied authorities are recorded for an exempt transaction, whatever they cross.

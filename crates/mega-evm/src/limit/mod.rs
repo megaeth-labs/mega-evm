@@ -459,9 +459,10 @@ impl LimitCheck {
     }
 }
 
-/// A transaction-level limit that stopped a transaction: the dimension, the limit and the usage
-/// that crossed it. It is what an RPC maps a limit stop to, in place of the halt reasons the
-/// legacy engine reported one with.
+/// A limit that stopped a transaction: the dimension, the limit and the usage that crossed it, of
+/// the crossing that produced the result of the transaction's own frame — a transaction-level
+/// limit, or that frame's own data-size budget. It is what an RPC maps a limit stop to, in place of
+/// the halt reasons the legacy engine reported one with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LimitStop {
     /// The dimension crossed.
@@ -476,21 +477,19 @@ impl LimitStop {
     /// The stop a transaction ended with, read off its `result` and the `limit_exceeded` it
     /// reports: [`MegaTransactionOutcome::limit_exceeded`](crate::MegaTransactionOutcome), or,
     /// for a transaction run through another entry point,
-    /// [`AdditionalLimit::latched`] on the EVM's context, read after the transaction ran and
-    /// before the next transaction or system call starts on the EVM, which resets it.
+    /// [`AdditionalLimit::limit_exceeded`] on the EVM's context, read after the transaction ran
+    /// and before the next transaction or system call starts on the EVM, which resets it.
     ///
-    /// `Some` when both say so: `limit_exceeded` names a transaction-level limit, and `result` is
-    /// a revert whose output is that limit's [`MegaLimitExceeded`]. The output alone never makes a
-    /// stop. A contract can revert with the same bytes, and a frame a frame budget stopped
-    /// reverts with them while its caller runs on and may re-raise them: `limit_exceeded` is then
-    /// `None`, and so is this.
+    /// `Some` when both say so: `limit_exceeded` names a crossing, and `result` is a revert whose
+    /// output is that limit's [`MegaLimitExceeded`]. The output alone never makes a stop. A
+    /// contract can revert with the same bytes, and a frame a frame budget stopped below the
+    /// transaction's own reverts with them while its caller runs on and may re-raise them:
+    /// `limit_exceeded` is then `None`, and so is this.
     pub fn from_result<HaltReason>(
         result: &ExecutionResult<HaltReason>,
         limit_exceeded: Option<&LimitCheck>,
     ) -> Option<Self> {
-        let Some(&LimitCheck::ExceedsLimit { kind, limit, used, frame_local: false }) =
-            limit_exceeded
-        else {
+        let Some(&LimitCheck::ExceedsLimit { kind, limit, used, .. }) = limit_exceeded else {
             return None;
         };
         let ExecutionResult::Revert { output, .. } = result else { return None };
@@ -669,7 +668,8 @@ mod tests {
     }
 
     /// A stop is read off the result and `limit_exceeded` together: the revert carrying the
-    /// limit's data and a transaction-level check naming it. Either alone is no stop.
+    /// limit's data and a check naming it, a frame budget's as well as a transaction-level
+    /// limit's. Either alone is no stop.
     #[test]
     fn test_limit_stop_needs_the_revert_and_the_check_to_agree() {
         use crate::MegaHaltReason;
@@ -702,8 +702,8 @@ mod tests {
         };
         assert_eq!(
             LimitStop::from_result(&revert(check.revert_data()), Some(&frame_local)),
-            None,
-            "a frame budget stops no transaction"
+            Some(stop),
+            "the transaction's own frame stopped by its budget"
         );
         let other_limit = LimitCheck::ExceedsLimit {
             kind: LimitKind::DataSize,

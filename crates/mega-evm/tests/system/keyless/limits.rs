@@ -209,7 +209,8 @@ fn test_the_creations_start_crossing_the_limit_stops_the_transaction() {
 
 /// A failed creation leaves its creator's nonce record on the call's lane, which no check held it
 /// to: a call whose budget cannot hold that record reverts alone with its own stop, and takes the
-/// nonce back with it. The transaction is not latched.
+/// nonce back with it. The transaction is not latched; the outcome names the call's budget, whose
+/// crossing produced the result of the transaction's own frame.
 #[test]
 fn test_the_signers_record_can_put_the_call_over_its_budget() {
     let deployment = Deployment::new(deploying(&runtime(1)));
@@ -220,7 +221,16 @@ fn test_the_signers_record_can_put_the_call_over_its_budget() {
             EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(39),
         );
         assert_eq!(stop(&outcome), MegaLimitExceeded { kind: 0, limit: 39 });
-        assert_eq!(outcome.limit_exceeded, None, "a budget, not the transaction's limit");
+        assert_eq!(
+            outcome.limit_exceeded,
+            Some(LimitCheck::ExceedsLimit {
+                kind: LimitKind::DataSize,
+                limit: 39,
+                used: WRITE_RECORD_SIZE,
+                frame_local: true,
+            }),
+            "a budget, not the transaction's limit"
+        );
         assert_stopped_whole(&outcome, &deployment, gas_limit);
     }
 }

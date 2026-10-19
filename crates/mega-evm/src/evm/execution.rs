@@ -13,7 +13,7 @@ use op_revm::{
     transaction::deposit::DEPOSIT_TRANSACTION_TYPE,
     OpHaltReason, OpTransactionError,
 };
-use std::{boxed::Box, vec::Vec};
+use std::vec::Vec;
 
 use alloy_evm::{precompiles::PrecompilesMap, Database};
 use revm::{
@@ -39,9 +39,8 @@ use revm::{
         InspectorEvmTr, InspectorHandler, JournalExt,
     },
     interpreter::{
-        interpreter::EthInterpreter, interpreter_action::FrameInit, CallInput, CallInputs,
-        CallScheme, CallValue, CreateInputs, CreateScheme, FrameInput, InitialAndFloorGas,
-        InstructionResult, InterpreterAction, InterpreterResult, SharedMemory,
+        interpreter::EthInterpreter, interpreter_action::FrameInit, CallScheme, FrameInput,
+        InitialAndFloorGas, InstructionResult, InterpreterAction, InterpreterResult,
     },
     primitives::{Address, Bytes, TxKind, CALL_STACK_LIMIT, U256},
     Inspector, Journal,
@@ -153,10 +152,7 @@ where
     ///
     /// Validation refused every transaction whose body, with a record for each entry of its
     /// authorization list, crosses the data-size limit, so neither the body nor the authorities'
-    /// records cross it here. A transaction already latched when it reaches this phase has nothing
-    /// applied or charged after the caller's account, and its first frame is answered with the
-    /// stop; the caller's account is charged all the same, because it exists whatever the
-    /// transaction does.
+    /// records cross it here, and no limit stops the transaction before its first frame.
     fn pre_execution(
         &self,
         evm: &mut Self::Evm,
@@ -172,9 +168,6 @@ where
         if self.deposit_creates_caller.get() && !charge_created_caller(evm.ctx_mut(), gas) {
             runtime_oog_unwind(evm.ctx(), checkpoint)?;
             return Ok(None);
-        }
-        if evm.ctx_ref().additional_limit.latched().is_some() {
-            return Ok(Some(PreExecutionOutput { eip7702_refund: 0, checkpoint }));
         }
         let Some(eip7702_refund) = self.apply_eip7702_auth_list(evm, gas)? else {
             runtime_oog_unwind(evm.ctx(), checkpoint)?;
@@ -275,23 +268,14 @@ where
         Ok(gas)
     }
 
-    /// revm's first frame, unless the transaction is already latched: then a frame input built on
-    /// what the transaction has left, with nothing charged for the frame's start.
-    ///
-    /// A latched transaction's first frame is answered with the stop before revm builds it, so it
-    /// makes none of the writes revm's EIP-2780 runtime charges price for its start — a value
-    /// recipient's new account, a created account — and reaches no delegation target. Charging
-    /// them would only matter to a gas limit that cannot pay them, which would then report an
-    /// out-of-gas in place of the stop that bound first. The input carries no charged flag, so
-    /// the stop's settlement gives nothing back that was not charged.
+    /// revm's first frame, with a read of the block beneficiary's account marked for gas detention
+    /// when the transaction's recipient delegates to the beneficiary: revm resolves that delegate
+    /// through the journal, where the Host does not see it.
     fn first_frame_input(
         &mut self,
         evm: &mut Self::Evm,
         gas: &mut GasTracker,
     ) -> Result<Option<FrameInit>, Self::Error> {
-        if evm.ctx_ref().additional_limit.latched().is_some() {
-            return Ok(Some(unbuilt_first_frame(evm.ctx_ref(), gas)));
-        }
         let Some(frame) = self.op.first_frame_input(evm, gas)? else {
             // The runtime gas phase could not pay for the first frame's start: EIP-2780's charge
             // for the account the frame adds, a call's recipient or a creation's account, or the
@@ -461,35 +445,36 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
 
     /// Starts a frame, in this order:
     ///
-    /// 1. the latch: a latched transaction's frame is answered with the stop;
-    /// 2. the depth guard: a frame past the call-stack limit is answered with `CallTooDeep`, as
+    /// 1. the depth guard: a frame past the call-stack limit is answered with `CallTooDeep`, as
     ///    revm answers it, before anything could intercept it or count its start;
-    /// 3. the keyless dispatch ([`keyless::is_dispatched`]): a `keylessDeploy` call a transaction
+    /// 2. the keyless dispatch ([`keyless::is_dispatched`]): a `keylessDeploy` call a transaction
     ///    makes is answered when it carries value, and otherwise readied for revm to build as the
     ///    frame whose actions [`keyless::run`] makes ([`keyless::ready`]);
-    /// 4. system contract interception ([`MegaEvm::intercept`]), for any other frame, which answers
+    /// 3. system contract interception ([`MegaEvm::intercept`]), for any other frame, which answers
     ///    the frame or lets it start; the caller of a frame that starts is recorded for gas
     ///    detention while no read has set a compute limit ([`record_caller`]);
-    /// 5. the frame's lane is pushed and the writes its start makes are counted; a limit they cross
+    /// 4. the frame's lane is pushed and the writes its start makes are counted; a limit they cross
     ///    answers the frame with the stop before it runs. A start revm refuses on its caller's
     ///    account ([`caller_refuses_start`]) makes no write and journals no transfer log, so it
     ///    gets an empty lane and nothing is counted;
-    /// 6. revm builds the frame, or answers it. A success answer of the transaction's own frame
+    /// 5. revm builds the frame, or answers it. A success answer of the transaction's own frame
     ///    rewritten into the stop has its journal taken back to where its start began, since no
     ///    caller's revert will take back what the answer wrote ([`take_back_a_stopped_answer`]).
     ///
-    /// A frame answered at step 3, 4 or 6 — a `keylessDeploy` call carrying value, an
+    /// A frame answered at step 2, 3 or 5 — a `keylessDeploy` call carrying value, an
     /// interceptor's answer, a precompile's, revm's for a call it did not start — is held to the
     /// compute limit, as a frame that ran would be ([`settle_answer`]). A precompile,
-    /// which revm runs at step 6, is decided from its price before it runs when the engine can
+    /// which revm runs at step 5, is decided from its price before it runs when the engine can
     /// price it, and answered without running when that price crosses the compute limit; one it
     /// cannot price is run on the gas the limit leaves the frame rather than on all its caller
     /// forwarded ([`hold_precompile`]).
     ///
-    /// Steps 1 and 2 are the pre-frame check: they answer a frame nothing may start. The frame's
-    /// own writes are counted after the interceptor, because an intercepted frame's writes are the
-    /// interceptor's to count. A `keylessDeploy` call's frame is built as any call's, and its
-    /// creation is started by its first run, through this same frame start, as its child.
+    /// Step 1 is the pre-frame check: it answers a frame nothing may start. No limit has a part in
+    /// it: validation admits no transaction a limit would stop before its first frame, and once a
+    /// limit stops a transaction no caller resumes to start another. The frame's own writes are
+    /// counted after the interceptor, because an intercepted frame's writes are the interceptor's
+    /// to count. A `keylessDeploy` call's frame is built as any call's, and its creation is started
+    /// by its first run, through this same frame start, as its child.
     ///
     /// A frame answered before revm builds it gets an empty lane, so the lanes stay aligned with
     /// the results [`frame_return_result`](EvmTr::frame_return_result) pops. A creation answered
@@ -499,7 +484,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         &mut self,
         mut frame_init: FrameInit,
     ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
-        if let Some(result) = self.answered_before_building(&frame_init)? {
+        if let Some(result) = self.answered_before_building(&frame_init) {
             return Ok(ItemOrResult::Result(result));
         }
         let keyless = keyless::is_dispatched(&self.inner.ctx, &frame_init);
@@ -694,9 +679,9 @@ where
     /// itself never reaches [`EvmTr::frame_init`], so an empty lane stands in for it, and its
     /// answer settles as a frame that never started ([`answered_without_running`]).
     ///
-    /// A frame nothing may start — a latched transaction's, one past the call-stack limit — is
-    /// answered by [`EvmTr::frame_init`], after the inspector's `frame_start`, as every frame
-    /// revm does not build is, and the inspector is told it ended.
+    /// A frame nothing may start, one past the call-stack limit, is answered by
+    /// [`EvmTr::frame_init`], after the inspector's `frame_start`, as every frame revm does not
+    /// build is, and the inspector is told it ended.
     ///
     /// A keyless deployment is seen as the frames it is made of: the transaction's `keylessDeploy`
     /// call, and the creation it starts, one journal depth below it, as its child. The call's
@@ -714,8 +699,8 @@ where
         // call it charged for.
         let upfront = UpfrontRecord::of(&frame_init.frame_input);
         if let Some(output) = frame_start(ctx, inspector, &mut frame_init.frame_input) {
-            return answered_by_inspector(ctx, inspector, &frame_init, output, upfront)
-                .map(ItemOrResult::Result);
+            let output = answered_by_inspector(ctx, inspector, &frame_init, output, upfront);
+            return Ok(ItemOrResult::Result(output));
         }
         let (frame_input, depth) = (frame_init.frame_input.clone(), frame_init.depth);
         // What the start journals begins here. A start answered with a success without a frame
@@ -810,7 +795,7 @@ fn before_frame_run<DB: Database, ExtEnvs: ExternalEnvTypes>(
     let stop = ctx.additional_limit.stop_before_run()?;
     Some(InterpreterAction::new_return(
         InstructionResult::Revert,
-        stop.revert_data(),
+        ctx.additional_limit.note_frame_stop(&stop),
         frame.interpreter.gas,
     ))
 }
@@ -1001,14 +986,7 @@ fn stop_at_the_compute_limit<DB: Database, ExtEnvs: ExternalEnvTypes>(
 ) {
     let stop = ctx.additional_limit.latch(LimitKind::ComputeGas, stop.limit, stop.used);
     result.result = InstructionResult::Revert;
-    result.output = stop.revert_data();
-}
-
-/// The result of a frame a limit stopped before it ran: a revert with the stop's
-/// [`MegaLimitExceeded`](crate::MegaLimitExceeded) output, as a
-/// [`synthetic_frame_result`] that settles like a frame revm ran.
-fn stopped_frame_result(frame_init: &FrameInit, check: &LimitCheck) -> FrameResult {
-    synthetic_frame_result(&frame_init.frame_input, InstructionResult::Revert, check.revert_data())
+    result.output = ctx.additional_limit.note_frame_stop(&stop);
 }
 
 impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
@@ -1037,20 +1015,16 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
         crate::system::intercept(&mut self.inner.ctx, inputs, frame_init.depth, caller_remaining)
     }
 
-    /// Steps 1 and 2 of [`EvmTr::frame_init`], the pre-frame check: answers a frame nothing may
-    /// start ([`answer_before_building`]), with the empty lane that stands in for it. It comes
-    /// before the keyless dispatch, so the dispatch never sees a latched transaction; on the
-    /// inspected path it comes after the inspector's `frame_start`.
+    /// Step 1 of [`EvmTr::frame_init`], the pre-frame check: answers a frame nothing may start, one
+    /// past the call-stack limit ([`call_too_deep`]), with the empty lane that stands in for it. On
+    /// the inspected path it comes after the inspector's `frame_start`.
     #[inline]
-    fn answered_before_building(
-        &mut self,
-        frame_init: &FrameInit,
-    ) -> Result<Option<FrameResult>, ContextDbError<MegaContext<DB, ExtEnvs>>> {
-        let answer = answer_before_building(&mut self.inner.ctx, frame_init)?;
+    fn answered_before_building(&mut self, frame_init: &FrameInit) -> Option<FrameResult> {
+        let answer = call_too_deep(frame_init);
         if answer.is_some() {
             self.inner.ctx.additional_limit.push_empty_frame();
         }
-        Ok(answer)
+        answer
     }
 }
 
@@ -1075,22 +1049,19 @@ fn take_back_a_stopped_answer<DB: Database, ExtEnvs: ExternalEnvTypes>(
 }
 
 /// Settles `output`, the answer the inspector gave the frame `frame_init` starts in its place.
-/// The latch and the depth guard still hold: an answer cannot start a frame of a stopped
-/// transaction, nor reach past the call-stack limit.
+/// The depth guard still holds: an answer cannot reach past the call-stack limit.
 fn answered_by_inspector<DB: Database, ExtEnvs: ExternalEnvTypes, INSP>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     inspector: &mut INSP,
     frame_init: &FrameInit,
-    mut output: FrameResult,
+    output: FrameResult,
     upfront: Option<UpfrontRecord>,
-) -> Result<FrameResult, ContextDbError<MegaContext<DB, ExtEnvs>>>
+) -> FrameResult
 where
     INSP: Inspector<MegaContext<DB, ExtEnvs>, EthInterpreter>,
 {
-    if let Some(answer) = answer_before_building(ctx, frame_init)? {
-        output = answer;
-    }
-    Ok(answered_without_running(ctx, inspector, frame_init, output, upfront))
+    let output = call_too_deep(frame_init).unwrap_or(output);
+    answered_without_running(ctx, inspector, frame_init, output, upfront)
 }
 
 /// Settles `output`, the answer an inspector gave the frame `frame_init` starts in its place, as
@@ -1117,23 +1088,13 @@ where
     output
 }
 
-/// The answer a frame gets before anything builds or answers it otherwise, in this order: the
-/// latched stop of a stopped transaction, then the depth guard's `CallTooDeep`.
-fn answer_before_building<DB: Database, ExtEnvs: ExternalEnvTypes>(
-    ctx: &mut MegaContext<DB, ExtEnvs>,
-    frame_init: &FrameInit,
-) -> Result<Option<FrameResult>, ContextDbError<MegaContext<DB, ExtEnvs>>> {
-    if let Some(latched) = ctx.additional_limit.latched().copied() {
-        return stop_before_building(ctx, frame_init, &latched).map(Some);
-    }
-    Ok(call_too_deep(frame_init))
-}
-
-/// Answers a frame a limit stops before it is built with the stop.
+/// Answers a frame a limit stops before it is built with the stop: a revert with the stop's
+/// [`MegaLimitExceeded`](crate::MegaLimitExceeded) output, as a [`synthetic_frame_result`] that
+/// settles like a frame revm ran.
 ///
 /// A creation still bumps its creator's nonce, as one that starts and reverts does: a nested
-/// creation's caller sees an ordinary failed creation, and a creation transaction stopped before
-/// its first frame cannot be replayed.
+/// creation's caller sees an ordinary failed creation, and a creation transaction whose own frame
+/// is stopped at its start cannot be replayed.
 fn stop_before_building<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     frame_init: &FrameInit,
@@ -1142,7 +1103,8 @@ fn stop_before_building<DB: Database, ExtEnvs: ExternalEnvTypes>(
     if let FrameInput::Create(inputs) = &frame_init.frame_input {
         let _ = ctx.journal_mut().load_account_mut(inputs.caller())?.data.bump_nonce();
     }
-    Ok(stopped_frame_result(frame_init, check))
+    let output = ctx.additional_limit.note_frame_stop(check);
+    Ok(synthetic_frame_result(&frame_init.frame_input, InstructionResult::Revert, output))
 }
 
 /// The depth guard: a frame past the call-stack limit, of any call scheme or a creation, answered
@@ -1236,42 +1198,6 @@ fn inspect_logs<DB: Database, ExtEnvs: ExternalEnvTypes, INSP>(
     for log in logs {
         inspector.log(ctx, log);
     }
-}
-
-/// The first frame of a latched transaction: the transaction's call or creation on the gas it
-/// has left, for the frame the latch answers with the stop.
-///
-/// Nothing is loaded and nothing is charged. The frame is never built, so its code is never read.
-fn unbuilt_first_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
-    ctx: &MegaContext<DB, ExtEnvs>,
-    gas: &GasTracker,
-) -> FrameInit {
-    let tx = ctx.tx();
-    let frame_input = match tx.kind() {
-        TxKind::Call(target_address) => FrameInput::Call(Box::new(CallInputs {
-            input: CallInput::Bytes(tx.input().clone()),
-            return_memory_offset: 0..0,
-            gas_limit: gas.remaining(),
-            reservoir: gas.reservoir(),
-            bytecode_address: target_address,
-            known_bytecode: Default::default(),
-            target_address,
-            caller: tx.caller(),
-            value: CallValue::Transfer(tx.value()),
-            scheme: CallScheme::Call,
-            is_static: false,
-            charged_new_account_state_gas: false,
-        })),
-        TxKind::Create => FrameInput::Create(Box::new(CreateInputs::new(
-            tx.caller(),
-            CreateScheme::Create,
-            tx.value(),
-            tx.input().clone(),
-            gas.remaining(),
-            gas.reservoir(),
-        ))),
-    };
-    FrameInit { depth: 0, memory: SharedMemory::new(), frame_input }
 }
 
 /// Whether executing this transaction creates its caller's account: a deposit-like transaction
@@ -1469,7 +1395,12 @@ mod tests {
     use super::*;
     use crate::{test_utils::MemoryDatabase, MegaSpecId};
     use alloy_primitives::{address, U256};
-    use revm::interpreter::gas::WithheldCrossing;
+    use revm::interpreter::{
+        gas::WithheldCrossing, CallInput, CallInputs, CallValue, SharedMemory,
+    };
+    #[cfg(debug_assertions)]
+    use revm::interpreter::{CreateInputs, CreateScheme};
+    use std::boxed::Box;
 
     const CALLER: Address = address!("00000000000000000000000000000000000e0001");
     const TARGET: Address = address!("00000000000000000000000000000000000e0002");

@@ -370,8 +370,10 @@ fn forwarded_hint_bytes<I>(evm: &mega_evm::MegaEvm<MemoryDatabase, I, Envs>) -> 
         .sum()
 }
 
-/// A stopped transaction keeps only what the spec says survives: the stop is a revert carrying
-/// `MegaLimitExceeded`, with no log; no storage write stands; no account changes but the sender's
+/// A stopped transaction keeps only what the spec says survives: the stop is the one the
+/// transaction latched, or, when it latched none, its own frame's budget, which latches nothing
+/// and reverts that frame as the latch does; it is a revert carrying `MegaLimitExceeded`, with no
+/// log; no storage write stands; no account changes but the sender's
 /// nonce and fee, the fee recipients' credit, an applied EIP-7702 authority's nonce and
 /// delegation, and a deposit's mint; the records kept are the applied authorities', and the data
 /// size is the body, those records and the payloads of the Oracle hints it forwarded, which have
@@ -393,27 +395,33 @@ fn test_property_a_stop_keeps_only_what_survives() {
             let (execution, evm) = case.execute_with_evm();
             let Ok(outcome) = execution else { return Ok(()) };
             let Some(stop) = outcome.limit_exceeded else { return Ok(()) };
-            check_survivors(case, &tx, &outcome, stop, forwarded_hint_bytes(&evm))
+            let latched = evm.ctx().additional_limit().latched().copied();
+            check_survivors(case, &tx, &outcome, stop, latched, forwarded_hint_bytes(&evm))
         },
     );
 }
 
 /// What [`test_property_a_stop_keeps_only_what_survives`] checks of a stopped transaction;
-/// `hint_bytes` is what the Oracle hints it forwarded weigh.
+/// `latched` is the stop its EVM latched, if any, and `hint_bytes` is what the Oracle hints it
+/// forwarded weigh.
 pub(crate) fn check_survivors(
     case: &Case,
     tx: &MegaTransaction,
     outcome: &MegaTransactionOutcome,
     stop: LimitCheck,
+    latched: Option<LimitCheck>,
     hint_bytes: u64,
 ) -> Result<(), proptest::test_runner::TestCaseError> {
     let rendered = render_outcome(outcome);
     let LimitCheck::ExceedsLimit { frame_local, .. } = stop else {
         return Err(crate::harness::fail(format!(
-            "a latched check that is within the limit\n{rendered}"
+            "a reported stop that is within the limit\n{rendered}"
         )));
     };
-    prop_check!(!frame_local, "a frame budget latched the transaction\n{rendered}");
+    match latched {
+        Some(_) => prop_check!(!frame_local, "a frame budget latched the transaction\n{rendered}"),
+        None => prop_check!(frame_local, "a transaction-level stop latched nothing\n{rendered}"),
+    }
     match &outcome.result {
         ExecutionResult::Revert { output, .. } => {
             prop_eq!(*output, stop.revert_data(), "the stop's revert data\n{rendered}");
