@@ -50,8 +50,9 @@
 //! `SELFDESTRUCT`). Burned gas is counted as compute, so the stop comes earlier, never later.
 //! A value call's stipend is not compute either: compute is regular gas drawn from the
 //! transaction's own pools, and the stipend is gas nobody paid. A callee may run up to 2,300 gas
-//! on each value call's stipend, and each value call costs its caller at least 9,100 of compute,
-//! so the gas run after a read is at most about 25% more than the cap.
+//! on each value call's stipend, and a warm value call to an empty account counts 6,800 of compute
+//! (9,100, less the 2,300 stipend the callee leaves unspent and returns to its caller), so the
+//! gas run after a read is at most about 34% (2,300 / 6,800) more than the cap.
 //!
 //! A read sets a limit: the transaction's compute at the read plus the read's cap. The limit only
 //! goes down, so the most restrictive of several reads is the one that binds, whatever their

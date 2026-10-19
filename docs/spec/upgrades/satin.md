@@ -75,6 +75,7 @@ The changes, in the order this page records them:
   - A block in which Satin activates, or in which an Optimism fork at or after Jovian in the Optimism fork order activates, MUST contain only deposit transactions; a non-deposit transaction in it makes the block invalid.
     A fork activates in a block when it is active at the block's timestamp and not at the parent block's, as the chain configuration schedules it; a fork the configuration does not schedule never activates.
     The rule covers Jovian, Karst and every later Optimism fork the chain configuration schedules.
+    A Mega System Transaction is a legacy transaction, so it is refused in such a block too, and the Satin activation block owes none: nothing writes the [Oracle](#16-oracle-storage-reads-and-hints) in it, because the only transactions the block admits are deposits, and a deposit from the system address is a failed deposit that runs no call (see [The Live System Address](#17-the-live-system-address)).
   - Each non-deposit transaction's data-availability footprint — its compressed size times the footprint gas scalar held by the L1 block contract — MUST accumulate against the block's gas limit, and the block MUST report the sum as its blob gas used.
     A transaction whose footprint does not fit in what the block has left MUST NOT be included.
     With no scalar in state the scalar is zero, and the rule costs nothing.
@@ -409,7 +410,8 @@ One dimension is limited per transaction, data size; compute is not one (see [Tw
   One record per account or storage write the transaction keeps: a slot's first change in the transaction (taken back when the slot is written back to its original value); a value transfer's sender and recipient; a creation's creator nonce and created account; a `SELFDESTRUCT` that moves a balance to another account (its beneficiary); an applied EIP-7702 authority; the transaction's value recipient or created account.
   The sender's account is one of the body's five fixed records and MUST NOT be counted as a record again, whatever writes it: a frame running as the sender, a value transfer or a `SELFDESTRUCT` that moves value to the sender, an applied EIP-7702 authority that is the sender, and a keyless deployment whose signer is the sender record nothing for it.
   The four fee accounts are in the body only for the fee credits the transaction's settlement makes: a write execution makes to a fee account that is not the sender — for example a value transfer to it, a `SELFDESTRUCT` that moves a balance to it, or an applied EIP-7702 authority that is one of them — MUST be recorded like a write to any other account.
-  Records MUST be deduplicated per frame: a frame records an account once.
+  Records MUST be deduplicated per frame, not per transaction: a frame records an account once, and each value-transferring call records its target on the lane of the frame it starts, which merges into the caller's when the call succeeds.
+  N value transfers from one frame to the same recipient keep N records and pay N records' history gas, so a transaction's record count is an upper bound on the accounts it wrote, like the body's fixed fee-account records.
   A successful frame's records and bytes MUST merge into its caller's; a failed frame's MUST be discarded, except that a creator's nonce record survives its creation's failure once the nonce was bumped, and lands on the creator.
   The KV count is the write-record count; every record weighs `WRITE_RECORD_SIZE` bytes of data size, counted and taken back with it, so `KV × 40 ≤ data size` at every point.
   No limit holds the KV count: the data-size limit bounds it — a transaction keeps fewer than 327,680 write records (13,107,200 / 40) — and history gas prices every record (see [History Gas](#7-history-gas)).
@@ -430,6 +432,8 @@ One dimension is limited per transaction, data size; compute is not one (see [Tw
   They are not chain configuration: no chain configuration carries them, and a node MUST hold every Satin transaction and block to them, never to values a configuration names or a node is handed with a block.
   A later spec that changes one states its own value.
   A transaction executed outside a block — a call, a gas estimate, a simulation — MUST be held to the same per-transaction limits and detention caps block execution holds it to.
+  That rule binds block execution and validation, the executions whose result the chain agrees on.
+  An RPC node may run a simulation such as `eth_call` under other limits as its own policy; the result of such a call is no part of the chain, and the node SHOULD keep `eth_call` and `eth_estimateGas` consistent with each other.
 
 ### 11. The Revert-Class Stop
 
@@ -989,6 +993,9 @@ A node, a stateless validator and a replay tool must agree on everything below, 
   A node build must not enable the `mega-evm/satin-price-override` feature (it reads `MEGA_SATIN_CPSB` / `MEGA_SATIN_CPHB` at run time).
   A node that reads the configuration before it executes anything — gas estimation reads the execution cap — must read these values, not its own.
   The limits are fixed by the spec too (see [Resource Limits](#10-resource-limits) and [Block Limits](#20-block-limits)): a node passes none of them, neither in its chain configuration nor with a block, and the reference implementation holds a block's transactions, and an execution outside a block — a call, a gas estimate — to the same values without being told, so a node's calls and estimates stop what its blocks stop.
+- **Precompiles.**
+  A node adds or replaces a precompile only through `MegaEvm::with_dyn_precompiles` or the factory's precompile builder.
+  The engine prices a call to a Satin precompile from its own table, by the precompile's identifier, so a set put in place around those two routes, through the mutable access to the precompile map that revm and alloy-evm expose, keeps the Satin prices for every entry that carries a Satin identifier: gas detention then decides a call from a price the replacing precompile does not charge.
 - **What a transaction pool can check without state.**
   The body, with `WRITE_RECORD_SIZE` bytes for each entry of the authorization list, must fit the transaction's data-size limit, and the chain id must be the chain's, a typed transaction's included; neither depends on the node's configuration.
   The gas limit must cover the intrinsic regular gas (EIP-2780's base and recipient and value charges, calldata, access list, authorizations, init code) plus the history gas of the transaction's body, and the calldata floor; above the execution cap, the intrinsic regular gas and the floor must fit under the cap.
@@ -1005,6 +1012,7 @@ A node, a stateless validator and a replay tool must agree on everything below, 
   A node must refuse, when it loads a chain configuration, a genesis allocation that gives storage to an account with empty code and nonce 0 at a system-contract address or the factory's, since the deploy would neither write nor clear that storage (see [System Calls and Pre-Block Calls](#18-system-calls-and-pre-block-calls)).
 - **Activation blocks.**
   Block execution does not work out whether a block admits only deposits: it is told, and refuses a non-deposit transaction only when told so.
+  The chain's rule is therefore enforced by the nodes that derive and build the chain, not by the executor alone: MegaETH's op-node MUST enforce deposit-only activation blocks for Satin and for every later MegaETH fork, and a block builder MUST compute the flag from the MegaETH schedule, since a node that knows only the Optimism schedule cannot tell that Satin activates.
   A node works it out from its configuration and the parent block's timestamp — whether a MegaETH fork, Satin itself, or an Optimism fork at or after Jovian in the Optimism fork order, is active at the block's timestamp and not at the parent's (see [Base Layer](#1-base-layer-optimism-karst-ethereum-osaka)) — for every block it builds and every block it validates, and a stateless validator is given it beside the witness.
   An execution that is not told runs the block as one that admits non-deposit transactions, and accepts one in an activation block, which makes the block invalid.
 - **The L1 block information.**
