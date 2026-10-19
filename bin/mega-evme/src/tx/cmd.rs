@@ -63,7 +63,7 @@ impl Cmd {
 
         // Step 1: Create transaction
         info!("Creating transaction");
-        let tx = if let Some(ref raw) = self.raw {
+        let (tx, tx_hash) = if let Some(ref raw) = self.raw {
             let raw_bytes = load_hex(Some(raw.clone()), None)?.unwrap_or_default();
             let decoded = DecodedRawTx::from_raw(raw_bytes)?.override_tx_env(&self.tx_args)?;
             if decoded.tx_env.chain_id != Some(chain_id) {
@@ -73,9 +73,12 @@ impl Cmd {
                     "Raw transaction chain_id does not match the configured chain_id"
                 );
             }
-            decoded.into_tx()
+            let tx_hash = decoded.tx_hash();
+            (decoded.into_tx(), tx_hash)
         } else {
-            self.tx_args.create_tx(chain_id)?
+            let tx = self.tx_args.create_tx(chain_id)?;
+            let tx_hash = self.tx_args.tx_hash(&tx);
+            (tx, tx_hash)
         };
 
         debug!(
@@ -135,7 +138,7 @@ impl Cmd {
 
         // Step 4: Output results (including state dump if requested)
         trace!("Writing output results");
-        self.output_results(&outcome, &tx)?;
+        self.output_results(&outcome, &tx, tx_hash)?;
 
         // Step 5: Persist the RPC cache (clean-exit only).
         cache_store.persist()?;
@@ -144,7 +147,12 @@ impl Cmd {
     }
 
     /// Output execution results
-    fn output_results(&self, outcome: &EvmeOutcome, tx: &MegaTransaction) -> Result<()> {
+    fn output_results(
+        &self,
+        outcome: &EvmeOutcome,
+        tx: &MegaTransaction,
+        tx_hash: Option<alloy_primitives::B256>,
+    ) -> Result<()> {
         let tx_type = MegaTxType::try_from(tx.base.tx_type)
             .map_err(|_| EvmeError::UnsupportedTxType(tx.base.tx_type))?;
         let sender = tx.base.caller;
@@ -171,7 +179,7 @@ impl Cmd {
             contract_address,
             effective_gas_price,
             outcome.exec_result.tx_gas_used(),
-            tx.enveloped_tx.as_ref().map(alloy_primitives::keccak256),
+            tx_hash,
             None,
             0,
             0,

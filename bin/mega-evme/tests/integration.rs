@@ -352,3 +352,111 @@ fn test_the_rpc_url_userinfo_reaches_no_output() {
         assert!(!text.contains("alice"), "{url}: {text}");
     }
 }
+
+const ZERO_HASH: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
+const SENDER: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
+const RECEIVER: &str = "0x0000000000000000000000000000000000000001";
+
+/// The `transactionHash` of the receipt a `tx` run prints.
+fn printed_hash(args: &[&str]) -> String {
+    let mut full = vec!["tx", "--spec", "Satin", "--json"];
+    full.extend_from_slice(args);
+    let json: serde_json::Value = serde_json::from_str(&run_ok(&full)).unwrap();
+    json["receipt"]["transactionHash"].as_str().unwrap().to_string()
+}
+
+/// The hash of the deposit `tx` runs for these flags: the keccak of its EIP-2718 encoding.
+fn deposit_hash(source_hash: &str, mint: u128) -> String {
+    use alloy_eips::Encodable2718;
+    use op_alloy_consensus::{OpTxEnvelope, TxDeposit};
+
+    let deposit = TxDeposit {
+        source_hash: source_hash.parse().unwrap(),
+        from: SENDER.parse().unwrap(),
+        to: alloy_primitives::TxKind::Call(RECEIVER.parse().unwrap()),
+        mint,
+        value: alloy_primitives::U256::from(1000),
+        gas_limit: 100_000,
+        is_system_transaction: false,
+        input: Default::default(),
+    };
+    let encoded =
+        OpTxEnvelope::Deposit(alloy_consensus::Sealable::seal_slow(deposit)).encoded_2718();
+    alloy_primitives::keccak256(encoded).to_string()
+}
+
+/// A deposit built from flags prints its own hash: the source hash and the mint are in it, so
+/// deposits that differ in either print different hashes, and the hash is the encoding's.
+#[test]
+fn test_a_deposit_built_from_flags_prints_the_hash_of_what_ran() {
+    let one = format!("0x{}", "11".repeat(32));
+    let two = format!("0x{}", "22".repeat(32));
+    let mut seen = std::collections::BTreeSet::new();
+    for (source_hash, mint) in [(&one, 0u128), (&one, 1000), (&two, 0), (&two, 1000)] {
+        let mint_flag = mint.to_string();
+        let hash = printed_hash(&[
+            "--tx-type",
+            "126",
+            "--sender",
+            SENDER,
+            "--receiver",
+            RECEIVER,
+            "--value",
+            "1000",
+            "--gas",
+            "100000",
+            "--source-hash",
+            source_hash,
+            "--mint",
+            &mint_flag,
+        ]);
+        assert_eq!(hash, deposit_hash(source_hash, mint));
+        seen.insert(hash);
+    }
+    assert_eq!(seen.len(), 4, "four different deposits, four hashes");
+}
+
+/// A signed transaction built from flags has no hash: the tool signs nothing, so it prints the
+/// zero hash and not the hash of an unsigned stand-in no transaction has.
+#[test]
+fn test_a_signed_transaction_built_from_flags_prints_no_hash() {
+    for tx_type in ["0", "1", "2"] {
+        let hash = printed_hash(&[
+            "--tx-type",
+            tx_type,
+            "--sender",
+            SENDER,
+            "--receiver",
+            RECEIVER,
+            "--value",
+            "1000",
+            "--sender.balance",
+            "1ether",
+        ]);
+        assert_eq!(hash, ZERO_HASH, "type {tx_type}");
+    }
+}
+
+/// A raw transaction prints its own hash while it runs as it was signed, and none once a flag
+/// changed what runs.
+#[test]
+fn test_a_raw_transaction_prints_its_hash_until_a_flag_changes_it() {
+    use alloy_eips::Encodable2718;
+    use op_alloy_consensus::{OpTxEnvelope, TxDeposit};
+
+    let deposit = TxDeposit {
+        source_hash: format!("0x{}", "33".repeat(32)).parse().unwrap(),
+        from: SENDER.parse().unwrap(),
+        to: alloy_primitives::TxKind::Call(RECEIVER.parse().unwrap()),
+        mint: 5,
+        value: alloy_primitives::U256::from(1000),
+        gas_limit: 100_000,
+        is_system_transaction: false,
+        input: Default::default(),
+    };
+    let raw = OpTxEnvelope::Deposit(alloy_consensus::Sealable::seal_slow(deposit)).encoded_2718();
+    let raw_hex = alloy_primitives::hex::encode_prefixed(&raw);
+
+    assert_eq!(printed_hash(&[&raw_hex]), alloy_primitives::keccak256(&raw).to_string());
+    assert_eq!(printed_hash(&[&raw_hex, "--value", "1"]), ZERO_HASH);
+}

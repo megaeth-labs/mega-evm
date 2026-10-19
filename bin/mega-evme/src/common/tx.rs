@@ -351,7 +351,8 @@ impl TxArgs {
     /// Loads input data from `--input` or `--inputfile` arguments.
     pub fn create_tx(&self, chain_id: u64) -> Result<MegaTransaction> {
         let tx_env = self.create_tx_env(chain_id)?;
-        let envelope = create_fake_envelope(&tx_env)?;
+        let envelope =
+            create_fake_envelope(&tx_env, self.source_hash.unwrap_or(B256::ZERO), self.mint)?;
         let mut tx = OpTx(OpTransaction::new(tx_env));
         tx.enveloped_tx = Some(Bytes::from(envelope.encoded_2718()));
 
@@ -368,6 +369,20 @@ impl TxArgs {
     }
 }
 
+impl TxArgs {
+    /// The hash of the transaction [`Self::create_tx`] builds, when it has one.
+    ///
+    /// A deposit is unsigned, so the hash of its encoding is its hash. Any other type would be
+    /// signed, and the tool signs nothing: the encoding it builds carries a placeholder signature
+    /// and hashes to no transaction, so there is none.
+    pub fn tx_hash(&self, tx: &MegaTransaction) -> Option<B256> {
+        if !matches!(MegaTxType::try_from(tx.base.tx_type), Ok(MegaTxType::Deposit)) {
+            return None;
+        }
+        tx.enveloped_tx.as_ref().map(alloy_primitives::keccak256)
+    }
+}
+
 /// Result of decoding a raw EIP-2718 transaction.
 #[derive(Debug)]
 pub struct DecodedRawTx {
@@ -378,6 +393,8 @@ pub struct DecodedRawTx {
     /// Deposit-specific fields, if this is a deposit transaction.
     /// `(source_hash, mint, is_system_transaction)`
     pub deposit: Option<(B256, Option<u128>, bool)>,
+    /// Whether an override changed the transaction from the one the bytes encode.
+    pub overridden: bool,
 }
 
 impl DecodedRawTx {
@@ -433,7 +450,7 @@ impl DecodedRawTx {
             chain_id: decoded_chain_id,
         };
 
-        Ok(Self { tx_env, raw_bytes, deposit })
+        Ok(Self { tx_env, raw_bytes, deposit, overridden: false })
     }
 
     /// Applies explicitly-set [`TxArgs`] fields as overrides to the decoded [`TxEnv`].
@@ -441,6 +458,7 @@ impl DecodedRawTx {
     /// Only fields that were explicitly provided via CLI flags are overridden;
     /// `None` / empty fields in `tx_args` leave the base value unchanged.
     pub fn override_tx_env(mut self, tx_args: &TxArgs) -> Result<Self> {
+        let decoded = (self.tx_env.clone(), self.deposit);
         if let Some(tx_type) = tx_args.tx_type {
             self.tx_env.tx_type = tx_type;
             self.drop_fields_the_type_cannot_carry();
@@ -492,7 +510,14 @@ impl DecodedRawTx {
             }
         }
         self.reject_inconsistent_override(tx_args)?;
+        self.overridden |= decoded != (self.tx_env.clone(), self.deposit);
         Ok(self)
+    }
+
+    /// The hash of the transaction that runs: the hash of the signed bytes, or none once an
+    /// override changed what they encode.
+    pub fn tx_hash(&self) -> Option<B256> {
+        (!self.overridden).then(|| alloy_primitives::keccak256(&self.raw_bytes))
     }
 
     /// Drops what the raw transaction carries and its new type cannot: the priority fee of a type
@@ -596,9 +621,15 @@ impl DecodedRawTx {
 ///
 /// The created envelope only contains the information available in [`TxEnv`] and fills many
 /// fields with placeholder values. The encoded envelope is used for L1 data fee calculation.
+/// A deposit has no signature, so its envelope is the transaction itself, with the given
+/// `source_hash` and `mint`.
 /// A dummy signature is used since the CLI doesn't have access to signing keys — the non-zero
 /// r/s bytes ensure the encoded size is realistic (matching real signed transactions).
-fn create_fake_envelope(tx_env: &TxEnv) -> Result<MegaTxEnvelope> {
+fn create_fake_envelope(
+    tx_env: &TxEnv,
+    source_hash: B256,
+    mint: Option<u128>,
+) -> Result<MegaTxEnvelope> {
     let dummy_sig = Signature::new(U256::from(1u64), U256::from(1u64), false);
     let chain_id = tx_env.chain_id.unwrap_or(0);
     let tx_type = MegaTxType::try_from(tx_env.tx_type)
@@ -684,10 +715,10 @@ fn create_fake_envelope(tx_env: &TxEnv) -> Result<MegaTxEnvelope> {
         }
         MegaTxType::Deposit => {
             let tx = TxDeposit {
-                source_hash: B256::ZERO,
+                source_hash,
                 from: tx_env.caller,
                 to: tx_env.kind,
-                mint: 0,
+                mint: mint.unwrap_or(0),
                 value: tx_env.value,
                 gas_limit: tx_env.gas_limit,
                 is_system_transaction: false,
@@ -728,7 +759,7 @@ mod tests {
             .tx_type(Some(0))
             .build()
             .expect("legacy transaction");
-        DecodedRawTx { tx_env, raw_bytes: Bytes::new(), deposit: None }
+        DecodedRawTx { tx_env, raw_bytes: Bytes::new(), deposit: None, overridden: false }
     }
 
     #[test]
@@ -759,9 +790,10 @@ mod tests {
             .gas_priority_fee(Some(1))
             .build()
             .expect("EIP-1559 transaction");
-        let decoded = DecodedRawTx { tx_env, raw_bytes: Bytes::new(), deposit: None }
-            .override_tx_env(&bare_args())
-            .expect("an EIP-1559 transaction may carry a priority fee");
+        let decoded =
+            DecodedRawTx { tx_env, raw_bytes: Bytes::new(), deposit: None, overridden: false }
+                .override_tx_env(&bare_args())
+                .expect("an EIP-1559 transaction may carry a priority fee");
         assert_eq!(decoded.tx_env.tx_type, 2);
         assert_eq!(decoded.tx_env.gas_priority_fee, Some(1));
     }
@@ -775,7 +807,7 @@ mod tests {
             .access_list(AccessList(vec![item]))
             .build()
             .expect("EIP-1559 transaction");
-        DecodedRawTx { tx_env, raw_bytes: Bytes::new(), deposit: None }
+        DecodedRawTx { tx_env, raw_bytes: Bytes::new(), deposit: None, overridden: false }
     }
 
     /// Changing only the type of a raw transaction runs it as the new type: what the old type
@@ -817,6 +849,7 @@ mod tests {
             tx_env,
             raw_bytes: Bytes::new(),
             deposit: Some((B256::ZERO, None, false)),
+            overridden: false,
         };
         let mut args = bare_args();
         args.tx_type = Some(2);
