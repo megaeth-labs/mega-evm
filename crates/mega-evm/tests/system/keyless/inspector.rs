@@ -5,8 +5,8 @@
 
 use alloy_sol_types::SolError;
 use mega_evm::{
-    system::keyless::KEYLESS_DEPLOY_OVERHEAD_GAS, test_utils::BytecodeBuilder, MegaLimitExceeded,
-    MegaTransaction, WRITE_RECORD_SIZE,
+    system::keyless::KEYLESS_DEPLOY_OVERHEAD_GAS, test_utils::BytecodeBuilder, LimitKind,
+    MegaLimitExceeded, MegaTransaction, WRITE_RECORD_SIZE,
 };
 use revm::{
     bytecode::opcode::{LOG0, PUSH0, REVERT},
@@ -401,7 +401,7 @@ fn test_a_revived_keyless_creation_a_limit_stopped_answers_address_mismatch() {
         };
         assert_eq!(
             MegaLimitExceeded::abi_decode(&output).expect("a limit stop"),
-            MegaLimitExceeded { kind: 0, limit },
+            MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit },
             "at {gas_limit}: the constructor's log crossed the transaction's limit"
         );
         assert_eq!(nonce(&plain, deployment.signer), 1, "the plain run spends the nonce");

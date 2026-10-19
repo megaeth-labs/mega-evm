@@ -30,9 +30,9 @@ use revm::{
 
 use crate::{
     detention::{
-        assert_caught, assert_stopped, cold_access, context, intrinsic, memory_cost, op, run_on,
-        spin, sstore_static, value_transfer, Calls, Charges, Run, BENEFICIARY, CALLER, CAP, CHILD,
-        CONTRACT, TIERS,
+        assert_caught, assert_stopped, cold_access, context, failed_status_store, intrinsic,
+        memory_cost, op, run_on, spin, value_transfer, Calls, Charges, Run, BENEFICIARY, CALLER,
+        CAP, CHILD, CONTRACT, TIERS,
     },
     withheld_gas::{costly_modexp_input, intrinsic_with},
 };
@@ -93,13 +93,6 @@ fn charges_to_the_call(len: u64, call: u64) -> Charges {
         2,
         call - 2_300,
     ])
-}
-
-/// What [`calls_with_value`] runs once a call the cap stopped returned into it: the push of the
-/// slot, and the store of the failed call's status, zero, into the cold slot that holds zero, a
-/// write that changes nothing and pays the cold access alone.
-fn the_status_store() -> Charges {
-    Charges::default().then(&[3, sstore_static(), crate::salt::entry(GasId::cold_storage_cost())])
 }
 
 /// A value call's own charges to a cold contract: the cold access and the transfer.
@@ -243,7 +236,7 @@ fn test_a_value_call_to_a_precompile_after_a_read_keeps_the_log_it_counted() {
         let charges = charges_to_the_call(above.len() as u64, call_to_an_empty_precompile())
             .then(&[price.unwrap()]);
         let intrinsic = intrinsic_with(&above, gas_limit);
-        assert_caught(&detained, intrinsic, charges.left(CAP), &the_status_store());
+        assert_caught(&detained, intrinsic, charges.left(CAP), &failed_status_store());
         // The answer is the stop, having spent nothing.
         assert_eq!(ended(&calls, MODEXP), (InstructionResult::Revert, 0));
         assert_eq!(detained.outcome.usage, LimitUsage { data_size: body, write_records: 0 });
@@ -574,7 +567,7 @@ fn test_every_detained_frame_start_keeps_the_log_it_counted() {
                 if let Some(charges) = start.stops {
                     let left = charges(input.len() as u64).left(CAP);
                     let intrinsic = intrinsic_with(&input, gas_limit);
-                    assert_caught(&detained, intrinsic, left, &the_status_store());
+                    assert_caught(&detained, intrinsic, left, &failed_status_store());
                     assert_eq!(detained.outcome.usage.write_records, 0, "{case}");
                 } else {
                     let plain = exec(PUSH0);

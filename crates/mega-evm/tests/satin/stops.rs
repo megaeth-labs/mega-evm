@@ -182,11 +182,11 @@ fn execute(
         .expect("the transaction is valid")
 }
 
-/// Records every step and the result of every frame it sees end, and, when it `rewrites`, then
-/// rewrites that result into a success with no output — a creation's too, which revives a
-/// creation that failed: a tool's inspector.
+/// Records every step and the result of every frame it sees end, and, made to rewrite
+/// ([`rewriting`](Self::rewriting)), then rewrites that result into a success with no output — a
+/// creation's too, which revives a creation that failed: a tool's inspector.
 #[derive(Clone, Default)]
-struct Rewriter {
+struct FrameRecorder {
     /// Whether it rewrites the results it records.
     rewrites: bool,
     /// Every step: the frame it ran in, its opcode, and the slot it named when it was an `SSTORE`.
@@ -197,7 +197,7 @@ struct Rewriter {
     created: Vec<(InstructionResult, Bytes)>,
 }
 
-impl Rewriter {
+impl FrameRecorder {
     /// One that records and rewrites nothing.
     fn recording() -> Self {
         Self::default()
@@ -219,7 +219,7 @@ impl Rewriter {
     }
 }
 
-impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Rewriter {
+impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for FrameRecorder {
     fn step(&mut self, interp: &mut Interpreter<EthInterpreter>, _context: &mut MegaContext<DB>) {
         let opcode = interp.bytecode.opcode();
         let slot = (opcode == SSTORE).then(|| interp.stack.peek(0).expect("SSTORE takes a slot"));
@@ -317,7 +317,7 @@ fn assert_cell(limit: Limit, crossing: usize, gas_limit: u64) {
     let plain = execute(chain(limit, crossing, false), configured, gas_limit);
     let mut evm =
         MegaEvm::new(context(chain(limit, crossing, false)).with_tx_runtime_limits(configured))
-            .with_inspector(Rewriter::recording());
+            .with_inspector(FrameRecorder::recording());
     let recorded = evm.execute_transaction(call(CALLER, A, U256::ZERO, gas_limit)).unwrap();
     let recorder = evm.inspector();
 
@@ -433,6 +433,63 @@ fn test_every_limit_stops_the_frame_that_crosses_it_at_every_depth_and_tier() {
     }
 }
 
+/// Rewrites every call result it sees end into `into`, and leaves its gas as it is.
+struct Halter {
+    into: InstructionResult,
+}
+
+impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Halter {
+    fn call_end(
+        &mut self,
+        _context: &mut MegaContext<DB>,
+        _inputs: &CallInputs,
+        outcome: &mut CallOutcome,
+    ) {
+        outcome.result.result = self.into;
+    }
+}
+
+/// An inspector that rewrites every frame result into a halt gets the halt: a stop is a revert of
+/// the frame that crossed, which the rewrite turns into a halt like any other result, so the
+/// transaction halts, keeps nothing but its body, and reports no stop, whether the frame that
+/// crossed was its own or three calls below, under every limit and at either tier. The stop is
+/// in the inspector's hands as every result is.
+///
+/// Rules: [S11.1], [S11.6]. Independence: constants — the body is `TX_BODY_SIZE`.
+#[test]
+fn test_an_inspector_that_rewrites_a_stop_into_a_halt_gets_the_halt() {
+    let halts = [
+        InstructionResult::OutOfGas,
+        InstructionResult::PrecompileOOG,
+        InstructionResult::InvalidFEOpcode,
+    ];
+    for limit in Limit::ALL {
+        for crossing in [0, 3] {
+            for gas_limit in TIERS {
+                let (configured, _) = limits_of(limit, crossing);
+                for into in halts {
+                    let case =
+                        format!("{limit:?} at depth {crossing}, gas limit {gas_limit}, {into:?}");
+                    let mut evm = MegaEvm::new(
+                        context(chain(limit, crossing, false)).with_tx_runtime_limits(configured),
+                    )
+                    .with_inspector(Halter { into });
+                    let halted =
+                        evm.execute_transaction(call(CALLER, A, U256::ZERO, gas_limit)).unwrap();
+                    assert!(halted.result.is_halt(), "{case}: {:?}", halted.result);
+                    assert_eq!(halted.limit_exceeded, None, "{case}: the result is no stop");
+                    assert!(halted.result.logs().is_empty(), "{case}");
+                    assert_eq!(
+                        halted.usage,
+                        LimitUsage { data_size: TX_BODY_SIZE, write_records: 0 },
+                        "{case}: the body alone"
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// The limits a cell runs under, and the stop's limit where it is known before the run: every
 /// dimension but the compute limit, which the read sets.
 fn limits_of(limit: Limit, crossing: usize) -> (EvmTxRuntimeLimits, Option<u64>) {
@@ -537,7 +594,7 @@ fn test_a_revived_creation_settles_as_a_frame_that_kept_nothing() {
                 let configured = creation_limits(creation, limit, gas_limit);
                 let (db, tx) = creation_run(creation, limit, gas_limit);
                 let mut evm = MegaEvm::new(context(db.clone()).with_tx_runtime_limits(configured))
-                    .with_inspector(Rewriter::recording());
+                    .with_inspector(FrameRecorder::recording());
                 let plain = evm.execute_transaction(tx.clone()).expect("the transaction is valid");
                 let [(InstructionResult::Revert, stop)] = evm.inspector().created.as_slice() else {
                     panic!(
@@ -551,7 +608,7 @@ fn test_a_revived_creation_settles_as_a_frame_that_kept_nothing() {
                 let stop = stop.clone();
 
                 let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(configured))
-                    .with_inspector(Rewriter::rewriting());
+                    .with_inspector(FrameRecorder::rewriting());
                 let revived = evm.execute_transaction(tx).expect("the revival is not refused");
                 let rewriter = evm.inspector();
                 assert_eq!(
@@ -1004,13 +1061,6 @@ fn oracle_pops_then_writes() -> Charges {
     Charges::default().then(&[2, 2]).fresh_writes(slots_past_the_cap())
 }
 
-/// What `A` has left of the limit when a charge of its own crosses it, having caught the stop of a
-/// callee that crossed it `left` short and then run `after`: the room the callee's crossing charge
-/// was not made from is what the limit leaves `A`.
-fn left_after_a_caught_stop(left: u64, after: &Charges) -> u64 {
-    after.crossing(left).expect("the caller's own charge crosses the limit again")
-}
-
 /// A frame that reads the block's timestamp and then writes the fresh slots stops at the
 /// first write's charge past the limit the read set, and bills its compute before it: the
 /// transaction's own frame, a child whose caller catches the stop and is held to what is left,
@@ -1035,9 +1085,10 @@ fn test_nested_call_block_env_access_child_oog() {
     let db = MemoryDatabase::default()
         .account_code(A, parent.stop().build())
         .account_code(B, child.stop().build());
-    // The child's crossing, then the caller's `POP` and write.
+    // The child's crossing, then the caller's `POP` and write, from the room the child's crossing
+    // charge was not made from.
     let left = pop_then_writes().left(CAP);
-    let left = left_after_a_caught_stop(left, &Charges::default().then(&[2]).fresh_writes(1));
+    let left = Charges::default().then(&[2]).fresh_writes(1).left(left);
     let (limit, _) = assert_detention_stop(db, EvmTxRuntimeLimits::default(), left);
     assert!(limit - CAP < 10_000, "the child read near the start: {}", limit - CAP);
 }
@@ -1107,7 +1158,7 @@ fn test_parent_runs_out_of_gas_after_oracle_access() {
         params.get(GasId::cold_storage_additional_cost()),
         2,
     ];
-    let left = left_after_a_caught_stop(left, &Charges::default().then(&sload));
+    let left = Charges::default().then(&sload).left(left);
     let (_, accessed) =
         assert_detention_stop(with_oracle_read(db), EvmTxRuntimeLimits::default(), left);
     assert_eq!(accessed, mega_evm::VolatileDataAccess::ORACLE);
@@ -1353,19 +1404,22 @@ fn test_data_size_top_level_exceed_is_frame_local_revert() {
     assert_eq!(outcome.usage, LimitUsage { data_size: TX_BODY_SIZE, write_records: 0 });
 }
 
-/// A call its own frame budget stopped, revived into a success by an inspector, hands its caller
-/// nothing it counted: its checkpoint was reverted before the inspector saw its result, so its log
-/// is not kept, and its lane goes the way its log did. Its caller runs on within its own budget,
-/// and the transaction is the one no inspector runs: the rewrite changed only the flag `A` drops.
+/// A call a data-size limit stopped — its own frame budget, or the transaction's limit — revived
+/// into a success by an inspector, hands its caller nothing it counted: its checkpoint was reverted
+/// before the inspector saw its result, so its log is not kept, and its lane goes the way its log
+/// did. Its caller runs on within the limits, and the transaction is the one no inspector runs: the
+/// rewrite changed only the flag `A` drops.
 ///
-/// `A` has a frame cap of 1,000 bytes and gives `B` 98% of it. `B`'s log of 1,000 bytes counts
-/// 1,032, which crosses `B`'s budget, and would cross `A`'s were it handed on.
+/// Under a frame cap of 1,000 bytes `A` gives `B` 98% of it, and `B`'s log of 1,000 bytes counts
+/// 1,032, which crosses `B`'s budget, and would cross `A`'s were it handed on. Under a transaction
+/// limit of the body and 1,000 bytes the same log crosses the transaction's limit, which is checked
+/// first.
 #[test]
-fn test_a_call_revived_past_its_budget_hands_its_caller_nothing() {
-    const FRAME_CAP: u64 = 1_000;
+fn test_a_call_revived_past_a_limit_hands_its_caller_nothing() {
+    const CAP: u64 = 1_000;
     const LOGGED: u64 = 1_000;
-    const { assert!(LOG_BASE_SIZE + LOGGED > FRAME_CAP, "the log would cross A's budget too") };
-    let share = FRAME_CAP * FRAME_DATA_SHARE_NUMERATOR / FRAME_DATA_SHARE_DENOMINATOR;
+    const { assert!(LOG_BASE_SIZE + LOGGED > CAP, "the log would cross A's budget too") };
+    let share = CAP * FRAME_DATA_SHARE_NUMERATOR / FRAME_DATA_SHARE_DENOMINATOR;
     let a = call_all(BytecodeBuilder::default(), B)
         .append(POP)
         .sstore(MARKER, U256::from(1))
@@ -1374,37 +1428,48 @@ fn test_a_call_revived_past_its_budget_hands_its_caller_nothing() {
     let b =
         BytecodeBuilder::default().push_number(LOGGED).append_many([PUSH0, LOG0]).stop().build();
     let db = MemoryDatabase::default().account_code(A, a).account_code(B, b);
-    let limits = EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(FRAME_CAP);
-    let plain = execute(db.clone(), limits, BELOW);
-    let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits))
-        .with_inspector(Rewriter::rewriting());
-    let outcome = evm.execute_transaction(call(CALLER, A, U256::ZERO, BELOW)).unwrap();
-    let rewriter = evm.inspector();
+    let unlimited = EvmTxRuntimeLimits::no_limits();
+    let rows = [
+        ("its frame budget", unlimited.with_frame_data_size_limit(CAP), share),
+        ("the transaction's limit", unlimited.with_tx_data_size_limit(TX_BODY_SIZE + CAP), {
+            TX_BODY_SIZE + CAP
+        }),
+    ];
+    for (row, limits, crossed) in rows {
+        let plain = execute(db.clone(), limits, BELOW);
+        let mut evm = MegaEvm::new(context(db.clone()).with_tx_runtime_limits(limits))
+            .with_inspector(FrameRecorder::rewriting());
+        let outcome = evm.execute_transaction(call(CALLER, A, U256::ZERO, BELOW)).unwrap();
+        let rewriter = evm.inspector();
 
-    let stop = LimitCheck::ExceedsLimit {
-        kind: LimitKind::DataSize,
-        limit: share,
-        used: 0,
-        frame_local: true,
+        // The revert data names the limit crossed, whatever the usage.
+        let stop = LimitCheck::ExceedsLimit {
+            kind: LimitKind::DataSize,
+            limit: crossed,
+            used: 0,
+            frame_local: false,
+        };
+        assert_eq!(
+            rewriter.ended,
+            vec![
+                (B, InstructionResult::Revert, stop.revert_data()),
+                (A, InstructionResult::Stop, Bytes::new())
+            ],
+            "{row}: B crossed it; A did not"
+        );
+        assert_eq!(rewriter.marker_writes(), 1, "{row}: A ran on after its call returned");
+        assert!(outcome.result.is_success(), "{row}: {:?}", outcome.result);
+        assert_eq!(outcome.limit_exceeded, None, "{row}: a stop below is no stop");
+        assert_eq!(
+            outcome.usage,
+            LimitUsage { data_size: TX_BODY_SIZE + WRITE_RECORD_SIZE, write_records: 1 },
+            "{row}: the body and A's marker: none of B's log"
+        );
+        assert!(outcome.result.logs().is_empty(), "{row}: B's log was reverted with B");
+        assert!(plain.result.is_success(), "{row}: {:?}", plain.result);
+        assert_eq!((&outcome.result, &outcome.state), (&plain.result, &plain.state), "{row}");
+        assert_eq!((outcome.gas, outcome.usage), (plain.gas, plain.usage), "{row}");
     }
-    .revert_data();
-    assert_eq!(
-        rewriter.ended,
-        vec![(B, InstructionResult::Revert, stop), (A, InstructionResult::Stop, Bytes::new())],
-        "B crossed its budget; A did not"
-    );
-    assert_eq!(rewriter.marker_writes(), 1, "A ran on after its call returned");
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert_eq!(outcome.limit_exceeded, None, "a frame budget below is no stop");
-    assert_eq!(
-        outcome.usage,
-        LimitUsage { data_size: TX_BODY_SIZE + WRITE_RECORD_SIZE, write_records: 1 },
-        "the body and A's marker: none of B's log"
-    );
-    assert!(outcome.result.logs().is_empty(), "B's log was reverted with B");
-    assert!(plain.result.is_success(), "{:?}", plain.result);
-    assert_eq!((&outcome.result, &outcome.state), (&plain.result, &plain.state));
-    assert_eq!((outcome.gas, outcome.usage), (plain.gas, plain.usage));
 }
 
 /* ---------- a frame three calls down, answered without running ---------- */
@@ -1503,7 +1568,7 @@ fn answered_limits(answered: Answered) -> (EvmTxRuntimeLimits, LimitCheck) {
 
 /// Answers every call to `D` itself, having spent all the gas it was forwarded, and records every
 /// frame it sees end, deepest first, with the result and output it had; with `rewrite`, it then
-/// rewrites that result into a success, as [`Rewriter`] does.
+/// rewrites that result into a success, as [`FrameRecorder`] does.
 struct AnswersD {
     rewrite: bool,
     ended: Vec<(Address, InstructionResult, Bytes)>,
@@ -1564,7 +1629,7 @@ fn run_answered(
         let outcome = evm.execute_transaction(tx).expect("the transaction is valid");
         (outcome, evm.inspector().ended.clone())
     } else if rewrite {
-        let mut evm = evm.with_inspector(Rewriter::rewriting());
+        let mut evm = evm.with_inspector(FrameRecorder::rewriting());
         let outcome = evm.execute_transaction(tx).expect("the transaction is valid");
         (outcome, evm.inspector().ended.clone())
     } else {

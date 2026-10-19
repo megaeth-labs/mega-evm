@@ -741,22 +741,33 @@ fn answer_the_call(code: BytecodeBuilder) -> Bytes {
         .build()
 }
 
-/// What the call [`answer_the_call`] answered for did: `None` for a success, the stop's dimension
-/// and limit for a stop, and `Some(None)` for a halt.
-fn read_the_answer(answer: &[u8]) -> Option<Option<(LimitKind, u64)>> {
+/// What a call [`answer_the_call`] answered for did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Answer {
+    /// The call succeeded.
+    Success,
+    /// The call failed with no return data: its frame halted.
+    Halt,
+    /// The call failed with a limit's stop: its dimension and limit.
+    Stop(LimitKind, u64),
+}
+
+/// The [`Answer`] `answer` is, as [`answer_the_call`] wrote it: the call's flag, the size of what
+/// it returned, and what it returned.
+fn read_the_answer(answer: &[u8]) -> Answer {
     let flag = U256::from_be_slice(&answer[..32]);
     let returned = U256::from_be_slice(&answer[32..64]);
     if flag == U256::ONE {
-        return None;
+        return Answer::Success;
     }
     assert!(flag.is_zero(), "a CALL's flag");
     assert_eq!(returned, U256::from(answer.len() - 64), "the return data follows");
     if returned.is_zero() {
-        return Some(None);
+        return Answer::Halt;
     }
-    let stop = mega_evm::decode_mega_limit_exceeded(&answer[64..]);
-    assert!(stop.is_some(), "the call failed with something other than a stop: {answer:?}");
-    Some(stop)
+    let (kind, limit) = mega_evm::decode_mega_limit_exceeded(&answer[64..])
+        .unwrap_or_else(|| panic!("the call failed with something other than a stop: {answer:?}"));
+    Answer::Stop(kind, limit)
 }
 
 /// A call from `CALLER` to `A` running `code`, at `gas_limit`, under a transaction data-size limit
@@ -786,24 +797,19 @@ fn bound_at(code: &Bytes, gas_limit: u64, data_limit: u64) -> Bound {
             }
             ExecutionResult::Success { output, .. } => {
                 assert_eq!(outcome.limit_exceeded, None);
-                // A frame start the limit stopped: `A` answers the call it returned the stop to.
-                match read_the_answer_of(output.data()) {
-                    Some(Some(_)) => Bound::DataSize,
-                    Some(None) => panic!("the call halted: {output:?}"),
-                    None => Bound::Success,
+                // A frame start the limit stopped: `A` answers the call it returned the stop to;
+                // code that answers nothing ran to its success.
+                if output.data().is_empty() {
+                    return Bound::Success;
+                }
+                match read_the_answer(output.data()) {
+                    Answer::Stop(..) => Bound::DataSize,
+                    Answer::Halt => panic!("the call halted: {output:?}"),
+                    Answer::Success => Bound::Success,
                 }
             }
         },
     }
-}
-
-/// [`read_the_answer`] of `A`'s output, when `A` answers a call; `None` for code that answers
-/// nothing.
-fn read_the_answer_of(output: &[u8]) -> Option<Option<(LimitKind, u64)>> {
-    if output.is_empty() {
-        return None;
-    }
-    read_the_answer(output)
 }
 
 /// A gas limit above what any write here needs to be counted, at the byte prices in effect:
@@ -1032,8 +1038,8 @@ fn test_a_caller_one_gas_short_of_its_records_runs_out_of_gas_under_a_limit_they
     let stopped = run_at(db(), call(CALLER, A, U256::ZERO, gas_limit + 1), crosses);
     assert!(stopped.result.is_success(), "the caller catches the stop: {:?}", stopped.result);
     assert_eq!(
-        read_the_answer_of(stopped.result.output().expect("A answers")),
-        Some(Some((LimitKind::DataSize, crosses))),
+        read_the_answer(stopped.result.output().expect("A answers")),
+        Answer::Stop(LimitKind::DataSize, crosses),
         "the start was answered with the stop",
     );
     assert_eq!(stopped.usage, LimitUsage { data_size: mega_evm::TX_BODY_SIZE, write_records: 0 });
@@ -1092,9 +1098,9 @@ fn child_bound(outcome: &MegaTransactionOutcome) -> Bound {
     assert!(outcome.result.is_success(), "A answers: {:?}", outcome.result);
     assert_eq!(outcome.limit_exceeded, None);
     match read_the_answer(outcome.result.output().expect("A answers")) {
-        Some(Some(_)) => Bound::DataSize,
-        Some(None) => Bound::OutOfGas,
-        None => Bound::Success,
+        Answer::Stop(..) => Bound::DataSize,
+        Answer::Halt => Bound::OutOfGas,
+        Answer::Success => Bound::Success,
     }
 }
 
@@ -1243,7 +1249,7 @@ fn test_a_record_a_limit_refuses_is_not_charged_where_the_reservoir_has_one_gas_
         assert!(matches!(child_bound(&refused), Bound::DataSize), "{name}: {:?}", refused.result);
         assert_eq!(
             read_the_answer(refused.result.output().expect("A answers")),
-            Some(Some((LimitKind::DataSize, crosses))),
+            Answer::Stop(LimitKind::DataSize, crosses),
             "{name}: the record crossed the transaction's limit",
         );
         assert_eq!(refused.gas.history, body, "{name}: the refused record was not charged");

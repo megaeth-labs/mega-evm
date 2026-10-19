@@ -68,6 +68,13 @@ pub(crate) fn fresh_sstore() -> u64 {
         crate::salt::entry(GasId::sstore_set_without_load_cost())
 }
 
+/// What the store of a failed call's status charges once the call returned: the push of the slot,
+/// then `SSTORE`'s static gas and the cold access of a slot that holds zero, which the status,
+/// zero, leaves as it is.
+pub(crate) fn failed_status_store() -> Charges {
+    Charges::default().then(&[3, sstore_static(), crate::salt::entry(GasId::cold_storage_cost())])
+}
+
 /// What a call reaching a cold account pays for the access: the warm base and the cold surcharge,
 /// 3,000 at the schedule's prices.
 pub(crate) fn cold_access() -> u64 {

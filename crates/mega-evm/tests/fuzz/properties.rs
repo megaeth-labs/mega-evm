@@ -299,8 +299,12 @@ fn test_property_gas_ledgers() {
 }
 
 /// After every instruction the KV count never weighs more than the data size, `KV × 40 ≤ data
-/// size`; at the end the same holds, the history bytes are within the data size, and every
-/// transaction keeps at least its body and the Oracle hints it forwarded.
+/// size`; at the end the same holds, the history bytes are within the data size, every
+/// transaction keeps at least its body and the Oracle hints it forwarded, and a user's
+/// transaction keeps no more than its data-size limit: a frame that crossed the limit took what
+/// it counted back with it, whether its caller caught the stop or not. Deposits and the protocol's
+/// transactions are left out of the last: the protocol's are held to no limit, and a deposit whose
+/// body is over the limit keeps it as a failed deposit.
 #[test]
 fn test_property_kv_weighs_no_more_than_data_size() {
     #[derive(Default)]
@@ -352,6 +356,13 @@ fn test_property_kv_weighs_no_more_than_data_size() {
                 usage.data_size >= transaction_body_bytes(&tx) + hints,
                 "the body and the {hints} bytes of hints forwarded are counted: {usage:?}"
             );
+            if !is_exempt(&tx) {
+                let limit = case.world.limits.runtime().tx_data_size_limit;
+                prop_check!(
+                    usage.data_size <= limit,
+                    "a user's transaction keeps more than its limit of {limit}: {usage:?}"
+                );
+            }
             Ok(())
         },
     );

@@ -14,9 +14,9 @@
 //! Every site runs below the execution cap and above it, and is pinned four ways: the exact bytes
 //! it adds and the log the receipt carries; a frame budget one byte short of them, which stops the
 //! frame that moves the value and lets its caller resume; the transaction's limit one byte short,
-//! which stops the transaction; and a failure above the move, which takes the log and its bytes
-//! back. Each stop is the one a `LOG3` of one word makes in the same place, where the same bytes
-//! are counted: its twin below.
+//! which does the same, and stops the transaction when the frame is its own; and a failure above
+//! the move, which takes the log and its bytes back. Each stop is the one a `LOG3` of one word
+//! makes in the same place, where the same bytes are counted: its twin below.
 //!
 //! A frame start is counted before revm decides it. A start revm refuses on its caller's account
 //! — a value the caller cannot fund, a creation whose creator's nonce cannot be bumped — counts
