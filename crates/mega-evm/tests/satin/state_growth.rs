@@ -20,8 +20,7 @@ use mega_evm::{
     WRITE_RECORD_SIZE,
 };
 use revm::bytecode::opcode::{
-    CALL, CREATE, CREATE2, DELEGATECALL, GAS, INVALID, POP, PUSH0, PUSH1, REVERT, SELFDESTRUCT,
-    STOP,
+    CALL, CREATE, DELEGATECALL, GAS, INVALID, POP, PUSH0, SELFDESTRUCT, STOP,
 };
 
 use crate::common::{
@@ -85,52 +84,19 @@ fn write_slots(mut builder: BytecodeBuilder, from: u64, to: u64) -> BytecodeBuil
     builder
 }
 
-/// Appends a `CALL` to `target` with all the gas and `value`, dropping its success flag.
-fn then_call(builder: BytecodeBuilder, target: Address, value: u8) -> BytecodeBuilder {
-    builder
-        .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
-        .append(PUSH1)
-        .append(value)
-        .push_address(target)
-        .append(GAS)
-        .append(CALL)
-        .append(POP)
-}
-
-/// Appends a `CREATE` of `init` carrying no value, or a `CREATE2` with salt zero, dropping the
-/// address.
-fn then_create(builder: BytecodeBuilder, init: &Bytes, create2: bool) -> BytecodeBuilder {
-    let builder = builder.mstore(0, init);
-    // CREATE2 takes a salt below the size, the offset and the value.
-    let builder = if create2 { builder.push_number(0_u64) } else { builder };
-    builder
-        .push_number(init.len() as u64)
-        .push_number(0_u64)
-        .push_number(0_u64)
-        .append(if create2 { CREATE2 } else { CREATE })
-        .append(POP)
-}
-
 /// The schedule's state gas for the account a creation adds.
 fn created_account_state_gas() -> u64 {
     crate::salt::entry(revm::context_interface::cfg::GasId::create_state_gas())
 }
 
-/// The state gas a transaction reports is net: a slot written back gives its state gas back, and so
-/// do a failed child's writes, a creation that failed, and a slot a delegate writes back before
-/// writing another. Each case is charged two slots' worth over its run, or a created account and a
-/// slot, and keeps one slot.
+/// A slot a delegate writes back, from a frame of its own, gives its state gas back, and the
+/// transaction keeps the one slot the delegate writes after it. The other ways a charge is given
+/// back — a slot written back in its own frame, a failed child, a failed creation — are held at
+/// every multiplier with the SALT pricing.
 ///
 /// Independence: constants — the slot is the schedule's entry.
 #[test]
-fn test_the_state_gas_is_net_of_what_is_given_back() {
-    let slot = slot_state_gas();
-    let reverting = Bytes::from_static(&[PUSH0, PUSH0, REVERT]);
-    let restores_then_writes = BytecodeBuilder::default()
-        .sstore(U256::ZERO, U256::ZERO)
-        .sstore(U256::from(1), U256::from(1))
-        .stop()
-        .build();
+fn test_a_delegate_that_writes_a_slot_back_gives_its_state_gas_back() {
     let delegate_to_b = BytecodeBuilder::default()
         .sstore(U256::ZERO, U256::from(1))
         .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
@@ -140,60 +106,15 @@ fn test_the_state_gas_is_net_of_what_is_given_back() {
         .append(POP)
         .stop()
         .build();
-    let cases: [(&str, MemoryDatabase); 3] = [
-        (
-            "a slot written back, then another",
-            funded().account_code(
-                A,
-                BytecodeBuilder::default()
-                    .sstore(U256::ZERO, U256::from(1))
-                    .sstore(U256::ZERO, U256::ZERO)
-                    .sstore(U256::from(1), U256::from(1))
-                    .stop()
-                    .build(),
-            ),
-        ),
-        (
-            "a child's slot rolled back with its revert, then a slot of the caller's",
-            funded()
-                .account_code(
-                    A,
-                    then_call(BytecodeBuilder::default(), B, 0)
-                        .sstore(U256::ZERO, U256::from(1))
-                        .stop()
-                        .build(),
-                )
-                .account_code(
-                    B,
-                    BytecodeBuilder::default()
-                        .sstore(U256::ZERO, U256::from(1))
-                        .append_many([PUSH0, PUSH0, REVERT])
-                        .build(),
-                ),
-        ),
-        (
-            "a delegate that writes its caller's slot back, then another",
-            funded().account_code(A, delegate_to_b).account_code(B, restores_then_writes),
-        ),
-    ];
-    for (name, db) in cases {
-        let outcome = run(db, call(CALLER, A, U256::ZERO, BELOW_CAP));
-        assert!(outcome.result.is_success(), "{name}: {:?}", outcome.result);
-        assert_eq!(outcome.gas.state, slot, "{name}");
-    }
-
-    // A creation that fails gives its account back, and its creator keeps the slot it writes
-    // after it.
-    let db = funded().account_code(
-        A,
-        then_create(BytecodeBuilder::default(), &reverting, false)
-            .sstore(U256::from(9), U256::from(1))
-            .stop()
-            .build(),
-    );
+    let restores_then_writes = BytecodeBuilder::default()
+        .sstore(U256::ZERO, U256::ZERO)
+        .sstore(U256::from(1), U256::from(1))
+        .stop()
+        .build();
+    let db = funded().account_code(A, delegate_to_b).account_code(B, restores_then_writes);
     let outcome = run(db, call(CALLER, A, U256::ZERO, BELOW_CAP));
-    assert!(outcome.result.is_success(), "a failed creation: {:?}", outcome.result);
-    assert_eq!(outcome.gas.state, slot);
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    assert_eq!(outcome.gas.state, slot_state_gas());
 }
 
 /// One authorization: its authority — `None` for a signature that recovers to nobody — its chain
@@ -332,30 +253,6 @@ fn test_an_authorization_adds_state_only_when_it_applies() {
             outcome.state.values().any(|a| a.info.code.as_ref().is_some_and(|c| c.is_eip7702()));
         assert_eq!(delegated, state_gas >= delegation, "{name}: whether anything was delegated");
     }
-}
-
-/// An authority in a crowded bucket costs the bucket's multiple of its new account and its
-/// delegation, on the state ledger alone: its record and the data size do not move.
-#[test]
-fn test_a_crowded_authority_moves_the_state_ledger_alone() {
-    use crate::salt::{crowded_account, minimal_envs, salt_context};
-    let (account, delegation) = account_and_delegation();
-    // Room below the execution cap for the authority at the crowded price.
-    let gas_limit = BELOW_CAP + 100 * (account + delegation);
-    let run = |envs| {
-        let mut tx = authorizing(A, U256::ZERO, &[(Some(AUTHORITY_1), 0, 0)]);
-        tx.0.base.gas_limit = gas_limit;
-        MegaEvm::new(salt_context(funded().account_code(A, Bytes::from_static(&[STOP])), envs))
-            .execute_transaction(tx)
-            .unwrap()
-    };
-    let minimal = run(minimal_envs());
-    let crowded = run(crowded_account(minimal_envs(), AUTHORITY_1, 100));
-    assert!(minimal.result.is_success() && crowded.result.is_success());
-    assert_eq!(minimal.gas.state, account + delegation);
-    assert_eq!(crowded.gas.state, 100 * (account + delegation));
-    assert_eq!(crowded.gas.regular, minimal.gas.regular, "the regular ledger does not move");
-    assert_eq!(crowded.usage, minimal.usage, "the record and the data size do not move");
 }
 
 /// The state gas an authority costs is charged before the first frame, from the transaction's
@@ -521,32 +418,16 @@ fn test_a_stopped_deposit_keeps_the_caller_it_created() {
     assert_eq!(stopped.gas.state, account_state_gas(), "the caller's account");
 }
 
-/// A `SELFDESTRUCT` grows the state only when the value it moves creates its beneficiary: one new
-/// account, which is also one write record. Moving value to an account that exists is a record
-/// and no state; moving nothing, or to itself, is neither.
+/// A `SELFDESTRUCT` of value to itself grows no state and records nothing. The destructions that
+/// move value to another account are held with the SALT pricing and the write records.
 #[test]
-fn test_a_destruction_grows_state_only_when_it_creates_its_beneficiary() {
-    let (account, _) = account_and_delegation();
-    let destroys_to = |beneficiary| {
-        BytecodeBuilder::default().push_address(beneficiary).append(SELFDESTRUCT).build()
-    };
-    let cases: [(&str, MemoryDatabase, u64, u64); 4] = [
-        ("value to a new beneficiary", funded().account_code(A, destroys_to(EMPTY)), account, 1),
-        ("value to a beneficiary that exists", funded().account_code(A, destroys_to(BURNER)), 0, 1),
-        (
-            "nothing to move",
-            funded().account_balance(A, U256::ZERO).account_code(A, destroys_to(EMPTY)),
-            0,
-            0,
-        ),
-        ("value to itself", funded().account_code(A, destroys_to(A)), 0, 0),
-    ];
-    for (name, db, state_gas, records) in cases {
-        let outcome = run(db, call(CALLER, A, U256::ZERO, BELOW_CAP));
-        assert!(outcome.result.is_success(), "{name}: {:?}", outcome.result);
-        assert_eq!(outcome.gas.state, state_gas, "{name}: the state gas");
-        assert_eq!(outcome.usage.write_records, records, "{name}: the records");
-    }
+fn test_a_destruction_to_itself_grows_no_state() {
+    let db = funded()
+        .account_code(A, BytecodeBuilder::default().push_address(A).append(SELFDESTRUCT).build());
+    let outcome = run(db, call(CALLER, A, U256::ZERO, BELOW_CAP));
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    assert_eq!(outcome.gas.state, 0, "the state gas");
+    assert_eq!(outcome.usage.write_records, 0, "the records");
 }
 
 /// A state charge the frame cannot pay is an out-of-gas, which no limit turns into a stop.

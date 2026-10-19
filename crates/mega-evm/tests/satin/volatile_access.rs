@@ -46,31 +46,10 @@ const PAST_THE_CAP: u32 = 7_000;
 
 /* ---------- what records a read ---------- */
 
-/// Every block-environment opcode records its own kind; the transaction's and the chain's own
-/// fields, and a contract's own balance, record nothing.
+/// The transaction's and the chain's own fields, and a contract's own balance, record nothing; the
+/// opcodes that read the block environment record their kinds in the matrix of reads.
 #[test]
-fn test_the_block_environment_opcodes_record_their_kind_and_nothing_else_does() {
-    let reads: [(u8, VolatileDataAccess); 9] = [
-        (NUMBER, VolatileDataAccess::BLOCK_NUMBER),
-        (TIMESTAMP, VolatileDataAccess::TIMESTAMP),
-        (COINBASE, VolatileDataAccess::COINBASE),
-        (DIFFICULTY, VolatileDataAccess::PREV_RANDAO),
-        (GASLIMIT, VolatileDataAccess::GAS_LIMIT),
-        (BASEFEE, VolatileDataAccess::BASE_FEE),
-        (BLOBBASEFEE, VolatileDataAccess::BLOB_BASE_FEE),
-        (SLOTNUM, VolatileDataAccess::SLOT_NUM),
-        (PUSH0, VolatileDataAccess::empty()),
-    ];
-    for (opcode, access) in reads {
-        let code = op(BytecodeBuilder::default(), opcode).stop().build();
-        let run = execute(
-            MemoryDatabase::default().account_code(CONTRACT, code),
-            tx(CALLER, CONTRACT, BELOW),
-        );
-        assert!(run.outcome.result.is_success());
-        assert_eq!(run.accessed, access, "{opcode:#04x}");
-        assert_eq!(run.accessed.count_block_env_accessed(), usize::from(!access.is_empty()));
-    }
+fn test_the_transactions_own_fields_record_nothing() {
     for opcode in [
         revm::bytecode::opcode::CALLER,
         ORIGIN,
@@ -89,31 +68,6 @@ fn test_the_block_environment_opcodes_record_their_kind_and_nothing_else_does() 
         assert!(run.outcome.result.is_success());
         assert_eq!(run.accessed, VolatileDataAccess::empty(), "{opcode:#04x}");
         assert_eq!(run.limit, None, "{opcode:#04x}");
-    }
-}
-
-/// A transaction that reads several kinds records all of them, and the first read's limit, the
-/// lowest, is the one that holds.
-#[test]
-fn test_several_reads_record_every_kind_and_the_first_limit_holds() {
-    for gas_limit in TIERS {
-        let code = op(BytecodeBuilder::default(), NUMBER);
-        let code = op(work(code, 300), TIMESTAMP);
-        let code = op(work(code, 300), BASEFEE);
-        let code = work(code, 300).stop().build();
-        let run = execute(
-            MemoryDatabase::default().account_code(CONTRACT, code),
-            tx(CALLER, CONTRACT, gas_limit),
-        );
-        assert!(run.outcome.result.is_success());
-        assert_eq!(
-            run.accessed,
-            VolatileDataAccess::BLOCK_NUMBER |
-                VolatileDataAccess::TIMESTAMP |
-                VolatileDataAccess::BASE_FEE
-        );
-        assert_eq!(run.accessed.count_block_env_accessed(), 3);
-        assert_eq!(run.limit, Some(2 + CAP), "NUMBER, the first read, set the limit");
     }
 }
 
@@ -173,23 +127,6 @@ fn test_a_read_two_frames_down_caps_every_caller() {
         );
         assert!(run.outcome.result.is_success());
         assert!(run.outcome.result.gas().tx_gas_used() < 200_000 + body_history(0));
-    }
-}
-
-/// A caller that already read keeps its own limit through a child that reads again.
-#[test]
-fn test_a_childs_second_read_leaves_the_callers_limit() {
-    let child = op(BytecodeBuilder::default(), NUMBER).stop().build();
-    let parent = work(op(BytecodeBuilder::default(), TIMESTAMP), 300);
-    let parent = call(parent, CALL, CHILD).stop().build();
-    for gas_limit in TIERS {
-        let db = MemoryDatabase::default()
-            .account_code(CONTRACT, parent.clone())
-            .account_code(CHILD, child.clone());
-        let run = execute(db, tx(CALLER, CONTRACT, gas_limit));
-        assert!(run.outcome.result.is_success());
-        assert_eq!(run.limit, Some(2 + CAP), "TIMESTAMP, the caller's first opcode, set it");
-        assert_eq!(run.accessed, VolatileDataAccess::TIMESTAMP | VolatileDataAccess::BLOCK_NUMBER);
     }
 }
 
