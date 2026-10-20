@@ -113,6 +113,7 @@ A command on a legacy spec is refused with `--override.limits`: the legacy engin
 ### A chain's genesis file
 
 A chain the tool does not know, a devnet for one, is replayed as its nodes run it only with its own Satin configuration: which blocks run Satin.
+Without it a replay of such a chain is refused, unless `--override.spec` names the engine; `run` and `tx` with `--spec Satin` run a counterfactual on any chain, with Satin active from genesis.
 `--genesis <FILE>` takes it from the chain's genesis file, on every command, `replay` included.
 The file's `config` object (or a file that is the `config` object) is read for its `chainId` and its Satin key, `satinTime`, with the parser the node and the stateless validator read it with, so a key the node refuses is refused here too: a `satin`-prefixed key other than `satinTime`, the registry roles an earlier format named among them.
 For that chain the file replaces the tool's table: a block runs Satin from the file's `satinTime`.

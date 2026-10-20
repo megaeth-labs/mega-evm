@@ -156,9 +156,8 @@ On these chains a block runs on Satin from the timestamp the chain's schedule ac
 Neither chain schedules Satin yet, so every block of theirs replays on the legacy engine, exactly as the 1.7.1 tool replayed it.
 To pick the engine, a transaction replay without `--override.spec` first reads the chain ID over RPC (one `eth_chainId` request, or the replay file's), and on a chain that schedules Satin also the timestamp of the block the transaction runs in; a legacy replay then makes the 1.7.1 tool's own requests.
 
-Any other chain runs Satin from genesis, the rung the Satin engine pins for an unrecognized chain.
+Any other chain is refused: the tool cannot tell which engine its blocks ran on, so the replay names it, with `--override.spec` below, or gives the chain's genesis file.
 The 1.7.1 tool ran such a chain through `Rex7`, the legacy line's unstable spec, which Satin supersedes.
-Use `--override.spec` below to replay a chain that runs a legacy spec.
 
 Given the chain's genesis file (`--genesis <FILE>`, see [A chain's genesis file](../configuration/chain-and-spec.md#a-chains-genesis-file)), the file decides instead: a block runs on Satin from the file's `satinTime`, under Satin's limits, and a block before it is refused, whether it would run on the legacy engine or `--override.spec` forces Satin on it.
 A replay on another chain than the file's is refused for its chain, before any engine is picked.
@@ -167,7 +166,7 @@ A replay on another chain than the file's is refused for its chain, before any e
 
 Override the auto-detected spec.
 Useful when you want to test how the transaction would behave under a different spec, or when replaying against a chain that isn't recognized.
-`--override.spec Satin` replays the transaction as it would run on Satin: a counterfactual, on the same forked state.
+`--override.spec Satin` replays the transaction as it would run on Satin: a counterfactual, on the same forked state, under the chain's schedule with Satin active from genesis, so no block of it is Satin's activation block and it checks no predeploy.
 
 ```
 mega-evme replay --override.spec Rex2 <TX_HASH>
@@ -204,7 +203,8 @@ On Satin a block in which a fork activates admits only deposits, as the [Satin u
 The replay works this out as a node does, from the schedule the block runs under and the parent block's timestamp, and tells block execution; every transaction of such a block but its deposits is reported `refused`.
 A transaction replay works it out the same way, from the parent block it forks, and refuses a non-deposit transaction of such a block with an error.
 The parent's timestamp decides the answer only for a Satin block at which a fork its schedule activates after genesis is active; for such a block alone the replay fetches the parent's header over `--rpc` and keeps its timestamp in the cache.
-Every other block, a legacy one or one whose schedule activates every fork at genesis as the Satin counterfactual's does, replays from what the cache holds and never asks for the parent.
+Every other block, a legacy one or one whose schedule activates every fork it runs at genesis as the Satin counterfactual's does, replays from what the cache holds and never asks for the parent.
+Satin's activation block also checks the predeploys (the six system contracts and the EIP-7997 factory), which the legacy engine never read in full, so a block cached from a legacy replay may need them over `--rpc` once.
 Offline, a block that needs the parent's timestamp and whose cache entry lacks it (an entry written before the cache kept it, or by a replay that did not need it) fails rather than guess, and the error says so.
 To recover, replay it once with `--rpc`: the replay fetches the timestamp and writes it to the cache, and the block then replays offline.
 
@@ -255,7 +255,7 @@ The exit code is 0, 1 when a block could not be replayed, or 2 when `--verify` i
 `--override.spec Satin` runs every block as it would run on Satin: every transaction as signed, on the state its parent block left, under Satin's protocol limits, or those `--override.limits` gives, with no building policy of a block builder applied.
 A transaction the Satin engine refuses (it cannot pay for its gas, or a block budget is full) is reported `refused` and left out, and the block goes on.
 A transaction signed with a gas limit sized for legacy costs can run out of gas on Satin: that is the counterfactual's answer, not a tool fault.
-Satin's pre-block changes deploy the EIP-7997 factory at `0x4e59b44847b379578588920cA78FbF26c0B4956C`, which no legacy spec reads, so a block cached from a legacy replay does not hold it; the first Satin replay of the block reads it over RPC and adds it to the cache.
+`--override.spec Satin` runs no block as Satin's activation block, so it checks no predeploy; what it reads beyond the legacy replay is the L1 fee overhead slot, which every Satin block reads with the rest of the L1 block info.
 
 ## Transaction Overrides
 

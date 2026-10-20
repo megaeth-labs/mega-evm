@@ -49,30 +49,36 @@ impl Engine {
     /// on.
     ///
     /// A known chain runs Satin from the timestamp its activation table gives, and the legacy
-    /// engine before it, or throughout while Satin is not scheduled. An unknown chain runs the
-    /// Satin engine's fallback rung, Satin, from genesis. A chain the run was given the genesis
-    /// file of (`--genesis`) is known, by its file's `satinTime`.
-    pub fn of_block(chain_id: u64, timestamp: u64) -> Self {
-        Self::under(chain_activation(chain_id), timestamp)
+    /// engine before it, or throughout while Satin is not scheduled. A chain the run was given the
+    /// genesis file of (`--genesis`) is known, by its file's `satinTime`.
+    ///
+    /// # Errors
+    ///
+    /// For a chain that is not known ([`unknown_chain`]).
+    pub fn of_block(chain_id: u64, timestamp: u64) -> Result<Self> {
+        Self::under(chain_activation(chain_id), timestamp).ok_or_else(|| unknown_chain(chain_id))
     }
 
     /// The engine a block with timestamp `timestamp` runs on under `activation`, the activation
-    /// table of its chain (`None` for an unknown chain).
-    fn under(activation: Option<ChainActivation>, timestamp: u64) -> Self {
-        match activation {
-            None => Self::Satin,
-            Some(ChainActivation { satin: Some(satin), .. }) if timestamp >= satin => Self::Satin,
-            Some(_) => Self::Legacy,
+    /// table of its chain; `None` for a chain without one.
+    fn under(activation: Option<ChainActivation>, timestamp: u64) -> Option<Self> {
+        match activation? {
+            ChainActivation { satin: Some(satin), .. } if timestamp >= satin => Some(Self::Satin),
+            _ => Some(Self::Legacy),
         }
     }
 
     /// The engine every block of `chain_id` runs on, if the chain's schedule decides it without
     /// a timestamp: `None` when the chain switches engines at a scheduled timestamp.
-    pub fn of_chain(chain_id: u64) -> Option<Self> {
+    ///
+    /// # Errors
+    ///
+    /// For a chain that is not known ([`unknown_chain`]).
+    pub fn of_chain(chain_id: u64) -> Result<Option<Self>> {
         match chain_activation(chain_id) {
-            None => Some(Self::Satin),
-            Some(ChainActivation { satin: None, .. }) => Some(Self::Legacy),
-            Some(ChainActivation { satin: Some(_), .. }) => None,
+            None => Err(unknown_chain(chain_id)),
+            Some(ChainActivation { satin: None, .. }) => Ok(Some(Self::Legacy)),
+            Some(ChainActivation { satin: Some(_), .. }) => Ok(None),
         }
     }
 
@@ -83,6 +89,17 @@ impl Engine {
             Self::Legacy => "legacy",
         }
     }
+}
+
+/// The refusal of a chain neither the tool's table nor a genesis file names: the tool cannot tell
+/// which engine its blocks run on, so the run names it.
+pub fn unknown_chain(chain_id: u64) -> EvmeError {
+    EvmeError::InvalidInput(format!(
+        "chain {chain_id} is not a MegaETH chain this tool knows (mainnet {}, testnet {}): give its \
+         genesis file (--genesis) or name the spec to run (--override.spec)",
+        mega_evm::MAINNET_CHAIN_ID,
+        mega_evm::TESTNET_CHAIN_ID
+    ))
 }
 
 /// Runs `args` on the released 1.7.1 CLI.
@@ -174,25 +191,31 @@ mod tests {
     }
 
     /// Mainnet and testnet have no Satin timestamp yet: every block of theirs is legacy, and the
-    /// schedule says so without a timestamp. An unknown chain runs Satin from genesis.
+    /// schedule says so without a timestamp. A chain the tool does not know is refused, naming
+    /// how to run it.
     #[test]
     fn test_the_chain_schedule_picks_the_engine() {
         for chain_id in [MAINNET_CHAIN_ID, TESTNET_CHAIN_ID] {
-            assert_eq!(Engine::of_chain(chain_id), Some(Engine::Legacy));
-            assert_eq!(Engine::of_block(chain_id, 0), Engine::Legacy);
-            assert_eq!(Engine::of_block(chain_id, u64::MAX), Engine::Legacy);
+            assert_eq!(Engine::of_chain(chain_id).unwrap(), Some(Engine::Legacy));
+            assert_eq!(Engine::of_block(chain_id, 0).unwrap(), Engine::Legacy);
+            assert_eq!(Engine::of_block(chain_id, u64::MAX).unwrap(), Engine::Legacy);
         }
-        assert_eq!(Engine::of_chain(1_337), Some(Engine::Satin));
-        assert_eq!(Engine::of_block(1_337, 0), Engine::Satin);
+        for error in [
+            Engine::of_chain(1_337).unwrap_err().to_string(),
+            Engine::of_block(1_337, 0).unwrap_err().to_string(),
+        ] {
+            assert!(error.contains("chain 1337 is not a MegaETH chain this tool knows"), "{error}");
+            assert!(error.contains("--genesis") && error.contains("--override.spec"), "{error}");
+        }
     }
 
     /// Once a known chain schedules Satin, its blocks before the timestamp stay legacy and the
-    /// block at the timestamp is the first Satin one.
+    /// block at the timestamp is the first Satin one. A chain without a table has no engine.
     #[test]
     fn test_a_scheduled_chain_switches_at_the_timestamp() {
         let scheduled = ChainActivation { chain_id: MAINNET_CHAIN_ID, satin: Some(1_800_000_000) };
-        assert_eq!(Engine::under(Some(scheduled), 1_799_999_999), Engine::Legacy);
-        assert_eq!(Engine::under(Some(scheduled), 1_800_000_000), Engine::Satin);
-        assert_eq!(Engine::under(None, 0), Engine::Satin);
+        assert_eq!(Engine::under(Some(scheduled), 1_799_999_999), Some(Engine::Legacy));
+        assert_eq!(Engine::under(Some(scheduled), 1_800_000_000), Some(Engine::Satin));
+        assert_eq!(Engine::under(None, 0), None);
     }
 }

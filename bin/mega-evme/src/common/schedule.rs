@@ -3,8 +3,8 @@
 use std::sync::OnceLock;
 
 use mega_evm::{
-    ChainActivation, MegaHardforkConfig, MegaHardforks, MegaSpecId, ProtocolLimits,
-    SatinChainConfig,
+    alloy_hardforks::ForkCondition, ChainActivation, MegaHardfork, MegaHardforkConfig,
+    MegaHardforks, MegaSpecId, ProtocolLimits, SatinChainConfig,
 };
 use serde_json::{Map, Value};
 
@@ -16,23 +16,31 @@ use super::{EvmeError, Result};
 /// refuses ([`MegaHardforks::validate_schedule`]) is refused rather than replaced: a run under
 /// another schedule would report results the chain does not produce.
 ///
-/// Any other run is a counterfactual and executes under the schedule the Satin engine gives a chain
-/// it does not know ([`mega_evm::all_activated_hardforks`]): Satin from genesis. Satin carries no
+/// Any other run is a counterfactual — `--override.spec Satin`, or `run` and `tx` with
+/// `--spec Satin` — and executes under the chain's own schedule with Satin from genesis
+/// ([`counterfactual`]), so no block of the run is Satin's activation block. Satin carries no
 /// parameter: the `SequencerRegistry`'s roles are what the state the run executes on holds.
 ///
 /// The limits are not the schedule's: they are fixed per spec ([`satin_limits`]).
 ///
 /// The chain's own schedule is the one its genesis file gives, when the run was given the file
-/// (`--genesis`), and otherwise the Satin engine's table ([`mega_evm::hardfork_schedule`]). A run
-/// given the file makes no counterfactual: one the file does not run on Satin — before its
-/// `satinTime`, or on a file without Satin keys — is refused, since the file was given to
-/// configure the run and cannot.
+/// (`--genesis`), and otherwise the Satin engine's table ([`mega_evm::hardfork_schedule`]), which
+/// knows `MegaETH` mainnet and testnet and no other chain. A run given the file makes no
+/// counterfactual: one the file does not run on Satin — before its `satinTime`, or on a file
+/// without Satin keys — is refused, since the file was given to configure the run and cannot.
 pub fn satin_schedule(chain_id: u64, timestamp: u64) -> Result<MegaHardforkConfig> {
     let chain = match GENESIS.get() {
-        Some(genesis) => genesis_schedule(genesis, chain_id, timestamp)?,
+        Some(genesis) => Some(genesis_schedule(genesis, chain_id, timestamp)?),
         None => mega_evm::hardfork_schedule(chain_id),
     };
     schedule_for(chain, timestamp)
+}
+
+/// The schedule of a Satin counterfactual on the chain whose schedule is `chain`: that schedule
+/// with Satin from genesis, or, for a chain neither the engine's table nor a genesis file names,
+/// the engine's base forks with Satin from genesis.
+fn counterfactual(chain: Option<MegaHardforkConfig>) -> MegaHardforkConfig {
+    chain.unwrap_or_default().with(MegaHardfork::Satin, ForkCondition::Timestamp(0))
 }
 
 /// The protocol limits a Satin run is held to: Satin's ([`ProtocolLimits::for_spec`]), the ones
@@ -155,10 +163,12 @@ pub fn parse_genesis(path: &str) -> std::result::Result<GenesisChain, String> {
     Ok(GenesisChain { chain_id, satin })
 }
 
-/// [`satin_schedule`] for a chain whose schedule is `chain`.
-fn schedule_for(chain: MegaHardforkConfig, timestamp: u64) -> Result<MegaHardforkConfig> {
-    let runs_satin = chain.spec_id(timestamp) == Some(MegaSpecId::SATIN);
-    let schedule = if runs_satin { chain } else { mega_evm::all_activated_hardforks() };
+/// [`satin_schedule`] for a chain whose schedule is `chain`, `None` for a chain nothing names.
+fn schedule_for(chain: Option<MegaHardforkConfig>, timestamp: u64) -> Result<MegaHardforkConfig> {
+    let schedule = match chain {
+        Some(chain) if chain.spec_id(timestamp) == Some(MegaSpecId::SATIN) => chain,
+        chain => counterfactual(chain),
+    };
     schedule.validate_schedule().map_err(|e| {
         EvmeError::InvalidInput(format!(
             "the chain's schedule runs Satin at timestamp {timestamp} but cannot run it: {e}"
@@ -226,24 +236,31 @@ mod tests {
         ChainActivation { chain_id: MAINNET_CHAIN_ID, satin: Some(ACTIVATION) }.hardforks()
     }
 
-    /// A counterfactual runs on the engine's schedule for an unknown chain, whatever the chain:
-    /// Satin from genesis.
+    /// A counterfactual runs on the chain's own schedule with Satin from genesis, whatever the
+    /// chain; a chain the engine does not know gets the engine's base forks with Satin from
+    /// genesis. No block of a counterfactual is Satin's activation block.
     #[test]
-    fn test_a_counterfactual_runs_on_the_engines_fallback_schedule() {
+    fn test_a_counterfactual_runs_on_the_chains_schedule_with_satin_from_genesis() {
         for chain_id in [MAINNET_CHAIN_ID, TESTNET_CHAIN_ID, 6342, 1] {
             let schedule = satin_schedule(chain_id, 1_700_000_000).unwrap();
             assert_eq!(schedule.spec_id(0), Some(MegaSpecId::SATIN), "chain {chain_id}");
+            assert!(!schedule.is_satin_activation_block(0, 1_700_000_000), "chain {chain_id}");
             assert_eq!(schedule.validate_schedule(), Ok(()));
         }
+        let known = mega_evm::hardfork_schedule(MAINNET_CHAIN_ID).unwrap();
+        let counterfactual = satin_schedule(MAINNET_CHAIN_ID, 1_700_000_000).unwrap();
+        let osaka = mega_evm::alloy_hardforks::EthereumHardfork::Osaka;
+        assert_eq!(counterfactual.get(osaka), known.get(osaka), "the chain's own forks");
     }
 
-    /// Before a chain's scheduled activation a Satin run is a counterfactual on the fallback
-    /// schedule; from it on, the run takes the chain's schedule, which needs no parameter.
+    /// Before a chain's scheduled activation a Satin run is a counterfactual on the chain's
+    /// schedule with Satin from genesis; from it on, the run takes the chain's schedule, which
+    /// needs no parameter.
     #[test]
     fn test_a_real_satin_block_runs_on_the_chains_own_schedule() {
-        let before = schedule_for(scheduled(), ACTIVATION - 1).unwrap();
-        assert_eq!(before.spec_id(0), Some(MegaSpecId::SATIN), "the fallback runs Satin from 0");
-        let from = schedule_for(scheduled(), ACTIVATION).unwrap();
+        let before = schedule_for(Some(scheduled()), ACTIVATION - 1).unwrap();
+        assert_eq!(before.spec_id(0), Some(MegaSpecId::SATIN), "Satin from genesis");
+        let from = schedule_for(Some(scheduled()), ACTIVATION).unwrap();
         assert_eq!(from.spec_id(ACTIVATION - 1), None, "the chain's own activation holds");
         assert_eq!(from.spec_id(ACTIVATION), Some(MegaSpecId::SATIN));
     }
@@ -255,7 +272,7 @@ mod tests {
         use mega_evm::alloy_hardforks::{EthereumHardfork, ForkCondition};
         let late = ForkCondition::Timestamp(ACTIVATION + 1);
         let chain = scheduled().with(EthereumHardfork::Osaka, late);
-        let error = schedule_for(chain, ACTIVATION).unwrap_err().to_string();
+        let error = schedule_for(Some(chain), ACTIVATION).unwrap_err().to_string();
         assert!(error.contains("the Osaka fork it runs on is not active"), "{error}");
         assert!(error.contains(&ACTIVATION.to_string()), "{error}");
         assert!(error.contains("cannot run it"), "{error}");
@@ -320,8 +337,8 @@ mod tests {
         (path.to_str().unwrap().to_string(), satin)
     }
 
-    /// A genesis file's schedule is its chain's: Satin from its `satinTime`, in place of the
-    /// table's, which for a chain the engine does not know is Satin from genesis.
+    /// A genesis file's schedule is its chain's: Satin from its `satinTime`. Without the file the
+    /// engine's table does not know the chain, and a Satin run on it is a counterfactual.
     #[test]
     fn test_a_genesis_file_gives_its_chain_its_schedule() {
         let dir = tempfile::tempdir().unwrap();
@@ -331,16 +348,16 @@ mod tests {
 
         for timestamp in [ACTIVATION, u64::MAX] {
             let chain = genesis_schedule(&genesis, 6342, timestamp).unwrap();
-            let schedule = schedule_for(chain, timestamp).unwrap();
+            let schedule = schedule_for(Some(chain), timestamp).unwrap();
             assert_eq!(schedule.spec_id(ACTIVATION - 1), None);
             assert_eq!(schedule.spec_id(ACTIVATION), Some(MegaSpecId::SATIN));
         }
-        let table = mega_evm::hardfork_schedule(6342);
-        let table = schedule_for(table, ACTIVATION).unwrap();
+        assert!(mega_evm::hardfork_schedule(6342).is_none(), "the engine table does not know it");
+        let counterfactual = schedule_for(None, ACTIVATION).unwrap();
         assert_eq!(
-            table.spec_id(0),
+            counterfactual.spec_id(0),
             Some(MegaSpecId::SATIN),
-            "without the file, the unknown-chain fallback"
+            "without the file, a counterfactual from genesis"
         );
 
         // Before its activation the file configures no Satin run: the run is refused, not made

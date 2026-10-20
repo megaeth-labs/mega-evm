@@ -192,9 +192,7 @@ fn admits_only_deposits(
 
 #[cfg(test)]
 mod tests {
-    use mega_evm::{
-        all_activated_hardforks, alloy_hardforks::ForkCondition, MegaHardfork, MegaHardforkConfig,
-    };
+    use mega_evm::{alloy_hardforks::ForkCondition, MegaHardfork, MegaHardforkConfig};
 
     use super::admits_only_deposits;
 
@@ -224,7 +222,8 @@ mod tests {
     /// Expected values: independent (the schedule's own timestamps and the rule).
     #[test]
     fn test_without_the_parent_timestamp_only_an_undecidable_block_is_refused() {
-        assert!(!admits_only_deposits(&all_activated_hardforks(), 7, None, ACTIVATION).unwrap());
+        let all_activated = MegaHardforkConfig::default().with_all_activated();
+        assert!(!admits_only_deposits(&all_activated, 7, None, ACTIVATION).unwrap());
         assert!(!admits_only_deposits(&satin_at(0), 7, None, ACTIVATION).unwrap());
         assert!(!admits_only_deposits(&satin_at(ACTIVATION), 7, None, ACTIVATION - 1).unwrap());
         for timestamp in [ACTIVATION, ACTIVATION + 1] {

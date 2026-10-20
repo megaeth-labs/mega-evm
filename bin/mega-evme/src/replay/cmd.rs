@@ -145,7 +145,7 @@ impl Cmd {
         }
         let (provider, chain_id) = self.rpc_args.build_lookup_provider().await?;
         check_genesis_chain(chain_id)?;
-        if let Some(engine) = Engine::of_chain(chain_id) {
+        if let Some(engine) = Engine::of_chain(chain_id)? {
             return Ok(engine);
         }
         let tx = provider
@@ -165,7 +165,7 @@ impl Cmd {
             .ok_or(ReplayError::BlockNotFound(number))?
             .header
             .timestamp();
-        Ok(Engine::of_block(chain_id, timestamp))
+        Engine::of_block(chain_id, timestamp)
     }
 
     /// Whether this replays whole blocks (`--block`), which runs here for both engines.
