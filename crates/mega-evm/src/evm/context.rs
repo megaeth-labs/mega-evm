@@ -134,8 +134,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// The fields the spec fixes are set from the spec, whatever `cfg` holds: the gas schedule,
     /// the EIP-8037 and EIP-2780 switches, the execution cap, the EIP-7708 switch and its
     /// disabling flag, the chain-id check, the two code-size limits and the fork's switch back to
-    /// revm 40.0.3's journal semantics. Every other field (chain
-    /// id, the other disabled checks, blob schedule) is taken from `cfg`.
+    /// revm 40.0.3's journal semantics. Every other field (chain id, the other disabled checks,
+    /// blob schedule) is taken from `cfg`.
     ///
     /// A context that ran the neutral configuration returns to the spec's.
     pub fn with_cfg(mut self, cfg: CfgEnv<MegaSpecId>) -> Self {

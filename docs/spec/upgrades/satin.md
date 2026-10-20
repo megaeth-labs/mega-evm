@@ -495,7 +495,7 @@ The revert data:
 
 The discriminants are Rex6's, so a decoder of the Rex6 revert data decodes Satin's.
 Kinds 1 and 3, Rex6's KV updates and state growth, are not reported: no limit holds either dimension.
-Kind 2 names the limit; the compute the transaction is billed can exceed it when frames halt because they cannot pay an opcode's static gas — the first of them taking the compute past the limit, each later one holding it there — by less than that static gas per halting frame, added over those frames (see [Gas Detention on Withheld Gas](#12-gas-detention-on-withheld-gas)).
+Kind 2 names the limit, which the transaction's compute does not exceed (see [Gas Detention on Withheld Gas](#12-gas-detention-on-withheld-gas)).
 A contract can revert with the same bytes, and so can a caller that re-raises the stop a frame below it returned, so the revert data alone does not identify a stop: the stop of a transaction is the crossing that produced the result of its own frame (see [Developer Impact](#developer-impact)).
 
 ### 12. Gas Detention on Withheld Gas
@@ -519,7 +519,7 @@ A contract can revert with the same bytes, and so can a caller that re-raises th
   A value call's 2,300 stipend is not forwarded gas: what the callee runs on it MUST count as compute, as the rest of what it runs does.
   The stipend MUST NOT lower compute either: when a value call returns, what the callee left of the stipend comes back to its caller with the rest of the callee's gas, and compute MUST NOT fall with the caller's spent regular gas.
   So compute exceeds the transaction's regular ledger by the stipends of its value calls, gas no pool of the transaction paid.
-  What a halting frame burns is not compute, with one exception: when an opcode's static gas cannot be paid, what the halting frame had left counts as compute.
+  What a halting frame burns — the regular gas it had left when it halted — MUST NOT count as compute, whatever it could not pay: a dynamic charge, an opcode's static gas, a cold access, or state or history gas that spilled past the reservoir.
   A precompile that runs out of gas counts nothing of its forward as compute: it burns the forward, a value call's stipend included, as a halting frame burns what it had left, unless it is the crossing (see Precompiles, below), and then the forward returns to its caller.
 - **The limit.**
   A read MUST set `limit = compute_at_read + cap`, with `cap` = `BLOCK_ENV_ACCESS_COMPUTE_GAS` = 20,000,000 for the block environment and the beneficiary and `ORACLE_ACCESS_COMPUTE_GAS` = 20,000,000 for the Oracle; the limit only goes down, so the most restrictive read binds.
@@ -536,12 +536,9 @@ A contract can revert with the same bytes, and so can a caller that re-raises th
 - **The crossing.**
   A regular charge that the spendable part cannot pay but the frame's whole regular gas can is the crossing: the charge MUST NOT be made, the frame's gas MUST be put back to what it was before the charge, and the frame MUST be stopped with `MegaLimitExceeded(2, limit)` (see [The Revert-Class Stop](#11-the-revert-class-stop)).
   What the frame spent before the crossing charge stays spent, and its caller MUST get back everything the frame had, the withheld part included.
-  The transaction's compute at the crossing is then at most the limit and less than the crossing charge short of it, with one exception.
+  The transaction's compute at the crossing is then at most the limit and less than the crossing charge short of it.
   A caller the stop returns into resumes held to what the limit leaves the transaction, which is less than the charge that crossed, so any regular charge of its own past that is a crossing too.
-  A frame that halts because it cannot pay an opcode's static gas counts what it had left as compute (see Compute, above), and that can take the transaction's compute past the limit without a crossing, by less than the static charge the frame failed to pay: at most 4,999 gas per such frame, `SELFDESTRUCT`'s static gas of 5,000 being the largest.
-  Its caller then resumes with no spendable gas; a caller whose whole regular gas cannot pay its next opcode's static gas either halts the same way and adds what it had left, so the overshoots accumulate along such a chain of frames, each adding less than its own static charge, with no fixed total.
-  From then on the spendable part is zero, so the next non-zero regular charge that a frame's whole regular gas can pay MUST be the crossing, and the compute stays past the limit by the overshoots together.
-  A transaction whose frames make no such charge after the overshoot ends as it would without the read, its compute past the limit.
+  A frame that halts adds nothing to the compute (see Compute, above), so no halt takes the transaction's compute past the limit: the compute after a read is at most the cap.
   A regular charge beyond the frame's whole regular gas, and every other out-of-gas, MUST halt as it would without the read.
 - **Precompiles.**
   A call to a precompile forwarded more regular gas than the frame's allowance MUST be decided from the precompile's price before it runs: priced within the allowance, it runs on its whole forward; priced past the allowance but within the forward, it MUST NOT run and is the crossing; priced past its whole forward, it runs on the forward and fails, as without the read.

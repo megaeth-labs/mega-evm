@@ -286,9 +286,9 @@ where
     /// reads inside it, and the rest is its state-gas reservoir, which the state it writes draws
     /// first.
     ///
-    /// revm builds a system call's gas here, on no intrinsic gas, and so its runtime out-of-gas
-    /// fallback, which a system call does not reach: it carries no value and its target is no
-    /// delegator. Every transaction's gas is split by the execution cap alone, the
+    /// revm builds a system call's gas here, on no intrinsic gas, and so does its runtime
+    /// out-of-gas fallback, which a system call does not reach: it carries no value and its target
+    /// is no delegator. Every transaction's gas is split by the execution cap alone, the
     /// system-address transaction's included, which is a deposit and not a system call; and under
     /// the neutral configuration a system call's is not split, as revm's own runner has it.
     fn tx_gas(&self, evm: &mut Self::Evm, init_and_floor_gas: &InitialAndFloorGas) -> GasTracker {
