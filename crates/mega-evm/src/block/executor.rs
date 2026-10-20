@@ -61,9 +61,9 @@
 //!
 //! # The pre-block observer
 //!
-//! Each pre-block step — the EIP-2935 call, the EIP-4788 call, every system-contract deploy, the
-//! read of the `SequencerRegistry`'s pending changes, the `applyPendingChanges()` call and the
-//! read of the L1 block info the block's transactions are priced against — produces an
+//! Each pre-block step — the EIP-2935 call, the EIP-4788 call, the activation block's read of each
+//! predeploy, the read of the `SequencerRegistry`'s pending changes, the `applyPendingChanges()`
+//! call and the read of the L1 block info the block's transactions are priced against — produces an
 //! [`EvmState`] that this executor commits. alloy-evm 0.36
 //! re-exports revm's `OnStateHook` (`on_state(&EvmState)`) but has no `set_state_hook` on
 //! [`BlockExecutor`] and no source tag, so this crate names the step ([`PreBlockStateSource`]) and
@@ -71,8 +71,8 @@
 //! **before** it is committed, in execution order. The sequence, with the returned states of the
 //! block's transactions and the exported block hashes and buckets, is the witness a stateless
 //! client needs: revm drops untouched accounts from the committed transition, so a caller that
-//! only saw the database after the commit would miss the read-only entries — a later block's
-//! deploys, the registry's pending slots, the L1 block info.
+//! only saw the database after the commit would miss the read-only entries — the activation
+//! block's predeploys, the registry's pending slots, the L1 block info.
 //!
 //! The L1 block info is read here because nothing else puts it in a state: op-revm prices the
 //! block's first non-deposit transaction against the L1 block contract's slots read on the

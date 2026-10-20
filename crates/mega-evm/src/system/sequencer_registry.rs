@@ -58,7 +58,9 @@ pub use mega_system_contracts::sequencer_registry::{storage_slots, ISequencerReg
 /// witness a stateless client replays the decision from, which the caller hands on whether or
 /// not a change is due. Both roles' pending slots are read, and a role's activation block only
 /// when it has a change pending. A registry that does not exist has nothing due, and its absence
-/// is what the witness records.
+/// is what the witness records; no chain Satin runs on lacks it, its activation block refusing
+/// one without the registry's code, so only a state built apart from a chain, such as a test's,
+/// reaches that answer.
 ///
 /// # Errors
 ///

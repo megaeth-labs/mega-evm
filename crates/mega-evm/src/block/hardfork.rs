@@ -242,8 +242,8 @@ impl Clone for ForkEntry {
 /// A chain's hardfork schedule.
 ///
 /// [`new`](Self::new) activates every Ethereum and Optimism fork up to and including the base
-/// Satin runs on (Osaka / Karst) at genesis, and no `MegaETH` fork:  those the caller schedules,
-/// with [`with`](Self::with) or [`with_all_activated`](Self::with_all_activated).
+/// Satin runs on (Osaka / Karst) from the first block, and no `MegaETH` fork: those the caller
+/// schedules, with [`with`](Self::with) or [`with_all_activated`](Self::with_all_activated).
 #[derive(Debug, Clone)]
 pub struct MegaHardforkConfig {
     entries: Vec<ForkEntry>,
@@ -273,12 +273,13 @@ where
 }
 
 impl MegaHardforkConfig {
-    /// A schedule with every Ethereum and Optimism fork up to Osaka / Karst active at genesis,
-    /// and no `MegaETH` fork.
+    /// A schedule with every Ethereum and Optimism fork up to Osaka / Karst active from the first
+    /// block, and no `MegaETH` fork.
     ///
     /// Karst is the base [`MegaSpecId::SATIN`] runs on, so a chain executing Satin has already
     /// passed every fork below it; the schedule states that rather than leaving the node to
-    /// repeat it.
+    /// repeat it. A chain that ran the legacy forks activated them later than its first block, by
+    /// Satin's activation, which no Satin block can tell apart from the first block.
     pub fn new() -> Self {
         let forks: Vec<(Box<dyn Hardfork>, ForkCondition)> = vec![
             (EthereumHardfork::Frontier.boxed(), ForkCondition::Block(0)),

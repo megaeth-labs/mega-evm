@@ -78,7 +78,9 @@ const ARBITRARY_PRECISION_NUMBER: &str = "$serde_json::private::Number";
 ///   here, so every reader reads it the same.
 ///
 /// The parser reads no other fork's key. Satin runs on the OP Karst fork and the Ethereum forks
-/// Karst includes, Osaka among them, and [`hardforks`](Self::hardforks) schedules those at genesis.
+/// Karst includes, Osaka among them, and [`hardforks`](Self::hardforks) schedules those as active
+/// from the first block, which no Satin block can tell apart from the file's times when they are
+/// active by `satinTime`.
 /// A node's own schedule times those forks from the file, and holds them to both halves of the
 /// timing rule [`validate_schedule`](MegaHardforks::validate_schedule) states.
 ///
@@ -140,8 +142,8 @@ impl SatinChainConfig {
     /// The hardfork schedule this configuration makes: [`MegaHardforkConfig::new`]'s base forks
     /// and Satin at [`activation_time`](Self::activation_time).
     ///
-    /// The base forks, every OP and Ethereum fork up to Karst, are at genesis here whatever the
-    /// genesis file times them at, so the schedule passes the base-fork check of
+    /// The base forks, every OP and Ethereum fork up to Karst, are active from the first block here
+    /// whatever the genesis file times them at, so the schedule passes the base-fork check of
     /// [`validate_schedule`](MegaHardforks::validate_schedule) whenever Satin activates: a node
     /// checks the file's own times against `satinTime` on its own schedule (see the
     /// [format](Self)).
