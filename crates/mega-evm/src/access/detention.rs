@@ -134,9 +134,9 @@ impl FrameFigures {
 /// ```
 ///
 /// Every regular charge an instruction makes counts, the ones a callee pays out of a stipend
-/// included, so the gas run after a read is at most the cap, but for what halting frames leave
-/// (below). The regular ledger bills the transaction its compute less the stipends, which no pool
-/// of the transaction's gas paid.
+/// included, and nothing else does, so the gas run after a read is at most the cap. The regular
+/// ledger bills the transaction its compute less the stipends, which no pool of the transaction's
+/// gas paid.
 ///
 /// A keyless deployment's call is the transaction's own frame, and runs no code: it charges its
 /// own work — the overhead of decoding the signed transaction and recovering its signer, and the
@@ -148,17 +148,11 @@ impl FrameFigures {
 /// frame that halts consumes the gas it had left, and its spill, without running anything with
 /// it. A frame answered without running that halts burns its whole gas limit: a precompile that
 /// runs out of gas counts nothing of its forward, nor of a value call's stipend, as compute. An
-/// out-of-gas zeroes what the frame had before the frame returns; the wrapper of the opcode whose
-/// charge failed notes it first, `EXP`'s and the unbounded charges of `KECCAK256` and the copies
-/// into memory included.
-///
-/// The one charge no wrapper sees is an opcode's static gas, which the interpreter's step loop
-/// makes before the opcode runs. When it fails, what the halting frame had left counts as
-/// compute: per halting frame, less than the failed charge's price, so at most 4,999, on
-/// `SELFDESTRUCT`. Burned gas is counted as compute, so the stop comes earlier, never later. A
-/// frame whose leftover takes the compute past the limit does so without a crossing, so the stop
-/// is its caller's next charge, and the regular ledger at the stop holds that leftover's part
-/// past the limit beside the limit.
+/// out-of-gas zeroes what the frame had before the frame returns; the revm fork records it first,
+/// before every deduction that fails — an opcode's static gas, which the interpreter's step loop
+/// charges before the opcode runs, included — and before a halt on a cold access the frame cannot
+/// pay, and the frame's end reads the record. A frame that drops the frame its opcode was
+/// starting records what it has once the forward is back.
 ///
 /// # Keeping the figure
 ///
@@ -203,8 +197,6 @@ pub struct Detention {
     limit: Option<u64>,
     /// The regular gas the frames that halted burned without running anything with it.
     burned: u64,
-    /// What the running frame had left when a charge failed on an out-of-gas whose halt zeroes it.
-    left_at_halt: Option<u64>,
     /// The frames' figures, for a transaction detention holds.
     figures: FrameFigures,
 }
@@ -234,7 +226,6 @@ impl Detention {
         self.accessed = VolatileDataAccess::empty();
         self.limit = None;
         self.burned = 0;
-        self.left_at_halt = None;
         self.figures.clear();
     }
 
@@ -383,13 +374,6 @@ impl Detention {
         }
     }
 
-    /// Notes what the running frame has left, `left`, when an opcode's charge failed on an
-    /// out-of-gas the halt after it zeroes: what the halt burns rather than what the frame ran.
-    #[inline]
-    pub(crate) const fn note_halt(&mut self, left: u64) {
-        self.left_at_halt = Some(left);
-    }
-
     /* The frame lifecycle */
 
     /// The frame at `depth`, whose gas is `gas`, is about to run: for the first time, or again
@@ -433,7 +417,11 @@ impl Detention {
     }
 
     /// The frame at `depth` returns `result` with `gas`, after it ran. The switch turns back on if
-    /// the frame, or a frame below it, turned it off. A frame that halts burns what it had left.
+    /// the frame, or a frame below it, turned it off. A frame that halts burns what it had left:
+    /// for an out-of-gas, whose halt zeroed the frame's gas, the regular gas the revm fork
+    /// recorded before the failed charge, or before the halt when no charge failed
+    /// (`failed_charge_remaining`); for any other halt, which zeroes nothing, the gas the frame
+    /// returns.
     ///
     /// Returns the stop when the frame ran out of gas on a charge the withheld part of its gas
     /// would have paid ([`stop`](Self::stop)): the frame crossed the limit, and must revert with
@@ -446,7 +434,6 @@ impl Detention {
         gas: &mut Gas,
         depth: usize,
     ) -> Option<ComputeStop> {
-        let left_at_halt = self.left_at_halt.take();
         if self.disabled_from.is_some_and(|from| from >= depth) {
             self.disabled_from = None;
         }
@@ -459,7 +446,7 @@ impl Detention {
         }
         if result.is_halt() {
             // The settlement rolls the spill back into regular gas and burns it all.
-            let left = left_at_halt.unwrap_or_else(|| gas.remaining());
+            let left = gas.failed_charge_remaining().unwrap_or_else(|| gas.remaining());
             self.burned = self.burned.saturating_add(left).saturating_add(gas.state_gas_spilled());
         }
         None
@@ -880,7 +867,6 @@ mod tests {
         detention.on_frame_run(&mut frame, 0);
         detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0);
         assert!(!frame.record_regular_cost(100_000_001));
-        detention.note_halt(frame.remaining());
         frame.spend_all();
         assert_eq!(detention.on_frame_end(InstructionResult::OutOfGas, &mut frame, 0), None);
         assert_eq!(detention.burned, 100_000_000);
@@ -1017,7 +1003,7 @@ mod tests {
 
     /// What a halting child burns is not compute: its caller's compute after it returns is what
     /// the child ran, not the gas the child was given — whether the halt left the gas in place or
-    /// zeroed it after the child's wrapper noted it.
+    /// zeroed it after the failed charge recorded what the child had.
     #[test]
     fn test_what_a_halt_burns_is_not_compute() {
         for zeroed in [false, true] {
@@ -1031,7 +1017,7 @@ mod tests {
             assert!(child.record_regular_cost(1_000));
             assert!(child.record_state_cost(3_000));
             let result = if zeroed {
-                detention.note_halt(child.remaining());
+                assert!(!child.record_regular_cost(u64::MAX));
                 child.spend_all();
                 InstructionResult::OutOfGas
             } else {

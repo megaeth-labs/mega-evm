@@ -434,8 +434,7 @@ pub enum LimitCheck {
         /// transaction's value calls, gas nobody paid: gas detention stops a frame on a regular
         /// charge its spendable gas could not pay, does not make it, and puts the frame's gas
         /// back to what it had before it. The charge's size is not kept, so this is at most the
-        /// limit, unless a halting frame's leftover, counted as compute, took the transaction past
-        /// it before the charge.
+        /// limit.
         used: u64,
         /// Whether the limit is a frame budget rather than a transaction-level limit.
         frame_local: bool,

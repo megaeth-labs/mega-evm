@@ -44,16 +44,14 @@
 //!
 //! Compute is the regular gas the transaction spends on what it runs, read off revm's `Gas`: state
 //! and history gas that spilled onto regular gas are not compute, gas withheld from regular
-//! charges is never spent, and what a halting frame burns is not compute either ([`Detention`]).
-//! The one burn counted as compute is what a frame has left when an opcode's static gas fails,
-//! which no wrapper sees: per halting frame, under the failed charge's price (at most 4,999, on
-//! `SELFDESTRUCT`). Burned gas is counted as compute, so the stop comes earlier, never later.
-//! What a callee runs on a value call's stipend is compute, as everything a frame runs is: compute
-//! counts every regular charge an instruction makes, whoever funds it, so the gas run after a read
-//! is at most the cap, but for what halting frames leave. The stipend itself is gas nobody paid,
-//! so the regular ledger bills the transaction its compute less the stipends of its value calls.
-//! A precompile that runs out of gas counts nothing of its forward: it burns it, as a halting
-//! frame burns what it has left.
+//! charges is never spent, and what a halting frame burns is not compute either ([`Detention`]),
+//! whatever charge it failed on, an opcode's static gas included: the revm fork records what the
+//! frame had before the halt zeroed it. What a callee runs on a value call's stipend is compute, as
+//! everything a frame runs is: compute counts every regular charge an instruction makes, whoever
+//! funds it, and nothing else, so the gas run after a read is at most the cap. The stipend itself
+//! is gas nobody paid, so the regular ledger bills the transaction its compute less the stipends of
+//! its value calls. A precompile that runs out of gas counts nothing of its forward: it burns it,
+//! as a halting frame burns what it has left.
 //!
 //! A read sets a limit: the transaction's compute at the read plus the read's cap. The limit only
 //! goes down, so the most restrictive of several reads is the one that binds, whatever their
