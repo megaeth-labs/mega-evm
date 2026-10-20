@@ -37,6 +37,24 @@ pub(crate) enum HistoryBytes {
     Taken(u64),
 }
 
+/// What a completed write keeps, as the lanes and the journal's ledger both count it: what it adds,
+/// what it takes back, and the log bytes among what it adds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WriteCount {
+    /// What the write adds: a record, a log's bytes, a transfer log.
+    pub(crate) added: LimitUsage,
+    /// What the write takes back: the record of a slot written back to its original value.
+    pub(crate) taken: LimitUsage,
+    /// The bytes of [`added`](Self::added) that are a log's.
+    pub(crate) log_bytes: u64,
+}
+
+impl WriteCount {
+    /// Nothing kept.
+    pub(crate) const NONE: Self =
+        Self { added: LimitUsage::ZERO, taken: LimitUsage::ZERO, log_bytes: 0 };
+}
+
 impl RecordEffect {
     /// The history bytes this effect appends or takes back.
     pub(crate) const fn history_bytes(self) -> HistoryBytes {

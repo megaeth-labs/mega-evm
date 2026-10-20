@@ -1,14 +1,29 @@
-//! The journal of the Satin engine: revm's journal behind a wrapper of the engine's own.
+//! The journal of the Satin engine: revm's journal, with the ledger of what the transaction's own
+//! execution keeps beside it.
 //!
 //! [`MegaJournal`] owns revm's [`Journal`] and implements [`JournalTr`] by delegating every method
-//! to it, the configuration switches included: a switch kept at the trait's no-op default would
-//! silently turn a journal feature off. The one default kept is `clear`'s, which finalizes through
-//! `finalize`. The impl denies `clippy::missing_trait_methods`, so a method `JournalTr` gains is a
-//! lint error here until it is given its rule.
+//! to it. A handful of methods also tell the ledger what they did, under one rule:
+//!
+//! - **Counted writes.** A call's value transfer (`transfer_loaded`) and a creation's account
+//!   checkpoint (`create_account_checkpoint`) are counted when revm makes them for a frame start,
+//!   inside the start window the engine opens around revm's frame start, and only there. Every
+//!   other write — `sstore`, `log`, `selfdestruct`, a `transfer`, anything through an account
+//!   handle — is forwarded and counts nothing: a write an opcode completed reaches the ledger from
+//!   the Host's completed-write hook, and a write a tool or a precompile makes is not the
+//!   transaction's own execution.
+//! - **Levels and the transaction's end.** `checkpoint`, `checkpoint_commit` and
+//!   `checkpoint_revert` open and close the ledger's levels with revm's checkpoints; `commit_tx`,
+//!   `discard_tx` and `finalize` close them all.
+//! - **Everything else is forwarded**, the configuration switches included: a switch kept at the
+//!   trait's no-op default would silently turn a journal feature off. The one default kept is
+//!   `clear`'s, which finalizes through the hooked `finalize`.
+//!
+//! The impl denies `clippy::missing_trait_methods`, so a method `JournalTr` gains is a lint error
+//! here until it is given its rule.
 //!
 //! [`JournalExt::journal`] hands out revm's own entries, and the journal dereferences to revm's
 //! [`Journal`] read-only, so code that reads revm's journal state keeps reading it. There is no
-//! mutable dereference: a write goes through [`JournalTr`], where the wrapper sees it.
+//! mutable dereference: a write that bypassed the methods above could not be seen by the ledger.
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
@@ -34,8 +49,13 @@ use revm::{
     Database, Journal, JournalEntry,
 };
 
-/// The journal of the Satin engine: revm's journal behind a wrapper of the engine's own. See the
-/// module documentation.
+use crate::{
+    limit::{ledger_assert, Ledger, Mark, StartFacts, StartReport},
+    LimitUsage,
+};
+
+/// The journal of the Satin engine: revm's journal, and the ledger of what the transaction's own
+/// execution keeps. See the module documentation.
 ///
 /// It is the journal of every [`MegaContext`](crate::MegaContext). A node that names the
 /// context's journal type names this one; one that reads revm's journal state reads it through the
@@ -44,12 +64,74 @@ use revm::{
 pub struct MegaJournal<DB: Database> {
     /// revm's journal, which holds the state.
     revm: Journal<DB>,
+    /// The ledger, kept in step with `revm`'s checkpoints.
+    ledger: Ledger,
 }
 
 impl<DB: Database> MegaJournal<DB> {
+    /// What the journal's ledger holds the running (or last) transaction to keep: its data-size
+    /// bytes and write records.
+    ///
+    /// The engine's decisions are taken on
+    /// [`AdditionalLimit::usage`](crate::AdditionalLimit::usage), which counts the same writes; the
+    /// two agree wherever the transaction's own execution, rather than a tool, took its state back.
+    pub fn ledger_usage(&self) -> LimitUsage {
+        self.ledger.usage()
+    }
+
+    /// The ledger.
+    pub(crate) const fn ledger(&self) -> &Ledger {
+        &self.ledger
+    }
+
+    /// The ledger, mutably.
+    pub(crate) const fn ledger_mut(&mut self) -> &mut Ledger {
+        &mut self.ledger
+    }
+
     /// Consumes the journal and returns revm's.
     pub fn into_revm(self) -> Journal<DB> {
         self.revm
+    }
+
+    /// Opens the start window for the frame start `facts` describes, which revm decides next.
+    pub(crate) fn open_start(&mut self, facts: StartFacts) {
+        self.ledger.open_start(facts);
+    }
+
+    /// Closes the start window, and reports what the start counted.
+    pub(crate) fn close_start(&mut self) -> StartReport {
+        self.ledger.close_start()
+    }
+
+    /// Marks where the journal and the ledger stand, without changing the journal's depth.
+    pub(crate) fn mark(&mut self) -> Mark {
+        let position = self.revm.checkpoint();
+        self.revm.checkpoint_commit();
+        self.ledger.mark(position)
+    }
+
+    /// The mark the frame revm just built is taken back to when it is rewritten into a failure
+    /// ([`Ledger::frame_start_mark`]).
+    pub(crate) fn frame_start_mark(&self) -> Option<Mark> {
+        self.ledger.frame_start_mark()
+    }
+
+    /// Takes back every journal entry, log and self-destruct made since `mark`, as revm takes back
+    /// a frame that fails, and the ledger with them; the journal's depth is left as it is.
+    pub(crate) fn revert_to(&mut self, mark: &Mark) {
+        let _ = self.revm.checkpoint();
+        self.revm.checkpoint_revert(mark.position);
+        self.ledger.revert_to(mark);
+    }
+
+    /// Asserts the ledger holds a level for every checkpoint revm's journal holds open.
+    #[inline]
+    fn assert_levels(&self) {
+        ledger_assert!(
+            self.ledger.depth() == self.revm.depth,
+            "the ledger holds one level per open checkpoint"
+        );
     }
 }
 
@@ -71,9 +153,12 @@ impl<DB: Database> JournalTr for MegaJournal<DB> {
         DB: 'a;
 
     fn new(database: DB) -> Self {
-        Self { revm: Journal::new(database) }
+        Self { revm: Journal::new(database), ledger: Ledger::default() }
     }
 
+    // Forwarded: reads, transient storage, the switches, account handles, and the writes the
+    // ledger does not count here. A write an opcode completed is counted by the Host's
+    // completed-write hook; any other is not the transaction's own execution.
     delegate! {
         to self.revm {
             fn db_mut(&mut self) -> &mut DB;
@@ -126,6 +211,7 @@ impl<DB: Database> JournalTr for MegaJournal<DB> {
             fn set_amsterdam_eip7708_enabled(&mut self, enabled: bool);
             fn set_legacy_journal_semantics(&mut self, enabled: bool);
             fn touch_account(&mut self, address: Address);
+            // A transfer that is not a frame start's: revm starts frames with `transfer_loaded`.
             fn transfer(
                 &mut self,
                 from: Address,
@@ -179,25 +265,6 @@ impl<DB: Database> JournalTr for MegaJournal<DB> {
             fn code(&mut self, address: Address) -> Result<StateLoad<Bytes>, DB::Error>;
             fn code_hash(&mut self, address: Address) -> Result<StateLoad<B256>, DB::Error>;
             fn depth(&self) -> usize;
-            fn transfer_loaded(
-                &mut self,
-                from: Address,
-                to: Address,
-                balance: U256,
-            ) -> Option<TransferError>;
-            fn create_account_checkpoint(
-                &mut self,
-                caller: Address,
-                address: Address,
-                balance: U256,
-                spec_id: SpecId,
-            ) -> Result<JournalCheckpoint, TransferError>;
-            fn checkpoint(&mut self) -> JournalCheckpoint;
-            fn checkpoint_commit(&mut self);
-            fn checkpoint_revert(&mut self, checkpoint: JournalCheckpoint);
-            fn commit_tx(&mut self);
-            fn discard_tx(&mut self);
-            fn finalize(&mut self) -> EvmState;
             fn load_account_info_skip_cold_load(
                 &mut self,
                 address: Address,
@@ -207,7 +274,74 @@ impl<DB: Database> JournalTr for MegaJournal<DB> {
         }
     }
 
-    /// The trait's own default: it finalizes through `finalize`.
+    /// Counted inside a call's start window: the records the transfer makes and its transfer log.
+    fn transfer_loaded(
+        &mut self,
+        from: Address,
+        to: Address,
+        balance: U256,
+    ) -> Option<TransferError> {
+        let logs = self.revm.logs().len();
+        let refused = self.revm.transfer_loaded(from, to, balance);
+        let logged = self.revm.logs().len() > logs;
+        self.ledger.on_transfer(from, to, balance, refused.is_some(), logged);
+        refused
+    }
+
+    /// Counted inside a creation's start window: the creator's nonce record before the creation's
+    /// level opens, then the created account and the transfer log on it.
+    fn create_account_checkpoint(
+        &mut self,
+        caller: Address,
+        address: Address,
+        balance: U256,
+        spec_id: SpecId,
+    ) -> Result<JournalCheckpoint, TransferError> {
+        let start = self.ledger.before_creation();
+        let logs = self.revm.logs().len();
+        let opened = self.revm.create_account_checkpoint(caller, address, balance, spec_id);
+        let logged = self.revm.logs().len() > logs;
+        self.ledger.after_creation(start, address, opened.ok(), logged);
+        self.assert_levels();
+        opened
+    }
+
+    fn checkpoint(&mut self) -> JournalCheckpoint {
+        let checkpoint = self.revm.checkpoint();
+        self.ledger.on_checkpoint(checkpoint);
+        self.assert_levels();
+        checkpoint
+    }
+
+    fn checkpoint_commit(&mut self) {
+        self.revm.checkpoint_commit();
+        self.ledger.on_commit();
+        self.assert_levels();
+    }
+
+    fn checkpoint_revert(&mut self, checkpoint: JournalCheckpoint) {
+        self.revm.checkpoint_revert(checkpoint);
+        self.ledger.on_revert(checkpoint);
+        self.assert_levels();
+    }
+
+    fn commit_tx(&mut self) {
+        self.revm.commit_tx();
+        self.ledger.on_transaction_end();
+    }
+
+    fn discard_tx(&mut self) {
+        self.revm.discard_tx();
+        self.ledger.on_transaction_end();
+    }
+
+    fn finalize(&mut self) -> EvmState {
+        let state = self.revm.finalize();
+        self.ledger.on_transaction_end();
+        state
+    }
+
+    /// The trait's own default: it finalizes through the hooked `finalize`.
     fn clear(&mut self) {
         let _ = self.finalize();
     }
@@ -224,12 +358,121 @@ impl<DB: Database> JournalExt for MegaJournal<DB> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::MemoryDatabase;
+    use crate::{
+        limit::{Mark, StartSide},
+        test_utils::MemoryDatabase,
+        EvmTxRuntimeLimits, LimitCheck, LimitKind, TRANSFER_LOG_SIZE, WRITE_RECORD_SIZE,
+    };
     use alloy_primitives::address;
+    use revm::{
+        context_interface::journaled_state::account::JournaledAccountTr,
+        primitives::Log as PrimitiveLog,
+    };
 
+    const SENDER: Address = address!("00000000000000000000000000000000000a0001");
+    /// The transaction's own frame.
     const A: Address = address!("00000000000000000000000000000000000a0002");
     const B: Address = address!("00000000000000000000000000000000000a0003");
     const C: Address = address!("00000000000000000000000000000000000a0004");
+    /// The account a creation from [`A`] makes.
+    const CREATED: Address = address!("00000000000000000000000000000000000a0005");
+    const BODY: u64 = 310;
+
+    /// The transaction's bytes before any frame: the body.
+    fn body() -> LimitUsage {
+        LimitUsage { data_size: BODY, write_records: 0 }
+    }
+
+    /// `n` write records and `logs` transfer logs on top of the body.
+    fn kept(records: u64, logs: u64) -> LimitUsage {
+        LimitUsage {
+            data_size: BODY + records * WRITE_RECORD_SIZE + logs * TRANSFER_LOG_SIZE,
+            write_records: records,
+        }
+    }
+
+    /// A journal on Satin's base spec, with transfer logs, every account funded, holding a
+    /// transaction from [`SENDER`] under `limits`.
+    fn journal(limits: EvmTxRuntimeLimits) -> MegaJournal<MemoryDatabase> {
+        let db = [SENDER, A, B, C].into_iter().fold(MemoryDatabase::default(), |db, account| {
+            db.account_balance(account, U256::from(10))
+        });
+        let mut journal = MegaJournal::new(db);
+        journal.set_spec_id(SpecId::OSAKA);
+        journal.set_amsterdam_eip7708_enabled(true);
+        for account in [SENDER, A, B, C, CREATED] {
+            journal.load_account(account).unwrap();
+        }
+        journal.ledger_mut().set_limits(limits);
+        journal.ledger_mut().begin_transaction(false, true, BODY);
+        journal
+    }
+
+    /// Starts a call from `caller` to `target` at `depth` as revm starts one: its checkpoint, then
+    /// its value transfer. Returns the frame's checkpoint and what the start counted.
+    fn start_call(
+        journal: &mut MegaJournal<MemoryDatabase>,
+        depth: usize,
+        caller: Address,
+        target: Address,
+        value: u64,
+    ) -> (JournalCheckpoint, StartReport) {
+        let value = U256::from(value);
+        let facts =
+            StartFacts { depth, caller, target: Some(target), transfers_value: !value.is_zero() };
+        journal.open_start(facts);
+        let checkpoint = journal.checkpoint();
+        assert!(journal.transfer_loaded(caller, target, value).is_none());
+        (checkpoint, journal.close_start())
+    }
+
+    /// Starts a creation from `creator` at `depth` as revm starts one: the nonce bump, then the
+    /// account checkpoint.
+    fn start_creation(
+        journal: &mut MegaJournal<MemoryDatabase>,
+        depth: usize,
+        creator: Address,
+        value: u64,
+    ) -> (JournalCheckpoint, StartReport) {
+        let value = U256::from(value);
+        let facts =
+            StartFacts { depth, caller: creator, target: None, transfers_value: !value.is_zero() };
+        journal.open_start(facts);
+        let _ = journal.load_account_mut(creator).unwrap().data.bump_nonce();
+        let checkpoint =
+            journal.create_account_checkpoint(creator, CREATED, value, SpecId::OSAKA).unwrap();
+        (checkpoint, journal.close_start())
+    }
+
+    /// The journal's own write methods count nothing, inside a frame start's window and outside
+    /// it: a write an opcode completed is counted by the Host's completed-write hook, and any other
+    /// is not the transaction's own execution.
+    #[test]
+    fn test_the_journals_own_writes_count_nothing() {
+        let mut journal = journal(EvmTxRuntimeLimits::no_limits());
+        let writes = |journal: &mut MegaJournal<MemoryDatabase>| {
+            journal.sstore(A, U256::from(1), U256::from(1)).unwrap();
+            journal.sstore_skip_cold_load(A, U256::from(2), U256::from(1), false).unwrap();
+            journal.log(PrimitiveLog::new_unchecked(A, Vec::new(), Bytes::new()));
+            assert_eq!(journal.transfer(A, B, U256::from(1)).unwrap(), None);
+            journal.selfdestruct(C, B, false).unwrap();
+        };
+        let _ = start_call(&mut journal, 0, SENDER, A, 0);
+        writes(&mut journal);
+        assert_eq!(journal.ledger_usage(), body(), "outside a start's window");
+
+        journal.open_start(StartFacts {
+            depth: 1,
+            caller: A,
+            target: Some(B),
+            transfers_value: false,
+        });
+        let _ = journal.checkpoint();
+        writes(&mut journal);
+        let _ = journal.close_start();
+        assert_eq!(journal.ledger_usage(), body(), "inside a start's window");
+        assert!(!journal.logs().is_empty(), "the writes reached revm's journal");
+    }
 
     /// Every configuration switch reaches revm's journal: a switch kept at the trait's no-op
     /// default would turn a journal feature off without a word.
@@ -264,12 +507,167 @@ mod tests {
     /// write.
     #[test]
     fn test_the_journal_extension_hands_out_revms_entries() {
-        let mut journal = MegaJournal::new(MemoryDatabase::default());
-        journal.set_spec_id(SpecId::OSAKA);
-        journal.load_account(A).unwrap();
+        let mut journal = journal(EvmTxRuntimeLimits::no_limits());
         journal.sstore(A, U256::from(1), U256::from(1)).unwrap();
         let entries = JournalExt::journal(&journal);
         assert!(!entries.is_empty());
         assert_eq!(entries, JournalExt::journal(&*journal), "revm's own");
+    }
+
+    /// The ledger holds a level for every checkpoint revm's journal holds open: a commit closes
+    /// one and keeps what was counted inside it, a revert closes one and takes it back, and
+    /// `clear`, the trait's default, closes them all through `finalize`.
+    #[test]
+    fn test_the_levels_follow_revms_checkpoints() {
+        let mut journal = journal(EvmTxRuntimeLimits::no_limits());
+        let _ = start_call(&mut journal, 0, SENDER, A, 0);
+        let (checkpoint, _) = start_call(&mut journal, 1, A, B, 1);
+        assert_eq!((journal.ledger().depth(), journal.depth()), (2, 2));
+        assert_eq!(journal.ledger_usage(), kept(2, 1), "B's record, A's, and the transfer log");
+        journal.ledger_mut().frame_returning();
+        journal.checkpoint_revert(checkpoint);
+        assert_eq!((journal.ledger().depth(), journal.depth()), (1, 1));
+        assert_eq!(journal.ledger_usage(), body(), "the revert takes the start back");
+
+        let _ = start_call(&mut journal, 1, A, B, 1);
+        journal.ledger_mut().frame_returning();
+        journal.checkpoint_commit();
+        assert_eq!(journal.ledger_usage(), kept(2, 1), "the commit keeps it");
+        let _ = journal.checkpoint();
+        journal.clear();
+        assert_eq!((journal.ledger().depth(), journal.depth()), (0, 0));
+        assert_eq!(journal.ledger_usage(), kept(2, 1), "readable until the next transaction");
+    }
+
+    /// A tool's checkpoint around a frame start — opened before the start, closed after the frame
+    /// returned — is a rollback level the frame's level sits above. Committed, it changes nothing:
+    /// the frame's records stand, its refund is none, and its caller's account stays recorded, so
+    /// a later value call from it records only its recipient. Reverted, it takes back what the
+    /// frame kept: the records, the caller's flag and the frame's refund all go back to before
+    /// the start, and the later call records the caller again.
+    #[test]
+    fn test_a_tool_checkpoint_around_a_frame_start_closes_in_order() {
+        for reverted in [false, true] {
+            let case = if reverted { "reverted" } else { "committed" };
+            let mut journal = journal(EvmTxRuntimeLimits::no_limits());
+            let _ = start_call(&mut journal, 0, SENDER, A, 0);
+            let tool = journal.checkpoint();
+            let (_, report) = start_call(&mut journal, 1, A, B, 1);
+            assert_eq!(
+                (report.on_level, report.caller_on_level, report.transfer_log),
+                (1, true, true),
+                "{case}: B's record, A's, and the log"
+            );
+            journal.ledger_mut().frame_returning();
+            journal.checkpoint_commit();
+            let mut side = StartSide::new(1, 7, 11);
+            side.attach(report, None);
+            if reverted {
+                journal.checkpoint_revert(tool);
+            } else {
+                journal.checkpoint_commit();
+            }
+            let refund = if reverted { 7 + 11 } else { 0 };
+            assert_eq!(side.refund(journal.ledger()), refund, "{case}: B's refund");
+            assert_eq!(journal.ledger_usage(), if reverted { body() } else { kept(2, 1) });
+
+            let (_, later) = start_call(&mut journal, 1, A, C, 1);
+            assert_eq!(later.caller_on_level, reverted, "{case}: A's flag");
+            journal.ledger_mut().frame_returning();
+            journal.checkpoint_commit();
+            let records = if reverted { 2 } else { 3 };
+            assert_eq!(
+                journal.ledger_usage(),
+                kept(records, if reverted { 1 } else { 2 }),
+                "{case}"
+            );
+        }
+    }
+
+    /// A revert that would close a level from below — a checkpoint taken before a frame started,
+    /// reverted while the frame still runs — is not supported, and trips.
+    #[test]
+    #[cfg(any(debug_assertions, feature = "ledger-shadow"))]
+    #[should_panic(expected = "a revert closes the latest level")]
+    fn test_a_revert_below_a_running_frame_trips() {
+        let mut journal = journal(EvmTxRuntimeLimits::no_limits());
+        let _ = start_call(&mut journal, 0, SENDER, A, 0);
+        let tool = journal.checkpoint();
+        let _ = start_call(&mut journal, 1, A, B, 1);
+        journal.checkpoint_revert(tool);
+    }
+
+    /// A creation's budget and usage are measured from before its creator's nonce record, and its
+    /// level opens after it: with `R` bytes left to an unrecorded creator, the creation gets
+    /// `R − ⌈R / 50⌉` and starts with the created account's record and the creator's, 80 bytes.
+    /// At 81 bytes that is a budget of 79, which the start crosses; at 100, a budget of 98, which
+    /// leaves the creation 18 bytes. An endowment adds its transfer log to the start.
+    #[test]
+    fn test_a_creation_is_budgeted_from_before_its_creators_record() {
+        for (left, value, budget, start) in
+            [(81, 0, 79, 80), (100, 0, 98, 80), (81 + 160, 1, 236, 240), (100 + 160, 1, 254, 240)]
+        {
+            let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(BODY + left);
+            let mut journal = journal(limits);
+            let _ = start_call(&mut journal, 0, SENDER, A, 0);
+            let (_, report) = start_creation(&mut journal, 1, A, value);
+            let case = format!("{left} bytes left, value {value}");
+            assert!(report.creator, "{case}: the creator's record is the start's");
+            let used = LimitUsage { data_size: start, write_records: 2 };
+            assert_eq!(journal.ledger().running_budget(), Some((budget, used)), "{case}");
+            let verdict = if start > budget {
+                LimitCheck::ExceedsLimit {
+                    kind: LimitKind::DataSize,
+                    limit: budget,
+                    used: start,
+                    frame_local: true,
+                }
+            } else {
+                LimitCheck::WithinLimit
+            };
+            assert_eq!(report.verdict, Some(verdict), "{case}");
+        }
+    }
+
+    /// A creation's start mark is its level's opening — after the creator's record — never where
+    /// its usage is measured from: a creation rewritten into a failure is taken back to it, and
+    /// keeps its creator's record and flag, as a creation that fails does.
+    #[test]
+    fn test_a_creations_start_mark_keeps_its_creators_record() {
+        let mut journal = journal(EvmTxRuntimeLimits::no_limits());
+        let _ = start_call(&mut journal, 0, SENDER, A, 0);
+        let (checkpoint, _) = start_creation(&mut journal, 1, A, 1);
+        let mark: Mark = journal.frame_start_mark().expect("the creation's level is open");
+        assert_eq!(mark.position, checkpoint, "the creation's own checkpoint");
+        journal.ledger_mut().frame_returning();
+        journal.checkpoint_commit();
+        assert_eq!(journal.ledger_usage(), kept(2, 1));
+
+        journal.revert_to(&mark);
+        assert_eq!(journal.ledger_usage(), kept(1, 0), "the creator's record stays");
+        let (_, later) = start_creation(&mut journal, 1, A, 0);
+        assert!(!later.creator, "A stays recorded");
+    }
+
+    /// The hypothetical start a call gas detention answers without running is held to the limits
+    /// as the start revm would have made: the same records, the transfer log of the value it moves,
+    /// the same budget.
+    #[test]
+    fn test_a_hypothetical_start_is_held_as_the_start_revm_makes() {
+        for (depth, value, limit) in [(1, 1, 239), (1, 1, 240), (1, 0, 0), (0, 1, 199), (0, 1, 200)]
+        {
+            let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(BODY + limit);
+            let mut journal = journal(limits);
+            let caller = if depth == 0 {
+                SENDER
+            } else {
+                let _ = start_call(&mut journal, 0, SENDER, A, 0);
+                A
+            };
+            let facts = StartFacts { depth, caller, target: Some(B), transfers_value: value != 0 };
+            let hypothetical = journal.ledger().hypothetical_start(&facts);
+            let (_, report) = start_call(&mut journal, depth, caller, B, value);
+            assert_eq!(Some(hypothetical), report.verdict, "depth {depth}, value {value}, {limit}");
+        }
     }
 }

@@ -109,7 +109,7 @@
 
 use revm::{
     context::{ContextTr, JournalTr},
-    context_interface::{cfg::StateGasCharge, journaled_state::JournalCheckpoint, Host},
+    context_interface::{cfg::StateGasCharge, Host},
     handler::FrameResult,
     inspector::{handler::frame_end, JournalExt, NoOpInspector},
     interpreter::{
@@ -120,7 +120,7 @@ use revm::{
     Database, Inspector,
 };
 
-use crate::{synthetic_frame_result, ExternalEnvTypes, MegaContext};
+use crate::{limit::Mark, synthetic_frame_result, ExternalEnvTypes, MegaContext};
 
 /// A declaration, made in source about one inspector type, that none of its callbacks writes
 /// anything back to the EVM: nothing to an interpreter's gas or pending action, nothing to a
@@ -523,9 +523,10 @@ pub(crate) enum ResultSource {
     /// journal.
     Inspector,
     /// The engine produced it — a frame that ran, or a start revm or the engine answered without
-    /// building a frame — and what the frame journaled begins at the checkpoint: the frame's own,
-    /// or where the journal stood when the start began.
-    Engine(JournalCheckpoint),
+    /// building a frame — and what the frame journaled begins at the mark: the frame's own
+    /// checkpoint, or where the journal stood when the start began, with the ledger as it stood
+    /// there.
+    Engine(Mark),
 }
 
 /// Hands a frame's end to the inspector, then settles what its rewrite does not change.
@@ -569,9 +570,9 @@ pub(crate) fn frame_end_checked<DB, ExtEnvs, INTR, INSP>(
     }
     let answered = match source {
         ResultSource::Inspector => true,
-        ResultSource::Engine(checkpoint) => {
+        ResultSource::Engine(mark) => {
             if before.is_ok() && !frame_result.instruction_result().is_ok() {
-                revert_journal_to(context, checkpoint);
+                context.journal_mut().revert_to(&mark);
             }
             false
         }
@@ -638,34 +639,12 @@ fn settle_kept_nothing<DB: Database, ExtEnvs: ExternalEnvTypes>(
     let upfront = upfront.map_or(Some(0), |charge| context.state_gas_charge(charge));
     let history =
         if depth == 0 { context.additional_limit.top_level_write_record_gas() } else { 0 };
+    #[cfg(feature = "ledger-shadow")]
+    context.additional_limit.shadow_note_top_level_refund(history);
     let gas = result.gas_mut();
     gas.refill_reservoir(upfront.unwrap_or_default());
     gas.refill_history(history);
     context.additional_limit.discard_returning_lane();
-}
-
-/// Where the journal stands: the checkpoint a frame starting now would take, taken without
-/// changing the journal's depth.
-#[inline]
-pub(crate) fn journal_position<DB: Database, ExtEnvs: ExternalEnvTypes>(
-    context: &mut MegaContext<DB, ExtEnvs>,
-) -> JournalCheckpoint {
-    let journal = context.journal_mut();
-    let checkpoint = journal.checkpoint();
-    journal.checkpoint_commit();
-    checkpoint
-}
-
-/// Takes back every journal entry, log and self-destruct made since `checkpoint`, as revm takes
-/// back a frame that fails, and leaves the journal's depth as it is: the frame's own checkpoint was
-/// already closed, so one is opened for the revert to close.
-pub(crate) fn revert_journal_to<DB: Database, ExtEnvs: ExternalEnvTypes>(
-    context: &mut MegaContext<DB, ExtEnvs>,
-    checkpoint: JournalCheckpoint,
-) {
-    let journal = context.journal_mut();
-    let _ = journal.checkpoint();
-    journal.checkpoint_revert(checkpoint);
 }
 
 /// Sets `result`'s upfront-charge flags to those of `input`, the frame it answers: what revm's

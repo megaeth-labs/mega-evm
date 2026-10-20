@@ -17,6 +17,11 @@
 //! counted once the opcode completed, in the Host's completed-write hook, which revm calls after
 //! every charge the opcode makes.
 //!
+//! The journal ([`MegaJournal`](crate::MegaJournal)) counts the same quantities in its ledger, at
+//! the journal's writes and from the same hooks, and revm's checkpoint reverts rewind it. The lanes
+//! take every decision; under the `ledger-shadow` feature the two are held to each other wherever
+//! they must agree, and a mismatch panics.
+//!
 //! # The data-size limit
 //!
 //! A transaction is held to [`EvmTxRuntimeLimits::tx_data_size_limit`] and every frame to a
@@ -130,10 +135,16 @@
 //!   an over-charge, never an under-charge.
 
 mod frame_limit;
+mod ledger;
 #[allow(clippy::module_inception)]
 mod limit;
 mod record;
+#[cfg(feature = "ledger-shadow")]
+pub(crate) mod shadow;
 
+#[cfg(test)]
+pub(crate) use ledger::StartSide;
+pub(crate) use ledger::{ledger_assert, Ledger, Mark, StartFacts, StartReport};
 pub use limit::AdditionalLimit;
 pub(crate) use limit::FrameStartRecords;
 pub(crate) use record::HistoryBytes;

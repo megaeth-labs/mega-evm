@@ -92,6 +92,16 @@ pub(crate) fn intercept<DB: Database, ExtEnvs: ExternalEnvTypes>(
     }
     let payload = inputs.input.bytes(&*ctx);
     let check = ctx.additional_limit.record_hint_bytes(payload.len() as u64);
+    let journaled = ctx.inner.journaled_state.ledger_mut().admit_hint(payload.len() as u64);
+    #[cfg(feature = "ledger-shadow")]
+    {
+        use crate::limit::shadow;
+        let ledger = ctx.inner.journaled_state.ledger();
+        shadow::verdict(Some(check), Some(journaled), ledger, "an Oracle hint");
+        shadow::agree(&ctx.additional_limit, ledger, "an Oracle hint");
+    }
+    #[cfg(not(feature = "ledger-shadow"))]
+    let _ = journaled;
     if check.exceeded_limit() {
         let output = ctx.additional_limit.note_frame_stop(&check);
         return Some(synthetic_call_result(inputs, InstructionResult::Revert, output));

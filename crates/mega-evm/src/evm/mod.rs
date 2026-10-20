@@ -223,7 +223,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
 
     /// Enforces `limits` on every transaction this EVM runs from now on.
     pub const fn set_tx_runtime_limits(&mut self, limits: crate::EvmTxRuntimeLimits) {
-        self.inner.ctx.additional_limit.set_limits(limits);
+        self.inner.ctx.set_tx_runtime_limits(limits);
     }
 
     /// The limits every transaction this EVM runs is held to.

@@ -250,7 +250,29 @@ fn take_back_bump<DB: Database, ExtEnvs: ExternalEnvTypes>(
 ) -> Result<(), ContextError<DB::Error>> {
     ctx.journal_mut().load_account_mut(started.signer)?.data.set_nonce(started.signer_nonce);
     let moved_value = started.moves_value && result.is_ok();
-    if !moved_value && ctx.additional_limit.take_back_creator_record() {
+    if moved_value {
+        return Ok(());
+    }
+    let taken = ctx.additional_limit.take_back_creator_record();
+    let journaled = ctx.journal_mut().ledger_mut().take_back_creator_record();
+    #[cfg(feature = "ledger-shadow")]
+    {
+        use crate::limit::shadow;
+        let ledger = ctx.journal_ref().ledger();
+        assert_eq!(taken, journaled, "ledger shadow mismatch at a keyless take-back: taken back");
+        let pending = ctx.additional_limit.shadow_pending_stop();
+        let check = ledger.check();
+        shadow::verdict(
+            pending,
+            check.exceeded_limit().then_some(check),
+            ledger,
+            "a keyless take-back",
+        );
+        shadow::agree(&ctx.additional_limit, ledger, "a keyless take-back");
+    }
+    #[cfg(not(feature = "ledger-shadow"))]
+    let _ = journaled;
+    if taken {
         gas.refill_history(started.signer_record_charge);
     }
     Ok(())

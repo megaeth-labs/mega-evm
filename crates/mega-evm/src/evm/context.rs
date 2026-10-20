@@ -108,15 +108,15 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         external_envs: ExternalEnvs<ExtEnvs>,
     ) -> Self {
         let cfg = spec_cfg(CfgEnv::new_with_spec(spec));
-        let inner: MegaInnerContext<DB> =
+        let limits = ProtocolLimits::for_spec(spec).tx_runtime_limits;
+        let mut inner: MegaInnerContext<DB> =
             Context::new(db, spec.into_op_spec()).with_cfg(op_cfg(&cfg));
+        inner.journaled_state.ledger_mut().set_limits(limits);
         Self {
             inner,
             cfg,
             external_envs,
-            additional_limit: AdditionalLimit::new(
-                ProtocolLimits::for_spec(spec).tx_runtime_limits,
-            ),
+            additional_limit: AdditionalLimit::new(limits),
             detention: Detention::default(),
             upfront_records: Vec::new(),
             block_hash_record: BlockHashRecord::default(),
@@ -250,8 +250,15 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// Enforces `limits` on every transaction from now on, in place of the spec's: a tool's or a
     /// test's counterfactual.
     pub fn with_tx_runtime_limits(mut self, limits: EvmTxRuntimeLimits) -> Self {
-        self.additional_limit.set_limits(limits);
+        self.set_tx_runtime_limits(limits);
         self
+    }
+
+    /// Holds every transaction from the next one on to `limits`, on the lanes and in the journal's
+    /// ledger alike.
+    pub(crate) const fn set_tx_runtime_limits(&mut self, limits: EvmTxRuntimeLimits) {
+        self.additional_limit.set_limits(limits);
+        self.inner.journaled_state.ledger_mut().set_limits(limits);
     }
 
     /// The block hashes execution has read on this context.
@@ -448,7 +455,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     }
 
     /// Prepares the common execution layer for a transaction or a system call that is, or is not,
-    /// `system_originated`.
+    /// `system_originated`: the lanes and the journal's ledger begin it together, held to the same
+    /// limits and counting the same body.
     ///
     /// The SALT bucket multipliers and the oracle reads go with it: they are what one transaction
     /// read, so the next one reads its own.
@@ -460,7 +468,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// to every one of them.
     fn prepare(&mut self, system_originated: bool) {
         self.additional_limit.reset();
-        self.additional_limit.set_transfer_logs(emits_transfer_logs(&self.inner.cfg));
+        let transfer_logs = emits_transfer_logs(&self.inner.cfg);
+        self.additional_limit.set_transfer_logs(transfer_logs);
         self.bucket_multipliers.reset();
         self.oracle_reads.clear();
         // A transaction that failed with an error, or was stopped, left its `keylessDeploy` call
@@ -474,7 +483,13 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         }
         // The body is data size whether or not the transaction pays history for it. A deposit,
         // a system transaction and a system call are exempt from the charge, not from the count.
-        self.additional_limit.record_tx_body(transaction_body_bytes(self.tx()));
+        let body = transaction_body_bytes(self.tx());
+        self.additional_limit.record_tx_body(body);
+        self.inner.journaled_state.ledger_mut().begin_transaction(
+            system_originated,
+            transfer_logs,
+            body,
+        );
         // The protocol's own transactions are not detained: they maintain the volatile data.
         let limits = self.additional_limit.limits();
         self.detention.reset(
@@ -648,9 +663,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextTr for MegaContext<DB, ExtE
     }
 
     /// Holds the code a creation deposits to the data-size limit, and counts its history bytes,
-    /// once `return_create` made every charge for the deposit and before it commits
-    /// the creation ([`AdditionalLimit::on_code_deposit`]). A crossing refuses the deposit with the
-    /// stop's revert data: the creation reverts with it, on the gas it had before the deposit.
+    /// once `return_create` made every charge for the deposit and before it commits the creation
+    /// ([`AdditionalLimit::on_code_deposit`]); the journal's ledger counts it on the creation's
+    /// level. A crossing refuses the deposit with the stop's revert data: the creation reverts
+    /// with it, on the gas it had before the deposit.
     ///
     /// A keyless deployment's constructor that returns empty code for the deploy address is
     /// refused the same way, with empty revert data ([`keyless::refuses_empty_deposit`]).
@@ -664,7 +680,25 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextTr for MegaContext<DB, ExtE
         if keyless::refuses_empty_deposit(&mut self.keyless_frame, deposit, destroyed) {
             return Err(Bytes::new());
         }
-        self.additional_limit.on_code_deposit(deposit)
+        let admitted = self.additional_limit.on_code_deposit(deposit);
+        let journaled =
+            self.inner.journaled_state.ledger_mut().count_code(deposit.code.len() as u64);
+        #[cfg(feature = "ledger-shadow")]
+        {
+            use crate::limit::shadow;
+            let ledger = self.inner.journaled_state.ledger();
+            let lanes = admitted.is_err().then(|| ledger.check());
+            shadow::verdict(
+                lanes,
+                journaled.exceeded_limit().then_some(journaled),
+                ledger,
+                "a code deposit",
+            );
+            shadow::agree(&self.additional_limit, ledger, "a code deposit");
+        }
+        #[cfg(not(feature = "ledger-shadow"))]
+        let _ = journaled;
+        admitted
     }
 }
 

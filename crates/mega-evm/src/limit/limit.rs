@@ -10,11 +10,17 @@ use revm::{
     interpreter::{CallInputs, CallScheme, FrameInput, InstructionResult},
 };
 
+#[cfg(not(feature = "std"))]
+use alloc as std;
+use std::vec::Vec;
+
 use super::{
     frame_limit::{FrameLimitTracker, Lane},
-    record::{write_effect, write_moves_value, HistoryBytes, RecordEffect},
-    EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, FRAME_DATA_SHARE_DENOMINATOR,
-    FRAME_DATA_SHARE_NUMERATOR, TRANSFER_LOG, WRITE_RECORD, WRITE_RECORD_SIZE,
+    ledger::{Mark, StartSide},
+    record::{write_effect, write_moves_value, HistoryBytes, RecordEffect, WriteCount},
+    EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, StartReport,
+    FRAME_DATA_SHARE_DENOMINATOR, FRAME_DATA_SHARE_NUMERATOR, TRANSFER_LOG, WRITE_RECORD,
+    WRITE_RECORD_SIZE,
 };
 use crate::storage_call_stipend;
 
@@ -109,6 +115,23 @@ pub struct AdditionalLimit {
     /// Whether the running transaction's value movements journal EIP-7708 transfer logs, which
     /// revm emits itself and the data size counts where the value moves.
     transfer_logs: bool,
+    /// Satin's side of every frame start, one per frame result revm will return, as the lanes
+    /// are: what the start's caller paid for its records, what the journal's ledger saw the start
+    /// count, and the mark a frame revm built is taken back to when it is rewritten into a
+    /// failure.
+    starts: Vec<StartSide>,
+    /// The write records the transaction's own frame makes, as the charge of their history before
+    /// execution found them, kept whatever an inspector does: what the shadow holds the frame's
+    /// refund to.
+    #[cfg(feature = "ledger-shadow")]
+    top_level_paid_for: Option<u64>,
+    /// The history gas given back for the transaction's own frame's write record, at whichever of
+    /// the three sites gave it back: what the shadow holds the journal's formula to.
+    #[cfg(feature = "ledger-shadow")]
+    top_level_refunded: u64,
+    /// The journal's formula's answer to the same, once the transaction's own frame returned.
+    #[cfg(feature = "ledger-shadow")]
+    top_level_refund: Option<u64>,
 }
 
 impl AdditionalLimit {
@@ -147,6 +170,13 @@ impl AdditionalLimit {
         self.history_bytes = 0;
         self.reservoir_remaining = 0;
         self.transfer_logs = false;
+        self.starts.clear();
+        #[cfg(feature = "ledger-shadow")]
+        {
+            self.top_level_paid_for = None;
+            self.top_level_refunded = 0;
+            self.top_level_refund = None;
+        }
     }
 
     /// Records whether the running transaction's value movements journal EIP-7708 transfer logs.
@@ -340,6 +370,10 @@ impl AdditionalLimit {
     /// or refused before its lane is pushed leaves it for the next transaction's reset to clear.
     pub(crate) const fn stage_top_level_records(&mut self, records: u64) {
         self.pending_top_level_records = Some(records);
+        #[cfg(feature = "ledger-shadow")]
+        {
+            self.top_level_paid_for = Some(records);
+        }
     }
 
     /// Draws up to `amount` from the running frame's history allowance and reports what it gave;
@@ -373,7 +407,13 @@ impl AdditionalLimit {
         on_lane: u64,
         caller: u64,
     ) {
-        self.pending_frame_charge = FrameCharge { records: Some(records), on_lane, caller };
+        self.pending_frame_charge = FrameCharge {
+            records: Some(records),
+            on_lane,
+            caller,
+            #[cfg(feature = "ledger-shadow")]
+            paid_for: Some(records),
+        };
     }
 
     /// Leaves the frame about to start unchecked against the answer its charge was computed from
@@ -394,46 +434,56 @@ impl AdditionalLimit {
 
     /* Completed writes */
 
-    /// Commits the record of `write`, which the running opcode completed, to the running frame's
-    /// lane, and reports the history bytes it appends or takes back. Called by the Host's
-    /// completed-write hook, which revm calls only once the opcode made every charge; a crossed
-    /// limit in the verdict stops the opcode's frame, and the hook charges the history.
+    /// What `write`, which the running opcode completed, keeps, and the history bytes it appends or
+    /// takes back: one answer, which the Host's completed-write hook commits to the running frame's
+    /// lane ([`commit_count`](Self::commit_count)) and to the journal's ledger.
     ///
-    /// A `SELFDESTRUCT` that moved value to another account also counts the EIP-7708 transfer log
-    /// revm journaled for the move, with the beneficiary's record and in the same check. The log
-    /// is the running frame's, as the move is: the frame's own journal checkpoint takes both back
-    /// when the frame fails, and its lane the bytes. It is data size and nothing else — no write
-    /// record, and no history: the bytes reported are the record's alone.
+    /// A `SELFDESTRUCT` that moved value to another account also keeps the EIP-7708 transfer log
+    /// revm journaled for the move, with the beneficiary's record. The log is the running frame's,
+    /// as the move is: the frame's own journal checkpoint takes both back when the frame fails, and
+    /// its lane the bytes. It is data size and nothing else — no write record, and no history: the
+    /// bytes reported are the record's alone.
     #[inline]
-    pub(crate) fn commit_write(
-        &mut self,
-        write: &CompletedWrite<'_>,
-    ) -> (LimitCheck, HistoryBytes) {
+    pub(crate) fn write_count(&self, write: &CompletedWrite<'_>) -> (WriteCount, HistoryBytes) {
         let effect = write_effect(write, self.sender);
         let history = effect.history_bytes();
-        let counted = match effect {
+        let added = match effect {
             RecordEffect::None => LimitUsage::ZERO,
             RecordEffect::Record(usage) => usage,
             RecordEffect::Refund(usage) => {
-                self.tracker.refund(usage);
-                return (LimitCheck::WithinLimit, history);
+                return (WriteCount { taken: usage, ..WriteCount::NONE }, history);
             }
         };
-        match write {
-            // A log's bytes are history beside the write records; a record's are counted as one.
-            CompletedWrite::Log { .. } => self.tracker.record_log_and_code_bytes(counted.data_size),
-            CompletedWrite::Sstore { .. } | CompletedWrite::SelfDestruct { .. } => {}
-        }
-        let counted = if self.transfer_logs && write_moves_value(write) {
-            counted.saturating_add(TRANSFER_LOG)
-        } else {
-            counted
+        // A log's bytes are history beside the write records; a record's are counted as one.
+        let log_bytes = match write {
+            CompletedWrite::Log { .. } => added.data_size,
+            CompletedWrite::Sstore { .. } | CompletedWrite::SelfDestruct { .. } => 0,
         };
-        if counted == LimitUsage::ZERO {
-            return (LimitCheck::WithinLimit, history);
+        let added = if self.transfer_logs && write_moves_value(write) {
+            added.saturating_add(TRANSFER_LOG)
+        } else {
+            added
+        };
+        (WriteCount { added, log_bytes, ..WriteCount::NONE }, history)
+    }
+
+    /// Commits what a completed write keeps to the running frame's lane, and holds it to the
+    /// limits; a crossed limit in the verdict stops the opcode's frame, and the hook charges the
+    /// history. A record taken back holds nothing.
+    #[inline]
+    pub(crate) fn commit_count(&mut self, count: &WriteCount) -> LimitCheck {
+        if count.taken != LimitUsage::ZERO {
+            self.tracker.refund(count.taken);
+            return LimitCheck::WithinLimit;
         }
-        self.tracker.record(counted);
-        (self.check(), history)
+        if count.log_bytes != 0 {
+            self.tracker.record_log_and_code_bytes(count.log_bytes);
+        }
+        if count.added == LimitUsage::ZERO {
+            return LimitCheck::WithinLimit;
+        }
+        self.tracker.record(count.added);
+        self.check()
     }
 
     /* Transaction-level records */
@@ -561,16 +611,18 @@ impl AdditionalLimit {
     /// frame returns on its first run, before any instruction ([`stop_before_run`]). revm moved
     /// the value, journaled the transfer log and, for a creation, bumped its creator's nonce; the
     /// stop is a revert of the frame, so its journal checkpoint takes the move and the log back,
-    /// and the nonce, bumped before the checkpoint, stays, with its record on the creator.
+    /// and the nonce, bumped before the checkpoint, stays, with its record on the creator. Returns
+    /// the verdict.
     ///
     /// [`stop_before_run`]: Self::stop_before_run
     #[inline]
-    pub(crate) fn hold_built_start(&mut self) {
+    pub(crate) fn hold_built_start(&mut self) -> LimitCheck {
         let check = self.check();
         if check.exceeded_limit() {
             debug_assert!(self.pending_stop.is_none(), "a frame starts from a caller that ran");
             self.pending_stop = Some(check);
         }
+        check
     }
 
     /// The verdict on the start of the frame revm just answered without building it, the
@@ -646,6 +698,7 @@ impl AdditionalLimit {
         // no such caller: its record is charged before execution and given back by the settlement
         // ([`top_level_write_record_gas`](Self::top_level_write_record_gas)).
         let charge = core::mem::replace(&mut self.pending_frame_charge, FrameCharge::NONE);
+        self.push_start(depth, charge);
         match input {
             FrameInput::Call(inputs) => {
                 let target = inputs.target_address;
@@ -665,6 +718,8 @@ impl AdditionalLimit {
                     return;
                 }
                 let records = self.records_the_caller_paid_for(input, charge.records);
+                #[cfg(feature = "ledger-shadow")]
+                self.note_paid_for(charge.paid_for, records);
                 let inherited = self.tracker.current().is_some_and(|caller| {
                     caller.address == Some(target) && caller.account_recorded
                 });
@@ -685,6 +740,10 @@ impl AdditionalLimit {
             }
             FrameInput::Create(inputs) => {
                 let records = self.records_the_caller_paid_for(input, charge.records);
+                #[cfg(feature = "ledger-shadow")]
+                if depth > 0 {
+                    self.note_paid_for(charge.paid_for, records);
+                }
                 self.tracker.push(Lane::new(None, true, budget, charge.on_lane));
                 self.tracker.record(WRITE_RECORD.times(records.on_lane));
                 if depth == 0 {
@@ -745,6 +804,8 @@ impl AdditionalLimit {
     /// here in every other debug build rather than charging history for a record the data size
     /// does not count, or counting one no history paid for.
     fn check_top_level_records(&mut self, counted: u64) {
+        #[cfg(feature = "ledger-shadow")]
+        self.note_paid_for(self.top_level_paid_for, counted);
         if let Some(charged) = self.pending_top_level_records.take() {
             debug_assert_eq!(
                 charged, counted,
@@ -873,10 +934,96 @@ impl AdditionalLimit {
     ///
     /// Such a frame records none of the writes its caller paid for, so the whole charge sits on
     /// the lane and comes back when it is popped, whatever the answer was.
-    pub(crate) fn push_empty_frame(&mut self) {
+    pub(crate) fn push_empty_frame(&mut self, depth: usize) {
         self.frame_began = true;
         let charge = core::mem::replace(&mut self.pending_frame_charge, FrameCharge::NONE);
+        self.push_start(depth, charge);
         self.tracker.push(Lane::empty(charge.on_lane.saturating_add(charge.caller)));
+    }
+
+    /* The frame side */
+
+    /// Pushes Satin's side of a frame start at `depth`, whose caller paid `charge` for the records
+    /// the start makes; the transaction's own frame was paid for before execution.
+    fn push_start(&mut self, depth: usize, charge: FrameCharge) {
+        let (on_level, caller) = if depth == 0 {
+            (self.top_level_write_record_gas, 0)
+        } else {
+            (charge.on_lane, charge.caller)
+        };
+        self.starts.push(StartSide::new(depth, on_level, caller));
+    }
+
+    /// Notes, for the shadow, whether the records the lanes count for the latest start, `counted`,
+    /// are those its charge paid for (`paid_for`): an inspector that rewrites a start's input can
+    /// split them, and then the lanes' refund and the journal's formula part by design.
+    #[cfg(feature = "ledger-shadow")]
+    fn note_paid_for<T: PartialEq>(&mut self, paid_for: Option<T>, counted: T) {
+        let comparable = paid_for.is_none_or(|paid| paid == counted);
+        if let Some(side) = self.starts.last_mut() {
+            side.set_comparable(comparable);
+        }
+    }
+
+    /// Attaches what the journal's ledger saw the latest start count, and the mark a frame revm
+    /// built is taken back to, to that start's side.
+    pub(crate) fn attach_start(&mut self, report: StartReport, mark: Option<Mark>) {
+        if let Some(side) = self.starts.last_mut() {
+            side.attach(report, mark);
+        }
+    }
+
+    /// The side of the running frame's start, or of the start just answered.
+    pub(crate) fn running_start(&self) -> Option<&StartSide> {
+        self.starts.last()
+    }
+
+    /// Pops the side of the start of the frame returning now.
+    pub(crate) fn pop_start(&mut self) -> Option<StartSide> {
+        self.starts.pop()
+    }
+
+    /// The number of starts whose frames have not returned yet.
+    pub(crate) fn starts_open(&self) -> usize {
+        self.starts.len()
+    }
+
+    /// What the lanes hold the transaction and the running frame to, for the shadow.
+    #[cfg(feature = "ledger-shadow")]
+    pub(crate) fn shadow_view(&self) -> super::shadow::LanesView {
+        super::shadow::LanesView {
+            usage: self.tracker.net(),
+            log_and_code_bytes: self.tracker.log_and_code_bytes(),
+            frames: self.tracker.depth(),
+            running: self.tracker.current().map(|lane| (lane.budget, lane.net())),
+            check: self.check(),
+        }
+    }
+
+    /// The stop the lanes left the running frame to return before it runs on, for the shadow.
+    #[cfg(feature = "ledger-shadow")]
+    pub(crate) const fn shadow_pending_stop(&self) -> Option<LimitCheck> {
+        self.pending_stop
+    }
+
+    /// Notes, for the shadow, history the lanes gave back for the transaction's own frame's record.
+    #[cfg(feature = "ledger-shadow")]
+    pub(crate) const fn shadow_note_top_level_refund(&mut self, gas: u64) {
+        self.top_level_refunded = self.top_level_refunded.saturating_add(gas);
+    }
+
+    /// Notes, for the shadow, what the journal's formula gives back for the transaction's own
+    /// frame's record once that frame returned.
+    #[cfg(feature = "ledger-shadow")]
+    pub(crate) const fn shadow_set_top_level_refund(&mut self, gas: u64) {
+        self.top_level_refund = Some(gas);
+    }
+
+    /// What the lanes gave back for the transaction's own frame's record, and what the formula
+    /// gives back (`None` when the frame never started), for the shadow.
+    #[cfg(feature = "ledger-shadow")]
+    pub(crate) const fn shadow_top_level_refunds(&self) -> (u64, Option<u64>) {
+        (self.top_level_refunded, self.top_level_refund)
     }
 
     /// Pops the lane of the frame `result` returns from: a success merges it into the caller's,
@@ -967,7 +1114,7 @@ impl AdditionalLimit {
 /// product is `remaining − ⌈remaining / K⌉`, which stays in `u64` and never wraps. A `u128`
 /// product would call the 128-bit division routine on every frame start, where a division of a
 /// `u64` by a constant compiles to a multiplication.
-const fn share_of_remaining(remaining: u64) -> u64 {
+pub(super) const fn share_of_remaining(remaining: u64) -> u64 {
     const N: u64 = FRAME_DATA_SHARE_NUMERATOR;
     const D: u64 = FRAME_DATA_SHARE_DENOMINATOR;
     const _: () = assert!(N < D && D.is_multiple_of(D - N));
@@ -1033,11 +1180,20 @@ struct FrameCharge {
     on_lane: u64,
     /// What the record of the caller's own account cost.
     caller: u64,
+    /// The same records as [`records`](Self::records), kept when an inspector waives the check.
+    #[cfg(feature = "ledger-shadow")]
+    paid_for: Option<FrameStartRecords>,
 }
 
 impl FrameCharge {
     /// Nothing charged.
-    const NONE: Self = Self { records: None, on_lane: 0, caller: 0 };
+    const NONE: Self = Self {
+        records: None,
+        on_lane: 0,
+        caller: 0,
+        #[cfg(feature = "ledger-shadow")]
+        paid_for: None,
+    };
 }
 
 #[cfg(test)]
@@ -1196,7 +1352,7 @@ mod tests {
             limit.set_intrinsic_history(1, BODY);
             let inner = call_from_to(CALLEE, TARGET, U256::from(1));
             limit.stage_frame_charge(limit.frame_start_records(&inner), 1_000, 2_000);
-            limit.push_empty_frame();
+            limit.push_empty_frame(1);
 
             let result = crate::synthetic_frame_result(&inner, answer, Bytes::new());
             assert_eq!(limit.on_frame_return(&result), 3_000, "{answer:?}: all of it back");
@@ -1684,6 +1840,16 @@ mod tests {
         }
     }
 
+    /// Counts `write` on `limit` as the completed-write hook does, and reports the verdict and the
+    /// history bytes.
+    fn commit(
+        limit: &mut AdditionalLimit,
+        write: &CompletedWrite<'_>,
+    ) -> (LimitCheck, HistoryBytes) {
+        let (count, history) = limit.write_count(write);
+        (limit.commit_count(&count), history)
+    }
+
     /// A `SELFDESTRUCT` that moved value to another account counts its transfer log with the
     /// beneficiary's record, in one check, and reports the record's history alone. To the sender,
     /// whose account the body counts, it is the log alone, and the log alone can cross.
@@ -1694,7 +1860,7 @@ mod tests {
             |target| CompletedWrite::SelfDestruct { address: CALLEE, target, result: &moved };
         let mut limit = logging(EvmTxRuntimeLimits::no_limits());
         limit.on_frame_init(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
-        let (check, history) = limit.commit_write(&destruction(TARGET));
+        let (check, history) = commit(&mut limit, &destruction(TARGET));
         assert_eq!(check, LimitCheck::WithinLimit);
         assert_eq!(history, HistoryBytes::Appended(WRITE_RECORD_SIZE), "the record's alone");
         assert_eq!(
@@ -1705,7 +1871,7 @@ mod tests {
         let mut limit =
             logging(EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(TRANSFER_LOG_SIZE - 1));
         limit.on_frame_init(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
-        let (check, history) = limit.commit_write(&destruction(SENDER));
+        let (check, history) = commit(&mut limit, &destruction(SENDER));
         assert_eq!(history, HistoryBytes::None);
         assert_eq!(
             check,
@@ -1720,7 +1886,7 @@ mod tests {
 
         let mut limit = AdditionalLimit::default();
         limit.on_frame_init(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
-        let _ = limit.commit_write(&destruction(TARGET));
+        let _ = commit(&mut limit, &destruction(TARGET));
         assert_eq!(limit.usage(), WRITE_RECORD, "no log, no bytes");
     }
 

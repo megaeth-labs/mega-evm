@@ -287,7 +287,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
         Ok(load)
     }
 
-    /// Commits the record of a write an opcode completed, holds it to the limits, and charges the
+    /// Commits the record of a write an opcode completed — to the running frame's lane, and to the
+    /// running frame's level of the journal's ledger — holds it to the limits, and charges the
     /// frame the history it costs. revm calls it at the end of `SSTORE`, `LOG0`..`LOG4` and
     /// `SELFDESTRUCT`, after every charge the opcode makes, so a write the opcode's own failure
     /// takes back is never counted.
@@ -316,7 +317,19 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
             CompletedWrite::Log { .. } => (true, false),
             CompletedWrite::SelfDestruct { .. } => (false, false),
         };
-        let (check, history) = self.additional_limit.commit_write(&write);
+        // One count, committed to the lanes, which decide, and to the journal's ledger.
+        let (count, history) = self.additional_limit.write_count(&write);
+        let check = self.additional_limit.commit_count(&count);
+        let journaled = self.inner.journaled_state.ledger_mut().count_write(&count);
+        #[cfg(feature = "ledger-shadow")]
+        {
+            use crate::limit::shadow;
+            let ledger = self.inner.journaled_state.ledger();
+            shadow::verdict(Some(check), Some(journaled), ledger, "a completed write");
+            shadow::agree(&self.additional_limit, ledger, "a completed write");
+        }
+        #[cfg(not(feature = "ledger-shadow"))]
+        let _ = journaled;
         if check.exceeded_limit() {
             return WriteVerdict::Revert(self.additional_limit.note_frame_stop(&check));
         }
