@@ -46,8 +46,9 @@ pub(crate) type MegaInnerContext<DB> =
 /// configuration), so they cannot drift apart.
 ///
 /// Every context accessor delegates to the wrapped context, and so does every
-/// [`Host`](revm::interpreter::Host) method except the three that stage what a state-writing
-/// opcode did and the ones that load volatile data (see the `host` module). It also carries the
+/// [`Host`](revm::interpreter::Host) method except the two instruction hooks, which meter a
+/// completed write and a frame start, and the ones that load volatile data (see the `host`
+/// module). It also carries the
 /// common execution layer's state for the running transaction ([`AdditionalLimit`]), gas
 /// detention's ([`Detention`]), the SALT bucket multipliers that transaction has priced state
 /// gas with ([`BucketMultipliers`]) and the reads of the Oracle's storage it made through the

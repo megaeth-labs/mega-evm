@@ -154,8 +154,8 @@ impl FrameFigures {
 /// out-of-gas zeroes what the frame had before the frame returns; the revm fork records it first,
 /// before every deduction that fails — an opcode's static gas, which the interpreter's step loop
 /// charges before the opcode runs, included — and before a halt on a cold access the frame cannot
-/// pay, and the frame's end reads the record. A frame that drops the frame its opcode was
-/// starting records what it has once the forward is back.
+/// pay, and the frame's end reads the record. A frame whose opcode cannot pay the records of the
+/// frame it was starting gets the forward back, and records what it has then, before it halts.
 ///
 /// # Keeping the figure
 ///

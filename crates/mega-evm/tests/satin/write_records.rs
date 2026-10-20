@@ -579,7 +579,7 @@ fn test_completed_sstore_commits_its_record() {
 /// An `SSTORE` that runs out of gas after its Host call wrote the slot counts nothing: the
 /// failure takes the write back, and revm offers the completed-write hook nothing.
 #[test]
-fn test_sstore_out_of_gas_after_the_write_discards_the_record() {
+fn test_sstore_out_of_gas_after_the_write_counts_nothing() {
     // CALLEE calls CONTRACT with 5,000 gas: past the EIP-2200 stipend check, so the Host call
     // writes the slot, but short of the 22,100 a cold first write charges after it.
     let child = BytecodeBuilder::default().sstore(U256::ZERO, U256::from(1)).stop().build();
