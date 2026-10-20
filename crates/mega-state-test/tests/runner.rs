@@ -542,7 +542,7 @@ fn test_the_digest_is_stable_across_runs_and_thread_counts() {
     assert_eq!(one, run_with(4));
     assert_eq!(one, run_with(4));
     let hashes: std::collections::BTreeSet<_> =
-        one.iter().flatten().map(|record| state_test::digest::hash(record)).collect();
+        one.iter().flatten().map(state_test::digest::hash).collect();
     assert_eq!(hashes.len(), 6, "six distinct values, two files of each");
 }
 
