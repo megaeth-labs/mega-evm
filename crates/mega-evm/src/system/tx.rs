@@ -139,6 +139,10 @@ pub(crate) fn classify_system_transaction(
 /// ([`SYSTEM_ADDRESS_WITHOUT_SYSTEM_SHAPE`]), so a transaction handed to the engine already
 /// promoted is a failed deposit.
 ///
+/// Only a deposit carries a source hash: op-revm reads a transaction's type off it, so a
+/// transaction that carries one is a deposit, and is executed as one, whatever type its other
+/// fields declare. Testing the source hash is therefore testing for a deposit that carries it.
+///
 /// It is what exempts the protocol's own work from the metering `MegaETH` holds users to — the
 /// history gas of a system transaction is not charged, and no per-transaction limit stops it, so
 /// the protocol's maintenance cannot fail on a resource limit. The engine makes the same decision
@@ -152,6 +156,7 @@ pub fn is_system_originated(tx: &MegaTransaction, system_address: Address) -> bo
 pub(crate) fn originates_from_the_protocol(tx: &MegaTransaction, system_transaction: bool) -> bool {
     system_transaction ||
         tx.caller() == alloy_eips::eip4788::SYSTEM_ADDRESS ||
+        // A source hash makes the transaction a deposit, whatever type its fields declare.
         tx.deposit.source_hash == MEGA_SYSTEM_TRANSACTION_SOURCE_HASH
 }
 
@@ -253,6 +258,20 @@ mod tests {
             "the legacy-typed check no longer matches after the promotion",
         );
         assert!(is_system_originated(&tx, MEGA_SYSTEM_ADDRESS), "the source hash does");
+    }
+
+    /// A transaction that carries the promotion's source hash is a deposit whatever type it
+    /// declares, so it is system-originated as the deposit it is, whoever sends it: no transaction
+    /// of another type carries the hash.
+    #[test]
+    fn test_a_transaction_carrying_the_source_hash_is_a_deposit_whatever_type_it_declares() {
+        for declared in [0, 1, 2, 4] {
+            let mut tx = legacy_call_tx(USER, NOT_WHITELISTED);
+            tx.base.tx_type = declared;
+            tx.deposit.source_hash = MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
+            assert_eq!(tx.tx_type(), DEPOSIT_TRANSACTION_TYPE, "declared {declared}");
+            assert!(is_system_originated(&tx, MEGA_SYSTEM_ADDRESS), "declared {declared}");
+        }
     }
 
     /// A user's deposit transaction is not system-originated: otherwise a user could buy the
