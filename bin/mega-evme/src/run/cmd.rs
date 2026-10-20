@@ -74,7 +74,7 @@ impl Cmd {
         debug!(sender = %sender, "State initialized");
 
         // Install Satin's predeploys
-        state.deploy_system_contracts();
+        state.deploy_system_contracts()?;
         debug!("System contracts deployed");
 
         let pre_execution_nonce = state.basic_ref(sender)?.map(|acc| acc.nonce).unwrap_or(0);

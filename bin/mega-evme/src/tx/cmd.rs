@@ -95,7 +95,7 @@ impl Cmd {
             self.prestate_args.create_initial_state(&sender, &self.rpc_args).await?;
         debug!(sender = %sender, "State initialized");
 
-        state.deploy_system_contracts();
+        state.deploy_system_contracts()?;
         debug!(spec = ?spec, "System contracts deployed");
 
         let pre_execution_nonce = state.basic_ref(sender)?.map(|acc| acc.nonce).unwrap_or(0);

@@ -6,10 +6,10 @@
 //! `crates/system-contracts/contracts/SequencerRegistry.sol`.
 //!
 //! The legacy forks deployed it (Rex5) and upgraded it to v2.0.0 (Rex6); Satin neither creates nor
-//! upgrades it. Before every block the pre-block deploy step
-//! ([`transact_deploy`](crate::system::transact_deploy)) reads it and refuses the block unless it
-//! holds v2.0.0. A role change the registry schedules takes effect at its activation block through
-//! a pre-block call: the block executor reads whether one is due
+//! upgrades it. The block in which Satin activates checks that it holds v2.0.0
+//! ([`check_system_contract`](crate::system::check_system_contract)), and is invalid
+//! otherwise. A role change the registry schedules takes effect at its activation block through a
+//! pre-block call: the block executor reads whether one is due
 //! ([`is_apply_pending_changes_due`]) and, when one is, calls `applyPendingChanges()`
 //! ([`transact_apply_pending_changes`]). The call is permissionless and applies only what is due,
 //! so a block that makes it applies the same changes whoever calls.
@@ -177,11 +177,11 @@ pub fn live_system_address<DB: revm::Database>(mut db: DB) -> Result<Option<Addr
 ///
 /// `None` when the registry names no address this engine trusts: it has no account, it holds other
 /// code than [`SEQUENCER_REGISTRY_CODE`], or its `_currentSystemAddress` is zero. Block execution
-/// never runs a transaction over such a registry — the pre-block deploy step refuses a block whose
-/// registry does not hold this code, and the contract writes no zero address — so these are states
-/// an EVM run outside block execution may meet, and in none of them is any transaction a
-/// system-address transaction. The
-/// slot is loaded in each of them all the same, so the transaction's gas does not depend on them.
+/// never runs a transaction over such a registry — Satin's activation block refuses a chain whose
+/// registry does not hold this code, nothing in Satin replaces a contract's code, and the contract
+/// writes no zero address — so these are states an EVM run outside block execution may meet, and
+/// in none of them is any transaction a system-address transaction. The slot is loaded in each of
+/// them all the same, so the transaction's gas does not depend on them.
 ///
 /// # Errors
 ///

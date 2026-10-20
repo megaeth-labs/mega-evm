@@ -98,6 +98,17 @@ pub trait MegaHardforks: OpHardforks {
         self.mega_fork_activation(MegaHardfork::Satin).active_at_timestamp(timestamp)
     }
 
+    /// Whether the block at `block_timestamp`, whose parent is at `parent_timestamp`, is the one
+    /// in which Satin activates: Satin is active at the block and not at its parent.
+    ///
+    /// A chain whose schedule has Satin from genesis has no such block, and neither does a
+    /// schedule that never activates it. A block that follows a gap in the timestamps is the
+    /// activation block when the activation falls in the gap.
+    fn is_satin_activation_block(&self, parent_timestamp: u64, block_timestamp: u64) -> bool {
+        self.is_satin_active_at_timestamp(block_timestamp) &&
+            !self.is_satin_active_at_timestamp(parent_timestamp)
+    }
+
     /// Whether the block at `block_timestamp`, whose parent is at `parent_timestamp`, admits
     /// only deposit transactions.
     ///
@@ -483,6 +494,34 @@ mod tests {
         assert!(config.admits_only_deposits(99, 101), "and the first block after a gap");
         assert!(!config.admits_only_deposits(98, 99), "not before the activation");
         assert!(!config.admits_only_deposits(100, 101), "and not once the parent had it too");
+    }
+
+    /// Satin's activation block is the block at which Satin is active and at whose parent it is
+    /// not: the first block at the activation, and the first after a gap over it; not the block
+    /// after it, nor any block of a chain with Satin from genesis or without Satin. An Optimism
+    /// fork's activation block, which admits only deposits too, is not Satin's.
+    #[test]
+    fn test_satin_activation_block_follows_the_parent_timestamp() {
+        let satin_at = |timestamp| {
+            MegaHardforkConfig::default()
+                .with(MegaHardfork::Satin, ForkCondition::Timestamp(timestamp))
+        };
+        let config = satin_at(100);
+        assert!(config.is_satin_activation_block(99, 100), "the activation block");
+        assert!(config.is_satin_activation_block(90, 105), "the first block after a gap over it");
+        assert!(!config.is_satin_activation_block(100, 101), "the block after it");
+        assert!(!config.is_satin_activation_block(98, 99), "a block before it");
+
+        let genesis = satin_at(0);
+        assert!(!genesis.is_satin_activation_block(0, 1), "Satin from genesis has none");
+        assert!(!genesis.is_satin_activation_block(99, 100));
+        assert!(!MegaHardforkConfig::default().is_satin_activation_block(99, 100), "nor no Satin");
+
+        let jovian = genesis
+            .with(OpHardfork::Jovian, ForkCondition::Timestamp(100))
+            .with(OpHardfork::Karst, ForkCondition::Timestamp(200));
+        assert!(jovian.admits_only_deposits(99, 100), "Jovian's activation block is deposit-only");
+        assert!(!jovian.is_satin_activation_block(99, 100), "but not Satin's activation block");
     }
 
     #[test]

@@ -87,8 +87,9 @@
 //! # The pre-block system calls
 //!
 //! [`apply_pre_execution_changes`](BlockExecutor::apply_pre_execution_changes) makes the EIP-2935
-//! and EIP-4788 calls, deploys the system contracts and the EIP-7997 factory (idempotent), then
-//! applies a role change the `SequencerRegistry` has due in this block. Every call is a system call
+//! and EIP-4788 calls, in the block in which Satin activates checks that the system contracts and
+//! the EIP-7997 factory hold the code Satin expects, then applies a role change the
+//! `SequencerRegistry` has due in this block. Every call is a system call
 //! on the pre-block budget ([`pre_block_call_gas_limit`](crate::pre_block_call_gas_limit)), and
 //! one that does not succeed refuses the block.
 //!
@@ -136,9 +137,9 @@ use crate::{
     block::{eips, read_l1_block_info},
     estimated_da_size,
     system::{
-        classify_system_transaction, is_apply_pending_changes_due, live_system_address,
-        system_contract_specs, transact_apply_pending_changes, transact_deploy,
-        write_registry_not_deployed, SystemContractDeployError,
+        check_system_contract, classify_system_transaction, is_apply_pending_changes_due,
+        live_system_address, system_contract_specs, transact_apply_pending_changes,
+        write_unexpected_code, SystemContractCheckError,
     },
     BlockGasCounters, BlockLimiter, BlockLimits, BucketId, ExternalEnvTypes,
     MegaBlockExecutionResult, MegaBlockTxResult, MegaContext, MegaEvm, MegaHardforks,
@@ -148,8 +149,8 @@ use crate::{
 /// What the node hands block execution beside the EVM.
 ///
 /// It carries what the pre-block calls need (the parent hash and the parent beacon block root, as
-/// alloy-op-evm does), the block's own extra data, the activation-block flag and the builder's
-/// packing policy.
+/// alloy-op-evm does), the block's own extra data, the two activation-block flags and the
+/// builder's packing policy.
 #[derive(Clone, Debug, Default)]
 pub struct MegaBlockExecutionCtx {
     /// The parent block's hash, which the EIP-2935 pre-block call records.
@@ -164,6 +165,15 @@ pub struct MegaBlockExecutionCtx {
     /// [`MegaHardforks::admits_only_deposits`], which needs the parent block's timestamp; `false`
     /// skips the rule.
     pub no_user_tx_activation_block: bool,
+    /// Whether Satin activates in this block, which makes the pre-block step check the system
+    /// contracts and the EIP-7997 factory.
+    ///
+    /// The caller sets it from the chain's schedule with
+    /// [`MegaHardforks::is_satin_activation_block`], which needs the parent block's timestamp, as
+    /// it sets [`no_user_tx_activation_block`](Self::no_user_tx_activation_block); `false`
+    /// skips the check. The two differ: an Optimism fork at or after Jovian also makes a block
+    /// deposit-only.
+    pub satin_activation_block: bool,
     /// The builder's packing policy: the limits only a builder applies, and a cap on the block's
     /// data-size budget below the protocol's ([`BlockLimits`]).
     ///
@@ -185,6 +195,7 @@ impl MegaBlockExecutionCtx {
             parent_beacon_block_root,
             extra_data,
             no_user_tx_activation_block: false,
+            satin_activation_block: false,
             block_limits,
         }
     }
@@ -192,6 +203,12 @@ impl MegaBlockExecutionCtx {
     /// Marks this block one that admits only deposit transactions.
     pub const fn with_no_user_tx_activation_block(mut self, activation_block: bool) -> Self {
         self.no_user_tx_activation_block = activation_block;
+        self
+    }
+
+    /// Marks this block the one in which Satin activates.
+    pub const fn with_satin_activation_block(mut self, activation_block: bool) -> Self {
+        self.satin_activation_block = activation_block;
         self
     }
 }
@@ -213,40 +230,19 @@ pub enum MegaBlockExecutionError {
     ///
     /// The inspector is the node's own choice, not a verdict on the block: an internal error.
     RewritingInspector,
-    /// A system-contract address already holds bytecode that is not the contract this engine
-    /// deploys.
-    ForeignSystemContractCode {
-        /// The system-contract address that already has code.
-        address: Address,
-        /// The hash this engine deploys.
-        expected: B256,
-        /// The hash already in state.
-        found: B256,
-    },
-    /// The `SequencerRegistry` is not deployed at v2.0.0: its address holds no account, an
-    /// account without code, or the legacy engine's v1.0.0.
+    /// In the block in which Satin activates, a predeploy's address does not hold the code Satin
+    /// expects: it holds other code, an older version of the contract, no code, or no account.
     ///
-    /// The legacy forks deploy it (Rex5) and upgrade it to v2.0.0 (Rex6); Satin neither creates
-    /// nor upgrades it, so a block on a state without it is invalid.
-    SequencerRegistryNotDeployed {
-        /// The registry's address.
+    /// Satin deploys and upgrades nothing: the legacy forks install the six system contracts, the
+    /// `SequencerRegistry` and the Oracle at v2.0.0, and OP's genesis tooling the EIP-7997
+    /// factory, so a chain without them is not one Satin runs on.
+    UnexpectedSystemContractCode {
+        /// The predeploy's address.
         address: Address,
-        /// The code hash of v2.0.0.
+        /// The code hash Satin expects there.
         expected: B256,
-        /// The code hash the address holds: the empty code's for no account or no code.
+        /// The code hash the address holds: the empty code's for no code or no account.
         found: B256,
-    },
-    /// The EIP-7997 factory holds the right runtime but nonce 0.
-    ZeroFactoryNonce {
-        /// The factory address.
-        address: Address,
-    },
-    /// A system-contract address has empty code but a used nonce.
-    UsedEmptyAccount {
-        /// The system-contract address.
-        address: Address,
-        /// The nonce already on the account.
-        nonce: u64,
     },
     /// The pre-block `SequencerRegistry.applyPendingChanges()` call did not succeed, so a role
     /// change due in this block could not be applied.
@@ -284,21 +280,9 @@ impl fmt::Display for MegaBlockExecutionError {
             Self::RewritingInspector => f.write_str(
                 "block execution does not admit an inspector that may rewrite execution",
             ),
-            Self::ForeignSystemContractCode { address, expected, found } => write!(
-                f,
-                "system contract at {address} has unexpected code hash {found}, expected {expected}; refusing to overwrite"
-            ),
-            Self::SequencerRegistryNotDeployed { address, expected, found } => {
-                write_registry_not_deployed(f, *address, *expected, *found)
+            Self::UnexpectedSystemContractCode { address, expected, found } => {
+                write_unexpected_code(f, *address, *expected, *found)
             }
-            Self::ZeroFactoryNonce { address } => write!(
-                f,
-                "EIP-7997 factory at {address} has matching code but nonce 0; refusing to accept a zero-nonce factory"
-            ),
-            Self::UsedEmptyAccount { address, nonce } => write!(
-                f,
-                "system contract at {address} has empty code but nonce {nonce}; refusing to overwrite a used account"
-            ),
             Self::ApplyPendingChangesFailed { message } => {
                 write!(f, "the SequencerRegistry's pending changes could not be applied: {message}")
             }
@@ -324,10 +308,7 @@ impl From<MegaBlockExecutionError> for BlockExecutionError {
             MegaBlockExecutionError::StaleOutcome { .. } => Self::other(error),
             MegaBlockExecutionError::UnexpectedNonDepositTxInActivationBlock |
             MegaBlockExecutionError::TransactionDaFootprintAboveGasLimit { .. } |
-            MegaBlockExecutionError::ForeignSystemContractCode { .. } |
-            MegaBlockExecutionError::SequencerRegistryNotDeployed { .. } |
-            MegaBlockExecutionError::ZeroFactoryNonce { .. } |
-            MegaBlockExecutionError::UsedEmptyAccount { .. } |
+            MegaBlockExecutionError::UnexpectedSystemContractCode { .. } |
             MegaBlockExecutionError::ApplyPendingChangesFailed { .. } => {
                 Self::Validation(alloy_evm::block::BlockValidationError::Other(Box::new(error)))
             }
@@ -345,7 +326,8 @@ pub enum PreBlockStateSource {
     Eip2935,
     /// The EIP-4788 beacon-root system call.
     Eip4788,
-    /// A system-contract or factory deploy at this address.
+    /// The read of the predeploy at this address, a system contract or the EIP-7997 factory, which
+    /// the block in which Satin activates checks.
     SystemContract(Address),
     /// The reads of the `SequencerRegistry`'s pending role changes that decide whether the
     /// block makes the `applyPendingChanges()` call.
@@ -727,11 +709,11 @@ where
     /// Runs what a block does before its transactions.
     ///
     /// In order: the admission gate, the reset of the block-hash and bucket records, the EIP-2935
-    /// and EIP-4788 pre-block calls, the system-contract deploys, the `SequencerRegistry`'s due
-    /// role changes and the read of the L1 block info. Each step's state is handed to the
-    /// pre-block observer and then committed here rather than inside its helper, so a witness
-    /// generator sees every step's read and write set. The sequence the observer receives is
-    /// the witness a stateless client needs.
+    /// and EIP-4788 pre-block calls, in the block in which Satin activates the check of the
+    /// predeploys, the `SequencerRegistry`'s due role changes and the read of the L1 block info.
+    /// Each step's state is handed to the pre-block observer and then committed here rather than
+    /// inside its helper, so a witness generator sees every step's read and write set. The
+    /// sequence the observer receives is the witness a stateless client needs.
     ///
     /// The transactions are not priced against the read made here. op-revm's handler fetches the
     /// L1 block info when it deducts the caller of the first non-deposit transaction, which is
@@ -740,15 +722,21 @@ where
     /// L1 block contract's account and every slot that fetch can reach in the pre-block states,
     /// and nothing else.
     ///
-    /// The EIP-2935 and EIP-4788 calls run before the deploy. They write the parent hash and
-    /// the parent beacon root into their own contracts (`0x0…2935` and `0x0…4788`), which are
-    /// not `MegaETH` system contracts and do not read them, so their outcome does not depend on
-    /// the deploy that follows. Each runs on the pre-block budget
+    /// The EIP-2935 and EIP-4788 calls run before the check. They write the parent hash and the
+    /// parent beacon root into their own contracts (`0x0…2935` and `0x0…4788`), which are not
+    /// `MegaETH` system contracts and do not read them, so their outcome does not depend on the
+    /// check that follows. Each runs on the pre-block budget
     /// ([`pre_block_call_gas_limit`](eips::pre_block_call_gas_limit)), and one that does not
     /// succeed refuses the block before its state reaches the observer.
     ///
-    /// The registry's role changes come after the deploy step, which refuses the block unless the
-    /// registry is the v2.0.0 the legacy forks left. Its pending slots are read and handed on
+    /// The check is made once, in the block in which Satin activates
+    /// ([`MegaBlockExecutionCtx::satin_activation_block`]): each of the seven predeploys must hold
+    /// the code Satin expects, and its account is handed on as a read-only entry; any other block
+    /// reads none of them. Satin deploys and upgrades nothing: a chain reaches it through the
+    /// legacy forks, which leave the six system contracts at the versions Satin runs, and the
+    /// EIP-7997 factory is OP's predeploy.
+    ///
+    /// The registry's role changes come after. Its pending slots are read and handed on
     /// whatever they say, and when a change is due in this block the `applyPendingChanges()` call
     /// applies it on the same pre-block budget, refusing the block if it does not succeed. So a
     /// rotation due in this block governs this block's system-address transactions: each reads the
@@ -782,31 +770,28 @@ where
 
         // The EIP-2935 / EIP-4788 calls above do not depend on these predeploys: they target
         // their own contracts, not the MegaETH system addresses or the factory.
-        for spec in system_contract_specs() {
-            let state = transact_deploy(self.evm.db_mut(), &spec).map_err(|error| match error {
-                SystemContractDeployError::Database(error) => BlockExecutionError::other(error),
-                SystemContractDeployError::ForeignCode { address, expected, found } => {
-                    MegaBlockExecutionError::ForeignSystemContractCode { address, expected, found }
-                        .into()
-                }
-                SystemContractDeployError::ZeroFactoryNonce { address } => {
-                    MegaBlockExecutionError::ZeroFactoryNonce { address }.into()
-                }
-                SystemContractDeployError::UsedEmptyAccount { address, nonce } => {
-                    MegaBlockExecutionError::UsedEmptyAccount { address, nonce }.into()
-                }
-                SystemContractDeployError::SequencerRegistryNotDeployed {
-                    address,
-                    expected,
-                    found,
-                } => MegaBlockExecutionError::SequencerRegistryNotDeployed {
-                    address,
-                    expected,
-                    found,
-                }
-                .into(),
-            })?;
-            self.deliver_pre_block(PreBlockStateSource::SystemContract(spec.address), state);
+        if self.ctx.satin_activation_block {
+            for spec in system_contract_specs() {
+                let state =
+                    check_system_contract(self.evm.db_mut(), &spec).map_err(
+                        |error| match error {
+                            SystemContractCheckError::Database(error) => {
+                                BlockExecutionError::other(error)
+                            }
+                            SystemContractCheckError::UnexpectedCode {
+                                address,
+                                expected,
+                                found,
+                            } => MegaBlockExecutionError::UnexpectedSystemContractCode {
+                                address,
+                                expected,
+                                found,
+                            }
+                            .into(),
+                        },
+                    )?;
+                self.deliver_pre_block(PreBlockStateSource::SystemContract(spec.address), state);
+            }
         }
 
         let block_number = self.evm.block().number().saturating_to();
@@ -1243,8 +1228,8 @@ mod tests {
     }
 
     /// Every refusal but those for what the node itself does — an inspector it runs, here — is a
-    /// verdict on the block: a validation error. A state whose `SequencerRegistry` is not v2.0.0
-    /// is one.
+    /// verdict on the block: a validation error. A predeploy that does not hold Satin's code when
+    /// Satin activates is one.
     #[test]
     fn test_a_refusal_of_the_block_is_a_validation_error() {
         let address = alloy_primitives::Address::repeat_byte(1);
@@ -1254,18 +1239,11 @@ mod tests {
                 transaction_da_footprint: 2,
                 available_block_da_footprint: 1,
             },
-            MegaBlockExecutionError::ForeignSystemContractCode {
+            MegaBlockExecutionError::UnexpectedSystemContractCode {
                 address,
                 expected: B256::ZERO,
                 found: B256::repeat_byte(1),
             },
-            MegaBlockExecutionError::SequencerRegistryNotDeployed {
-                address,
-                expected: B256::ZERO,
-                found: B256::repeat_byte(1),
-            },
-            MegaBlockExecutionError::ZeroFactoryNonce { address },
-            MegaBlockExecutionError::UsedEmptyAccount { address, nonce: 1 },
             MegaBlockExecutionError::ApplyPendingChangesFailed { message: String::new() },
         ] {
             let error = BlockExecutionError::from(refusal.clone());

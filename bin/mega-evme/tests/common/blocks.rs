@@ -18,9 +18,18 @@ use serde_json::Value;
 /// The recorded blocks.
 pub(crate) const BLOCKS: [u64; 3] = [26_400_001, 26_400_007, 26_400_110];
 
-/// The EIP-7997 factory, which Satin's pre-block changes deploy and the legacy engine never
-/// reads: the one account a Satin replay reads that the recording does not hold.
+/// The EIP-7997 factory, which Satin's activation block checks and the legacy engine never reads:
+/// the one account a Satin replay of an activation block reads that the recording does not hold.
 pub(crate) const FACTORY: Address = address!("0x4e59b44847b379578588920cA78FbF26c0B4956C");
+
+/// The factory as `MegaETH` mainnet holds it: its code, at the nonce its use has brought it to.
+pub(crate) fn factory_account() -> PreAccount {
+    PreAccount {
+        nonce: 1_443,
+        code_hash: Some(mega_evm::system::CREATE2_FACTORY_CODE_HASH),
+        ..PreAccount::default()
+    }
+}
 
 /// The L1 block contract, whose L1 fee overhead slot Satin's pre-block changes read with the
 /// rest of the L1 block info, whatever the fee scalars hold. The legacy engine reads the slot
@@ -54,11 +63,19 @@ pub(crate) fn write_block(dir: &Path, number: u64, block: &CachedBlock) {
     std::fs::write(block_path(dir, number), zstd::encode_all(json.as_slice(), 3).unwrap()).unwrap();
 }
 
-/// The code with `hash` from the recorded code store.
+/// The code with `hash` from the recorded code store, or the factory's ([`factory_account`]),
+/// which no recording holds.
 pub(crate) fn code_of(hash: B256) -> Vec<u8> {
+    if hash == mega_evm::system::CREATE2_FACTORY_CODE_HASH {
+        return mega_evm::system::CREATE2_FACTORY_CODE.to_vec();
+    }
+    std::fs::read(code_path(fixtures(), hash)).unwrap()
+}
+
+/// Where the code with `hash` lives in the code store of the cache at `dir`.
+fn code_path(dir: &Path, hash: B256) -> PathBuf {
     let hex = hash.to_string();
-    std::fs::read(fixtures().join("codes").join(&hex[2..4]).join(format!("{}.bin", &hex[2..])))
-        .unwrap()
+    dir.join("codes").join(&hex[2..4]).join(format!("{}.bin", &hex[2..]))
 }
 
 /// A copy of the recorded block cache, so no test can write to the fixtures.
@@ -69,14 +86,19 @@ pub(crate) fn cache_copy() -> tempfile::TempDir {
 }
 
 /// A copy of the recorded block cache in which every block's pre-state holds what a Satin replay
-/// reads beyond the recording: the factory, absent, and the L1 fee overhead, zero, as the chain
-/// held both. `block_replay.rs` shows neither the factory's state nor the overhead's value changes
-/// a transaction row.
+/// reads beyond the recording: the factory, as the chain holds it ([`factory_account`], its code
+/// in the cache's code store), which only Satin's activation block reads, and the L1 fee overhead,
+/// zero, as the chain held it. `block_replay.rs` shows the overhead's value changes no transaction
+/// row.
 pub(crate) fn cache_copy_for_satin() -> tempfile::TempDir {
     let dir = cache_copy();
+    let factory = factory_account();
+    let code = code_path(dir.path(), factory.code_hash.unwrap());
+    std::fs::create_dir_all(code.parent().unwrap()).unwrap();
+    std::fs::write(code, mega_evm::system::CREATE2_FACTORY_CODE).unwrap();
     for number in BLOCKS {
         let mut block = read_block(dir.path(), number);
-        block.prestate.accounts.insert(FACTORY, PreAccount::default());
+        block.prestate.accounts.insert(FACTORY, factory.clone());
         set_overhead(&mut block, U256::ZERO);
         write_block(dir.path(), number, &block);
     }

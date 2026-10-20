@@ -75,13 +75,18 @@ pub(super) fn execute(
     );
     let only_deposits =
         admits_only_deposits(&hardforks, header.number, parent_timestamp, header.timestamp)?;
+    // Without the parent's timestamp the block admits every transaction only where no fork the
+    // schedule activates after genesis is active at it, so Satin does not activate in it either.
+    let activates_satin = parent_timestamp
+        .is_some_and(|parent| hardforks.is_satin_activation_block(parent, header.timestamp));
     let block_ctx = MegaBlockExecutionCtx::new(
         header.parent_hash,
         header.parent_beacon_block_root,
         header.extra_data.clone(),
         BlockLimits::default(),
     )
-    .with_no_user_tx_activation_block(only_deposits);
+    .with_no_user_tx_activation_block(only_deposits)
+    .with_satin_activation_block(activates_satin);
 
     let result = {
         let mut db = State::builder().with_database(SatinDb(state)).with_bundle_update().build();

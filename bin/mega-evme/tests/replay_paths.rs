@@ -8,9 +8,9 @@
 //!
 //! The RPC is a mock that answers only from the recorded block: a read the recording does not
 //! hold is an error, not a guess. The two exceptions are what Satin's pre-block changes read and
-//! no recording holds: the EIP-7997 factory, served as absent, and the L1 block contract's L1 fee
-//! overhead, served as zero, as the chain held both. `block_replay.rs` shows neither changes a
-//! transaction row.
+//! no recording holds: the EIP-7997 factory, which Satin's activation block checks, served with
+//! its code as the chain holds it, and the L1 block contract's L1 fee overhead, served as zero, as
+//! the chain held it. `block_replay.rs` shows the overhead changes no transaction row.
 #![cfg(feature = "legacy")]
 
 mod common;
@@ -22,8 +22,8 @@ use std::{
 
 use alloy_primitives::{address, Address, B256, U256};
 use common::blocks::{
-    cache_copy_for_satin, code_of, fixtures, is_deposit, overhead_slot, read_block, run_evme,
-    satin_genesis, timestamp_of, FACTORY, L1_BLOCK,
+    cache_copy_for_satin, code_of, factory_account, fixtures, is_deposit, overhead_slot,
+    read_block, run_evme, satin_genesis, timestamp_of, FACTORY, L1_BLOCK,
 };
 use mega_evme::block::{CachedBlock, PreAccount};
 use serde_json::{json, Value};
@@ -49,7 +49,7 @@ impl Recording {
                 Some(account)
             }
             Some(account) => Some(account.clone()),
-            None if address == FACTORY => Some(PreAccount::default()),
+            None if address == FACTORY => Some(factory_account()),
             None => None,
         }
     }

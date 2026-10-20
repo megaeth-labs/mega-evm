@@ -452,15 +452,17 @@ impl Cmd {
         // policy, as a validator holds it; the block's gas limit comes from its header. Whether
         // it admits only deposits comes from the schedule and the parent block's timestamp, as a
         // node works it out.
-        let only_deposits =
-            hardforks.admits_only_deposits(ctx.parent_block.header.timestamp(), timestamp);
+        let parent_timestamp = ctx.parent_block.header.timestamp();
+        let only_deposits = hardforks.admits_only_deposits(parent_timestamp, timestamp);
+        let activates_satin = hardforks.is_satin_activation_block(parent_timestamp, timestamp);
         let block_ctx = MegaBlockExecutionCtx::new(
             ctx.parent_block.hash(),
             ctx.block.header.parent_beacon_block_root(),
             ctx.block.header.extra_data().clone(),
             BlockLimits::default(),
         )
-        .with_no_user_tx_activation_block(only_deposits);
+        .with_no_user_tx_activation_block(only_deposits)
+        .with_satin_activation_block(activates_satin);
 
         let start = Instant::now();
         // The tracer reads and writes nothing back, so block execution admits it declared.

@@ -39,7 +39,7 @@ use mega_evm::{
     satin_gas_params, satin_gas_params_at, satin_precompiles,
     system::{
         keyless::{KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_OVERHEAD_GAS},
-        VolatileDataAccessType, CREATE2_FACTORY_ADDRESS, CREATE2_FACTORY_NONCE,
+        VolatileDataAccessType, CREATE2_FACTORY_ADDRESS, CREATE2_FACTORY_CODE_HASH,
         SLOT_NUM_ACCESS_TYPE,
     },
     LimitKind, MegaSpecId, ProtocolLimits, SatinPrices, VolatileDataAccess,
@@ -347,7 +347,7 @@ fn precompiles(doc: &str) {
 fn addresses(doc: &str) {
     require_addr(doc, &format!("`KEYLESS_DEPLOY_ADDRESS` = `{KEYLESS_DEPLOY_ADDRESS}`"));
     require_addr(doc, &CREATE2_FACTORY_ADDRESS.to_string());
-    require(doc, &format!("with nonce {CREATE2_FACTORY_NONCE}"));
+    require_addr(doc, &CREATE2_FACTORY_CODE_HASH.to_string());
     assert_eq!(
         ETH_TRANSFER_LOG_ADDRESS, SYSTEM_ADDRESS,
         "the transfer log and the pre-block caller are the address the page names once"

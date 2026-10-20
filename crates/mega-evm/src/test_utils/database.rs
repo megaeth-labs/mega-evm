@@ -13,11 +13,47 @@ use crate::system::{
         ADMIN, CURRENT_SEQUENCER, CURRENT_SYSTEM_ADDRESS, INITIAL_FROM_BLOCK, INITIAL_SEQUENCER,
         INITIAL_SYSTEM_ADDRESS, MIN_ROTATION_DELAY,
     },
-    SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE, SEQUENCER_REGISTRY_CODE_HASH,
+    system_contract_specs, CREATE2_FACTORY_ADDRESS, SEQUENCER_REGISTRY_ADDRESS,
+    SYSTEM_CONTRACT_COUNT,
 };
 
+/// The nonce of the EIP-7997 factory in a Rex6-shaped state: the one OP's genesis tooling gives it.
+/// Any nonzero nonce is one a chain holds; mainnet's is in the thousands.
+const REX6_FACTORY_NONCE: u64 = 1;
+
+/// One predeploy as a state holds it: its address, its account and its storage slots.
+pub type PredeployAccount = (Address, AccountInfo, Vec<(U256, U256)>);
+
+/// The seven predeploys as a chain that ran Rex6 holds them, which is what Satin's activation
+/// block finds on mainnet and testnet, in [`system_contract_specs`] order.
+///
+/// Each holds the code Satin expects. The six `MegaETH` system contracts are at nonce 0, which the
+/// legacy engine never moved; the EIP-7997 factory is at a nonzero nonce, as OP's genesis tooling
+/// leaves it; and the `SequencerRegistry` holds `roles` in its storage. Test and tool support for
+/// a state of one's own, installed by [`MemoryDatabase::rex6_predeploys`].
+pub fn rex6_predeploys(
+    roles: impl Into<SequencerRegistryRoles>,
+) -> [PredeployAccount; SYSTEM_CONTRACT_COUNT] {
+    let roles = roles.into();
+    system_contract_specs().map(|spec| {
+        let nonce = if spec.address == CREATE2_FACTORY_ADDRESS { REX6_FACTORY_NONCE } else { 0 };
+        let storage = if spec.address == SEQUENCER_REGISTRY_ADDRESS {
+            roles.storage().to_vec()
+        } else {
+            Vec::new()
+        };
+        let info = AccountInfo {
+            nonce,
+            code_hash: spec.code_hash,
+            code: Some(Bytecode::new_raw(spec.code)),
+            ..Default::default()
+        };
+        (spec.address, info, storage)
+    })
+}
+
 /// The roles of a `SequencerRegistry` a test or a tool puts in a state, with
-/// [`MemoryDatabase::sequencer_registry`] or [`storage`](Self::storage).
+/// [`rex6_predeploys`] or [`MemoryDatabase::sequencer_registry`].
 ///
 /// Test and tool support, not a chain parameter: the legacy forks deploy the registry (Rex5) and
 /// upgrade it to v2.0.0 (Rex6), and Satin neither creates nor seeds it, so a state Satin runs a
@@ -42,17 +78,6 @@ impl From<Address> for SequencerRegistryRoles {
 }
 
 impl SequencerRegistryRoles {
-    /// The account of a v2.0.0 registry, as the legacy forks leave it: the code, and nonce 1, a
-    /// created contract's.
-    pub fn account_info() -> AccountInfo {
-        AccountInfo {
-            nonce: 1,
-            code_hash: SEQUENCER_REGISTRY_CODE_HASH,
-            code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE)),
-            ..Default::default()
-        }
-    }
-
     /// The storage of a v2.0.0 registry holding these roles, as the legacy forks leave it on a
     /// chain that never rotated one: the seven slots its bootstrap writes, `_initialFromBlock`
     /// zero.
@@ -167,17 +192,29 @@ impl MemoryDatabase {
         self
     }
 
-    /// Installs the `SequencerRegistry` v2.0.0 holding `roles` — an address names it in every role
-    /// — as the legacy forks leave it: [`SequencerRegistryRoles::account_info`] and
-    /// [`SequencerRegistryRoles::storage`]. A legacy call from the system address to a whitelisted
-    /// contract is then a system-address transaction, and Satin runs a block on the state.
-    pub fn sequencer_registry(mut self, roles: impl Into<SequencerRegistryRoles>) -> Self {
-        self.db.insert_account_info(
-            SEQUENCER_REGISTRY_ADDRESS,
-            SequencerRegistryRoles::account_info(),
-        );
-        for (slot, value) in roles.into().storage() {
-            self.set_account_storage(SEQUENCER_REGISTRY_ADDRESS, slot, value);
+    /// Installs the seven predeploys as a chain that ran Rex6 holds them ([`rex6_predeploys`]),
+    /// the `SequencerRegistry` holding `roles` — an address names it in every role. Satin's
+    /// activation block finds what it checks, and a legacy call from the system address to a
+    /// whitelisted contract is a system-address transaction.
+    pub fn rex6_predeploys(self, roles: impl Into<SequencerRegistryRoles>) -> Self {
+        rex6_predeploys(roles).into_iter().fold(self, Self::install)
+    }
+
+    /// Installs the `SequencerRegistry` alone, as [`rex6_predeploys`](Self::rex6_predeploys)
+    /// does: a state whose system address a test names, without the other predeploys.
+    pub fn sequencer_registry(self, roles: impl Into<SequencerRegistryRoles>) -> Self {
+        let registry = rex6_predeploys(roles)
+            .into_iter()
+            .find(|(address, ..)| *address == SEQUENCER_REGISTRY_ADDRESS)
+            .expect("the registry is a predeploy");
+        self.install(registry)
+    }
+
+    /// Installs `account` over whatever the database holds at its address.
+    fn install(mut self, (address, info, storage): PredeployAccount) -> Self {
+        self.db.insert_account_info(address, info);
+        for (slot, value) in storage {
+            self.set_account_storage(address, slot, value);
         }
         self
     }

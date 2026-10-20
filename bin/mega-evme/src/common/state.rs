@@ -661,21 +661,66 @@ where
         self.prestate.entry(address).or_default().info.set_code(code);
     }
 
-    /// Installs the code of Satin's predeploys: the six system contracts and the EIP-7997 factory.
+    /// Puts Satin's predeploys, the six system contracts and the EIP-7997 factory, where the state
+    /// lacks the code Satin expects.
     ///
-    /// `run` and `tx` execute no block, so nothing deploys them; the code is applied as a raw
-    /// state patch, over whatever a forked state holds at those addresses. The factory gets the
-    /// nonce its deployment gives it. The `SequencerRegistry` gets its code alone, no storage: a
-    /// forked run reads the chain's, and a local run's registry names no system address.
-    pub fn deploy_system_contracts(&mut self) {
-        use mega_evm::system::system_contract_specs;
+    /// `run` and `tx` execute no block, and a chain Satin runs on holds the predeploys, so an
+    /// address that already holds the expected code is left as it is: a forked state keeps the
+    /// chain's account, nonce and storage. Elsewhere a forked state gets the code alone, its
+    /// account otherwise as the chain holds it; a local state gets the account a chain that ran
+    /// Rex6 holds ([`rex6_predeploys`](mega_evm::test_utils::rex6_predeploys)): the six at nonce
+    /// 0, the factory at a nonzero nonce, and the `SequencerRegistry` naming
+    /// [`MEGA_SYSTEM_ADDRESS`](mega_evm::system::MEGA_SYSTEM_ADDRESS) in every role.
+    ///
+    /// # Errors
+    ///
+    /// When a forked state cannot load one of the accounts.
+    pub fn deploy_system_contracts(&mut self) -> Result<()> {
+        use mega_evm::{system::MEGA_SYSTEM_ADDRESS, test_utils::rex6_predeploys};
 
-        for contract in system_contract_specs() {
-            self.set_account_code(contract.address, Bytecode::new_raw(contract.code));
-            if contract.nonce != 0 {
-                self.set_account_nonce(contract.address, contract.nonce);
+        let local = matches!(self.backend, EvmeBackend::Empty(_));
+        for (address, rex6, storage) in rex6_predeploys(MEGA_SYSTEM_ADDRESS) {
+            let held = self.basic_without_overlay(address)?;
+            if held.as_ref().is_some_and(|info| info.code_hash == rex6.code_hash) {
+                continue;
             }
+            let code = rex6.code.clone().expect("a predeploy carries its code");
+            let info = if local { rex6 } else { held.unwrap_or_default() };
+            let account = self.prestate.entry(address).or_default();
+            account.info = info;
+            if local {
+                account.storage.extend(
+                    storage.into_iter().map(|(slot, value)| {
+                        (slot, EvmStorageSlot::new(value, TransactionId::ZERO))
+                    }),
+                );
+            }
+            self.set_account_code(address, code);
         }
+        Ok(())
+    }
+
+    /// The account at `address` as the prestate or the backend holds it, before any field
+    /// overlay.
+    fn basic_without_overlay(&mut self, address: Address) -> Result<Option<AccountInfo>> {
+        if let Some(account) = self.prestate.get(&address) {
+            trace!(address = %address, account = ?account, "Loaded account basic from prestate");
+            return Ok(Some(account.info.clone()));
+        }
+        Ok(match &mut self.backend {
+            EvmeBackend::Empty(db) => {
+                let account = db.basic(address).unwrap();
+                trace!(address = %address, account = ?account, "Loaded account basic from empty state");
+                account
+            }
+            EvmeBackend::Forked(db) => {
+                let account = db.basic(address).map_err(|e| {
+                    EvmeError::RpcError(format!("Failed to fetch account {}: {:?}", address, e))
+                })?;
+                trace!(address = %address, account = ?account, "Loaded account basic from forked state");
+                account.filter(|info| !rpc_reads_as_absent(info))
+            }
+        })
     }
 
     /// Replaces the balance and adds the faucet on top of `info`. A storage-only overlay leaves
@@ -795,28 +840,10 @@ where
     type Error = EvmeError;
 
     fn basic(&mut self, address: Address) -> std::result::Result<Option<AccountInfo>, Self::Error> {
-        // Check prestate overrides first. An overlay applies on top of an entry too: `run` and
-        // `tx` add entries (the receiver's code, the predeploys) after the overlays were taken.
-        if let Some(account) = self.prestate.get(&address) {
-            trace!(address = %address, account = ?account, "Loaded account basic from prestate");
-            return self.apply_account_overlay(address, Some(account.info.clone()));
-        }
-
-        // Query backend database
-        let account = match &mut self.backend {
-            EvmeBackend::Empty(db) => {
-                let account = db.basic(address).unwrap();
-                trace!(address = %address, account = ?account, "Loaded account basic from empty state");
-                account
-            }
-            EvmeBackend::Forked(db) => {
-                let account = db.basic(address).map_err(|e| {
-                    EvmeError::RpcError(format!("Failed to fetch account {}: {:?}", address, e))
-                })?;
-                trace!(address = %address, account = ?account, "Loaded account basic from forked state");
-                account.filter(|info| !rpc_reads_as_absent(info))
-            }
-        };
+        // Prestate overrides first, then the backend. An overlay applies on top of an entry too:
+        // `run` and `tx` add entries (the receiver's code, the predeploys) after the overlays were
+        // taken.
+        let account = self.basic_without_overlay(address)?;
         self.apply_account_overlay(address, account)
     }
 

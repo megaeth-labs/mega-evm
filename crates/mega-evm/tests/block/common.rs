@@ -1,9 +1,9 @@
 //! Shared setup of the block-executor tests.
 //!
 //! A block on a chain whose schedule activates Satin at genesis, over an in-memory database holding
-//! the `SequencerRegistry` v2.0.0 the legacy forks leave, and an empty L1 block contract — so the
-//! L1 fees, the operator fee and the data-availability footprint scalar all read as zero unless a
-//! test writes them.
+//! the seven predeploys as a chain that ran Rex6 holds them, and no L1 block contract — so the L1
+//! fees, the operator fee and the data-availability footprint scalar all read as zero unless a test
+//! writes them. Satin activates at genesis, so no block of these tests is its activation block.
 
 use alloy_consensus::{transaction::Recovered, Sealed, Signed, TxLegacy};
 use alloy_evm::{EvmEnv, EvmFactory};
@@ -45,10 +45,10 @@ pub(crate) const BLOCK_GAS_LIMIT: u64 = 30_000_000;
 /// The chain id the test transactions carry.
 pub(crate) const CHAIN_ID: u64 = 4_326;
 
-/// The database a block runs on: the registry holds [`registry_roles`], the caller is funded and
-/// the callee has empty code.
+/// The database a block runs on: the seven predeploys as a chain that ran Rex6 holds them, the
+/// registry holding [`registry_roles`]; the caller is funded and the callee has empty code.
 pub(crate) fn database() -> MemoryDatabase {
-    let mut db = MemoryDatabase::default().sequencer_registry(registry_roles());
+    let mut db = MemoryDatabase::default().rex6_predeploys(registry_roles());
     db.set_account_code(CONTRACT, Bytes::new());
     db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000_u64));
     db

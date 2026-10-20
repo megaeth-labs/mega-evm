@@ -120,17 +120,16 @@ fn executor_on(
     MegaBlockExecutor::new(evm, ctx, spec, OpAlloyReceiptBuilder::default())
 }
 
-/// The registry's own steps the observer received, in order: the deploy step's read of it, the
-/// read of its pending changes and the call that applies them.
+/// The registry's own steps the observer received, in order: the read of its pending changes and
+/// the call that applies them. The blocks here are not Satin's activation block, so no step
+/// checks the registry's code.
 fn registry_steps(log: &PreBlockLog) -> Vec<(PreBlockStateSource, EvmState)> {
     pre_block_states(log)
         .into_iter()
         .filter(|(source, _)| {
             matches!(
                 source,
-                PreBlockStateSource::SystemContract(SEQUENCER_REGISTRY_ADDRESS) |
-                    PreBlockStateSource::PendingChanges |
-                    PreBlockStateSource::ApplyPendingChanges
+                PreBlockStateSource::PendingChanges | PreBlockStateSource::ApplyPendingChanges
             )
         })
         .collect()
@@ -171,11 +170,7 @@ fn test_a_due_change_is_applied_under_a_crowded_bucket() {
 
     assert_eq!(
         sources(&steps),
-        [
-            PreBlockStateSource::SystemContract(SEQUENCER_REGISTRY_ADDRESS),
-            PreBlockStateSource::PendingChanges,
-            PreBlockStateSource::ApplyPendingChanges,
-        ]
+        [PreBlockStateSource::PendingChanges, PreBlockStateSource::ApplyPendingChanges]
     );
     assert_eq!(envs.total_bucket_queries(), 0, "no pre-block step read a capacity");
     assert_eq!(slot(&mut state, CURRENT_SYSTEM_ADDRESS), common::word(NEXT_SYSTEM_ADDRESS));
@@ -189,14 +184,8 @@ fn test_a_due_change_is_applied_under_a_crowded_bucket() {
 fn test_a_block_with_nothing_due_makes_no_call() {
     let mut state = State::builder().with_database(registry_with(&[])).build();
     let steps = start_block(&mut state, envs_at(1), common::BLOCK_GAS_LIMIT);
-    assert_eq!(
-        sources(&steps),
-        [
-            PreBlockStateSource::SystemContract(SEQUENCER_REGISTRY_ADDRESS),
-            PreBlockStateSource::PendingChanges,
-        ]
-    );
-    let registry = &steps[1].1[&SEQUENCER_REGISTRY_ADDRESS];
+    assert_eq!(sources(&steps), [PreBlockStateSource::PendingChanges]);
+    let registry = &steps[0].1[&SEQUENCER_REGISTRY_ADDRESS];
     assert!(!registry.is_touched(), "a read-only entry");
     assert_eq!(registry.storage.len(), 2);
     assert!(registry.storage.contains_key(&PENDING_SYSTEM_ADDRESS));

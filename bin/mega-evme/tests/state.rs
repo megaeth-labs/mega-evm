@@ -17,6 +17,71 @@ use tempfile::tempdir;
 mod common;
 use common::{rpc_cache_path, test_rpc_args, test_rpc_args_cached, MockRpcServer};
 
+// ─── The predeploys `run` and `tx` put in the state ──────────────────────────
+
+/// `run` and `tx` put Satin's predeploys only where the state lacks the code Satin expects. On a
+/// fork of a chain that holds the factory with its code at nonce 1443 and the six system
+/// contracts at nonce 0, those accounts stay as the chain holds them; an address the chain holds
+/// without the code gets the code and keeps its nonce. Nothing is rewritten to a nonce of the
+/// tool's own.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_fork_keeps_the_predeploys_it_holds() {
+    use mega_evm::system::{
+        system_contract_specs, CREATE2_FACTORY_ADDRESS, ORACLE_CONTRACT_ADDRESS,
+    };
+    use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
+
+    let specs = system_contract_specs();
+    let server = MockServer::start().await;
+    let chain = specs.clone();
+    Mock::given(matchers::method("POST"))
+        .respond_with(move |req: &wiremock::Request| {
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+            let address = body["params"][0].as_str().unwrap_or_default().to_lowercase();
+            let held = chain.iter().find(|spec| format!("{:#x}", spec.address) == address);
+            let is = |target: Address| format!("{target:#x}") == address;
+            let result = match body["method"].as_str().unwrap() {
+                "eth_chainId" => serde_json::json!("0x10e6"),
+                "eth_getTransactionCount" if is(CREATE2_FACTORY_ADDRESS) => {
+                    serde_json::json!("0x5a3")
+                }
+                "eth_getTransactionCount" if is(ORACLE_CONTRACT_ADDRESS) => {
+                    serde_json::json!("0x5")
+                }
+                "eth_getTransactionCount" | "eth_getBalance" => serde_json::json!("0x0"),
+                "eth_getCode" => match held {
+                    Some(spec) if spec.address != ORACLE_CONTRACT_ADDRESS => {
+                        serde_json::json!(alloy_primitives::hex::encode_prefixed(&spec.code))
+                    }
+                    _ => serde_json::json!("0x"),
+                },
+                _ => serde_json::json!(B256::ZERO),
+            };
+            ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({ "jsonrpc": "2.0", "id": body["id"], "result": result }),
+            )
+        })
+        .mount(&server)
+        .await;
+
+    let prestate_args = PreStateArgs::parse_from(["mega-evme", "--fork", "--fork.block", "7"]);
+    let rpc_args = test_rpc_args(&server.uri(), Some(0));
+    let (mut state, _) =
+        prestate_args.create_initial_state(&Address::ZERO, &rpc_args).await.expect("the state");
+    state.deploy_system_contracts().expect("the predeploys");
+
+    for spec in specs {
+        let info = state.basic_ref(spec.address).expect("readable").expect("present");
+        assert_eq!(info.code_hash, spec.code_hash, "{} holds Satin's code", spec.address);
+        let nonce = match spec.address {
+            CREATE2_FACTORY_ADDRESS => 1_443,
+            ORACLE_CONTRACT_ADDRESS => 5,
+            _ => 0,
+        };
+        assert_eq!(info.nonce, nonce, "{} keeps the nonce the chain holds", spec.address);
+    }
+}
+
 // ─── Synthetic branch wiring tests (no network required) ─────────────────────
 
 /// Non-fork must produce a no-op cache store regardless of the flags

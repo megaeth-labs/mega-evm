@@ -8,12 +8,11 @@ use std::path::Path;
 
 use alloy_primitives::{Address, B256, U256};
 use common::blocks::{
-    block_path, cache_copy, cache_copy_for_satin, code_of, fixtures, is_deposit, overhead_slot,
-    read_block, refused_for_block_gas, run_evme, satin_genesis, set_overhead, timestamp_of,
-    write_block, BLOCKS, FACTORY, L1_BLOCK,
+    block_path, cache_copy, cache_copy_for_satin, code_of, factory_account, fixtures, is_deposit,
+    overhead_slot, read_block, refused_for_block_gas, run_evme, satin_genesis, set_overhead,
+    timestamp_of, write_block, BLOCKS, FACTORY, L1_BLOCK,
 };
 use mega_evm::{system::MEGA_SYSTEM_ADDRESS, MegaSpecId, ProtocolLimits};
-use mega_evme::block::PreAccount;
 use serde_json::Value;
 
 fn blocks_of(records: &[Value]) -> Vec<&Value> {
@@ -64,13 +63,17 @@ fn test_the_legacy_leg_replays_recorded_blocks_as_the_chain_did() {
     assert_eq!(std::fs::read(block_path(cache.path(), BLOCKS[0])).unwrap(), before);
 }
 
-/// A Satin replay of a recorded block reads the EIP-7997 factory and the L1 fee overhead, which
-/// the recording lacks: offline, the block fails and names the first of them it met, and the
-/// exit code is 1.
+/// A Satin replay of a recorded block reads what the recording lacks: offline, the block fails
+/// and names the first of them it met, and the exit code is 1. A counterfactual block is not
+/// Satin's activation block, so it reads no predeploy, and its miss is the L1 fee overhead, which
+/// the pre-block read of the L1 block info reads beside the fee scalars the recording holds set.
+/// Satin's activation block — under a genesis file that activates Satin at the block, whose
+/// parent came a second earlier — checks the predeploys first, and its miss is the EIP-7997
+/// factory.
 #[test]
 fn test_a_read_the_recording_lacks_fails_the_block_offline() {
-    let refusal = |dir: &Path| {
-        let run = replay(BLOCKS[0], dir, &["--override.spec", "Satin"]);
+    let refusal = |dir: &Path, args: &[&str]| {
+        let run = replay(BLOCKS[0], dir, args);
         assert_eq!(run.code, 1);
         let error = run.records()[0]["error"].as_str().unwrap().to_lowercase();
         assert!(error.contains("no rpc to read it"), "{error}");
@@ -78,16 +81,17 @@ fn test_a_read_the_recording_lacks_fails_the_block_offline() {
     };
 
     let cache = cache_copy();
-    let error = refusal(cache.path());
-    assert!(error.contains(&format!("account {FACTORY:#x}")), "{error}");
-
-    // With the factory in the pre-state, the pre-block read of the L1 block info is the miss:
-    // it reads the overhead beside the fee scalars the recording holds set.
-    let mut block = read_block(cache.path(), BLOCKS[0]);
-    block.prestate.accounts.insert(FACTORY, PreAccount::default());
-    write_block(cache.path(), BLOCKS[0], &block);
-    let error = refusal(cache.path());
+    let error = refusal(cache.path(), &["--override.spec", "Satin"]);
     assert!(error.contains(&format!("storage {L1_BLOCK:#x}[{}]", overhead_slot())), "{error}");
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut block = read_block(cache.path(), BLOCKS[0]);
+    let timestamp = timestamp_of(&block);
+    block.parent_timestamp = Some(timestamp - 1);
+    write_block(cache.path(), BLOCKS[0], &block);
+    let genesis = satin_genesis(dir.path(), mega_evm::MAINNET_CHAIN_ID, timestamp);
+    let error = refusal(cache.path(), &["--genesis", &genesis]);
+    assert!(error.contains(&format!("account {FACTORY:#x}")), "{error}");
 }
 
 /// The Satin counterfactual of the recorded blocks: every block runs, a transaction is refused
@@ -126,45 +130,6 @@ fn test_the_satin_counterfactual_of_recorded_blocks() {
     }
 }
 
-/// Whichever state the factory had on chain, the Satin rows of the recorded blocks are the
-/// same: no transaction reads the factory, and the pre-block deploy that reads it is no
-/// transaction.
-#[test]
-fn test_the_factory_state_does_not_change_the_satin_rows() {
-    let absent = cache_copy_for_satin();
-    let present = cache_copy_for_satin();
-    for number in BLOCKS {
-        let mut block = read_block(present.path(), number);
-        block.prestate.accounts.insert(
-            FACTORY,
-            PreAccount {
-                balance: U256::ZERO,
-                nonce: 1,
-                code_hash: Some(mega_evm::system::CREATE2_FACTORY_CODE_HASH),
-                storage: Default::default(),
-            },
-        );
-        write_block(present.path(), number, &block);
-    }
-    let hash = mega_evm::system::CREATE2_FACTORY_CODE_HASH.to_string();
-    let code_dir = present.path().join("codes").join(&hash[2..4]);
-    std::fs::create_dir_all(&code_dir).unwrap();
-    std::fs::write(
-        code_dir.join(format!("{}.bin", &hash[2..])),
-        mega_evm::system::CREATE2_FACTORY_CODE,
-    )
-    .unwrap();
-
-    for number in BLOCKS {
-        let rows = |dir: &Path| {
-            let run = replay(number, dir, &["--override.spec", "Satin"]);
-            assert_eq!(run.code, 0, "{}", run.stderr);
-            run.records()
-        };
-        assert_eq!(rows(absent.path()), rows(present.path()), "block {number}");
-    }
-}
-
 /// Whatever the L1 fee overhead holds, the Satin rows of the recorded blocks are the same: the
 /// blocks' fee scalars are set, so no transaction is priced with it, and the pre-block read that
 /// reads it is no transaction.
@@ -190,11 +155,11 @@ fn test_the_overhead_does_not_change_the_satin_rows() {
 /// [S18] A block fetched over RPC replays as the chain did, is written to the block cache with
 /// what its replay read beyond the trace, and then replays offline from the cache. The mock
 /// serves the recorded responses, and the trace is the recorded pre-state as one transaction's
-/// sighting. The Satin replay reads two accounts' worth of state the recording lacks, the
-/// EIP-7997 factory its pre-block deploy reads and the L1 fee overhead its pre-block read of the
-/// L1 block info reads, and the cache keeps both.
+/// sighting. The Satin replay, a counterfactual and so no activation block, reads one slot the
+/// recording lacks, the L1 fee overhead its pre-block read of the L1 block info reads, and the
+/// cache keeps it; it reads no predeploy, so the cache holds no EIP-7997 factory.
 ///
-/// Expected values: independent (the chain's own receipts, and the two pre-block reads).
+/// Expected values: independent (the chain's own receipts, and the one pre-block read).
 #[tokio::test(flavor = "multi_thread")]
 async fn test_a_block_fetched_over_rpc_is_cached_and_replays_offline() {
     let number = BLOCKS[2];
@@ -209,14 +174,9 @@ async fn test_a_block_fetched_over_rpc_is_cached_and_replays_offline() {
 
     let run = replay(number, cache.path(), &["--rpc", &uri, "--override.spec", "Satin"]);
     assert_eq!(run.code, 0, "{}", run.stderr);
-    assert_eq!(
-        blocks_of(&run.records())[0]["rpc_reads"],
-        2,
-        "the factory and the L1 fee overhead came over RPC"
-    );
+    assert_eq!(blocks_of(&run.records())[0]["rpc_reads"], 1, "the L1 fee overhead came over RPC");
 
-    // Offline now: the cache holds the block, and the factory and the overhead the Satin replay
-    // read.
+    // Offline now: the cache holds the block, and the overhead the Satin replay read.
     drop(server);
     let run = replay(number, cache.path(), &["--verify"]);
     assert_eq!(run.code, 0, "{}", run.stderr);
@@ -225,7 +185,7 @@ async fn test_a_block_fetched_over_rpc_is_cached_and_replays_offline() {
     assert_eq!(run.code, 0, "{}", run.stderr);
     assert_eq!(blocks_of(&run.records())[0]["rpc_reads"], 0);
     let cached = read_block(cache.path(), number).prestate;
-    assert!(cached.accounts.contains_key(&FACTORY));
+    assert!(!cached.accounts.contains_key(&FACTORY), "no predeploy was read");
     assert_eq!(cached.accounts[&L1_BLOCK].storage.get(&overhead_slot()), Some(&U256::ZERO));
 }
 
@@ -554,11 +514,41 @@ async fn recorded_chain(number: u64, parent: Parent) -> wiremock::MockServer {
     respond("eth_getBlockByNumber", recorded.block.clone()).mount(&server).await;
     respond("eth_getBlockReceipts", recorded.receipts.clone()).mount(&server).await;
     respond("debug_traceBlockByNumber", trace).mount(&server).await;
-    // The parent state of what the trace does not hold: the factory, which does not exist, and
-    // the L1 fee overhead, which is zero.
+    // The parent state of what the trace does not hold: the factory, as the chain holds it
+    // ([`factory_account`]), which Satin's activation block checks, and the L1 fee overhead, which
+    // is zero.
+    let factory = factory_account();
+    let per_account = |method: &'static str, factory_value: Value, other: Value| {
+        Mock::given(matchers::method("POST"))
+            .and(matchers::body_string_contains(format!("\"{method}\"")))
+            .respond_with(move |req: &wiremock::Request| {
+                let body: Value = serde_json::from_slice(&req.body).unwrap();
+                let asked = body["params"][0].as_str().unwrap_or_default().to_lowercase();
+                let result = if asked == format!("{FACTORY:#x}") {
+                    factory_value.clone()
+                } else {
+                    other.clone()
+                };
+                ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({ "jsonrpc": "2.0", "id": body["id"], "result": result }),
+                )
+            })
+    };
     respond("eth_getBalance", serde_json::json!("0x0")).mount(&server).await;
-    respond("eth_getTransactionCount", serde_json::json!("0x0")).mount(&server).await;
-    respond("eth_getCode", serde_json::json!("0x")).mount(&server).await;
+    per_account(
+        "eth_getTransactionCount",
+        serde_json::json!(format!("0x{:x}", factory.nonce)),
+        serde_json::json!("0x0"),
+    )
+    .mount(&server)
+    .await;
+    per_account(
+        "eth_getCode",
+        Value::String(alloy_primitives::hex::encode_prefixed(code_of(factory.code_hash.unwrap()))),
+        serde_json::json!("0x"),
+    )
+    .mount(&server)
+    .await;
     respond("eth_getStorageAt", serde_json::json!(B256::ZERO)).mount(&server).await;
     server
 }
