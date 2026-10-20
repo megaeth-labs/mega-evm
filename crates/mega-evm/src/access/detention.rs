@@ -6,7 +6,10 @@ use core::{cell::Cell, num::NonZeroU64};
 use std::vec::Vec;
 
 use alloy_primitives::{Bytes, U256};
-use revm::interpreter::{gas::WithheldCrossing, Gas, InstructionResult, InterpreterResult};
+use revm::{
+    context_interface::cfg::gas::GasTracker,
+    interpreter::{gas::WithheldCrossing, Gas, InstructionResult, InterpreterResult},
+};
 
 use super::VolatileDataAccess;
 use crate::system::VOLATILE_DATA_ACCESS_DISABLED_SELECTOR;
@@ -83,7 +86,7 @@ impl FrameFigures {
     /// value call's `stipend` on top of what the frame forwarded.
     fn on_frame_suspend(&mut self, gas: &Gas, depth: usize, stipend: u64) {
         if let Some(frame) = self.frames.get_mut(depth) {
-            frame.at_suspension = regular_spent(gas);
+            frame.at_suspension = regular_spent(gas.tracker());
             frame.child_stipend = stipend;
         }
     }
@@ -342,7 +345,7 @@ impl Detention {
         if cap == u64::MAX {
             return;
         }
-        let compute = self.compute(gas).saturating_sub(forwarded);
+        let compute = self.compute(gas.tracker()).saturating_sub(forwarded);
         let limit = self.lower_limit(compute.saturating_add(cap));
         gas.limit_spendable(limit.saturating_sub(compute));
     }
@@ -368,7 +371,7 @@ impl Detention {
     /// it resumes on the gas a child handed back, and after a storage write, whose restore of a
     /// slot to its original value refills the state and history gas that spilled onto regular gas.
     #[inline]
-    pub(crate) fn hold(&self, gas: &mut Gas) {
+    pub(crate) fn hold(&self, gas: &mut GasTracker) {
         if let Some(limit) = self.limit {
             gas.limit_spendable(limit.saturating_sub(self.compute(gas)));
         }
@@ -392,7 +395,7 @@ impl Detention {
             return;
         }
         self.figures.on_frame_run(gas.limit(), depth);
-        self.hold(gas);
+        self.hold(gas.tracker_mut());
     }
 
     /// The frame at `depth`, whose gas is `gas`, suspended to start a child, to which revm gives
@@ -442,7 +445,7 @@ impl Detention {
         }
         self.figures.on_frame_end(depth);
         if let Some(limit) = self.stop(gas) {
-            return Some(ComputeStop { limit, used: self.compute(gas) });
+            return Some(ComputeStop { limit, used: self.compute(gas.tracker()) });
         }
         if result.is_halt() {
             // The settlement rolls the spill back into regular gas and burns it all.
@@ -564,7 +567,7 @@ impl Detention {
         // had before the charge: the forward less the spill here, the forward for a precompile's,
         // which spills nothing. Put back, it leaves the answer no regular gas spent, so the stop's
         // compute is the transaction's when the frame started.
-        debug_assert_eq!(regular_spent(&result.gas), 0, "a stopped answer spent nothing");
+        debug_assert_eq!(regular_spent(result.gas.tracker()), 0, "a stopped answer spent nothing");
         Some(ComputeStop { limit, used: self.compute_at_start(depth, gas_limit) })
     }
 
@@ -656,7 +659,7 @@ impl Detention {
     /* Helpers */
 
     /// The transaction's compute while the running frame has `gas`.
-    fn compute(&self, gas: &Gas) -> u64 {
+    fn compute(&self, gas: &GasTracker) -> u64 {
         let figures = &self.figures;
         figures
             .suspended
@@ -731,7 +734,7 @@ pub fn decode_volatile_data_access_disabled(revert_data: &[u8]) -> Option<Volati
 /// The regular gas a frame spent: its limit, less what it has left — the withheld part included —
 /// less the state and history gas that spilled onto its regular gas.
 #[inline]
-pub(crate) const fn regular_spent(gas: &Gas) -> u64 {
+pub(crate) const fn regular_spent(gas: &GasTracker) -> u64 {
     gas.limit().saturating_sub(gas.remaining()).saturating_sub(gas.state_gas_spilled())
 }
 
@@ -804,8 +807,8 @@ mod tests {
         detention.on_frame_run(&mut frame, 0);
         detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0);
         assert!(frame.record_state_cost(1_000_000));
-        detention.hold(&mut frame);
-        assert_eq!(detention.compute(&frame), 0);
+        detention.hold(frame.tracker_mut());
+        assert_eq!(detention.compute(frame.tracker()), 0);
         assert_eq!(frame.spendable(), BLOCK_ENV_ACCESS_COMPUTE_GAS);
     }
 
@@ -831,7 +834,7 @@ mod tests {
             assert_eq!(stop, Some(ComputeStop { limit, used: 10 }), "{result:?}");
             assert_eq!(frame.remaining(), 100_000_000 - 10);
             assert_eq!(frame.withheld_crossing(), None);
-            assert_eq!(regular_spent(&frame), 10, "the charge that crossed is not made");
+            assert_eq!(regular_spent(frame.tracker()), 10, "the charge that crossed is not made");
         }
     }
 
@@ -899,15 +902,15 @@ mod tests {
 
             let mut child = gas(60_000 + 2_300, 0);
             detention.on_frame_run(&mut child, 1);
-            assert_eq!(detention.compute(&child), 9_000);
+            assert_eq!(detention.compute(child.tracker()), 9_000);
             assert!(child.record_regular_cost(spent));
-            assert_eq!(detention.compute(&child), 9_000 + spent, "{spent}");
+            assert_eq!(detention.compute(child.tracker()), 9_000 + spent, "{spent}");
             detention.on_frame_end(InstructionResult::Stop, &mut child, 1);
 
             caller.erase_cost(child.remaining());
-            assert_eq!(regular_spent(&caller), 9_000 + spent - 2_300, "{spent}");
+            assert_eq!(regular_spent(caller.tracker()), 9_000 + spent - 2_300, "{spent}");
             detention.on_frame_run(&mut caller, 0);
-            assert_eq!(detention.compute(&caller), 9_000 + spent, "{spent}");
+            assert_eq!(detention.compute(caller.tracker()), 9_000 + spent, "{spent}");
             assert_eq!(detention.figures.suspended, 0);
         }
     }
@@ -958,7 +961,7 @@ mod tests {
         let child_adds = 4_000 + 30_000 - 30_000;
         assert_eq!(detention.figures.suspended, caller_adds + child_adds);
         let compute = 2_000 + 1_000 + 9_000 + 4_000 + 500;
-        assert_eq!(detention.compute(&grandchild), compute);
+        assert_eq!(detention.compute(grandchild.tracker()), compute);
         assert_eq!(detention.compute_limit(), Some(compute + CAP));
         assert_eq!(grandchild.spendable(), CAP);
 
@@ -968,7 +971,7 @@ mod tests {
         child.erase_cost(grandchild.remaining());
         detention.on_frame_run(&mut child, 1);
         assert_eq!(detention.figures.suspended, caller_adds);
-        assert_eq!(detention.compute(&child), compute + 600);
+        assert_eq!(detention.compute(child.tracker()), compute + 600);
         assert_eq!(child.spendable(), CAP - 600);
     }
 
@@ -1027,7 +1030,7 @@ mod tests {
 
             // The caller's regular gas spent now holds everything it forwarded.
             detention.on_frame_run(&mut caller, 0);
-            assert_eq!(detention.compute(&caller), 1_000, "zeroed: {zeroed}");
+            assert_eq!(detention.compute(caller.tracker()), 1_000, "zeroed: {zeroed}");
             assert_eq!(detention.burned, 500_000 - 1_000);
         }
     }
@@ -1077,7 +1080,7 @@ mod tests {
             );
             assert_eq!(beyond.result, InstructionResult::OutOfGas);
             assert_eq!(beyond.gas.remaining(), 90_000_000 - spill);
-            assert_eq!(regular_spent(&beyond.gas), 0);
+            assert_eq!(regular_spent(beyond.gas.tracker()), 0);
         }
     }
 
@@ -1188,7 +1191,7 @@ mod tests {
         detention.on_frame_suspend(&call, 0, 0);
         let mut creation = gas(50_000_000, 0);
         detention.on_frame_run(&mut creation, 1);
-        assert_eq!(detention.compute(&creation), 112_000, "the charges, not the forward");
+        assert_eq!(detention.compute(creation.tracker()), 112_000, "the charges, not the forward");
         assert_eq!(creation.spendable(), BLOCK_ENV_ACCESS_COMPUTE_GAS - 112_000);
         assert_eq!(detention.allowance(2, 0), Some(BLOCK_ENV_ACCESS_COMPUTE_GAS - 112_000));
     }

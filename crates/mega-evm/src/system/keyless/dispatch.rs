@@ -119,7 +119,7 @@ pub(crate) fn ready<DB: Database, ExtEnvs: ExternalEnvTypes>(
         return Ok(None);
     }
     let mut gas = untouched_call_gas(inputs);
-    ctx.detention.hold(&mut gas);
+    ctx.detention.hold(gas.tracker_mut());
     let Err(refusal) = prepare(ctx, inputs, &mut gas)? else {
         unreachable!("a call carrying value is refused at rule 2")
     };

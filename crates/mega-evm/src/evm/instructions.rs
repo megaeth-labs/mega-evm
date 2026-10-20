@@ -245,7 +245,7 @@ fn sstore<DB: Database, ExtEnvs: ExternalEnvTypes>(
     );
     // Only a restore refills, and a restore takes a record back rather than adding one, so it
     // never crosses a limit: no stop's result is pending when the frame is held again.
-    host.detention.hold(&mut interpreter.gas);
+    host.detention.hold(interpreter.gas.tracker_mut());
     result
 }
 
