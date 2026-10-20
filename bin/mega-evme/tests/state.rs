@@ -82,6 +82,63 @@ async fn test_a_fork_keeps_the_predeploys_it_holds() {
     }
 }
 
+/// Without a fork, an address the prestate file gives Satin's code keeps the account the file
+/// holds — the factory at nonce 1443, the Oracle at nonce 3 with a slot of its own — and every
+/// other predeploy gets the account Rex6 left: the code at nonce 0, the `SequencerRegistry` naming
+/// the system address.
+#[tokio::test]
+async fn test_a_local_prestate_keeps_the_predeploys_it_holds() {
+    use mega_evm::system::{
+        system_contract_specs, CREATE2_FACTORY_ADDRESS, MEGA_SYSTEM_ADDRESS,
+        ORACLE_CONTRACT_ADDRESS, SEQUENCER_REGISTRY_ADDRESS,
+    };
+
+    let specs = system_contract_specs();
+    let held = |address: Address, nonce: u64, storage: serde_json::Value| {
+        let spec = specs.iter().find(|spec| spec.address == address).unwrap();
+        serde_json::json!({
+            "balance": "0x0",
+            "nonce": format!("{nonce:#x}"),
+            "code": alloy_primitives::hex::encode_prefixed(&spec.code),
+            "codeHash": spec.code_hash,
+            "storage": storage,
+        })
+    };
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("prestate.json");
+    let prestate = serde_json::json!({
+        format!("{CREATE2_FACTORY_ADDRESS:#x}"): held(CREATE2_FACTORY_ADDRESS, 1_443, serde_json::json!({})),
+        format!("{ORACLE_CONTRACT_ADDRESS:#x}"): held(ORACLE_CONTRACT_ADDRESS, 3, serde_json::json!({ "0x1": "0x7" })),
+    });
+    std::fs::write(&path, prestate.to_string()).expect("write prestate");
+    let prestate_args =
+        PreStateArgs::parse_from(["mega-evme", "--prestate", path.to_str().unwrap()]);
+    // Without --fork no endpoint is contacted.
+    let rpc_args = test_rpc_args("http://localhost:8545", None);
+    let (mut state, _) =
+        prestate_args.create_initial_state(&Address::ZERO, &rpc_args).await.expect("the state");
+    state.deploy_system_contracts().expect("the predeploys");
+
+    for spec in &specs {
+        let info = state.basic_ref(spec.address).expect("readable").expect("present");
+        assert_eq!(info.code_hash, spec.code_hash, "{} holds Satin's code", spec.address);
+        let nonce = match spec.address {
+            CREATE2_FACTORY_ADDRESS => 1_443,
+            ORACLE_CONTRACT_ADDRESS => 3,
+            _ => 0,
+        };
+        assert_eq!(info.nonce, nonce, "{}", spec.address);
+    }
+    let slot =
+        |address: Address, index: u64| state.storage_ref(address, U256::from(index)).unwrap();
+    assert_eq!(slot(ORACLE_CONTRACT_ADDRESS, 1), U256::from(7), "the Oracle keeps its slot");
+    assert_eq!(
+        slot(SEQUENCER_REGISTRY_ADDRESS, 0),
+        U256::from_be_bytes(MEGA_SYSTEM_ADDRESS.into_word().0),
+        "the registry names the system address"
+    );
+}
+
 // ─── Synthetic branch wiring tests (no network required) ─────────────────────
 
 /// Non-fork must produce a no-op cache store regardless of the flags
