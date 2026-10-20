@@ -133,7 +133,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     ///
     /// The fields the spec fixes are set from the spec, whatever `cfg` holds: the gas schedule,
     /// the EIP-8037 and EIP-2780 switches, the execution cap, the EIP-7708 switch and its
-    /// disabling flag, the chain-id check and the two code-size limits. Every other field (chain
+    /// disabling flag, the chain-id check, the two code-size limits and the fork's switch back to
+    /// revm 40.0.3's journal semantics. Every other field (chain
     /// id, the other disabled checks, blob schedule) is taken from `cfg`.
     ///
     /// A context that ran the neutral configuration returns to the spec's.
@@ -158,7 +159,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     ///
     /// - Every field is taken from `cfg`, including the ones [`with_cfg`](Self::with_cfg) sets from
     ///   the spec: the gas schedule, the EIP-8037, EIP-2780 and EIP-7708 switches, the execution
-    ///   cap and the code-size limits.
+    ///   cap and the code-size limits. The one exception is the fork's switch back to revm 40.0.3's
+    ///   journal semantics, which stays off: the journal's semantics are part of the machinery
+    ///   under test, not of what is priced.
     /// - No transaction pays history gas, and none has its schedule swapped for its history
     ///   exemption: every transaction runs `cfg`'s schedule.
     /// - A system call's gas is not split: its whole gas limit is regular gas, as revm's own runner
@@ -173,7 +176,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// journal execute. The precompile set is the EVM's, not the context's: a caller that wants
     /// the fixture fork's replaces it on the [`MegaEvm`](crate::MegaEvm).
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn with_neutral_cfg(mut self, cfg: CfgEnv<MegaSpecId>) -> Self {
+    pub fn with_neutral_cfg(mut self, mut cfg: CfgEnv<MegaSpecId>) -> Self {
+        // The journal's semantics are part of the machinery, not of what is priced.
+        cfg.legacy_journal_semantics = false;
         self.inner = self.inner.with_cfg(op_cfg(&cfg));
         self.cfg = cfg;
         self.neutral = true;
@@ -565,6 +570,12 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
 /// transfer log is data size like any log, and pays no history gas: Ethereum prices it at
 /// nothing, and it is not a byte the transaction chose to write (see the `limit` module).
 ///
+/// The journal runs with the fork's journal semantics, not revm 40.0.3's: a storage slot warmed
+/// while cold inside the current transaction keeps its EIP-2200 baseline, and a reverted code
+/// change restores the code the account had. The fork's switch back to revm 40.0.3's semantics
+/// exists for the engine that reproduces that version; it is set off here whatever the caller's
+/// configuration says, since the journal's own copy of it is written from this configuration.
+///
 /// The chain-id check is on, whatever the caller's configuration says: a transaction that carries
 /// a chain id must carry the chain's, and one of a type other than legacy must carry one. Which
 /// transactions a chain accepts is the chain's rule, not a caller's choice.
@@ -578,6 +589,7 @@ pub fn spec_cfg(mut cfg: CfgEnv<MegaSpecId>) -> CfgEnv<MegaSpecId> {
     cfg.tx_chain_id_check = true;
     cfg.limit_contract_code_size = Some(constants::MAX_CONTRACT_SIZE);
     cfg.limit_contract_initcode_size = Some(constants::MAX_INITCODE_SIZE);
+    cfg.legacy_journal_semantics = false;
     cfg
 }
 
@@ -685,7 +697,17 @@ mod tests {
             assert_eq!(cfg.code_size, Some(constants::MAX_CONTRACT_SIZE), "contract size");
             assert_eq!(cfg.initcode_size, Some(constants::MAX_INITCODE_SIZE), "initcode size");
             assert_eq!(cfg.gas_params.table(), satin_gas_params().table(), "gas schedule");
+            assert!(!cfg.legacy, "revm 40.0.3's journal semantics must stay off");
         }
+        assert_journal_runs_the_spec_switches(ctx);
+    }
+
+    /// The journal's own copies of the switches it reads, as the context's cfg sync delivered
+    /// them: the fork's journal semantics, and EIP-7708 transfer logs on.
+    fn assert_journal_runs_the_spec_switches(ctx: &MegaContext<EmptyDB, impl ExternalEnvTypes>) {
+        let journal = &ctx.journal_ref().inner;
+        assert!(!journal.legacy_journal_semantics(), "the journal keeps the fork's semantics");
+        assert!(journal.amsterdam_eip7708_enabled(), "the journal emits transfer logs");
     }
 
     /// The configuration fields the spec fixes, read out of either view.
@@ -699,6 +721,7 @@ mod tests {
         code_size: Option<usize>,
         initcode_size: Option<usize>,
         gas_params: &'a GasParams,
+        legacy: bool,
     }
 
     impl<'a> Fixed<'a> {
@@ -713,6 +736,7 @@ mod tests {
                 code_size: cfg.limit_contract_code_size,
                 initcode_size: cfg.limit_contract_initcode_size,
                 gas_params: &cfg.gas_params,
+                legacy: cfg.legacy_journal_semantics,
             }
         }
     }
@@ -763,11 +787,38 @@ mod tests {
             cfg.limit_contract_code_size = Some(24 * 1024);
             cfg.limit_contract_initcode_size = Some(48 * 1024);
             cfg.gas_params = GasParams::new_spec(EthSpecId::AMSTERDAM);
+            cfg.legacy_journal_semantics = true;
         });
 
         assert_satin_cfg(&ctx);
         assert_eq!(ctx.mega_cfg().chain_id, 4326);
         assert_eq!(ctx.cfg().chain_id, 4326);
+    }
+
+    /// The switch back to revm 40.0.3's journal semantics is the legacy engine's. A configuration
+    /// carrying every switch at the legacy engine's values — it exports that one on — changes
+    /// nothing the journal reads: the fork's semantics and transfer logs stay as the spec fixes
+    /// them, in `cfg` and in the journal's copies, under the spec's configuration and the neutral
+    /// one.
+    #[test]
+    fn test_a_legacy_engine_cfg_does_not_change_the_journal_switches() {
+        let ctx = context_with(|cfg| {
+            cfg.enable_amsterdam_eip8037 = false;
+            cfg.enable_amsterdam_eip2780 = false;
+            cfg.enable_amsterdam_eip7708 = false;
+            cfg.legacy_journal_semantics = true;
+        });
+        assert_satin_cfg(&ctx);
+
+        let neutral = MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN).with_neutral_cfg({
+            let mut cfg = osaka_cfg();
+            cfg.legacy_journal_semantics = true;
+            cfg
+        });
+        assert!(neutral.is_neutral());
+        assert!(!neutral.mega_cfg().legacy_journal_semantics);
+        assert!(!neutral.cfg().legacy_journal_semantics);
+        assert!(!neutral.journal_ref().inner.legacy_journal_semantics());
     }
 
     /// The op-revm view is the `MegaETH` view keyed by the base spec, field for field.
