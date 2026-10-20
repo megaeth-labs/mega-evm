@@ -69,6 +69,14 @@ The record holds the status with its halt or revert reason, the output, the crea
 It is canonical: JSON with every object's keys sorted, 256-bit numbers as lowercase hex without leading zeros, hashes and addresses at full width, maps sorted by key, so it depends on neither a thread count nor a hash map's order.
 It is taken from the outcome as the engine produced it, before the runner takes the base-fee vault the fee routing created back out of the state.
 
+## Tightened limits
+
+Satin mode holds each transaction to the spec's limits, which the corpus rarely reaches.
+`--limit-data-size BYTES` replaces the transaction data-size limit, and with it the frame data-size cap, which follows it unless `--limit-frame-data-size BYTES` names another; `--limit-compute-gas GAS` replaces gas detention's two caps.
+A run so limited stops transactions the spec's run lets through, so its verdicts fail; it is read through its digest, whose `limit_exceeded` and `usage` then cover the stop paths of the whole corpus.
+The options need `--mode satin`: equivalence mode installs no limit, and refuses them.
+There is no write-record limit to tighten: a record is forty bytes of data size and is held by the data-size limit.
+
 To compare two revisions, run the same command at both, keep the lines that start with `{`, sort them, and compare the files; a line that differs is found by its `path` and `test`, and its full form shows the fields.
 
 ```bash

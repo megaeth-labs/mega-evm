@@ -35,6 +35,8 @@ pub mod skips;
 pub mod witness;
 
 pub use fork::*;
+/// The per-transaction limits a run can be held to, for [`runner::Config::limits`].
+pub use mega_evm::EvmTxRuntimeLimits;
 pub use mode::*;
 
 /// The execution-spec state-test fixture types, as the revm fork's reference runner reads

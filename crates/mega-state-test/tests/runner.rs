@@ -18,7 +18,7 @@ use state_test::{
     runner::{run, Config, FailureKind, Outcome, Report},
     skips::SkipReason,
     types::TestSuite,
-    Fork, Mode,
+    EvmTxRuntimeLimits, Fork, Mode,
 };
 
 const SENDER: &str = "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b";
@@ -38,6 +38,7 @@ fn config(mode: Mode, fork: Fork) -> Config {
         json_outcome: false,
         trace: false,
         digest: None,
+        limits: None,
         deviations: DEVIATIONS,
     }
 }
@@ -578,4 +579,33 @@ fn test_the_digest_covers_failed_and_rejected_tests() {
         .as_str()
         .unwrap()
         .contains("CallGasCostMoreThanGasLimit"));
+}
+
+/// Running under tighter limits stops the transaction a limit holds: its record names the stop,
+/// where the same fixture under the spec's limits has none.
+#[test]
+fn test_tightened_limits_reach_the_limit_stop_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(
+        dir.path(),
+        "a.json",
+        json!({ "call": fill_from_ethereum(unit(&[Fork::Osaka], json!({ "gasLimit": ["0x0f4240"] }))) }),
+    );
+    let spec = run(std::slice::from_ref(&path), config(Mode::Satin, Fork::Osaka));
+    let tight = run(
+        &[path],
+        Config {
+            limits: Some(
+                EvmTxRuntimeLimits::default()
+                    .with_tx_data_size_limit(400)
+                    .with_frame_data_size_limit(400),
+            ),
+            ..config(Mode::Satin, Fork::Osaka)
+        },
+    );
+    let (spec, tight) = (records(&spec)[0].unwrap(), records(&tight)[0].unwrap());
+    assert!(spec["limit_exceeded"].is_null());
+    assert_eq!(tight["limit_exceeded"]["kind"], "DataSize");
+    assert_eq!(tight["limit_exceeded"]["limit"], 400);
+    assert_ne!(state_test::digest::hash(spec), state_test::digest::hash(tight));
 }

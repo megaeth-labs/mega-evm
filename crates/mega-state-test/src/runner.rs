@@ -52,7 +52,7 @@ use mega_evm::{
         primitives::{Bytes, B256, KECCAK_EMPTY, U256},
         DatabaseCommit, ExecuteCommitEvm,
     },
-    MegaContext, MegaEvm,
+    EvmTxRuntimeLimits, MegaContext, MegaEvm,
 };
 use serde::{
     de::{Error as _, MapAccess, Visitor},
@@ -86,6 +86,9 @@ pub struct Config {
     pub trace: bool,
     /// Print the digest of every transaction's whole outcome to standard error, in this form.
     pub digest: Option<DigestForm>,
+    /// Satin mode: the per-transaction limits the tests run under instead of the spec's, to reach
+    /// the limit-stop paths. Equivalence mode installs no limit and refuses these.
+    pub limits: Option<EvmTxRuntimeLimits>,
     /// The registry equivalence mode attributes failures to: [`deviations::DEVIATIONS`] for the
     /// gate.
     pub deviations: &'static [Deviation],
@@ -674,6 +677,9 @@ fn execute_and_check(
     let mut state =
         State::builder().with_cached_prestate(unit.state()).with_bundle_update().build();
     let mut evm = config.mode.evm(config.fork, &mut state, block, chain_id);
+    if let Some(limits) = config.limits {
+        evm.set_tx_runtime_limits(limits);
+    }
     let result = if config.trace {
         let mut evm = evm.with_inspector(TracerEip3155::buffered(stderr()).without_summary());
         execute_and_commit(&mut evm, tx, executed)
