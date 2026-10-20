@@ -58,7 +58,7 @@ The block context a node passes carries only building policy (`BlockLimits`): a 
 The execution figure a block counts for a transaction is its regular ledger — its gas less state and history, read off revm's `Gas` — at least its EIP-7623 floor.
 The block's data-size cap never refuses a deposit, which the block must include; a deposit still counts towards it.
 A builder that executes candidates and chooses among them commits through `commit_transaction_outcome`, which checks the block's counters again; alloy-evm's `commit_transaction` cannot fail and expects each outcome to commit before the next transaction executes, and a debug build asserts it.
-`apply_pre_execution_changes` makes the EIP-2935 and EIP-4788 calls, deploys the six MegaETH system contracts and the EIP-7997 `CREATE2` factory every block, idempotently, applies a role change the `SequencerRegistry` has due in the block with its `applyPendingChanges()` call, and last reads the L1 block contract's account and the five slots the block's transactions can be priced against, which op-revm and the executor read on the database rather than through a transaction.
+`apply_pre_execution_changes` makes the EIP-2935 and EIP-4788 calls, deploys five of the six MegaETH system contracts and the EIP-7997 `CREATE2` factory every block, idempotently, checks the sixth, the `SequencerRegistry`, which the legacy forks deployed and upgraded to v2.0.0 and without which the block is invalid, applies a role change the `SequencerRegistry` has due in the block with its `applyPendingChanges()` call, and last reads the L1 block contract's account and the five slots the block's transactions can be priced against, which op-revm and the executor read on the database rather than through a transaction.
 It hands each pre-block state — the two EIP calls, the seven deploys, the read of the registry's pending changes and its call, and the L1 block info — to an optional observer before it commits; with the included transactions' states and oracle reads, and the block hashes and buckets the executor exports, that is the witness a stateless client needs.
 A database that cannot serve one of those L1 reads fails the block before its first transaction, as an internal error, whatever the block holds.
 
@@ -234,10 +234,9 @@ The crate builds on Rust 1.94.
   The state a transaction adds is charged when it runs, so a new recipient or authority is not in the intrinsic gas; a deposit that fails validation is included as a failed deposit rather than refused.
 - `MegaTransactionOutcome::limit_stop()`, or `LimitStop::from_result(result, limit_exceeded)` for a result read elsewhere, gives the kind, limit and usage of the limit that stopped a transaction, for an RPC's error.
   `decode_mega_limit_exceeded` reads revert data alone; bytes that decode are no stop without the outcome's `limit_exceeded`.
-- `SatinChainConfig::from_genesis_config(config)` reads a genesis file's `config` object: `satinTime` and one flat `satin`-prefixed key per field of `SequencerRegistryConfig`, five keys in all; the limits are the spec's, and no key names them.
-  It refuses a missing, unknown or mistyped key and a value the parameters or the schedule refuse, and `hardforks()` builds the schedule; it serializes to the same keys, for a genesis generator.
+- `SatinChainConfig::from_genesis_config(config)` reads a genesis file's `config` object: `satinTime`, the one Satin key; Satin carries no parameter, the limits are the spec's, and no key names them.
+  It refuses any other key starting with `satin`, those of the format's earlier versions among them, a mistyped value and a schedule `validate_schedule` refuses, and `hardforks()` builds the schedule; it serializes to the same key, for a genesis generator.
   The key format is provisional.
-  `SequencerRegistryConfig` also serializes on its own, camelCase with no unknown field.
 
 ## Documentation
 

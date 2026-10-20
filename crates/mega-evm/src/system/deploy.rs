@@ -138,7 +138,7 @@ pub enum SystemContractDeployError<DbError> {
     ForeignCode {
         /// The system-contract address that already has code.
         address: Address,
-        /// The hash this engine deploys.
+        /// The hash this engine deploys, or requires there.
         expected: B256,
         /// The hash already in state.
         found: B256,

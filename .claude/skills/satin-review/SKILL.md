@@ -57,7 +57,7 @@ A test name or a line count is not a reason to trust the code: read the code aga
 ## Glossary of the terms the checks use
 
 - **Live system address**: the address the `SequencerRegistry` names (`_currentSystemAddress`).
-  `MEGA_SYSTEM_ADDRESS` in code is only the placeholder the registry is seeded with.
+  `MEGA_SYSTEM_ADDRESS` in code is only the default a test's registry names (`test_utils::MemoryDatabase::sequencer_registry`).
 - **Pre-block caller**: `0xff…fe`, the EIP-4788 system address, the caller of the pre-block system calls.
   It is a different address from the live system address.
 - **MST** (Mega System Transaction): a signed legacy transaction from the live system address to a whitelisted system contract (today the Oracle), promoted to a deposit by the engine.
@@ -125,7 +125,7 @@ For each module: where it is, what to check, the spec sections, and the `AGENTS.
   - A transaction is an MST when it is a legacy transaction of the system shape from the live system address, decided before it runs; a failed read of the address is an internal error.
   - A deposit and an MST are never refused by the packing budget or building policy and count towards them; the header gas limit (`BlockLimiter::pre_execution_check`) and the DA footprint (`check_da_footprint`) still apply.
   - `commit_transaction_outcome` refuses a stale outcome: the sender's nonce or balance moved since the candidate executed (`StaleOutcome`, internal).
-  - Pre-block order: EIP-2935, EIP-4788, the contract deploys and the EIP-7997 factory, the registry's due change, the read of the L1 block info; a pre-block call that does not succeed makes the block invalid, and a fatal database error is an internal error.
+  - Pre-block order: EIP-2935, EIP-4788, the contract deploys (the registry's only checked) and the EIP-7997 factory, the registry's due change, the read of the L1 block info; a pre-block call that does not succeed makes the block invalid, and a fatal database error is an internal error.
   - A rewriting inspector is refused at every block-execution entry, as an internal error.
   - The block's ledgers: regular as `max(regular, floor)`, state, history, plus history bytes, data size and write records; reported, not limited.
   - When the OP base moves, diff the file against the new base's `OpBlockExecutor`.
@@ -141,8 +141,8 @@ For each module: where it is, what to check, the spec sections, and the `AGENTS.
   - A deposit carrying the MST source hash from any **other** sender is not refused: it is system-originated, so it is held to no limit, pays no history gas, is not detained and is priced at the minimum bucket.
     The spec's basis is that no deposit derived from L1 carries the hash. This is the widest exemption in the engine, so check that claim.
   - An MST is validated (chain id, nonce, EIP-3607) before it is promoted to a deposit.
-  - Deploys are idempotent; a known older version (Oracle 1.0.0 / 1.1.0, SequencerRegistry 1.0.0) is replaced in place with nonce, balance and storage kept; any other code, or empty code with a used nonce, makes the block invalid.
-  - The registry's `_initialFromBlock` is the number of the block whose pre-block step creates it.
+  - Deploys are idempotent; a known older version of the Oracle (1.0.0 / 1.1.0) is replaced in place with nonce, balance and storage kept; any other code, or empty code with a used nonce, makes the block invalid.
+  - The `SequencerRegistry` is a precondition, never created, seeded or upgraded: v2.0.0 (which Rex6 left) is a read-only entry; no account, no code or v1.0.0 makes the block invalid (`SequencerRegistryNotDeployed`); other code is foreign code.
   - An Oracle read in a system call reads chain storage, never the oracle service.
   - Keyless: the call runs as a native creation of the recovered signer; an empty code deposit at the deploy address is refused with `EmptyCodeDeployed`, a constructor's inner creation returning empty code is not; the answers are the documented error set.
   - The interceptor dispatch order is scheme guard, address, selector, then value policy; an unknown selector is not intercepted.
@@ -178,7 +178,7 @@ For each module: where it is, what to check, the spec sections, and the `AGENTS.
 - **Where:** `src/lib.rs` (explicit exports), `src/block/hardfork.rs`, `src/block/chain.rs`, `src/block/genesis.rs`, `src/evm/validation.rs`, `src/evm/state.rs`, `src/block/l1_block_info.rs`, `src/test_utils/witness.rs`, `crates/mega-state-test/src/witness.rs`.
 - **Check:**
   - `validate_schedule` refuses a schedule in which a base fork Satin runs on is not active by `satinTime`.
-  - The genesis format has exactly five keys (`satinTime`, the registry's initial system address, sequencer, admin and minimum rotation delay); unknown, old and missing keys are refused.
+  - The genesis format has exactly one key, `satinTime`; Satin carries no parameter, and every other `satin*` key (the old registry and limit keys included) is refused.
   - The pool and the engine refuse the same oversize body with the same error (`TX_BODY_OVER_DATA_SIZE_LIMIT`): body + 40 × authorizations over the transaction limit.
   - The witness holds every read: block hashes, SALT bucket ids, the Oracle reads of the block's transactions (none for system calls), the L1 block info, the registry.
 - **Spec:** §1, §21, §22, "Node integrators".

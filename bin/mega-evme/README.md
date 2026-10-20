@@ -35,7 +35,7 @@ On Satin every output field keeps its legacy name and meaning, and a `satin` obj
 
 A Satin run is held to Satin's protocol limits, which the spec fixes for every chain.
 `--override.limits <JSON|FILE>` on `run`, `tx` and `replay` replaces the fields it names of those limits, a counterfactual; it is refused on a legacy spec.
-`--genesis <FILE>` gives a chain the tool does not know, a devnet for one, its own Satin configuration: its genesis file's `satinTime` and registry roles replace the tool's table for that chain, read with the parser a node reads them with.
+`--genesis <FILE>` gives a chain the tool does not know, a devnet for one, its own Satin configuration: its genesis file's `satinTime` replaces the tool's table for that chain, read with the parser a node reads it with.
 Under it `run` and `tx` default to `--spec Satin`, and a run the file cannot configure — on another chain, on a legacy spec, before the file's `satinTime`, or on a file without Satin keys — is refused rather than run on the tool's table.
 
 The legacy leg is the default feature `legacy`; `--no-default-features` builds a Satin-only binary.

@@ -198,7 +198,7 @@ pub(crate) fn load_system_address<J: JournalTr>(
 /// `_currentSystemAddress` holds `current`: none unless the registry holds this engine's code and
 /// a non-zero address.
 fn system_address_named_by(code_hash: B256, current: U256) -> Option<Address> {
-    // The expected hash is the registry code this engine deploys, the latest version. When the
+    // The expected hash is the registry code this engine requires, the latest version. When the
     // registry is next upgraded under a later spec, the hash compared here must be chosen per
     // spec: compared with the newer code alone, a block of this spec replayed by the newer binary
     // finds no system address, and its system transactions are silently demoted to ordinary ones.
@@ -486,7 +486,7 @@ mod tests {
         assert_eq!(slot.present_value(), current);
     }
 
-    /// A registry holding the code this engine deploys names the address it stores, and the read
+    /// A registry holding the code this engine requires names the address it stores, and the read
     /// leaves the account and the slot warm, without loading the code.
     #[test]
     fn test_the_read_answers_the_stored_system_address_and_warms_the_registry() {
@@ -501,7 +501,7 @@ mod tests {
     }
 
     /// A registry still holding the legacy engine's first bytecode is not the one this engine
-    /// deploys: it names no address. Its slot is read all the same, so what a transaction pays
+    /// requires: it names no address. Its slot is read all the same, so what a transaction pays
     /// does not depend on the registry's code.
     #[test]
     fn test_the_read_refuses_the_v1_code_hash() {

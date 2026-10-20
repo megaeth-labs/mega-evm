@@ -22,8 +22,8 @@ pub struct MainCmd {
     pub log: LogArgs,
 
     /// Satin only: the genesis file of the chain the command runs on. Its `config` object's
-    /// `chainId` and Satin keys (`satinTime` and the registry seeds) replace the
-    /// engine's table for that chain: which blocks run Satin, and the schedule they run under.
+    /// `chainId` and Satin key (`satinTime`) replace the engine's table for that chain: which
+    /// blocks run Satin, and the schedule they run under.
     /// `run` and `tx` default to `--spec Satin` under it. A run on another chain, on a legacy
     /// spec, before the file's `satinTime`, or on a file without Satin keys is refused
     #[arg(long = "genesis", global = true, value_name = "FILE", value_parser = parse_genesis)]
