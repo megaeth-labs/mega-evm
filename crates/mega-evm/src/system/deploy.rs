@@ -1,15 +1,18 @@
 //! Shared primitive for deploying `MegaETH` system contracts and the EIP-7997 factory.
 //!
-//! Every predeploy is one state patch: install the account's bytecode, optionally seed storage,
-//! and mark the account touched and created. [`SystemContractSpec`] names those differences;
-//! [`transact_deploy`] applies them and never commits. The caller — the block executor today,
-//! the CLI later — commits the returned [`EvmState`].
+//! Every predeploy is one state patch: install the account's bytecode and mark the account
+//! touched and created. [`SystemContractSpec`] names those differences; [`transact_deploy`]
+//! applies them and never commits. The caller — the block executor today, the CLI later — commits
+//! the returned [`EvmState`].
 //!
 //! [`system_contract_specs`] is the single list both iterate: the six `MegaETH` contracts in
-//! address order, then the factory. A spec names the version the engine deploys (the bytecode
+//! address order, then the factory. A spec names the version the engine runs (the bytecode
 //! `mega-system-contracts` ships; the Oracle and the `SequencerRegistry` are their v2.0.0) and the
 //! older versions of the contract that chains hold: an address holding one of those is upgraded in
-//! place, its storage kept, and an address holding any other code is an error.
+//! place, its storage kept, and an address holding any other code is an error. The
+//! `SequencerRegistry` is the exception: the legacy forks created it (Rex5) and upgraded it to
+//! v2.0.0 (Rex6), so the deploy only checks that it is there, at v2.0.0, and neither creates nor
+//! upgrades it.
 //!
 //! [`check_genesis_account`] is the one check made before any block: a deploy over an account
 //! that holds storage neither writes nor clears that storage, and only a genesis allocation can
@@ -21,22 +24,16 @@ use core::fmt;
 use std::vec::Vec;
 
 use alloy_primitives::{address, b256, bytes, keccak256, Address, Bytes, B256, U256};
-use mega_system_contracts::{
-    oracle, sequencer_registry,
-    sequencer_registry::storage_slots::{
-        ADMIN, CURRENT_SEQUENCER, CURRENT_SYSTEM_ADDRESS, INITIAL_FROM_BLOCK, INITIAL_SEQUENCER,
-        INITIAL_SYSTEM_ADDRESS, MIN_ROTATION_DELAY,
-    },
-};
+use mega_system_contracts::{oracle, sequencer_registry};
 use revm::{
     primitives::KECCAK_EMPTY,
-    state::{Account, Bytecode, EvmState, EvmStorageSlot, TransactionId},
+    state::{Account, Bytecode, EvmState},
     Database,
 };
 
 use super::{
     keyless::{KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE, KEYLESS_DEPLOY_CODE_HASH},
-    SequencerRegistryConfig, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE, ACCESS_CONTROL_CODE_HASH,
+    ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE, ACCESS_CONTROL_CODE_HASH,
     HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS, HIGH_PRECISION_TIMESTAMP_ORACLE_CODE,
     HIGH_PRECISION_TIMESTAMP_ORACLE_CODE_HASH, LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE,
     LIMIT_CONTROL_CODE_HASH, ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE,
@@ -74,9 +71,6 @@ pub struct SystemContractSpec {
     pub code_hash: B256,
     /// Nonce written on a fresh deploy. Created contract accounts start at 1.
     pub nonce: u64,
-    /// Flat storage slots to seed `(slot, value)` on a fresh deploy. Empty for every contract
-    /// except the `SequencerRegistry`.
-    pub seed: Vec<(U256, U256)>,
     /// When set, matching code with nonce 0 is an error rather than a read-only entry.
     ///
     /// EIP-7997 requires the factory to hold its runtime **and a nonzero nonce**. The six
@@ -84,43 +78,51 @@ pub struct SystemContractSpec {
     /// accepted regardless of nonce, because the matching-code path must not rewrite an
     /// already-deployed contract.
     pub require_nonzero_nonce: bool,
+    /// When set, an earlier fork deployed this contract and the deploy neither creates nor
+    /// upgrades it: the account must already hold [`code`](Self::code), and anything else is an
+    /// error.
+    ///
+    /// The `SequencerRegistry` sets it: the legacy forks created it (Rex5) and upgraded it to
+    /// v2.0.0 (Rex6), and a chain that activates Satin has run them.
+    pub require_deployed: bool,
     /// Code hashes of the older versions of this contract that a chain may hold. An account
     /// holding one of them is upgraded in place to [`code`](Self::code): the code and its hash
-    /// are replaced, and the nonce, the balance and the storage stay. Empty for a contract that
-    /// has only ever had one version.
-    pub upgradable_from: Vec<B256>,
+    /// are replaced, and the nonce, the balance and the storage stay. For a contract with
+    /// [`require_deployed`](Self::require_deployed) set it is refused instead, as not deployed.
+    /// Empty for a contract that has only ever had one version.
+    pub older_versions: Vec<B256>,
 }
 
 impl SystemContractSpec {
-    /// A spec with nonce 1, no seeded storage, no nonce requirement on a matching account and no
-    /// older version to upgrade from.
+    /// A spec with nonce 1, no nonce requirement on a matching account, deployed when absent, and
+    /// no older version.
     pub fn new(address: Address, code: Bytes, code_hash: B256) -> Self {
         Self {
             address,
             code,
             code_hash,
             nonce: 1,
-            seed: Vec::new(),
             require_nonzero_nonce: false,
-            upgradable_from: Vec::new(),
+            require_deployed: false,
+            older_versions: Vec::new(),
         }
     }
 
-    /// Names the older versions, by code hash, that an account is upgraded in place from.
-    pub fn with_upgrades_from(mut self, code_hashes: impl IntoIterator<Item = B256>) -> Self {
-        self.upgradable_from = code_hashes.into_iter().collect();
-        self
-    }
-
-    /// Sets the seeded storage slots applied on a fresh deploy.
-    pub fn with_seed(mut self, seed: Vec<(U256, U256)>) -> Self {
-        self.seed = seed;
+    /// Names the older versions of the contract, by code hash.
+    pub fn with_older_versions(mut self, code_hashes: impl IntoIterator<Item = B256>) -> Self {
+        self.older_versions = code_hashes.into_iter().collect();
         self
     }
 
     /// Requires a matching existing account to hold a nonzero nonce (EIP-7997).
     pub fn require_nonzero_nonce(mut self) -> Self {
         self.require_nonzero_nonce = true;
+        self
+    }
+
+    /// Requires the contract to be deployed already, by an earlier fork.
+    pub fn require_deployed(mut self) -> Self {
+        self.require_deployed = true;
         self
     }
 }
@@ -156,6 +158,19 @@ pub enum SystemContractDeployError<DbError> {
         /// The nonce already on the account.
         nonce: u64,
     },
+    /// The `SequencerRegistry` is not deployed at v2.0.0: its address holds no account, an
+    /// account without code, or an older version of the contract.
+    ///
+    /// The legacy forks deploy it and upgrade it to v2.0.0, and the deploy neither creates nor
+    /// upgrades it ([`SystemContractSpec::require_deployed`]).
+    SequencerRegistryNotDeployed {
+        /// The registry's address.
+        address: Address,
+        /// The code hash of v2.0.0.
+        expected: B256,
+        /// The code hash the address holds: the empty code's for no account or no code.
+        found: B256,
+    },
 }
 
 impl<DbError> From<DbError> for SystemContractDeployError<DbError> {
@@ -186,7 +201,30 @@ impl<DbError: fmt::Display> fmt::Display for SystemContractDeployError<DbError> 
                     "system contract at {address} has empty code but nonce {nonce}; refusing to overwrite a used account"
                 )
             }
+            Self::SequencerRegistryNotDeployed { address, expected, found } => {
+                write_registry_not_deployed(f, *address, *expected, *found)
+            }
         }
+    }
+}
+
+/// The refusal of a chain whose `SequencerRegistry` at `address` holds the code hash `found`
+/// where v2.0.0's, `expected`, must already be.
+pub(crate) fn write_registry_not_deployed(
+    f: &mut fmt::Formatter<'_>,
+    address: Address,
+    expected: B256,
+    found: B256,
+) -> fmt::Result {
+    write!(
+        f,
+        "the SequencerRegistry at {address} must already be deployed at v2.0.0 (code hash \
+         {expected}) by the legacy forks, and Satin neither creates nor upgrades it; "
+    )?;
+    if found == KECCAK_EMPTY {
+        f.write_str("the address holds no code")
+    } else {
+        write!(f, "the address holds code hash {found}")
     }
 }
 
@@ -198,7 +236,8 @@ impl<DbError: core::error::Error + 'static> core::error::Error
             Self::Database(error) => Some(error),
             Self::ForeignCode { .. } |
             Self::ZeroFactoryNonce { .. } |
-            Self::UsedEmptyAccount { .. } => None,
+            Self::UsedEmptyAccount { .. } |
+            Self::SequencerRegistryNotDeployed { .. } => None,
         }
     }
 }
@@ -207,22 +246,27 @@ impl<DbError: core::error::Error + 'static> core::error::Error
 /// committed.
 ///
 /// - Already deployed with [`SystemContractSpec::code_hash`]: the account as a read-only entry
-///   (neither touched nor created, no seeding), so the witness records the read. A nonce of 7 stays
+///   (neither touched nor created, no storage), so the witness records the read. A nonce of 7 stays
 ///   7. If [`SystemContractSpec::require_nonzero_nonce`] is set (the EIP-7997 factory) and the
 ///   nonce is 0, this is [`SystemContractDeployError::ZeroFactoryNonce`] instead: the matching-code
 ///   path does not rewrite a nonce, so a genesis factory with the right code and nonce 0 would
-///   otherwise stay invalid forever. The six `MegaETH` contracts leave that flag unset; they
-///   are not EIP-7997, and matching code is accepted regardless of nonce.
-/// - Absent, or present with empty code and nonce 0: the created account with its bytecode, nonce
-///   and every seeded slot, all marked. An existing balance is kept; prefunding with balance alone
-///   is the accepted bootstrap path. Storage the account held is neither written nor cleared: the
-///   returned state carries no change to those slots, so the state a block commits still holds
-///   them, while the created mark has the state layer answer them as zero for the rest of the
-///   block, dropping a value its cache held. Only a genesis allocation can put storage on such an
-///   account, and [`check_genesis_account`] refuses one that does. An empty-code account with a
-///   nonzero nonce is [`SystemContractDeployError::UsedEmptyAccount`]: a used account at a system
-///   address is not overwritten silently.
-/// - Present with the code of a version in [`SystemContractSpec::upgradable_from`]: upgraded in
+///   otherwise stay invalid forever. The six `MegaETH` contracts leave that flag unset; they are
+///   not EIP-7997, and matching code is accepted regardless of nonce.
+/// - Anything else, when [`SystemContractSpec::require_deployed`] is set (the `SequencerRegistry`):
+///   no account, an account without code, or one holding a version in
+///   [`SystemContractSpec::older_versions`] is
+///   [`SystemContractDeployError::SequencerRegistryNotDeployed`], and any other code
+///   [`SystemContractDeployError::ForeignCode`]. Nothing is created or upgraded.
+/// - Absent, or present with empty code and nonce 0: the created account with its bytecode and
+///   nonce, marked. An existing balance is kept; prefunding with balance alone is the accepted
+///   bootstrap path. Storage the account held is neither written nor cleared: the returned state
+///   carries no change to those slots, so the state a block commits still holds them, while the
+///   created mark has the state layer answer them as zero for the rest of the block, dropping a
+///   value its cache held. Only a genesis allocation can put storage on such an account, and
+///   [`check_genesis_account`] refuses one that does. An empty-code account with a nonzero nonce is
+///   [`SystemContractDeployError::UsedEmptyAccount`]: a used account at a system address is not
+///   overwritten silently.
+/// - Present with the code of a version in [`SystemContractSpec::older_versions`]: upgraded in
 ///   place. The account is returned touched and not created, with the new code and its hash, its
 ///   nonce and balance as they were, and no storage entry: a created mark would have the state
 ///   layer answer the contract's storage as zero, so the slots are neither written nor cleared and
@@ -237,7 +281,9 @@ impl<DbError: core::error::Error + 'static> core::error::Error
 /// [`SystemContractDeployError::ZeroFactoryNonce`] when the factory holds matching code at
 /// nonce 0;
 /// [`SystemContractDeployError::UsedEmptyAccount`] when the address has empty code and a
-/// used nonce.
+/// used nonce;
+/// [`SystemContractDeployError::SequencerRegistryNotDeployed`] when the registry is not there at
+/// v2.0.0.
 pub fn transact_deploy<DB: Database>(
     db: &mut DB,
     spec: &SystemContractSpec,
@@ -260,7 +306,23 @@ pub fn transact_deploy<DB: Database>(
             // created, which is the read-only witness entry. An existing nonce is kept.
             return Ok(EvmState::from_iter([(spec.address, Account::from(info.clone()))]));
         }
-        if spec.upgradable_from.contains(&info.code_hash) {
+    }
+
+    if spec.require_deployed {
+        let found = existing.map_or(KECCAK_EMPTY, |info| info.code_hash);
+        let (address, expected) = (spec.address, spec.code_hash);
+        if found == KECCAK_EMPTY || spec.older_versions.contains(&found) {
+            return Err(SystemContractDeployError::SequencerRegistryNotDeployed {
+                address,
+                expected,
+                found,
+            });
+        }
+        return Err(SystemContractDeployError::ForeignCode { address, expected, found });
+    }
+
+    if let Some(info) = &existing {
+        if spec.older_versions.contains(&info.code_hash) {
             let mut upgraded = info.clone();
             upgraded.code_hash = spec.code_hash;
             upgraded.code = Some(Bytecode::new_raw(spec.code.clone()));
@@ -291,11 +353,6 @@ pub fn transact_deploy<DB: Database>(
     let mut account: Account = info.into();
     account.mark_touch();
     account.mark_created();
-    for (slot, value) in &spec.seed {
-        account
-            .storage
-            .insert(*slot, EvmStorageSlot::new_changed(U256::ZERO, *value, TransactionId::ZERO));
-    }
 
     Ok(EvmState::from_iter([(spec.address, account)]))
 }
@@ -303,22 +360,17 @@ pub fn transact_deploy<DB: Database>(
 /// The seven predeploys in deploy order: Oracle, high-precision timestamp, `KeylessDeploy`,
 /// `MegaAccessControl`, `MegaLimitControl`, `SequencerRegistry`, then the EIP-7997 factory.
 ///
-/// The registry's seeded slots come from `config`, but for `_initialFromBlock`, which is
-/// `block_number`: the number of the block whose pre-block step runs the deploy. The seeds are
-/// written only when the deploy creates the registry, so the number they record is that of the
-/// block that created it, as the legacy engine seeded it, and the registry's historical lookups
-/// are valid from there. The factory has nonce 1 and no storage.
-pub fn system_contract_specs(
-    config: &SequencerRegistryConfig,
-    block_number: u64,
-) -> [SystemContractSpec; SYSTEM_CONTRACT_DEPLOY_COUNT] {
+/// The Oracle is upgraded in place from its older versions. The `SequencerRegistry` must already
+/// hold v2.0.0, which the legacy forks deployed: the deploy only reads it. The factory has nonce
+/// 1 and no storage.
+pub fn system_contract_specs() -> [SystemContractSpec; SYSTEM_CONTRACT_DEPLOY_COUNT] {
     [
         SystemContractSpec::new(
             ORACLE_CONTRACT_ADDRESS,
             ORACLE_CONTRACT_CODE,
             ORACLE_CONTRACT_CODE_HASH,
         )
-        .with_upgrades_from([oracle::V1_0_0_CODE_HASH, oracle::V1_1_0_CODE_HASH]),
+        .with_older_versions([oracle::V1_0_0_CODE_HASH, oracle::V1_1_0_CODE_HASH]),
         SystemContractSpec::new(
             HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
             HIGH_PRECISION_TIMESTAMP_ORACLE_CODE,
@@ -340,8 +392,8 @@ pub fn system_contract_specs(
             SEQUENCER_REGISTRY_CODE,
             SEQUENCER_REGISTRY_CODE_HASH,
         )
-        .with_seed(registry_seed(config, block_number))
-        .with_upgrades_from([sequencer_registry::V1_0_0_CODE_HASH]),
+        .require_deployed()
+        .with_older_versions([sequencer_registry::V1_0_0_CODE_HASH]),
         SystemContractSpec::new(
             CREATE2_FACTORY_ADDRESS,
             CREATE2_FACTORY_CODE,
@@ -394,9 +446,9 @@ impl fmt::Display for GenesisAllocationError {
 impl core::error::Error for GenesisAllocationError {}
 
 /// Refuses an account of a genesis allocation that the system-contract deploy would run over
-/// without clearing what it holds: one at a predeploy address ([`SYSTEM_CONTRACT_ADDRESSES`])
-/// with empty `code`, `nonce` 0 and a slot of `storage`, the values of its storage, that is not
-/// zero.
+/// without clearing what it holds: one at an address the deploy installs a contract at (every
+/// predeploy of [`system_contract_specs`] but the `SequencerRegistry`) with empty `code`, `nonce`
+/// 0 and a slot of `storage`, the values of its storage, that is not zero.
 ///
 /// A node calls it on every account of its genesis allocation when it loads a chain
 /// configuration, as it checks the configuration's Satin keys
@@ -405,7 +457,9 @@ impl core::error::Error for GenesisAllocationError {}
 /// deploy over one ([`transact_deploy`]) leaves the slots to the state layer. Any other account
 /// passes: one holding the contract's own code is only read by the deploy, a slot holding zero is
 /// no storage, and the deploy refuses every other account it cannot install the contract on —
-/// other code, or a used nonce — at the block that runs it.
+/// other code, or a used nonce — at the block that runs it. The `SequencerRegistry`'s address
+/// passes too: the deploy installs nothing there, and refuses the block unless the address
+/// already holds v2.0.0.
 ///
 /// # Errors
 ///
@@ -416,31 +470,14 @@ pub fn check_genesis_account(
     nonce: u64,
     storage: impl IntoIterator<Item = U256>,
 ) -> Result<(), GenesisAllocationError> {
-    let predeploy = SYSTEM_CONTRACT_ADDRESSES.contains(&address);
-    if predeploy &&
-        code.is_empty() &&
+    if code.is_empty() &&
         nonce == 0 &&
-        storage.into_iter().any(|value| !value.is_zero())
+        storage.into_iter().any(|value| !value.is_zero()) &&
+        system_contract_specs()
+            .iter()
+            .any(|spec| spec.address == address && !spec.require_deployed)
     {
         return Err(GenesisAllocationError::StorageWithoutCode { address });
     }
     Ok(())
-}
-
-/// Encodes an address into its `U256` storage representation (standard Solidity address-in-slot).
-fn address_to_storage_value(address: Address) -> U256 {
-    U256::from_be_bytes(address.into_word().0)
-}
-
-/// The seven bootstrap slots the `SequencerRegistry` is created with, in block `block_number`.
-fn registry_seed(config: &SequencerRegistryConfig, block_number: u64) -> Vec<(U256, U256)> {
-    Vec::from([
-        (CURRENT_SYSTEM_ADDRESS, address_to_storage_value(config.initial_system_address)),
-        (CURRENT_SEQUENCER, address_to_storage_value(config.initial_sequencer)),
-        (ADMIN, address_to_storage_value(config.initial_admin)),
-        (INITIAL_SYSTEM_ADDRESS, address_to_storage_value(config.initial_system_address)),
-        (INITIAL_SEQUENCER, address_to_storage_value(config.initial_sequencer)),
-        (INITIAL_FROM_BLOCK, U256::from(block_number)),
-        (MIN_ROTATION_DELAY, U256::from(config.min_rotation_delay)),
-    ])
 }

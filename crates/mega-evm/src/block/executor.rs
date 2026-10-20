@@ -138,7 +138,7 @@ use crate::{
     system::{
         classify_system_transaction, is_apply_pending_changes_due, live_system_address,
         system_contract_specs, transact_apply_pending_changes, transact_deploy,
-        SequencerRegistryConfig, SystemContractDeployError,
+        write_registry_not_deployed, SystemContractDeployError,
     },
     BlockGasCounters, BlockLimiter, BlockLimits, BucketId, ExternalEnvTypes,
     MegaBlockExecutionResult, MegaBlockTxResult, MegaContext, MegaEvm, MegaHardforks,
@@ -223,10 +223,19 @@ pub enum MegaBlockExecutionError {
         /// The hash already in state.
         found: B256,
     },
-    /// Satin is scheduled but the schedule does not carry a [`SequencerRegistryConfig`].
+    /// The `SequencerRegistry` is not deployed at v2.0.0: its address holds no account, an
+    /// account without code, or the legacy engine's v1.0.0.
     ///
-    /// A gap in the node's configuration, not a verdict on the block: an internal error.
-    MissingSequencerRegistryConfig,
+    /// The legacy forks deploy it (Rex5) and upgrade it to v2.0.0 (Rex6); Satin neither creates
+    /// nor upgrades it, so a block on a state without it is invalid.
+    SequencerRegistryNotDeployed {
+        /// The registry's address.
+        address: Address,
+        /// The code hash of v2.0.0.
+        expected: B256,
+        /// The code hash the address holds: the empty code's for no account or no code.
+        found: B256,
+    },
     /// The EIP-7997 factory holds the right runtime but nonce 0.
     ZeroFactoryNonce {
         /// The factory address.
@@ -279,8 +288,8 @@ impl fmt::Display for MegaBlockExecutionError {
                 f,
                 "system contract at {address} has unexpected code hash {found}, expected {expected}; refusing to overwrite"
             ),
-            Self::MissingSequencerRegistryConfig => {
-                f.write_str("Satin is scheduled but SequencerRegistryConfig is not configured")
+            Self::SequencerRegistryNotDeployed { address, expected, found } => {
+                write_registry_not_deployed(f, *address, *expected, *found)
             }
             Self::ZeroFactoryNonce { address } => write!(
                 f,
@@ -305,18 +314,18 @@ impl fmt::Display for MegaBlockExecutionError {
 impl core::error::Error for MegaBlockExecutionError {}
 
 impl From<MegaBlockExecutionError> for BlockExecutionError {
-    /// A block refused for what the node itself does is an internal error: a schedule without a
-    /// parameter the block needs, or an inspector the node runs that may rewrite execution, says
-    /// nothing about the block, and a node must not mark a block invalid because of its own
-    /// configuration. Every other refusal is a verdict on the block, a validation error.
+    /// A block refused for what the node itself does is an internal error: an inspector the node
+    /// runs that may rewrite execution, or an outcome the builder let go stale, says nothing about
+    /// the block, and a node must not mark a block invalid because of its own choices. Every other
+    /// refusal is a verdict on the block, a validation error.
     fn from(error: MegaBlockExecutionError) -> Self {
         match error {
-            MegaBlockExecutionError::MissingSequencerRegistryConfig |
             MegaBlockExecutionError::RewritingInspector |
             MegaBlockExecutionError::StaleOutcome { .. } => Self::other(error),
             MegaBlockExecutionError::UnexpectedNonDepositTxInActivationBlock |
             MegaBlockExecutionError::TransactionDaFootprintAboveGasLimit { .. } |
             MegaBlockExecutionError::ForeignSystemContractCode { .. } |
+            MegaBlockExecutionError::SequencerRegistryNotDeployed { .. } |
             MegaBlockExecutionError::ZeroFactoryNonce { .. } |
             MegaBlockExecutionError::UsedEmptyAccount { .. } |
             MegaBlockExecutionError::ApplyPendingChangesFailed { .. } => {
@@ -738,9 +747,10 @@ where
     /// ([`pre_block_call_gas_limit`](eips::pre_block_call_gas_limit)), and one that does not
     /// succeed refuses the block before its state reaches the observer.
     ///
-    /// The registry's role changes come after the deploy, which is what puts the registry in
-    /// state on the chain's first block. Its pending slots are read and handed on whatever they
-    /// say, and when a change is due in this block the `applyPendingChanges()` call applies it on
+    /// The registry's role changes come after the deploy step, which refuses the block unless the
+    /// registry is the v2.0.0 the legacy forks left. Its pending slots are read and handed on
+    /// whatever they say, and when a change is due in this block the `applyPendingChanges()` call
+    /// applies it on
     /// the same pre-block budget, refusing the block if it does not succeed. So a rotation due in
     /// this block governs this block's system-address transactions: each reads the live system
     /// address out of the registry when it is validated, after these steps are committed, and
@@ -773,13 +783,7 @@ where
 
         // The EIP-2935 / EIP-4788 calls above do not depend on these predeploys: they target
         // their own contracts, not the MegaETH system addresses or the factory.
-        let config = self
-            .spec
-            .fork_params::<SequencerRegistryConfig>()
-            .copied()
-            .ok_or(MegaBlockExecutionError::MissingSequencerRegistryConfig)?;
-        let block_number = self.evm.block().number().saturating_to();
-        for spec in system_contract_specs(&config, block_number) {
+        for spec in system_contract_specs() {
             let state = transact_deploy(self.evm.db_mut(), &spec).map_err(|error| match error {
                 SystemContractDeployError::Database(error) => BlockExecutionError::other(error),
                 SystemContractDeployError::ForeignCode { address, expected, found } => {
@@ -792,10 +796,21 @@ where
                 SystemContractDeployError::UsedEmptyAccount { address, nonce } => {
                     MegaBlockExecutionError::UsedEmptyAccount { address, nonce }.into()
                 }
+                SystemContractDeployError::SequencerRegistryNotDeployed {
+                    address,
+                    expected,
+                    found,
+                } => MegaBlockExecutionError::SequencerRegistryNotDeployed {
+                    address,
+                    expected,
+                    found,
+                }
+                .into(),
             })?;
             self.deliver_pre_block(PreBlockStateSource::SystemContract(spec.address), state);
         }
 
+        let block_number = self.evm.block().number().saturating_to();
         let (due, reads) = is_apply_pending_changes_due(self.evm.db_mut(), block_number)
             .map_err(BlockExecutionError::other)?;
         self.deliver_pre_block(PreBlockStateSource::PendingChanges, reads);
@@ -1228,31 +1243,8 @@ mod tests {
             .unwrap_or_else(|| panic!("not an internal refusal of this engine: {error:?}"))
     }
 
-    /// A schedule that activates Satin without a `SequencerRegistryConfig` refuses the block at
-    /// the deploy, as an internal error: the registry cannot be seeded, and that is the node's
-    /// configuration, not the block.
-    #[test]
-    fn test_a_block_without_the_registry_config_is_an_internal_error() {
-        let ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN)
-            .with_block(BlockEnv { gas_limit: 30_000_000, ..Default::default() });
-        let mut executor = MegaBlockExecutor::new(
-            MegaEvm::new(ctx),
-            MegaBlockExecutionCtx::new(
-                B256::ZERO,
-                Some(B256::ZERO),
-                Bytes::new(),
-                BlockLimits::default(),
-            ),
-            MegaHardforkConfig::default().with_all_activated(),
-            alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder::default(),
-        );
-
-        let error = executor.apply_pre_execution_changes().expect_err("no registry, no block");
-        assert_eq!(internal(&error), &MegaBlockExecutionError::MissingSequencerRegistryConfig);
-    }
-
-    /// Every refusal but one for what the node itself does — a configuration gap, or an inspector
-    /// it runs — is a verdict on the block: a validation error.
+    /// Every refusal but one for what the node itself does — an inspector it runs — is a verdict on
+    /// the block: a validation error. A state whose `SequencerRegistry` is not v2.0.0 is one.
     #[test]
     fn test_a_refusal_of_the_block_is_a_validation_error() {
         let address = alloy_primitives::Address::repeat_byte(1);
@@ -1263,6 +1255,11 @@ mod tests {
                 available_block_da_footprint: 1,
             },
             MegaBlockExecutionError::ForeignSystemContractCode {
+                address,
+                expected: B256::ZERO,
+                found: B256::repeat_byte(1),
+            },
+            MegaBlockExecutionError::SequencerRegistryNotDeployed {
                 address,
                 expected: B256::ZERO,
                 found: B256::repeat_byte(1),
@@ -1278,12 +1275,8 @@ mod tests {
             };
             assert_eq!(inner.downcast_ref::<MegaBlockExecutionError>(), Some(&refusal));
         }
-        for gap in [
-            MegaBlockExecutionError::MissingSequencerRegistryConfig,
-            MegaBlockExecutionError::RewritingInspector,
-        ] {
-            assert_eq!(internal(&BlockExecutionError::from(gap.clone())), &gap);
-        }
+        let inspector = MegaBlockExecutionError::RewritingInspector;
+        assert_eq!(internal(&BlockExecutionError::from(inspector.clone())), &inspector);
     }
 
     /// The executor prints whether a pre-block observer is installed. A trait object has no

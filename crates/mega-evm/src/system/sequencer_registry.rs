@@ -5,12 +5,14 @@
 //! to it is an ordinary call. Its Solidity source is
 //! `crates/system-contracts/contracts/SequencerRegistry.sol`.
 //!
-//! The contract is deployed by [`transact_deploy`](crate::system::transact_deploy) with the
-//! bootstrap slots [`SequencerRegistryConfig`] names, before every block. A role change the
-//! registry schedules takes effect at its activation block through a pre-block call: the block
-//! executor reads whether one is due ([`is_apply_pending_changes_due`]) and, when one is, calls
-//! `applyPendingChanges()` ([`transact_apply_pending_changes`]). The call is permissionless and
-//! applies only what is due, so a block that makes it applies the same changes whoever calls.
+//! The legacy forks deployed it (Rex5) and upgraded it to v2.0.0 (Rex6); Satin neither creates nor
+//! upgrades it. Before every block the pre-block deploy step
+//! ([`transact_deploy`](crate::system::transact_deploy)) reads it and refuses the block unless it
+//! holds v2.0.0. A role change the registry schedules takes effect at its activation block through
+//! a pre-block call: the block executor reads whether one is due
+//! ([`is_apply_pending_changes_due`]) and, when one is, calls `applyPendingChanges()`
+//! ([`transact_apply_pending_changes`]). The call is permissionless and applies only what is due,
+//! so a block that makes it applies the same changes whoever calls.
 //!
 //! The live system address, which a system-address transaction must be sent from, is read out of
 //! the registry by every transaction when it is validated ([`load_system_address`]): the read
@@ -256,9 +258,10 @@ pub fn live_system_address<DB: revm::Database>(mut db: DB) -> Result<Option<Addr
 ///
 /// `None` when the registry names no address this engine trusts: it has no account, it holds other
 /// code than [`SEQUENCER_REGISTRY_CODE`], or its `_currentSystemAddress` is zero. Block execution
-/// never leaves such a registry behind — the pre-block deploy puts this code there or refuses the
-/// block, and the contract writes no zero address — so these are states an EVM run outside block
-/// execution may meet, and in none of them is any transaction a system-address transaction. The
+/// never runs a transaction over such a registry — the pre-block deploy step refuses a block whose
+/// registry does not hold this code, and the contract writes no zero address — so these are states
+/// an EVM run outside block execution may meet, and in none of them is any transaction a
+/// system-address transaction. The
 /// slot is loaded in each of them all the same, so the transaction's gas does not depend on them.
 ///
 /// # Errors

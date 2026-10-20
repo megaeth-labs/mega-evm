@@ -41,7 +41,7 @@ use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use mega_evm::{
-    system::{SequencerRegistryConfig, SYSTEM_CONTRACT_DEPLOY_COUNT},
+    system::{SequencerRegistryConfig, MEGA_SYSTEM_ADDRESS, SYSTEM_CONTRACT_DEPLOY_COUNT},
     test_utils::{BytecodeBuilder, MemoryDatabase},
     BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardforkConfig,
     MegaSpecId, MegaTxEnvelope, PreBlockStateSource,
@@ -101,10 +101,10 @@ fn slot_calldata(nonce: u64) -> Bytes {
     Bytes::from(U256::from(nonce + 1).to_be_bytes::<32>())
 }
 
-/// The accounts the workloads use, the EIP-2935 and EIP-4788 contracts' code, and nothing the
-/// chain deploys.
+/// The accounts the workloads use, the EIP-2935 and EIP-4788 contracts' code, the
+/// `SequencerRegistry` the legacy forks left, and nothing Satin deploys.
 fn database() -> MemoryDatabase {
-    let mut db = MemoryDatabase::default();
+    let mut db = MemoryDatabase::default().sequencer_registry(MEGA_SYSTEM_ADDRESS);
     db.set_account_code(WRITER, writer_code());
     db.set_account_code(RECIPIENT, Bytes::new());
     db.set_account_balance(SENDER, U256::from(1_000_000_000_000_000_u64));
@@ -197,8 +197,8 @@ fn pre_block_states(db: MemoryDatabase, number: u64) -> Vec<(PreBlockStateSource
 }
 
 /// The database the chain's steady state starts a block from: [`database`] with what the
-/// previous block's pre-block changes left in it, the seven predeploys among them, committed in
-/// the order the executor commits them.
+/// previous block's pre-block changes left in it, the six predeploys it created among them,
+/// committed in the order the executor commits them.
 fn steady_database() -> MemoryDatabase {
     let mut db = database();
     let states = pre_block_states(db.clone(), BLOCK_NUMBER - 1);
@@ -207,7 +207,11 @@ fn steady_database() -> MemoryDatabase {
         .filter(|(source, _)| matches!(source, PreBlockStateSource::SystemContract(_)))
         .filter(|(_, state)| state.values().any(|account| account.is_created()))
         .count();
-    assert_eq!(deployed, SYSTEM_CONTRACT_DEPLOY_COUNT, "the previous block deploys all seven");
+    assert_eq!(
+        deployed,
+        SYSTEM_CONTRACT_DEPLOY_COUNT - 1,
+        "the previous block deploys all seven but the registry, which it reads"
+    );
     for (_, state) in states {
         db.commit(state);
     }
@@ -334,13 +338,14 @@ fn bench_block(c: &mut Criterion) {
         );
     });
 
-    // The first block after activation deploys all seven, checked once before measurement.
+    // The first block after activation deploys all seven but the registry, which it reads,
+    // checked once before measurement.
     let deployed = pre_block_states(database(), BLOCK_NUMBER)
         .iter()
         .filter(|(source, _)| matches!(source, PreBlockStateSource::SystemContract(_)))
         .filter(|(_, state)| state.values().any(|account| account.is_created()))
         .count();
-    assert_eq!(deployed, SYSTEM_CONTRACT_DEPLOY_COUNT, "the first block deploys all seven");
+    assert_eq!(deployed, SYSTEM_CONTRACT_DEPLOY_COUNT - 1, "the first block deploys six");
 
     group.bench_function("activation_pre_block", |b| {
         b.iter_batched(

@@ -1,35 +1,30 @@
-//! System contract deployment at the start of a block, and the EIP-7997 factory round trip.
+//! System contract deployment at the start of a block, the `SequencerRegistry` it requires, and
+//! the EIP-7997 factory round trip.
 
-use alloy_evm::block::BlockExecutor;
+use alloy_evm::block::{BlockExecutor, BlockValidationError};
 use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
     system::{
         keyless::{KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE_HASH},
-        storage_slots::{
-            ADMIN as ADMIN_SLOT, CURRENT_SEQUENCER, CURRENT_SYSTEM_ADDRESS, INITIAL_FROM_BLOCK,
-            INITIAL_SEQUENCER, INITIAL_SYSTEM_ADDRESS, MIN_ROTATION_DELAY,
-        },
-        IOracle, SequencerRegistryConfig, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE_HASH,
-        CREATE2_FACTORY_ADDRESS, CREATE2_FACTORY_CODE, CREATE2_FACTORY_CODE_HASH,
-        HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS, HIGH_PRECISION_TIMESTAMP_ORACLE_CODE_HASH,
-        LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE_HASH, MEGA_SYSTEM_ADDRESS,
+        IOracle, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE_HASH, CREATE2_FACTORY_ADDRESS,
+        CREATE2_FACTORY_CODE, CREATE2_FACTORY_CODE_HASH, HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
+        HIGH_PRECISION_TIMESTAMP_ORACLE_CODE_HASH, LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE_HASH,
         ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_HASH, SEQUENCER_REGISTRY_ADDRESS,
         SEQUENCER_REGISTRY_CODE_HASH, SYSTEM_CONTRACT_DEPLOY_COUNT,
     },
     test_utils::MemoryDatabase,
-    MegaHardfork, MegaHardforkConfig, MegaHardforks, PreBlockStateSource,
+    MegaBlockExecutionError, MegaHardfork, MegaHardforkConfig, MegaHardforks, PreBlockStateSource,
 };
 use revm::{
     context::{result::ExecutionResult, ContextTr},
     database::{states::bundle_state::BundleRetention, OriginalValuesKnown, State},
-    state::Account,
+    primitives::KECCAK_EMPTY,
     Database,
 };
 
 use crate::common::{
-    self, executor, executor_with_spec, pre_block_states, record_pre_block, recovered,
-    registry_config, tx, unlimited_ctx, ADMIN, BLOCK_NUMBER, SEQUENCER,
+    self, executor, pre_block_states, record_pre_block, recovered, tx, unlimited_ctx,
 };
 
 fn expected_hashes() -> [(Address, B256); SYSTEM_CONTRACT_DEPLOY_COUNT] {
@@ -71,64 +66,10 @@ fn assert_pre_block_order(outcomes: &[(PreBlockStateSource, revm::state::EvmStat
     assert_eq!(outcomes[3 + SYSTEM_CONTRACT_DEPLOY_COUNT].0, PreBlockStateSource::L1BlockInfo);
 }
 
-/// The registry's seeded slots: the roles `config` names, and `_initialFromBlock` the number of
-/// the block that created the registry, `created_in`.
-fn assert_registry_account_seed(
-    account: &Account,
-    config: &SequencerRegistryConfig,
-    created_in: u64,
-) {
-    let addr_val = |address: Address| U256::from_be_bytes(address.into_word().0);
-    let slot = |key: U256| account.storage.get(&key).expect("seeded").present_value;
-    assert_eq!(slot(CURRENT_SYSTEM_ADDRESS), addr_val(config.initial_system_address));
-    assert_eq!(slot(CURRENT_SEQUENCER), addr_val(config.initial_sequencer));
-    assert_eq!(slot(ADMIN_SLOT), addr_val(config.initial_admin));
-    assert_eq!(slot(INITIAL_SYSTEM_ADDRESS), addr_val(config.initial_system_address));
-    assert_eq!(slot(INITIAL_SEQUENCER), addr_val(config.initial_sequencer));
-    assert_eq!(slot(INITIAL_FROM_BLOCK), U256::from(created_in));
-    assert_eq!(slot(MIN_ROTATION_DELAY), U256::from(config.min_rotation_delay));
-}
-
-/// [`assert_registry_account_seed`], on the state a block committed.
-fn assert_registry_seed(
-    state: &mut State<MemoryDatabase>,
-    config: &SequencerRegistryConfig,
-    created_in: u64,
-) {
-    let addr_val = |address: Address| U256::from_be_bytes(address.into_word().0);
-    assert_eq!(
-        state.storage(SEQUENCER_REGISTRY_ADDRESS, CURRENT_SYSTEM_ADDRESS).unwrap(),
-        addr_val(config.initial_system_address)
-    );
-    assert_eq!(
-        state.storage(SEQUENCER_REGISTRY_ADDRESS, CURRENT_SEQUENCER).unwrap(),
-        addr_val(config.initial_sequencer)
-    );
-    assert_eq!(
-        state.storage(SEQUENCER_REGISTRY_ADDRESS, ADMIN_SLOT).unwrap(),
-        addr_val(config.initial_admin)
-    );
-    assert_eq!(
-        state.storage(SEQUENCER_REGISTRY_ADDRESS, INITIAL_SYSTEM_ADDRESS).unwrap(),
-        addr_val(config.initial_system_address)
-    );
-    assert_eq!(
-        state.storage(SEQUENCER_REGISTRY_ADDRESS, INITIAL_SEQUENCER).unwrap(),
-        addr_val(config.initial_sequencer)
-    );
-    assert_eq!(
-        state.storage(SEQUENCER_REGISTRY_ADDRESS, INITIAL_FROM_BLOCK).unwrap(),
-        U256::from(created_in)
-    );
-    assert_eq!(
-        state.storage(SEQUENCER_REGISTRY_ADDRESS, MIN_ROTATION_DELAY).unwrap(),
-        U256::from(config.min_rotation_delay)
-    );
-}
-
-/// The first block deploys all seven predeploys with the pinned hashes, nonce 1, and the
-/// registry's seeded slots. The executor's own observer sees the two EIP calls, the seven deploy
-/// states and the two reads of the registry, in that order.
+/// The first block deploys the six predeploys the chain does not hold yet with the pinned hashes
+/// and nonce 1, and writes no storage; it finds the `SequencerRegistry` the legacy forks left and
+/// only reads it. The executor's own observer sees the two EIP calls, the seven deploy states and
+/// the two reads of the registry, in that order.
 #[test]
 fn test_the_first_block_deploys_every_system_contract() {
     let mut state = common::state();
@@ -142,27 +83,18 @@ fn test_the_first_block_deploys_every_system_contract() {
         pre_block_states(&log)
     };
     assert_pre_block_order(&outcomes);
-    let config = registry_config();
     for (i, (address, hash)) in expected_hashes().into_iter().enumerate() {
-        let account = outcomes[2 + i]
-            .1
-            .get(&address)
-            .unwrap_or_else(|| panic!("{address} is in the deploy state"));
-        assert!(account.is_touched(), "{address} is touched");
-        assert!(account.is_created(), "{address} is created");
+        let state = &outcomes[2 + i].1;
+        assert_eq!(state.len(), 1, "{address} is the only account in its state");
+        let account = &state[&address];
+        let created = address != SEQUENCER_REGISTRY_ADDRESS;
+        assert_eq!(account.is_touched(), created, "{address} is touched when it is created");
+        assert_eq!(account.is_created(), created, "{address}");
         assert_eq!(account.info.code_hash, hash, "{address} has the wrong code");
         assert_eq!(account.info.nonce, 1, "{address} is a created contract");
-        if address == SEQUENCER_REGISTRY_ADDRESS {
-            assert_registry_account_seed(account, &config, BLOCK_NUMBER);
-        } else {
-            assert!(account.storage.is_empty(), "{address} has no seeded storage");
-        }
+        assert!(account.storage.is_empty(), "{address}: the deploy writes no storage");
     }
     assert_deployed(&mut state);
-    assert_registry_seed(&mut state, &config, BLOCK_NUMBER);
-    assert_eq!(config.initial_system_address, MEGA_SYSTEM_ADDRESS);
-    assert_eq!(config.initial_sequencer, SEQUENCER);
-    assert_eq!(config.initial_admin, ADMIN);
 }
 
 /// A second block changes nothing in the seven deploys: the executor's own observer reports
@@ -192,38 +124,78 @@ fn test_the_second_block_is_seven_read_only_entries() {
         let account = state.get(&address).unwrap();
         assert!(!account.is_touched(), "{address} is not touched");
         assert!(!account.is_created(), "{address} is not created");
-        assert!(account.storage.is_empty(), "{address} is not re-seeded");
+        assert!(account.storage.is_empty(), "{address} is not written");
         assert_eq!(account.info.code_hash, hash);
     }
     assert_deployed(&mut state);
-    assert_registry_seed(&mut state, &registry_config(), BLOCK_NUMBER);
 }
 
-/// The registry's `_initialFromBlock` is the number of the block that creates it, whatever that
-/// number is, as the legacy engine seeded it: its historical lookups are valid from there, and
-/// below it they revert. A later block finds the registry and keeps the seed.
-#[test]
-fn test_the_registry_is_seeded_with_the_number_of_the_block_that_creates_it() {
-    let env_at = |number: u64| {
-        let mut env = common::evm_env();
-        env.block_env.number = U256::from(number);
-        env
-    };
-    let created_in = BLOCK_NUMBER + 7;
-    let mut state = common::state();
-    {
-        let mut executor =
-            common::executor_with_env(&mut state, unlimited_ctx(), env_at(created_in));
-        executor.apply_pre_execution_changes().expect("the block deploys the registry");
-    }
-    assert_registry_seed(&mut state, &registry_config(), created_in);
+/// The database of [`common::database`] without the `SequencerRegistry`.
+fn without_registry() -> MemoryDatabase {
+    let mut db = common::database();
+    db.cache.accounts.remove(&SEQUENCER_REGISTRY_ADDRESS);
+    db
+}
 
-    {
-        let mut executor =
-            common::executor_with_env(&mut state, unlimited_ctx(), env_at(created_in + 1));
-        executor.apply_pre_execution_changes().expect("a later block finds it deployed");
+/// The refusal of the block over `db`, which the pre-block observer receives no state of the
+/// registry before.
+fn refused(db: MemoryDatabase) -> MegaBlockExecutionError {
+    let mut state = State::builder().with_database(db).build();
+    let mut executor = executor(&mut state, unlimited_ctx());
+    let log = record_pre_block(&mut executor);
+    let error = executor.apply_pre_execution_changes().expect_err("the block is refused");
+    let registry = PreBlockStateSource::SystemContract(SEQUENCER_REGISTRY_ADDRESS);
+    assert!(pre_block_states(&log).iter().all(|(source, _)| *source != registry));
+    let Some(BlockValidationError::Other(inner)) = error.as_validation() else {
+        panic!("a verdict on the block: {error:?}");
+    };
+    inner.downcast_ref::<MegaBlockExecutionError>().expect("the engine's refusal").clone()
+}
+
+/// [S18] The `SequencerRegistry` must already hold v2.0.0, which the legacy forks deployed: a
+/// block whose state holds no account at its address, an account without code — one only funded,
+/// or one whose nonce is used — or the legacy engine's v1.0.0 is invalid, refused before the
+/// registry's step reaches the observer. The block neither creates the registry nor upgrades it.
+///
+/// Expected values: independent (the code hash each state holds).
+#[test]
+fn test_a_block_without_the_v2_registry_is_refused() {
+    use mega_system_contracts::sequencer_registry::{V1_0_0_CODE, V1_0_0_CODE_HASH};
+    let funded = {
+        let mut db = without_registry();
+        db.set_account_balance(SEQUENCER_REGISTRY_ADDRESS, U256::from(1_000));
+        db
+    };
+    let used = {
+        let mut db = common::database();
+        db.set_account_code(SEQUENCER_REGISTRY_ADDRESS, Bytes::new());
+        db
+    };
+    let v1 = {
+        let mut db = common::database();
+        db.set_account_code(SEQUENCER_REGISTRY_ADDRESS, V1_0_0_CODE);
+        db
+    };
+    for (name, db, found) in [
+        ("no account", without_registry(), KECCAK_EMPTY),
+        ("a funded account without code", funded, KECCAK_EMPTY),
+        ("an account without code at nonce 1", used, KECCAK_EMPTY),
+        ("v1.0.0", v1, V1_0_0_CODE_HASH),
+    ] {
+        let refusal = refused(db);
+        assert_eq!(
+            refusal,
+            MegaBlockExecutionError::SequencerRegistryNotDeployed {
+                address: SEQUENCER_REGISTRY_ADDRESS,
+                expected: SEQUENCER_REGISTRY_CODE_HASH,
+                found,
+            },
+            "{name}"
+        );
+        let message = refusal.to_string();
+        assert!(message.contains("must already be deployed at v2.0.0"), "{name}: {message}");
+        assert!(message.contains(&SEQUENCER_REGISTRY_ADDRESS.to_string()), "{name}: {message}");
     }
-    assert_registry_seed(&mut state, &registry_config(), created_in);
 }
 
 /// [S18.12] [S18] An account a genesis allocation gave storage but no code, at a predeploy
@@ -363,7 +335,7 @@ fn test_a_used_empty_account_at_a_system_address_fails_the_block() {
     assert!(message.contains(&ORACLE_CONTRACT_ADDRESS.to_string()));
 }
 
-/// Foreign code at any of the seven addresses fails the block.
+/// Foreign code at any of the seven addresses fails the block, the registry's included.
 #[test]
 fn test_foreign_code_at_a_system_address_fails_the_block() {
     for (address, _) in expected_hashes() {
@@ -416,23 +388,15 @@ fn test_an_older_oracle_is_upgraded_by_the_pre_block_step_with_its_storage() {
     assert_eq!(state.storage(ORACLE_CONTRACT_ADDRESS, SLOT).unwrap(), value, "the storage is kept");
 }
 
-/// A scheduled Satin without registry params fails at load, and a block built from one anyway
-/// fails when it tries to deploy.
+/// A scheduled Satin without registry params fails at load.
 #[test]
-fn test_missing_registry_params_fail_at_load_and_at_the_block() {
+fn test_missing_registry_params_fail_at_load() {
     let missing = MegaHardforkConfig::default()
         .with(MegaHardfork::Satin, alloy_hardforks::ForkCondition::Timestamp(0));
     assert_eq!(
         missing.validate_schedule().unwrap_err().to_string(),
         "hardfork Satin is scheduled but its SequencerRegistryConfig params are not configured"
     );
-
-    let mut state = common::state();
-    let mut executor = executor_with_spec(&mut state, unlimited_ctx(), missing);
-    let err = executor
-        .apply_pre_execution_changes()
-        .expect_err("a block without registry params cannot deploy");
-    assert!(err.to_string().contains("SequencerRegistryConfig"), "unexpected error: {err}");
 }
 
 /// Calling the factory with salt || initcode returns the CREATE2 address as 20 bytes.
