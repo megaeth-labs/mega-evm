@@ -34,7 +34,7 @@ pub trait OracleEnv: Debug + Unpin {
     /// A frame whose regular gas, the part gas detention withholds included, cannot pay the read's
     /// cold access, and a frame whose volatile-data access is switched off, read nothing and do not
     /// ask. A detained frame that holds the gas but may not spend it does ask, and the read's
-    /// charge then stops the transaction at the compute limit.
+    /// charge then stops that frame at the compute limit.
     fn get_oracle_storage(&self, slot: U256) -> Option<U256>;
 
     /// Receives hints emitted on-chain by the oracle contract. A hint is a message sent from

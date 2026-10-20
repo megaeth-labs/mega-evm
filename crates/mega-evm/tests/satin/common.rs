@@ -2,14 +2,15 @@
 
 use alloy_evm::Evm;
 use alloy_op_evm::OpTx;
-use alloy_primitives::{Address, Bytes, TxKind, U256};
+use alloy_primitives::{Address, Bytes, TxKind, B256, U256};
 use mega_evm::{
     active_satin_prices,
-    test_utils::{note_price_guard, op_transaction, zero_fee_l1_block_info},
-    LimitUsage, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MegaTransactionOutcome,
+    test_utils::{note_price_guard, op_transaction, zero_fee_l1_block_info, BytecodeBuilder},
+    EvmTxRuntimeLimits, LimitUsage, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
+    MegaTransaction, MegaTransactionOutcome,
 };
 use revm::{
+    bytecode::opcode::{PUSH0, RETURN},
     context::{result::ResultAndState, BlockEnv, TxEnv},
     Database,
 };
@@ -37,17 +38,6 @@ pub(crate) fn call_with_data(
     gas_limit: u64,
 ) -> MegaTransaction {
     tx(caller, TxKind::Call(to), data, U256::ZERO, gas_limit)
-}
-
-/// A call from `caller` to `to` carrying `value` and `data`.
-pub(crate) fn call_with_value_and_data(
-    caller: Address,
-    to: Address,
-    value: U256,
-    data: Bytes,
-    gas_limit: u64,
-) -> MegaTransaction {
-    tx(caller, TxKind::Call(to), data, value, gas_limit)
 }
 
 /// A creation from `caller` running `init_code`.
@@ -116,6 +106,40 @@ pub(crate) fn execute<DB: alloy_evm::Database>(
     tx: MegaTransaction,
 ) -> MegaTransactionOutcome {
     MegaEvm::new(context(db)).execute_transaction(tx).expect("the transaction is valid")
+}
+
+/// Runs `tx` on a fresh Satin EVM over `db` held to `limits` and returns its outcome.
+pub(crate) fn execute_under<DB: alloy_evm::Database>(
+    db: DB,
+    tx: MegaTransaction,
+    limits: EvmTxRuntimeLimits,
+) -> MegaTransactionOutcome {
+    MegaEvm::new(context(db).with_tx_runtime_limits(limits))
+        .execute_transaction(tx)
+        .expect("the transaction is valid")
+}
+
+/// 98% of `remaining`, the share a child frame is given.
+pub(crate) fn share(remaining: u64) -> u64 {
+    (u128::from(remaining) * u128::from(mega_evm::FRAME_DATA_SHARE_NUMERATOR) /
+        u128::from(mega_evm::FRAME_DATA_SHARE_DENOMINATOR)) as u64
+}
+
+/// `tx` as a user's deposit: no fee, and a source hash a user's transaction could carry.
+pub(crate) fn deposit(mut tx: MegaTransaction) -> MegaTransaction {
+    tx.0.deposit.source_hash = B256::repeat_byte(0x11);
+    tx.0.base.gas_price = 0;
+    tx
+}
+
+/// Init code that returns `len` bytes of zeros as the deployed code.
+pub(crate) fn deploying(len: u64) -> Bytes {
+    BytecodeBuilder::default().push_number(len).append_many([PUSH0, RETURN]).build()
+}
+
+/// Init code that returns `size` zero bytes as the deployed contract.
+pub(crate) fn constructor_returning(size: u64) -> Bytes {
+    BytecodeBuilder::default().push_number(size).push_number(0_u8).append(RETURN).build()
 }
 
 /// Whether this process prices bytes at something other than the constants the spec fixes.

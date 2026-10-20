@@ -421,8 +421,8 @@ fn first_block_differs() -> (Value, ListedBlock) {
 
 /// Two blocks of calls filled from Ethereum pass on Satin's block executor: the pre-block system
 /// calls, the gas and the receipts of several transactions to a block, the base fee Ethereum burns
-/// and Satin routes to its vault, the predeploys Satin adds, and a `BLOCKHASH` of the first block
-/// read in the second.
+/// and Satin routes to its vault, the predeploys the pre-state holds for Satin, and a `BLOCKHASH`
+/// of the first block read in the second.
 #[test]
 fn test_a_chain_filled_from_ethereum_passes() {
     let test = chain(&[
@@ -552,7 +552,8 @@ fn test_only_what_satin_added_is_taken_out() {
     let report = run_one(chain(&blocks));
     assert_eq!(failure_kind(&report), Some(FailureKind::StateRootMismatch));
 
-    // The predeploys the executor adds are taken out: without them the root is Ethereum's.
+    // The predeploys the pre-state holds for Satin are taken out: without them the root is
+    // Ethereum's.
     assert_eq!(outcome(&run_one(chain(&[BlockSpec::valid(vec![])]))), &Outcome::Passed);
 }
 

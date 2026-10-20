@@ -3,7 +3,7 @@
 //! A receipt's `cumulative_gas_used` is the running sum of [`mega_evm::MegaGasUsage::gas_used`].
 //! That figure is what the transaction spent from both pools — regular, state and history gas
 //! together — after the refund, and at least the EIP-7623 floor. It is also the block header's
-//! gas used. The execution-gas ledger the block limit counts, `max(regular, floor)`, is not it.
+//! gas used. The execution ledger the block counts, `max(regular, floor)`, is not it.
 //!
 //! The encoded receipt carries the status, that cumulative gas, the logs bloom and the logs.
 //! It does not carry revert data. The limit stop's `MegaLimitExceeded` payload is on the
@@ -13,14 +13,14 @@
 //! checked: each bloom is its logs', each cumulative step is that transaction's `gas_used`, and
 //! the receipts root is the ordered trie of the encodings.
 
-use alloy_consensus::{transaction::Recovered, Sealed, Signed, TxLegacy, TxReceipt};
+use alloy_consensus::{transaction::Recovered, Sealed, TxReceipt};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_evm::block::BlockExecutor;
-use alloy_primitives::{address, hex, logs_bloom, Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_primitives::{address, hex, logs_bloom, Address, Bytes, TxKind, B256, U256};
 use alloy_sol_types::SolError;
 use mega_evm::{
     test_utils::is_transfer_log, LimitCheck, LimitKind, MegaLimitExceeded, MegaTxEnvelope,
-    ProtocolLimits, TX_BODY_SIZE,
+    TX_BODY_SIZE,
 };
 use op_alloy_consensus::{OpReceiptEnvelope, TxDeposit};
 use revm::{context::result::ExecutionResult, database::State};
@@ -29,12 +29,17 @@ use crate::common::{self, body_history, new_account_state_gas, system_tx, CALLER
 
 /// The data-size limit the block holds every transaction to.
 ///
-/// Above what the other five transactions keep, and below the stop transaction's body.
+/// Above what the other five transactions keep, and above the stop transaction's body, which
+/// validation holds to it, but below that body with what its first frame's start makes.
 const DATA_SIZE_LIMIT: u64 = 2_000;
 
-/// Calldata long enough that the stop transaction's body, and nothing it does afterwards, crosses
-/// [`DATA_SIZE_LIMIT`].
-const STOP_CALLDATA: usize = 1_700;
+/// Calldata long enough that the stop transaction's body fits [`DATA_SIZE_LIMIT`] and its first
+/// frame's start — its value's record and transfer log — crosses it, before anything runs.
+const STOP_CALLDATA: usize = 1_600;
+
+/// What the stop transaction's first frame's start counts: the record of the account its value
+/// writes, and the transfer log of the value.
+const STOP_START: u64 = mega_evm::WRITE_RECORD_SIZE + mega_evm::TRANSFER_LOG_SIZE;
 
 /// The account the value transfer pays, absent from the pre-state so the transfer creates it.
 const PAYEE: Address = address!("0x1000000000000000000000000000000000000003");
@@ -81,25 +86,8 @@ fn legacy(
     value: u64,
     input: Bytes,
     gas_limit: u64,
-    hash_byte: u8,
 ) -> Recovered<MegaTxEnvelope> {
-    let tx = TxLegacy {
-        chain_id: Some(common::CHAIN_ID),
-        nonce,
-        gas_price: 1_000_000,
-        gas_limit,
-        to,
-        value: U256::from(value),
-        input,
-    };
-    Recovered::new_unchecked(
-        MegaTxEnvelope::Legacy(Signed::new_unchecked(
-            tx,
-            Signature::test_signature(),
-            B256::repeat_byte(hash_byte),
-        )),
-        CALLER,
-    )
+    common::legacy_from(CALLER, nonce, to, U256::from(value), input, gas_limit, 1_000_000)
 }
 
 /// A deposit from [`DEPOSITOR`] to [`CONTRACT`].
@@ -137,10 +125,10 @@ struct Kept {
 }
 
 /// The receipts root of the six encodings at the spec's byte prices.
-const RECEIPTS_ROOT: &str = "708f8df343aed051aa13edc905fe25603761aeb16dc431260497b6ebf479caa1";
+const RECEIPTS_ROOT: &str = "93b0c0565033f73a5b75072f5ba52e4586a3fdee75a5fbc99109cc0a16ae07b7";
 
 /// `cumulative_gas_used` of each receipt at the spec's byte prices.
-const CUMULATIVE_GAS: [u64; 6] = [15_000, 250_400, 469_480, 511_764, 750_482, 951_664];
+const CUMULATIVE_GAS: [u64; 6] = [15_000, 250_400, 465_080, 507_364, 746_082, 947_264];
 
 /// The logs bloom of a receipt that carries no logs.
 const EMPTY_BLOOM: &str = "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
@@ -159,13 +147,13 @@ const ENCODINGS: [&str; 6] = [
     // the value transfer
     "f901a7018303d220b9010000000000000000000000080000000000000000000000000004000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002000000000008000000000000000000000000000000000000001000400000000000000004000000000000000000000002000000000000000000000000f89df89b94fffffffffffffffffffffffffffffffffffffffef863a0ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3efa00000000000000000000000002000000000000000000000000000000000000002a00000000000000000000000001000000000000000000000000000000000000003a00000000000000000000000000000000000000000000000000000000000000001",
     // the limit stop
-    "f9010980830729e8b9010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c0",
+    "f9010980830718b8b9010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c0",
     // the failed call
-    "f90109808307cf14b9010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c0",
+    "f90109808307bde4b9010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c0",
     // the creation
-    "f9010901830b7392b9010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c0",
+    "f9010901830b6262b9010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c0",
     // the system-address transaction
-    "f9010901830e8570b9010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c0",
+    "f9010901830e7440b9010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c0",
 ];
 
 /// The six receipts of one block, and the receipts root of their encodings.
@@ -174,28 +162,36 @@ fn test_a_blocks_receipts_pin_their_bytes_bloom_and_cumulative_gas() {
     let mut state = state();
     let mut executor = common::executor_with_limits(
         &mut state,
-        ProtocolLimits::loosest()
+        common::loosest()
             .with_tx_runtime_limits(common::loosest_tx().with_tx_data_size_limit(DATA_SIZE_LIMIT)),
     );
     executor.apply_pre_execution_changes().expect("the block starts");
 
     let stop_input = Bytes::from(vec![0xab; STOP_CALLDATA]);
+    let stop_body = TX_BODY_SIZE + STOP_CALLDATA as u64;
     assert!(
-        TX_BODY_SIZE + STOP_CALLDATA as u64 > DATA_SIZE_LIMIT,
-        "the stop's body crosses the limit before it runs",
+        stop_body <= DATA_SIZE_LIMIT && stop_body + STOP_START > DATA_SIZE_LIMIT,
+        "the stop's body fits the limit, and its first frame's start crosses it",
     );
     let txs = [
         depositor_tx(),
-        legacy(0, TxKind::Call(PAYEE), 1, Bytes::new(), room(0, 4, new_account_state_gas()), 0x11),
-        legacy(1, TxKind::Call(CONTRACT), 0, stop_input, room(STOP_CALLDATA as u64, 0, 0), 0x22),
-        legacy(2, TxKind::Call(REVERTER), 0, Bytes::new(), room(0, 2, 0), 0x33),
+        legacy(0, TxKind::Call(PAYEE), 1, Bytes::new(), room(0, 4, new_account_state_gas())),
+        // The first frame's input charges the account the value would create in the empty
+        // `CONTRACT` before the stop gives it back.
+        legacy(
+            1,
+            TxKind::Call(CONTRACT),
+            1,
+            stop_input,
+            room(STOP_CALLDATA as u64, 1, new_account_state_gas()),
+        ),
+        legacy(2, TxKind::Call(REVERTER), 0, Bytes::new(), room(0, 2, 0)),
         legacy(
             3,
             TxKind::Create,
             0,
             Bytes::from_static(EMPTY_INIT),
             room(EMPTY_INIT.len() as u64, 4, new_account_state_gas()),
-            0x44,
         ),
         system_tx(),
     ];
@@ -216,10 +212,10 @@ fn test_a_blocks_receipts_pin_their_bytes_bloom_and_cumulative_gas() {
                 Some(LimitCheck::ExceedsLimit {
                     kind: LimitKind::DataSize,
                     limit: DATA_SIZE_LIMIT,
-                    used: TX_BODY_SIZE + STOP_CALLDATA as u64,
+                    used: stop_body + STOP_START,
                     frame_local: false,
                 }),
-                "the body crossed the data-size limit",
+                "the first frame's start crossed the data-size limit",
             );
             let output = stop.clone().expect("the stop reverts");
             assert_eq!(
@@ -286,7 +282,7 @@ fn test_a_blocks_receipts_pin_their_bytes_bloom_and_cumulative_gas() {
     assert!(is_transfer_log(&transfer_logs[0]), "that log is a transfer");
 
     assert!(!receipts[2].status(), "the limit stop is a failed receipt");
-    assert!(receipts[2].logs().is_empty(), "the stop reverts before any log");
+    assert!(receipts[2].logs().is_empty(), "the stop reverts before any log, its value's included");
     assert!(kept[2].stop.is_some(), "the outcome carried MegaLimitExceeded");
 
     assert!(!receipts[3].status(), "the reverting call is a failed receipt");

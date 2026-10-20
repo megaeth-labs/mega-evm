@@ -13,6 +13,7 @@ use mega_evm::{
 use revm::{
     bytecode::opcode::{BALANCE, BLOCKHASH, CALL, GAS, MSTORE, POP, PUSH0, RETURN, SLOAD},
     context::result::ExecutionResult,
+    context_interface::cfg::GasId,
 };
 
 use super::{
@@ -74,13 +75,15 @@ fn test_a_cold_sload_with_gas_reads_the_slot() {
 /// A cold `BALANCE` with less gas than its cold surcharge loads no account.
 #[test]
 fn test_a_cold_account_load_short_of_gas_reads_no_account() {
+    // The push, and `BALANCE`'s static 100 leaves the cold surcharge short by that 100.
+    let cold = mega_evm::satin_gas_params().get(GasId::cold_account_additional_cost());
     let mut db = common::database();
     db.set_account_code(
         CONTRACT,
         BytecodeBuilder::default().push_address(STRANGER).append(BALANCE).stop().build(),
     );
     let replay = Case::new("cold balance skipped", db)
-        .tx(call(0, CONTRACT, Bytes::new(), gas_with_room(3 + 2_500)))
+        .tx(call(0, CONTRACT, Bytes::new(), gas_with_room(3 + cold)))
         .run();
     let run = &replay.recorded;
     assert!(matches!(run.tx(0).result, ExecutionResult::Halt { .. }), "{:?}", run.tx(0).result);
@@ -92,7 +95,7 @@ fn test_a_cold_account_load_short_of_gas_reads_no_account() {
         BytecodeBuilder::default().push_address(STRANGER).append(BALANCE).stop().build(),
     );
     let replay = Case::new("cold balance", db)
-        .tx(call(0, CONTRACT, Bytes::new(), gas_with_room(3 + 2_700)))
+        .tx(call(0, CONTRACT, Bytes::new(), gas_with_room(3 + 100 + cold + 100)))
         .run();
     assert_eq!(replay.recorded.record.accounts.get(&STRANGER), Some(&None));
 }

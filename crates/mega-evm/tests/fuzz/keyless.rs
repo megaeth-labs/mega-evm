@@ -23,7 +23,7 @@ use crate::{
         tx::{DeployAddress, Encoding, InitSize, Override, Shape, SignerCode},
         Value,
     },
-    harness::{check, fail, print_tally, prop_check, prop_eq},
+    harness::{check, fail, print_tally, prop_check, prop_eq, require_coverage},
     render::render_outcome,
 };
 
@@ -55,30 +55,18 @@ fn error_name(data: &[u8]) -> &'static str {
         SignerNonceTooHigh,
         ExecutionReverted,
         ExecutionHalted,
-        ParentBudgetExceeded,
         EmptyCodeDeployed,
         NoContractCreated,
         AddressMismatch,
         GasLimitTooLow,
-        InsufficientComputeGas,
         InitCodeTooLarge,
         SignerHasCode,
-        InternalError,
-        InvalidTransaction,
         NotIntercepted,
     )
 }
 
 /// The errors the spec says no deployment produces.
-const NEVER_PRODUCED: [&str; 7] = [
-    "ParentBudgetExceeded",
-    "InvalidTransaction",
-    "InsufficientComputeGas",
-    "InternalError",
-    "AddressMismatch",
-    "NoContractCreated",
-    "NotIntercepted",
-];
+const NEVER_PRODUCED: [&str; 3] = ["AddressMismatch", "NoContractCreated", "NotIntercepted"];
 
 /// What the generator's fields say of a keyless call, rule by rule.
 struct Rules {
@@ -147,12 +135,14 @@ fn rules(case: &Case) -> Rules {
 /// A `keylessDeploy` call follows its rules, in their order, and settles its signer:
 ///
 /// - a call a rule refuses whatever its gas reverts with that rule's error, the first in the spec's
-///   order, unless it ran out of gas before or a limit stopped the transaction, and init code over
-///   the initcode size limit is refused naming its size and the limit;
+///   order, unless it ran out of gas before or a limit stopped it, and init code over the initcode
+///   size limit is refused naming its size and the limit;
 /// - a call those rules admit reverts only with `GasLimitTooLow`, when what it has left no longer
 ///   covers the signed gas limit, with `ContractAlreadyExists` when the deploy address holds a
-///   contract, with `InsufficientBalance` when the signer cannot fund the carried value, or with
-///   the stop of its own frame budget;
+///   contract, with `InsufficientBalance` when the signer cannot fund the carried value, or with a
+///   stop of its own frame — its budget, or a limit its own charges cross — which is the
+///   transaction's own frame's and so the limit stop the transaction reports, its revert data the
+///   stop's; a limit its creation crosses is the creation's stop, which the call answers;
 /// - a call that succeeds started its creation, so no rule refused it, and answers the deploy
 ///   address with no error when the address holds code afterwards, and otherwise the zero address
 ///   with `ExecutionReverted`, `ExecutionHalted` or `EmptyCodeDeployed`, the address then holding
@@ -206,8 +196,21 @@ fn test_property_a_keyless_deployment_follows_its_rules() {
                 );
                 count("the call runs out of gas".to_string());
             }
-            ExecutionResult::Revert { .. } if outcome.limit_exceeded.is_some() => {
-                count("a limit stops the transaction".to_string());
+            ExecutionResult::Revert { output, .. }
+                if outcome.limit_exceeded.is_some_and(|stop| stop.is_frame_local()) =>
+            {
+                prop_eq!(error_name(output), "MegaLimitExceeded", "its budget's stop\n{rendered}");
+                prop_eq!(
+                    rules.refused,
+                    None,
+                    "the call's own budget stops only a call no rule refuses\n{rendered}"
+                );
+                count("the call's own frame budget stops it".to_string());
+            }
+            ExecutionResult::Revert { output, .. } if outcome.limit_exceeded.is_some() => {
+                let stop = outcome.limit_exceeded.expect("a stop");
+                prop_eq!(*output, stop.revert_data(), "the call's own stop\n{rendered}");
+                count("a limit stops the call".to_string());
             }
             ExecutionResult::Revert { output, .. } => {
                 let error = error_name(output);
@@ -233,7 +236,6 @@ fn test_property_a_keyless_deployment_follows_its_rules() {
                     ),
                     None => prop_check!(
                         error == "GasLimitTooLow" ||
-                            error == "MegaLimitExceeded" ||
                             (error == "ContractAlreadyExists" && rules.exists) ||
                             (error == "InsufficientBalance" && rules.underfunded),
                         "the call is refused {error}, which no rule gives it\n{rendered}"
@@ -303,5 +305,38 @@ fn test_property_a_keyless_deployment_follows_its_rules() {
         }
         Ok(())
     });
-    print_tally("keyless_deployment_follows_its_rules", tally.into_inner().unwrap());
+    let tally = tally.into_inner().unwrap();
+    print_tally("keyless_deployment_follows_its_rules", tally.iter().map(|(k, n)| (k, *n)));
+    // The default bounded run at the spec's byte prices reaches every class below, and fails if
+    // one is missed. Any other run (a named seed or count, the long mode) draws cases nobody has
+    // checked, so a missed class is printed as a note; at another byte price a class can be
+    // unreachable — a large initcode is refused before `InitCodeTooLarge`. The signer's own code
+    // spending a nonce needs a delegated signer whose code bumps a nonce, which these cases do
+    // not draw, so that class is checked when a case reaches it and is not required here.
+    let missing: Vec<String> = [
+        "refused NoEtherTransfer",
+        "refused MalformedEncoding",
+        "refused NotContractCreation",
+        "refused NotPreEIP155",
+        "refused NonZeroTxNonce",
+        "refused InitCodeTooLarge",
+        "refused GasLimitTooLow",
+        "refused InvalidSignature",
+        "refused SignerNonceTooHigh",
+        "refused SignerHasCode",
+        "refused ContractAlreadyExists",
+        "refused InsufficientBalance",
+        "the call's own frame budget stops it",
+        "deployed",
+        "the creation fails: ExecutionReverted",
+        "the creation fails: ExecutionHalted",
+        "the creation fails: EmptyCodeDeployed",
+        "  the creation's bump is taken back from nonce 1",
+        "  init code at the initcode size limit started its creation",
+    ]
+    .into_iter()
+    .filter(|class| tally.get(*class).copied().unwrap_or(0) == 0)
+    .map(str::to_string)
+    .collect();
+    require_coverage("keyless_deployment_follows_its_rules", CASES, &missing);
 }

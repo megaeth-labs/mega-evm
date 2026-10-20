@@ -26,13 +26,18 @@
 //! routes fees differently, so its arm takes the other transactions at a gas price of zero in a
 //! block with no base fee, and op-revm's three fee vaults, touched empty, are taken out of
 //! `MegaEvm`'s state before the two are compared, as `tests/satin/neutral.rs` does.
+//!
+//! Neither reference reads the live system address, which every Satin transaction does when it is
+//! validated: the read-only entry it leaves in `MegaEvm`'s state is taken out before either
+//! comparison, and taking it out fails when it is anything but the read.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use alloy_op_evm::OpTx;
 use mega_evm::{
     test_utils::{
-        neutral_cfg, neutral_gas_table, neutralize_evm, zero_fee_l1_block_info, MemoryDatabase,
+        neutral_cfg, neutral_gas_table, neutralize_evm, take_system_address_read,
+        zero_fee_l1_block_info, MemoryDatabase,
     },
     EthSpecId, EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
 };
@@ -56,7 +61,7 @@ use crate::{
         case::{case, Case},
         Flavor,
     },
-    harness::{check, prop_eq},
+    harness::{check, prop_eq, runs_at_measurement_prices},
     render::render_state,
 };
 
@@ -105,7 +110,9 @@ fn run_mega(
     let outcome = mega
         .execute_transaction(OpTx(tx))
         .map(|outcome| {
-            ExecResultAndState::new(outcome.result_and_state.result, outcome.result_and_state.state)
+            let mut state = outcome.result_and_state.state;
+            take_system_address_read(&mut state);
+            ExecResultAndState::new(outcome.result_and_state.result, state)
         })
         .map_err(|error| format!("{error}"));
     (outcome, cfg)
@@ -156,6 +163,7 @@ fn run_eth(case: &Case, fork: EthSpecId, block: BlockEnv, tx: TxEnv) -> Result<O
 /// every transaction but a deposit that creates its caller's account.
 #[test]
 fn test_differential_neutral_mega_evm_matches_op_revm() {
+    let compared = AtomicU32::new(0);
     check(
         "differential_op_revm",
         CASES,
@@ -168,6 +176,7 @@ fn test_differential_neutral_mega_evm_matches_op_revm() {
             if case.tx.is_deposit() && caller_is_empty {
                 return Ok(());
             }
+            compared.fetch_add(1, Ordering::Relaxed);
             for fork in FORKS {
                 let block = case.block();
                 let tx = case.transaction().0;
@@ -178,6 +187,12 @@ fn test_differential_neutral_mega_evm_matches_op_revm() {
             Ok(())
         },
     );
+    let compared = compared.load(Ordering::Relaxed);
+    // The coverage minimum binds at the spec's byte prices. A measurement build leaves it out:
+    // the count still stands, and a class those prices leave unreachable is allowed.
+    if !runs_at_measurement_prices() {
+        assert!(compared > 0, "no case was compared with op-revm");
+    }
 }
 
 /// Under the neutral configuration of each fork, an unpriced transaction that is not a deposit
@@ -222,10 +237,16 @@ fn test_differential_neutral_mega_evm_matches_ethereum() {
             Ok(())
         },
     );
+    let compared = compared.load(Ordering::Relaxed);
+    let rewritten = rewritten.load(Ordering::Relaxed);
     println!(
-        "differential_ethereum: {} cases compared on both forks, {} of them on Amsterdam without \
-         the self-destruction their init code held",
-        compared.load(Ordering::Relaxed),
-        rewritten.load(Ordering::Relaxed)
+        "differential_ethereum: {compared} cases compared on both forks, {rewritten} of them on \
+         Amsterdam without the self-destruction their init code held"
     );
+    // The coverage minimums bind at the spec's byte prices. A measurement build leaves them out:
+    // the counts above still stand, and a class those prices leave unreachable is allowed.
+    if !runs_at_measurement_prices() {
+        assert!(compared > 0, "no case was compared with Ethereum");
+        assert!(rewritten > 0, "no case was rewritten for Amsterdam");
+    }
 }

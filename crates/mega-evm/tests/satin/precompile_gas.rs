@@ -15,11 +15,15 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{MSTORE, POP, PUSH0, RETURN, STATICCALL},
+    context_interface::cfg::GasId,
     precompile::kzg_point_evaluation::kzg_to_versioned_hash,
     primitives::hex,
 };
 
-use crate::common::{call, context};
+use crate::{
+    common::{call, context},
+    salt::entry,
+};
 
 const CALLER: Address = address!("0000000000000000000000000000000000a00000");
 const CONTRACT: Address = address!("0000000000000000000000000000000000a00001");
@@ -39,7 +43,7 @@ const PROOF: [u8; 48] = hex!(
 );
 
 /// The precompile's input: `versioned_hash ++ z ++ y ++ commitment ++ proof`.
-fn kzg_input() -> Vec<u8> {
+pub(crate) fn kzg_input() -> Vec<u8> {
     let mut input = kzg_to_versioned_hash(&COMMITMENT).to_vec();
     input.extend_from_slice(&Z);
     input.extend_from_slice(&Y);
@@ -193,7 +197,7 @@ fn test_the_precompile_addresses_are_warm() {
 
     // The cold surcharge the plain address pays and the precompile does not, less the 15 gas the
     // identity precompile charges for an empty input.
-    assert_eq!(gas_of(PLAIN) - gas_of(IDENTITY), 2_500 - 15);
+    assert_eq!(gas_of(PLAIN) - gas_of(IDENTITY), entry(GasId::cold_account_additional_cost()) - 15);
 }
 
 /// A caller that forwards less than the price is out of gas before verification runs, so the

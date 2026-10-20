@@ -1,10 +1,10 @@
-//! The hardfork schedule a Satin run executes under, and so the protocol limits it is held to.
+//! The hardfork schedule a Satin run executes under, and the protocol limits it is held to.
 
 use std::sync::OnceLock;
 
 use mega_evm::{
-    ChainActivation, HardforkParams, MegaHardforkConfig, MegaHardforks, MegaSpecId, ProtocolLimits,
-    SatinChainConfig,
+    alloy_hardforks::ForkCondition, ChainActivation, MegaHardfork, MegaHardforkConfig,
+    MegaHardforks, MegaSpecId, ProtocolLimits, SatinChainConfig,
 };
 use serde_json::{Map, Value};
 
@@ -12,42 +12,53 @@ use super::{EvmeError, Result};
 
 /// The hardfork schedule a Satin run for chain `chain_id` at `timestamp` executes under.
 ///
-/// A block the chain's own schedule runs on Satin runs under that schedule, with the parameters
-/// it carries: the chain's protocol limits among them. A schedule that cannot run the block — its
-/// table schedules Satin without the parameters Satin requires — is refused rather than filled in:
-/// the tool does not know the chain's limits, and a default in their place would report results
-/// the chain does not produce.
+/// A block the chain's own schedule runs on Satin runs under that schedule. A schedule the engine
+/// refuses ([`MegaHardforks::validate_schedule`]) is refused rather than replaced: a run under
+/// another schedule would report results the chain does not produce.
 ///
-/// Any other run is a counterfactual and executes under the schedule the Satin engine gives a chain
-/// it does not know ([`mega_evm::all_activated_hardforks`]): Satin from genesis, placeholder
-/// registry parameters, which only a registry deployed from scratch reads (a chain whose registry
-/// is already deployed keeps the roles in its storage), and [`ProtocolLimits::DEFAULT`].
+/// Any other run is a counterfactual — `--override.spec Satin`, or `run` and `tx` with
+/// `--spec Satin` — and executes under the chain's own schedule with Satin from genesis
+/// ([`counterfactual`]), so no block of the run is Satin's activation block. Satin carries no
+/// parameter: the `SequencerRegistry`'s roles are what the state the run executes on holds.
 ///
-/// `limits_override` replaces the fields it names of the limits that schedule carries, a
-/// counterfactual either way.
+/// The limits are not the schedule's: they are fixed per spec ([`satin_limits`]).
 ///
 /// The chain's own schedule is the one its genesis file gives, when the run was given the file
-/// (`--genesis`), and otherwise the Satin engine's table ([`mega_evm::hardfork_schedule`]). A run
-/// given the file makes no counterfactual: one the file does not run on Satin — before its
-/// `satinTime`, or on a file without Satin keys — is refused, since the file was given to
-/// configure the run and cannot.
-pub fn satin_schedule(
-    chain_id: u64,
-    timestamp: u64,
-    limits_override: Option<&LimitsOverride>,
-) -> Result<MegaHardforkConfig> {
+/// (`--genesis`), and otherwise the Satin engine's table ([`mega_evm::hardfork_schedule`]), which
+/// knows `MegaETH` mainnet and testnet and no other chain. A run given the file makes no
+/// counterfactual: one the file does not run on Satin — before its `satinTime`, or on a file
+/// without Satin keys — is refused, since the file was given to configure the run and cannot.
+pub fn satin_schedule(chain_id: u64, timestamp: u64) -> Result<MegaHardforkConfig> {
     let chain = match GENESIS.get() {
-        Some(genesis) => genesis_schedule(genesis, chain_id, timestamp)?,
+        Some(genesis) => Some(genesis_schedule(genesis, chain_id, timestamp)?),
         None => mega_evm::hardfork_schedule(chain_id),
     };
-    schedule_for(chain, timestamp, limits_override)
+    schedule_for(chain, timestamp)
+}
+
+/// The schedule of a Satin counterfactual on the chain whose schedule is `chain`: that schedule
+/// with Satin from genesis, or, for a chain neither the engine's table nor a genesis file names,
+/// the engine's base forks with Satin from genesis.
+fn counterfactual(chain: Option<MegaHardforkConfig>) -> MegaHardforkConfig {
+    chain.unwrap_or_default().with(MegaHardfork::Satin, ForkCondition::Timestamp(0))
+}
+
+/// The protocol limits a Satin run is held to: Satin's ([`ProtocolLimits::for_spec`]), the ones
+/// every chain's Satin blocks are held to, with the fields `limits_override` names replaced, a
+/// counterfactual.
+pub fn satin_limits(limits_override: Option<&LimitsOverride>) -> Result<ProtocolLimits> {
+    let limits = ProtocolLimits::for_spec(MegaSpecId::SATIN);
+    match limits_override {
+        Some(limits_override) => limits_override.apply(limits),
+        None => Ok(limits),
+    }
 }
 
 /// The genesis file this run was given (`--genesis`), set once before the command runs.
 static GENESIS: OnceLock<GenesisChain> = OnceLock::new();
 
-/// A chain as its genesis file configures it: its chain id, and its Satin keys, read by the
-/// parser every reader of a genesis file shares ([`SatinChainConfig::from_genesis_config`]).
+/// A chain as its genesis file configures it: its chain id, and its Satin key, read by the parser
+/// every reader of a genesis file shares ([`SatinChainConfig::from_genesis_config`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GenesisChain {
     /// The genesis file's `chainId`.
@@ -139,7 +150,7 @@ fn genesis_schedule(
 }
 
 /// Parses `--genesis`: the path of a genesis file, whose `config` object carries the chain id and
-/// the Satin keys. A file that is the `config` object itself is read as one.
+/// the Satin key. A file that is the `config` object itself is read as one.
 pub fn parse_genesis(path: &str) -> std::result::Result<GenesisChain, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
     let file: Value = serde_json::from_str(&text).map_err(|e| format!("not JSON: {e}"))?;
@@ -152,20 +163,11 @@ pub fn parse_genesis(path: &str) -> std::result::Result<GenesisChain, String> {
     Ok(GenesisChain { chain_id, satin })
 }
 
-/// [`satin_schedule`] for a chain whose schedule is `chain`.
-fn schedule_for(
-    chain: MegaHardforkConfig,
-    timestamp: u64,
-    limits_override: Option<&LimitsOverride>,
-) -> Result<MegaHardforkConfig> {
-    let runs_satin = chain.spec_id(timestamp) == Some(MegaSpecId::SATIN);
-    let schedule = if runs_satin { chain } else { mega_evm::all_activated_hardforks() };
-    let schedule = match limits_override {
-        Some(limits) => {
-            let limits = limits.apply(schedule.protocol_limits(timestamp))?;
-            schedule.with_params(limits)
-        }
-        None => schedule,
+/// [`satin_schedule`] for a chain whose schedule is `chain`, `None` for a chain nothing names.
+fn schedule_for(chain: Option<MegaHardforkConfig>, timestamp: u64) -> Result<MegaHardforkConfig> {
+    let schedule = match chain {
+        Some(chain) if chain.spec_id(timestamp) == Some(MegaSpecId::SATIN) => chain,
+        chain => counterfactual(chain),
     };
     schedule.validate_schedule().map_err(|e| {
         EvmeError::InvalidInput(format!(
@@ -175,30 +177,24 @@ fn schedule_for(
     Ok(schedule)
 }
 
-/// Protocol limits to run under in place of the chain's (`--override.limits`): a JSON object in
-/// the shape a chain configuration carries [`ProtocolLimits`] in, naming only the fields it
-/// replaces.
+/// Protocol limits to run under in place of the spec's (`--override.limits`): a JSON object in
+/// [`ProtocolLimits`]' shape, naming only the fields it replaces.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LimitsOverride(Map<String, Value>);
 
 impl LimitsOverride {
-    /// The limits `base` becomes with the fields this names replaced, recursively. With no `base`
-    /// the override must name every field.
+    /// The limits `base` becomes with the fields this names replaced, recursively.
     ///
-    /// The result is refused when it names a field [`ProtocolLimits`] does not have, lacks one, or
-    /// is a value no chain may carry ([`HardforkParams::validate`]).
-    pub fn apply(&self, base: Option<ProtocolLimits>) -> Result<ProtocolLimits> {
+    /// The result is refused when it names a field [`ProtocolLimits`] does not have, or a value
+    /// of the wrong type. Any value of the right type is run: an override is a counterfactual, and
+    /// a limit of zero, or `u64::MAX` for both detention caps, which turns detention off, is one
+    /// a tool may ask for.
+    pub fn apply(&self, base: ProtocolLimits) -> Result<ProtocolLimits> {
         let invalid =
             |message: String| EvmeError::InvalidInput(format!("--override.limits: {message}"));
-        let mut merged = match base {
-            Some(base) => serde_json::to_value(base).expect("limits serialize"),
-            None => Value::Object(Map::new()),
-        };
+        let mut merged = serde_json::to_value(base).expect("limits serialize");
         merge(&mut merged, &self.0);
-        let limits: ProtocolLimits =
-            serde_json::from_value(merged).map_err(|e| invalid(e.to_string()))?;
-        limits.validate().map_err(|e| invalid(e.message))?;
-        Ok(limits)
+        serde_json::from_value(merged).map_err(|e| invalid(e.to_string()))
     }
 }
 
@@ -232,10 +228,7 @@ pub fn parse_limits_override(arg: &str) -> std::result::Result<LimitsOverride, S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mega_evm::{
-        system::SequencerRegistryConfig, ChainActivation, EvmTxRuntimeLimits, MAINNET_CHAIN_ID,
-        TESTNET_CHAIN_ID,
-    };
+    use mega_evm::{ChainActivation, MAINNET_CHAIN_ID, TESTNET_CHAIN_ID};
 
     const ACTIVATION: u64 = 1_800_000_000;
 
@@ -243,121 +236,98 @@ mod tests {
         ChainActivation { chain_id: MAINNET_CHAIN_ID, satin: Some(ACTIVATION) }.hardforks()
     }
 
-    /// A counterfactual runs on the engine's schedule for an unknown chain, whatever the chain:
-    /// Satin from genesis, the placeholder registry, the protocol's default limits.
+    /// A counterfactual runs on the chain's own schedule with Satin from genesis, whatever the
+    /// chain; a chain the engine does not know gets the engine's base forks with Satin from
+    /// genesis. No block of a counterfactual is Satin's activation block.
     #[test]
-    fn test_a_counterfactual_runs_on_the_engines_fallback_schedule() {
+    fn test_a_counterfactual_runs_on_the_chains_schedule_with_satin_from_genesis() {
         for chain_id in [MAINNET_CHAIN_ID, TESTNET_CHAIN_ID, 6342, 1] {
-            let schedule = satin_schedule(chain_id, 1_700_000_000, None).unwrap();
+            let schedule = satin_schedule(chain_id, 1_700_000_000).unwrap();
             assert_eq!(schedule.spec_id(0), Some(MegaSpecId::SATIN), "chain {chain_id}");
-            assert_eq!(schedule.protocol_limits(0), Some(ProtocolLimits::DEFAULT));
-            assert_eq!(
-                schedule.fork_params::<SequencerRegistryConfig>(),
-                Some(&SequencerRegistryConfig::placeholder())
-            );
+            assert!(!schedule.is_satin_activation_block(0, 1_700_000_000), "chain {chain_id}");
             assert_eq!(schedule.validate_schedule(), Ok(()));
         }
+        let known = mega_evm::hardfork_schedule(MAINNET_CHAIN_ID).unwrap();
+        let counterfactual = satin_schedule(MAINNET_CHAIN_ID, 1_700_000_000).unwrap();
+        let osaka = mega_evm::alloy_hardforks::EthereumHardfork::Osaka;
+        assert_eq!(counterfactual.get(osaka), known.get(osaka), "the chain's own forks");
     }
 
-    /// Before a chain's scheduled activation a Satin run is a counterfactual; from it on, the run
-    /// takes the chain's schedule, and its limits are the chain's, not the default.
+    /// Before a chain's scheduled activation a Satin run is a counterfactual on the chain's
+    /// schedule with Satin from genesis; from it on, the run takes the chain's schedule, which
+    /// needs no parameter.
     #[test]
-    fn test_a_real_satin_block_runs_under_the_chains_own_limits() {
-        let own = ProtocolLimits::DEFAULT
-            .with_tx_runtime_limits(EvmTxRuntimeLimits::default().with_tx_data_size_limit(350));
-        let chain =
-            scheduled().with_params(SequencerRegistryConfig::placeholder()).with_params(own);
-
-        let before = schedule_for(chain.clone(), ACTIVATION - 1, None).unwrap();
-        assert_eq!(before.protocol_limits(ACTIVATION - 1), Some(ProtocolLimits::DEFAULT));
-        let from = schedule_for(chain, ACTIVATION, None).unwrap();
-        assert_eq!(from.protocol_limits(ACTIVATION), Some(own));
+    fn test_a_real_satin_block_runs_on_the_chains_own_schedule() {
+        let before = schedule_for(Some(scheduled()), ACTIVATION - 1).unwrap();
+        assert_eq!(before.spec_id(0), Some(MegaSpecId::SATIN), "Satin from genesis");
+        let from = schedule_for(Some(scheduled()), ACTIVATION).unwrap();
         assert_eq!(from.spec_id(ACTIVATION - 1), None, "the chain's own activation holds");
+        assert_eq!(from.spec_id(ACTIVATION), Some(MegaSpecId::SATIN));
     }
 
-    /// A chain whose table schedules Satin without the limits is refused, not run on a default.
+    /// A chain whose schedule the engine refuses is refused, not run on another schedule: one
+    /// that activates Satin before a fork Satin runs on.
     #[test]
-    fn test_a_real_satin_block_without_the_chains_limits_is_refused() {
-        let chain = scheduled().with_params(SequencerRegistryConfig::placeholder());
-        let error = schedule_for(chain, ACTIVATION, None).unwrap_err().to_string();
-        assert!(error.contains("ProtocolLimits params are not configured"), "{error}");
+    fn test_a_real_satin_block_on_a_refused_schedule_is_refused() {
+        use mega_evm::alloy_hardforks::{EthereumHardfork, ForkCondition};
+        let late = ForkCondition::Timestamp(ACTIVATION + 1);
+        let chain = scheduled().with(EthereumHardfork::Osaka, late);
+        let error = schedule_for(Some(chain), ACTIVATION).unwrap_err().to_string();
+        assert!(error.contains("the Osaka fork it runs on is not active"), "{error}");
         assert!(error.contains(&ACTIVATION.to_string()), "{error}");
-
-        let error = schedule_for(scheduled(), ACTIVATION, None).unwrap_err().to_string();
         assert!(error.contains("cannot run it"), "{error}");
+    }
+
+    /// Without an override a run is held to Satin's limits, whatever the chain.
+    #[test]
+    fn test_a_run_is_held_to_the_specs_limits() {
+        assert_eq!(satin_limits(None).unwrap(), ProtocolLimits::for_spec(MegaSpecId::SATIN));
     }
 
     fn overriding(json: &str) -> LimitsOverride {
         parse_limits_override(json).unwrap()
     }
 
-    /// An override replaces the fields it names and keeps every other one the schedule carries.
+    /// An override replaces the fields it names and keeps every other one of Satin's.
     #[test]
     fn test_an_override_replaces_only_the_fields_it_names() {
-        let schedule = satin_schedule(
-            MAINNET_CHAIN_ID,
-            0,
-            Some(&overriding(
-                r#"{"txRuntimeLimits":{"txDataSizeLimit":350},"blockKvUpdateLimit":7}"#,
-            )),
-        )
+        let limits = satin_limits(Some(&overriding(
+            r#"{"txRuntimeLimits":{"txDataSizeLimit":350},"blockTxsDataLimit":7}"#,
+        )))
         .unwrap();
-        let expected = ProtocolLimits::DEFAULT
-            .with_tx_runtime_limits(
-                ProtocolLimits::DEFAULT.tx_runtime_limits.with_tx_data_size_limit(350),
-            )
-            .with_block_kv_update_limit(7);
-        assert_eq!(schedule.protocol_limits(0), Some(expected));
+        let satin = ProtocolLimits::for_spec(MegaSpecId::SATIN);
+        let expected = satin
+            .with_tx_runtime_limits(satin.tx_runtime_limits.with_tx_data_size_limit(350))
+            .with_block_txs_data_limit(7);
+        assert_eq!(limits, expected);
     }
 
-    /// An override applies to a chain's own Satin schedule too, and there it replaces the chain's
-    /// limits; a chain whose table carries none needs the override to name every field.
+    /// An override is held to the limits' shape: no unknown field, no value of the wrong type.
+    /// Any value of the right type is a counterfactual the tool runs: a limit of zero, or
+    /// detention turned off.
     #[test]
-    fn test_an_override_supplies_limits_a_chain_does_not_carry() {
-        let chain = scheduled().with_params(SequencerRegistryConfig::placeholder());
-        let partial = overriding(r#"{"txRuntimeLimits":{"txDataSizeLimit":350}}"#);
-        let error = schedule_for(chain.clone(), ACTIVATION, Some(&partial)).unwrap_err();
-        assert!(error.to_string().contains("missing field"), "{error}");
-
-        let loosest = serde_json::to_string(&ProtocolLimits::loosest()).unwrap();
-        let schedule = schedule_for(chain, ACTIVATION, Some(&overriding(&loosest))).unwrap();
-        assert_eq!(schedule.protocol_limits(ACTIVATION), Some(ProtocolLimits::loosest()));
-    }
-
-    /// An override is held to what a chain configuration is: no unknown field, no value the
-    /// limits' own check refuses.
-    #[test]
-    fn test_an_override_no_chain_may_carry_is_refused() {
-        let refused = |json: &str| {
-            satin_schedule(MAINNET_CHAIN_ID, 0, Some(&overriding(json))).unwrap_err().to_string()
-        };
+    fn test_an_override_is_held_to_the_limits_shape() {
+        let refused = |json: &str| satin_limits(Some(&overriding(json))).unwrap_err().to_string();
         let unknown = refused(r#"{"txDataSizeLimit":350}"#);
         assert!(unknown.contains("unknown field `txDataSizeLimit`"), "{unknown}");
-        let zero = refused(r#"{"txRuntimeLimits":{"txKvUpdateLimit":0}}"#);
-        assert!(zero.contains("tx_kv_update_limit must not be zero"), "{zero}");
-        let uncapped =
-            refused(r#"{"txRuntimeLimits":{"oracleAccessComputeGasLimit":18446744073709551615}}"#);
-        assert!(uncapped.contains("oracle_access_compute_gas_limit"), "{uncapped}");
         let not_a_number = refused(r#"{"blockTxsDataLimit":"1"}"#);
         assert!(not_a_number.starts_with("Invalid input: --override.limits:"), "{not_a_number}");
+
+        let zero =
+            satin_limits(Some(&overriding(r#"{"txRuntimeLimits":{"frameDataSizeLimit":0}}"#)))
+                .unwrap();
+        assert_eq!(zero.tx_runtime_limits.frame_data_size_limit, 0);
+        let undetained = serde_json::to_string(&ProtocolLimits::no_limits()).unwrap();
+        assert_eq!(
+            satin_limits(Some(&overriding(&undetained))).unwrap(),
+            ProtocolLimits::no_limits()
+        );
     }
 
-    /// A genesis file whose `config` carries `chainId` and the Satin keys: Satin at
-    /// [`ACTIVATION`], registry seeds that are not the placeholder's, and a KV limit of one.
+    /// A genesis file whose `config` carries `chainId` and the Satin key: Satin at
+    /// [`ACTIVATION`].
     fn genesis_file(dir: &tempfile::TempDir, chain_id: u64) -> (String, SatinChainConfig) {
-        let satin = SatinChainConfig {
-            activation_time: ACTIVATION,
-            sequencer_registry: SequencerRegistryConfig {
-                initial_system_address: alloy_primitives::Address::repeat_byte(0x11),
-                initial_sequencer: alloy_primitives::Address::repeat_byte(0x22),
-                initial_admin: alloy_primitives::Address::repeat_byte(0x33),
-                initial_from_block: 1,
-                min_rotation_delay: 100,
-            },
-            protocol_limits: ProtocolLimits::DEFAULT.with_tx_runtime_limits(
-                ProtocolLimits::DEFAULT.tx_runtime_limits.with_tx_kv_update_limit(1),
-            ),
-        };
+        let satin = SatinChainConfig { activation_time: ACTIVATION };
         let mut config = serde_json::to_value(satin).unwrap();
         config["chainId"] = serde_json::json!(chain_id);
         config["optimism"] = serde_json::json!({ "eip1559Elasticity": 6 });
@@ -367,9 +337,8 @@ mod tests {
         (path.to_str().unwrap().to_string(), satin)
     }
 
-    /// A genesis file's schedule is its chain's: Satin from its `satinTime`, its registry seeds
-    /// and its limits, in place of the table's, which for a chain the engine does not know is
-    /// the placeholder seeds and the default limits.
+    /// A genesis file's schedule is its chain's: Satin from its `satinTime`. Without the file the
+    /// engine's table does not know the chain, and a Satin run on it is a counterfactual.
     #[test]
     fn test_a_genesis_file_gives_its_chain_its_schedule() {
         let dir = tempfile::tempdir().unwrap();
@@ -379,20 +348,16 @@ mod tests {
 
         for timestamp in [ACTIVATION, u64::MAX] {
             let chain = genesis_schedule(&genesis, 6342, timestamp).unwrap();
-            let schedule = schedule_for(chain, timestamp, None).unwrap();
+            let schedule = schedule_for(Some(chain), timestamp).unwrap();
             assert_eq!(schedule.spec_id(ACTIVATION - 1), None);
-            assert_eq!(schedule.protocol_limits(timestamp), Some(satin.protocol_limits));
-            assert_eq!(
-                schedule.fork_params::<SequencerRegistryConfig>(),
-                Some(&satin.sequencer_registry)
-            );
+            assert_eq!(schedule.spec_id(ACTIVATION), Some(MegaSpecId::SATIN));
         }
-        let table = mega_evm::hardfork_schedule(6342);
-        let table = schedule_for(table, ACTIVATION, None).unwrap();
+        assert!(mega_evm::hardfork_schedule(6342).is_none(), "the engine table does not know it");
+        let counterfactual = schedule_for(None, ACTIVATION).unwrap();
         assert_eq!(
-            table.fork_params::<SequencerRegistryConfig>(),
-            Some(&SequencerRegistryConfig::placeholder()),
-            "without the file, the unknown-chain fallback"
+            counterfactual.spec_id(0),
+            Some(MegaSpecId::SATIN),
+            "without the file, a counterfactual from genesis"
         );
 
         // Before its activation the file configures no Satin run: the run is refused, not made
@@ -433,7 +398,8 @@ mod tests {
     }
 
     /// The file is read as a genesis file or as its `config` object; one without a chain id, or
-    /// whose Satin keys the shared parser refuses, is refused with the parser's reason.
+    /// whose Satin keys the shared parser refuses, is refused with the parser's reason: an old
+    /// file that still names the registry's roles among them.
     #[test]
     fn test_the_genesis_file_is_parsed_by_the_shared_parser() {
         let dir = tempfile::tempdir().unwrap();
@@ -446,9 +412,19 @@ mod tests {
         assert_eq!(parse_genesis(&bare), Ok(GenesisChain { chain_id: 7, satin: None }));
         let no_chain_id = write("no-id.json", serde_json::json!({ "config": {} }));
         assert!(parse_genesis(&no_chain_id).unwrap_err().contains("chainId"));
-        let partial = write("partial.json", serde_json::json!({ "chainId": 7, "satinTime": 0 }));
-        let error = parse_genesis(&partial).unwrap_err();
-        assert!(error.contains("lacks `satinInitialSystemAddress`"), "{error}");
+        let satin = write("satin.json", serde_json::json!({ "chainId": 7, "satinTime": 0 }));
+        let expected =
+            GenesisChain { chain_id: 7, satin: Some(SatinChainConfig { activation_time: 0 }) };
+        assert_eq!(parse_genesis(&satin), Ok(expected));
+        let old = write(
+            "old.json",
+            serde_json::json!({ "chainId": 7, "satinTime": 0, "satinInitialAdmin": "0x33" }),
+        );
+        let error = parse_genesis(&old).unwrap_err();
+        assert!(
+            error.contains("`satinInitialAdmin` is not a Satin chain-configuration key"),
+            "{error}"
+        );
         assert!(parse_genesis(dir.path().join("absent").to_str().unwrap())
             .unwrap_err()
             .contains("reading"));
@@ -457,7 +433,7 @@ mod tests {
     /// The flag takes an object inline or from a file, and nothing but an object.
     #[test]
     fn test_the_override_parses_inline_or_from_a_file() {
-        let inline = r#" {"blockKvUpdateLimit": 7}"#;
+        let inline = r#" {"blockTxsDataLimit": 7}"#;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("limits.json");
         std::fs::write(&path, inline).unwrap();

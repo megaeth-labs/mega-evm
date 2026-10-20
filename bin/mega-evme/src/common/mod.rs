@@ -11,6 +11,7 @@ mod tx;
 mod tx_override;
 
 pub use env::*;
+pub(crate) use error::sanitize_terminal_text;
 pub use error::*;
 pub use hex::*;
 pub use logging::*;

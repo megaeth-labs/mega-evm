@@ -13,7 +13,7 @@ use mega_evm::{
         primitives::eip4844,
     },
     BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory,
-    MegaHardforkConfig, MegaHardforks, MegaSpecId, MegaTxEnvelope,
+    MegaHardforkConfig, MegaHardforks, MegaSpecId, MegaTxEnvelope, ProtocolLimits,
 };
 
 use super::{
@@ -22,15 +22,15 @@ use super::{
     state::{BlockState, SatinDb},
 };
 use crate::common::{
-    decode_revert_reason, format_halt_reason, satin_schedule, EvmeError, EvmeExternalEnvs,
-    LimitsOverride, Result, SatinReport,
+    decode_revert_reason, format_halt_reason, satin_limits, satin_schedule, EvmeError,
+    EvmeExternalEnvs, LimitsOverride, Result, SatinReport,
 };
 
 /// Executes the block `header` describes, with `transactions`, on Satin over `state`.
 ///
 /// The block runs as a validator runs it: under the schedule [`satin_schedule`] gives — the
 /// chain's own when it runs Satin at the block, otherwise the engine's fallback, a counterfactual
-/// — held to the protocol limits that schedule carries, or `limits_override` over them, with no
+/// — held to Satin's protocol limits, or `limits_override` over them, a counterfactual, with no
 /// building policy, and with the block's gas limit from its header. Whether the block admits only
 /// deposits is worked out from that schedule and `parent_timestamp`, the parent block's timestamp
 /// ([`admits_only_deposits`]). A transaction the engine refuses is reported as refused and left
@@ -44,7 +44,9 @@ pub(super) fn execute(
     limits_override: Option<&LimitsOverride>,
     state: &mut BlockState,
 ) -> Result<ExecutedBlock> {
-    let hardforks = satin_schedule(chain_id, header.timestamp, limits_override)?;
+    let hardforks = satin_schedule(chain_id, header.timestamp)?;
+    let limits_override: Option<ProtocolLimits> =
+        limits_override.map(|limits| satin_limits(Some(limits))).transpose()?;
     let mut cfg = CfgEnv::new_with_spec(MegaSpecId::SATIN);
     cfg.chain_id = chain_id;
     let mut block_env = BlockEnv {
@@ -69,17 +71,22 @@ pub(super) fn execute(
     let factory = MegaBlockExecutorFactory::new(
         OpAlloyReceiptBuilder::default(),
         &hardforks,
-        MegaEvmFactory::new().with_schedule(hardforks.clone()).with_external_env_factory(envs),
+        MegaEvmFactory::new().with_external_env_factory(envs),
     );
     let only_deposits =
         admits_only_deposits(&hardforks, header.number, parent_timestamp, header.timestamp)?;
+    // Without the parent's timestamp the block admits every transaction only where no fork the
+    // schedule activates after genesis is active at it, so Satin does not activate in it either.
+    let activates_satin = parent_timestamp
+        .is_some_and(|parent| hardforks.is_satin_activation_block(parent, header.timestamp));
     let block_ctx = MegaBlockExecutionCtx::new(
         header.parent_hash,
         header.parent_beacon_block_root,
         header.extra_data.clone(),
         BlockLimits::default(),
     )
-    .with_no_user_tx_activation_block(only_deposits);
+    .with_no_user_tx_activation_block(only_deposits)
+    .with_satin_activation_block(activates_satin);
 
     let result = {
         let mut db = State::builder().with_database(SatinDb(state)).with_bundle_update().build();
@@ -89,6 +96,9 @@ pub(super) fn execute(
             block_ctx,
             NoOpInspector,
         );
+        if let Some(limits) = limits_override {
+            executor = executor.with_protocol_limits(limits);
+        }
         let mut run = || -> Result<ExecutedBlock> {
             executor
                 .apply_pre_execution_changes()
@@ -133,8 +143,6 @@ pub(super) fn execute(
                     satin: Some(satin),
                 });
             }
-            let limits_override =
-                limits_override.and_then(|_| hardforks.protocol_limits(header.timestamp));
             Ok(ExecutedBlock { transactions: results, limits_override })
         };
         run()
@@ -147,15 +155,11 @@ pub(super) fn execute(
 }
 
 /// Whether running the block of chain `chain_id` at `timestamp` on Satin, under the schedule
-/// [`satin_schedule`] gives it with `limits_override`, needs its parent's timestamp: a fork that
-/// schedule activates after timestamp 0 is active at the block, so whether the fork activates in
-/// this block depends on when its parent came ([`admits_only_deposits`]).
-pub(super) fn needs_parent_timestamp(
-    chain_id: u64,
-    timestamp: u64,
-    limits_override: Option<&LimitsOverride>,
-) -> Result<bool> {
-    let hardforks = satin_schedule(chain_id, timestamp, limits_override)?;
+/// [`satin_schedule`] gives it, needs its parent's timestamp: a fork that schedule activates after
+/// timestamp 0 is active at the block, so whether the fork activates in this block depends on when
+/// its parent came ([`admits_only_deposits`]).
+pub(super) fn needs_parent_timestamp(chain_id: u64, timestamp: u64) -> Result<bool> {
+    let hardforks = satin_schedule(chain_id, timestamp)?;
     Ok(hardforks.admits_only_deposits(0, timestamp))
 }
 
@@ -188,9 +192,7 @@ fn admits_only_deposits(
 
 #[cfg(test)]
 mod tests {
-    use mega_evm::{
-        all_activated_hardforks, alloy_hardforks::ForkCondition, MegaHardfork, MegaHardforkConfig,
-    };
+    use mega_evm::{alloy_hardforks::ForkCondition, MegaHardfork, MegaHardforkConfig};
 
     use super::admits_only_deposits;
 
@@ -220,7 +222,8 @@ mod tests {
     /// Expected values: independent (the schedule's own timestamps and the rule).
     #[test]
     fn test_without_the_parent_timestamp_only_an_undecidable_block_is_refused() {
-        assert!(!admits_only_deposits(&all_activated_hardforks(), 7, None, ACTIVATION).unwrap());
+        let all_activated = MegaHardforkConfig::default().with_all_activated();
+        assert!(!admits_only_deposits(&all_activated, 7, None, ACTIVATION).unwrap());
         assert!(!admits_only_deposits(&satin_at(0), 7, None, ACTIVATION).unwrap());
         assert!(!admits_only_deposits(&satin_at(ACTIVATION), 7, None, ACTIVATION - 1).unwrap());
         for timestamp in [ACTIVATION, ACTIVATION + 1] {

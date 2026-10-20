@@ -5,8 +5,7 @@
 //! (`fixtures/replay_offline.cache.json`, which includes the on-chain receipt),
 //! so it is deterministic: the tests dump a fixture, validate the written file
 //! with the state-test runner, check byte-reproducibility, and verify the
-//! transaction-override and `--override.spec` guards. (Benchmarking lives in
-//! `state-test --bench`; see `bench/replay/`.)
+//! transaction-override and `--override.spec` guards.
 //!
 //! The dump is the legacy leg's: the transaction replays on the released 1.7.1 CLI, and the
 //! fixture is validated by the 1.7.1 state-test runner.

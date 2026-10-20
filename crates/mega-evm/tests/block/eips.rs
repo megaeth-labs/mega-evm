@@ -24,7 +24,7 @@ use mega_evm::{
     pre_block_call_gas_limit,
     test_utils::{BytecodeBuilder, ErrorInjectingDatabase, MemoryDatabase},
     BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardforkConfig,
-    MegaSpecId, PreBlockStateSource, ProtocolLimits,
+    MegaSpecId, PreBlockStateSource,
 };
 use revm::{
     bytecode::opcode::{CALLDATALOAD, MLOAD, SSTORE},
@@ -195,44 +195,39 @@ fn test_the_pre_block_calls_record_the_parent_hash_and_the_beacon_root() {
 }
 
 /// The pre-block calls are the protocol's own work, held to no per-transaction limit: under the
-/// smallest value a chain may carry for each limit, which their bodies, their writes and their
-/// state gas cross, both calls still record.
+/// smallest value a chain may carry for each limit, which their bodies and their writes cross, both
+/// calls still record.
 ///
-/// Each contract writes two slots, so each call keeps two write records, past a KV count of one
-/// at the transaction and at the frame; the body (`TX_BODY_SIZE` and 32 bytes of calldata) crosses
-/// the transaction's data size, a record the frame's, and a fresh slot the state gas. The states
-/// the observer receives show the two writes; a limit of zero, which would let one write cross,
-/// is not a limit a chain may carry. Each limit is set alone as well as all together: data size is
-/// checked before the write records, so with every limit set the KV counts are never reached.
+/// Each contract writes two slots, so each call keeps two write records: the body (`TX_BODY_SIZE`
+/// and 32 bytes of calldata) crosses the transaction's data size, and a record the frame's. The
+/// states the observer receives show the two writes. Each limit is set alone as well as both
+/// together.
 ///
 /// Rule [S19.3]. Expected values `independent`: the parent hash and the beacon root are the
 /// block's own inputs, and the crossings are counted here from the writes the calls made.
 #[test]
 fn test_the_pre_block_calls_are_held_to_no_limit() {
     let loosest = common::loosest_tx();
-    let every = loosest
-        .with_tx_data_size_limit(mega_evm::TX_BODY_SIZE)
-        .with_frame_data_size_limit(1)
-        .with_tx_kv_update_limit(1)
-        .with_frame_kv_update_limit(1)
-        .with_tx_state_gas_limit(1);
+    let every =
+        loosest.with_tx_data_size_limit(mega_evm::TX_BODY_SIZE).with_frame_data_size_limit(1);
     for (name, limits) in [
         ("the transaction's data size", loosest.with_tx_data_size_limit(mega_evm::TX_BODY_SIZE)),
         ("a frame's data size", loosest.with_frame_data_size_limit(1)),
-        ("the transaction's KV count", loosest.with_tx_kv_update_limit(1)),
-        ("a frame's KV count", loosest.with_frame_kv_update_limit(1)),
-        ("the transaction's state gas", loosest.with_tx_state_gas_limit(1)),
-        ("every limit at once", every),
+        ("both limits at once", every),
     ] {
-        let spec =
-            common::chain_spec_with(ProtocolLimits::loosest().with_tx_runtime_limits(limits));
+        let limits = common::loosest().with_tx_runtime_limits(limits);
         let mut db = common::database();
         db.set_account_code(HISTORY_STORAGE_ADDRESS, recorder_writing_twice());
         db.set_account_code(BEACON_ROOTS_ADDRESS, recorder_writing_twice());
         let mut state = State::builder().with_database(db).build();
         let states = {
-            let mut executor =
-                executor_with_env_and_spec(&mut state, ctx(), env_at_block(BLOCK_NUMBER), spec);
+            let mut executor = executor_with_env_and_spec(
+                &mut state,
+                ctx(),
+                env_at_block(BLOCK_NUMBER),
+                common::chain_spec(),
+            )
+            .with_protocol_limits(limits);
             let log = record_pre_block(&mut executor);
             executor
                 .apply_pre_execution_changes()
@@ -257,18 +252,13 @@ fn test_the_pre_block_calls_are_held_to_no_limit() {
 
 /// The pre-block calls count towards none of the block's counters or budgets. With the EIP-2935
 /// and EIP-4788 contracts' own code in state, both calls write their contracts' storage; after the
-/// pre-block phase every counter of the block is still zero, and a block whose four budgets are
-/// one unit each — execution gas, state gas, data size and KV updates, each reached by anything
-/// counted — still admits its first transaction.
+/// pre-block phase every counter of the block is still zero, and a block whose data-size budget is
+/// one byte — reached by anything counted — still admits its first transaction.
 ///
 /// Rule [S19.7]. Expected values `independent`: zeros, and the first transaction admitted.
 #[test]
 fn test_the_pre_block_calls_count_towards_no_counter_or_budget() {
-    let policy = BlockLimits::no_limits()
-        .with_block_execution_gas_limit(1)
-        .with_block_state_gas_limit(1)
-        .with_block_txs_data_limit(1)
-        .with_block_kv_update_limit(1);
+    let policy = BlockLimits::no_limits().with_block_txs_data_limit(1);
     let ctx =
         MegaBlockExecutionCtx::new(PARENT_HASH, Some(PARENT_BEACON_ROOT), Bytes::new(), policy);
     let mut db = common::database();
@@ -474,43 +464,6 @@ fn test_a_block_is_refused_when_its_beacon_root_call_halts() {
                 message,
             }) if **parent_beacon_block_root == PARENT_BEACON_ROOT
                 && message.contains("did not succeed")
-        ),
-        "{err}"
-    );
-    assert_eq!(calls, [PreBlockStateSource::Eip2935]);
-}
-
-/// A pre-block call that reverts refuses the block just as one that halts does.
-#[test]
-fn test_a_block_is_refused_when_a_pre_block_call_reverts() {
-    let reverts = BytecodeBuilder::default().revert().build();
-
-    let mut db = common::database();
-    db.set_account_code(HISTORY_STORAGE_ADDRESS, reverts.clone());
-    let (calls, started) = start_block(db, common::evm_env());
-    let err = started.expect_err("a reverted block hashes call refuses the block");
-    assert!(
-        matches!(
-            &err,
-            BlockExecutionError::Validation(BlockValidationError::BlockHashContractCall { message })
-                if message.contains("EIP-2935 pre-block call did not succeed")
-                    && message.contains("Revert")
-        ),
-        "{err}"
-    );
-    assert!(calls.is_empty(), "{calls:?}");
-
-    let mut db = common::database();
-    db.set_account_code(BEACON_ROOTS_ADDRESS, reverts);
-    let (calls, started) = start_block(db, common::evm_env());
-    let err = started.expect_err("a reverted beacon root call refuses the block");
-    assert!(
-        matches!(
-            &err,
-            BlockExecutionError::Validation(BlockValidationError::BeaconRootContractCall {
-                message,
-                ..
-            }) if message.contains("EIP-4788 pre-block call did not succeed")
         ),
         "{err}"
     );

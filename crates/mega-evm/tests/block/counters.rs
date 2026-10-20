@@ -5,7 +5,7 @@ use alloy_evm::block::BlockExecutor;
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
     test_utils::{transfer_log, BytecodeBuilder},
-    BlockGasCounters, BlockLimits, MegaTxEnvelope,
+    BlockGasCounters, MegaTxEnvelope,
 };
 use revm::{
     bytecode::opcode::{CALL, LOG0, LOG3, POP, PUSH0},
@@ -102,90 +102,6 @@ fn test_the_result_carries_the_counters_and_the_footprint() {
     assert_eq!(result.blob_gas_used, footprint);
     assert_eq!(result.receipts().len(), 1);
     assert!(result.usage.write_records > 0, "the transaction wrote to state");
-}
-
-/// The execution-gas dimension of the block: the transaction that crosses the limit is packed,
-/// and the next one is refused before it runs.
-#[test]
-fn test_the_execution_limit_packs_the_crossing_transaction_and_skips_the_next() {
-    let mut state = state_with_writer();
-
-    // What one of these transactions spends on the execution ledger, so the block below has room
-    // for exactly one of them.
-    let spent = {
-        let mut probe_state = state_with_writer();
-        let mut probe = executor(&mut probe_state, common::unlimited_ctx());
-        probe.apply_pre_execution_changes().expect("the block starts");
-        probe.execute_transaction(&user_tx(0, 1_000_000)).expect("the probe executes");
-        probe.gas().execution
-    };
-    assert!(spent > 0);
-
-    let mut executor = executor(
-        &mut state,
-        common::block_ctx(BlockLimits::no_limits().with_block_execution_gas_limit(spent - 1)),
-    );
-    executor.apply_pre_execution_changes().expect("the block starts");
-
-    executor
-        .execute_transaction(&user_tx(0, 1_000_000))
-        .expect("the transaction that crosses the limit is still packed");
-    assert!(executor.gas().execution > spent - 1, "the block has crossed its limit");
-
-    let err = executor
-        .execute_transaction(&user_tx(1, 1_000_000))
-        .expect_err("the block has no execution gas left");
-    assert!(format!("{err}").contains("Block execution gas limit reached"), "{err}");
-
-    let (_, result) = executor.finish_with_counters().expect("the block finishes");
-    assert_eq!(result.receipts().len(), 1);
-}
-
-/// A deposit is not a transaction the builder chose: the block derived from L1 must include it,
-/// so the execution-gas limit never refuses one, however far past it the block is. It still
-/// counts, so an ordinary transaction after the deposits finds the room they used.
-#[test]
-fn test_a_deposit_is_never_refused_by_the_execution_limit() {
-    let deposit = || common::deposit_tx_to(RECIPIENT, Bytes::new(), 1_000_000);
-
-    // What one deposit spends on the execution ledger, so two of them cross the limit below.
-    let spent = {
-        let mut probe_state = state_with_writer();
-        let mut probe = executor(&mut probe_state, common::unlimited_ctx());
-        probe.apply_pre_execution_changes().expect("the block starts");
-        probe.execute_transaction(&deposit()).expect("the probe executes");
-        probe.gas().execution
-    };
-    assert!(spent > 0);
-
-    let mut state = state_with_writer();
-    let mut executor = executor(
-        &mut state,
-        common::block_ctx(
-            BlockLimits::no_limits().with_block_execution_gas_limit(spent + spent / 2),
-        ),
-    );
-    executor.apply_pre_execution_changes().expect("the block starts");
-
-    executor.execute_transaction(&deposit()).expect("the block has room");
-    executor.execute_transaction(&deposit()).expect("the deposit that crosses the limit");
-    assert_eq!(executor.gas().execution, 2 * spent, "two deposits crossed the limit between them");
-
-    executor
-        .execute_transaction(&deposit())
-        .expect("a deposit is included whatever the block's execution gas");
-    assert_eq!(executor.gas().execution, 3 * spent, "and it counts");
-
-    // Each deposit bumped the sender's nonce, so this one is valid and refused for room alone.
-    let err = executor
-        .execute_transaction(&user_tx(3, 1_000_000))
-        .expect_err("an ordinary transaction finds no execution gas left");
-    assert!(format!("{err}").contains("Block execution gas limit reached"), "{err}");
-    assert!(format!("{err}").contains(&format!("block_used={}", 3 * spent)), "{err}");
-
-    let (_, result) = executor.finish_with_counters().expect("the block finishes");
-    assert_eq!(result.receipts().len(), 3);
-    assert_eq!(result.gas.execution, 3 * spent);
 }
 
 /// The state and history ledgers are counted, and with no limit configured nothing refuses a
@@ -325,8 +241,7 @@ fn test_a_floor_bound_transaction_adds_its_floor_to_the_block() {
 /// ledger takes the body's history and nothing for the record the frame never made.
 #[test]
 fn test_an_out_of_gas_before_the_first_frame_bills_the_whole_gas_limit_to_the_block() {
-    use alloy_consensus::{Signed, TxLegacy};
-    use alloy_primitives::{Signature, TxKind, B256};
+    use alloy_primitives::TxKind;
     use op_revm::constants::{BASE_FEE_RECIPIENT, L1_FEE_RECIPIENT, OPERATOR_FEE_RECIPIENT};
     use revm::Database as _;
 
@@ -337,19 +252,15 @@ fn test_an_out_of_gas_before_the_first_frame_bills_the_whole_gas_limit_to_the_bl
     const FRESH: Address = address!("0x3000000000000000000000000000000000000005");
     const GAS_PRICE: u128 = 1_000_000;
     let transfer = |gas_limit: u64| {
-        common::recovered(MegaTxEnvelope::Legacy(Signed::new_unchecked(
-            TxLegacy {
-                chain_id: Some(common::CHAIN_ID),
-                nonce: 0,
-                gas_price: GAS_PRICE,
-                gas_limit,
-                to: TxKind::Call(FRESH),
-                value: U256::from(1),
-                input: Bytes::new(),
-            },
-            Signature::test_signature(),
-            B256::repeat_byte(1),
-        )))
+        common::legacy_from(
+            common::CALLER,
+            0,
+            TxKind::Call(FRESH),
+            U256::from(1),
+            Bytes::new(),
+            gas_limit,
+            GAS_PRICE,
+        )
     };
 
     // What the transfer spends when it has room, on a block of its own: one gas less falls short

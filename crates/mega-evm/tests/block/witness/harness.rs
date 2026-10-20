@@ -17,7 +17,7 @@ use std::{
     fmt::Debug,
 };
 
-use alloy_consensus::{transaction::Recovered, Signed, TxEip7702, TxLegacy};
+use alloy_consensus::{transaction::Recovered, Signed, TxEip7702};
 use alloy_eips::eip7702::{Authorization, SignedAuthorization};
 use alloy_evm::{block::BlockExecutor, EvmEnv, EvmFactory};
 use alloy_op_evm::block::receipt_builder::{OpAlloyReceiptBuilder, OpReceiptBuilder};
@@ -68,6 +68,8 @@ pub(crate) struct Case {
     pub db: MemoryDatabase,
     pub envs: Envs,
     pub spec: MegaHardforkConfig,
+    /// The limits the block is held to in place of the spec's, if any.
+    pub limits: Option<ProtocolLimits>,
     pub ctx: MegaBlockExecutionCtx,
     pub env: EvmEnv<MegaSpecId>,
     pub txs: Vec<Tx>,
@@ -92,6 +94,7 @@ impl Case {
             db,
             envs: Envs::new(),
             spec: common::chain_spec(),
+            limits: None,
             ctx: common::unlimited_ctx(),
             env: common::evm_env(),
             txs: Vec::new(),
@@ -133,9 +136,9 @@ impl Case {
         self
     }
 
-    /// Holds the block to `limits`.
+    /// Holds the block to `limits` in place of the spec's.
     pub(crate) fn limits(mut self, limits: ProtocolLimits) -> Self {
-        self.spec = common::chain_spec_with(limits);
+        self.limits = Some(limits);
         self
     }
 
@@ -308,6 +311,9 @@ impl Case {
             self.spec.clone(),
             OpAlloyReceiptBuilder::default(),
         );
+        if let Some(limits) = self.limits {
+            executor = executor.with_protocol_limits(limits);
+        }
         let log = record_pre_block_generic(&mut executor);
         executor.apply_pre_execution_changes().expect("the block starts");
         let pre_block = log.lock().expect("pre-block observer").clone();
@@ -574,22 +580,7 @@ pub(crate) fn legacy_from(
     input: Bytes,
     gas_limit: u64,
 ) -> Tx {
-    let tx = TxLegacy {
-        chain_id: Some(CHAIN_ID),
-        nonce,
-        gas_price: 1_000_000,
-        gas_limit,
-        to: kind,
-        value,
-        input,
-    };
-    let hash = B256::from(alloy_primitives::keccak256(
-        [sender.as_slice(), &nonce.to_be_bytes(), &[0u8]].concat(),
-    ));
-    Recovered::new_unchecked(
-        MegaTxEnvelope::Legacy(Signed::new_unchecked(tx, Signature::test_signature(), hash)),
-        sender,
-    )
+    common::legacy_from(sender, nonce, kind, value, input, gas_limit, 1_000_000)
 }
 
 /// A legacy call from [`CALLER`] at `nonce` to `to` carrying `input`.

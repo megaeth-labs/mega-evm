@@ -321,6 +321,24 @@ class Scoring(GateCase):
             code, text = self.report(results, suppressions=self.suppressions(suppressed))
             self.assertEqual(code, 0, text)
 
+    def test_a_locatorless_suppression_of_two_mutants_fails(self) -> None:
+        body = gate.mutant_body(MISSED)
+        other = f"crates/mega-evm/src/b.rs:4:1: {body}"
+        results = self.results(outcomes=outcomes_json(
+            mutant(MISSED, "MissedMutant"), mutant(other, "CaughtMutant")))
+        code, text = self.report(results, suppressions=self.suppressions(body))
+        self.assertEqual(code, 1, text)
+        self.assertIn("more than one mutant", text)
+        self.assertIn(body, text)
+
+    def test_located_suppressions_of_one_shared_text_pass(self) -> None:
+        body = gate.mutant_body(MISSED)
+        other = f"crates/mega-evm/src/b.rs:4:1: {body}"
+        results = self.results(outcomes=outcomes_json(
+            mutant(MISSED, "MissedMutant"), mutant(other, "MissedMutant")))
+        code, text = self.report(results, suppressions=self.suppressions(MISSED, other))
+        self.assertEqual(code, 0, text)
+
     def test_a_timeout_without_a_recheck_fails(self) -> None:
         results = self.results(outcomes=outcomes_json(
             mutant(CAUGHT, "CaughtMutant"), mutant(TIMEOUT, "Timeout")))
@@ -621,6 +639,32 @@ class DriverGuard(unittest.TestCase):
         if not Path("/bin/bash").exists():
             self.skipTest("no /bin/bash")
         self.assert_refused("/bin/bash")
+
+
+class OrphanSuppressions(GateCase):
+    """A suppression must name live mutants, and a bare line must name one."""
+
+    def orphans(self, suppressions: Path, universe: list[str]) -> tuple[int, str]:
+        path = self.tmp / "universe.txt"
+        path.write_text("".join(f"{line}\n" for line in universe))
+        args = Namespace(suppressions=str(suppressions), universe=str(path))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = gate.cmd_orphans(args)
+        return code, buf.getvalue()
+
+    def test_a_locatorless_line_suppression_matching_two_mutants_fails(self) -> None:
+        body = gate.mutant_body(MISSED)
+        other = f"crates/mega-evm/src/b.rs:4:1: {body}"
+        code, text = self.orphans(self.suppressions(body), [MISSED, other])
+        self.assertEqual(code, 1, text)
+        self.assertIn("more than one mutant", text)
+
+    def test_a_located_line_suppression_matches_one_of_two(self) -> None:
+        body = gate.mutant_body(MISSED)
+        other = f"crates/mega-evm/src/b.rs:4:1: {body}"
+        code, text = self.orphans(self.suppressions(MISSED), [MISSED, other])
+        self.assertEqual(code, 0, text)
 
 
 if __name__ == "__main__":

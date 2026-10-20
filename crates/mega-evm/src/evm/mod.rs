@@ -26,7 +26,6 @@ pub use execution::*;
 pub use factory::*;
 pub use frame::*;
 pub use history::*;
-pub use host::*;
 pub use inspector::*;
 pub use precompiles::*;
 pub use prices::*;
@@ -209,12 +208,11 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
 
     /// Enforces `limits` on every transaction this EVM runs from now on.
     ///
-    /// Block execution installs the chain's limits this way before every transaction
-    /// ([`ProtocolLimits`](crate::ProtocolLimits)), so a block's transaction runs under them
-    /// whatever the caller configured on the EVM. An EVM from
-    /// [`MegaEvmFactory`](crate::MegaEvmFactory) already runs under the limits the factory
-    /// resolved for its block; outside block execution — an RPC call, a tool, a test — this is how
-    /// a caller chooses others.
+    /// Every EVM already runs under its spec's limits
+    /// ([`ProtocolLimits::for_spec`](crate::ProtocolLimits::for_spec)), and block execution
+    /// installs them again this way before every transaction, so a block's transaction runs under
+    /// them whatever the caller configured on the EVM. Outside block execution — a tool, a test —
+    /// this is how a caller runs a counterfactual under others.
     #[must_use]
     pub fn with_tx_runtime_limits(mut self, limits: crate::EvmTxRuntimeLimits) -> Self {
         self.set_tx_runtime_limits(limits);
@@ -310,18 +308,11 @@ where
             result_and_state,
             gas,
             usage: layer.usage(),
-            limit_exceeded: layer.latched().copied(),
+            limit_exceeded: layer.limit_exceeded().copied(),
             oracle_reads: self.inner.ctx.oracle_reads().reads().to_vec(),
         })
     }
-}
 
-impl<DB, INSP, ExtEnvs> MegaEvm<DB, INSP, ExtEnvs>
-where
-    DB: Database,
-    INSP: Inspector<MegaContext<DB, ExtEnvs>, EthInterpreter>,
-    ExtEnvs: ExternalEnvTypes,
-{
     /// Runs `tx` through the inspector when one is enabled, without committing.
     fn run_transaction(
         &mut self,
@@ -401,30 +392,18 @@ where
 {
 }
 
-/// The transaction a system call runs, on the gas limit its caller names.
-trait SystemCallTxWithGasLimit: SystemCallTx {
-    /// revm's system-call transaction from `caller` to `contract` with `data`
-    /// ([`SystemCallTx::new_system_tx_with_caller`]), on `gas_limit` instead of revm's
-    /// [`SYSTEM_CALL_GAS_LIMIT`](revm::handler::SYSTEM_CALL_GAS_LIMIT).
-    fn new_system_tx_with_gas_limit(
-        caller: Address,
-        contract: Address,
-        data: Bytes,
-        gas_limit: u64,
-    ) -> Self;
-}
-
-impl SystemCallTxWithGasLimit for MegaTransaction {
-    fn new_system_tx_with_gas_limit(
-        caller: Address,
-        contract: Address,
-        data: Bytes,
-        gas_limit: u64,
-    ) -> Self {
-        let mut tx = Self::new_system_tx_with_caller(caller, contract, data);
-        tx.0.base.gas_limit = gas_limit;
-        tx
-    }
+/// revm's system-call transaction from `caller` to `contract` with `data`
+/// ([`SystemCallTx::new_system_tx_with_caller`]), on `gas_limit` instead of revm's
+/// [`SYSTEM_CALL_GAS_LIMIT`](revm::handler::SYSTEM_CALL_GAS_LIMIT).
+fn system_tx_with_gas_limit(
+    caller: Address,
+    contract: Address,
+    data: Bytes,
+    gas_limit: u64,
+) -> MegaTransaction {
+    let mut tx = MegaTransaction::new_system_tx_with_caller(caller, contract, data);
+    tx.0.base.gas_limit = gas_limit;
+    tx
 }
 
 impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> SystemCallEvm for MegaEvm<DB, INSP, ExtEnvs> {
@@ -461,7 +440,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
         data: Bytes,
         gas_limit: u64,
     ) -> Result<ResultAndState<OpHaltReason>, EVMError<DB::Error, MegaTransactionError>> {
-        let tx = MegaTransaction::new_system_tx_with_gas_limit(caller, contract, data, gas_limit);
+        let tx = system_tx_with_gas_limit(caller, contract, data, gas_limit);
         let result = self.run_system_call(tx).map_err(map_op_err)?;
         Ok(ResultAndState::new(result, ExecuteEvm::finalize(self)))
     }

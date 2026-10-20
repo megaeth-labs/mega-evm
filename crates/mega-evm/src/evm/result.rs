@@ -45,9 +45,11 @@ pub struct MegaTransactionOutcome {
     /// The data-size bytes and write records the transaction kept. The KV count a node reports
     /// is [`LimitUsage::write_records`].
     pub usage: LimitUsage,
-    /// The transaction-level limit that stopped the transaction, if one did. The result is then a
-    /// revert whose output is its [`MegaLimitExceeded`](crate::MegaLimitExceeded); this, not the
-    /// output, tells a limit stop from a contract reverting with the same bytes.
+    /// The crossing that produced the result of the transaction's own frame, if one did: a
+    /// transaction-level limit, or that frame's own data-size budget. The result is then a revert
+    /// whose output is its [`MegaLimitExceeded`](crate::MegaLimitExceeded); this, not the output,
+    /// tells a limit stop from a contract reverting with the same bytes, or re-raising those a
+    /// frame below it was stopped with.
     pub limit_exceeded: Option<LimitCheck>,
     /// The reads of the Oracle's storage the transaction made through the oracle service, in
     /// order, each with the service's answer. The answers are in no database: a node building a
@@ -57,8 +59,8 @@ pub struct MegaTransactionOutcome {
 }
 
 impl MegaTransactionOutcome {
-    /// The transaction-level limit that stopped the transaction, if one did, read off the result
-    /// and [`limit_exceeded`](Self::limit_exceeded) together ([`LimitStop::from_result`]).
+    /// The limit that stopped the transaction, if one did, read off the result and
+    /// [`limit_exceeded`](Self::limit_exceeded) together ([`LimitStop::from_result`]).
     pub fn limit_stop(&self) -> Option<LimitStop> {
         LimitStop::from_result(&self.result, self.limit_exceeded.as_ref())
     }
@@ -143,9 +145,13 @@ impl MegaGasUsage {
 mod tests {
     use super::*;
     use crate::{LimitCheck, LimitKind, MegaHaltReason, MegaLimitExceeded};
+    use alloy_primitives::{Address, Bytes};
     use alloy_sol_types::SolError;
     use op_revm::OpHaltReason;
-    use revm::context::result::{HaltReason as EthHaltReason, OutOfGasError};
+    use revm::{
+        context::result::{ExecutionResult, HaltReason as EthHaltReason, OutOfGasError},
+        state::{Account, EvmState},
+    };
 
     fn result_gas(total: u64, state: u64, refunded: u64, floor: u64) -> ResultGas {
         ResultGas::default()
@@ -193,17 +199,33 @@ mod tests {
     /// dimension.
     #[test]
     fn test_limit_stops_are_reverts_with_mega_limit_exceeded() {
-        for kind in [
-            LimitKind::DataSize,
-            LimitKind::KVUpdate,
-            LimitKind::ComputeGas,
-            LimitKind::StateGrowth,
-        ] {
+        for kind in [LimitKind::DataSize, LimitKind::ComputeGas] {
             let stop = LimitCheck::ExceedsLimit { kind, limit: 100, used: 101, frame_local: false };
             let decoded = MegaLimitExceeded::abi_decode(&stop.revert_data()).unwrap();
             assert_eq!(LimitKind::from_u8(decoded.kind), Some(kind));
             assert_eq!(decoded.limit, 100);
         }
+    }
+
+    /// An outcome reads and writes through to the result and the state it carries.
+    #[test]
+    fn test_an_outcome_derefs_to_its_result_and_state() {
+        let result = ExecutionResult::Revert {
+            gas: result_gas(21_000, 0, 0, 0),
+            logs: Vec::new(),
+            output: Bytes::new(),
+        };
+        let mut outcome = MegaTransactionOutcome {
+            result_and_state: ResultAndState::new(result, EvmState::default()),
+            gas: MegaGasUsage::default(),
+            usage: LimitUsage::ZERO,
+            limit_exceeded: None,
+            oracle_reads: Vec::new(),
+        };
+        assert!(!outcome.result.is_success());
+
+        outcome.state.insert(Address::ZERO, Account::default());
+        assert!(outcome.result_and_state.state.contains_key(&Address::ZERO));
     }
 
     /// The one halt reason op-revm adds, a failed deposit, has no Ethereum counterpart.

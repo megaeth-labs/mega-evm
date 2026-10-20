@@ -1,6 +1,24 @@
 //! The minimal cases the properties found, and the ones a review of them found, one named test
 //! each, so a finding is pinned without its seed.
 //!
+//! Four findings first pinned here now live as deterministic tests:
+//!
+//! - `test_an_out_of_gas_before_the_first_frame_matches_op_revm` pins the out-of-gas before the
+//!   first frame. Found by the gas-ledgers property: the fork drops the runtime phase's partial
+//!   charges by rebuilding the transaction's gas, and the settlement gave the recipient record's
+//!   history back a second time, into the reservoir, which the halt does not burn.
+//! - `test_a_system_deposit_over_the_limit_reports_the_failed_deposit` pins a failed deposit that
+//!   reports no stop. Found by the survivors property: the stop the body's count set, before
+//!   op-revm validated the deposit, was reported beside the halt.
+//! - `test_an_out_of_gas_creation_before_the_first_frame_matches_op_revm` pins the nonce bump of an
+//!   out-of-gas creation. Found by the gas-ledgers property: Satin's pre-execution bailed out with
+//!   a plain checkpoint revert, which took the bump the creation frame makes back and made none of
+//!   its own.
+//! - `test_a_failed_deposit_keeps_the_hints_it_forwarded` pins a failed deposit that keeps a
+//!   forwarded hint. Found by comparing every case's outcome before and after the failed deposit's
+//!   settlement was added: that settlement reset the whole count to the body, the forwarded hint
+//!   with it.
+//!
 //! A case whose gas limit falls short of a charge is pinned at the spec's byte prices, where it
 //! was found: its gas limit is the one the minimal case carries, and the charge moves with the
 //! prices. At other prices those tests return early, with the note the byte-price grid counts; the
@@ -14,20 +32,9 @@ use crate::{
         world::{AccountShape, Balance, BeneficiaryIs, BlockShape, Limits, Salt, World},
         Value, Who,
     },
+    harness::runs_at_measurement_prices,
     render::render,
 };
-
-/// Whether this process prices bytes at something other than the constants, in which case the
-/// minimal cases below do not reproduce what they were found with.
-fn runs_at_measurement_prices() -> bool {
-    if mega_evm::active_satin_prices().is_constants() {
-        return false;
-    }
-    mega_evm::test_utils::note_price_guard(
-        "MEGA_SATIN_CPSB or MEGA_SATIN_CPHB fixed prices other than the spec's",
-    );
-    true
-}
 
 /// A world of empty programs, with the sender funded and nothing else.
 fn plain_world() -> World {
@@ -57,19 +64,25 @@ fn stop() -> Program {
     Program { ops: vec![], end: End::Stop }
 }
 
-/// A value transfer to an address with no account, at a gas limit that cannot cover EIP-2780's
-/// charge for the new recipient, runs out of gas before its first frame and burns its whole gas
-/// limit: nothing comes back from a reservoir the transaction never had, and the history ledger
-/// reads the body alone.
+/// A value transfer that runs out of gas before its first frame, with a non-zero operator fee
+/// scalar and constant, pays that fee on the whole gas limit.
 ///
-/// Found by the gas-ledgers property: the fork drops the runtime phase's partial charges by
-/// rebuilding the transaction's gas, and the settlement gave the recipient record's history back a
-/// second time, into the reservoir, which the halt does not burn.
+/// The fee is `gas × scalar × 100 + constant` on the gas the receipt counts, less any reservoir.
+/// Handing the first frame's record history back a second time leaves that gas in the reservoir,
+/// and the fee is then computed on less than the gas the halt burned. An empty envelope pays no
+/// operator fee whatever the parameters, so the transaction carries one byte that is not a deposit.
+/// The recipient account is created empty: the frame never runs, so the value does not move.
 #[test]
-fn test_an_out_of_gas_before_the_first_frame_burns_the_whole_gas_limit() {
+fn test_an_out_of_gas_before_the_first_frame_pays_the_operator_fee_on_the_whole_gas_limit() {
     if runs_at_measurement_prices() {
         return;
     }
+    use alloy_primitives::{Bytes, U256};
+    use op_revm::constants::{OPERATOR_FEE_JOVIAN_MULTIPLIER, OPERATOR_FEE_RECIPIENT};
+
+    const SCALAR: u64 = 2;
+    const CONSTANT: u64 = 50;
+
     let case = Case {
         world: plain_world(),
         tx: Tx {
@@ -83,18 +96,26 @@ fn test_an_out_of_gas_before_the_first_frame_burns_the_whole_gas_limit() {
         a: stop(),
         b: stop(),
     };
-    let execution = case.execute();
+    let mut evm = case.evm();
+    evm.ctx_mut().modify_chain(|chain| {
+        // A block number the info does not name makes op-revm load the info from the database,
+        // which has no scalars, and the parameters above would not be the ones the fee uses.
+        chain.l2_block = Some(case.block().number);
+        chain.operator_fee_scalar = Some(U256::from(SCALAR));
+        chain.operator_fee_constant = Some(U256::from(CONSTANT));
+    });
+    let mut tx = case.transaction();
+    tx.0.enveloped_tx = Some(Bytes::from_static(&[0x01]));
+
+    let execution = Case::execute_on(&mut evm, tx);
     let outcome = execution.as_ref().expect("the transaction is valid");
     let rendered = render(&execution);
     assert!(outcome.result.is_halt(), "{rendered}");
     let gas = outcome.result.gas();
-    assert_eq!(
-        gas.total_gas_spent(),
-        GasTier::Tiny.limit(),
-        "the whole gas limit burns\n{rendered}"
-    );
+    let gas_limit = GasTier::Tiny.limit();
+    assert_eq!(gas.total_gas_spent(), gas_limit, "the whole gas limit burns\n{rendered}");
     assert_eq!(gas.reservoir_remaining(), 0, "nothing comes back from a reservoir\n{rendered}");
-    assert_eq!(outcome.gas.gas_used, GasTier::Tiny.limit(), "{rendered}");
+    assert_eq!(outcome.gas.gas_used, gas_limit, "{rendered}");
     let body = mega_evm::transaction_body_bytes(&case.transaction());
     assert_eq!(outcome.gas.history_bytes, body, "the body alone is kept\n{rendered}");
     assert_eq!(
@@ -103,176 +124,24 @@ fn test_an_out_of_gas_before_the_first_frame_burns_the_whole_gas_limit() {
         "the history ledger reads the body\n{rendered}"
     );
     assert_eq!(outcome.usage.write_records, 0, "{rendered}");
-}
 
-/// A system deposit, which Regolith refuses, with a body over the data-size limit: op-revm
-/// answers the refusal with a failed-deposit halt, and the outcome reports the halt and no stop,
-/// as an out-of-gas before the first frame does; the body is what the deposit kept.
-///
-/// Found by the survivors property: the body's latch, set before op-revm validated the deposit,
-/// was reported beside the halt.
-#[test]
-fn test_a_failed_deposit_reports_no_stop() {
-    if runs_at_measurement_prices() {
-        return;
-    }
-    use crate::gen::world::{DataLimit, DetentionCap, StateLimit};
-    let mut world = plain_world();
-    world.limits = Limits::Custom {
-        data: DataLimit::Body,
-        frame_data: None,
-        kv: None,
-        frame_kv: None,
-        state: StateLimit::Unlimited,
-        block_env_cap: DetentionCap::Default,
-        oracle_cap: DetentionCap::Default,
-    };
-    let case = Case {
-        world,
-        tx: Tx {
-            shape: Shape::Deposit {
-                to: Who::Caller,
-                mint: Value::Zero,
-                data_len: 1,
-                system: true,
-                create: false,
-            },
-            value: Value::Zero,
-            gas: GasTier::Tiny,
-            price: Price::Free,
-            nonce_ok: true,
-        },
-        main: stop(),
-        a: stop(),
-        b: stop(),
-    };
-    let execution = case.execute();
-    let outcome = execution.as_ref().expect("the deposit is included");
-    let rendered = render(&execution);
-    assert!(
-        matches!(&outcome.result, revm::context::result::ExecutionResult::Halt { reason, .. }
-            if *reason == mega_evm::MegaHaltReason::FailedDeposit),
-        "{rendered}"
-    );
-    assert_eq!(outcome.limit_exceeded, None, "the halt is what the deposit reports\n{rendered}");
-    let body = mega_evm::transaction_body_bytes(&case.transaction());
+    let fee =
+        U256::from(gas_limit) * U256::from(SCALAR) * U256::from(OPERATOR_FEE_JOVIAN_MULTIPLIER) +
+            U256::from(CONSTANT);
+    let caller = case.tx.sender();
     assert_eq!(
-        outcome.usage,
-        mega_evm::LimitUsage { data_size: body, write_records: 0 },
-        "the body is what the deposit kept\n{rendered}"
+        outcome.state[&caller].info.balance,
+        case.world.caller.balance.wei() - fee,
+        "the sender pays the operator fee on the whole gas limit, and the value does not move\n{rendered}"
     );
-    assert_eq!(outcome.gas.gas_used, GasTier::Tiny.limit(), "{rendered}");
-}
-
-/// A creation transaction that runs out of gas before its first frame, on the history of the
-/// record its own frame would make, bumps its sender's nonce as revm's unwind does for a creation
-/// whose runtime gas phase ran out: an included out-of-gas creation cannot be replayed.
-///
-/// Found by the gas-ledgers property: Satin's pre-execution bailed out with a plain checkpoint
-/// revert, which took the bump the creation frame makes back and made none of its own.
-#[test]
-fn test_an_out_of_gas_creation_bumps_the_sender_s_nonce() {
-    if runs_at_measurement_prices() {
-        return;
-    }
-    use crate::gen::program::{AccountRead, Forward, Op, Scheme, SystemContract, Target};
-    let mut world = plain_world();
-    world.caller.balance = Balance::Small;
-    let case = Case {
-        world,
-        tx: Tx {
-            shape: Shape::Create,
-            value: Value::Zero,
-            gas: GasTier::Tiny,
-            price: Price::Free,
-            nonce_ok: true,
-        },
-        main: Program {
-            ops: vec![
-                Op::Account {
-                    target: Target::System(SystemContract::Oracle),
-                    read: AccountRead::Balance,
-                },
-                Op::Call {
-                    scheme: Scheme::Call,
-                    target: Target::Who(Who::Caller),
-                    value: Value::Zero,
-                    forward: Forward::All,
-                    args_len: 0,
-                },
-            ],
-            end: End::Stop,
-        },
-        a: stop(),
-        b: stop(),
-    };
-    let execution = case.execute();
-    let outcome = execution.as_ref().expect("the transaction is valid");
-    let rendered = render(&execution);
-    assert!(outcome.result.is_halt(), "{rendered}");
-    assert_eq!(outcome.result.gas().total_gas_spent(), GasTier::Tiny.limit(), "{rendered}");
     assert_eq!(
-        outcome.state[&Who::Caller.address()].info.nonce,
-        1,
-        "the nonce moves by one\n{rendered}"
+        outcome.state[&OPERATOR_FEE_RECIPIENT].info.balance, fee,
+        "the operator fee recipient is paid that fee\n{rendered}"
     );
-}
-
-/// A deposit whose callee forwards an Oracle hint and then halts is a failed deposit that keeps
-/// its body and the hint's payload as data size, as the same program does when an ordinary
-/// transaction reaches it: the hint left the machine before the halt.
-///
-/// Found by comparing every case's outcome before and after the failed deposit's settlement was
-/// added: that settlement reset the whole count to the body, the forwarded hint with it.
-#[test]
-fn test_a_failed_deposit_keeps_the_hint_it_forwarded() {
-    use crate::gen::program::{Op, Scheme, SystemMethod};
-    let hint = SystemMethod::SendHint { len: 21 };
-    let hint_bytes = hint.calldata().len() as u64;
-    let program = Program {
-        ops: vec![Op::System { method: hint, scheme: Scheme::Call, value: Value::Zero }],
-        end: End::Invalid,
-    };
-    let run = |shape: Shape| {
-        let case = Case {
-            world: plain_world(),
-            tx: Tx {
-                shape,
-                value: Value::Zero,
-                gas: GasTier::Medium,
-                price: Price::Free,
-                nonce_ok: true,
-            },
-            main: program.clone(),
-            a: stop(),
-            b: stop(),
-        };
-        let (execution, evm) = case.execute_with_evm();
-        let hints = evm.ctx().external_envs().oracle_env.recorded_hints().len();
-        let body = mega_evm::transaction_body_bytes(&case.transaction());
-        let rendered = render(&execution);
-        (execution.expect("the transaction is included"), hints, body, rendered)
-    };
-
-    let (outcome, hints, body, rendered) = run(Shape::Deposit {
-        to: Who::Contract,
-        mint: Value::Zero,
-        data_len: 0,
-        system: false,
-        create: false,
-    });
-    assert!(
-        matches!(&outcome.result, revm::context::result::ExecutionResult::Halt { reason, .. }
-            if *reason == mega_evm::MegaHaltReason::FailedDeposit),
-        "{rendered}"
+    let fresh = outcome.state.get(&Who::Fresh.address()).expect("the recipient account is created");
+    assert_eq!(
+        fresh.info.balance,
+        U256::ZERO,
+        "the recipient is created empty: the frame never runs, so the value does not move\n{rendered}"
     );
-    assert_eq!(hints, 1, "the hint was forwarded\n{rendered}");
-    let kept = mega_evm::LimitUsage { data_size: body + hint_bytes, write_records: 0 };
-    assert_eq!(outcome.usage, kept, "the body and the hint stay counted\n{rendered}");
-
-    let (outcome, hints, call_body, rendered) =
-        run(Shape::Call { to: Who::Contract, data_len: 0, access_list: vec![] });
-    assert!(outcome.result.is_halt(), "{rendered}");
-    assert_eq!((hints, call_body), (1, body), "{rendered}");
-    assert_eq!(outcome.usage, kept, "an ordinary transaction keeps the same bytes\n{rendered}");
 }

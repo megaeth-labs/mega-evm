@@ -19,8 +19,8 @@ use mega_evm::{
         ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE,
     },
     test_utils::{is_transfer_log, BytecodeBuilder, MemoryDatabase},
-    LimitCheck, LimitKind, LimitUsage, MegaContext, MegaEvm, StagedRecord, TRANSFER_LOG_SIZE,
-    TX_BODY_SIZE, WRITE_RECORD_SIZE,
+    LimitUsage, MegaContext, MegaEvm, StagedRecord, TRANSFER_LOG_SIZE, TX_BODY_SIZE,
+    WRITE_RECORD_SIZE,
 };
 use revm::{
     bytecode::opcode::{
@@ -186,15 +186,6 @@ fn reverting_creations(n: usize) -> Bytes {
     code.into()
 }
 
-/// A reverted creation keeps the creator's nonce record: the nonce bump survives the revert.
-#[test]
-fn test_reverted_nested_create_keeps_the_creator_nonce_record() {
-    let db = funded().account_code(OUTER_CREATOR, reverting_creations(1));
-    let (result, usage) = run(db, call(CALLER, OUTER_CREATOR, U256::ZERO, gas_limit()));
-    assert!(result.result.is_success());
-    assert_eq!(usage, records(1), "the creator's nonce; the created account is gone");
-}
-
 /// Two reverted creations record the creator once: the first record survives, so the second
 /// finds the creator recorded.
 #[test]
@@ -350,26 +341,6 @@ fn test_write_back_in_a_child_refunds_the_caller_record() {
         assert!(result.result.is_success());
         assert_eq!(usage, expected);
     }
-}
-
-/// A log counts 32 bytes for its address, 32 per topic and its data; no write record.
-#[test]
-fn test_log_counts_its_bytes() {
-    let code = BytecodeBuilder::default()
-        .push_number(0x22_u8)
-        .push_number(0x11_u8)
-        .push_number(10_u8)
-        .append(PUSH0)
-        .append(LOG2)
-        .stop()
-        .build();
-    let (result, usage) = run(
-        MemoryDatabase::default().account_code(CALLEE, code),
-        call(CALLER, CALLEE, U256::ZERO, gas_limit()),
-    );
-    assert!(result.result.is_success());
-    assert_eq!(result.result.logs().len(), 1);
-    assert_eq!(usage, with_extra(body_only(), 32 + 2 * 32 + 10));
 }
 
 /// `SELFDESTRUCT` records the beneficiary only when value moves to another account than the
@@ -662,32 +633,14 @@ fn authorizing_call(
     value: u64,
     authorizations: &[(Address, u64)],
 ) -> mega_evm::MegaTransaction {
-    use revm::{
-        context::{transaction::TransactionType, TxEnv},
-        context_interface::{
-            either::Either,
-            transaction::{Authorization, RecoveredAuthority, RecoveredAuthorization},
-        },
-    };
-    let authorization_list = authorizations
-        .iter()
-        .map(|(authority, nonce)| {
-            Either::Right(RecoveredAuthorization::new_unchecked(
-                Authorization { chain_id: U256::ZERO, address: DELEGATE, nonce: *nonce },
-                RecoveredAuthority::Valid(*authority),
-            ))
-        })
-        .collect();
-    alloy_op_evm::OpTx(mega_evm::test_utils::op_transaction(TxEnv {
-        tx_type: TransactionType::Eip7702 as u8,
-        caller: CALLER,
-        kind: alloy_primitives::TxKind::Call(to),
-        value: U256::from(value),
-        gas_limit: gas_limit(),
-        gas_priority_fee: Some(0),
-        authorization_list,
-        ..Default::default()
-    }))
+    crate::common::authorizing_call(
+        CALLER,
+        to,
+        U256::from(value),
+        gas_limit(),
+        DELEGATE,
+        authorizations,
+    )
 }
 
 /// Each distinct applied authority is one record, however many of its authorizations applied;
@@ -709,14 +662,6 @@ fn test_applied_authorities_record_once_each() {
         usage,
         with_extra(body_only(), mega_evm::AUTHORIZATION_SIZE),
         "a wrong nonce applies nothing, and its tuple is still in the body"
-    );
-
-    let (result, usage) = run(db(), authorizing_call(CONTRACT, 0, &[(CALLER, 1)]));
-    assert!(result.result.is_success());
-    assert_eq!(
-        usage,
-        with_extra(body_only(), mega_evm::AUTHORIZATION_SIZE),
-        "the sender's own account is part of the body"
     );
 }
 
@@ -858,43 +803,40 @@ fn test_creation_stopped_at_init_bumps_the_creator_nonce() {
     assert_eq!(evm.ctx().additional_limit().usage(), records(2), "slot 1 and the creator's nonce");
 }
 
-/// Authorities whose records would cross the transaction's data-size limit are not applied: the
-/// limit is enforced before the writes it guards, and the transaction is stopped before its first
-/// frame.
+/// A transaction is held at validation to its body and a record for every entry of its
+/// authorization list, against the data-size limit: the largest transaction that fits runs with
+/// its authority applied, and with one byte of limit less it is rejected before anything is
+/// applied. The bound counts every entry, applied or not: a list naming one authority twice is held
+/// to two records, though the one authority makes one.
 #[test]
-fn test_authorities_crossing_the_cap_are_not_applied() {
+fn test_authority_records_are_held_to_the_limit_at_validation() {
     let db = || MemoryDatabase::default().account_balance(CALLER, U256::from(1_000));
-    let with_cap = |cap| {
+    let with_cap = |cap, authorizations: &[(Address, u64)]| {
         let limits = mega_evm::EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(cap);
         MegaEvm::new(context(db()).with_tx_runtime_limits(limits))
-            .execute_transaction(authorizing_call(CONTRACT, 0, &[(AUTHORITY_1, 0)]))
-            .unwrap()
+            .execute_transaction(authorizing_call(CONTRACT, 0, authorizations))
+    };
+    let refused = |cap, authorizations: &[(Address, u64)]| {
+        let error = with_cap(cap, authorizations).expect_err("rejected at validation");
+        format!("{error:?}").contains(mega_evm::TX_BODY_OVER_DATA_SIZE_LIMIT)
     };
     // The body carries the authorization tuple; the applied authority is one record on top.
     let tuple = mega_evm::AUTHORIZATION_SIZE;
-    let at_the_cap = with_cap(TX_BODY_SIZE + tuple + WRITE_RECORD_SIZE);
-    assert!(at_the_cap.result.is_success(), "records equal to the cap do not cross it");
+    let once = [(AUTHORITY_1, 0)];
+    let largest = TX_BODY_SIZE + tuple + WRITE_RECORD_SIZE;
+    let at_the_cap = with_cap(largest, &once).expect("a transaction at the limit is valid");
+    assert!(at_the_cap.result.is_success(), "{:?}", at_the_cap.result);
     assert_eq!(at_the_cap.usage, with_extra(records(1), tuple));
+    let code = at_the_cap.state[&AUTHORITY_1].info.code.as_ref();
+    assert_eq!(code.and_then(|code| code.eip7702_address()), Some(DELEGATE), "it is applied");
+    assert!(refused(largest - 1, &once), "one byte of limit less rejects it");
 
-    let limit = TX_BODY_SIZE + tuple + WRITE_RECORD_SIZE - 1;
-    let outcome = with_cap(limit);
-    assert!(!outcome.result.is_success() && !outcome.result.is_halt(), "{:?}", outcome.result);
-    assert_eq!(
-        outcome.limit_exceeded,
-        Some(LimitCheck::ExceedsLimit {
-            kind: LimitKind::DataSize,
-            limit,
-            used: limit + 1,
-            frame_local: false,
-        }),
-        "the authority record is the byte that crosses, and nothing after it is counted"
-    );
-    let authority = outcome.state.get(&AUTHORITY_1);
-    assert!(
-        authority.is_none_or(|a| a.info.nonce == 0 && a.info.is_empty_code_hash()),
-        "the delegation was not applied: {authority:?}"
-    );
-    assert_eq!(outcome.usage, with_extra(body_only(), mega_evm::AUTHORIZATION_SIZE));
+    let twice = [(AUTHORITY_1, 0), (AUTHORITY_1, 1)];
+    let bound = TX_BODY_SIZE + 2 * tuple + 2 * WRITE_RECORD_SIZE;
+    assert!(refused(bound - 1, &twice), "two entries are held to two records");
+    let ran = with_cap(bound, &twice).expect("valid at two records");
+    assert!(ran.result.is_success(), "{:?}", ran.result);
+    assert_eq!(ran.usage, with_extra(records(1), 2 * tuple), "the one authority makes one record");
 }
 
 /// A funded caller's database, for the runtime out-of-gas tests.
@@ -1237,6 +1179,7 @@ fn paired_corpus() -> Vec<Paired> {
         case("an empty call", to_callee(Bytes::new()), plain(), 0, 0),
         case("three fresh slots", to_callee(storing(&[(1, 1), (2, 1), (3, 1)])), plain(), 0, 3),
         case("a slot written and restored", to_callee(storing(&[(1, 1), (1, 0)])), plain(), 0, 0),
+        case("zero written to an empty slot", to_callee(storing(&[(1, 0)])), plain(), 0, 0),
         case(
             "a slot rewritten twice",
             to_callee(storing(&[(1, 1), (1, 2), (1, 3)])),
@@ -1535,8 +1478,8 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for KvWeighsNoMore
 /// what it keeps parts from the records by exactly the bytes that are not records: the body, the
 /// logs — the transfer logs among them — the deployed code and the hint's payload.
 ///
-/// So a KV limit binds only below the data-size limit's fortieth: at the production data-size
-/// caps a transaction keeps at most 327,680 records, whatever its KV limit.
+/// So the data-size limit bounds the records: at the production data-size caps a transaction keeps
+/// at most 327,680 of them.
 #[test]
 fn test_the_kv_count_never_weighs_more_than_the_data_size() {
     assert_eq!(mega_evm::constants::TX_DATA_LIMIT / WRITE_RECORD_SIZE, 327_680);

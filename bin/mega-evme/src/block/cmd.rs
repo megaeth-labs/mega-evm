@@ -129,17 +129,15 @@ pub async fn replay_blocks(
         summary.blocks += 1;
         let outcome = async {
             let mut inputs = source.load(number, &mut codes).await?;
-            let engine = forced_engine
-                .unwrap_or_else(|| Engine::of_block(inputs.chain_id, inputs.header.timestamp));
+            let engine = match forced_engine {
+                Some(engine) => engine,
+                None => Engine::of_block(inputs.chain_id, inputs.header.timestamp)?,
+            };
             // The parent's timestamp is fetched only for a Satin block whose schedule makes the
             // activation-block rule depend on it, so every other block replays from the cache.
             if engine == Engine::Satin &&
                 inputs.parent_timestamp.is_none() &&
-                satin::needs_parent_timestamp(
-                    inputs.chain_id,
-                    inputs.header.timestamp,
-                    limits_override,
-                )?
+                satin::needs_parent_timestamp(inputs.chain_id, inputs.header.timestamp)?
             {
                 source.complete_parent_timestamp(&mut inputs).await?;
             }
@@ -185,7 +183,7 @@ pub async fn replay_blocks(
                         serde_json::json!({ "kind": "block", "block": number, "error": message })
                     );
                 } else {
-                    println!("block {number}  error: {message}");
+                    println!("block {number}  error: {}", crate::sanitize_terminal_text(&message));
                 }
                 summary.failed.push((number, message));
             }

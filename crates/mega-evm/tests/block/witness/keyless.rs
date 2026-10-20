@@ -83,8 +83,8 @@ fn runtime() -> Vec<u8> {
     vec![0x00; 5]
 }
 
-/// The database every case starts from: the caller funded; the system contracts are deployed by
-/// the block itself.
+/// The database every case starts from: the caller funded, and the predeploys as a chain that ran
+/// Rex6 holds them.
 fn db() -> MemoryDatabase {
     common::database()
 }

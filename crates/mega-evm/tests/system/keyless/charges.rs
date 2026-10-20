@@ -149,16 +149,17 @@ fn test_a_failed_deployment_gives_the_created_account_back() {
 }
 
 /// The call pays the regular gas the `CREATE` opcode charges its frame on top of the overhead,
-/// whatever the pools: the schedule's `create` entry, 32,000, and EIP-3860's 2 gas per word of
+/// whatever the pools: the schedule's `create` entry, 12,000, and EIP-3860's 2 gas per word of
 /// init code, 65,536 for init code of the maximum size. Init code of zero bytes stops at once and
-/// deploys nothing, so the creation itself spends nothing, and every other charge of the call is
-/// state and history gas.
+/// deploys nothing, so the creation, refused its empty deposit, spends nothing and reverts: the
+/// deployed account's state gas and its record's history come back, and what stays charged is the
+/// signer's account and the signer's nonce record.
 #[test]
 fn test_the_call_pays_the_create_opcodes_regular_gas() {
-    assert_eq!(create_regular(1), 32_000 + 2);
-    assert_eq!(create_regular(33), 32_000 + 4);
-    assert_eq!(create_regular(MAX_INITCODE_SIZE), 32_000 + 65_536);
-    let state = entry(GasId::new_account_state_gas()) + entry(GasId::create_state_gas());
+    assert_eq!(create_regular(1), 12_000 + 2);
+    assert_eq!(create_regular(33), 12_000 + 4);
+    assert_eq!(create_regular(MAX_INITCODE_SIZE), 12_000 + 65_536);
+    let state = entry(GasId::new_account_state_gas());
     for len in [1, 33, MAX_INITCODE_SIZE] {
         let deployment = Deployment::new(vec![0; len].into());
         // Gas limits that cover the body of a transaction carrying a mebibyte of calldata, below
@@ -174,12 +175,8 @@ fn test_the_call_pays_the_create_opcodes_regular_gas() {
             let regular_expected = KEYLESS_DEPLOY_OVERHEAD_GAS + create_regular(len);
             assert_eq!(regular, regular_expected, "{len} bytes at {gas_limit}");
             assert_eq!(state_gas, state, "{len} bytes at {gas_limit}");
-            assert_eq!(history_gas, 2 * record(), "{len} bytes at {gas_limit}");
-            assert_eq!(
-                total,
-                regular_expected + state + 2 * record(),
-                "{len} bytes at {gas_limit}"
-            );
+            assert_eq!(history_gas, record(), "{len} bytes at {gas_limit}");
+            assert_eq!(total, regular_expected + state + record(), "{len} bytes at {gas_limit}");
         }
     }
 }

@@ -1,11 +1,6 @@
 //! Factory of Satin EVMs for alloy-evm consumers.
 
-#[cfg(not(feature = "std"))]
-use alloc as std;
-use std::sync::Arc;
-
 use alloy_evm::{precompiles::PrecompilesMap, Database, EvmEnv};
-use alloy_primitives::BlockTimestamp;
 use core::fmt;
 use op_revm::OpHaltReason;
 use revm::{
@@ -15,64 +10,31 @@ use revm::{
 };
 
 use crate::{
-    DynPrecompilesBuilder, EmptyExternalEnv, EvmTxRuntimeLimits, ExternalEnvFactory,
-    HardforkParams, MegaContext, MegaEvm, MegaHardforks, MegaSpecId, MegaTransaction,
-    MegaTransactionError, ProtocolLimits,
+    DynPrecompilesBuilder, EmptyExternalEnv, EvmTxRuntimeLimits, ExternalEnvFactory, MegaContext,
+    MegaEvm, MegaSpecId, MegaTransaction, MegaTransactionError, ProtocolLimits,
 };
-
-/// Reads the limits a chain's schedule carries at a block's timestamp.
-type ProtocolLimitsResolver = Arc<dyn Fn(BlockTimestamp) -> Option<ProtocolLimits> + Send + Sync>;
-
-/// Where the EVMs a factory creates take their per-transaction limits from.
-#[derive(Clone, Default)]
-enum TxRuntimeLimitsSource {
-    /// The protocol's defaults, [`ProtocolLimits::DEFAULT`]: the factory holds no schedule.
-    #[default]
-    ProtocolDefault,
-    /// The chain's, read from its schedule at the block's timestamp.
-    Schedule(ProtocolLimitsResolver),
-    /// The caller's, whatever the block.
-    Fixed(EvmTxRuntimeLimits),
-}
-
-impl fmt::Debug for TxRuntimeLimitsSource {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ProtocolDefault => f.write_str("ProtocolDefault"),
-            Self::Schedule(_) => f.write_str("Schedule"),
-            Self::Fixed(limits) => f.debug_tuple("Fixed").field(limits).finish(),
-        }
-    }
-}
 
 /// Creates [`MegaEvm`]s for alloy-evm consumers such as a node's block executor.
 ///
 /// The factory holds the [`ExternalEnvFactory`] that supplies each EVM with the SALT and oracle
-/// environments of the block it executes, the optional builder of the dynamic precompiles a node
-/// adds on top of the Satin set, and where the EVMs take their per-transaction limits from.
+/// environments of the block it executes, and the optional builder of the dynamic precompiles a
+/// node adds on top of the Satin set.
 ///
 /// # The limits an EVM runs under
 ///
-/// An EVM the factory creates runs under the limits block execution would hold its block's
-/// transactions to, so an RPC call, a simulation or a tool built on the factory stops what the
-/// chain stops without having to be told:
-///
-/// - given the chain's schedule ([`with_schedule`](Self::with_schedule)), the limits the schedule
-///   carries at the block's timestamp ([`MegaHardforks::protocol_limits`]);
-/// - without one, the protocol's defaults ([`ProtocolLimits::DEFAULT`]), which is what block
-///   execution runs on a chain that keeps them;
-/// - where the schedule carries no limits at the timestamp, or limits their own check refuses
-///   ([`HardforkParams::validate`]), the protocol's defaults too: block execution refuses such a
-///   block, and an EVM cannot refuse to be built.
+/// An EVM the factory creates runs under its spec's limits ([`ProtocolLimits::for_spec`]), the
+/// ones block execution holds the spec's blocks to, so an RPC call, a simulation or a tool built
+/// on the factory stops what the chain stops without having to be told.
 ///
 /// [`with_tx_runtime_limits`](Self::with_tx_runtime_limits) is the explicit opt-out: every EVM
 /// runs under exactly the limits it is given, as the execution-spec gate and tests need. Block
-/// execution installs the chain's limits on the EVM whatever it was created with.
+/// execution installs the spec's limits on the EVM whatever it was created with.
 #[derive(Clone, Default)]
 pub struct MegaEvmFactory<ExtEnvFactory = EmptyExternalEnv> {
     external_env_factory: ExtEnvFactory,
     dyn_precompiles_builder: Option<DynPrecompilesBuilder>,
-    tx_runtime_limits: TxRuntimeLimitsSource,
+    /// The limits every EVM runs under in place of its spec's, when the caller set them.
+    tx_runtime_limits: Option<EvmTxRuntimeLimits>,
 }
 
 impl<ExtEnvFactory: fmt::Debug> fmt::Debug for MegaEvmFactory<ExtEnvFactory> {
@@ -86,13 +48,13 @@ impl<ExtEnvFactory: fmt::Debug> fmt::Debug for MegaEvmFactory<ExtEnvFactory> {
 }
 
 impl MegaEvmFactory<EmptyExternalEnv> {
-    /// Creates a factory whose EVMs have no external environments and run under the protocol's
-    /// default limits.
+    /// Creates a factory whose EVMs have no external environments and run under their spec's
+    /// limits.
     pub const fn new() -> Self {
         Self {
             external_env_factory: EmptyExternalEnv,
             dyn_precompiles_builder: None,
-            tx_runtime_limits: TxRuntimeLimitsSource::ProtocolDefault,
+            tx_runtime_limits: None,
         }
     }
 }
@@ -122,44 +84,18 @@ impl<ExtEnvFactory> MegaEvmFactory<ExtEnvFactory> {
         self
     }
 
-    /// Gives the factory the chain's schedule: every EVM it creates runs under the limits the
-    /// schedule carries at the block's timestamp, as block execution holds that block's
-    /// transactions to them. It replaces limits set with
-    /// [`with_tx_runtime_limits`](Self::with_tx_runtime_limits).
-    ///
-    /// A node hands it the schedule it hands its block executor factory, so the EVMs it builds
-    /// outside block execution — an RPC call, a simulation — stop what the chain stops. A schedule
-    /// held in an `Arc` is handed over as a clone of the `Arc`: [`MegaHardforks`] holds for an
-    /// `Arc` or a `Box` of a schedule.
-    pub fn with_schedule<Spec>(mut self, spec: Spec) -> Self
-    where
-        Spec: MegaHardforks + Send + Sync + 'static,
-    {
-        self.tx_runtime_limits = TxRuntimeLimitsSource::Schedule(Arc::new(move |timestamp| {
-            spec.protocol_limits(timestamp)
-        }));
-        self
-    }
-
-    /// Runs every EVM the factory creates under exactly `limits`, whatever the block and whatever
-    /// the chain's schedule says: the explicit opt-out, for the execution-spec gate's equivalence
-    /// mode ([`EvmTxRuntimeLimits::no_limits`]) and for tests. It replaces a schedule given with
-    /// [`with_schedule`](Self::with_schedule).
+    /// Runs every EVM the factory creates under exactly `limits`, in place of its spec's: the
+    /// explicit opt-out, for the execution-spec gate's equivalence mode
+    /// ([`EvmTxRuntimeLimits::no_limits`]), for tools and for tests.
     pub fn with_tx_runtime_limits(mut self, limits: EvmTxRuntimeLimits) -> Self {
-        self.tx_runtime_limits = TxRuntimeLimitsSource::Fixed(limits);
+        self.tx_runtime_limits = Some(limits);
         self
     }
 
-    /// The limits an EVM the factory creates for a block at `timestamp` runs under.
-    pub fn tx_runtime_limits(&self, timestamp: BlockTimestamp) -> EvmTxRuntimeLimits {
-        let protocol_default = ProtocolLimits::DEFAULT.tx_runtime_limits;
-        match &self.tx_runtime_limits {
-            TxRuntimeLimitsSource::ProtocolDefault => protocol_default,
-            TxRuntimeLimitsSource::Schedule(resolve) => resolve(timestamp)
-                .filter(|limits| limits.validate().is_ok())
-                .map_or(protocol_default, |limits| limits.tx_runtime_limits),
-            TxRuntimeLimitsSource::Fixed(limits) => *limits,
-        }
+    /// The limits an EVM the factory creates for `spec` runs under: the ones given to the factory,
+    /// or the spec's.
+    pub fn tx_runtime_limits(&self, spec: MegaSpecId) -> EvmTxRuntimeLimits {
+        self.tx_runtime_limits.unwrap_or_else(|| ProtocolLimits::for_spec(spec).tx_runtime_limits)
     }
 }
 
@@ -176,7 +112,7 @@ impl<ExtEnvFactory: ExternalEnvFactory> alloy_evm::EvmFactory for MegaEvmFactory
     type Precompiles = PrecompilesMap;
 
     /// Creates an EVM for the block in `evm_env`, with the external environments of that block,
-    /// running under the limits the factory resolves for the block's timestamp
+    /// running under the limits of the spec the configuration names, or those given to the factory
     /// ([`tx_runtime_limits`](MegaEvmFactory::tx_runtime_limits)).
     ///
     /// The configuration fields the spec fixes are set from the spec (see
@@ -189,8 +125,8 @@ impl<ExtEnvFactory: ExternalEnvFactory> alloy_evm::EvmFactory for MegaEvmFactory
         let EvmEnv { cfg_env, block_env } = evm_env;
         let external_envs =
             self.external_env_factory.external_envs(block_env.number.saturating_to());
-        let limits = self.tx_runtime_limits(block_env.timestamp.saturating_to());
         let spec = cfg_env.spec;
+        let limits = self.tx_runtime_limits(spec);
         let ctx = MegaContext::new_with_external_envs(db, spec, external_envs)
             .with_cfg(cfg_env)
             .with_block(block_env)
@@ -222,7 +158,7 @@ mod tests {
     use crate::{
         satin_precompiles,
         test_utils::{op_transaction, MemoryDatabase},
-        ExternalEnvs, MegaHardforkConfig, SaltEnv, TestExternalEnvs,
+        ExternalEnvs, SaltEnv, TestExternalEnvs,
     };
     use alloy_evm::{precompiles::DynPrecompile, Evm, EvmFactory};
     use alloy_op_evm::OpTx;
@@ -245,24 +181,6 @@ mod tests {
         let got: &TestExternalEnvs = factory.external_env_factory();
 
         assert_eq!(got.get_bucket_capacity(7).unwrap(), 1_024);
-    }
-
-    /// Whatever configuration the caller passes, the EVM runs with the switches the spec fixes.
-    #[test]
-    fn test_create_evm_applies_the_spec_switches() {
-        let mut cfg_env = CfgEnv::new_with_spec(MegaSpecId::SATIN);
-        cfg_env.chain_id = 4326;
-        cfg_env.tx_gas_limit_cap = Some(1 << 24);
-        cfg_env.enable_amsterdam_eip8037 = false;
-        let block_env = BlockEnv { number: U256::from(5), ..Default::default() };
-
-        let evm = MegaEvmFactory::new()
-            .create_evm(MemoryDatabase::default(), EvmEnv { cfg_env, block_env });
-
-        assert_eq!(evm.chain_id(), 4326);
-        assert_eq!(evm.cfg_env().tx_gas_limit_cap, Some(crate::constants::TX_GAS_LIMIT_CAP));
-        assert!(evm.cfg_env().enable_amsterdam_eip8037);
-        assert_eq!(evm.block().number, U256::from(5));
     }
 
     /// The configuration [`spec_cfg`](crate::spec_cfg) returns is the one an EVM created from the
@@ -369,133 +287,55 @@ mod tests {
     }
 
     /// The factory prints its external environment factory, whether a precompile builder is
-    /// installed and where its EVMs take their limits from. A closure has no `Debug`, so the
-    /// builder and the schedule are reported by name rather than dropped: a reader of a node's log
-    /// can tell the configurations apart.
+    /// installed and the limits given to it, if any. A closure has no `Debug`, so the builder is
+    /// reported by whether it is there rather than dropped: a reader of a node's log can tell the
+    /// configurations apart.
     #[test]
     fn test_debug_reports_the_factorys_configuration() {
         let factory = MegaEvmFactory::new();
         assert_eq!(
             format!("{factory:?}"),
             "MegaEvmFactory { external_env_factory: EmptyExternalEnv, \
-             dyn_precompiles_builder: false, tx_runtime_limits: ProtocolDefault }"
+             dyn_precompiles_builder: false, tx_runtime_limits: None }"
         );
 
         let with_builder = factory.with_dyn_precompiles_builder(Arc::new(|_| HashMap::default()));
         assert_eq!(
             format!("{with_builder:?}"),
             "MegaEvmFactory { external_env_factory: EmptyExternalEnv, \
-             dyn_precompiles_builder: true, tx_runtime_limits: ProtocolDefault }"
+             dyn_precompiles_builder: true, tx_runtime_limits: None }"
         );
 
-        let on_schedule = with_builder.with_schedule(MegaHardforkConfig::default());
-        assert!(format!("{on_schedule:?}").ends_with("tx_runtime_limits: Schedule }"));
-        let fixed = on_schedule.with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits());
-        assert!(format!("{fixed:?}").contains("tx_runtime_limits: Fixed(EvmTxRuntimeLimits {"));
+        let fixed = with_builder.with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits());
+        assert!(format!("{fixed:?}").contains("tx_runtime_limits: Some(EvmTxRuntimeLimits {"));
     }
 
-    /// A timestamp from which a chain's schedule activates Satin in these tests.
-    const SATIN_AT: u64 = 1_000;
-
-    /// A chain that activates Satin at [`SATIN_AT`] and holds its transactions to `limits`,
-    /// attached unchecked so a test may hand it limits no chain may carry.
-    fn chain(limits: ProtocolLimits) -> MegaHardforkConfig {
-        MegaHardforkConfig::default()
-            .with(crate::MegaHardfork::Satin, alloy_hardforks::ForkCondition::Timestamp(SATIN_AT))
-            .with_params_unchecked(limits)
-    }
-
-    /// A chain's own limits, which no default carries.
-    fn chain_limits() -> ProtocolLimits {
-        ProtocolLimits::DEFAULT.with_tx_runtime_limits(
-            ProtocolLimits::DEFAULT
-                .tx_runtime_limits
-                .with_tx_data_size_limit(crate::TX_BODY_SIZE + 40)
-                .with_tx_kv_update_limit(7),
-        )
-    }
-
-    /// An EVM the factory creates for a block at `timestamp`.
-    fn evm_at(factory: &MegaEvmFactory, timestamp: u64) -> MegaEvm<MemoryDatabase, NoOpInspector> {
-        let block_env = BlockEnv { timestamp: U256::from(timestamp), ..evm_env().block_env };
-        factory
-            .create_evm(MemoryDatabase::default(), EvmEnv { cfg_env: evm_env().cfg_env, block_env })
-    }
-
-    /// Without a schedule the factory's EVMs run under the protocol's default limits, which is
-    /// what block execution runs on a chain that keeps them — not a bare context's, which leave
-    /// the data size unlimited.
+    /// The factory's EVMs run under their spec's limits, the data-size limit included, as block
+    /// execution holds the spec's blocks: no schedule or caller has to hand them over.
     #[test]
-    fn test_without_a_schedule_an_evm_runs_under_the_protocols_defaults() {
-        let evm = evm_at(&MegaEvmFactory::new(), SATIN_AT);
-        assert_eq!(*evm.tx_runtime_limits(), ProtocolLimits::DEFAULT.tx_runtime_limits);
-        assert_ne!(*evm.tx_runtime_limits(), EvmTxRuntimeLimits::default());
+    fn test_an_evm_runs_under_its_specs_limits() {
+        let factory = MegaEvmFactory::new();
+        let evm = factory.create_evm(MemoryDatabase::default(), evm_env());
+        let satin = ProtocolLimits::for_spec(MegaSpecId::SATIN).tx_runtime_limits;
+        assert_eq!(*evm.tx_runtime_limits(), satin);
+        assert_eq!(evm.tx_runtime_limits().tx_data_size_limit, 13_107_200);
+        assert_eq!(factory.tx_runtime_limits(MegaSpecId::SATIN), satin);
     }
 
-    /// A schedule shared behind an `Arc`, as a node holds its chain spec, is handed over as a
-    /// clone of the `Arc`, and resolves the limits the schedule it points to carries.
+    /// The opt-out: limits given to the factory are what every EVM runs under, in place of its
+    /// spec's.
     #[test]
-    fn test_a_schedule_behind_an_arc_is_a_schedule() {
-        let shared = Arc::new(chain(chain_limits()));
-        let factory = MegaEvmFactory::new().with_schedule(Arc::clone(&shared));
-        assert_eq!(factory.tx_runtime_limits(SATIN_AT), chain_limits().tx_runtime_limits);
-        assert_eq!(
-            factory.tx_runtime_limits(SATIN_AT),
-            shared.protocol_limits(SATIN_AT).unwrap().tx_runtime_limits
-        );
-    }
-
-    /// Given the chain's schedule, the factory's EVMs run under the limits it carries at the
-    /// block's timestamp; where it carries none, or limits their own check refuses — both of which
-    /// block execution refuses — under the protocol's defaults.
-    #[test]
-    fn test_an_evm_runs_under_the_limits_the_schedule_carries_at_its_block() {
-        let factory = MegaEvmFactory::new().with_schedule(chain(chain_limits()));
-        assert_eq!(
-            *evm_at(&factory, SATIN_AT).tx_runtime_limits(),
-            chain_limits().tx_runtime_limits
-        );
-        assert_eq!(factory.tx_runtime_limits(SATIN_AT + 1), chain_limits().tx_runtime_limits);
-        assert_eq!(
-            factory.tx_runtime_limits(SATIN_AT - 1),
-            ProtocolLimits::DEFAULT.tx_runtime_limits,
-            "before Satin the schedule carries no limits"
-        );
-
-        let refused = MegaEvmFactory::new().with_schedule(chain(ProtocolLimits::no_limits()));
-        assert_eq!(
-            *evm_at(&refused, SATIN_AT).tx_runtime_limits(),
-            ProtocolLimits::DEFAULT.tx_runtime_limits,
-            "limits their own check refuses run no EVM"
-        );
-    }
-
-    /// The opt-out: limits given to the factory are what every EVM runs under, whatever the
-    /// schedule says; the last of the two settings made is the one that holds.
-    #[test]
-    fn test_limits_given_to_the_factory_replace_the_schedules() {
-        let factory = MegaEvmFactory::new()
-            .with_schedule(chain(chain_limits()))
-            .with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits());
-        for timestamp in [SATIN_AT - 1, SATIN_AT] {
-            assert_eq!(
-                *evm_at(&factory, timestamp).tx_runtime_limits(),
-                EvmTxRuntimeLimits::no_limits()
-            );
-        }
-
-        let factory = factory.with_schedule(chain(chain_limits()));
-        assert_eq!(
-            *evm_at(&factory, SATIN_AT).tx_runtime_limits(),
-            chain_limits().tx_runtime_limits
-        );
+    fn test_limits_given_to_the_factory_replace_the_specs() {
+        let factory = MegaEvmFactory::new().with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits());
+        let evm = factory.create_evm(MemoryDatabase::default(), evm_env());
+        assert_eq!(*evm.tx_runtime_limits(), EvmTxRuntimeLimits::no_limits());
+        assert_eq!(factory.tx_runtime_limits(MegaSpecId::SATIN), EvmTxRuntimeLimits::no_limits());
     }
 
     /// And the EVM enforces them, as block execution does: a call that keeps two writes where the
-    /// chain allows one is stopped on an EVM from a factory given the schedule, and keeps both on
-    /// one from a factory without it.
+    /// limits given to the factory allow one is stopped, and keeps both on an EVM under the spec's.
     #[test]
-    fn test_an_evm_from_the_factory_stops_what_the_chain_stops() {
+    fn test_an_evm_from_the_factory_enforces_its_limits() {
         use crate::{test_utils::BytecodeBuilder, LimitCheck, LimitKind};
         use revm::context_interface::cfg::GasId;
         const WRITER: Address = address!("0x0000000000000000000000000000000000077700");
@@ -516,13 +356,15 @@ mod tests {
                     .stop()
                     .build(),
             );
-            let block_env = BlockEnv { timestamp: U256::from(SATIN_AT), ..evm_env().block_env };
-            let mut evm = factory.create_evm(db, EvmEnv { cfg_env: evm_env().cfg_env, block_env });
+            let mut evm = factory.create_evm(db, evm_env());
             evm.execute_transaction(call_with_gas_limit(WRITER, gas_limit))
                 .expect("the call is valid")
         };
 
-        let stopped = run(&MegaEvmFactory::new().with_schedule(chain(chain_limits())));
+        let one_record = ProtocolLimits::for_spec(MegaSpecId::SATIN)
+            .tx_runtime_limits
+            .with_tx_data_size_limit(crate::TX_BODY_SIZE + 40);
+        let stopped = run(&MegaEvmFactory::new().with_tx_runtime_limits(one_record));
         assert_eq!(
             stopped.limit_exceeded,
             Some(LimitCheck::ExceedsLimit {
@@ -606,6 +448,7 @@ mod tests {
         );
 
         assert_eq!(factory.external_env_factory().0.get(), Some(1_234));
+        assert_eq!(evm.block().number, U256::from(1_234), "the EVM runs the block it was given");
         assert!(evm.is_inspecting());
     }
 }

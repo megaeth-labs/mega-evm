@@ -10,7 +10,7 @@ use mega_evm::{
 };
 
 use crate::common::{
-    body_history, call, context, history, runs_at_measurement_prices, slot_state_gas,
+    body_history, call, context, execute_under, history, runs_at_measurement_prices, slot_state_gas,
 };
 
 const CALLER: Address = address!("0000000000000000000000000000000000600000");
@@ -36,9 +36,7 @@ fn execute(
     limits: EvmTxRuntimeLimits,
     gas_limit: u64,
 ) -> MegaTransactionOutcome {
-    MegaEvm::new(context(db).with_tx_runtime_limits(limits))
-        .execute_transaction(call(CALLER, CONTRACT, U256::ZERO, gas_limit))
-        .unwrap()
+    execute_under(db, call(CALLER, CONTRACT, U256::ZERO, gas_limit), limits)
 }
 
 /// The ledgers split the raw spend, the receipt reports revm's gas used, and the reservoir the

@@ -5,7 +5,6 @@ use alloy_evm::block::BlockExecutor;
 use alloy_primitives::Bytes;
 use mega_evm::{
     constants::BLOCK_ENV_ACCESS_COMPUTE_GAS, test_utils::BytecodeBuilder, LimitCheck, LimitKind,
-    ProtocolLimits,
 };
 use revm::{
     bytecode::opcode::{JUMP, JUMPDEST, MCOPY, POP, PUSH0, TIMESTAMP},
@@ -38,13 +37,9 @@ fn test_a_stopped_transaction_is_included_with_a_failed_receipt_that_bills_what_
     let mut state = State::builder().with_database(db).build();
     let mut env = common::evm_env();
     env.block_env.gas_limit = 100_000_000;
-    // The production limits: the chain's default holds the spec's detention caps.
-    let mut executor = executor_with_env_and_spec(
-        &mut state,
-        common::unlimited_ctx(),
-        env,
-        common::chain_spec_with(ProtocolLimits::DEFAULT),
-    );
+    // The production limits: the spec's detention caps.
+    let mut executor =
+        executor_with_env_and_spec(&mut state, common::unlimited_ctx(), env, common::chain_spec());
     executor.apply_pre_execution_changes().expect("the block starts");
 
     let gas_limit = 29_000_000;

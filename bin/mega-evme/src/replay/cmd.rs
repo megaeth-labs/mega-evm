@@ -6,13 +6,18 @@ use alloy_provider::Provider;
 use alloy_rpc_types_eth::Block;
 use clap::Parser;
 use mega_evm::{
-    alloy_evm::{block::BlockExecutor, Evm, EvmEnv},
+    alloy_evm::{
+        block::{BlockExecutionError, BlockExecutor},
+        Evm, EvmEnv,
+    },
     alloy_op_evm::block::OpAlloyReceiptBuilder,
     revm::{
-        context::{result::ExecutionResult, BlockEnv, CfgEnv},
+        context::{result::ExecutionResult, BlockEnv, CfgEnv, ContextTr},
         database::{states::bundle_state::BundleRetention, StateBuilder},
-        primitives::eip4844,
-        DatabaseRef,
+        inspector::JournalExt,
+        interpreter::{CallInputs, CallOutcome, CreateInputs, CreateOutcome, Interpreter},
+        primitives::{eip4844, Address, Log},
+        DatabaseRef, Inspector,
     },
     BlockLimits, DeclaredObserver, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory,
     MegaHardforks, MegaSpecId,
@@ -25,9 +30,9 @@ use crate::{
     common::{
         check_genesis_chain, op_receipt_to_tx_receipt, parse_bucket_capacity,
         parse_limits_override, print_execution_summary, print_execution_trace, print_receipt,
-        print_satin_report, satin_schedule, BuildProviderOutput, EvmeExternalEnvs, EvmeOutcome,
-        ExecutionSummary, ExternalEnvSnapshot, LimitsOverride, OpTxReceipt, RpcCacheStore,
-        SatinReport, TxOverrideArgs,
+        print_satin_report, satin_limits, satin_schedule, BuildProviderOutput, EvmeExternalEnvs,
+        EvmeOutcome, ExecutionSummary, ExternalEnvSnapshot, LimitsOverride, OpTxReceipt,
+        RpcCacheStore, SatinReport, TxOverrideArgs,
     },
     engine::Engine,
     run, EvmeState,
@@ -67,11 +72,11 @@ pub struct Cmd {
     #[arg(long = "override.spec", value_name = "SPEC")]
     pub spec_override: Option<String>,
 
-    /// Satin only: replay under these protocol limits instead of the chain's, a counterfactual. A
-    /// JSON object in the shape a chain configuration carries `ProtocolLimits` in (camelCase,
-    /// per-transaction limits under `txRuntimeLimits`), inline or in a file; the fields it names
-    /// replace the chain's, every other stays. Refused when it names an unknown field or a value
-    /// no chain may carry, and for a block that runs on the legacy engine
+    /// Satin only: replay under these protocol limits instead of the spec's, a counterfactual. A
+    /// JSON object in `ProtocolLimits`' shape (camelCase, per-transaction limits under
+    /// `txRuntimeLimits`), inline or in a file; the fields it names replace the spec's, every
+    /// other stays. Refused when it names an unknown field or a value of the wrong type, and for a
+    /// block that runs on the legacy engine
     #[arg(long = "override.limits", value_name = "JSON|FILE", value_parser = parse_limits_override)]
     pub limits_override: Option<LimitsOverride>,
 
@@ -89,11 +94,10 @@ pub struct Cmd {
     /// The fixture captures the pre-state read closure, block environment,
     /// transaction, and `MegaETH` external environment, and records `post`
     /// expectations (state/logs roots, gas, status) computed by the state-test
-    /// runner. Re-running the file through `state-test` self-validates the
-    /// replay, and `state-test --bench` benchmarks it. The dump is rejected
-    /// unless the local replay reproduces the on-chain receipt's gas and success
-    /// status. Incompatible with transaction overrides and `--override.spec`. Legacy specs
-    /// only: no state-test runner prices a transaction as Satin does.
+    /// runner. Re-running the file through the 1.7.1 `state-test` self-validates the
+    /// replay. The dump is rejected unless the local replay reproduces the on-chain receipt's gas
+    /// and success status. Incompatible with transaction overrides and `--override.spec`.
+    /// Legacy specs only: no state-test runner prices a transaction as Satin does.
     #[arg(long = "dump-fixture", value_name = "FILE")]
     pub dump_fixture: Option<std::path::PathBuf>,
 }
@@ -141,7 +145,7 @@ impl Cmd {
         }
         let (provider, chain_id) = self.rpc_args.build_lookup_provider().await?;
         check_genesis_chain(chain_id)?;
-        if let Some(engine) = Engine::of_chain(chain_id) {
+        if let Some(engine) = Engine::of_chain(chain_id)? {
             return Ok(engine);
         }
         let tx = provider
@@ -161,7 +165,7 @@ impl Cmd {
             .ok_or(ReplayError::BlockNotFound(number))?
             .header
             .timestamp();
-        Ok(Engine::of_block(chain_id, timestamp))
+        Engine::of_block(chain_id, timestamp)
     }
 
     /// Whether this replays whole blocks (`--block`), which runs here for both engines.
@@ -276,7 +280,7 @@ impl Cmd {
             info!(path = %path.display(), "Provider mode: offline replay from cache file");
             self.rpc_args.build_replay_provider().await?
         } else if let Some(rpc) = &self.rpc_args.rpc_url {
-            info!(rpc = %rpc, "Provider mode: online RPC");
+            info!(rpc = %crate::redact_rpc_url(rpc), "Provider mode: online RPC");
             self.rpc_args.build_provider().await?
         } else {
             return Err(ReplayError::Other(
@@ -301,7 +305,7 @@ impl Cmd {
             .get_transaction_by_hash(tx_hash)
             .await
             .map_err(|e| ReplayError::RpcError(format!("Failed to fetch transaction: {e}")))?
-            .ok_or_else(|| ReplayError::TransactionNotFound(tx_hash))?;
+            .ok_or(ReplayError::TransactionNotFound(tx_hash))?;
         debug!(block_number = ?target_tx.block_number, "Transaction found");
 
         let (state_base_block, block_number, is_pending) = if let Some(n) = target_tx.block_number {
@@ -331,15 +335,14 @@ impl Cmd {
             .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?
             .ok_or(ReplayError::BlockNotFound(block_number))?;
 
-        let mut preceding_tx_hashes = vec![];
-        if !is_pending {
-            for hash in block.transactions.hashes() {
-                if hash == tx_hash {
-                    break;
-                }
-                preceding_tx_hashes.push(hash);
-            }
-        }
+        let preceding_tx_hashes = preceding_transactions(
+            tx_hash,
+            target_tx.block_number,
+            target_tx.block_hash,
+            block.number(),
+            block.hash(),
+            block.transactions.hashes(),
+        )?;
 
         debug!(chain_id, preceding_count = preceding_tx_hashes.len(), "Replay context ready");
 
@@ -419,7 +422,9 @@ impl Cmd {
         P: Provider<op_alloy_network::Optimism> + Clone + std::fmt::Debug,
     {
         let timestamp = ctx.block.header.timestamp();
-        let hardforks = satin_schedule(ctx.chain_id, timestamp, self.limits_override.as_ref())?;
+        let hardforks = satin_schedule(ctx.chain_id, timestamp)?;
+        let limits_override =
+            self.limits_override.as_ref().map(|limits| satin_limits(Some(limits))).transpose()?;
         debug!(chain_id = ctx.chain_id, spec = %MegaSpecId::SATIN, "Chain configuration");
 
         info!(fork_block = ctx.parent_block.header.number(), "Forking state from parent block",);
@@ -437,31 +442,33 @@ impl Cmd {
         cfg_env.chain_id = ctx.chain_id;
         let evm_env = EvmEnv::new(cfg_env, block_env);
 
-        let evm_factory = MegaEvmFactory::new()
-            .with_schedule(hardforks.clone())
-            .with_external_env_factory(external_envs);
+        let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
         let block_executor_factory = MegaBlockExecutorFactory::new(
             OpAlloyReceiptBuilder::default(),
             &hardforks,
             evm_factory,
         );
-        // The block is held to the protocol limits its schedule carries, with no building
+        // The block is held to Satin's protocol limits, or the override's, with no building
         // policy, as a validator holds it; the block's gas limit comes from its header. Whether
         // it admits only deposits comes from the schedule and the parent block's timestamp, as a
         // node works it out.
-        let only_deposits =
-            hardforks.admits_only_deposits(ctx.parent_block.header.timestamp(), timestamp);
+        let parent_timestamp = ctx.parent_block.header.timestamp();
+        let only_deposits = hardforks.admits_only_deposits(parent_timestamp, timestamp);
+        let activates_satin = hardforks.is_satin_activation_block(parent_timestamp, timestamp);
         let block_ctx = MegaBlockExecutionCtx::new(
             ctx.parent_block.hash(),
             ctx.block.header.parent_beacon_block_root(),
             ctx.block.header.extra_data().clone(),
             BlockLimits::default(),
         )
-        .with_no_user_tx_activation_block(only_deposits);
+        .with_no_user_tx_activation_block(only_deposits)
+        .with_satin_activation_block(activates_satin);
 
         let start = Instant::now();
         // The tracer reads and writes nothing back, so block execution admits it declared.
-        let mut inspector = DeclaredObserver::new(self.trace_args.create_inspector());
+        // It is attached only for `--trace`: otherwise preceding transactions would be recorded
+        // and then discarded.
+        let mut inspector = DeclaredObserver::new(ReplayTracer::from_args(&self.trace_args));
         let mut state =
             StateBuilder::new().with_database(&mut database).with_bundle_update().build();
         let mut block_executor = block_executor_factory.create_executor_with_trusted_inspector(
@@ -470,13 +477,21 @@ impl Cmd {
             block_ctx,
             &mut inspector,
         );
+        if let Some(limits) = limits_override {
+            block_executor = block_executor.with_protocol_limits(limits);
+        }
 
         block_executor
             .apply_pre_execution_changes()
             .map_err(|e| ReplayError::Other(format!("Block execution error: {e}")))?;
 
-        // Execute preceding transactions
+        // Execute preceding transactions. A validation error is a refusal: a block import
+        // records it and continues, and the target runs on the state the included ones left.
+        // A database failure or an internal error stops the replay. The receipt index counts
+        // only the included transactions.
         info!(preceding_count = ctx.preceding_tx_hashes.len(), "Executing preceding transactions",);
+        let mut included_preceding = 0u64;
+        let mut log_index_base = 0u64;
         for tx_hash in &ctx.preceding_tx_hashes {
             debug!(tx_hash = %tx_hash, "Executing preceding transaction");
             let tx = provider
@@ -484,13 +499,32 @@ impl Cmd {
                 .await
                 .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?
                 .ok_or(ReplayError::TransactionNotFound(*tx_hash))?;
-            let outcome = block_executor
-                .run_transaction(tx.as_recovered())
-                .map_err(|e| ReplayError::Other(format!("Block execution error: {e}")))?;
+            let outcome = match block_executor.run_transaction(tx.as_recovered()) {
+                Ok(outcome) => outcome,
+                Err(e) => match predecessor_error(&e) {
+                    PredecessorError::Skip => {
+                        warn!(tx_hash = %tx_hash, error = %e, "Skipping refused preceding transaction");
+                        continue;
+                    }
+                    PredecessorError::Propagate(error) => return Err(error),
+                },
+            };
             trace!(tx_hash = %tx_hash, ?outcome, "Preceding transaction executed");
-            block_executor
-                .commit_transaction_outcome(outcome)
-                .map_err(|e| ReplayError::Other(format!("Block execution error: {e}")))?;
+            if let Err(e) = block_executor.commit_transaction_outcome(outcome) {
+                match predecessor_error(&e) {
+                    PredecessorError::Skip => {
+                        warn!(tx_hash = %tx_hash, error = %e, "Skipping refused preceding transaction");
+                        continue;
+                    }
+                    PredecessorError::Propagate(error) => return Err(error),
+                }
+            }
+            included_preceding += 1;
+            log_index_base += block_executor
+                .receipts()
+                .last()
+                .map(|receipt| receipt.logs().len() as u64)
+                .unwrap_or(0);
         }
 
         // Execute target transaction.
@@ -507,15 +541,15 @@ impl Cmd {
             .unwrap_or(0);
 
         // The trace covers the target transaction only.
-        block_executor.evm_mut().inspector_mut().0.fuse();
+        if let ReplayTracer::On(tracer) = &mut block_executor.evm_mut().inspector_mut().0 {
+            tracer.fuse();
+        }
         let outcome = block_executor
             .run_transaction(wrapped_tx)
             .map_err(|e| ReplayError::Other(format!("Block execution error: {e}")))?;
         trace!(tx_hash = %ctx.target_tx.inner.inner.tx_hash(), ?outcome, "Target transaction executed");
         let mut satin = SatinReport::of(&outcome.inner);
-        if self.limits_override.is_some() {
-            satin.limits_override = hardforks.protocol_limits(timestamp).map(Box::new);
-        }
+        satin.limits_override = limits_override.map(Box::new);
         let exec_result = outcome.inner.result.clone();
         let evm_state = outcome.inner.state.clone();
 
@@ -536,13 +570,14 @@ impl Cmd {
             state: evm_state.clone(),
         };
 
-        let trace_data = self.trace_args.is_tracing_enabled().then(|| {
-            self.trace_args.generate_trace(
-                &block_executor.inspector().0,
+        let trace_data = match &block_executor.inspector().0 {
+            ReplayTracer::On(tracer) => Some(self.trace_args.generate_trace(
+                tracer,
                 &result_and_state,
                 block_executor.evm().db(),
-            )
-        });
+            )),
+            ReplayTracer::Off => None,
+        };
 
         let gas_output = block_executor
             .commit_transaction_outcome(outcome)
@@ -573,7 +608,8 @@ impl Cmd {
             gas_used,
             Some(ctx.target_tx.inner.inner.tx_hash()),
             Some(ctx.block.hash()),
-            ctx.preceding_tx_hashes.len() as u64,
+            included_preceding,
+            log_index_base,
         );
 
         Ok(ReplayOutcome {
@@ -625,6 +661,62 @@ impl Cmd {
     }
 }
 
+/// What the preceding-transaction loop does with an execution error.
+#[derive(Debug)]
+enum PredecessorError {
+    /// A validation error: the block refused the transaction, and the replay continues.
+    Skip,
+    /// A database failure or an internal error. The replay stops.
+    Propagate(ReplayError),
+}
+
+/// Classifies `error` for the preceding-transaction loop.
+///
+/// A validation error is a refusal a block import records and continues past.
+/// A database failure or an internal error stops the replay, so the target runs on the state
+/// the included predecessors left.
+fn predecessor_error(error: &BlockExecutionError) -> PredecessorError {
+    if error.as_validation().is_some() {
+        PredecessorError::Skip
+    } else {
+        PredecessorError::Propagate(ReplayError::Other(format!("Block execution error: {error}")))
+    }
+}
+
+/// Hashes of the transactions before `target_hash` in the fetched block.
+///
+/// A pending transaction has no block yet, so it has no predecessors here. A mined transaction
+/// must name this block's number and hash, and the hash must occur in the block. Otherwise every
+/// transaction in the block would be treated as preceding and the target would still run.
+fn preceding_transactions(
+    target_hash: B256,
+    target_block_number: Option<u64>,
+    target_block_hash: Option<B256>,
+    block_number: u64,
+    block_hash: B256,
+    hashes: impl IntoIterator<Item = B256>,
+) -> Result<Vec<B256>> {
+    let Some(tx_block_number) = target_block_number else {
+        return Ok(Vec::new());
+    };
+    if tx_block_number != block_number || target_block_hash != Some(block_hash) {
+        let tx_block_hash =
+            target_block_hash.map(|hash| hash.to_string()).unwrap_or_else(|| "none".to_string());
+        return Err(ReplayError::Other(format!(
+            "transaction {target_hash} belongs to block {tx_block_number} ({tx_block_hash}), \
+             not block {block_number} ({block_hash})"
+        )));
+    }
+    let mut preceding = Vec::new();
+    for hash in hashes {
+        if hash == target_hash {
+            return Ok(preceding);
+        }
+        preceding.push(hash);
+    }
+    Err(ReplayError::Other(format!("transaction {target_hash} is not in block {block_number}")))
+}
+
 /// Build a [`BlockEnv`] from the RPC block header.
 ///
 /// Reads `excess_blob_gas` directly from the header rather than using a
@@ -656,6 +748,87 @@ fn retrieve_block_env(block: &Block<Transaction>) -> Result<BlockEnv> {
 
     trace!(block_env = ?block_env, "Block environment retrieved");
     Ok(block_env)
+}
+
+/// The tracer a replay attaches. Absent unless `--trace` is set.
+enum ReplayTracer {
+    On(revm_inspectors::tracing::TracingInspector),
+    Off,
+}
+
+impl ReplayTracer {
+    fn from_args(args: &run::TraceArgs) -> Self {
+        if args.is_tracing_enabled() {
+            Self::On(args.create_inspector())
+        } else {
+            Self::Off
+        }
+    }
+}
+
+impl<CTX> Inspector<CTX> for ReplayTracer
+where
+    CTX: ContextTr<Journal: JournalExt>,
+{
+    fn step(&mut self, interp: &mut Interpreter, context: &mut CTX) {
+        if let Self::On(inspector) = self {
+            inspector.step(interp, context);
+        }
+    }
+
+    fn step_end(&mut self, interp: &mut Interpreter, context: &mut CTX) {
+        if let Self::On(inspector) = self {
+            inspector.step_end(interp, context);
+        }
+    }
+
+    fn log(&mut self, context: &mut CTX, log: Log) {
+        if let Self::On(inspector) = self {
+            inspector.log(context, log);
+        }
+    }
+
+    fn call(&mut self, context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
+        if let Self::On(inspector) = self {
+            inspector.call(context, inputs)
+        } else {
+            None
+        }
+    }
+
+    fn call_end(&mut self, context: &mut CTX, inputs: &CallInputs, outcome: &mut CallOutcome) {
+        if let Self::On(inspector) = self {
+            inspector.call_end(context, inputs, outcome);
+        }
+    }
+
+    fn create(&mut self, context: &mut CTX, inputs: &mut CreateInputs) -> Option<CreateOutcome> {
+        if let Self::On(inspector) = self {
+            inspector.create(context, inputs)
+        } else {
+            None
+        }
+    }
+
+    fn create_end(
+        &mut self,
+        context: &mut CTX,
+        inputs: &CreateInputs,
+        outcome: &mut CreateOutcome,
+    ) {
+        if let Self::On(inspector) = self {
+            inspector.create_end(context, inputs, outcome);
+        }
+    }
+
+    fn selfdestruct(&mut self, contract: Address, target: Address, value: U256) {
+        if let Self::On(inspector) = self {
+            // The hook takes no context, so the inspector's generic impl cannot be inferred.
+            <revm_inspectors::tracing::TracingInspector as Inspector<
+                mega_evm::MegaContext<revm::database::EmptyDB>,
+            >>::selfdestruct(inspector, contract, target, value);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -707,5 +880,117 @@ mod tests {
             ),
             other => panic!("unexpected error variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_preceding_transactions_stop_at_the_target() {
+        let target = B256::repeat_byte(1);
+        let earlier = B256::repeat_byte(2);
+        let block_hash = B256::repeat_byte(4);
+        let got = preceding_transactions(
+            target,
+            Some(9),
+            Some(block_hash),
+            9,
+            block_hash,
+            [earlier, target, B256::repeat_byte(3)],
+        )
+        .expect("target is in the block");
+        assert_eq!(got, vec![earlier]);
+    }
+
+    #[test]
+    fn test_preceding_transactions_reject_a_missing_target() {
+        let target = B256::repeat_byte(1);
+        let block_hash = B256::repeat_byte(4);
+        let err = preceding_transactions(
+            target,
+            Some(9),
+            Some(block_hash),
+            9,
+            block_hash,
+            [B256::repeat_byte(2)],
+        )
+        .expect_err("the target hash never occurs");
+        match err {
+            ReplayError::Other(msg) => assert!(msg.contains("not in block"), "{msg}"),
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_preceding_transactions_reject_a_different_block() {
+        let target = B256::repeat_byte(1);
+        let err = preceding_transactions(
+            target,
+            Some(9),
+            Some(B256::repeat_byte(4)),
+            8,
+            B256::repeat_byte(5),
+            [target],
+        )
+        .expect_err("the transaction names a different block");
+        assert!(matches!(err, ReplayError::Other(_)));
+    }
+
+    #[test]
+    fn test_replay_attaches_a_tracer_only_when_trace_is_set() {
+        let off = run::TraceArgs::try_parse_from(["mega-evme"]).expect("defaults parse");
+        assert!(matches!(ReplayTracer::from_args(&off), ReplayTracer::Off));
+
+        let on = run::TraceArgs::try_parse_from([
+            "mega-evme",
+            "--trace",
+            "--trace.opcode.disable-stack",
+        ])
+        .expect("trace flags parse");
+        let ReplayTracer::On(inspector) = ReplayTracer::from_args(&on) else {
+            panic!("--trace attaches a tracer");
+        };
+        assert_eq!(
+            inspector.config().record_stack_snapshots,
+            revm_inspectors::tracing::StackSnapshotType::None
+        );
+    }
+
+    #[test]
+    fn test_a_predecessor_error_skips_a_refusal_and_propagates_an_internal_error() {
+        use mega_evm::alloy_evm::block::BlockValidationError;
+
+        let refusal = BlockExecutionError::from(BlockValidationError::BlockGasExceeded);
+        assert!(
+            matches!(predecessor_error(&refusal), PredecessorError::Skip),
+            "a validation error is a refusal: {refusal}"
+        );
+
+        let internal = BlockExecutionError::msg("database read failed");
+        match predecessor_error(&internal) {
+            PredecessorError::Propagate(ReplayError::Other(message)) => {
+                assert_eq!(message, format!("Block execution error: {internal}"));
+            }
+            other => panic!("an internal error propagates: {other:?}"),
+        }
+
+        let other = BlockExecutionError::other(std::io::Error::other("rpc failed"));
+        match predecessor_error(&other) {
+            PredecessorError::Propagate(ReplayError::Other(message)) => {
+                assert_eq!(message, format!("Block execution error: {other}"));
+            }
+            other => panic!("an internal error propagates: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_preceding_transactions_skip_a_pending_transaction() {
+        let got = preceding_transactions(
+            B256::repeat_byte(1),
+            None,
+            None,
+            9,
+            B256::repeat_byte(4),
+            [B256::repeat_byte(2)],
+        )
+        .expect("a pending transaction has no predecessors");
+        assert!(got.is_empty());
     }
 }

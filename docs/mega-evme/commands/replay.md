@@ -43,7 +43,7 @@ mega-evme replay --rpc https://mainnet.megaeth.com/rpc <TX_HASH>
 `mega-evme replay` supports a transport-level JSON-RPC fixture mechanism that records every request/response pair to a single file and serves them back on later runs without touching the network.
 It is useful for pinning a reproducible replay (e.g. for regression tests, debugging sessions, or offline review) and for running `replay` in environments that cannot reach the RPC endpoint.
 
-Unlike the generic [RPC Cache](../configuration/state-management.md#rpc-cache-and-retry), which is keyed on a small allow-list of cacheable methods and stored per chain under the platform cache directory, the cache file covers every single (non-batch) JSON-RPC call issued during the replay and lives at a user-chosen path.
+Unlike the generic [RPC Cache](../configuration/state-management.md#rpc-cache-and-retry), which is keyed on a small allow-list of cacheable methods and stored per endpoint under the platform cache directory, the cache file covers every single (non-batch) JSON-RPC call issued during the replay and lives at a user-chosen path.
 
 The mechanism has two modes, selected by two mutually exclusive flags.
 
@@ -54,6 +54,8 @@ Capture mode. Requires `--rpc`.
 On the first run, every JSON-RPC request and response issued while serving the replay is captured in memory and the complete envelope is written to `<PATH>` atomically on clean exit.
 On subsequent runs the existing file is loaded, its entries are merged into the in-memory transport cache, and only missing requests are fetched from the RPC endpoint.
 The updated set of entries is persisted back to the same file on clean exit.
+`mega-evme` reads back at most 64 MiB of cache file, so it writes no more than that: a capture that would grow the file past the limit fails with an error and leaves the file as it was.
+Capture into a new file, or delete the old one.
 
 The file also embeds an external-environment snapshot — currently the set of `--bucket-capacity` values in effect — so the captured fixture is self-contained.
 If `--bucket-capacity` is not passed on a subsequent run, the previous envelope's values are reused; passing `--bucket-capacity` overrides them.
@@ -88,6 +90,12 @@ Replay the captured transaction fully offline:
 ```bash
 mega-evme replay --rpc.replay-file ./fixtures/tx.json 0xabc123...
 ```
+
+## The Receipt of a Replayed Transaction
+
+`replay <TX_HASH>` runs the transactions the block included before the target, then the target, and prints the target's receipt.
+A transaction the block executor refuses is skipped, and the receipt's `transactionIndex` counts the transactions that were included.
+Each log carries its transaction's index and hash, and its `logIndex` counts from the first log of the block: the logs of the earlier transactions that were included come first.
 
 ## Self-Validating Fixture Dump
 
@@ -130,20 +138,10 @@ mega-evme replay --rpc https://mainnet.megaeth.com/rpc \
 # Offline: re-dump reproducibly from the capture (receipt already captured):
 mega-evme replay --rpc.replay-file ./cap.json --dump-fixture ./fixtures/0xabc123.json 0xabc123...
 
-# Validate the fixture (and detect any gas/status/result drift):
-state-test ./fixtures/0xabc123.json
+# The fidelity gate checks the dump against the receipt as it is written.
+# To re-run it later, use the 1.7.1 release's state-test runner:
+# this repository's `state-test` runs the Osaka and Amsterdam fixtures only.
 ```
-
-## Throughput Benchmark
-
-To benchmark a replayed transaction, dump it to a fixture and time the fixture with the `state-test` runner — there is no `replay`-side benchmark flag:
-
-```bash
-mega-evme replay --rpc <url> --dump-fixture /tmp/tx.json 0xabc123...
-state-test --bench /tmp/tx.json
-```
-
-`state-test --bench` reports `min` / `median` / `mean` time and throughput (Mgas/s), timing only the EVM `transact` call. A committed corpus of characteristic transactions and a base-vs-PR comparison driver build on this to track real-transaction throughput across changes; see `bench/replay/` and the `replay-bench` CI workflow.
 
 ## Spec Auto-Detection
 
@@ -158,32 +156,31 @@ On these chains a block runs on Satin from the timestamp the chain's schedule ac
 Neither chain schedules Satin yet, so every block of theirs replays on the legacy engine, exactly as the 1.7.1 tool replayed it.
 To pick the engine, a transaction replay without `--override.spec` first reads the chain ID over RPC (one `eth_chainId` request, or the replay file's), and on a chain that schedules Satin also the timestamp of the block the transaction runs in; a legacy replay then makes the 1.7.1 tool's own requests.
 
-Any other chain runs Satin from genesis, the rung the Satin engine pins for an unrecognized chain.
+Any other chain is refused: the tool cannot tell which engine its blocks ran on, so the replay names it, with `--override.spec` below, or gives the chain's genesis file.
 The 1.7.1 tool ran such a chain through `Rex7`, the legacy line's unstable spec, which Satin supersedes.
-Use `--override.spec` below to replay a chain that runs a legacy spec.
 
-Given the chain's genesis file (`--genesis <FILE>`, see [A chain's genesis file](../configuration/chain-and-spec.md#a-chains-genesis-file)), the file decides instead: a block runs on Satin from the file's `satinTime`, under the registry seeds and limits the file carries, and a block before it is refused, whether it would run on the legacy engine or `--override.spec` forces Satin on it.
+Given the chain's genesis file (`--genesis <FILE>`, see [A chain's genesis file](../configuration/chain-and-spec.md#a-chains-genesis-file)), the file decides instead: a block runs on Satin from the file's `satinTime`, under Satin's limits, and a block before it is refused, whether it would run on the legacy engine or `--override.spec` forces Satin on it.
 A replay on another chain than the file's is refused for its chain, before any engine is picked.
 
 ### `--override.spec <SPEC>`
 
 Override the auto-detected spec.
 Useful when you want to test how the transaction would behave under a different spec, or when replaying against a chain that isn't recognized.
-`--override.spec Satin` replays the transaction as it would run on Satin: a counterfactual, on the same forked state.
+`--override.spec Satin` replays the transaction as it would run on Satin: a counterfactual, on the same forked state, under the chain's schedule with Satin active from genesis, so no block of it is Satin's activation block and it checks no predeploy.
 
 ```
 mega-evme replay --override.spec Rex2 <TX_HASH>
 mega-evme replay --override.spec Satin <TX_HASH>
 ```
 
-A Satin replay needs a state whose system contracts are at the versions Satin deploys, which MegaETH mainnet and testnet reach at `Rex6`.
-On an older block Satin's own deploy check refuses to overwrite them, and the replay fails with an error naming the contract.
+A Satin replay needs a state whose system contracts are at the versions Satin runs, which MegaETH mainnet and testnet reach at `Rex6`: Satin deploys and upgrades none of them, and the `SequencerRegistry` it reads before every transaction must be at version 2.0.0, which Rex6 left.
+Replayed at its activation block, under a genesis file, Satin checks them and refuses a block whose state does not hold them, with an error naming the contract; a counterfactual checks nothing, so on an older block a transaction runs on whatever the state holds there.
 
 ### `--override.limits <JSON|FILE>`
 
-Replay on Satin under other protocol limits than the chain's, a counterfactual: the fields the JSON object names replace the chain's, and every other stays.
-Without it, a Satin replay of a block its chain does not run on Satin runs on Satin's default limits.
-The object's shape, the defaults and what is refused are in [Protocol limits](../configuration/chain-and-spec.md#protocol-limits).
+Replay on Satin under other protocol limits than Satin's, a counterfactual: the fields the JSON object names replace Satin's, and every other stays.
+Without it, a Satin replay runs on Satin's limits, which the spec fixes for every chain.
+The object's shape, Satin's values and what is refused are in [Protocol limits](../configuration/chain-and-spec.md#protocol-limits).
 It applies to both the transaction replay and the block replay; a replay that runs on the legacy engine is refused with it, and so is a legacy block of a block replay.
 The limits a replay ran under are reported: a transaction replay's in its `satin.limits_override`, a block's in the `satin.limits_override` of its block record, and in text mode as `limits overridden` on the block's line.
 
@@ -206,7 +203,8 @@ On Satin a block in which a fork activates admits only deposits, as the [Satin u
 The replay works this out as a node does, from the schedule the block runs under and the parent block's timestamp, and tells block execution; every transaction of such a block but its deposits is reported `refused`.
 A transaction replay works it out the same way, from the parent block it forks, and refuses a non-deposit transaction of such a block with an error.
 The parent's timestamp decides the answer only for a Satin block at which a fork its schedule activates after genesis is active; for such a block alone the replay fetches the parent's header over `--rpc` and keeps its timestamp in the cache.
-Every other block, a legacy one or one whose schedule activates every fork at genesis as the Satin counterfactual's does, replays from what the cache holds and never asks for the parent.
+Every other block, a legacy one or one whose schedule activates every fork it runs at genesis as the Satin counterfactual's does, replays from what the cache holds and never asks for the parent.
+Satin's activation block also checks the predeploys (the six system contracts and the EIP-7997 factory), which the legacy engine never read in full, so a block cached from a legacy replay may need them over `--rpc` once.
 Offline, a block that needs the parent's timestamp and whose cache entry lacks it (an entry written before the cache kept it, or by a replay that did not need it) fails rather than guess, and the error says so.
 To recover, replay it once with `--rpc`: the replay fetches the timestamp and writes it to the cache, and the block then replays offline.
 
@@ -254,10 +252,10 @@ The exit code is 0, 1 when a block could not be replayed, or 2 when `--verify` i
 
 ### The Satin counterfactual
 
-`--override.spec Satin` runs every block as it would run on Satin: every transaction as signed, on the state its parent block left, under Satin's default protocol limits, or those `--override.limits` gives, with no building policy of a block builder applied.
+`--override.spec Satin` runs every block as it would run on Satin: every transaction as signed, on the state its parent block left, under Satin's protocol limits, or those `--override.limits` gives, with no building policy of a block builder applied.
 A transaction the Satin engine refuses (it cannot pay for its gas, or a block budget is full) is reported `refused` and left out, and the block goes on.
 A transaction signed with a gas limit sized for legacy costs can run out of gas on Satin: that is the counterfactual's answer, not a tool fault.
-Satin's pre-block changes deploy the EIP-7997 factory at `0x4e59b44847b379578588920cA78FbF26c0B4956C`, which no legacy spec reads, so a block cached from a legacy replay does not hold it; the first Satin replay of the block reads it over RPC and adds it to the cache.
+`--override.spec Satin` runs no block as Satin's activation block, so it checks no predeploy; what it reads beyond the legacy replay is the L1 fee overhead slot, which every Satin block reads with the rest of the L1 block info.
 
 ## Transaction Overrides
 
@@ -292,8 +290,6 @@ See the linked pages for full details.
   See [Tracing Overview](../tracing/overview.md).
 - **Fixture dump** — Write a self-validating EEST state-test fixture via `--dump-fixture`.
   See [Self-Validating Fixture Dump](#self-validating-fixture-dump) above.
-- **Throughput benchmark** — Dump a fixture (`--dump-fixture`) and time it with `state-test --bench`.
-  See [Throughput Benchmark](#throughput-benchmark) above.
 
 ## Examples
 

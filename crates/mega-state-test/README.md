@@ -12,7 +12,7 @@ It also imports the execution-spec blockchain tests through Satin's block execut
   Every test either passes, is skipped for a reason the reference runner shares, or fails on a [registered deviation](DEVIATIONS.md); one failure no deviation explains fails the gate.
 - **Satin** — a report.
   The same fixtures under Satin's own configuration, counted by outcome.
-  Satin prices state, history and the access entries it pressed back on purpose, and logs every value movement (EIP-7708) where Osaka's fixtures log none, so almost every stateful fixture differs; the count is what CI shows, and it never fails the job.
+  Satin prices state and history on purpose, prices state access as Amsterdam does (EIP-8038), and logs every value movement (EIP-7708) where Osaka's fixtures log none, so almost every stateful fixture differs; the count is what CI shows, and it never fails the job.
 
 A run executes the entries one fork defines: Osaka's in the main fixture release, Amsterdam's in the glamsterdam devnet release.
 Satin's base spec is Osaka, so those are the two forks it can be configured to.
@@ -67,9 +67,10 @@ A blockchain test is a chain: a pre-state, a genesis block, and blocks a node im
 ### How a block is imported
 
 Every block is decoded from its RLP, as a node receives it, and runs through `MegaBlockExecutor` on `MegaEvm` in equivalence mode's configuration — the neutral Osaka configuration, the fork's precompile set and static opcode prices — over a copy of the state the chain holds.
-The executor makes the EIP-2935 and EIP-4788 pre-block system calls and deploys Satin's system contracts before the transactions, as it does for every block; `BLOCKHASH` reads the hashes of the chain's own blocks.
-The executor requires the Satin fork's parameters, which the runner supplies with values that bind nothing on an Osaka fixture (`blockchain::chain_spec`): the loosest protocol limits a chain may carry, every limit unlimited and gas detention's caps far above the compute a transaction can spend under EIP-7825's cap, and placeholder `SequencerRegistry` roles that promote no fixture's transaction.
-Each block is told whether it admits only deposits as a node works it out, from that schedule and its parent's timestamp; the schedule activates every fork at genesis, so no block the runner imports is one.
+The executor makes the EIP-2935 and EIP-4788 pre-block system calls before the transactions, as it does for every block; `BLOCKHASH` reads the hashes of the chain's own blocks.
+Satin runs on a chain that holds its predeploys — the six `MegaETH` system contracts and the EIP-7997 factory — and deploys none of them, so the runner seeds each one the fixture's pre-state lacks into the chain's genesis state, as a chain that ran Rex6 holds it, the `SequencerRegistry` naming roles that promote no fixture's transaction (`blockchain::registry_roles`).
+The runner holds the blocks to no protocol limit in place of Satin's, through the executor's test-and-tool override, as equivalence mode holds a state test's transaction to none.
+Each block is told whether it admits only deposits, and whether Satin activates in it, as a node works them out, from the schedule (`blockchain::chain_spec`) and its parent's timestamp; the schedule activates every fork at genesis, so no block the runner imports is either.
 
 ### How a block is judged
 
@@ -79,9 +80,9 @@ Each block is told whether it admits only deposits as a node works it out, from 
 
 A receipt of an OP transaction that is not a deposit encodes as an Ethereum receipt, so the receipts root is Ethereum's.
 
-A Satin block adds accounts to the state an Ethereum block leaves, and the runner takes them out of the post-state before computing its root (`blockchain::SATIN_ACCOUNTS`):
+The runner and a Satin block add accounts to the state an Ethereum block leaves, and the runner takes them out of the post-state before computing its root (`blockchain::SATIN_ACCOUNTS`):
 
-- the seven contracts the executor deploys before every block: the six `MegaETH` system contracts and the EIP-7997 factory, each taken out when it holds exactly what the deploy writes;
+- the seven predeploys the runner seeds: the six `MegaETH` system contracts and the EIP-7997 factory, each taken out when it holds exactly what the seed wrote — the code, the nonce, the storage and no balance;
 - OP's base-fee vault, which holds the base fee Ethereum burns, taken out when it holds exactly the base fees of the blocks the chain accepted;
 - OP's L1-fee and operator-fee vaults, credited nothing under the neutral configuration, taken out when they hold nothing.
 

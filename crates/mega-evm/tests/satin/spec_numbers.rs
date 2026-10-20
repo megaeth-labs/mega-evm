@@ -21,8 +21,10 @@ use mega_evm::{
         bn254_pair::{KARST, KARST_MAX_INPUT_SIZE},
     },
     revm::{
-        context_interface::cfg::{gas::WARM_STORAGE_READ_COST, GasId},
+        bytecode::opcode::{EXTCODECOPY, EXTCODESIZE},
+        context_interface::cfg::{gas::WARM_STORAGE_READ_COST, GasId, GasParams},
         handler::SYSTEM_CALL_REGULAR_GAS_LIMIT,
+        interpreter::instructions::gas_table_spec,
         precompile::secp256r1::{P256VERIFY_BASE_GAS_FEE_OSAKA, P256VERIFY_OSAKA},
         primitives::{
             eip2780::{TX_BASE_COST, TX_VALUE_COST},
@@ -31,18 +33,21 @@ use mega_evm::{
                 AUTH_BASE_BYTES, CODE_DEPOSIT_PER_BYTE, NEW_ACCOUNT_BYTES, SSTORE_SET_BYTES,
             },
             eip8038::COLD_ACCOUNT_ACCESS,
+            hardfork::SpecId,
         },
     },
     satin_gas_params, satin_gas_params_at, satin_precompiles,
     system::{
         keyless::{KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_OVERHEAD_GAS},
-        CREATE2_FACTORY_ADDRESS, CREATE2_FACTORY_NONCE, SLOT_NUM_ACCESS_TYPE,
+        VolatileDataAccessType, CREATE2_FACTORY_ADDRESS, CREATE2_FACTORY_CODE_HASH,
+        SLOT_NUM_ACCESS_TYPE,
     },
-    LimitKind, ProtocolLimits, SatinPrices, VolatileDataAccess, ACCESS_LIST_ADDRESS_SIZE,
-    ACCESS_LIST_SLOT_SIZE, AUTHORIZATION_SIZE, FRAME_DATA_SHARE_DENOMINATOR,
-    FRAME_DATA_SHARE_NUMERATOR, HISTORY_GAS_PRICED, LOG_BASE_SIZE, LOG_TOPIC_SIZE, MIN_BUCKET_SIZE,
-    STATE_GAS_REPRICED, STORAGE_CALL_STIPEND_BYTES, SYSTEM_ADDRESS, TRANSFER_LOG_SIZE,
-    TX_BASE_SIZE, TX_BODY_SIZE, TX_FIXED_WRITE_RECORDS, WRITE_RECORD_SIZE,
+    LimitKind, MegaSpecId, ProtocolLimits, SatinPrices, VolatileDataAccess,
+    ACCESS_LIST_ADDRESS_SIZE, ACCESS_LIST_SLOT_SIZE, AUTHORIZATION_SIZE,
+    FRAME_DATA_SHARE_DENOMINATOR, FRAME_DATA_SHARE_NUMERATOR, HISTORY_GAS_PRICED, LOG_BASE_SIZE,
+    LOG_TOPIC_SIZE, MIN_BUCKET_SIZE, STATE_GAS_REPRICED, STORAGE_CALL_STIPEND_BYTES,
+    SYSTEM_ADDRESS, TRANSFER_LOG_SIZE, TX_BASE_SIZE, TX_BODY_SIZE, TX_FIXED_WRITE_RECORDS,
+    WRITE_RECORD_SIZE,
 };
 
 const SATIN_MD: &str = include_str!("../../../../docs/spec/upgrades/satin.md");
@@ -99,7 +104,7 @@ fn named_constants(doc: &str) {
     require(
         doc,
         &format!(
-            "`FRAME_SHARE_NUMERATOR / FRAME_SHARE_DENOMINATOR` = {}/{}",
+            "`FRAME_DATA_SHARE_NUMERATOR / FRAME_DATA_SHARE_DENOMINATOR` = {}/{}",
             FRAME_DATA_SHARE_NUMERATOR, FRAME_DATA_SHARE_DENOMINATOR
         ),
     );
@@ -122,8 +127,8 @@ fn schedule(doc: &str) {
     let rows = [
         ("Warm storage read", GasId::warm_storage_read_cost()),
         ("Cold account access, additional", GasId::cold_account_additional_cost()),
-        ("Cold storage access, additional", GasId::cold_storage_additional_cost()),
-        ("Cold `SLOAD`", GasId::cold_storage_cost()),
+        ("Cold storage access of an `SLOAD`, additional", GasId::cold_storage_additional_cost()),
+        ("Cold storage access of an `SSTORE`", GasId::cold_storage_cost()),
         ("Value transfer of a call", GasId::transfer_value_cost()),
         ("New account of a call", GasId::new_account_cost()),
         ("New account of `SELFDESTRUCT`", GasId::new_account_cost_for_selfdestruct()),
@@ -153,8 +158,11 @@ fn schedule(doc: &str) {
         ("Floor tokens per zero calldata byte", GasId::tx_floor_token_zero_byte_multiplier()),
         ("Floor tokens per access-list byte", GasId::tx_access_list_floor_byte_multiplier()),
     ];
+    let osaka = GasParams::new_spec(SpecId::OSAKA);
     for (label, id) in rows {
-        let shown = *table_row(page, label).last().expect("a satin cell");
+        let row = table_row(page, label);
+        let [.., before, shown] = row[..] else { panic!("{label}: an Osaka and a Satin cell") };
+        assert_eq!(before, grouped(osaka.get(id)), "{label} at Osaka");
         assert_eq!(shown, grouped(spec.get(id)), "{label}");
         if !byte_priced(id) {
             assert_eq!(satin_gas_params().get(id), spec.get(id), "{label} is not a byte price");
@@ -165,6 +173,16 @@ fn schedule(doc: &str) {
         for (label, id) in rows {
             assert_eq!(live.get(id), spec.get(id), "{label} at the prices in effect");
         }
+    }
+
+    // The static gas of the two opcodes EIP-8038 gives two reads, which revm keeps in the
+    // instruction table rather than the schedule; the engine's table is Amsterdam's (a unit test of
+    // `evm/schedule.rs` holds it to that).
+    let row = table_row(page, "`EXTCODESIZE` and `EXTCODECOPY`, static gas");
+    let [.., before, shown] = row[..] else { panic!("an Osaka and a Satin cell") };
+    for opcode in [EXTCODESIZE, EXTCODECOPY] {
+        assert_eq!(before, grouped(gas_table_spec(SpecId::OSAKA)[opcode as usize].into()));
+        assert_eq!(shown, grouped(gas_table_spec(SpecId::AMSTERDAM)[opcode as usize].into()));
     }
 
     let base = TX_BASE_COST;
@@ -214,15 +232,10 @@ fn state_and_history(doc: &str) {
 }
 
 fn limits(doc: &str) {
-    let defaults = ProtocolLimits::DEFAULT;
+    let defaults = ProtocolLimits::for_spec(MegaSpecId::SATIN);
     assert_eq!(defaults.tx_runtime_limits.tx_data_size_limit, TX_DATA_LIMIT);
     assert_eq!(defaults.block_txs_data_limit, BLOCK_DATA_LIMIT);
     assert_eq!(TX_DATA_LIMIT, BLOCK_DATA_LIMIT, "the page states one data-size number for both");
-    assert_eq!(defaults.tx_runtime_limits.tx_kv_update_limit, u64::MAX);
-    assert_eq!(defaults.tx_runtime_limits.tx_state_gas_limit, u64::MAX);
-    assert_eq!(defaults.block_execution_gas_limit, u64::MAX);
-    assert_eq!(defaults.block_state_gas_limit, u64::MAX);
-    assert_eq!(defaults.block_kv_update_limit, u64::MAX);
     assert_eq!(
         defaults.tx_runtime_limits.block_env_access_compute_gas_limit,
         BLOCK_ENV_ACCESS_COMPUTE_GAS
@@ -236,20 +249,26 @@ fn limits(doc: &str) {
         "the page states one detention cap for both"
     );
 
+    // Data size is the one dimension limited per transaction and per block: no table row names a
+    // limit on KV updates, state gas or execution gas.
     let resources = section(doc, "### 10. Resource Limits", "### 11. The Revert-Class");
     assert!(
-        table_row(resources, "KV updates").iter().any(|cell| cell.starts_with("Unlimited")),
-        "the KV limit"
+        table_row(resources, "Data size")[2].contains(&grouped(TX_DATA_LIMIT)),
+        "the transaction's data-size limit"
     );
-    assert!(
-        table_row(resources, "State gas").iter().any(|cell| cell.starts_with("Unlimited")),
-        "the state-gas limit"
-    );
-
     let blocks = section(doc, "### 20. Block Limits", "### 21. Transaction and Block");
-    assert_eq!(*table_row(blocks, "Execution gas").last().unwrap(), "Unlimited");
-    assert_eq!(*table_row(blocks, "State gas").last().unwrap(), "Unlimited");
-    assert_eq!(*table_row(blocks, "KV updates").last().unwrap(), "Unlimited");
+    for (page, removed) in [
+        (resources, "KV updates"),
+        (resources, "State growth"),
+        (blocks, "Execution gas"),
+        (blocks, "State gas"),
+        (blocks, "KV updates"),
+    ] {
+        assert!(
+            !page.lines().any(|line| line.contains(removed) && line.contains('|')),
+            "no table row limits {removed}"
+        );
+    }
     assert_eq!(
         *table_row(blocks, "Data size").last().unwrap(),
         format!("{} bytes", grouped(BLOCK_DATA_LIMIT))
@@ -259,7 +278,7 @@ fn limits(doc: &str) {
     require(
         safety,
         &format!(
-            "the data-size limits at {} bytes, and the detention caps at {} each",
+            "the data-size limits at {} bytes and the detention caps at {} each",
             grouped(TX_DATA_LIMIT),
             grouped(BLOCK_ENV_ACCESS_COMPUTE_GAS)
         ),
@@ -328,7 +347,7 @@ fn precompiles(doc: &str) {
 fn addresses(doc: &str) {
     require_addr(doc, &format!("`KEYLESS_DEPLOY_ADDRESS` = `{KEYLESS_DEPLOY_ADDRESS}`"));
     require_addr(doc, &CREATE2_FACTORY_ADDRESS.to_string());
-    require(doc, &format!("with nonce {CREATE2_FACTORY_NONCE}"));
+    require_addr(doc, &CREATE2_FACTORY_CODE_HASH.to_string());
     assert_eq!(
         ETH_TRANSFER_LOG_ADDRESS, SYSTEM_ADDRESS,
         "the transfer log and the pre-block caller are the address the page names once"
@@ -352,15 +371,19 @@ fn detention_and_stops(doc: &str) {
     );
 
     let stops = section(doc, "### 11. The Revert-Class", "### 12. Gas Detention");
-    let kinds = [
-        (LimitKind::DataSize, "Data size"),
-        (LimitKind::KVUpdate, "KV updates"),
-        (LimitKind::ComputeGas, "Compute (gas detention)"),
-        (LimitKind::StateGrowth, "State growth"),
-    ];
+    let kinds =
+        [(LimitKind::DataSize, "Data size"), (LimitKind::ComputeGas, "Compute (gas detention)")];
     for (kind, name) in kinds {
         let cells = row_with_first(stops, &kind.as_u8().to_string());
         assert_eq!(cells[1], name, "kind {}", kind.as_u8());
+    }
+    for retired in [1_u8, 3] {
+        assert_eq!(LimitKind::from_u8(retired), None, "kind {retired} names no dimension");
+        let first = retired.to_string();
+        assert!(
+            stops.lines().map(cells).all(|cells| cells.first() != Some(&first.as_str())),
+            "the page lists no kind {retired}"
+        );
     }
 
     let access = section(doc, "### 13. Volatile-Data", "### 14. EIP-7708");
@@ -386,8 +409,8 @@ fn detention_and_stops(doc: &str) {
         access,
         &format!(
             "Values {} (`Difficulty`) and {} (`BlobHash`) are not produced.",
-            VolatileDataAccess::DIFFICULTY.as_u8(),
-            VolatileDataAccess::BLOB_HASH.as_u8()
+            VolatileDataAccessType::Difficulty as u8,
+            VolatileDataAccessType::BlobHash as u8
         ),
     );
 }

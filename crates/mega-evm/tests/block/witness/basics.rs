@@ -39,10 +39,10 @@ pub(crate) fn write_gas() -> u64 {
         mega_evm::write_record_history_gas(1).expect("a record has a price")
 }
 
-/// A block whose pre-block phase deploys the system contracts over an empty chain and whose
-/// transactions write two fresh slots: the replay reads only the record and produces the same
-/// block, the exported buckets are the two slots', and the absent accounts the deploys asked
-/// about are in the record as absent.
+/// A block whose transactions write two fresh slots: the replay reads only the record and
+/// produces the same block, and the exported buckets are the two slots'. The block is not Satin's
+/// activation block, so its pre-block phase reads no predeploy and the record holds none that no
+/// transaction reached.
 #[test]
 fn test_a_block_of_writes_replays_from_its_witness() {
     let mut db = common::database();
@@ -59,8 +59,8 @@ fn test_a_block_of_writes_replays_from_its_witness() {
     }
     assert_eq!(
         run.record.accounts.get(&mega_evm::system::ORACLE_CONTRACT_ADDRESS),
-        Some(&None),
-        "the deploy asked about the Oracle's account and found none"
+        None,
+        "nothing asked about the Oracle's account"
     );
     assert!(run.record.codes.values().all(|code| !code.is_empty()), "code travels by hash");
     assert_eq!(
@@ -75,7 +75,7 @@ fn test_an_empty_block_replays_from_its_witness() {
     let replay = Case::new("empty", common::database()).run();
     assert!(replay.recorded.txs.is_empty());
     assert!(replay.recorded.bucket_ids.is_empty());
-    assert!(!replay.recorded.record.accounts.is_empty(), "the deploys read their accounts");
+    assert!(!replay.recorded.record.accounts.is_empty(), "the pre-block phase reads accounts");
 }
 
 /// A transaction the block refuses before it runs — its declared gas above the block's gas

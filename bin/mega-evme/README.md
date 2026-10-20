@@ -33,9 +33,9 @@ Every command runs on the engine its spec names.
 On Satin every output field keeps its legacy name and meaning, and a `satin` object is added with the gas by ledger (`regular_gas`, `state_gas`, `history_gas`, `history_bytes`, `reservoir_remaining`, `floor_gas`) and the limits' counts (`data_size`, `write_records`, `limit_exceeded`, and under `--override.limits` the limits the run was held to, `limits_override`).
 `tests/integration.rs` checks that on every fixture pair, and `tests/satin-differences.md` pins what the two engines produce on the same inputs.
 
-A Satin run is held to the protocol limits of the chain's schedule at the block's timestamp; a chain that does not run Satin there (mainnet and testnet today, the default chain, any chain the tool does not know) runs on Satin's default limits, a counterfactual.
-`--override.limits <JSON|FILE>` on `run`, `tx` and `replay` replaces the fields it names of those limits; it is refused on a legacy spec.
-`--genesis <FILE>` gives a chain the tool does not know, a devnet for one, its own Satin configuration: its genesis file's `satinTime`, registry seeds and limits replace the tool's table for that chain, read with the parser a node reads them with.
+A Satin run is held to Satin's protocol limits, which the spec fixes for every chain.
+`--override.limits <JSON|FILE>` on `run`, `tx` and `replay` replaces the fields it names of those limits, a counterfactual; it is refused on a legacy spec.
+`--genesis <FILE>` gives a chain the tool does not know, a devnet for one, its own Satin configuration: its genesis file's `satinTime` replaces the tool's table for that chain, read with the parser a node reads it with.
 Under it `run` and `tx` default to `--spec Satin`, and a run the file cannot configure — on another chain, on a legacy spec, before the file's `satinTime`, or on a file without Satin keys — is refused rather than run on the tool's table.
 
 The legacy leg is the default feature `legacy`; `--no-default-features` builds a Satin-only binary.
@@ -279,7 +279,7 @@ mega-evme replay 0x1234...txhash --override.input-file calldata.hex
 # Check 200 blocks against the chain and record them
 mega-evme replay --block 26400000..26400199 --rpc https://mainnet.megaeth.com/rpc --block-cache ./blocks --verify
 
-# The same blocks on Satin, as NDJSON (the first Satin run reads the EIP-7997 factory over RPC;
+# The same blocks on Satin, as NDJSON (the first Satin run reads the L1 fee overhead slot over RPC;
 # later runs of the same blocks can drop --rpc)
 mega-evme replay --block 26400000..26400199 --rpc https://mainnet.megaeth.com/rpc --block-cache ./blocks --override.spec Satin --json > satin.ndjson
 ```

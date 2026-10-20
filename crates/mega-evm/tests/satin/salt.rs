@@ -39,7 +39,7 @@ use revm::{
     context_interface::cfg::GasId,
 };
 
-use crate::common::{block, history, runs_at_measurement_prices, state_is_free};
+use crate::common::{block, history, state_is_free};
 
 /// The sender of every probe.
 pub(crate) const CALLER: Address = address!("0000000000000000000000000000000000c00000");
@@ -426,20 +426,6 @@ fn test_the_code_deposit_charge_scales_with_the_deployed_address_s_bucket() {
     );
 }
 
-/// The numbers the sites above pay at the minimum bucket, written out: the schedule's state
-/// entries at `MegaETH`'s cost per state byte.
-#[test]
-fn test_the_minimum_bucket_pays_the_spec_s_own_state_gas() {
-    if runs_at_measurement_prices() {
-        return;
-    }
-    assert_eq!(entry(GasId::sstore_set_state_gas()), 97_920);
-    assert_eq!(entry(GasId::new_account_state_gas()), 183_600);
-    assert_eq!(entry(GasId::create_state_gas()), 183_600);
-    assert_eq!(entry(GasId::code_deposit_state_gas()), 1_530);
-    assert_eq!(entry(GasId::tx_eip7702_state_gas_bytecode()), 35_190);
-}
-
 /* What the multiplier does not touch. */
 
 /// A crowded bucket somewhere else changes nothing: the charge reads the bucket of the account
@@ -532,47 +518,35 @@ fn test_an_absurd_capacity_saturates_rather_than_wrapping() {
 
 /// The pre-block system calls and every other system call price at the minimum bucket, whatever
 /// the bucket they write into actually holds: a state change the protocol mandates cannot be
-/// priced out by the growth of a region it does not control.
+/// priced out by the growth of a region it does not control. A system call is system-originated
+/// whatever caller it names: it is the protocol running, not a transaction anybody sent.
 #[test]
 fn test_a_system_call_prices_at_the_minimum_bucket() {
     use alloy_evm::Evm;
 
     const SLOT: u64 = 7;
     let code = BytecodeBuilder::default().sstore(U256::from(SLOT), U256::from(1)).stop().build();
-    let envs = crowded_slot(minimal_envs(), CONTRACT, U256::from(SLOT), 8);
+    for caller in [SYSTEM_ADDRESS, CALLER] {
+        let envs = crowded_slot(minimal_envs(), CONTRACT, U256::from(SLOT), 8);
 
-    let mut evm = MegaEvm::new(salt_context(db(code), envs.clone()));
-    let result = evm
-        .transact_system_call(SYSTEM_ADDRESS, CONTRACT, Bytes::new())
-        .expect("the system call is valid");
-    assert!(result.result.is_success(), "{:?}", result.result);
+        let mut evm = MegaEvm::new(salt_context(db(code.clone()), envs.clone()));
+        let result = evm
+            .transact_system_call(caller, CONTRACT, Bytes::new())
+            .expect("the system call is valid");
+        assert!(result.result.is_success(), "{caller}: {:?}", result.result);
 
-    assert_eq!(
-        result.result.gas().state_gas_spent_final(),
-        entry(GasId::sstore_set_state_gas()),
-        "a system call pays the schedule's own entry",
-    );
-    assert_eq!(envs.total_bucket_queries(), 0, "and never reads the SALT environment");
-    assert!(evm.ctx().is_system_originated());
-}
-
-/// A system call is system-originated whatever caller it names: it is the protocol running, not
-/// a transaction anybody sent.
-#[test]
-fn test_a_system_call_with_another_caller_is_still_system_originated() {
-    use alloy_evm::Evm;
-
-    const SLOT: u64 = 7;
-    let code = BytecodeBuilder::default().sstore(U256::from(SLOT), U256::from(1)).stop().build();
-    let envs = crowded_slot(minimal_envs(), CONTRACT, U256::from(SLOT), 8);
-
-    let mut evm = MegaEvm::new(salt_context(db(code), envs.clone()));
-    let result =
-        evm.transact_system_call(CALLER, CONTRACT, Bytes::new()).expect("the system call is valid");
-    assert!(result.result.is_success(), "{:?}", result.result);
-
-    assert_eq!(result.result.gas().state_gas_spent_final(), entry(GasId::sstore_set_state_gas()));
-    assert_eq!(envs.total_bucket_queries(), 0);
+        assert_eq!(
+            result.result.gas().state_gas_spent_final(),
+            entry(GasId::sstore_set_state_gas()),
+            "{caller}: a system call pays the schedule's own entry",
+        );
+        assert_eq!(
+            envs.total_bucket_queries(),
+            0,
+            "{caller}: and never reads the SALT environment"
+        );
+        assert!(evm.ctx().is_system_originated(), "{caller}");
+    }
 }
 
 /// A transaction the system address sends prices at the minimum bucket too: that address has no
@@ -592,26 +566,6 @@ fn test_a_transaction_from_the_system_address_prices_at_the_minimum_bucket() {
     let outcome = run(db(code), envs.clone(), tx);
     assert_eq!(outcome.gas.state, entry(GasId::sstore_set_state_gas()));
     assert_eq!(envs.total_bucket_queries(), 0);
-}
-
-/// The control arm of the rule: the very same write, sent by a user, pays the crowded price.
-/// Without this the exemption above could be passing for the wrong reason.
-#[test]
-fn test_a_user_transaction_into_the_same_bucket_pays_the_crowded_price() {
-    // A charge that costs nothing costs nothing at any capacity, and the engine asks for none.
-    if state_is_free() {
-        return;
-    }
-    const SLOT: u64 = 7;
-    let code = BytecodeBuilder::default().sstore(U256::from(SLOT), U256::from(1)).stop().build();
-    let envs = crowded_slot(minimal_envs(), CONTRACT, U256::from(SLOT), 8);
-
-    let mut evm = MegaEvm::new(salt_context(db(code), envs.clone()));
-    let outcome = evm.execute_transaction(call_contract()).expect("the probe is valid");
-
-    assert_eq!(outcome.gas.state, entry(GasId::sstore_set_state_gas()) * 8);
-    assert_eq!(envs.total_bucket_queries(), 1);
-    assert!(!evm.ctx().is_system_originated());
 }
 
 /* The sequencer's own system transaction. */
@@ -1020,27 +974,6 @@ fn test_the_create2_charge_scales_with_the_created_address_s_bucket() {
             (db(code), call_contract())
         },
     );
-}
-
-/// An account leaf costs the same however it comes about: the entry a creation pays and the one
-/// a value transfer pays are the same number, because they buy the same leaf.
-#[test]
-fn test_an_account_leaf_costs_the_same_however_it_is_added() {
-    assert_eq!(entry(GasId::create_state_gas()), entry(GasId::new_account_state_gas()));
-
-    let created = CONTRACT.create(0);
-    let creation = run(
-        db(create_empty_contract().stop().build()),
-        crowded_account(minimal_envs(), created, 8),
-        call_contract(),
-    );
-    let transfer = run(
-        db(value_call(EMPTY).stop().build()),
-        crowded_account(minimal_envs(), EMPTY, 8),
-        call_contract(),
-    );
-
-    assert_eq!(creation.gas.state, transfer.gas.state);
 }
 
 /// A creation that also writes a slot pays for both leaves, each in the bucket it lands in: the

@@ -6,18 +6,8 @@
 
 use alloy_eips::eip2935::{HISTORY_SERVE_WINDOW, HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE};
 use alloy_evm::{block::BlockExecutor, EvmEnv};
-use alloy_primitives::{Address, Bytes, B256, U256};
-use mega_evm::{
-    system::{
-        keyless::{KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE_HASH},
-        ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE_HASH, CREATE2_FACTORY_ADDRESS,
-        CREATE2_FACTORY_CODE_HASH, HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
-        HIGH_PRECISION_TIMESTAMP_ORACLE_CODE_HASH, LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE_HASH,
-        ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_HASH, SEQUENCER_REGISTRY_ADDRESS,
-        SEQUENCER_REGISTRY_CODE_HASH, SYSTEM_CONTRACT_DEPLOY_COUNT,
-    },
-    BlockLimits, MegaBlockExecutionCtx, MegaSpecId,
-};
+use alloy_primitives::{Bytes, B256, U256};
+use mega_evm::{test_utils::rex6_predeploys, BlockLimits, MegaBlockExecutionCtx, MegaSpecId};
 use revm::{database::State, Database};
 
 use crate::common::{
@@ -25,25 +15,11 @@ use crate::common::{
     BLOCK_NUMBER, CALLER,
 };
 
-/// The seven contracts a block deploys, in the order the executor installs them.
-fn deployed() -> [(Address, B256); SYSTEM_CONTRACT_DEPLOY_COUNT] {
-    [
-        (ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_HASH),
-        (HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS, HIGH_PRECISION_TIMESTAMP_ORACLE_CODE_HASH),
-        (KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE_HASH),
-        (ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE_HASH),
-        (LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE_HASH),
-        (SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE_HASH),
-        (CREATE2_FACTORY_ADDRESS, CREATE2_FACTORY_CODE_HASH),
-    ]
-}
-
-/// The seven deploys are present, each with the code the executor installs and nonce 1.
-fn assert_deployed(state: &mut State<mega_evm::test_utils::MemoryDatabase>) {
-    for (address, hash) in deployed() {
-        let info = state.basic(address).expect("readable").expect("deployed");
-        assert_eq!(info.code_hash, hash, "{address} keeps the deployed code");
-        assert_eq!(info.nonce, 1, "{address} stays a created contract");
+/// The seven predeploys are as the state held them before the blocks: the code and the nonce.
+fn assert_predeploys_unchanged(state: &mut State<mega_evm::test_utils::MemoryDatabase>) {
+    for (address, held, _) in rex6_predeploys(common::registry_roles()) {
+        let info = state.basic(address).expect("readable").expect("still there");
+        assert_eq!((info.code_hash, info.nonce), (held.code_hash, held.nonce), "{address}");
     }
 }
 
@@ -121,15 +97,17 @@ fn next_block_env() -> EvmEnv<MegaSpecId> {
     env
 }
 
-/// An activation block packs a deposit and refuses a user transaction. The next block, on the
-/// state that block committed, packs the user transaction, and the contracts the activation
-/// block deployed are still there.
+/// Satin's activation block packs a deposit and refuses a user transaction. The next block, on
+/// the state that block committed, packs the user transaction, and the predeploys the activation
+/// block checked are as they were.
 #[test]
 fn test_the_block_after_an_activation_block_packs_a_user_transaction() {
     let mut state = common::state();
     let nonce = {
-        let mut executor =
-            executor(&mut state, unlimited_ctx().with_no_user_tx_activation_block(true));
+        let ctx = unlimited_ctx()
+            .with_no_user_tx_activation_block(true)
+            .with_satin_activation_block(true);
+        let mut executor = executor(&mut state, ctx);
         executor.apply_pre_execution_changes().expect("the activation block starts");
         executor
             .execute_transaction(&deposit_tx(Bytes::new(), empty_call_gas()))
@@ -147,7 +125,7 @@ fn test_the_block_after_an_activation_block_packs_a_user_transaction() {
         assert!(result.receipts()[0].status(), "the deposit succeeds");
         state.basic(CALLER).expect("readable").expect("the caller").nonce
     };
-    assert_deployed(&mut state);
+    assert_predeploys_unchanged(&mut state);
 
     let mut executor = executor_with_env(&mut state, unlimited_ctx(), next_block_env());
     executor.apply_pre_execution_changes().expect("the next block starts");
@@ -157,5 +135,5 @@ fn test_the_block_after_an_activation_block_packs_a_user_transaction() {
     let (_, result) = executor.finish_with_counters().expect("the next block finishes");
     assert_eq!(result.receipts().len(), 1);
     assert!(result.receipts()[0].status(), "the user transaction succeeds");
-    assert_deployed(&mut state);
+    assert_predeploys_unchanged(&mut state);
 }

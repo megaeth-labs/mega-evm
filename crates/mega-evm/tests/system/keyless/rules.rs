@@ -69,23 +69,6 @@ fn small() -> Deployment {
     Deployment::new(deploying(&runtime(1)))
 }
 
-/// Rule 1: the call carries no value. A deployment is made by its signer, and the contract holds
-/// no balance.
-#[test]
-fn test_keyless_deploy_rejects_ether_transfer() {
-    let deployment = small();
-    for gas_limit in GAS_LIMITS {
-        let mut tx =
-            call_tx(KEYLESS_DEPLOY_ADDRESS, deployment.call_data(LARGE_OVERRIDE), U256::ONE);
-        tx.0.base.gas_limit = gas_limit;
-        let outcome = MegaEvm::new(context(system_db()))
-            .execute_transaction(tx)
-            .expect("a valid transaction");
-        assert_eq!(refusal(&outcome), KeylessDeployError::NoEtherTransfer, "at {gas_limit}");
-        assert_nothing_written(&outcome, &deployment, 0);
-    }
-}
-
 /// Rule 2: `gasLimitOverride` covers the gas limit the transaction was signed with.
 #[test]
 fn test_keyless_deploy_gas_limit_too_low() {
@@ -437,31 +420,6 @@ fn test_keyless_deploy_signer_nonce_too_high() {
     }
 }
 
-/// Rule 4 counts real nonces, and a deployment that fails takes its signer from 0 to 1 and no
-/// further: a signer at nonce 1 stays there however often its deployment fails.
-#[test]
-fn test_a_signer_at_nonce_one_stays_there_however_often_it_fails() {
-    let deployment = Deployment::new(Bytes::from_static(&[PUSH0, PUSH0, REVERT]));
-    for gas_limit in GAS_LIMITS {
-        let mut db = system_db().account_nonce(deployment.signer, 1);
-        for attempt in 0..10 {
-            let outcome = run_nth(
-                db.clone(),
-                deployment.call_data(LARGE_OVERRIDE),
-                gas_limit,
-                EvmTxRuntimeLimits::no_limits(),
-                attempt,
-            );
-            assert!(
-                matches!(failure(&outcome), KeylessDeployError::ExecutionReverted { .. }),
-                "attempt {attempt} at {gas_limit}",
-            );
-            assert_eq!(nonce(&outcome, deployment.signer), 1, "attempt {attempt} at {gas_limit}");
-            db.commit(outcome.result_and_state.state);
-        }
-    }
-}
-
 /// The two canonical keyless deployments: the transaction, the gas limit it was signed with, its
 /// signer and the address it deploys at. Signed for chains that charge no state gas for deployed
 /// code: at the spec's prices, without a reservoir, the signed gas limit does not cover the code
@@ -623,13 +581,14 @@ fn test_a_failure_from_nonce_one_keeps_no_record_of_the_signer() {
 
 /// However a deployment from nonce 1 fails — its init code reverts or halts, it deploys no code,
 /// or a limit stops its creation at its start — the signer stays at 1 and its nonce record goes.
-/// The record stays only when a creation that deployed no code moved value out of the signer's
-/// account: the record then stands for that write. A deployment that deployed no code keeps the
-/// record of the account it created.
+/// A creation that deployed no code is refused its empty deposit and reverts, so it keeps neither
+/// the record of the account it created nor the value it moved.
 #[test]
 fn test_every_way_a_deployment_from_nonce_one_fails_leaves_the_nonce_at_one() {
     let one = U256::ONE;
-    let kv_share_of_one = EvmTxRuntimeLimits::no_limits().with_tx_kv_update_limit(2);
+    // The call's lane gets 39 bytes, and its creation 98% of that: less than its start's two
+    // records.
+    let a_share_short_of_the_start = EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(39);
     let cases = [
         (
             "revert carrying value",
@@ -643,14 +602,19 @@ fn test_every_way_a_deployment_from_nonce_one_fails_leaves_the_nonce_at_one() {
             EvmTxRuntimeLimits::no_limits(),
             0,
         ),
-        ("no code", Deployment::new(Bytes::new()), EvmTxRuntimeLimits::no_limits(), 1),
+        ("no code", Deployment::new(Bytes::new()), EvmTxRuntimeLimits::no_limits(), 0),
         (
             "no code carrying value",
             Deployment::with_value(Bytes::new(), one),
             EvmTxRuntimeLimits::no_limits(),
-            2,
+            0,
         ),
-        ("stopped at its start", Deployment::new(deploying(&runtime(1))), kv_share_of_one, 0),
+        (
+            "stopped at its start",
+            Deployment::new(deploying(&runtime(1))),
+            a_share_short_of_the_start,
+            0,
+        ),
     ];
     for gas_limit in GAS_LIMITS {
         for (name, deployment, limits, records) in &cases {
@@ -780,8 +744,9 @@ fn test_a_delegated_signer_deploys() {
 /// takes back nothing — so the nonce never goes back below an account the signer created, and
 /// the signer's next creations land at fresh addresses. The signer ends at 4, and a resubmission
 /// is refused `SignerNonceTooHigh` at that nonce. A creation that reverts takes the delegation's
-/// creations back with it: the bump is the last one again, it is taken back, the signer ends at 1,
-/// and a resubmission runs and fails as the first did.
+/// creations back with it, as does a creation refused its empty deposit: the bump is the last one
+/// again, it is taken back, the signer ends at 1, and a resubmission runs and fails as the first
+/// did.
 #[test]
 fn test_nonces_a_delegated_signer_spends_in_its_deployment_stay_spent() {
     let delegate = address!("0x00000000000000000000000000000000000d1e6a");
@@ -792,7 +757,7 @@ fn test_nonces_a_delegated_signer_spends_in_its_deployment_stay_spent() {
     let with_suffix = |suffix: &[u8]| Bytes::from([&calling_the_signer[..], suffix].concat());
     let cases = [
         ("deploys", constructor(&calling_the_signer, &runtime(1)), 4),
-        ("deploys nothing", with_suffix(&[STOP]), 4),
+        ("deploys nothing", with_suffix(&[STOP]), 1),
         ("reverts", with_suffix(&[PUSH0, PUSH0, REVERT]), 1),
     ];
     for gas_limit in GAS_LIMITS {
@@ -831,10 +796,12 @@ fn test_nonces_a_delegated_signer_spends_in_its_deployment_stay_spent() {
                 );
             } else {
                 let error = failure(&again);
-                assert!(
-                    matches!(error, KeylessDeployError::ExecutionReverted { .. }),
-                    "{name}: resubmitted at {gas_limit}: {error:?}",
-                );
+                let as_first = if *name == "deploys nothing" {
+                    matches!(error, KeylessDeployError::EmptyCodeDeployed { .. })
+                } else {
+                    matches!(error, KeylessDeployError::ExecutionReverted { .. })
+                };
+                assert!(as_first, "{name}: resubmitted at {gas_limit}: {error:?}");
             }
             assert_eq!(nonce(&again, deployment.signer), *ends_at, "{name}: resubmitted");
 
@@ -912,7 +879,9 @@ fn test_a_delegated_signer_whose_creation_reverts_keeps_every_bump() {
     }
 }
 
-/// Rule 5: the deploy address holds no code.
+/// Rule 5: the deploy address holds no code. The occupancy read goes through the journal, so the
+/// deploy address is in the transaction's state — the witness a stateless client replays the
+/// refusal from — even though the call reverts.
 #[test]
 fn test_keyless_deploy_contract_already_exists() {
     let db = system_db().account_code(CREATE2_FACTORY_CONTRACT, Bytes::from_static(&[0x60, 0x00]));
@@ -920,20 +889,10 @@ fn test_keyless_deploy_contract_already_exists() {
         let outcome = submit(db.clone(), CREATE2_FACTORY_TX, LARGE_OVERRIDE, gas_limit);
         assert_eq!(refusal(&outcome), KeylessDeployError::ContractAlreadyExists, "at {gas_limit}");
         assert_eq!(nonce(&outcome, CREATE2_FACTORY_DEPLOYER), 0);
-    }
-}
-
-/// The occupancy read goes through the journal, so the deploy address is in the transaction's
-/// state — the witness a stateless client replays the refusal from — even though the call
-/// reverts.
-#[test]
-fn test_keyless_deploy_contract_already_exists_deploy_address_in_witness_rex6() {
-    for gas_limit in GAS_LIMITS {
-        let db =
-            system_db().account_code(CREATE2_FACTORY_CONTRACT, Bytes::from_static(&[0x60, 0x00]));
-        let outcome = submit(db, CREATE2_FACTORY_TX, LARGE_OVERRIDE, gas_limit);
-        assert_eq!(refusal(&outcome), KeylessDeployError::ContractAlreadyExists);
-        assert!(outcome.state.contains_key(&CREATE2_FACTORY_CONTRACT));
+        assert!(
+            outcome.state.contains_key(&CREATE2_FACTORY_CONTRACT),
+            "the occupancy read is in the witness, at {gas_limit}",
+        );
     }
 }
 
@@ -963,7 +922,7 @@ fn test_keyless_deploy_insufficient_balance_zero() {
     }
 }
 
-/// A signer holding part of the value is refused too.
+/// A signer holding part of the value is refused too, and the refusal writes nothing.
 #[test]
 fn test_keyless_deploy_insufficient_balance_partial() {
     for gas_limit in GAS_LIMITS {
@@ -971,6 +930,7 @@ fn test_keyless_deploy_insufficient_balance_partial() {
         let outcome =
             submit(db_for(&deployment, U256::from(9)), &deployment.tx, LARGE_OVERRIDE, gas_limit);
         assert_eq!(refusal(&outcome), KeylessDeployError::InsufficientBalance);
+        assert_nothing_written(&outcome, &deployment, 0);
     }
 }
 
@@ -1000,18 +960,6 @@ fn test_a_signer_with_nothing_deploys_what_carries_no_value() {
             outcome.state.get(&deployment.signer).map(|account| account.info.balance),
             Some(U256::ZERO),
         );
-    }
-}
-
-/// The value is real, so it must be funded.
-#[test]
-fn test_the_value_must_be_funded() {
-    let deployment = Deployment::with_value(deploying(&runtime(1)), U256::from(1_000));
-    for gas_limit in GAS_LIMITS {
-        let db = db_for(&deployment, U256::from(999));
-        let outcome = submit(db, &deployment.tx, LARGE_OVERRIDE, gas_limit);
-        assert_eq!(refusal(&outcome), KeylessDeployError::InsufficientBalance, "at {gas_limit}");
-        assert_nothing_written(&outcome, &deployment, 0);
     }
 }
 

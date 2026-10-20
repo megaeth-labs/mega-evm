@@ -29,7 +29,7 @@ use revm::{
     context::TxEnv,
 };
 
-use crate::common::{context, runs_at_measurement_prices};
+use crate::common::{context, deposit, runs_at_measurement_prices};
 
 const CALLER: Address = address!("0000000000000000000000000000000000400000");
 const CONTRACT: Address = address!("0000000000000000000000000000000000400001");
@@ -181,13 +181,6 @@ fn test_the_exempt_schedule_prices_a_deposited_byte_at_zero() {
         "a user transaction pays a history byte per deployed byte",
     );
     assert_eq!(ledgers(deposit(call_from(CALLER, CONTRACT))).0, 0, "a deposit pays none of it");
-}
-
-/// `tx` as a deposit: no fee, and a source hash a user's transaction could carry.
-fn deposit(mut tx: MegaTransaction) -> MegaTransaction {
-    tx.0.deposit.source_hash = B256::repeat_byte(0x11);
-    tx.0.base.gas_price = 0;
-    tx
 }
 
 /// A deposit pays no history gas: the bytes it carries were paid for on L1.

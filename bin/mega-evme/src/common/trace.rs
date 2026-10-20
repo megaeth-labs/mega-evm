@@ -93,10 +93,32 @@ impl TraceArgs {
         self.trace
     }
 
-    /// Creates a [`TracingInspector`] configured for full tracing
+    /// Creates a [`TracingInspector`] that records what this tracer and its flags ask for.
+    ///
+    /// The opcode flags turn memory, stack, storage and return data on or off here. A call trace
+    /// records logs only with `--trace.call.with-log`. A pre-state trace is rendered from the
+    /// execution result, so its inspector records nothing.
     pub fn create_inspector(&self) -> TracingInspector {
-        let config = TracingInspectorConfig::all();
-        TracingInspector::new(config)
+        TracingInspector::new(self.inspector_config())
+    }
+
+    /// The inspector config for [`Self::tracer`] and the flags that apply to it.
+    fn inspector_config(&self) -> TracingInspectorConfig {
+        match self.tracer {
+            TracerType::Opcode => {
+                let mut options = self.create_geth_options();
+                // `from_geth_config` reads `enable_memory`. The flag is disable-memory, and memory
+                // is on unless that flag is set.
+                options.enable_memory = Some(!self.trace_opcode_disable_memory);
+                TracingInspectorConfig::from_geth_config(&options)
+            }
+            TracerType::Call => {
+                TracingInspectorConfig::from_geth_call_config(&self.create_call_config())
+            }
+            TracerType::PreState => {
+                TracingInspectorConfig::from_geth_prestate_config(&self.create_prestate_config())
+            }
+        }
     }
 
     /// Creates [`GethDefaultTracingOptions`] from CLI arguments
@@ -255,5 +277,63 @@ impl TraceArgs {
             let ResultAndState { result, state } = outcome.result_and_state;
             Ok((result, state, None, satin))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use revm_inspectors::tracing::StackSnapshotType;
+
+    use super::*;
+
+    fn args(flags: &[&str]) -> TraceArgs {
+        let mut cmd = vec!["mega-evme"];
+        cmd.extend_from_slice(flags);
+        TraceArgs::try_parse_from(cmd).expect("flags parse")
+    }
+
+    #[test]
+    fn test_an_opcode_trace_records_what_its_flags_leave_on() {
+        let config = *args(&[]).create_inspector().config();
+        assert!(config.record_steps);
+        assert!(config.record_memory_snapshots);
+        assert_eq!(config.record_stack_snapshots, StackSnapshotType::Full);
+        assert!(config.record_state_diff);
+        assert!(!config.record_returndata_snapshots);
+
+        let disabled = *args(&[
+            "--trace.opcode.disable-memory",
+            "--trace.opcode.disable-stack",
+            "--trace.opcode.disable-storage",
+        ])
+        .create_inspector()
+        .config();
+        assert!(!disabled.record_memory_snapshots);
+        assert_eq!(disabled.record_stack_snapshots, StackSnapshotType::None);
+        assert!(!disabled.record_state_diff);
+
+        let with_return = *args(&["--trace.opcode.enable-return-data"]).create_inspector().config();
+        assert!(with_return.record_returndata_snapshots);
+    }
+
+    #[test]
+    fn test_a_call_trace_records_logs_only_when_asked() {
+        let plain = *args(&["--tracer", "call"]).create_inspector().config();
+        assert!(!plain.record_steps);
+        assert!(!plain.record_logs);
+
+        let with_log =
+            *args(&["--tracer", "call", "--trace.call.with-log"]).create_inspector().config();
+        assert!(with_log.record_logs);
+        assert!(!with_log.record_steps);
+    }
+
+    #[test]
+    fn test_a_prestate_trace_records_nothing() {
+        let config = *args(&["--tracer", "prestate"]).create_inspector().config();
+        assert!(!config.record_steps);
+        assert!(!config.record_memory_snapshots);
+        assert!(!config.record_state_diff);
+        assert!(!config.record_logs);
     }
 }

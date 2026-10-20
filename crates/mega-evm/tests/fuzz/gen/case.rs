@@ -2,12 +2,6 @@
 
 use alloy_primitives::{Address, Bytes, B256, U256};
 use mega_evm::{
-    system::{
-        keyless::{KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE},
-        ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE, HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
-        HIGH_PRECISION_TIMESTAMP_ORACLE_CODE, LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE,
-        ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE,
-    },
     test_utils::{zero_fee_l1_block_info, MemoryDatabase},
     ExternalEnvs, MegaContext, MegaEvm, MegaTransaction, MegaTransactionOutcome, SaltEnv,
     TestExternalEnvs, MIN_BUCKET_SIZE,
@@ -63,20 +57,11 @@ pub(crate) fn keyless_case() -> impl Strategy<Value = Case> {
 pub(crate) type Execution = Result<MegaTransactionOutcome, String>;
 
 impl Case {
-    /// The pre-state: the system contracts, the registry naming the system address, the fixed
-    /// accounts with their programs, the delegation, and, for a keyless deployment, its signer's
-    /// account and what its deploy address holds.
+    /// The pre-state: the predeploys as a chain that ran Rex6 holds them, the registry naming the
+    /// system address, the fixed accounts with their programs, the delegation, and, for a keyless
+    /// deployment, its signer's account and what its deploy address holds.
     pub(crate) fn database(&self) -> MemoryDatabase {
-        let mut db = MemoryDatabase::default()
-            .account_code(ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE)
-            .account_code(
-                HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
-                HIGH_PRECISION_TIMESTAMP_ORACLE_CODE,
-            )
-            .account_code(KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE)
-            .account_code(ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE)
-            .account_code(LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE)
-            .sequencer_registry(SYSTEM_ADDRESS);
+        let mut db = MemoryDatabase::default().rex6_predeploys(SYSTEM_ADDRESS);
         let world = &self.world;
         install(&mut db, Who::Caller.address(), &world.caller, None);
         install(&mut db, Who::Contract.address(), &world.contract, Some(self.main.assemble()));
