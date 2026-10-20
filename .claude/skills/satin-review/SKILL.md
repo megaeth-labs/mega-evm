@@ -76,7 +76,7 @@ For each module: where it is, what to check, the spec sections, and the `AGENTS.
 
 ### Limits: data size, write records, the stop
 
-- **Where:** `src/limit/` (byte table, `LimitKind`, `AdditionalLimit`, `FrameLimitTracker`, `Lane`, `StagedRecord`), `src/block/limit.rs` (`ProtocolLimits::for_spec`), `src/constants.rs`.
+- **Where:** `src/limit/` (byte table, `LimitKind`, `AdditionalLimit`, `FrameLimitTracker`, `Lane`, the effect of a completed write in `record.rs`), `src/block/limit.rs` (`ProtocolLimits::for_spec`), `src/constants.rs`.
 - **Read first:** the module docs of `src/limit/mod.rs` and `src/limit/limit.rs`.
 - **Check:**
   - A record is counted where it is made and taken back with its frame; the one exception is a failed creation's creator-nonce record, which lands on the creator and is held to the creator's limits.
@@ -94,7 +94,8 @@ For each module: where it is, what to check, the spec sections, and the `AGENTS.
 - **Where:** `src/evm/execution.rs` (`MegaHandler`, the frame lifecycle), `src/evm/context.rs` (`MegaContext`, `spec_cfg`, `admit_code_deposit`), `src/evm/mod.rs`, `src/evm/host.rs`, `src/evm/state.rs`, `src/evm/instructions.rs`, `src/evm/frame.rs`, `src/evm/result.rs`.
 - **Read first:** the module docs of `src/evm/execution.rs` and `src/evm/host.rs`.
 - **Check:**
-  - The Host only observes; a staged record is committed after the opcode completes and dropped when it fails.
+  - A write is counted in the Host's completed-write hook, which revm calls only once the opcode made every charge, so a failed opcode counts nothing; the Host's write methods count nothing, whoever calls them.
+  - A frame start's records are charged in the Host's frame-start hook, after the forward and before revm builds the frame's input; a caller that cannot pay gets the forward back, the halt's record re-written, and starts no frame.
   - Pre-frame charges (a deposit's caller account, EIP-7702 authorities, pre-frame records) either succeed or leave an included out-of-gas halt without a frame, with the journal unwound as revm unwinds it (a creation keeps its nonce bump).
   - A frame whose start would cross a limit is answered with the stop before it is built, so no value moves; `take_back_a_stopped_answer` takes back what an answer rewritten into a crossing had moved.
   - A frame start is counted before revm decides the frame, by predicting its refusals (`caller_refuses_start`, `assert_start_as_counted`); see "What follows" for what changes here.
