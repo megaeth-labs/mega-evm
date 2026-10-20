@@ -1,20 +1,21 @@
 //! A blockchain test's chain, imported block by block through Satin's block executor.
 //!
-//! Each block runs through [`MegaBlockExecutor`] — the pre-block system calls, the system-contract
-//! deploys, every transaction and the end of the block — on a `MegaEvm` in the neutral
-//! configuration of the Osaka fixtures (`Mode::Equivalence`), over a copy of the state the chain
-//! holds. A block the executor accepts becomes the chain's head and its state the chain's; a block
-//! it refuses is dropped with its copy, so the chain stays at the previous block.
+//! Each block runs through [`MegaBlockExecutor`] — the pre-block system calls, every transaction
+//! and the end of the block — on a `MegaEvm` in the neutral configuration of the Osaka fixtures
+//! (`Mode::Equivalence`), over a copy of the state the chain holds. A block the executor accepts
+//! becomes the chain's head and its state the chain's; a block it refuses is dropped with its copy,
+//! so the chain stays at the previous block.
 //!
 //! Satin runs on a chain that ran the legacy forks, which holds the six system contracts, and OP's
-//! EIP-7997 factory; the chain's pre-state holds the seven as such a chain holds them, the
-//! `SequencerRegistry` with roles that bind nothing on an Osaka fixture ([`registry_roles`]), and
-//! says why.
+//! EIP-7997 factory, and deploys none of them; the runner seeds each of the seven the fixture's
+//! pre-state lacks into the chain's genesis state, once, as such a chain holds them
+//! ([`rex6_predeploys`]), the `SequencerRegistry` with roles that bind nothing on an Osaka fixture
+//! ([`registry_roles`], which says why).
 //!
-//! Each block's context tells the executor whether the block admits only deposits, worked out as
-//! a node works it out: from the schedule and the timestamp of the chain's head, the block's
-//! parent. Under [`chain_spec`], which activates every fork at genesis, no block the runner
-//! imports is such a block.
+//! Each block's context tells the executor whether the block admits only deposits and whether
+//! Satin activates in it, worked out as a node works them out: from the schedule and the timestamp
+//! of the chain's head, the block's parent. Under [`chain_spec`], which activates every fork at
+//! genesis, no block the runner imports is either, so no block checks the predeploys.
 //!
 //! A Satin chain holds accounts an Ethereum chain does not: the seven predeploys, which Satin
 //! requires and does not create, so the chain's pre-state holds them; and the fee vaults op-revm

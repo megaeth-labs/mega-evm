@@ -14,7 +14,7 @@ The `state-test` CLI (`crates/state-test`) is a thin front end over this crate.
 - `src/skips.rs`: the reference runner's skips, with their reasons.
 - `src/deviations.rs`: the registry of places Satin differs on purpose, each with the exact entries it explains and the hashes Satin produces for them; `DEVIATIONS.md` is rendered from it.
 - `src/roots.rs`: the post-state root and the logs hash.
-- `src/blockchain/`: the blockchain tests' gate. `mod.rs`: discovery, judging a test block by block, the report and the gate; `fixture.rs`: the fixture as the runner reads it, every block decoded from its RLP; `chain.rs`: a test's chain imported through `MegaBlockExecutor`, the Satin fork's parameters that bind nothing (`chain_spec`), and the accounts a Satin block adds (`SATIN_ACCOUNTS`); `skips.rs`: the classes a test is skipped for, decided from its content.
+- `src/blockchain/`: the blockchain tests' gate. `mod.rs`: discovery, judging a test block by block, the report and the gate; `fixture.rs`: the fixture as the runner reads it, every block decoded from its RLP; `chain.rs`: a test's chain imported through `MegaBlockExecutor`, its schedule with every fork at genesis (`chain_spec`), the seven predeploys seeded once into the chain's genesis state, in the shape Rex6 left them, where the fixture's pre-state lacks them (the registry's roles, `registry_roles`, bind nothing), and the accounts the seed and a Satin block add (`SATIN_ACCOUNTS`); `skips.rs`: the classes a test is skipped for, decided from its content.
 - `src/witness.rs`: `check_replay`, a fixture entry executed on a recorder of every read and replayed on a strict database and environments serving exactly a witness: the record of every read, and, for an entry the engine executed, the channel witness a node builds; `Replayed` says which.
 - `tests/runner.rs`: the runner on fixtures written in the test, filled from revm's mainnet EVM on the fixture's fork.
 - `tests/blockchain.rs`: the blockchain runner on chains written in the test, filled block by block from revm's mainnet EVM on Osaka, the pre-block system calls included.
@@ -28,7 +28,7 @@ The fixture types are the revm fork's own (`revm::statetest_types`, the `test-ty
 - A deviation lists the exact entries it explains — file, test, data, gas and value indices — with the hashes Satin produces; a failure is its only with those hashes, and `--expect-deviations` requires every listed entry to fail exactly as listed.
 - Skips mirror the reference runner's, so the executed and skipped counts equal the ones `.github/workflows/exec-spec.yml` pins for it.
 - A blockchain test is skipped only for a class decided from its content (`src/blockchain/skips.rs`); a block that differs passes only when a deviation the registry already has lists that test and block with exactly the outcome Satin produces, and the chain is imported on from Satin's state, so a listed block exempts no later one.
-- An account is taken out of a blockchain test's state root only by `SATIN_ACCOUNTS`, only when the pre-state does not hold it and it holds exactly what Satin put there.
+- An account is taken out of a blockchain test's state root only by `SATIN_ACCOUNTS`, only when the pre-state does not hold it and it holds exactly what the seed or a Satin block put there.
 
 ## ANTI-PATTERNS
 - Do not accept any error for an expected exception; map the error in `src/exceptions.rs`.
