@@ -1,13 +1,13 @@
 //! The `SequencerRegistry`'s role changes, applied before a block's transactions, and the live
 //! system address read out of it.
 //!
-//! The registry the legacy forks left is read before every block by the deploy step, which refuses
-//! a block without it. After that step, the executor reads whether a role change is due in the
-//! block and, when one is, makes the `applyPendingChanges()` system call. Each step's state reaches
-//! the pre-block observer before it is committed. The executor does not read the system address: a
-//! transaction of the system shape reads it out of the registry when it is validated, so every EVM
-//! — the block's, or one a node builds outside block execution — promotes the address the state
-//! names.
+//! The registry the legacy forks left is checked once, by Satin's activation block, which refuses
+//! a chain without it. Before every block's transactions the executor reads whether a role change
+//! is due in the block and, when one is, makes the `applyPendingChanges()` system call. Each step's
+//! state reaches the pre-block observer before it is committed. The executor's pre-block steps do
+//! not read the system address: every transaction reads it out of the registry when it is
+//! validated, so every EVM — the block's, or one a node builds outside block execution — promotes
+//! the address the state names.
 
 use alloy_consensus::{transaction::Recovered, Sealed, Signed, TxEip1559};
 use alloy_evm::{block::BlockExecutor, EvmEnv, EvmFactory, ToTxEnv};
