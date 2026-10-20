@@ -13,7 +13,7 @@ use crate::system::{
         ADMIN, CURRENT_SEQUENCER, CURRENT_SYSTEM_ADDRESS, INITIAL_FROM_BLOCK, INITIAL_SEQUENCER,
         INITIAL_SYSTEM_ADDRESS, MIN_ROTATION_DELAY,
     },
-    SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE,
+    SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE, SEQUENCER_REGISTRY_CODE_HASH,
 };
 
 /// The roles of a `SequencerRegistry` a test or a tool puts in a state, with
@@ -42,6 +42,17 @@ impl From<Address> for SequencerRegistryRoles {
 }
 
 impl SequencerRegistryRoles {
+    /// The account of a v2.0.0 registry, as the legacy forks leave it: the code, and nonce 1, a
+    /// created contract's.
+    pub fn account_info() -> AccountInfo {
+        AccountInfo {
+            nonce: 1,
+            code_hash: SEQUENCER_REGISTRY_CODE_HASH,
+            code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE)),
+            ..Default::default()
+        }
+    }
+
     /// The storage of a v2.0.0 registry holding these roles, as the legacy forks leave it on a
     /// chain that never rotated one: the seven slots its bootstrap writes, `_initialFromBlock`
     /// zero.
@@ -157,16 +168,18 @@ impl MemoryDatabase {
     }
 
     /// Installs the `SequencerRegistry` v2.0.0 holding `roles` — an address names it in every role
-    /// — as the legacy forks leave it: its code, nonce 1 and
+    /// — as the legacy forks leave it: [`SequencerRegistryRoles::account_info`] and
     /// [`SequencerRegistryRoles::storage`]. A legacy call from the system address to a whitelisted
     /// contract is then a system-address transaction, and Satin runs a block on the state.
-    pub fn sequencer_registry(self, roles: impl Into<SequencerRegistryRoles>) -> Self {
-        let roles = roles.into();
-        roles.storage().into_iter().fold(
-            self.account_code(SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE)
-                .account_nonce(SEQUENCER_REGISTRY_ADDRESS, 1),
-            |db, (slot, value)| db.account_storage(SEQUENCER_REGISTRY_ADDRESS, slot, value),
-        )
+    pub fn sequencer_registry(mut self, roles: impl Into<SequencerRegistryRoles>) -> Self {
+        self.db.insert_account_info(
+            SEQUENCER_REGISTRY_ADDRESS,
+            SequencerRegistryRoles::account_info(),
+        );
+        for (slot, value) in roles.into().storage() {
+            self.set_account_storage(SEQUENCER_REGISTRY_ADDRESS, slot, value);
+        }
+        self
     }
 }
 

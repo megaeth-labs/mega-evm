@@ -39,7 +39,6 @@ use mega_evm::{
         keyless::KEYLESS_DEPLOY_ADDRESS, system_contract_specs, ACCESS_CONTROL_ADDRESS,
         CREATE2_FACTORY_ADDRESS, HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS, LIMIT_CONTROL_ADDRESS,
         MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS, SEQUENCER_REGISTRY_ADDRESS,
-        SEQUENCER_REGISTRY_CODE, SEQUENCER_REGISTRY_CODE_HASH,
     },
     test_utils::SequencerRegistryRoles,
     BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaHardforkConfig, MegaHardforks,
@@ -274,14 +273,10 @@ impl Chain {
             state.insert_account_with_storage(*address, plain.info, plain.storage);
         }
         if !pre.contains_key(&SEQUENCER_REGISTRY_ADDRESS) {
-            let code = Bytecode::new_raw(SEQUENCER_REGISTRY_CODE);
-            state.contracts.insert(SEQUENCER_REGISTRY_CODE_HASH, code.clone());
-            let info = AccountInfo {
-                nonce: 1,
-                code_hash: SEQUENCER_REGISTRY_CODE_HASH,
-                code: Some(code),
-                ..Default::default()
-            };
+            let info = SequencerRegistryRoles::account_info();
+            if let Some(code) = &info.code {
+                state.contracts.insert(info.code_hash, code.clone());
+            }
             let storage = registry_roles().storage().into_iter().filter(|(_, v)| !v.is_zero());
             state.insert_account_with_storage(SEQUENCER_REGISTRY_ADDRESS, info, storage.collect());
         }
@@ -329,9 +324,10 @@ impl Chain {
                     .filter(|(_, value)| !value.is_zero())
                     .map(|(slot, value)| (slot, value))
                     .collect();
-                info.nonce == 1 &&
-                    info.balance.is_zero() &&
-                    info.code_hash == SEQUENCER_REGISTRY_CODE_HASH &&
+                let installed = SequencerRegistryRoles::account_info();
+                info.nonce == installed.nonce &&
+                    info.balance == installed.balance &&
+                    info.code_hash == installed.code_hash &&
                     storage == held
             }
             Added::Predeploy => system_contract_specs().iter().any(|spec| {
