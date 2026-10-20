@@ -17,7 +17,7 @@ Implementation detail lives in [`AGENTS.md`](../../../AGENTS.md) and the specifi
 - Judge the final code.
   A defect an earlier commit introduced and a later one fixed is not a defect; history only explains why something is as it is.
   A test deleted or parked in an intermediate commit is not a finding either: test completeness is judged on the whole.
-- Satin is the first spec of a line, so keep the extension points a line needs (spec-keyed constants, fork params, a spec argument).
+- Satin is the first spec of a line, so keep the extension points a line needs (spec-keyed constants, a spec argument); a later fork that first needs configuration parameters adds a mechanism for them then.
   Satin is a new spec: simpler semantics win over parity with the legacy engine.
 - Out of scope: the legacy engine (`main`, frozen), which runs every block before Satin activates.
   Satin never executes or decodes legacy-era data, so "Satin cannot handle legacy data" is not a defect, and code kept only for that purpose is dead code.
@@ -225,7 +225,7 @@ Each is a decision with its reason; "in this pull request" means review the code
 - **`validate_schedule` checks that base forks are active by `satinTime`**; engine-built schedules activate them from the first block, which no Satin block can tell apart. An unknown chain has no schedule (`hardfork_schedule` answers `None`).
 - **A rewriting inspector in block execution is an internal error**, not a block verdict: the inspector is the node's own choice.
 - **Explicit crate-root exports; dead helpers and legacy-era remnants are deleted.**
-- **Generic fork params** stay: later specs need params whose shape changes per fork.
+- **Satin carries no fork parameter**, and the fork-parameter mechanism was removed with nothing using it.
 - **An absurd state-gas price makes the operation run out of gas**; no reachable divergence.
 - **The pending-changes due check uses the direct-read convention** (any database error is an internal error), as the other direct reads and upstream do.
 - **Precompile prices are looked up by id**: a precompile set replaced around the engine, through the mutable accessors, keeps the built-in prices; the spec states the boundary, and nodes change the set through `with_dyn_precompiles` or the factory builder.
