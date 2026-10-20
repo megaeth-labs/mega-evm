@@ -166,13 +166,10 @@ pub(crate) fn is_deposit(block: &CachedBlock, index: usize) -> bool {
     block.block["transactions"][index]["type"] == "0x7e"
 }
 
-/// A genesis file of chain `chain_id` activating Satin at `satin_time`, with the placeholder
-/// registry seeds, written in `dir`; its path.
+/// A genesis file of chain `chain_id` activating Satin at `satin_time`, written in `dir`; its
+/// path.
 pub(crate) fn satin_genesis(dir: &Path, chain_id: u64, satin_time: u64) -> String {
-    let satin = mega_evm::SatinChainConfig {
-        activation_time: satin_time,
-        sequencer_registry: mega_evm::system::SequencerRegistryConfig::placeholder(),
-    };
+    let satin = mega_evm::SatinChainConfig { activation_time: satin_time };
     let mut config = serde_json::to_value(satin).unwrap();
     config["chainId"] = chain_id.into();
     let path = dir.join(format!("satin-genesis-{chain_id}-{satin_time}.json"));

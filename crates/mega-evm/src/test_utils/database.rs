@@ -9,8 +9,66 @@ use revm::{
 };
 
 use crate::system::{
-    storage_slots::CURRENT_SYSTEM_ADDRESS, SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE,
+    storage_slots::{
+        ADMIN, CURRENT_SEQUENCER, CURRENT_SYSTEM_ADDRESS, INITIAL_FROM_BLOCK, INITIAL_SEQUENCER,
+        INITIAL_SYSTEM_ADDRESS, MIN_ROTATION_DELAY,
+    },
+    SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE, SEQUENCER_REGISTRY_CODE_HASH,
 };
+
+/// The roles of a `SequencerRegistry` a test or a tool puts in a state, with
+/// [`MemoryDatabase::sequencer_registry`] or [`storage`](Self::storage).
+///
+/// Test and tool support, not a chain parameter: the legacy forks deploy the registry (Rex5) and
+/// upgrade it to v2.0.0 (Rex6), and Satin neither creates nor seeds it, so a state Satin runs a
+/// block on must already hold it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SequencerRegistryRoles {
+    /// The live system address, and the initial one.
+    pub system_address: Address,
+    /// The current sequencer, and the initial one.
+    pub sequencer: Address,
+    /// The admin.
+    pub admin: Address,
+    /// The minimum delay between scheduling a rotation and its activation, in blocks.
+    pub min_rotation_delay: u64,
+}
+
+impl From<Address> for SequencerRegistryRoles {
+    /// `address` in every role, and a rotation delay of one block.
+    fn from(address: Address) -> Self {
+        Self { system_address: address, sequencer: address, admin: address, min_rotation_delay: 1 }
+    }
+}
+
+impl SequencerRegistryRoles {
+    /// The account of a v2.0.0 registry, as the legacy forks leave it: the code, and nonce 1, a
+    /// created contract's.
+    pub fn account_info() -> AccountInfo {
+        AccountInfo {
+            nonce: 1,
+            code_hash: SEQUENCER_REGISTRY_CODE_HASH,
+            code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE)),
+            ..Default::default()
+        }
+    }
+
+    /// The storage of a v2.0.0 registry holding these roles, as the legacy forks leave it on a
+    /// chain that never rotated one: the seven slots its bootstrap writes, `_initialFromBlock`
+    /// zero.
+    pub fn storage(&self) -> [(U256, U256); 7] {
+        let word = |address: Address| U256::from_be_bytes(address.into_word().0);
+        [
+            (CURRENT_SYSTEM_ADDRESS, word(self.system_address)),
+            (CURRENT_SEQUENCER, word(self.sequencer)),
+            (ADMIN, word(self.admin)),
+            (INITIAL_SYSTEM_ADDRESS, word(self.system_address)),
+            (INITIAL_SEQUENCER, word(self.sequencer)),
+            (INITIAL_FROM_BLOCK, U256::ZERO),
+            (MIN_ROTATION_DELAY, U256::from(self.min_rotation_delay)),
+        ]
+    }
+}
 
 /// A memory database for testing purposes.
 #[derive(Debug, Default, Clone, derive_more::Deref, derive_more::DerefMut)]
@@ -109,15 +167,19 @@ impl MemoryDatabase {
         self
     }
 
-    /// Installs the `SequencerRegistry` this engine deploys, naming `system_address` the live
-    /// system address: a legacy call from it to a whitelisted contract is then a system-address
-    /// transaction, as it is on a chain whose registry names it.
-    pub fn sequencer_registry(self, system_address: Address) -> Self {
-        self.account_code(SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE).account_storage(
+    /// Installs the `SequencerRegistry` v2.0.0 holding `roles` — an address names it in every role
+    /// — as the legacy forks leave it: [`SequencerRegistryRoles::account_info`] and
+    /// [`SequencerRegistryRoles::storage`]. A legacy call from the system address to a whitelisted
+    /// contract is then a system-address transaction, and Satin runs a block on the state.
+    pub fn sequencer_registry(mut self, roles: impl Into<SequencerRegistryRoles>) -> Self {
+        self.db.insert_account_info(
             SEQUENCER_REGISTRY_ADDRESS,
-            CURRENT_SYSTEM_ADDRESS,
-            U256::from_be_bytes(system_address.into_word().0),
-        )
+            SequencerRegistryRoles::account_info(),
+        );
+        for (slot, value) in roles.into().storage() {
+            self.set_account_storage(SEQUENCER_REGISTRY_ADDRESS, slot, value);
+        }
+        self
     }
 }
 

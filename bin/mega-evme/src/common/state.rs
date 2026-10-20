@@ -665,13 +665,12 @@ where
     ///
     /// `run` and `tx` execute no block, so nothing deploys them; the code is applied as a raw
     /// state patch, over whatever a forked state holds at those addresses. The factory gets the
-    /// nonce its deployment gives it. The `SequencerRegistry`'s storage is not seeded: a local run
-    /// has no chain configuration to seed it from, and a forked run reads the chain's.
+    /// nonce its deployment gives it. The `SequencerRegistry` gets its code alone, no storage: a
+    /// forked run reads the chain's, and a local run's registry names no system address.
     pub fn deploy_system_contracts(&mut self) {
-        use mega_evm::system::{system_contract_specs, SequencerRegistryConfig};
+        use mega_evm::system::system_contract_specs;
 
-        // The block number only seeds the registry's storage, which this does not install.
-        for contract in system_contract_specs(&SequencerRegistryConfig::placeholder(), 0) {
+        for contract in system_contract_specs() {
             self.set_account_code(contract.address, Bytecode::new_raw(contract.code));
             if contract.nonce != 0 {
                 self.set_account_nonce(contract.address, contract.nonce);

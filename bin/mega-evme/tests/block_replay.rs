@@ -349,8 +349,7 @@ fn test_an_override_refuses_a_legacy_block() {
     assert!(error.contains("--override.limits applies to Satin only"), "{error}");
 }
 
-/// A genesis file of mainnet activating Satin at `satin_time`, with the placeholder registry
-/// seeds, in `dir`.
+/// A genesis file of mainnet activating Satin at `satin_time`, in `dir`.
 fn mainnet_genesis(dir: &tempfile::TempDir, satin_time: u64) -> String {
     genesis_of(dir, mega_evm::MAINNET_CHAIN_ID, satin_time)
 }

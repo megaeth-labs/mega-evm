@@ -1,39 +1,29 @@
-//! The Satin keys of a chain configuration: when Satin activates, and the parameters it carries.
+//! The Satin key of a chain configuration: when Satin activates.
 //!
-//! [`SatinChainConfig`] reads them and states the format, which is provisional.
+//! [`SatinChainConfig`] reads it and states the format, which is provisional.
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use core::{fmt, str::FromStr};
+use core::fmt;
 use std::{
-    borrow::ToOwned,
     collections::BTreeMap,
     string::{String, ToString},
 };
 
 use alloy_hardforks::ForkCondition;
-use alloy_primitives::Address;
 use serde::{
     de::{self, IgnoredAny, MapAccess, SeqAccess, Visitor},
     ser::SerializeMap,
     Deserialize, Deserializer, Serialize, Serializer,
 };
 
-use crate::{
-    system::SequencerRegistryConfig, MegaHardfork, MegaHardforkConfig, MegaHardforks, ScheduleError,
-};
+use crate::{MegaHardfork, MegaHardforkConfig, MegaHardforks, ScheduleError};
 
 /// The key of Satin's activation timestamp.
 pub const SATIN_TIME_KEY: &str = "satinTime";
 
 /// Every Satin key of a chain configuration, in the order [`SatinChainConfig`] writes them.
-pub const SATIN_CHAIN_CONFIG_KEYS: [&str; 5] = [
-    SATIN_TIME_KEY,
-    "satinInitialSystemAddress",
-    "satinInitialSequencer",
-    "satinInitialAdmin",
-    "satinMinRotationDelay",
-];
+pub const SATIN_CHAIN_CONFIG_KEYS: [&str; 1] = [SATIN_TIME_KEY];
 
 /// The prefix every Satin key starts with, compared without regard to case.
 const PREFIX: &str = "satin";
@@ -42,52 +32,50 @@ const PREFIX: &str = "satin";
 const ARBITRARY_PRECISION_NUMBER: &str = "$serde_json::private::Number";
 
 /// A chain's Satin configuration, as its genesis file's `config` object carries it: when Satin
-/// activates, and the params type it requires.
+/// activates.
 ///
 /// **The key format is provisional.** It is fixed when a network first publishes a genesis file
 /// that carries it; until then a change to it is a change to this parser and to every genesis
 /// file written against it.
 ///
-/// Every reader of a chain's Satin parameters — a node, a stateless validator, a genesis
-/// generator, a replay tool — parses them here ([`SatinChainConfig::from_genesis_config`]), so
-/// the key names and the rules cannot drift apart between them: a reader that took another value
-/// for one key would execute another chain.
+/// Every reader of a chain's Satin configuration — a node, a stateless validator, a genesis
+/// generator, a replay tool — parses it here ([`SatinChainConfig::from_genesis_config`]), so the
+/// key names and the rules cannot drift apart between them: a reader that took another value for
+/// the key would execute another chain.
 ///
-/// The keys sit at the top level of the genesis file's `config` object, beside the other forks'
-/// keys, flat and camelCase, each prefixed `satin`:
+/// Satin carries no parameter: a chain that activates it has run the legacy forks, which deployed
+/// the `SequencerRegistry` and upgraded it to v2.0.0, and the registry's roles are what it holds.
+/// The legacy forks' own keys (`rex5InitialSequencer`, `rex6MinRotationDelay`, ...) are theirs
+/// and are not read here.
 ///
-/// | Key                                  | Value              | Field                                                         |
-/// | ------------------------------------ | ------------------ | ------------------------------------------------------------- |
-/// | `satinTime`                          | integer            | the activation timestamp                                      |
-/// | `satinInitialSystemAddress`          | address            | [`SequencerRegistryConfig::initial_system_address`]           |
-/// | `satinInitialSequencer`              | address            | [`SequencerRegistryConfig::initial_sequencer`]                |
-/// | `satinInitialAdmin`                  | address            | [`SequencerRegistryConfig::initial_admin`]                    |
-/// | `satinMinRotationDelay`              | integer            | [`SequencerRegistryConfig::min_rotation_delay`]               |
+/// The key sits at the top level of the genesis file's `config` object, beside the other forks'
+/// keys, camelCase:
 ///
-/// Each key is the `satin` prefix before the field's key in the JSON of its params type, so the
-/// flat names follow the type's own serde names. An integer is a JSON number that fits in 64
-/// unsigned bits, `u64::MAX` included, which a writer must emit exactly; an address is a hex
-/// string.
+/// | Key         | Value   | Field                                                  |
+/// | ----------- | ------- | ------------------------------------------------------ |
+/// | `satinTime` | integer | the activation timestamp ([`Self::activation_time`])   |
+///
+/// An integer is a JSON number that fits in 64 unsigned bits, `u64::MAX` included, which a writer
+/// must emit exactly.
 ///
 /// The rules:
 ///
 /// - A configuration with no key starting with `satin` does not activate Satin.
-/// - One that has `satinTime` carries every other key: a key left out is refused, never read as a
-///   default. A `satin` key without `satinTime` is refused too.
-/// - A key starting with `satin`, in any case, that is not in the table is refused, so a misspelled
-///   key cannot stand in for the one it meant. Every other key is another fork's and is not read.
+/// - A key starting with `satin`, in any case, that is not `satinTime` is refused, so a misspelled
+///   key cannot stand in for the one it meant, and a file written against an earlier version of the
+///   format — one that named the registry's roles (`satinInitialSequencer`, ...) or the limits —
+///   does not load. Every other key is another fork's and is not read.
 /// - A key given twice is refused only where the deserializer still shows both copies, as the
 ///   object's text through a `serde_json::Deserializer` does. A `serde_json::Value` has already
 ///   kept the last copy, so a reader that parses the file into one first — `mega-evme --genesis`
 ///   does, and so does a node that serializes its chain-config type — reads the last value and
 ///   refuses nothing.
-/// - A value of the wrong type is refused, naming its key; a value its params type refuses
-///   ([`HardforkParams::validate`](crate::HardforkParams::validate)) is refused, and so is a
-///   schedule [`validate_schedule`](MegaHardforks::validate_schedule) refuses. One object is read
-///   as an integer: `{"$serde_json::private::Number": "<digits>"}`, the form `serde_json` hands a
-///   number over in when its `arbitrary_precision` feature is on. A deserializer shows that form
-///   and the same object written into the file alike, so both are read as the number; every reader
-///   parses here, so every reader reads it the same.
+/// - A value of the wrong type is refused, naming its key, and so is a schedule
+///   [`validate_schedule`](MegaHardforks::validate_schedule) refuses. One object is read as an
+///   integer: `{"$serde_json::private::Number": "<digits>"}`, the form `serde_json` hands a number
+///   over in when its `arbitrary_precision` feature is on. A deserializer shows that form and the
+///   same object written into the file alike, so both are read as the number; every reader parses
+///   here, so every reader reads it the same.
 ///
 /// The parser reads no other fork's key. Satin runs on the OP Karst fork and the Ethereum forks
 /// Karst includes, Osaka among them, and [`hardforks`](Self::hardforks) schedules those at genesis.
@@ -95,30 +83,27 @@ const ARBITRARY_PRECISION_NUMBER: &str = "$serde_json::private::Number";
 /// timing rule [`validate_schedule`](MegaHardforks::validate_schedule) states.
 ///
 /// A flat key is one entry of the object, so a checker that freezes a configuration key by key
-/// freezes each parameter on its own and names it when it changes. It does not stop a key being
-/// added later; a rule that refuses a new key starting with `satin` once the configuration was
-/// first loaded does.
+/// freezes `satinTime` on its own and names it when it changes. It does not stop a key being added
+/// later; a rule that refuses a new key starting with `satin` once the configuration was first
+/// loaded does.
 ///
-/// It serializes to the flat keys it is read from, so a generator that writes a genesis file with
-/// it writes what every reader parses.
+/// It serializes to the key it is read from, so a generator that writes a genesis file with it
+/// writes what every reader parses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SatinChainConfig {
     /// The timestamp Satin activates at.
     pub activation_time: u64,
-    /// The `SequencerRegistry`'s bootstrap roles.
-    pub sequencer_registry: SequencerRegistryConfig,
 }
 
 impl SatinChainConfig {
-    /// Reads the Satin keys of a genesis file's `config` object from `config`, which any
+    /// Reads the Satin key of a genesis file's `config` object from `config`, which any
     /// self-describing deserializer of the object can supply: a `&serde_json::Value`, or the
     /// object's text through a `serde_json::Deserializer`, whose caller checks that the input ends
     /// with the object. A node's own chain-config type supplies one by serializing to a
     /// `serde_json::Value`.
     ///
     /// `Ok(None)` when the configuration does not activate Satin; otherwise the configuration,
-    /// with its params valid and the schedule it makes one
-    /// [`validate_schedule`](MegaHardforks::validate_schedule) accepts.
+    /// whose schedule [`validate_schedule`](MegaHardforks::validate_schedule) accepts.
     ///
     /// # Errors
     ///
@@ -126,32 +111,34 @@ impl SatinChainConfig {
     pub fn from_genesis_config<'de, D: Deserializer<'de>>(
         config: D,
     ) -> Result<Option<Self>, SatinChainConfigError> {
-        let Entries { entries, duplicate } = config
+        let Entries { mut entries, duplicate } = config
             .deserialize_map(EntriesVisitor)
             .map_err(|error| SatinChainConfigError::Malformed(error.to_string()))?;
         if let Some(key) = duplicate {
             return Err(SatinChainConfigError::DuplicateKey(key));
         }
-        let mut keys = Keys::new(entries)?;
-        let Some(activation_time) = keys.optional_u64(SATIN_TIME_KEY)? else {
-            return match keys.first_remaining() {
-                None => Ok(None),
-                Some(_) => Err(SatinChainConfigError::MissingKey(SATIN_TIME_KEY)),
-            };
+        if let Some(unknown) =
+            entries.keys().find(|key| !SATIN_CHAIN_CONFIG_KEYS.contains(&key.as_str()))
+        {
+            return Err(SatinChainConfigError::UnknownKey(unknown.clone()));
+        }
+        let activation_time = match entries.remove(SATIN_TIME_KEY) {
+            None => return Ok(None),
+            Some(Entry::Unsigned(value)) => value,
+            Some(Entry::Other) => {
+                return Err(SatinChainConfigError::InvalidValue {
+                    key: SATIN_TIME_KEY,
+                    expected: "an integer from 0 to 2^64 - 1",
+                })
+            }
         };
-        let sequencer_registry = SequencerRegistryConfig {
-            initial_system_address: keys.address("satinInitialSystemAddress")?,
-            initial_sequencer: keys.address("satinInitialSequencer")?,
-            initial_admin: keys.address("satinInitialAdmin")?,
-            min_rotation_delay: keys.u64("satinMinRotationDelay")?,
-        };
-        let config = Self { activation_time, sequencer_registry };
+        let config = Self { activation_time };
         config.hardforks()?;
         Ok(Some(config))
     }
 
-    /// The hardfork schedule this configuration makes: [`MegaHardforkConfig::new`]'s base forks,
-    /// Satin at [`activation_time`](Self::activation_time), and its params attached.
+    /// The hardfork schedule this configuration makes: [`MegaHardforkConfig::new`]'s base forks
+    /// and Satin at [`activation_time`](Self::activation_time).
     ///
     /// The base forks, every OP and Ethereum fork up to Karst, are at genesis here whatever the
     /// genesis file times them at, so the schedule passes the base-fork check of
@@ -161,51 +148,33 @@ impl SatinChainConfig {
     ///
     /// # Errors
     ///
-    /// A params value its type refuses
-    /// ([`HardforkParams::validate`](crate::HardforkParams::validate)), or a schedule
-    /// [`validate_schedule`](MegaHardforks::validate_schedule) refuses.
+    /// A schedule [`validate_schedule`](MegaHardforks::validate_schedule) refuses.
     pub fn hardforks(&self) -> Result<MegaHardforkConfig, ScheduleError> {
         let schedule = MegaHardforkConfig::new()
-            .with(MegaHardfork::Satin, ForkCondition::Timestamp(self.activation_time))
-            .attach(self.sequencer_registry);
+            .with(MegaHardfork::Satin, ForkCondition::Timestamp(self.activation_time));
         schedule.validate_schedule()?;
         Ok(schedule)
     }
 }
 
 impl Serialize for SatinChainConfig {
-    /// Writes the flat keys, in [`SATIN_CHAIN_CONFIG_KEYS`] order.
+    /// Writes the key, [`SATIN_TIME_KEY`].
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let Self { activation_time, sequencer_registry } = self;
-        let SequencerRegistryConfig {
-            initial_system_address,
-            initial_sequencer,
-            initial_admin,
-            min_rotation_delay,
-        } = sequencer_registry;
-        let [time, system_address, sequencer, admin, rotation_delay] = SATIN_CHAIN_CONFIG_KEYS;
         let mut map = serializer.serialize_map(Some(SATIN_CHAIN_CONFIG_KEYS.len()))?;
-        map.serialize_entry(time, activation_time)?;
-        map.serialize_entry(system_address, initial_system_address)?;
-        map.serialize_entry(sequencer, initial_sequencer)?;
-        map.serialize_entry(admin, initial_admin)?;
-        map.serialize_entry(rotation_delay, min_rotation_delay)?;
+        map.serialize_entry(SATIN_TIME_KEY, &self.activation_time)?;
         map.end()
     }
 }
 
-/// Why a chain configuration's Satin keys cannot be read.
+/// Why a chain configuration's Satin key cannot be read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SatinChainConfigError {
     /// The configuration is not an object with string keys.
     Malformed(String),
-    /// A key that starts with `satin` but is none of the Satin keys.
+    /// A key that starts with `satin` but is not `satinTime`.
     UnknownKey(String),
     /// A key that starts with `satin`, given twice.
     DuplicateKey(String),
-    /// A key the configuration must carry: every Satin key once `satinTime` is there, and
-    /// `satinTime` once any other is.
-    MissingKey(&'static str),
     /// A key whose value is not of its type.
     InvalidValue {
         /// The key.
@@ -213,7 +182,7 @@ pub enum SatinChainConfigError {
         /// What its value must be.
         expected: &'static str,
     },
-    /// Values the params types or the schedule refuse.
+    /// A schedule [`validate_schedule`](MegaHardforks::validate_schedule) refuses.
     Schedule(ScheduleError),
 }
 
@@ -225,7 +194,6 @@ impl fmt::Display for SatinChainConfigError {
             }
             Self::UnknownKey(key) => write!(f, "`{key}` is not a Satin chain-configuration key"),
             Self::DuplicateKey(key) => write!(f, "`{key}` is given twice"),
-            Self::MissingKey(key) => write!(f, "the chain configuration lacks `{key}`"),
             Self::InvalidValue { key, expected } => write!(f, "`{key}` must be {expected}"),
             Self::Schedule(error) => write!(f, "{error}"),
         }
@@ -240,12 +208,11 @@ impl From<ScheduleError> for SatinChainConfigError {
     }
 }
 
-/// The value of a key, as far as reading the Satin keys needs it: an unsigned integer, a string,
-/// or anything else.
+/// The value of a key, as far as reading the Satin key needs it: an unsigned integer, or anything
+/// else.
 #[derive(Debug)]
 enum Entry {
     Unsigned(u64),
-    Text(String),
     Other,
 }
 
@@ -329,8 +296,8 @@ impl<'de> Visitor<'de> for EntryVisitor {
         Ok(Entry::Other)
     }
 
-    fn visit_str<E: de::Error>(self, value: &str) -> Result<Entry, E> {
-        Ok(Entry::Text(value.to_owned()))
+    fn visit_str<E: de::Error>(self, _: &str) -> Result<Entry, E> {
+        Ok(Entry::Other)
     }
 
     fn visit_unit<E: de::Error>(self) -> Result<Entry, E> {
@@ -373,82 +340,45 @@ impl<'de> Visitor<'de> for EntryVisitor {
     }
 }
 
-/// The Satin entries of a configuration, taken one key at a time.
-struct Keys(BTreeMap<String, Entry>);
-
-impl Keys {
-    /// The entries, once every one of them is known to be a Satin key.
-    fn new(entries: BTreeMap<String, Entry>) -> Result<Self, SatinChainConfigError> {
-        match entries.keys().find(|key| !SATIN_CHAIN_CONFIG_KEYS.contains(&key.as_str())) {
-            Some(unknown) => Err(SatinChainConfigError::UnknownKey(unknown.clone())),
-            None => Ok(Self(entries)),
-        }
-    }
-
-    /// The first key not taken yet.
-    fn first_remaining(&self) -> Option<&String> {
-        self.0.keys().next()
-    }
-
-    /// The integer at `key`, which may be absent.
-    fn optional_u64(&mut self, key: &'static str) -> Result<Option<u64>, SatinChainConfigError> {
-        match self.0.remove(key) {
-            None => Ok(None),
-            Some(Entry::Unsigned(value)) => Ok(Some(value)),
-            Some(_) => Err(SatinChainConfigError::InvalidValue {
-                key,
-                expected: "an integer from 0 to 2^64 - 1",
-            }),
-        }
-    }
-
-    /// The integer at `key`.
-    fn u64(&mut self, key: &'static str) -> Result<u64, SatinChainConfigError> {
-        self.optional_u64(key)?.ok_or(SatinChainConfigError::MissingKey(key))
-    }
-
-    /// The address at `key`: a hex string of twenty bytes.
-    fn address(&mut self, key: &'static str) -> Result<Address, SatinChainConfigError> {
-        let invalid = SatinChainConfigError::InvalidValue { key, expected: "a hex address" };
-        match self.0.remove(key) {
-            None => Err(SatinChainConfigError::MissingKey(key)),
-            Some(Entry::Text(text)) => Address::from_str(&text).map_err(|_| invalid),
-            Some(_) => Err(invalid),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::MegaSpecId;
-    use alloy_primitives::address;
     use serde_json::{json, Value};
 
     const ACTIVATION: u64 = 1_800_000_000;
 
-    /// A configuration whose every value differs from the others', so a key read into the wrong
-    /// field shows.
     fn config() -> SatinChainConfig {
-        SatinChainConfig {
-            activation_time: ACTIVATION,
-            sequencer_registry: SequencerRegistryConfig {
-                initial_system_address: address!("0x1111111111111111111111111111111111111111"),
-                initial_sequencer: address!("0x2222222222222222222222222222222222222222"),
-                initial_admin: address!("0x3333333333333333333333333333333333333333"),
-                min_rotation_delay: 5,
-            },
-        }
+        SatinChainConfig { activation_time: ACTIVATION }
     }
 
-    /// A genesis `config` object carrying [`config`] among other forks' keys.
+    /// The keys of the configuration format's earlier versions: the `SequencerRegistry`'s roles and
+    /// rotation delay, `_initialFromBlock`, and the limits.
+    const OLD_KEYS: [&str; 10] = [
+        "satinInitialSystemAddress",
+        "satinInitialSequencer",
+        "satinInitialAdmin",
+        "satinMinRotationDelay",
+        "satinInitialFromBlock",
+        "satinTxDataSizeLimit",
+        "satinFrameDataSizeLimit",
+        "satinBlockEnvAccessComputeGasLimit",
+        "satinOracleAccessComputeGasLimit",
+        "satinBlockTxsDataLimit",
+    ];
+
+    /// A mainnet-shaped genesis `config` object carrying [`config`] among other forks' keys, the
+    /// legacy forks' registry keys included.
     fn genesis_config() -> Value {
         let mut object = json!({
-            "chainId": 6342,
+            "chainId": 4326,
             "homesteadBlock": 0,
             "shanghaiTime": 0,
-            "rex6Time": 0,
+            "rex5Time": 1_760_000_000,
+            "rex6Time": 1_770_000_000,
             "rex5InitialSequencer": "0x4444444444444444444444444444444444444444",
+            "rex5InitialAdmin": "0x5555555555555555555555555555555555555555",
+            "rex6MinRotationDelay": 100,
             "optimism": { "eip1559Elasticity": 6, "eip1559Denominator": 50 },
             "blobSchedule": { "cancun": { "target": 3, "max": 6 } },
             "terminalTotalDifficultyPassed": true,
@@ -463,25 +393,13 @@ mod tests {
         SatinChainConfig::from_genesis_config(config)
     }
 
-    /// The keys a configuration writes, in order, and what reading them back gives: the same
-    /// configuration, from a `serde_json::Value` and from the object's text alike.
+    /// The configuration writes `satinTime` alone, and reading it back gives the same
+    /// configuration, from a `serde_json::Value` and from the object's text alike, with the legacy
+    /// forks' keys beside it read by nobody here.
     #[test]
-    fn test_the_keys_round_trip() {
-        let json = serde_json::to_string(&config()).unwrap();
-        assert_eq!(
-            json,
-            r#"{"satinTime":1800000000,"satinInitialSystemAddress":"0x1111111111111111111111111111111111111111","satinInitialSequencer":"0x2222222222222222222222222222222222222222","satinInitialAdmin":"0x3333333333333333333333333333333333333333","satinMinRotationDelay":5}"#
-        );
-        let mut written: Vec<String> =
-            serde_json::from_str::<serde_json::Map<String, Value>>(&json)
-                .unwrap()
-                .keys()
-                .cloned()
-                .collect();
-        written.sort();
-        let mut sorted = SATIN_CHAIN_CONFIG_KEYS.map(String::from).to_vec();
-        sorted.sort();
-        assert_eq!(written, sorted, "every key, once");
+    fn test_the_key_round_trips() {
+        assert_eq!(serde_json::to_string(&config()).unwrap(), r#"{"satinTime":1800000000}"#);
+        assert_eq!(SATIN_CHAIN_CONFIG_KEYS, [SATIN_TIME_KEY]);
 
         assert_eq!(parse(&genesis_config()), Ok(Some(config())));
         let text = genesis_config().to_string();
@@ -491,84 +409,58 @@ mod tests {
         );
     }
 
-    /// Each flat key is `satin` before the key its field has in its params type's own JSON, so the
-    /// two cannot name a field differently, and a field added to a params type fails this until the
-    /// module reads it.
+    /// The schedule the configuration makes runs Satin from its activation and passes the
+    /// schedule's own check.
     #[test]
-    fn test_the_keys_follow_the_params_types_own_names() {
-        fn leaves(value: &Value, out: &mut Vec<String>) {
-            for (key, value) in value.as_object().unwrap() {
-                match value {
-                    Value::Object(_) => leaves(value, out),
-                    _ => out.push(key.clone()),
-                }
-            }
-        }
-        let mut names = Vec::new();
-        leaves(&serde_json::to_value(config().sequencer_registry).unwrap(), &mut names);
-        let mut flat: Vec<String> = names
-            .iter()
-            .map(|name| format!("{PREFIX}{}{}", name[..1].to_uppercase(), &name[1..]))
-            .collect();
-        flat.push(SATIN_TIME_KEY.into());
-        flat.sort();
-        let mut keys = SATIN_CHAIN_CONFIG_KEYS.map(String::from).to_vec();
-        keys.sort();
-        assert_eq!(flat, keys);
-    }
-
-    /// The schedule the configuration makes runs Satin from its activation, with its params
-    /// attached, and passes the schedule's own check.
-    #[test]
-    fn test_the_schedule_activates_satin_with_its_params() {
+    fn test_the_schedule_activates_satin() {
         let schedule = config().hardforks().unwrap();
         assert_eq!(schedule.spec_id(ACTIVATION - 1), None);
         assert_eq!(schedule.spec_id(ACTIVATION), Some(MegaSpecId::SATIN));
-        assert_eq!(
-            schedule.fork_params::<SequencerRegistryConfig>(),
-            Some(&config().sequencer_registry)
-        );
         assert_eq!(schedule.validate_schedule(), Ok(()));
     }
 
-    /// A configuration without a Satin key does not activate Satin; one with a Satin key but not
-    /// `satinTime` is refused.
+    /// A configuration without a Satin key does not activate Satin. One whose only Satin key is
+    /// not `satinTime` is refused for that key.
     #[test]
     fn test_without_satin_time() {
         let mut other_forks = genesis_config();
-        other_forks.as_object_mut().unwrap().retain(|key, _| !key.starts_with(PREFIX));
+        other_forks.as_object_mut().unwrap().remove(SATIN_TIME_KEY);
         assert_eq!(parse(&other_forks), Ok(None));
         assert_eq!(parse(&json!({})), Ok(None));
 
-        let mut without_time = genesis_config();
-        without_time.as_object_mut().unwrap().remove(SATIN_TIME_KEY);
-        assert_eq!(parse(&without_time), Err(SatinChainConfigError::MissingKey(SATIN_TIME_KEY)));
+        let mut without_time = other_forks;
+        without_time.as_object_mut().unwrap().insert("satinInitialSequencer".into(), json!("0x22"));
+        assert_eq!(
+            parse(&without_time),
+            Err(SatinChainConfigError::UnknownKey("satinInitialSequencer".into()))
+        );
     }
 
-    /// Every key but `satinTime`, left out, is refused by name rather than read as a default.
+    /// Every key of the format's earlier versions is refused by name, beside `satinTime` or
+    /// without it, whatever its value: a file written against one does not load.
     #[test]
-    fn test_a_missing_key_is_refused() {
-        for key in &SATIN_CHAIN_CONFIG_KEYS[1..] {
-            let mut config = genesis_config();
-            config.as_object_mut().unwrap().remove(*key);
-            assert_eq!(parse(&config), Err(SatinChainConfigError::MissingKey(key)), "{key}");
+    fn test_the_old_keys_are_refused() {
+        for key in OLD_KEYS {
+            for with_time in [true, false] {
+                let mut config = genesis_config();
+                if !with_time {
+                    config.as_object_mut().unwrap().remove(SATIN_TIME_KEY);
+                }
+                config.as_object_mut().unwrap().insert(key.into(), json!(1));
+                assert_eq!(
+                    parse(&config),
+                    Err(SatinChainConfigError::UnknownKey(key.into())),
+                    "{key}, satinTime given: {with_time}"
+                );
+            }
         }
     }
 
-    /// A key that starts with `satin`, in any case, and is not one of the keys is refused, so a
+    /// A key that starts with `satin`, in any case, and is not `satinTime` is refused, so a
     /// misspelling cannot stand in for the key it meant; a key that does not is another fork's.
-    /// The keys of the provisional format's earlier version are refused the same way: the limits
-    /// are the spec's and `_initialFromBlock` the creating block's number, and a file that still
-    /// names one does not load.
     #[test]
     fn test_an_unknown_satin_key_is_refused() {
         for unknown in [
-            "satinInitialFromBlock",
-            "satinTxDataSizeLimit",
-            "satinFrameDataSizeLimit",
-            "satinBlockEnvAccessComputeGasLimit",
-            "satinOracleAccessComputeGasLimit",
-            "satinBlockTxsDataLimit",
             "satinTxDataSizeLimt",
             "SatinTime",
             "SATINTIME",
@@ -594,71 +486,43 @@ mod tests {
         assert_eq!(parse(&config), Ok(Some(super::tests::config())), "another fork's keys");
     }
 
-    /// A value of the wrong type is refused, naming its key.
+    /// A `satinTime` that is not an integer from 0 to 2^64 - 1 is refused, naming the key; both
+    /// ends of the range are read.
     #[test]
-    fn test_a_value_of_the_wrong_type_is_refused() {
-        let integer = "an integer from 0 to 2^64 - 1";
-        let address = "a hex address";
-        let cases: [(&str, Value, &str); 13] = [
-            ("satinTime", json!("1800000000"), integer),
-            ("satinTime", json!(-1), integer),
-            ("satinTime", json!(1.5), integer),
-            ("satinMinRotationDelay", json!(1e20), integer),
-            ("satinMinRotationDelay", json!(null), integer),
-            ("satinMinRotationDelay", json!(true), integer),
-            ("satinMinRotationDelay", json!([1]), integer),
-            ("satinMinRotationDelay", json!({ "value": 1 }), integer),
-            ("satinMinRotationDelay", json!("0x4"), integer),
-            ("satinInitialAdmin", json!(3), address),
-            ("satinInitialAdmin", json!("0x33"), address),
-            ("satinInitialAdmin", json!("0xzz33333333333333333333333333333333333333"), address),
-            ("satinInitialAdmin", json!(null), address),
-        ];
-        for (key, value, expected) in cases {
+    fn test_a_value_out_of_range_or_of_the_wrong_type_is_refused() {
+        let with_time = |value: Value| {
             let mut config = genesis_config();
-            config.as_object_mut().unwrap().insert(key.into(), value.clone());
-            let key = *SATIN_CHAIN_CONFIG_KEYS.iter().find(|known| **known == key).unwrap();
-            assert_eq!(
-                parse(&config),
-                Err(SatinChainConfigError::InvalidValue { key, expected }),
-                "{key}: {value}"
-            );
-        }
-    }
-
-    /// Values the params types refuse are refused, with the message their check gives.
-    #[test]
-    fn test_a_value_the_params_refuse_is_refused() {
-        let refused = |key: &str, value: Value| {
-            let mut config = genesis_config();
-            config.as_object_mut().unwrap().insert(key.into(), value);
-            match parse(&config) {
-                Err(SatinChainConfigError::Schedule(ScheduleError::InvalidParams {
-                    params,
-                    message,
-                    ..
-                })) => (params, message),
-                other => panic!("{key}: {other:?}"),
-            }
+            config.as_object_mut().unwrap().insert(SATIN_TIME_KEY.into(), value);
+            parse(&config)
         };
-        let zero = Address::ZERO.to_string();
+        assert_eq!(with_time(json!(0)).unwrap().unwrap().activation_time, 0);
+        assert_eq!(with_time(json!(u64::MAX)).unwrap().unwrap().activation_time, u64::MAX);
+        let refused = Err(SatinChainConfigError::InvalidValue {
+            key: SATIN_TIME_KEY,
+            expected: "an integer from 0 to 2^64 - 1",
+        });
+        let text = genesis_config().to_string();
+        let past_max = text.replacen("1800000000", "18446744073709551616", 1);
         assert_eq!(
-            refused("satinInitialSequencer", json!(zero)),
-            (
-                "SequencerRegistryConfig",
-                "SequencerRegistryConfig.initial_sequencer must not be zero".into()
-            )
+            SatinChainConfig::from_genesis_config(&mut serde_json::Deserializer::from_str(
+                &past_max
+            )),
+            refused,
+            "2^64"
         );
-        assert_eq!(refused("satinMinRotationDelay", json!(0)).0, "SequencerRegistryConfig");
-
-        let invalid = SatinChainConfig {
-            sequencer_registry: SequencerRegistryConfig {
-                min_rotation_delay: 0,
-                ..config().sequencer_registry
-            },
-            ..config()
-        };
-        assert!(matches!(invalid.hardforks(), Err(ScheduleError::InvalidParams { .. })));
+        for value in [
+            json!("1800000000"),
+            json!(-1),
+            json!(1.5),
+            json!(1e20),
+            json!(null),
+            json!(true),
+            json!([1]),
+            json!({ "value": 1 }),
+            json!("0x4"),
+        ] {
+            assert_eq!(with_time(value.clone()), refused, "{value}");
+        }
     }
 
     /// A key given twice is refused where the deserializer shows both, as in the object's text; a
@@ -738,10 +602,6 @@ mod tests {
     /// The errors read as what went wrong, naming the key.
     #[test]
     fn test_the_errors_name_the_key() {
-        assert_eq!(
-            SatinChainConfigError::MissingKey("satinMinRotationDelay").to_string(),
-            "the chain configuration lacks `satinMinRotationDelay`"
-        );
         assert_eq!(
             SatinChainConfigError::UnknownKey("satinTme".into()).to_string(),
             "`satinTme` is not a Satin chain-configuration key"

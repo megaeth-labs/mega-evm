@@ -1,12 +1,13 @@
 //! The `SequencerRegistry`'s role changes, applied before a block's transactions, and the live
 //! system address read out of it.
 //!
-//! The registry is deployed before every block. After the deploy, the executor reads whether a
-//! role change is due in the block and, when one is, makes the `applyPendingChanges()` system
-//! call. Each step's state reaches the pre-block observer before it is committed. The executor
-//! does not read the system address: a transaction of the system shape reads it out of the
-//! registry when it is validated, so every EVM — the block's, or one a node builds outside block
-//! execution — promotes the address the state names.
+//! The registry the legacy forks left is read before every block by the deploy step, which refuses
+//! a block without it. After that step, the executor reads whether a role change is due in the
+//! block and, when one is, makes the `applyPendingChanges()` system call. Each step's state reaches
+//! the pre-block observer before it is committed. The executor does not read the system address: a
+//! transaction of the system shape reads it out of the registry when it is validated, so every EVM
+//! — the block's, or one a node builds outside block execution — promotes the address the state
+//! names.
 
 use alloy_consensus::{transaction::Recovered, Sealed, Signed, TxEip1559};
 use alloy_evm::{block::BlockExecutor, EvmEnv, EvmFactory, ToTxEnv};
@@ -16,15 +17,14 @@ use alloy_sol_types::{SolCall, SolValue};
 use mega_evm::{
     system::{
         storage_slots::{
-            ADMIN, CURRENT_SEQUENCER, CURRENT_SYSTEM_ADDRESS, MIN_ROTATION_DELAY, PENDING_ADMIN,
-            PENDING_SEQUENCER, PENDING_SYSTEM_ADDRESS, SEQUENCER_ACTIVATION_BLOCK,
-            SYSTEM_ADDRESS_ACTIVATION_BLOCK,
+            ADMIN, CURRENT_SEQUENCER, CURRENT_SYSTEM_ADDRESS, PENDING_ADMIN, PENDING_SEQUENCER,
+            PENDING_SYSTEM_ADDRESS, SEQUENCER_ACTIVATION_BLOCK, SYSTEM_ADDRESS_ACTIVATION_BLOCK,
         },
-        IOracle, ISequencerRegistry, SequencerRegistryConfig, MEGA_SYSTEM_ADDRESS,
-        ORACLE_CONTRACT_ADDRESS, SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE,
-        SEQUENCER_REGISTRY_CODE_HASH, SYSTEM_ADDRESS_WITHOUT_SYSTEM_SHAPE,
+        IOracle, ISequencerRegistry, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
+        SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE_HASH,
+        SYSTEM_ADDRESS_WITHOUT_SYSTEM_SHAPE,
     },
-    test_utils::MemoryDatabase,
+    test_utils::{MemoryDatabase, SequencerRegistryRoles},
     BlockLimits, ExternalEnvFactory, MegaBlockExecutionCtx, MegaBlockExecutor, MegaContext,
     MegaEvm, MegaEvmFactory, MegaHardforkConfig, MegaTxEnvelope, PreBlockStateSource,
     TestExternalEnvs, MIN_BUCKET_SIZE,
@@ -64,21 +64,10 @@ type Executor<'a> = MegaBlockExecutor<
     MegaHardforkConfig,
 >;
 
-/// A database holding a deployed registry with `slots` on top of the bootstrap roles, and the
-/// accounts the tests' transactions come from.
+/// A database holding the registry with `slots` on top of its roles, and the accounts the tests'
+/// transactions come from.
 fn registry_with(slots: &[(U256, U256)]) -> MemoryDatabase {
     let mut db = common::database();
-    db.set_account_code(SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE);
-    db.set_account_storage(
-        SEQUENCER_REGISTRY_ADDRESS,
-        CURRENT_SYSTEM_ADDRESS,
-        common::word(MEGA_SYSTEM_ADDRESS),
-    );
-    db.set_account_storage(
-        SEQUENCER_REGISTRY_ADDRESS,
-        CURRENT_SEQUENCER,
-        common::word(common::SEQUENCER),
-    );
     for &(slot, value) in slots {
         db.set_account_storage(SEQUENCER_REGISTRY_ADDRESS, slot, value);
     }
@@ -131,8 +120,8 @@ fn executor_on(
     MegaBlockExecutor::new(evm, ctx, spec, OpAlloyReceiptBuilder::default())
 }
 
-/// The registry's own steps the observer received, in order: the deploy of it, the read of its
-/// pending changes and the call that applies them.
+/// The registry's own steps the observer received, in order: the deploy step's read of it, the
+/// read of its pending changes and the call that applies them.
 fn registry_steps(log: &PreBlockLog) -> Vec<(PreBlockStateSource, EvmState)> {
     pre_block_states(log)
         .into_iter()
@@ -195,26 +184,23 @@ fn test_a_due_change_is_applied_under_a_crowded_bucket() {
 }
 
 /// A block with nothing due makes no call: the observer receives the read that found nothing
-/// due, both pending slots and nothing else, read-only. On the chain's first block that read
-/// finds the registry the deploy before it just created.
+/// due, both pending slots and nothing else, read-only.
 #[test]
 fn test_a_block_with_nothing_due_makes_no_call() {
-    for db in [common::database(), registry_with(&[])] {
-        let mut state = State::builder().with_database(db).build();
-        let steps = start_block(&mut state, envs_at(1), common::BLOCK_GAS_LIMIT);
-        assert_eq!(
-            sources(&steps),
-            [
-                PreBlockStateSource::SystemContract(SEQUENCER_REGISTRY_ADDRESS),
-                PreBlockStateSource::PendingChanges,
-            ]
-        );
-        let registry = &steps[1].1[&SEQUENCER_REGISTRY_ADDRESS];
-        assert!(!registry.is_touched(), "a read-only entry");
-        assert_eq!(registry.storage.len(), 2);
-        assert!(registry.storage.contains_key(&PENDING_SYSTEM_ADDRESS));
-        assert!(registry.storage.contains_key(&PENDING_SEQUENCER));
-    }
+    let mut state = State::builder().with_database(registry_with(&[])).build();
+    let steps = start_block(&mut state, envs_at(1), common::BLOCK_GAS_LIMIT);
+    assert_eq!(
+        sources(&steps),
+        [
+            PreBlockStateSource::SystemContract(SEQUENCER_REGISTRY_ADDRESS),
+            PreBlockStateSource::PendingChanges,
+        ]
+    );
+    let registry = &steps[1].1[&SEQUENCER_REGISTRY_ADDRESS];
+    assert!(!registry.is_touched(), "a read-only entry");
+    assert_eq!(registry.storage.len(), 2);
+    assert!(registry.storage.contains_key(&PENDING_SYSTEM_ADDRESS));
+    assert!(registry.storage.contains_key(&PENDING_SEQUENCER));
 }
 
 /// A change scheduled for a later block is left pending: nothing is due, and no call is made.
@@ -242,20 +228,12 @@ fn test_a_due_sequencer_change_is_applied() {
     assert_eq!(slot(&mut state, CURRENT_SYSTEM_ADDRESS), common::word(MEGA_SYSTEM_ADDRESS));
 }
 
-/// The system address a chain's schedule seeds the registry with, distinct from
-/// [`MEGA_SYSTEM_ADDRESS`], so a test can tell the one read out of the registry from the default.
-const GENESIS_SYSTEM_ADDRESS: Address = address!("0x5000000000000000000000000000000000000005");
+/// A system address a chain's registry names, distinct from [`MEGA_SYSTEM_ADDRESS`], so a test can
+/// tell the one read out of the registry from the default.
+const CHAIN_SYSTEM_ADDRESS: Address = address!("0x5000000000000000000000000000000000000005");
 
 /// The admin a handoff moves the registry to.
 const NEXT_ADMIN: Address = address!("0x6000000000000000000000000000000000000006");
-
-/// A Satin-at-genesis schedule whose registry is seeded with [`GENESIS_SYSTEM_ADDRESS`].
-fn chain_seeding_genesis_system_address() -> MegaHardforkConfig {
-    common::chain_spec().with_params(SequencerRegistryConfig {
-        initial_system_address: GENESIS_SYSTEM_ADDRESS,
-        ..common::registry_config()
-    })
-}
 
 /// A gas limit for a call carrying `input_len` bytes to the Oracle or the registry: 1,000,000 of
 /// regular gas on top of the account the engine creates for a system-address caller, up to four
@@ -325,53 +303,6 @@ fn assert_carries_the_system_address_read(state: &EvmState, system_address: Addr
     assert_eq!(slot.present_value(), common::word(system_address));
 }
 
-/// A fresh chain's first block deploys the registry seeded with the system address its schedule
-/// names, and that address is the system address from the block's first transaction: the
-/// registry's, not the engine's default. No pre-block step reads it; the system-address
-/// transaction does, and its state carries the read.
-#[test]
-fn test_the_bootstrap_block_promotes_the_seeded_system_address() {
-    let mut state = common::state();
-    let mut executor = executor_on(
-        &mut state,
-        envs_at(1),
-        common::BLOCK_GAS_LIMIT,
-        chain_seeding_genesis_system_address(),
-    );
-    let log = common::record_pre_block(&mut executor);
-    executor.apply_pre_execution_changes().expect("the block starts");
-    let sources = sources(&registry_steps(&log));
-    assert_eq!(
-        sources,
-        [
-            PreBlockStateSource::SystemContract(SEQUENCER_REGISTRY_ADDRESS),
-            PreBlockStateSource::PendingChanges,
-        ]
-    );
-    let outcome = assert_is_the_system_address(&mut executor, GENESIS_SYSTEM_ADDRESS);
-    assert_carries_the_system_address_read(&outcome.inner.state, GENESIS_SYSTEM_ADDRESS);
-    assert_is_not_the_system_address(&mut executor, MEGA_SYSTEM_ADDRESS);
-    drop(executor);
-
-    // The registry is the one this engine ships, seeded with the schedule's roles and delay.
-    assert_eq!(
-        state.basic(SEQUENCER_REGISTRY_ADDRESS).unwrap().unwrap().code_hash,
-        SEQUENCER_REGISTRY_CODE_HASH,
-    );
-    assert_eq!(slot(&mut state, CURRENT_SYSTEM_ADDRESS), common::word(GENESIS_SYSTEM_ADDRESS));
-    assert_eq!(
-        slot(&mut state, MIN_ROTATION_DELAY),
-        U256::from(common::registry_config().min_rotation_delay)
-    );
-    assert_eq!(slot(&mut state, CURRENT_SEQUENCER), common::word(common::SEQUENCER));
-
-    // The default schedule seeds the engine's default address, and it is the system address.
-    let mut state = common::state();
-    let mut default = self::executor(&mut state, envs_at(1), common::BLOCK_GAS_LIMIT);
-    default.apply_pre_execution_changes().expect("the block starts");
-    assert_is_the_system_address(&mut default, MEGA_SYSTEM_ADDRESS);
-}
-
 /// Once the registry is in place, no pre-block step carries the system address's slot: the
 /// deploy leaves the registry as a read-only entry without storage, and the read of the pending
 /// changes reads the pending slots alone. The slot is in the system-address transaction's own
@@ -400,15 +331,14 @@ fn test_the_slot_is_in_the_system_transactions_state_not_the_pre_block_witness()
 /// system address, it is an ordinary transaction.
 #[test]
 fn test_system_tx_uses_resolved_system_address() {
-    let mut state = common::state();
-    let mut executor = executor_on(
-        &mut state,
-        envs_at(1),
-        common::BLOCK_GAS_LIMIT,
-        chain_seeding_genesis_system_address(),
-    );
+    let roles =
+        SequencerRegistryRoles { system_address: CHAIN_SYSTEM_ADDRESS, ..common::registry_roles() };
+    let mut state =
+        State::builder().with_database(common::database().sequencer_registry(roles)).build();
+    let mut executor = executor(&mut state, envs_at(1), common::BLOCK_GAS_LIMIT);
     executor.apply_pre_execution_changes().expect("the block starts");
-    assert_is_the_system_address(&mut executor, GENESIS_SYSTEM_ADDRESS);
+    let outcome = assert_is_the_system_address(&mut executor, CHAIN_SYSTEM_ADDRESS);
+    assert_carries_the_system_address_read(&outcome.inner.state, CHAIN_SYSTEM_ADDRESS);
     assert_is_not_the_system_address(&mut executor, MEGA_SYSTEM_ADDRESS);
 }
 
@@ -648,7 +578,7 @@ fn test_dual_change_in_same_block() {
 /// next one accepts, and the registry's admin slot moves while the pending one is cleared.
 #[test]
 fn test_admin_handoff_via_block_executor() {
-    let mut db = registry_with(&[(ADMIN, common::word(common::ADMIN))]);
+    let mut db = registry_with(&[]);
     db.set_account_balance(common::ADMIN, U256::from(10_u64.pow(18)));
     db.set_account_balance(NEXT_ADMIN, U256::from(10_u64.pow(18)));
     let mut state = State::builder().with_database(db).build();
@@ -761,7 +691,7 @@ fn schedule(
     succeeded
 }
 
-/// A state whose registry the first block deploys, with a funded admin.
+/// A state holding the registry, with a funded admin.
 fn state_with_funded_admin() -> State<MemoryDatabase> {
     let mut db = common::database();
     db.set_account_balance(common::ADMIN, U256::from(10_u64.pow(18)));
@@ -774,7 +704,7 @@ fn state_with_funded_admin() -> State<MemoryDatabase> {
 #[test]
 fn test_a_rotation_with_a_valid_proof_activates_at_its_block() {
     let (next, secret) = next_sequencer_key();
-    let activation = BLOCK_NUMBER + common::registry_config().min_rotation_delay;
+    let activation = BLOCK_NUMBER + common::registry_roles().min_rotation_delay;
     let mut state = state_with_funded_admin();
 
     let proof = rotation_proof(secret, next, U256::from(activation));
@@ -793,13 +723,13 @@ fn test_a_rotation_with_a_valid_proof_activates_at_its_block() {
 /// A sequencer rotation scheduled in one block takes effect at its activation block and stays
 /// in force in the block after it.
 ///
-/// The block before the activation block still names the sequencer the registry was seeded with,
-/// and the change is still pending. The activation block applies it and clears the pending
+/// The block before the activation block still names the sequencer the registry held, and the
+/// change is still pending. The activation block applies it and clears the pending
 /// change. The next block names the new sequencer and applies nothing again.
 #[test]
 fn test_a_sequencer_rotation_takes_effect_across_blocks() {
     let (next, secret) = next_sequencer_key();
-    let activation = BLOCK_NUMBER + common::registry_config().min_rotation_delay;
+    let activation = BLOCK_NUMBER + common::registry_roles().min_rotation_delay;
     let mut state = state_with_funded_admin();
 
     let proof = rotation_proof(secret, next, U256::from(activation));
@@ -827,7 +757,7 @@ fn test_a_sequencer_rotation_takes_effect_across_blocks() {
 #[test]
 fn test_a_schedule_without_a_proof_reverts() {
     let (next, _) = next_sequencer_key();
-    let activation = BLOCK_NUMBER + common::registry_config().min_rotation_delay;
+    let activation = BLOCK_NUMBER + common::registry_roles().min_rotation_delay;
     let mut state = state_with_funded_admin();
 
     assert!(!schedule(&mut state, next, activation, Bytes::new()), "the call reverts");
@@ -897,7 +827,7 @@ fn test_a_non_fatal_error_on_the_due_read_is_an_internal_error() {
         )
         .apply_pre_execution_changes()
     }
-    let chain = || common::database().sequencer_registry(MEGA_SYSTEM_ADDRESS);
+    let chain = common::database;
 
     start(chain()).expect("the chain starts when the pending slot is served");
 

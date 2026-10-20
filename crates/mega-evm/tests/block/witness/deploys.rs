@@ -69,22 +69,30 @@ fn deploy_state(run: &Run, address: Address) -> &Account {
     &state[&address]
 }
 
-/// The first Satin block over a chain without the contracts: every deploy asks about an absent
-/// account, which the record holds as absent, and creates it; a validator given those absences
-/// deploys the same code.
+/// The first Satin block over a chain holding none of the contracts but the `SequencerRegistry`
+/// the legacy forks left: every other deploy asks about an absent account, which the record holds
+/// as absent, and creates it; a validator given those absences deploys the same code. The
+/// registry's step reads the account the chain holds and creates nothing.
 ///
 /// The deploy states carry the code the deploys wrote, and the witness built from them carries
 /// none of it: the chain held no code for those accounts before the block, and a state's code is
 /// not the chain's.
 ///
-/// Rule [S22.4]. Expected values `independent`: the absent accounts are the test's own empty chain.
+/// Rule [S22.4]. Expected values `independent`: the absent accounts are the test's own chain.
 #[test]
 fn test_the_first_block_deploys_from_absent_accounts() {
     let case = || Case::new("first block", common::database());
     let replay = case().run();
     let run = &replay.recorded;
     let witness = case().channel_witness(run);
-    for spec in system_contract_specs(&common::registry_config(), common::BLOCK_NUMBER) {
+    let (registry, created): (Vec<_>, Vec<_>) =
+        system_contract_specs().into_iter().partition(|spec| spec.require_deployed);
+    assert_eq!(registry.len(), 1);
+    assert_eq!(registry[0].address, SEQUENCER_REGISTRY_ADDRESS);
+    let held = run.record.accounts.get(&SEQUENCER_REGISTRY_ADDRESS).expect("read");
+    assert_eq!(held.as_ref().map(|info| info.code_hash), Some(registry[0].code_hash));
+    assert!(!deploy_state(run, SEQUENCER_REGISTRY_ADDRESS).is_created(), "the registry is read");
+    for spec in created {
         assert_eq!(run.record.accounts.get(&spec.address), Some(&None), "{}", spec.address);
         let state = deploy_state(run, spec.address);
         assert!(state.is_created(), "{} was created", spec.address);
@@ -118,7 +126,7 @@ fn test_a_later_block_reads_the_deployed_contracts() {
     let run = &replay.recorded;
     let witness = case().channel_witness(run);
     let held: BTreeMap<Address, Bytes> = contracts().into_iter().collect();
-    for spec in system_contract_specs(&common::registry_config(), common::BLOCK_NUMBER) {
+    for spec in system_contract_specs() {
         let code = &held[&spec.address];
         let hash = keccak256(code);
         let info = run.record.accounts.get(&spec.address).expect("read").as_ref().expect("held");

@@ -1,44 +1,26 @@
-//! The system-contract deploy helper: the spec list, a fresh deploy, the idempotent read, and
-//! foreign code.
+//! The system-contract deploy helper: the spec list, a fresh deploy, the idempotent read, the
+//! `SequencerRegistry` it requires, and foreign code.
 
 use alloy_primitives::{address, keccak256, Address, Bytes, B256, U256};
 use mega_evm::{
     system::{
         check_genesis_account,
         keyless::{KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE_HASH},
-        storage_slots::{
-            ADMIN, CURRENT_SEQUENCER, CURRENT_SYSTEM_ADDRESS, INITIAL_FROM_BLOCK,
-            INITIAL_SEQUENCER, INITIAL_SYSTEM_ADDRESS, MIN_ROTATION_DELAY,
-        },
-        system_contract_specs, transact_deploy, GenesisAllocationError, SequencerRegistryConfig,
-        SystemContractDeployError, SystemContractSpec, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE,
-        ACCESS_CONTROL_CODE_HASH, CREATE2_FACTORY_ADDRESS, CREATE2_FACTORY_CODE,
-        CREATE2_FACTORY_CODE_HASH, CREATE2_FACTORY_NONCE, HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
+        system_contract_specs, transact_deploy, GenesisAllocationError, SystemContractDeployError,
+        SystemContractSpec, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE, ACCESS_CONTROL_CODE_HASH,
+        CREATE2_FACTORY_ADDRESS, CREATE2_FACTORY_CODE, CREATE2_FACTORY_CODE_HASH,
+        CREATE2_FACTORY_NONCE, HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
         HIGH_PRECISION_TIMESTAMP_ORACLE_CODE_HASH, LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE_HASH,
-        MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE,
-        ORACLE_CONTRACT_CODE_HASH, SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE_HASH,
+        ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE, ORACLE_CONTRACT_CODE_HASH,
+        SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE, SEQUENCER_REGISTRY_CODE_HASH,
         SYSTEM_CONTRACT_ADDRESSES, SYSTEM_CONTRACT_DEPLOY_COUNT,
     },
     test_utils::{ErrorInjectingDatabase, MemoryDatabase},
-    HardforkParams,
 };
 use revm::{primitives::KECCAK_EMPTY, Database, DatabaseCommit};
 
-const SEQUENCER: Address = address!("0x2222222222222222222222222222222222222222");
-const ADMIN_ADDR: Address = address!("0x3333333333333333333333333333333333333333");
-
-fn config() -> SequencerRegistryConfig {
-    SequencerRegistryConfig {
-        initial_system_address: MEGA_SYSTEM_ADDRESS,
-        initial_sequencer: SEQUENCER,
-        initial_admin: ADMIN_ADDR,
-        min_rotation_delay: 100,
-    }
-}
-
-/// The number of the block whose pre-block step runs the deploys here, which the registry's
-/// `_initialFromBlock` records.
-const BLOCK: u64 = 7;
+/// An address no contract is deployed at.
+const NO_CONTRACT: Address = address!("0x2222222222222222222222222222222222222222");
 
 fn oracle_spec() -> SystemContractSpec {
     SystemContractSpec::new(
@@ -56,12 +38,13 @@ fn test_the_factory_code_hashes_to_its_pinned_hash() {
 }
 
 /// [S18.8] The spec list is the six `MegaETH` contracts in address order, then the factory, each
-/// at nonce 1, and the public address list is the spec list's addresses in that order.
+/// at nonce 1, and the public address list is the spec list's addresses in that order. The
+/// `SequencerRegistry` alone must already be deployed.
 ///
 /// Expected values: constants (the addresses and code hashes are the production constants).
 #[test]
 fn test_the_spec_list_is_the_seven_predeploys_in_order() {
-    let specs = system_contract_specs(&config(), BLOCK);
+    let specs = system_contract_specs();
     assert_eq!(specs.len(), SYSTEM_CONTRACT_DEPLOY_COUNT);
     assert_eq!(
         [
@@ -110,52 +93,22 @@ fn test_the_spec_list_is_the_seven_predeploys_in_order() {
     }
     assert!(specs[..6].iter().all(|spec| !spec.require_nonzero_nonce));
     assert!(specs[6].require_nonzero_nonce, "EIP-7997 requires a nonzero factory nonce");
-    assert!(specs[..5].iter().all(|spec| spec.seed.is_empty()));
-    assert!(specs[6].seed.is_empty(), "the factory has no storage");
-    assert_eq!(specs[5].seed.len(), 7, "the registry seeds the seven bootstrap slots");
+    assert_eq!(
+        specs
+            .iter()
+            .filter(|spec| spec.require_deployed)
+            .map(|spec| spec.address)
+            .collect::<Vec<_>>(),
+        [SEQUENCER_REGISTRY_ADDRESS],
+        "the legacy forks deployed the registry"
+    );
 }
 
-/// A fresh deploy creates the account, installs the code and seeds every slot.
+/// A fresh deploy creates the account and installs the code, and writes no storage.
 #[test]
-fn test_a_fresh_deploy_creates_the_account_and_seeds_storage() {
+fn test_a_fresh_deploy_creates_the_account() {
     let mut db = MemoryDatabase::default();
-    let specs = system_contract_specs(&config(), BLOCK);
-    let registry = &specs[5];
-    let factory = &specs[6];
-
-    let state = transact_deploy(&mut db, registry).expect("the registry deploys");
-    let account = state.get(&SEQUENCER_REGISTRY_ADDRESS).expect("the registry is in the witness");
-    assert!(account.is_touched());
-    assert!(account.is_created());
-    assert_eq!(account.info.code_hash, SEQUENCER_REGISTRY_CODE_HASH);
-    assert_eq!(account.info.nonce, 1);
-    assert_eq!(account.storage.len(), 7);
-    assert_eq!(
-        account.storage.get(&CURRENT_SYSTEM_ADDRESS).unwrap().present_value,
-        U256::from_be_bytes(MEGA_SYSTEM_ADDRESS.into_word().0)
-    );
-    assert_eq!(
-        account.storage.get(&CURRENT_SEQUENCER).unwrap().present_value,
-        U256::from_be_bytes(SEQUENCER.into_word().0)
-    );
-    assert_eq!(
-        account.storage.get(&ADMIN).unwrap().present_value,
-        U256::from_be_bytes(ADMIN_ADDR.into_word().0)
-    );
-    assert_eq!(
-        account.storage.get(&INITIAL_SYSTEM_ADDRESS).unwrap().present_value,
-        U256::from_be_bytes(MEGA_SYSTEM_ADDRESS.into_word().0)
-    );
-    assert_eq!(
-        account.storage.get(&INITIAL_SEQUENCER).unwrap().present_value,
-        U256::from_be_bytes(SEQUENCER.into_word().0)
-    );
-    assert_eq!(account.storage.get(&INITIAL_FROM_BLOCK).unwrap().present_value, U256::from(BLOCK));
-    assert_eq!(
-        account.storage.get(&MIN_ROTATION_DELAY).unwrap().present_value,
-        U256::from(config().min_rotation_delay)
-    );
-    db.commit(state);
+    let factory = &system_contract_specs()[6];
 
     let state = transact_deploy(&mut db, factory).expect("the factory deploys");
     let account = state.get(&CREATE2_FACTORY_ADDRESS).expect("the factory is in the witness");
@@ -176,7 +129,7 @@ fn test_a_matching_deploy_is_a_read_only_witness_entry() {
     let account = state.get(&ORACLE_CONTRACT_ADDRESS).expect("the read is in the witness");
     assert!(!account.is_touched(), "a matching deploy does not touch");
     assert!(!account.is_created(), "a matching deploy does not create");
-    assert!(account.storage.is_empty(), "a matching deploy does not seed");
+    assert!(account.storage.is_empty(), "a matching deploy writes no storage");
     assert_eq!(account.info.code_hash, ORACLE_CONTRACT_CODE_HASH);
 }
 
@@ -207,7 +160,7 @@ fn test_matching_factory_code_at_nonce_zero_is_an_error() {
     let mut db = MemoryDatabase::default();
     db.set_account_code(CREATE2_FACTORY_ADDRESS, CREATE2_FACTORY_CODE);
     db.set_account_nonce(CREATE2_FACTORY_ADDRESS, 0);
-    let factory = &system_contract_specs(&config(), BLOCK)[6];
+    let factory = &system_contract_specs()[6];
     assert!(factory.require_nonzero_nonce);
 
     let error = transact_deploy(&mut db, factory).expect_err("nonce 0 is invalid for the factory");
@@ -227,7 +180,7 @@ fn test_matching_factory_code_keeps_a_nonce_greater_than_one() {
     let mut db = MemoryDatabase::default();
     db.set_account_code(CREATE2_FACTORY_ADDRESS, CREATE2_FACTORY_CODE);
     db.set_account_nonce(CREATE2_FACTORY_ADDRESS, 7);
-    let factory = &system_contract_specs(&config(), BLOCK)[6];
+    let factory = &system_contract_specs()[6];
 
     let state = transact_deploy(&mut db, factory).expect("nonce 7 is a valid factory");
     let account = state.get(&CREATE2_FACTORY_ADDRESS).unwrap();
@@ -254,28 +207,24 @@ fn test_matching_megaeth_code_at_nonce_zero_is_accepted() {
 }
 
 /// [S18.12] [S18] An account that exists with empty code and nonce 0 (an EOA that received value)
-/// is a fresh deploy: the balance is kept and the slots are seeded, which is the accepted
-/// bootstrap path. The account is marked created, which writes nothing to a slot it held and
-/// clears none: the returned state carries the seeds alone.
+/// is a fresh deploy: the balance is kept, which is the accepted bootstrap path. The account is
+/// marked created, which writes nothing to a slot it held and clears none: the returned state
+/// carries no slot.
 ///
-/// Expected values: independent (the balance, nonce 1 and the seven seeds), with the contract's
-/// code hash from the production constant.
+/// Expected values: independent (the balance, nonce 1 and no slot), with the contract's code hash
+/// from the production constant.
 #[test]
 fn test_an_empty_account_at_the_address_is_a_fresh_deploy() {
     let mut db = MemoryDatabase::default();
-    db.set_account_balance(SEQUENCER_REGISTRY_ADDRESS, U256::from(1_000));
+    db.set_account_balance(ORACLE_CONTRACT_ADDRESS, U256::from(1_000));
 
-    let spec = system_contract_specs(&config(), BLOCK)
-        .into_iter()
-        .find(|spec| spec.address == SEQUENCER_REGISTRY_ADDRESS)
-        .unwrap();
-    let state = transact_deploy(&mut db, &spec).expect("empty code is a fresh deploy");
-    let account = state.get(&SEQUENCER_REGISTRY_ADDRESS).unwrap();
+    let state = transact_deploy(&mut db, &oracle_spec()).expect("empty code is a fresh deploy");
+    let account = state.get(&ORACLE_CONTRACT_ADDRESS).unwrap();
     assert!(account.is_created(), "the bootstrap path marks the account created");
     assert_eq!(account.info.balance, U256::from(1_000));
     assert_eq!(account.info.nonce, 1);
-    assert_eq!(account.info.code_hash, SEQUENCER_REGISTRY_CODE_HASH);
-    assert_eq!(account.storage.len(), 7);
+    assert_eq!(account.info.code_hash, ORACLE_CONTRACT_CODE_HASH);
+    assert!(account.storage.is_empty());
 }
 
 /// An empty-code account with nonce 42 is a used account, not a prefunded EOA: refusing it
@@ -283,17 +232,13 @@ fn test_an_empty_account_at_the_address_is_a_fresh_deploy() {
 #[test]
 fn test_an_empty_account_with_a_used_nonce_is_an_error() {
     let mut db = MemoryDatabase::default();
-    db.set_account_balance(SEQUENCER_REGISTRY_ADDRESS, U256::from(1_000));
-    db.set_account_nonce(SEQUENCER_REGISTRY_ADDRESS, 42);
+    db.set_account_balance(ORACLE_CONTRACT_ADDRESS, U256::from(1_000));
+    db.set_account_nonce(ORACLE_CONTRACT_ADDRESS, 42);
 
-    let spec = system_contract_specs(&config(), BLOCK)
-        .into_iter()
-        .find(|spec| spec.address == SEQUENCER_REGISTRY_ADDRESS)
-        .unwrap();
-    let error = transact_deploy(&mut db, &spec).expect_err("a used empty account must fail");
+    let error = transact_deploy(&mut db, &oracle_spec()).expect_err("a used empty account fails");
     match error {
         SystemContractDeployError::UsedEmptyAccount { address, nonce } => {
-            assert_eq!(address, SEQUENCER_REGISTRY_ADDRESS);
+            assert_eq!(address, ORACLE_CONTRACT_ADDRESS);
             assert_eq!(nonce, 42);
         }
         other => panic!("expected UsedEmptyAccount, got {other}"),
@@ -301,35 +246,69 @@ fn test_an_empty_account_with_a_used_nonce_is_an_error() {
     assert!(error.to_string().contains("nonce 42"));
 }
 
-/// Zero addresses in the registry config fail at load, not at the first block.
+/// [S18] The `SequencerRegistry` is read, never created or upgraded: holding v2.0.0 it is a
+/// read-only entry whatever its storage; no account, an account without code — funded, or at a
+/// used nonce — and the legacy engine's v1.0.0 are each refused as not deployed, naming the code
+/// hash the address holds.
+///
+/// Expected values: independent (the code hash each state holds).
 #[test]
-fn test_registry_config_rejects_a_zero_address() {
-    let mut config = config();
-    config.initial_system_address = Address::ZERO;
-    let err = config.validate().expect_err("zero system address");
-    assert!(err.message.contains("initial_system_address must not be zero"));
+fn test_the_registry_must_already_be_deployed_at_v2() {
+    use mega_system_contracts::sequencer_registry::{V1_0_0_CODE, V1_0_0_CODE_HASH};
+    let registry = spec_at(SEQUENCER_REGISTRY_ADDRESS);
 
-    config = self::config();
-    config.initial_sequencer = Address::ZERO;
-    let err = config.validate().expect_err("zero sequencer");
-    assert!(err.message.contains("initial_sequencer must not be zero"));
+    let mut deployed = MemoryDatabase::default()
+        .account_code(SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE)
+        .account_storage(SEQUENCER_REGISTRY_ADDRESS, U256::from(1), U256::from(7));
+    let state = transact_deploy(&mut deployed, &registry).expect("v2.0.0 is read");
+    let account = &state[&SEQUENCER_REGISTRY_ADDRESS];
+    assert!(!account.is_touched() && !account.is_created(), "a read-only entry");
+    assert!(account.storage.is_empty(), "nothing is written");
 
-    config = self::config();
-    config.initial_admin = Address::ZERO;
-    let err = config.validate().expect_err("zero admin");
-    assert!(err.message.contains("initial_admin must not be zero"));
-
-    config = self::config();
-    config.min_rotation_delay = 0;
-    let err = config.validate().expect_err("zero min rotation delay");
-    assert!(err.message.contains("min_rotation_delay must not be zero"));
-}
-
-/// The seeded current-system-address slot is slot 0, which is the slot a later rotation read
-/// consults.
-#[test]
-fn test_the_seeded_system_address_slot_is_the_current_one() {
-    assert_eq!(CURRENT_SYSTEM_ADDRESS, U256::ZERO);
+    let cases = [
+        ("no account", MemoryDatabase::default(), KECCAK_EMPTY),
+        (
+            "a funded account without code",
+            MemoryDatabase::default().account_balance(SEQUENCER_REGISTRY_ADDRESS, U256::from(1)),
+            KECCAK_EMPTY,
+        ),
+        (
+            "an account without code at a used nonce",
+            MemoryDatabase::default().account_nonce(SEQUENCER_REGISTRY_ADDRESS, 1),
+            KECCAK_EMPTY,
+        ),
+        (
+            "v1.0.0",
+            MemoryDatabase::default().account_code(SEQUENCER_REGISTRY_ADDRESS, V1_0_0_CODE),
+            V1_0_0_CODE_HASH,
+        ),
+    ];
+    for (name, mut db, held) in cases {
+        let error = transact_deploy(&mut db, &registry).expect_err(name);
+        match &error {
+            SystemContractDeployError::SequencerRegistryNotDeployed {
+                address,
+                expected,
+                found,
+            } => {
+                assert_eq!(
+                    (*address, *expected, *found),
+                    (SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE_HASH, held),
+                    "{name}"
+                );
+            }
+            other => panic!("{name}: expected SequencerRegistryNotDeployed, got {other}"),
+        }
+        let message = error.to_string();
+        assert!(message.contains("must already be deployed at v2.0.0"), "{name}: {message}");
+        assert!(message.contains(&SEQUENCER_REGISTRY_CODE_HASH.to_string()), "{name}: {message}");
+        let holding = if held == KECCAK_EMPTY {
+            "holds no code".to_string()
+        } else {
+            format!("holds code hash {held}")
+        };
+        assert!(message.ends_with(&holding), "{name}: {message}");
+    }
 }
 
 /// A failed account load is [`SystemContractDeployError::Database`], and that inner error is
@@ -349,22 +328,22 @@ fn test_a_database_error_is_the_source_of_the_deploy_error() {
     );
 }
 
-/// The seven addresses the deploy installs a contract at, by hand.
-fn predeploys() -> [Address; 7] {
+/// The six addresses the deploy installs a contract at, by hand: every predeploy but the
+/// `SequencerRegistry`, which it requires already deployed.
+fn predeploys() -> [Address; 6] {
     [
         ORACLE_CONTRACT_ADDRESS,
         HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
         KEYLESS_DEPLOY_ADDRESS,
         ACCESS_CONTROL_ADDRESS,
         LIMIT_CONTROL_ADDRESS,
-        SEQUENCER_REGISTRY_ADDRESS,
         CREATE2_FACTORY_ADDRESS,
     ]
 }
 
 /// [S18] A genesis allocation that gives an account with empty code and nonce 0 storage at any of
-/// the seven predeploy addresses is refused, naming the address: the deploy would neither write
-/// nor clear that storage. A single non-zero slot among zero ones is storage.
+/// the six addresses the deploy installs a contract at is refused, naming the address: the deploy
+/// would neither write nor clear that storage. A single non-zero slot among zero ones is storage.
 ///
 /// Expected values: independent.
 #[test]
@@ -385,14 +364,15 @@ type GenesisCase<'a> = (&'a str, Address, &'a [u8], u64, &'a [U256]);
 /// [S18] Every other account of a genesis allocation passes the check: a predeploy allocated with
 /// its own code and storage, which the deploy only reads; a balance-only account, the bootstrap
 /// path; one whose storage holds zeros alone, which is no storage; one with a used nonce or other
-/// code, which the deploy refuses at the block that runs it; and storage without code at an
-/// address no contract is deployed at.
+/// code, which the deploy refuses at the block that runs it; storage without code at an address no
+/// contract is deployed at; and storage without code at the `SequencerRegistry`'s address, where
+/// the deploy installs nothing and refuses the block.
 ///
 /// Expected values: independent.
 #[test]
 fn test_other_genesis_accounts_pass_the_check() {
     let held = [U256::from(7)];
-    let cases: [GenesisCase<'_>; 6] = [
+    let cases: [GenesisCase<'_>; 7] = [
         ("its own code and storage", ACCESS_CONTROL_ADDRESS, &ACCESS_CONTROL_CODE, 1, &held),
         (
             "its own code and storage at nonce 0",
@@ -404,7 +384,14 @@ fn test_other_genesis_accounts_pass_the_check() {
         ("a balance alone", SEQUENCER_REGISTRY_ADDRESS, &[], 0, &[]),
         ("slots holding zero", SEQUENCER_REGISTRY_ADDRESS, &[], 0, &[U256::ZERO, U256::ZERO]),
         ("a used nonce", ORACLE_CONTRACT_ADDRESS, &[], 1, &held),
-        ("no contract deployed there", SEQUENCER, &[], 0, &held),
+        ("no contract deployed there", NO_CONTRACT, &[], 0, &held),
+        (
+            "the registry, which the deploy never installs",
+            SEQUENCER_REGISTRY_ADDRESS,
+            &[],
+            0,
+            &held,
+        ),
     ];
     for (name, address, code, nonce, storage) in cases {
         assert_eq!(
@@ -423,7 +410,7 @@ fn test_other_genesis_accounts_pass_the_check() {
 /// The older versions of the contracts the deploy upgrades in place, with the address each lives
 /// at and the version Satin deploys there.
 fn known_older_versions() -> Vec<(&'static str, Address, Bytes, B256, B256)> {
-    use mega_system_contracts::{oracle, sequencer_registry};
+    use mega_system_contracts::oracle;
     vec![
         (
             "Oracle 1.0.0",
@@ -439,19 +426,12 @@ fn known_older_versions() -> Vec<(&'static str, Address, Bytes, B256, B256)> {
             oracle::V1_1_0_CODE_HASH,
             ORACLE_CONTRACT_CODE_HASH,
         ),
-        (
-            "SequencerRegistry 1.0.0",
-            SEQUENCER_REGISTRY_ADDRESS,
-            sequencer_registry::V1_0_0_CODE,
-            sequencer_registry::V1_0_0_CODE_HASH,
-            SEQUENCER_REGISTRY_CODE_HASH,
-        ),
     ]
 }
 
 /// The spec of `address` in the list the block deploys.
 fn spec_at(address: Address) -> SystemContractSpec {
-    system_contract_specs(&config(), BLOCK)
+    system_contract_specs()
         .into_iter()
         .find(|spec| spec.address == address)
         .expect("the address is a predeploy")

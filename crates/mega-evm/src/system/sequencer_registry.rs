@@ -5,12 +5,14 @@
 //! to it is an ordinary call. Its Solidity source is
 //! `crates/system-contracts/contracts/SequencerRegistry.sol`.
 //!
-//! The contract is deployed by [`transact_deploy`](crate::system::transact_deploy) with the
-//! bootstrap slots [`SequencerRegistryConfig`] names, before every block. A role change the
-//! registry schedules takes effect at its activation block through a pre-block call: the block
-//! executor reads whether one is due ([`is_apply_pending_changes_due`]) and, when one is, calls
-//! `applyPendingChanges()` ([`transact_apply_pending_changes`]). The call is permissionless and
-//! applies only what is due, so a block that makes it applies the same changes whoever calls.
+//! The legacy forks deployed it (Rex5) and upgraded it to v2.0.0 (Rex6); Satin neither creates nor
+//! upgrades it. Before every block the pre-block deploy step
+//! ([`transact_deploy`](crate::system::transact_deploy)) reads it and refuses the block unless it
+//! holds v2.0.0. A role change the registry schedules takes effect at its activation block through
+//! a pre-block call: the block executor reads whether one is due
+//! ([`is_apply_pending_changes_due`]) and, when one is, calls `applyPendingChanges()`
+//! ([`transact_apply_pending_changes`]). The call is permissionless and applies only what is due,
+//! so a block that makes it applies the same changes whoever calls.
 //!
 //! The live system address, which a system-address transaction must be sent from, is read out of
 //! the registry by every transaction when it is validated ([`load_system_address`]): the read
@@ -31,11 +33,7 @@ use revm::{
     state::{Account, EvmState, EvmStorageSlot, TransactionId},
 };
 
-use super::MEGA_SYSTEM_ADDRESS;
-use crate::{
-    transact_pre_block_call, ExternalEnvTypes, HardforkParams, HardforkParamsError,
-    MegaBlockExecutionError, MegaEvm, MegaHardfork,
-};
+use crate::{transact_pre_block_call, ExternalEnvTypes, MegaBlockExecutionError, MegaEvm};
 use storage_slots::{
     CURRENT_SYSTEM_ADDRESS, PENDING_SEQUENCER, PENDING_SYSTEM_ADDRESS, SEQUENCER_ACTIVATION_BLOCK,
     SYSTEM_ADDRESS_ACTIVATION_BLOCK,
@@ -52,83 +50,6 @@ pub use mega_system_contracts::sequencer_registry::LATEST_CODE as SEQUENCER_REGI
 pub use mega_system_contracts::sequencer_registry::LATEST_CODE_HASH as SEQUENCER_REGISTRY_CODE_HASH;
 
 pub use mega_system_contracts::sequencer_registry::{storage_slots, ISequencerRegistry};
-
-/// Delay the unknown-chain placeholder seeds, in blocks.
-///
-/// A zero delay would disable the reaction window the field exists to guarantee. Ten matches
-/// the contract's own tests: long enough that a rotation cannot activate in the same block.
-pub const PLACEHOLDER_MIN_ROTATION_DELAY: u64 = 10;
-
-/// Bootstrap configuration for the `SequencerRegistry`, attached to Satin via [`HardforkParams`].
-///
-/// These values seed the registry's storage on a fresh deploy, beside `_initialFromBlock`, which is
-/// the number of the block that creates the registry and no configuration's to choose. After that
-/// the live roles are whatever the contract holds, rotated by the `applyPendingChanges()` pre-block
-/// call. The contract has no setter for `_minRotationDelay`, so a matching-code registry cannot be
-/// repaired later through this helper: the delay must be seeded here, and it must not be zero.
-///
-/// It travels with the chain configuration: a JSON object with camelCase keys, every field required
-/// and no other accepted. Deserializing does not validate; whoever loads it runs
-/// [`HardforkParams::validate`], as the chain-config parser and
-/// [`validate_schedule`](crate::MegaHardforks::validate_schedule) do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SequencerRegistryConfig {
-    /// Seeded into `_currentSystemAddress` and `_initialSystemAddress`.
-    pub initial_system_address: Address,
-    /// Seeded into `_currentSequencer` and `_initialSequencer`.
-    pub initial_sequencer: Address,
-    /// Seeded into `_admin`.
-    pub initial_admin: Address,
-    /// Seeded into `_minRotationDelay`. Must be nonzero: a zero delay disables the reaction
-    /// window the field exists to guarantee.
-    pub min_rotation_delay: u64,
-}
-
-impl SequencerRegistryConfig {
-    /// Placeholder roles for a chain that has none published: [`MEGA_SYSTEM_ADDRESS`] for every
-    /// address, and [`PLACEHOLDER_MIN_ROTATION_DELAY`].
-    ///
-    /// The unknown-chain fallback schedule uses this so a local chain can start. A real network
-    /// attaches the roles governance chose.
-    pub const fn placeholder() -> Self {
-        Self {
-            initial_system_address: MEGA_SYSTEM_ADDRESS,
-            initial_sequencer: MEGA_SYSTEM_ADDRESS,
-            initial_admin: MEGA_SYSTEM_ADDRESS,
-            min_rotation_delay: PLACEHOLDER_MIN_ROTATION_DELAY,
-        }
-    }
-}
-
-impl HardforkParams for SequencerRegistryConfig {
-    const FORK: MegaHardfork = MegaHardfork::Satin;
-    const NAME: &'static str = "SequencerRegistryConfig";
-
-    fn validate(&self) -> Result<(), HardforkParamsError> {
-        if self.initial_system_address.is_zero() {
-            return Err(HardforkParamsError {
-                message: "SequencerRegistryConfig.initial_system_address must not be zero".into(),
-            });
-        }
-        if self.initial_sequencer.is_zero() {
-            return Err(HardforkParamsError {
-                message: "SequencerRegistryConfig.initial_sequencer must not be zero".into(),
-            });
-        }
-        if self.initial_admin.is_zero() {
-            return Err(HardforkParamsError {
-                message: "SequencerRegistryConfig.initial_admin must not be zero".into(),
-            });
-        }
-        if self.min_rotation_delay == 0 {
-            return Err(HardforkParamsError {
-                message: "SequencerRegistryConfig.min_rotation_delay must not be zero".into(),
-            });
-        }
-        Ok(())
-    }
-}
 
 /// Whether a role change the registry holds is due at `block_number`: a pending system address
 /// or sequencer whose activation block has come.
@@ -256,9 +177,10 @@ pub fn live_system_address<DB: revm::Database>(mut db: DB) -> Result<Option<Addr
 ///
 /// `None` when the registry names no address this engine trusts: it has no account, it holds other
 /// code than [`SEQUENCER_REGISTRY_CODE`], or its `_currentSystemAddress` is zero. Block execution
-/// never leaves such a registry behind — the pre-block deploy puts this code there or refuses the
-/// block, and the contract writes no zero address — so these are states an EVM run outside block
-/// execution may meet, and in none of them is any transaction a system-address transaction. The
+/// never runs a transaction over such a registry — the pre-block deploy step refuses a block whose
+/// registry does not hold this code, and the contract writes no zero address — so these are states
+/// an EVM run outside block execution may meet, and in none of them is any transaction a
+/// system-address transaction. The
 /// slot is loaded in each of them all the same, so the transaction's gas does not depend on them.
 ///
 /// # Errors
@@ -276,7 +198,7 @@ pub(crate) fn load_system_address<J: JournalTr>(
 /// `_currentSystemAddress` holds `current`: none unless the registry holds this engine's code and
 /// a non-zero address.
 fn system_address_named_by(code_hash: B256, current: U256) -> Option<Address> {
-    // The expected hash is the registry code this engine deploys, the latest version. When the
+    // The expected hash is the registry code this engine requires, the latest version. When the
     // registry is next upgraded under a later spec, the hash compared here must be chosen per
     // spec: compared with the newer code alone, a block of this spec replayed by the newer binary
     // finds no system address, and its system transactions are silently demoted to ordinary ones.
@@ -287,7 +209,7 @@ fn system_address_named_by(code_hash: B256, current: U256) -> Option<Address> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{MegaContext, MegaSpecId};
+    use crate::{system::MEGA_SYSTEM_ADDRESS, MegaContext, MegaSpecId};
     use alloy_primitives::address;
     use revm::{
         context::{BlockEnv, ContextTr, JournalTr, Transaction},
@@ -564,7 +486,7 @@ mod tests {
         assert_eq!(slot.present_value(), current);
     }
 
-    /// A registry holding the code this engine deploys names the address it stores, and the read
+    /// A registry holding the code this engine requires names the address it stores, and the read
     /// leaves the account and the slot warm, without loading the code.
     #[test]
     fn test_the_read_answers_the_stored_system_address_and_warms_the_registry() {
@@ -579,7 +501,7 @@ mod tests {
     }
 
     /// A registry still holding the legacy engine's first bytecode is not the one this engine
-    /// deploys: it names no address. Its slot is read all the same, so what a transaction pays
+    /// requires: it names no address. Its slot is read all the same, so what a transaction pays
     /// does not depend on the registry's code.
     #[test]
     fn test_the_read_refuses_the_v1_code_hash() {
@@ -615,42 +537,6 @@ mod tests {
         assert_eq!(address, None);
         assert!(journal.inner.state[&SEQUENCER_REGISTRY_ADDRESS].is_loaded_as_not_existing());
         assert_warm_and_unchanged(&journal, U256::ZERO);
-    }
-
-    /// The seeds travel with a chain configuration: they survive a round trip through its JSON,
-    /// whose shape is written out here. A field left out is an error rather than a zero, and so is
-    /// one the type does not have. Deserializing does not validate: a zero address reads, and
-    /// [`HardforkParams::validate`] is what refuses it on load.
-    #[test]
-    fn test_sequencer_registry_config_round_trip() {
-        let config = SequencerRegistryConfig {
-            initial_system_address: NEXT_SYSTEM_ADDRESS,
-            initial_sequencer: NEXT_SEQUENCER,
-            initial_admin: CURRENT_SEQUENCER_ADDRESS,
-            min_rotation_delay: 11,
-        };
-        let json = serde_json::to_string(&config).expect("serializes");
-        assert_eq!(
-            json,
-            r#"{"initialSystemAddress":"0x1111111111111111111111111111111111111111","initialSequencer":"0x2222222222222222222222222222222222222222","initialAdmin":"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","minRotationDelay":11}"#
-        );
-        assert_eq!(serde_json::from_str::<SequencerRegistryConfig>(&json).unwrap(), config);
-        assert_eq!(config.validate(), Ok(()));
-
-        let missing = json.replace(r#","minRotationDelay":11"#, "");
-        assert!(serde_json::from_str::<SequencerRegistryConfig>(&missing).is_err(), "{missing}");
-        let unknown = json.replace(r#""minRotationDelay":11"#, r#""minRotationDelay":11,"x":1"#);
-        assert!(serde_json::from_str::<SequencerRegistryConfig>(&unknown).is_err(), "{unknown}");
-        let snake = json.replace("minRotationDelay", "min_rotation_delay");
-        assert!(serde_json::from_str::<SequencerRegistryConfig>(&snake).is_err(), "{snake}");
-
-        let zero =
-            json.replace("0x2222222222222222222222222222222222222222", &Address::ZERO.to_string());
-        let read = serde_json::from_str::<SequencerRegistryConfig>(&zero).expect("it reads");
-        assert_eq!(
-            read.validate().map_err(|e| e.message),
-            Err("SequencerRegistryConfig.initial_sequencer must not be zero".into())
-        );
     }
 
     /// Read off a database, the live system address is what a transaction's validation reads:

@@ -17,8 +17,7 @@ use mega_evm::{
 };
 
 use crate::common::{
-    self, block_ctx, deposit_tx, empty_call_gas, executor_with_env_and_spec, registry_config,
-    user_tx,
+    self, block_ctx, deposit_tx, empty_call_gas, executor_with_env_and_spec, user_tx,
 };
 
 /// The timestamp the fork each case schedules activates at.
@@ -28,12 +27,9 @@ const ACTIVATION: u64 = common::BLOCK_TIMESTAMP;
 /// forks in their order without that fork activating in the blocks the case runs.
 const LATER: u64 = ACTIVATION + 1_000;
 
-/// A schedule with every Ethereum and Optimism fork up to Karst at genesis, Satin at `satin` and
-/// the registry parameters.
+/// A schedule with every Ethereum and Optimism fork up to Karst at genesis and Satin at `satin`.
 fn schedule(satin: u64) -> MegaHardforkConfig {
-    MegaHardforkConfig::default()
-        .with(MegaHardfork::Satin, ForkCondition::Timestamp(satin))
-        .with_params(registry_config())
+    MegaHardforkConfig::default().with(MegaHardfork::Satin, ForkCondition::Timestamp(satin))
 }
 
 /// The context of the block at `timestamp`, whose parent is at `parent_timestamp`, as a node

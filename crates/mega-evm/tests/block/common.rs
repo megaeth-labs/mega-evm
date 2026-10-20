@@ -1,8 +1,9 @@
 //! Shared setup of the block-executor tests.
 //!
-//! A block on a chain whose schedule activates Satin at genesis, over an in-memory database with
-//! an empty L1 block contract — so the L1 fees, the operator fee and the data-availability
-//! footprint scalar all read as zero unless a test writes them.
+//! A block on a chain whose schedule activates Satin at genesis, over an in-memory database holding
+//! the `SequencerRegistry` v2.0.0 the legacy forks leave, and an empty L1 block contract — so the
+//! L1 fees, the operator fee and the data-availability footprint scalar all read as zero unless a
+//! test writes them.
 
 use alloy_consensus::{transaction::Recovered, Sealed, Signed, TxLegacy};
 use alloy_evm::{EvmEnv, EvmFactory};
@@ -10,8 +11,8 @@ use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
-    system::{IOracle, SequencerRegistryConfig, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS},
-    test_utils::{BytecodeBuilder, MemoryDatabase},
+    system::{IOracle, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS},
+    test_utils::{BytecodeBuilder, MemoryDatabase, SequencerRegistryRoles},
     BlockLimits, EmptyExternalEnv, EvmTxRuntimeLimits, MegaBlockExecutionCtx, MegaBlockExecutor,
     MegaBlockExecutorFactory, MegaEvm, MegaEvmFactory, MegaHardforkConfig, MegaSpecId,
     MegaTxEnvelope, PreBlockStateSource, ProtocolLimits,
@@ -44,9 +45,10 @@ pub(crate) const BLOCK_GAS_LIMIT: u64 = 30_000_000;
 /// The chain id the test transactions carry.
 pub(crate) const CHAIN_ID: u64 = 4_326;
 
-/// The database a block runs on: the caller is funded and the callee has empty code.
+/// The database a block runs on: the registry holds [`registry_roles`], the caller is funded and
+/// the callee has empty code.
 pub(crate) fn database() -> MemoryDatabase {
-    let mut db = MemoryDatabase::default();
+    let mut db = MemoryDatabase::default().sequencer_registry(registry_roles());
     db.set_account_code(CONTRACT, Bytes::new());
     db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000_u64));
     db
@@ -70,10 +72,10 @@ pub(crate) fn evm_env() -> EvmEnv<MegaSpecId> {
     EvmEnv::new(cfg_env, block_env)
 }
 
-/// The sequencer the tests seed into the registry, distinct from the system address and admin.
+/// The sequencer the tests' registry names, distinct from the system address and admin.
 pub(crate) const SEQUENCER: Address = address!("0x2222222222222222222222222222222222222222");
 
-/// The admin the tests seed into the registry, distinct from the system address and sequencer.
+/// The admin the tests' registry names, distinct from the system address and sequencer.
 pub(crate) const ADMIN: Address = address!("0x3333333333333333333333333333333333333333");
 
 /// An address as the word the registry stores it as.
@@ -92,23 +94,24 @@ pub(crate) fn writer() -> Bytes {
         .build()
 }
 
-/// Registry params the block tests attach to a Satin-at-genesis schedule.
-pub(crate) fn registry_config() -> SequencerRegistryConfig {
-    SequencerRegistryConfig {
-        initial_system_address: MEGA_SYSTEM_ADDRESS,
-        initial_sequencer: SEQUENCER,
-        initial_admin: ADMIN,
+/// The roles the registry of [`database`] holds: the default system address, and a sequencer and
+/// an admin of their own.
+pub(crate) fn registry_roles() -> SequencerRegistryRoles {
+    SequencerRegistryRoles {
+        system_address: MEGA_SYSTEM_ADDRESS,
+        sequencer: SEQUENCER,
+        admin: ADMIN,
         min_rotation_delay: 100,
     }
 }
 
-/// A schedule that activates Satin at genesis and can seed the `SequencerRegistry`.
+/// A schedule that activates Satin at genesis.
 ///
 /// Its blocks are held to the spec's limits ([`ProtocolLimits::for_spec`]), which no block this
 /// size reaches but gas detention's caps; a test that holds a block or a transaction to another
 /// limit replaces them ([`executor_with_limits`]).
 pub(crate) fn chain_spec() -> MegaHardforkConfig {
-    MegaHardforkConfig::default().with_all_activated().with_params(registry_config())
+    MegaHardforkConfig::default().with_all_activated()
 }
 
 /// The loosest limits a block could be held to while a read of volatile data still detains:

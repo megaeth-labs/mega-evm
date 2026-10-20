@@ -6,18 +6,19 @@
 //! holds. A block the executor accepts becomes the chain's head and its state the chain's; a block
 //! it refuses is dropped with its copy, so the chain stays at the previous block.
 //!
-//! The executor needs the Satin fork's parameters; [`chain_spec`] supplies them with values that
-//! bind nothing on an Osaka fixture, and says why for each.
+//! The executor needs the `SequencerRegistry` the legacy forks deploy; the chain's pre-state holds
+//! it with roles that bind nothing on an Osaka fixture ([`registry_roles`]), and says why.
 //!
 //! Each block's context tells the executor whether the block admits only deposits, worked out as
 //! a node works it out: from the schedule and the timestamp of the chain's head, the block's
 //! parent. Under [`chain_spec`], which activates every fork at genesis, no block the runner
 //! imports is such a block.
 //!
-//! A Satin block adds accounts to the state an Ethereum block leaves: the system contracts the
-//! executor deploys before every block, and the fee vaults op-revm routes fees to.
-//! [`SATIN_ACCOUNTS`] lists them, each with the rule it is taken out of the post-state by before
-//! the root is computed; any other account that differs is a failure.
+//! A Satin chain holds accounts an Ethereum chain does not: the `SequencerRegistry`, which Satin
+//! requires and does not create, so the chain's pre-state holds it as the legacy forks leave it;
+//! the system contracts the executor deploys before every block; and the fee vaults op-revm routes
+//! fees to. [`SATIN_ACCOUNTS`] lists them, each with the rule it is taken out of the post-state by
+//! before the root is computed; any other account that differs is a failure.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -35,11 +36,11 @@ use mega_evm::{
         state::AccountInfo,
     },
     system::{
-        keyless::KEYLESS_DEPLOY_ADDRESS, system_contract_specs, SequencerRegistryConfig,
-        SystemContractSpec, ACCESS_CONTROL_ADDRESS, CREATE2_FACTORY_ADDRESS,
-        HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS, LIMIT_CONTROL_ADDRESS, ORACLE_CONTRACT_ADDRESS,
-        SEQUENCER_REGISTRY_ADDRESS,
+        keyless::KEYLESS_DEPLOY_ADDRESS, system_contract_specs, ACCESS_CONTROL_ADDRESS,
+        CREATE2_FACTORY_ADDRESS, HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS, LIMIT_CONTROL_ADDRESS,
+        MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS, SEQUENCER_REGISTRY_ADDRESS,
     },
+    test_utils::SequencerRegistryRoles,
     BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaHardforkConfig, MegaHardforks,
     ProtocolLimits,
 };
@@ -58,12 +59,17 @@ pub const FORK: Fork = Fork::Osaka;
 /// How many of the most recent block hashes `BLOCKHASH` can read.
 const BLOCK_HASH_WINDOW: u64 = 256;
 
-/// Why an account a Satin block adds is in the post-state, and so what it must hold to be taken
+/// Why an account a Satin chain holds is in the post-state, and so what it must hold to be taken
 /// out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Added {
+    /// The `SequencerRegistry`, which Satin requires and neither creates nor upgrades: the chain's
+    /// pre-state holds it at v2.0.0, as the legacy forks leave it, with the roles of
+    /// [`registry_roles`]. It is taken out when it holds exactly that: the code, nonce 1, the
+    /// roles' storage, and no balance.
+    PreState,
     /// A contract the executor deploys before every block. It is taken out when it holds exactly
-    /// what the deploy writes: the contract's code and nonce, its seeded storage, and no balance.
+    /// what the deploy writes: the contract's code and nonce, no storage, and no balance.
     Predeploy,
     /// The vault op-revm credits the base fee to, where Ethereum burns it. It is taken out when it
     /// holds exactly the base fees of the blocks the chain accepted, and nothing else.
@@ -74,7 +80,7 @@ pub enum Added {
     UnpaidFeeVault,
 }
 
-/// An account a Satin block adds to the state an Ethereum block leaves.
+/// An account a Satin chain holds that an Ethereum chain does not.
 #[derive(Clone, Copy, Debug)]
 pub struct SatinAccount {
     /// Its address.
@@ -85,7 +91,8 @@ pub struct SatinAccount {
     pub reason: &'static str,
 }
 
-/// The accounts a Satin block adds to the state an Ethereum block leaves.
+/// The accounts a Satin chain holds that an Ethereum chain does not: the one its pre-state holds
+/// for Satin, and the ones a Satin block adds to the state an Ethereum block leaves.
 ///
 /// One is taken out of the post-state before its root is computed only when the fixture's
 /// pre-state does not hold it — an account the fixture put there is Ethereum's to compare — and
@@ -119,8 +126,8 @@ pub const SATIN_ACCOUNTS: [SatinAccount; 10] = [
     },
     SatinAccount {
         address: SEQUENCER_REGISTRY_ADDRESS,
-        added: Added::Predeploy,
-        reason: "the SequencerRegistry, deployed with its seeded roles before every block",
+        added: Added::PreState,
+        reason: "the SequencerRegistry, which Satin requires and the chain's pre-state holds",
     },
     SatinAccount {
         address: CREATE2_FACTORY_ADDRESS,
@@ -144,20 +151,20 @@ pub const SATIN_ACCOUNTS: [SatinAccount; 10] = [
     },
 ];
 
-/// The `SequencerRegistry` roles the executor seeds the registry with.
+/// The roles of the `SequencerRegistry` the chain's pre-state holds: [`MEGA_SYSTEM_ADDRESS`] in
+/// every one.
 ///
 /// They bind nothing on a fixture: the registry's system address is the only one whose
 /// transactions are promoted, and only a legacy call to one of `MegaETH`'s whitelisted contracts
 /// is, which no Ethereum fixture makes; no role change is ever pending, so no block makes the
 /// `applyPendingChanges()` call.
-pub fn registry_config() -> SequencerRegistryConfig {
-    SequencerRegistryConfig::placeholder()
+pub fn registry_roles() -> SequencerRegistryRoles {
+    SequencerRegistryRoles::from(MEGA_SYSTEM_ADDRESS)
 }
 
-/// The schedule the blocks run on: every fork active from genesis, with the `SequencerRegistry`
-/// roles of [`registry_config`], the one parameter the Satin fork requires.
+/// The schedule the blocks run on: every fork active from genesis.
 pub fn chain_spec() -> MegaHardforkConfig {
-    MegaHardforkConfig::default().with_all_activated().with_params(registry_config())
+    MegaHardforkConfig::default().with_all_activated()
 }
 
 /// The limits the blocks are held to in place of Satin's: none ([`ProtocolLimits::no_limits`]).
@@ -242,15 +249,12 @@ pub(crate) struct Chain {
     blob_base_fee_update_fraction: u64,
     /// The schedule the blocks run on.
     spec: MegaHardforkConfig,
-    /// What the executor deployed: the predeploys the first block the chain accepted created,
-    /// by address, which hold that block's number as the registry's `_initialFromBlock`. Empty
-    /// until the chain accepts a block.
-    predeploys: BTreeMap<Address, SystemContractSpec>,
 }
 
 impl Chain {
     /// The chain at its genesis block, numbered and hashed `genesis` and stamped
-    /// `genesis_timestamp`, holding `pre`.
+    /// `genesis_timestamp`, holding `pre` and, when `pre` does not hold its address, the
+    /// `SequencerRegistry` Satin requires ([`Added::PreState`]).
     pub(crate) fn new(
         pre: &BTreeMap<Address, Account>,
         genesis: (u64, B256),
@@ -268,6 +272,14 @@ impl Chain {
             }
             state.insert_account_with_storage(*address, plain.info, plain.storage);
         }
+        if !pre.contains_key(&SEQUENCER_REGISTRY_ADDRESS) {
+            let info = SequencerRegistryRoles::account_info();
+            if let Some(code) = &info.code {
+                state.contracts.insert(info.code_hash, code.clone());
+            }
+            let storage = registry_roles().storage().into_iter().filter(|(_, v)| !v.is_zero());
+            state.insert_account_with_storage(SEQUENCER_REGISTRY_ADDRESS, info, storage.collect());
+        }
         Ok(Self {
             state,
             hashes: BTreeMap::from([genesis]),
@@ -278,7 +290,6 @@ impl Chain {
             chain_id,
             blob_base_fee_update_fraction,
             spec: chain_spec(),
-            predeploys: BTreeMap::new(),
         })
     }
 
@@ -306,17 +317,25 @@ impl Chain {
             account.storage.iter().filter(|(_, value)| !value.is_zero()).collect();
         let info = &account.info;
         match added {
-            Added::Predeploy => self.predeploys.get(&address).is_some_and(|spec| {
-                let seed: BTreeMap<_, _> = spec
-                    .seed
+            Added::PreState => {
+                let roles = registry_roles().storage();
+                let held: BTreeMap<_, _> = roles
                     .iter()
                     .filter(|(_, value)| !value.is_zero())
                     .map(|(slot, value)| (slot, value))
                     .collect();
-                info.nonce == spec.nonce &&
+                let installed = SequencerRegistryRoles::account_info();
+                info.nonce == installed.nonce &&
+                    info.balance == installed.balance &&
+                    info.code_hash == installed.code_hash &&
+                    storage == held
+            }
+            Added::Predeploy => system_contract_specs().iter().any(|spec| {
+                spec.address == address &&
+                    info.nonce == spec.nonce &&
                     info.balance.is_zero() &&
                     info.code_hash == spec.code_hash &&
-                    storage == seed
+                    storage.is_empty()
             }),
             Added::BaseFeeVault => {
                 info.balance == self.routed_base_fee &&
@@ -390,14 +409,6 @@ impl Chain {
         self.head = header.hash_slow();
         self.head_timestamp = header.timestamp;
         self.hashes.insert(header.number, self.head);
-        if self.predeploys.is_empty() {
-            // The first block the chain accepts creates every predeploy its pre-state lacks: a
-            // refused block left the state as it was.
-            self.predeploys = system_contract_specs(&registry_config(), header.number)
-                .into_iter()
-                .map(|spec| (spec.address, spec))
-                .collect();
-        }
         Ok(BlockOutput {
             gas_used: result.gas_used,
             receipts_root: receipts_root(&result.receipts),
@@ -425,23 +436,24 @@ fn refusal(error: BlockExecutionError) -> Refusal {
 mod tests {
     use super::*;
 
-    /// The removal list names every predeploy the executor deploys and the three fee vaults, each
-    /// once.
+    /// The removal list names the registry the pre-state holds, every predeploy the executor
+    /// deploys and the three fee vaults, each once.
     #[test]
-    fn test_the_list_names_every_account_a_satin_block_adds() {
+    fn test_the_list_names_every_account_a_satin_chain_adds() {
         let listed: BTreeSet<_> = SATIN_ACCOUNTS.iter().map(|a| a.address).collect();
         assert_eq!(listed.len(), SATIN_ACCOUNTS.len(), "an address listed twice");
-        let predeploys: BTreeSet<_> =
-            system_contract_specs(&registry_config(), 1).iter().map(|spec| spec.address).collect();
-        let listed_predeploys: BTreeSet<_> = SATIN_ACCOUNTS
-            .iter()
-            .filter(|a| a.added == Added::Predeploy)
-            .map(|a| a.address)
-            .collect();
-        assert_eq!(listed_predeploys, predeploys);
+        let listed_as = |added: Added| -> BTreeSet<_> {
+            SATIN_ACCOUNTS.iter().filter(|a| a.added == added).map(|a| a.address).collect()
+        };
+        let specs = system_contract_specs();
+        let deployed_by = |required: bool| -> BTreeSet<_> {
+            specs.iter().filter(|s| s.require_deployed == required).map(|s| s.address).collect()
+        };
+        assert_eq!(listed_as(Added::PreState), deployed_by(true));
+        assert_eq!(listed_as(Added::Predeploy), deployed_by(false));
         let vaults: BTreeSet<_> = SATIN_ACCOUNTS
             .iter()
-            .filter(|a| a.added != Added::Predeploy)
+            .filter(|a| !matches!(a.added, Added::Predeploy | Added::PreState))
             .map(|a| a.address)
             .collect();
         assert_eq!(
@@ -450,14 +462,13 @@ mod tests {
         );
     }
 
-    /// [S10] The schedule the chain runs on loads, carrying the registry's roles, and the blocks
-    /// are held to no limit: equivalence mode takes out every one `MegaETH` sets.
+    /// [S10] The schedule the chain runs on loads, and the blocks are held to no limit:
+    /// equivalence mode takes out every one `MegaETH` sets.
     ///
     /// Expected values: constants (no limit at all).
     #[test]
     fn test_the_chain_spec_loads_and_the_blocks_are_held_to_no_limit() {
         let spec = chain_spec();
-        assert!(spec.fork_params::<SequencerRegistryConfig>().is_some());
         assert!(spec.validate_schedule().is_ok());
         assert_eq!(limits(), ProtocolLimits::no_limits());
         assert_eq!(limits().tx_runtime_limits, mega_evm::EvmTxRuntimeLimits::no_limits());
@@ -511,8 +522,7 @@ mod tests {
             DecodedBlock::new(header, BlockBody { transactions, ommers: vec![], withdrawals: None })
         };
         let satin_at_activation = MegaHardforkConfig::default()
-            .with(MegaHardfork::Satin, ForkCondition::Timestamp(ACTIVATION))
-            .with_params(registry_config());
+            .with(MegaHardfork::Satin, ForkCondition::Timestamp(ACTIVATION));
 
         let mut chain = Chain::new(&pre, (0, B256::ZERO), ACTIVATION - 1, 1, 5_007_716).unwrap();
         chain.spec = satin_at_activation;
