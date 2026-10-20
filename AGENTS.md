@@ -584,6 +584,8 @@ When the agent is requested to implement a new feature or bug fix, it should con
 
 ## Caveats for Agents
 
+- **Reviewing the Satin pull request: use `.claude/skills/satin-review/`.**
+  It is temporary and removed before the Satin pull request merges.
 - **Satin is the unstable spec; the legacy engine is frozen.**
   Do not add legacy specs or alias rungs to this crate, and do not port a legacy mechanism the legacy test inventory retired.
   Spec gates come with the next spec (see Spec System), not before.
