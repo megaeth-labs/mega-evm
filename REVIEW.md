@@ -82,9 +82,6 @@ Defer to the baseline for everything not listed here; the rules below take prece
 - **Benchmark methodology.**
   A perf-comparison PR must pin comparable hardforks on both arms.
   Missing the required explicit hardfork pin can silently bench the wrong fork when a shared bench subject defaults to a different one.
-  For the paired Criterion-style harness, use an even round count.
-  Odd defeats A/B alternation there.
-  Do not apply that even-round rule to the replay ABBA harness.
   Adjudicate quantitatively.
   Don't drop a `saturating_sub`/guard "for speed" without a measured, attributable gain.
 - **Storage-layout parity.**
@@ -184,10 +181,9 @@ These checks guard every change to the Satin engine.
 
 ### Scheduled workflows
 
-- GitHub fires a `schedule` trigger only from the default branch's copy of a workflow, so the schedules in `satin`'s copies (nightly mutation, weekly benchmark, doc-audit, the weekly execution-spec run, the nightly byte-price grid) stay inert until `satin` is the default branch.
+- GitHub fires a `schedule` trigger only from the default branch's copy of a workflow, so the schedules in `satin`'s copies (nightly mutation, doc-audit, the weekly execution-spec run, the nightly byte-price grid) stay inert until `satin` is the default branch.
 - Run them on `satin` by hand: `gh workflow run <workflow>.yml --ref satin` runs `satin`'s copy of the workflow on `satin`'s head, so none of them needs a `ref` input.
   - `mutation.yml`: the whole-crate cargo-mutants run and suppression hygiene.
-  - `benchmark.yml`: the Satin bench set on `satin`'s head, without a baseline (`-f aa_check=true` measures the noise floor).
   - `exec-spec.yml`: the execution-spec fixtures at the pinned fork tag.
   - `doc-audit.yml`: the documentation audit of `satin`'s docs.
   - `price-grid.yml`: the whole byte-price grid.

@@ -46,7 +46,7 @@ jobs:
         with:
           # Empty rustflags overrides this action's default `-D warnings` —
           # measurement builds should not fail on unrelated warnings (clippy CI
-          # is the warnings gate). Mirrors benchmark.yml.
+          # is the warnings gate).
           rustflags: ""
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
