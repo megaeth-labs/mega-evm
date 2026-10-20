@@ -178,11 +178,12 @@ pub fn live_system_address<DB: revm::Database>(mut db: DB) -> Result<Option<Addr
 /// was. The registry's code is not loaded: its code hash is compared, not its code.
 ///
 /// `None` when the registry names no address this engine trusts: it has no account, it holds other
-/// code than [`SEQUENCER_REGISTRY_CODE`], or its `_currentSystemAddress` is zero. Block execution
-/// never runs a transaction over such a registry — Satin's activation block refuses a chain whose
-/// registry does not hold this code, nothing in Satin replaces a contract's code, and the contract
-/// writes no zero address — so these are states an EVM run outside block execution may meet, and
-/// in none of them is any transaction a system-address transaction. The slot is loaded in each of
+/// code than [`SEQUENCER_REGISTRY_CODE`], or its `_currentSystemAddress` is zero. A chain Satin
+/// runs on never holds such a registry — Satin's activation block refuses a chain whose registry
+/// does not hold this code, nothing in Satin replaces a contract's code, and the contract writes no
+/// zero address — so these are states an EVM run outside block execution, or a block a tool or a
+/// test runs on a state of its own, may meet, and in none of them is any transaction a
+/// system-address transaction. The slot is loaded in each of
 /// them all the same, so the transaction's gas does not depend on them.
 ///
 /// # Errors
