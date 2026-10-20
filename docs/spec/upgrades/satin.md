@@ -798,6 +798,7 @@ An out-of-gas step halts the call, consuming its regular gas.
 
 A transaction MUST be system-originated when it is a Mega System Transaction, before or after its promotion; when its caller is `0xfffffffffffffffffffffffffffffffffffffffe`, the caller of the pre-block calls; or when it is a deposit carrying the source hash the promotion stamps, `keccak256("MEGA_SYSTEM_TRANSACTION")`, whoever its caller.
 The test is the transaction's own fields, in a block as outside one: a transaction of any type from that caller, or a deposit carrying that source hash, is treated as the protocol's wherever it is executed, a call or simulation included; no transaction a block derives from L1 carries either, and that caller's key is held by nobody, so in a block the set is the promoted Mega System Transactions.
+Only a deposit carries a source hash: a transaction handed to a node with one is a deposit, and is executed as one, whatever type its other fields name, so no transaction of another type carries the promotion's.
 
 A system-originated transaction and every system call:
 
