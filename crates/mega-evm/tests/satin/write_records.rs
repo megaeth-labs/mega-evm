@@ -1198,6 +1198,14 @@ fn paired_corpus() -> Vec<Paired> {
             0,
             0,
         ),
+        // Its sender is its recipient: one account, one record, and no transfer log.
+        case(
+            "a value call to the calling account itself",
+            to_callee(self_calling_code(&[CALLEE], 1)),
+            call_with_data(CALLER, CALLEE, Bytes::from_static(&[1]), gas_limit()),
+            0,
+            1,
+        ),
         case(
             "a log over one word",
             to_callee(
