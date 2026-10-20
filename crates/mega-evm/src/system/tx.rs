@@ -43,7 +43,8 @@ use crate::{
     system::ORACLE_CONTRACT_ADDRESS, types::MegaTransaction, ExternalEnvTypes, MegaContext,
 };
 
-/// The system address the unknown-chain placeholder schedule seeds the `SequencerRegistry` with.
+/// The initial system address of the `SequencerRegistry`: the one Rex5 created it naming, which a
+/// chain's registry holds until a rotation.
 ///
 /// A system-address transaction is executed as a deposit: no nonce check of op-revm's own and no
 /// fee. Which address sends them is the registry's to say, and it can be rotated through the

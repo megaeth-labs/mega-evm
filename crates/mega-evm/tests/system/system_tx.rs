@@ -745,8 +745,8 @@ fn test_a_deposit_over_the_data_size_limit_that_cannot_pay_for_its_caller_is_a_f
     );
 }
 
-/// The registry the Oracle reads the current system address from is seeded as the chain seeds
-/// it, so a write from the system address is the one the Oracle accepts.
+/// The registry the Oracle reads the current system address from holds it as a chain's registry
+/// does, so a write from the system address is the one the Oracle accepts.
 #[test]
 fn test_the_oracle_accepts_the_system_address_the_registry_names() {
     let current = ISequencerRegistry::currentSystemAddressCall {}.abi_encode();

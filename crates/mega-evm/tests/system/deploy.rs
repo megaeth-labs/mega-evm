@@ -129,7 +129,7 @@ fn test_a_matching_deploy_is_a_read_only_witness_entry() {
     let account = state.get(&ORACLE_CONTRACT_ADDRESS).expect("the read is in the witness");
     assert!(!account.is_touched(), "a matching deploy does not touch");
     assert!(!account.is_created(), "a matching deploy does not create");
-    assert!(account.storage.is_empty(), "a matching deploy does not seed");
+    assert!(account.storage.is_empty(), "a matching deploy writes no storage");
     assert_eq!(account.info.code_hash, ORACLE_CONTRACT_CODE_HASH);
 }
 
