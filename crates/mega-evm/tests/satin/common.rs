@@ -230,6 +230,24 @@ pub(crate) fn history(bytes: u64) -> u64 {
     u64::try_from((milli_gas + 500) / 1_000).expect("the history of the bytes fits a u64")
 }
 
+/// Room for the state gas of several new accounts, including in a frame that resumes after a
+/// child burned the 63/64 it was forwarded: at least 50,000,000, and 64 times what a value call to
+/// a new account costs its caller at the byte prices in effect.
+pub(crate) fn value_call_room() -> u64 {
+    (64 * (account_state_gas() + history(4 * mega_evm::WRITE_RECORD_SIZE) + 50_000)).max(50_000_000)
+}
+
+/// What a transaction with an empty calldata keeps: its body, `records` write records and the
+/// transfer logs of `moves` value movements.
+pub(crate) const fn records_and_moves(records: u64, moves: u64) -> LimitUsage {
+    LimitUsage {
+        data_size: mega_evm::TX_BODY_SIZE +
+            records * mega_evm::WRITE_RECORD_SIZE +
+            moves * mega_evm::TRANSFER_LOG_SIZE,
+        write_records: records,
+    }
+}
+
 /// The history gas the body of a transaction carrying `calldata_len` bytes of calldata, and no
 /// access list or authorization, pays at the byte prices in effect, by hand: `TX_BODY_SIZE`, 310
 /// bytes, and one byte per byte of calldata.

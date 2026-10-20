@@ -52,7 +52,9 @@ use revm::{
     Database, Inspector,
 };
 
-use crate::common::{account_state_gas, context, execute_under, history_rounds, share};
+use crate::common::{
+    account_state_gas, context, execute_under, history_rounds, share, value_call_room,
+};
 
 const CALLER: Address = address!("0000000000000000000000000000000000d00000");
 /// The contract a nested site's transaction calls: it calls [`ACTOR`] and returns what that
@@ -1125,7 +1127,7 @@ fn test_a_failed_precompiles_start_is_held_to_the_limits_it_counted_against() {
     let tx = OpTx(op_transaction(TxEnv {
         caller: CALLER,
         kind: TxKind::Call(ACTOR),
-        gas_limit: 20_000_000,
+        gas_limit: value_call_room(),
         ..Default::default()
     }));
     let body = transaction_body_bytes(&tx);
@@ -1161,7 +1163,7 @@ fn test_a_nested_creation_whose_nonce_cannot_be_bumped_keeps_nothing() {
     let tx = OpTx(op_transaction(TxEnv {
         caller: CALLER,
         kind: TxKind::Call(ACTOR),
-        gas_limit: 20_000_000,
+        gas_limit: value_call_room(),
         ..Default::default()
     }));
     let body = transaction_body_bytes(&tx);

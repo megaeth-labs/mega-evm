@@ -15,7 +15,7 @@ use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{address, map::HashMap, Address, Bytes, Log, LogData, B256, U256};
 use mega_evm::{
     test_utils::{transfer_log, BytecodeBuilder, MemoryDatabase},
-    transaction_body_bytes, LimitUsage, MegaContext, MegaEvm, TRANSFER_LOG_SIZE, WRITE_RECORD_SIZE,
+    MegaContext, MegaEvm,
 };
 use revm::{
     bytecode::opcode::STOP,
@@ -30,7 +30,7 @@ use revm::{
     Inspector,
 };
 
-use crate::common::{call, context};
+use crate::common::{call, context, records_and_moves, value_call_room};
 
 const CALLER: Address = address!("0000000000000000000000000000000000e10000");
 /// The transaction's own frame.
@@ -44,17 +44,6 @@ const STATEFUL: Address = address!("0000000000000000000000000000000000e10100");
 
 /// What every value call moves.
 const VALUE: u64 = 1_000;
-
-/// Room for every scenario, at any byte price the grid reaches.
-const GAS_LIMIT: u64 = 50_000_000;
-
-/// The data size of a body, `records` write records and `logs` transfer logs.
-fn kept(body: u64, records: u64, logs: u64) -> LimitUsage {
-    LimitUsage {
-        data_size: body + records * WRITE_RECORD_SIZE + logs * TRANSFER_LOG_SIZE,
-        write_records: records,
-    }
-}
 
 /// A log of `address`'s with one topic and no data.
 fn marker(address: Address, topic: u8) -> Log {
@@ -92,8 +81,7 @@ fn test_a_precompiles_writes_through_evm_internals_count_nothing() {
     let db = MemoryDatabase::default()
         .account_code(CONTRACT, code)
         .account_balance(CONTRACT, U256::from(VALUE));
-    let tx = call(CALLER, CONTRACT, U256::ZERO, GAS_LIMIT);
-    let body = transaction_body_bytes(&tx);
+    let tx = call(CALLER, CONTRACT, U256::ZERO, value_call_room());
     let mut evm = MegaEvm::new(context(db))
         .with_dyn_precompiles(HashMap::from_iter([(STATEFUL, stateful())]));
     let outcome = evm.execute_transaction(tx).expect("the transaction is valid");
@@ -115,7 +103,7 @@ fn test_a_precompiles_writes_through_evm_internals_count_nothing() {
         ],
         "the receipt carries the call's transfer log, then the precompile's log and transfer log",
     );
-    assert_eq!(outcome.usage, kept(body, 2, 1), "the call's start alone is counted");
+    assert_eq!(outcome.usage, records_and_moves(2, 1), "the call's start alone is counted");
     assert_eq!(evm.ctx().journal_ref().ledger_usage(), outcome.usage, "the ledger counts the same");
 }
 
@@ -181,8 +169,7 @@ fn test_a_tool_checkpoint_around_a_call_closes_with_it() {
             .account_code(CONTRACT, code)
             .account_balance(CONTRACT, U256::from(2 * VALUE))
             .account_code(RECEIVER, Bytes::from_static(&[STOP]));
-        let tx = call(CALLER, CONTRACT, U256::ZERO, GAS_LIMIT);
-        let body = transaction_body_bytes(&tx);
+        let tx = call(CALLER, CONTRACT, U256::ZERO, value_call_room());
         let inspector = Encloses { target: RECEIVER, revert, open: Vec::new() };
         let mut evm = MegaEvm::new(context(db)).with_inspector(inspector);
         let outcome = evm.execute_transaction(tx).expect("the transaction is valid");
@@ -196,11 +183,11 @@ fn test_a_tool_checkpoint_around_a_call_closes_with_it() {
                 Some(U256::ZERO),
                 "{case}: the first call's value went back"
             );
-            assert_eq!(ledger, kept(body, 2, 1), "{case}: what the journal kept");
+            assert_eq!(ledger, records_and_moves(2, 1), "{case}: what the journal kept");
         } else {
             let received = transfer_log(CONTRACT, RECEIVER, U256::from(VALUE));
             assert_eq!(outcome.result.logs(), [received, paid], "{case}");
-            assert_eq!(outcome.usage, kept(body, 3, 2), "{case}");
+            assert_eq!(outcome.usage, records_and_moves(3, 2), "{case}");
             assert_eq!(ledger, outcome.usage, "{case}: the ledger counts what the lanes count");
         }
     }
@@ -248,13 +235,12 @@ fn test_a_value_call_answered_at_frame_start_counts_nothing() {
             .account_balance(CALLER, U256::from(VALUE))
             .account_code(RECEIVER, Bytes::from_static(&[STOP]));
         let value = if to == RECEIVER { VALUE } else { 0 };
-        let tx = call(CALLER, to, U256::from(value), GAS_LIMIT);
-        let body = transaction_body_bytes(&tx);
+        let tx = call(CALLER, to, U256::from(value), value_call_room());
         let mut evm = MegaEvm::new(context(db)).with_inspector(AnswersAtFrameStart { target });
         let outcome = evm.execute_transaction(tx).expect("the transaction is valid");
         assert!(outcome.result.is_success(), "{case}: {:?}", outcome.result);
         assert!(outcome.result.logs().is_empty(), "{case}: nothing moved");
-        assert_eq!(outcome.usage, kept(body, 0, 0), "{case}");
+        assert_eq!(outcome.usage, records_and_moves(0, 0), "{case}");
         assert_eq!(evm.ctx().journal_ref().ledger_usage(), outcome.usage, "{case}");
     }
 }

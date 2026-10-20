@@ -12,7 +12,7 @@ use alloy_primitives::{address, Address, Bytes, B256, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, LimitUsage, MegaEvm, MegaTransaction, AUTHORIZATION_SIZE, LOG_BASE_SIZE,
-    LOG_TOPIC_SIZE, TRANSFER_LOG_SIZE, TX_BODY_SIZE, WRITE_RECORD_SIZE,
+    LOG_TOPIC_SIZE, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 use revm::{
     bytecode::opcode::{
@@ -24,6 +24,7 @@ use revm::{
 
 use crate::common::{
     call, call_with_data, constructor_returning, context, create, execute, execute_under,
+    records_and_moves,
 };
 
 const CALLER: Address = address!("0000000000000000000000000000000000400000");
@@ -46,11 +47,6 @@ const fn kept(extra: u64, bytes: u64, records: u64) -> LimitUsage {
 /// `records` write records and nothing else.
 const fn records(records: u64) -> LimitUsage {
     kept(0, records * WRITE_RECORD_SIZE, records)
-}
-
-/// `records` write records and the transfer logs of `moves` value movements.
-const fn records_and_moves(records: u64, moves: u64) -> LimitUsage {
-    kept(0, records * WRITE_RECORD_SIZE + moves * TRANSFER_LOG_SIZE, records)
 }
 
 /// A contract that `CREATE`s `init` and stops.
