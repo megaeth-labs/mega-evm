@@ -1,25 +1,29 @@
 //! The L1 block info a block's transactions are priced against, read before the block's
-//! transactions and handed to the pre-block observer.
+//! transactions and committed as a read-only state of its own.
 //!
 //! A non-deposit transaction is priced against the L1 block contract: op-revm reads the L1 base
 //! fee, the Ecotone blob base fee and fee scalars, the L1 fee overhead when the scalars it finds
 //! are empty, and the operator fee scalars, once per block, and block execution reads the DA
 //! footprint gas scalar before every non-deposit transaction. Both read the block's state
 //! directly, not through a transaction's journal, so the account and the slots they read land in
-//! no transaction's returned state. A stateless witness built from the returned states alone
-//! would miss them, and a validator's database that answers a missing slot with zero would price
-//! the L1 fee, the operator fee and the footprint differently without an error.
+//! no transaction's returned state. A stateless witness built from the states the block commits
+//! would miss them, and a validator re-executing the block from such a witness fails it with an
+//! error: a read outside the witness is an error, not a zero to price with.
 //!
 //! [`read_l1_block_info`] reads the account and the slots before the block's transactions and
-//! hands them back as read-only entries, as the reads of the `SequencerRegistry`'s pending changes
-//! are handed back, so the pre-block states carry them and a witness built from the states is
-//! complete. It reads every slot the pricing can read, whatever the contract holds before the
-//! block: op-revm makes its read at the block's first non-deposit transaction, on the state the
-//! deposits before it left, so which slots it reads is not decided by the state the block starts
-//! from. A deposit that empties the scalars turns the read to the overhead, and no transaction's
-//! state would name it. The entry may therefore carry a slot the block does not read after all.
-//! The read loads the account and its slots into the block's state cache and changes nothing: an
-//! untouched entry is not committed, and the transactions' own reads find the same values, or the
+//! answers them as read-only entries, as the reads of the `SequencerRegistry`'s pending changes
+//! are answered, and block execution commits them as a state of their own, so a witness built
+//! from the committed states holds them. Without the read, such a witness holds them only as long
+//! as two assumptions no check enforces hold: that the block starts with its L1 attributes
+//! deposit, whose returned state names slots 1, 3, 7 and 8 because the deposit writes them, and
+//! that the Ecotone scalars the deposit leaves are not both zero, since op-revm then reads the
+//! overhead in slot 5, which nothing writes and no other state names. The read takes every slot
+//! the pricing can read, whatever the contract holds before the block: op-revm makes its read at
+//! the block's first non-deposit transaction, on the state the deposits before it left, so which
+//! slots it reads is not decided by the state the block starts from. The entry may therefore
+//! carry a slot the block does not read after all. The read loads the account and its slots into
+//! the block's state cache and changes nothing: its commit hands a commit hook the read-only
+//! entry and keeps no transition, and the transactions' own reads find the same values, or the
 //! ones the block's L1 attributes deposit wrote over them.
 
 use alloy_primitives::U256;
@@ -56,8 +60,8 @@ pub const L1_BLOCK_INFO_SLOTS: [U256; 5] = [
 ///
 /// Every slot is read whatever the others hold, the overhead beside set scalars included.
 ///
-/// Nothing is committed. Block execution hands the state to the pre-block observer and commits
-/// it, which changes nothing.
+/// Nothing is committed here. Block execution commits the state on its own, which changes
+/// nothing and hands a commit hook the read-only entry.
 ///
 /// # Errors
 ///

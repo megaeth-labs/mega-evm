@@ -1,8 +1,9 @@
 //! The pre-block calls a block makes before its transactions.
 //!
-//! Each helper runs the call and hands back the state it produced; none of them commits. A
-//! node's witness generator needs to see the read and write set of every step of block
-//! execution, and a helper that committed straight to the database would hide its own.
+//! Each helper runs the call and hands back the state it produced; none of them commits. The block
+//! executor commits each pre-block step's state on its own, in the order the steps run, and that
+//! sequence of committed states, read and write sets whole, is what a node's witness generator
+//! collects through a commit hook on the block's state.
 //!
 //! A pre-block call is a system call on [`pre_block_call_gas_limit`], and a block whose
 //! pre-block call does not succeed is refused: the state the protocol maintains before the

@@ -39,9 +39,9 @@ pub use block::{
     MegaBlockExecutionError, MegaBlockExecutionResult, MegaBlockExecutor, MegaBlockExecutorFactory,
     MegaBlockLimitExceededError, MegaBlockTxResult, MegaFinishedBlock, MegaHardfork,
     MegaHardforkConfig, MegaHardforks, MegaTransactionExt, MegaTxLimitExceededError,
-    PreBlockStateObserver, PreBlockStateSource, ProtocolLimits, SatinChainConfig,
-    SatinChainConfigError, ScheduleError, CHAIN_ACTIVATIONS, L1_BLOCK_INFO_SLOTS, MAINNET_CHAIN_ID,
-    SATIN_CHAIN_CONFIG_KEYS, SATIN_TIME_KEY, SYSTEM_ADDRESS, TESTNET_CHAIN_ID,
+    ProtocolLimits, SatinChainConfig, SatinChainConfigError, ScheduleError, CHAIN_ACTIVATIONS,
+    L1_BLOCK_INFO_SLOTS, MAINNET_CHAIN_ID, SATIN_CHAIN_CONFIG_KEYS, SATIN_TIME_KEY, SYSTEM_ADDRESS,
+    TESTNET_CHAIN_ID,
 };
 #[cfg(feature = "satin-price-override")]
 pub use evm::install_satin_prices;

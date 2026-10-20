@@ -59,20 +59,20 @@
 //! build. Any other state the candidate read is not checked: a candidate executed before another
 //! commit changed it is the builder's to execute again.
 //!
-//! # The pre-block observer
+//! # The witness is what the block commits
 //!
 //! Each pre-block step — the EIP-2935 call, the EIP-4788 call, the activation block's read of each
 //! predeploy, the read of the `SequencerRegistry`'s pending changes, the `applyPendingChanges()`
 //! call and the read of the L1 block info the block's transactions are priced against — produces an
-//! [`EvmState`] that this executor commits. alloy-evm 0.36
-//! re-exports revm's `OnStateHook` (`on_state(&EvmState)`) but has no `set_state_hook` on
-//! [`BlockExecutor`] and no source tag, so this crate names the step ([`PreBlockStateSource`]) and
-//! carries an optional [`PreBlockStateObserver`]. Every pre-block state is handed to the observer
-//! **before** it is committed, in execution order. The sequence, with the returned states of the
-//! block's transactions and the exported block hashes and buckets, is the witness a stateless
-//! client needs: revm drops untouched accounts from the committed transition, so a caller that
-//! only saw the database after the commit would miss the read-only entries — the activation
-//! block's predeploys, the registry's pending slots, the L1 block info.
+//! [`EvmState`], and this executor commits each one on its own, in that order, before the first
+//! transaction; every committed transaction's returned state follows. A read is a read-only entry
+//! of its step's state: an account neither touched nor created, its slots unchanged. The sequence
+//! of committed states, with the exported block hashes and buckets, is the witness a stateless
+//! client needs. A node takes it with a commit hook on revm's `State` (`State::set_state_hook`),
+//! which `commit` hands every state whole, before the cache drops the accounts the state did not
+//! touch. The block's transitions and bundle keep only what a state changed, so a witness taken
+//! from them would miss the read-only entries — the activation block's predeploys, the registry's
+//! pending slots, the L1 block info.
 //!
 //! The L1 block info is read here because nothing else puts it in a state: op-revm prices the
 //! block's first non-deposit transaction against the L1 block contract's slots read on the
@@ -316,63 +316,6 @@ impl From<MegaBlockExecutionError> for BlockExecutionError {
     }
 }
 
-/// Where a pre-block state change came from.
-///
-/// alloy-evm 0.36 re-exports revm's `OnStateHook` (`on_state(&EvmState)`) but has no
-/// `set_state_hook` on [`BlockExecutor`] and no source tag, so this crate names the step.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PreBlockStateSource {
-    /// The EIP-2935 history-storage system call.
-    Eip2935,
-    /// The EIP-4788 beacon-root system call.
-    Eip4788,
-    /// The read of the predeploy at this address, a system contract or the EIP-7997 factory, which
-    /// the block in which Satin activates checks.
-    SystemContract(Address),
-    /// The reads of the `SequencerRegistry`'s pending role changes that decide whether the
-    /// block makes the `applyPendingChanges()` call.
-    PendingChanges,
-    /// The `SequencerRegistry.applyPendingChanges()` system call.
-    ApplyPendingChanges,
-    /// The read of the L1 block info the block's transactions are priced against: the L1 block
-    /// contract's account and every slot of [`L1_BLOCK_INFO_SLOTS`](crate::L1_BLOCK_INFO_SLOTS),
-    /// as read-only entries, or the account as not existing on a chain that does not hold it. It
-    /// is the last pre-block state.
-    L1BlockInfo,
-}
-
-/// Receives each pre-block [`EvmState`] before the executor commits it.
-///
-/// The sequence is the witness a stateless client needs: every read and write a pre-block step
-/// made, tagged with its source, in execution order. Install one with
-/// [`MegaBlockExecutor::set_pre_block_observer`].
-pub trait PreBlockStateObserver: Send + 'static {
-    /// `state` is the witness of this step, not yet committed.
-    fn on_pre_block_state(&mut self, source: PreBlockStateSource, state: &EvmState);
-}
-
-impl<F> PreBlockStateObserver for F
-where
-    F: FnMut(PreBlockStateSource, &EvmState) + Send + 'static,
-{
-    fn on_pre_block_state(&mut self, source: PreBlockStateSource, state: &EvmState) {
-        self(source, state)
-    }
-}
-
-/// [`Debug`] skip for the optional observer: a trait object is not [`Debug`].
-struct OptionalPreBlockObserver(Option<Box<dyn PreBlockStateObserver>>);
-
-impl fmt::Debug for OptionalPreBlockObserver {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.0.is_some() {
-            f.write_str("Some(_)")
-        } else {
-            f.write_str("None")
-        }
-    }
-}
-
 /// Executes the transactions of one block on a Satin EVM.
 #[derive(Debug)]
 pub struct MegaBlockExecutor<E, R: OpReceiptBuilder, Spec> {
@@ -391,8 +334,6 @@ pub struct MegaBlockExecutor<E, R: OpReceiptBuilder, Spec> {
     limiter: BlockLimiter,
     /// The limits the protocol holds this block to: the spec's.
     protocol_limits: ProtocolLimits,
-    /// Optional observer of each pre-block state, invoked before the state is committed.
-    pre_block_observer: OptionalPreBlockObserver,
 }
 
 impl<E, R: OpReceiptBuilder, Spec> MegaBlockExecutor<E, R, Spec> {
@@ -419,13 +360,6 @@ impl<E, R: OpReceiptBuilder, Spec> MegaBlockExecutor<E, R, Spec> {
     /// The gas the block's transactions have spent so far, by ledger.
     pub const fn gas(&self) -> &BlockGasCounters {
         &self.limiter.gas
-    }
-
-    /// Installs the observer that receives every pre-block state before it is committed.
-    ///
-    /// The sequence is the witness a stateless client needs. `None` turns observation off.
-    pub fn set_pre_block_observer(&mut self, observer: Option<Box<dyn PreBlockStateObserver>>) {
-        self.pre_block_observer = OptionalPreBlockObserver(observer);
     }
 }
 
@@ -458,16 +392,7 @@ where
         let protocol_limits = ProtocolLimits::for_spec(evm.ctx().spec());
         evm.set_tx_runtime_limits(protocol_limits.tx_runtime_limits);
         let limiter = BlockLimiter::new(ctx.block_limits.within(&protocol_limits), block_gas_limit);
-        Self {
-            spec,
-            receipt_builder,
-            ctx,
-            evm,
-            receipts: Vec::new(),
-            limiter,
-            protocol_limits,
-            pre_block_observer: OptionalPreBlockObserver(None),
-        }
+        Self { spec, receipt_builder, ctx, evm, receipts: Vec::new(), limiter, protocol_limits }
     }
 
     /// The limits the protocol holds this block to: the spec's
@@ -527,14 +452,6 @@ where
     /// Commits `state` to the database.
     fn commit(&mut self, state: EvmState) {
         self.evm.ctx_mut().db_mut().commit(state);
-    }
-
-    /// Hands `state` to the pre-block observer, then commits it.
-    fn deliver_pre_block(&mut self, source: PreBlockStateSource, state: EvmState) {
-        if let Some(observer) = self.pre_block_observer.0.as_mut() {
-            observer.on_pre_block_state(source, &state);
-        }
-        self.commit(state);
     }
 
     /// Refuses a data-availability footprint the block has no room left for.
@@ -711,9 +628,9 @@ where
     /// In order: the admission gate, the reset of the block-hash and bucket records, the EIP-2935
     /// and EIP-4788 pre-block calls, in the block in which Satin activates the check of the
     /// predeploys, the `SequencerRegistry`'s due role changes and the read of the L1 block info.
-    /// Each step's state is handed to the pre-block observer and then committed here rather than
-    /// inside its helper, so a witness generator sees every step's read and write set. The
-    /// sequence the observer receives is the witness a stateless client needs.
+    /// Each step's state is committed here, on its own and read-only entries included, rather
+    /// than inside its helper, so a commit hook on the database sees every step's read and write
+    /// set. The sequence of committed states is the witness a stateless client needs.
     ///
     /// The transactions are not priced against the read made here. op-revm's handler fetches the
     /// L1 block info when it deducts the caller of the first non-deposit transaction, which is
@@ -727,21 +644,22 @@ where
     /// `MegaETH` system contracts and do not read them, so their outcome does not depend on the
     /// check that follows. Each runs on the pre-block budget
     /// ([`pre_block_call_gas_limit`](eips::pre_block_call_gas_limit)), and one that does not
-    /// succeed refuses the block before its state reaches the observer.
+    /// succeed refuses the block before its state is committed.
     ///
     /// The check is made once, in the block in which Satin activates
     /// ([`MegaBlockExecutionCtx::satin_activation_block`]): each of the seven predeploys must hold
-    /// the code Satin expects, and its account is handed on as a read-only entry; any other block
+    /// the code Satin expects, and its account is committed as a read-only entry; any other block
     /// reads none of them. Satin deploys and upgrades nothing: a chain reaches it through the
     /// legacy forks, which leave the six system contracts at the versions Satin runs, and the
     /// EIP-7997 factory is OP's predeploy.
     ///
-    /// The registry's role changes come after. Its pending slots are read and handed on
-    /// whatever they say, and when a change is due in this block the `applyPendingChanges()` call
-    /// applies it on the same pre-block budget, refusing the block if it does not succeed. So a
-    /// rotation due in this block governs this block's system-address transactions: each reads the
-    /// live system address out of the registry when it is validated, after these steps are
-    /// committed, and nothing inside the block can change it again.
+    /// The registry's role changes come after. Its pending slots are read and committed as a
+    /// read-only state whatever they say, and when a change is due in this block the
+    /// `applyPendingChanges()` call applies it on the same pre-block budget, refusing the block
+    /// if it does not succeed. So a rotation due in this block governs this block's
+    /// system-address transactions: each reads the live system address out of the registry when
+    /// it is validated, after these steps are committed, and nothing inside the block can
+    /// change it again.
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
         self.check_admission()?;
 
@@ -756,7 +674,7 @@ where
             &mut self.evm,
         )?;
         if let Some(ResultAndState { state, .. }) = state {
-            self.deliver_pre_block(PreBlockStateSource::Eip2935, state);
+            self.commit(state);
         }
 
         let state = eips::transact_beacon_root_contract_call(
@@ -765,7 +683,7 @@ where
             &mut self.evm,
         )?;
         if let Some(ResultAndState { state, .. }) = state {
-            self.deliver_pre_block(PreBlockStateSource::Eip4788, state);
+            self.commit(state);
         }
 
         // The EIP-2935 / EIP-4788 calls above do not depend on these predeploys: they target
@@ -790,27 +708,28 @@ where
                             .into(),
                         },
                     )?;
-                self.deliver_pre_block(PreBlockStateSource::SystemContract(spec.address), state);
+                self.commit(state);
             }
         }
 
         let block_number = self.evm.block().number().saturating_to();
         let (due, reads) = is_apply_pending_changes_due(self.evm.db_mut(), block_number)
             .map_err(BlockExecutionError::other)?;
-        self.deliver_pre_block(PreBlockStateSource::PendingChanges, reads);
+        self.commit(reads);
         if due {
             let ResultAndState { state, .. } = transact_apply_pending_changes(&mut self.evm)?;
-            self.deliver_pre_block(PreBlockStateSource::ApplyPendingChanges, state);
+            self.commit(state);
         }
 
         // The L1 block info the transactions are priced against is read on the database itself,
         // by op-revm once per block and by `execute` before every non-deposit transaction, so it
         // lands in no transaction's state. Read here, it is in the pre-block states instead:
         // every slot those reads can reach, because which ones they reach is decided by the state
-        // the block's deposits leave, not by this one. The read fills the state cache and commits
-        // nothing.
+        // the block's deposits leave, not by this one. The read fills the state cache, and its
+        // commit changes nothing: a commit hook receives the read-only entry, and the cache keeps
+        // no transition for it.
         let state = read_l1_block_info(self.evm.db_mut()).map_err(BlockExecutionError::other)?;
-        self.deliver_pre_block(PreBlockStateSource::L1BlockInfo, state);
+        self.commit(state);
 
         Ok(())
     }
@@ -1255,27 +1174,5 @@ mod tests {
         }
         let inspector = MegaBlockExecutionError::RewritingInspector;
         assert_eq!(internal(&BlockExecutionError::from(inspector.clone())), &inspector);
-    }
-
-    /// The executor prints whether a pre-block observer is installed. A trait object has no
-    /// `Debug`, so the observer is reported as a flag rather than dropped: a reader of a node's
-    /// log can tell a block whose pre-block states were witnessed from one whose were not.
-    #[test]
-    fn test_debug_reports_whether_a_pre_block_observer_is_installed() {
-        let ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
-        let mut executor = MegaBlockExecutor::new(
-            MegaEvm::new(ctx),
-            MegaBlockExecutionCtx::default(),
-            MegaHardforkConfig::default().with_all_activated(),
-            alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder::default(),
-        );
-
-        assert_eq!(format!("{:?}", executor.pre_block_observer), "None");
-
-        executor.set_pre_block_observer(Some(Box::new(|_: PreBlockStateSource, _: &EvmState| {})));
-        assert_eq!(format!("{:?}", executor.pre_block_observer), "Some(_)");
-
-        executor.set_pre_block_observer(None);
-        assert_eq!(format!("{:?}", executor.pre_block_observer), "None");
     }
 }

@@ -8,8 +8,8 @@
 //!
 //! The block in which Satin activates checks once that each address holds that code
 //! ([`check_system_contract`]); no other block reads them. The check returns its read as a state
-//! and never commits; the block executor hands it to its pre-block observer, so the activation
-//! block's witness carries the seven accounts.
+//! and never commits; the block executor commits it as a read-only state of its own, so the
+//! activation block's witness, built from the committed states, carries the seven accounts.
 
 use core::fmt;
 

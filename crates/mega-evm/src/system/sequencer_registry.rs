@@ -55,7 +55,7 @@ pub use mega_system_contracts::sequencer_registry::{storage_slots, ISequencerReg
 /// or sequencer whose activation block has come.
 ///
 /// Also answers the reads that decided it, as read-only entries of the registry's account: the
-/// witness a stateless client replays the decision from, which the caller hands on whether or
+/// witness a stateless client replays the decision from, which the caller commits whether or
 /// not a change is due. Both roles' pending slots are read, and a role's activation block only
 /// when it has a change pending. A registry that does not exist has nothing due, and its absence
 /// is what the witness records; no chain Satin runs on lacks it, its activation block refusing
