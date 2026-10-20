@@ -45,9 +45,7 @@ use std::{
     },
 };
 
-pub use chain::{
-    chain_spec, registry_config, registry_roles, Added, SatinAccount, FORK, SATIN_ACCOUNTS,
-};
+pub use chain::{chain_spec, registry_roles, Added, SatinAccount, FORK, SATIN_ACCOUNTS};
 pub use fixture::NETWORK;
 use mega_evm::{
     alloy_consensus::Header,

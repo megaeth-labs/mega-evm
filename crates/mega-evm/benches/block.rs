@@ -41,7 +41,7 @@ use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use mega_evm::{
-    system::{SequencerRegistryConfig, MEGA_SYSTEM_ADDRESS, SYSTEM_CONTRACT_DEPLOY_COUNT},
+    system::{MEGA_SYSTEM_ADDRESS, SYSTEM_CONTRACT_DEPLOY_COUNT},
     test_utils::{BytecodeBuilder, MemoryDatabase},
     BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardforkConfig,
     MegaSpecId, MegaTxEnvelope, PreBlockStateSource,
@@ -170,9 +170,7 @@ fn transactions(
 }
 
 fn chain_spec() -> MegaHardforkConfig {
-    MegaHardforkConfig::default()
-        .with_all_activated()
-        .with_params(SequencerRegistryConfig::placeholder())
+    MegaHardforkConfig::default().with_all_activated()
 }
 
 /// Runs the pre-block changes of block `number` on `db` and returns what they handed their

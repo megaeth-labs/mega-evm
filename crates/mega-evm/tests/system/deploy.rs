@@ -6,31 +6,21 @@ use mega_evm::{
     system::{
         check_genesis_account,
         keyless::{KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE_HASH},
-        system_contract_specs, transact_deploy, GenesisAllocationError, SequencerRegistryConfig,
-        SystemContractDeployError, SystemContractSpec, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE,
-        ACCESS_CONTROL_CODE_HASH, CREATE2_FACTORY_ADDRESS, CREATE2_FACTORY_CODE,
-        CREATE2_FACTORY_CODE_HASH, CREATE2_FACTORY_NONCE, HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
+        system_contract_specs, transact_deploy, GenesisAllocationError, SystemContractDeployError,
+        SystemContractSpec, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE, ACCESS_CONTROL_CODE_HASH,
+        CREATE2_FACTORY_ADDRESS, CREATE2_FACTORY_CODE, CREATE2_FACTORY_CODE_HASH,
+        CREATE2_FACTORY_NONCE, HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
         HIGH_PRECISION_TIMESTAMP_ORACLE_CODE_HASH, LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE_HASH,
-        MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE,
-        ORACLE_CONTRACT_CODE_HASH, SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE,
-        SEQUENCER_REGISTRY_CODE_HASH, SYSTEM_CONTRACT_ADDRESSES, SYSTEM_CONTRACT_DEPLOY_COUNT,
+        ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE, ORACLE_CONTRACT_CODE_HASH,
+        SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE, SEQUENCER_REGISTRY_CODE_HASH,
+        SYSTEM_CONTRACT_ADDRESSES, SYSTEM_CONTRACT_DEPLOY_COUNT,
     },
     test_utils::{ErrorInjectingDatabase, MemoryDatabase},
-    HardforkParams,
 };
 use revm::{primitives::KECCAK_EMPTY, Database, DatabaseCommit};
 
-const SEQUENCER: Address = address!("0x2222222222222222222222222222222222222222");
-const ADMIN_ADDR: Address = address!("0x3333333333333333333333333333333333333333");
-
-fn config() -> SequencerRegistryConfig {
-    SequencerRegistryConfig {
-        initial_system_address: MEGA_SYSTEM_ADDRESS,
-        initial_sequencer: SEQUENCER,
-        initial_admin: ADMIN_ADDR,
-        min_rotation_delay: 100,
-    }
-}
+/// An address no contract is deployed at.
+const NO_CONTRACT: Address = address!("0x2222222222222222222222222222222222222222");
 
 fn oracle_spec() -> SystemContractSpec {
     SystemContractSpec::new(
@@ -321,30 +311,6 @@ fn test_the_registry_must_already_be_deployed_at_v2() {
     }
 }
 
-/// Zero addresses in the registry config fail at load, not at the first block.
-#[test]
-fn test_registry_config_rejects_a_zero_address() {
-    let mut config = config();
-    config.initial_system_address = Address::ZERO;
-    let err = config.validate().expect_err("zero system address");
-    assert!(err.message.contains("initial_system_address must not be zero"));
-
-    config = self::config();
-    config.initial_sequencer = Address::ZERO;
-    let err = config.validate().expect_err("zero sequencer");
-    assert!(err.message.contains("initial_sequencer must not be zero"));
-
-    config = self::config();
-    config.initial_admin = Address::ZERO;
-    let err = config.validate().expect_err("zero admin");
-    assert!(err.message.contains("initial_admin must not be zero"));
-
-    config = self::config();
-    config.min_rotation_delay = 0;
-    let err = config.validate().expect_err("zero min rotation delay");
-    assert!(err.message.contains("min_rotation_delay must not be zero"));
-}
-
 /// A failed account load is [`SystemContractDeployError::Database`], and that inner error is
 /// the `source` of the deploy error.
 #[test]
@@ -418,7 +384,7 @@ fn test_other_genesis_accounts_pass_the_check() {
         ("a balance alone", SEQUENCER_REGISTRY_ADDRESS, &[], 0, &[]),
         ("slots holding zero", SEQUENCER_REGISTRY_ADDRESS, &[], 0, &[U256::ZERO, U256::ZERO]),
         ("a used nonce", ORACLE_CONTRACT_ADDRESS, &[], 1, &held),
-        ("no contract deployed there", SEQUENCER, &[], 0, &held),
+        ("no contract deployed there", NO_CONTRACT, &[], 0, &held),
         (
             "the registry, which the deploy never installs",
             SEQUENCER_REGISTRY_ADDRESS,

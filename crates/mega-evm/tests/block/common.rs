@@ -11,7 +11,7 @@ use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
-    system::{IOracle, SequencerRegistryConfig, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS},
+    system::{IOracle, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS},
     test_utils::{BytecodeBuilder, MemoryDatabase, SequencerRegistryRoles},
     BlockLimits, EmptyExternalEnv, EvmTxRuntimeLimits, MegaBlockExecutionCtx, MegaBlockExecutor,
     MegaBlockExecutorFactory, MegaEvm, MegaEvmFactory, MegaHardforkConfig, MegaSpecId,
@@ -105,23 +105,13 @@ pub(crate) fn registry_roles() -> SequencerRegistryRoles {
     }
 }
 
-/// Registry params the block tests attach to a Satin-at-genesis schedule.
-pub(crate) fn registry_config() -> SequencerRegistryConfig {
-    SequencerRegistryConfig {
-        initial_system_address: MEGA_SYSTEM_ADDRESS,
-        initial_sequencer: SEQUENCER,
-        initial_admin: ADMIN,
-        min_rotation_delay: 100,
-    }
-}
-
-/// A schedule that activates Satin at genesis and can seed the `SequencerRegistry`.
+/// A schedule that activates Satin at genesis.
 ///
 /// Its blocks are held to the spec's limits ([`ProtocolLimits::for_spec`]), which no block this
 /// size reaches but gas detention's caps; a test that holds a block or a transaction to another
 /// limit replaces them ([`executor_with_limits`]).
 pub(crate) fn chain_spec() -> MegaHardforkConfig {
-    MegaHardforkConfig::default().with_all_activated().with_params(registry_config())
+    MegaHardforkConfig::default().with_all_activated()
 }
 
 /// The loosest limits a block could be held to while a read of volatile data still detains:

@@ -1,18 +1,14 @@
 //! The schedule a block runs on, and what is checked of it before the block starts.
 
-use core::any::{Any, TypeId};
-
-use alloy_evm::{block::BlockExecutor, EvmFactory};
-use alloy_hardforks::{EthereumHardfork, EthereumHardforks, ForkCondition, Hardfork};
-use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
-use alloy_op_hardforks::{OpHardfork, OpHardforks};
+use alloy_evm::block::BlockExecutor;
+use alloy_hardforks::{EthereumHardfork, ForkCondition, Hardfork};
+use alloy_op_hardforks::OpHardfork;
 use mega_evm::{
-    chain_activation, mainnet_hardforks, system::SequencerRegistryConfig, testnet_hardforks,
-    ChainActivation, MegaBlockExecutor, MegaEvmFactory, MegaHardfork, MegaHardforkConfig,
-    MegaHardforks, MegaSpecId, ProtocolLimits, ScheduleError, MAINNET_CHAIN_ID, TESTNET_CHAIN_ID,
+    chain_activation, mainnet_hardforks, testnet_hardforks, ChainActivation, MegaHardfork,
+    MegaHardforkConfig, MegaHardforks, ScheduleError, MAINNET_CHAIN_ID, TESTNET_CHAIN_ID,
 };
 
-use crate::common::{self, empty_call_gas, registry_config, user_tx};
+use crate::common::{self, empty_call_gas, user_tx};
 
 /// The canonical schedules are the chain activation table: the two are one source, so a
 /// timestamp cannot be right in one and wrong in the other. What the published upgrade pages
@@ -30,7 +26,7 @@ fn test_canonical_schedules_match_the_chain_activation_table() {
                 "{fork:?} on chain {chain_id}"
             );
             // The schedule carries an entry for every fork, including the ones the chain has not
-            // scheduled: attaching a fork's parameters needs its entry to be there.
+            // scheduled.
             assert_eq!(
                 schedule.get(*fork),
                 Some(&activation.condition(*fork)),
@@ -60,79 +56,6 @@ fn test_a_schedule_activating_satin_alone_loads_and_runs() {
     executor.execute_transaction(&user_tx(0, empty_call_gas())).expect("the transaction executes");
 }
 
-/// A fork the schedule does not activate needs no parameters.
-#[test]
-fn test_an_unscheduled_fork_needs_no_params() {
-    let unscheduled = MegaHardforkConfig::default();
-
-    assert_eq!(unscheduled.require_params::<SequencerRegistryConfig>(), Ok(()));
-    assert_eq!(unscheduled.validate_schedule(), Ok(()));
-}
-
-/// A node's own schedule type: it attaches its parameters without `with_params`, and answers with
-/// whatever it holds. This one answers limits of its own for Satin, as a schedule that carried
-/// them would, and everything else as [`common::chain_spec`] does.
-struct NodeSchedule {
-    inner: MegaHardforkConfig,
-    limits: ProtocolLimits,
-}
-
-impl EthereumHardforks for NodeSchedule {
-    fn ethereum_fork_activation(&self, fork: EthereumHardfork) -> ForkCondition {
-        self.inner.ethereum_fork_activation(fork)
-    }
-}
-
-impl OpHardforks for NodeSchedule {
-    fn op_fork_activation(&self, fork: OpHardfork) -> ForkCondition {
-        self.inner.op_fork_activation(fork)
-    }
-}
-
-impl MegaHardforks for NodeSchedule {
-    fn mega_fork_activation(&self, fork: MegaHardfork) -> ForkCondition {
-        self.inner.mega_fork_activation(fork)
-    }
-
-    fn fork_params_any(
-        &self,
-        fork: MegaHardfork,
-        params: TypeId,
-    ) -> Option<&(dyn Any + Send + Sync)> {
-        if fork == MegaHardfork::Satin && params == TypeId::of::<ProtocolLimits>() {
-            Some(&self.limits)
-        } else {
-            self.inner.fork_params_any(fork, params)
-        }
-    }
-}
-
-/// A schedule cannot hand a block its limits: the executor holds the block to the spec's, whatever
-/// a node's own schedule type answers, so no chain configuration loosens or tightens them. The
-/// block runs, its transactions under the spec's per-transaction limits and the block under its
-/// data-size budget.
-#[test]
-fn test_a_schedule_cannot_hand_a_block_its_limits() {
-    let satin = ProtocolLimits::for_spec(MegaSpecId::SATIN);
-    let schedule =
-        NodeSchedule { inner: common::chain_spec(), limits: ProtocolLimits::no_limits() };
-    assert_eq!(schedule.validate_schedule(), Ok(()));
-
-    let mut state = common::state();
-    let evm = MegaEvmFactory::new().create_evm(&mut state, common::evm_env());
-    let mut executor = MegaBlockExecutor::new(
-        evm,
-        common::unlimited_ctx(),
-        &schedule,
-        OpAlloyReceiptBuilder::default(),
-    );
-    assert_eq!(executor.protocol_limits(), &satin);
-    assert_eq!(*executor.evm().tx_runtime_limits(), satin.tx_runtime_limits);
-    assert_eq!(executor.limiter().limits.block_txs_data_limit, satin.block_txs_data_limit);
-    executor.apply_pre_execution_changes().expect("the block starts");
-    executor.execute_transaction(&user_tx(0, empty_call_gas())).expect("the transaction executes");
-}
-
 /// When Satin activates on the schedules of [`base_fork_case`].
 const SATIN_TIME: u64 = 1_800_000_000;
 
@@ -156,13 +79,12 @@ const OP_BASE_FORKS: [OpHardfork; 9] = [
     OpHardfork::Karst,
 ];
 
-/// A schedule that activates Satin at [`SATIN_TIME`] with its params attached, every base fork at
-/// genesis but `base`, which activates on `condition`.
+/// A schedule that activates Satin at [`SATIN_TIME`], every base fork at genesis but `base`, which
+/// activates on `condition`.
 fn base_fork_case(base: impl Hardfork, condition: ForkCondition) -> MegaHardforkConfig {
     MegaHardforkConfig::new()
         .with(MegaHardfork::Satin, ForkCondition::Timestamp(SATIN_TIME))
         .with(base, condition)
-        .with_params(registry_config())
 }
 
 /// The refusal of a schedule whose `base` fork is not active when Satin activates.
@@ -242,12 +164,11 @@ fn test_a_base_fork_at_satin_time_is_accepted() {
 fn test_engine_built_schedules_keep_their_base_forks_at_genesis() {
     for satin_time in [0, 1, SATIN_TIME] {
         let schedule = MegaHardforkConfig::new()
-            .with(MegaHardfork::Satin, ForkCondition::Timestamp(satin_time))
-            .with_params(registry_config());
+            .with(MegaHardfork::Satin, ForkCondition::Timestamp(satin_time));
         assert_eq!(schedule.validate_schedule(), Ok(()), "Satin at {satin_time}");
 
         let activation = ChainActivation { chain_id: MAINNET_CHAIN_ID, satin: Some(satin_time) };
-        let schedule = activation.hardforks().with_params(registry_config());
+        let schedule = activation.hardforks();
         assert_eq!(schedule.validate_schedule(), Ok(()), "the table's Satin at {satin_time}");
     }
 }

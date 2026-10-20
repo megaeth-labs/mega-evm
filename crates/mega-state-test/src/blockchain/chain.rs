@@ -6,8 +6,8 @@
 //! holds. A block the executor accepts becomes the chain's head and its state the chain's; a block
 //! it refuses is dropped with its copy, so the chain stays at the previous block.
 //!
-//! The executor needs the Satin fork's parameters; [`chain_spec`] supplies them with values that
-//! bind nothing on an Osaka fixture, and says why for each.
+//! The executor needs the `SequencerRegistry` the legacy forks deploy; the chain's pre-state holds
+//! it with roles that bind nothing on an Osaka fixture ([`registry_roles`]), and says why.
 //!
 //! Each block's context tells the executor whether the block admits only deposits, worked out as
 //! a node works it out: from the schedule and the timestamp of the chain's head, the block's
@@ -36,10 +36,10 @@ use mega_evm::{
         state::AccountInfo,
     },
     system::{
-        keyless::KEYLESS_DEPLOY_ADDRESS, system_contract_specs, SequencerRegistryConfig,
-        ACCESS_CONTROL_ADDRESS, CREATE2_FACTORY_ADDRESS, HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
-        LIMIT_CONTROL_ADDRESS, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
-        SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE, SEQUENCER_REGISTRY_CODE_HASH,
+        keyless::KEYLESS_DEPLOY_ADDRESS, system_contract_specs, ACCESS_CONTROL_ADDRESS,
+        CREATE2_FACTORY_ADDRESS, HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS, LIMIT_CONTROL_ADDRESS,
+        MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS, SEQUENCER_REGISTRY_ADDRESS,
+        SEQUENCER_REGISTRY_CODE, SEQUENCER_REGISTRY_CODE_HASH,
     },
     test_utils::SequencerRegistryRoles,
     BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaHardforkConfig, MegaHardforks,
@@ -163,15 +163,9 @@ pub fn registry_roles() -> SequencerRegistryRoles {
     SequencerRegistryRoles::from(MEGA_SYSTEM_ADDRESS)
 }
 
-/// The `SequencerRegistry` parameters the schedule carries.
-pub fn registry_config() -> SequencerRegistryConfig {
-    SequencerRegistryConfig::placeholder()
-}
-
-/// The schedule the blocks run on: every fork active from genesis, with the `SequencerRegistry`
-/// roles of [`registry_config`], the one parameter the Satin fork requires.
+/// The schedule the blocks run on: every fork active from genesis.
 pub fn chain_spec() -> MegaHardforkConfig {
-    MegaHardforkConfig::default().with_all_activated().with_params(registry_config())
+    MegaHardforkConfig::default().with_all_activated()
 }
 
 /// The limits the blocks are held to in place of Satin's: none ([`ProtocolLimits::no_limits`]).
@@ -472,14 +466,13 @@ mod tests {
         );
     }
 
-    /// [S10] The schedule the chain runs on loads, carrying the registry's roles, and the blocks
-    /// are held to no limit: equivalence mode takes out every one `MegaETH` sets.
+    /// [S10] The schedule the chain runs on loads, and the blocks are held to no limit:
+    /// equivalence mode takes out every one `MegaETH` sets.
     ///
     /// Expected values: constants (no limit at all).
     #[test]
     fn test_the_chain_spec_loads_and_the_blocks_are_held_to_no_limit() {
         let spec = chain_spec();
-        assert!(spec.fork_params::<SequencerRegistryConfig>().is_some());
         assert!(spec.validate_schedule().is_ok());
         assert_eq!(limits(), ProtocolLimits::no_limits());
         assert_eq!(limits().tx_runtime_limits, mega_evm::EvmTxRuntimeLimits::no_limits());
@@ -533,8 +526,7 @@ mod tests {
             DecodedBlock::new(header, BlockBody { transactions, ommers: vec![], withdrawals: None })
         };
         let satin_at_activation = MegaHardforkConfig::default()
-            .with(MegaHardfork::Satin, ForkCondition::Timestamp(ACTIVATION))
-            .with_params(registry_config());
+            .with(MegaHardfork::Satin, ForkCondition::Timestamp(ACTIVATION));
 
         let mut chain = Chain::new(&pre, (0, B256::ZERO), ACTIVATION - 1, 1, 5_007_716).unwrap();
         chain.spec = satin_at_activation;

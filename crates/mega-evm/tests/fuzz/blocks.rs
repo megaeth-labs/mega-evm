@@ -14,11 +14,9 @@ use alloy_evm::{
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{keccak256, Address, Bytes, Signature, TxKind, B256, U256};
 use mega_evm::{
-    system::{SequencerRegistryConfig, MEGA_SYSTEM_ADDRESS},
-    test_utils::MemoryDatabase,
-    BlockGasCounters, BlockLimiter, BlockLimits, LimitUsage, MegaBlockExecutionCtx,
-    MegaBlockExecutor, MegaEvmFactory, MegaHardforkConfig, MegaTxEnvelope, ProtocolLimits,
-    WRITE_RECORD_SIZE,
+    test_utils::MemoryDatabase, BlockGasCounters, BlockLimiter, BlockLimits, LimitUsage,
+    MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardforkConfig, MegaTxEnvelope,
+    ProtocolLimits, WRITE_RECORD_SIZE,
 };
 use op_alloy_consensus::TxDeposit;
 use proptest::prelude::*;
@@ -215,12 +213,7 @@ impl BlockCase {
     }
 
     fn spec(&self) -> MegaHardforkConfig {
-        MegaHardforkConfig::default().with_all_activated().with_params(SequencerRegistryConfig {
-            initial_system_address: MEGA_SYSTEM_ADDRESS,
-            initial_sequencer: Address::repeat_byte(0x22),
-            initial_admin: Address::repeat_byte(0x33),
-            min_rotation_delay: 100,
-        })
+        MegaHardforkConfig::default().with_all_activated()
     }
 
     fn block_env(&self) -> BlockEnv {
