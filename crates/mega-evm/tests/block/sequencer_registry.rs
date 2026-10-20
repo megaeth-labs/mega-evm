@@ -292,10 +292,10 @@ fn assert_carries_the_system_address_read(state: &EvmState, system_address: Addr
     assert_eq!(slot.present_value(), common::word(system_address));
 }
 
-/// Once the registry is in place, no pre-block step carries the system address's slot: the
-/// deploy leaves the registry as a read-only entry without storage, and the read of the pending
-/// changes reads the pending slots alone. The slot is in the system-address transaction's own
-/// state instead, read-only and warm, as its validation read it.
+/// No pre-block step carries the system address's slot: the read of the pending changes reads the
+/// pending slots alone, and the activation block's check, which reads the registry's account
+/// without storage, is not made here. The slot is in the system-address transaction's own state
+/// instead, read-only and warm, as its validation read it.
 #[test]
 fn test_the_slot_is_in_the_system_transactions_state_not_the_pre_block_witness() {
     let mut state = State::builder().with_database(registry_with(&[])).build();

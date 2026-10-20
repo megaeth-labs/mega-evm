@@ -75,7 +75,7 @@ fn test_an_empty_block_replays_from_its_witness() {
     let replay = Case::new("empty", common::database()).run();
     assert!(replay.recorded.txs.is_empty());
     assert!(replay.recorded.bucket_ids.is_empty());
-    assert!(!replay.recorded.record.accounts.is_empty(), "the deploys read their accounts");
+    assert!(!replay.recorded.record.accounts.is_empty(), "the pre-block phase reads accounts");
 }
 
 /// A transaction the block refuses before it runs — its declared gas above the block's gas

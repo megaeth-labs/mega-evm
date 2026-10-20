@@ -26,8 +26,8 @@
 //! - A call carrying value is refused `NoEtherTransfer()`, having paid the overhead, before revm
 //!   builds its frame: no value moves, and nothing its start would write is counted.
 //! - The dispatch is by address and selector, whatever the address holds: where the state holds no
-//!   contract code, the frame is built on the contract's own. A chain holds it from the fork that
-//!   deploys it on.
+//!   contract code, the frame is built on the contract's own. A chain Satin runs on holds it, as
+//!   Rex2 deployed it, and Satin's activation block checks it.
 //! - `ORIGIN` and `GASPRICE` in the init code are the transaction's own.
 //! - The creation runs at depth 1, as the call's child: one level below the same init code sent as
 //!   a creation transaction, which runs at depth 0. Its frames reach the call-stack limit one frame

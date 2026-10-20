@@ -31,8 +31,8 @@ pub(crate) const CONTRACT: Address = address!("0x0000000000000000000000000000000
 /// A gas limit below the execution cap, so a transaction has no state-gas reservoir.
 pub(crate) const GAS_LIMIT: u64 = 100_000_000;
 
-/// A database holding the code of every system contract, as the chain holds it once the fork
-/// that deploys them has activated.
+/// A database holding the code of every system contract, as a chain that ran the legacy forks
+/// holds it.
 pub(crate) fn system_db() -> MemoryDatabase {
     MemoryDatabase::default()
         .account_balance(CALLER, U256::from(1_000_000_000_000_u64))
