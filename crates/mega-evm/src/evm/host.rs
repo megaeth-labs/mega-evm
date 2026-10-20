@@ -66,7 +66,7 @@ use revm::{
     context_interface::{
         cfg::{gas::GasTracker, GasId, GasParams, StateGasSite},
         context::{ContextError, SStoreResult, SelfDestructResult, StateLoad},
-        host::{CompletedWrite, LoadError, WriteVerdict},
+        host::{CompletedWrite, FrameStart, LoadError, WriteVerdict},
         journaled_state::AccountInfoLoad,
     },
     primitives::{Address, Log, StorageKey, StorageValue, B256, U256},
@@ -74,8 +74,8 @@ use revm::{
 };
 
 use crate::{
-    history_gas, limit::HistoryBytes, system::ORACLE_CONTRACT_ADDRESS, ExternalEnvTypes,
-    MegaContext, OracleEnv, VolatileDataAccess,
+    charge_write_records_history, history_gas, limit::HistoryBytes,
+    system::ORACLE_CONTRACT_ADDRESS, ExternalEnvTypes, MegaContext, OracleEnv, VolatileDataAccess,
 };
 
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
@@ -341,6 +341,44 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
             self.detention.hold(gas);
         }
         WriteVerdict::Continue
+    }
+
+    /// Charges the running frame the history of the write records the frame it is starting makes
+    /// — a value transfer's sender and recipient, a creation's creator nonce and created account.
+    /// revm calls it at `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, `CREATE` and `CREATE2`,
+    /// once the opcode made every charge and took the gas it forwards, and before it builds the
+    /// frame's input.
+    ///
+    /// The charge comes out of what the caller kept rather than out of what the callee gets, so
+    /// the frame's allowance is free for what the recipient does. The frame's input copies the
+    /// caller's reservoir after the charge, so the frame, or the answer revm gives in its place,
+    /// inherits the reservoir the charge left. An opcode that starts no frame — a creation the
+    /// balance, the nonce or the depth refuses, an out-of-gas before the forward — never calls
+    /// it, and makes no records. A start revm then refuses — a value the caller cannot fund, a
+    /// frame past the call-stack limit — makes no records, and the charge comes back when it
+    /// returns, as does what a frame that ran did not keep.
+    ///
+    /// A charge the caller cannot pay, or a price that does not fit in a `u64`, fails the opcode
+    /// with an out-of-gas and starts no frame, even where revm would have refused the start. The
+    /// gas the opcode forwarded goes back to the caller first, so the halt burns it with the rest:
+    /// the frame never ran, and gas detention must not count the forward as compute. The halt's
+    /// record of what the frame had, which detention reads where the frame ends, is written again
+    /// once the forward is back: a failed charge recorded the gas left after the forward was
+    /// taken, and a price that could not be computed failed before any charge.
+    #[inline]
+    fn frame_starting(&mut self, start: &FrameStart, gas: &mut GasTracker) -> bool {
+        let records = self.additional_limit.opcode_start_records(start);
+        if !self.prices_history() {
+            return true;
+        }
+        let charged = charge_write_records_history(gas, records.on_lane, u64::from(records.caller));
+        let Some((on_lane, caller)) = charged else {
+            gas.erase_cost(start.forward);
+            gas.set_failed_charge_remaining(Some(gas.remaining()));
+            return false;
+        };
+        self.additional_limit.stage_frame_charge(records, on_lane, caller);
+        true
     }
 }
 

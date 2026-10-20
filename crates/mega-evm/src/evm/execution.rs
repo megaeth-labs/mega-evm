@@ -711,6 +711,7 @@ where
         &mut self,
         mut frame_init: FrameInit,
     ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
+        let rewriting = self.has_rewriting_inspector();
         let (ctx, inspector) = self.ctx_inspector();
         // What the calling opcode charged upfront, before the inspector's hooks can rewrite the
         // call it charged for.
@@ -718,6 +719,10 @@ where
         if let Some(output) = frame_start(ctx, inspector, &mut frame_init.frame_input) {
             let output = answered_by_inspector(ctx, inspector, &frame_init, output, upfront);
             return Ok(ItemOrResult::Result(output));
+        }
+        if rewriting {
+            // The start the calling opcode paid for may not be the one the inspector lets start.
+            ctx.additional_limit.waive_start_check();
         }
         let (frame_input, depth) = (frame_init.frame_input.clone(), frame_init.depth);
         // What the start journals begins here. A start answered with a success without a frame

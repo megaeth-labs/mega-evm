@@ -2,7 +2,10 @@
 
 use alloy_primitives::{Address, Bytes};
 use revm::{
-    context_interface::{context::CodeDeposit, host::CompletedWrite},
+    context_interface::{
+        context::CodeDeposit,
+        host::{CompletedWrite, FrameStart, FrameStartKind},
+    },
     handler::FrameResult,
     interpreter::{CallInputs, CallScheme, FrameInput, InstructionResult},
 };
@@ -373,6 +376,13 @@ impl AdditionalLimit {
         self.pending_frame_charge = FrameCharge { records: Some(records), on_lane, caller };
     }
 
+    /// Leaves the frame about to start unchecked against the answer its caller's charge was
+    /// computed from ([`records_the_caller_paid_for`](Self::records_the_caller_paid_for)): an
+    /// inspector that may rewrite the frame's input ran between the charge and the count.
+    pub(crate) const fn waive_start_check(&mut self) {
+        self.pending_frame_charge.records = None;
+    }
+
     /// Records the history gas the settled transaction spent.
     pub(crate) const fn set_history_gas_spent(&mut self, history_gas_spent: u64) {
         self.history_gas_spent = history_gas_spent;
@@ -692,12 +702,16 @@ impl AdditionalLimit {
     /// computed from.
     ///
     /// The two are separate answers to the same question, asked at two points: the charge at the
-    /// opcode, on the input revm's instruction built, or at a `keylessDeploy` call's first run, on
-    /// the creation it starts; and the count here, on the input that survived interception. They
-    /// agree because nothing between the two changes the input: an interceptor answers a frame or
-    /// lets it start as it is, and a creation reaches none. A divergence trips here in every debug
-    /// build rather than mis-charging the caller and mis-splitting the refund its failure gets
-    /// back.
+    /// opcode, on the facts revm's instruction hands the frame-start hook, or at a `keylessDeploy`
+    /// call's first run, on the creation it starts; and the count here, on the input that survived
+    /// interception. They agree because the input revm builds carries the caller, target and value
+    /// the hook was handed, and nothing between the two changes it: an interceptor answers a frame
+    /// or lets it start as it is, and a creation reaches none. A divergence trips here in every
+    /// debug build rather than mis-charging the caller and mis-splitting the refund its failure
+    /// gets back.
+    ///
+    /// An inspector that may rewrite the input runs between the two, and can split them: under one
+    /// the frame is not checked ([`waive_start_check`](Self::waive_start_check)).
     fn records_the_caller_paid_for(
         &self,
         input: &FrameInput,
@@ -735,27 +749,68 @@ impl AdditionalLimit {
         }
     }
 
-    /// The write records starting `input` makes at a depth above the transaction's own frame, for
-    /// the opcode that starts it: `on_lane` are the records the frame's failure discards, `caller`
-    /// whether its start also writes the caller's own account.
-    ///
-    /// The caller pays for both at the opcode, before it forwards gas, so the frame's own budget
-    /// carries none of them — which is what lets a value transfer's allowance pay for what the
-    /// recipient does with it.
+    /// The write records starting `input` makes at a depth above the transaction's own frame,
+    /// counted as the frame starts ([`start_records`](Self::start_records)).
     pub(crate) fn frame_start_records(&self, input: &FrameInput) -> FrameStartRecords {
-        let caller_recorded = self.tracker.current().is_some_and(|lane| lane.account_recorded);
         match input {
-            FrameInput::Call(inputs) => {
-                if !inputs.transfers_value() {
-                    return FrameStartRecords::NONE;
-                }
-                let target = inputs.target_address;
-                let writes_target = target != inputs.caller && target != self.sender;
-                FrameStartRecords { on_lane: u64::from(writes_target), caller: !caller_recorded }
-            }
-            FrameInput::Create(_) => FrameStartRecords { on_lane: 1, caller: !caller_recorded },
+            FrameInput::Call(inputs) => self.start_records(
+                inputs.caller,
+                Some(inputs.target_address),
+                inputs.transfers_value(),
+            ),
+            FrameInput::Create(inputs) => self.start_records(inputs.caller(), None, true),
             FrameInput::Empty => FrameStartRecords::NONE,
         }
+    }
+
+    /// The write records the frame `start` describes makes, for the opcode about to start it,
+    /// which pays for them ([`start_records`](Self::start_records)).
+    pub(crate) fn opcode_start_records(&self, start: &FrameStart) -> FrameStartRecords {
+        let transfers_value = !start.value.is_zero();
+        match start.kind {
+            FrameStartKind::Create | FrameStartKind::Create2 => {
+                self.start_records(start.caller, None, true)
+            }
+            FrameStartKind::Call |
+            FrameStartKind::CallCode |
+            FrameStartKind::DelegateCall |
+            FrameStartKind::StaticCall => {
+                self.start_records(start.caller, start.target, transfers_value)
+            }
+        }
+    }
+
+    /// The write records a frame's start makes at a depth above the transaction's own frame: a
+    /// call from `caller` to `target` that transfers value or not, or a creation (`target` is
+    /// `None`). `on_lane` are the records the frame's failure discards, `caller` whether its start
+    /// also writes the caller's own account.
+    ///
+    /// A call that moves no value writes nothing. A value call writes its recipient, unless that is
+    /// the caller itself or the transaction's sender, whose account the body counts. A creation
+    /// writes the account it creates. Either writes the caller's account — a transfer's sender, a
+    /// creation's creator nonce — unless the caller's frame already recorded it.
+    ///
+    /// The opcode that starts the frame pays for all of them, after the gas it forwards was taken,
+    /// so the frame's own budget carries none of them — which is what lets a value transfer's
+    /// allowance pay for what the recipient does with it. The answer is asked twice, at the opcode
+    /// ([`opcode_start_records`](Self::opcode_start_records)) and as the frame starts
+    /// ([`frame_start_records`](Self::frame_start_records)), and the two are checked against each
+    /// other ([`records_the_caller_paid_for`](Self::records_the_caller_paid_for)).
+    fn start_records(
+        &self,
+        caller: Address,
+        target: Option<Address>,
+        transfers_value: bool,
+    ) -> FrameStartRecords {
+        let caller_recorded = self.tracker.current().is_some_and(|lane| lane.account_recorded);
+        let Some(target) = target else {
+            return FrameStartRecords { on_lane: 1, caller: !caller_recorded };
+        };
+        if !transfers_value {
+            return FrameStartRecords::NONE;
+        }
+        let writes_target = target != caller && target != self.sender;
+        FrameStartRecords { on_lane: u64::from(writes_target), caller: !caller_recorded }
     }
 
     /// Sets the account the running frame runs as, once known (a creation's address).
