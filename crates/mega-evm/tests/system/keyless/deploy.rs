@@ -260,6 +260,39 @@ fn test_an_empty_code_deployment_leaves_the_address_deployable() {
     }
 }
 
+/// A deploy address at nonce 1 without code — what a Rex6 deployment whose creation returned
+/// empty code left — passes the occupancy rule, which reads the code alone, and the creation
+/// collides there before its init code runs: whatever the init code would do, the call answers
+/// `ExecutionHalted` with the whole forward spent, the address keeps its nonce and no code, and the
+/// signer's bump from 0 stands.
+#[test]
+fn test_a_deploy_address_with_a_nonce_and_no_code_collides() {
+    let init_codes =
+        [deploying(&runtime(1)), Bytes::new(), Bytes::from_static(&[INVALID]), logging(32)];
+    for init_code in init_codes {
+        let deployment = Deployment::new(init_code);
+        let db = system_db().account_nonce(deployment.address, 1);
+        for gas_limit in GAS_LIMITS {
+            for forward in [SIGNED_GAS_LIMIT, 2 * SIGNED_GAS_LIMIT] {
+                let outcome = run_with(
+                    db.clone(),
+                    deployment.call_data(forward),
+                    gas_limit,
+                    EvmTxRuntimeLimits::no_limits(),
+                );
+                let KeylessDeployError::ExecutionHalted { gas_used, .. } = failure(&outcome) else {
+                    panic!("expected ExecutionHalted: {:?}", outcome.result);
+                };
+                assert_eq!(gas_used, forward, "a collision spends the forward, at {gas_limit}");
+                assert_eq!(nonce(&outcome, deployment.signer), 1, "the bump from 0 stands");
+                assert_eq!(nonce(&outcome, deployment.address), 1, "the address keeps its nonce");
+                assert_eq!(code_hash(&outcome, deployment.address), Some(KECCAK_EMPTY));
+                assert!(outcome.result.logs().is_empty(), "the init code never ran");
+            }
+        }
+    }
+}
+
 /// An empty deposit is refused at the deploy address alone: a constructor's own `CREATE` that
 /// returns empty code is admitted, and the deployment around it succeeds.
 #[test]
