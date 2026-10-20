@@ -102,6 +102,8 @@ pub struct AdditionalLimit {
     history_gas_spent: u64,
     /// The history bytes the settled transaction appended.
     history_bytes: u64,
+    /// The EIP-8037 reservoir the settled transaction left unspent.
+    reservoir_remaining: u64,
     /// Whether the running transaction's value movements journal EIP-7708 transfer logs, which
     /// revm emits itself and the data size counts where the value moves.
     transfer_logs: bool,
@@ -142,6 +144,7 @@ impl AdditionalLimit {
         self.pending_frame_charge = FrameCharge::NONE;
         self.history_gas_spent = 0;
         self.history_bytes = 0;
+        self.reservoir_remaining = 0;
         self.transfer_logs = false;
     }
 
@@ -261,6 +264,19 @@ impl AdditionalLimit {
     /// The history gas the last settled transaction spent.
     pub const fn history_gas_spent(&self) -> u64 {
         self.history_gas_spent
+    }
+
+    /// The EIP-8037 reservoir the last settled transaction or system call left unspent, which
+    /// its sender gets back, as a transaction reports it
+    /// ([`MegaGasUsage::reservoir_remaining`](crate::MegaGasUsage::reservoir_remaining)). It is
+    /// read before the EIP-7623 floor absorbs it, and a failed deposit leaves none.
+    pub const fn reservoir_remaining(&self) -> u64 {
+        self.reservoir_remaining
+    }
+
+    /// Records the reservoir the settled transaction or system call left unspent.
+    pub(crate) const fn set_reservoir_remaining(&mut self, reservoir: u64) {
+        self.reservoir_remaining = reservoir;
     }
 
     /// The history gas validation charged for the transaction's body: the bytes the transaction

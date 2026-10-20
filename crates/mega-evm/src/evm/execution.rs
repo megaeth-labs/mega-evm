@@ -59,6 +59,10 @@ use crate::{
     PricedPrecompiles, VolatileDataAccess, TX_BODY_OVER_DATA_SIZE_LIMIT,
 };
 
+/// The regular gas a system call runs on, at most: EIP-8037's system-call budget. The rest of its
+/// gas limit is its state-gas reservoir ([`MegaHandler`]'s `tx_gas`).
+pub const SYSTEM_CALL_REGULAR_GAS_LIMIT: u64 = 30_000_000;
+
 /// The Satin handler.
 ///
 /// It wraps op-revm's [`OpHandler`] and delegates every phase `MegaETH` does not extend to it.
@@ -71,12 +75,20 @@ pub struct MegaHandler<EVM, ERROR, FRAME> {
     /// before the transaction runs; by then the caller has been materialised and the fact is no
     /// longer visible in the state.
     deposit_creates_caller: Cell<bool>,
+    /// The reservoir the transaction's result settled with, read by
+    /// [`post_execution`](Handler::post_execution) where revm builds the result's gas, and
+    /// reported once the result is built ([`execution_result`](Handler::execution_result)).
+    settled_reservoir: Cell<Option<u64>>,
 }
 
 impl<EVM, ERROR, FRAME> MegaHandler<EVM, ERROR, FRAME> {
     /// Creates a handler.
     pub fn new() -> Self {
-        Self { op: OpHandler::new(), deposit_creates_caller: Cell::new(false) }
+        Self {
+            op: OpHandler::new(),
+            deposit_creates_caller: Cell::new(false),
+            settled_reservoir: Cell::new(None),
+        }
     }
 }
 
@@ -269,6 +281,26 @@ where
         Ok(gas)
     }
 
+    /// revm's transaction-level gas, with a system call's split as EIP-8037 has it: at most
+    /// [`SYSTEM_CALL_REGULAR_GAS_LIMIT`] of its gas limit is regular gas, which is what `GAS`
+    /// reads inside it, and the rest is its state-gas reservoir, which the state it writes draws
+    /// first.
+    ///
+    /// revm builds a system call's gas here, on no intrinsic gas, and so its runtime out-of-gas
+    /// fallback, which a system call does not reach: it carries no value and its target is no
+    /// delegator. Every transaction's gas is split by the execution cap alone, the
+    /// system-address transaction's included, which is a deposit and not a system call; and under
+    /// the neutral configuration a system call's is not split, as revm's own runner has it.
+    fn tx_gas(&self, evm: &mut Self::Evm, init_and_floor_gas: &InitialAndFloorGas) -> GasTracker {
+        let mut gas = self.op.tx_gas(evm, init_and_floor_gas);
+        if evm.ctx_ref().splits_system_call_gas() {
+            let margin = gas.remaining().saturating_sub(SYSTEM_CALL_REGULAR_GAS_LIMIT);
+            gas.set_remaining(gas.remaining() - margin);
+            gas.set_reservoir(gas.reservoir() + margin);
+        }
+        gas
+    }
+
     /// revm's first frame, with a read of the block beneficiary's account marked for gas detention
     /// when the transaction's recipient delegates to the beneficiary: revm resolves that delegate
     /// through the journal, where the Host does not see it.
@@ -333,6 +365,10 @@ where
     /// revm's post-execution, on the intrinsic gas with the body's history taken back out of the
     /// state slot it rode in: the result's state gas is state gas alone, and the history the
     /// transaction spent is reported on its own ledger.
+    ///
+    /// The reservoir the transaction leaves unspent is read first, where revm builds the result's
+    /// gas: before the EIP-7623 floor check, which absorbs the reservoir into the floor's cost
+    /// when the floor binds. The refund before it does not move the reservoir.
     fn post_execution(
         &self,
         evm: &mut Self::Evm,
@@ -340,6 +376,7 @@ where
         init_and_floor_gas: InitialAndFloorGas,
         eip7702_gas_refund: i64,
     ) -> Result<ResultGas, Self::Error> {
+        self.settled_reservoir.set(Some(exec_result.gas().reservoir()));
         let history = evm.ctx_ref().additional_limit.intrinsic_history_gas();
         let init_and_floor_gas = init_and_floor_gas
             .with_initial_state_gas(init_and_floor_gas.initial_state_gas_final() - history);
@@ -371,13 +408,22 @@ where
         self.op.reward_beneficiary(evm, exec_result)
     }
 
+    /// op-revm's result, and the reservoir it settled with reported
+    /// ([`AdditionalLimit::reservoir_remaining`](crate::AdditionalLimit::reservoir_remaining)).
+    ///
+    /// revm's system-call path settles without [`post_execution`](Handler::post_execution): the
+    /// result it hands over here is the settled one. A deposit that halts is not a result: op-revm
+    /// turns it into a failed deposit, which leaves no reservoir.
     fn execution_result(
         &mut self,
         evm: &mut Self::Evm,
         result: FrameResult,
         result_gas: revm::context::result::ResultGas,
     ) -> Result<revm::context::result::ExecutionResult<Self::HaltReason>, Self::Error> {
-        self.op.execution_result(evm, result, result_gas)
+        let reservoir = self.settled_reservoir.get().unwrap_or_else(|| result.gas().reservoir());
+        let result = self.op.execution_result(evm, result, result_gas)?;
+        evm.ctx_mut().additional_limit.set_reservoir_remaining(reservoir);
+        Ok(result)
     }
 
     /// op-revm's error handling, which answers a deposit's transaction error with a failed-deposit

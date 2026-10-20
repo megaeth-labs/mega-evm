@@ -56,6 +56,7 @@ pub use evm::{
     MegaSpecId, MegaTransactionOutcome, OpSpecId, OracleRead, OracleReadRecord, ParseMegaSpecError,
     SatinPriceError, SatinPrices, TrustedObserver, CPHB_ENV_VAR, CPSB_ENV_VAR, HISTORY_GAS_PRICED,
     LEGACY_SPEC_NAMES, STATE_GAS_REPRICED, STORAGE_CALL_STIPEND_BYTES,
+    SYSTEM_CALL_REGULAR_GAS_LIMIT,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use external::{

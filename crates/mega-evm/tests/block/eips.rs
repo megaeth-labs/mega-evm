@@ -24,12 +24,11 @@ use mega_evm::{
     pre_block_call_gas_limit,
     test_utils::{BytecodeBuilder, CommittedStates, ErrorInjectingDatabase, MemoryDatabase},
     BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardforkConfig,
-    MegaSpecId,
+    MegaSpecId, SYSTEM_CALL_REGULAR_GAS_LIMIT,
 };
 use revm::{
     bytecode::opcode::{CALLDATALOAD, MLOAD, SSTORE},
     database::State,
-    handler::SYSTEM_CALL_REGULAR_GAS_LIMIT,
     Database,
 };
 
@@ -531,28 +530,19 @@ fn test_a_database_error_in_the_beacon_root_call_is_internal() {
 }
 
 /// What the block commits for a pre-block call is the state op-revm's own system call produces
-/// for it: the same call from the same state, on the same configuration — the split
-/// switched on — and the same pre-block budget. The contract stores the regular gas it had, which
-/// is 30M of the 250M budget, and the word it was called with.
+/// for it: the same call from the same state, on the same configuration, with the same split of
+/// its gas ([`op_reference`](crate::op_reference)) and the same pre-block budget. The contract
+/// stores the regular gas it had, which is 30M of the 250M budget, and the word it was called
+/// with.
 #[test]
 fn test_a_pre_block_call_commits_the_state_op_revm_produces() {
-    use op_revm::{handler::OpHandler, L1BlockInfo, OpEvm, OpSpecId, OpTransaction};
+    use crate::op_reference::{self, OpContext};
+    use op_revm::{OpEvm, OpSpecId};
     use revm::{
         bytecode::opcode::{GAS, PUSH0, PUSH1, STOP},
-        context::{result::EVMError, BlockEnv, CfgEnv, Context, ContextSetters, ContextTr, TxEnv},
-        handler::{EthFrame, ExecuteEvm, Handler, SystemCallTx},
+        context::ContextTr,
         inspector::NoOpInspector,
-        interpreter::interpreter::EthInterpreter,
-        Journal,
     };
-    type OpContext = Context<
-        BlockEnv,
-        OpTransaction<TxEnv>,
-        CfgEnv<OpSpecId>,
-        MemoryDatabase,
-        Journal<MemoryDatabase>,
-        L1BlockInfo,
-    >;
 
     let code = BytecodeBuilder::default()
         .append_many([GAS, PUSH0, SSTORE])
@@ -569,24 +559,22 @@ fn test_a_pre_block_call_commits_the_state_op_revm_produces() {
     let delivered = committed.states().into_iter().next().expect("a first step");
     assert!(delivered.contains_key(&HISTORY_STORAGE_ADDRESS), "the block hashes call is first");
     let (cfg, block) = (executor.evm().ctx().cfg().clone(), executor.evm().ctx().block().clone());
-    assert!(cfg.system_call_state_gas_margin_in_reservoir);
     drop(executor);
 
     let mut op = OpEvm::new(
         OpContext::new(db, OpSpecId::KARST).with_cfg(cfg).with_block(block),
         NoOpInspector,
     );
-    let mut tx = OpTransaction::<TxEnv>::new_system_tx_with_caller(
+    let outcome = op_reference::system_call(
+        &mut op,
         mega_evm::SYSTEM_ADDRESS,
         HISTORY_STORAGE_ADDRESS,
         PARENT_HASH.0.into(),
-    );
-    tx.base.gas_limit = pre_block_call_gas_limit(250_000_000);
-    op.0.ctx.set_tx(tx);
-    let result: Result<_, EVMError<core::convert::Infallible, op_revm::OpTransactionError>> =
-        OpHandler::<_, _, EthFrame<EthInterpreter>>::new().run_system_call(&mut op);
-    assert!(result.expect("op-revm runs the call").is_success());
-    let expected = op.finalize();
+        pre_block_call_gas_limit(250_000_000),
+    )
+    .expect("op-revm runs the call");
+    assert!(outcome.result.is_success());
+    let expected = outcome.result_and_state.state;
 
     assert_eq!(delivered, expected, "the block commits op-revm's state");
     let stored = &delivered[&HISTORY_STORAGE_ADDRESS].storage;

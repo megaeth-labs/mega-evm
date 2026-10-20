@@ -30,15 +30,12 @@ use alloy_evm::block::{BlockExecutionError, BlockValidationError};
 use alloy_hardforks::EthereumHardforks;
 use alloy_primitives::{Address, Bytes, B256};
 use op_revm::OpHaltReason;
-use revm::{
-    context::{
-        result::{EVMError, ResultAndState},
-        Block, ContextTr, DBErrorMarker,
-    },
-    handler::SYSTEM_CALL_REGULAR_GAS_LIMIT,
+use revm::context::{
+    result::{EVMError, ResultAndState},
+    Block, ContextTr, DBErrorMarker,
 };
 
-use crate::{ExternalEnvTypes, MegaEvm};
+use crate::{ExternalEnvTypes, MegaEvm, SYSTEM_CALL_REGULAR_GAS_LIMIT};
 
 /// The caller every pre-block system call runs as.
 pub use alloy_eips::eip4788::SYSTEM_ADDRESS;

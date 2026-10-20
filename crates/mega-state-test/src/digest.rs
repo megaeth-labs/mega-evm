@@ -66,14 +66,16 @@ fn address(address: &Address) -> String {
     format!("0x{}", to_hex(address.as_slice()))
 }
 
-fn result_gas(gas: &ResultGas) -> Value {
+/// A result's gas, with the reservoir the transaction left beside its other fields: revm's
+/// [`ResultGas`] does not carry it, the outcome does ([`MegaGasUsage::reservoir_remaining`]).
+fn result_gas(gas: &ResultGas, reservoir_remaining: u64) -> Value {
     fields([
         ("block_regular_gas_used", gas.block_regular_gas_used().into()),
         ("block_state_gas_used", gas.block_state_gas_used().into()),
         ("final_refunded", gas.final_refunded().into()),
         ("floor_gas", gas.floor_gas().into()),
         ("inner_refunded", gas.inner_refunded().into()),
-        ("reservoir_remaining", gas.reservoir_remaining().into()),
+        ("reservoir_remaining", reservoir_remaining.into()),
         ("state_gas_spent_final", gas.state_gas_spent_final().into()),
         ("total_gas_spent", gas.total_gas_spent().into()),
         ("tx_gas_used", gas.tx_gas_used().into()),
@@ -161,24 +163,24 @@ fn state(state: &EvmState) -> Value {
     object(state.iter().map(|(addr, account_)| (address(addr), account(account_))))
 }
 
-fn result(result: &ExecutionResult<MegaHaltReason>) -> Value {
+fn result(result: &ExecutionResult<MegaHaltReason>, reservoir_remaining: u64) -> Value {
     match result {
         ExecutionResult::Success { reason, gas, logs: l, output } => fields([
             ("created", output.address().map_or(Value::Null, |a| address(a).into())),
-            ("gas", result_gas(gas)),
+            ("gas", result_gas(gas, reservoir_remaining)),
             ("logs", logs(l)),
             ("output", hex(output.data())),
             ("reason", format!("{reason:?}").into()),
             ("status", "success".into()),
         ]),
         ExecutionResult::Revert { gas, logs: l, output } => fields([
-            ("gas", result_gas(gas)),
+            ("gas", result_gas(gas, reservoir_remaining)),
             ("logs", logs(l)),
             ("output", hex(output)),
             ("status", "revert".into()),
         ]),
         ExecutionResult::Halt { reason, gas, logs: l } => fields([
-            ("gas", result_gas(gas)),
+            ("gas", result_gas(gas, reservoir_remaining)),
             ("logs", logs(l)),
             ("reason", format!("{reason:?}").into()),
             ("status", "halt".into()),
@@ -193,7 +195,7 @@ pub fn canonical(executed: Executed<'_>) -> Value {
             ("gas", gas_usage(&outcome.gas)),
             ("limit_exceeded", outcome.limit_exceeded.as_ref().map_or(Value::Null, limit_check)),
             ("oracle_reads", Value::Array(outcome.oracle_reads.iter().map(oracle_read).collect())),
-            ("result", result(&outcome.result)),
+            ("result", result(&outcome.result, outcome.gas.reservoir_remaining)),
             ("state", state(&outcome.state)),
             ("usage", usage(&outcome.usage)),
         ]),
@@ -231,7 +233,6 @@ mod tests {
             .with_state_gas_spent(30_000)
             .with_refunded(4_000)
             .with_floor_gas(21_000)
-            .with_reservoir_remaining(5_000)
     }
 
     fn outcome() -> MegaTransactionOutcome {
@@ -254,7 +255,7 @@ mod tests {
                 },
                 state,
             ),
-            gas: MegaGasUsage::new(&gas(), 10_000, 125),
+            gas: MegaGasUsage::new(&gas(), 10_000, 125, 5_000),
             usage: LimitUsage { data_size: 500, write_records: 3 },
             limit_exceeded: None,
             oracle_reads: vec![OracleRead { slot: U256::from(4), answer: Some(U256::from(5)) }],

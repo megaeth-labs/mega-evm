@@ -303,6 +303,7 @@ where
             result_and_state.result.gas(),
             layer.history_gas_spent(),
             layer.history_bytes(),
+            layer.reservoir_remaining(),
         );
         Ok(MegaTransactionOutcome {
             result_and_state,
@@ -429,10 +430,12 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     /// caller names instead of revm's [`SYSTEM_CALL_GAS_LIMIT`]. The limit is split as every
     /// system call's is: at most [`SYSTEM_CALL_REGULAR_GAS_LIMIT`] of it is regular gas and the
     /// rest is the call's state-gas reservoir, so a limit above 30,000,000 widens the reservoir
-    /// and never the regular budget. The block's pre-block calls run through it.
+    /// and never the regular budget. The block's pre-block calls run through it. What the call
+    /// left of its reservoir is
+    /// [`AdditionalLimit::reservoir_remaining`](crate::AdditionalLimit::reservoir_remaining).
     ///
     /// [`SYSTEM_CALL_GAS_LIMIT`]: revm::handler::SYSTEM_CALL_GAS_LIMIT
-    /// [`SYSTEM_CALL_REGULAR_GAS_LIMIT`]: revm::handler::SYSTEM_CALL_REGULAR_GAS_LIMIT
+    /// [`SYSTEM_CALL_REGULAR_GAS_LIMIT`]: crate::SYSTEM_CALL_REGULAR_GAS_LIMIT
     pub fn transact_system_call_with_gas_limit(
         &mut self,
         caller: Address,
@@ -553,7 +556,7 @@ mod tests {
     use revm::{
         context::{result::InvalidTransaction, ContextSetters, Transaction, TxEnv},
         database::State,
-        handler::{SYSTEM_CALL_GAS_LIMIT, SYSTEM_CALL_REGULAR_GAS_LIMIT},
+        handler::system_call::SYSTEM_CALL_GAS_LIMIT,
         DatabaseRef,
     };
     use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
@@ -747,7 +750,7 @@ mod tests {
         assert!(result.result.is_success());
         assert_eq!(evm.ctx().tx().gas_limit(), 123_456_789);
         assert_eq!(
-            result.result.gas().reservoir_remaining(),
+            evm.ctx().additional_limit().reservoir_remaining(),
             123_456_789 - SYSTEM_CALL_REGULAR_GAS_LIMIT,
             "an empty callee draws nothing from the reservoir",
         );
@@ -757,7 +760,7 @@ mod tests {
             .unwrap();
         assert!(result.result.is_success());
         assert_eq!(evm.ctx().tx().gas_limit(), 1_000_000);
-        assert_eq!(result.result.gas().reservoir_remaining(), 0);
+        assert_eq!(evm.ctx().additional_limit().reservoir_remaining(), 0);
     }
 
     /// The default system-call entry point runs on revm's system-call gas limit whatever the
@@ -777,7 +780,7 @@ mod tests {
         assert_eq!(evm.ctx().tx().gas_limit(), 31_566_720);
         assert_eq!(SYSTEM_CALL_GAS_LIMIT, 31_566_720);
         assert_eq!(
-            result.result.gas().reservoir_remaining(),
+            evm.ctx().additional_limit().reservoir_remaining(),
             31_566_720 - 30_000_000,
             "30M of it is regular gas",
         );

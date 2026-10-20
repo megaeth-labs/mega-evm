@@ -58,11 +58,11 @@ use crate::{
 ///   otherwise keys on the spec id; EIP-7825's execution cap; the EIP-7954 code-size limits, set
 ///   explicitly for the same reason.
 ///
-/// On both, a system call's whole gas limit is regular gas, as revm's runner has it: the switch
-/// that makes the part above 30,000,000 a state-gas reservoir, which Satin sets, is off. Under
-/// Osaka it would do nothing, EIP-8037 being off. Under Amsterdam upstream revm splits no system
-/// call's gas, and no state fixture makes a system call, so neither release the gate runs can
-/// tell the two apart.
+/// On both, a system call's whole gas limit is regular gas, as revm's runner has it: a context on
+/// the neutral configuration does not make the part above 30,000,000 a state-gas reservoir, as
+/// Satin's handler does. Under Osaka the split would do nothing, EIP-8037 being off. Under
+/// Amsterdam upstream revm splits no system call's gas, and no state fixture makes a system call,
+/// so neither release the gate runs can tell the two apart.
 ///
 /// Every other field is revm's default: chain id 1, which a caller replaces with the fixture's.
 pub fn neutral_cfg(fork: EthSpecId) -> Option<CfgEnv<MegaSpecId>> {
@@ -77,7 +77,6 @@ pub fn neutral_cfg(fork: EthSpecId) -> Option<CfgEnv<MegaSpecId>> {
     cfg.enable_amsterdam_eip2780 = amsterdam;
     cfg.enable_amsterdam_eip7708 = amsterdam;
     cfg.tx_gas_limit_cap = None;
-    cfg.system_call_state_gas_margin_in_reservoir = false;
     if amsterdam {
         cfg.limit_contract_code_size = Some(eip7954::MAX_CODE_SIZE);
         cfg.limit_contract_initcode_size = Some(eip7954::MAX_INITCODE_SIZE);
@@ -185,8 +184,7 @@ mod tests {
         assert_eq!(cfg.max_initcode_size(), eip3860::MAX_INITCODE_SIZE);
         assert_eq!(cfg.max_code_size(), osaka.max_code_size());
         assert_eq!(cfg.max_initcode_size(), osaka.max_initcode_size());
-        assert!(!cfg.system_call_state_gas_margin_in_reservoir());
-        assert!(!osaka.system_call_state_gas_margin_in_reservoir());
+        assert_system_call_gas_is_whole(ctx);
     }
 
     /// Amsterdam's configuration carries what revm's runner derives from the Amsterdam spec id,
@@ -203,8 +201,13 @@ mod tests {
         assert_eq!(cfg.max_code_size(), amsterdam.max_code_size());
         assert_eq!(cfg.max_initcode_size(), amsterdam.max_initcode_size());
         assert_eq!(cfg.max_code_size(), eip7954::MAX_CODE_SIZE);
-        assert!(!cfg.system_call_state_gas_margin_in_reservoir());
-        assert!(!amsterdam.system_call_state_gas_margin_in_reservoir());
+        assert_system_call_gas_is_whole(ctx);
+    }
+
+    /// A system call on `ctx` runs on its whole gas limit as regular gas, as revm's runner has it.
+    fn assert_system_call_gas_is_whole(mut ctx: MegaContext<EmptyDB>) {
+        ctx.on_new_system_call();
+        assert!(!ctx.splits_system_call_gas());
     }
 
     /// Neither configuration is Satin's, and both run Satin's spec.

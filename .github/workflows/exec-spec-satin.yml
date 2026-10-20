@@ -144,27 +144,28 @@ jobs:
       - name: Read the fork pin from Cargo.lock
         id: pin
         run: |
-          sources=$(grep -o 'git+https://github.com/megaeth-labs/revm?tag=[^"#]*#[0-9a-f]*' Cargo.lock | sort -u)
+          # A release tag, or a release's commit until its tag is cut.
+          sources=$(grep -oE 'git\+https://github.com/megaeth-labs/revm\?(tag|rev)=[^"#]*#[0-9a-f]*' Cargo.lock | sort -u)
           if [ "$(printf '%s\n' "$sources" | grep -c .)" -ne 1 ]; then
             printf 'expected exactly one revm fork revision in Cargo.lock, found:\n%s\n' "$sources" >&2
             exit 1
           fi
-          tag=${sources#*tag=}
-          tag=${tag%%#*}
+          ref=${sources#*=}
+          ref=${ref%%#*}
           commit=${sources##*#}
-          echo "fork tag $tag at $commit"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "fork ref $ref at $commit"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v4
         with:
           repository: megaeth-labs/revm
-          ref: ${{ steps.pin.outputs.tag }}
+          ref: ${{ steps.pin.outputs.ref }}
           path: revm-fork
           sparse-checkout: scripts
           persist-credentials: false
 
-      - name: Check the tag names the locked revision
+      - name: Check the ref names the locked revision
         working-directory: revm-fork
         env:
           COMMIT: ${{ steps.pin.outputs.commit }}

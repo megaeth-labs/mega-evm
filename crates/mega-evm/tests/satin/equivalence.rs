@@ -40,38 +40,27 @@ use mega_evm::{
         note_price_guard, op_transaction, take_system_address_read, transfer_log,
         zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase,
     },
-    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransactionOutcome, TX_BODY_SIZE,
-    WRITE_RECORD_SIZE,
+    MegaContext, MegaEvm, MegaSpecId, MegaTransactionOutcome, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
-use op_revm::{constants::BASE_FEE_RECIPIENT, L1BlockInfo, OpEvm, OpSpecId, OpTransaction};
+use op_revm::{constants::BASE_FEE_RECIPIENT, OpEvm, OpSpecId, OpTransaction};
 use revm::{
     bytecode::opcode::{CALL, GAS, POP, PUSH0, PUSH1},
-    context::{
-        result::{ExecResultAndState, ExecutionResult},
-        BlockEnv, CfgEnv, Context, ContextTr, TxEnv,
-    },
+    context::{BlockEnv, CfgEnv, ContextTr, TxEnv},
     context_interface::cfg::GasId,
     inspector::NoOpInspector,
     state::EvmState,
-    ExecuteEvm, Journal,
+    ExecuteEvm,
 };
 
-use crate::common::{
-    account_state_gas, body_history, history, runs_at_measurement_prices, slot_state_gas,
+use crate::{
+    common::{
+        account_state_gas, body_history, history, runs_at_measurement_prices, slot_state_gas,
+    },
+    op_reference::{self, Op, OpContext, Settled},
 };
 
 const CALLER: Address = address!("0x4000000000000000000000000000000000000001");
 const CALLEE: Address = address!("0x5000000000000000000000000000000000000001");
-
-type Outcome = ExecResultAndState<ExecutionResult<MegaHaltReason>, EvmState>;
-type OpContext = Context<
-    BlockEnv,
-    OpTransaction<TxEnv>,
-    CfgEnv<OpSpecId>,
-    MemoryDatabase,
-    Journal<MemoryDatabase>,
-    L1BlockInfo,
->;
 
 fn block() -> BlockEnv {
     BlockEnv {
@@ -84,17 +73,18 @@ fn block() -> BlockEnv {
 
 /// Runs `tx` on `db` through `MegaEvm`, then through op-revm's `OpEvm` configured with the
 /// `CfgEnv` the `MegaEvm` context holds. Returns both outcomes — the `MegaEvm` one with its gas
-/// by ledger — and that `CfgEnv`.
-fn run_both(db: MemoryDatabase, tx: TxEnv) -> (MegaTransactionOutcome, Outcome, CfgEnv<OpSpecId>) {
+/// by ledger, op-revm's with the reservoir it left ([`op_reference`](crate::op_reference)) — and
+/// that `CfgEnv`.
+fn run_both(db: MemoryDatabase, tx: TxEnv) -> (MegaTransactionOutcome, Settled, CfgEnv<OpSpecId>) {
     run_both_in(db, tx, block())
 }
 
 /// Runs `tx` on `db` through op-revm's `OpEvm` alone, on the `CfgEnv` a `MegaEvm` context holds:
 /// for a gas limit that is op-revm's own, which Satin, charging the body's history on top, may
 /// refuse at validation.
-fn run_op_alone(db: MemoryDatabase, tx: TxEnv) -> Outcome {
+fn run_op_alone(db: MemoryDatabase, tx: TxEnv) -> Settled {
     let (_, mut op, _) = both_evms(db, block());
-    op.transact(op_transaction(tx)).unwrap()
+    op_reference::transact(&mut op, op_transaction(tx)).unwrap()
 }
 
 /// [`run_both`] in `block`.
@@ -102,10 +92,10 @@ fn run_both_in(
     db: MemoryDatabase,
     tx: TxEnv,
     block: BlockEnv,
-) -> (MegaTransactionOutcome, Outcome, CfgEnv<OpSpecId>) {
+) -> (MegaTransactionOutcome, Settled, CfgEnv<OpSpecId>) {
     let (mut mega, mut op, cfg) = both_evms(db, block);
     let mega_outcome = mega.execute_transaction(OpTx(op_transaction(tx.clone()))).unwrap();
-    let op_outcome = op.transact(op_transaction(tx)).unwrap();
+    let op_outcome = op_reference::transact(&mut op, op_transaction(tx)).unwrap();
     (mega_outcome, op_outcome, cfg)
 }
 
@@ -113,7 +103,7 @@ fn run_both_in(
 fn both_evms(
     db: MemoryDatabase,
     block: BlockEnv,
-) -> (MegaEvm<MemoryDatabase, NoOpInspector>, OpEvm<OpContext, NoOpInspector>, CfgEnv<OpSpecId>) {
+) -> (MegaEvm<MemoryDatabase, NoOpInspector>, Op, CfgEnv<OpSpecId>) {
     let ctx = MegaContext::new(db.clone(), MegaSpecId::SATIN)
         .with_block(block.clone())
         .with_chain(zero_fee_l1_block_info());
@@ -127,8 +117,8 @@ fn both_evms(
 
 /// Asserts the two outcomes agree on everything but the history gas Satin charges: `mega` spends
 /// exactly its history ledger more than `op` and nothing else moves. The whole `ResultGas` is
-/// compared against op-revm's with the two fields history touches rebuilt, so a field added later
-/// is covered too.
+/// compared against op-revm's with the field history touches rebuilt, so a field added later is
+/// covered too, and the reservoir each left, which the result does not carry, beside it.
 ///
 /// The reservoir pays history first and the regular budget pays what it cannot, which is why the
 /// reservoir left over saturates at zero rather than going negative.
@@ -144,7 +134,7 @@ fn both_evms(
 /// The state is compared with the read of the live system address taken out, which holds because
 /// these transactions carry no gas price: a priced transaction pays the extra gas out of the
 /// sender's balance ([`test_fees_match_op_revm`]).
-fn assert_same_but_history(mega: &MegaTransactionOutcome, op: &Outcome) {
+fn assert_same_but_history(mega: &MegaTransactionOutcome, op: &Settled) {
     let history = mega.gas.history;
     assert!(history >= body_history(0), "every Satin transaction pays for its own body");
     let (m, o) = (mega.result.gas(), op.result.gas());
@@ -154,16 +144,13 @@ fn assert_same_but_history(mega: &MegaTransactionOutcome, op: &Outcome) {
     assert!(m.inner_refunded() >= o.inner_refunded(), "refund");
     assert_eq!(m.floor_gas(), o.floor_gas(), "EIP-7623 floor");
     assert_eq!(
-        m.reservoir_remaining(),
-        o.reservoir_remaining().saturating_sub(history),
+        mega.gas.reservoir_remaining,
+        op.reservoir_remaining.saturating_sub(history),
         "reservoir remaining"
     );
     assert_eq!(
         m,
-        &(*o)
-            .with_total_gas_spent(o.total_gas_spent() + history)
-            .with_reservoir_remaining(o.reservoir_remaining().saturating_sub(history))
-            .with_refunded(m.inner_refunded()),
+        &(*o).with_total_gas_spent(o.total_gas_spent() + history).with_refunded(m.inner_refunded()),
         "ResultGas"
     );
     assert_eq!(mega.result.logs(), op.result.logs(), "logs");
@@ -182,13 +169,13 @@ fn but_the_system_address_read(state: &EvmState) -> EvmState {
 /// Asserts the two outcomes agree field by field, then as a whole so a field added later is
 /// covered too. For the paths that charge no history: a system call, which the protocol pays
 /// nothing for.
-fn assert_same(mega: &Outcome, op: &Outcome) {
+fn assert_same(mega: &Settled, op: &Settled) {
     let (m, o) = (mega.result.gas(), op.result.gas());
     assert_eq!(m.total_gas_spent(), o.total_gas_spent(), "total gas spent");
     assert_eq!(m.state_gas_spent_final(), o.state_gas_spent_final(), "state gas spent");
     assert_eq!(m.inner_refunded(), o.inner_refunded(), "refund");
     assert_eq!(m.floor_gas(), o.floor_gas(), "EIP-7623 floor");
-    assert_eq!(m.reservoir_remaining(), o.reservoir_remaining(), "reservoir remaining");
+    assert_eq!(mega.reservoir_remaining, op.reservoir_remaining, "reservoir remaining");
     assert_eq!(m.tx_gas_used(), o.tx_gas_used(), "gas used");
     assert_eq!(m, o, "ResultGas");
     assert_eq!(mega.result.logs(), op.result.logs(), "logs");
@@ -197,10 +184,10 @@ fn assert_same(mega: &Outcome, op: &Outcome) {
 }
 
 /// Both engines run on the Satin configuration: Karst on the Satin gas schedule, EIP-8037,
-/// EIP-2780 and EIP-7708 switched on, the 200M execution cap, `MegaETH`'s code-size limits, and a
-/// system call's gas above 30M in its reservoir. So op-revm journals the same transfer logs, and
-/// the logs of the two are compared as they are, and op-revm splits a system call's gas as Satin
-/// does.
+/// EIP-2780 and EIP-7708 switched on, the 200M execution cap and `MegaETH`'s code-size limits. So
+/// op-revm journals the same transfer logs, and the logs of the two are compared as they are. A
+/// system call's split is no configuration: op-revm runs one through the reference handler, which
+/// splits its gas as Satin's does ([`op_reference`](crate::op_reference)).
 fn assert_satin_cfg(cfg: &CfgEnv<OpSpecId>) {
     assert_eq!(cfg.spec, OpSpecId::KARST);
     assert_eq!(cfg.gas_params.table(), satin_gas_params().table());
@@ -211,7 +198,6 @@ fn assert_satin_cfg(cfg: &CfgEnv<OpSpecId>) {
     assert_eq!(cfg.limit_contract_initcode_size, Some(MAX_INITCODE_SIZE));
     assert!(cfg.enable_amsterdam_eip7708);
     assert!(!cfg.amsterdam_eip7708_disabled);
-    assert!(cfg.system_call_state_gas_margin_in_reservoir);
 }
 
 #[test]
@@ -230,11 +216,11 @@ fn test_empty_transaction_matches_op_revm() {
     assert_satin_cfg(&cfg);
     assert!(mega.result.is_success());
     assert_eq!(
-        mega.result.gas().reservoir_remaining(),
+        mega.gas.reservoir_remaining,
         reservoir - mega.gas.history,
         "the reservoir paid for the body",
     );
-    assert_eq!(op.result.gas().reservoir_remaining(), reservoir, "op-revm has nothing to pay");
+    assert_eq!(op.reservoir_remaining, reservoir, "op-revm has nothing to pay");
     assert_same_but_history(&mega, &op);
 }
 
@@ -444,18 +430,27 @@ fn test_refund_matches_op_revm() {
 /// fresh slot it writes is paid out of the reservoir, and what is left of it is reported.
 #[test]
 fn test_system_call_matches_op_revm() {
-    use revm::handler::{
-        system_call::SystemCallEvm, SYSTEM_CALL_GAS_LIMIT, SYSTEM_CALL_REGULAR_GAS_LIMIT,
-    };
+    use mega_evm::SYSTEM_CALL_REGULAR_GAS_LIMIT;
+    use revm::handler::system_call::{SystemCallEvm, SYSTEM_CALL_GAS_LIMIT};
     let code = BytecodeBuilder::default().sstore(U256::ZERO, U256::from(3)).stop().build();
     let (mut mega, mut op, cfg) =
         both_evms(MemoryDatabase::default().account_code(CALLEE, code), block());
     assert_satin_cfg(&cfg);
-    let mega_outcome = mega.system_call_with_caller(CALLER, CALLEE, Default::default()).unwrap();
-    let op_outcome = op.system_call_with_caller(CALLER, CALLEE, Default::default()).unwrap();
+    let result_and_state =
+        mega.system_call_with_caller(CALLER, CALLEE, Default::default()).unwrap();
+    let reservoir_remaining = mega.ctx().additional_limit().reservoir_remaining();
+    let mega_outcome = Settled { result_and_state, reservoir_remaining };
+    let op_outcome = op_reference::system_call(
+        &mut op,
+        CALLER,
+        CALLEE,
+        Default::default(),
+        SYSTEM_CALL_GAS_LIMIT,
+    )
+    .unwrap();
     assert!(mega_outcome.result.is_success());
     assert_eq!(
-        mega_outcome.result.gas().reservoir_remaining(),
+        mega_outcome.reservoir_remaining,
         SYSTEM_CALL_GAS_LIMIT -
             SYSTEM_CALL_REGULAR_GAS_LIMIT -
             satin_gas_params().get(GasId::sstore_set_state_gas()),
@@ -823,13 +818,14 @@ fn test_an_out_of_gas_before_the_first_frame_matches_op_revm() {
     let (mega, _, cfg) = run_both(db(), transfer(mega_limit));
     let op = run_op_alone(db(), transfer(op_limit));
     assert_satin_cfg(&cfg);
-    for (engine, result, gas_limit) in
-        [("Satin", &mega.result, mega_limit), ("op-revm", &op.result, op_limit)]
-    {
+    for (engine, result, reservoir, gas_limit) in [
+        ("Satin", &mega.result, mega.gas.reservoir_remaining, mega_limit),
+        ("op-revm", &op.result, op.reservoir_remaining, op_limit),
+    ] {
         assert!(result.is_halt(), "{engine}: {result:?}");
         let gas = result.gas();
         assert_eq!(gas.total_gas_spent(), gas_limit, "{engine}: the whole gas limit burns");
-        assert_eq!(gas.reservoir_remaining(), 0, "{engine}: no reservoir comes back");
+        assert_eq!(reservoir, 0, "{engine}: no reservoir comes back");
         assert_eq!(gas.tx_gas_used(), gas_limit, "{engine}: the receipt bills the gas limit");
     }
     assert_eq!(mega.gas.history, body_history(0), "the history ledger reads the body");
@@ -879,16 +875,17 @@ fn test_an_out_of_gas_creation_before_the_first_frame_matches_op_revm() {
     let (mega, _, cfg) = run_both(db(), creation(mega_limit));
     let op = run_op_alone(db(), creation(op_limit));
     assert_satin_cfg(&cfg);
-    for (engine, result, gas_limit) in
-        [("Satin", &mega.result, mega_limit), ("op-revm", &op.result, op_limit)]
-    {
+    for (engine, result, reservoir, gas_limit) in [
+        ("Satin", &mega.result, mega.gas.reservoir_remaining, mega_limit),
+        ("op-revm", &op.result, op.reservoir_remaining, op_limit),
+    ] {
         assert!(result.is_halt(), "{engine}: {result:?}");
         assert_eq!(
             result.gas().total_gas_spent(),
             gas_limit,
             "{engine}: the whole gas limit burns"
         );
-        assert_eq!(result.gas().reservoir_remaining(), 0, "{engine}: no reservoir comes back");
+        assert_eq!(reservoir, 0, "{engine}: no reservoir comes back");
     }
     assert_eq!(mega.gas.history, body_history(init_code.len() as u64), "the ledger reads the body");
     // op-revm reaches the charge for the created account and loads its address; Satin falls short

@@ -214,18 +214,18 @@ fn test_stop_refills_the_reservoir_at_any_gas_limit() {
     let at = |gas_limit: u64| {
         let result = run(chain(), cap(180), call(CALLER, A, U256::ZERO, gas_limit));
         assert_stopped(&result.result, LimitKind::DataSize, mega_evm::TX_BODY_SIZE + 180);
-        *result.result.gas()
+        result
     };
     let small = at(100_000_000);
     let large = at(1_000_000_000);
-    assert_eq!(small.reservoir_remaining(), 0, "a limit under the cap has no reservoir");
+    assert_eq!(small.gas.reservoir_remaining, 0, "a limit under the cap has no reservoir");
     assert_eq!(
-        large.reservoir_remaining(),
+        large.gas.reservoir_remaining,
         1_000_000_000 - TX_GAS_LIMIT_CAP - body_history(),
         "all of it back but the body's history, which the stop does not take back",
     );
-    assert_eq!(small.tx_gas_used(), large.tx_gas_used());
-    assert_eq!(small.total_gas_spent(), large.total_gas_spent());
+    assert_eq!(small.result.gas().tx_gas_used(), large.result.gas().tx_gas_used());
+    assert_eq!(small.result.gas().total_gas_spent(), large.result.gas().total_gas_spent());
 }
 
 /// An `SSTORE` that runs out of gas after its Host call records nothing, so a cap of zero does
@@ -440,7 +440,7 @@ fn test_create_transaction_stopped_before_its_first_frame_bumps_the_nonce() {
     let tx = crate::common::create(CALLER, init_code.clone(), 1_000_000_000);
     let result = run(MemoryDatabase::default(), cap(room), tx);
     assert_eq!(
-        result.result.gas().reservoir_remaining(),
+        result.gas.reservoir_remaining,
         1_000_000_000 - TX_GAS_LIMIT_CAP - create_body_history(init_code.len() as u64),
     );
 }

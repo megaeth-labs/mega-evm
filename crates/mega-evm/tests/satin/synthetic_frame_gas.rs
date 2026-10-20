@@ -232,11 +232,11 @@ fn test_stopped_first_frame_keeps_the_reservoir_at_any_gas_limit() {
             alloy_evm::Evm::transact_raw(&mut evm, call(CALLER, TARGET, U256::from(1), gas_limit))
                 .unwrap();
         assert!(!result.result.is_success() && !result.result.is_halt(), "{:?}", result.result);
-        *result.result.gas()
+        (*result.result.gas(), evm.ctx().additional_limit().reservoir_remaining())
     };
-    let (small, large) = (at(100_000_000), at(1_000_000_000));
-    assert_eq!(small.reservoir_remaining(), 0);
-    assert_eq!(large.reservoir_remaining(), 1_000_000_000 - TX_GAS_LIMIT_CAP - body_history(0));
+    let ((small, small_reservoir), (large, large_reservoir)) = (at(100_000_000), at(1_000_000_000));
+    assert_eq!(small_reservoir, 0);
+    assert_eq!(large_reservoir, 1_000_000_000 - TX_GAS_LIMIT_CAP - body_history(0));
     assert_eq!(small.tx_gas_used(), large.tx_gas_used());
     assert_eq!(small.state_gas_spent_final(), large.state_gas_spent_final());
 }
@@ -330,7 +330,7 @@ fn assert_the_reservoir_survives(to: Address, data: Bytes, value: U256, expected
     let at = |gas_limit: u64| {
         let mut tx = crate::common::call_with_data(CALLER, to, data.clone(), gas_limit);
         tx.0.base.value = value;
-        let (result, _) = crate::common::run(system_db(), tx);
+        let result = crate::common::execute(system_db(), tx);
         let output = result.result.output().cloned().unwrap_or_default();
         match &expected {
             Expected::Answer(answer) => {
@@ -349,7 +349,7 @@ fn assert_the_reservoir_survives(to: Address, data: Bytes, value: U256, expected
                 assert!(result.result.is_success(), "at {gas_limit}: {:?}", result.result);
             }
         }
-        (*result.result.gas(), output)
+        (result, output)
     };
     let ((narrow, narrow_answer), (wide, wide_answer)) = (at(NARROW), at(WIDE));
 
@@ -365,15 +365,15 @@ fn assert_the_reservoir_survives(to: Address, data: Bytes, value: U256, expected
              narrow limit has no reservoir, so its body's history comes off that budget too",
         );
     }
-    assert_eq!(narrow.reservoir_remaining(), 0, "there is no pool below the cap");
+    assert_eq!(narrow.gas.reservoir_remaining, 0, "there is no pool below the cap");
     assert_eq!(
-        wide.reservoir_remaining(),
+        wide.gas.reservoir_remaining,
         WIDE - TX_GAS_LIMIT_CAP - body_history(data.len() as u64),
         "the call spends no state gas, so the whole pool but the body's history comes back",
     );
     assert_eq!(
-        narrow.tx_gas_used(),
-        wide.tx_gas_used(),
+        narrow.result.gas().tx_gas_used(),
+        wide.result.gas().tx_gas_used(),
         "the call costs the same with a pool and without one",
     );
 }

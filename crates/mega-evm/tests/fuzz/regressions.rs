@@ -114,7 +114,10 @@ fn test_an_out_of_gas_before_the_first_frame_pays_the_operator_fee_on_the_whole_
     let gas = outcome.result.gas();
     let gas_limit = GasTier::Tiny.limit();
     assert_eq!(gas.total_gas_spent(), gas_limit, "the whole gas limit burns\n{rendered}");
-    assert_eq!(gas.reservoir_remaining(), 0, "nothing comes back from a reservoir\n{rendered}");
+    assert_eq!(
+        outcome.gas.reservoir_remaining, 0,
+        "nothing comes back from a reservoir\n{rendered}"
+    );
     assert_eq!(outcome.gas.gas_used, gas_limit, "{rendered}");
     let body = mega_evm::transaction_body_bytes(&case.transaction());
     assert_eq!(outcome.gas.history_bytes, body, "the body alone is kept\n{rendered}");

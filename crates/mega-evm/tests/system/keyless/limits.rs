@@ -105,8 +105,7 @@ fn assert_nothing_kept(
     assert_eq!(outcome.usage.write_records, 0, "{case}: no record is kept");
     if gas_limit > TX_GAS_LIMIT_CAP {
         assert_eq!(
-            outcome.result.gas().reservoir_remaining(),
-            reference.result.gas().reservoir_remaining(),
+            outcome.gas.reservoir_remaining, reference.gas.reservoir_remaining,
             "{case}: the reservoir comes back",
         );
     }
@@ -240,10 +239,7 @@ fn test_a_refusal_after_the_charges_gives_the_reservoir_back() {
         [total, regular, state, history_gas],
         [KEYLESS_DEPLOY_OVERHEAD_GAS, KEYLESS_DEPLOY_OVERHEAD_GAS, 0, 0]
     );
-    assert_eq!(
-        outcome.result.gas().reservoir_remaining(),
-        reference.result.gas().reservoir_remaining(),
-    );
+    assert_eq!(outcome.gas.reservoir_remaining, reference.gas.reservoir_remaining,);
 }
 
 /// And a call refused after the charges of the creation's start — the forward the `CREATE`
@@ -281,10 +277,7 @@ fn test_a_refusal_after_the_creations_charges_gives_the_reservoir_back() {
     let [total, regular, state, history_gas, _] = beyond(&outcome, &reference);
     let kept = KEYLESS_DEPLOY_OVERHEAD_GAS + opcode;
     assert_eq!([total, regular, state, history_gas], [kept, kept, 0, 0]);
-    assert_eq!(
-        outcome.result.gas().reservoir_remaining(),
-        reference.result.gas().reservoir_remaining(),
-    );
+    assert_eq!(outcome.gas.reservoir_remaining, reference.gas.reservoir_remaining,);
 }
 
 /// The call gets back what its creation did not spend, the same way whether the creation

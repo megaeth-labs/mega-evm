@@ -28,6 +28,8 @@ mod intrinsic;
 mod limit_exemption;
 mod limit_stop;
 mod neutral;
+#[path = "../shared/op_reference.rs"]
+mod op_reference;
 mod outcome;
 mod pool_validation;
 mod precompile_gas;

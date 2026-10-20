@@ -215,7 +215,7 @@ impl Scenario {
                     self.to,
                     self.data.clone(),
                 );
-                render_system_call(result.map(|r| (r.result, r.state)))
+                render_system_call(result.map(|r| (r.result, r.state)), evm.ctx())
             } else {
                 render_outcome(evm.execute_transaction(self.tx()))
             };
@@ -230,7 +230,7 @@ impl Scenario {
                 self.to,
                 self.data.clone(),
             );
-            render_system_call(result.map(|r| (r.result, r.state)))
+            render_system_call(result.map(|r| (r.result, r.state)), evm.ctx())
         } else {
             render_outcome(evm.execute_transaction(self.tx()))
         };
@@ -1031,11 +1031,17 @@ fn render_outcome<E: core::fmt::Debug>(outcome: Result<MegaTransactionOutcome, E
     )
 }
 
-fn render_system_call<R: core::fmt::Debug, E: core::fmt::Debug>(
+/// A system call's result and state, and the reservoir it left, which its result does not carry.
+fn render_system_call<R: core::fmt::Debug, E: core::fmt::Debug, DB: Database>(
     result: Result<(R, EvmState), E>,
+    ctx: &MegaContext<DB>,
 ) -> String {
     match result {
-        Ok((result, state)) => format!("result: {result:?}\nstate:\n{}", render_state(&state)),
+        Ok((result, state)) => format!(
+            "result: {result:?}\nreservoir_remaining: {}\nstate:\n{}",
+            ctx.additional_limit().reservoir_remaining(),
+            render_state(&state)
+        ),
         Err(error) => format!("error: {error:?}\n"),
     }
 }

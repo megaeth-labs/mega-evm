@@ -133,9 +133,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     ///
     /// The fields the spec fixes are set from the spec, whatever `cfg` holds: the gas schedule,
     /// the EIP-8037 and EIP-2780 switches, the execution cap, the EIP-7708 switch and its
-    /// disabling flag, the system-call state-gas margin, the chain-id check and the two code-size
-    /// limits. Every other field (chain id, the other disabled checks, blob schedule) is taken
-    /// from `cfg`.
+    /// disabling flag, the chain-id check and the two code-size limits. Every other field (chain
+    /// id, the other disabled checks, blob schedule) is taken from `cfg`.
     ///
     /// A context that ran the neutral configuration returns to the spec's.
     pub fn with_cfg(mut self, cfg: CfgEnv<MegaSpecId>) -> Self {
@@ -162,6 +161,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     ///   cap and the code-size limits.
     /// - No transaction pays history gas, and none has its schedule swapped for its history
     ///   exemption: every transaction runs `cfg`'s schedule.
+    /// - A system call's gas is not split: its whole gas limit is regular gas, as revm's own runner
+    ///   has it.
     /// - SALT pricing needs nothing here: without a SALT environment every bucket is minimal, and
     ///   the multiplier is one.
     /// - Gas detention is not part of the configuration: its caps are runtime limits, which the
@@ -424,6 +425,20 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         self.system_call
     }
 
+    /// Whether the running execution's gas is split as EIP-8037 splits a system call's: at most
+    /// [`SYSTEM_CALL_REGULAR_GAS_LIMIT`](crate::SYSTEM_CALL_REGULAR_GAS_LIMIT) of it regular gas,
+    /// the rest its state-gas reservoir. Every system call's is, whatever the caller's
+    /// configuration: which pool pays the protocol's own state writes, and what `GAS` reads inside
+    /// a system contract, are part of executing the chain. No transaction's is, and under the
+    /// neutral configuration no system call's either, as revm's own runner has it.
+    pub(crate) fn splits_system_call_gas(&self) -> bool {
+        #[cfg(any(test, feature = "test-utils"))]
+        if self.neutral {
+            return false;
+        }
+        self.system_call
+    }
+
     /// Prepares the common execution layer for a transaction or a system call that is, or is not,
     /// `system_originated`.
     ///
@@ -550,14 +565,6 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
 /// transfer log is data size like any log, and pays no history gas: Ethereum prices it at
 /// nothing, and it is not a byte the transaction chose to write (see the `limit` module).
 ///
-/// A system call runs as EIP-8037 has it: on at most the base 30,000,000 of regular gas, the
-/// rest of its gas limit being its state-gas reservoir, which the state it writes draws first.
-/// The switch for it is set on whatever the caller's configuration says, because which pool pays
-/// the protocol's own state writes, and what `GAS` reads inside a system contract, are part of
-/// executing the chain. It reaches system calls only: every transaction's gas is split by the
-/// execution cap as before, the system-address transaction's included, which is a deposit and
-/// not a system call.
-///
 /// The chain-id check is on, whatever the caller's configuration says: a transaction that carries
 /// a chain id must carry the chain's, and one of a type other than legacy must carry one. Which
 /// transactions a chain accepts is the chain's rule, not a caller's choice.
@@ -568,7 +575,6 @@ pub fn spec_cfg(mut cfg: CfgEnv<MegaSpecId>) -> CfgEnv<MegaSpecId> {
     cfg.tx_gas_limit_cap = Some(constants::TX_GAS_LIMIT_CAP);
     cfg.enable_amsterdam_eip7708 = true;
     cfg.amsterdam_eip7708_disabled = false;
-    cfg.system_call_state_gas_margin_in_reservoir = true;
     cfg.tx_chain_id_check = true;
     cfg.limit_contract_code_size = Some(constants::MAX_CONTRACT_SIZE);
     cfg.limit_contract_initcode_size = Some(constants::MAX_INITCODE_SIZE);
@@ -675,7 +681,6 @@ mod tests {
             assert_eq!(cfg.cap, Some(constants::TX_GAS_LIMIT_CAP), "execution cap");
             assert!(cfg.eip7708, "EIP-7708 must be on");
             assert!(!cfg.eip7708_disabled, "EIP-7708 must not be disabled");
-            assert!(cfg.margin, "a system call's gas above 30M must be its reservoir");
             assert!(cfg.chain_id_check, "the chain id must be checked");
             assert_eq!(cfg.code_size, Some(constants::MAX_CONTRACT_SIZE), "contract size");
             assert_eq!(cfg.initcode_size, Some(constants::MAX_INITCODE_SIZE), "initcode size");
@@ -690,7 +695,6 @@ mod tests {
         cap: Option<u64>,
         eip7708: bool,
         eip7708_disabled: bool,
-        margin: bool,
         chain_id_check: bool,
         code_size: Option<usize>,
         initcode_size: Option<usize>,
@@ -705,7 +709,6 @@ mod tests {
                 cap: cfg.tx_gas_limit_cap,
                 eip7708: cfg.enable_amsterdam_eip7708,
                 eip7708_disabled: cfg.amsterdam_eip7708_disabled,
-                margin: cfg.system_call_state_gas_margin_in_reservoir,
                 chain_id_check: cfg.tx_chain_id_check,
                 code_size: cfg.limit_contract_code_size,
                 initcode_size: cfg.limit_contract_initcode_size,
@@ -756,7 +759,6 @@ mod tests {
             cfg.tx_gas_limit_cap = Some(1 << 24);
             cfg.enable_amsterdam_eip7708 = false;
             cfg.amsterdam_eip7708_disabled = true;
-            cfg.system_call_state_gas_margin_in_reservoir = false;
             cfg.tx_chain_id_check = false;
             cfg.limit_contract_code_size = Some(24 * 1024);
             cfg.limit_contract_initcode_size = Some(48 * 1024);
@@ -901,6 +903,25 @@ mod tests {
         ctx.on_new_system_call();
         ctx.on_new_tx(true);
         assert!(!ctx.is_system_call(), "nor is a system transaction, which the protocol sends");
+    }
+
+    /// A system call's gas is split as EIP-8037 has it; a transaction's is not, a system-address
+    /// transaction's neither, and under the neutral configuration no system call's is.
+    #[test]
+    fn test_only_a_system_call_splits_its_gas() {
+        let mut ctx = MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN);
+        assert!(!ctx.splits_system_call_gas());
+        ctx.on_new_system_call();
+        assert!(ctx.splits_system_call_gas());
+        ctx.on_new_tx(false);
+        assert!(!ctx.splits_system_call_gas(), "a transaction is split by the execution cap");
+        ctx.on_new_tx(true);
+        assert!(!ctx.splits_system_call_gas(), "so is a system-address transaction");
+
+        let mut neutral =
+            MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN).with_neutral_cfg(osaka_cfg());
+        neutral.on_new_system_call();
+        assert!(!neutral.splits_system_call_gas(), "as revm's own runner has it");
     }
 
     /// Two contexts may read one SALT environment — a node builds an EVM per transaction over
