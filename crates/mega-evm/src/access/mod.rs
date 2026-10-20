@@ -37,8 +37,8 @@
 //! (which every account opcode and every call goes through, the EIP-7702 delegate's included), its
 //! storage load and its `SELFDESTRUCT`. A load that fails — a cold account the frame cannot pay
 //! for, a database error — marks nothing, and neither does an opcode that fails after the load:
-//! the Host only observes, and the opcode's wrapper commits the read once the opcode completed,
-//! as it does with a write record.
+//! the Host only marks the read, and the opcode's wrapper commits it once the opcode completed, as
+//! a write record is counted only once its opcode completed.
 //!
 //! # The cap
 //!

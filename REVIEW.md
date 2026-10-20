@@ -24,10 +24,10 @@ Defer to the baseline for everything not listed here; the rules below take prece
 - Pre-block helpers (the activation block's predeploy check, pre-block system calls, the registry's due-change read, the L1 block info read) return their state (an `EvmState`, or a `ResultAndState` for a system call) for the block executor to commit on its own, in order; they never call `db.commit(...)`.
   An idempotent "no change" path returns an `EvmState` that carries the observed account as a read-only entry; returning nothing drops the account from the stateless witness read set and produces an incomplete proof.
   The same applies inside execution: read through the journal with revm's own loads (`load_account`, `sload`), never `journal.database.basic(...)`, or the account driving the result is missing from the returned state.
-- **The Host only observes; the opcode's wrapper commits.**
-  `sstore`, `log` and `selfdestruct` stage a record and record nothing; the wrapper commits it after the opcode completed and discards it if the opcode failed.
+- **A write is counted once its opcode completed.**
+  The Host's `sstore`, `log` and `selfdestruct` only write and count nothing; revm's write instructions call the completed-write hook (`Host::write_completed`) after every charge they make, and the frame-starting instructions call the frame-start hook (`Host::frame_starting`) after the forward and before the frame's input is built.
   A record, a charge or a read mark made before the opcode can still fail counts a write that never happened.
-  Check that every exit path of a wrapped instruction (stack underflow, out of gas, decode failure, a failed inner call) leaves the staged record discarded and nothing counted.
+  Check that nothing is counted in the Host's write methods, that no charge lands in a write instruction after the hook (the fork's call sites), and that the engine's matches over `CompletedWrite` and `FrameStartKind` carry no wildcard arm.
 - **A limit is enforced before the write it guards.**
   A limit — the transaction's or a frame's budget — stops the frame that crosses it with a revert carrying `MegaLimitExceeded`, never with a halt, and its caller resumes within every limit; a stop of the transaction's own frame keeps the gas its frames hold, and nothing is taken from the sender on a stop.
   Flag a stop that surfaces as a halt, a limit that is checked after the state change it guards, a stopped frame whose writes, logs or counted bytes survive into its caller, and an answer the engine turns into the stop whose journal is not taken back.
