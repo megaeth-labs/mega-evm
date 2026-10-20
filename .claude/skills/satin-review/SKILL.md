@@ -125,7 +125,7 @@ For each module: where it is, what to check, the spec sections, and the `AGENTS.
   - A transaction is an MST when it is a legacy transaction of the system shape from the live system address, decided before it runs; a failed read of the address is an internal error.
   - A deposit and an MST are never refused by the packing budget or building policy and count towards them; the header gas limit (`BlockLimiter::pre_execution_check`) and the DA footprint (`check_da_footprint`) still apply.
   - `commit_transaction_outcome` refuses a stale outcome: the sender's nonce or balance moved since the candidate executed (`StaleOutcome`, internal).
-  - Pre-block order: EIP-2935, EIP-4788, the contract deploys (the registry's only checked) and the EIP-7997 factory, the registry's due change, the read of the L1 block info; a pre-block call that does not succeed makes the block invalid, and a fatal database error is an internal error.
+  - Pre-block order: EIP-2935, EIP-4788, in Satin's activation block alone the check of the six system contracts and the EIP-7997 factory, the registry's due change, the read of the L1 block info; a pre-block call that does not succeed makes the block invalid, and a fatal database error is an internal error.
   - A rewriting inspector is refused at every block-execution entry, as an internal error.
   - The block's ledgers: regular as `max(regular, floor)`, state, history, plus history bytes, data size and write records; reported, not limited.
   - When the OP base moves, diff the file against the new base's `OpBlockExecutor`.
@@ -133,7 +133,7 @@ For each module: where it is, what to check, the spec sections, and the `AGENTS.
 
 ### System contracts and the system address
 
-- **Where:** `src/system/` (`intercept.rs`, `oracle.rs`, `control.rs`, `limit_control.rs`, `keyless/`, `tx.rs`, `deploy.rs`, `sequencer_registry.rs`), `crates/system-contracts/`.
+- **Where:** `src/system/` (`intercept.rs`, `oracle.rs`, `control.rs`, `limit_control.rs`, `keyless/`, `tx.rs`, `predeploys.rs`, `sequencer_registry.rs`), `crates/system-contracts/`.
 - **Read first:** the module doc of `src/system/tx.rs`.
 - **Check:**
   - Every transaction reads the registry's account and its `_currentSystemAddress` slot, warm, by comparing the code hash, without running the registry's code.
@@ -141,8 +141,7 @@ For each module: where it is, what to check, the spec sections, and the `AGENTS.
   - A deposit carrying the MST source hash from any **other** sender is not refused: it is system-originated, so it is held to no limit, pays no history gas, is not detained and is priced at the minimum bucket.
     The spec's basis is that no deposit derived from L1 carries the hash. This is the widest exemption in the engine, so check that claim.
   - An MST is validated (chain id, nonce, EIP-3607) before it is promoted to a deposit.
-  - Deploys are idempotent; a known older version of the Oracle (1.0.0 / 1.1.0) is replaced in place with nonce, balance and storage kept; any other code, or empty code with a used nonce, makes the block invalid.
-  - The `SequencerRegistry` is a precondition, never created, seeded or upgraded: v2.0.0 (which Rex6 left) is a read-only entry; no account, no code or v1.0.0 makes the block invalid (`SequencerRegistryNotDeployed`); other code is foreign code.
+  - Satin deploys, upgrades and seeds no predeploy. The block in which Satin activates (`MegaBlockExecutionCtx::satin_activation_block`, set by the node from its schedule and the parent's timestamp) reads the seven, each a read-only entry, and each must hold exactly Satin's code whatever its nonce, balance and storage; anything else — no account, no code, an older version (the Oracle's 1.0.0 / 1.1.0, the registry's 1.0.0), other code — makes the block invalid with one error, `UnexpectedSystemContractCode`. No other block reads them.
   - An Oracle read in a system call reads chain storage, never the oracle service.
   - Keyless: the call runs as a native creation of the recovered signer; an empty code deposit at the deploy address is refused with `EmptyCodeDeployed`, a constructor's inner creation returning empty code is not; the answers are the documented error set.
   - The interceptor dispatch order is scheme guard, address, selector, then value policy; an unknown selector is not intercepted.
@@ -219,11 +218,11 @@ Each is a decision with its reason; "in this pull request" means review the code
 - **Every transaction pre-warms the registry read**, so gas does not depend on the envelope type; the non-warming journal read is not a generic upstream candidate.
 - **A delayed commit re-checks only the sender's nonce and balance**: other staleness is the builder's documented responsibility, as the system-transaction-first flow requires.
 - **An MST is never refused by a packing budget or builder policy**: it serves a user transaction already admitted.
-- **System contracts have an in-place upgrade path** for known older versions; unknown code is a fail-closed error, and no contract changes.
+- **Satin has no deploy or upgrade path**: it runs on a chain that ran the legacy forks, and its activation block refuses any predeploy without Satin's code; no contract changes.
 - **Keyless refuses only an empty code deposit** at the deploy address; the four producer-less errors are deleted, which changes no deployed byte.
 - **Creation revival by an inspector is allowed** (Foundry parity), settled as a frame that kept nothing; the upfront refund is given back at the price it was charged at.
 - **The Amsterdam regular gas table is taken wholesale**: the earlier press-back to Osaka priced creation twice.
-- **`validate_schedule` checks that base forks are active by `satinTime`**; engine-built schedules put them at genesis.
+- **`validate_schedule` checks that base forks are active by `satinTime`**; engine-built schedules activate them from the first block, which no Satin block can tell apart. An unknown chain has no schedule (`hardfork_schedule` answers `None`).
 - **A rewriting inspector in block execution is an internal error**, not a block verdict: the inspector is the node's own choice.
 - **Explicit crate-root exports; dead helpers and legacy-era remnants are deleted.**
 - **Generic fork params** stay: later specs need params whose shape changes per fork.

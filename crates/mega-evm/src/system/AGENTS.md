@@ -1,7 +1,7 @@
 # AGENTS.md
 
 ## OVERVIEW
-The six system contracts: their addresses and bytecode, the interceptor dispatch over four of them (`MegaAccessControl` and `MegaLimitControl` answer, the Oracle's `sendHint` runs a side effect and falls through, and `KeylessDeploy` is routed but left to the keyless dispatch), the system-address transaction, and the pre-block deploy of five of those six plus the EIP-7997 factory, with the check of the sixth, the `SequencerRegistry` the legacy forks left, and the registry's pre-block steps: the due-change read and the `applyPendingChanges()` system call. The live system address is read by every transaction when it is validated, not before the block.
+The six system contracts: their addresses and bytecode, the interceptor dispatch over four of them (`MegaAccessControl` and `MegaLimitControl` answer, the Oracle's `sendHint` runs a side effect and falls through, and `KeylessDeploy` is routed but left to the keyless dispatch), the system-address transaction, the check Satin's activation block makes of the six and the EIP-7997 factory, which the legacy forks and OP's genesis tooling installed and Satin never deploys, and the registry's pre-block steps: the due-change read and the `applyPendingChanges()` system call. The live system address is read by every transaction when it is validated, not before the block.
 
 ## STRUCTURE
 - `oracle.rs`: the Oracle's address, code and ABI, and the `sendHint` side effect. Its storage is read by the Host (`evm/host.rs`), through the oracle environment.
@@ -10,7 +10,7 @@ The six system contracts: their addresses and bytecode, the interceptor dispatch
 - `control.rs`: `MegaAccessControl`'s address, code, ABI and revert payloads, `SLOT_NUM_ACCESS_TYPE`, and its interceptor, which steers gas detention's switch.
 - `limit_control.rs`: `MegaLimitControl`'s address, code, ABI and its interceptor, which answers the compute the calling frame could still spend.
 - `sequencer_registry.rs`: the `SequencerRegistry`'s address, code and ABI, its two pre-block helpers — `is_apply_pending_changes_due` (the read-only due check and its witness) and `transact_apply_pending_changes` (the system call on `pre_block_call_gas_limit`) — and `load_system_address`, the warming journal read of the registry's account and `_currentSystemAddress` every transaction makes (no address unless the registry holds this engine's code and a non-zero address). No interceptor.
-- `deploy.rs`: the declarative spec, `transact_deploy`, the EIP-7997 factory, and the list of seven predeploys, the `SequencerRegistry` among them as the one the deploy requires already deployed (`require_deployed`) and refuses the block without (`SequencerRegistryNotDeployed`).
+- `predeploys.rs`: the list of the seven predeploys (`system_contract_specs`: address, code, code hash), the EIP-7997 factory's constants, and `check_system_contract`, the read Satin's activation block makes of each: exactly the expected code, whatever the nonce, balance and storage, or `SystemContractCheckError::UnexpectedCode` naming the address and both hashes.
 - `intercept.rs`: the dispatch — the address test, the selector peek, the value policy and the shape of an answer.
 - `tx.rs`: the system-address transaction, its whitelist and shape, the per-transaction decision and the refusal of another shape from the system address (`classify_system_transaction`), and the validation that precedes its promotion to a deposit.
 
@@ -40,11 +40,10 @@ The contract for a new or modified helper:
 
 - Never call `db.commit(...)` inside the helper.
   Return the prepared state; let the executor commit.
-- On an idempotent no-change path (the contract is already deployed with the correct code hash), return `EvmState` that carries the observed account as a read-only entry: neither `touched` nor `created`.
+- On a read that changes nothing (a predeploy holding the expected code, the registry's due check), return `EvmState` that carries the observed account as a read-only entry: neither `touched` nor `created`.
   Returning nothing here is a bug — the account disappears from the stateless witness read set.
-- On a real-change path, include every account and storage slot the helper touched.
-- Present with different code is an error, not an overwrite, unless the code is a known older version of the contract (`SystemContractSpec::upgradable_from`): that is replaced in place, returned as a touched account that is not created and carries no storage entry, so its nonce, balance and storage stay.
-  A system address holding any other bytecode is a broken chain.
+- On a step that writes (`applyPendingChanges()`), include every account and storage slot the helper touched.
+- A predeploy holding other code is an error, never an overwrite or an upgrade: Satin's activation block refuses a chain that does not hold the seven at the versions it runs.
 
 The returned `EvmState` is both the commit and the witness record of that step.
 The executor hands it to the pre-block observer, then commits: the sequence the observer sees is the witness a stateless client needs.
@@ -65,7 +64,7 @@ The executor hands it to the pre-block observer, then commits: the sequence the 
   It hides the step from a witness generator.
 - Do not return nothing from a helper on a "no change needed" path.
   Return the account entries observed, even when nothing is written.
-- Do not overwrite foreign code at a system address; upgrade only a version `upgradable_from` names.
+- Do not create, overwrite or upgrade a predeploy from the engine: the legacy forks installed them, and Satin's activation block only checks them.
 
 ## WHERE TO LOOK
 - Add a method to an intercepted contract: the contract's own module, next to the selectors it already answers, and a boundary test per `tests/system/`.
@@ -73,7 +72,7 @@ The executor hands it to the pre-block observer, then commits: the sequence the 
 - Change a keyless deployment: `keyless/dispatch.rs` for what is dispatched, the rules and the charges of the creation's start; `keyless/settle.rs` for the creation's return into the call and the answer; `evm/execution.rs` for where they are called — `frame_init`, `frame_run` and `frame_return_result`; `tests/system/keyless/` for the tests.
 - Change the system transaction's validation: `tx.rs::validate_and_promote`, which `MegaHandler::validate_env_as` calls for both the handler's `validate_env` and the stateless pool validation (`evm/validation.rs`, which leaves the system address's nonce and code to the state).
 - Change what a deposit-like transaction pays for the account it creates: `evm/execution.rs`, where the charge is made in the pre-execution phase.
-- Add a predeploy: a spec in `deploy.rs::system_contract_specs`. The deploy writes no storage; a contract that needs its storage set brings that mechanism with it.
-- Change how a block deploys the contracts: `block/executor.rs::apply_pre_execution_changes` iterates the spec list, delivers each witness to the pre-block observer, and commits.
-- Change when a role change is applied: `sequencer_registry.rs`, whose two pre-block helpers `block/executor.rs::apply_pre_execution_changes` calls after the deploys, in that order.
+- Add a predeploy: a spec in `predeploys.rs::system_contract_specs`, which Satin's activation block then checks; a contract Satin itself would install needs a mechanism of its own, which the engine no longer has.
+- Change how the activation block checks the predeploys: `block/executor.rs::apply_pre_execution_changes` iterates the spec list when `MegaBlockExecutionCtx::satin_activation_block` is set, delivers each read to the pre-block observer, and refuses the block on the first unexpected code.
+- Change when a role change is applied: `sequencer_registry.rs`, whose two pre-block helpers `block/executor.rs::apply_pre_execution_changes` calls after the predeploy check, in that order.
 - Change how the live system address is read: `sequencer_registry.rs::load_system_address`, which `MegaHandler::validate_env` calls, and `MegaHandler::validate_env_as`, which decides from the address whether the transaction is a system-address transaction; the answer lives on the context as the transaction's system-originated flag (`MegaContext::is_system_originated`). `sequencer_registry.rs::live_system_address` makes the same read off a database, for a pool.

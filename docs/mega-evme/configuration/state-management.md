@@ -217,6 +217,9 @@ A `code` that is present is checked against `codeHash` and refused if they diffe
 `--balance`, `--faucet` and `--storage` name one field of an account and leave the others as the prestate or the fork holds them.
 They hold for an account `run` or `tx` adds code to afterwards: the `run` receiver and the system contracts.
 
+A Satin `run` or `tx` puts the six system contracts and the EIP-7997 factory where the state does not hold their code, as a chain that ran `Rex6` holds them: an address that already holds the code is left as it is.
+Without `--fork` an address that lacks it gets the account `Rex6` left — the six at nonce 0, the `SequencerRegistry` naming `0xa887dcb9d5f39ef79272801d05abdf707cfbbd1d` in every role, the factory at nonce 1; with `--fork` it gets the code alone, its nonce, balance and storage as the chain holds them.
+
 ## RPC Cache and Retry
 
 When using fork mode, `mega-evme` caches RPC responses to avoid redundant network calls and supports configurable retry behavior for resilience against transient failures.

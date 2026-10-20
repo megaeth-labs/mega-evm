@@ -21,7 +21,7 @@ Defer to the baseline for everything not listed here; the rules below take prece
 ### Consensus-critical execution
 
 - All execution logic must be **deterministic and architecture-independent** — no `mem::transmute`, no native-endian byte conversions, no platform-dependent operations in consensus paths.
-- Pre-block helpers (system contract deploys, pre-block system calls, the registry's due-change read, the L1 block info read) return their state (an `EvmState`, or a `ResultAndState` for a system call) for the block executor to hand to the pre-block observer and commit; they never call `db.commit(...)`.
+- Pre-block helpers (the activation block's predeploy check, pre-block system calls, the registry's due-change read, the L1 block info read) return their state (an `EvmState`, or a `ResultAndState` for a system call) for the block executor to hand to the pre-block observer and commit; they never call `db.commit(...)`.
   An idempotent "no change" path returns an `EvmState` that carries the observed account as a read-only entry; returning nothing drops the account from the stateless witness read set and produces an incomplete proof.
   The same applies inside execution: read through the journal with revm's own loads (`load_account`, `sload`), never `journal.database.basic(...)`, or the account driving the result is missing from the returned state.
 - **The Host only observes; the opcode's wrapper commits.**
@@ -122,7 +122,7 @@ These checks guard every change to the Satin engine.
   A block that differs passes only when a deviation the registry already has lists that test and block with exactly the outcome Satin produces — gas used, logs bloom, receipts root and state root — and the chain goes on from Satin's state, so a listed block exempts nothing after it; a block listed as differing only by an earlier block's state must run as on Ethereum otherwise, and a chain that ends on a listed block's state says why its post-state is not compared.
   The summary counts the blocks checked against Ethereum apart from those matched to a deviation; the executed tests and the skips of each class are pinned in the workflow.
   A skip is decided from the fixture before anything runs, and a class added to the list says what Ethereum's block has that an OP block does not, or which check a node makes before the executor does.
-  The accounts a Satin block adds — its predeploys and the fee vaults op-revm credits — are taken out of the state root only when the fixture's pre-state does not hold them and they hold exactly what Satin put there (`SATIN_ACCOUNTS`); widening that rule is reviewed like a deviation.
+  The accounts the runner and a Satin block add — the predeploys, which the runner seeds as Rex6 left them where the fixture's pre-state lacks them, and the fee vaults op-revm credits — are taken out of the state root only when the fixture's pre-state does not hold them and they hold exactly what was put there (`SATIN_ACCOUNTS`); widening that rule is reviewed like a deviation.
 - A deviation is a rule Satin keeps on purpose and is reviewed as one: an entry added to explain a failure that is a bug is the defect, and an entry added, removed or given new hashes says which fixtures moved and why.
   `crates/mega-state-test/DEVIATIONS.md` is rendered from the registry, and a test keeps the two equal.
 - Neither workflow is a required check; `execution-spec gate on Satin` is the job a branch rule would require.
@@ -152,7 +152,7 @@ These checks guard every change to the Satin engine.
 ### Instruction counts (CodSpeed)
 
 - The bench set is `transact` (`MegaEvm` next to op-revm's `OpEvm`, from an empty transaction to 64-deep calls and loops of storage writes and logs), `corpus` (the JSON scenarios under `benches/scenarios` through `MegaEvm`, a bench input rather than a conformance suite), `factory` (EVM construction through `MegaEvmFactory`) and `block` (a block through `MegaBlockExecutor`), all in `crates/mega-evm/benches`.
-- `block` measures a chain's steady state: a block on a state that already holds the predeploys, under `BlockLimits::default()`; the one-off deployment of the first block after activation is its own arm, `block/activation_pre_block`.
+- `block` measures a chain's steady state: a block on a state holding the predeploys as Rex6 left them, under `BlockLimits::default()`; the one-off check of the activation block is not measured.
 - `codspeed.yml` runs them under instrumentation on every pull request that touches code and on every push to `satin`; the baseline a pull request is compared with is the latest `satin` push.
 - Read regressions from the CodSpeed report on the pull request (the CodSpeed comment and the `CodSpeed Performance Analysis` check).
   The regression threshold that fails that check is a setting of the repository's CodSpeed project; it is not recorded in this repository or in the reports CodSpeed posts, so this file does not state a number.

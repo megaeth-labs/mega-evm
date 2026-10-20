@@ -173,8 +173,8 @@ mega-evme replay --override.spec Rex2 <TX_HASH>
 mega-evme replay --override.spec Satin <TX_HASH>
 ```
 
-A Satin replay needs a state whose system contracts are at the versions Satin deploys or requires, which MegaETH mainnet and testnet reach at `Rex6`: Satin requires the `SequencerRegistry` at version 2.0.0, which Rex6 left, and neither creates nor upgrades it.
-On an older block Satin's own deploy check refuses the block, and the replay fails with an error naming the contract.
+A Satin replay needs a state whose system contracts are at the versions Satin runs, which MegaETH mainnet and testnet reach at `Rex6`: Satin deploys and upgrades none of them, and the `SequencerRegistry` it reads before every transaction must be at version 2.0.0, which Rex6 left.
+Replayed at its activation block, under a genesis file, Satin checks them and refuses a block whose state does not hold them, with an error naming the contract; a counterfactual checks nothing, so on an older block a transaction runs on whatever the state holds there.
 
 ### `--override.limits <JSON|FILE>`
 

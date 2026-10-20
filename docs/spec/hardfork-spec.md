@@ -197,7 +197,7 @@ It restates MegaETH's execution rules on Optimism Karst (Ethereum Osaka) rather 
 - **[Gas detention](evm/gas-detention.md)** — enforced on the gas a frame is allowed to spend, withholding the rest inside the frame's own gas.
 - **[EIP-7708](https://eips.ethereum.org/EIPS/eip-7708) transfer logs**, the `DUPN`, `SWAPN`, `EXCHANGE` and `SLOTNUM` opcodes, and 63/64 gas forwarding.
 - **[KeylessDeploy](system-contracts/keyless-deploy.md)** — the deployment runs as a native creation frame instead of a sandbox.
-- **System calls** — at most 30,000,000 of a system call's gas is regular gas; the pre-block calls, the system-contract deploys and the EIP-7997 factory run before every block.
+- **System calls** — at most 30,000,000 of a system call's gas is regular gas, and the pre-block calls run before every block; the block in which Satin activates checks that the system contracts and the EIP-7997 factory hold the code Satin runs, and Satin deploys none of them.
 - **Live system address** — every transaction reads the [SequencerRegistry](system-contracts/sequencer-registry.md) itself, and a system-address transaction without the system shape is invalid.
 - **Block limits** — data size is a packing budget that never refuses a deposit or a Mega System Transaction.
 
