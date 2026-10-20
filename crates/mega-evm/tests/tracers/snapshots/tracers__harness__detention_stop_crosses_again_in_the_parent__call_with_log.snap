@@ -1,28 +1,28 @@
 ---
 source: crates/mega-evm/tests/tracers/harness.rs
-expression: "&traced.call_frame(true)"
+expression: "&redacted(&traced.call_frame(true))"
 ---
 {
-  "from": "0x0000000000000000000000000000000000400000",
-  "gas": "0x10aa0e",
-  "gasUsed": "0xb275",
-  "to": "0x0000000000000000000000000000000000400002",
-  "input": "0x",
-  "output": "0x84b9026700000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000d4e",
-  "error": "execution reverted",
   "calls": [
     {
-      "from": "0x0000000000000000000000000000000000400002",
-      "gas": "0xfb932",
-      "gasUsed": "0x178",
-      "to": "0x0000000000000000000000000000000000400003",
-      "input": "0x",
-      "output": "0x84b9026700000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000d4e",
       "error": "execution reverted",
-      "value": "0x0",
-      "type": "CALL"
+      "from": "0x0000000000000000000000000000000000400002",
+      "gas": "[gas]",
+      "gasUsed": "[gas]",
+      "input": "0x",
+      "output": "MegaLimitExceeded(2, [gas])",
+      "to": "0x0000000000000000000000000000000000400003",
+      "type": "CALL",
+      "value": "0x0"
     }
   ],
-  "value": "0x0",
-  "type": "CALL"
+  "error": "execution reverted",
+  "from": "0x0000000000000000000000000000000000400000",
+  "gas": "[gas]",
+  "gasUsed": "[gas]",
+  "input": "0x",
+  "output": "MegaLimitExceeded(2, [gas])",
+  "to": "0x0000000000000000000000000000000000400002",
+  "type": "CALL",
+  "value": "0x0"
 }

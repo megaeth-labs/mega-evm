@@ -18,9 +18,13 @@
 //! changes what a tracer prints moves them, and fails the named tracer-shape assertions it
 //! touches, such as the keyless struct logs' gap and the detention step's rendering.
 //!
-//! Each scenario pins six snapshots under `tests/tracers/snapshots/`: the call tracer with and
-//! without logs, the prestate tracer in both modes and the opcode tracer as sorted JSON, and the
-//! EIP-3155 trace as its JSON lines. The comparison runs only at the spec's byte prices.
+//! Each scenario pins two snapshots under `tests/tracers/snapshots/`, the call tracer with logs and
+//! the prestate tracer's diff, and two scenarios (`OPCODE_VIEWS`) pin the opcode tracer as well.
+//! The snapshots hold the trace's structure with every gas figure redacted (`redact_gas`): the
+//! frame tree, the logs, the revert data and the accounts and slots a transaction reads and
+//! writes. The figures are asserted against the schedule instead (`assert_ledgers`,
+//! `assert_root_gas_used_is_the_receipt` and the relations beside them), so a change to a price
+//! moves no snapshot. The comparison runs only at the spec's byte prices.
 //!
 //! Review a change with `cargo insta review`, which shows each snapshot and accepts or rejects it
 //! on its own. Without `cargo-insta`, diff each `.snap.new` the failing run left against its

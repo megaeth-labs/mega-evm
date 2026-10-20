@@ -1,235 +1,235 @@
 ---
 source: crates/mega-evm/tests/tracers/harness.rs
-expression: "&traced.struct_logs()"
+expression: "&redacted(&traced.struct_logs())"
 ---
 {
   "failed": true,
-  "gas": 42360,
-  "returnValue": "0x84b9026700000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000052",
+  "gas": "[gas]",
+  "returnValue": "MegaLimitExceeded(2, [gas])",
   "structLogs": [
     {
-      "pc": 0,
-      "op": "TIMESTAMP",
-      "gas": 1042448,
-      "gasCost": 2,
       "depth": 1,
-      "stack": [],
-      "refund": 0
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "TIMESTAMP",
+      "pc": 0,
+      "refund": "[gas]",
+      "stack": []
     },
     {
-      "pc": 1,
-      "op": "POP",
-      "gas": 1042446,
-      "gasCost": 2,
       "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "POP",
+      "pc": 1,
+      "refund": "[gas]",
       "stack": [
         "0x6553f100"
-      ],
-      "refund": 0
+      ]
     },
     {
-      "pc": 2,
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
       "op": "JUMPDEST",
-      "gas": 1042444,
-      "gasCost": 1,
-      "depth": 1,
-      "stack": [],
-      "refund": 0
+      "pc": 2,
+      "refund": "[gas]",
+      "stack": []
     },
     {
-      "pc": 3,
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
       "op": "PUSH8",
-      "gas": 1042443,
-      "gasCost": 3,
-      "depth": 1,
-      "stack": [],
-      "refund": 0
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": []
     },
     {
-      "pc": 12,
-      "op": "JUMP",
-      "gas": 1042440,
-      "gasCost": 8,
       "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 12,
+      "refund": "[gas]",
       "stack": [
         "0x2"
-      ],
-      "refund": 0
+      ]
     },
     {
-      "pc": 2,
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
       "op": "JUMPDEST",
-      "gas": 1042432,
-      "gasCost": 1,
-      "depth": 1,
-      "stack": [],
-      "refund": 0
+      "pc": 2,
+      "refund": "[gas]",
+      "stack": []
     },
     {
-      "pc": 3,
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
       "op": "PUSH8",
-      "gas": 1042431,
-      "gasCost": 3,
-      "depth": 1,
-      "stack": [],
-      "refund": 0
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": []
     },
     {
-      "pc": 12,
-      "op": "JUMP",
-      "gas": 1042428,
-      "gasCost": 8,
       "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 12,
+      "refund": "[gas]",
       "stack": [
         "0x2"
-      ],
-      "refund": 0
+      ]
     },
     {
-      "pc": 2,
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
       "op": "JUMPDEST",
-      "gas": 1042420,
-      "gasCost": 1,
-      "depth": 1,
-      "stack": [],
-      "refund": 0
+      "pc": 2,
+      "refund": "[gas]",
+      "stack": []
     },
     {
-      "pc": 3,
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
       "op": "PUSH8",
-      "gas": 1042419,
-      "gasCost": 3,
-      "depth": 1,
-      "stack": [],
-      "refund": 0
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": []
     },
     {
-      "pc": 12,
-      "op": "JUMP",
-      "gas": 1042416,
-      "gasCost": 8,
       "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 12,
+      "refund": "[gas]",
       "stack": [
         "0x2"
-      ],
-      "refund": 0
+      ]
     },
     {
-      "pc": 2,
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
       "op": "JUMPDEST",
-      "gas": 1042408,
-      "gasCost": 1,
-      "depth": 1,
-      "stack": [],
-      "refund": 0
+      "pc": 2,
+      "refund": "[gas]",
+      "stack": []
     },
     {
-      "pc": 3,
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
       "op": "PUSH8",
-      "gas": 1042407,
-      "gasCost": 3,
-      "depth": 1,
-      "stack": [],
-      "refund": 0
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": []
     },
     {
-      "pc": 12,
-      "op": "JUMP",
-      "gas": 1042404,
-      "gasCost": 8,
       "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 12,
+      "refund": "[gas]",
       "stack": [
         "0x2"
-      ],
-      "refund": 0
+      ]
     },
     {
-      "pc": 2,
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
       "op": "JUMPDEST",
-      "gas": 1042396,
-      "gasCost": 1,
-      "depth": 1,
-      "stack": [],
-      "refund": 0
+      "pc": 2,
+      "refund": "[gas]",
+      "stack": []
     },
     {
-      "pc": 3,
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
       "op": "PUSH8",
-      "gas": 1042395,
-      "gasCost": 3,
-      "depth": 1,
-      "stack": [],
-      "refund": 0
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": []
     },
     {
-      "pc": 12,
-      "op": "JUMP",
-      "gas": 1042392,
-      "gasCost": 8,
       "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 12,
+      "refund": "[gas]",
       "stack": [
         "0x2"
-      ],
-      "refund": 0
+      ]
     },
     {
-      "pc": 2,
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
       "op": "JUMPDEST",
-      "gas": 1042384,
-      "gasCost": 1,
-      "depth": 1,
-      "stack": [],
-      "refund": 0
+      "pc": 2,
+      "refund": "[gas]",
+      "stack": []
     },
     {
-      "pc": 3,
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
       "op": "PUSH8",
-      "gas": 1042383,
-      "gasCost": 3,
-      "depth": 1,
-      "stack": [],
-      "refund": 0
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": []
     },
     {
-      "pc": 12,
-      "op": "JUMP",
-      "gas": 1042380,
-      "gasCost": 8,
       "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 12,
+      "refund": "[gas]",
       "stack": [
         "0x2"
-      ],
-      "refund": 0
+      ]
     },
     {
-      "pc": 2,
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
       "op": "JUMPDEST",
-      "gas": 1042372,
-      "gasCost": 1,
-      "depth": 1,
-      "stack": [],
-      "refund": 0
+      "pc": 2,
+      "refund": "[gas]",
+      "stack": []
     },
     {
-      "pc": 3,
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
       "op": "PUSH8",
-      "gas": 1042371,
-      "gasCost": 3,
-      "depth": 1,
-      "stack": [],
-      "refund": 0
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": []
     },
     {
-      "pc": 12,
-      "op": "JUMP",
-      "gas": 1042368,
-      "gasCost": 1042368,
       "depth": 1,
       "error": "Some(OutOfGas)",
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 12,
+      "refund": "[gas]",
       "stack": [
         "0x2"
-      ],
-      "refund": 0
+      ]
     }
   ]
 }

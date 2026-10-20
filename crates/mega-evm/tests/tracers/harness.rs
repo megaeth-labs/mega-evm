@@ -1,7 +1,7 @@
 //! Run `MegaEvm` under `revm-inspectors` tracers and compare their output with insta snapshots.
 //!
-//! The JSON views are sorted JSON snapshots and the EIP-3155 trace is a string snapshot, one file
-//! per scenario and view, under `tests/tracers/snapshots/`. A mismatch fails the test. Outside CI,
+//! The views are sorted JSON snapshots with their gas figures redacted, one file per scenario and
+//! view, under `tests/tracers/snapshots/`. A mismatch fails the test. Outside CI,
 //! insta also writes the new value beside the old one as a `.snap.new` file.
 //!
 //! Review a change with `cargo insta review`, which shows each snapshot's diff and accepts or
@@ -26,6 +26,7 @@ use alloy_sol_types::SolError;
 use mega_evm::{
     alloy_evm::Evm as _,
     op_revm::constants::L1_BLOCK_CONTRACT,
+    system::keyless::KEYLESS_DEPLOY_ADDRESS,
     test_utils::{
         op_transaction, zero_fee_l1_block_info, MemoryDatabase, RecordingDatabase, WitnessRecord,
     },
@@ -278,34 +279,112 @@ pub(crate) fn eip3155_steps(traced: &Traced) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// The EIP-3155 trace as a string snapshot. The JSON views go through the shared sorted-JSON
-/// snapshot, which compares only at the spec's byte prices; this one repeats that, with the same
-/// note of the skip, because a line-oriented trace is not JSON.
-fn assert_eip3155_snapshot(name: &str, trace: &str) {
-    if mega_evm::active_satin_prices().is_constants() {
-        insta::assert_snapshot!(name, trace);
-    } else {
-        mega_evm::test_utils::note_snapshot_skipped();
+/// The scenarios whose opcode-level view, the node's struct logs, is pinned as well.
+///
+/// Both show what only an opcode trace shows of gas detention: the step a crossing ends on reads as
+/// an out-of-gas, and a parent's steps resume after the child's stop at depth 1.
+const OPCODE_VIEWS: [&str; 2] =
+    ["timestamp_detention", "detention_stop_crosses_again_in_the_parent"];
+
+/// The keys whose values are gas figures, in the call frames and the struct logs.
+const GAS_KEYS: [&str; 4] = ["gas", "gasUsed", "gasCost", "refund"];
+
+/// What stands in a snapshot for a gas figure.
+const GAS_REDACTED: &str = "[gas]";
+
+/// The kind of a `MegaLimitExceeded` stop whose limit is a gas figure: gas detention's.
+const COMPUTE_STOP_KIND: u8 = 2;
+
+/// `value` with every gas figure replaced by a placeholder, so a snapshot holds the trace's
+/// structure and no figure the gas schedule or the byte prices set.
+///
+/// Redacted: the values under [`GAS_KEYS`], the value a `GAS` step pushes, the compute limit a
+/// detention stop reports in its revert data (it is the compute at the read plus the cap), and the
+/// leading `gasUsed` word of a successful `keylessDeploy` answer. A data-size stop's limit is a
+/// byte count and stays. The figures are asserted against the schedule by the scenario, not here.
+fn redact_gas(value: &mut serde_json::Value) {
+    use serde_json::Value;
+    match value {
+        Value::Object(map) => {
+            let keyless_answer = map.get("to").and_then(Value::as_str) ==
+                Some(format!("{KEYLESS_DEPLOY_ADDRESS:#x}").as_str()) &&
+                !map.contains_key("error");
+            for (key, field) in map.iter_mut() {
+                if GAS_KEYS.contains(&key.as_str()) {
+                    *field = Value::String(GAS_REDACTED.into());
+                } else if matches!(key.as_str(), "output" | "returnValue") {
+                    redact_output(field, keyless_answer);
+                } else {
+                    redact_gas(field);
+                }
+            }
+            if let Some(logs) = map.get_mut("structLogs").and_then(|logs| logs.as_array_mut()) {
+                redact_gas_pushes(logs);
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(redact_gas),
+        _ => {}
     }
 }
 
-/// Pins every tracer view of `traced` under `scenario`'s name: one snapshot per view.
+/// The value a `GAS` step leaves on the stack, in the struct-log step that follows it at the same
+/// depth: a gas figure, which a `CALL`'s gas argument carries into its own step.
+fn redact_gas_pushes(logs: &mut [serde_json::Value]) {
+    for at in 1..logs.len() {
+        let after_gas = logs[at - 1]["op"] == "GAS" && logs[at - 1]["depth"] == logs[at]["depth"];
+        let top = logs[at].get_mut("stack").and_then(|stack| stack.as_array_mut());
+        if let (true, Some(top)) = (after_gas, top.and_then(|stack| stack.last_mut())) {
+            *top = serde_json::Value::String(GAS_REDACTED.into());
+        }
+    }
+}
+
+/// [`redact_gas`] for a hex `output`: a detention stop's limit and a keyless answer's `gasUsed`.
+fn redact_output(output: &mut serde_json::Value, keyless_answer: bool) {
+    let Some(bytes) = output.as_str().and_then(|text| text.parse::<Bytes>().ok()) else {
+        return;
+    };
+    if let Ok(stop) = MegaLimitExceeded::abi_decode(&bytes) {
+        if stop.kind == COMPUTE_STOP_KIND {
+            *output =
+                serde_json::Value::String(format!("MegaLimitExceeded({COMPUTE_STOP_KIND}, [gas])"));
+        }
+    } else if keyless_answer && bytes.len() >= 32 {
+        *output = serde_json::Value::String(format!(
+            "{GAS_REDACTED}{}",
+            Bytes::copy_from_slice(&bytes[32..])
+        ));
+    }
+}
+
+/// `view` as JSON with its gas figures redacted.
+fn redacted(view: &impl serde::Serialize) -> serde_json::Value {
+    let mut value = serde_json::to_value(view).expect("a tracer view is JSON");
+    redact_gas(&mut value);
+    value
+}
+
+/// Pins the tracer views of `traced` under `scenario`'s name, as sorted JSON with the gas figures
+/// redacted: the call tracer with logs and the prestate diff for every scenario, and the struct
+/// logs for the [`OPCODE_VIEWS`] scenarios.
 ///
-/// The five JSON views are sorted JSON snapshots. The EIP-3155 trace is a string snapshot of its
-/// JSON lines. Both comparisons run only at the spec's byte prices.
+/// The figures are asserted against the schedule (`assert_ledgers` and the relations beside it),
+/// so a gas-only change moves no snapshot. The comparisons run only at the spec's byte prices.
 pub(crate) fn pin_tracer_views(scenario: &str, traced: &Traced) {
-    crate::assert_sorted_json_snapshot!(format!("{scenario}__call"), &traced.call_frame(false));
     crate::assert_sorted_json_snapshot!(
         format!("{scenario}__call_with_log"),
-        &traced.call_frame(true)
+        &redacted(&traced.call_frame(true))
     );
-    crate::assert_sorted_json_snapshot!(format!("{scenario}__prestate"), &traced.prestate(false));
     crate::assert_sorted_json_snapshot!(
         format!("{scenario}__prestate_diff"),
-        &traced.prestate(true)
+        &redacted(&traced.prestate(true))
     );
-    crate::assert_sorted_json_snapshot!(format!("{scenario}__struct_logs"), &traced.struct_logs());
-    assert_eip3155_snapshot(&format!("{scenario}__eip3155"), &traced.eip3155());
+    if OPCODE_VIEWS.contains(&scenario) {
+        crate::assert_sorted_json_snapshot!(
+            format!("{scenario}__struct_logs"),
+            &redacted(&traced.struct_logs())
+        );
+    }
 }
 
 /// The transaction is billed `expected`, ledger by ledger, under the expected floor, and its
@@ -465,6 +544,18 @@ pub(crate) fn assert_root_gas_is_the_gas_limit(traced: &Traced) {
             frame.gas,
             U256::from(traced.gas_limit()),
             "root gas (withLog = {with_log}) is not the transaction's gas limit"
+        );
+    }
+}
+
+/// The root frame's `gasUsed` in both call tracer views is the receipt's gas used, as a node
+/// reports it: `DebugInspector::get_result` hands the call tracer the receipt's figure.
+pub(crate) fn assert_root_gas_used_is_the_receipt(traced: &Traced) {
+    for with_log in [false, true] {
+        assert_eq!(
+            traced.call_frame(with_log).gas_used,
+            U256::from(traced.outcome.gas.gas_used),
+            "root gasUsed (withLog = {with_log}) is not the receipt's gas used"
         );
     }
 }

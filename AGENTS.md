@@ -606,7 +606,7 @@ When the agent is requested to implement a new feature or bug fix, it should con
   A test that pins the spec's own numbers returns early at other prices (`runs_at_measurement_prices`); run `scripts/price_grid.sh --pr` before committing a test change.
 - **Pin only outputs with no computable expectation.**
   A snapshot or a golden is the owner of an output no test can compute an expectation for, and of nothing else.
-  Those outputs are the tracers' formats (`tests/tracers/`, six views per scenario), recorded traces, such as the keyless differential's record pinned by one digest per case (`tests/system/keyless/differential.rs`), and the receipt bytes a node hashes, hand-pinned in `tests/block/receipt_goldens.rs`.
+  Those outputs are the tracers' formats (`tests/tracers/`, the call-with-logs and prestate-diff views per scenario with the gas figures redacted, and the opcode view of two), recorded traces, such as the keyless differential's record pinned by one digest per case (`tests/system/keyless/differential.rs`), and the receipt bytes a node hashes, hand-pinned in `tests/block/receipt_goldens.rs`.
   A figure the schedule and the named constants determine — gas on any ledger, a usage count, a limit, a balance, a slot, a log — is asserted with `assert_eq!` against its derivation, never pinned.
   A snapshot is never a net over a behaviour test: a test that runs a transaction asserts what it owns and snapshots nothing of its outcome.
   A digest stands for a record too large to keep in the tree, so a changed digest is reviewed through the record's dump: `MEGA_KEYLESS_RECORD=<file>` writes the keyless record, written at the base and at the head and diffed; it is never accepted on the digest alone.
