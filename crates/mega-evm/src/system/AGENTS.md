@@ -46,7 +46,7 @@ The contract for a new or modified helper:
 - A predeploy holding other code is an error, never an overwrite or an upgrade: Satin's activation block refuses a chain that does not hold the seven at the versions it runs.
 
 The returned `EvmState` is both the commit and the witness record of that step.
-The executor hands it to the pre-block observer, then commits: the sequence the observer sees is the witness a stateless client needs.
+The executor commits it on its own, in the order the steps run: a commit hook on the block's state receives each committed state whole, read-only entries included, and that sequence is the witness a stateless client needs.
 
 ## ANTI-PATTERNS
 - Do not answer an unknown selector with a synthetic revert: the on-chain bytecode is the fall-through, and what it answers is the contract's own business.
@@ -61,7 +61,7 @@ The executor hands it to the pre-block observer, then commits: the sequence the 
 - Do not read the system address from a constant or hold it on the context: the address can be rotated, and the registry in the state the EVM runs on is the one source.
 - Do not skip the registry read for a transaction of some shape: every transaction starts with the registry warm, and a read that depends on the envelope makes the gas depend on it too.
 - Do not call `db.commit(...)` inside a helper that participates in `apply_pre_execution_changes`.
-  It hides the step from a witness generator.
+  It takes the step out of the executor's sequence: the executor commits each step's state on its own, in order, and only once the step succeeded, and that sequence is the witness.
 - Do not return nothing from a helper on a "no change needed" path.
   Return the account entries observed, even when nothing is written.
 - Do not create, overwrite or upgrade a predeploy from the engine: the legacy forks installed them, and Satin's activation block only checks them.
@@ -73,6 +73,6 @@ The executor hands it to the pre-block observer, then commits: the sequence the 
 - Change the system transaction's validation: `tx.rs::validate_and_promote`, which `MegaHandler::validate_env_as` calls for both the handler's `validate_env` and the stateless pool validation (`evm/validation.rs`, which leaves the system address's nonce and code to the state).
 - Change what a deposit-like transaction pays for the account it creates: `evm/execution.rs`, where the charge is made in the pre-execution phase.
 - Add a predeploy: a spec in `predeploys.rs::system_contract_specs`, which Satin's activation block then checks; a contract Satin itself would install needs a mechanism of its own, which the engine no longer has.
-- Change how the activation block checks the predeploys: `block/executor.rs::apply_pre_execution_changes` iterates the spec list when `MegaBlockExecutionCtx::satin_activation_block` is set, delivers each read to the pre-block observer, and refuses the block on the first unexpected code.
+- Change how the activation block checks the predeploys: `block/executor.rs::apply_pre_execution_changes` iterates the spec list when `MegaBlockExecutionCtx::satin_activation_block` is set, commits each read as a state of its own, and refuses the block on the first unexpected code.
 - Change when a role change is applied: `sequencer_registry.rs`, whose two pre-block helpers `block/executor.rs::apply_pre_execution_changes` calls after the predeploy check, in that order.
 - Change how the live system address is read: `sequencer_registry.rs::load_system_address`, which `MegaHandler::validate_env` calls, and `MegaHandler::validate_env_as`, which decides from the address whether the transaction is a system-address transaction; the answer lives on the context as the transaction's system-originated flag (`MegaContext::is_system_originated`). `sequencer_registry.rs::live_system_address` makes the same read off a database, for a pool.

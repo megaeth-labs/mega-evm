@@ -180,6 +180,7 @@ For each module: where it is, what to check, the spec sections, and the `AGENTS.
   - The genesis format has exactly one key, `satinTime`; Satin carries no parameter, and every other `satin*` key (the old registry and limit keys included) is refused.
   - The pool and the engine refuse the same oversize body with the same error (`TX_BODY_OVER_DATA_SIZE_LIMIT`): body + 40 × authorizations over the transaction limit.
   - The witness holds every read: block hashes, SALT bucket ids, the Oracle reads of the block's transactions (none for system calls), the L1 block info, the registry.
+  - The witness is the sequence of states the block commits: each pre-block step commits its state on its own, read-only entries included, where a commit hook on `State` receives it whole; nothing else hands the pre-block states out.
 - **Spec:** §1, §21, §22, "Node integrators".
 
 ### Tools, tests, goldens, benches and CI

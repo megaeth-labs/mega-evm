@@ -21,7 +21,7 @@ Defer to the baseline for everything not listed here; the rules below take prece
 ### Consensus-critical execution
 
 - All execution logic must be **deterministic and architecture-independent** — no `mem::transmute`, no native-endian byte conversions, no platform-dependent operations in consensus paths.
-- Pre-block helpers (the activation block's predeploy check, pre-block system calls, the registry's due-change read, the L1 block info read) return their state (an `EvmState`, or a `ResultAndState` for a system call) for the block executor to hand to the pre-block observer and commit; they never call `db.commit(...)`.
+- Pre-block helpers (the activation block's predeploy check, pre-block system calls, the registry's due-change read, the L1 block info read) return their state (an `EvmState`, or a `ResultAndState` for a system call) for the block executor to commit on its own, in order; they never call `db.commit(...)`.
   An idempotent "no change" path returns an `EvmState` that carries the observed account as a read-only entry; returning nothing drops the account from the stateless witness read set and produces an incomplete proof.
   The same applies inside execution: read through the journal with revm's own loads (`load_account`, `sload`), never `journal.database.basic(...)`, or the account driving the result is missing from the returned state.
 - **The Host only observes; the opcode's wrapper commits.**
@@ -46,7 +46,7 @@ Defer to the baseline for everything not listed here; the rules below take prece
   The call-scheme guard, then the address, then the selector, then the method's value policy; only `CALL` and `STATICCALL` reach an interceptor; an unknown selector is not intercepted and falls through to the contract's bytecode; a method that takes no value answers a value-bearing call with its error.
 - **System calls and system-address transactions:** a system call and a system-originated transaction are exempt from the per-transaction limits and history gas, priced at the minimum SALT bucket and not detained; a pre-block call with dynamic cost takes a `block.gas_limit`-derived budget; a database error the database calls fatal is an internal error and any other failure refuses the block with the call's own validation error; a system-address transaction validates nonce, chain id and EIP-3607 against replay, and a commit step that re-checks block limits re-checks the sender's nonce and balance too.
 - **The stateless witness must hold every read.**
-  A change that makes block execution read state outside a transaction's journal hands the read to the pre-block observer as a read-only entry or exports it, and adds a witness-replay case; nothing may depend on which source (the database, the SALT environment, the oracle service) answered.
+  A change that makes block execution read state outside a transaction's journal commits the read as a read-only entry of a pre-block state or exports it, and adds a witness-replay case; nothing may depend on which source (the database, the SALT environment, the oracle service) answered.
 - **Hot-path accounting stays O(1)** in attacker-controlled call depth and authorization count — no frame-stack walk per opcode, no unindexed `Vec` scan per authorization.
 
 ## Design and architecture
@@ -129,11 +129,11 @@ These checks guard every change to the Satin engine.
 
 ### Witness replay
 
-- `crates/mega-evm/tests/block/witness/` executes a block on a recorder of every read and replays the transactions it included twice, on a strict database and environments that serve exactly a witness and refuse everything else: once on the record of every database read, once on the witness a node builds from the pre-block states, the included transactions' returned states and the engine's exports.
+- `crates/mega-evm/tests/block/witness/` executes a block on a recorder of every read and replays the transactions it included twice, on a strict database and environments that serve exactly a witness and refuse everything else: once on the record of every database read, once on the witness a node builds from the states the block committed — the pre-block steps' and the included transactions' returned states — and the engine's exports.
   `witness::check_replay` in `crates/mega-state-test` does the same for a fixture's transaction; an entry the engine rejects has no returned state and replays on the record alone.
   Its test over the execution-spec fixtures is always ignored by default: it runs only with `-- --ignored` (or `--include-ignored`) and `MEGA_STATE_TEST_FIXTURES` set to the fixtures, and setting the variable alone runs nothing.
 - The replay on the node's witness is the one that finds a read the witness lacks; the replay on the record of every read shows the block has no input outside its database and environments.
-  A change that makes block execution read state outside a transaction's journal hands the read to the pre-block observer as a read-only entry, or exports it, and adds the case that makes the read.
+  A change that makes block execution read state outside a transaction's journal commits the read as a read-only entry of a pre-block state, or exports it, and adds the case that makes the read.
 - The block cases run in the `test` check.
   `.github/workflows/exec-spec-satin.yml` runs the fixture replay after the equivalence gate, on the same fixture releases: every Osaka and Amsterdam entry, in equivalence and in Satin mode; an entry that does not replay fails the job, and so `execution-spec gate on Satin`, and so does a run that prints no single well-formed summary, executes nothing or reports a failed entry.
   The step summary counts the entries replayed on both witnesses apart from the rejected ones.
