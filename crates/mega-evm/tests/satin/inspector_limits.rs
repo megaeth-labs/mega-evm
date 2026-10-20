@@ -5,7 +5,8 @@
 //!   after it reaches nobody. What a frame returns is changed on its result, in `call_end`.
 //! - An inspector cannot overdraw a frame: a charge the frame's spendable gas cannot pay is refused
 //!   and takes nothing, the frame runs on, and nothing is left behind to classify its end — not
-//!   even under gas detention, where the same refusal of an opcode's charge is the crossing.
+//!   even under gas detention, where the same refusal of an opcode's charge is the crossing, nor
+//!   for what a later halt of the frame burns.
 //! - An answer carries only the regular gas its inspector chose: the frame never ran, so its caller
 //!   merges back the reservoir it forwarded, whatever `Gas` the answer was built on.
 
@@ -17,7 +18,7 @@ use mega_evm::{
     MegaTransactionOutcome,
 };
 use revm::{
-    bytecode::opcode::{LOG0, POP, PUSH0, TIMESTAMP},
+    bytecode::opcode::{BALANCE, CALL, JUMP, JUMPDEST, LOG0, POP, PUSH0, TIMESTAMP},
     interpreter::{
         interpreter::EthInterpreter, interpreter_types::LoopControl, CallInputs, CallOutcome, Gas,
         InstructionResult, Interpreter, InterpreterAction, InterpreterResult,
@@ -30,6 +31,8 @@ use crate::common::{call, context};
 const CALLER: Address = address!("0000000000000000000000000000000000e00000");
 const A: Address = address!("0000000000000000000000000000000000e00001");
 const B: Address = address!("0000000000000000000000000000000000e00002");
+/// An account no transaction here touches before `B` reads its balance.
+const COLD: Address = address!("0000000000000000000000000000000000e00003");
 const GAS_LIMIT: u64 = 1_000_000;
 
 /// `A` calls `B` and stops; `B` pushes and pops a word and stops.
@@ -140,32 +143,45 @@ fn test_gas_changed_at_a_frames_end_has_no_effect() {
 /// The callbacks holding the interpreter that [`Overdraws`] charges from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Callback {
+    InitializeInterp,
     Step,
     StepEnd,
     LogFull,
 }
 
+/// The frames [`Overdraws`] charges in.
+#[derive(Clone, Copy, Debug)]
+enum Frames {
+    /// Any frame.
+    Any,
+    /// A frame part of whose gas is withheld.
+    Detained,
+    /// A frame running `B`'s code.
+    B,
+}
+
 /// Charges, once, one more gas than the running frame's spendable gas from the callback `from`,
-/// the first time it runs while part of the frame's gas is withheld — or at all, when
-/// `detained_only` is off — and records whether the charge was refused.
+/// the first time it runs in one of `frames`, and records whether the charge was refused.
 #[derive(Clone)]
 struct Overdraws {
     from: Callback,
-    detained_only: bool,
+    frames: Frames,
     refused: Option<bool>,
 }
 
 impl Overdraws {
-    const fn new(from: Callback, detained_only: bool) -> Self {
-        Self { from, detained_only, refused: None }
+    const fn new(from: Callback, frames: Frames) -> Self {
+        Self { from, frames, refused: None }
     }
 
     fn charge(&mut self, from: Callback, interp: &mut Interpreter<EthInterpreter>) {
         let gas = interp.gas.tracker();
-        if from != self.from ||
-            self.refused.is_some() ||
-            (self.detained_only && gas.withheld() == 0)
-        {
+        let in_frames = match self.frames {
+            Frames::Any => true,
+            Frames::Detained => gas.withheld() > 0,
+            Frames::B => interp.input.target_address == B,
+        };
+        if from != self.from || self.refused.is_some() || !in_frames {
             return;
         }
         let over = gas.spendable() + 1;
@@ -174,6 +190,14 @@ impl Overdraws {
 }
 
 impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Overdraws {
+    fn initialize_interp(
+        &mut self,
+        interp: &mut Interpreter<EthInterpreter>,
+        _: &mut MegaContext<DB>,
+    ) {
+        self.charge(Callback::InitializeInterp, interp);
+    }
+
     fn step(&mut self, interp: &mut Interpreter<EthInterpreter>, _: &mut MegaContext<DB>) {
         self.charge(Callback::Step, interp);
     }
@@ -204,7 +228,7 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Overdraws {
 fn test_an_inspector_cannot_overdraw_a_frame() {
     let limits = EvmTxRuntimeLimits::no_limits();
     let (plain, _) = run::<Overdraws>(a_calls_b(), limits, GAS_LIMIT, None);
-    let overdraws = Overdraws::new(Callback::StepEnd, false);
+    let overdraws = Overdraws::new(Callback::StepEnd, Frames::Any);
     let (overdrawn, inspector) = run(a_calls_b(), limits, GAS_LIMIT, Some(overdraws));
     assert_eq!(inspector.unwrap().refused, Some(true), "the charge was refused");
     assert_eq!(overdrawn.result, plain.result, "nothing was taken, and nothing halted");
@@ -224,11 +248,47 @@ fn test_an_inspector_cannot_overdraw_a_frame() {
     assert!(plain.result.is_success(), "{:?}", plain.result);
     for from in [Callback::Step, Callback::StepEnd, Callback::LogFull] {
         let (overdrawn, inspector) =
-            run(db(), detained, GAS_LIMIT, Some(Overdraws::new(from, true)));
+            run(db(), detained, GAS_LIMIT, Some(Overdraws::new(from, Frames::Detained)));
         assert_eq!(inspector.unwrap().refused, Some(true), "{from:?}: the withheld part");
         assert_eq!(overdrawn.limit_exceeded, None, "{from:?}: no crossing");
         assert_eq!(overdrawn.result, plain.result, "{from:?}");
         assert_eq!(overdrawn.gas, plain.gas, "{from:?}: everything the frame ran is billed");
+    }
+}
+
+/// A charge an inspector's callback could not pay leaves nothing behind for what the frame burns
+/// when it halts. `A` reads the block's timestamp, calls `B` with 2,000 gas, then loops until the
+/// compute limit stops it. `B`'s callback charge is refused; `B` then pushes and pops a hundred
+/// words and halts on a cold `BALANCE` it cannot pay, which the interpreter refuses before any
+/// charge, so no failed deduction records what `B` had. What `B` burns is what it had at that
+/// halt, not at the refused charge: counted as compute, the difference would leave `A` a longer
+/// run to the limit, and a larger bill, than the transaction no inspector runs.
+#[test]
+fn test_a_refused_charge_leaves_nothing_for_a_later_halt() {
+    let b = BytecodeBuilder::default()
+        .append_many([PUSH0, POP].repeat(100))
+        .push_address(COLD)
+        .append(BALANCE)
+        .stop()
+        .build();
+    let a = BytecodeBuilder::default()
+        .append_many([TIMESTAMP, POP, PUSH0, PUSH0, PUSH0, PUSH0, PUSH0])
+        .push_address(B)
+        .push_number(2_000_u16)
+        .append_many([CALL, POP]);
+    let lap = a.len() as u8;
+    let a = a.append(JUMPDEST).push_number(lap).append(JUMP).build();
+    let db = || MemoryDatabase::default().account_code(A, a.clone()).account_code(B, b.clone());
+    let detained = EvmTxRuntimeLimits::default().with_block_env_access_compute_gas_limit(20_000);
+    let (plain, _) = run::<Overdraws>(db(), detained, GAS_LIMIT, None);
+    assert!(plain.limit_exceeded.is_some(), "the loop runs to the limit: {:?}", plain.result);
+    for from in [Callback::InitializeInterp, Callback::Step, Callback::StepEnd] {
+        let (overdrawn, inspector) =
+            run(db(), detained, GAS_LIMIT, Some(Overdraws::new(from, Frames::B)));
+        assert_eq!(inspector.unwrap().refused, Some(true), "{from:?}: the charge was refused");
+        assert_eq!(overdrawn.limit_exceeded, plain.limit_exceeded, "{from:?}: the same stop");
+        assert_eq!(overdrawn.result, plain.result, "{from:?}");
+        assert_eq!(overdrawn.gas, plain.gas, "{from:?}: the same run to the limit");
     }
 }
 

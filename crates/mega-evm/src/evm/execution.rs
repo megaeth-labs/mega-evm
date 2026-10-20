@@ -754,7 +754,7 @@ where
             inspect_logs(ctx, inspector, logs_i);
         }
         if !keyless::runs(ctx, frame) && !stopped {
-            inspector.initialize_interp(&mut frame.interpreter, ctx);
+            StepGuard(&mut *inspector).initialize_interp(&mut frame.interpreter, ctx);
         }
         Ok(ItemOrResult::Item(frame))
     }
@@ -763,8 +763,9 @@ where
     /// with a stop to return returns it without a step, and the inspector sees it end. A
     /// `keylessDeploy` call's frame makes its actions by hand, as on the plain path, with no step.
     ///
-    /// The step callbacks run through [`StepGuard`], so a charge the inspector makes on the
-    /// interpreter's gas and the frame cannot pay does not classify the frame's end.
+    /// The step callbacks run through [`StepGuard`], as `initialize_interp` does at the frame's
+    /// start, so a charge the inspector makes on the interpreter's gas and the frame cannot pay
+    /// does not classify the frame's end.
     #[inline]
     fn inspect_frame_run(
         &mut self,

@@ -331,6 +331,11 @@ fn charge_frame_start<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// The gas the opcode forwarded to the dropped frame goes back to the caller, which the halt then
 /// burns with the rest: it never ran, so gas detention counts it with what the halt burns rather
 /// than as compute. A value call's stipend was never the caller's, and is not handed back.
+///
+/// The halt's record of what the frame had — the regular gas the revm fork records before a
+/// failed charge, which detention reads where the frame ends — is written again once the forward
+/// is back: the failed charge recorded the gas left after the forward was taken, and a price that
+/// could not be computed failed before any charge.
 #[cold]
 #[inline(never)]
 fn abandon_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
@@ -340,6 +345,7 @@ fn abandon_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
     if let InterpreterAction::NewFrame(input) = interpreter.take_next_action() {
         interpreter.gas.erase_cost(forwarded_gas(&input, host.gas_params().call_stipend()));
     }
+    interpreter.gas.set_failed_charge_remaining(Some(interpreter.gas.remaining()));
     note_halt(interpreter, host, Err(InstructionResult::OutOfGas))
 }
 

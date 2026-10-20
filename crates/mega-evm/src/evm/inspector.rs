@@ -90,13 +90,16 @@
 //!   refused and takes nothing, and the frame is not halted: the interpreter does not ask the
 //!   callback what it did. A tool that wants a frame out of gas says so through its result. Under
 //!   gas detention the refusal of an opcode's charge the withheld part would have paid is the
-//!   crossing; the refusal of an inspector's is not, and classifies nothing ([`StepGuard`]).
+//!   crossing, and an opcode's failed charge records what the frame had, which detention reads as
+//!   what its halt burned; the refusal of an inspector's charge is neither, and classifies nothing
+//!   ([`StepGuard`]).
 //! - **Gas an inspector puts back carries the split it was taken with.** The part gas detention
 //!   withholds is in the frame's `Gas`, and detention sets it where it can have moved: at a read of
 //!   volatile data, when the frame starts or resumes, and after an `SSTORE`. An inspector that
 //!   overwrites the interpreter's gas — Foundry's `pauseGasMetering` puts a snapshot back before
 //!   every instruction — overwrites the split with it, and the frame runs on the snapshot's split
-//!   until detention next sets it. Only the crossing record is kept from a callback's write.
+//!   until detention next sets it. Only the two records of a refused charge are kept from a
+//!   callback's write.
 //! - **An answer carries only the regular gas the inspector chose.** A frame the inspector answered
 //!   never ran, so it drew nothing from the reservoir: whatever `Gas` the answer is built on —
 //!   `Gas::new(limit)`, as Foundry answers a cheatcode, carries no reservoir — its caller merges
@@ -110,8 +113,8 @@ use revm::{
     handler::FrameResult,
     inspector::{handler::frame_end, JournalExt, NoOpInspector},
     interpreter::{
-        CallInputs, CallOutcome, CreateInputs, CreateOutcome, FrameInput, InstructionResult,
-        Interpreter, InterpreterTypes,
+        gas::WithheldCrossing, CallInputs, CallOutcome, CreateInputs, CreateOutcome, FrameInput,
+        Gas, InstructionResult, Interpreter, InterpreterTypes,
     },
     primitives::{Address, Bytes, Log, U256},
     Database, Inspector,
@@ -304,19 +307,23 @@ where
 /// Hands a running frame's instruction-loop callbacks to the inspector inside, and keeps what they
 /// do to the interpreter's gas from classifying the frame.
 ///
-/// A regular charge the frame's spendable gas cannot pay is refused, and when the part gas
-/// detention withholds would have paid it the refusal is recorded as the crossing, which stops the
+/// A regular charge the frame's spendable gas cannot pay is refused, and leaves two records: the
+/// regular gas the frame had before it, which gas detention reads as what a halting frame burned,
+/// and, when the part detention withholds would have paid it, the crossing, which stops the
 /// transaction at the compute limit when the frame ends. An opcode's refused charge halts the
-/// frame at once, so its record is the frame's end. An inspector's does not: the interpreter never
-/// sees it fail and the frame runs on. So the record a callback leaves is put back to what it was
-/// before the callback, and the frame ends on the charges it made itself.
+/// frame at once, so its records are the frame's end. An inspector's does not: the interpreter
+/// never sees it fail and the frame runs on, and a halt that no failed charge records — a cold
+/// access the frame cannot pay — keeps a record already there. So both records a callback leaves
+/// are put back to what they were before the callback, and the frame ends on the charges it made
+/// itself; a record an opcode's own failure left before the callback stays.
 ///
-/// It stands in for the inspector in revm's instruction loop alone (`inspect_instructions`), which
-/// makes the four callbacks forwarded here and no other; frame starts and ends reach the inspector
-/// itself. The other callbacks are left to the trait's no-op defaults rather than forwarded,
-/// because the loop never makes them and a forward nothing reaches is one nothing tests. So a
-/// callback the loop gains in a later revision of the fork reaches no inspector until it is
-/// forwarded here: a fork upgrade checks the loop's callbacks against this list.
+/// It stands in for the inspector in revm's instruction loop (`inspect_instructions`), which makes
+/// four of the callbacks forwarded here and no other, and for the one callback a frame's start
+/// hands the interpreter to before the loop, `initialize_interp`; the rest of frame starts and
+/// ends reach the inspector itself. The other callbacks are left to the trait's no-op defaults
+/// rather than forwarded, because the loop never makes them and a forward nothing reaches is one
+/// nothing tests. So a callback the loop gains in a later revision of the fork reaches no inspector
+/// until it is forwarded here: a fork upgrade checks the loop's callbacks against this list.
 pub(crate) struct StepGuard<'a, I>(pub(crate) &'a mut I);
 
 impl<I, CTX, INTR> Inspector<CTX, INTR> for StepGuard<'_, I>
@@ -325,30 +332,54 @@ where
     INTR: InterpreterTypes,
 {
     #[inline]
+    fn initialize_interp(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX) {
+        let records = gas_records(&interp.gas);
+        self.0.initialize_interp(interp, context);
+        restore_gas_records(&mut interp.gas, records);
+    }
+
+    #[inline]
     fn step(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX) {
-        let crossing = interp.gas.withheld_crossing();
+        let records = gas_records(&interp.gas);
         self.0.step(interp, context);
-        interp.gas.set_withheld_crossing(crossing);
+        restore_gas_records(&mut interp.gas, records);
     }
 
     #[inline]
     fn step_end(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX) {
-        let crossing = interp.gas.withheld_crossing();
+        let records = gas_records(&interp.gas);
         self.0.step_end(interp, context);
-        interp.gas.set_withheld_crossing(crossing);
+        restore_gas_records(&mut interp.gas, records);
     }
 
     #[inline]
     fn log_full(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX, log: Log) {
-        let crossing = interp.gas.withheld_crossing();
+        let records = gas_records(&interp.gas);
         self.0.log_full(interp, context, log);
-        interp.gas.set_withheld_crossing(crossing);
+        restore_gas_records(&mut interp.gas, records);
     }
 
     #[inline]
     fn selfdestruct(&mut self, contract: Address, target: Address, value: U256) {
         self.0.selfdestruct(contract, target, value);
     }
+}
+
+/// A frame's two records of a refused regular charge: the crossing of its withheld gas and the
+/// regular gas it had before the charge.
+type GasRecords = (Option<WithheldCrossing>, Option<u64>);
+
+/// The records of a refused charge `gas` holds before a callback runs.
+#[inline]
+const fn gas_records(gas: &Gas) -> GasRecords {
+    (gas.withheld_crossing(), gas.failed_charge_remaining())
+}
+
+/// Puts the records [`gas_records`] read back on `gas`, over whatever the callback left.
+#[inline]
+const fn restore_gas_records(gas: &mut Gas, (crossing, failed): GasRecords) {
+    gas.set_withheld_crossing(crossing);
+    gas.set_failed_charge_remaining(failed);
 }
 
 /// The journal's entry and log counts, for the debug-build proof. `None` in release builds.
@@ -667,4 +698,69 @@ const fn inherited_reservoir(input: &FrameInput) -> u64 {
 fn upfront_charge(input: &FrameInput) -> Option<StateGasCharge> {
     synthetic_frame_result(input, InstructionResult::Revert, Bytes::new())
         .refundable_state_gas_charge()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use revm::interpreter::interpreter::EthInterpreter;
+
+    /// Charges `amount` of regular gas from every callback that holds the interpreter, and
+    /// ignores whether the frame could pay it.
+    struct Charges(u64);
+
+    impl Inspector<(), EthInterpreter> for Charges {
+        fn initialize_interp(&mut self, interp: &mut Interpreter<EthInterpreter>, _: &mut ()) {
+            let _ = interp.gas.record_regular_cost(self.0);
+        }
+
+        fn step(&mut self, interp: &mut Interpreter<EthInterpreter>, _: &mut ()) {
+            let _ = interp.gas.record_regular_cost(self.0);
+        }
+
+        fn step_end(&mut self, interp: &mut Interpreter<EthInterpreter>, _: &mut ()) {
+            let _ = interp.gas.record_regular_cost(self.0);
+        }
+
+        fn log_full(&mut self, interp: &mut Interpreter<EthInterpreter>, _: &mut (), _: Log) {
+            let _ = interp.gas.record_regular_cost(self.0);
+        }
+    }
+
+    /// Runs `callback` of [`StepGuard`] around `inspector` on `interp`.
+    fn guarded(callback: &str, inspector: &mut Charges, interp: &mut Interpreter<EthInterpreter>) {
+        let mut guard = StepGuard(inspector);
+        match callback {
+            "initialize_interp" => guard.initialize_interp(interp, &mut ()),
+            "step" => guard.step(interp, &mut ()),
+            "step_end" => guard.step_end(interp, &mut ()),
+            "log_full" => guard.log_full(interp, &mut (), Log::default()),
+            _ => unreachable!(),
+        }
+    }
+
+    /// A charge a callback cannot pay is refused and leaves no failed-charge record behind: the
+    /// frame did not fail, and a record left there would be read as what the frame had when a
+    /// later halt that records nothing of its own ended it. A record an opcode's own failed charge
+    /// left before the callback stays as it was, whatever the callback's charge did.
+    #[test]
+    fn test_a_callback_leaves_the_failed_charge_record_as_it_was() {
+        for callback in ["initialize_interp", "step", "step_end", "log_full"] {
+            let mut interp = Interpreter { gas: Gas::new(1_000), ..Default::default() };
+            guarded(callback, &mut Charges(1_001), &mut interp);
+            assert_eq!(interp.gas.remaining(), 1_000, "{callback}: the charge took nothing");
+            assert_eq!(interp.gas.failed_charge_remaining(), None, "{callback}: no record");
+
+            // An opcode's charge failed with 1,000 left, and its halt zeroed the frame's gas: a
+            // callback after it fails its own charge on nothing left.
+            assert!(!interp.gas.record_regular_cost(1_500));
+            interp.gas.spend_all();
+            guarded(callback, &mut Charges(1), &mut interp);
+            assert_eq!(
+                interp.gas.failed_charge_remaining(),
+                Some(1_000),
+                "{callback}: the opcode's record"
+            );
+        }
+    }
 }
