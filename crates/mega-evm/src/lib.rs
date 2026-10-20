@@ -53,9 +53,9 @@ pub use evm::{
     untouched_create_gas, validate_transaction_stateless, with_pools_of, write_record_history_gas,
     BlockHashRecord, BucketRecord, BytePrice, DeclaredObserver, DynPrecompilesBuilder, EthSpecId,
     IntrinsicGas, MegaContext, MegaEvm, MegaEvmError, MegaEvmFactory, MegaGasUsage, MegaHandler,
-    MegaSpecId, MegaTransactionOutcome, OpSpecId, OracleRead, OracleReadRecord, ParseMegaSpecError,
-    SatinPriceError, SatinPrices, TrustedObserver, CPHB_ENV_VAR, CPSB_ENV_VAR, HISTORY_GAS_PRICED,
-    LEGACY_SPEC_NAMES, STATE_GAS_REPRICED, STORAGE_CALL_STIPEND_BYTES,
+    MegaJournal, MegaSpecId, MegaTransactionOutcome, OpSpecId, OracleRead, OracleReadRecord,
+    ParseMegaSpecError, SatinPriceError, SatinPrices, TrustedObserver, CPHB_ENV_VAR, CPSB_ENV_VAR,
+    HISTORY_GAS_PRICED, LEGACY_SPEC_NAMES, STATE_GAS_REPRICED, STORAGE_CALL_STIPEND_BYTES,
     SYSTEM_CALL_REGULAR_GAS_LIMIT,
 };
 #[cfg(any(test, feature = "test-utils"))]
@@ -79,9 +79,7 @@ pub use types::{
 
 /* Items the crate's modules share through the root, not part of the public surface */
 pub(crate) use block::transact_pre_block_call;
-pub(crate) use evm::{
-    charge_write_records_history, MegaInnerContext, MegaInstructions, PricedPrecompiles,
-};
+pub(crate) use evm::{charge_write_records_history, MegaInstructions, PricedPrecompiles};
 
 /* Re-export of upstream crates, so consumers build against the exact versions used here */
 pub use alloy_consensus;

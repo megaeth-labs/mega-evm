@@ -13,7 +13,7 @@ use revm::{
     },
     context_interface::{cfg::GasId, context::CodeDeposit},
     primitives::{Address, Bytes, StorageKey},
-    Database, Journal,
+    Database,
 };
 
 use crate::{
@@ -29,13 +29,14 @@ use crate::{
     },
     AdditionalLimit, BlockHashRecord, BucketError, BucketId, BucketMultipliers, BucketRecord,
     Detention, EmptyExternalEnv, EthSpecId, EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs,
-    MegaSpecId, MegaTransaction, OracleReadRecord, ProtocolLimits, SaltEnv, VolatileDataAccess,
+    MegaJournal, MegaSpecId, MegaTransaction, OracleReadRecord, ProtocolLimits, SaltEnv,
+    VolatileDataAccess,
 };
 
 /// The revm context the Satin engine runs on: op-revm's context shape with the `MegaETH`
-/// transaction type.
+/// transaction type and the Satin journal.
 pub(crate) type MegaInnerContext<DB> =
-    Context<BlockEnv, MegaTransaction, CfgEnv<OpSpecId>, DB, Journal<DB>, L1BlockInfo>;
+    Context<BlockEnv, MegaTransaction, CfgEnv<OpSpecId>, DB, MegaJournal<DB>, L1BlockInfo>;
 
 /// Execution context of the Satin engine.
 ///
@@ -107,7 +108,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         external_envs: ExternalEnvs<ExtEnvs>,
     ) -> Self {
         let cfg = spec_cfg(CfgEnv::new_with_spec(spec));
-        let inner = Context::new(db, spec.into_op_spec()).with_cfg(op_cfg(&cfg));
+        let inner: MegaInnerContext<DB> =
+            Context::new(db, spec.into_op_spec()).with_cfg(op_cfg(&cfg));
         Self {
             inner,
             cfg,
@@ -544,7 +546,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// Consumes the context and returns the database, the configuration and the block.
     pub fn into_parts(self) -> (DB, CfgEnv<MegaSpecId>, BlockEnv) {
         let Context { block, journaled_state, .. } = self.inner;
-        (journaled_state.database, self.cfg, block)
+        (journaled_state.into_revm().database, self.cfg, block)
     }
 }
 
@@ -614,7 +616,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextTr for MegaContext<DB, ExtE
     type Tx = MegaTransaction;
     type Cfg = CfgEnv<OpSpecId>;
     type Db = DB;
-    type Journal = Journal<DB>;
+    type Journal = MegaJournal<DB>;
     type Chain = L1BlockInfo;
     type Local = LocalContext;
 
@@ -627,7 +629,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextTr for MegaContext<DB, ExtE
                 &MegaTransaction,
                 &CfgEnv<OpSpecId>,
                 &DB,
-                &Journal<DB>,
+                &MegaJournal<DB>,
                 &L1BlockInfo,
                 &LocalContext,
             );
@@ -637,7 +639,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextTr for MegaContext<DB, ExtE
                 &BlockEnv,
                 &MegaTransaction,
                 &CfgEnv<OpSpecId>,
-                &mut Journal<DB>,
+                &mut MegaJournal<DB>,
                 &mut L1BlockInfo,
                 &mut LocalContext,
             );

@@ -43,7 +43,7 @@ use revm::{
         InitialAndFloorGas, InstructionResult, InterpreterAction, InterpreterResult,
     },
     primitives::{Address, Bytes, TxKind, CALL_STACK_LIMIT},
-    Inspector, Journal,
+    Inspector,
 };
 
 use crate::{
@@ -55,7 +55,7 @@ use crate::{
     },
     history_gas, synthetic_frame_result,
     system::keyless,
-    Detention, ExternalEnvTypes, LimitKind, MegaContext, MegaEvm, MegaInstructions,
+    Detention, ExternalEnvTypes, LimitKind, MegaContext, MegaEvm, MegaInstructions, MegaJournal,
     PricedPrecompiles, VolatileDataAccess, TX_BODY_OVER_DATA_SIZE_LIMIT,
 };
 
@@ -444,15 +444,15 @@ impl<DB, EVM, ERROR, ExtEnvs> InspectorHandler for MegaHandler<EVM, ERROR, EthFr
 where
     DB: Database,
     ExtEnvs: ExternalEnvTypes,
-    MegaContext<DB, ExtEnvs>: ContextTr<Journal = Journal<DB>>,
-    Journal<DB>: JournalExt,
+    MegaContext<DB, ExtEnvs>: ContextTr<Journal = MegaJournal<DB>>,
+    MegaJournal<DB>: JournalExt,
     EVM: InspectorEvmTr<
         Context = MegaContext<DB, ExtEnvs>,
         Frame = EthFrame<EthInterpreter>,
         Inspector: Inspector<MegaContext<DB, ExtEnvs>, EthInterpreter>,
     >,
-    // Implied by `EvmTrError<EVM>`, but the `ContextTr<Journal = Journal<DB>>` bound above stops
-    // the compiler from normalizing the context's database type down to `DB`.
+    // Implied by `EvmTrError<EVM>`, but the `ContextTr<Journal = MegaJournal<DB>>` bound above
+    // stops the compiler from normalizing the context's database type down to `DB`.
     ERROR: EvmTrError<EVM>
         + From<DB::Error>
         + From<ContextError<DB::Error>>
