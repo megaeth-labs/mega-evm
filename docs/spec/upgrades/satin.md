@@ -1032,7 +1032,7 @@ A node, a stateless validator and a replay tool must agree on everything below, 
 - **The L1 block information.**
   Block execution reads the L1 block contract at the block's first non-deposit transaction other than a Mega System Transaction, after the block's L1 attributes deposit wrote it, unless the node handed it the information for this block beforehand, which it then prices with, the footprint gas scalar aside; a node that hands it over must hand over what that deposit writes, so that the block's transactions are priced as [Base Layer](#1-base-layer-optimism-karst-ethereum-osaka) requires.
 - **The predeploys.**
-  Satin runs on a chain that ran the legacy forks: Rex5 deployed the SequencerRegistry and Rex6 upgraded it and the Oracle to 2.0.0, so the chain holds the six system contracts at the versions Satin runs, and OP's genesis tooling gave it the EIP-7997 factory.
+  Satin runs on a chain that ran the legacy forks: Rex5 deployed the SequencerRegistry and upgraded the Oracle to 2.0.0, and Rex6 upgraded the SequencerRegistry to 2.0.0, so the chain holds the six system contracts at the versions Satin runs, and OP's genesis tooling gave it the EIP-7997 factory.
   Satin's activation block checks that they are there and is invalid otherwise (see [System Calls and Pre-Block Calls](#18-system-calls-and-pre-block-calls)); it deploys, upgrades and seeds nothing, so a chain must have run a Rex6 block before `satinTime`.
   The registry's roles are what it holds: the legacy forks' own configuration keys (`rex5InitialSequencer`, `rex5InitialAdmin`, `rex6MinRotationDelay`) seeded it, and Satin reads none of those keys.
 - **Committing a delayed outcome.**
