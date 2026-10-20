@@ -139,12 +139,11 @@ mod ledger;
 #[allow(clippy::module_inception)]
 mod limit;
 mod record;
-#[cfg(feature = "ledger-shadow")]
 pub(crate) mod shadow;
 
 #[cfg(test)]
 pub(crate) use ledger::StartSide;
-pub(crate) use ledger::{ledger_assert, Ledger, Mark, StartFacts, StartReport};
+pub(crate) use ledger::{ledger_assert, FrameIdentity, Ledger, Mark, StartFacts, StartReport};
 pub use limit::AdditionalLimit;
 pub(crate) use limit::FrameStartRecords;
 pub(crate) use record::HistoryBytes;

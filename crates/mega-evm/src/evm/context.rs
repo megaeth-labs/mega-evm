@@ -23,6 +23,7 @@ use crate::{
         inspector::UpfrontRecord,
         schedule::{satin_gas_params, satin_gas_params_history_exempt},
     },
+    limit::{shadow, Ledger},
     system::{
         self,
         keyless::{self, KeylessFrame},
@@ -258,7 +259,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// ledger alike.
     pub(crate) const fn set_tx_runtime_limits(&mut self, limits: EvmTxRuntimeLimits) {
         self.additional_limit.set_limits(limits);
-        self.inner.journaled_state.ledger_mut().set_limits(limits);
+        self.ledger_mut().set_limits(limits);
     }
 
     /// The block hashes execution has read on this context.
@@ -302,6 +303,16 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// The common execution layer's state for the running (or last) transaction.
     pub const fn additional_limit(&self) -> &AdditionalLimit {
         &self.additional_limit
+    }
+
+    /// The journal's ledger of what the running (or last) transaction keeps.
+    pub(crate) const fn ledger(&self) -> &Ledger {
+        self.inner.journaled_state.ledger()
+    }
+
+    /// The journal's ledger, mutably.
+    pub(crate) const fn ledger_mut(&mut self) -> &mut Ledger {
+        self.inner.journaled_state.ledger_mut()
     }
 
     /// Gas detention for the running (or last) transaction: the volatile data it read and the
@@ -485,11 +496,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         // a system transaction and a system call are exempt from the charge, not from the count.
         let body = transaction_body_bytes(self.tx());
         self.additional_limit.record_tx_body(body);
-        self.inner.journaled_state.ledger_mut().begin_transaction(
-            system_originated,
-            transfer_logs,
-            body,
-        );
+        self.ledger_mut().begin_transaction(system_originated, transfer_logs, body);
         // The protocol's own transactions are not detained: they maintain the volatile data.
         let limits = self.additional_limit.limits();
         self.detention.reset(
@@ -681,23 +688,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextTr for MegaContext<DB, ExtE
             return Err(Bytes::new());
         }
         let admitted = self.additional_limit.on_code_deposit(deposit);
-        let journaled =
-            self.inner.journaled_state.ledger_mut().count_code(deposit.code.len() as u64);
-        #[cfg(feature = "ledger-shadow")]
-        {
-            use crate::limit::shadow;
-            let ledger = self.inner.journaled_state.ledger();
-            let lanes = admitted.is_err().then(|| ledger.check());
-            shadow::verdict(
-                lanes,
-                journaled.exceeded_limit().then_some(journaled),
-                ledger,
-                "a code deposit",
-            );
-            shadow::agree(&self.additional_limit, ledger, "a code deposit");
-        }
-        #[cfg(not(feature = "ledger-shadow"))]
-        let _ = journaled;
+        let journaled = self.ledger_mut().count_code(deposit.code.len() as u64);
+        shadow::code_deposit(&self.additional_limit, self.ledger(), admitted.is_err(), journaled);
         admitted
     }
 }

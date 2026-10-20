@@ -49,10 +49,9 @@ use revm::{
     Database, Journal, JournalEntry,
 };
 
-use crate::{
-    limit::{ledger_assert, Ledger, Mark, StartFacts, StartReport},
-    LimitUsage,
-};
+use crate::limit::{ledger_assert, Ledger, Mark};
+#[cfg(any(test, feature = "test-utils"))]
+use crate::LimitUsage;
 
 /// The journal of the Satin engine: revm's journal, and the ledger of what the transaction's own
 /// execution keeps. See the module documentation.
@@ -70,11 +69,10 @@ pub struct MegaJournal<DB: Database> {
 
 impl<DB: Database> MegaJournal<DB> {
     /// What the journal's ledger holds the running (or last) transaction to keep: its data-size
-    /// bytes and write records.
-    ///
-    /// The engine's decisions are taken on
-    /// [`AdditionalLimit::usage`](crate::AdditionalLimit::usage), which counts the same writes; the
+    /// bytes and write records, for a test to hold to what the engine decides on,
+    /// [`AdditionalLimit::usage`](crate::AdditionalLimit::usage), which counts the same writes. The
     /// two agree wherever the transaction's own execution, rather than a tool, took its state back.
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn ledger_usage(&self) -> LimitUsage {
         self.ledger.usage()
     }
@@ -90,18 +88,8 @@ impl<DB: Database> MegaJournal<DB> {
     }
 
     /// Consumes the journal and returns revm's.
-    pub fn into_revm(self) -> Journal<DB> {
+    pub(crate) fn into_revm(self) -> Journal<DB> {
         self.revm
-    }
-
-    /// Opens the start window for the frame start `facts` describes, which revm decides next.
-    pub(crate) fn open_start(&mut self, facts: StartFacts) {
-        self.ledger.open_start(facts);
-    }
-
-    /// Closes the start window, and reports what the start counted.
-    pub(crate) fn close_start(&mut self) -> StartReport {
-        self.ledger.close_start()
     }
 
     /// Marks where the journal and the ledger stand, without changing the journal's depth.
@@ -109,12 +97,6 @@ impl<DB: Database> MegaJournal<DB> {
         let position = self.revm.checkpoint();
         self.revm.checkpoint_commit();
         self.ledger.mark(position)
-    }
-
-    /// The mark the frame revm just built is taken back to when it is rewritten into a failure
-    /// ([`Ledger::frame_start_mark`]).
-    pub(crate) fn frame_start_mark(&self) -> Option<Mark> {
-        self.ledger.frame_start_mark()
     }
 
     /// Takes back every journal entry, log and self-destruct made since `mark`, as revm takes back
@@ -359,9 +341,10 @@ impl<DB: Database> JournalExt for MegaJournal<DB> {
 mod tests {
     use super::*;
     use crate::{
-        limit::{Mark, StartSide},
+        limit::{Mark, StartFacts, StartReport, StartSide},
         test_utils::MemoryDatabase,
-        EvmTxRuntimeLimits, LimitCheck, LimitKind, TRANSFER_LOG_SIZE, WRITE_RECORD_SIZE,
+        EvmTxRuntimeLimits, LimitCheck, LimitKind, TRANSFER_LOG_SIZE, TX_BODY_SIZE,
+        WRITE_RECORD_SIZE,
     };
     use alloy_primitives::address;
     use revm::{
@@ -374,19 +357,24 @@ mod tests {
     const A: Address = address!("00000000000000000000000000000000000a0002");
     const B: Address = address!("00000000000000000000000000000000000a0003");
     const C: Address = address!("00000000000000000000000000000000000a0004");
-    /// The account a creation from [`A`] makes.
+    /// The account a creation makes.
     const CREATED: Address = address!("00000000000000000000000000000000000a0005");
-    const BODY: u64 = 310;
 
-    /// The transaction's bytes before any frame: the body.
-    fn body() -> LimitUsage {
-        LimitUsage { data_size: BODY, write_records: 0 }
+    /// What a start's records and transfer log weigh: `records` write records, and the log when it
+    /// `moves` value.
+    const fn start_bytes(records: u64, moves: bool) -> u64 {
+        records * WRITE_RECORD_SIZE + if moves { TRANSFER_LOG_SIZE } else { 0 }
     }
 
-    /// `n` write records and `logs` transfer logs on top of the body.
-    fn kept(records: u64, logs: u64) -> LimitUsage {
+    /// The transaction's bytes before any frame: the body.
+    const fn body() -> LimitUsage {
+        LimitUsage { data_size: TX_BODY_SIZE, write_records: 0 }
+    }
+
+    /// `records` write records and `logs` transfer logs on top of the body.
+    const fn kept(records: u64, logs: u64) -> LimitUsage {
         LimitUsage {
-            data_size: BODY + records * WRITE_RECORD_SIZE + logs * TRANSFER_LOG_SIZE,
+            data_size: TX_BODY_SIZE + records * WRITE_RECORD_SIZE + logs * TRANSFER_LOG_SIZE,
             write_records: records,
         }
     }
@@ -404,7 +392,7 @@ mod tests {
             journal.load_account(account).unwrap();
         }
         journal.ledger_mut().set_limits(limits);
-        journal.ledger_mut().begin_transaction(false, true, BODY);
+        journal.ledger_mut().begin_transaction(false, true, TX_BODY_SIZE);
         journal
     }
 
@@ -420,28 +408,39 @@ mod tests {
         let value = U256::from(value);
         let facts =
             StartFacts { depth, caller, target: Some(target), transfers_value: !value.is_zero() };
-        journal.open_start(facts);
+        journal.ledger_mut().open_start(facts);
         let checkpoint = journal.checkpoint();
         assert!(journal.transfer_loaded(caller, target, value).is_none());
-        (checkpoint, journal.close_start())
+        (checkpoint, journal.ledger_mut().close_start())
     }
 
-    /// Starts a creation from `creator` at `depth` as revm starts one: the nonce bump, then the
-    /// account checkpoint.
+    /// Starts a creation of `created` from `creator` at `depth` as revm starts one: the nonce
+    /// bump, then the account checkpoint.
     fn start_creation(
         journal: &mut MegaJournal<MemoryDatabase>,
         depth: usize,
         creator: Address,
+        created: Address,
         value: u64,
     ) -> (JournalCheckpoint, StartReport) {
         let value = U256::from(value);
         let facts =
             StartFacts { depth, caller: creator, target: None, transfers_value: !value.is_zero() };
-        journal.open_start(facts);
+        journal.ledger_mut().open_start(facts);
         let _ = journal.load_account_mut(creator).unwrap().data.bump_nonce();
         let checkpoint =
-            journal.create_account_checkpoint(creator, CREATED, value, SpecId::OSAKA).unwrap();
-        (checkpoint, journal.close_start())
+            journal.create_account_checkpoint(creator, created, value, SpecId::OSAKA).unwrap();
+        (checkpoint, journal.ledger_mut().close_start())
+    }
+
+    /// Returns from the running frame as revm does: its level closes, committed or reverted to
+    /// `failed`'s checkpoint.
+    fn end_frame(journal: &mut MegaJournal<MemoryDatabase>, failed: Option<JournalCheckpoint>) {
+        journal.ledger_mut().frame_returning();
+        match failed {
+            Some(checkpoint) => journal.checkpoint_revert(checkpoint),
+            None => journal.checkpoint_commit(),
+        }
     }
 
     /// The journal's own write methods count nothing, inside a frame start's window and outside
@@ -461,7 +460,7 @@ mod tests {
         writes(&mut journal);
         assert_eq!(journal.ledger_usage(), body(), "outside a start's window");
 
-        journal.open_start(StartFacts {
+        journal.ledger_mut().open_start(StartFacts {
             depth: 1,
             caller: A,
             target: Some(B),
@@ -469,7 +468,7 @@ mod tests {
         });
         let _ = journal.checkpoint();
         writes(&mut journal);
-        let _ = journal.close_start();
+        let _ = journal.ledger_mut().close_start();
         assert_eq!(journal.ledger_usage(), body(), "inside a start's window");
         assert!(!journal.logs().is_empty(), "the writes reached revm's journal");
     }
@@ -514,6 +513,20 @@ mod tests {
         assert_eq!(entries, JournalExt::journal(&*journal), "revm's own");
     }
 
+    /// An ordinary method call on the journal is the journal's own trait method, not one of revm's
+    /// journal reached through the dereference: a checkpoint opened and reverted with method syntax
+    /// opens and closes a level of the ledger, and the extension's entries are revm's.
+    #[test]
+    fn test_an_ordinary_method_call_is_the_journals_own() {
+        let mut journal = journal(EvmTxRuntimeLimits::no_limits());
+        let checkpoint = journal.checkpoint();
+        assert_eq!(journal.ledger().depth(), 1, "the ledger saw the checkpoint");
+        journal.sstore(A, U256::from(1), U256::from(1)).unwrap();
+        assert_eq!(journal.journal().len(), journal.revm.journal.len());
+        journal.checkpoint_revert(checkpoint);
+        assert_eq!((journal.ledger().depth(), journal.depth()), (0, 0));
+    }
+
     /// The ledger holds a level for every checkpoint revm's journal holds open: a commit closes
     /// one and keeps what was counted inside it, a revert closes one and takes it back, and
     /// `clear`, the trait's default, closes them all through `finalize`.
@@ -524,14 +537,12 @@ mod tests {
         let (checkpoint, _) = start_call(&mut journal, 1, A, B, 1);
         assert_eq!((journal.ledger().depth(), journal.depth()), (2, 2));
         assert_eq!(journal.ledger_usage(), kept(2, 1), "B's record, A's, and the transfer log");
-        journal.ledger_mut().frame_returning();
-        journal.checkpoint_revert(checkpoint);
+        end_frame(&mut journal, Some(checkpoint));
         assert_eq!((journal.ledger().depth(), journal.depth()), (1, 1));
         assert_eq!(journal.ledger_usage(), body(), "the revert takes the start back");
 
         let _ = start_call(&mut journal, 1, A, B, 1);
-        journal.ledger_mut().frame_returning();
-        journal.checkpoint_commit();
+        end_frame(&mut journal, None);
         assert_eq!(journal.ledger_usage(), kept(2, 1), "the commit keeps it");
         let _ = journal.checkpoint();
         journal.clear();
@@ -539,14 +550,14 @@ mod tests {
         assert_eq!(journal.ledger_usage(), kept(2, 1), "readable until the next transaction");
     }
 
-    /// A tool's checkpoint around a frame start — opened before the start, closed after the frame
+    /// A tool's checkpoint around a call's start — opened before the start, closed after the frame
     /// returned — is a rollback level the frame's level sits above. Committed, it changes nothing:
-    /// the frame's records stand, its refund is none, and its caller's account stays recorded, so
-    /// a later value call from it records only its recipient. Reverted, it takes back what the
-    /// frame kept: the records, the caller's flag and the frame's refund all go back to before
-    /// the start, and the later call records the caller again.
+    /// the frame's records stand, its refund is none, and its caller's account stays recorded, so a
+    /// later value call from it records only its recipient. Reverted, it takes back what the frame
+    /// kept: the records, the caller's flag and the frame's refund all go back to before the
+    /// start, and the later call records the caller again.
     #[test]
-    fn test_a_tool_checkpoint_around_a_frame_start_closes_in_order() {
+    fn test_a_tool_checkpoint_around_a_call_closes_in_order() {
         for reverted in [false, true] {
             let case = if reverted { "reverted" } else { "committed" };
             let mut journal = journal(EvmTxRuntimeLimits::no_limits());
@@ -558,8 +569,7 @@ mod tests {
                 (1, true, true),
                 "{case}: B's record, A's, and the log"
             );
-            journal.ledger_mut().frame_returning();
-            journal.checkpoint_commit();
+            end_frame(&mut journal, None);
             let mut side = StartSide::new(1, 7, 11);
             side.attach(report, None);
             if reverted {
@@ -573,14 +583,47 @@ mod tests {
 
             let (_, later) = start_call(&mut journal, 1, A, C, 1);
             assert_eq!(later.caller_on_level, reverted, "{case}: A's flag");
-            journal.ledger_mut().frame_returning();
-            journal.checkpoint_commit();
+            end_frame(&mut journal, None);
             let records = if reverted { 2 } else { 3 };
-            assert_eq!(
-                journal.ledger_usage(),
-                kept(records, if reverted { 1 } else { 2 }),
-                "{case}"
-            );
+            assert_eq!(journal.ledger_usage(), kept(records, if reverted { 1 } else { 2 }));
+        }
+    }
+
+    /// A tool's checkpoint around a creation's start closes in order as one around a call does, and
+    /// a revert of it takes back the creator's nonce record with the rest, which the creation's own
+    /// failure leaves: the creator's caller gets back the charge for that record too, and the
+    /// creator's account is unrecorded again, so its next creation records it.
+    #[test]
+    fn test_a_tool_checkpoint_around_a_creation_takes_its_creators_record_back() {
+        for (case, failed, reverted, refund, creator_recorded) in [
+            ("a creation that succeeds, the tool's checkpoint committed", false, false, 0, true),
+            ("a creation that fails, the tool's checkpoint committed", true, false, 7, true),
+            (
+                "a creation that succeeds, the tool's checkpoint reverted",
+                false,
+                true,
+                7 + 11,
+                false,
+            ),
+            ("a creation that fails, the tool's checkpoint reverted", true, true, 7 + 11, false),
+        ] {
+            let mut journal = journal(EvmTxRuntimeLimits::no_limits());
+            let _ = start_call(&mut journal, 0, SENDER, A, 0);
+            let _ = start_call(&mut journal, 1, A, B, 0);
+            let tool = journal.checkpoint();
+            let (checkpoint, report) = start_creation(&mut journal, 2, B, CREATED, 1);
+            assert!(report.creator_record, "{case}: B's nonce record is the start's");
+            end_frame(&mut journal, failed.then_some(checkpoint));
+            let mut side = StartSide::new(2, 7, 11);
+            side.attach(report, None);
+            if reverted {
+                journal.checkpoint_revert(tool);
+            } else {
+                journal.checkpoint_commit();
+            }
+            assert_eq!(side.refund(journal.ledger()), refund, "{case}: the refund");
+            let (_, later) = start_creation(&mut journal, 2, B, C, 0);
+            assert_eq!(!later.creator_record, creator_recorded, "{case}: B's flag");
         }
     }
 
@@ -604,15 +647,18 @@ mod tests {
     /// leaves the creation 18 bytes. An endowment adds its transfer log to the start.
     #[test]
     fn test_a_creation_is_budgeted_from_before_its_creators_record() {
-        for (left, value, budget, start) in
-            [(81, 0, 79, 80), (100, 0, 98, 80), (81 + 160, 1, 236, 240), (100 + 160, 1, 254, 240)]
+        let log = TRANSFER_LOG_SIZE;
+        for (left, value, budget) in
+            [(81, 0, 79), (100, 0, 98), (81 + log, 1, 236), (100 + log, 1, 254)]
         {
-            let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(BODY + left);
+            let start = start_bytes(2, value != 0);
+            let limits =
+                EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(TX_BODY_SIZE + left);
             let mut journal = journal(limits);
             let _ = start_call(&mut journal, 0, SENDER, A, 0);
-            let (_, report) = start_creation(&mut journal, 1, A, value);
+            let (_, report) = start_creation(&mut journal, 1, A, CREATED, value);
             let case = format!("{left} bytes left, value {value}");
-            assert!(report.creator, "{case}: the creator's record is the start's");
+            assert!(report.creator_record, "{case}: the creator's record is the start's");
             let used = LimitUsage { data_size: start, write_records: 2 };
             assert_eq!(journal.ledger().running_budget(), Some((budget, used)), "{case}");
             let verdict = if start > budget {
@@ -636,17 +682,16 @@ mod tests {
     fn test_a_creations_start_mark_keeps_its_creators_record() {
         let mut journal = journal(EvmTxRuntimeLimits::no_limits());
         let _ = start_call(&mut journal, 0, SENDER, A, 0);
-        let (checkpoint, _) = start_creation(&mut journal, 1, A, 1);
-        let mark: Mark = journal.frame_start_mark().expect("the creation's level is open");
+        let (checkpoint, _) = start_creation(&mut journal, 1, A, CREATED, 1);
+        let mark: Mark = journal.ledger().frame_start_mark().expect("the creation's level is open");
         assert_eq!(mark.position, checkpoint, "the creation's own checkpoint");
-        journal.ledger_mut().frame_returning();
-        journal.checkpoint_commit();
+        end_frame(&mut journal, None);
         assert_eq!(journal.ledger_usage(), kept(2, 1));
 
         journal.revert_to(&mark);
         assert_eq!(journal.ledger_usage(), kept(1, 0), "the creator's record stays");
-        let (_, later) = start_creation(&mut journal, 1, A, 0);
-        assert!(!later.creator, "A stays recorded");
+        let (_, later) = start_creation(&mut journal, 1, A, C, 0);
+        assert!(!later.creator_record, "A stays recorded");
     }
 
     /// The hypothetical start a call gas detention answers without running is held to the limits
@@ -654,9 +699,14 @@ mod tests {
     /// the same budget.
     #[test]
     fn test_a_hypothetical_start_is_held_as_the_start_revm_makes() {
-        for (depth, value, limit) in [(1, 1, 239), (1, 1, 240), (1, 0, 0), (0, 1, 199), (0, 1, 200)]
+        // A value call one frame down records its recipient and its caller; the transaction's own
+        // frame records its recipient alone.
+        let (below, own) = (start_bytes(2, true), start_bytes(1, true));
+        for (depth, value, room) in
+            [(1, 1, below - 1), (1, 1, below), (1, 0, 0), (0, 1, own - 1), (0, 1, own)]
         {
-            let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(BODY + limit);
+            let limits =
+                EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(TX_BODY_SIZE + room);
             let mut journal = journal(limits);
             let caller = if depth == 0 {
                 SENDER
@@ -667,7 +717,7 @@ mod tests {
             let facts = StartFacts { depth, caller, target: Some(B), transfers_value: value != 0 };
             let hypothetical = journal.ledger().hypothetical_start(&facts);
             let (_, report) = start_call(&mut journal, depth, caller, B, value);
-            assert_eq!(Some(hypothetical), report.verdict, "depth {depth}, value {value}, {limit}");
+            assert_eq!(Some(hypothetical), report.verdict, "depth {depth}, value {value}, {room}");
         }
     }
 }

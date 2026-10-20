@@ -20,6 +20,7 @@ use revm::{
 };
 
 use crate::{
+    limit::shadow,
     system::keyless::{encode_error_result, IKeylessDeploy, KeylessDeployError},
     ExternalEnvTypes, MegaContext, MegaHaltReason,
 };
@@ -254,24 +255,8 @@ fn take_back_bump<DB: Database, ExtEnvs: ExternalEnvTypes>(
         return Ok(());
     }
     let taken = ctx.additional_limit.take_back_creator_record();
-    let journaled = ctx.journal_mut().ledger_mut().take_back_creator_record();
-    #[cfg(feature = "ledger-shadow")]
-    {
-        use crate::limit::shadow;
-        let ledger = ctx.journal_ref().ledger();
-        assert_eq!(taken, journaled, "ledger shadow mismatch at a keyless take-back: taken back");
-        let pending = ctx.additional_limit.shadow_pending_stop();
-        let check = ledger.check();
-        shadow::verdict(
-            pending,
-            check.exceeded_limit().then_some(check),
-            ledger,
-            "a keyless take-back",
-        );
-        shadow::agree(&ctx.additional_limit, ledger, "a keyless take-back");
-    }
-    #[cfg(not(feature = "ledger-shadow"))]
-    let _ = journaled;
+    let journaled = ctx.ledger_mut().take_back_creator_record();
+    shadow::keyless_take_back(&ctx.additional_limit, ctx.ledger(), taken, journaled);
     if taken {
         gas.refill_history(started.signer_record_charge);
     }

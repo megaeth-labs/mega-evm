@@ -74,8 +74,10 @@ use revm::{
 };
 
 use crate::{
-    charge_write_records_history, history_gas, limit::HistoryBytes,
-    system::ORACLE_CONTRACT_ADDRESS, ExternalEnvTypes, MegaContext, OracleEnv, VolatileDataAccess,
+    charge_write_records_history, history_gas,
+    limit::{shadow, HistoryBytes},
+    system::ORACLE_CONTRACT_ADDRESS,
+    ExternalEnvTypes, MegaContext, OracleEnv, VolatileDataAccess,
 };
 
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
@@ -320,16 +322,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
         // One count, committed to the lanes, which decide, and to the journal's ledger.
         let (count, history) = self.additional_limit.write_count(&write);
         let check = self.additional_limit.commit_count(&count);
-        let journaled = self.inner.journaled_state.ledger_mut().count_write(&count);
-        #[cfg(feature = "ledger-shadow")]
-        {
-            use crate::limit::shadow;
-            let ledger = self.inner.journaled_state.ledger();
-            shadow::verdict(Some(check), Some(journaled), ledger, "a completed write");
-            shadow::agree(&self.additional_limit, ledger, "a completed write");
-        }
-        #[cfg(not(feature = "ledger-shadow"))]
-        let _ = journaled;
+        let journaled = self.ledger_mut().count_write(&count);
+        shadow::completed_write(&self.additional_limit, self.ledger(), check, journaled);
         if check.exceeded_limit() {
             return WriteVerdict::Revert(self.additional_limit.note_frame_stop(&check));
         }

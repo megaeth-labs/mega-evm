@@ -46,14 +46,12 @@ use revm::{
     Inspector,
 };
 
-#[cfg(feature = "ledger-shadow")]
-use crate::limit::shadow;
 use crate::{
     access::ComputeStop,
     charge_write_records_history,
     evm::inspector::{frame_end_checked, ResultSource, StepGuard, UpfrontRecord},
     history_gas,
-    limit::{ledger_assert, Mark, StartFacts, StartReport},
+    limit::{ledger_assert, shadow, FrameIdentity, Mark, StartFacts, StartReport},
     synthetic_frame_result,
     system::keyless,
     Detention, ExternalEnvTypes, LimitKind, MegaContext, MegaEvm, MegaInstructions, MegaJournal,
@@ -353,8 +351,7 @@ where
         let instruction_result = frame_result.instruction_result();
         if !instruction_result.is_ok() {
             let top_level = evm.ctx_ref().additional_limit.top_level_write_record_gas();
-            #[cfg(feature = "ledger-shadow")]
-            evm.ctx_mut().additional_limit.shadow_note_top_level_refund(top_level);
+            evm.ctx_mut().additional_limit.note_top_level_refund(top_level);
             parent_gas.refill_history(top_level);
             if instruction_result.is_halt() {
                 parent_gas.spend_all();
@@ -368,22 +365,8 @@ where
             .saturating_add_signed(frame_result.gas().history_gas_spent());
         layer.set_history_gas_spent(history);
         layer.settle_history_bytes(priced);
-        #[cfg(feature = "ledger-shadow")]
-        {
-            let ctx = evm.ctx_ref();
-            let ledger = ctx.journal_ref().ledger();
-            if !ledger.diverged() {
-                let (lanes, formula) = ctx.additional_limit.shadow_top_level_refunds();
-                if let Some(formula) = formula {
-                    assert_eq!(
-                        lanes, formula,
-                        "ledger shadow mismatch at the transaction's settlement: the own frame's \
-                         record refund"
-                    );
-                }
-            }
-            shadow::agree(&ctx.additional_limit, ledger, "the transaction's settlement");
-        }
+        let ctx = evm.ctx_ref();
+        shadow::settlement(&ctx.additional_limit, ctx.ledger());
         Ok(())
     }
 
@@ -578,24 +561,23 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             &self.priced_precompiles,
             &mut frame_init,
         );
-        let facts = start_facts(&frame_init);
         let (outcome, report) = if hold == PrecompileHold::Crossing {
             // revm never decides the start, so the ledger counts nothing; what it would have
             // counted is held to the limits as the hypothetical the answer gives way to.
             let report = StartReport {
-                verdict: Some(ctx.journal_ref().ledger().hypothetical_start(&facts)),
+                verdict: Some(ctx.ledger().hypothetical_start(&start.facts)),
                 ..Default::default()
             };
             (Err(crossing_answer(&frame_init.frame_input)), report)
         } else {
             // The start window: what revm writes for the start is counted as the start's, and its
             // first checkpoint opens the frame's level.
-            ctx.journal_mut().open_start(facts);
+            ctx.ledger_mut().open_start(start.facts);
             let decided = self.inner.frame_init(frame_init).map(|outcome| match outcome {
                 ItemOrResult::Item(frame) => Ok(frame.interpreter.input.target_address),
                 ItemOrResult::Result(result) => Err(result),
             });
-            let report = self.inner.ctx.journal_mut().close_start();
+            let report = self.inner.ctx.ledger_mut().close_start();
             (decided?, report)
         };
         let ctx = &mut self.inner.ctx;
@@ -609,17 +591,10 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
                 #[cfg(debug_assertions)]
                 start.assert_transfer_log_journaled(ctx, Some(address));
                 let check = ctx.additional_limit.hold_built_start();
-                let mark = ctx.journal_ref().frame_start_mark();
+                let mark = ctx.ledger().frame_start_mark();
                 ledger_assert!(mark.is_some(), "a frame revm built has its level open");
                 ctx.additional_limit.attach_start(report, mark);
-                #[cfg(feature = "ledger-shadow")]
-                {
-                    let ledger = ctx.journal_ref().ledger();
-                    shadow::verdict(Some(check), report.verdict, ledger, "a built start");
-                    shadow::agree(&ctx.additional_limit, ledger, "a built start");
-                }
-                #[cfg(not(feature = "ledger-shadow"))]
-                let _ = check;
+                shadow::built_start(&ctx.additional_limit, ctx.ledger(), check, &report);
                 Ok(ItemOrResult::Item(self.inner.frame_stack.get()))
             }
             Err(mut result) => {
@@ -662,7 +637,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         };
         if action.is_return() {
             // revm closes the frame's level as it processes its return.
-            ctx.journal_mut().ledger_mut().frame_returning();
+            ctx.ledger_mut().frame_returning();
         }
         let mut next = frame.process_next_action(ctx, action);
         after_frame_run(ctx, frame, &mut next);
@@ -767,6 +742,10 @@ where
         mut frame_init: FrameInit,
     ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
         let rewriting = self.has_rewriting_inspector();
+        // A start past the call-stack limit is answered by the depth guard, wherever it comes from.
+        if frame_init.depth <= CALL_STACK_LIMIT as usize {
+            assert_running_frame(&self.inner.ctx, frame_init.depth);
+        }
         let (ctx, inspector) = self.ctx_inspector();
         // What the calling opcode charged upfront, before the inspector's hooks can rewrite the
         // call it charged for.
@@ -845,7 +824,7 @@ where
         };
         if action.is_return() {
             // revm closes the frame's level as it processes its return.
-            ctx.journal_mut().ledger_mut().frame_returning();
+            ctx.ledger_mut().frame_returning();
         }
         let mut next = frame.process_next_action(ctx, action);
         after_frame_run(ctx, frame, &mut next);
@@ -1179,10 +1158,9 @@ struct FrameStart {
     /// for it — a creator's nonce bump, the value the start moves and its transfer log, a
     /// precompile's writes — comes after.
     mark: Mark,
-    /// The frame's depth.
-    depth: usize,
-    /// The account a creation is made by; `None` for a call.
-    creator: Option<Address>,
+    /// What the start is: its depth, its caller, its target or none for a creation, and whether it
+    /// moves value.
+    facts: StartFacts,
     /// The gas limit the frame's caller forwarded, before gas detention held a precompile to less.
     gas_limit: u64,
     /// The reservoir the frame inherits.
@@ -1191,10 +1169,6 @@ struct FrameStart {
     /// revm journaled.
     #[cfg(debug_assertions)]
     transfer_log: bool,
-    /// The account the start moves value from, and the call's target, which a creation learns
-    /// when revm builds it: the two ends of the start's own transfer log.
-    #[cfg(debug_assertions)]
-    ends: (Address, Option<Address>),
 }
 
 impl FrameStart {
@@ -1203,26 +1177,45 @@ impl FrameStart {
         ctx: &mut MegaContext<DB, ExtEnvs>,
         frame_init: &FrameInit,
     ) -> Self {
-        let input = &frame_init.frame_input;
-        let (creator, reservoir) = match input {
-            FrameInput::Call(inputs) => (None, inputs.reservoir),
-            FrameInput::Create(inputs) => (Some(inputs.caller()), inputs.reservoir()),
-            FrameInput::Empty => (None, 0),
+        let (input, depth) = (&frame_init.frame_input, frame_init.depth);
+        let (facts, reservoir) = match input {
+            FrameInput::Call(inputs) => (
+                StartFacts {
+                    depth,
+                    caller: inputs.caller,
+                    target: Some(inputs.target_address),
+                    transfers_value: inputs.transfers_value(),
+                },
+                inputs.reservoir,
+            ),
+            FrameInput::Create(inputs) => (
+                StartFacts {
+                    depth,
+                    caller: inputs.caller(),
+                    target: None,
+                    transfers_value: !inputs.value().is_zero(),
+                },
+                inputs.reservoir(),
+            ),
+            FrameInput::Empty => unreachable!(
+                "a frame input always names a call or a creation, as revm's frame init asserts"
+            ),
         };
         Self {
             mark: ctx.journal_mut().mark(),
-            depth: frame_init.depth,
-            creator,
+            facts,
             gas_limit: input_gas_limit(input),
             reservoir,
             #[cfg(debug_assertions)]
             transfer_log: ctx.additional_limit.frame_start_transfer_log(input),
-            #[cfg(debug_assertions)]
-            ends: match input {
-                FrameInput::Call(inputs) => (inputs.caller, Some(inputs.target_address)),
-                FrameInput::Create(inputs) => (inputs.caller(), None),
-                FrameInput::Empty => (Address::ZERO, None),
-            },
+        }
+    }
+
+    /// The account a creation is made by; `None` for a call.
+    const fn creator(&self) -> Option<Address> {
+        match self.facts.target {
+            Some(_) => None,
+            None => Some(self.facts.caller),
         }
     }
 
@@ -1238,7 +1231,7 @@ impl FrameStart {
         created: Option<Address>,
     ) {
         use revm::primitives::eip7708::{ETH_TRANSFER_LOG_ADDRESS, ETH_TRANSFER_LOG_TOPIC};
-        let (from, to) = (self.ends.0, self.ends.1.or(created).unwrap_or_default());
+        let (from, to) = (self.facts.caller, self.facts.target.or(created).unwrap_or_default());
         let ends = [ETH_TRANSFER_LOG_TOPIC, from.into_word(), to.into_word()];
         let journaled = ctx.journal_ref().logs()[self.mark.position.log_i..]
             .iter()
@@ -1275,19 +1268,12 @@ fn hold_answered_start<DB: Database, ExtEnvs: ExternalEnvTypes>(
     report: &StartReport,
     answer: &mut FrameResult,
 ) {
-    #[cfg(feature = "ledger-shadow")]
-    let held = |ctx: &MegaContext<DB, ExtEnvs>, lanes: Option<crate::LimitCheck>| {
-        shadow::verdict(lanes, report.verdict, ctx.journal_ref().ledger(), "an answered start");
-    };
-    #[cfg(not(feature = "ledger-shadow"))]
-    let _ = report;
-    let Some(creator) = start.creator else {
+    let Some(creator) = start.creator() else {
         if matches!(
             answer.instruction_result(),
             InstructionResult::OutOfFunds | InstructionResult::OverflowPayment
         ) {
-            #[cfg(feature = "ledger-shadow")]
-            held(ctx, None);
+            shadow::answered_start(ctx.ledger(), None, report);
             return;
         }
         #[cfg(debug_assertions)]
@@ -1295,8 +1281,7 @@ fn hold_answered_start<DB: Database, ExtEnvs: ExternalEnvTypes>(
             start.assert_transfer_log_journaled(ctx, None);
         }
         let check = ctx.additional_limit.check_start();
-        #[cfg(feature = "ledger-shadow")]
-        held(ctx, Some(check));
+        shadow::answered_start(ctx.ledger(), Some(check), report);
         if check.exceeded_limit() {
             let output = ctx.additional_limit.note_frame_stop(&check);
             stop_the_answer(answer, start, output);
@@ -1306,8 +1291,7 @@ fn hold_answered_start<DB: Database, ExtEnvs: ExternalEnvTypes>(
     let bumped = ctx.journal_ref().journal()[start.mark.position.journal_i..]
         .iter()
         .any(|entry| matches!(entry, JournalEntry::NonceBump { address } if *address == creator));
-    #[cfg(feature = "ledger-shadow")]
-    held(ctx, None);
+    shadow::answered_start(ctx.ledger(), None, report);
     if bumped {
         return;
     }
@@ -1315,10 +1299,9 @@ fn hold_answered_start<DB: Database, ExtEnvs: ExternalEnvTypes>(
     // revm answers a creation whose creator's nonce cannot be bumped with a success. The
     // transaction's own frame, refused so, makes none of the records charged before execution for
     // it, and the history they cost comes back with the answer, as for a frame that kept nothing.
-    if start.depth == 0 && answer.instruction_result().is_ok() {
+    if start.facts.depth == 0 && answer.instruction_result().is_ok() {
         let top_level = ctx.additional_limit.top_level_write_record_gas();
-        #[cfg(feature = "ledger-shadow")]
-        ctx.additional_limit.shadow_note_top_level_refund(top_level);
+        ctx.additional_limit.note_top_level_refund(top_level);
         answer.gas_mut().refill_history(top_level);
     }
 }
@@ -1389,29 +1372,7 @@ fn built_frame_mark<DB: Database, ExtEnvs: ExternalEnvTypes>(
         kept.is_some_and(|mark| mark.position == frame.checkpoint),
         "a built frame's start side keeps the mark of its own checkpoint"
     );
-    kept.unwrap_or_else(|| ctx.journal_ref().ledger().mark(frame.checkpoint))
-}
-
-/// What the ledger is told about the start `frame_init` asks revm for.
-fn start_facts(frame_init: &FrameInit) -> StartFacts {
-    let depth = frame_init.depth;
-    match &frame_init.frame_input {
-        FrameInput::Call(inputs) => StartFacts {
-            depth,
-            caller: inputs.caller,
-            target: Some(inputs.target_address),
-            transfers_value: inputs.transfers_value(),
-        },
-        FrameInput::Create(inputs) => StartFacts {
-            depth,
-            caller: inputs.caller(),
-            target: None,
-            transfers_value: !inputs.value().is_zero(),
-        },
-        FrameInput::Empty => unreachable!(
-            "a frame input always names a call or a creation, as revm's frame init asserts"
-        ),
-    }
+    kept.unwrap_or_else(|| ctx.ledger().mark(frame.checkpoint))
 }
 
 /// Asserts, as a frame at `depth` starts, that the journal's nearest frame level is the running
@@ -1422,9 +1383,11 @@ fn assert_running_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &MegaContext<DB, ExtEnvs>,
     depth: usize,
 ) {
-    let running = ctx.additional_limit.running_start().and_then(|side| side.seq());
+    let running = ctx.additional_limit.running_start().and_then(|side| side.start());
+    let expected =
+        depth.checked_sub(1).zip(running).map(|(depth, start)| FrameIdentity { depth, start });
     ledger_assert!(
-        ctx.journal_ref().ledger().running_frame() == depth.checked_sub(1).zip(running),
+        ctx.ledger().running_frame() == expected,
         "a frame starts from the running frame's own level"
     );
 }
@@ -1442,34 +1405,22 @@ fn on_start_return<DB: Database, ExtEnvs: ExternalEnvTypes>(
     refund: u64,
 ) {
     let Some(side) = ctx.additional_limit.pop_start() else { return };
-    let caller = ctx.additional_limit.running_start().and_then(|side| side.seq());
+    let caller = ctx.additional_limit.running_start().and_then(|side| side.start());
+    let expected = side
+        .depth()
+        .checked_sub(1)
+        .zip(caller)
+        .map(|(depth, start)| FrameIdentity { depth, start });
     ledger_assert!(
-        ctx.journal_ref().ledger().running_frame() == side.depth().checked_sub(1).zip(caller),
+        ctx.ledger().running_frame() == expected,
         "a frame returns with its own level closed, into its caller's"
     );
-    #[cfg(feature = "ledger-shadow")]
-    {
-        let ledger = ctx.journal_ref().ledger();
-        if side.depth() == 0 {
-            if side.comparable() {
-                let formula = side.refund(ledger);
-                ctx.additional_limit.shadow_set_top_level_refund(formula);
-            }
-        } else {
-            shadow::refund(refund, &side, ledger, "a frame's return");
-            let check = ledger.check();
-            let lanes = ctx.additional_limit.shadow_pending_stop();
-            shadow::verdict(
-                lanes,
-                check.exceeded_limit().then_some(check),
-                ledger,
-                "a caller's check",
-            );
-        }
-        shadow::agree(&ctx.additional_limit, ctx.journal_ref().ledger(), "a frame's return");
-    }
-    #[cfg(not(feature = "ledger-shadow"))]
-    let _ = refund;
+    shadow::frame_return(
+        &mut ctx.additional_limit,
+        ctx.inner.journaled_state.ledger(),
+        refund,
+        &side,
+    );
 }
 
 /// Whether executing this transaction creates its caller's account: a deposit-like transaction
@@ -1532,7 +1483,7 @@ fn record_applied_authorities<DB: Database, ExtEnvs: ExternalEnvTypes>(
         target.is_some_and(|target| authorities.binary_search(&target).is_ok());
     let applied = authorities.len() as u64;
     ctx.additional_limit.record_applied_authorities(caller, applied, target_is_authority);
-    ctx.journal_mut().ledger_mut().count_authorities(caller, applied, target_is_authority);
+    ctx.ledger_mut().count_authorities(caller, applied, target_is_authority);
     // An applied authority that is the block beneficiary wrote the beneficiary's account.
     if authorities.binary_search(&ctx.block().beneficiary).is_ok() {
         ctx.detention.mark_before_execution(VolatileDataAccess::BENEFICIARY_BALANCE);
@@ -1869,12 +1820,15 @@ mod tests {
         let mut ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
         let start = FrameStart {
             mark: ctx.journal_mut().mark(),
-            depth: 1,
-            creator: None,
+            facts: StartFacts {
+                depth: 1,
+                caller: CALLER,
+                target: Some(TARGET),
+                transfers_value: true,
+            },
             gas_limit: 0,
             reservoir: 0,
             transfer_log: true,
-            ends: (CALLER, Some(TARGET)),
         };
         start.assert_transfer_log_journaled(&ctx, None);
     }

@@ -247,9 +247,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
         PrecompileProvider::<RevmJournalContext<DB>>::warm_addresses(self)
     }
 
+    /// Whether the set holds `address`, as alloy-evm's provider answers it.
     #[inline]
     fn contains(&self, address: &Address) -> bool {
-        self.get(address).is_some()
+        PrecompileProvider::<RevmJournalContext<DB>>::contains(self, address)
     }
 }
 

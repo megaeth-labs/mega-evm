@@ -125,13 +125,13 @@ pub struct AdditionalLimit {
     /// refund to.
     #[cfg(feature = "ledger-shadow")]
     top_level_paid_for: Option<u64>,
-    /// The history gas given back for the transaction's own frame's write record, at whichever of
-    /// the three sites gave it back: what the shadow holds the journal's formula to.
+    /// The history gas the lanes gave back for the transaction's own frame's write record, at
+    /// whichever of the three sites gave it back: what the shadow holds the journal's formula to.
     #[cfg(feature = "ledger-shadow")]
-    top_level_refunded: u64,
+    top_level_refunded_by_lanes: u64,
     /// The journal's formula's answer to the same, once the transaction's own frame returned.
     #[cfg(feature = "ledger-shadow")]
-    top_level_refund: Option<u64>,
+    top_level_refund_by_formula: Option<u64>,
 }
 
 impl AdditionalLimit {
@@ -174,8 +174,8 @@ impl AdditionalLimit {
         #[cfg(feature = "ledger-shadow")]
         {
             self.top_level_paid_for = None;
-            self.top_level_refunded = 0;
-            self.top_level_refund = None;
+            self.top_level_refunded_by_lanes = 0;
+            self.top_level_refund_by_formula = None;
         }
     }
 
@@ -1006,24 +1006,30 @@ impl AdditionalLimit {
         self.pending_stop
     }
 
-    /// Notes, for the shadow, history the lanes gave back for the transaction's own frame's record.
-    #[cfg(feature = "ledger-shadow")]
-    pub(crate) const fn shadow_note_top_level_refund(&mut self, gas: u64) {
-        self.top_level_refunded = self.top_level_refunded.saturating_add(gas);
+    /// Notes, for the shadow, history the lanes gave back for the transaction's own frame's record;
+    /// nothing without the `ledger-shadow` feature.
+    #[inline(always)]
+    pub(crate) const fn note_top_level_refund(&mut self, gas: u64) {
+        #[cfg(feature = "ledger-shadow")]
+        {
+            self.top_level_refunded_by_lanes = self.top_level_refunded_by_lanes.saturating_add(gas);
+        }
+        #[cfg(not(feature = "ledger-shadow"))]
+        let _ = gas;
     }
 
     /// Notes, for the shadow, what the journal's formula gives back for the transaction's own
     /// frame's record once that frame returned.
     #[cfg(feature = "ledger-shadow")]
-    pub(crate) const fn shadow_set_top_level_refund(&mut self, gas: u64) {
-        self.top_level_refund = Some(gas);
+    pub(crate) const fn shadow_set_top_level_refund_by_formula(&mut self, gas: u64) {
+        self.top_level_refund_by_formula = Some(gas);
     }
 
     /// What the lanes gave back for the transaction's own frame's record, and what the formula
     /// gives back (`None` when the frame never started), for the shadow.
     #[cfg(feature = "ledger-shadow")]
     pub(crate) const fn shadow_top_level_refunds(&self) -> (u64, Option<u64>) {
-        (self.top_level_refunded, self.top_level_refund)
+        (self.top_level_refunded_by_lanes, self.top_level_refund_by_formula)
     }
 
     /// Pops the lane of the frame `result` returns from: a success merges it into the caller's,

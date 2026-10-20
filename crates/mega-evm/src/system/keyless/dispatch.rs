@@ -226,7 +226,7 @@ fn start<DB: Database, ExtEnvs: ExternalEnvTypes>(
         }
     };
     ctx.additional_limit.set_frame_creator(deployment.signer);
-    ctx.journal_mut().ledger_mut().set_frame_creator(deployment.signer);
+    ctx.ledger_mut().set_frame_creator(deployment.signer);
     if let Some((on_lane, caller)) = deployment.record_charges {
         ctx.additional_limit.stage_frame_charge(deployment.records, on_lane, caller);
     }

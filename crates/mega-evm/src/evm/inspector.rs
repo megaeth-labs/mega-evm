@@ -639,8 +639,7 @@ fn settle_kept_nothing<DB: Database, ExtEnvs: ExternalEnvTypes>(
     let upfront = upfront.map_or(Some(0), |charge| context.state_gas_charge(charge));
     let history =
         if depth == 0 { context.additional_limit.top_level_write_record_gas() } else { 0 };
-    #[cfg(feature = "ledger-shadow")]
-    context.additional_limit.shadow_note_top_level_refund(history);
+    context.additional_limit.note_top_level_refund(history);
     let gas = result.gas_mut();
     gas.refill_reservoir(upfront.unwrap_or_default());
     gas.refill_history(history);
