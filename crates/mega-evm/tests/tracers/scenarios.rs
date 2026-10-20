@@ -51,8 +51,8 @@ use crate::{
         assert_keyless_struct_logs_miss_the_creation, assert_ledgers,
         assert_log_index_counts_discarded, assert_logs, assert_parent_resumed,
         assert_prestate_covers_reads, assert_root_frame_settles, assert_root_gas_is_the_gas_limit,
-        call_tx, create_tx, decode_stop, eip3155_steps, eip3155_summary_gas_used, pin_tracer_views,
-        step, Traced,
+        assert_root_gas_used_is_the_receipt, call_tx, create_tx, decode_stop, eip3155_steps,
+        eip3155_summary_gas_used, pin_tracer_views, step, Traced,
     },
 };
 
@@ -129,6 +129,7 @@ fn pin_given_back(name: &str, traced: &Traced, expected: Ledgers, given_back: u6
     assert_eip3155_agrees(traced);
     assert_prestate_covers_reads(traced);
     assert_root_gas_is_the_gas_limit(traced);
+    assert_root_gas_used_is_the_receipt(traced);
     pin_tracer_views(name, traced);
 }
 

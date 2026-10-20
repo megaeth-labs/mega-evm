@@ -1,34 +1,34 @@
 ---
 source: crates/mega-evm/tests/tracers/harness.rs
-expression: "&traced.call_frame(true)"
+expression: "&redacted(&traced.call_frame(true))"
 ---
 {
-  "from": "0x0000000000000000000000000000000000400000",
-  "gas": "0x18c86f",
-  "gasUsed": "0x112d8",
-  "to": "0x0000000000000000000000000000000000400002",
-  "input": "0x",
   "calls": [
     {
-      "from": "0x0000000000000000000000000000000000400002",
-      "gas": "0x1794aa",
-      "gasUsed": "0x1be83",
-      "to": "0x0000000000000000000000000000000000400003",
-      "input": "0x",
       "error": "execution reverted",
-      "value": "0x1",
-      "type": "CALL"
+      "from": "0x0000000000000000000000000000000000400002",
+      "gas": "[gas]",
+      "gasUsed": "[gas]",
+      "input": "0x",
+      "to": "0x0000000000000000000000000000000000400003",
+      "type": "CALL",
+      "value": "0x1"
     }
   ],
+  "from": "0x0000000000000000000000000000000000400000",
+  "gas": "[gas]",
+  "gasUsed": "[gas]",
+  "input": "0x",
   "logs": [
     {
       "address": "0x0000000000000000000000000000000000400002",
-      "topics": [],
       "data": "0x",
+      "index": "0x2",
       "position": "0x1",
-      "index": "0x2"
+      "topics": []
     }
   ],
-  "value": "0x0",
-  "type": "CALL"
+  "to": "0x0000000000000000000000000000000000400002",
+  "type": "CALL",
+  "value": "0x0"
 }
