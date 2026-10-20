@@ -14,7 +14,7 @@ use mega_evm::{
         SEQUENCER_REGISTRY_CODE_HASH, SYSTEM_CONTRACT_DEPLOY_COUNT,
     },
     test_utils::MemoryDatabase,
-    MegaBlockExecutionError, MegaHardfork, MegaHardforkConfig, MegaHardforks, PreBlockStateSource,
+    MegaBlockExecutionError, PreBlockStateSource,
 };
 use revm::{
     context::{result::ExecutionResult, ContextTr},
@@ -386,17 +386,6 @@ fn test_an_older_oracle_is_upgraded_by_the_pre_block_step_with_its_storage() {
     assert_eq!(info.code_hash, ORACLE_CONTRACT_CODE_HASH, "the block holds the newer code");
     assert_eq!(info.nonce, 3, "the nonce is kept");
     assert_eq!(state.storage(ORACLE_CONTRACT_ADDRESS, SLOT).unwrap(), value, "the storage is kept");
-}
-
-/// A scheduled Satin without registry params fails at load.
-#[test]
-fn test_missing_registry_params_fail_at_load() {
-    let missing = MegaHardforkConfig::default()
-        .with(MegaHardfork::Satin, alloy_hardforks::ForkCondition::Timestamp(0));
-    assert_eq!(
-        missing.validate_schedule().unwrap_err().to_string(),
-        "hardfork Satin is scheduled but its SequencerRegistryConfig params are not configured"
-    );
 }
 
 /// Calling the factory with salt || initcode returns the CREATE2 address as 20 bytes.

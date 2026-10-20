@@ -45,38 +45,17 @@ fn test_canonical_schedules_match_the_chain_activation_table() {
     assert_eq!(testnet_hardforks().spec_id(u64::MAX), None);
 }
 
-/// A schedule that activates a fork without the parameters it requires fails when the chain
-/// configuration is loaded, not at the fork's first block: the block executor is never built
-/// from one.
+/// Satin carries no parameter: a schedule that activates it alone loads, and a block runs on it,
+/// over a state holding the registry the legacy forks left. The limits are the spec's, not a
+/// parameter either.
 #[test]
-fn test_a_schedule_missing_its_fork_params_is_refused_at_load() {
-    let missing =
+fn test_a_schedule_activating_satin_alone_loads_and_runs() {
+    let satin =
         MegaHardforkConfig::default().with(MegaHardfork::Satin, ForkCondition::Timestamp(0));
-    assert_eq!(
-        missing.require_params::<SequencerRegistryConfig>(),
-        Err(ScheduleError::MissingParams {
-            fork: MegaHardfork::Satin,
-            params: "SequencerRegistryConfig",
-        }),
-        "the load refuses it"
-    );
-    assert_eq!(
-        missing.validate_schedule(),
-        Err(ScheduleError::MissingParams {
-            fork: MegaHardfork::Satin,
-            params: "SequencerRegistryConfig",
-        }),
-    );
-
-    // With the registry's attached the schedule loads, and a block runs on it: the limits are
-    // the spec's, not a parameter.
-    let loaded = missing.with_params(registry_config());
-    assert_eq!(loaded.require_params::<SequencerRegistryConfig>(), Ok(()));
-    assert_eq!(loaded.validate_schedule(), Ok(()));
-    assert_eq!(loaded.fork_params::<SequencerRegistryConfig>(), Some(&registry_config()));
+    assert_eq!(satin.validate_schedule(), Ok(()));
 
     let mut state = common::state();
-    let mut executor = common::executor_with_spec(&mut state, common::unlimited_ctx(), loaded);
+    let mut executor = common::executor_with_spec(&mut state, common::unlimited_ctx(), satin);
     executor.apply_pre_execution_changes().expect("the block starts");
     executor.execute_transaction(&user_tx(0, empty_call_gas())).expect("the transaction executes");
 }

@@ -12,16 +12,13 @@ use super::{EvmeError, Result};
 
 /// The hardfork schedule a Satin run for chain `chain_id` at `timestamp` executes under.
 ///
-/// A block the chain's own schedule runs on Satin runs under that schedule, with the parameters
-/// it carries. A schedule that cannot run the block — its table schedules Satin without the
-/// parameters Satin requires — is refused rather than filled in: the tool does not know the
-/// chain's registry roles, and a placeholder in their place would report results the chain does
-/// not produce.
+/// A block the chain's own schedule runs on Satin runs under that schedule. A schedule the engine
+/// refuses ([`MegaHardforks::validate_schedule`]) is refused rather than replaced: a run under
+/// another schedule would report results the chain does not produce.
 ///
 /// Any other run is a counterfactual and executes under the schedule the Satin engine gives a chain
-/// it does not know ([`mega_evm::all_activated_hardforks`]): Satin from genesis, and placeholder
-/// registry parameters, which only a registry deployed from scratch reads (a chain whose registry
-/// is already deployed keeps the roles in its storage).
+/// it does not know ([`mega_evm::all_activated_hardforks`]): Satin from genesis. Satin carries no
+/// parameter: the `SequencerRegistry`'s roles are what the state the run executes on holds.
 ///
 /// The limits are not the schedule's: they are fixed per spec ([`satin_limits`]).
 ///
@@ -52,8 +49,8 @@ pub fn satin_limits(limits_override: Option<&LimitsOverride>) -> Result<Protocol
 /// The genesis file this run was given (`--genesis`), set once before the command runs.
 static GENESIS: OnceLock<GenesisChain> = OnceLock::new();
 
-/// A chain as its genesis file configures it: its chain id, and its Satin keys, read by the
-/// parser every reader of a genesis file shares ([`SatinChainConfig::from_genesis_config`]).
+/// A chain as its genesis file configures it: its chain id, and its Satin key, read by the parser
+/// every reader of a genesis file shares ([`SatinChainConfig::from_genesis_config`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GenesisChain {
     /// The genesis file's `chainId`.
@@ -145,7 +142,7 @@ fn genesis_schedule(
 }
 
 /// Parses `--genesis`: the path of a genesis file, whose `config` object carries the chain id and
-/// the Satin keys. A file that is the `config` object itself is read as one.
+/// the Satin key. A file that is the `config` object itself is read as one.
 pub fn parse_genesis(path: &str) -> std::result::Result<GenesisChain, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
     let file: Value = serde_json::from_str(&text).map_err(|e| format!("not JSON: {e}"))?;
@@ -221,9 +218,7 @@ pub fn parse_limits_override(arg: &str) -> std::result::Result<LimitsOverride, S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mega_evm::{
-        system::SequencerRegistryConfig, ChainActivation, MAINNET_CHAIN_ID, TESTNET_CHAIN_ID,
-    };
+    use mega_evm::{ChainActivation, MAINNET_CHAIN_ID, TESTNET_CHAIN_ID};
 
     const ACTIVATION: u64 = 1_800_000_000;
 
@@ -232,46 +227,36 @@ mod tests {
     }
 
     /// A counterfactual runs on the engine's schedule for an unknown chain, whatever the chain:
-    /// Satin from genesis and the placeholder registry.
+    /// Satin from genesis.
     #[test]
     fn test_a_counterfactual_runs_on_the_engines_fallback_schedule() {
         for chain_id in [MAINNET_CHAIN_ID, TESTNET_CHAIN_ID, 6342, 1] {
             let schedule = satin_schedule(chain_id, 1_700_000_000).unwrap();
             assert_eq!(schedule.spec_id(0), Some(MegaSpecId::SATIN), "chain {chain_id}");
-            assert_eq!(
-                schedule.fork_params::<SequencerRegistryConfig>(),
-                Some(&SequencerRegistryConfig::placeholder())
-            );
             assert_eq!(schedule.validate_schedule(), Ok(()));
         }
     }
 
     /// Before a chain's scheduled activation a Satin run is a counterfactual on the fallback
-    /// schedule; from it on, the run takes the chain's schedule and its registry roles.
+    /// schedule; from it on, the run takes the chain's schedule, which needs no parameter.
     #[test]
     fn test_a_real_satin_block_runs_on_the_chains_own_schedule() {
-        let roles = SequencerRegistryConfig {
-            initial_system_address: alloy_primitives::Address::repeat_byte(0x11),
-            ..SequencerRegistryConfig::placeholder()
-        };
-        let chain = scheduled().with_params(roles);
-
-        let before = schedule_for(chain.clone(), ACTIVATION - 1).unwrap();
-        assert_eq!(
-            before.fork_params::<SequencerRegistryConfig>(),
-            Some(&SequencerRegistryConfig::placeholder())
-        );
-        let from = schedule_for(chain, ACTIVATION).unwrap();
-        assert_eq!(from.fork_params::<SequencerRegistryConfig>(), Some(&roles));
+        let before = schedule_for(scheduled(), ACTIVATION - 1).unwrap();
+        assert_eq!(before.spec_id(0), Some(MegaSpecId::SATIN), "the fallback runs Satin from 0");
+        let from = schedule_for(scheduled(), ACTIVATION).unwrap();
         assert_eq!(from.spec_id(ACTIVATION - 1), None, "the chain's own activation holds");
+        assert_eq!(from.spec_id(ACTIVATION), Some(MegaSpecId::SATIN));
     }
 
-    /// A chain whose table schedules Satin without its registry roles is refused, not run on a
-    /// placeholder.
+    /// A chain whose schedule the engine refuses is refused, not run on another schedule: one
+    /// that activates Satin before a fork Satin runs on.
     #[test]
-    fn test_a_real_satin_block_without_the_chains_params_is_refused() {
-        let error = schedule_for(scheduled(), ACTIVATION).unwrap_err().to_string();
-        assert!(error.contains("SequencerRegistryConfig params are not configured"), "{error}");
+    fn test_a_real_satin_block_on_a_refused_schedule_is_refused() {
+        use mega_evm::alloy_hardforks::{EthereumHardfork, ForkCondition};
+        let late = ForkCondition::Timestamp(ACTIVATION + 1);
+        let chain = scheduled().with(EthereumHardfork::Osaka, late);
+        let error = schedule_for(chain, ACTIVATION).unwrap_err().to_string();
+        assert!(error.contains("the Osaka fork it runs on is not active"), "{error}");
         assert!(error.contains(&ACTIVATION.to_string()), "{error}");
         assert!(error.contains("cannot run it"), "{error}");
     }
@@ -322,18 +307,10 @@ mod tests {
         );
     }
 
-    /// A genesis file whose `config` carries `chainId` and the Satin keys: Satin at
-    /// [`ACTIVATION`], and registry seeds that are not the placeholder's.
+    /// A genesis file whose `config` carries `chainId` and the Satin key: Satin at
+    /// [`ACTIVATION`].
     fn genesis_file(dir: &tempfile::TempDir, chain_id: u64) -> (String, SatinChainConfig) {
-        let satin = SatinChainConfig {
-            activation_time: ACTIVATION,
-            sequencer_registry: SequencerRegistryConfig {
-                initial_system_address: alloy_primitives::Address::repeat_byte(0x11),
-                initial_sequencer: alloy_primitives::Address::repeat_byte(0x22),
-                initial_admin: alloy_primitives::Address::repeat_byte(0x33),
-                min_rotation_delay: 100,
-            },
-        };
+        let satin = SatinChainConfig { activation_time: ACTIVATION };
         let mut config = serde_json::to_value(satin).unwrap();
         config["chainId"] = serde_json::json!(chain_id);
         config["optimism"] = serde_json::json!({ "eip1559Elasticity": 6 });
@@ -343,9 +320,8 @@ mod tests {
         (path.to_str().unwrap().to_string(), satin)
     }
 
-    /// A genesis file's schedule is its chain's: Satin from its `satinTime` and its registry seeds,
-    /// in place of the table's, which for a chain the engine does not know is the placeholder
-    /// seeds.
+    /// A genesis file's schedule is its chain's: Satin from its `satinTime`, in place of the
+    /// table's, which for a chain the engine does not know is Satin from genesis.
     #[test]
     fn test_a_genesis_file_gives_its_chain_its_schedule() {
         let dir = tempfile::tempdir().unwrap();
@@ -357,16 +333,13 @@ mod tests {
             let chain = genesis_schedule(&genesis, 6342, timestamp).unwrap();
             let schedule = schedule_for(chain, timestamp).unwrap();
             assert_eq!(schedule.spec_id(ACTIVATION - 1), None);
-            assert_eq!(
-                schedule.fork_params::<SequencerRegistryConfig>(),
-                Some(&satin.sequencer_registry)
-            );
+            assert_eq!(schedule.spec_id(ACTIVATION), Some(MegaSpecId::SATIN));
         }
         let table = mega_evm::hardfork_schedule(6342);
         let table = schedule_for(table, ACTIVATION).unwrap();
         assert_eq!(
-            table.fork_params::<SequencerRegistryConfig>(),
-            Some(&SequencerRegistryConfig::placeholder()),
+            table.spec_id(0),
+            Some(MegaSpecId::SATIN),
             "without the file, the unknown-chain fallback"
         );
 
@@ -408,7 +381,8 @@ mod tests {
     }
 
     /// The file is read as a genesis file or as its `config` object; one without a chain id, or
-    /// whose Satin keys the shared parser refuses, is refused with the parser's reason.
+    /// whose Satin keys the shared parser refuses, is refused with the parser's reason: an old
+    /// file that still names the registry's roles among them.
     #[test]
     fn test_the_genesis_file_is_parsed_by_the_shared_parser() {
         let dir = tempfile::tempdir().unwrap();
@@ -421,9 +395,19 @@ mod tests {
         assert_eq!(parse_genesis(&bare), Ok(GenesisChain { chain_id: 7, satin: None }));
         let no_chain_id = write("no-id.json", serde_json::json!({ "config": {} }));
         assert!(parse_genesis(&no_chain_id).unwrap_err().contains("chainId"));
-        let partial = write("partial.json", serde_json::json!({ "chainId": 7, "satinTime": 0 }));
-        let error = parse_genesis(&partial).unwrap_err();
-        assert!(error.contains("lacks `satinInitialSystemAddress`"), "{error}");
+        let satin = write("satin.json", serde_json::json!({ "chainId": 7, "satinTime": 0 }));
+        let expected =
+            GenesisChain { chain_id: 7, satin: Some(SatinChainConfig { activation_time: 0 }) };
+        assert_eq!(parse_genesis(&satin), Ok(expected));
+        let old = write(
+            "old.json",
+            serde_json::json!({ "chainId": 7, "satinTime": 0, "satinInitialAdmin": "0x33" }),
+        );
+        let error = parse_genesis(&old).unwrap_err();
+        assert!(
+            error.contains("`satinInitialAdmin` is not a Satin chain-configuration key"),
+            "{error}"
+        );
         assert!(parse_genesis(dir.path().join("absent").to_str().unwrap())
             .unwrap_err()
             .contains("reading"));

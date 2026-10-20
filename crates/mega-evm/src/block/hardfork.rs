@@ -208,10 +208,6 @@ pub trait MegaHardforks: OpHardforks {
     ///   do not apply different rules to one block. The other half of that timing rule, that
     ///   Jovian, Karst and Osaka do not activate before Satin, is the node's to check: before Satin
     ///   the chain runs its pre-Satin engine, which this crate does not execute.
-    /// - The parameters every scheduled fork requires are attached, and their values pass their
-    ///   type's own checks ([`require_params`](Self::require_params)). Satin requires
-    ///   [`SequencerRegistryConfig`](crate::system::SequencerRegistryConfig) so the registry can be
-    ///   seeded at the first block.
     ///
     /// There is no ordering or gap check: a single fork has nothing to be out of order with. The
     /// spec that follows Satin brings the ladder back, and with it those checks.
@@ -223,12 +219,7 @@ pub trait MegaHardforks: OpHardforks {
             }
         }
 
-        require_base_forks(self)?;
-
-        // Required parameters, one `self.require_params::<P>()?` per params type.
-        self.require_params::<crate::system::SequencerRegistryConfig>()?;
-
-        Ok(())
+        require_base_forks(self)
     }
 }
 
@@ -779,20 +770,6 @@ mod tests {
 
         let with_params = no_params.with_params(params());
         assert_eq!(with_params.require_params::<TestParams>(), Ok(()));
-        // TestParams is not SequencerRegistryConfig, so the schedule still cannot run.
-        assert_eq!(
-            with_params.validate_schedule(),
-            Err(ScheduleError::MissingParams {
-                fork: MegaHardfork::Satin,
-                params: "SequencerRegistryConfig",
-            })
-        );
-
-        // The registry's config is Satin's one params type: with it the schedule loads.
-        let with_registry = MegaHardforkConfig::default()
-            .with_all_activated()
-            .with_params(crate::system::SequencerRegistryConfig::placeholder());
-        assert_eq!(with_registry.validate_schedule(), Ok(()));
     }
 
     /// A scheduled fork's params are checked at load even when they were attached without

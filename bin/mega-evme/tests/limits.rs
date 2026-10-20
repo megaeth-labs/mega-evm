@@ -182,13 +182,9 @@ fn test_an_override_is_refused_on_a_legacy_spec() {
     }
 }
 
-/// A genesis file for chain `chain_id` activating Satin at `satin_time`, with the placeholder
-/// registry seeds, in `dir`.
+/// A genesis file for chain `chain_id` activating Satin at `satin_time`, in `dir`.
 fn genesis(dir: &tempfile::TempDir, chain_id: u64, satin_time: u64) -> String {
-    let satin = mega_evm::SatinChainConfig {
-        activation_time: satin_time,
-        sequencer_registry: mega_evm::system::SequencerRegistryConfig::placeholder(),
-    };
+    let satin = mega_evm::SatinChainConfig { activation_time: satin_time };
     let mut config = serde_json::to_value(satin).unwrap();
     config["chainId"] = json!(chain_id);
     let path = dir.path().join(format!("genesis-{chain_id}-{satin_time}.json"));
