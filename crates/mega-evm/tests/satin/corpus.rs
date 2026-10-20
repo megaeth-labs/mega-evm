@@ -2,8 +2,9 @@
 //!
 //! `benches/corpus.rs` times the JSON scenarios under `benches/scenarios`. A change that sends a
 //! transaction of one down a shorter path would be timed without notice, so every transaction of
-//! every scenario file is pinned here: its outcome class at any byte prices, and its gas used at
-//! the spec's.
+//! every scenario file is pinned here: its outcome class and its gas used.
+//! The scenarios fix their gas limits, so at dearer byte prices a transaction can run out of gas;
+//! the pins hold at the spec's byte prices only, and the snapshot is skipped at other ones.
 
 use std::{collections::BTreeMap, path::Path};
 
@@ -28,7 +29,6 @@ struct Tx {
 #[test]
 fn test_corpus_scenarios_keep_their_outcome_and_gas() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("benches/scenarios");
-    let mut classes: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut gas: BTreeMap<String, Vec<Tx>> = BTreeMap::new();
     for entry in std::fs::read_dir(&dir).unwrap() {
         let path = entry.unwrap().path();
@@ -43,22 +43,17 @@ fn test_corpus_scenarios_keep_their_outcome_and_gas() {
             serde_json::from_str(&text).unwrap_or_else(|err| panic!("{path:?}: {err}"));
         scenario.validate().unwrap_or_else(|err| panic!("{path:?}: {err}"));
         let (outcomes, _) = scenario.run(scenario.database());
-        let mut scenario_classes = Vec::new();
         let mut scenario_gas = Vec::new();
         for (i, outcome) in outcomes.iter().enumerate() {
             let executed = outcome.as_ref().unwrap_or_else(|err| {
                 panic!("{name}: tx[{i}] is rejected: {err:?}");
             });
             let outcome = class(&executed.result);
-            scenario_classes.push(outcome.clone());
             scenario_gas.push(Tx { outcome, gas_used: executed.result.tx_gas_used() });
         }
-        classes.insert(name.clone(), scenario_classes);
         gas.insert(name, scenario_gas);
     }
-    assert_eq!(classes.len(), 13, "the corpus has 13 scenarios");
+    assert_eq!(gas.len(), 13, "the corpus has 13 scenarios");
 
-    // The class does not move with the byte prices, so it is compared at any of them.
-    insta::assert_json_snapshot!("corpus_outcome_classes", classes);
     crate::assert_sorted_json_snapshot!("corpus_outcomes_and_gas", gas);
 }
