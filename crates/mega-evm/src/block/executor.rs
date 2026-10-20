@@ -750,11 +750,10 @@ where
     /// The registry's role changes come after the deploy step, which refuses the block unless the
     /// registry is the v2.0.0 the legacy forks left. Its pending slots are read and handed on
     /// whatever they say, and when a change is due in this block the `applyPendingChanges()` call
-    /// applies it on
-    /// the same pre-block budget, refusing the block if it does not succeed. So a rotation due in
-    /// this block governs this block's system-address transactions: each reads the live system
-    /// address out of the registry when it is validated, after these steps are committed, and
-    /// nothing inside the block can change it again.
+    /// applies it on the same pre-block budget, refusing the block if it does not succeed. So a
+    /// rotation due in this block governs this block's system-address transactions: each reads the
+    /// live system address out of the registry when it is validated, after these steps are
+    /// committed, and nothing inside the block can change it again.
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
         self.check_admission()?;
 
@@ -1243,8 +1242,9 @@ mod tests {
             .unwrap_or_else(|| panic!("not an internal refusal of this engine: {error:?}"))
     }
 
-    /// Every refusal but one for what the node itself does — an inspector it runs — is a verdict on
-    /// the block: a validation error. A state whose `SequencerRegistry` is not v2.0.0 is one.
+    /// Every refusal but those for what the node itself does — an inspector it runs, here — is a
+    /// verdict on the block: a validation error. A state whose `SequencerRegistry` is not v2.0.0
+    /// is one.
     #[test]
     fn test_a_refusal_of_the_block_is_a_validation_error() {
         let address = alloy_primitives::Address::repeat_byte(1);
