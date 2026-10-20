@@ -138,21 +138,10 @@ mega-evme replay --rpc https://mainnet.megaeth.com/rpc \
 # Offline: re-dump reproducibly from the capture (receipt already captured):
 mega-evme replay --rpc.replay-file ./cap.json --dump-fixture ./fixtures/0xabc123.json 0xabc123...
 
-# Validate the fixture (and detect any gas/status/result drift):
-state-test ./fixtures/0xabc123.json
+# The fidelity gate checks the dump against the receipt as it is written.
+# To re-run it later, use the 1.7.1 release's state-test runner:
+# this repository's `state-test` runs the Osaka and Amsterdam fixtures only.
 ```
-
-## Throughput Benchmark
-
-To benchmark a replayed transaction, dump it to a fixture and time the fixture with the `state-test` runner — there is no `replay`-side benchmark flag:
-
-```bash
-mega-evme replay --rpc <url> --dump-fixture /tmp/tx.json 0xabc123...
-state-test --bench /tmp/tx.json
-```
-
-`state-test --bench` reports `min` / `median` / `mean` time and throughput (Mgas/s), timing only the EVM `transact` call.
-A committed corpus of characteristic transactions and a base-vs-PR comparison driver build on this to track real-transaction throughput across changes; see `bench/replay/`.
 
 ## Spec Auto-Detection
 
@@ -301,8 +290,6 @@ See the linked pages for full details.
   See [Tracing Overview](../tracing/overview.md).
 - **Fixture dump** — Write a self-validating EEST state-test fixture via `--dump-fixture`.
   See [Self-Validating Fixture Dump](#self-validating-fixture-dump) above.
-- **Throughput benchmark** — Dump a fixture (`--dump-fixture`) and time it with `state-test --bench`.
-  See [Throughput Benchmark](#throughput-benchmark) above.
 
 ## Examples
 

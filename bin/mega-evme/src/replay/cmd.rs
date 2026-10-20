@@ -94,11 +94,10 @@ pub struct Cmd {
     /// The fixture captures the pre-state read closure, block environment,
     /// transaction, and `MegaETH` external environment, and records `post`
     /// expectations (state/logs roots, gas, status) computed by the state-test
-    /// runner. Re-running the file through `state-test` self-validates the
-    /// replay, and `state-test --bench` benchmarks it. The dump is rejected
-    /// unless the local replay reproduces the on-chain receipt's gas and success
-    /// status. Incompatible with transaction overrides and `--override.spec`. Legacy specs
-    /// only: no state-test runner prices a transaction as Satin does.
+    /// runner. Re-running the file through the 1.7.1 `state-test` self-validates the
+    /// replay. The dump is rejected unless the local replay reproduces the on-chain receipt's gas
+    /// and success status. Incompatible with transaction overrides and `--override.spec`.
+    /// Legacy specs only: no state-test runner prices a transaction as Satin does.
     #[arg(long = "dump-fixture", value_name = "FILE")]
     pub dump_fixture: Option<std::path::PathBuf>,
 }
