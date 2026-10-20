@@ -12,7 +12,7 @@ use revm::{
     context::result::EVMError,
     inspector::NoOpInspector,
     interpreter::{
-        interpreter::EthInterpreter, interpreter_types::Jumps, CallInputs, CallOutcome,
+        interpreter::EthInterpreter, interpreter_types::Jumps, CallInputs, CallOutcome, CallValue,
         CreateInputs, CreateOutcome, Gas, InstructionResult, Interpreter, InterpreterResult,
     },
     Database, Inspector,
@@ -770,4 +770,35 @@ fn test_intrinsic_data_size_overflow_with_inspector_early_return() {
     assert_eq!(evm.inspector().answered, 0, "the inspector never saw a frame");
     assert_eq!(format!("{inspected:?}"), format!("{plain:?}"));
     assert!(format!("{plain:?}").contains(mega_evm::TX_BODY_OVER_DATA_SIZE_LIMIT), "{plain:?}");
+}
+
+/// Turns every call into a transfer of one wei, whatever value its opcode or the transaction gave
+/// it.
+struct AddsValue;
+
+impl<CTX> Inspector<CTX, EthInterpreter> for AddsValue {
+    fn call(&mut self, _: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
+        inputs.value = CallValue::Transfer(U256::from(1));
+        None
+    }
+}
+
+/// A rewriting inspector may change what a start writes after its history was charged: the
+/// transaction's own call and `A`'s call to `B` carry no value when they are charged — before
+/// execution and at `A`'s `CALL` — and one wei each once the inspector rewrote them. The checks
+/// that the records counted are the ones charged, which a debug build makes on every other path,
+/// are not made under such an inspector, and the rewritten starts run: both transfers move their
+/// wei.
+#[test]
+fn test_a_rewriting_inspector_may_change_what_a_start_writes() {
+    let db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(10u64.pow(18)))
+        .account_balance(A, U256::from(1))
+        .account_code(A, call_b_and_store_flag(0));
+    let mut evm = MegaEvm::new(context(db)).with_inspector(AddsValue);
+    let outcome = evm.execute_transaction(call(CALLER, A, U256::ZERO, gas_limit())).unwrap();
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    assert_eq!(outcome.state[&A].storage[&U256::ZERO].present_value, U256::from(1), "B ran");
+    assert_eq!(outcome.state[&B].info.balance, U256::from(1), "A's rewritten call moved its wei");
+    assert_eq!(outcome.state[&A].info.balance, U256::from(1), "and the transaction's moved A's");
 }

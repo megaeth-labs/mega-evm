@@ -376,11 +376,15 @@ impl AdditionalLimit {
         self.pending_frame_charge = FrameCharge { records: Some(records), on_lane, caller };
     }
 
-    /// Leaves the frame about to start unchecked against the answer its caller's charge was
-    /// computed from ([`records_the_caller_paid_for`](Self::records_the_caller_paid_for)): an
-    /// inspector that may rewrite the frame's input ran between the charge and the count.
+    /// Leaves the frame about to start unchecked against the answer its charge was computed from
+    /// — its caller's at the opcode
+    /// ([`records_the_caller_paid_for`](Self::records_the_caller_paid_for)),
+    /// or the transaction's before execution for the transaction's own frame
+    /// ([`check_top_level_records`](Self::check_top_level_records)): an inspector that may rewrite
+    /// the frame's input ran between the charge and the count.
     pub(crate) const fn waive_start_check(&mut self) {
         self.pending_frame_charge.records = None;
+        self.pending_top_level_records = None;
     }
 
     /// Records the history gas the settled transaction spent.
@@ -736,9 +740,10 @@ impl AdditionalLimit {
     /// the transaction's own caller, target and value, and both read the same answer to whether
     /// the target is an applied authority. An inspector that rewrites the input so that the answer
     /// changes splits them, as it does for a frame an opcode starts
-    /// ([`records_the_caller_paid_for`](Self::records_the_caller_paid_for)). A divergence trips
-    /// here in every debug build rather than charging history for a record the data size does not
-    /// count, or counting one no history paid for.
+    /// ([`records_the_caller_paid_for`](Self::records_the_caller_paid_for)), and under one the
+    /// frame is not checked ([`waive_start_check`](Self::waive_start_check)). A divergence trips
+    /// here in every other debug build rather than charging history for a record the data size
+    /// does not count, or counting one no history paid for.
     fn check_top_level_records(&mut self, counted: u64) {
         if let Some(charged) = self.pending_top_level_records.take() {
             debug_assert_eq!(
@@ -766,7 +771,6 @@ impl AdditionalLimit {
     /// The write records the frame `start` describes makes, for the opcode about to start it,
     /// which pays for them ([`start_records`](Self::start_records)).
     pub(crate) fn opcode_start_records(&self, start: &FrameStart) -> FrameStartRecords {
-        let transfers_value = !start.value.is_zero();
         match start.kind {
             FrameStartKind::Create | FrameStartKind::Create2 => {
                 self.start_records(start.caller, None, true)
@@ -775,7 +779,7 @@ impl AdditionalLimit {
             FrameStartKind::CallCode |
             FrameStartKind::DelegateCall |
             FrameStartKind::StaticCall => {
-                self.start_records(start.caller, start.target, transfers_value)
+                self.start_records(start.caller, start.target, !start.value.is_zero())
             }
         }
     }

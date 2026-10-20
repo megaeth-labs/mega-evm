@@ -721,7 +721,8 @@ where
             return Ok(ItemOrResult::Result(output));
         }
         if rewriting {
-            // The start the calling opcode paid for may not be the one the inspector lets start.
+            // The start its charge paid for — the calling opcode's, or the transaction's for its
+            // own frame — may not be the one the inspector lets start.
             ctx.additional_limit.waive_start_check();
         }
         let (frame_input, depth) = (frame_init.frame_input.clone(), frame_init.depth);
