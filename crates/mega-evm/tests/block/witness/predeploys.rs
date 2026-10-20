@@ -2,10 +2,7 @@
 //! harness.
 
 use alloy_primitives::{keccak256, Address, Bytes, U256};
-use mega_evm::{
-    system::{system_contract_specs, CREATE2_FACTORY_ADDRESS},
-    PreBlockStateSource,
-};
+use mega_evm::system::{system_contract_specs, CREATE2_FACTORY_ADDRESS};
 use revm::{
     bytecode::opcode::{CODECOPY, PUSH0, RETURN},
     state::Account,
@@ -27,12 +24,12 @@ fn init_code() -> Bytes {
     code.into()
 }
 
-/// The state the activation block's check handed over for the predeploy at `address`.
+/// The state the activation block's check committed for the predeploy at `address`.
 fn check_state(run: &Run, address: Address) -> &Account {
-    let (_, state) = run
+    let state = run
         .pre_block
         .iter()
-        .find(|(source, _)| *source == PreBlockStateSource::SystemContract(address))
+        .find(|state| common::is_predeploy_check(state) && state.contains_key(&address))
         .unwrap_or_else(|| panic!("{address} has a check state"));
     &state[&address]
 }
@@ -59,8 +56,8 @@ fn test_a_deployment_through_the_factory_replays() {
 
 /// Satin's activation block over a chain shaped as Rex6 leaves it replays on both witnesses: it
 /// admits deposits alone, so the deposit runs and the user transaction is refused, and its check
-/// reads the seven predeploys, each with the chain's code hash, loads none of their code, and hands
-/// each over as a read-only entry. The witness built from those entries holds, for every
+/// reads the seven predeploys, each with the chain's code hash, loads none of their code, and
+/// commits each as a read-only entry. The witness built from those entries holds, for every
 /// predeploy, the code the chain held, under its hash: no check loaded it, so it is there because
 /// the account was named, resolved against the chain.
 ///
@@ -112,10 +109,7 @@ fn test_an_activation_block_replays() {
     let replay = Case::new("ordinary block", db).tx(call(0, CONTRACT, slot(2), write_gas())).run();
     let run = &replay.recorded;
     assert!(run.tx(0).result.is_success(), "{:?}", run.tx(0).result);
-    assert!(run
-        .pre_block
-        .iter()
-        .all(|(source, _)| !matches!(source, PreBlockStateSource::SystemContract(_))));
+    assert!(!run.pre_block.iter().any(common::is_predeploy_check), "no check state");
     for spec in &system_contract_specs()[1..5] {
         assert!(!run.record.accounts.contains_key(&spec.address), "{} was read", spec.address);
     }

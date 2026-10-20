@@ -11,7 +11,7 @@ use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, ErrorInjectingDatabase, MemoryDatabase},
-    MegaBlockExecutor, MegaEvmFactory, PreBlockStateSource,
+    MegaBlockExecutor, MegaEvmFactory,
 };
 use op_revm::constants::{
     BASE_FEE_SCALAR_OFFSET, BLOB_BASE_FEE_SCALAR_OFFSET, ECOTONE_L1_BLOB_BASE_FEE_SLOT,
@@ -252,12 +252,12 @@ fn chain_with_l1_info(code: Bytes) -> MemoryDatabase {
     db
 }
 
-/// The L1 block info entry of a run's pre-block states: the last state, and the one entry in it.
+/// The L1 block info entry of a run's pre-block states: the last state the pre-block steps
+/// committed, and the one entry in it.
 fn l1_entry(run: &Run) -> &Account {
-    let (source, state) = run.pre_block.last().expect("a pre-block state");
-    assert_eq!(*source, PreBlockStateSource::L1BlockInfo, "the L1 block info is the last state");
+    let state = run.pre_block.last().expect("a pre-block state");
     assert_eq!(state.len(), 1, "the L1 block contract alone");
-    &state[&L1_BLOCK_CONTRACT]
+    state.get(&L1_BLOCK_CONTRACT).expect("the L1 block info is the last state")
 }
 
 /// A deposit minting to a fresh depositor: the depositor's absent account is read (for the

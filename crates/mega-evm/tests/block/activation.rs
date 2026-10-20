@@ -12,8 +12,8 @@ use alloy_hardforks::{EthereumHardfork, ForkCondition};
 use alloy_op_hardforks::OpHardfork;
 use alloy_primitives::{Bytes, U256};
 use mega_evm::{
-    system::SYSTEM_CONTRACT_COUNT, BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutionError,
-    MegaHardfork, MegaHardforkConfig, MegaHardforks, PreBlockStateSource,
+    system::SYSTEM_CONTRACT_COUNT, test_utils::CommittedStates, BlockLimits, MegaBlockExecutionCtx,
+    MegaBlockExecutionError, MegaHardfork, MegaHardforkConfig, MegaHardforks,
 };
 
 use crate::common::{
@@ -187,19 +187,16 @@ fn test_the_activation_rule_follows_the_optimism_fork_order() {
 }
 
 /// The predeploys a node's context has the block check, from its schedule and the parent's
-/// timestamp: how many of the pre-block states are reads of a predeploy.
+/// timestamp: how many of the states the pre-block steps committed are reads of a predeploy.
 fn predeploys_checked(spec: MegaHardforkConfig, parent_timestamp: u64, timestamp: u64) -> usize {
     let mut env = common::evm_env();
     env.block_env.timestamp = U256::from(timestamp);
     let ctx = node_ctx(&spec, parent_timestamp, timestamp);
     let mut state = common::state();
+    let committed = CommittedStates::install(&mut state);
     let mut executor = executor_with_env_and_spec(&mut state, ctx, env, spec);
-    let log = common::record_pre_block(&mut executor);
     executor.apply_pre_execution_changes().expect("the block starts");
-    common::pre_block_states(&log)
-        .iter()
-        .filter(|(source, _)| matches!(source, PreBlockStateSource::SystemContract(_)))
-        .count()
+    committed.states().iter().filter(|state| common::is_predeploy_check(state)).count()
 }
 
 /// [S18] A node's context has the predeploys checked in Satin's activation block and in no other:

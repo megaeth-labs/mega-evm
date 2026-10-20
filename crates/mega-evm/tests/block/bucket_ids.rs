@@ -15,14 +15,12 @@ use alloy_evm::{
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
 use mega_evm::{
-    test_utils::MemoryDatabase, BlockLimits, BucketId, LimitUsage, MegaBlockExecutionCtx,
-    MegaBlockExecutor, MegaEvm, MegaEvmFactory, MegaHardforkConfig, MegaTxEnvelope,
-    PreBlockStateSource, SaltEnv, TestExternalEnvs,
+    test_utils::{CommittedStates, MemoryDatabase},
+    BlockLimits, BucketId, LimitUsage, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvm,
+    MegaEvmFactory, MegaHardforkConfig, MegaTxEnvelope, SaltEnv, TestExternalEnvs,
 };
 use op_alloy_consensus::TxDeposit;
-use revm::{
-    context::ContextTr, database::State, inspector::NoOpInspector, state::EvmState, Database,
-};
+use revm::{context::ContextTr, database::State, inspector::NoOpInspector, Database};
 
 use crate::common::{self, system_tx, CALLER, CONTRACT};
 
@@ -169,6 +167,7 @@ fn test_the_pre_block_calls_and_a_system_transaction_add_no_bucket() {
     );
     db.set_account_code(HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE.clone());
     let mut state = State::builder().with_database(db).build();
+    let committed = CommittedStates::install(&mut state);
     // A non-zero parent hash, so the EIP-2935 call's write changes the ring slot it lands in.
     let evm = MegaEvmFactory::new()
         .with_external_env_factory(envs.clone())
@@ -181,18 +180,10 @@ fn test_the_pre_block_calls_and_a_system_transaction_add_no_bucket() {
     );
     let mut executor =
         MegaBlockExecutor::new(evm, ctx, common::chain_spec(), OpAlloyReceiptBuilder::default());
-    let written = std::sync::Arc::new(std::sync::Mutex::new(false));
-    let seen = std::sync::Arc::clone(&written);
-    executor.set_pre_block_observer(Some(Box::new(
-        move |source: PreBlockStateSource, state: &EvmState| {
-            if source == PreBlockStateSource::Eip2935 {
-                let changed = state[&HISTORY_STORAGE_ADDRESS].changed_storage_slots().count();
-                *seen.lock().expect("pre-block observer") = changed > 0;
-            }
-        },
-    )));
     executor.apply_pre_execution_changes().expect("the block starts");
-    assert!(*written.lock().expect("pre-block observer"), "the EIP-2935 call wrote a slot");
+    let call = common::call_state(&committed.states(), HISTORY_STORAGE_ADDRESS).clone();
+    let changed = call[&HISTORY_STORAGE_ADDRESS].changed_storage_slots().count();
+    assert!(changed > 0, "the EIP-2935 call wrote a slot");
     assert!(executor.get_accessed_bucket_ids().is_empty(), "priced at the minimum bucket");
     let outcome = executor.run_transaction(&system_tx()).expect("it executes");
     assert!(outcome.result.is_success(), "{:?}", outcome.result);

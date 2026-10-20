@@ -38,11 +38,12 @@ use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use mega_evm::{
-    system::MEGA_SYSTEM_ADDRESS,
-    test_utils::{BytecodeBuilder, MemoryDatabase},
+    system::{MEGA_SYSTEM_ADDRESS, SEQUENCER_REGISTRY_ADDRESS},
+    test_utils::{BytecodeBuilder, CommittedStates, MemoryDatabase},
     BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardforkConfig,
-    MegaSpecId, MegaTxEnvelope, PreBlockStateSource,
+    MegaSpecId, MegaTxEnvelope,
 };
+use op_revm::constants::L1_BLOCK_CONTRACT;
 use revm::{
     bytecode::opcode::{CALLDATALOAD, SSTORE},
     context::{BlockEnv, CfgEnv},
@@ -50,10 +51,7 @@ use revm::{
     state::EvmState,
     DatabaseCommit,
 };
-use std::{
-    hint::black_box,
-    sync::{Arc, Mutex},
-};
+use std::hint::black_box;
 
 /// Transactions in the block.
 const N: u64 = 64;
@@ -75,10 +73,6 @@ const PARENT_BEACON_ROOT: B256 = B256::repeat_byte(0xcd);
 const SENDER: Address = address!("0x2000000000000000000000000000000000000002");
 const RECIPIENT: Address = address!("0x3000000000000000000000000000000000000003");
 const WRITER: Address = address!("0x1000000000000000000000000000000000000001");
-
-/// What the pre-block changes of a block handed their observer, in the order the executor
-/// commits them.
-type PreBlockStates = Arc<Mutex<Vec<(PreBlockStateSource, EvmState)>>>;
 
 /// Code that writes 1 to the slot its first calldata word names, so every call that names a slot
 /// of its own changes storage and leaves a write record behind.
@@ -170,25 +164,19 @@ fn chain_spec() -> MegaHardforkConfig {
     MegaHardforkConfig::default().with_all_activated()
 }
 
-/// Runs the pre-block changes of block `number` on `db` and returns what they handed their
-/// observer, without committing anything to `db`.
-fn pre_block_states(db: MemoryDatabase, number: u64) -> Vec<(PreBlockStateSource, EvmState)> {
+/// Runs the pre-block changes of block `number` on a state over `db` and returns what they
+/// committed to it, in order, as a commit hook on the state receives it; `db` itself is not
+/// changed.
+fn pre_block_states(db: MemoryDatabase, number: u64) -> Vec<EvmState> {
     let spec = chain_spec();
     let mut state = State::builder().with_database(db).build();
+    let committed = CommittedStates::install(&mut state);
     let evm = MegaEvmFactory::new().create_evm(&mut state, evm_env_at(number));
     let mut executor =
         MegaBlockExecutor::new(evm, block_ctx(), &spec, OpAlloyReceiptBuilder::default());
-    let log = PreBlockStates::default();
-    let captured = Arc::clone(&log);
-    executor.set_pre_block_observer(Some(Box::new(
-        move |source: PreBlockStateSource, state: &EvmState| {
-            captured.lock().expect("pre-block observer").push((source, state.clone()));
-        },
-    )));
     executor.apply_pre_execution_changes().expect("the pre-block changes apply");
     drop(executor);
-    let states = std::mem::take(&mut *log.lock().expect("pre-block observer"));
-    states
+    committed.states()
 }
 
 /// The database the chain's steady state starts a block from: [`database`] with what the
@@ -196,37 +184,39 @@ fn pre_block_states(db: MemoryDatabase, number: u64) -> Vec<(PreBlockStateSource
 /// them.
 fn steady_database() -> MemoryDatabase {
     let mut db = database();
-    for (_, state) in pre_block_states(db.clone(), BLOCK_NUMBER - 1) {
+    for state in pre_block_states(db.clone(), BLOCK_NUMBER - 1) {
         db.commit(state);
     }
     db
 }
 
 /// Asserts that the pre-block changes of the bench's block on `db` are a steady block's: the two
-/// calls, which write their contracts, and no read of a predeploy, which only Satin's activation
-/// block makes.
+/// calls, which write their contracts, then the reads of the registry's pending changes and of the
+/// L1 block info, and no read of a predeploy, which only Satin's activation block makes. Each step
+/// names one account.
 fn assert_steady_pre_block(db: &MemoryDatabase) {
     let states = pre_block_states(db.clone(), BLOCK_NUMBER);
-    assert!(
-        states.iter().all(|(source, _)| !matches!(source, PreBlockStateSource::SystemContract(_))),
+    let named: Vec<_> = states
+        .iter()
+        .map(|state| {
+            assert_eq!(state.len(), 1, "a pre-block step names one account: {state:?}");
+            *state.keys().next().expect("one account")
+        })
+        .collect();
+    assert_eq!(
+        named,
+        [
+            HISTORY_STORAGE_ADDRESS,
+            BEACON_ROOTS_ADDRESS,
+            SEQUENCER_REGISTRY_ADDRESS,
+            L1_BLOCK_CONTRACT
+        ],
         "a steady block reads no predeploy"
     );
-    assert_eq!(states[0].0, PreBlockStateSource::Eip2935);
-    assert_eq!(states[1].0, PreBlockStateSource::Eip4788);
     // Outside every measured section: both calls wrote the contract the bench seeded.
-    for (source, address) in [
-        (PreBlockStateSource::Eip2935, HISTORY_STORAGE_ADDRESS),
-        (PreBlockStateSource::Eip4788, BEACON_ROOTS_ADDRESS),
-    ] {
-        let (_, call) = states
-            .iter()
-            .find(|(observed, _)| *observed == source)
-            .unwrap_or_else(|| panic!("{source:?} reached the observer"));
-        let writes = call
-            .get(&address)
-            .map(|account| account.storage.values().filter(|slot| slot.is_changed()).count())
-            .unwrap_or(0);
-        assert!(writes > 0, "{source:?} wrote its contract's storage");
+    for (call, address) in states.iter().zip([HISTORY_STORAGE_ADDRESS, BEACON_ROOTS_ADDRESS]) {
+        let writes = call[&address].storage.values().filter(|slot| slot.is_changed()).count();
+        assert!(writes > 0, "the call to {address} wrote its contract's storage");
     }
 }
 

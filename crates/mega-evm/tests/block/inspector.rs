@@ -12,10 +12,10 @@ use alloy_evm::{
 };
 use alloy_primitives::{address, Address, Bytes, B256, U256};
 use mega_evm::{
-    test_utils::{BytecodeBuilder, GasInspector, MemoryDatabase},
+    test_utils::{BytecodeBuilder, CommittedStates, GasInspector, MemoryDatabase},
     transaction_body_bytes, BlockLimits, DeclaredObserver, LimitUsage, MegaBlockExecutionCtx,
     MegaBlockExecutionError, MegaContext, MegaEvmFactory, MegaTransaction, MegaTransactionOutcome,
-    MegaTxEnvelope, PreBlockStateSource,
+    MegaTxEnvelope,
 };
 use revm::{
     bytecode::opcode::{ADD, POP, PUSH0, SLOAD, SSTORE},
@@ -27,13 +27,9 @@ use revm::{
         CallInputs, CallOutcome, FrameInput, Gas, InstructionResult, Interpreter,
         InterpreterResult, InterpreterTypes,
     },
-    state::EvmState,
     Inspector,
 };
-use std::{
-    cell::Cell,
-    sync::{Arc, Mutex},
-};
+use std::cell::Cell;
 
 use crate::common::{self, empty_call_gas, system_tx, user_tx};
 
@@ -254,6 +250,7 @@ fn recording_ctx() -> MegaBlockExecutionCtx {
 #[test]
 fn test_a_declared_observer_sees_the_transactions_of_a_block_and_nothing_else() {
     let mut state = state_with_code();
+    let committed = CommittedStates::install(&mut state);
     let factory = common::factory();
     let mut executor = factory.create_executor_with_trusted_inspector(
         &mut state,
@@ -261,31 +258,20 @@ fn test_a_declared_observer_sees_the_transactions_of_a_block_and_nothing_else() 
         recording_ctx(),
         DeclaredObserver::new(Seen::default()),
     );
-    let pre_block = Arc::new(Mutex::new(Vec::new()));
-    let log = Arc::clone(&pre_block);
-    executor.set_pre_block_observer(Some(Box::new(
-        move |source: PreBlockStateSource, state: &EvmState| {
-            let wrote =
-                state.values().any(|account| account.storage.values().any(|s| s.is_changed()));
-            log.lock().unwrap().push((source, wrote));
-        },
-    )));
 
     executor.apply_pre_execution_changes().expect("a declared observer is admitted");
-    let calls: Vec<_> = pre_block
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|(source, _)| {
-            matches!(source, PreBlockStateSource::Eip2935 | PreBlockStateSource::Eip4788)
-        })
-        .copied()
-        .collect();
+    let states = committed.states();
     assert_eq!(
-        calls,
-        [(PreBlockStateSource::Eip2935, true), (PreBlockStateSource::Eip4788, true)],
-        "both pre-block calls ran and wrote"
+        common::eip_calls(&states),
+        [HISTORY_STORAGE_ADDRESS, BEACON_ROOTS_ADDRESS],
+        "both pre-block calls ran"
     );
+    for target in [HISTORY_STORAGE_ADDRESS, BEACON_ROOTS_ADDRESS] {
+        let wrote = common::call_state(&states, target)
+            .values()
+            .any(|account| account.storage.values().any(|slot| slot.is_changed()));
+        assert!(wrote, "the call to {target} wrote");
+    }
     assert_eq!(executor.evm().inspector().0, Seen::default(), "and the observer saw none of it");
 
     let outcome = executor.run_transaction(&system_tx()).expect("a system transaction");

@@ -5,23 +5,24 @@
 //! that ran Rex6 holds, and is invalid when one of them does not hold the code Satin expects; no
 //! other block reads them, and no block deploys or upgrades them.
 
+use alloy_eips::{eip2935::HISTORY_STORAGE_ADDRESS, eip4788::BEACON_ROOTS_ADDRESS};
 use alloy_evm::block::{BlockExecutionError, BlockExecutor, BlockValidationError};
 use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use mega_evm::{
     system::{
+        storage_slots::{PENDING_SEQUENCER, PENDING_SYSTEM_ADDRESS},
         system_contract_specs, CREATE2_FACTORY_ADDRESS, ORACLE_CONTRACT_ADDRESS,
         SEQUENCER_REGISTRY_ADDRESS,
     },
-    test_utils::{rex6_predeploys, ErrorInjectingDatabase, MemoryDatabase},
-    MegaBlockExecutionCtx, MegaBlockExecutionError, PreBlockStateSource,
+    test_utils::{rex6_predeploys, CommittedStates, ErrorInjectingDatabase, MemoryDatabase},
+    MegaBlockExecutionCtx, MegaBlockExecutionError,
 };
+use op_revm::constants::L1_BLOCK_CONTRACT;
 use revm::{
     context::result::ExecutionResult, database::State, primitives::KECCAK_EMPTY, state::EvmState,
 };
 
-use crate::common::{
-    self, executor, pre_block_states, record_pre_block, recovered, tx, unlimited_ctx,
-};
+use crate::common::{self, executor, named_accounts, recovered, tx, unlimited_ctx};
 
 /// The context of the block in which Satin activates, as a node sets it from the schedule and
 /// the parent's timestamp: deposit-only, and the check of the predeploys.
@@ -29,61 +30,70 @@ fn activation_ctx() -> MegaBlockExecutionCtx {
     unlimited_ctx().with_no_user_tx_activation_block(true).with_satin_activation_block(true)
 }
 
-/// The pre-block states of a block over `state` held to `ctx`.
+/// The states the pre-block steps of a block over `state` held to `ctx` committed, in order, as a
+/// commit hook on `state` receives them.
 fn start(
     state: &mut State<MemoryDatabase>,
     ctx: MegaBlockExecutionCtx,
-) -> Result<Vec<(PreBlockStateSource, EvmState)>, BlockExecutionError> {
+) -> Result<Vec<EvmState>, BlockExecutionError> {
+    let committed = CommittedStates::install(state);
     let mut executor = executor(state, ctx);
-    let log = record_pre_block(&mut executor);
     executor.apply_pre_execution_changes()?;
     assert_eq!(executor.gas().execution, 0);
     assert_eq!(executor.gas().state, 0);
     assert_eq!(executor.gas().history, 0);
-    Ok(pre_block_states(&log))
+    Ok(committed.states())
 }
 
-fn sources(states: &[(PreBlockStateSource, EvmState)]) -> Vec<PreBlockStateSource> {
-    states.iter().map(|(source, _)| *source).collect()
-}
-
-/// The sources of a block's pre-block states: the two EIP calls, in the activation block the
-/// seven predeploys in order, the read of the registry's pending changes, which finds none due on
-/// these blocks, and the read of the L1 block info.
-fn expected_sources(activation: bool) -> Vec<PreBlockStateSource> {
-    let mut expected = vec![PreBlockStateSource::Eip2935, PreBlockStateSource::Eip4788];
+/// The account each pre-block state of a block names, in commit order: the two EIP calls' targets,
+/// in the activation block the seven predeploys in order, the registry, whose pending changes are
+/// read and found none due on these blocks, and the L1 block contract, whose info is read.
+fn expected_accounts(activation: bool) -> Vec<Address> {
+    let mut expected = vec![HISTORY_STORAGE_ADDRESS, BEACON_ROOTS_ADDRESS];
     if activation {
-        expected.extend(
-            system_contract_specs().map(|spec| PreBlockStateSource::SystemContract(spec.address)),
-        );
+        expected.extend(system_contract_specs().map(|spec| spec.address));
     }
-    expected.extend([PreBlockStateSource::PendingChanges, PreBlockStateSource::L1BlockInfo]);
+    expected.extend([SEQUENCER_REGISTRY_ADDRESS, L1_BLOCK_CONTRACT]);
     expected
 }
 
 /// [S18] Satin's activation block over a state shaped as Rex6 leaves it finds every predeploy with
-/// Satin's code: its pre-block states hold the seven accounts, in order, each a read-only entry as
-/// the chain holds it — no write, no created mark, the six at nonce 0 and the factory at its own.
-/// The block after it, on the committed state, reads none of them, and neither block changes one.
+/// Satin's code. Each pre-block step commits a state of its own, and a commit hook receives them in
+/// order, read-only entries included: the two EIP calls, which touch their contracts; the seven
+/// accounts, each a read-only entry as the chain holds it — no write, no created mark, the six at
+/// nonce 0 and the factory at its own; the registry's two pending slots, read only; and the L1
+/// block contract, read only. The block after it, on the committed state, reads none of the
+/// predeploys, and neither block changes one.
 ///
 /// Expected values: independent (the Rex6-shaped accounts the test puts in the state).
 #[test]
 fn test_the_activation_block_reads_the_seven_predeploys_once() {
     let mut state = common::state();
     let activation = start(&mut state, activation_ctx()).expect("the activation block starts");
-    assert_eq!(sources(&activation), expected_sources(true));
+    assert_eq!(named_accounts(&activation), expected_accounts(true));
+    for (call, target) in activation.iter().zip([HISTORY_STORAGE_ADDRESS, BEACON_ROOTS_ADDRESS]) {
+        assert!(call[&target].is_touched(), "the call to {target} touches it");
+    }
     let held = rex6_predeploys(common::registry_roles());
     for (i, (address, info, _)) in held.iter().enumerate() {
-        let entry = &activation[2 + i].1;
-        assert_eq!(entry.len(), 1, "{address} is the only account of its state");
-        let account = &entry[address];
+        let account = &activation[2 + i][address];
         assert!(!account.is_touched() && !account.is_created(), "{address} is read only");
         assert!(account.storage.is_empty(), "{address}: no slot is written");
         assert_eq!((account.info.code_hash, account.info.nonce), (info.code_hash, info.nonce));
     }
+    let registry = &activation[2 + held.len()][&SEQUENCER_REGISTRY_ADDRESS];
+    assert!(!registry.is_touched() && !registry.is_created(), "the registry is read only");
+    assert_eq!(
+        registry.storage.keys().copied().collect::<std::collections::BTreeSet<_>>(),
+        [PENDING_SYSTEM_ADDRESS, PENDING_SEQUENCER].into(),
+        "the read of its pending changes"
+    );
+    assert!(registry.storage.values().all(|slot| !slot.is_changed()));
+    let l1_block = &activation[3 + held.len()][&L1_BLOCK_CONTRACT];
+    assert!(!l1_block.is_touched() && !l1_block.is_created(), "the L1 block info is read only");
 
     let next = start(&mut state, unlimited_ctx()).expect("the next block starts");
-    assert_eq!(sources(&next), expected_sources(false), "no other block reads the predeploys");
+    assert_eq!(named_accounts(&next), expected_accounts(false), "no other block reads them");
     for (address, info, _) in held {
         let now = revm::Database::basic(&mut state, address).unwrap().expect("still there");
         assert_eq!((now.code_hash, now.nonce), (info.code_hash, info.nonce), "{address}");
@@ -124,15 +134,15 @@ fn test_no_other_block_reads_a_predeploy() {
 }
 
 /// The refusal of Satin's activation block over `db`: a verdict on the block, before the refused
-/// predeploy's state reaches the observer, whose last state is the predeploy before it.
+/// predeploy's state is committed, so the last state committed is the predeploy before it.
 fn refused(db: MemoryDatabase, at: Address) -> MegaBlockExecutionError {
     let mut state = State::builder().with_database(db).build();
+    let committed = CommittedStates::install(&mut state);
     let mut executor = executor(&mut state, activation_ctx());
-    let log = record_pre_block(&mut executor);
     let error = executor.apply_pre_execution_changes().expect_err("the block is refused");
-    let delivered = sources(&pre_block_states(&log));
+    let delivered = named_accounts(&committed.states());
     let position = system_contract_specs().iter().position(|spec| spec.address == at).unwrap();
-    assert_eq!(delivered, expected_sources(true)[..2 + position], "refused at {at}");
+    assert_eq!(delivered, expected_accounts(true)[..2 + position], "refused at {at}");
     let Some(BlockValidationError::Other(inner)) = error.as_validation() else {
         panic!("a verdict on the block: {error:?}");
     };

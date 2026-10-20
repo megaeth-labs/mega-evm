@@ -14,11 +14,10 @@ use mega_evm::{
         SEQUENCER_REGISTRY_CODE,
     },
     test_utils::MemoryDatabase,
-    PreBlockStateSource,
 };
 
 use super::harness::{legacy_from, Case};
-use crate::common::{self, BLOCK_NUMBER};
+use crate::common::{self, applies_pending_changes, BLOCK_NUMBER};
 
 /// The system address a pending change rotates to.
 const NEXT_SYSTEM_ADDRESS: Address = address!("0x3000000000000000000000000000000000000003");
@@ -66,10 +65,7 @@ fn test_a_rotation_and_a_system_transaction_replay() {
         .tx(oracle_call_from(MEGA_SYSTEM_ADDRESS))
         .run();
     let run = &replay.recorded;
-    assert!(
-        run.pre_block.iter().any(|(source, _)| *source == PreBlockStateSource::ApplyPendingChanges),
-        "the change was applied"
-    );
+    assert!(applies_pending_changes(&run.pre_block), "the change was applied");
     assert!(run.tx(0).result.is_success(), "{:?}", run.tx(0).result);
     assert_eq!(run.tx(0).gas.history, 0, "the protocol's own transaction pays no history");
     assert!(run.refusal(1).contains("lack of funds"), "{}", run.refusal(1));
@@ -114,8 +110,5 @@ fn test_a_system_transaction_reads_the_live_address_from_the_witness() {
         !run.record.codes.contains_key(&keccak256(SEQUENCER_REGISTRY_CODE)),
         "the registry's code was never loaded"
     );
-    assert!(!run
-        .pre_block
-        .iter()
-        .any(|(source, _)| *source == PreBlockStateSource::ApplyPendingChanges));
+    assert!(!applies_pending_changes(&run.pre_block), "nothing was due");
 }

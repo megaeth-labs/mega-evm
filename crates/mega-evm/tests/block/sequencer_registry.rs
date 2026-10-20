@@ -3,11 +3,11 @@
 //!
 //! The registry the legacy forks left is checked once, by Satin's activation block, which refuses
 //! a chain without it. Before every block's transactions the executor reads whether a role change
-//! is due in the block and, when one is, makes the `applyPendingChanges()` system call. Each step's
-//! state reaches the pre-block observer before it is committed. The executor's pre-block steps do
-//! not read the system address: every transaction reads it out of the registry when it is
-//! validated, so every EVM — the block's, or one a node builds outside block execution — promotes
-//! the address the state names.
+//! is due in the block and, when one is, makes the `applyPendingChanges()` system call. Each step
+//! commits a state of its own, which a commit hook on the block's state receives, the read as a
+//! read-only entry. The executor's pre-block steps do not read the system address: every
+//! transaction reads it out of the registry when it is validated, so every EVM — the block's, or
+//! one a node builds outside block execution — promotes the address the state names.
 
 use alloy_consensus::{transaction::Recovered, Sealed, Signed, TxEip1559};
 use alloy_evm::{block::BlockExecutor, EvmEnv, EvmFactory, ToTxEnv};
@@ -24,10 +24,9 @@ use mega_evm::{
         SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE_HASH,
         SYSTEM_ADDRESS_WITHOUT_SYSTEM_SHAPE,
     },
-    test_utils::{MemoryDatabase, SequencerRegistryRoles},
+    test_utils::{CommittedStates, MemoryDatabase, SequencerRegistryRoles},
     BlockLimits, ExternalEnvFactory, MegaBlockExecutionCtx, MegaBlockExecutor, MegaContext,
-    MegaEvm, MegaEvmFactory, MegaHardforkConfig, MegaTxEnvelope, PreBlockStateSource,
-    TestExternalEnvs, MIN_BUCKET_SIZE,
+    MegaEvm, MegaEvmFactory, MegaHardforkConfig, MegaTxEnvelope, TestExternalEnvs, MIN_BUCKET_SIZE,
 };
 use op_alloy_consensus::TxDeposit;
 use op_revm::OpHaltReason;
@@ -36,7 +35,7 @@ use revm::{
     Database,
 };
 
-use crate::common::{self, pre_block_states, PreBlockLog, BLOCK_NUMBER};
+use crate::common::{self, applies_pending_changes, BLOCK_NUMBER};
 
 /// The outcome of a transaction the tests run.
 type Outcome = mega_evm::MegaBlockTxResult<mega_evm::MegaTxType>;
@@ -120,32 +119,19 @@ fn executor_on(
     MegaBlockExecutor::new(evm, ctx, spec, OpAlloyReceiptBuilder::default())
 }
 
-/// The registry's own steps the observer received, in order: the read of its pending changes and
-/// the call that applies them. The blocks here are not Satin's activation block, so no step
-/// checks the registry's code.
-fn registry_steps(log: &PreBlockLog) -> Vec<(PreBlockStateSource, EvmState)> {
-    pre_block_states(log)
-        .into_iter()
-        .filter(|(source, _)| {
-            matches!(
-                source,
-                PreBlockStateSource::PendingChanges | PreBlockStateSource::ApplyPendingChanges
-            )
-        })
-        .collect()
-}
-
-/// Starts a block at [`BLOCK_NUMBER`] over `state` and answers the registry's steps the observer
-/// received.
-fn start_block(
-    state: &mut State<MemoryDatabase>,
-    envs: Envs,
-    gas_limit: u64,
-) -> Vec<(PreBlockStateSource, EvmState)> {
+/// Starts a block at [`BLOCK_NUMBER`] over `state` and answers the registry's own steps, the
+/// committed states that name it, in order: the read of its pending changes and the call that
+/// applies them. The blocks here are not Satin's activation block, so no step checks the
+/// registry's code.
+fn start_block(state: &mut State<MemoryDatabase>, envs: Envs, gas_limit: u64) -> Vec<EvmState> {
+    let committed = CommittedStates::install(state);
     let mut executor = executor(state, envs, gas_limit);
-    let log = common::record_pre_block(&mut executor);
     executor.apply_pre_execution_changes().expect("the block starts");
-    registry_steps(&log)
+    committed
+        .states()
+        .into_iter()
+        .filter(|state| state.contains_key(&SEQUENCER_REGISTRY_ADDRESS))
+        .collect()
 }
 
 /// The registry's `slot`, as the block left it.
@@ -153,14 +139,10 @@ fn slot(state: &mut State<MemoryDatabase>, slot: U256) -> U256 {
     state.storage(SEQUENCER_REGISTRY_ADDRESS, slot).expect("the registry is readable")
 }
 
-fn sources(steps: &[(PreBlockStateSource, EvmState)]) -> Vec<PreBlockStateSource> {
-    steps.iter().map(|(source, _)| *source).collect()
-}
-
 /// A system-address change due in this block is applied before the block's transactions, in a
 /// block whose every bucket is crowded: the call is the protocol's own, priced at the minimum
-/// bucket, so the crowding neither halts it nor makes it read a capacity. The observer receives
-/// the read that found the change due, then the call's state.
+/// bucket, so the crowding neither halts it nor makes it read a capacity. The block commits the
+/// read that found the change due, then the call's state.
 #[test]
 fn test_a_due_change_is_applied_under_a_crowded_bucket() {
     let envs = envs_at(CROWDED);
@@ -168,24 +150,23 @@ fn test_a_due_change_is_applied_under_a_crowded_bucket() {
         State::builder().with_database(registry_with(&system_address_change(BLOCK_NUMBER))).build();
     let steps = start_block(&mut state, envs.clone(), LARGE_BLOCK_GAS_LIMIT);
 
-    assert_eq!(
-        sources(&steps),
-        [PreBlockStateSource::PendingChanges, PreBlockStateSource::ApplyPendingChanges]
-    );
+    assert_eq!(steps.len(), 2, "the read and the call");
+    assert!(!applies_pending_changes(&steps[..1]), "the read leaves the registry untouched");
+    assert!(applies_pending_changes(&steps[1..]), "the call touches it");
     assert_eq!(envs.total_bucket_queries(), 0, "no pre-block step read a capacity");
     assert_eq!(slot(&mut state, CURRENT_SYSTEM_ADDRESS), common::word(NEXT_SYSTEM_ADDRESS));
     assert_eq!(slot(&mut state, PENDING_SYSTEM_ADDRESS), U256::ZERO, "the pending slot is cleared");
     assert_eq!(slot(&mut state, SYSTEM_ADDRESS_ACTIVATION_BLOCK), U256::ZERO);
 }
 
-/// A block with nothing due makes no call: the observer receives the read that found nothing
-/// due, both pending slots and nothing else, read-only.
+/// A block with nothing due makes no call: the block commits the read that found nothing due,
+/// both pending slots and nothing else, read-only.
 #[test]
 fn test_a_block_with_nothing_due_makes_no_call() {
     let mut state = State::builder().with_database(registry_with(&[])).build();
     let steps = start_block(&mut state, envs_at(1), common::BLOCK_GAS_LIMIT);
-    assert_eq!(sources(&steps), [PreBlockStateSource::PendingChanges]);
-    let registry = &steps[0].1[&SEQUENCER_REGISTRY_ADDRESS];
+    assert_eq!(steps.len(), 1, "the read alone");
+    let registry = &steps[0][&SEQUENCER_REGISTRY_ADDRESS];
     assert!(!registry.is_touched(), "a read-only entry");
     assert_eq!(registry.storage.len(), 2);
     assert!(registry.storage.contains_key(&PENDING_SYSTEM_ADDRESS));
@@ -198,7 +179,7 @@ fn test_a_change_not_yet_due_makes_no_call() {
     let db = registry_with(&system_address_change(BLOCK_NUMBER + 1));
     let mut state = State::builder().with_database(db).build();
     let steps = start_block(&mut state, envs_at(1), common::BLOCK_GAS_LIMIT);
-    assert!(!sources(&steps).contains(&PreBlockStateSource::ApplyPendingChanges));
+    assert!(!applies_pending_changes(&steps));
     assert_eq!(slot(&mut state, CURRENT_SYSTEM_ADDRESS), common::word(MEGA_SYSTEM_ADDRESS));
     assert_eq!(slot(&mut state, PENDING_SYSTEM_ADDRESS), common::word(NEXT_SYSTEM_ADDRESS));
 }
@@ -210,7 +191,7 @@ fn test_a_due_sequencer_change_is_applied() {
     let mut state =
         State::builder().with_database(registry_with(&sequencer_change(BLOCK_NUMBER))).build();
     let steps = start_block(&mut state, envs_at(1), common::BLOCK_GAS_LIMIT);
-    assert!(sources(&steps).contains(&PreBlockStateSource::ApplyPendingChanges));
+    assert!(applies_pending_changes(&steps));
     assert_eq!(slot(&mut state, CURRENT_SEQUENCER), common::word(NEXT_SEQUENCER));
     assert_eq!(slot(&mut state, PENDING_SEQUENCER), U256::ZERO);
     assert_eq!(slot(&mut state, SEQUENCER_ACTIVATION_BLOCK), U256::ZERO);
@@ -299,14 +280,14 @@ fn assert_carries_the_system_address_read(state: &EvmState, system_address: Addr
 #[test]
 fn test_the_slot_is_in_the_system_transactions_state_not_the_pre_block_witness() {
     let mut state = State::builder().with_database(registry_with(&[])).build();
+    let committed = CommittedStates::install(&mut state);
     let mut executor = executor(&mut state, envs_at(1), common::BLOCK_GAS_LIMIT);
-    let log = common::record_pre_block(&mut executor);
     executor.apply_pre_execution_changes().expect("the block starts");
-    for (source, state) in pre_block_states(&log) {
+    for (step, state) in committed.states().iter().enumerate() {
         let slot = state
             .get(&SEQUENCER_REGISTRY_ADDRESS)
             .and_then(|registry| registry.storage.get(&CURRENT_SYSTEM_ADDRESS));
-        assert!(slot.is_none(), "{source:?} carries the system address's slot");
+        assert!(slot.is_none(), "pre-block step {step} carries the system address's slot");
     }
 
     let outcome = assert_is_the_system_address(&mut executor, MEGA_SYSTEM_ADDRESS);

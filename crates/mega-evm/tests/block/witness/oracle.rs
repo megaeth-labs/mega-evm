@@ -17,7 +17,7 @@ use mega_evm::{
         ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE,
     },
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    MegaHaltReason, OracleRead, PreBlockStateSource,
+    MegaHaltReason, OracleRead,
 };
 use revm::{
     bytecode::opcode::{CALL, GAS, INVALID, MLOAD, POP, PUSH0, SSTORE},
@@ -437,11 +437,7 @@ fn test_a_pre_block_oracle_read_takes_chain_storage_and_replays() {
     let replay = case().run();
     let run = &replay.recorded;
 
-    let (_, state) = run
-        .pre_block
-        .iter()
-        .find(|(source, _)| *source == PreBlockStateSource::Eip2935)
-        .expect("the EIP-2935 call ran");
+    let state = common::call_state(&run.pre_block, HISTORY_STORAGE_ADDRESS);
     let stored =
         state.get(&HISTORY_STORAGE_ADDRESS).expect("the contract wrote").storage.get(&U256::ZERO);
     assert_eq!(

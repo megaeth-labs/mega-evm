@@ -4,9 +4,10 @@
 //! witness a node builds from its channels — and every replay must produce the block the
 //! recording produced.
 //!
-//! The channel witness is the check a validator's witness must pass: its keys are what the
-//! pre-block states and the included transactions' returned states name, its values the chain's,
-//! its block hashes and buckets the engine's exports, and its oracle answers the included
+//! The channel witness is the check a validator's witness must pass: its keys are what the states
+//! the block committed name — the pre-block steps', read-only entries included, and the included
+//! transactions' — as a node's commit hook on the block's `State` receives them, its values the
+//! chain's, its block hashes and buckets the engine's exports, and its oracle answers the included
 //! transactions' own records. The database-level replay is a different check: that the block
 //! reads nothing outside its database and environments and computes the same block twice. Both
 //! replays run the transactions the recorded block included, and only those: a candidate the
@@ -24,13 +25,13 @@ use alloy_op_evm::block::receipt_builder::{OpAlloyReceiptBuilder, OpReceiptBuild
 use alloy_primitives::{Address, Bytes, Signature, TxKind, B256, U256};
 use mega_evm::{
     test_utils::{
-        MemoryDatabase, RecordingDatabase, RecordingEnvFactory, SharedWitnessRecord,
-        StrictDatabase, StrictEnvFactory, WitnessKeys, WitnessRecord,
+        CommittedStates, MemoryDatabase, RecordingDatabase, RecordingEnvFactory,
+        SharedWitnessRecord, StrictDatabase, StrictEnvFactory, WitnessKeys, WitnessRecord,
     },
     BlockGasCounters, BucketId, ExternalEnvFactory, LimitCheck, LimitUsage, MegaBlockExecutionCtx,
     MegaBlockExecutor, MegaEvmFactory, MegaGasUsage, MegaHaltReason, MegaHardforkConfig,
-    MegaSpecId, MegaTxEnvelope, OracleRead, PreBlockStateSource, ProtocolLimits, SaltEnv,
-    TestExternalEnvs, MIN_BUCKET_SIZE,
+    MegaSpecId, MegaTxEnvelope, OracleRead, ProtocolLimits, SaltEnv, TestExternalEnvs,
+    MIN_BUCKET_SIZE,
 };
 use op_alloy_consensus::TxDeposit;
 use revm::{
@@ -208,10 +209,10 @@ impl Case {
         run
     }
 
-    /// The witness a node builds from `recorded`'s channels: the keys its pre-block states and
-    /// included transactions' states name, resolved against the case's pre-state; the exported
-    /// block hashes; the exported buckets with the capacities the case's environments hold; and
-    /// the included transactions' own oracle reads, in block order.
+    /// The witness a node builds from `recorded`'s channels: the keys the states it committed
+    /// name, resolved against the case's pre-state; the exported block hashes; the exported
+    /// buckets with the capacities the case's environments hold; and the included transactions'
+    /// own oracle reads, in block order.
     pub(crate) fn channel_witness(&self, recorded: &Run) -> WitnessRecord {
         let buckets = recorded
             .bucket_ids
@@ -235,10 +236,11 @@ impl Case {
 
     /// Records the block, replays its included transactions on the record of every database
     /// read and on the channel witness, against the included transactions' recorded oracle
-    /// answers, and asserts every replay produced the block the recording produced; that the
-    /// engine's oracle records are the service's own view of the block; and that the executor's
-    /// exports are the recorded side-channel reads, a bucket only where the environment answered
-    /// it with a valid capacity.
+    /// answers, and asserts every replay produced the block the recording produced; that each run
+    /// committed its pre-block states, then its included transactions' states; that the engine's
+    /// oracle records are the service's own view of the block; and that the executor's exports
+    /// are the recorded side-channel reads, a bucket only where the environment answered it with
+    /// a valid capacity.
     ///
     /// A replay that asks for a key its witness does not hold is refused the read, and the
     /// transaction or the block that asked fails with it, so the comparison with the recording is
@@ -247,6 +249,7 @@ impl Case {
     pub(crate) fn run(self) -> Replay {
         let recorded = self.record();
         let included = recorded.included();
+        assert_commits_the_block(&self.name, &recorded);
 
         let mut record = recorded.record.clone();
         record.oracle_reads = recorded.included_oracle_reads();
@@ -258,6 +261,8 @@ impl Case {
         let name = format!("{} (channel witness)", self.name);
         assert_same_run(&name, &recorded, &channel);
         assert!(channel.oracle_replayed_exactly, "{name}: the oracle reads were replayed");
+        assert_commits_the_block(&format!("{} (replay)", self.name), &replayed);
+        assert_commits_the_block(&name, &channel);
 
         assert_eq!(
             recorded.executed_oracle_reads, recorded.record.oracle_reads,
@@ -302,6 +307,7 @@ impl Case {
         DB: Database<Error: core::error::Error + Send + Sync + 'static> + Debug,
         F: ExternalEnvFactory,
     {
+        let committed = CommittedStates::install(&mut state);
         let evm = MegaEvmFactory::new()
             .with_external_env_factory(factory)
             .create_evm(&mut state, self.env.clone());
@@ -314,13 +320,8 @@ impl Case {
         if let Some(limits) = self.limits {
             executor = executor.with_protocol_limits(limits);
         }
-        let log = record_pre_block_generic(&mut executor);
         executor.apply_pre_execution_changes().expect("the block starts");
-        let pre_block = log.lock().expect("pre-block observer").clone();
-        let mut keys = WitnessKeys::default();
-        for (_, state) in &pre_block {
-            keys.add_state(state);
-        }
+        let pre_block = committed.states();
         let mut txs = Vec::new();
         let mut executed_oracle_reads = Vec::new();
         for (index, tx) in self.txs.iter().enumerate() {
@@ -358,10 +359,7 @@ impl Case {
                 oracle_reads: outcome.inner.oracle_reads.clone(),
             };
             match executor.commit_transaction_outcome(outcome) {
-                Ok(_) => {
-                    keys.add_state(&snapshot.state);
-                    txs.push(Ok(snapshot));
-                }
+                Ok(_) => txs.push(Ok(snapshot)),
                 Err(error) => txs.push(Err(error.to_string())),
             }
         }
@@ -370,8 +368,14 @@ impl Case {
         let (evm, result) = executor.finish_with_counters().expect("the block finishes");
         drop(evm);
         state.merge_transitions(BundleRetention::Reverts);
+        let committed = committed.states();
+        let mut keys = WitnessKeys::default();
+        for state in &committed {
+            keys.add_state(state);
+        }
         Run {
             pre_block,
+            committed,
             txs,
             receipts: result.inner.receipts,
             gas_used: result.inner.gas_used,
@@ -388,23 +392,6 @@ impl Case {
             oracle_replayed_exactly: true,
         }
     }
-}
-
-/// Installs a recording pre-block observer on any executor and returns its log.
-fn record_pre_block_generic<E, R, Spec>(
-    executor: &mut MegaBlockExecutor<E, R, Spec>,
-) -> common::PreBlockLog
-where
-    R: OpReceiptBuilder,
-{
-    let log = common::PreBlockLog::default();
-    let captured = std::sync::Arc::clone(&log);
-    executor.set_pre_block_observer(Some(Box::new(
-        move |source: PreBlockStateSource, state: &EvmState| {
-            captured.lock().expect("pre-block observer").push((source, state.clone()));
-        },
-    )));
-    log
 }
 
 /// What one transaction of a run produced.
@@ -429,8 +416,10 @@ pub(crate) struct TxSnapshot {
 /// What one run of a block produced, and what it read.
 #[derive(Clone, Debug)]
 pub(crate) struct Run {
-    /// The pre-block states the observer received, in order.
-    pub pre_block: Vec<(PreBlockStateSource, EvmState)>,
+    /// The states the pre-block steps committed, in order.
+    pub pre_block: Vec<EvmState>,
+    /// Every state the block committed, in order, as a node's commit hook receives them.
+    pub committed: Vec<EvmState>,
     /// Each candidate's outcome when the block includes it, or why it does not: the refusal the
     /// block answered it with, that the builder dropped it, or that a replay did not run it.
     pub txs: Vec<Result<TxSnapshot, String>>,
@@ -446,8 +435,8 @@ pub(crate) struct Run {
     /// What the executor exported.
     pub block_hashes: BTreeMap<u64, B256>,
     pub bucket_ids: Vec<BucketId>,
-    /// The keys the pre-block states and the included transactions' states name: a node's
-    /// channel witness, before its values are resolved.
+    /// The keys the committed states name: a node's channel witness, before its values are
+    /// resolved.
     pub keys: WitnessKeys,
     /// The oracle reads every executed candidate recorded, dropped ones included, in execution
     /// order: what the service saw.
@@ -556,6 +545,16 @@ pub(crate) fn assert_same_run(name: &str, a: &Run, b: &Run) {
             "{name}: the replay exported a bucket the recording did not"
         );
     }
+}
+
+/// Asserts what the run `a` committed, in order, is the block: its pre-block states, then each
+/// included transaction's returned state, then the end of the block, whose balance increments
+/// name no account on this chain.
+fn assert_commits_the_block(name: &str, a: &Run) {
+    let mut expected = a.pre_block.clone();
+    expected.extend(a.included_outcomes().into_iter().map(|tx| tx.state.clone()));
+    expected.push(EvmState::default());
+    assert_eq!(a.committed, expected, "{name}: the committed states");
 }
 
 /// Asserts a replay differs from its recording somewhere in what the block produced: an included

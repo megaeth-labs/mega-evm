@@ -6,16 +6,20 @@
 //! writes them. Satin activates at genesis, so no block of these tests is its activation block.
 
 use alloy_consensus::{transaction::Recovered, Sealed, Signed, TxLegacy};
+use alloy_eips::{eip2935::HISTORY_STORAGE_ADDRESS, eip4788::BEACON_ROOTS_ADDRESS};
 use alloy_evm::{EvmEnv, EvmFactory};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
-    system::{IOracle, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS},
+    system::{
+        system_contract_specs, IOracle, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
+        SEQUENCER_REGISTRY_ADDRESS,
+    },
     test_utils::{BytecodeBuilder, MemoryDatabase, SequencerRegistryRoles},
     BlockLimits, EmptyExternalEnv, EvmTxRuntimeLimits, MegaBlockExecutionCtx, MegaBlockExecutor,
     MegaBlockExecutorFactory, MegaEvm, MegaEvmFactory, MegaHardforkConfig, MegaSpecId,
-    MegaTxEnvelope, PreBlockStateSource, ProtocolLimits,
+    MegaTxEnvelope, ProtocolLimits,
 };
 use op_alloy_consensus::TxDeposit;
 use revm::{
@@ -25,7 +29,6 @@ use revm::{
     inspector::NoOpInspector,
     state::EvmState,
 };
-use std::sync::{Arc, Mutex};
 
 /// The sender every test transaction comes from.
 pub(crate) const CALLER: Address = address!("0x2000000000000000000000000000000000000002");
@@ -224,29 +227,68 @@ fn build(
     MegaBlockExecutor::new(evm, ctx, spec, OpAlloyReceiptBuilder::default())
 }
 
-/// Shared log of pre-block states an executor observer records.
-pub(crate) type PreBlockLog = Arc<Mutex<Vec<(PreBlockStateSource, EvmState)>>>;
-
-/// Installs a recording observer on `executor` and returns the log it writes.
-pub(crate) fn record_pre_block<E, R, Spec>(
-    executor: &mut MegaBlockExecutor<E, R, Spec>,
-) -> PreBlockLog
-where
-    R: alloy_op_evm::block::receipt_builder::OpReceiptBuilder,
-{
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let captured = Arc::clone(&log);
-    executor.set_pre_block_observer(Some(Box::new(
-        move |source: PreBlockStateSource, state: &EvmState| {
-            captured.lock().expect("pre-block observer").push((source, state.clone()));
-        },
-    )));
-    log
+/// The one account each of `states` names, in commit order: what each pre-block step committed
+/// is about. A pre-block call names its target, the activation block's check the predeploy it
+/// read, the read of the registry's pending changes and the call that applies them the registry,
+/// and the read of the L1 block info the L1 block contract.
+///
+/// # Panics
+///
+/// On a state that names more than one account, as a pre-block call whose code reaches another
+/// contract does.
+pub(crate) fn named_accounts(states: &[EvmState]) -> Vec<Address> {
+    states
+        .iter()
+        .map(|state| {
+            assert_eq!(state.len(), 1, "a pre-block step names one account: {state:?}");
+            *state.keys().next().expect("one account")
+        })
+        .collect()
 }
 
-/// The states the log holds, in execution order.
-pub(crate) fn pre_block_states(log: &PreBlockLog) -> Vec<(PreBlockStateSource, EvmState)> {
-    log.lock().expect("pre-block observer").clone()
+/// The committed state of the pre-block call to `target` among `states`: the first that names it.
+///
+/// # Panics
+///
+/// When no state names `target`.
+pub(crate) fn call_state(states: &[EvmState], target: Address) -> &EvmState {
+    states
+        .iter()
+        .find(|state| state.contains_key(&target))
+        .unwrap_or_else(|| panic!("no committed state names {target}"))
+}
+
+/// The contracts the EIP-2935 and EIP-4788 calls committed in `states` targeted, in commit order:
+/// a call's state names its target.
+pub(crate) fn eip_calls(states: &[EvmState]) -> Vec<Address> {
+    states
+        .iter()
+        .filter_map(|state| {
+            [HISTORY_STORAGE_ADDRESS, BEACON_ROOTS_ADDRESS]
+                .into_iter()
+                .find(|target| state.contains_key(target))
+        })
+        .collect()
+}
+
+/// Whether `state` is the activation block's check of a predeploy: one of the seven accounts
+/// alone, read only, with no slot. The read of the registry's pending changes names the registry
+/// alone too, with the slots it read.
+pub(crate) fn is_predeploy_check(state: &EvmState) -> bool {
+    state.len() == 1 &&
+        system_contract_specs().iter().any(|spec| {
+            state.get(&spec.address).is_some_and(|account| {
+                !account.is_touched() && !account.is_created() && account.storage.is_empty()
+            })
+        })
+}
+
+/// Whether one of `states` is the `applyPendingChanges()` call: a state that touched the
+/// registry. The read of its pending changes leaves the registry untouched.
+pub(crate) fn applies_pending_changes(states: &[EvmState]) -> bool {
+    states.iter().any(|state| {
+        state.get(&SEQUENCER_REGISTRY_ADDRESS).is_some_and(|registry| registry.is_touched())
+    })
 }
 
 /// The history gas the body of a legacy transaction carrying `calldata_len` bytes of calldata
