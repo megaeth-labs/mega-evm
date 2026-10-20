@@ -280,6 +280,76 @@ fn test_a_value_call_to_a_precompile_after_a_read_keeps_the_log_it_counted() {
     }
 }
 
+/// A contract that copies its calldata into memory, then, after `first`, calls `to` with it,
+/// [`VALUE`] and all its gas, and returns what the call returned or reverted with.
+fn calls_with_value_returning(first: u8, to: Address) -> Bytes {
+    op(BytecodeBuilder::default(), first)
+        .append_many([CALLDATASIZE, PUSH0, PUSH0, CALLDATACOPY])
+        .append_many([PUSH0, PUSH0, CALLDATASIZE, PUSH0])
+        .push_number(VALUE)
+        .push_address(to)
+        .append_many([GAS, CALL, POP])
+        .return_returndata()
+        .build()
+}
+
+/// A value call to modexp after a read, priced past the allowance and within the forward, is
+/// answered without running with gas detention's stop — unless the start it would have made
+/// crosses the data size first. The start's records, modexp's and the caller's, and the transfer
+/// log of the value it would move are held to the transaction's limit and to the budget its frame
+/// would get before detention classifies the answer, so data size wins over compute at one start.
+///
+/// Under a transaction limit, or a frame cap, that leaves the start one byte short of its records
+/// and its log — which the records alone fit, so the log is what crosses — the call is answered
+/// with the data-size stop, naming the limit crossed. With room for the start in its frame's share,
+/// it is answered with the compute stop. Nothing moves either way, and the transaction keeps its
+/// body alone.
+#[test]
+fn test_a_start_crossing_data_size_and_compute_at_once_is_the_data_size_stop() {
+    use alloy_sol_types::SolError;
+    use mega_evm::{LimitKind, MegaLimitExceeded};
+    let above = costly_modexp_input(64, 0);
+    let start = 2 * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE;
+    let share = |cap: u64| crate::common::share(cap);
+    let cap = (start..).find(|cap| share(*cap) == start - 1).expect("a cap whose share is short");
+    let room = (start..).find(|room| share(*room) == start).expect("a room whose share fits");
+    for gas_limit in TIERS {
+        let tx = tx_to(CALLER, CONTRACT, &above, 0, gas_limit);
+        let body = transaction_body_bytes(&tx);
+        let limits = EvmTxRuntimeLimits::default();
+        let rows = [
+            (
+                "the transaction's limit",
+                limits.with_tx_data_size_limit(body + start - 1),
+                Some(body + start - 1),
+            ),
+            ("the frame cap", limits.with_frame_data_size_limit(cap), Some(start - 1)),
+            ("room for the start", limits.with_tx_data_size_limit(body + room), None),
+            ("room under the frame cap", limits.with_frame_data_size_limit(cap + 1), None),
+        ];
+        for (case, limits, data_size) in rows {
+            let db = accounts(calls_with_value_returning(TIMESTAMP, MODEXP), VALUE);
+            let (run, _) = run_tx(db, tx.clone(), limits, false);
+            assert!(run.outcome.result.is_success(), "{case}: {:?}", run.outcome.result);
+            let stop = match data_size {
+                Some(limit) => MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit },
+                None => MegaLimitExceeded {
+                    kind: LimitKind::ComputeGas.as_u8(),
+                    limit: run.limit.expect("the read set a limit"),
+                },
+            };
+            assert_eq!(
+                run.outcome.result.output(),
+                Some(&Bytes::from(stop.abi_encode())),
+                "{case}: the call's answer"
+            );
+            assert_eq!(balance(&run, MODEXP), U256::ZERO, "{case}: nothing moved");
+            let body_alone = LimitUsage { data_size: body, write_records: 0 };
+            assert_eq!(run.outcome.usage, body_alone, "{case}");
+        }
+    }
+}
+
 /* ---------- a value call its caller cannot fund ---------- */
 
 /// A value call its caller cannot fund, after a read: revm refuses it on the caller's account

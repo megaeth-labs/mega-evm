@@ -1059,6 +1059,131 @@ fn test_a_deposit_its_depositor_cannot_fund_fails_as_without_a_limit() {
     }
 }
 
+/// A value call whose recipient cannot hold the value — its balance would overflow — is refused by
+/// revm with `OverflowPayment` before it journals the move: no transfer log, no record, and the
+/// history the actor paid for the records at its opcode comes back with the refusal. A limit one
+/// byte short of the start's bytes changes nothing: nothing was counted.
+#[test]
+fn test_a_value_call_its_recipient_cannot_hold_keeps_nothing() {
+    let actor = BytecodeBuilder::default().call(PAYEE, U256::from(VALUE)).return_top().build();
+    let db = || {
+        MemoryDatabase::default()
+            .account_balance(ACTOR, U256::from(VALUE))
+            .account_balance(PAYEE, U256::MAX)
+            .account_code(ACTOR, actor.clone())
+    };
+    for gas_limit in GAS_LIMITS {
+        let tx = OpTx(op_transaction(TxEnv {
+            caller: CALLER,
+            kind: TxKind::Call(ACTOR),
+            gas_limit,
+            ..Default::default()
+        }));
+        let body = transaction_body_bytes(&tx);
+        let start = 2 * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE;
+        for limits in [
+            EvmTxRuntimeLimits::no_limits(),
+            EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(body + start - 1),
+        ] {
+            let outcome = execute_under(db(), tx.clone(), limits);
+            assert!(outcome.result.is_success(), "{limits:?}: {:?}", outcome.result);
+            assert_eq!(outcome.result.output(), Some(&Bytes::from(vec![0; 32])), "the call failed");
+            assert!(outcome.result.logs().is_empty(), "{limits:?}: no transfer log");
+            assert_eq!(outcome.usage, LimitUsage { data_size: body, write_records: 0 });
+            assert_eq!(
+                outcome.gas.history,
+                history_gas(body).unwrap(),
+                "the records' charge came back"
+            );
+        }
+    }
+}
+
+/// A value call to a precompile that fails after its gas check — the BN254 pairing given an input
+/// of the wrong length — moved its value and journaled its transfer log before the precompile ran,
+/// and revm takes both back with the failure. The start is held to the limits as revm made it, on
+/// the records and the log it counted before the failure took them back: under a limit one byte
+/// short of them the call is answered with the stop rather than the failure, and either way the
+/// transaction keeps its body alone.
+#[test]
+fn test_a_failed_precompiles_start_is_held_to_the_limits_it_counted_against() {
+    const EC_PAIRING: Address = address!("0000000000000000000000000000000000000008");
+    let actor = BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0])
+        .push_number(1_u8)
+        .append(PUSH0)
+        .push_number(VALUE)
+        .push_address(EC_PAIRING)
+        .append_many([GAS, CALL, POP])
+        .return_returndata()
+        .build();
+    let db = || {
+        MemoryDatabase::default()
+            .account_balance(ACTOR, U256::from(VALUE))
+            .account_code(ACTOR, actor.clone())
+    };
+    let tx = OpTx(op_transaction(TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(ACTOR),
+        gas_limit: 20_000_000,
+        ..Default::default()
+    }));
+    let body = transaction_body_bytes(&tx);
+    let start = 2 * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE;
+
+    let failed = execute_under(db(), tx.clone(), EvmTxRuntimeLimits::no_limits());
+    assert!(failed.result.is_success(), "{:?}", failed.result);
+    assert_eq!(failed.result.output(), Some(&Bytes::new()), "the precompile's failure");
+    assert!(failed.result.logs().is_empty(), "the failure took the transfer log back");
+    assert_eq!(failed.usage, LimitUsage { data_size: body, write_records: 0 });
+
+    let limit = body + start - 1;
+    let stopped =
+        execute_under(db(), tx, EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit));
+    let stop = MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit };
+    assert_eq!(stopped.result.output(), Some(&Bytes::from(stop.abi_encode())), "the stop");
+    assert!(stopped.result.logs().is_empty());
+    assert_eq!(stopped.usage, LimitUsage { data_size: body, write_records: 0 });
+}
+
+/// A `CREATE` from a contract whose nonce cannot be bumped is answered by revm without bumping it:
+/// no account, no record, no log, and the history the creator paid at its opcode for the two
+/// records comes back. A limit one byte short of the start's bytes changes nothing.
+#[test]
+fn test_a_nested_creation_whose_nonce_cannot_be_bumped_keeps_nothing() {
+    let actor = BytecodeBuilder::default().create(U256::from(1), [STOP]).return_top().build();
+    let db = || {
+        MemoryDatabase::default()
+            .account_balance(ACTOR, U256::from(VALUE))
+            .account_nonce(ACTOR, u64::MAX)
+            .account_code(ACTOR, actor.clone())
+    };
+    let tx = OpTx(op_transaction(TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(ACTOR),
+        gas_limit: 20_000_000,
+        ..Default::default()
+    }));
+    let body = transaction_body_bytes(&tx);
+    let start = 2 * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE;
+    for limits in [
+        EvmTxRuntimeLimits::no_limits(),
+        EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(body + start - 1),
+    ] {
+        let outcome = execute_under(db(), tx.clone(), limits);
+        assert!(outcome.result.is_success(), "{limits:?}: {:?}", outcome.result);
+        assert_eq!(outcome.result.output(), Some(&Bytes::from(vec![0; 32])), "no address");
+        assert!(outcome.result.logs().is_empty(), "{limits:?}");
+        assert_eq!(outcome.usage, LimitUsage { data_size: body, write_records: 0 });
+        assert_eq!(outcome.state[&ACTOR].info.nonce, u64::MAX, "{limits:?}: not bumped");
+        assert_eq!(
+            outcome.gas.history,
+            history_gas(body).unwrap(),
+            "the records' charge came back"
+        );
+    }
+}
+
 /// A creation from an account whose nonce cannot be bumped is answered by revm with a success
 /// that creates nothing and moves nothing: a `Return` with no address, and no log. It keeps
 /// nothing either, and no limit stops it for what it did not do.

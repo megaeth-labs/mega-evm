@@ -23,8 +23,8 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{
-        CALL, CALLDATASIZE, CREATE, GAS, INVALID, JUMPDEST, JUMPI, LOG2, POP, PUSH0, PUSH1, RETURN,
-        REVERT, SELFDESTRUCT, SSTORE, STOP,
+        CALL, CALLDATASIZE, CREATE, DELEGATECALL, GAS, INVALID, JUMPDEST, JUMPI, LOG2, POP, PUSH0,
+        PUSH1, RETURN, REVERT, SELFDESTRUCT, SSTORE, STOP,
     },
     interpreter::{interpreter::EthInterpreter, interpreter_types::Jumps, Interpreter},
     Database, Inspector,
@@ -101,6 +101,25 @@ fn test_two_value_calls_record_the_sender_once() {
     );
 }
 
+/// Value transfers to one recipient record it each time, and the sender once: a recipient's record
+/// is the transfer's, not the frame's, so nothing deduplicates it.
+#[test]
+fn test_value_calls_to_one_recipient_record_it_each_time() {
+    let code = (0..3).fold(BytecodeBuilder::default(), |code, _| {
+        append_value_call(code, CONTRACT, 1).append(POP)
+    });
+    let (result, usage) = run(
+        funded().account_code(CALLEE, code.append(STOP).build()),
+        call(CALLER, CALLEE, U256::ZERO, gas_limit()),
+    );
+    assert!(result.result.is_success());
+    assert_eq!(
+        usage,
+        with_extra(records(4), 3 * TRANSFER_LOG_SIZE),
+        "CALLEE once, CONTRACT three times, and a transfer log for each transfer"
+    );
+}
+
 /// A creation and a value transfer from one frame record the frame's account once.
 #[test]
 fn test_create_then_call_record_the_frame_account_once() {
@@ -170,6 +189,43 @@ fn test_failed_first_child_lets_the_next_transfer_record_the_sender() {
         with_extra(records(2), TRANSFER_LOG_SIZE),
         "CALLEE and CONTRACT2 and the transfer log, from the second transfer"
     );
+}
+
+/// A library a `DELEGATECALL` runs as its caller: a value transfer to [`CONTRACT`], then a revert
+/// when `fails`.
+fn library_transferring(fails: bool) -> Bytes {
+    let code = append_value_call(BytecodeBuilder::default(), CONTRACT, 1).append(POP);
+    if fails {
+        code.append_many([PUSH0, PUSH0, REVERT]).build()
+    } else {
+        code.append(STOP).build()
+    }
+}
+
+/// A `DELEGATECALL` runs as its caller, so a value transfer it makes records its caller's account,
+/// and that record follows the delegate's frame: kept and handed to the caller when the delegate
+/// succeeds, so a later transfer from the caller does not record it again; taken back with the
+/// delegate's failure, so the later transfer records it.
+#[test]
+fn test_a_delegates_record_of_its_callers_account_follows_the_delegate() {
+    const LIBRARY: Address = address!("0000000000000000000000000000000000100004");
+    for fails in [false, true] {
+        let code = BytecodeBuilder::default()
+            .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
+            .push_address(LIBRARY)
+            .append_many([GAS, DELEGATECALL, POP]);
+        let code = append_value_call(code, CONTRACT2, 1).append(POP).append(STOP).build();
+        let db =
+            funded().account_code(CALLEE, code).account_code(LIBRARY, library_transferring(fails));
+        let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, gas_limit()));
+        assert!(result.result.is_success(), "the caller succeeds");
+        let expected = if fails {
+            with_extra(records(2), TRANSFER_LOG_SIZE)
+        } else {
+            with_extra(records(3), 2 * TRANSFER_LOG_SIZE)
+        };
+        assert_eq!(usage, expected, "CALLEE once, then CONTRACT2, and CONTRACT unless it failed");
+    }
 }
 
 const OUTER_CREATOR: Address = address!("000000000000000000000000000000000000C0FF");
