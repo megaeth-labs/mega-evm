@@ -27,8 +27,8 @@ use mega_evm::{
     test_utils::{
         is_transfer_log, note_price_guard, transfer_log, BytecodeBuilder, MemoryDatabase,
     },
-    EvmTxRuntimeLimits, LimitKind, MegaEvm, MegaTransaction, MegaTransactionOutcome,
-    STORAGE_CALL_STIPEND_BYTES, TRANSFER_LOG_SIZE, TX_BODY_SIZE, WRITE_RECORD_SIZE,
+    EvmTxRuntimeLimits, LimitKind, MegaEvm, MegaTransaction, MegaTransactionOutcome, LOG_BASE_SIZE,
+    LOG_TOPIC_SIZE, STORAGE_CALL_STIPEND_BYTES, TRANSFER_LOG_SIZE, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 use revm::bytecode::opcode::{
     ADDRESS, CALL, CALLCODE, CALLDATASIZE, DELEGATECALL, DUP1, GAS, ISZERO, JUMPDEST, JUMPI, LOG3,
@@ -273,6 +273,59 @@ fn test_the_allowance_cannot_be_spent_on_computation() {
         return;
     }
     assert_eq!((allowance(), record_history()), (14_080, 3_520), "160 and 40 bytes at 88 gas");
+}
+
+/// The hook's three-topic event over `len` bytes of memory: `PUSH1 3; PUSH1 2; PUSH1 1; PUSH2 len;
+/// PUSH0; LOG3; STOP`.
+fn event_over(len: u16) -> Bytes {
+    let [high, low] = len.to_be_bytes();
+    Bytes::from(vec![PUSH1, 3, PUSH1, 2, PUSH1, 1, PUSH2, high, low, PUSH0, LOG3, STOP])
+}
+
+/// What [`event_over`] computes, by hand from the opcode prices: the four pushes, 3 each, and
+/// `PUSH0`, 2; `LOG3`'s 375, 375 a topic and 8 a byte of data; and the memory it expands, 3 a word
+/// and the square of the words over 512.
+const fn event_over_gas(len: u64) -> u64 {
+    let words = len.div_ceil(32);
+    4 * 3 + 2 + 375 + 3 * 375 + 8 * len + 3 * words + words * words / 512
+}
+
+/// An event larger than the allowance draws the whole allowance and pays the rest out of the
+/// frame's gas: a hook given its computation and one gas less than that rest runs out of gas on
+/// the history charge, after the allowance paid its part, and keeps no event; given the rest in
+/// full it keeps the event, and the transaction pays that rest beside the transfer's records.
+///
+/// Expected values `independent`: the hook's computation is summed by hand from the opcode prices,
+/// and the two runs are the control that the sum is its whole cost; the event's bytes are its
+/// address, its three topics and its data, and the rest is their history less the allowance's 160
+/// bytes, at the cost per history byte in effect (`constants`).
+#[test]
+fn test_an_event_larger_than_the_allowance_pays_the_rest_or_runs_out_of_gas() {
+    if !the_allowance_outweighs_a_record() {
+        return;
+    }
+    let len = 1_024;
+    let computation = event_over_gas(u64::from(len));
+    let rest = history(LOG_BASE_SIZE + 3 * LOG_TOPIC_SIZE + u64::from(len)) - allowance();
+
+    let short = run_hook(event_over(len), computation + rest - 1, U256::ZERO);
+    assert!(!transfer_succeeded(&short), "one gas short of the rest is out of gas");
+    assert!(events(&short).is_empty(), "the hook kept no event");
+    assert_eq!(short.gas.history, body_history(0), "the failed hook's transfer records came back");
+
+    let exact = run_hook(event_over(len), computation + rest, U256::ZERO);
+    assert!(transfer_succeeded(&exact), "the rest in full is enough");
+    assert_eq!(events(&exact).len(), 1, "the hook kept its event");
+    assert_eq!(
+        exact.gas.history,
+        body_history(0) + 2 * record_history() + rest,
+        "the transfer's two records and the rest of the event; the allowance's part is on no ledger",
+    );
+
+    if runs_at_measurement_prices() {
+        return;
+    }
+    assert_eq!((computation, rest), (9_804, (1_152 - 160) * 88));
 }
 
 /// The hook's `SSTORE(0, 2)`: `PUSH1 2; PUSH0; SSTORE; STOP`.

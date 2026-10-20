@@ -399,6 +399,103 @@ fn test_deployed_code_over_the_frame_budget_reverts_the_creation_alone() {
     }
 }
 
+/// A contract that runs `init` through `CREATE` with `value` wei, then returns what the creation
+/// returned or reverted with: nothing once it succeeded, the stop's revert data once a limit
+/// stopped it.
+fn create_returning_its_output(init: &Bytes, value: u64) -> Bytes {
+    BytecodeBuilder::default()
+        .mstore(0, init)
+        .push_number(init.len() as u64)
+        .push_number(0_u64)
+        .push_number(value)
+        .append_many([CREATE, POP, RETURNDATASIZE, PUSH0, PUSH0, RETURNDATACOPY])
+        .append_many([RETURNDATASIZE, PUSH0, RETURN])
+        .build()
+}
+
+/// A creation's start counts against the creation's own budget — the share of what its creator
+/// has left — the created account's record and its creator's nonce record, the creator not having
+/// recorded its account, and with an endowment the transfer log. The creator here is the
+/// transaction's own frame, with `R` bytes left under the transaction's limit.
+///
+/// The largest `R` whose share falls short of the start stops the creation at its start, which
+/// keeps its creator's nonce record: 81 without an endowment, a share of 79 against 80 bytes. One
+/// byte more, a share of 80, starts it. With 100 left the share is 98, so the creation may deposit
+/// the 18 bytes beyond its start, and the 19th stops it at its deposit; with an endowment, 260
+/// left leave room for 14. A stopped creation keeps nothing of its own, and its creator resumes
+/// with the nonce record alone.
+#[test]
+fn test_a_creation_is_held_to_its_share_from_its_start() {
+    let run = |left: u64, endowment: u64, deployed: u64| {
+        let db = funded()
+            .account_code(
+                A,
+                create_returning_its_output(&constructor_returning(deployed), endowment),
+            )
+            .account_balance(A, U256::from(endowment));
+        run_at(db, call(CALLER, A, U256::ZERO, GAS_LIMIT), mega_evm::TX_BODY_SIZE + left)
+    };
+    let stop = |budget| MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit: budget };
+    let usage = |bytes, write_records| LimitUsage {
+        data_size: mega_evm::TX_BODY_SIZE + bytes,
+        write_records,
+    };
+    let nonce_record_alone = usage(WRITE_RECORD_SIZE, 1);
+    let assert_stopped = |outcome: &MegaTransactionOutcome, budget: u64, case: &str| {
+        assert!(outcome.result.is_success(), "{case}: A resumes: {:?}", outcome.result);
+        assert_eq!(outcome.limit_exceeded, None, "{case}: a stop below the transaction's frame");
+        assert_eq!(
+            outcome.result.output().unwrap().as_ref(),
+            stop(budget).abi_encode(),
+            "{case}: the creation was stopped on its own budget",
+        );
+        assert_eq!(outcome.usage, nonce_record_alone, "{case}: A keeps its nonce record");
+        assert_eq!(outcome.state[&A].info.nonce, 1, "{case}");
+        assert!(
+            outcome.state.get(&A.create(0)).is_none_or(|account| account.info.is_empty()),
+            "{case}: nothing was created",
+        );
+    };
+
+    for endowment in [0, 1] {
+        let log = if endowment == 0 { 0 } else { TRANSFER_LOG_SIZE };
+        let at_start = 2 * WRITE_RECORD_SIZE + log;
+        let starts = child_room(at_start);
+
+        let case = format!("endowment {endowment}, {} left", starts - 1);
+        assert_stopped(&run(starts - 1, endowment, 0), share(starts - 1), &case);
+
+        let case = format!("endowment {endowment}, {starts} left");
+        let started = run(starts, endowment, 0);
+        assert!(started.result.is_success(), "{case}: {:?}", started.result);
+        assert_eq!(started.result.output().unwrap(), &Bytes::new(), "{case}: it started");
+        assert_eq!(started.usage, usage(at_start, 2), "{case}: both records and the log");
+
+        let left = 100 + log;
+        let room = share(left) - at_start;
+        let case = format!("endowment {endowment}, {left} left, {room} bytes deployed");
+        let fits = run(left, endowment, room);
+        assert!(fits.result.is_success(), "{case}: {:?}", fits.result);
+        assert_eq!(fits.result.output().unwrap(), &Bytes::new(), "{case}: it deployed");
+        assert_eq!(fits.usage, usage(share(left), 2), "{case}: exactly its share");
+        assert_eq!(
+            fits.state[&A.create(0)].info.code_hash,
+            keccak256(vec![0_u8; room as usize]),
+            "{case}",
+        );
+
+        let case = format!("endowment {endowment}, {left} left, {} bytes deployed", room + 1);
+        assert_stopped(&run(left, endowment, room + 1), share(left), &case);
+
+        if endowment == 0 {
+            assert_eq!((starts - 1, share(starts - 1), starts), (81, 79, 82));
+            assert_eq!((share(left), room), (98, 18));
+        } else {
+            assert_eq!((share(left), room), (254, 14));
+        }
+    }
+}
+
 /// Init code that returns `len` bytes as the deployed contract, the first of them `first` and
 /// the rest zeros.
 fn constructor_returning_from(first: u8, len: u64) -> Bytes {

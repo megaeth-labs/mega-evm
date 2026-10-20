@@ -11,7 +11,10 @@ use mega_evm::{
     WRITE_RECORD_SIZE,
 };
 use revm::{
-    bytecode::opcode::{CALL, CREATE, GAS, LOG0, POP, PUSH0, PUSH1, REVERT, STOP},
+    bytecode::opcode::{
+        CALL, CALLCODE, CREATE, DELEGATECALL, GAS, LOG0, POP, PUSH0, PUSH1, REVERT, STATICCALL,
+        STOP,
+    },
     context_interface::cfg::GasId,
 };
 
@@ -223,6 +226,100 @@ fn test_a_creation_whose_creator_cannot_pay_its_records_starts_no_frame() {
     assert!(ample.result.is_success(), "{:?}", ample.result);
     assert_eq!(ample.usage.write_records, 2, "the created account and the creator's nonce");
     assert_eq!(ample.gas.history, body(0) + 2 * WRITE_RECORD_SIZE * CPHB);
+}
+
+/// Every call kind reaches the start's charge after its forward. A caller given its charges, an
+/// explicit forward and one gas less than what the reservoir leaves of its records' price keeps too
+/// little once it forwarded, and starts no frame; given that gas in full it starts the frame and
+/// pays the price, the reservoir first and then its own gas. Below the execution cap there is no
+/// reservoir; above it the reservoir holds half the price. A `DELEGATECALL` or a `STATICCALL`
+/// moves no value and makes no records: from the same gas it starts, and pays no history.
+///
+/// `CALLEE` calls `CONTRACT` with the gas each case gives it and returns the call's flag, so the
+/// flag says whether `CONTRACT`'s own start happened. `TARGET` holds a balance and no code, so the
+/// start is answered without running, and no account is created.
+#[test]
+fn test_every_call_kind_charges_its_records_after_its_forward() {
+    if runs_at_measurement_prices() {
+        return;
+    }
+    const TARGET: Address = address!("0000000000000000000000000000000000200003");
+    let params = mega_evm::satin_gas_params();
+    let cold_access = params.get(GasId::warm_storage_read_cost()) +
+        params.get(GasId::cold_account_additional_cost());
+    let transfer = params.get(GasId::transfer_value_cost());
+    // `scheme(forward, TARGET, value, [], [])` and its charges before the forward: four `PUSH0`, a
+    // `PUSH1` of the value where the scheme carries one, the `PUSH20` and the `PUSH8` of the
+    // forward, then the cold access and the transfer.
+    let start = |scheme: u8, forward: u64| {
+        let code = BytecodeBuilder::default().append_many([PUSH0, PUSH0, PUSH0, PUSH0]);
+        let (code, charges) = if matches!(scheme, CALL | CALLCODE) {
+            (code.push_number(1_u8), 8 + 3 + 3 + 3 + cold_access + transfer)
+        } else {
+            (code, 8 + 3 + 3 + cold_access)
+        };
+        (
+            code.push_address(TARGET).push_number(forward).append_many([scheme, STOP]).build(),
+            charges,
+        )
+    };
+    let run = |code: Bytes, given: u64, reservoir: Option<u64>| {
+        let caller = BytecodeBuilder::default()
+            .append_many([PUSH0, PUSH0, PUSH0, PUSH0, PUSH0])
+            .push_address(CONTRACT)
+            .push_number(given)
+            .append(CALL)
+            .return_top()
+            .build();
+        let db = funded()
+            .account_code(CALLEE, caller)
+            .account_code(CONTRACT, code)
+            .account_balance(CONTRACT, U256::from(1))
+            .account_balance(TARGET, U256::from(1));
+        let gas_limit =
+            reservoir.map_or(GAS_LIMIT, |reservoir| TX_GAS_LIMIT_CAP + body(0) + reservoir);
+        let outcome = execute(db, call(CALLER, CALLEE, U256::ZERO, gas_limit));
+        assert!(outcome.result.is_success(), "{:?}", outcome.result);
+        let started = U256::from_be_slice(outcome.result.output().unwrap()) == U256::from(1);
+        (started, outcome)
+    };
+
+    for (scheme, records) in [(CALL, 2), (CALLCODE, 1)] {
+        let price = records * WRITE_RECORD_SIZE * CPHB;
+        for reservoir in [None, Some(price / 2)] {
+            let case = format!("scheme {scheme:#04x}, reservoir {reservoir:?}");
+            // What the caller's own gas pays once the reservoir is spent, and a forward that leaves
+            // it one gas less than that, the most the 63/64 rule lets it forward.
+            let spill = price - reservoir.unwrap_or(0);
+            let forward = 63 * (spill - 1);
+            let (code, charges) = start(scheme, forward);
+
+            let (started, short) = run(code.clone(), charges + forward + spill - 1, reservoir);
+            assert!(!started, "{case}: one gas short, no frame");
+            assert_eq!(short.usage.write_records, 0, "{case}");
+            assert_eq!(short.gas.history, body(0), "{case}: the body alone");
+            if let Some(reservoir) = reservoir {
+                assert_eq!(short.gas.reservoir_remaining, reservoir, "{case}: the reservoir too");
+            }
+
+            let (started, exact) = run(code, charges + forward + spill, reservoir);
+            assert!(started, "{case}: the gas in full, the frame starts");
+            assert_eq!(exact.usage.write_records, records, "{case}");
+            assert_eq!(exact.gas.history, body(0) + price, "{case}: the body and the records");
+            if reservoir.is_some() {
+                assert_eq!(exact.gas.reservoir_remaining, 0, "{case}: the reservoir paid first");
+            }
+
+            for scheme in [DELEGATECALL, STATICCALL] {
+                let case = format!("{case}, then scheme {scheme:#04x} from the same gas");
+                let (code, _) = start(scheme, forward);
+                let (started, outcome) = run(code, charges + forward + spill - 1, reservoir);
+                assert!(started, "{case}: no records, no charge to fall short of");
+                assert_eq!(outcome.usage.write_records, 0, "{case}");
+                assert_eq!(outcome.gas.history, body(0), "{case}");
+            }
+        }
+    }
 }
 
 /// Whether a write record is paid for may not depend on how much gas its frame's caller had
