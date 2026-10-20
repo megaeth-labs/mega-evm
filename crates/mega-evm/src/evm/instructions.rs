@@ -1,31 +1,19 @@
 //! The instruction table of the Satin engine.
 //!
-//! Every opcode runs revm's own instruction, except the ones that write state the resource
-//! limits count. Three of them write it themselves — `SSTORE`, `LOG0`..`LOG4` and `SELFDESTRUCT`
-//! — and four write it by starting a frame: `CALL`, `CALLCODE`, `CREATE` and `CREATE2`.
+//! Every opcode runs revm's own instruction, except the four that write state the resource limits
+//! count by starting a frame — `CALL`, `CALLCODE`, `CREATE` and `CREATE2` — and the ones that can
+//! read volatile data.
 //!
-//! The first three run in a wrapper that commits what the Host staged for them after the opcode
-//! completed:
+//! The opcodes that write state themselves — `SSTORE`, `LOG0`..`LOG4` and `SELFDESTRUCT` — are
+//! revm's own: revm calls the Host's completed-write hook at the end of each, once the write is in
+//! the journal and every charge the opcode makes has been made, and the Host counts the write,
+//! holds it to the limits and charges the history it costs there (see the `host` module). A failed
+//! opcode never reaches the hook, so it counts nothing. `SELFDESTRUCT` is wrapped for the volatile
+//! read it can make alone.
 //!
-//! 1. discard any record staged before the opcode (nothing may commit it for this one);
-//! 2. run revm's instruction, whose Host call stages the record and which charges the state gas of
-//!    a fresh slot or a new beneficiary;
-//! 3. discard the record if the opcode failed; if it completed, commit it;
-//! 4. charge the frame the history gas of what the record appends — and give it back when the
-//!    record was taken away, as a slot written back to its original value takes its own back.
-//!
-//! The history a record costs is its data size, so the charge and the count cannot drift apart:
-//! a log pays for its address, its topics and its data, a storage write or a destructed account's
-//! beneficiary for the forty bytes of one write record.
-//!
-//! A commit that crosses a limit stops the opcode's frame with a revert whose output is
-//! [`MegaLimitExceeded`](crate::MegaLimitExceeded), and its caller resumes as after any revert
-//! (see [`AdditionalLimit`](crate::AdditionalLimit) for the stop). A history charge the frame
-//! cannot pay is an ordinary out-of-gas, which burns the frame's gas the way any other does.
-//!
-//! The other four run in a wrapper that charges their frame for the write records the frame it
-//! starts makes — a value transfer's sender and recipient, a creation's creator nonce and created
-//! account — before the frame runs, so the gas it forwards is not reduced by them and its
+//! The four that start a frame run in a wrapper that charges their frame for the write records the
+//! frame it starts makes — a value transfer's sender and recipient, a creation's creator nonce and
+//! created account — before the frame runs, so the gas it forwards is not reduced by them and its
 //! allowance is free for what the recipient does. What the frame does not keep goes back to the
 //! caller when it returns. The frame the opcode is suspending on carries the caller's reservoir,
 //! which the charge has just moved, so the wrapper writes the reservoir it left into the frame's
@@ -42,9 +30,6 @@
 //! 4. on a refusal, hand the frame back the gas it had before the opcode and revert it with
 //!    `VolatileDataAccessDisabled`; otherwise, once the opcode completed, commit the reads, which
 //!    holds the frame's spendable gas to what the compute limit leaves it.
-//!
-//! `SSTORE` also holds its frame to the compute limit again once it completed: a slot restored to
-//! its original value refills regular gas.
 //!
 //! An opcode whose charge fails with an out-of-gas halts its frame, and the halt zeroes the gas
 //! the frame had left before the frame returns. The revm fork records that gas first, before
@@ -66,9 +51,8 @@
 use revm::{
     bytecode::opcode::{
         BALANCE, BASEFEE, BLOBBASEFEE, BLOCKHASH, CALL, CALLCODE, COINBASE, CREATE, CREATE2,
-        DELEGATECALL, DIFFICULTY, EXTCODECOPY, EXTCODEHASH, EXTCODESIZE, GASLIMIT, LOG0, LOG1,
-        LOG2, LOG3, LOG4, NUMBER, SELFBALANCE, SELFDESTRUCT, SLOAD, SLOTNUM, SSTORE, STATICCALL,
-        TIMESTAMP,
+        DELEGATECALL, DIFFICULTY, EXTCODECOPY, EXTCODEHASH, EXTCODESIZE, GASLIMIT, NUMBER,
+        SELFBALANCE, SELFDESTRUCT, SLOAD, SLOTNUM, STATICCALL, TIMESTAMP,
     },
     context_interface::Host,
     handler::instructions::EthInstructions,
@@ -80,13 +64,13 @@ use revm::{
         FrameInput, Gas, Instruction, InstructionContext, InstructionExecResult, InstructionResult,
         Interpreter, InterpreterAction,
     },
-    primitives::{hardfork::SpecId, Bytes},
+    primitives::hardfork::SpecId,
     Database,
 };
 
 use crate::{
-    charge_write_records_history, history_gas, limit::HistoryBytes,
-    volatile_data_access_disabled_revert_data, ExternalEnvTypes, MegaContext, VolatileDataAccess,
+    charge_write_records_history, volatile_data_access_disabled_revert_data, ExternalEnvTypes,
+    MegaContext, VolatileDataAccess,
 };
 
 use super::{input_gas_limit, satin_gas_table, value_call_stipend, MegaInstructions};
@@ -98,21 +82,15 @@ type Ctx<'a, DB, ExtEnvs> = InstructionContext<'a, MegaContext<DB, ExtEnvs>, Eth
 type InstructionFn<DB, ExtEnvs> = fn(Ctx<'_, DB, ExtEnvs>) -> InstructionExecResult;
 
 /// The Satin instruction table: revm's for the base spec, with the Amsterdam opcodes activated,
-/// the opcodes that write state the limits count wrapped, and the opcodes that can read volatile
-/// data wrapped, on the Satin static gas table.
+/// the opcodes that start a frame whose start the limits count wrapped, and the opcodes that can
+/// read volatile data wrapped, on the Satin static gas table.
 pub(crate) fn mega_instructions<DB: Database, ExtEnvs: ExternalEnvTypes>(
     spec: SpecId,
 ) -> MegaInstructions<DB, ExtEnvs> {
     let mut table = instruction_table();
     enable_amsterdam_opcodes(&mut table);
     let mut instructions = EthInstructions::new(table, satin_gas_table(), spec);
-    let wrappers: [(u8, InstructionFn<DB, ExtEnvs>); 28] = [
-        (SSTORE, sstore::<DB, ExtEnvs>),
-        (LOG0, log::<0, DB, ExtEnvs>),
-        (LOG1, log::<1, DB, ExtEnvs>),
-        (LOG2, log::<2, DB, ExtEnvs>),
-        (LOG3, log::<3, DB, ExtEnvs>),
-        (LOG4, log::<4, DB, ExtEnvs>),
+    let wrappers: [(u8, InstructionFn<DB, ExtEnvs>); 22] = [
         (SELFDESTRUCT, selfdestruct::<DB, ExtEnvs>),
         (CALL, call::<CALL, DB, ExtEnvs>),
         (CALLCODE, call::<CALLCODE, DB, ExtEnvs>),
@@ -141,127 +119,6 @@ pub(crate) fn mega_instructions<DB: Database, ExtEnvs: ExternalEnvTypes>(
         instructions.insert_instruction(opcode, Instruction::new(wrapper), static_gas);
     }
     instructions
-}
-
-/// Runs `inner`, commits the record its Host call staged once it completed, and settles the
-/// history gas the record costs.
-///
-/// An opcode completes when it returns `Ok` or stops the frame successfully (`SELFDESTRUCT`
-/// returns its own `SelfDestruct` result). Any other result fails the opcode, which takes the
-/// staged write back with it.
-///
-/// The record is held to the data-size limit first, and only then is its history charged. A record
-/// the limit rejects is not kept, so its history is not a charge and the stop is what the frame
-/// reports. A record the limit accepts is charged, and a charge the frame cannot pay is an
-/// out-of-gas.
-#[inline(always)]
-fn commit_after<const FROM_ALLOWANCE: bool, DB: Database, ExtEnvs: ExternalEnvTypes>(
-    context: Ctx<'_, DB, ExtEnvs>,
-    inner: InstructionFn<DB, ExtEnvs>,
-) -> InstructionExecResult {
-    let InstructionContext { interpreter, host } = context;
-    host.additional_limit.discard_staged_record();
-    let result = inner(InstructionContext { interpreter: &mut *interpreter, host: &mut *host });
-    let completed = match result {
-        Ok(()) => true,
-        Err(result) => result.is_ok(),
-    };
-    if !completed {
-        host.additional_limit.discard_staged_record();
-        return result;
-    }
-    let (check, history) = host.additional_limit.commit_staged_record();
-    if check.exceeded_limit() {
-        return Err(stop_frame(interpreter, host.additional_limit.note_frame_stop(&check)));
-    }
-    if host.prices_history() {
-        settle_history::<FROM_ALLOWANCE, _, _>(interpreter, host, history)?;
-    }
-    result
-}
-
-/// Charges the running frame the history gas of the bytes a record appends, or gives back the
-/// history of a record that was taken away.
-///
-/// Both sides are priced the same way, so a record taken back cancels its own charge exactly,
-/// whichever frame made it: a refill below zero is reconciled when the frame merges into its
-/// caller. A byte count with no price and a charge the frame cannot pay are both an out-of-gas.
-///
-/// With `FROM_ALLOWANCE` the frame's history allowance pays what it can of the charge before the
-/// frame's gas pays the rest ([`storage_call_stipend`](crate::storage_call_stipend)). Only the
-/// log site sets it: a write record is the frame's own to pay for, and a record taken back gives
-/// back what the frame's gas paid, never what the allowance did — the allowance is spent, not
-/// lent.
-#[inline]
-fn settle_history<const FROM_ALLOWANCE: bool, DB: Database, ExtEnvs: ExternalEnvTypes>(
-    interpreter: &mut Interpreter<EthInterpreter>,
-    host: &mut MegaContext<DB, ExtEnvs>,
-    history: HistoryBytes,
-) -> Result<(), InstructionResult> {
-    match history {
-        HistoryBytes::None => Ok(()),
-        HistoryBytes::Appended(bytes) => {
-            let Some(cost) = history_gas(bytes) else { return Err(InstructionResult::OutOfGas) };
-            let drawn =
-                if FROM_ALLOWANCE { host.additional_limit.try_consume_stipend(cost) } else { 0 };
-            if interpreter.gas.record_history_cost(cost - drawn) {
-                Ok(())
-            } else {
-                Err(InstructionResult::OutOfGas)
-            }
-        }
-        HistoryBytes::Taken(bytes) => {
-            interpreter.gas.refill_history(history_gas(bytes).unwrap_or(0));
-            Ok(())
-        }
-    }
-}
-
-/// Stops the running frame with the revert a crossed limit asks for: its output is the stop's
-/// [`MegaLimitExceeded`](crate::MegaLimitExceeded), `output`, and its gas is the frame's, so the
-/// caller gets the unspent part back.
-#[cold]
-#[inline(never)]
-fn stop_frame(interpreter: &mut Interpreter<EthInterpreter>, output: Bytes) -> InstructionResult {
-    if interpreter.bytecode.action().is_some() {
-        // A `SELFDESTRUCT` or a return the opcode already set gives way to the stop.
-        let _ = interpreter.take_next_action();
-    }
-    let result = InstructionResult::Revert;
-    interpreter.bytecode.set_action(InterpreterAction::new_return(result, output, interpreter.gas));
-    result
-}
-
-/// `SSTORE`, committing the slot's write record, then holding the frame to the compute limit
-/// again: a slot restored to its original value refills the state and history gas that spilled
-/// onto regular gas, and the spill may predate the limit.
-fn sstore<DB: Database, ExtEnvs: ExternalEnvTypes>(
-    context: Ctx<'_, DB, ExtEnvs>,
-) -> InstructionExecResult {
-    let InstructionContext { interpreter, host } = context;
-    let result = commit_after::<false, _, _>(
-        InstructionContext { interpreter: &mut *interpreter, host: &mut *host },
-        host::sstore,
-    );
-    // Only a restore refills, and a restore takes a record back rather than adding one, so it
-    // never crosses a limit: no stop's result is pending when the frame is held again.
-    host.detention.hold(interpreter.gas.tracker_mut());
-    result
-}
-
-/// `LOG0`..`LOG4`, committing the log's bytes.
-fn log<const N: usize, DB: Database, ExtEnvs: ExternalEnvTypes>(
-    context: Ctx<'_, DB, ExtEnvs>,
-) -> InstructionExecResult {
-    commit_after::<true, _, _>(context, host::log::<N, MegaContext<DB, ExtEnvs>>)
-}
-
-/// `SELFDESTRUCT`, committing the beneficiary's write record and the read of the block
-/// beneficiary's account when it is either end.
-fn selfdestruct<DB: Database, ExtEnvs: ExternalEnvTypes>(
-    context: Ctx<'_, DB, ExtEnvs>,
-) -> InstructionExecResult {
-    read_volatile(context, |context| commit_after::<false, _, _>(context, host::selfdestruct))
 }
 
 /// Runs `inner` and charges the frame the history of the write records the frame `inner` starts
@@ -506,6 +363,7 @@ volatile_read! {
     extcodecopy => host::extcodecopy, "EXTCODECOPY", "the block beneficiary's account";
     extcodehash => host::extcodehash, "EXTCODEHASH", "the block beneficiary's account";
     sload => host::sload, "SLOAD", "the Oracle's storage";
+    selfdestruct => host::selfdestruct, "SELFDESTRUCT", "the block beneficiary's account";
 }
 
 /// `BLOCKHASH`, committing the read of the block number and of the hash.

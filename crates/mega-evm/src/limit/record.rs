@@ -1,38 +1,14 @@
-//! The facts the Host observes for the opcode that is running.
+//! What a write an opcode completed counts.
+//!
+//! revm hands the Host the facts of every write `SSTORE`, `LOG0`..`LOG4` and `SELFDESTRUCT`
+//! complete, once the write is in the journal and every charge the opcode makes has been made
+//! ([`Host::write_completed`](revm::context_interface::Host::write_completed)). A failed opcode
+//! offers nothing, so nothing here is counted for a write its failure takes back.
 
 use alloy_primitives::Address;
-use revm::interpreter::SStoreResult;
+use revm::context_interface::host::CompletedWrite;
 
 use super::{log_history_bytes, LimitUsage, WRITE_RECORD};
-
-/// What the Host saw an opcode do, staged until the opcode completes.
-///
-/// The Host only observes: it stages the facts revm hands it and records nothing. The opcode's
-/// wrapper commits the staged record once the opcode completed, or discards it when the opcode
-/// failed after the Host call (an out-of-gas on the gas charged after the write, say), because the
-/// failure takes the write back with it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum StagedRecord {
-    /// An `SSTORE`: the slot's value at the start of the transaction, before the write, and
-    /// after it.
-    Sstore(SStoreResult),
-    /// A `LOG`: its topic count and data length.
-    Log {
-        /// Number of topics.
-        topics: u8,
-        /// Length of the data, in bytes.
-        data_len: u64,
-    },
-    /// A `SELFDESTRUCT`.
-    SelfDestruct {
-        /// Whether the destructed account had a balance to move.
-        had_value: bool,
-        /// Whether the beneficiary is another account than the destructed one.
-        to_other_account: bool,
-        /// The beneficiary.
-        beneficiary: Address,
-    },
-}
 
 /// How a committed record changes the running frame's usage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,50 +48,52 @@ impl RecordEffect {
     }
 }
 
-impl StagedRecord {
-    /// What committing the record counts, per site:
-    ///
-    /// - `SSTORE`: the first change of a slot in the transaction is one write record; writing the
-    ///   slot back to its original value takes the record back.
-    /// - `LOG`: its bytes, one base record for the address, one per topic and the data.
-    /// - `SELFDESTRUCT`: one write record for the beneficiary, when value moves to another account
-    ///   than the destructed one and the transaction's `sender`, whose account the transaction body
-    ///   counts.
-    pub(crate) fn effect(&self, sender: Address) -> RecordEffect {
-        match self {
-            Self::Sstore(slot) => {
-                if slot.is_original_eq_present() {
-                    if slot.is_original_eq_new() {
-                        RecordEffect::None
-                    } else {
-                        RecordEffect::Record(WRITE_RECORD)
-                    }
-                } else if slot.is_original_eq_new() {
-                    RecordEffect::Refund(WRITE_RECORD)
-                } else {
+/// What committing the write `write` counts, per site:
+///
+/// - `SSTORE`: the first change of a slot in the transaction is one write record; writing the slot
+///   back to its original value takes the record back.
+/// - `LOG`: its bytes, one base record for the address, one per topic and the data.
+/// - `SELFDESTRUCT`: one write record for the beneficiary, when value moves to another account than
+///   the destructed one and the transaction's `sender`, whose account the transaction body counts.
+pub(crate) fn write_effect(write: &CompletedWrite<'_>, sender: Address) -> RecordEffect {
+    match *write {
+        CompletedWrite::Sstore { result: slot, .. } => {
+            if slot.is_original_eq_present() {
+                if slot.is_original_eq_new() {
                     RecordEffect::None
-                }
-            }
-            Self::Log { topics, data_len } => RecordEffect::Record(LimitUsage {
-                data_size: log_history_bytes(u64::from(*topics), *data_len),
-                write_records: 0,
-            }),
-            Self::SelfDestruct { had_value, to_other_account, beneficiary, .. } => {
-                if *had_value && *to_other_account && *beneficiary != sender {
+                } else {
                     RecordEffect::Record(WRITE_RECORD)
-                } else {
-                    RecordEffect::None
                 }
+            } else if slot.is_original_eq_new() {
+                RecordEffect::Refund(WRITE_RECORD)
+            } else {
+                RecordEffect::None
+            }
+        }
+        CompletedWrite::Log { topics, data_len, .. } => RecordEffect::Record(LimitUsage {
+            data_size: log_history_bytes(u64::from(topics), data_len),
+            write_records: 0,
+        }),
+        CompletedWrite::SelfDestruct { address, target, result } => {
+            if result.had_value && target != address && target != sender {
+                RecordEffect::Record(WRITE_RECORD)
+            } else {
+                RecordEffect::None
             }
         }
     }
+}
 
-    /// Whether the opcode moved value to another account: a `SELFDESTRUCT` of an account that had
-    /// a balance, to a beneficiary other than itself. revm journals an EIP-7708 transfer log for
-    /// exactly that move, whoever the beneficiary is — the sender included — and none for a
-    /// destruction to itself, which burns the balance on Satin's base spec.
-    pub(crate) const fn moves_value(&self) -> bool {
-        matches!(self, Self::SelfDestruct { had_value: true, to_other_account: true, .. })
+/// Whether the write moved value to another account: a `SELFDESTRUCT` of an account that had a
+/// balance, to a beneficiary other than itself. revm journals an EIP-7708 transfer log for exactly
+/// that move, whoever the beneficiary is — the sender included — and none for a destruction to
+/// itself, which burns the balance on Satin's base spec.
+pub(crate) fn write_moves_value(write: &CompletedWrite<'_>) -> bool {
+    match *write {
+        CompletedWrite::SelfDestruct { address, target, result } => {
+            result.had_value && target != address
+        }
+        CompletedWrite::Sstore { .. } | CompletedWrite::Log { .. } => false,
     }
 }
 
@@ -124,41 +102,64 @@ mod tests {
     use super::*;
     use crate::{LOG_BASE_SIZE, LOG_TOPIC_SIZE, WRITE_RECORD_SIZE};
     use alloy_primitives::{address, U256};
+    use revm::context_interface::context::{SStoreResult, SelfDestructResult};
 
     const SENDER: Address = address!("0000000000000000000000000000000000005e4d");
     const OTHER: Address = address!("0000000000000000000000000000000000000077");
+    const DESTRUCTED: Address = address!("0000000000000000000000000000000000000d00");
 
-    fn sstore(original: u64, present: u64, new: u64) -> StagedRecord {
-        StagedRecord::Sstore(SStoreResult {
+    fn slot(original: u64, present: u64, new: u64) -> SStoreResult {
+        SStoreResult {
             original_value: U256::from(original),
             present_value: U256::from(present),
             new_value: U256::from(new),
-        })
+        }
+    }
+
+    fn sstore(slot: &SStoreResult) -> CompletedWrite<'_> {
+        CompletedWrite::Sstore { address: OTHER, key: U256::ZERO, result: slot }
+    }
+
+    const fn log(topics: u8, data_len: u64) -> CompletedWrite<'static> {
+        CompletedWrite::Log { address: OTHER, topics, data_len }
+    }
+
+    fn destruction(had_value: bool) -> SelfDestructResult {
+        SelfDestructResult { had_value, target_exists: true, previously_destroyed: false }
+    }
+
+    fn selfdestruct(result: &SelfDestructResult, target: Address) -> CompletedWrite<'_> {
+        CompletedWrite::SelfDestruct { address: DESTRUCTED, target, result }
     }
 
     /// A slot counts once, on its first change in the transaction; writing it back to its
     /// original value takes the record back; every other write counts nothing.
     #[test]
     fn test_sstore_record_rules() {
-        assert_eq!(sstore(0, 0, 1).effect(SENDER), RecordEffect::Record(WRITE_RECORD));
-        assert_eq!(sstore(5, 5, 0).effect(SENDER), RecordEffect::Record(WRITE_RECORD));
-        assert_eq!(sstore(0, 1, 0).effect(SENDER), RecordEffect::Refund(WRITE_RECORD));
-        assert_eq!(sstore(0, 1, 2).effect(SENDER), RecordEffect::None);
-        assert_eq!(sstore(3, 3, 3).effect(SENDER), RecordEffect::None);
-        assert_eq!(sstore(3, 4, 4).effect(SENDER), RecordEffect::None);
+        let effect =
+            |original, present, new| write_effect(&sstore(&slot(original, present, new)), SENDER);
+        assert_eq!(effect(0, 0, 1), RecordEffect::Record(WRITE_RECORD));
+        assert_eq!(effect(5, 5, 0), RecordEffect::Record(WRITE_RECORD));
+        assert_eq!(effect(0, 1, 0), RecordEffect::Refund(WRITE_RECORD));
+        assert_eq!(effect(0, 1, 2), RecordEffect::None);
+        assert_eq!(effect(3, 3, 3), RecordEffect::None);
+        assert_eq!(effect(3, 4, 4), RecordEffect::None);
     }
 
     /// A log is 32 bytes for its address, 32 per topic and its data.
     #[test]
     fn test_log_bytes() {
-        let log = |topics, data_len| StagedRecord::Log { topics, data_len }.effect(SENDER);
-        assert_eq!(log(0, 0), RecordEffect::Record(LimitUsage { data_size: 32, write_records: 0 }));
+        let effect = |topics, data_len| write_effect(&log(topics, data_len), SENDER);
         assert_eq!(
-            log(4, 100),
+            effect(0, 0),
+            RecordEffect::Record(LimitUsage { data_size: 32, write_records: 0 })
+        );
+        assert_eq!(
+            effect(4, 100),
             RecordEffect::Record(LimitUsage { data_size: 32 + 4 * 32 + 100, write_records: 0 })
         );
         assert_eq!(
-            log(1, u64::MAX),
+            effect(1, u64::MAX),
             RecordEffect::Record(LimitUsage { data_size: u64::MAX, write_records: 0 })
         );
     }
@@ -167,26 +168,16 @@ mod tests {
     /// record's forty, and nothing for a write that leaves no record.
     #[test]
     fn test_history_bytes_are_the_records_data_size() {
+        let history = |write: &CompletedWrite<'_>| write_effect(write, SENDER).history_bytes();
+        assert_eq!(history(&sstore(&slot(0, 0, 1))), HistoryBytes::Appended(WRITE_RECORD_SIZE));
+        assert_eq!(history(&sstore(&slot(0, 1, 0))), HistoryBytes::Taken(WRITE_RECORD_SIZE));
+        assert_eq!(history(&sstore(&slot(3, 3, 3))), HistoryBytes::None);
         assert_eq!(
-            sstore(0, 0, 1).effect(SENDER).history_bytes(),
-            HistoryBytes::Appended(WRITE_RECORD_SIZE)
-        );
-        assert_eq!(
-            sstore(0, 1, 0).effect(SENDER).history_bytes(),
-            HistoryBytes::Taken(WRITE_RECORD_SIZE)
-        );
-        assert_eq!(sstore(3, 3, 3).effect(SENDER).history_bytes(), HistoryBytes::None);
-        assert_eq!(
-            StagedRecord::Log { topics: 3, data_len: 32 }.effect(SENDER).history_bytes(),
+            history(&log(3, 32)),
             HistoryBytes::Appended(LOG_BASE_SIZE + 3 * LOG_TOPIC_SIZE + 32)
         );
-        let to_other = StagedRecord::SelfDestruct {
-            had_value: true,
-            to_other_account: true,
-            beneficiary: OTHER,
-        };
         assert_eq!(
-            to_other.effect(SENDER).history_bytes(),
+            history(&selfdestruct(&destruction(true), OTHER)),
             HistoryBytes::Appended(WRITE_RECORD_SIZE)
         );
     }
@@ -194,37 +185,28 @@ mod tests {
     /// Only value that moves to another account is a beneficiary write.
     #[test]
     fn test_selfdestruct_record_rules() {
-        let sd = |had_value, to_other_account| {
-            let beneficiary = OTHER;
-            StagedRecord::SelfDestruct { had_value, to_other_account, beneficiary }.effect(SENDER)
+        let effect = |had_value, target| {
+            write_effect(&selfdestruct(&destruction(had_value), target), SENDER)
         };
-        assert_eq!(sd(true, true), RecordEffect::Record(WRITE_RECORD));
-        assert_eq!(sd(true, false), RecordEffect::None);
-        assert_eq!(sd(false, true), RecordEffect::None);
-        assert_eq!(sd(false, false), RecordEffect::None);
-        let to_sender = StagedRecord::SelfDestruct {
-            had_value: true,
-            to_other_account: true,
-            beneficiary: SENDER,
-        };
-        assert_eq!(to_sender.effect(SENDER), RecordEffect::None, "the body counts the sender");
+        assert_eq!(effect(true, OTHER), RecordEffect::Record(WRITE_RECORD));
+        assert_eq!(effect(true, DESTRUCTED), RecordEffect::None);
+        assert_eq!(effect(false, OTHER), RecordEffect::None);
+        assert_eq!(effect(false, DESTRUCTED), RecordEffect::None);
+        assert_eq!(effect(true, SENDER), RecordEffect::None, "the body counts the sender");
     }
 
     /// Value moves to another account only when a destructed account had a balance and a
     /// beneficiary other than itself, the sender included; a write or a log moves none.
     #[test]
     fn test_only_a_destruction_to_another_account_moves_value() {
-        let sd = |had_value, to_other_account, beneficiary| StagedRecord::SelfDestruct {
-            had_value,
-            to_other_account,
-            beneficiary,
-        };
-        assert!(sd(true, true, OTHER).moves_value());
-        assert!(sd(true, true, SENDER).moves_value(), "the body's record is not the log");
-        assert!(!sd(true, false, OTHER).moves_value(), "a destruction to itself burns");
-        assert!(!sd(false, true, OTHER).moves_value(), "nothing to move");
-        assert!(!sstore(0, 0, 1).moves_value());
-        assert!(!StagedRecord::Log { topics: 3, data_len: 32 }.moves_value());
+        let moves =
+            |had_value, target| write_moves_value(&selfdestruct(&destruction(had_value), target));
+        assert!(moves(true, OTHER));
+        assert!(moves(true, SENDER), "the body's record is not the log");
+        assert!(!moves(true, DESTRUCTED), "a destruction to itself burns");
+        assert!(!moves(false, OTHER), "nothing to move");
+        assert!(!write_moves_value(&sstore(&slot(0, 0, 1))));
+        assert!(!write_moves_value(&log(3, 32)));
     }
 
     /// A transfer log counts what a `LOG3` carrying one word counts: the same rule, not a number
@@ -232,7 +214,7 @@ mod tests {
     #[test]
     fn test_a_transfer_log_counts_what_a_log3_of_one_word_counts() {
         assert_eq!(
-            StagedRecord::Log { topics: 3, data_len: 32 }.effect(SENDER),
+            write_effect(&log(3, 32), SENDER),
             RecordEffect::Record(crate::limit::TRANSFER_LOG)
         );
     }

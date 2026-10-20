@@ -1,4 +1,4 @@
-//! The observe-stage-commit layer and the write records it counts.
+//! The write records the common execution layer counts, and when it counts them.
 //!
 //! A write record is one account or storage write, 40 bytes of data size. The sites: the first
 //! change of a slot in the transaction (taken back when the slot is written back), a value
@@ -19,8 +19,7 @@ use mega_evm::{
         ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE,
     },
     test_utils::{is_transfer_log, BytecodeBuilder, MemoryDatabase},
-    LimitUsage, MegaContext, MegaEvm, StagedRecord, TRANSFER_LOG_SIZE, TX_BODY_SIZE,
-    WRITE_RECORD_SIZE,
+    LimitUsage, MegaContext, MegaEvm, TRANSFER_LOG_SIZE, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 use revm::{
     bytecode::opcode::{
@@ -528,26 +527,24 @@ fn test_execution_writes_to_the_fee_accounts_are_records() {
 /// Records, after each opcode, what the layer holds.
 #[derive(Default)]
 struct LayerProbe {
-    /// `(opcode, staged record left, usage)` after each opcode.
-    steps: Vec<(u8, bool, LimitUsage)>,
+    /// `(opcode, usage)` after each opcode.
+    steps: Vec<(u8, LimitUsage)>,
     opcode: u8,
-    /// Stages a log through the Host before every `SSTORE`, as a stale record.
-    stage_before_sstore: bool,
+    /// Appends a log through the Host before every `SSTORE`, as a tool's write.
+    log_before_sstore: bool,
 }
 
 impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for LayerProbe {
     fn step(&mut self, interp: &mut Interpreter<EthInterpreter>, context: &mut MegaContext<DB>) {
         self.opcode = interp.bytecode.opcode();
-        if self.stage_before_sstore && self.opcode == SSTORE {
+        if self.log_before_sstore && self.opcode == SSTORE {
+            let before = context.additional_limit().usage();
             let log = Log {
                 address: CALLEE,
                 data: LogData::new(vec![B256::ZERO], Bytes::new()).unwrap(),
             };
             revm::context_interface::Host::log(context, log);
-            assert!(matches!(
-                context.additional_limit().staged_record(),
-                Some(StagedRecord::Log { .. })
-            ));
+            assert_eq!(context.additional_limit().usage(), before, "a tool's log counts nothing");
         }
     }
 
@@ -556,40 +553,31 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for LayerProbe {
         _interp: &mut Interpreter<EthInterpreter>,
         context: &mut MegaContext<DB>,
     ) {
-        let layer = context.additional_limit();
-        self.steps.push((self.opcode, layer.staged_record().is_some(), layer.usage()));
+        self.steps.push((self.opcode, context.additional_limit().usage()));
     }
 }
 
-fn probe(
-    db: MemoryDatabase,
-    gas_limit: u64,
-    stage_before_sstore: bool,
-) -> Vec<(u8, bool, LimitUsage)> {
+fn probe(db: MemoryDatabase, gas_limit: u64, log_before_sstore: bool) -> Vec<(u8, LimitUsage)> {
     let mut evm = MegaEvm::new(context(db))
-        .with_inspector(LayerProbe { stage_before_sstore, ..Default::default() });
+        .with_inspector(LayerProbe { log_before_sstore, ..Default::default() });
     alloy_evm::Evm::transact_raw(&mut evm, call(CALLER, CALLEE, U256::ZERO, gas_limit)).unwrap();
     evm.inspector().steps.clone()
 }
 
-fn after_sstore(steps: &[(u8, bool, LimitUsage)]) -> (bool, LimitUsage) {
-    let (_, staged, usage) = steps.iter().find(|(op, ..)| *op == SSTORE).copied().unwrap();
-    (staged, usage)
+fn after_sstore(steps: &[(u8, LimitUsage)]) -> LimitUsage {
+    steps.iter().find(|(op, _)| *op == SSTORE).map(|(_, usage)| *usage).unwrap()
 }
 
-/// A completed `SSTORE` commits its record: nothing is left staged and the record is counted by
-/// the time the opcode ends.
+/// A completed `SSTORE` commits its record by the time the opcode ends.
 #[test]
 fn test_completed_sstore_commits_its_record() {
     let code = BytecodeBuilder::default().sstore(U256::ZERO, U256::from(1)).stop().build();
     let steps = probe(MemoryDatabase::default().account_code(CALLEE, code), gas_limit(), false);
-    let (staged, usage) = after_sstore(&steps);
-    assert!(!staged);
-    assert_eq!(usage, records(1));
+    assert_eq!(after_sstore(&steps), records(1));
 }
 
-/// An `SSTORE` that runs out of gas after its Host call wrote the slot discards the staged
-/// record: the Host observed the write, the failure takes it back, and nothing is counted.
+/// An `SSTORE` that runs out of gas after its Host call wrote the slot counts nothing: the
+/// failure takes the write back, and revm offers the completed-write hook nothing.
 #[test]
 fn test_sstore_out_of_gas_after_the_write_discards_the_record() {
     // CALLEE calls CONTRACT with 5,000 gas: past the EIP-2200 stipend check, so the Host call
@@ -604,20 +592,16 @@ fn test_sstore_out_of_gas_after_the_write_discards_the_record() {
         .build();
     let db = MemoryDatabase::default().account_code(CALLEE, parent).account_code(CONTRACT, child);
     let steps = probe(db, gas_limit(), false);
-    let (staged, usage) = after_sstore(&steps);
-    assert!(!staged, "the record is discarded, not left for the next opcode");
-    assert_eq!(usage, body_only(), "a failed opcode's write is not counted");
+    assert_eq!(after_sstore(&steps), body_only(), "a failed opcode's write is not counted");
 }
 
-/// A record staged outside an opcode's wrapper is discarded when the next wrapper starts, so it
-/// is never committed for that opcode.
+/// A log a tool appends through the Host, outside an opcode — here an inspector's, in its `step`
+/// before an `SSTORE` — counts nothing, and the `SSTORE` that follows counts its own record alone.
 #[test]
-fn test_wrapper_discards_a_stale_record_on_entry() {
+fn test_a_tools_log_in_step_counts_nothing() {
     let code = BytecodeBuilder::default().sstore(U256::ZERO, U256::from(1)).stop().build();
     let steps = probe(MemoryDatabase::default().account_code(CALLEE, code), gas_limit(), true);
-    let (staged, usage) = after_sstore(&steps);
-    assert!(!staged);
-    assert_eq!(usage, records(1), "the SSTORE's record, and not the stale log's bytes");
+    assert_eq!(after_sstore(&steps), records(1), "the SSTORE's record, and not the tool's log");
 }
 
 /* ---------- applied EIP-7702 authorities ---------- */

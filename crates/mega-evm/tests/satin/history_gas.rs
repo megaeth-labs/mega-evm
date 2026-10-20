@@ -104,7 +104,7 @@ fn test_calldata_costs_one_history_byte_per_byte() {
     assert_eq!(longer.gas.history - zeros.gas.history, 100 * CPHB, "a hundred bytes more");
 }
 
-/* ---------- the sites the Host stages ---------- */
+/* ---------- the sites of completed writes ---------- */
 
 /// The body of a `LOG` with `topics` topics over `data_len` bytes of memory, without the `STOP`
 /// that ends a program.

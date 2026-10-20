@@ -1,16 +1,17 @@
 //! The Host of the Satin engine.
 //!
-//! # The Host only observes
+//! # Writes are counted once their opcode completed
 //!
-//! revm hands the Host the facts of every state-writing opcode: an `SSTORE`'s original, present and
-//! new values, a log's topics and data, a `SELFDESTRUCT`'s balance and beneficiary. The Host
-//! stages them ([`AdditionalLimit::stage_record`](crate::AdditionalLimit)) and records nothing.
-//! The opcode's wrapper commits the staged record after the opcode completed, and charges the
-//! frame the history the record costs; it discards the record, and charges nothing, when the
-//! opcode failed. Recording in the Host would count a write the opcode's own failure then takes
-//! back: `SSTORE` charges its dynamic gas after the Host call, and an out-of-gas there halts the
-//! frame with the record already counted — and would have charged the frame for a byte the chain
-//! never carries.
+//! revm hands the Host the facts of every state-writing opcode twice: as it makes the write (an
+//! `SSTORE`'s slot, a log, a `SELFDESTRUCT`'s beneficiary), and once the opcode completed, in the
+//! completed-write hook ([`write_completed`](revm::context_interface::Host::write_completed)),
+//! after every charge the opcode makes. The Host counts nothing in the first: the write methods
+//! only write, whoever calls them. The hook commits the write's record to the running frame, holds
+//! it to the limits and charges the frame the history the record costs. Counting at the write
+//! would count one the opcode's own failure then takes back: `SSTORE` charges its dynamic gas after
+//! the write, and an out-of-gas there halts the frame with the record already counted — and would
+//! have charged the frame for a byte the chain never carries. A tool's write through the Host, an
+//! inspector's log among them, reaches no hook, and is not counted.
 //!
 //! `block_hash` serves the read and records it, so a stateless witness learns of a `BLOCKHASH`
 //! that bypassed the journal.
@@ -63,9 +64,9 @@ use delegate::delegate;
 use revm::{
     context::ContextTr,
     context_interface::{
-        cfg::{GasId, GasParams, StateGasSite},
+        cfg::{gas::GasTracker, GasId, GasParams, StateGasSite},
         context::{ContextError, SStoreResult, SelfDestructResult, StateLoad},
-        host::LoadError,
+        host::{CompletedWrite, LoadError, WriteVerdict},
         journaled_state::AccountInfoLoad,
     },
     primitives::{Address, Log, StorageKey, StorageValue, B256, U256},
@@ -73,8 +74,8 @@ use revm::{
 };
 
 use crate::{
-    system::ORACLE_CONTRACT_ADDRESS, ExternalEnvTypes, MegaContext, OracleEnv, StagedRecord,
-    VolatileDataAccess,
+    history_gas, limit::HistoryBytes, system::ORACLE_CONTRACT_ADDRESS, ExternalEnvTypes,
+    MegaContext, OracleEnv, VolatileDataAccess,
 };
 
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
@@ -93,6 +94,22 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
             fn is_amsterdam_eip8037_enabled(&self) -> bool;
             fn tstore(&mut self, address: Address, key: StorageKey, value: StorageValue);
             fn tload(&mut self, address: Address, key: StorageKey) -> StorageValue;
+            // A write is counted once its opcode completed, in `write_completed`: what the Host's
+            // write methods are called with, by an opcode or by a tool, counts nothing.
+            fn sstore(
+                &mut self,
+                address: Address,
+                key: StorageKey,
+                value: StorageValue,
+            ) -> Option<StateLoad<SStoreResult>>;
+            fn sstore_skip_cold_load(
+                &mut self,
+                address: Address,
+                key: StorageKey,
+                value: StorageValue,
+                skip_cold_load: bool,
+            ) -> Result<StateLoad<SStoreResult>, LoadError>;
+            fn log(&mut self, log: Log);
         }
     }
 
@@ -249,46 +266,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
         Some(hash)
     }
 
-    /// Writes the slot and stages the write's values.
-    #[inline]
-    fn sstore_skip_cold_load(
-        &mut self,
-        address: Address,
-        key: StorageKey,
-        value: StorageValue,
-        skip_cold_load: bool,
-    ) -> Result<StateLoad<SStoreResult>, LoadError> {
-        let load = self.inner.sstore_skip_cold_load(address, key, value, skip_cold_load)?;
-        self.additional_limit.stage_record(StagedRecord::Sstore(load.data.clone()));
-        Ok(load)
-    }
-
-    /// Writes the slot and stages the write's values.
-    #[inline]
-    fn sstore(
-        &mut self,
-        address: Address,
-        key: StorageKey,
-        value: StorageValue,
-    ) -> Option<StateLoad<SStoreResult>> {
-        let load = self.inner.sstore(address, key, value)?;
-        self.additional_limit.stage_record(StagedRecord::Sstore(load.data.clone()));
-        Some(load)
-    }
-
-    /// Stages the log's topic count and data length, then appends it.
-    #[inline]
-    fn log(&mut self, log: Log) {
-        self.additional_limit.stage_record(StagedRecord::Log {
-            topics: log.topics().len() as u8,
-            data_len: log.data.data.len() as u64,
-        });
-        self.inner.log(log);
-    }
-
-    /// Destructs the account and stages whether value moved and where to, marking a read of the
-    /// block beneficiary's account when it is either end: the source's balance is read and
-    /// cleared, the target's read and credited.
+    /// Destructs the account, marking a read of the block beneficiary's account when it is either
+    /// end: the source's balance is read and cleared, the target's read and credited.
     #[inline]
     fn selfdestruct(
         &mut self,
@@ -305,12 +284,63 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
         if volatile {
             self.detention.observe(VolatileDataAccess::BENEFICIARY_BALANCE);
         }
-        self.additional_limit.stage_record(StagedRecord::SelfDestruct {
-            had_value: load.data.had_value,
-            to_other_account: target != address,
-            beneficiary: target,
-        });
         Ok(load)
+    }
+
+    /// Commits the record of a write an opcode completed, holds it to the limits, and charges the
+    /// frame the history it costs. revm calls it at the end of `SSTORE`, `LOG0`..`LOG4` and
+    /// `SELFDESTRUCT`, after every charge the opcode makes, so a write the opcode's own failure
+    /// takes back is never counted.
+    ///
+    /// The record is held to the limits first, and only then is its history charged: a record the
+    /// limit rejects is not kept, so its history is no charge, and the stop is what the frame
+    /// reports — a revert whose output is the stop's
+    /// [`MegaLimitExceeded`](crate::MegaLimitExceeded), on the frame's gas, so its caller resumes
+    /// as after any revert. A record the limit accepts is charged, and a charge the frame cannot
+    /// pay, or a byte count with no price, is an ordinary out-of-gas.
+    ///
+    /// A log's history is drawn from the frame's history allowance first, and the frame's gas pays
+    /// the rest ([`storage_call_stipend`](crate::storage_call_stipend)): a write record is the
+    /// frame's own to pay for, and a record taken back — a slot written back to its original value
+    /// — gives back what the frame's gas paid, never what an allowance did. Both sides are priced
+    /// the same way, so a record taken back cancels its own charge exactly, whichever frame made
+    /// it: a refill below zero is reconciled when the frame merges into its caller.
+    ///
+    /// A completed `SSTORE` holds the frame to the compute limit again: a slot restored to its
+    /// original value refills the state gas (revm, before this hook) and the history gas (here)
+    /// that spilled onto regular gas, and the spill may predate the limit.
+    #[inline]
+    fn write_completed(&mut self, write: CompletedWrite<'_>, gas: &mut GasTracker) -> WriteVerdict {
+        let (from_allowance, holds_again) = match write {
+            CompletedWrite::Sstore { .. } => (false, true),
+            CompletedWrite::Log { .. } => (true, false),
+            CompletedWrite::SelfDestruct { .. } => (false, false),
+        };
+        let (check, history) = self.additional_limit.commit_write(&write);
+        if check.exceeded_limit() {
+            return WriteVerdict::Revert(self.additional_limit.note_frame_stop(&check));
+        }
+        if self.prices_history() {
+            match history {
+                HistoryBytes::None => {}
+                HistoryBytes::Appended(bytes) => {
+                    let Some(cost) = history_gas(bytes) else { return WriteVerdict::OutOfGas };
+                    let drawn = if from_allowance {
+                        self.additional_limit.try_consume_stipend(cost)
+                    } else {
+                        0
+                    };
+                    if !gas.record_history_cost(cost - drawn) {
+                        return WriteVerdict::OutOfGas;
+                    }
+                }
+                HistoryBytes::Taken(bytes) => gas.refill_history(history_gas(bytes).unwrap_or(0)),
+            }
+        }
+        if holds_again {
+            self.detention.hold(gas);
+        }
+        WriteVerdict::Continue
     }
 }
 
@@ -395,11 +425,12 @@ mod tests {
     use alloy_primitives::{address, Bytes};
     use revm::context::JournalTr;
 
-    /// The Host stages what each state-writing call observed and counts nothing: counting is the
-    /// opcode wrapper's, after the opcode completed.
+    /// The Host's write methods count nothing, whoever calls them — an opcode, or a tool such as
+    /// an inspector appending a log in its `step`: a write is counted once its opcode completed,
+    /// through the completed-write hook, which only revm's write instructions call.
     #[test]
-    fn test_host_stages_observations_and_counts_nothing() {
-        use crate::{test_utils::MemoryDatabase, MegaSpecId};
+    fn test_host_writes_count_nothing() {
+        use crate::{test_utils::MemoryDatabase, LimitUsage, MegaSpecId, WRITE_RECORD_SIZE};
         use revm::{context_interface::Host, primitives::LogData};
 
         const CONTRACT: Address = address!("00000000000000000000000000000000000000c1");
@@ -409,40 +440,26 @@ mod tests {
         ctx.inner.journaled_state.load_account(CONTRACT).unwrap();
 
         let slot = Host::sstore(&mut ctx, CONTRACT, U256::from(1), U256::from(9)).unwrap();
-        assert_eq!(
-            ctx.additional_limit.staged_record(),
-            Some(&StagedRecord::Sstore(slot.data.clone())),
-            "the non-Berlin entry point stages too"
-        );
         assert_eq!(slot.data.new_value, U256::from(9));
-        let slot =
-            Host::sstore_skip_cold_load(&mut ctx, CONTRACT, U256::from(1), U256::from(4), false)
-                .unwrap();
-        assert_eq!(ctx.additional_limit.staged_record(), Some(&StagedRecord::Sstore(slot.data)));
-
+        Host::sstore_skip_cold_load(&mut ctx, CONTRACT, U256::from(2), U256::from(4), false)
+            .unwrap();
         let log = Log {
             address: CONTRACT,
             data: LogData::new(vec![B256::ZERO, B256::ZERO], Bytes::from_static(b"abc")).unwrap(),
         };
         Host::log(&mut ctx, log);
-        assert_eq!(
-            ctx.additional_limit.staged_record(),
-            Some(&StagedRecord::Log { topics: 2, data_len: 3 })
-        );
+        let destructed = Host::selfdestruct(&mut ctx, CONTRACT, BENEFICIARY, false).unwrap();
+        assert!(destructed.data.had_value);
+        assert_eq!(ctx.additional_limit.usage(), LimitUsage::ZERO, "the Host counts nothing");
 
-        Host::selfdestruct(&mut ctx, CONTRACT, BENEFICIARY, false).unwrap();
-        assert_eq!(
-            ctx.additional_limit.staged_record(),
-            Some(&StagedRecord::SelfDestruct {
-                had_value: true,
-                to_other_account: true,
-                beneficiary: BENEFICIARY,
-            })
-        );
+        // The hook is what counts: the slot's first change is one write record.
+        let mut gas = GasTracker::new(1_000_000, 1_000_000, 0);
+        let write =
+            CompletedWrite::Sstore { address: CONTRACT, key: U256::from(1), result: &slot.data };
+        assert_eq!(Host::write_completed(&mut ctx, write, &mut gas), WriteVerdict::Continue);
         assert_eq!(
             ctx.additional_limit.usage(),
-            crate::LimitUsage::ZERO,
-            "the Host counts nothing"
+            LimitUsage { data_size: WRITE_RECORD_SIZE, write_records: 1 },
         );
     }
 }

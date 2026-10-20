@@ -2,26 +2,26 @@
 
 use alloy_primitives::{Address, Bytes};
 use revm::{
-    context_interface::context::CodeDeposit,
+    context_interface::{context::CodeDeposit, host::CompletedWrite},
     handler::FrameResult,
     interpreter::{CallInputs, CallScheme, FrameInput, InstructionResult},
 };
 
 use super::{
     frame_limit::{FrameLimitTracker, Lane},
-    record::{HistoryBytes, RecordEffect, StagedRecord},
+    record::{write_effect, write_moves_value, HistoryBytes, RecordEffect},
     EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, FRAME_DATA_SHARE_DENOMINATOR,
     FRAME_DATA_SHARE_NUMERATOR, TRANSFER_LOG, WRITE_RECORD, WRITE_RECORD_SIZE,
 };
 use crate::storage_call_stipend;
 
 /// What the common execution layer tracks for the running transaction: the per-frame lanes of
-/// data-size bytes and write records, the record the Host staged for the running opcode, the stops
-/// its frames return, and whether it is exempt from every limit.
+/// data-size bytes and write records, the stops its frames return, and whether it is exempt from
+/// every limit.
 ///
 /// It lives on the [`MegaContext`](crate::MegaContext), is reset before each transaction and
-/// system call, and is driven by the Host (staging), the opcode wrappers (commit and discard)
-/// and the frame lifecycle (lanes, stops).
+/// system call, and is driven by the Host's instruction hooks (the records of completed writes and
+/// the charge of a frame's start) and the frame lifecycle (lanes, stops).
 ///
 /// # The stop
 ///
@@ -49,7 +49,6 @@ use crate::storage_call_stipend;
 #[derive(Clone, Debug, Default)]
 pub struct AdditionalLimit {
     pub(crate) tracker: FrameLimitTracker,
-    staged: Option<StagedRecord>,
     limits: EvmTxRuntimeLimits,
     /// Whether the transaction is exempt from every per-transaction limit, sticky for the
     /// transaction. See [`exempt`](Self::exempt).
@@ -128,7 +127,6 @@ impl AdditionalLimit {
     /// Clears the state for a new transaction, keeping allocations and the limits.
     pub(crate) fn reset(&mut self) {
         self.tracker.reset();
-        self.staged = None;
         self.exempt = false;
         self.pending_stop = None;
         self.frame_stop = None;
@@ -380,22 +378,12 @@ impl AdditionalLimit {
         self.history_gas_spent = history_gas_spent;
     }
 
-    /* Observe, stage, commit */
+    /* Completed writes */
 
-    /// The record the Host staged for the running opcode, if any.
-    pub const fn staged_record(&self) -> Option<&StagedRecord> {
-        self.staged.as_ref()
-    }
-
-    /// Stages the facts the Host observed. Called by the Host, which records nothing itself.
-    #[inline]
-    pub(crate) fn stage_record(&mut self, record: StagedRecord) {
-        self.staged = Some(record);
-    }
-
-    /// Commits the staged record to the running frame's lane, and reports the history bytes it
-    /// appends or takes back. Called by an opcode's wrapper once the opcode completed; a crossed
-    /// limit in the verdict stops the opcode's frame, and the wrapper charges the history.
+    /// Commits the record of `write`, which the running opcode completed, to the running frame's
+    /// lane, and reports the history bytes it appends or takes back. Called by the Host's
+    /// completed-write hook, which revm calls only once the opcode made every charge; a crossed
+    /// limit in the verdict stops the opcode's frame, and the hook charges the history.
     ///
     /// A `SELFDESTRUCT` that moved value to another account also counts the EIP-7708 transfer log
     /// revm journaled for the move, with the beneficiary's record and in the same check. The log
@@ -403,16 +391,12 @@ impl AdditionalLimit {
     /// when the frame fails, and its lane the bytes. It is data size and nothing else — no write
     /// record, and no history: the bytes reported are the record's alone.
     #[inline]
-    pub(crate) fn commit_staged_record(&mut self) -> (LimitCheck, HistoryBytes) {
-        let Some(record) = self.staged.take() else {
-            return (LimitCheck::WithinLimit, HistoryBytes::None);
-        };
-        let effect = record.effect(self.sender);
+    pub(crate) fn commit_write(
+        &mut self,
+        write: &CompletedWrite<'_>,
+    ) -> (LimitCheck, HistoryBytes) {
+        let effect = write_effect(write, self.sender);
         let history = effect.history_bytes();
-        // A log's bytes are history beside the write records; a record's are counted as one.
-        if let (StagedRecord::Log { .. }, HistoryBytes::Appended(bytes)) = (&record, history) {
-            self.tracker.record_log_and_code_bytes(bytes);
-        }
         let counted = match effect {
             RecordEffect::None => LimitUsage::ZERO,
             RecordEffect::Record(usage) => usage,
@@ -421,7 +405,12 @@ impl AdditionalLimit {
                 return (LimitCheck::WithinLimit, history);
             }
         };
-        let counted = if self.transfer_logs && record.moves_value() {
+        match write {
+            // A log's bytes are history beside the write records; a record's are counted as one.
+            CompletedWrite::Log { .. } => self.tracker.record_log_and_code_bytes(counted.data_size),
+            CompletedWrite::Sstore { .. } | CompletedWrite::SelfDestruct { .. } => {}
+        }
+        let counted = if self.transfer_logs && write_moves_value(write) {
             counted.saturating_add(TRANSFER_LOG)
         } else {
             counted
@@ -431,14 +420,6 @@ impl AdditionalLimit {
         }
         self.tracker.record(counted);
         (self.check(), history)
-    }
-
-    /// Discards the staged record. Called by an opcode's wrapper on entry, so a record staged
-    /// outside a wrapper cannot be committed for the wrong opcode, and when the opcode failed,
-    /// which takes the observed write back with it.
-    #[inline]
-    pub(crate) fn discard_staged_record(&mut self) {
-        self.staged = None;
     }
 
     /* Transaction-level records */
@@ -1005,7 +986,10 @@ mod tests {
     use super::*;
     use crate::{TRANSFER_LOG_SIZE, WRITE_RECORD_SIZE};
     use alloy_primitives::{address, Address, Bytes, U256};
-    use revm::interpreter::{CallInput, CallValue};
+    use revm::{
+        context_interface::context::SelfDestructResult,
+        interpreter::{CallInput, CallValue},
+    };
 
     const SENDER: Address = address!("00000000000000000000000000000000000f0001");
     const CALLEE: Address = address!("00000000000000000000000000000000000f0002");
@@ -1646,15 +1630,12 @@ mod tests {
     /// whose account the body counts, it is the log alone, and the log alone can cross.
     #[test]
     fn test_a_destruction_counts_its_transfer_log_with_its_beneficiary() {
-        let destruction = |beneficiary| StagedRecord::SelfDestruct {
-            had_value: true,
-            to_other_account: true,
-            beneficiary,
-        };
+        let moved = SelfDestructResult { had_value: true, ..Default::default() };
+        let destruction =
+            |target| CompletedWrite::SelfDestruct { address: CALLEE, target, result: &moved };
         let mut limit = logging(EvmTxRuntimeLimits::no_limits());
         limit.on_frame_init(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
-        limit.stage_record(destruction(TARGET));
-        let (check, history) = limit.commit_staged_record();
+        let (check, history) = limit.commit_write(&destruction(TARGET));
         assert_eq!(check, LimitCheck::WithinLimit);
         assert_eq!(history, HistoryBytes::Appended(WRITE_RECORD_SIZE), "the record's alone");
         assert_eq!(
@@ -1665,8 +1646,7 @@ mod tests {
         let mut limit =
             logging(EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(TRANSFER_LOG_SIZE - 1));
         limit.on_frame_init(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
-        limit.stage_record(destruction(SENDER));
-        let (check, history) = limit.commit_staged_record();
+        let (check, history) = limit.commit_write(&destruction(SENDER));
         assert_eq!(history, HistoryBytes::None);
         assert_eq!(
             check,
@@ -1681,8 +1661,7 @@ mod tests {
 
         let mut limit = AdditionalLimit::default();
         limit.on_frame_init(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
-        limit.stage_record(destruction(TARGET));
-        let _ = limit.commit_staged_record();
+        let _ = limit.commit_write(&destruction(TARGET));
         assert_eq!(limit.usage(), WRITE_RECORD, "no log, no bytes");
     }
 

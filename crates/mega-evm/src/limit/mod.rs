@@ -13,8 +13,9 @@
 //! ([`LimitCheck::ExceedsLimit`]).
 //!
 //! It also counts what the data-size limit meters, at the sites the bytes are made: data-size
-//! bytes and write records, on a lane per frame ([`AdditionalLimit`]). The Host stages what it
-//! observes ([`StagedRecord`]) and the opcode commits it once it completed.
+//! bytes and write records, on a lane per frame ([`AdditionalLimit`]). A write an opcode makes is
+//! counted once the opcode completed, in the Host's completed-write hook, which revm calls after
+//! every charge the opcode makes.
 //!
 //! # The data-size limit
 //!
@@ -136,7 +137,6 @@ mod record;
 pub use limit::AdditionalLimit;
 pub(crate) use limit::FrameStartRecords;
 pub(crate) use record::HistoryBytes;
-pub use record::StagedRecord;
 
 use alloy_primitives::Bytes;
 use alloy_sol_types::SolError;
