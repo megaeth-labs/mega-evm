@@ -218,7 +218,8 @@ A `code` that is present is checked against `codeHash` and refused if they diffe
 They hold for an account `run` or `tx` adds code to afterwards: the `run` receiver and the system contracts.
 
 A Satin `run` or `tx` puts the six system contracts and the EIP-7997 factory where the state does not hold their code, as a chain that ran `Rex6` holds them: an address that already holds the code is left as it is.
-Without `--fork` an address that lacks it gets the account `Rex6` left — the six at nonce 0, the `SequencerRegistry` naming `0xa887dcb9d5f39ef79272801d05abdf707cfbbd1d` in every role, the factory at nonce 1; with `--fork` it gets the code alone, its nonce, balance and storage as the chain holds them.
+Without `--fork` an address that lacks it gets the account `Rex6` left — the six at nonce 0, the `SequencerRegistry` naming `0xa887dcb9d5f39ef79272801d05abdf707cfbbd1d` in every role, the factory at nonce 1 — over any account the prestate file holds there, whose nonce and balance it replaces and whose slots it writes its own over; with `--fork` it gets the code alone, its nonce, balance and storage as the prestate or the fork holds them.
+Either way the overrides above hold over the account installed, whether or not the prestate file holds one at the address.
 
 ## RPC Cache and Retry
 

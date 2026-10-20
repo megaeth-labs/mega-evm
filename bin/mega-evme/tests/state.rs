@@ -19,21 +19,17 @@ use common::{rpc_cache_path, test_rpc_args, test_rpc_args_cached, MockRpcServer}
 
 // ─── The predeploys `run` and `tx` put in the state ──────────────────────────
 
-/// `run` and `tx` put Satin's predeploys only where the state lacks the code Satin expects. On a
-/// fork of a chain that holds the factory with its code at nonce 1443 and the six system
-/// contracts at nonce 0, those accounts stay as the chain holds them; an address the chain holds
-/// without the code gets the code and keeps its nonce. Nothing is rewritten to a nonce of the
-/// tool's own.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_a_fork_keeps_the_predeploys_it_holds() {
+/// A mock of a chain holding the factory with its code at nonce 1443, the Oracle without code at
+/// nonce 5, and the other five system contracts with their code at nonce 0; every other account,
+/// balance and slot is empty.
+async fn predeploy_chain() -> wiremock::MockServer {
     use mega_evm::system::{
         system_contract_specs, CREATE2_FACTORY_ADDRESS, ORACLE_CONTRACT_ADDRESS,
     };
     use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
 
-    let specs = system_contract_specs();
     let server = MockServer::start().await;
-    let chain = specs.clone();
+    let chain = system_contract_specs();
     Mock::given(matchers::method("POST"))
         .respond_with(move |req: &wiremock::Request| {
             let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
@@ -63,14 +59,65 @@ async fn test_a_fork_keeps_the_predeploys_it_holds() {
         })
         .mount(&server)
         .await;
+    server
+}
 
-    let prestate_args = PreStateArgs::parse_from(["mega-evme", "--fork", "--fork.block", "7"]);
-    let rpc_args = test_rpc_args(&server.uri(), Some(0));
-    let (mut state, _) =
-        prestate_args.create_initial_state(&Address::ZERO, &rpc_args).await.expect("the state");
+/// A state with Satin's predeploys installed: forked from `chain`, or local without one; built
+/// with the CLI `overrides`, from a prestate file that holds an account without code at each of
+/// `file_accounts` (and no file when there are none).
+async fn state_with_predeploys(
+    chain: Option<&wiremock::MockServer>,
+    file_accounts: &[Address],
+    overrides: &[String],
+) -> impl DatabaseRef<Error = mega_evme::common::EvmeError> {
+    let dir = tempdir().expect("tempdir");
+    let mut argv = vec!["mega-evme".to_string()];
+    if chain.is_some() {
+        argv.extend(["--fork", "--fork.block", "7"].map(String::from));
+    }
+    if !file_accounts.is_empty() {
+        let path = dir.path().join("prestate.json");
+        let accounts: serde_json::Map<String, serde_json::Value> = file_accounts
+            .iter()
+            .map(|address| {
+                let empty = serde_json::json!({
+                    "balance": "0x0", "nonce": "0x0", "code": "0x", "storage": {}
+                });
+                (format!("{address:#x}"), empty)
+            })
+            .collect();
+        std::fs::write(&path, serde_json::Value::Object(accounts).to_string())
+            .expect("write prestate");
+        argv.extend(["--prestate".to_string(), path.to_str().unwrap().to_string()]);
+    }
+    argv.extend(overrides.iter().cloned());
+    let rpc_args = match chain {
+        Some(server) => test_rpc_args(&server.uri(), Some(0)),
+        // Without --fork no endpoint is contacted.
+        None => test_rpc_args("http://localhost:8545", None),
+    };
+    let (mut state, _) = PreStateArgs::parse_from(argv)
+        .create_initial_state(&Address::ZERO, &rpc_args)
+        .await
+        .expect("the state");
     state.deploy_system_contracts().expect("the predeploys");
+    state
+}
 
-    for spec in specs {
+/// `run` and `tx` put Satin's predeploys only where the state lacks the code Satin expects. On a
+/// fork of a chain that holds the factory with its code at nonce 1443 and the six system
+/// contracts at nonce 0, those accounts stay as the chain holds them; an address the chain holds
+/// without the code gets the code and keeps its nonce. Nothing is rewritten to a nonce of the
+/// tool's own.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_fork_keeps_the_predeploys_it_holds() {
+    use mega_evm::system::{
+        system_contract_specs, CREATE2_FACTORY_ADDRESS, ORACLE_CONTRACT_ADDRESS,
+    };
+
+    let chain = predeploy_chain().await;
+    let state = state_with_predeploys(Some(&chain), &[], &[]).await;
+    for spec in system_contract_specs() {
         let info = state.basic_ref(spec.address).expect("readable").expect("present");
         assert_eq!(info.code_hash, spec.code_hash, "{} holds Satin's code", spec.address);
         let nonce = match spec.address {
@@ -137,6 +184,70 @@ async fn test_a_local_prestate_keeps_the_predeploys_it_holds() {
         U256::from_be_bytes(MEGA_SYSTEM_ADDRESS.into_word().0),
         "the registry names the system address"
     );
+}
+
+/// A balance override and a faucet on a predeploy hold over the account `run` and `tx` install
+/// there, locally and on a fork, whether or not the prestate file holds an account without code at
+/// the address: the Oracle gets its code and the overridden balance plus the faucet. The rest of
+/// the account is the one installed: the account Rex6 left locally, on a fork the chain's (nonce 5)
+/// or the file's.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_balance_override_holds_over_a_predeploy() {
+    use mega_evm::system::{ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_HASH};
+
+    let chain = predeploy_chain().await;
+    let overrides = [
+        format!("--balance={ORACLE_CONTRACT_ADDRESS}=100wei"),
+        format!("--faucet={ORACLE_CONTRACT_ADDRESS}+=5wei"),
+    ];
+    for fork in [None, Some(&chain)] {
+        for file_accounts in [&[][..], &[ORACLE_CONTRACT_ADDRESS][..]] {
+            let case =
+                format!("fork {}, file account {}", fork.is_some(), !file_accounts.is_empty());
+            let state = state_with_predeploys(fork, file_accounts, &overrides).await;
+            let oracle = state.basic_ref(ORACLE_CONTRACT_ADDRESS).unwrap().expect("installed");
+            assert_eq!(oracle.code_hash, ORACLE_CONTRACT_CODE_HASH, "{case}");
+            assert_eq!(oracle.balance, U256::from(105), "{case}: the override and the faucet hold");
+            let nonce = if fork.is_some() && file_accounts.is_empty() { 5 } else { 0 };
+            assert_eq!(oracle.nonce, nonce, "{case}");
+        }
+    }
+}
+
+/// A storage override on the `SequencerRegistry` holds over the account `run` and `tx` install
+/// there, locally and on a fork, whether or not the prestate file holds an account without code
+/// at the address: the overridden slot keeps its value. Every other slot is the installed
+/// account's: the registry Rex6 left locally, on a fork the chain's (empty in the mock) or the
+/// file's.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_a_storage_override_holds_over_a_predeploy() {
+    use mega_evm::{
+        system::{MEGA_SYSTEM_ADDRESS, SEQUENCER_REGISTRY_ADDRESS},
+        test_utils::rex6_predeploys,
+    };
+
+    let (_, _, rex6_slots) = rex6_predeploys(MEGA_SYSTEM_ADDRESS)
+        .into_iter()
+        .find(|(address, ..)| *address == SEQUENCER_REGISTRY_ADDRESS)
+        .expect("the registry is a predeploy");
+    let chain = predeploy_chain().await;
+    let overrides = [format!("--storage={SEQUENCER_REGISTRY_ADDRESS}:0=4660")];
+    for fork in [None, Some(&chain)] {
+        for file_accounts in [&[][..], &[SEQUENCER_REGISTRY_ADDRESS][..]] {
+            let case =
+                format!("fork {}, file account {}", fork.is_some(), !file_accounts.is_empty());
+            let state = state_with_predeploys(fork, file_accounts, &overrides).await;
+            for (slot, rex6) in &rex6_slots {
+                let expected = match (slot.is_zero(), fork) {
+                    (true, _) => U256::from(4660),
+                    (false, None) => *rex6,
+                    (false, Some(_)) => U256::ZERO,
+                };
+                let held = state.storage_ref(SEQUENCER_REGISTRY_ADDRESS, *slot).unwrap();
+                assert_eq!(held, expected, "{case}: slot {slot}");
+            }
+        }
+    }
 }
 
 // ─── Synthetic branch wiring tests (no network required) ─────────────────────

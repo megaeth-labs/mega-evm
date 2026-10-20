@@ -221,26 +221,16 @@ impl PreStateArgs {
     /// default account would hide the rest of a forked account. [`Self::create_initial_state`]
     /// applies those as field overlays on top of the backend.
     pub fn load_prestate(&self, sender: &Address) -> Result<EvmState> {
-        let (mut accounts, overlays) = self.prepare_prestate(sender)?;
+        let PreparedPrestate { mut accounts, overlays, .. } = self.prepare_prestate(sender)?;
         for (address, overlay) in overlays {
-            let account = accounts.entry(address).or_default();
-            if let Some(balance) = overlay.balance {
-                account.info.balance = balance;
-            }
-            if !overlay.faucet.is_zero() {
-                account.info.balance =
-                    checked_faucet(account.info.balance, overlay.faucet, address)?;
-            }
-            account.storage.extend(overlay.storage);
+            overlay.apply_to(accounts.entry(address).or_default(), address)?;
         }
         Ok(accounts)
     }
 
-    /// The file accounts, plus field overlays for addresses the file does not hold.
-    fn prepare_prestate(
-        &self,
-        sender: &Address,
-    ) -> Result<(EvmState, HashMap<Address, AccountOverlay>)> {
+    /// The file accounts with the overrides that name them applied, and the overrides split by
+    /// whether the file holds the account.
+    fn prepare_prestate(&self, sender: &Address) -> Result<PreparedPrestate> {
         let mut prestate = if let Some(pre_state_path) = &self.prestate {
             info!(prestate_path = ?pre_state_path, "Loading prestate from file");
             let prestate_content = std::fs::read_to_string(pre_state_path)?;
@@ -261,30 +251,32 @@ impl PreStateArgs {
             debug!("No prestate file provided");
             HashMap::default()
         };
-        let mut overlays: HashMap<Address, AccountOverlay> = HashMap::default();
+        let mut overrides: HashMap<Address, AccountOverlay> = HashMap::default();
 
         for (address, balance) in self.parse_balance()? {
             info!(address = %address, balance = %balance, "Overriding balance");
-            set_balance_override(&mut prestate, &mut overlays, address, balance);
+            set_balance_override(&mut prestate, &mut overrides, address, balance);
         }
 
         for (address, slot, value) in self.parse_storage()? {
             info!(address = %address, slot = %slot, value = %value, "Overriding storage");
-            set_storage_override(&mut prestate, &mut overlays, address, slot, value);
+            set_storage_override(&mut prestate, &mut overrides, address, slot, value);
         }
 
         if let Some(sender_balance_str) = &self.sender_balance {
             let sender_balance = parse_ether_value(sender_balance_str)?;
             info!(sender = %sender, sender_balance = %sender_balance, "Overriding sender balance");
-            set_balance_override(&mut prestate, &mut overlays, *sender, sender_balance);
+            set_balance_override(&mut prestate, &mut overrides, *sender, sender_balance);
         }
 
         for (address, balance) in self.parse_faucet()? {
             info!(address = %address, balance = %balance, "Faucet: adding balance");
-            add_faucet(&mut prestate, &mut overlays, address, balance)?;
+            add_faucet(&mut prestate, &mut overrides, address, balance)?;
         }
 
-        Ok((prestate, overlays))
+        let (file_overrides, overlays) =
+            overrides.into_iter().partition(|(address, _)| prestate.contains_key(address));
+        Ok(PreparedPrestate { accounts: prestate, overlays, file_overrides })
     }
 
     /// Build the initial execution state and the clean-exit RPC cache store.
@@ -298,7 +290,8 @@ impl PreStateArgs {
         sender: &Address,
         rpc_args: &super::RpcArgs,
     ) -> Result<(EvmeState<Optimism, super::OpProvider>, RpcCacheStore)> {
-        let (prestate, overlays) = self.prepare_prestate(sender)?;
+        let PreparedPrestate { accounts: prestate, overlays, file_overrides } =
+            self.prepare_prestate(sender)?;
         let block_hashes = self.parse_block_hashes()?;
 
         if self.fork {
@@ -318,6 +311,7 @@ impl PreStateArgs {
             let mut state =
                 EvmeState::new_forked(provider, self.fork_block, prestate, block_hashes).await?;
             state.overlays = overlays;
+            state.file_overrides = file_overrides;
             Ok((state, cache_store))
         } else {
             debug!("Creating local state");
@@ -330,15 +324,27 @@ impl PreStateArgs {
             }
             let mut state = EvmeState::new_empty(prestate, block_hashes);
             state.overlays = overlays;
+            state.file_overrides = file_overrides;
             Ok((state, RpcCacheStore::noop()))
         }
     }
 }
 
-/// One CLI override of an account the prestate file does not already hold.
+/// The prestate file's accounts and the CLI's field overrides, before a state is built from them.
+struct PreparedPrestate {
+    /// The file's accounts, with the overrides that name them applied.
+    accounts: EvmState,
+    /// The overrides of accounts the file does not hold.
+    overlays: HashMap<Address, AccountOverlay>,
+    /// The overrides of accounts the file holds, as given.
+    file_overrides: HashMap<Address, AccountOverlay>,
+}
+
+/// The CLI's field overrides of one account.
 ///
-/// Applied on read, on top of the backend account or of an entry added to the prestate later, so a
-/// balance or one storage slot does not replace the rest of a forked account.
+/// For an account the prestate file does not already hold, applied on read, on top of the backend
+/// account or of an entry added to the prestate later, so a balance or one storage slot does not
+/// replace the rest of a forked account.
 #[derive(Debug, Default, Clone)]
 struct AccountOverlay {
     /// Replaces the balance when set. Applied before [`Self::faucet`].
@@ -349,46 +355,60 @@ struct AccountOverlay {
     storage: HashMap<U256, EvmStorageSlot>,
 }
 
+impl AccountOverlay {
+    /// Writes the overrides into `account`: the balance, then the faucet, then the slots.
+    fn apply_to(&self, account: &mut Account, address: Address) -> Result<()> {
+        if let Some(balance) = self.balance {
+            account.info.balance = balance;
+        }
+        if !self.faucet.is_zero() {
+            account.info.balance = checked_faucet(account.info.balance, self.faucet, address)?;
+        }
+        account.storage.extend(self.storage.iter().map(|(slot, value)| (*slot, value.clone())));
+        Ok(())
+    }
+}
+
+/// Records a balance override, and applies it to the account when the file holds it.
 fn set_balance_override(
     prestate: &mut EvmState,
-    overlays: &mut HashMap<Address, AccountOverlay>,
+    overrides: &mut HashMap<Address, AccountOverlay>,
     address: Address,
     balance: U256,
 ) {
     if let Some(account) = prestate.get_mut(&address) {
         account.info.balance = balance;
-    } else {
-        overlays.entry(address).or_default().balance = Some(balance);
     }
+    overrides.entry(address).or_default().balance = Some(balance);
 }
 
+/// Records a storage override, and applies it to the account when the file holds it.
 fn set_storage_override(
     prestate: &mut EvmState,
-    overlays: &mut HashMap<Address, AccountOverlay>,
+    overrides: &mut HashMap<Address, AccountOverlay>,
     address: Address,
     slot: U256,
     value: U256,
 ) {
     let stored = EvmStorageSlot::new(value, TransactionId::ZERO);
     if let Some(account) = prestate.get_mut(&address) {
-        account.storage.insert(slot, stored);
-    } else {
-        overlays.entry(address).or_default().storage.insert(slot, stored);
+        account.storage.insert(slot, stored.clone());
     }
+    overrides.entry(address).or_default().storage.insert(slot, stored);
 }
 
+/// Records a faucet, and adds it to the account's balance when the file holds it.
 fn add_faucet(
     prestate: &mut EvmState,
-    overlays: &mut HashMap<Address, AccountOverlay>,
+    overrides: &mut HashMap<Address, AccountOverlay>,
     address: Address,
     amount: U256,
 ) -> Result<()> {
     if let Some(account) = prestate.get_mut(&address) {
         account.info.balance = checked_faucet(account.info.balance, amount, address)?;
-    } else {
-        let overlay = overlays.entry(address).or_default();
-        overlay.faucet = checked_faucet(overlay.faucet, amount, address)?;
     }
+    let overlay = overrides.entry(address).or_default();
+    overlay.faucet = checked_faucet(overlay.faucet, amount, address)?;
     Ok(())
 }
 
@@ -620,6 +640,9 @@ where
     /// Field overrides for accounts the prestate file does not hold. Applied on top of the
     /// backend so one named field does not hide the rest of a forked account.
     overlays: HashMap<Address, AccountOverlay>,
+    /// Field overrides for accounts the prestate file holds, already applied to them: kept to be
+    /// applied again to an account that replaces one of them, a local predeploy's.
+    file_overrides: HashMap<Address, AccountOverlay>,
     /// Code hash to bytecode map (extracted from prestate accounts)
     code_map: HashMap<alloy_primitives::B256, Bytecode>,
     /// Block hash overrides (block number -> block hash)
@@ -645,6 +668,7 @@ where
             backend: EvmeBackend::Empty(EmptyDB::default()),
             prestate,
             overlays: HashMap::default(),
+            file_overrides: HashMap::default(),
             code_map,
             block_hashes,
         }
@@ -672,6 +696,9 @@ where
     /// 0, the factory at a nonzero nonce, and the `SequencerRegistry` naming
     /// [`MEGA_SYSTEM_ADDRESS`](mega_evm::system::MEGA_SYSTEM_ADDRESS) in every role.
     ///
+    /// The CLI's balance, faucet and storage overrides hold over the account installed, whether
+    /// or not the prestate file held an account at the address.
+    ///
     /// # Errors
     ///
     /// When a forked state cannot load one of the accounts.
@@ -685,15 +712,24 @@ where
                 continue;
             }
             let code = rex6.code.clone().expect("a predeploy carries its code");
-            let info = if local { rex6 } else { held.unwrap_or_default() };
             let account = self.prestate.entry(address).or_default();
-            account.info = info;
             if local {
+                account.info = rex6;
                 account.storage.extend(
                     storage.into_iter().map(|(slot, value)| {
                         (slot, EvmStorageSlot::new(value, TransactionId::ZERO))
                     }),
                 );
+                // This replaces the account the file held here, if any, which had the overrides
+                // naming it applied; they hold over the replacement, as the overlay of an address
+                // the file does not hold holds over it on read.
+                if let Some(overrides) = self.file_overrides.get(&address) {
+                    overrides.apply_to(account, address)?;
+                }
+            } else {
+                // A forked state keeps the account it held, the file's with its overrides
+                // included.
+                account.info = held.unwrap_or_default();
             }
             self.set_account_code(address, code);
         }
@@ -826,6 +862,7 @@ where
             backend: EvmeBackend::Forked(Box::new(db)),
             prestate,
             overlays: HashMap::default(),
+            file_overrides: HashMap::default(),
             code_map,
             block_hashes,
         })
