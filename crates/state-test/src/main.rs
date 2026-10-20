@@ -17,7 +17,7 @@ use std::{path::PathBuf, process::ExitCode};
 use clap::Parser;
 use state_test::{
     deviations,
-    runner::{find_json_files, run, Config, Outcome, Report, Summary, TestResult},
+    runner::{find_json_files, run, Config, DigestForm, Outcome, Report, Summary, TestResult},
     Fork, Mode,
 };
 
@@ -47,6 +47,14 @@ struct Cmd {
     /// Print one JSON line per test to standard error.
     #[arg(long)]
     json_outcome: bool,
+    /// Print one JSON line per executed transaction on standard error: the test's identity and the
+    /// hash of the canonical record of the transaction's whole outcome (result, state, gas by
+    /// ledger, usage, logs, oracle reads), whatever the fixture's verdict.
+    #[arg(long)]
+    json_digest: bool,
+    /// As `--json-digest`, with the canonical record in each line, to see which field differs.
+    #[arg(long)]
+    json_digest_full: bool,
     /// Trace every test with an EIP-3155 tracer on standard error; runs on one thread.
     #[arg(long)]
     trace: bool,
@@ -92,12 +100,18 @@ fn main() -> ExitCode {
     } else {
         cmd.threads.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
     };
+    let digest = match (cmd.json_digest, cmd.json_digest_full) {
+        (_, true) => Some(DigestForm::Full),
+        (true, false) => Some(DigestForm::Compact),
+        (false, false) => None,
+    };
     let config = Config {
         mode: cmd.mode,
         fork: cmd.fork,
         threads,
         json_outcome: cmd.json_outcome,
         trace: cmd.trace,
+        digest,
         deviations: deviations::DEVIATIONS,
     };
     let report = run(&files, config);

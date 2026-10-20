@@ -58,6 +58,23 @@ cargo run --release -p state-test -- --mode satin --fork Osaka <main>/state_test
 `--expect-executed`, `--expect-skipped` and `--expect-deviations` turn a full run into the pinned gate CI runs (`.github/workflows/exec-spec-satin.yml`).
 `--json-outcome` prints one JSON line per test, a failure's produced hashes included, and `--trace` runs each test under an EIP-3155 tracer.
 
+## The outcome digest
+
+A verdict is the post-state root and the logs hash, so a change that moves gas between ledgers and keeps the receipt's total, or changes the bytes a limit counted, leaves every verdict as it was.
+The digest (`src/digest.rs`) is the record such a change cannot leave alone: the whole `MegaTransactionOutcome` of every transaction that ran, whatever its fixture's verdict.
+`--json-digest` prints, per executed transaction, one JSON line on standard error with the test's identity (`mode`, `fork`, `path`, `test`, `d`, `g`, `v`), the Keccak-256 of the canonical record (`digest`) and `row`, `outcome` for a transaction that ended and `panic` for a test that panicked; `--json-digest-full` adds the record (`record`).
+A transaction the engine rejects has a record of its own, the error; a test skipped before it ran has none.
+
+The record holds the status with its halt or revert reason, the output, the created address and the logs in order; `ResultGas` and every field of `MegaGasUsage`; `usage`; `limit_exceeded`; `oracle_reads`; and the post-state, each account with its status flags, balance, nonce, code hash and every storage slot's original and present values.
+It is canonical: JSON with every object's keys sorted, 256-bit numbers as lowercase hex without leading zeros, hashes and addresses at full width, maps sorted by key, so it depends on neither a thread count nor a hash map's order.
+It is taken from the outcome as the engine produced it, before the runner takes the base-fee vault the fee routing created back out of the state.
+
+To compare two revisions, run the same command at both, keep the lines that start with `{`, sort them, and compare the files; a line that differs is found by its `path` and `test`, and its full form shows the fields.
+
+```bash
+state-test --mode satin --fork Osaka <main>/state_tests --json-digest 2>&1 >/dev/null | grep '^{' | sort > head.digest
+```
+
 ## Blockchain tests
 
 `state-test btest` imports the execution-spec blockchain tests through Satin's block executor (`src/blockchain/`): the tests of the main release's `blockchain_tests` filled for Osaka, the release and the network the state-test gate's Osaka run uses.

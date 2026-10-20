@@ -25,6 +25,7 @@
 
 pub mod blockchain;
 pub mod deviations;
+pub mod digest;
 pub mod exceptions;
 mod fork;
 mod mode;

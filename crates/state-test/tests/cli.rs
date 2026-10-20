@@ -159,6 +159,34 @@ fn test_bad_arguments_exit_non_zero() {
     }
 }
 
+/// The digest options print one line per executed transaction on standard error: the compact form
+/// the test and the hash of its record, the full form the record too, and the same line twice.
+#[test]
+fn test_the_digest_options_print_a_line_per_transaction() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = fixture(dir.path(), "TransactionException.INTRINSIC_GAS_TOO_LOW");
+    let lines = |flag: &str| -> Vec<serde_json::Value> {
+        let output = state_test(&[flag, "--fork", "Osaka"], &path);
+        assert!(output.status.success(), "{}", stdout(&output));
+        String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .filter(|line| line.starts_with('{'))
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    };
+    let compact = lines("--json-digest");
+    assert_eq!(compact.len(), 1);
+    assert_eq!(compact[0]["row"], "outcome");
+    assert!(compact[0]["digest"].as_str().unwrap().starts_with("0x"));
+    assert!(compact[0].get("record").is_none());
+    assert_eq!(compact, lines("--json-digest"));
+
+    let full = lines("--json-digest-full");
+    assert_eq!(full.len(), 1);
+    assert_eq!(full[0]["digest"], compact[0]["digest"]);
+    assert!(full[0]["record"]["rejected"].is_string(), "the transaction is rejected");
+}
+
 /// A blockchain fixture of one empty block on a pre-state of one funded account, with
 /// `edit` applied to the block's header. With no pre-block contract and no transaction the block
 /// changes nothing on Ethereum, so its expected roots are the pre-state's and the empty trie's,

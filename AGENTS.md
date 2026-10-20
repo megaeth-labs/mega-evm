@@ -50,6 +50,8 @@ cargo run --release -p state-test -- btest <main-fixtures>/blockchain_tests --ex
 # the fixtures named by an absolute path (the test runs in the package's directory)
 MEGA_STATE_TEST_FIXTURES=$PWD/<main-fixtures>/state_tests MEGA_STATE_TEST_SAMPLE=0 MEGA_STATE_TEST_FORK=Osaka \
   MEGA_STATE_TEST_MODE=satin cargo test --release -p mega-state-test --test witness -- --ignored --nocapture
+# The whole-outcome digest: one line per executed transaction (the canonical record of its MegaTransactionOutcome, hashed; `-full` adds the record), for a base-against-head `sort | cmp`
+cargo run --release -p state-test -- --mode satin --fork Osaka <main-fixtures>/state_tests --json-digest 2>&1 >/dev/null | grep '^{' | sort > head.digest
 # Regenerate the rendered deviation registry after changing crates/mega-state-test/src/deviations.rs
 UPDATE_DEVIATIONS=1 cargo test -p mega-state-test --lib deviations
 
