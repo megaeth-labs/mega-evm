@@ -11,15 +11,16 @@
 //! A record is built two ways, and the two are different checks.
 //!
 //! - **From the channels a node has**, with [`WitnessRecord::from_channels`]: the accounts and
-//!   slots the pre-block states and the included transactions' returned states name, collected by
-//!   [`WitnessKeys`] and resolved against the state the block ran on; the code the chain holds for
-//!   those accounts; the block hashes and buckets the engine exported; and the oracle reads the
-//!   included transactions recorded. That is the witness a node builds, and a replay on it is the
-//!   check a validator's witness must pass: a read the engine makes outside every state and export
-//!   is a key the record lacks, and the replay fails on it. The code a returned state carries is
-//!   not taken: it is what the transaction left the account with, which for an account whose code
-//!   the transaction replaced — an EIP-7702 authority delegated anew — is not the code the engine
-//!   loaded from the chain.
+//!   slots the states the block committed name — each pre-block step's, read-only entries included,
+//!   and each included transaction's, as a node's commit hook receives them ([`CommittedStates`]) —
+//!   collected by [`WitnessKeys`] and resolved against the state the block ran on; the code the
+//!   chain holds for those accounts; the block hashes and buckets the engine exported; and the
+//!   oracle reads the included transactions recorded. That is the witness a node builds, and a
+//!   replay on it is the check a validator's witness must pass: a read the engine makes outside
+//!   every committed state and export is a key the record lacks, and the replay fails on it. The
+//!   code a committed state carries is not taken: it is what the transaction left the account with,
+//!   which for an account whose code the transaction replaced — an EIP-7702 authority delegated
+//!   anew — is not the code the engine loaded from the chain.
 //! - **From every read the database served**, with a [`RecordingDatabase`] and the
 //!   [`RecordingEnvFactory`]'s environments around the block: what a recorder at the database level
 //!   sees. A replay on it shows the block reads nothing outside its database and environments and
@@ -52,6 +53,8 @@ use std::{
 };
 
 use alloy_primitives::{Address, BlockNumber, Bytes, B256, U256};
+#[cfg(feature = "std")]
+use revm::database::State;
 use revm::{
     database::DBErrorMarker,
     primitives::{HashMap, StorageKey, StorageValue, KECCAK_EMPTY},
@@ -89,7 +92,7 @@ pub struct WitnessRecord {
 }
 
 /// The keys a node's witness builder collects from its channels: every account and slot the
-/// pre-block states and the included transactions' returned states name.
+/// states the block committed name, the pre-block steps' and the included transactions'.
 ///
 /// The keys are all it takes from a state. The values a state carries are what the block made of
 /// them; the witness holds what the chain held before the block, which the builder resolves the
@@ -111,6 +114,36 @@ impl WitnessKeys {
                 self.slots.insert((*address, *key));
             }
         }
+    }
+}
+
+/// The states committed to a [`State`], in commit order, as a node's commit hook receives them.
+///
+/// A node builds a block's witness from what the block commits: a hook on its [`State`]
+/// ([`State::set_state_hook`]) is handed each state whole when it is committed, before the cache
+/// drops the accounts the state did not touch, so it receives every pre-block step's state,
+/// read-only entries included, and every committed transaction's. [`install`](Self::install)
+/// installs such a hook and keeps what it receives.
+#[cfg(feature = "std")]
+#[derive(Clone, Debug, Default)]
+pub struct CommittedStates(std::sync::Arc<std::sync::Mutex<Vec<EvmState>>>);
+
+#[cfg(feature = "std")]
+impl CommittedStates {
+    /// Installs on `state` a hook that keeps every state committed to it from now on, in place of
+    /// the hook it had, and answers what the hook keeps.
+    pub fn install<DB: Database>(state: &mut State<DB>) -> Self {
+        let committed = Self::default();
+        let kept = committed.clone();
+        state.set_state_hook(Some(std::boxed::Box::new(move |changes: &EvmState| {
+            kept.0.lock().expect("the committed states").push(changes.clone());
+        })));
+        committed
+    }
+
+    /// The states committed so far, in commit order.
+    pub fn states(&self) -> Vec<EvmState> {
+        self.0.lock().expect("the committed states").clone()
     }
 }
 
