@@ -1,0 +1,48 @@
+---
+source: crates/mega-evm/tests/satin/corpus.rs
+expression: classes
+---
+{
+  "access_list_warm_slots_and_account": [
+    "success"
+  ],
+  "create_success": [
+    "success"
+  ],
+  "eip7702_delegate_new_authority": [
+    "success"
+  ],
+  "logs_all_topic_counts": [
+    "success"
+  ],
+  "nested_call_revert_with_spill": [
+    "success"
+  ],
+  "precompile_ecrecover": [
+    "success",
+    "success"
+  ],
+  "precompile_modexp": [
+    "success",
+    "success"
+  ],
+  "selfdestruct_created_in_same_tx_to_existing_account": [
+    "success"
+  ],
+  "sstore_set_spills": [
+    "success"
+  ],
+  "system_call": [
+    "success"
+  ],
+  "test_calldata_floor_with_sstore_fork_Amsterdam_state_test": [
+    "success"
+  ],
+  "test_nested_state_gas_refund_consumed_at_depth_fork_Amsterdam_state_test_consume_deepest_depth_10_sstore_restoration": [
+    "success"
+  ],
+  "two_txs_sequential": [
+    "success",
+    "success"
+  ]
+}
