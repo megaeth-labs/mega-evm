@@ -117,7 +117,8 @@ Without it a replay of such a chain is refused, unless `--override.spec` names t
 `--genesis <FILE>` takes it from the chain's genesis file, on every command, `replay` included.
 The file's `config` object (or a file that is the `config` object) is read for its `chainId` and its Satin key, `satinTime`, with the parser the node and the stateless validator read it with, so a key the node refuses is refused here too: a `satin`-prefixed key other than `satinTime`, the registry roles an earlier format named among them.
 For that chain the file replaces the tool's table: a block runs Satin from the file's `satinTime`.
-The file names no limit and no `SequencerRegistry` role: a Satin run under it is held to Satin's limits, as every Satin run is, and a Satin block reads the registry the chain's state holds, which the legacy forks deployed; a block over a state without it is refused.
+The file names no limit and no `SequencerRegistry` role: a Satin run under it is held to Satin's limits, as every Satin run is, and a Satin block reads the registry the chain's state holds, which the legacy forks deployed.
+Satin's activation block refuses a state whose registry is missing or holds other code; a later block makes no such check and runs on the state it is given, where a missing registry names no system address.
 Every command under it holds to one rule: a run the file cannot configure is refused, never run on the tool's own table.
 
 - A command on another chain than the file's `chainId` is refused first, whatever its spec.
