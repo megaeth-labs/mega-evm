@@ -761,15 +761,19 @@ mod tests {
     /// record: a frame that failed, and a frame answered before revm decided it. A frame that kept
     /// its record gives nothing back, and a transaction whose first frame never started has
     /// nothing to give back.
+    ///
+    /// The record's history is charged at the price in effect, as pre-execution charges it, so the
+    /// refunds hold at any history byte price, a price of nothing included.
     #[test]
     fn test_the_top_level_record_comes_back_once_at_the_settlement() {
+        let charge = crate::write_record_history_gas(1).unwrap_or(0);
         let mut ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
         let outer = call_from_to(SENDER, CALLEE, U256::from(1));
         let ended = |result| crate::synthetic_frame_result(&outer, result, Bytes::new());
         // The start kept: a level revm committed.
-        for (case, failed, refund) in [("kept", false, 0), ("failed", true, 7)] {
+        for (case, failed, refund) in [("kept", false, 0), ("failed", true, charge)] {
             let mut limit = AdditionalLimit::default();
-            limit.set_top_level_write_record_gas(7);
+            limit.set_top_level_write_record_gas(charge);
             limit.push_start(&outer, 0);
             ctx.ledger_mut().begin_transaction(false, false, 0);
             ctx.ledger_mut().open_start(StartFacts {
@@ -798,14 +802,14 @@ mod tests {
 
         // Answered before revm decided it: nothing counted, everything back.
         let mut limit = AdditionalLimit::default();
-        limit.set_top_level_write_record_gas(7);
+        limit.set_top_level_write_record_gas(charge);
         limit.push_answered_start(0);
         let _ = limit.on_start_return(ctx.ledger(), &ended(InstructionResult::Stop));
-        assert_eq!(limit.take_top_level_refund(), 7);
+        assert_eq!(limit.take_top_level_refund(), charge);
 
         // Never started: no side, nothing back.
         let mut limit = AdditionalLimit::default();
-        limit.set_top_level_write_record_gas(7);
+        limit.set_top_level_write_record_gas(charge);
         assert!(limit.on_start_return(ctx.ledger(), &ended(InstructionResult::OutOfGas)).is_none());
         assert_eq!(limit.take_top_level_refund(), 0);
     }

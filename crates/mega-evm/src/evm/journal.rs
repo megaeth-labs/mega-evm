@@ -500,6 +500,12 @@ mod tests {
         records * WRITE_RECORD_SIZE + if moves { TRANSFER_LOG_SIZE } else { 0 }
     }
 
+    /// What a caller pays for `records` write records at the history price in effect, as the
+    /// frame-start hook charges them: nothing at a price of nothing.
+    fn record_charge(records: u64) -> u64 {
+        crate::write_record_history_gas(records).unwrap_or(0)
+    }
+
     /// The transaction's bytes before any frame: the body.
     const fn body() -> LimitUsage {
         LimitUsage { data_size: TX_BODY_SIZE, write_records: 0 }
@@ -748,8 +754,12 @@ mod tests {
     /// later value call from it records only its recipient. Reverted, it takes back what the frame
     /// kept: the records and the frame's refund all go back to before the start, and the later
     /// call finds the caller unchanged and records it again.
+    ///
+    /// The caller paid for the start's two records at the price in effect, as the frame-start hook
+    /// charges them, so the refund holds at any history byte price, a price of nothing included.
     #[test]
     fn test_a_tool_checkpoint_around_a_call_closes_in_order() {
+        let charge = record_charge(2);
         for reverted in [false, true] {
             let case = if reverted { "reverted" } else { "committed" };
             let mut journal = journal(EvmTxRuntimeLimits::no_limits());
@@ -762,14 +772,14 @@ mod tests {
                 "{case}: B's record, A's, and the log"
             );
             end_frame(&mut journal, None);
-            let mut side = StartSide::new(1, 7, 0, true, None);
+            let mut side = StartSide::new(1, charge, 0, true, None);
             side.attach(report, None);
             if reverted {
                 journal.checkpoint_revert(tool);
             } else {
                 journal.checkpoint_commit();
             }
-            let refund = if reverted { 7 } else { 0 };
+            let refund = if reverted { charge } else { 0 };
             assert_eq!(side.refund(journal.ledger()), refund, "{case}: B's refund");
             assert_eq!(journal.ledger().usage(), if reverted { body() } else { kept(2, 1) });
 
@@ -786,19 +796,30 @@ mod tests {
     /// a revert of it takes back the creator's nonce record with the rest, which the creation's own
     /// failure leaves: the creator's caller gets back the charge for that record too, and the
     /// creator's account is unchanged again, so its next creation records it.
+    ///
+    /// The caller paid one record's price for the created account and one for the creator's nonce,
+    /// at the price in effect, as the frame-start hook charges them, so the refunds hold at any
+    /// history byte price, a price of nothing included.
     #[test]
     fn test_a_tool_checkpoint_around_a_creation_takes_its_creators_record_back() {
+        let (created, creator) = (record_charge(1), record_charge(1));
         for (case, failed, reverted, refund, creator_changed) in [
             ("a creation that succeeds, the tool's checkpoint committed", false, false, 0, true),
-            ("a creation that fails, the tool's checkpoint committed", true, false, 7, true),
+            ("a creation that fails, the tool's checkpoint committed", true, false, created, true),
             (
                 "a creation that succeeds, the tool's checkpoint reverted",
                 false,
                 true,
-                7 + 11,
+                created + creator,
                 false,
             ),
-            ("a creation that fails, the tool's checkpoint reverted", true, true, 7 + 11, false),
+            (
+                "a creation that fails, the tool's checkpoint reverted",
+                true,
+                true,
+                created + creator,
+                false,
+            ),
         ] {
             let mut journal = journal(EvmTxRuntimeLimits::no_limits());
             let _ = start_call(&mut journal, 0, SENDER, A, 0);
@@ -807,7 +828,7 @@ mod tests {
             let (checkpoint, report) = start_creation(&mut journal, 2, B, CREATED, 1);
             assert!(report.records.creator, "{case}: B's nonce record is the start's");
             end_frame(&mut journal, failed.then_some(checkpoint));
-            let mut side = StartSide::new(2, 7, 11, true, None);
+            let mut side = StartSide::new(2, created, creator, true, None);
             side.attach(report, None);
             if reverted {
                 journal.checkpoint_revert(tool);
