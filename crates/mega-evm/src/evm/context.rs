@@ -23,7 +23,7 @@ use crate::{
         inspector::UpfrontRecord,
         schedule::{satin_gas_params, satin_gas_params_history_exempt},
     },
-    limit::{shadow, Ledger},
+    limit::Ledger,
     system::{
         self,
         keyless::{self, KeylessFrame},
@@ -255,8 +255,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         self
     }
 
-    /// Holds every transaction from the next one on to `limits`, on the lanes and in the journal's
-    /// ledger alike.
+    /// Holds every transaction from the next one on to `limits`, in the journal's ledger and for
+    /// gas detention alike.
     pub(crate) const fn set_tx_runtime_limits(&mut self, limits: EvmTxRuntimeLimits) {
         self.additional_limit.set_limits(limits);
         self.ledger_mut().set_limits(limits);
@@ -475,8 +475,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     }
 
     /// Prepares the common execution layer for a transaction or a system call that is, or is not,
-    /// `system_originated`: the lanes and the journal's ledger begin it together, held to the same
-    /// limits and counting the same body.
+    /// `system_originated`: the journal's ledger begins it, counting its body, and the frame side
+    /// is reset.
     ///
     /// The SALT bucket multipliers and the oracle reads go with it: they are what one transaction
     /// read, so the next one reads its own.
@@ -489,7 +489,6 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     fn prepare(&mut self, system_originated: bool) {
         self.additional_limit.reset();
         let transfer_logs = emits_transfer_logs(&self.inner.cfg);
-        self.additional_limit.set_transfer_logs(transfer_logs);
         self.bucket_multipliers.reset();
         self.oracle_reads.clear();
         // A transaction that failed with an error, or was stopped, left its `keylessDeploy` call
@@ -504,7 +503,6 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         // The body is data size whether or not the transaction pays history for it. A deposit,
         // a system transaction and a system call are exempt from the charge, not from the count.
         let body = transaction_body_bytes(self.tx());
-        self.additional_limit.record_tx_body(body);
         self.ledger_mut().begin_transaction(system_originated, transfer_logs, body);
         // The protocol's own transactions are not detained: they maintain the volatile data.
         let limits = self.additional_limit.limits();
@@ -704,9 +702,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextTr for MegaContext<DB, ExtE
         if keyless::refuses_empty_deposit(&mut self.keyless_frame, deposit, destroyed) {
             return Err(Bytes::new());
         }
-        let lanes = self.additional_limit.on_code_deposit(deposit);
         let check = self.ledger_mut().count_code(deposit.code.len() as u64);
-        shadow::code_deposit(&self.additional_limit, self.ledger(), lanes, check);
         if check.exceeded_limit() {
             return Err(self.additional_limit.note_frame_stop(&check));
         }
@@ -1167,24 +1163,12 @@ mod tests {
     /// transaction reads the configuration afresh, and Satin's emits them.
     #[test]
     fn test_a_transaction_counts_transfer_logs_where_revm_emits_them() {
-        let endowed_creation =
-            revm::interpreter::FrameInput::Create(Box::new(revm::interpreter::CreateInputs::new(
-                Address::repeat_byte(0x11),
-                revm::interpreter::CreateScheme::Create,
-                U256::from(1),
-                revm::primitives::Bytes::new(),
-                0,
-                0,
-            )));
         let counts = |cfg: CfgEnv<MegaSpecId>| {
             let mut ctx =
                 MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN).with_neutral_cfg(cfg);
             ctx.set_tx(call_from(Address::repeat_byte(0x11)));
             ctx.on_new_tx(false);
-            assert_eq!(
-                ctx.additional_limit.frame_start_transfer_log(&endowed_creation),
-                emits_transfer_logs(ctx.cfg()),
-            );
+            assert_eq!(ctx.ledger().counts_transfer_logs(), emits_transfer_logs(ctx.cfg()));
             emits_transfer_logs(ctx.cfg())
         };
         let with = |enabled: bool, disabled: bool| {
@@ -1205,7 +1189,7 @@ mod tests {
         });
         ctx.set_tx(call_from(Address::repeat_byte(0x11)));
         ctx.on_new_tx(false);
-        assert!(ctx.additional_limit.frame_start_transfer_log(&endowed_creation));
+        assert!(ctx.ledger().counts_transfer_logs());
     }
 
     /// A context is not neutral unless it is asked to be.

@@ -20,7 +20,6 @@ use revm::{
 };
 
 use crate::{
-    limit::shadow,
     system::keyless::{encode_error_result, IKeylessDeploy, KeylessDeployError},
     ExternalEnvTypes, MegaContext, MegaHaltReason,
 };
@@ -254,16 +253,13 @@ fn take_back_bump<DB: Database, ExtEnvs: ExternalEnvTypes>(
     if moved_value {
         return Ok(());
     }
-    let lanes = ctx.additional_limit.take_back_creator_record();
-    let taken = ctx.ledger_mut().take_back_creator_record();
-    if taken {
+    if ctx.ledger_mut().take_back_creator_record() {
         // A stop the record left the call, by putting it over a limit, goes with it: the call is
         // held to its limits again without the record.
         let check = ctx.ledger().check();
         ctx.additional_limit.hold_running_frame(check);
         gas.refill_history(started.signer_record_charge);
     }
-    shadow::keyless_take_back(&ctx.additional_limit, ctx.ledger(), lanes, taken);
     Ok(())
 }
 

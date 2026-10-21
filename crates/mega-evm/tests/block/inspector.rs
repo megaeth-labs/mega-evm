@@ -397,9 +397,9 @@ where
 
 /// An inspector that answers the calls below the transaction's own frame rewrites what execution
 /// produces, so block execution refuses it before the transaction runs. On the EVM, the route a
-/// tool takes, its answer stands in for the frame: an empty lane keeps the lanes aligned with the
-/// frames, the answered call ends as every call does, and the transaction settles as one whose
-/// nested call never ran.
+/// tool takes, its answer stands in for the frame: a side of its own keeps the frame sides aligned
+/// with the frames, the answered call ends as every call does, and the transaction settles as one
+/// whose nested call never ran.
 #[test]
 fn test_inspector_early_return_with_additional_limits() {
     let caller = BytecodeBuilder::default().call(CONTRACT_B, U256::ZERO).append(POP).stop().build();

@@ -37,8 +37,8 @@ pub(crate) enum HistoryBytes {
     Taken(u64),
 }
 
-/// What a completed write keeps, as the lanes and the journal's ledger both count it: what it adds,
-/// what it takes back, and the log bytes among what it adds.
+/// What a completed write keeps, as the journal's ledger counts it: what it adds, what it takes
+/// back, and the log bytes among what it adds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct WriteCount {
     /// What the write adds: a record, a log's bytes, a transfer log.

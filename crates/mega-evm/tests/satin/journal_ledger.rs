@@ -1,15 +1,12 @@
-//! The journal's ledger beside the lanes: what it counts of writes made by anything but the
-//! transaction's own execution, and how it follows a tool's checkpoints.
+//! The journal's ledger on the writes made by anything but the transaction's own execution, and on
+//! a tool's checkpoints.
 //!
 //! The ledger counts what the transaction's own execution keeps, at the journal's writes, and the
 //! journal's checkpoints rewind it. A precompile's writes through `EvmInternals` and an
-//! inspector's are not the transaction's own execution: neither is counted, and neither moves the
-//! ledger away from the lanes. A tool's checkpoint around a call is a level of the journal like any
-//! other: committed, it changes nothing; reverted, it takes back what the call kept, and the ledger
-//! follows it where the lanes, which follow frames, do not.
-//!
-//! Every test here, as every other, runs under the shadow in a `ledger-shadow` build, which holds
-//! the ledger to the lanes wherever the two must agree.
+//! inspector's are not the transaction's own execution, and neither is counted. A tool's
+//! checkpoint around a call is a level of the journal like any other: committed, it changes
+//! nothing; reverted, it takes back what the call kept, and the transaction reports what the
+//! journal holds.
 
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{address, map::HashMap, Address, Bytes, Log, LogData, B256, U256};
@@ -74,7 +71,7 @@ fn stateful() -> DynPrecompile {
 /// a checkpoint it commits and one it reverts — keeps its writes in the state and the receipt, and
 /// counts none of them: the transaction's data size is its body and the start of the value call
 /// that reached the precompile, the precompile's record and its caller's and the call's transfer
-/// log, as for a precompile that writes nothing. The ledger counts what the lanes count.
+/// log, as for a precompile that writes nothing.
 #[test]
 fn test_a_precompiles_writes_through_evm_internals_count_nothing() {
     let code = BytecodeBuilder::default().call(STATEFUL, U256::from(VALUE)).stop().build();
@@ -104,7 +101,6 @@ fn test_a_precompiles_writes_through_evm_internals_count_nothing() {
         "the receipt carries the call's transfer log, then the precompile's log and transfer log",
     );
     assert_eq!(outcome.usage, records_and_moves(2, 1), "the call's start alone is counted");
-    assert_eq!(evm.ctx().journal_ref().ledger_usage(), outcome.usage, "the ledger counts the same");
 }
 
 /// An inspector that opens a checkpoint when a call to `target` starts, and commits it or reverts
@@ -149,13 +145,12 @@ impl Inspector<MegaContext<MemoryDatabase>, EthInterpreter> for Encloses {
 /// [`CONTRACT`] makes a second value call, to [`PAYEE`].
 ///
 /// Committed, it changes nothing: both calls keep their starts — the two recipients' records,
-/// `CONTRACT`'s own, once, and the two transfer logs — and the ledger counts what the lanes count.
+/// `CONTRACT`'s own, once, and the two transfer logs.
 ///
 /// Reverted, it takes back what the first call kept, its value and its transfer log included, so
 /// the receipt carries the second call's log alone; the ledger takes back the first call's records
-/// and `CONTRACT`'s flag with it, so the second call records `CONTRACT` again, and the ledger
-/// holds what the journal kept: two records and one log. The lanes follow frames, not a tool's
-/// checkpoints, and keep counting the first call.
+/// and `CONTRACT`'s flag with it, so the second call records `CONTRACT` again, and the transaction
+/// reports what the journal kept: two records and one log.
 #[test]
 fn test_a_tool_checkpoint_around_a_call_closes_with_it() {
     for revert in [false, true] {
@@ -174,7 +169,6 @@ fn test_a_tool_checkpoint_around_a_call_closes_with_it() {
         let mut evm = MegaEvm::new(context(db)).with_inspector(inspector);
         let outcome = evm.execute_transaction(tx).expect("the transaction is valid");
         assert!(outcome.result.is_success(), "{case}: {:?}", outcome.result);
-        let ledger = evm.ctx().journal_ref().ledger_usage();
         let paid = transfer_log(CONTRACT, PAYEE, U256::from(VALUE));
         if revert {
             assert_eq!(outcome.result.logs(), [paid], "{case}: the second call's log alone");
@@ -183,12 +177,11 @@ fn test_a_tool_checkpoint_around_a_call_closes_with_it() {
                 Some(U256::ZERO),
                 "{case}: the first call's value went back"
             );
-            assert_eq!(ledger, records_and_moves(2, 1), "{case}: what the journal kept");
+            assert_eq!(outcome.usage, records_and_moves(2, 1), "{case}: what the journal kept");
         } else {
             let received = transfer_log(CONTRACT, RECEIVER, U256::from(VALUE));
             assert_eq!(outcome.result.logs(), [received, paid], "{case}");
             assert_eq!(outcome.usage, records_and_moves(3, 2), "{case}");
-            assert_eq!(ledger, outcome.usage, "{case}: the ledger counts what the lanes count");
         }
     }
 }
@@ -221,7 +214,7 @@ impl Inspector<MegaContext<MemoryDatabase>, EthInterpreter> for AnswersAtFrameSt
 
 /// A value call an inspector answers in `frame_start`, before revm decides it, starts nothing:
 /// the transaction keeps its body alone, whether the answered call is the transaction's own frame
-/// or one a contract makes, and the ledger counts what the lanes count.
+/// or one a contract makes.
 #[test]
 fn test_a_value_call_answered_at_frame_start_counts_nothing() {
     let code = BytecodeBuilder::default().call(RECEIVER, U256::from(VALUE)).stop().build();
@@ -241,6 +234,5 @@ fn test_a_value_call_answered_at_frame_start_counts_nothing() {
         assert!(outcome.result.is_success(), "{case}: {:?}", outcome.result);
         assert!(outcome.result.logs().is_empty(), "{case}: nothing moved");
         assert_eq!(outcome.usage, records_and_moves(0, 0), "{case}");
-        assert_eq!(evm.ctx().journal_ref().ledger_usage(), outcome.usage, "{case}");
     }
 }

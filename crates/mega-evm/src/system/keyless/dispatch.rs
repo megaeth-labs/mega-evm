@@ -207,7 +207,7 @@ pub(crate) fn run<DB: Database, ExtEnvs: ExternalEnvTypes>(
 ///
 /// The creation is started as the signer's, at the signer's Nick's-Method address
 /// (`CreateScheme::Custom`), as the call's child: its share of the data-size budget, its records,
-/// its forward and the reservoir it inherits. The call's lane runs as the signer, whose
+/// its forward and the reservoir it inherits. The call's level runs as the signer, whose
 /// nonce the creation's start writes. The call's journal checkpoint was taken when revm built its
 /// frame, so a call that is stopped takes that write back with the rest.
 fn start<DB: Database, ExtEnvs: ExternalEnvTypes>(
@@ -225,10 +225,9 @@ fn start<DB: Database, ExtEnvs: ExternalEnvTypes>(
             return Ok(InterpreterAction::new_return(result, output, *gas));
         }
     };
-    ctx.additional_limit.set_frame_creator(deployment.signer);
     ctx.ledger_mut().set_frame_creator(deployment.signer);
-    if let Some((on_lane, caller)) = deployment.record_charges {
-        ctx.additional_limit.stage_frame_charge(deployment.records, on_lane, caller);
+    if let Some((on_level, caller)) = deployment.record_charges {
+        ctx.additional_limit.stage_frame_charge(deployment.records, on_level, caller);
     }
     let mut create = CreateInputs::new(
         deployment.signer,
@@ -429,11 +428,11 @@ fn prepare<DB: Database, ExtEnvs: ExternalEnvTypes>(
             return Ok(Err(Refusal::OutOfGas));
         }
     }
-    let records = FrameStartRecords { on_lane: 1, caller: signer != ctx.tx().caller() };
+    let records = FrameStartRecords { on_level: 1, caller: signer != ctx.tx().caller() };
     let record_charges = if ctx.prices_history() {
         let charged = charge_write_records_history(
             gas.tracker_mut(),
-            records.on_lane,
+            records.on_level,
             u64::from(records.caller),
         );
         if charged.is_none() {

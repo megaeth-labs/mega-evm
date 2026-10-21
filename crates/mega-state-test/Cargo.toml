@@ -36,11 +36,6 @@ alloy-eips.workspace = true
 # misc
 tempfile.workspace = true
 
-[features]
-# The engine with the journal's ledger held to the lanes wherever the two must agree, a mismatch
-# panicking: mega-evm's `ledger-shadow`, for verification runs.
-ledger-shadow = ["mega-evm/ledger-shadow"]
-
 # Published as `mega-state-test`; the library keeps the `state_test` import name.
 [lib]
 name = "state_test"

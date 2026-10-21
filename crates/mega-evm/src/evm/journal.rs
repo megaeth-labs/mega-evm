@@ -49,9 +49,7 @@ use revm::{
     Database, Journal, JournalEntry,
 };
 
-use crate::limit::{ledger_assert, Ledger, Mark};
-#[cfg(any(test, feature = "test-utils"))]
-use crate::LimitUsage;
+use crate::limit::{Ledger, Mark};
 
 /// The journal of the Satin engine: revm's journal, and the ledger of what the transaction's own
 /// execution keeps. See the module documentation.
@@ -68,15 +66,6 @@ pub struct MegaJournal<DB: Database> {
 }
 
 impl<DB: Database> MegaJournal<DB> {
-    /// What the journal's ledger holds the running (or last) transaction to keep: its data-size
-    /// bytes and write records, for a test to hold to what the engine decides on,
-    /// [`AdditionalLimit::usage`](crate::AdditionalLimit::usage), which counts the same writes. The
-    /// two agree wherever the transaction's own execution, rather than a tool, took its state back.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn ledger_usage(&self) -> LimitUsage {
-        self.ledger.usage()
-    }
-
     /// The ledger.
     pub(crate) const fn ledger(&self) -> &Ledger {
         &self.ledger
@@ -110,7 +99,7 @@ impl<DB: Database> MegaJournal<DB> {
     /// Asserts the ledger holds a level for every checkpoint revm's journal holds open.
     #[inline]
     fn assert_levels(&self) {
-        ledger_assert!(
+        debug_assert!(
             self.ledger.depth() == self.revm.depth,
             "the ledger holds one level per open checkpoint"
         );
@@ -343,7 +332,7 @@ mod tests {
     use crate::{
         limit::{Mark, StartFacts, StartReport, StartSide},
         test_utils::MemoryDatabase,
-        EvmTxRuntimeLimits, LimitCheck, LimitKind, TRANSFER_LOG_SIZE, TX_BODY_SIZE,
+        EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, TRANSFER_LOG_SIZE, TX_BODY_SIZE,
         WRITE_RECORD_SIZE,
     };
     use alloy_primitives::address;
@@ -458,7 +447,7 @@ mod tests {
         };
         let _ = start_call(&mut journal, 0, SENDER, A, 0);
         writes(&mut journal);
-        assert_eq!(journal.ledger_usage(), body(), "outside a start's window");
+        assert_eq!(journal.ledger().usage(), body(), "outside a start's window");
 
         journal.ledger_mut().open_start(StartFacts {
             depth: 1,
@@ -469,7 +458,7 @@ mod tests {
         let _ = journal.checkpoint();
         writes(&mut journal);
         let _ = journal.ledger_mut().close_start();
-        assert_eq!(journal.ledger_usage(), body(), "inside a start's window");
+        assert_eq!(journal.ledger().usage(), body(), "inside a start's window");
         assert!(!journal.logs().is_empty(), "the writes reached revm's journal");
     }
 
@@ -536,18 +525,18 @@ mod tests {
         let _ = start_call(&mut journal, 0, SENDER, A, 0);
         let (checkpoint, _) = start_call(&mut journal, 1, A, B, 1);
         assert_eq!((journal.ledger().depth(), journal.depth()), (2, 2));
-        assert_eq!(journal.ledger_usage(), kept(2, 1), "B's record, A's, and the transfer log");
+        assert_eq!(journal.ledger().usage(), kept(2, 1), "B's record, A's, and the transfer log");
         end_frame(&mut journal, Some(checkpoint));
         assert_eq!((journal.ledger().depth(), journal.depth()), (1, 1));
-        assert_eq!(journal.ledger_usage(), body(), "the revert takes the start back");
+        assert_eq!(journal.ledger().usage(), body(), "the revert takes the start back");
 
         let _ = start_call(&mut journal, 1, A, B, 1);
         end_frame(&mut journal, None);
-        assert_eq!(journal.ledger_usage(), kept(2, 1), "the commit keeps it");
+        assert_eq!(journal.ledger().usage(), kept(2, 1), "the commit keeps it");
         let _ = journal.checkpoint();
         journal.clear();
         assert_eq!((journal.ledger().depth(), journal.depth()), (0, 0));
-        assert_eq!(journal.ledger_usage(), kept(2, 1), "readable until the next transaction");
+        assert_eq!(journal.ledger().usage(), kept(2, 1), "readable until the next transaction");
     }
 
     /// A tool's checkpoint around a call's start — opened before the start, closed after the frame
@@ -570,7 +559,7 @@ mod tests {
                 "{case}: B's record, A's, and the log"
             );
             end_frame(&mut journal, None);
-            let mut side = StartSide::new(1, 7, 11);
+            let mut side = StartSide::new(1, 7, 11, None);
             side.attach(report, None);
             if reverted {
                 journal.checkpoint_revert(tool);
@@ -579,13 +568,13 @@ mod tests {
             }
             let refund = if reverted { 7 + 11 } else { 0 };
             assert_eq!(side.refund(journal.ledger()), refund, "{case}: B's refund");
-            assert_eq!(journal.ledger_usage(), if reverted { body() } else { kept(2, 1) });
+            assert_eq!(journal.ledger().usage(), if reverted { body() } else { kept(2, 1) });
 
             let (_, later) = start_call(&mut journal, 1, A, C, 1);
             assert_eq!(later.caller_on_level, reverted, "{case}: A's flag");
             end_frame(&mut journal, None);
             let records = if reverted { 2 } else { 3 };
-            assert_eq!(journal.ledger_usage(), kept(records, if reverted { 1 } else { 2 }));
+            assert_eq!(journal.ledger().usage(), kept(records, if reverted { 1 } else { 2 }));
         }
     }
 
@@ -614,7 +603,7 @@ mod tests {
             let (checkpoint, report) = start_creation(&mut journal, 2, B, CREATED, 1);
             assert!(report.creator_record, "{case}: B's nonce record is the start's");
             end_frame(&mut journal, failed.then_some(checkpoint));
-            let mut side = StartSide::new(2, 7, 11);
+            let mut side = StartSide::new(2, 7, 11, None);
             side.attach(report, None);
             if reverted {
                 journal.checkpoint_revert(tool);
@@ -630,7 +619,7 @@ mod tests {
     /// A revert that would close a level from below — a checkpoint taken before a frame started,
     /// reverted while the frame still runs — is not supported, and trips.
     #[test]
-    #[cfg(any(debug_assertions, feature = "ledger-shadow"))]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "a revert closes the latest level")]
     fn test_a_revert_below_a_running_frame_trips() {
         let mut journal = journal(EvmTxRuntimeLimits::no_limits());
@@ -686,10 +675,10 @@ mod tests {
         let mark: Mark = journal.ledger().frame_start_mark().expect("the creation's level is open");
         assert_eq!(mark.position, checkpoint, "the creation's own checkpoint");
         end_frame(&mut journal, None);
-        assert_eq!(journal.ledger_usage(), kept(2, 1));
+        assert_eq!(journal.ledger().usage(), kept(2, 1));
 
         journal.revert_to(&mark);
-        assert_eq!(journal.ledger_usage(), kept(1, 0), "the creator's record stays");
+        assert_eq!(journal.ledger().usage(), kept(1, 0), "the creator's record stays");
         let (_, later) = start_creation(&mut journal, 1, A, C, 0);
         assert!(!later.creator_record, "A stays recorded");
     }

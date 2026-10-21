@@ -74,10 +74,8 @@ use revm::{
 };
 
 use crate::{
-    charge_write_records_history, history_gas,
-    limit::{shadow, HistoryBytes},
-    system::ORACLE_CONTRACT_ADDRESS,
-    ExternalEnvTypes, MegaContext, OracleEnv, VolatileDataAccess,
+    charge_write_records_history, history_gas, limit::HistoryBytes,
+    system::ORACLE_CONTRACT_ADDRESS, ExternalEnvTypes, MegaContext, OracleEnv, VolatileDataAccess,
 };
 
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
@@ -290,10 +288,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
     }
 
     /// Commits the record of a write an opcode completed to the running frame's level of the
-    /// journal's ledger — and to the running frame's lane, until the lanes go — holds it to the
-    /// limits, and charges the frame the history it costs. revm calls it at the end of `SSTORE`,
-    /// `LOG0`..`LOG4` and `SELFDESTRUCT`, after every charge the opcode makes, so a write the
-    /// opcode's own failure takes back is never counted.
+    /// journal's ledger, holds it to the limits, and charges the frame the history it costs. revm
+    /// calls it at the end of `SSTORE`, `LOG0`..`LOG4` and `SELFDESTRUCT`, after every charge the
+    /// opcode makes, so a write the opcode's own failure takes back is never counted.
     ///
     /// The record is held to the limits first, and only then is its history charged: a record the
     /// limit rejects is not kept, so its history is no charge, and the stop is what the frame
@@ -319,11 +316,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
             CompletedWrite::Log { .. } => (true, false),
             CompletedWrite::SelfDestruct { .. } => (false, false),
         };
-        // One count, committed to the journal's ledger, which decides, and to the lanes.
         let (count, history) = self.ledger().write_count(&write);
-        let lanes = self.additional_limit.commit_count(&count);
         let check = self.ledger_mut().count_write(&count);
-        shadow::completed_write(&self.additional_limit, self.ledger(), lanes, check);
         if check.exceeded_limit() {
             return WriteVerdict::Revert(self.additional_limit.note_frame_stop(&check));
         }
@@ -357,13 +351,14 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
     /// frame's input.
     ///
     /// The charge comes out of what the caller kept rather than out of what the callee gets, so
-    /// the frame's allowance is free for what the recipient does. The frame's input copies the
-    /// caller's reservoir after the charge, so the frame, or the answer revm gives in its place,
-    /// inherits the reservoir the charge left. An opcode that starts no frame — a creation the
-    /// balance, the nonce or the depth refuses, an out-of-gas before the forward — never calls
-    /// it, and makes no records. A start revm then refuses — a value the caller cannot fund, a
-    /// frame past the call-stack limit — makes no records, and the charge comes back when it
-    /// returns, as does what a frame that ran did not keep.
+    /// the frame's allowance is free for what the recipient does; the frame's side keeps it, and
+    /// gives back on return what the journal's ledger reports the start did not keep. The frame's
+    /// input copies the caller's reservoir after the charge, so the frame, or the answer revm
+    /// gives in its place, inherits the reservoir the charge left. An opcode that starts no frame —
+    /// a creation the balance, the nonce or the depth refuses, an out-of-gas before the forward
+    /// — never calls it, and makes no records. A start revm then refuses — a value the caller
+    /// cannot fund, a frame past the call-stack limit — makes no records, and the charge comes
+    /// back when it returns, as does what a frame that ran did not keep.
     ///
     /// A charge the caller cannot pay, or a price that does not fit in a `u64`, fails the opcode
     /// with an out-of-gas and starts no frame, even where revm would have refused the start. The
@@ -378,13 +373,14 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
         if !self.prices_history() {
             return true;
         }
-        let charged = charge_write_records_history(gas, records.on_lane, u64::from(records.caller));
-        let Some((on_lane, caller)) = charged else {
+        let charged =
+            charge_write_records_history(gas, records.on_level, u64::from(records.caller));
+        let Some((on_level, caller)) = charged else {
             gas.erase_cost(start.forward);
             gas.set_failed_charge_remaining(Some(gas.remaining()));
             return false;
         };
-        self.additional_limit.stage_frame_charge(records, on_lane, caller);
+        self.additional_limit.stage_frame_charge(records, on_level, caller);
         true
     }
 }

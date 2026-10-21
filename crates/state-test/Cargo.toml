@@ -35,8 +35,3 @@ alloy-rlp = { workspace = true, features = ["std"] }
 
 # misc
 tempfile.workspace = true
-
-[features]
-# The engine with the journal's ledger held to the lanes: mega-evm's `ledger-shadow`, for
-# verification runs.
-ledger-shadow = ["mega-state-test/ledger-shadow"]

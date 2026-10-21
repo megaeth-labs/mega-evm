@@ -41,9 +41,9 @@
 //!
 //! The ledger takes every decision: the counts, the frame budgets, the start verdicts, the
 //! refunds of the history a caller paid for a start's records, and the check of a caller its child
-//! returns into. The lanes ([`AdditionalLimit`](crate::AdditionalLimit)) count the same quantities
-//! beside it until their deletion; under the `ledger-shadow` feature they are held to the ledger
-//! wherever the two must agree.
+//! returns into. Satin's side of each frame start ([`StartSide`]) — what its caller paid for its
+//! records, the history allowance the frame was granted, a built frame's mark — lives beside it on
+//! [`AdditionalLimit`](crate::AdditionalLimit), one side per frame result revm returns.
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
@@ -56,25 +56,14 @@ use revm::context_interface::{
 };
 
 use super::{
-    limit::share_of_remaining,
     record::{write_effect, write_moves_value, HistoryBytes, RecordEffect, WriteCount},
-    EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, TRANSFER_LOG, WRITE_RECORD,
+    EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, FRAME_DATA_SHARE_DENOMINATOR,
+    FRAME_DATA_SHARE_NUMERATOR, TRANSFER_LOG, WRITE_RECORD,
 };
 
-/// Asserts an invariant of the ledger's levels in debug builds and in `ledger-shadow` builds; in
-/// any other build the check is type-checked and compiled out, as `debug_assert!`'s is.
-macro_rules! ledger_assert {
-    ($($arg:tt)*) => {
-        if cfg!(any(debug_assertions, feature = "ledger-shadow")) {
-            assert!($($arg)*);
-        }
-    };
-}
-pub(crate) use ledger_assert;
-
-/// What the ledger counts that the journal rewinds: additions and refunds, kept apart as the lanes
-/// keep them, so that a frame's own usage saturates as a lane's does, and the log and code bytes
-/// history counts beside the write records.
+/// What the ledger counts that the journal rewinds: additions and refunds, kept apart so that a
+/// frame's own usage saturates at zero on its own — a child can take back a slot its parent
+/// dirtied — and the log and code bytes history counts beside the write records.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Counts {
     /// What was counted.
@@ -174,14 +163,14 @@ pub(crate) struct StartFacts {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct FrameStartRecords {
     /// Records on the frame's own level, which its failure takes back.
-    pub(crate) on_lane: u64,
+    pub(crate) on_level: u64,
     /// Whether the frame's start also writes its caller's account.
     pub(crate) caller: bool,
 }
 
 impl FrameStartRecords {
     /// No record at all.
-    pub(crate) const NONE: Self = Self { on_lane: 0, caller: false };
+    pub(crate) const NONE: Self = Self { on_level: 0, caller: false };
 }
 
 /// The start window, open while revm decides one frame start.
@@ -289,11 +278,6 @@ pub(crate) struct Ledger {
     limits: EvmTxRuntimeLimits,
     /// Whether the transaction is held to no limit.
     exempt: bool,
-    /// Whether a tool's checkpoint that enclosed a frame start was reverted and took back what the
-    /// ledger held: the lanes do not follow it, and the shadow stops comparing for the
-    /// transaction.
-    #[cfg(feature = "ledger-shadow")]
-    diverged: bool,
 }
 
 /// `counted`, with the transfer log revm journaled for the value it moved when `logged`.
@@ -326,10 +310,6 @@ impl Ledger {
         self.target_is_authority = false;
         self.transfer_logs = transfer_logs;
         self.exempt = exempt;
-        #[cfg(feature = "ledger-shadow")]
-        {
-            self.diverged = false;
-        }
     }
 
     /* What the ledger holds */
@@ -378,12 +358,6 @@ impl Ledger {
         self.levels.len()
     }
 
-    /// The number of frame levels open: the frames on the call stack.
-    #[cfg(feature = "ledger-shadow")]
-    pub(crate) fn frame_levels(&self) -> usize {
-        self.levels.iter().filter(|level| level.frame.is_some()).count()
-    }
-
     /// The running frame's level: the nearest frame level.
     fn frame_level(&self) -> Option<&FrameLevel> {
         self.levels.iter().rev().find_map(|level| level.frame.as_ref())
@@ -404,8 +378,15 @@ impl Ledger {
         self.frame_level().map(|level| FrameIdentity { depth: level.depth, start: level.start })
     }
 
+    /// Whether the transaction's value movements journal EIP-7708 transfer logs, which the ledger
+    /// counts where the value moves.
+    #[cfg(test)]
+    pub(crate) const fn counts_transfer_logs(&self) -> bool {
+        self.transfer_logs
+    }
+
     /// The running frame's budget and what it keeps so far.
-    #[cfg(any(test, feature = "ledger-shadow"))]
+    #[cfg(test)]
     pub(crate) fn running_budget(&self) -> Option<(u64, LimitUsage)> {
         self.frame_level().map(|level| (level.budget, level.usage(&self.counts)))
     }
@@ -415,14 +396,8 @@ impl Ledger {
     /// held.
     pub(crate) fn fate(&self, start: StartId) -> (bool, bool) {
         let fate = self.last_decided.filter(|fate| fate.start == start);
-        ledger_assert!(fate.is_some(), "a start's fate is read as its frame returns");
+        debug_assert!(fate.is_some(), "a start's fate is read as its frame returns");
         fate.map_or((false, false), |fate| (fate.level_kept, fate.start_kept))
-    }
-
-    /// Whether a tool's checkpoint that enclosed a frame start was reverted in the transaction.
-    #[cfg(feature = "ledger-shadow")]
-    pub(crate) const fn diverged(&self) -> bool {
-        self.diverged
     }
 
     /* Verdicts */
@@ -499,7 +474,7 @@ impl Ledger {
         let recorded = self.frame_level().is_some_and(|level| level.recorded);
         let target = match start.kind {
             FrameStartKind::Create | FrameStartKind::Create2 => {
-                return FrameStartRecords { on_lane: 1, caller: !recorded };
+                return FrameStartRecords { on_level: 1, caller: !recorded };
             }
             FrameStartKind::Call |
             FrameStartKind::CallCode |
@@ -511,8 +486,8 @@ impl Ledger {
                 // An opcode runs inside a frame, so the frame it starts is below the
                 // transaction's own.
                 let depth = self.frame_level().map_or(1, |level| level.depth + 1);
-                let (on_lane, caller) = self.call_records(depth, start.caller, target, recorded);
-                FrameStartRecords { on_lane, caller }
+                let (on_level, caller) = self.call_records(depth, start.caller, target, recorded);
+                FrameStartRecords { on_level, caller }
             }
             _ => FrameStartRecords::NONE,
         }
@@ -552,6 +527,10 @@ impl Ledger {
     /// Counts the records of the applied EIP-7702 authorities, `authorities` distinct accounts
     /// other than the transaction's `sender`, `target_is_authority` if the call target is one.
     /// Inside the pre-execution level, whose revert takes them back.
+    ///
+    /// The records cannot cross the data-size limit: validation admitted the body with a record for
+    /// every entry of the authorization list ([`admits_tx_body`](Self::admits_tx_body)), and only
+    /// an entry can apply. A debug build asserts it.
     pub(crate) fn count_authorities(
         &mut self,
         sender: Address,
@@ -561,6 +540,10 @@ impl Ledger {
         self.sender = sender;
         self.target_is_authority = target_is_authority;
         self.counts.used = self.counts.used.saturating_add(WRITE_RECORD.times(authorities));
+        debug_assert!(
+            self.exempt || !self.usage().exceeds_data_size(self.limits.tx_data_size_limit),
+            "validation admits no body whose authority records cross the data-size limit"
+        );
     }
 
     /// Admits an Oracle hint of `bytes`: held to the transaction's limit before it is counted, and
@@ -660,7 +643,7 @@ impl Ledger {
 
     /// Opens the start window for the start `facts` describes, which revm decides next.
     pub(crate) fn open_start(&mut self, facts: StartFacts) {
-        ledger_assert!(self.window.is_none(), "start windows do not nest");
+        debug_assert!(self.window.is_none(), "start windows do not nest");
         if facts.depth == 0 {
             self.sender = facts.caller;
         }
@@ -865,7 +848,7 @@ impl Ledger {
     /// reverted while a frame opened after it still runs — would leave the frame running without
     /// its level.
     fn assert_frame_closes(&self, frame: &FrameLevel) {
-        ledger_assert!(
+        debug_assert!(
             self.window.is_some() || frame.returning,
             "a revert closes the latest level: a frame's level closes only when the frame returns"
         );
@@ -894,13 +877,10 @@ impl Ledger {
     /// the start counted back with it.
     pub(crate) fn on_revert(&mut self, checkpoint: JournalCheckpoint) {
         let Some(level) = self.levels.pop() else { return };
-        ledger_assert!(
+        debug_assert!(
             level.opened_at == checkpoint,
             "a revert closes the latest level: a revert below a level still open is not supported"
         );
-        #[cfg(feature = "ledger-shadow")]
-        let changed = self.counts != level.at_open ||
-            self.frame_level().is_some_and(|caller| caller.recorded != level.recorded_at_open);
         self.counts = level.at_open;
         if let Some(caller) = self.frame_level_mut() {
             caller.recorded = level.recorded_at_open;
@@ -911,13 +891,7 @@ impl Ledger {
                 self.last_decided =
                     Some(Fate { start: frame.start, level_kept: false, start_kept: true });
             }
-            None => {
-                self.take_back_starts_from(level.next_start_at_open, None);
-                #[cfg(feature = "ledger-shadow")]
-                if changed && self.next_start > level.next_start_at_open {
-                    self.diverged = true;
-                }
-            }
+            None => self.take_back_starts_from(level.next_start_at_open, None),
         }
     }
 
@@ -975,7 +949,7 @@ impl Ledger {
     /// Takes the ledger back to `mark`, which revm's journal is being reverted to: the counts, the
     /// running frame's flag, and what became of the last start decided.
     pub(crate) fn revert_to(&mut self, mark: &Mark) {
-        ledger_assert!(
+        debug_assert!(
             self.levels.len() <= mark.levels,
             "a revert to a mark finds every level opened since closed"
         );
@@ -1007,14 +981,23 @@ pub(crate) struct StartSide {
     /// What is left of the history allowance the frame was granted, if it was granted one. It
     /// never enters the frame's gas, and what it does not spend disappears with the frame.
     stipend: u64,
-    /// Whether the records the lanes counted for the start are those its charge paid for.
-    #[cfg(feature = "ledger-shadow")]
-    comparable: bool,
+    /// The records the charge was computed from, when the charge was made from one and nothing
+    /// could rewrite the start between the two: what a debug build holds the ledger's count to.
+    #[cfg(debug_assertions)]
+    charged: Option<FrameStartRecords>,
 }
 
 impl StartSide {
-    /// The side of a start at `depth` whose caller paid `on_level_charge` and `caller_charge`.
-    pub(crate) const fn new(depth: usize, on_level_charge: u64, caller_charge: u64) -> Self {
+    /// The side of a start at `depth` whose caller paid `on_level_charge` and `caller_charge` for
+    /// the records `charged`, when the charge was computed from them.
+    pub(crate) const fn new(
+        depth: usize,
+        on_level_charge: u64,
+        caller_charge: u64,
+        charged: Option<FrameStartRecords>,
+    ) -> Self {
+        #[cfg(not(debug_assertions))]
+        let _ = charged;
         Self {
             depth,
             on_level_charge,
@@ -1030,28 +1013,41 @@ impl StartSide {
             },
             mark: None,
             stipend: 0,
-            #[cfg(feature = "ledger-shadow")]
-            comparable: true,
+            #[cfg(debug_assertions)]
+            charged,
         }
     }
 
-    /// Attaches what the ledger saw the start count and the built frame's mark.
-    pub(crate) const fn attach(&mut self, report: StartReport, mark: Option<Mark>) {
+    /// Attaches what the ledger saw the start count and the built frame's mark, and holds the
+    /// count to the records the start's charge was computed from.
+    ///
+    /// The two are separate answers to one question, asked at two points: the charge at the
+    /// opcode, on the facts revm's instruction hands the frame-start hook — or before execution,
+    /// on the transaction, for its own frame; or at a `keylessDeploy` call's first run, on the
+    /// creation it starts — and the count, on the writes revm made for the start. They agree
+    /// because the start revm makes carries the caller, target and value the charge was computed
+    /// from, and nothing between the two changes it: an interceptor answers a frame or lets it
+    /// start as it is, and a creation reaches none. A divergence trips in a debug build rather
+    /// than mis-charging the caller and mis-splitting the refund its failure gets back. An
+    /// inspector that may rewrite the start runs between the two, and can split them: under one
+    /// the start is not checked. Only a start revm made and held to the limits is checked: one it
+    /// refused, or failed before its level opened, counted nothing, and the charge comes back.
+    pub(crate) fn attach(&mut self, report: StartReport, mark: Option<Mark>) {
         self.report = report;
         self.mark = mark;
-    }
-
-    /// Notes whether the records the lanes counted are those the charge paid for.
-    #[cfg(feature = "ledger-shadow")]
-    pub(crate) const fn set_comparable(&mut self, comparable: bool) {
-        self.comparable = comparable;
-    }
-
-    /// Whether the shadow compares the refund: the records the lanes counted are those the charge
-    /// paid for.
-    #[cfg(feature = "ledger-shadow")]
-    pub(crate) const fn comparable(&self) -> bool {
-        self.comparable
+        #[cfg(debug_assertions)]
+        if let Some(charged) =
+            self.charged.filter(|_| report.start.is_some() && report.verdict.is_some())
+        {
+            let counted = FrameStartRecords {
+                on_level: report.on_level,
+                caller: report.caller_on_level || report.creator_record,
+            };
+            debug_assert_eq!(
+                charged, counted,
+                "the records a frame's start makes changed after its caller was charged for them",
+            );
+        }
     }
 
     /// The frame's depth.
@@ -1108,6 +1104,20 @@ impl StartSide {
     }
 }
 
+/// `remaining` × [`FRAME_DATA_SHARE_NUMERATOR`] / [`FRAME_DATA_SHARE_DENOMINATOR`], rounded down.
+///
+/// The share is `N / D = 1 − 1 / K` with `K = D / (D − N)` a whole number, so the floor of the
+/// product is `remaining − ⌈remaining / K⌉`, which stays in `u64` and never wraps. A `u128`
+/// product would call the 128-bit division routine on every frame start, where a division of a
+/// `u64` by a constant compiles to a multiplication.
+const fn share_of_remaining(remaining: u64) -> u64 {
+    const N: u64 = FRAME_DATA_SHARE_NUMERATOR;
+    const D: u64 = FRAME_DATA_SHARE_DENOMINATOR;
+    const _: () = assert!(N < D && D.is_multiple_of(D - N));
+    const K: u64 = D / (D - N);
+    remaining - remaining.div_ceil(K)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1119,14 +1129,303 @@ mod tests {
     const CALLEE: Address = address!("00000000000000000000000000000000000f0002");
     const TARGET: Address = address!("00000000000000000000000000000000000f0003");
 
-    /// A ledger holding a transaction from [`SENDER`] with a body of `body` bytes under `limits`,
-    /// exempt or not, whose value movements journal transfer logs when `transfer_logs`.
+    /// A ledger holding a transaction with a body of `body` bytes under `limits`, exempt or not,
+    /// whose value movements journal transfer logs when `transfer_logs`. The sender is whoever
+    /// starts the transaction's own frame.
     fn ledger(limits: EvmTxRuntimeLimits, exempt: bool, transfer_logs: bool, body: u64) -> Ledger {
         let mut ledger = Ledger::default();
         ledger.set_limits(limits);
         ledger.begin_transaction(exempt, transfer_logs, body);
+        ledger
+    }
+
+    /// [`ledger`], with [`SENDER`] as the transaction's sender before any frame starts.
+    fn ledger_from_sender(limits: EvmTxRuntimeLimits, transfer_logs: bool) -> Ledger {
+        let mut ledger = ledger(limits, false, transfer_logs, 0);
         ledger.count_authorities(SENDER, 0, false);
         ledger
+    }
+
+    /// Limits every dimension holds at zero: anything a transaction counts crosses one.
+    fn zero_limits() -> EvmTxRuntimeLimits {
+        EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(0).with_frame_data_size_limit(0)
+    }
+
+    /// A checkpoint of revm's journal as the ledger sees one: distinct per open level.
+    fn checkpoint(ledger: &Ledger) -> JournalCheckpoint {
+        JournalCheckpoint { log_i: 0, journal_i: ledger.depth(), selfdestructed_i: 0 }
+    }
+
+    /// Starts a call from `caller` to `target` at `depth` as revm starts one, moving `value`, and
+    /// journaling a transfer log for it when the ledger's transaction does; reports what the start
+    /// counted.
+    fn start_call(
+        ledger: &mut Ledger,
+        depth: usize,
+        caller: Address,
+        target: Address,
+        value: u64,
+    ) -> StartReport {
+        let facts = StartFacts { depth, caller, target: Some(target), transfers_value: value != 0 };
+        ledger.open_start(facts);
+        ledger.on_checkpoint(checkpoint(ledger));
+        let logged = ledger.transfer_logs && value != 0 && target != caller;
+        ledger.on_transfer(caller, target, U256::from(value), false, logged);
+        ledger.close_start()
+    }
+
+    /// Returns from the running frame as revm does: its level closes, committed or reverted.
+    fn end_frame(ledger: &mut Ledger, failed: bool) {
+        ledger.frame_returning();
+        let opened_at = ledger.levels.last().expect("a frame is running").opened_at;
+        if failed {
+            ledger.on_revert(opened_at);
+        } else {
+            ledger.on_commit();
+        }
+    }
+
+    /// The stop of a data-size crossing.
+    const fn stop(limit: u64, used: u64, frame_local: bool) -> LimitCheck {
+        LimitCheck::ExceedsLimit { kind: LimitKind::DataSize, limit, used, frame_local }
+    }
+
+    #[test]
+    fn test_share_of_remaining_is_the_floor_of_the_exact_product() {
+        let exact = |x: u64| {
+            (u128::from(x) * u128::from(FRAME_DATA_SHARE_NUMERATOR) /
+                u128::from(FRAME_DATA_SHARE_DENOMINATOR)) as u64
+        };
+        let mut x = 0x9e37_79b9_7f4a_7c15_u64;
+        let edges = [0, 1, 49, 50, 51, 99, 100, 101, u64::MAX, u64::MAX - 1, u64::MAX / 100 * 100];
+        for v in edges.into_iter().chain((0..100_000).map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x >> (x % 64)
+        })) {
+            assert_eq!(share_of_remaining(v), exact(v), "{v}");
+        }
+    }
+
+    /// A hint is held to the transaction's data-size limit before it is counted: one that fits is
+    /// counted, one that would cross is the stop at the usage it would have reached and leaves the
+    /// count as it was, and a later one that fits is counted, the crossing having stopped nothing
+    /// but its own call. An exempt transaction's is counted whatever it crosses.
+    #[test]
+    fn test_a_hint_that_would_cross_the_limit_is_not_counted() {
+        let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(100);
+        let mut held = ledger(limits, false, false, 40);
+        assert_eq!(held.admit_hint(59), LimitCheck::WithinLimit);
+        assert_eq!(held.usage().data_size, 99);
+        assert_eq!(held.admit_hint(2), stop(100, 101, false), "two more bytes cross");
+        assert_eq!(held.usage().data_size, 99, "the hint that crossed is not counted");
+        assert_eq!(held.admit_hint(1), LimitCheck::WithinLimit, "one more fits exactly");
+        assert_eq!(held.usage().data_size, 100, "and is counted");
+
+        let mut exempt = ledger(limits, true, false, 40);
+        assert_eq!(exempt.admit_hint(61), LimitCheck::WithinLimit);
+        assert_eq!(exempt.usage().data_size, 101, "an exempt transaction's hint is counted");
+    }
+
+    /// A child frame's budget is 98% of what its parent has left, three frames down, and the
+    /// transaction's own frame gets what the transaction has left.
+    #[test]
+    fn test_a_child_frame_gets_98_percent_of_what_its_parent_has_left() {
+        let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(10_000);
+        let mut ledger = ledger(limits, false, false, 310);
+        let budget = |ledger: &Ledger| ledger.running_budget().expect("a frame is running").0;
+
+        start_call(&mut ledger, 0, SENDER, CALLEE, 0);
+        let first = 10_000 - 310;
+        assert_eq!(budget(&ledger), first);
+
+        start_call(&mut ledger, 1, CALLEE, TARGET, 0);
+        let child = share_of_remaining(first);
+        assert_eq!(child, 9_496);
+        assert_eq!(budget(&ledger), child);
+
+        start_call(&mut ledger, 2, TARGET, SENDER, 0);
+        let grandchild = share_of_remaining(child);
+        assert_eq!(budget(&ledger), grandchild);
+
+        start_call(&mut ledger, 3, SENDER, CALLEE, 0);
+        assert_eq!(
+            budget(&ledger),
+            share_of_remaining(grandchild),
+            "the fourth frame, at depth 3, still takes 98% of what is left"
+        );
+    }
+
+    /// The frame cap binds when it is tighter than the share of what the parent has left.
+    #[test]
+    fn test_the_frame_cap_binds_when_it_is_tighter_than_the_share() {
+        let limits = EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(100);
+        let mut ledger = ledger(limits, false, false, 0);
+        start_call(&mut ledger, 0, SENDER, CALLEE, 0);
+        assert_eq!(ledger.running_budget().map(|(budget, _)| budget), Some(100));
+        start_call(&mut ledger, 1, CALLEE, TARGET, 0);
+        assert_eq!(ledger.running_budget().map(|(budget, _)| budget), Some(98));
+    }
+
+    /// A transaction that is not exempt is stopped wherever it crosses a limit: the first check, at
+    /// its frame's start, is the stop, and a later start that crosses again is a stop of its own,
+    /// with the usage it reached, not the first one's. An exempt transaction is stopped by no
+    /// limit, at the transaction or at a frame, and what it uses is counted all the same.
+    #[test]
+    fn test_a_transaction_is_stopped_where_it_crosses_unless_exempt() {
+        for exempt in [false, true] {
+            let mut ledger = ledger(zero_limits(), exempt, false, TX_BODY_SIZE);
+            let first = start_call(&mut ledger, 0, SENDER, CALLEE, 0);
+            let second = start_call(&mut ledger, 1, CALLEE, TARGET, 1);
+            let verdicts = (first.verdict, second.verdict, ledger.check());
+            let expected = if exempt {
+                (
+                    Some(LimitCheck::WithinLimit),
+                    Some(LimitCheck::WithinLimit),
+                    LimitCheck::WithinLimit,
+                )
+            } else {
+                let records = TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE;
+                (
+                    Some(stop(0, TX_BODY_SIZE, false)),
+                    Some(stop(0, records, false)),
+                    stop(0, records, false),
+                )
+            };
+            assert_eq!(verdicts, expected, "exempt {exempt}");
+            assert_eq!(
+                ledger.usage(),
+                LimitUsage { data_size: TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE, write_records: 2 },
+                "exempt {exempt}: counted all the same"
+            );
+        }
+    }
+
+    /// Validation admits no body whose authority records cross the data-size limit, so a debug
+    /// build trips on records that do: under a limit lowered to the body and one record, two
+    /// applied authorities cross it.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "validation admits no body whose authority records cross")]
+    fn test_authority_records_that_cross_the_limit_trip() {
+        let limits = EvmTxRuntimeLimits::no_limits()
+            .with_tx_data_size_limit(TX_BODY_SIZE + WRITE_RECORD_SIZE);
+        let mut ledger = ledger(limits, false, false, TX_BODY_SIZE);
+        ledger.count_authorities(SENDER, 2, false);
+    }
+
+    /// Applied authorities are recorded for an exempt transaction, whatever they cross.
+    #[test]
+    fn test_an_exempt_transaction_records_its_authorities() {
+        let mut ledger = ledger(zero_limits(), true, false, 0);
+        ledger.count_authorities(SENDER, 2, false);
+        assert_eq!(ledger.usage(), WRITE_RECORD.times(2));
+    }
+
+    /// A transfer log is data size and nothing else: no write record, and no history byte beside
+    /// the records — the transaction's history is its body and its records, whatever it moved.
+    #[test]
+    fn test_a_transfer_log_is_data_size_and_never_history() {
+        let mut ledger = ledger(EvmTxRuntimeLimits::no_limits(), false, true, TX_BODY_SIZE);
+        start_call(&mut ledger, 0, SENDER, CALLEE, 1);
+        start_call(&mut ledger, 1, CALLEE, TARGET, 1);
+        assert_eq!(
+            ledger.usage(),
+            LimitUsage {
+                data_size: TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE + 2 * TRANSFER_LOG_SIZE,
+                write_records: 2,
+            },
+            "the recipient of each move — the inner one's caller is the outer one's — and two logs",
+        );
+        assert_eq!(ledger.log_and_code_bytes(), 0, "no history byte beside the records");
+    }
+
+    /// A frame that fails takes its transfer log back with its records, as revm's checkpoint
+    /// takes back the move and the log.
+    #[test]
+    fn test_a_failed_frame_gives_its_transfer_log_back() {
+        let mut ledger = ledger(EvmTxRuntimeLimits::no_limits(), false, true, 0);
+        start_call(&mut ledger, 0, SENDER, CALLEE, 0);
+        start_call(&mut ledger, 1, CALLEE, TARGET, 1);
+        assert_eq!(ledger.usage().data_size, 2 * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE);
+        end_frame(&mut ledger, true);
+        assert_eq!(ledger.usage(), LimitUsage::ZERO);
+    }
+
+    /// A frame start whose transfer log crosses a limit is stopped at its start, with a stop that
+    /// names the limit it crossed, its own budget or the transaction's limit. The records alone
+    /// fit, so it is the log that crosses; at exactly the limit it holds.
+    #[test]
+    fn test_a_frame_start_whose_transfer_log_crosses_is_stopped() {
+        let records = 2 * WRITE_RECORD_SIZE;
+        let needs = records + TRANSFER_LOG_SIZE;
+        // The smallest frame cap whose share, the budget of a child of the first frame, holds it.
+        let cap = (needs..).find(|cap| share_of_remaining(*cap) >= needs).unwrap();
+        assert_eq!(share_of_remaining(cap), needs);
+        for (cap, fits) in [(cap, true), (cap - 1, false)] {
+            let limits = EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(cap);
+            let mut ledger = ledger(limits, false, true, 0);
+            start_call(&mut ledger, 0, SENDER, CALLEE, 0);
+            let report = start_call(&mut ledger, 1, CALLEE, TARGET, 1);
+            let expected =
+                if fits { LimitCheck::WithinLimit } else { stop(needs - 1, needs, true) };
+            assert_eq!(report.verdict, Some(expected), "a cap of {cap}");
+        }
+
+        // The transaction's own value: one record, the recipient's, and the log.
+        let needs = WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE;
+        for (tx_limit, fits) in [(needs, true), (needs - 1, false), (WRITE_RECORD_SIZE, false)] {
+            let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(tx_limit);
+            let mut ledger = ledger(limits, false, true, 0);
+            let report = start_call(&mut ledger, 0, SENDER, CALLEE, 1);
+            let expected =
+                if fits { LimitCheck::WithinLimit } else { stop(tx_limit, needs, false) };
+            assert_eq!(report.verdict, Some(expected), "a limit of {tx_limit}");
+        }
+    }
+
+    /// A child's return holds its caller to the ledger's check with what the child left it, every
+    /// time: a failed creation's nonce record lands on the creator unchecked, and the creator is
+    /// stopped before it runs on when the record puts it over its budget; a success hands its
+    /// caller no more than the share it gave, and the caller runs on.
+    #[test]
+    fn test_a_childs_return_holds_its_caller_to_what_it_left() {
+        // A frame cap of 100: the transaction's own frame gets 100, a child 98.
+        let limits = EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(100);
+        for (case, left, failed, stopped) in [
+            ("a success within its share", 98, false, false),
+            ("a failed creation's nonce record, within", 60, true, false),
+            ("a failed creation's nonce record, over the budget", 61, true, true),
+        ] {
+            let mut ledger = ledger(limits, false, false, 0);
+            start_call(&mut ledger, 0, SENDER, CALLEE, 0);
+            // What the caller kept of its own before the start.
+            let count = WriteCount {
+                added: LimitUsage { data_size: left, write_records: 0 },
+                ..WriteCount::NONE
+            };
+            assert_eq!(ledger.count_write(&count), LimitCheck::WithinLimit, "{case}");
+            if failed {
+                ledger.open_start(StartFacts {
+                    depth: 1,
+                    caller: CALLEE,
+                    target: None,
+                    transfers_value: false,
+                });
+                let start = ledger.before_creation();
+                ledger.after_creation(start, TARGET, Some(checkpoint(&ledger)), false);
+                let _ = ledger.close_start();
+            } else {
+                start_call(&mut ledger, 1, CALLEE, TARGET, 0);
+            }
+            end_frame(&mut ledger, failed);
+            let check = ledger.check();
+            assert_eq!(check.exceeded_limit(), stopped, "{case}: {check:?}");
+            if stopped {
+                assert_eq!(check, stop(100, left + WRITE_RECORD_SIZE, true), "{case}");
+            }
+        }
     }
 
     /// Validation admits a body whose bytes, with one record for each entry of the authorization
@@ -1169,7 +1468,7 @@ mod tests {
         let moved = SelfDestructResult { had_value: true, ..Default::default() };
         let destruction =
             |target| CompletedWrite::SelfDestruct { address: CALLEE, target, result: &moved };
-        let mut logging = ledger(EvmTxRuntimeLimits::no_limits(), false, true, 0);
+        let mut logging = ledger_from_sender(EvmTxRuntimeLimits::no_limits(), true);
         let (check, history) = commit(&mut logging, &destruction(TARGET));
         assert_eq!(check, LimitCheck::WithinLimit);
         assert_eq!(history, HistoryBytes::Appended(WRITE_RECORD_SIZE), "the record's alone");
@@ -1179,7 +1478,7 @@ mod tests {
         );
 
         let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(TRANSFER_LOG_SIZE - 1);
-        let mut tight = ledger(limits, false, true, 0);
+        let mut tight = ledger_from_sender(limits, true);
         let (check, history) = commit(&mut tight, &destruction(SENDER));
         assert_eq!(history, HistoryBytes::None);
         assert_eq!(
@@ -1193,7 +1492,7 @@ mod tests {
             "the log alone crosses",
         );
 
-        let mut silent = ledger(EvmTxRuntimeLimits::no_limits(), false, false, 0);
+        let mut silent = ledger_from_sender(EvmTxRuntimeLimits::no_limits(), false);
         let _ = commit(&mut silent, &destruction(TARGET));
         assert_eq!(silent.usage(), WRITE_RECORD, "no log, no bytes");
     }

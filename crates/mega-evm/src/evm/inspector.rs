@@ -548,7 +548,6 @@ pub(crate) fn frame_end_checked<DB, ExtEnvs, INTR, INSP>(
     inspector: &mut INSP,
     frame_input: &FrameInput,
     frame_result: &mut FrameResult,
-    depth: usize,
     source: ResultSource,
     upfront: Option<UpfrontRecord>,
 ) where
@@ -578,11 +577,11 @@ pub(crate) fn frame_end_checked<DB, ExtEnvs, INTR, INSP>(
         }
     };
     if answered || !before.is_ok() {
-        settle_kept_nothing(context, frame_input, frame_result, depth, answered);
+        settle_kept_nothing(context, frame_input, frame_result, answered);
     }
 }
 
-/// Settles the result of a frame at `depth` that kept nothing in the journal — one an inspector
+/// Settles the result of a frame that kept nothing in the journal — one an inspector
 /// answered in place of running, or one whose checkpoint was reverted before the inspector saw its
 /// result — as such a frame settles, whatever the inspector made of the result.
 ///
@@ -613,13 +612,11 @@ pub(crate) fn frame_end_checked<DB, ExtEnvs, INTR, INSP>(
 /// the frame's writes, or which never counted the start of a frame the inspector answered: its
 /// caller gets back the history it paid for the start's records once the frame returns, and the
 /// transaction the history of its own frame's record at the settlement, as for any frame that kept
-/// nothing. The lanes, which follow frames rather than the journal, are settled as the failure's
-/// until they go.
+/// nothing.
 fn settle_kept_nothing<DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: &mut MegaContext<DB, ExtEnvs>,
     input: &FrameInput,
     result: &mut FrameResult,
-    depth: usize,
     answered: bool,
 ) {
     carry_upfront_flags(input, result);
@@ -641,11 +638,6 @@ fn settle_kept_nothing<DB: Database, ExtEnvs: ExternalEnvTypes>(
     // A failed lookup records its cause, which fails the transaction before the result settles.
     let upfront = upfront.map_or(Some(0), |charge| context.state_gas_charge(charge));
     result.gas_mut().refill_reservoir(upfront.unwrap_or_default());
-    if depth == 0 {
-        let history = context.additional_limit.top_level_write_record_gas();
-        context.additional_limit.note_top_level_refund(history);
-    }
-    context.additional_limit.discard_returning_lane();
 }
 
 /// Sets `result`'s upfront-charge flags to those of `input`, the frame it answers: what revm's

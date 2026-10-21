@@ -20,8 +20,8 @@ use revm::{
 };
 
 use crate::{
-    limit::shadow, synthetic_call_result, system::intercept::peek_selector, ExternalEnvTypes,
-    MegaContext, OracleEnv,
+    synthetic_call_result, system::intercept::peek_selector, ExternalEnvTypes, MegaContext,
+    OracleEnv,
 };
 
 /// The address of the Oracle system contract.
@@ -91,9 +91,7 @@ pub(crate) fn intercept<DB: Database, ExtEnvs: ExternalEnvTypes>(
         return None;
     }
     let payload = inputs.input.bytes(&*ctx);
-    let lanes = ctx.additional_limit.record_hint_bytes(payload.len() as u64);
     let check = ctx.ledger_mut().admit_hint(payload.len() as u64);
-    shadow::hint(&ctx.additional_limit, ctx.ledger(), lanes, check);
     if check.exceeded_limit() {
         let output = ctx.additional_limit.note_frame_stop(&check);
         return Some(synthetic_call_result(inputs, InstructionResult::Revert, output));

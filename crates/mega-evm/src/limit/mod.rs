@@ -6,22 +6,19 @@
 //! data-size limit below, and detention for compute gas.
 //!
 //! Gas detention caps compute, [`LimitKind::ComputeGas`]: its state lives beside this module, in
-//! [`Detention`](crate::Detention), because what it meters is gas rather than anything the lanes
-//! count, and it holds a frame to the cap with the gas the frame may spend. It stops the frame that
-//! crosses the cap with the same revert ([`AdditionalLimit`]), with the compute the transaction may
-//! reach as the limit, and its compute at the crossing as what was used
+//! [`Detention`](crate::Detention), because what it meters is gas rather than anything the ledger
+//! counts, and it holds a frame to the cap with the gas the frame may spend. It stops the frame
+//! that crosses the cap with the same revert ([`AdditionalLimit`]), with the compute the
+//! transaction may reach as the limit, and its compute at the crossing as what was used
 //! ([`LimitCheck::ExceedsLimit`]).
 //!
-//! It also counts what the data-size limit meters, at the sites the bytes are made: data-size
-//! bytes and write records, on a lane per frame ([`AdditionalLimit`]). A write an opcode makes is
-//! counted once the opcode completed, in the Host's completed-write hook, which revm calls after
-//! every charge the opcode makes.
-//!
-//! The journal ([`MegaJournal`](crate::MegaJournal)) counts the same quantities in its ledger, at
-//! the journal's writes and from the same hooks, and revm's checkpoint reverts rewind it. The
-//! ledger takes every decision; the lanes are kept beside it until their deletion, and under the
-//! `ledger-shadow` feature they are held to the ledger wherever the two must agree, a mismatch
-//! panicking.
+//! What the data-size limit meters — data-size bytes and write records — is counted by the
+//! journal's ledger ([`MegaJournal`](crate::MegaJournal), `ledger.rs`), on one level per open
+//! checkpoint of revm's journal, at the journal's writes and from the Host's hooks, and revm's
+//! checkpoint reverts rewind it: what the ledger holds is what the journal keeps, whoever reverted
+//! what. A write an opcode makes is counted once the opcode completed, in the Host's
+//! completed-write hook, which revm calls after every charge the opcode makes. Beside the ledger,
+//! [`AdditionalLimit`] keeps Satin's side of each frame start, the stops and the settled figures.
 //!
 //! # The data-size limit
 //!
@@ -45,16 +42,16 @@
 //! - the records a frame's start makes, when the frame starts;
 //! - a storage write's record, a log's bytes and the record of a `SELFDESTRUCT`'s beneficiary, once
 //!   the opcode completed;
-//! - deployed code, on the creation's lane before the creation is committed, so a crossing leaves
+//! - deployed code, on the creation's level before the creation is committed, so a crossing leaves
 //!   no code behind. Only code revm would deposit counts: code starting with `0xEF` or over the
 //!   code-size limit, and a creation that cannot pay for its deposit, fail the creation alone and
 //!   are not counted;
-//! - an Oracle hint's payload, on the transaction's own lane, before it is forwarded;
+//! - an Oracle hint's payload, as the transaction's own, before it is forwarded;
 //! - an EIP-7708 transfer log, which revm journals itself for every value movement, where the value
 //!   moves: with the records of the frame start that moves it — the transaction's own value, a
 //!   value `CALL`, a creation's endowment — and with a `SELFDESTRUCT`'s beneficiary once the opcode
 //!   completed. Each is counted by the rule a `LOG3` of one word is ([`TRANSFER_LOG_SIZE`]), on the
-//!   lane of the frame whose journal checkpoint holds the move, so the failure that takes the move
+//!   level of the frame whose journal checkpoint holds the move, so the failure that takes the move
 //!   back takes the bytes back.
 //!
 //! A frame start is counted as the frame starts and held to the limits once revm decided it, on
@@ -82,7 +79,7 @@
 //!
 //! # Write records
 //!
-//! The write-record count the lanes keep is the KV count a node reports: one record per account
+//! The write-record count the ledger keeps is the KV count a node reports: one record per account
 //! or storage write the transaction keeps, deduplicated per frame, taken back with a slot written
 //! back to its original value and with the frame that fails. The sender's account and the accounts
 //! fees are credited to are the body's, not records. No limit holds the count: a record weighs
@@ -135,18 +132,14 @@
 //!   recipient is the block beneficiary or a fee vault pays a record the body already bound. It is
 //!   an over-charge, never an under-charge.
 
-mod frame_limit;
 mod ledger;
 #[allow(clippy::module_inception)]
 mod limit;
 mod record;
-pub(crate) mod shadow;
 
 #[cfg(test)]
 pub(crate) use ledger::StartSide;
-pub(crate) use ledger::{
-    ledger_assert, FrameIdentity, FrameStartRecords, Ledger, Mark, StartFacts, StartReport,
-};
+pub(crate) use ledger::{FrameIdentity, FrameStartRecords, Ledger, Mark, StartFacts, StartReport};
 pub use limit::AdditionalLimit;
 pub(crate) use record::HistoryBytes;
 
