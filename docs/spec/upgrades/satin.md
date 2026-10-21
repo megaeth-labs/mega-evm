@@ -538,7 +538,7 @@ A contract can revert with the same bytes, and so can a caller that re-raises th
   What the frame spent before the crossing charge stays spent, and its caller MUST get back everything the frame had, the withheld part included.
   The transaction's compute at the crossing is then at most the limit and less than the crossing charge short of it.
   A caller the stop returns into resumes held to what the limit leaves the transaction, which is less than the charge that crossed, so any regular charge of its own past that is a crossing too.
-  A frame that halts adds nothing to the compute (see Compute, above), so no halt takes the transaction's compute past the limit: the compute after a read is at most the cap.
+  What a halting frame burns adds nothing to the compute (see Compute, above), while the frame's paid work before the halt still counts, so no halt takes the transaction's compute past the limit: the compute since a read is at most its cap.
   A regular charge beyond the frame's whole regular gas, and every other out-of-gas, MUST halt as it would without the read.
 - **Precompiles.**
   A call to a precompile forwarded more regular gas than the frame's allowance MUST be decided from the precompile's price before it runs: priced within the allowance, it runs on its whole forward; priced past the allowance but within the forward, it MUST NOT run and is the crossing; priced past its whole forward, it runs on the forward and fails, as without the read.
