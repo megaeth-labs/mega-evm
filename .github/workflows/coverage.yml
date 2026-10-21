@@ -20,10 +20,14 @@ jobs:
     name: mega-evm core coverage
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          persist-credentials: false
 
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -53,10 +57,10 @@ jobs:
         uses: codecov/codecov-action@v5
         with:
           disable_search: true
-          fail_ci_if_error: false
+          fail_ci_if_error: true
           files: target/coverage/mega-evm/lcov.info
           flags: mega-evm-core
           name: mega-evm-core
-          token: ${{ secrets.CODECOV_TOKEN }}
+          use_oidc: true
           env_vars: RUST
           verbose: true
