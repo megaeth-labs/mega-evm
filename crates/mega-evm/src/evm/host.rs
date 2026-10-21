@@ -366,9 +366,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
     /// reservoir after the charge, so the frame, or the answer revm gives in its place,
     /// inherits the reservoir the charge left. An opcode that starts no frame — a creation the
     /// balance, the nonce or the depth refuses, an out-of-gas before the forward — never calls
-    /// it, and makes no records. A start revm then refuses — a value the caller cannot fund, a
-    /// frame past the call-stack limit — makes no records, and the charge comes back when it
-    /// returns, as does what a frame that ran did not keep.
+    /// it, and makes no records; with EIP-8037 off, such a creation calls it without the address
+    /// it would take, which makes none either. A start revm then refuses — a value the caller
+    /// cannot fund, a frame past the call-stack limit — makes no records, and the charge comes
+    /// back when it returns, as does what a frame that ran did not keep.
     ///
     /// A charge the caller cannot pay, or a price that does not fit in a `u64`, fails the opcode
     /// with an out-of-gas and starts no frame, even where revm would have refused the start. The

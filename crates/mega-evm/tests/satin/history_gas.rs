@@ -3,7 +3,7 @@
 //! Every charge is a byte count at the cost per history byte, and every assertion here writes the
 //! count out, so a repricing moves the numbers without rewriting the test.
 
-use alloy_primitives::{address, Address, Bytes, U256};
+use alloy_primitives::{address, keccak256, Address, Bytes, B256, U256};
 use mega_evm::{
     constants::{COST_PER_HISTORY_BYTE, COST_PER_STATE_BYTE, TX_GAS_LIMIT_CAP},
     test_utils::{BytecodeBuilder, MemoryDatabase},
@@ -12,13 +12,16 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{
-        CALL, CALLCODE, CREATE, DELEGATECALL, GAS, LOG0, POP, PUSH0, PUSH1, REVERT, STATICCALL,
-        STOP,
+        CALL, CALLCODE, CREATE, CREATE2, DELEGATECALL, GAS, LOG0, POP, PUSH0, PUSH1, REVERT,
+        STATICCALL, STOP,
     },
     context_interface::cfg::GasId,
 };
 
-use crate::common::{call, call_with_data, create, deploying, execute, runs_at_measurement_prices};
+use crate::common::{
+    body_history, call, call_with_data, create, deploying, execute, history, history_is_free,
+    history_rounds, runs_at_measurement_prices,
+};
 
 const CALLER: Address = address!("0000000000000000000000000000000000200000");
 const CALLEE: Address = address!("0000000000000000000000000000000000200001");
@@ -226,6 +229,55 @@ fn test_a_creation_whose_creator_cannot_pay_its_records_starts_no_frame() {
     assert!(ample.result.is_success(), "{:?}", ample.result);
     assert_eq!(ample.usage.write_records, 2, "the created account and the creator's nonce");
     assert_eq!(ample.gas.history, body(0) + 2 * WRITE_RECORD_SIZE * CPHB);
+}
+
+/// A creation onto an account the transaction already changed makes no record of the created
+/// account — the transaction's earlier write made it — so its creator pays for its own nonce's
+/// record alone. `CONTRACT` funds the address `CALLEE`'s `CREATE2` lands on with one wei, a call
+/// answered without running, then calls `CALLEE` with the gas each case gives it. `CALLEE` runs
+/// `CREATE2` of empty init code, which charges four `PUSH0` and the creation's own gas — no state
+/// gas, for an account that exists — and forwards all but a 64th of what is left, keeping that
+/// 64th to pay the start's records with. Given 64 times one record's price on top of its charges,
+/// it starts the creation; one gas less, it does not.
+#[test]
+fn test_a_creation_onto_an_account_the_transaction_changed_charges_its_creator_one_record() {
+    // Records that cost nothing leave no price to be short of, and records priced at a fraction of
+    // a gas may round to nothing.
+    if history_is_free() || history_rounds() {
+        return;
+    }
+    let created = CALLEE.create2(B256::ZERO, keccak256([]));
+    let price = history(WRITE_RECORD_SIZE);
+    let charges = 4 * 2 + mega_evm::satin_gas_params().get(GasId::create());
+    let run = |given: u64| {
+        let funds_then_calls = BytecodeBuilder::default()
+            .call(created, U256::from(1))
+            .append_many([POP, PUSH0, PUSH0, PUSH0, PUSH0, PUSH0])
+            .push_address(CALLEE)
+            .push_number(given)
+            .append_many([CALL, POP, STOP])
+            .build();
+        let creates = BytecodeBuilder::default()
+            .append_many([PUSH0, PUSH0, PUSH0, PUSH0, CREATE2, POP, STOP])
+            .build();
+        let db = funded()
+            .account_code(CONTRACT, funds_then_calls)
+            .account_balance(CONTRACT, U256::from(1))
+            .account_code(CALLEE, creates);
+        let outcome = execute(db, call(CALLER, CONTRACT, U256::ZERO, GAS_LIMIT));
+        assert!(outcome.result.is_success(), "{:?}", outcome.result);
+        outcome
+    };
+
+    let short = run(charges + 64 * price - 1);
+    assert_eq!(short.state[&created].info.nonce, 0, "a gas short, the creation never started");
+    assert_eq!(short.usage.write_records, 2, "the funding call's: CONTRACT's and the address's");
+    assert_eq!(short.gas.history, body_history(0) + 2 * price);
+
+    let exact = run(charges + 64 * price);
+    assert_eq!(exact.state[&created].info.nonce, 1, "the creation ran");
+    assert_eq!(exact.usage.write_records, 3, "and added its creator's record alone");
+    assert_eq!(exact.gas.history, body_history(0) + 3 * price);
 }
 
 /// Every call kind reaches the start's charge after its forward. A caller given its charges, an

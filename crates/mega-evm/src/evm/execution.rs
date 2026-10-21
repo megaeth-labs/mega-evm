@@ -552,6 +552,10 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         #[cfg(debug_assertions)]
         let charged = self.inner.ctx.charged_records.take();
         if let Some(result) = call_too_deep(&frame_init) {
+            debug_assert!(
+                creator.is_none(),
+                "a creation past the depth limit takes no address, and its hook counts nothing"
+            );
             return Ok(ItemOrResult::Result(result));
         }
         let keyless = keyless::is_dispatched(&self.inner.ctx, &frame_init);
@@ -1261,6 +1265,17 @@ impl FrameStart {
             ),
         };
         let on_frame = records.on_frame();
+        // The hook, or a keyless deployment's start, charged the price of the records it predicted,
+        // which a debug build holds to those predicted here unless an inspector may have rewritten
+        // the start since.
+        #[cfg(debug_assertions)]
+        if hooked.is_some() && ctx.prices_history() {
+            debug_assert_eq!(
+                Some(charged),
+                write_record_history_gas(on_frame.added),
+                "a start's charge is the price of the records it makes on its frame"
+            );
+        }
         let credit = if ctx.prices_history() {
             let price = |records| write_record_history_gas(records).unwrap_or(0);
             charged.saturating_sub(price(on_frame.added)).saturating_add(price(on_frame.taken))
@@ -1481,9 +1496,9 @@ fn inspect_logs<DB: Database, ExtEnvs: ExternalEnvTypes, INSP>(
     }
 }
 
-/// Whether executing this transaction creates its caller's account/// Whether executing this
-/// transaction creates its caller's account: a deposit-like transaction whose caller is empty,
-/// which the deposit path materialises by bumping its nonce or by minting to it.
+/// Whether executing this transaction creates its caller's account: a deposit-like transaction
+/// whose caller is empty, which the deposit path materialises by bumping its nonce or by minting
+/// to it.
 ///
 /// Read before op-revm deducts the caller, which is what materialises the account, and after
 /// [`validate_env`](Handler::validate_env), which promoted a system-address transaction: a
@@ -1620,6 +1635,35 @@ mod tests {
             bytes_share: u64::MAX,
             history_allowance: 0,
         }))
+    }
+
+    /// A debug build holds the records a start's hook charged its caller for to those predicted
+    /// once revm is about to decide the start: a start whose records changed in between trips,
+    /// since its charge and the refund its failure gets back would both be wrong. `CALLER` holds
+    /// nothing, so the value call makes no record; its hook was charged for a transfer log.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "changed after its caller was charged for them")]
+    fn test_a_start_whose_records_changed_after_its_charge_trips() {
+        let mut ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
+        let init = FrameInit { depth: 1, memory: SharedMemory::new(), frame_input: value_call() };
+        let charged = StartRecords { transfer_log: true, ..StartRecords::NONE };
+        let _ = FrameStart::of(&mut ctx, &init, false, Some(charged));
+    }
+
+    /// A debug build holds the history a start declares to the price of the records predicted for
+    /// it: a start whose hook charged another price trips.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "a start's charge is the price of the records it makes on its frame")]
+    fn test_a_start_charged_another_price_trips() {
+        let mut ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
+        let mut frame_input = value_call();
+        if let FrameInput::Call(inputs) = &mut frame_input {
+            inputs.charged_start = StartCharge::new(1, 0);
+        }
+        let init = FrameInit { depth: 1, memory: SharedMemory::new(), frame_input };
+        let _ = FrameStart::of(&mut ctx, &init, false, Some(StartRecords::NONE));
     }
 
     /// A context whose transaction read the block environment before its first frame under a cap
