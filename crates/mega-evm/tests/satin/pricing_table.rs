@@ -141,9 +141,10 @@ fn render() -> String {
     out.push_str(
         "Every named entry of the schedule, at the Osaka price, at the Amsterdam (glamsterdam \
          devnet-8) price and at the Satin price. Satin is Amsterdam with the EIP-8037 state \
-         entries rebuilt at `MegaETH`'s cost per state byte and deposited code priced at \
-         `MegaETH`'s cost per history byte; the `Satin` column differs from `Amsterdam` in \
-         exactly the entries where one of those two applies.\n\n",
+         entries rebuilt at `MegaETH`'s cost per state byte, deposited code and a value call's \
+         history allowance priced at `MegaETH`'s cost per history byte, and a frame forwarded \
+         98 per cent of what its caller has left of its data-size budget; the `Satin` column \
+         differs from `Amsterdam` in exactly the entries where one of those three applies.\n\n",
     );
     out.push_str("| Gas id | Osaka | Amsterdam | Satin |\n|---|---:|---:|---:|\n");
     for slot in 0..=u8::MAX {
@@ -307,11 +308,11 @@ fn test_the_table_shows_where_satin_differs_from_amsterdam() {
 
     // Every regular entry is Amsterdam's. The state entries are rebuilt rather than copied, and
     // land on Amsterdam's numbers because the provisional cost per state byte is the one
-    // Glamsterdam uses. The history entry is the one Satin adds: upstream prices no history byte
-    // at all.
+    // Glamsterdam uses. The history entries are the ones Satin adds — upstream prices no history
+    // byte at all — and so is the frame's share of the byte pool, which upstream forwards whole.
     assert_eq!(
         differing,
-        ["code_deposit_history_gas"],
+        ["call_history_allowance", "bytes_forward_percent", "code_deposit_history_gas"],
         "the entries Satin prices differently from Amsterdam"
     );
 }

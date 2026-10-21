@@ -32,9 +32,11 @@
 //!
 //! # Block execution
 //!
-//! Block execution admits any inspector: the journal's ledger follows the journal, so a rewrite
-//! cannot put the ledger out of step with state, and which inspectors may run on block production
-//! is a node's decision, not the engine's.
+//! Block execution admits any inspector: which inspectors may run on block production is a node's
+//! decision, not the engine's. What the transaction keeps is counted where its own execution
+//! writes and taken back with a frame that keeps nothing, so a rewrite that reverts a frame takes
+//! back what the frame counted; an inspector that overwrites a frame's gas overwrites its byte
+//! pool with it, as it overwrites detention's split (below).
 //!
 //! # What a rewrite does not change
 //!
@@ -84,8 +86,10 @@
 //!   volatile data, when the frame starts or resumes, and after an `SSTORE`. An inspector that
 //!   overwrites the interpreter's gas — Foundry's `pauseGasMetering` puts a snapshot back before
 //!   every instruction — overwrites the split with it, and the frame runs on the snapshot's split
-//!   until detention next sets it. Only the two records of a refused charge are kept from a
-//!   callback's write.
+//!   until detention next sets it. The frame's byte pool is in its `Gas` too, and goes back to the
+//!   snapshot's with it: what the frame wrote in between is counted on the transaction, which is
+//!   held to its limit, and not drawn from the frame's budget. Only the two records of a refused
+//!   charge are kept from a callback's write.
 //! - **An answer carries only the regular gas the inspector chose.** A frame the inspector answered
 //!   never ran, so it drew nothing from the reservoir: whatever `Gas` the answer is built on —
 //!   `Gas::new(limit)`, as Foundry answers a cheatcode, carries no reservoir — its caller merges
@@ -95,7 +99,11 @@
 
 use revm::{
     context::ContextTr,
-    context_interface::{cfg::StateGasCharge, Host},
+    context_interface::{
+        cfg::{gas::StartCharge, StateGasCharge},
+        journaled_state::JournalCheckpoint,
+        Host,
+    },
     handler::FrameResult,
     inspector::handler::frame_end,
     interpreter::{
@@ -105,7 +113,7 @@ use revm::{
     Database, Inspector,
 };
 
-use crate::{limit::Mark, synthetic_frame_result, ExternalEnvTypes, MegaContext};
+use crate::{evm::execution::revert_to, synthetic_frame_result, ExternalEnvTypes, MegaContext};
 
 /// Hands a running frame's instruction-loop callbacks to the inspector inside, and keeps what they
 /// do to the interpreter's gas from classifying the frame.
@@ -230,9 +238,8 @@ pub(crate) enum ResultSource {
     Inspector,
     /// The engine produced it — a frame that ran, or a start revm or the engine answered without
     /// building a frame — and what the frame journaled begins at the mark: the frame's own
-    /// checkpoint, or where the journal stood when the start began, with the ledger as it stood
-    /// there.
-    Engine(Mark),
+    /// checkpoint, or where the journal stood when the start began.
+    Engine(JournalCheckpoint),
 }
 
 /// Hands a frame's end to the inspector, then settles what its rewrite does not change.
@@ -277,7 +284,7 @@ pub(crate) fn frame_end_checked<DB, ExtEnvs, INTR, INSP>(
         ResultSource::Inspector => true,
         ResultSource::Engine(mark) => {
             if before.is_ok() && !frame_result.instruction_result().is_ok() {
-                context.journal_mut().revert_to(&mark);
+                revert_to(context.journal_mut(), mark);
             }
             false
         }
@@ -299,26 +306,29 @@ pub(crate) fn frame_end_checked<DB, ExtEnvs, INTR, INSP>(
 ///
 /// A frame the inspector answered (`answered`) never ran, so it drew nothing from its pools: its
 /// answer's gas carries nothing but the regular gas the inspector chose. Whatever `Gas` the answer
-/// was built on — `Gas::new(limit)`, which carries no reservoir, or one carrying charges — its
-/// state and history charges are rolled back, its refund is dropped, and its reservoir is the one
-/// the frame inherited, so its caller merges back the reservoir it forwarded. The rollback comes
-/// first: it unwinds the charges against the answer's own reservoir, which the inherited one then
-/// replaces, so a charge the answer carries is counted neither in the reservoir nor on a ledger.
+/// was built on — `Gas::new(limit)`, which carries no reservoir and no byte pool, or one carrying
+/// charges — its state and history charges and its byte draws are rolled back, its refund is
+/// dropped, and its reservoir and pool are the ones the frame inherited, so its caller merges back
+/// the reservoir and the share of its pool it forwarded. The rollback comes first: it unwinds the
+/// charges against the answer's own reservoir, which the inherited one then replaces, so a charge
+/// the answer carries is counted neither in the reservoir nor on a ledger.
 ///
 /// A result that says success is not one revm's settlement treats as keeping nothing, so it is made
 /// to settle like the failure it stands for, save what the inspector chose — the success its caller
 /// sees, the output, the regular gas:
 ///
-/// - its state and history charges are rolled back and its refunds dropped, as a failure's are,
-///   before its caller merges them;
+/// - its state and history charges and its byte draws are rolled back and its refunds dropped, as a
+///   failure's are, before its caller merges them;
 /// - the upfront charge comes back through it: the result holds it as state its frame gave back, as
-///   a frame that restored a slot its caller filled does, and its caller's merge nets it out.
+///   a frame that restored a slot its caller filled does, and its caller's merge nets it out;
+/// - so does the start charge its caller paid for the start's records, which revm's settlement
+///   gives back to a failure alone.
 ///
-/// What the frame counted is the journal's ledger's, which the frame's checkpoint took back with
-/// the frame's writes, or which never counted the start of a frame the inspector answered: its
-/// caller gets back the history it paid for the start's records once the frame returns, and the
-/// transaction the history of its own frame's record at the settlement, as for any frame that kept
-/// nothing.
+/// What the frame counted goes back with its start, which the frame's return closes as one that
+/// kept nothing ([`AdditionalLimit::kept_nothing`](crate::AdditionalLimit)); a start the inspector
+/// answered was never counted. A creation the inspector answered never bumped its creator's nonce,
+/// so the record its start's hook counted on the creator comes back too, with what the creator paid
+/// for it.
 fn settle_kept_nothing<DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: &mut MegaContext<DB, ExtEnvs>,
     input: &FrameInput,
@@ -327,6 +337,17 @@ fn settle_kept_nothing<DB: Database, ExtEnvs: ExternalEnvTypes>(
 ) {
     carry_upfront_flags(input, result);
     let success = result.instruction_result().is_ok();
+    // An answer the inspector built carries whatever it was built with; a result the engine made
+    // carries the charge the engine put on it.
+    let mut charge = if answered { start_charge(input) } else { carried_start_charge(result) };
+    if answered {
+        if let Some(record) = context.additional_limit.take_creator_record() {
+            context.additional_limit.give_back_creator_record(record);
+            charge = StartCharge::new(charge.history + record.history, charge.bytes + record.drawn);
+        }
+    } else {
+        context.additional_limit.kept_nothing();
+    }
     let gas = result.gas_mut();
     if answered || success {
         gas.rollback_state_gas();
@@ -334,16 +355,47 @@ fn settle_kept_nothing<DB: Database, ExtEnvs: ExternalEnvTypes>(
     }
     if answered {
         gas.set_reservoir(inherited_reservoir(input));
+        gas.set_bytes_remaining(inherited_share(input));
     }
     if !success {
+        set_start_charge(result, charge);
         return;
     }
+    gas.refill_history(charge.history);
+    gas.refill_bytes(charge.bytes);
+    set_start_charge(result, StartCharge::default());
     // A creation answered with a success and no address is one revm's settlement gives the
     // charge back for itself.
     let upfront = upfront_charge(input).filter(|_| result.refundable_state_gas_charge().is_none());
     // A failed lookup records its cause, which fails the transaction before the result settles.
     let upfront = upfront.map_or(Some(0), |charge| context.state_gas_charge(charge));
     result.gas_mut().refill_reservoir(upfront.unwrap_or_default());
+}
+
+/// What the caller of the frame `input` starts paid for its start, and the frame's failure gives
+/// back: the start charge its input carries.
+fn start_charge(input: &FrameInput) -> StartCharge {
+    match input {
+        FrameInput::Call(inputs) => inputs.charged_start,
+        FrameInput::Create(inputs) => inputs.charged_start(),
+        FrameInput::Empty => StartCharge::default(),
+    }
+}
+
+/// The start charge `result` carries.
+const fn carried_start_charge(result: &FrameResult) -> StartCharge {
+    match result {
+        FrameResult::Call(outcome) => outcome.charged_start,
+        FrameResult::Create(outcome) => outcome.charged_start,
+    }
+}
+
+/// Sets the start charge `result` carries, which revm's settlement gives back when it fails.
+fn set_start_charge(result: &mut FrameResult, charge: StartCharge) {
+    match result {
+        FrameResult::Call(outcome) => outcome.charged_start = charge,
+        FrameResult::Create(outcome) => outcome.charged_start = charge,
+    }
 }
 
 /// Sets `result`'s upfront-charge flags to those of `input`, the frame it answers: what revm's
@@ -368,6 +420,15 @@ const fn inherited_reservoir(input: &FrameInput) -> u64 {
         FrameInput::Call(inputs) => inputs.reservoir,
         FrameInput::Create(inputs) => inputs.reservoir(),
         FrameInput::Empty => 0,
+    }
+}
+
+/// The share of its caller's byte pool the frame `input` starts with.
+const fn inherited_share(input: &FrameInput) -> u64 {
+    match input {
+        FrameInput::Call(inputs) => inputs.bytes_share,
+        FrameInput::Create(inputs) => inputs.bytes_share(),
+        FrameInput::Empty => u64::MAX,
     }
 }
 

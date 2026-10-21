@@ -2,14 +2,19 @@
 //!
 //! Satin takes the Amsterdam schedule — the one that carries EIP-8037 state gas, EIP-8038's
 //! state-access prices, the EIP-2780 intrinsic decomposition, the EIP-7976 calldata floor and
-//! EIP-7981 access-list data — and changes exactly two things:
+//! EIP-7981 access-list data — and changes exactly three things:
 //!
 //! 1. the EIP-8037 state-gas entries are rebuilt from `MegaETH`'s own cost per state byte
 //!    ([`STATE_GAS_REPRICED`]), which is what makes the state dimension `MegaETH`'s rather than
 //!    Glamsterdam's;
-//! 2. the history price of deposited code ([`HISTORY_GAS_PRICED`]), the one entry outside
-//!    Amsterdam's table: upstream leaves it at zero, and Satin gives it the cost of one history
-//!    byte, which is what makes a deployment pay for the bytes every node has to carry.
+//! 2. the history price of deposited code ([`HISTORY_GAS_PRICED`]), and the history allowance a
+//!    value-transferring call gives the frame it starts, the entries outside Amsterdam's table:
+//!    upstream leaves them at zero, and Satin gives deposited code the cost of one history byte per
+//!    byte, which is what makes a deployment pay for the bytes every node has to carry, and the
+//!    allowance the cost of [`STORAGE_CALL_STIPEND_BYTES`];
+//! 3. the share of its caller's data-size budget a frame starts with
+//!    ([`FRAME_BYTES_FORWARD_PERCENT`]): upstream forwards the whole byte pool, and Satin forwards
+//!    98 per cent of what the caller has left.
 //!
 //! Every regular-gas entry is Amsterdam's, so state creation is split between the two dimensions
 //! as Amsterdam splits it: the regular part is the access and write work EIP-8038 prices, and the
@@ -37,7 +42,13 @@ use revm::{
     primitives::{eip8037, hardfork::SpecId, OnceLock},
 };
 
-use crate::evm::prices::{active_satin_prices, SatinPrices};
+use crate::{
+    evm::{
+        history::STORAGE_CALL_STIPEND_BYTES,
+        prices::{active_satin_prices, SatinPrices},
+    },
+    limit::{FRAME_DATA_SHARE_DENOMINATOR, FRAME_DATA_SHARE_NUMERATOR},
+};
 
 /// A schedule entry and the number of bytes it prices: the entry is that many bytes at a byte
 /// price.
@@ -62,7 +73,21 @@ pub const STATE_GAS_REPRICED: &[ScheduleEntry] = &[
 /// Deposited code is the one history charge the schedule prices, because it is the one revm makes
 /// itself: `return_create` writes the code and charges the entry for its length. Every other
 /// history charge is made by the engine, which prices its own byte counts (the `history` module).
-pub const HISTORY_GAS_PRICED: &[ScheduleEntry] = &[(GasId::code_deposit_history_gas, 1)];
+/// The allowance a value-transferring call gives the frame it starts is in the schedule because
+/// revm's call instruction gives it, where it gives the call stipend; only a log the frame emits
+/// draws on it ([`storage_call_stipend`](crate::storage_call_stipend)).
+pub const HISTORY_GAS_PRICED: &[ScheduleEntry] = &[
+    (GasId::code_deposit_history_gas, 1),
+    (GasId::call_history_allowance, STORAGE_CALL_STIPEND_BYTES),
+];
+
+/// The share of its caller's byte pool, in per cent, a frame starts with: its data-size budget,
+/// [`FRAME_DATA_SHARE_NUMERATOR`] / [`FRAME_DATA_SHARE_DENOMINATOR`] of what the caller has left.
+/// revm's forward of the pool rounds the share down, as the budget's rule does.
+pub(crate) const FRAME_BYTES_FORWARD_PERCENT: u64 =
+    FRAME_DATA_SHARE_NUMERATOR * 100 / FRAME_DATA_SHARE_DENOMINATOR;
+const _: () =
+    assert!((FRAME_DATA_SHARE_NUMERATOR * 100).is_multiple_of(FRAME_DATA_SHARE_DENOMINATOR));
 
 /// The Satin gas schedule at the prices in effect.
 ///
@@ -87,7 +112,7 @@ pub fn satin_gas_params_history_exempt() -> GasParams {
     TABLE
         .get_or_init(|| {
             let mut params = satin_gas_params();
-            params.override_gas(HISTORY_GAS_PRICED.iter().map(|&(id, _)| (id(), 0)));
+            params.override_gas([(GasId::code_deposit_history_gas(), 0)]);
             params
         })
         .clone()
@@ -111,6 +136,7 @@ pub fn satin_gas_params_at(prices: SatinPrices) -> GasParams {
     params.override_gas(
         HISTORY_GAS_PRICED.iter().map(|&(id, bytes)| (id(), prices.cphb.fixed_size_gas(bytes))),
     );
+    params.override_gas([(GasId::bytes_forward_percent(), FRAME_BYTES_FORWARD_PERCENT)]);
     params
 }
 
@@ -143,7 +169,8 @@ mod tests {
         for slot in 0..=u8::MAX {
             let id = GasId::new(slot);
             let rebuilt = STATE_GAS_REPRICED.iter().any(|&(entry, _)| entry() == id) ||
-                HISTORY_GAS_PRICED.iter().any(|&(entry, _)| entry() == id);
+                HISTORY_GAS_PRICED.iter().any(|&(entry, _)| entry() == id) ||
+                id == GasId::bytes_forward_percent();
             if rebuilt {
                 continue;
             }
@@ -218,20 +245,48 @@ mod tests {
         }
     }
 
-    /// The schedule an exempt transaction runs prices no history byte and is otherwise the same
-    /// table.
+    /// The schedule an exempt transaction runs prices no deposited byte and is otherwise the same
+    /// table: an exempt transaction is charged no history by the engine, so the allowance, which
+    /// only a history charge draws, is left as it is.
     #[test]
     fn test_the_exempt_schedule_only_drops_the_history_price() {
         let exempt = satin_gas_params_history_exempt();
         let satin = satin_gas_params();
-        assert_eq!(exempt.get(GasId::code_deposit_history_gas()), 0);
+        let id = GasId::code_deposit_history_gas();
+        assert_eq!(exempt.get(id), 0);
         for slot in 0..=u8::MAX {
-            let id = GasId::new(slot);
-            if HISTORY_GAS_PRICED.iter().any(|&(entry, _)| entry() == id) {
-                continue;
+            let other = GasId::new(slot);
+            if other != id {
+                assert_eq!(exempt.get(other), satin.get(other), "{} must not move", other.name());
             }
-            assert_eq!(exempt.get(id), satin.get(id), "{} must not move", id.name());
         }
+    }
+
+    /// A frame starts with 98 per cent of what its caller has left of its data-size budget, which
+    /// revm forwards at every frame start as the schedule's share of the byte pool, rounded down as
+    /// the budget's rule is; upstream forwards the whole pool.
+    #[test]
+    fn test_a_frame_is_forwarded_98_percent_of_its_callers_pool() {
+        let satin = satin_gas_params();
+        assert_eq!(satin.get(GasId::bytes_forward_percent()), 98);
+        assert_eq!(amsterdam().get(GasId::bytes_forward_percent()), 100);
+        for pool in [0, 1, 49, 50, 51, 99, 100, 101, 9_690, u64::MAX] {
+            let floor = (u128::from(pool) * 98 / 100) as u64;
+            assert_eq!(satin.bytes_forward_share(pool), floor, "{pool}");
+        }
+    }
+
+    /// The history allowance a value-transferring call gives the frame it starts is
+    /// [`STORAGE_CALL_STIPEND_BYTES`] at the cost per history byte, the same figure the engine
+    /// prices its history at; Osaka and Amsterdam give none.
+    #[test]
+    fn test_a_value_call_is_given_the_storage_call_stipend() {
+        let id = GasId::call_history_allowance();
+        assert_eq!(satin_gas_params().get(id), crate::storage_call_stipend());
+        let constants = satin_gas_params_at(SatinPrices::CONSTANTS);
+        assert_eq!(constants.get(id), 160 * COST_PER_HISTORY_BYTE);
+        assert_eq!(osaka().get(id), 0);
+        assert_eq!(amsterdam().get(id), 0);
     }
 
     /// Deposited code costs one history byte per byte, which is the whole of Satin's history
@@ -284,6 +339,7 @@ mod tests {
             (GasId::code_deposit_state_gas(), 313),
             (GasId::tx_eip7702_state_gas_bytecode(), 7_188),
             (GasId::code_deposit_history_gas(), 400),
+            (GasId::call_history_allowance(), 160 * 400),
         ];
         for slot in 0..=u8::MAX {
             let id = GasId::new(slot);

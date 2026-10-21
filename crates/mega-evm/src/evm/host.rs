@@ -64,7 +64,10 @@ use delegate::delegate;
 use revm::{
     context::ContextTr,
     context_interface::{
-        cfg::{gas::GasTracker, GasId, GasParams, StateGasSite},
+        cfg::{
+            gas::{GasTracker, StartCharge},
+            GasId, GasParams, StateGasSite,
+        },
         context::{ContextError, SStoreResult, SelfDestructResult, StateLoad},
         host::{CompletedWrite, FrameStart, LoadError, WriteVerdict},
         journaled_state::AccountInfoLoad,
@@ -290,10 +293,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
         Ok(load)
     }
 
-    /// Commits the record of a write an opcode completed to the running frame's level of the
-    /// journal's ledger, holds it to the limits, and charges the frame the history it costs. revm
-    /// calls it at the end of `SSTORE`, `LOG0`..`LOG4` and `SELFDESTRUCT`, after every charge the
-    /// opcode makes, so a write the opcode's own failure takes back is never counted.
+    /// Counts the record of a write an opcode completed on the running frame's pool, holds it to
+    /// the limits, and charges the frame the history it costs. revm calls it at the end of
+    /// `SSTORE`, `LOG0`..`LOG4` and `SELFDESTRUCT`, after every charge the opcode makes, so a write
+    /// the opcode's own failure takes back is never counted.
     ///
     /// The record is held to the limits first, and only then is its history charged: a record the
     /// limit rejects is not kept, so its history is no charge, and the stop is what the frame
@@ -322,8 +325,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
             CompletedWrite::Log { .. } => (true, false),
             CompletedWrite::SelfDestruct { .. } => (false, false),
         };
-        let (count, history) = self.ledger().write_count(&write);
-        let check = self.ledger_mut().count_write(&count);
+        let (counted, history) = self.accounts().write_counted(&write);
+        let check = self.additional_limit.draw(gas, &counted);
         if check.exceeded_limit() {
             return WriteVerdict::Revert(self.additional_limit.note_frame_stop(&check));
         }
@@ -334,12 +337,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
             }
             if appended != 0 {
                 let Some(cost) = history_gas(appended) else { return WriteVerdict::OutOfGas };
-                let drawn = if from_allowance {
-                    self.additional_limit.try_consume_stipend(cost)
-                } else {
-                    0
-                };
-                if !gas.record_history_cost(cost - drawn) {
+                let cost = if from_allowance { gas.draw_history_allowance(cost) } else { cost };
+                if !gas.record_history_cost(cost) {
                     return WriteVerdict::OutOfGas;
                 }
             }
@@ -352,23 +351,24 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
 
     /// Charges the running frame the history of the write records the frame it is starting makes
     /// — the accounts a value transfer changes from what the transaction loaded, a creation's
-    /// created account and its creator's nonce — as the journal predicts them from its state
-    /// ([`MegaJournal::start_records`](crate::MegaJournal)). The created account is charged for
-    /// every creation: the address a `CREATE2` lands on is not known here, and a creation onto an
-    /// address the transaction changed already makes no record for it. revm calls it at `CALL`,
-    /// `CALLCODE`, `DELEGATECALL`, `STATICCALL`, `CREATE` and `CREATE2`, once the opcode made
-    /// every charge and took the gas it forwards, and before it builds the frame's input.
+    /// created account when the transaction had not changed it, and its creator's nonce — as the
+    /// journal's state stands ([`Accounts::start_records`](crate::limit::Accounts)), and counts the
+    /// creator's record on the running frame's pool, before the frame's share of it is forwarded.
+    /// revm calls it at `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, `CREATE` and `CREATE2`,
+    /// once the opcode made every charge and took the gas it forwards, and before it builds the
+    /// frame's input.
     ///
     /// The charge comes out of what the caller kept rather than out of what the callee gets, so
-    /// the frame's allowance is free for what the recipient does; the frame's side keeps it, and
-    /// gives back on return what the journal's ledger reports the start did not keep, and the
-    /// price of the records a transfer returned to what the transaction loaded, once that stands.
-    /// The frame's input copies the caller's reservoir after the charge, so the frame, or the
-    /// answer revm gives in its place, inherits the reservoir the charge left. An opcode that
-    /// starts no frame — a creation the balance, the nonce or the depth refuses, an out-of-gas
-    /// before the forward — never calls it, and makes no records. A start revm then refuses — a
-    /// value the caller cannot fund, a frame past the call-stack limit — makes no records, and the
-    /// charge comes back when it returns, as does what a frame that ran did not keep.
+    /// the frame's allowance is free for what the recipient does. What the frame's own records
+    /// cost is declared on the start ([`FrameStart::charge`]), which the fork carries on the
+    /// frame's input and gives back to the caller when the frame fails; the creator's record
+    /// outlives the creation and is not declared. The frame's input copies the caller's
+    /// reservoir after the charge, so the frame, or the answer revm gives in its place,
+    /// inherits the reservoir the charge left. An opcode that starts no frame — a creation the
+    /// balance, the nonce or the depth refuses, an out-of-gas before the forward — never calls
+    /// it, and makes no records. A start revm then refuses — a value the caller cannot fund, a
+    /// frame past the call-stack limit — makes no records, and the charge comes back when it
+    /// returns, as does what a frame that ran did not keep.
     ///
     /// A charge the caller cannot pay, or a price that does not fit in a `u64`, fails the opcode
     /// with an out-of-gas and starts no frame, even where revm would have refused the start. The
@@ -379,19 +379,28 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
     /// taken, and a price that could not be computed failed before any charge.
     #[inline]
     fn frame_starting(&mut self, start: &mut FrameStart, gas: &mut GasTracker) -> bool {
-        let records = self.journal_ref().start_records(start);
-        if !self.prices_history() {
-            self.additional_limit.stage_frame_charge(records, 0, 0, false);
-            return true;
-        }
-        let charged =
-            charge_write_records_history(gas, records.added_on_level(), u64::from(records.creator));
-        let Some((added, creator)) = charged else {
-            gas.erase_cost(start.forward);
-            gas.set_failed_charge_remaining(Some(gas.remaining()));
-            return false;
+        let records =
+            self.accounts().start_records(start.kind, start.caller, start.target, start.value);
+        let on_frame = records.on_frame().added;
+        let (charge, creator) = if self.prices_history() {
+            let creator = u64::from(records.creator);
+            let Some(charged) = charge_write_records_history(gas, on_frame, creator) else {
+                gas.erase_cost(start.forward);
+                gas.set_failed_charge_remaining(Some(gas.remaining()));
+                return false;
+            };
+            charged
+        } else {
+            (0, 0)
         };
-        self.additional_limit.stage_frame_charge(records, added, creator, true);
+        start.charge = StartCharge::new(charge, 0);
+        if records.creator {
+            self.additional_limit.count_creator_record(gas, creator);
+        }
+        #[cfg(debug_assertions)]
+        {
+            self.charged_records = Some(records);
+        }
         true
     }
 }

@@ -13,7 +13,6 @@ mod history;
 mod host;
 mod inspector;
 mod instructions;
-mod journal;
 mod precompiles;
 mod prices;
 mod result;
@@ -27,7 +26,6 @@ pub use execution::*;
 pub use factory::*;
 pub use frame::*;
 pub use history::*;
-pub use journal::*;
 pub use precompiles::*;
 pub use prices::*;
 pub use result::*;
@@ -258,7 +256,7 @@ where
     ExtEnvs: ExternalEnvTypes,
 {
     /// Executes `tx`, through the inspector when one is enabled, and returns its outcome: the
-    /// result and state, the gas by ledger, the usage the journal's ledger counted, the limit
+    /// result and state, the gas by ledger, the usage the common execution layer counted, the limit
     /// that stopped the transaction, if any, and the reads of the Oracle's storage it made
     /// through the oracle service. Nothing is committed.
     pub fn execute_transaction(

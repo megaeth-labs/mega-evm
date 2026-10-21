@@ -1,12 +1,9 @@
-//! The journal's ledger on the writes made by anything but the transaction's own execution, and on
-//! a tool's checkpoints.
+//! The data size of the writes made by anything but the transaction's own execution.
 //!
-//! The ledger counts what the transaction's own execution keeps, at the journal's writes, and the
-//! journal's checkpoints rewind it. A precompile's writes through `EvmInternals` and an
-//! inspector's are not the transaction's own execution, and neither is counted. A tool's
-//! checkpoint around a call is a level of the journal like any other: committed, it changes
-//! nothing; reverted, it takes back what the call kept, and the transaction reports what the
-//! journal holds.
+//! What a transaction keeps is counted where its own execution writes: at the completed-write and
+//! frame-start hooks, and where revm decides a start. A precompile's writes through
+//! `EvmInternals` and an inspector's are not the transaction's own execution, and neither is
+//! counted; neither is a start an inspector answers before revm decides it.
 
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{address, map::HashMap, Address, Bytes, Log, LogData, B256, U256};
@@ -16,11 +13,9 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::STOP,
-    context::{ContextTr, JournalTr},
-    context_interface::journaled_state::JournalCheckpoint,
     handler::FrameResult,
     interpreter::{
-        interpreter::EthInterpreter, CallInputs, CallOutcome, FrameInput, Gas, InstructionResult,
+        interpreter::EthInterpreter, CallOutcome, FrameInput, Gas, InstructionResult,
         InterpreterResult,
     },
     precompile::{PrecompileId, PrecompileOutput},
@@ -101,89 +96,6 @@ fn test_a_precompiles_writes_through_evm_internals_count_nothing() {
         "the receipt carries the call's transfer log, then the precompile's log and transfer log",
     );
     assert_eq!(outcome.usage, records_and_moves(2, 1), "the call's start alone is counted");
-}
-
-/// An inspector that opens a checkpoint when a call to `target` starts, and commits it or reverts
-/// it when the call ends: a tool's checkpoint around a frame start.
-struct Encloses {
-    target: Address,
-    revert: bool,
-    open: Vec<JournalCheckpoint>,
-}
-
-impl Inspector<MegaContext<MemoryDatabase>, EthInterpreter> for Encloses {
-    fn call(
-        &mut self,
-        context: &mut MegaContext<MemoryDatabase>,
-        inputs: &mut CallInputs,
-    ) -> Option<CallOutcome> {
-        if inputs.target_address == self.target {
-            self.open.push(context.journal_mut().checkpoint());
-        }
-        None
-    }
-
-    fn call_end(
-        &mut self,
-        context: &mut MegaContext<MemoryDatabase>,
-        inputs: &CallInputs,
-        _outcome: &mut CallOutcome,
-    ) {
-        if inputs.target_address != self.target {
-            return;
-        }
-        let checkpoint = self.open.pop().expect("opened when the call started");
-        if self.revert {
-            context.journal_mut().checkpoint_revert(checkpoint);
-        } else {
-            context.journal_mut().checkpoint_commit();
-        }
-    }
-}
-
-/// A tool's checkpoint opened as a value call to [`RECEIVER`] starts and closed as it ends, before
-/// [`CONTRACT`] makes a second value call, to [`PAYEE`].
-///
-/// Committed, it changes nothing: both calls keep their starts — the two recipients' records,
-/// `CONTRACT`'s own, once, and the two transfer logs.
-///
-/// Reverted, it takes back what the first call kept, its value and its transfer log included, so
-/// the receipt carries the second call's log alone; the ledger takes back the first call's records
-/// and `CONTRACT`'s flag with it, so the second call records `CONTRACT` again, and the transaction
-/// reports what the journal kept: two records and one log.
-#[test]
-fn test_a_tool_checkpoint_around_a_call_closes_with_it() {
-    for revert in [false, true] {
-        let case = if revert { "reverted" } else { "committed" };
-        let code = BytecodeBuilder::default()
-            .call(RECEIVER, U256::from(VALUE))
-            .call(PAYEE, U256::from(VALUE))
-            .stop()
-            .build();
-        let db = MemoryDatabase::default()
-            .account_code(CONTRACT, code)
-            .account_balance(CONTRACT, U256::from(2 * VALUE))
-            .account_code(RECEIVER, Bytes::from_static(&[STOP]));
-        let tx = call(CALLER, CONTRACT, U256::ZERO, value_call_room());
-        let inspector = Encloses { target: RECEIVER, revert, open: Vec::new() };
-        let mut evm = MegaEvm::new(context(db)).with_inspector(inspector);
-        let outcome = evm.execute_transaction(tx).expect("the transaction is valid");
-        assert!(outcome.result.is_success(), "{case}: {:?}", outcome.result);
-        let paid = transfer_log(CONTRACT, PAYEE, U256::from(VALUE));
-        if revert {
-            assert_eq!(outcome.result.logs(), [paid], "{case}: the second call's log alone");
-            assert_eq!(
-                outcome.state.get(&RECEIVER).map(|account| account.info.balance),
-                Some(U256::ZERO),
-                "{case}: the first call's value went back"
-            );
-            assert_eq!(outcome.usage, records_and_moves(2, 1), "{case}: what the journal kept");
-        } else {
-            let received = transfer_log(CONTRACT, RECEIVER, U256::from(VALUE));
-            assert_eq!(outcome.result.logs(), [received, paid], "{case}");
-            assert_eq!(outcome.usage, records_and_moves(3, 2), "{case}");
-        }
-    }
 }
 
 /// An inspector that answers, in `frame_start`, the call to `target` with a success on the gas

@@ -8,13 +8,16 @@
 //! 1. an upfront state-gas charge the calling opcode made for the frame (a new account, a creation)
 //!    is priced for refund when the frame failed;
 //! 2. [`handle_reservoir_remaining_gas`] merges the frame's gas into the caller's: unused regular
-//!    gas back on success and revert, the frame's reservoir adopted as the caller's own;
-//! 3. the refund is refilled into the caller's reservoir.
+//!    gas back on success and revert, the frame's reservoir adopted as the caller's own, and the
+//!    frame's byte pool absorbed into the caller's;
+//! 3. the refund is refilled into the caller's reservoir, and the start charge the frame carries —
+//!    what its caller paid for the records its start makes — is given back when it failed.
 //!
 //! The contract for a synthetic result is that it settles exactly like revm's own: its gas carries
-//! the reservoir the frame inherited ([`untouched_call_gas`], [`with_pools_of`]), never
-//! `Gas::new(limit)`, which would carry none and bill the sender for the whole reservoir; and it
-//! carries the calling opcode's upfront-charge flags, so step 1 refunds the charge.
+//! the reservoir and the share of the byte pool the frame inherited ([`untouched_call_gas`],
+//! [`with_pools_of`]), never `Gas::new(limit)`, which would carry no reservoir and an unlimited
+//! pool, billing the sender for the whole reservoir and lifting the caller's budget; and it carries
+//! the calling opcode's upfront-charge flags and start charge, so step 1 and step 3 refund them.
 //! [`synthetic_frame_result`] builds one; [`settle_frame_result`] is that settlement, for a caller
 //! that settles a result into its own gas outside revm's frame return.
 
@@ -30,26 +33,33 @@ use revm::{
 };
 
 /// The gas of a call result built without running the callee: the call's whole gas limit
-/// unspent, and the reservoir the call inherited.
+/// unspent, the reservoir the call inherited, and the share of its caller's byte pool it was
+/// given, undrawn.
 #[inline]
 pub const fn untouched_call_gas(inputs: &CallInputs) -> Gas {
-    Gas::new_with_regular_gas_and_reservoir(inputs.gas_limit, inputs.reservoir)
+    let mut gas = Gas::new_with_regular_gas_and_reservoir(inputs.gas_limit, inputs.reservoir);
+    gas.set_bytes_remaining(inputs.bytes_share);
+    gas
 }
 
 /// The gas of a creation result built without running the init code: its whole gas limit
-/// unspent, and the reservoir the creation inherited.
+/// unspent, the reservoir the creation inherited, and the share of its creator's byte pool it was
+/// given, undrawn.
 #[inline]
-pub fn untouched_create_gas(inputs: &CreateInputs) -> Gas {
-    Gas::new_with_regular_gas_and_reservoir(inputs.gas_limit(), inputs.reservoir())
+pub const fn untouched_create_gas(inputs: &CreateInputs) -> Gas {
+    let mut gas = Gas::new_with_regular_gas_and_reservoir(inputs.gas_limit(), inputs.reservoir());
+    gas.set_bytes_remaining(inputs.bytes_share());
+    gas
 }
 
-/// `gas_limit` of fresh regular gas carrying `source`'s EIP-8037 pools: its reservoir, the state
-/// and history gas it charged, and the part of those charges that spilled onto regular gas.
+/// `gas_limit` of fresh regular gas carrying `source`'s pools: its EIP-8037 reservoir, the state
+/// and history gas it charged, the part of those charges that spilled onto regular gas, and its
+/// byte pool with what it drew from it.
 ///
 /// For a result whose regular gas is rebuilt (a precompile's output normalised to the gas limit
-/// the caller forwarded): the caller keeps the frame's state and history charges on success and
-/// rolls them back on failure, so a rebuilt `Gas` that dropped them would hand the caller an
-/// empty reservoir and charges the frame never made.
+/// the caller forwarded): the caller keeps the frame's state and history charges and its byte
+/// draws on success and rolls them back on failure, so a rebuilt `Gas` that dropped them would
+/// hand the caller an empty reservoir, an unlimited pool and charges the frame never made.
 #[inline]
 pub const fn with_pools_of(gas_limit: u64, source: &Gas) -> Gas {
     let mut gas = Gas::new(gas_limit);
@@ -57,12 +67,15 @@ pub const fn with_pools_of(gas_limit: u64, source: &Gas) -> Gas {
     gas.set_state_gas_spent(source.state_gas_spent());
     gas.set_state_gas_spilled(source.state_gas_spilled());
     gas.set_history_gas_spent(source.history_gas_spent());
+    gas.set_bytes_remaining(source.bytes_remaining());
+    gas.set_bytes_spent(source.bytes_spent());
     gas
 }
 
 /// A result for the frame `input` would start, built without running it: `result` with
-/// `output`, the frame's gas untouched and the inherited reservoir carried, and the calling
-/// opcode's upfront state-gas flags, as revm builds the results of the frames it answers itself.
+/// `output`, the frame's gas untouched, the inherited reservoir and byte share carried, and the
+/// calling opcode's upfront state-gas flags and start charge, as revm builds the results of the
+/// frames it answers itself.
 pub fn synthetic_frame_result(
     input: &FrameInput,
     result: InstructionResult,
@@ -75,7 +88,7 @@ pub fn synthetic_frame_result(
             address: None,
             charged_create_state_gas: inputs.charged_create_state_gas(),
             charged_state_gas_address: inputs.charged_state_gas_address(),
-            charged_start: Default::default(),
+            charged_start: inputs.charged_start(),
         }),
         FrameInput::Empty => unreachable!("a frame input always names a call or a creation"),
     }
@@ -96,13 +109,14 @@ pub fn synthetic_call_result(
         precompile_call_logs: Default::default(),
         charged_new_account_state_gas: inputs.charged_new_account_state_gas,
         charged_state_gas_address: inputs.target_address,
-        charged_start: Default::default(),
+        charged_start: inputs.charged_start,
     })
 }
 
 /// Settles `result`'s gas into `caller_gas` exactly as revm's frame return does: the calling
 /// opcode's upfront state-gas charge priced for refund, [`handle_reservoir_remaining_gas`], then
-/// the refund refilled into the caller's reservoir.
+/// the refund refilled into the caller's reservoir, and the start charge the result carries
+/// given back when it failed.
 ///
 /// `ctx` prices the refund through the same hook the charge went through; a failed lookup is
 /// the error the hook recorded.
@@ -130,6 +144,10 @@ where
     handle_reservoir_remaining_gas(instruction_result, caller_gas, result.gas_mut().tracker_mut());
     if let Some(refund) = refund {
         caller_gas.refill_reservoir(refund);
+    }
+    if let Some(charge) = result.refundable_start_charge() {
+        caller_gas.refill_history(charge.history);
+        caller_gas.refill_bytes(charge.bytes);
     }
     Ok(())
 }

@@ -1,9 +1,8 @@
-//! The per-transaction state of the common execution layer beside the journal's ledger.
+//! The per-transaction state of the common execution layer.
 
 use alloy_primitives::Bytes;
 use revm::{
-    handler::FrameResult,
-    interpreter::{CallInputs, CallScheme, FrameInput, InstructionResult},
+    context_interface::cfg::gas::GasTracker, handler::FrameResult, interpreter::InstructionResult,
 };
 
 #[cfg(not(feature = "std"))]
@@ -11,52 +10,71 @@ use alloc as std;
 use std::vec::Vec;
 
 use super::{
-    ledger::{FrameStartRecords, Ledger, Rollback, StartId, StartSide},
-    EvmTxRuntimeLimits, LimitCheck, LimitKind, StartReport, WRITE_RECORD_SIZE,
+    EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, TRANSFER_LOG_SIZE, WRITE_RECORD_SIZE,
 };
-use crate::storage_call_stipend;
 
-/// What the common execution layer tracks for the running transaction beside the journal's
-/// ledger ([`Ledger`]), which counts what the transaction keeps and holds it to the data-size
-/// limit: Satin's side of each frame start ([`StartSide`]), the stops its frames return, whether
-/// it is exempt from every limit, and the figures the settled transaction reports.
+/// What the common execution layer tracks for the running transaction: what it keeps of the
+/// data-size limit and the frame budgets, the stops its frames return, whether it is exempt from
+/// every limit, and the figures the settled transaction reports.
 ///
-/// It lives on the [`MegaContext`](crate::MegaContext), is reset before each transaction and
-/// system call, and is driven by the Host's frame-start hook (the charge of a frame's start) and
-/// the frame lifecycle (the frame sides, the stops).
+/// It lives on the [`MegaContext`](crate::MegaContext), is begun before each transaction and
+/// system call, and is driven by the Host's hooks (a completed write, a frame's start, a code
+/// deposit) and by the frame lifecycle (a start revm decided, a frame's return, the stops).
+///
+/// # The data size
+///
+/// A frame's data-size budget is the byte pool on its gas tracker, which the revm fork forwards
+/// and settles as it does the reservoir: the transaction's own frame gets what the transaction has
+/// left once its body and the records made before it are counted
+/// ([`first_frame_pool`](Self::first_frame_pool)), every child the schedule's share of what its
+/// caller has left (98/100, `GasId::bytes_forward_percent`) under the frame cap, a failing frame's
+/// draws go back to its pool and a successful one hands what it kept to its caller. A byte is drawn
+/// where it is made, on the pool of the frame that makes it ([`draw`](Self::draw)): a completed
+/// write's record or log, a frame start's records and transfer log on the started frame, deployed
+/// code on the creating frame. A creator's nonce record is the creating frame's own, drawn on its
+/// pool before the creation's share is forwarded
+/// ([`count_creator_record`](Self::count_creator_record)).
+///
+/// The transaction's limit is held beside the pools, on what the transaction keeps
+/// ([`usage`](Self::usage)): its body, its Oracle hints, the records of its applied authorities,
+/// and what its frames keep ([`Kept`]), counted with every draw and restored to what it was at a
+/// start when that start's frame kept nothing ([`close_start`](Self::close_start)). A pool is one
+/// figure, the bytes; the write-record count and the transfer logs the transaction reports apart
+/// from the bytes are kept beside them, and restored with them.
 ///
 /// # The stop
 ///
 /// A limit crossed stops the frame that crossed it with a revert, not a halt: the frame reverts
 /// with [`MegaLimitExceeded`](crate::MegaLimitExceeded) as its output, whether it crossed the
 /// transaction's limit or its own frame budget, and its caller resumes as after any revert. What
-/// the frame counted goes with its level of the ledger, so a caller that resumes is back within
-/// the limits, and a transaction never keeps more than its limit: a caller that carries on is
-/// held to what is left, and a charge that crosses again stops the frame that makes it. A
-/// crossing the transaction's own frame makes is the transaction's result, which settles like any
-/// EIP-8037 revert: its unspent regular gas and the reservoir go back to the sender, who pays only
-/// for what ran. Exceptional halts (a real out-of-gas, an invalid opcode) are not limit stops and
-/// still burn the frame's gas.
+/// the frame counted goes with it, so a caller that resumes is back within the limits, and a
+/// transaction never keeps more than its limit: a caller that carries on is held to what is left,
+/// and a charge that crosses again stops the frame that makes it. A crossing the transaction's own
+/// frame makes is the transaction's result, which settles like any EIP-8037 revert: its unspent
+/// regular gas and the reservoir go back to the sender, who pays only for what ran. Exceptional
+/// halts (a real out-of-gas, an invalid opcode) are not limit stops and still burn the frame's gas.
 ///
 /// # The exemption
 ///
 /// The protocol's own work is held to none of the per-transaction limits: a system-originated
-/// transaction and a system call are marked exempt before their body is counted, and the mark is
+/// transaction and a system call are begun exempt, before their body is counted, and the mark is
 /// sticky for the transaction ([`is_exempt`](Self::is_exempt)). Every stop the layer hands out
-/// comes from one of two places — the ledger's verdict for the data size,
-/// [`crossed`](Self::crossed) for gas detention's compute stop — and both answer an exempt
-/// transaction with [`LimitCheck::WithinLimit`] whatever it crossed. What the transaction uses is
-/// counted all the same, so its usage is reported as any other transaction's is.
+/// comes from [`crossed`](Self::crossed), which answers an exempt transaction with
+/// [`LimitCheck::WithinLimit`] whatever it crossed, and an exempt transaction's pools are
+/// unlimited. What it uses is counted all the same, so its usage is reported as any other
+/// transaction's is.
 #[derive(Clone, Debug, Default)]
 pub struct AdditionalLimit {
     limits: EvmTxRuntimeLimits,
     /// Whether the transaction is exempt from every per-transaction limit, sticky for the
-    /// transaction. See [`exempt`](Self::exempt).
+    /// transaction. See [`is_exempt`](Self::is_exempt).
     exempt: bool,
+    /// Whether a value movement journals an EIP-7708 transfer log.
+    transfer_logs: bool,
     /// The stop the frame about to run must return instead of running: the one a frame revm built
     /// returns on its first run when its start crossed a limit ([`hold_start`](Self::hold_start)),
     /// or the one a frame a child returned into returns when what the child left it put it over a
-    /// limit ([`on_start_return`](Self::on_start_return)).
+    /// limit ([`hold_caller`](Self::hold_caller)).
     pending_stop: Option<LimitCheck>,
     /// The crossing the result of the frame returning next was made of, noted where the stop
     /// became that result ([`note_frame_stop`](Self::note_frame_stop)) and taken when the frame
@@ -65,39 +83,121 @@ pub struct AdditionalLimit {
     /// The crossing that produced the result of the transaction's own frame, if one did. See
     /// [`limit_exceeded`](Self::limit_exceeded).
     limit_exceeded: Option<LimitCheck>,
-    /// The history gas validation charged for the transaction's body, part of
+    /// The data-size bytes of the transaction's body.
+    body: u64,
+    /// The data-size bytes of the Oracle hints the transaction forwarded, never taken back.
+    hints: u64,
+    /// The write records of the EIP-7702 authorities the transaction applied.
+    authorities: u64,
+    /// What the transaction's frames keep, every running frame counted as if it succeeds.
+    kept: Kept,
+    /// One per start revm decided whose result has not returned, the latest last.
+    decided: Vec<Decided>,
+    /// The record of its own nonce the last creation's start hook charged its creator for, until
+    /// a frame start takes it.
+    pending_creator: Option<CreatorRecord>,
+    /// Whether the result returning next kept nothing, whatever it says: an inspector revived a
+    /// frame that failed.
+    kept_nothing: bool,
+    /// The history gas of the transaction's body, part of
     /// [`history_gas_spent`](Self::history_gas_spent).
     intrinsic_history_gas: u64,
-    /// The bytes of the transaction's body that
-    /// [`intrinsic_history_gas`](Self::intrinsic_history_gas) paid for, part of
-    /// [`history_bytes`](Self::history_bytes).
+    /// The bytes of the body that [`intrinsic_history_gas`](Self::intrinsic_history_gas) paid
+    /// for, part of [`history_bytes`](Self::history_bytes).
     intrinsic_history_bytes: u64,
-    /// The history gas of the write record the transaction's own frame makes — its value's
-    /// recipient, or the account it creates — charged before the first frame and given back when
-    /// that frame does not keep the record.
-    top_level_write_record_gas: u64,
-    /// The write records the transaction's own frame makes, as the charge of their history before
-    /// execution found them, for the frame's side to hold the ledger's count to. See
-    /// [`stage_top_level_records`](Self::stage_top_level_records).
-    pending_top_level_records: Option<FrameStartRecords>,
-    /// The history gas the running opcode charged its own frame for the records the frame it is
-    /// starting will make, waiting for that frame's side to be pushed.
-    pending_frame_charge: FrameCharge,
-    /// The history gas the transaction's own frame's start gets back, kept once that frame
-    /// returned for the settlement to give back
-    /// ([`take_top_level_refund`](Self::take_top_level_refund)).
-    top_level_refund: u64,
+    /// The history gas charged before the first frame for the write record that frame makes,
+    /// which the frame carries as its start charge.
+    first_frame_charge: u64,
     /// The history gas the settled transaction spent.
     history_gas_spent: u64,
     /// The history bytes the settled transaction appended.
     history_bytes: u64,
     /// The EIP-8037 reservoir the settled transaction left unspent.
     reservoir_remaining: u64,
-    /// Satin's side of every frame start, one per frame result revm will return: what the start's
-    /// caller paid for its records, what the journal's ledger saw the start count, the history
-    /// allowance the frame was granted, and the mark a frame revm built is taken back to when it
-    /// is rewritten into a failure.
-    starts: Vec<StartSide>,
+}
+
+/// What a transaction's frames keep: the data-size bytes they drew from their pools, and, among
+/// them, the write records and the EIP-7708 transfer logs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Kept {
+    /// Data-size bytes.
+    bytes: u64,
+    /// Write records.
+    records: u64,
+    /// EIP-7708 transfer logs.
+    transfer_logs: u64,
+}
+
+/// What one write, or one frame start, adds to what a frame keeps and takes back from it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Counted {
+    /// Data-size bytes added: records, a log's bytes, deployed code, a transfer log.
+    pub(crate) added: u64,
+    /// Data-size bytes taken back: the records of accounts and slots returned to what the
+    /// transaction loaded.
+    pub(crate) taken: u64,
+    /// Write records added.
+    pub(crate) records_added: u64,
+    /// Write records taken back.
+    pub(crate) records_taken: u64,
+    /// Whether an EIP-7708 transfer log is among the bytes added.
+    pub(crate) transfer_log: bool,
+}
+
+impl Counted {
+    /// Nothing counted.
+    pub(crate) const NONE: Self =
+        Self { added: 0, taken: 0, records_added: 0, records_taken: 0, transfer_log: false };
+
+    /// `added` write records made and `taken` taken back, with an EIP-7708 transfer log when
+    /// `transfer_log`.
+    pub(crate) const fn records(added: u64, taken: u64, transfer_log: bool) -> Self {
+        let log = if transfer_log { TRANSFER_LOG_SIZE } else { 0 };
+        Self {
+            added: WRITE_RECORD_SIZE.saturating_mul(added).saturating_add(log),
+            taken: WRITE_RECORD_SIZE.saturating_mul(taken),
+            records_added: added,
+            records_taken: taken,
+            transfer_log,
+        }
+    }
+
+    /// `bytes` bytes that are no write record: a log's, or deployed code.
+    pub(crate) const fn bytes(bytes: u64) -> Self {
+        Self { added: bytes, ..Self::NONE }
+    }
+
+    /// Whether it adds nothing and takes nothing back.
+    const fn is_none(&self) -> bool {
+        self.added == 0 && self.taken == 0
+    }
+}
+
+/// A start revm decided whose result has not returned.
+#[derive(Clone, Copy, Debug)]
+struct Decided {
+    /// The started frame's depth, which its result returns at.
+    depth: usize,
+    /// What the frames kept when the start began, before its own records.
+    at_start: Kept,
+    /// The history gas the start's caller gets back once the frame returned with its start kept:
+    /// the price of the records the start took back, less what the caller paid for records the
+    /// start did not make.
+    credit: u64,
+    /// The bytes of a creator's nonce record the frame's own pool could not pay when the frame
+    /// created, which it owes until the creation returns into it.
+    overdraft: u64,
+}
+
+/// The record of its own nonce a creation's start hook charged its creator for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CreatorRecord {
+    /// The history gas it cost.
+    pub(crate) history: u64,
+    /// The bytes it drew from the creator's pool.
+    pub(crate) drawn: u64,
+    /// The bytes the creator's pool could not pay, which the creator owes.
+    pub(crate) overdraft: u64,
 }
 
 impl AdditionalLimit {
@@ -116,22 +216,361 @@ impl AdditionalLimit {
         self.limits = limits;
     }
 
-    /// Clears the state for a new transaction, keeping allocations and the limits.
-    pub(crate) fn reset(&mut self) {
-        self.exempt = false;
+    /// Clears the state for a new transaction, keeping allocations and the limits, and begins it:
+    /// exempt from every limit or not, its value movements journaling transfer logs or not, its
+    /// body weighing `body` bytes.
+    ///
+    /// The exemption is decided before the body is counted: the protocol's own work is exempt
+    /// whatever it carries.
+    pub(crate) fn begin_transaction(&mut self, exempt: bool, transfer_logs: bool, body: u64) {
+        self.exempt = exempt;
+        self.transfer_logs = transfer_logs;
         self.pending_stop = None;
         self.frame_stop = None;
         self.limit_exceeded = None;
+        self.body = body;
+        self.hints = 0;
+        self.authorities = 0;
+        self.kept = Kept::default();
+        self.decided.clear();
+        self.pending_creator = None;
+        self.kept_nothing = false;
         self.intrinsic_history_gas = 0;
         self.intrinsic_history_bytes = 0;
-        self.top_level_write_record_gas = 0;
-        self.pending_top_level_records = None;
-        self.pending_frame_charge = FrameCharge::NONE;
-        self.top_level_refund = 0;
+        self.first_frame_charge = 0;
         self.history_gas_spent = 0;
         self.history_bytes = 0;
         self.reservoir_remaining = 0;
-        self.starts.clear();
+    }
+
+    /* What the transaction keeps */
+
+    /// What the transaction keeps so far: its data-size bytes and write records, every running
+    /// frame counted as if it succeeds.
+    pub(crate) const fn usage(&self) -> LimitUsage {
+        LimitUsage {
+            data_size: self
+                .body
+                .saturating_add(self.hints)
+                .saturating_add(WRITE_RECORD_SIZE.saturating_mul(self.authorities))
+                .saturating_add(self.kept.bytes),
+            write_records: self.authorities.saturating_add(self.kept.records),
+        }
+    }
+
+    /// The data-size bytes of the transaction's body, which it counts before any frame and no
+    /// revert takes back.
+    pub(crate) const fn body(&self) -> u64 {
+        self.body
+    }
+
+    /// Whether the transaction's value movements journal EIP-7708 transfer logs.
+    pub(crate) const fn counts_transfer_logs(&self) -> bool {
+        self.transfer_logs
+    }
+
+    /// Whether the transaction's body, with one write record for each of its `authorizations`,
+    /// fits its data-size limit: what validation holds a transaction to.
+    ///
+    /// Every entry of the authorization list counts, whether it will apply or not, so the figure is
+    /// an upper bound on what the transaction counts before its first frame — the body, then one
+    /// record for each distinct authority that applies — and a transaction validation admits
+    /// cannot cross the limit there. An exempt transaction is held to nothing.
+    pub(crate) const fn admits_tx_body(&self, authorizations: u64) -> bool {
+        self.exempt ||
+            self.body.saturating_add(WRITE_RECORD_SIZE.saturating_mul(authorizations)) <=
+                self.limits.tx_data_size_limit
+    }
+
+    /// Counts the records of the applied EIP-7702 authorities, `authorities` distinct accounts
+    /// other than the transaction's sender, made before the first frame. An out-of-gas before the
+    /// first frame takes them back ([`take_back_authorities`](Self::take_back_authorities)).
+    ///
+    /// The records cannot cross the data-size limit: validation admitted the body with a record for
+    /// every entry of the authorization list ([`admits_tx_body`](Self::admits_tx_body)), and only
+    /// an entry can apply. A debug build asserts it.
+    pub(crate) fn count_authorities(&mut self, authorities: u64) {
+        self.authorities = authorities;
+        debug_assert!(
+            self.exempt || !self.usage().exceeds_data_size(self.limits.tx_data_size_limit),
+            "validation admits no body whose authority records cross the data-size limit"
+        );
+    }
+
+    /// Takes back the authorities' records, which an out-of-gas before the first frame takes back
+    /// with the authorizations.
+    pub(crate) const fn take_back_authorities(&mut self) {
+        self.authorities = 0;
+    }
+
+    /// The pool of the transaction's own frame: what the transaction has left of its data-size
+    /// limit once its body and the records made before the frame are counted, under the frame
+    /// cap; unlimited for an exempt transaction.
+    pub(crate) const fn first_frame_pool(&self) -> u64 {
+        let left = self.limits.tx_data_size_limit.saturating_sub(self.usage().data_size);
+        let cap = self.frame_cap();
+        if self.exempt {
+            u64::MAX
+        } else if left < cap {
+            left
+        } else {
+            cap
+        }
+    }
+
+    /// The most a frame's pool may start with: the frame cap, and nothing for an exempt
+    /// transaction.
+    pub(crate) const fn frame_cap(&self) -> u64 {
+        if self.exempt {
+            u64::MAX
+        } else {
+            self.limits.frame_data_size_limit
+        }
+    }
+
+    /* Verdicts */
+
+    /// The verdict on `used` crossing `kind`'s `limit`, a frame budget when `frame_local` and a
+    /// transaction-level limit otherwise: the stop the running frame reverts with, alone, its
+    /// [`LimitCheck::revert_data`] naming the limit crossed.
+    ///
+    /// Every stop comes from here, so this is where the exemption applies: an exempt transaction's
+    /// verdict is [`LimitCheck::WithinLimit`], whatever it crossed.
+    pub(crate) const fn crossed(
+        &self,
+        kind: LimitKind,
+        limit: u64,
+        used: u64,
+        frame_local: bool,
+    ) -> LimitCheck {
+        if self.exempt {
+            return LimitCheck::WithinLimit;
+        }
+        LimitCheck::ExceedsLimit { kind, limit, used, frame_local }
+    }
+
+    /// The verdict on the transaction keeping `counted` more: its data-size limit crossed, or
+    /// within.
+    const fn check_transaction(&self, counted: &Counted) -> LimitCheck {
+        let used =
+            self.usage().data_size.saturating_sub(counted.taken).saturating_add(counted.added);
+        if used > self.limits.tx_data_size_limit {
+            return self.crossed(LimitKind::DataSize, self.limits.tx_data_size_limit, used, false);
+        }
+        LimitCheck::WithinLimit
+    }
+
+    /// The verdict on a frame budget crossed by `added` bytes the pool `gas` holds could not pay:
+    /// the budget is the pool the frame started with, which its pool and its net draw add up to,
+    /// and what it used is its net draw with `added` in.
+    fn budget_crossed(&self, gas: &GasTracker, added: u64) -> LimitCheck {
+        let budget = gas.bytes_remaining().saturating_add_signed(gas.bytes_spent());
+        let used = gas.bytes_spent().saturating_add_unsigned(added).max(0).unsigned_abs();
+        self.crossed(LimitKind::DataSize, budget, used, true)
+    }
+
+    /// Counts what the frame whose pool `gas` holds keeps of `counted`, held to the transaction's
+    /// limit, then to the frame's budget: the bytes `counted` takes back go back to the pool
+    /// first, and the bytes it adds are drawn; a draw the pool cannot pay is the frame's budget
+    /// crossed. A crossing counts nothing and draws nothing, and is the stop the frame reverts
+    /// with. A count that adds nothing holds nothing.
+    pub(crate) fn draw(&mut self, gas: &mut GasTracker, counted: &Counted) -> LimitCheck {
+        if counted.is_none() {
+            return LimitCheck::WithinLimit;
+        }
+        if counted.added != 0 {
+            let check = self.check_transaction(counted);
+            if check.exceeded_limit() {
+                return check;
+            }
+        }
+        gas.refill_bytes(counted.taken);
+        if !gas.record_bytes(counted.added) {
+            gas.clear_bytes_crossing();
+            let check = self.budget_crossed(gas, counted.added);
+            let drew = gas.record_bytes(counted.taken);
+            debug_assert!(drew, "what was given back can be drawn again");
+            return check;
+        }
+        self.count(counted);
+        LimitCheck::WithinLimit
+    }
+
+    /// Adds `counted` to what the frames keep.
+    fn count(&mut self, counted: &Counted) {
+        let kept = &mut self.kept;
+        debug_assert!(
+            kept.bytes >= counted.taken && kept.records >= counted.records_taken,
+            "a frame takes back only what the transaction's frames keep"
+        );
+        kept.bytes = kept.bytes.saturating_sub(counted.taken).saturating_add(counted.added);
+        kept.records = kept
+            .records
+            .saturating_sub(counted.records_taken)
+            .saturating_add(counted.records_added);
+        kept.transfer_logs += u64::from(counted.transfer_log);
+    }
+
+    /// The verdict on a start revm is not asked to decide — a call gas detention answers without
+    /// running the precompile it targets — had revm made it: `counted`, the records and transfer
+    /// log its value transfer would make, held to the transaction's limit and to `budget`, the
+    /// pool its frame would start with. Nothing is counted.
+    pub(crate) const fn hypothetical_start(&self, counted: &Counted, budget: u64) -> LimitCheck {
+        let check = self.check_transaction(counted);
+        if check.exceeded_limit() {
+            return check;
+        }
+        let used = counted.added.saturating_sub(counted.taken);
+        if used > budget {
+            return self.crossed(LimitKind::DataSize, budget, used, true);
+        }
+        LimitCheck::WithinLimit
+    }
+
+    /// Admits an Oracle hint of `bytes`: held to the transaction's limit before it is counted, and
+    /// never taken back once counted. A hint is on no frame's budget.
+    pub(crate) fn admit_hint(&mut self, bytes: u64) -> LimitCheck {
+        let check = self.check_transaction(&Counted::bytes(bytes));
+        if check.within_limit() {
+            self.hints = self.hints.saturating_add(bytes);
+        }
+        check
+    }
+
+    /* A frame's start */
+
+    /// Counts the record of a creator's own nonce, which a creation's start makes on the creating
+    /// frame, whose pool `gas` holds, before the frame's share is forwarded: the creation's budget
+    /// is taken from what the creator has left once the record is counted. It lands on the creator
+    /// unchecked, and the creator is held to its limits with it once the creation returns
+    /// ([`hold_caller`](Self::hold_caller)); a pool that cannot pay it is drained, and the creator
+    /// owes the rest until then. `history` is what the creator paid for it.
+    pub(crate) fn count_creator_record(&mut self, gas: &mut GasTracker, history: u64) {
+        self.count(&Counted::records(1, 0, false));
+        let drawn = WRITE_RECORD_SIZE.min(gas.bytes_remaining());
+        let drew = gas.record_bytes(drawn);
+        debug_assert!(drew, "the draw is what the pool holds");
+        let overdraft = WRITE_RECORD_SIZE - drawn;
+        if overdraft != 0 {
+            if let Some(running) = self.decided.last_mut() {
+                running.overdraft += overdraft;
+            }
+        }
+        self.pending_creator = Some(CreatorRecord { history, drawn, overdraft });
+    }
+
+    /// The record of its own nonce the last creation's start hook charged its creator for, which
+    /// the start's decision takes: revm deciding it keeps it, an inspector answering in its place
+    /// gives it back ([`give_back_creator_record`](Self::give_back_creator_record)).
+    pub(crate) const fn take_creator_record(&mut self) -> Option<CreatorRecord> {
+        self.pending_creator.take()
+    }
+
+    /// Takes back the record of its own nonce a creation's start counted on its creator, for a
+    /// creation an inspector answered in revm's place: the start never bumped the nonce. What the
+    /// creator paid for it goes back through the creation's answer.
+    pub(crate) fn give_back_creator_record(&mut self, record: CreatorRecord) {
+        self.count(&Counted::records(0, 1, false));
+        if let Some(running) = self.decided.last_mut() {
+            running.overdraft -= record.overdraft;
+        }
+    }
+
+    /// Opens the start of the frame at `depth` that revm just decided, before its records are
+    /// counted: what the frames keep now is what the frame's failure restores
+    /// ([`close_start`](Self::close_start)).
+    pub(crate) fn open_start(&mut self, depth: usize) {
+        self.decided.push(Decided { depth, at_start: self.kept, credit: 0, overdraft: 0 });
+    }
+
+    /// Holds the start revm just decided, whose frame's pool `gas` holds, to the limits, and counts
+    /// `counted`, the records and transfer log it made, on that pool ([`draw`](Self::draw)): the
+    /// verdict is the stop the frame returns before it runs, or the one its answer gives way to.
+    /// `credit` is what the start's caller gets back once the frame returned with its start kept.
+    pub(crate) fn count_start(
+        &mut self,
+        gas: &mut GasTracker,
+        counted: &Counted,
+        credit: u64,
+    ) -> LimitCheck {
+        let check = self.draw(gas, counted);
+        if check.within_limit() {
+            if let Some(start) = self.decided.last_mut() {
+                start.credit = credit;
+            }
+        }
+        check
+    }
+
+    /// Notes that the result returning next kept nothing, whatever it says: an inspector revived
+    /// a frame that failed.
+    pub(crate) const fn kept_nothing(&mut self) {
+        self.kept_nothing = true;
+    }
+
+    /// Closes the start of the frame whose result returns at `depth`, `kept` or not, and answers
+    /// the history its caller gets back for it: a frame that kept nothing — it failed, or an
+    /// inspector revived it — has what the frames keep restored to what they kept when its start
+    /// began, and its caller gets nothing back; one that kept its start, the start's credit.
+    ///
+    /// A result revm did not decide the start of — the depth guard's, an interceptor's, an
+    /// inspector's — has no start to close: what its caller paid comes back with its start charge.
+    pub(crate) fn close_start(&mut self, depth: usize, kept: bool) -> u64 {
+        let kept_nothing = core::mem::take(&mut self.kept_nothing);
+        let kept = kept && !kept_nothing;
+        let Some(&start) = self.decided.last().filter(|start| start.depth == depth) else {
+            return 0;
+        };
+        self.decided.pop();
+        if kept {
+            start.credit
+        } else {
+            self.kept = start.at_start;
+            0
+        }
+    }
+
+    /// Holds the frame a child just returned into, whose pool `gas` holds, to its limits with what
+    /// it now keeps: a creation's nonce record, which outlives the creation, lands on its creator
+    /// unchecked ([`count_creator_record`](Self::count_creator_record)), and a crossing is the stop
+    /// the creator returns before it runs on ([`stop_before_run`](Self::stop_before_run)). The
+    /// transaction's limit is held first. A record the creator's pool could not pay is drawn now if
+    /// the pool can pay it; a creator still owing it crossed its budget.
+    ///
+    /// Any other return leaves the caller within its limits — a failure hands it nothing, and a
+    /// success no more than the share it gave — and clears a stop it had.
+    pub(crate) fn hold_caller(&mut self, gas: &mut GasTracker) {
+        let check = self.check_transaction(&Counted::NONE);
+        self.pending_stop = check.exceeded_limit().then_some(check);
+        if self.pending_stop.is_some() {
+            return;
+        }
+        let Some(running) = self.decided.last_mut() else { return };
+        let overdraft = running.overdraft;
+        if overdraft == 0 {
+            return;
+        }
+        if gas.record_bytes(overdraft) {
+            running.overdraft = 0;
+            return;
+        }
+        gas.clear_bytes_crossing();
+        let stop = self.budget_crossed(gas, overdraft);
+        self.pending_stop = stop.exceeded_limit().then_some(stop);
+    }
+
+    /// Takes back one write record of the running frame, whose pool `gas` holds, for an account a
+    /// write outside the hooks returned to what the transaction loaded: a `keylessDeploy` call's
+    /// signer, whose nonce the settlement sets back. A record the frame still owes is forgiven
+    /// first.
+    pub(crate) fn take_back_record(&mut self, gas: &mut GasTracker) {
+        let forgiven = self.decided.last_mut().map_or(0, |running| {
+            let forgiven = running.overdraft.min(WRITE_RECORD_SIZE);
+            running.overdraft -= forgiven;
+            forgiven
+        });
+        gas.refill_bytes(WRITE_RECORD_SIZE - forgiven);
+        self.count(&Counted::records(0, 1, false));
     }
 
     /* The stops and the exemption */
@@ -155,13 +594,24 @@ impl AdditionalLimit {
     /// the [`MegaLimitExceeded`](crate::MegaLimitExceeded) revert data that frame stops with.
     ///
     /// Every site that turns a crossing into a frame's result takes the revert data from here, and
-    /// the frame returns before any other does: so the stop is the returning frame's when
-    /// [`on_start_return`](Self::on_start_return) takes it, and the transaction's when that frame
-    /// is the transaction's own ([`limit_exceeded`](Self::limit_exceeded)).
+    /// the frame returns before any other does: so the stop is the returning frame's when its
+    /// result returns ([`take_frame_stop`](Self::take_frame_stop)), and the transaction's when
+    /// that frame is the transaction's own ([`limit_exceeded`](Self::limit_exceeded)).
     pub(crate) fn note_frame_stop(&mut self, stop: &LimitCheck) -> Bytes {
         debug_assert!(stop.exceeded_limit(), "only a crossing stops a frame");
         self.frame_stop = Some(*stop);
         stop.revert_data()
+    }
+
+    /// Takes the stop noted for the frame whose `result` returns now; for the transaction's own
+    /// frame (`outermost`), it is the transaction's [`limit_exceeded`](Self::limit_exceeded) while
+    /// the result is still the stop's revert. A frame with no stop noted leaves the transaction's
+    /// as it is: the transaction's own frame returns through here once.
+    pub(crate) fn take_frame_stop(&mut self, result: &FrameResult, outermost: bool) {
+        let Some(noted) = self.frame_stop.take() else { return };
+        if outermost {
+            self.limit_exceeded = Some(noted).filter(|stop| is_the_revert_of(result, stop));
+        }
     }
 
     /// Whether the running transaction is exempt from every per-transaction limit.
@@ -169,65 +619,26 @@ impl AdditionalLimit {
         self.exempt
     }
 
-    /// Exempts the running transaction from every per-transaction limit, until the next
-    /// transaction resets the layer.
-    ///
-    /// Called for the protocol's own work — a system-originated transaction and a system call —
-    /// before its body is counted; the journal's ledger begins the transaction exempt alongside.
-    /// See the type's documentation.
-    pub(crate) const fn exempt(&mut self) {
-        self.exempt = true;
-    }
-
-    /// The verdict on `used` crossing `kind`'s `limit`, a frame budget when `frame_local` and a
-    /// transaction-level limit otherwise: the stop the running frame reverts with, alone, its
-    /// [`LimitCheck::revert_data`] naming the limit crossed.
-    ///
-    /// Gas detention's compute stop comes from here, as the data-size stops come from the
-    /// ledger's own verdict, so this is where the exemption applies to it: an exempt
-    /// transaction's verdict is [`LimitCheck::WithinLimit`], whatever it crossed.
-    pub(crate) const fn crossed(
-        &self,
-        kind: LimitKind,
-        limit: u64,
-        used: u64,
-        frame_local: bool,
-    ) -> LimitCheck {
-        if self.exempt {
-            return LimitCheck::WithinLimit;
-        }
-        LimitCheck::ExceedsLimit { kind, limit, used, frame_local }
-    }
-
     /// The stop the running frame returns instead of running another instruction: the one its own
     /// start left it ([`hold_start`](Self::hold_start)), or the one
-    /// [`on_start_return`](Self::on_start_return) left for a caller its child put over a limit.
-    /// Taking it clears it, which stops one frame.
+    /// [`hold_caller`](Self::hold_caller) left for a caller its child put over a limit. Taking it
+    /// clears it, which stops one frame.
     pub(crate) const fn stop_before_run(&mut self) -> Option<LimitCheck> {
         self.pending_stop.take()
     }
 
-    /// Holds the start of the frame revm just built to `verdict`, the journal's ledger's on what
-    /// the start counted while the frame's level was open: a crossing is the stop the frame
+    /// Holds the start of the frame revm just built to `verdict`: a crossing is the stop the frame
     /// returns on its first run, before any instruction
     /// ([`stop_before_run`](Self::stop_before_run)). revm moved the value, journaled the transfer
     /// log and, for a creation, bumped its creator's nonce; the stop is a revert of the frame, so
     /// its journal checkpoint takes the move and the log back, and the nonce, bumped before the
     /// checkpoint, stays, with its record on the creator.
     #[inline]
-    pub(crate) fn hold_start(&mut self, verdict: Option<LimitCheck>) {
-        if let Some(stop) = verdict.filter(LimitCheck::exceeded_limit) {
+    pub(crate) fn hold_start(&mut self, verdict: LimitCheck) {
+        if verdict.exceeded_limit() {
             debug_assert!(self.pending_stop.is_none(), "a frame starts from a caller that ran");
-            self.pending_stop = Some(stop);
+            self.pending_stop = Some(verdict);
         }
-    }
-
-    /// Holds the running frame to `check`, the journal's ledger's, once what it keeps changed
-    /// outside its own instructions — a child returned into it, or a record a child left it was
-    /// taken back: a crossing is the stop it returns before it runs on, and anything else clears a
-    /// stop it had.
-    pub(crate) fn hold_running_frame(&mut self, check: LimitCheck) {
-        self.pending_stop = check.exceeded_limit().then_some(check);
     }
 
     /// Whether the running frame has a stop to return before it runs another instruction
@@ -236,16 +647,40 @@ impl AdditionalLimit {
         self.pending_stop.is_some()
     }
 
+    /* What the transaction pays before its first frame */
+
+    /// The history gas of the transaction's body: the bytes the transaction carries and the write
+    /// records its inclusion makes, which are known before it runs. The transaction's gas pays it
+    /// before the first frame, reservoir first, as intrinsic gas.
+    pub const fn intrinsic_history_gas(&self) -> u64 {
+        self.intrinsic_history_gas
+    }
+
+    /// Records the history gas the transaction's body costs, and the `bytes` of the body it pays
+    /// for.
+    pub(crate) const fn set_intrinsic_history(&mut self, gas: u64, bytes: u64) {
+        self.intrinsic_history_gas = gas;
+        self.intrinsic_history_bytes = bytes;
+    }
+
+    /// Records the history gas charged before execution for the write record the transaction's own
+    /// frame makes: the recipient of its value, or the account it creates. The frame carries it as
+    /// its start charge, which its failure gives back.
+    pub(crate) const fn set_first_frame_charge(&mut self, gas: u64) {
+        self.first_frame_charge = gas;
+    }
+
+    /// The history gas charged before execution for the write record the transaction's own frame
+    /// makes.
+    pub(crate) const fn first_frame_charge(&self) -> u64 {
+        self.first_frame_charge
+    }
+
     /* What the settled transaction reports */
 
     /// The history gas the last settled transaction spent.
     pub const fn history_gas_spent(&self) -> u64 {
         self.history_gas_spent
-    }
-
-    /// Records the history gas the settled transaction spent.
-    pub(crate) const fn set_history_gas_spent(&mut self, history_gas_spent: u64) {
-        self.history_gas_spent = history_gas_spent;
     }
 
     /// The EIP-8037 reservoir the last settled transaction or system call left unspent, which
@@ -261,22 +696,6 @@ impl AdditionalLimit {
         self.reservoir_remaining = reservoir;
     }
 
-    /// The history gas validation charged for the transaction's body: the bytes the transaction
-    /// carries and the write records its inclusion makes, which are known before it runs.
-    ///
-    /// It rides in the EIP-8037 intrinsic state-gas slot, so the reservoir pays it first, and the
-    /// settled result takes it back out of the state gas it reports: it is history, not state.
-    pub const fn intrinsic_history_gas(&self) -> u64 {
-        self.intrinsic_history_gas
-    }
-
-    /// Records the history gas validation charged for the transaction's body, and the `bytes` of
-    /// the body it paid for.
-    pub(crate) const fn set_intrinsic_history(&mut self, gas: u64, bytes: u64) {
-        self.intrinsic_history_gas = gas;
-        self.intrinsic_history_bytes = bytes;
-    }
-
     /// The history bytes the last settled transaction appended, whoever paid for them, which a
     /// transaction reports as [`MegaGasUsage::history_bytes`](crate::MegaGasUsage::history_bytes);
     /// [`history_gas_spent`](Self::history_gas_spent) is what the transaction's own gas paid of
@@ -285,194 +704,19 @@ impl AdditionalLimit {
         self.history_bytes
     }
 
-    /// Settles [`history_bytes`](Self::history_bytes) from what the transaction kept — its
-    /// `write_records` and its `log_and_code_bytes`, as the journal's ledger holds them once the
-    /// transaction's own frame returned: `priced` is whether it pays history at all.
-    pub(crate) const fn settle_history_bytes(
-        &mut self,
-        priced: bool,
-        write_records: u64,
-        log_and_code_bytes: u64,
-    ) {
+    /// Settles the history figures once the transaction's own frame returned: `spent`, the history
+    /// gas its gas spent, and the history bytes it appended when it pays history at all (`priced`),
+    /// which are its body and the bytes it keeps but for its Oracle hints and its transfer logs.
+    pub(crate) fn settle_history(&mut self, priced: bool, spent: u64) {
+        self.history_gas_spent = spent;
         self.history_bytes = if priced {
             self.intrinsic_history_bytes
-                .saturating_add(WRITE_RECORD_SIZE.saturating_mul(write_records))
-                .saturating_add(log_and_code_bytes)
+                .saturating_add(WRITE_RECORD_SIZE.saturating_mul(self.authorities))
+                .saturating_add(self.kept.bytes)
+                .saturating_sub(TRANSFER_LOG_SIZE.saturating_mul(self.kept.transfer_logs))
         } else {
             0
         };
-    }
-
-    /* The charges a frame start is paid for */
-
-    /// Records the history gas charged before the first frame for the write record that frame
-    /// makes: the recipient of the transaction's value, or the account it creates. A first frame
-    /// that does not keep the record gets it back at the settlement, with the rest of what the
-    /// frame did not keep.
-    pub(crate) const fn set_top_level_write_record_gas(&mut self, gas: u64) {
-        self.top_level_write_record_gas = gas;
-    }
-
-    /// Leaves the write records the transaction's own frame makes, as the charge of their history
-    /// before execution found them, for that frame's side to hold the ledger's count to once revm
-    /// decided the start ([`attach_start`](Self::attach_start)).
-    ///
-    /// Only a transaction that pays history is charged, and so leaves one.
-    pub(crate) const fn stage_top_level_records(&mut self, records: FrameStartRecords) {
-        self.pending_top_level_records = Some(records);
-    }
-
-    /// Leaves the history gas the running opcode just charged its frame for the records the frame
-    /// it starts will make: `added` for the records that frame's failure takes back, `creator` for
-    /// the record of the creator's own nonce, and `records`, the answer the charge was computed
-    /// from, for the frame's side to hold the ledger's count to; `priced` says whether the
-    /// transaction prices history at all, so that a record the start takes back is history the
-    /// caller gets back.
-    ///
-    /// The next side pushed takes it, whether that is the frame's own or that of a frame answered
-    /// without running.
-    #[inline]
-    pub(crate) const fn stage_frame_charge(
-        &mut self,
-        records: FrameStartRecords,
-        added: u64,
-        creator: u64,
-        priced: bool,
-    ) {
-        self.pending_frame_charge = FrameCharge { records: Some(records), added, creator, priced };
-    }
-
-    /// Leaves the frame about to start unchecked against the answer its charge was computed from
-    /// — its caller's at the opcode, or the transaction's before execution for the transaction's
-    /// own frame: an inspector that may rewrite the frame's input runs between the charge and the
-    /// count.
-    pub(crate) const fn waive_start_check(&mut self) {
-        self.pending_frame_charge.records = None;
-        self.pending_top_level_records = None;
-    }
-
-    /// Draws up to `amount` from the running frame's history allowance and reports what it gave;
-    /// the caller pays the rest out of the frame's own gas.
-    ///
-    /// Only a history charge may draw, and only the one a log makes: a write record, a state
-    /// charge and a unit of computation are all paid for by the frame's gas alone. See
-    /// [`storage_call_stipend`](crate::storage_call_stipend).
-    #[inline]
-    pub(crate) fn try_consume_stipend(&mut self, amount: u64) -> u64 {
-        self.starts.last_mut().map_or(0, |side| side.consume_stipend(amount))
-    }
-
-    /* The frame side */
-
-    /// Pushes Satin's side of the start of the frame `input` asks for at `depth`, which revm
-    /// decides next: what its caller paid for the records the start makes, and, for a
-    /// value-transferring `CALL` or `CALLCODE` below the transaction's own frame, the history
-    /// allowance the frame is granted ([`storage_call_stipend`](crate::storage_call_stipend)).
-    /// What the ledger then sees the start count is attached once revm decided it
-    /// ([`attach_start`](Self::attach_start)).
-    pub(crate) fn push_start(&mut self, input: &FrameInput, depth: usize) {
-        self.push_side(depth);
-        if let FrameInput::Call(inputs) = input {
-            if depth > 0 && grants_stipend(inputs) {
-                if let Some(side) = self.starts.last_mut() {
-                    side.grant_stipend(storage_call_stipend());
-                }
-            }
-        }
-    }
-
-    /// Pushes the side of a frame at `depth` answered without revm deciding its start — by the
-    /// depth guard, an interceptor or an inspector — which keeps the frame sides aligned with the
-    /// results revm returns. Such a frame makes none of the records its caller paid for, so the
-    /// whole charge comes back when its side is popped, whatever the answer was.
-    pub(crate) fn push_answered_start(&mut self, depth: usize) {
-        self.push_side(depth);
-    }
-
-    /// Pushes a side at `depth` carrying the charge waiting for it: the opcode's for a frame below
-    /// the transaction's own, and, for the transaction's own frame, what was charged before
-    /// execution for the write record it makes.
-    fn push_side(&mut self, depth: usize) {
-        let charge = core::mem::replace(&mut self.pending_frame_charge, FrameCharge::NONE);
-        let side = if depth == 0 {
-            // The transaction's own frame takes no record back: before it, the transaction changed
-            // only its sender, to which no value moves, and the authorities it applied, which
-            // differ by a nonce no transfer returns.
-            let records = self.pending_top_level_records.take();
-            StartSide::new(depth, self.top_level_write_record_gas, 0, false, records)
-        } else {
-            StartSide::new(depth, charge.added, charge.creator, charge.priced, charge.records)
-        };
-        self.starts.push(side);
-    }
-
-    /// Attaches what the journal's ledger saw the latest start count, and what a frame revm built
-    /// is taken back to, to that start's side, and holds the count to the records the start's
-    /// charge was computed from ([`StartSide::attach`]).
-    pub(crate) fn attach_start(&mut self, report: StartReport, built: Option<(StartId, Rollback)>) {
-        if let Some(side) = self.starts.last_mut() {
-            side.attach(report, built);
-        }
-    }
-
-    /// The side of the running frame's start, or of the start just answered.
-    pub(crate) fn running_start(&self) -> Option<&StartSide> {
-        self.starts.last()
-    }
-
-    /// The number of starts whose frames have not returned yet.
-    pub(crate) fn starts_open(&self) -> usize {
-        self.starts.len()
-    }
-
-    /// Pops the side of the start of the frame `result` returns from, once revm closed the frame's
-    /// level, and settles what the start and the frame leave behind, as the journal's `ledger`
-    /// holds them:
-    ///
-    /// - the history the caller paid for the start's records, less the price of those the ledger
-    ///   still holds ([`StartSide::refund`]), which the caller gets back once the frame merged into
-    ///   it. The transaction's own frame was paid for before execution: its refund is kept for the
-    ///   settlement ([`take_top_level_refund`](Self::take_top_level_refund));
-    /// - the caller, held to its limits with what it now holds: a failed creation's nonce record,
-    ///   which outlives the creation, lands on its creator, and a crossing is the stop the caller
-    ///   returns before it runs on ([`stop_before_run`](Self::stop_before_run)). Any other return
-    ///   leaves the caller within its limits — a failure hands it nothing, and a success no more
-    ///   than the share it gave — and is held all the same;
-    /// - the crossing the result is made of, the stop noted for the frame
-    ///   ([`note_frame_stop`](Self::note_frame_stop)), which is the transaction's
-    ///   [`limit_exceeded`](Self::limit_exceeded) when the frame is the transaction's own and its
-    ///   result is still the stop's revert.
-    ///
-    /// Returns the side, and the history its caller gets back.
-    pub(crate) fn on_start_return(
-        &mut self,
-        ledger: &Ledger,
-        result: &FrameResult,
-    ) -> Option<(StartSide, u64)> {
-        let noted = self.frame_stop.take();
-        // A charge an opcode of this frame made for a child that never started died with that
-        // opcode, which failed after making it.
-        self.pending_frame_charge = FrameCharge::NONE;
-        let side = self.starts.pop()?;
-        let refund = side.refund(ledger);
-        if side.depth() == 0 {
-            self.limit_exceeded = noted.filter(|stop| is_the_revert_of(result, stop));
-            self.top_level_refund = refund;
-            return Some((side, 0));
-        }
-        self.hold_running_frame(ledger.check());
-        Some((side, refund))
-    }
-
-    /// The history gas the transaction's own frame's start gets back, once that frame returned
-    /// ([`on_start_return`](Self::on_start_return)): what the transaction paid before execution
-    /// for the write record that frame makes, unless the frame kept it. The settlement takes it
-    /// and gives it back; a transaction whose own frame never started gets nothing back, having
-    /// paid nothing that stands.
-    pub(crate) const fn take_top_level_refund(&mut self) -> u64 {
-        let refund = self.top_level_refund;
-        self.top_level_refund = 0;
-        refund
     }
 }
 
@@ -483,159 +727,16 @@ fn is_the_revert_of(result: &FrameResult, stop: &LimitCheck) -> bool {
     result.result == InstructionResult::Revert && result.output == stop.revert_data()
 }
 
-/// Whether the frame `inputs` starts is granted a history allowance: a value-transferring `CALL`
-/// or `CALLCODE` below the transaction's own frame.
-///
-/// `DELEGATECALL` and `STATICCALL` carry no value, and the transaction's own frame is not a call
-/// anybody made — its sender chose the gas limit.
-fn grants_stipend(inputs: &CallInputs) -> bool {
-    matches!(inputs.scheme, CallScheme::Call | CallScheme::CallCode) && inputs.transfers_value()
-}
-
-/// The history gas a caller paid for the records the frame it starts makes.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct FrameCharge {
-    /// The records the charge was computed from, when an opcode made one. The transaction's own
-    /// frame has no such opcode.
-    records: Option<FrameStartRecords>,
-    /// What the records the start adds on the frame's own level cost.
-    added: u64,
-    /// What the record of the creator's own nonce cost.
-    creator: u64,
-    /// Whether the transaction prices history.
-    priced: bool,
-}
-
-impl FrameCharge {
-    /// Nothing charged.
-    const NONE: Self = Self { records: None, added: 0, creator: 0, priced: false };
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        limit::{RecordDelta, StartFacts},
-        test_utils::MemoryDatabase,
-        MegaContext, MegaSpecId,
-    };
-    use alloy_primitives::{address, Address, Bytes, U256};
-    use revm::{
-        context::{ContextTr, JournalTr},
-        interpreter::{CallInput, CallValue},
-    };
 
-    const SENDER: Address = address!("00000000000000000000000000000000000f0001");
-    const CALLEE: Address = address!("00000000000000000000000000000000000f0002");
-    const TARGET: Address = address!("00000000000000000000000000000000000f0003");
-
-    fn call_inputs(scheme: CallScheme, value: U256) -> CallInputs {
-        CallInputs {
-            input: CallInput::Bytes(Bytes::new()),
-            return_memory_offset: 0..0,
-            gas_limit: 100_000,
-            bytecode_address: Address::ZERO,
-            known_bytecode: Default::default(),
-            target_address: Address::ZERO,
-            caller: Address::ZERO,
-            value: CallValue::Transfer(value),
-            scheme,
-            is_static: false,
-            reservoir: 0,
-            charged_new_account_state_gas: false,
-            charged_start: Default::default(),
-            bytes_share: u64::MAX,
-            history_allowance: 0,
-        }
-    }
-
-    /// A `CALL` from `caller` to `target` carrying `value`.
-    fn call_from_to(caller: Address, target: Address, value: U256) -> FrameInput {
-        FrameInput::Call(Box::new(CallInputs {
-            caller,
-            target_address: target,
-            ..call_inputs(CallScheme::Call, value)
-        }))
-    }
-
-    /// What the ledger reports of a start revm made and held to the limits: `records`.
-    fn report(records: FrameStartRecords) -> StartReport {
-        StartReport {
-            start: Some(StartId::default()),
-            records,
-            transfer_log: false,
-            verdict: Some(LimitCheck::WithinLimit),
-        }
-    }
-
-    /// `added` records a call's value transfer makes on the frame's level.
-    const fn transfer(added: u64) -> FrameStartRecords {
-        FrameStartRecords::of_transfer(RecordDelta { added, taken: 0 })
-    }
-
-    /// A creation's records: its created account's on the frame's level (`created`), and its
-    /// creator's own below it (`creator`).
-    const fn creation(created: bool, creator: bool) -> FrameStartRecords {
-        FrameStartRecords { transfer: RecordDelta::NONE, created, creator }
-    }
-
-    /// The allowance follows the transfer, and only the two schemes that can carry one: a `CALL`
-    /// or a `CALLCODE` that moves value is granted one, and nothing else is — a valueless call of
-    /// either scheme, and `DELEGATECALL` and `STATICCALL`, which take no value word at all.
-    #[test]
-    fn test_only_a_value_call_or_callcode_is_granted_an_allowance() {
-        for scheme in [
-            CallScheme::Call,
-            CallScheme::CallCode,
-            CallScheme::DelegateCall,
-            CallScheme::StaticCall,
-        ] {
-            let carries_value = matches!(scheme, CallScheme::Call | CallScheme::CallCode);
-            assert_eq!(
-                grants_stipend(&call_inputs(scheme, U256::from(1))),
-                carries_value,
-                "{scheme:?} with value",
-            );
-            assert!(!grants_stipend(&call_inputs(scheme, U256::ZERO)), "{scheme:?} without value");
-        }
-    }
-
-    /// The allowance is the started frame's, below the transaction's own frame: its side draws on
-    /// it, and nothing is left once the side is popped. The transaction's own frame is granted
-    /// none, however it was started. At a history price of nothing the allowance is nothing, and
-    /// there is nothing to draw.
-    #[test]
-    fn test_the_allowance_is_granted_to_the_frame_a_value_call_starts() {
-        let ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
-        let ledger = ctx.ledger();
-        let stipend = storage_call_stipend();
-        if stipend == 0 {
-            crate::test_utils::note_price_guard("MEGA_SATIN_CPHB prices a history byte at nothing");
-            return;
-        }
-        let mut limit = AdditionalLimit::default();
-        limit.push_start(&call_from_to(SENDER, CALLEE, U256::from(1)), 0);
-        assert_eq!(limit.try_consume_stipend(1), 0, "the transaction's own frame has none");
-        limit.push_start(&call_from_to(CALLEE, TARGET, U256::from(1)), 1);
-        assert_eq!(limit.try_consume_stipend(stipend - 1), stipend - 1);
-        assert_eq!(limit.try_consume_stipend(5), 1, "what is left of it");
-        assert_eq!(limit.try_consume_stipend(5), 0);
-        let result = crate::synthetic_frame_result(
-            &call_from_to(CALLEE, TARGET, U256::from(1)),
-            InstructionResult::Stop,
-            Bytes::new(),
-        );
-        let _ = limit.on_start_return(ledger, &result);
-        assert_eq!(limit.try_consume_stipend(5), 0, "the caller's own frame has none");
-    }
-
-    /// An exempt layer answers every crossing of gas detention's as within the limits, in any
-    /// dimension and at the transaction or at a frame; a reset ends the exemption, and the next
-    /// transaction is held to its limits again.
+    /// An exempt layer answers every crossing as within the limits, in any dimension and at the
+    /// transaction or at a frame; the next transaction begins held to its limits again.
     #[test]
     fn test_the_exemption_answers_every_crossing_and_lasts_one_transaction() {
         let mut limit = AdditionalLimit::default();
-        limit.exempt();
+        limit.begin_transaction(true, false, 0);
         assert!(limit.is_exempt());
         for kind in [LimitKind::DataSize, LimitKind::ComputeGas] {
             for frame_local in [false, true] {
@@ -643,7 +744,7 @@ mod tests {
                 assert_eq!(verdict, LimitCheck::WithinLimit, "{kind:?}, frame-local {frame_local}");
             }
         }
-        limit.reset();
+        limit.begin_transaction(false, false, 0);
         assert!(!limit.is_exempt());
         assert_eq!(
             limit.crossed(LimitKind::ComputeGas, 0, 1, false),
@@ -653,242 +754,7 @@ mod tests {
                 used: 1,
                 frame_local: false
             },
-            "after a reset the transaction is held to its limits"
+            "the next transaction is held to its limits"
         );
-    }
-
-    /// The records the ledger counts for a start are the records its caller was charged for: a
-    /// value transfer records the caller's account and the recipient's, the two the charge was
-    /// computed from, and a creation the created account and its creator's nonce. The charge counts
-    /// the created account for every creation, the address not being known at the opcode, so a
-    /// creation onto an account the transaction changed already counts less than it was charged
-    /// for. A start revm refused, or failed before its level opened, counted nothing and is not
-    /// held to the charge.
-    #[test]
-    fn test_the_records_counted_are_the_records_the_caller_was_charged_for() {
-        let mut limit = AdditionalLimit::default();
-        limit.push_start(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
-        let inner = call_from_to(CALLEE, TARGET, U256::from(1));
-        for (charged, counted) in [
-            (transfer(2), transfer(2)),
-            (creation(true, true), creation(true, true)),
-            (creation(true, true), creation(false, true)),
-            (creation(true, false), creation(false, false)),
-        ] {
-            limit.stage_frame_charge(charged, 2, 0, true);
-            limit.push_start(&inner, 1);
-            limit.attach_start(report(counted), None);
-        }
-
-        limit.stage_frame_charge(transfer(2), 2, 0, true);
-        limit.push_start(&inner, 1);
-        let refused = StartReport { verdict: None, ..report(FrameStartRecords::NONE) };
-        limit.attach_start(refused, None);
-    }
-
-    /// Attaches to a value call's side, charged for `charged`, a start the ledger counted
-    /// `counted` for: what the check below holds every start to.
-    fn attach_counted_against_charged(charged: FrameStartRecords, counted: FrameStartRecords) {
-        let mut limit = AdditionalLimit::default();
-        limit.push_start(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
-        limit.stage_frame_charge(charged, 0, 0, true);
-        limit.push_start(&call_from_to(CALLEE, TARGET, U256::from(1)), 1);
-        limit.attach_start(report(counted), None);
-    }
-
-    /// Every record but a creation's created account is held to the charge exactly: a transfer
-    /// that counts one record fewer than its caller was charged for trips, as one that counts more
-    /// does.
-    #[test]
-    #[cfg(debug_assertions)]
-    #[should_panic(expected = "changed after its caller was charged for them")]
-    fn test_a_transfer_counting_fewer_records_than_charged_trips() {
-        attach_counted_against_charged(transfer(2), transfer(1));
-    }
-
-    /// A creator's nonce record the ledger counted where none was charged trips.
-    #[test]
-    #[cfg(debug_assertions)]
-    #[should_panic(expected = "changed after its caller was charged for them")]
-    fn test_a_creator_record_not_charged_trips() {
-        attach_counted_against_charged(creation(true, false), creation(true, true));
-    }
-
-    /// A created account's record the ledger counted where none was charged trips: the charge may
-    /// count it where the ledger does not, never the reverse.
-    #[test]
-    #[cfg(debug_assertions)]
-    #[should_panic(expected = "changed after its caller was charged for them")]
-    fn test_a_created_account_not_charged_trips() {
-        attach_counted_against_charged(creation(false, false), creation(true, false));
-    }
-
-    /// A charge computed from a different answer than the count is what a rewrite that turns one
-    /// kind of frame into another would make. It trips rather than passing silently, because the
-    /// charge and the refund its failure gets back would both be wrong.
-    #[test]
-    #[cfg(debug_assertions)]
-    #[should_panic(expected = "changed after its caller was charged for them")]
-    fn test_a_charge_computed_from_another_answer_trips() {
-        let mut limit = AdditionalLimit::default();
-        limit.push_start(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
-        limit.stage_frame_charge(FrameStartRecords::NONE, 0, 0, true);
-        limit.push_start(&call_from_to(CALLEE, TARGET, U256::from(1)), 1);
-        limit.attach_start(report(transfer(2)), None);
-    }
-
-    /// The transaction's own frame is held to the records its history was charged for before
-    /// execution: its value's recipient, or the account a creation makes.
-    #[test]
-    fn test_the_transactions_own_frame_counts_the_records_its_history_paid_for() {
-        for records in [transfer(0), transfer(1), creation(true, false)] {
-            let mut limit = AdditionalLimit::default();
-            limit.stage_top_level_records(records);
-            limit.push_start(&call_from_to(SENDER, CALLEE, U256::from(1)), 0);
-            limit.attach_start(report(records), None);
-        }
-    }
-
-    /// A transaction's own frame that makes another record than its history paid for trips the
-    /// check, rather than counting data size no history matches or keeping history no data size
-    /// matches.
-    #[test]
-    #[cfg(debug_assertions)]
-    #[should_panic(expected = "changed after its caller was charged for them")]
-    fn test_a_top_level_record_its_history_did_not_pay_for_trips() {
-        let mut limit = AdditionalLimit::default();
-        limit.stage_top_level_records(transfer(0));
-        limit.push_start(&call_from_to(SENDER, CALLEE, U256::from(1)), 0);
-        limit.attach_start(report(transfer(1)), None);
-    }
-
-    /// Under an inspector that may rewrite a start, the check is waived: the start its charge paid
-    /// for may not be the one revm made.
-    #[test]
-    fn test_a_waived_start_is_not_held_to_its_charge() {
-        let mut limit = AdditionalLimit::default();
-        limit.stage_top_level_records(transfer(0));
-        limit.waive_start_check();
-        limit.push_start(&call_from_to(SENDER, CALLEE, U256::from(1)), 0);
-        limit.attach_start(report(transfer(1)), None);
-        limit.stage_frame_charge(FrameStartRecords::NONE, 0, 0, true);
-        limit.waive_start_check();
-        limit.push_start(&call_from_to(CALLEE, TARGET, U256::from(1)), 1);
-        limit.attach_start(report(transfer(2)), None);
-    }
-
-    /// A frame answered without running — by the depth guard, a stop, an interceptor or an
-    /// inspector — keeps none of the records its caller paid for, whatever its answer: the whole
-    /// charge comes back when its side is popped, and the caller it returns into is held to the
-    /// ledger's check.
-    ///
-    /// The depth guard's answer is reached here rather than through a transaction: under the
-    /// execution cap no call chain reaches the call-stack limit, because each call forwards at most
-    /// sixty-three sixty-fourths of what its caller has left, and 200,000,000 gas leaves about
-    /// twenty at depth 1,024. A stop's and an interceptor's answers are also reached through
-    /// transactions, in the history-byte tests.
-    #[test]
-    fn test_a_frame_answered_without_running_gives_the_whole_charge_back() {
-        let ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
-        let ledger = ctx.ledger();
-        for answer in
-            [InstructionResult::CallTooDeep, InstructionResult::Revert, InstructionResult::Stop]
-        {
-            let mut limit = AdditionalLimit::default();
-            limit.push_start(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
-            let inner = call_from_to(CALLEE, TARGET, U256::from(1));
-            limit.stage_frame_charge(creation(true, true), 1_000, 2_000, true);
-            limit.push_answered_start(1);
-            let result = crate::synthetic_frame_result(&inner, answer, Bytes::new());
-            let (_, refund) = limit.on_start_return(ledger, &result).expect("the side");
-            assert_eq!(refund, 3_000, "{answer:?}: all of it back");
-            assert_eq!(limit.stop_before_run(), None, "{answer:?}: the caller runs on");
-            assert_eq!(limit.starts_open(), 1, "{answer:?}: the caller's side is left");
-        }
-    }
-
-    /// The transaction's own frame's side keeps what was charged before execution for the write
-    /// record the frame makes, and gives it to the settlement when the frame did not keep the
-    /// record: a frame that failed, and a frame answered before revm decided it. A frame that kept
-    /// its record gives nothing back, and a transaction whose first frame never started has
-    /// nothing to give back.
-    ///
-    /// The record's history is charged at the price in effect, as pre-execution charges it, so the
-    /// refunds hold at any history byte price, a price of nothing included.
-    #[test]
-    fn test_the_top_level_record_comes_back_once_at_the_settlement() {
-        let charge = crate::write_record_history_gas(1).unwrap_or(0);
-        let mut ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
-        let outer = call_from_to(SENDER, CALLEE, U256::from(1));
-        let ended = |result| crate::synthetic_frame_result(&outer, result, Bytes::new());
-        // The start kept: a level revm committed.
-        for (case, failed, refund) in [("kept", false, 0), ("failed", true, charge)] {
-            let mut limit = AdditionalLimit::default();
-            limit.set_top_level_write_record_gas(charge);
-            limit.push_start(&outer, 0);
-            ctx.ledger_mut().begin_transaction(false, false, 0);
-            ctx.ledger_mut().open_start(StartFacts {
-                depth: 0,
-                creation: false,
-                transfers_value: true,
-            });
-            let checkpoint = ctx.journal_mut().checkpoint();
-            ctx.ledger_mut().on_transfer(RecordDelta { added: 1, taken: 0 }, false, false);
-            let report = ctx.ledger_mut().close_start();
-            limit.attach_start(report, None);
-            ctx.ledger_mut().frame_returning();
-            if failed {
-                ctx.journal_mut().checkpoint_revert(checkpoint);
-            } else {
-                ctx.journal_mut().checkpoint_commit();
-            }
-            let result =
-                ended(if failed { InstructionResult::Revert } else { InstructionResult::Stop });
-            let (side, caller) = limit.on_start_return(ctx.ledger(), &result).expect("the side");
-            assert_eq!(side.depth(), 0, "{case}");
-            assert_eq!(caller, 0, "{case}: the transaction's own frame has no caller to refund");
-            assert_eq!(limit.take_top_level_refund(), refund, "{case}");
-            assert_eq!(limit.take_top_level_refund(), 0, "{case}: taken once");
-        }
-
-        // Answered before revm decided it: nothing counted, everything back.
-        let mut limit = AdditionalLimit::default();
-        limit.set_top_level_write_record_gas(charge);
-        limit.push_answered_start(0);
-        let _ = limit.on_start_return(ctx.ledger(), &ended(InstructionResult::Stop));
-        assert_eq!(limit.take_top_level_refund(), charge);
-
-        // Never started: no side, nothing back.
-        let mut limit = AdditionalLimit::default();
-        limit.set_top_level_write_record_gas(charge);
-        assert!(limit.on_start_return(ctx.ledger(), &ended(InstructionResult::OutOfGas)).is_none());
-        assert_eq!(limit.take_top_level_refund(), 0);
-    }
-
-    /// The stop the transaction reports is the crossing its own frame's result is made of, read as
-    /// that frame returns, and only while the result is still the stop's revert.
-    #[test]
-    fn test_limit_exceeded_is_the_stop_the_own_frames_result_is_made_of() {
-        let ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
-        let outer = call_from_to(SENDER, CALLEE, U256::ZERO);
-        let stop = LimitCheck::ExceedsLimit {
-            kind: LimitKind::DataSize,
-            limit: 3,
-            used: 4,
-            frame_local: false,
-        };
-        for (case, output, result, reported) in [
-            ("the stop's revert", stop.revert_data(), InstructionResult::Revert, Some(stop)),
-            ("another output", Bytes::new(), InstructionResult::Revert, None),
-            ("a success", stop.revert_data(), InstructionResult::Return, None),
-        ] {
-            let mut limit = AdditionalLimit::default();
-            limit.push_start(&outer, 0);
-            let data = limit.note_frame_stop(&stop);
-            assert_eq!(data, stop.revert_data(), "{case}");
-            let result = crate::synthetic_frame_result(&outer, result, output);
-            let _ = limit.on_start_return(ctx.ledger(), &result);
-            assert_eq!(limit.limit_exceeded().copied(), reported, "{case}");
-        }
     }
 }

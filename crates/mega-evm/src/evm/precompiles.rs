@@ -46,19 +46,16 @@
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use std::{
-    string::{String, ToString},
-    sync::Arc,
-};
+use std::{string::String, sync::Arc};
 
 use alloy_evm::{
-    precompiles::{DynPrecompile, Precompile as _, PrecompileInput, PrecompilesMap},
-    Database, EvmInternals,
+    precompiles::{DynPrecompile, Precompile as _, PrecompilesMap},
+    Database,
 };
 use op_revm::{L1BlockInfo, OpSpecId};
 use revm::{
-    context::{BlockEnv, CfgEnv, ContextTr},
-    handler::{precompile_output_to_interpreter_result, PrecompileProvider},
+    context::{BlockEnv, CfgEnv},
+    handler::PrecompileProvider,
     interpreter::{CallInputs, InterpreterResult},
     precompile::Precompiles,
     primitives::{Address, AddressSet, HashMap, OnceLock},
@@ -191,18 +188,16 @@ pub mod kzg_point_evaluation {
             .with_required_gas(required_gas);
 }
 
-/// The plain revm context over revm's own journal, the one alloy-evm implements the provider for.
-type RevmJournalContext<DB> =
+/// The context [`MegaContext`] wraps: op-revm's context shape over revm's own journal, the one
+/// alloy-evm implements the provider for.
+type InnerContext<DB> =
     Context<BlockEnv, MegaTransaction, CfgEnv<OpSpecId>, DB, Journal<DB>, L1BlockInfo>;
 
-/// Runs the Satin precompile set on a [`MegaContext`].
-///
-/// alloy-evm implements the provider for revm's plain context over revm's own journal, and the
-/// context [`MegaContext`] wraps runs on the Satin journal ([`MegaJournal`](crate::MegaJournal)),
-/// so `run` is alloy-evm's own, on that journal: the precompile gets the call's input and an
-/// [`EvmInternals`] over the journal, and its output is turned into the call's result the way
-/// revm turns any precompile's. A precompile's writes through [`EvmInternals`] reach the journal
-/// as any tool's do, and the journal counts none of them.
+/// Runs the Satin precompile set on a [`MegaContext`], as alloy-evm runs it on the context
+/// [`MegaContext`] wraps: the precompile gets the call's input and an
+/// [`EvmInternals`](alloy_evm::EvmInternals) over revm's journal, and its output is turned into
+/// the call's result the way revm turns any precompile's. A precompile's writes through the
+/// internals reach the journal as any tool's do, and count none of the transaction's bytes.
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB, ExtEnvs>>
     for PrecompilesMap
 {
@@ -221,36 +216,19 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
         context: &mut MegaContext<DB, ExtEnvs>,
         inputs: &CallInputs,
     ) -> Result<Option<Self::Output>, String> {
-        let Some(precompile) = self.get(&inputs.bytecode_address) else {
-            return Ok(None);
-        };
-        let (block, tx, cfg, journal, _, local) = context.inner.all_mut();
-        let output = precompile
-            .call(PrecompileInput {
-                data: inputs.input.as_bytes_local(local).as_ref(),
-                gas: inputs.gas_limit,
-                reservoir: inputs.reservoir,
-                caller: inputs.caller,
-                value: inputs.call_value(),
-                is_static: inputs.is_static,
-                internals: EvmInternals::new(journal, block, cfg, tx),
-                target_address: inputs.target_address,
-                bytecode_address: inputs.bytecode_address,
-            })
-            .map_err(|error| error.to_string())?;
-        Ok(Some(precompile_output_to_interpreter_result(output, inputs.gas_limit)))
+        PrecompileProvider::<InnerContext<DB>>::run(self, &mut context.inner, inputs)
     }
 
     /// The addresses of the set, as alloy-evm's provider answers them.
     #[inline]
     fn warm_addresses(&self) -> &AddressSet {
-        PrecompileProvider::<RevmJournalContext<DB>>::warm_addresses(self)
+        PrecompileProvider::<InnerContext<DB>>::warm_addresses(self)
     }
 
     /// Whether the set holds `address`, as alloy-evm's provider answers it.
     #[inline]
     fn contains(&self, address: &Address) -> bool {
-        PrecompileProvider::<RevmJournalContext<DB>>::contains(self, address)
+        PrecompileProvider::<InnerContext<DB>>::contains(self, address)
     }
 }
 
@@ -320,71 +298,6 @@ mod tests {
             .run(&mut context, &inputs(to, input, gas_limit))
             .expect("the precompile does not fail fatally")
             .expect("the address is a precompile")
-    }
-
-    /// The provider on the Satin journal runs a precompile as alloy-evm's provider runs it on
-    /// revm's own journal: for every entry of the Satin set, and for a node's own precompiles that
-    /// succeed, log, write through `EvmInternals`, revert and fail fatally, and for an address with
-    /// no precompile, the two give the same answer and leave the same logs and the same state.
-    #[test]
-    fn test_the_provider_runs_a_precompile_as_alloy_evms_does() {
-        use alloy_primitives::{address, Log, LogData};
-        use revm::{context::JournalTr, precompile::PrecompileError};
-        const SUCCEEDS: Address = address!("00000000000000000000000000000000000e0001");
-        const LOGS: Address = address!("00000000000000000000000000000000000e0002");
-        const WRITES: Address = address!("00000000000000000000000000000000000e0003");
-        const REVERTS: Address = address!("00000000000000000000000000000000000e0004");
-        const FATAL: Address = address!("00000000000000000000000000000000000e0005");
-        const MISSING: Address = address!("00000000000000000000000000000000000e00ff");
-        let own = |address: Address| {
-            DynPrecompile::new(PrecompileId::Custom("own".into()), move |mut input| {
-                let ok = |gas| Ok(PrecompileOutput::new(gas, Bytes::from_static(b"ok"), 0));
-                match address {
-                    SUCCEEDS => ok(10),
-                    LOGS => {
-                        let data = LogData::new_unchecked(Vec::new(), input.data.to_vec().into());
-                        input.internals.log(Log { address, data });
-                        ok(20)
-                    }
-                    WRITES => {
-                        input.internals.sstore(address, U256::from(1), U256::from(2)).unwrap();
-                        ok(30)
-                    }
-                    REVERTS => Ok(PrecompileOutput::revert(5, Bytes::from_static(b"no"), 0)),
-                    _ => Err(PrecompileError::Fatal("broken".into())),
-                }
-            })
-        };
-        let mut map = satin_precompiles_map();
-        for address in [SUCCEEDS, LOGS, WRITES, REVERTS, FATAL] {
-            map.apply_precompile(&address, |_| Some(own(address)));
-        }
-        let addresses = satin_precompiles()
-            .addresses()
-            .copied()
-            .chain([SUCCEEDS, LOGS, WRITES, REVERTS, FATAL, MISSING]);
-        for address in addresses {
-            for input in [Bytes::new(), Bytes::from(std::vec![1; 192])] {
-                let inputs = inputs(address, input, 1_000_000);
-                let mut mega = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
-                let mut plain: RevmJournalContext<MemoryDatabase> =
-                    Context::new(MemoryDatabase::default(), OpSpecId::KARST)
-                        .with_cfg(mega.cfg().clone());
-                let ours = map.clone().run(&mut mega, &inputs);
-                let theirs = PrecompileProvider::<RevmJournalContext<_>>::run(
-                    &mut map.clone(),
-                    &mut plain,
-                    &inputs,
-                );
-                assert_eq!(ours, theirs, "{address}: the answer");
-                assert_eq!(mega.journal_ref().logs(), plain.journal_ref().logs(), "{address}");
-                assert_eq!(mega.journal_ref().state, plain.journal_ref().state, "{address}");
-            }
-        }
-        assert_eq!(
-            PrecompileProvider::<MegaContext<MemoryDatabase>>::warm_addresses(&map),
-            PrecompileProvider::<RevmJournalContext<MemoryDatabase>>::warm_addresses(&map),
-        );
     }
 
     /// A valid proof costs the `MegaETH` price and returns the field parameters.

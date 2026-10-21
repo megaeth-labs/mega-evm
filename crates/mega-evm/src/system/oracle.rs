@@ -67,9 +67,9 @@ pub use mega_system_contracts::oracle::IOracle;
 ///
 /// A `STATICCALL` does forward: `sendHint` is a view method and writes nothing.
 ///
-/// The payload is counted toward the transaction's data size before it is decoded (the journal's
-/// ledger admits it, `Ledger::admit_hint`), so trailing bytes an ABI
-/// decoder ignores are paid for; a payload that would cross the transaction's limit is neither
+/// The payload is counted toward the transaction's data size before it is decoded
+/// ([`AdditionalLimit::admit_hint`](crate::AdditionalLimit)), so trailing bytes an ABI decoder
+/// ignores are paid for; a payload that would cross the transaction's limit is neither
 /// forwarded nor counted, and the call is answered with the stop: a revert carrying
 /// `MegaLimitExceeded`, on the gas it was forwarded, as the frame it would have started. So the
 /// data size a transaction keeps holds exactly the hints that were admitted.
@@ -91,7 +91,7 @@ pub(crate) fn intercept<DB: Database, ExtEnvs: ExternalEnvTypes>(
         return None;
     }
     let payload = inputs.input.bytes(&*ctx);
-    let check = ctx.ledger_mut().admit_hint(payload.len() as u64);
+    let check = ctx.additional_limit.admit_hint(payload.len() as u64);
     if check.exceeded_limit() {
         let output = ctx.additional_limit.note_frame_stop(&check);
         return Some(synthetic_call_result(inputs, InstructionResult::Revert, output));

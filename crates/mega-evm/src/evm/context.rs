@@ -8,10 +8,13 @@ use delegate::delegate;
 use op_revm::{transaction::deposit::DEPOSIT_TRANSACTION_TYPE, L1BlockInfo, OpSpecId};
 use revm::{
     context::{
-        BlockEnv, Cfg, CfgEnv, Context, ContextError, ContextSetters, ContextTr, LocalContext,
-        Transaction,
+        BlockEnv, Cfg, CfgEnv, Context, ContextError, ContextSetters, ContextTr, Journal,
+        LocalContext, Transaction,
     },
-    context_interface::{cfg::GasId, context::CodeDeposit},
+    context_interface::{
+        cfg::{gas::GasTracker, GasId},
+        context::CodeDeposit,
+    },
     primitives::{Address, Bytes, StorageKey},
     Database,
 };
@@ -23,21 +26,21 @@ use crate::{
         inspector::UpfrontRecord,
         schedule::{satin_gas_params, satin_gas_params_history_exempt},
     },
-    limit::Ledger,
+    limit::{Accounts, Counted, StartRecords},
     system::{
         self,
         keyless::{self, KeylessFrame},
     },
     AdditionalLimit, BlockHashRecord, BucketError, BucketId, BucketMultipliers, BucketRecord,
     Detention, EmptyExternalEnv, EthSpecId, EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs,
-    LimitUsage, MegaJournal, MegaSpecId, MegaTransaction, OracleReadRecord, ProtocolLimits,
-    SaltEnv, VolatileDataAccess,
+    LimitUsage, MegaSpecId, MegaTransaction, OracleReadRecord, ProtocolLimits, SaltEnv,
+    VolatileDataAccess,
 };
 
 /// The revm context the Satin engine runs on: op-revm's context shape with the `MegaETH`
-/// transaction type and the Satin journal.
+/// transaction type, on revm's own journal.
 pub(crate) type MegaInnerContext<DB> =
-    Context<BlockEnv, MegaTransaction, CfgEnv<OpSpecId>, DB, MegaJournal<DB>, L1BlockInfo>;
+    Context<BlockEnv, MegaTransaction, CfgEnv<OpSpecId>, DB, Journal<DB>, L1BlockInfo>;
 
 /// Execution context of the Satin engine.
 ///
@@ -85,6 +88,10 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes = EmptyExternalEn
     /// Where the running transaction's `keylessDeploy` call stands, from the start of its frame
     /// to its answer. See the [`keyless`](crate::system::keyless) module.
     pub(crate) keyless_frame: Option<KeylessFrame>,
+    /// The records the last frame start's hook charged its caller for, which a debug build holds
+    /// the start revm then decides to.
+    #[cfg(debug_assertions)]
+    pub(crate) charged_records: Option<StartRecords>,
     /// Whether the context runs the neutral configuration. See [`MegaContext::with_neutral_cfg`].
     #[cfg(any(test, feature = "test-utils"))]
     neutral: bool,
@@ -110,9 +117,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     ) -> Self {
         let cfg = spec_cfg(CfgEnv::new_with_spec(spec));
         let limits = ProtocolLimits::for_spec(spec).tx_runtime_limits;
-        let mut inner: MegaInnerContext<DB> =
+        let inner: MegaInnerContext<DB> =
             Context::new(db, spec.into_op_spec()).with_cfg(op_cfg(&cfg));
-        inner.journaled_state.ledger_mut().set_limits(limits);
         Self {
             inner,
             cfg,
@@ -128,6 +134,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
             system_call: false,
             prices_history: true,
             keyless_frame: None,
+            #[cfg(debug_assertions)]
+            charged_records: None,
             #[cfg(any(test, feature = "test-utils"))]
             neutral: false,
         }
@@ -255,11 +263,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         self
     }
 
-    /// Holds every transaction from the next one on to `limits`, in the journal's ledger and for
-    /// gas detention alike.
+    /// Holds every transaction from the next one on to `limits`: the data-size limit and gas
+    /// detention alike.
     pub(crate) const fn set_tx_runtime_limits(&mut self, limits: EvmTxRuntimeLimits) {
         self.additional_limit.set_limits(limits);
-        self.ledger_mut().set_limits(limits);
     }
 
     /// The block hashes execution has read on this context.
@@ -308,20 +315,15 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// What the running (or last) transaction keeps so far: its data-size bytes and write records,
     /// with every running frame counted as if it succeeds. It is what the transaction's outcome
     /// reports ([`MegaTransactionOutcome::usage`](crate::MegaTransactionOutcome::usage)) once it
-    /// ran, and what the data-size limit holds it to; it is read off the journal's ledger, which
-    /// the next transaction or system call resets.
+    /// ran, and what the data-size limit holds it to; the next transaction or system call resets
+    /// it.
     pub fn limit_usage(&self) -> LimitUsage {
-        self.ledger().usage()
+        self.additional_limit.usage()
     }
 
-    /// The journal's ledger of what the running (or last) transaction keeps.
-    pub(crate) const fn ledger(&self) -> &Ledger {
-        self.inner.journaled_state.ledger()
-    }
-
-    /// The journal's ledger, mutably.
-    pub(crate) const fn ledger_mut(&mut self) -> &mut Ledger {
-        self.inner.journaled_state.ledger_mut()
+    /// The accounts the running transaction holds, read for the write records a write makes.
+    pub(crate) fn accounts(&self) -> Accounts<'_> {
+        Accounts::of(self.journal_ref(), self.additional_limit.counts_transfer_logs())
     }
 
     /// Gas detention for the running (or last) transaction: the volatile data it read and the
@@ -475,8 +477,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     }
 
     /// Prepares the common execution layer for a transaction or a system call that is, or is not,
-    /// `system_originated`: the journal's ledger begins it, counting its body, and the frame side
-    /// is reset.
+    /// `system_originated`: the layer begins it, counting its body.
     ///
     /// The SALT bucket multipliers and the oracle reads go with it: they are what one transaction
     /// read, so the next one reads its own.
@@ -487,7 +488,6 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// it uses is counted all the same. A user's deposit is not system-originated and is held
     /// to every one of them.
     fn prepare(&mut self, system_originated: bool) {
-        self.additional_limit.reset();
         let transfer_logs = emits_transfer_logs(&self.inner.cfg);
         self.bucket_multipliers.reset();
         self.oracle_reads.clear();
@@ -497,13 +497,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         self.system_originated = system_originated;
         let exempt = self.inner.tx.tx_type() == DEPOSIT_TRANSACTION_TYPE || system_originated;
         self.set_history_exempt(exempt);
-        if system_originated {
-            self.additional_limit.exempt();
-        }
         // The body is data size whether or not the transaction pays history for it. A deposit,
         // a system transaction and a system call are exempt from the charge, not from the count.
         let body = transaction_body_bytes(self.tx());
-        self.ledger_mut().begin_transaction(system_originated, transfer_logs, body);
+        self.additional_limit.begin_transaction(system_originated, transfer_logs, body);
         // The protocol's own transactions are not detained: they maintain the volatile data.
         let limits = self.additional_limit.limits();
         self.detention.reset(
@@ -575,7 +572,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// Consumes the context and returns the database, the configuration and the block.
     pub fn into_parts(self) -> (DB, CfgEnv<MegaSpecId>, BlockEnv) {
         let Context { block, journaled_state, .. } = self.inner;
-        (journaled_state.into_revm().database, self.cfg, block)
+        (journaled_state.database, self.cfg, block)
     }
 }
 
@@ -645,7 +642,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextTr for MegaContext<DB, ExtE
     type Tx = MegaTransaction;
     type Cfg = CfgEnv<OpSpecId>;
     type Db = DB;
-    type Journal = MegaJournal<DB>;
+    type Journal = Journal<DB>;
     type Chain = L1BlockInfo;
     type Local = LocalContext;
 
@@ -658,7 +655,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextTr for MegaContext<DB, ExtE
                 &MegaTransaction,
                 &CfgEnv<OpSpecId>,
                 &DB,
-                &MegaJournal<DB>,
+                &Journal<DB>,
                 &L1BlockInfo,
                 &LocalContext,
             );
@@ -668,7 +665,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextTr for MegaContext<DB, ExtE
                 &BlockEnv,
                 &MegaTransaction,
                 &CfgEnv<OpSpecId>,
-                &mut MegaJournal<DB>,
+                &mut Journal<DB>,
                 &mut L1BlockInfo,
                 &mut LocalContext,
             );
@@ -676,12 +673,12 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextTr for MegaContext<DB, ExtE
         }
     }
 
-    /// Holds the code a creation deposits to the data-size limit, and counts its history bytes, on
-    /// the creation's level of the journal's ledger, once `return_create` made every charge for
-    /// the deposit and before it commits the creation. A crossing refuses the deposit with the
-    /// stop's revert data: `return_create` reverts the creation's checkpoint, so the code is not
-    /// written and the level takes the bytes back, puts the frame's gas back to what it had before
-    /// the deposit's charges, and ends the creation as a revert carrying the stop.
+    /// Holds the code a creation deposits to the data-size limit, and counts its bytes, on the
+    /// creating frame's pool, `gas`, once `return_create` made every charge for the deposit and
+    /// before it commits the creation. A crossing refuses the deposit with the stop's revert data:
+    /// `return_create` reverts the creation's checkpoint, so the code is not written, puts the
+    /// frame's gas back to what it had before the deposit's charges, the draw included, and ends
+    /// the creation as a revert carrying the stop.
     ///
     /// A creation `return_create` fails itself is never offered: a revert or a halt of the init
     /// code, code it refuses — starting with `0xEF`, or over the code-size limit — and a creation
@@ -696,7 +693,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextTr for MegaContext<DB, ExtE
     fn admit_code_deposit(
         &mut self,
         deposit: &CodeDeposit<'_>,
-        _gas: &mut revm::context_interface::cfg::gas::GasTracker,
+        gas: &mut GasTracker,
     ) -> Result<(), Bytes> {
         let destroyed = self
             .journal_ref()
@@ -706,7 +703,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextTr for MegaContext<DB, ExtE
         if keyless::refuses_empty_deposit(&mut self.keyless_frame, deposit, destroyed) {
             return Err(Bytes::new());
         }
-        let check = self.ledger_mut().count_code(deposit.code.len() as u64);
+        let check = self.additional_limit.draw(gas, &Counted::bytes(deposit.code.len() as u64));
         if check.exceeded_limit() {
             return Err(self.additional_limit.note_frame_stop(&check));
         }
@@ -1172,7 +1169,7 @@ mod tests {
                 MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN).with_neutral_cfg(cfg);
             ctx.set_tx(call_from(Address::repeat_byte(0x11)));
             ctx.on_new_tx(false);
-            assert_eq!(ctx.ledger().counts_transfer_logs(), emits_transfer_logs(ctx.cfg()));
+            assert_eq!(ctx.additional_limit.counts_transfer_logs(), emits_transfer_logs(ctx.cfg()));
             emits_transfer_logs(ctx.cfg())
         };
         let with = |enabled: bool, disabled: bool| {
@@ -1193,7 +1190,7 @@ mod tests {
         });
         ctx.set_tx(call_from(Address::repeat_byte(0x11)));
         ctx.on_new_tx(false);
-        assert!(ctx.ledger().counts_transfer_logs());
+        assert!(ctx.additional_limit.counts_transfer_logs());
     }
 
     /// A context is not neutral unless it is asked to be.

@@ -6,19 +6,20 @@
 //! data-size limit below, and detention for compute gas.
 //!
 //! Gas detention caps compute, [`LimitKind::ComputeGas`]: its state lives beside this module, in
-//! [`Detention`](crate::Detention), because what it meters is gas rather than anything the ledger
-//! counts, and it holds a frame to the cap with the gas the frame may spend. It stops the frame
+//! [`Detention`](crate::Detention), because what it meters is gas rather than bytes, and it holds a
+//! frame to the cap with the gas the frame may spend. It stops the frame
 //! that crosses the cap with the same revert ([`AdditionalLimit`]), with the compute the
 //! transaction may reach as the limit, and its compute at the crossing as what was used
 //! ([`LimitCheck::ExceedsLimit`]).
 //!
-//! What the data-size limit meters — data-size bytes and write records — is counted by the
-//! journal's ledger ([`MegaJournal`](crate::MegaJournal), `ledger.rs`), on one level per open
-//! checkpoint of revm's journal, at the journal's writes and from the Host's hooks, and revm's
-//! checkpoint reverts rewind it: what the ledger holds is what the journal keeps, whoever reverted
-//! what. A write an opcode makes is counted once the opcode completed, in the Host's
-//! completed-write hook, which revm calls after every charge the opcode makes. Beside the ledger,
-//! [`AdditionalLimit`] keeps Satin's side of each frame start, the stops and the settled figures.
+//! What the data-size limit meters — data-size bytes, among them the write records — is drawn from
+//! the byte pool on each frame's gas tracker, which the revm fork forwards to a child as its share
+//! and settles as it does the reservoir: a frame that fails gives its draws back, and a frame that
+//! succeeds hands its caller what it kept. A write an opcode makes is drawn once the opcode
+//! completed, in the Host's completed-write hook, which revm calls after every charge the opcode
+//! makes; a frame start's records once revm decided the start, on the pool its frame starts with.
+//! [`AdditionalLimit`] holds the transaction's limit beside the pools, on what the transaction
+//! keeps, with the stops and the settled figures.
 //!
 //! # The data-size limit
 //!
@@ -42,7 +43,7 @@
 //! - the records a frame's start makes, when the frame starts;
 //! - a storage write's record, a log's bytes and the records of a `SELFDESTRUCT` — the account it
 //!   clears and its beneficiary — once the opcode completed;
-//! - deployed code, on the creation's level before the creation is committed, so a crossing leaves
+//! - deployed code, on the creation's pool before the creation is committed, so a crossing leaves
 //!   no code behind. Only code revm would deposit counts: code starting with `0xEF` or over the
 //!   code-size limit, and a creation that cannot pay for its deposit, fail the creation alone and
 //!   are not counted;
@@ -51,19 +52,22 @@
 //!   moves: with the records of the frame start that moves it — the transaction's own value, a
 //!   value `CALL`, a creation's endowment — and with a `SELFDESTRUCT`'s beneficiary once the opcode
 //!   completed. Each is counted by the rule a `LOG3` of one word is ([`TRANSFER_LOG_SIZE`]), on the
-//!   level of the frame whose journal checkpoint holds the move, so the failure that takes the move
+//!   pool of the frame whose journal checkpoint holds the move, so the failure that takes the move
 //!   back takes the bytes back.
 //!
-//! A frame start is counted as the frame starts and held to the limits once revm decided it, on
-//! what revm then did. A frame revm builds returns the stop on its first run when its start crossed
-//! a limit, and its revert takes back the value revm moved and the transfer log it journaled; an
-//! answer revm gives without building a frame — a call to an account with no code, to a precompile
-//! — gives way to the stop, and what its start moved is taken back with it. A start revm refuses on
-//! its caller's account — a value its caller cannot fund, a creation whose creator's nonce cannot
-//! be bumped — moves and writes nothing, so it counts nothing, gets back what its caller paid for
-//! its records, and no limit stops it. A creation revm fails after it bumped its creator's nonce,
-//! onto an occupied address, is held to nothing at its start: its failure discards its records and
-//! transfer log, but for the nonce record, which lands on the creator.
+//! A frame start's records are read off the journal before revm decides the start, as the hook
+//! that charges its caller for them reads them, and counted and held to the limits once revm
+//! decided it, on the pool its frame starts with; a debug build holds them to what revm's start
+//! made of the accounts. A frame revm builds returns the stop on its first run when its start
+//! crossed a limit, and its revert takes back the value revm moved and the transfer log it
+//! journaled; an answer revm gives without building a frame — a call to an account with no code, to
+//! a precompile — gives way to the stop, and what its start moved is taken back with it. A start
+//! revm refuses on its caller's account — a value its caller cannot fund, a creation whose
+//! creator's nonce cannot be bumped — moves and writes nothing, so it counts nothing, gets back
+//! what its caller paid for its records, and no limit stops it. A creation revm fails after it
+//! bumped its creator's nonce, onto an occupied address, is held to nothing at its start: its
+//! failure discards its records and transfer log, but for the nonce record, which lands on the
+//! creator.
 //!
 //! A record is checked against the limits before its history is charged: a record the limit
 //! rejects is not kept, so it is not charged, and the stop is what its frame reports. At a frame
@@ -79,14 +83,14 @@
 //!
 //! # Write records
 //!
-//! The write-record count the ledger keeps is the KV count a node reports: one record per account
-//! or storage write the transaction keeps, following the net change — a slot's while its value
-//! differs from its original, an account's while its nonce, balance or code differs from what the
-//! transaction loaded, whichever writes changed it, a creation's created account included — taken
-//! back by a write that returns the slot or the account and with the frame that fails. The sender's
-//! account and the accounts fees are credited to are the body's, not records. No limit holds the
-//! count: a record weighs [`WRITE_RECORD_SIZE`] bytes of data size, counted and taken back with
-//! them, so the data-size limit bounds the records, and history gas prices each of them.
+//! The write-record count [`AdditionalLimit`] keeps is the KV count a node reports: one record per
+//! account or storage write the transaction keeps, following the net change — a slot's while its
+//! value differs from its original, an account's while its nonce, balance or code differs from what
+//! the transaction loaded, whichever writes changed it, a creation's created account included —
+//! taken back by a write that returns the slot or the account and with the frame that fails. The
+//! sender's account and the accounts fees are credited to are the body's, not records. No limit
+//! holds the count: a record weighs [`WRITE_RECORD_SIZE`] bytes of data size, counted and taken
+//! back with them, so the data-size limit bounds the records, and history gas prices each of them.
 //!
 //! # State growth
 //!
@@ -134,16 +138,13 @@
 //!   recipient is the block beneficiary or a fee vault pays a record the body already bound. It is
 //!   an over-charge, never an under-charge.
 
-mod ledger;
 #[allow(clippy::module_inception)]
 mod limit;
 mod record;
 
-#[cfg(test)]
-pub(crate) use ledger::StartSide;
-pub(crate) use ledger::{FrameIdentity, FrameStartRecords, Ledger, Mark, StartFacts, StartReport};
 pub use limit::AdditionalLimit;
-pub(crate) use record::{HistoryBytes, RecordDelta};
+pub(crate) use limit::{Counted, CreatorRecord};
+pub(crate) use record::{Accounts, HistoryBytes, RecordDelta, StartRecords};
 
 use alloy_primitives::Bytes;
 use alloy_sol_types::SolError;
@@ -331,14 +332,6 @@ impl EvmTxRuntimeLimits {
         self
     }
 }
-
-/// One write record.
-pub(crate) const WRITE_RECORD: LimitUsage =
-    LimitUsage { data_size: WRITE_RECORD_SIZE, write_records: 1 };
-
-/// One EIP-7708 transfer log: data size, and no write record.
-pub(crate) const TRANSFER_LOG: LimitUsage =
-    LimitUsage { data_size: TRANSFER_LOG_SIZE, write_records: 0 };
 
 impl LimitUsage {
     /// Nothing counted.
@@ -545,8 +538,6 @@ mod tests {
         assert_eq!(AUTHORIZATION_SIZE, 101);
         assert_eq!(ACCESS_LIST_ADDRESS_SIZE, 20);
         assert_eq!(ACCESS_LIST_SLOT_SIZE, 32);
-        // A storage write and an account write are the same record.
-        assert_eq!(WRITE_RECORD, LimitUsage { data_size: WRITE_RECORD_SIZE, write_records: 1 });
     }
 
     /// `no_limits` leaves every dimension unlimited: it is what the execution-spec gate installs
@@ -597,14 +588,12 @@ mod tests {
     #[test]
     fn test_limit_usage_arithmetic_saturates() {
         let max = LimitUsage { data_size: u64::MAX, write_records: u64::MAX };
-        assert_eq!(max.saturating_add(WRITE_RECORD), max);
-        assert_eq!(LimitUsage::ZERO.saturating_sub(WRITE_RECORD), LimitUsage::ZERO);
-        assert_eq!(WRITE_RECORD.times(3), LimitUsage { data_size: 120, write_records: 3 });
-        assert_eq!(WRITE_RECORD.times(u64::MAX).data_size, u64::MAX);
-        assert_eq!(
-            WRITE_RECORD.saturating_add(WRITE_RECORD).saturating_sub(WRITE_RECORD),
-            WRITE_RECORD
-        );
+        let record = LimitUsage { data_size: WRITE_RECORD_SIZE, write_records: 1 };
+        assert_eq!(max.saturating_add(record), max);
+        assert_eq!(LimitUsage::ZERO.saturating_sub(record), LimitUsage::ZERO);
+        assert_eq!(record.times(3), LimitUsage { data_size: 120, write_records: 3 });
+        assert_eq!(record.times(u64::MAX).data_size, u64::MAX);
+        assert_eq!(record.saturating_add(record).saturating_sub(record), record);
     }
 
     /// `within_limit` follows the variant, and is the exact complement of `exceeded_limit`.

@@ -248,14 +248,12 @@ fn take_back_bump<DB: Database, ExtEnvs: ExternalEnvTypes>(
     gas: &mut Gas,
     started: &Started,
 ) -> Result<(), ContextError<DB::Error>> {
-    let changed = ctx.journal_ref().is_changed(started.signer);
+    let changed = ctx.accounts().is_changed(started.signer);
     ctx.journal_mut().load_account_mut(started.signer)?.data.set_nonce(started.signer_nonce);
-    if changed && !ctx.journal_ref().is_changed(started.signer) {
-        ctx.ledger_mut().take_back_record();
-        // A stop the record left the call, by putting it over a limit, goes with it: the call is
-        // held to its limits again without the record.
-        let check = ctx.ledger().check();
-        ctx.additional_limit.hold_running_frame(check);
+    if changed && !ctx.accounts().is_changed(started.signer) {
+        // A stop the record would leave the call, by putting it over a limit, goes with it: the
+        // call is held to its limits without the record once it is settled.
+        ctx.additional_limit.take_back_record(gas.tracker_mut());
         gas.refill_history(started.signer_record_charge);
     }
     Ok(())
