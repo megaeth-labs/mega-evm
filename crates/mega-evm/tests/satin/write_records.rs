@@ -33,12 +33,17 @@ use revm::{
         CALL, CALLDATASIZE, CALLER as CALLER_OPCODE, CALLVALUE, CREATE, DELEGATECALL, GAS, INVALID,
         JUMPDEST, JUMPI, LOG2, POP, PUSH0, PUSH1, RETURN, REVERT, SELFDESTRUCT, SSTORE, STOP,
     },
-    interpreter::{interpreter::EthInterpreter, interpreter_types::Jumps, Interpreter},
+    context::ContextTr,
+    interpreter::{
+        interpreter::EthInterpreter, interpreter_types::Jumps, CallInputs, CallOutcome,
+        CreateInputs, CreateOutcome, Interpreter,
+    },
     Database, Inspector,
 };
 
 use crate::common::{
-    account_state_gas, call, call_with_data, context, create, history, run, value_call_room,
+    account_state_gas, call, call_with_data, context, create, deposit, history, run,
+    value_call_room,
 };
 
 const CALLER: Address = address!("0000000000000000000000000000000000100000");
@@ -1401,6 +1406,121 @@ fn test_an_inspected_runtime_out_of_gas_unwinds_as_a_plain_one() {
     assert_eq!(inspected.gas, plain.gas);
     assert_eq!(inspected.usage, plain.usage);
     assert_eq!(inspected.state, plain.state);
+}
+
+/* ---------- what a transaction changed before its own frame ---------- */
+
+/// The accounts the transaction changed from what it loaded as its own frame starts, each with
+/// whether its nonce is among what changed: what the journal holds at the first frame's `call` or
+/// `create` hook.
+#[derive(Default)]
+struct ChangedBeforeTheFirstFrame(Option<Vec<(Address, bool)>>);
+
+impl ChangedBeforeTheFirstFrame {
+    fn note<DB: Database>(&mut self, context: &MegaContext<DB>) {
+        if self.0.is_some() {
+            return;
+        }
+        let journal = context.journal_ref();
+        let mut changed: Vec<(Address, bool)> = journal
+            .state
+            .iter()
+            .filter(|(_, account)| account.transaction_id == journal.transaction_id)
+            .filter_map(|(address, account)| {
+                let (now, loaded) = (&account.info, account.original_info());
+                let nonce = now.nonce != loaded.nonce;
+                (nonce || now.balance != loaded.balance || now.code_hash != loaded.code_hash)
+                    .then_some((*address, nonce))
+            })
+            .collect();
+        changed.sort_unstable();
+        self.0 = Some(changed);
+    }
+}
+
+impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for ChangedBeforeTheFirstFrame {
+    fn call(&mut self, context: &mut MegaContext<DB>, _: &mut CallInputs) -> Option<CallOutcome> {
+        self.note(context);
+        None
+    }
+
+    fn create(
+        &mut self,
+        context: &mut MegaContext<DB>,
+        _: &mut CreateInputs,
+    ) -> Option<CreateOutcome> {
+        self.note(context);
+        None
+    }
+}
+
+/// Before its own frame a transaction has changed no account but its sender and the EIP-7702
+/// authorities it applied, whose records the body and the authorities' count hold, and an account
+/// it changed there differs by its nonce — but for a creation's sender, whose own creation bumps
+/// it later, and which no value goes to. So the transaction's own value, which the history charged
+/// before execution prices as the records it makes, takes no record back: its recipient is an
+/// account the transaction had not changed, an authority whose nonce no transfer returns, or the
+/// sender itself, to which nothing moves. The frame's side builds on that, giving back no price
+/// for a record taken back; this holds it for every transaction shape, in the release build too.
+#[test]
+fn test_before_its_own_frame_a_transaction_changed_only_its_sender_and_authorities() {
+    let funded = || MemoryDatabase::default().account_balance(CALLER, U256::from(1_000));
+    let mut minted = deposit(call(CALLER, CONTRACT, U256::from(1), value_call_room()));
+    minted.0.deposit.mint = Some(5);
+    let one = U256::from(1);
+    for (case, db, tx, authorities, records_kept) in [
+        ("a value call", funded(), call(CALLER, CONTRACT, one, value_call_room()), vec![], 1),
+        (
+            "a value call to the sender",
+            funded(),
+            call(CALLER, CALLER, one, value_call_room()),
+            vec![],
+            0,
+        ),
+        (
+            "a creation",
+            funded(),
+            create(CALLER, Bytes::from_static(&[STOP]), value_call_room()),
+            vec![],
+            1,
+        ),
+        ("a deposit that mints and moves value", MemoryDatabase::default(), minted, vec![], 1),
+        (
+            "a value call to the authority it applies",
+            funded(),
+            authorizing_call(AUTHORITY_1, 1, &[(AUTHORITY_1, 0)]),
+            vec![AUTHORITY_1],
+            1,
+        ),
+        (
+            "a value call past the authority it applies",
+            funded(),
+            authorizing_call(CONTRACT, 1, &[(AUTHORITY_1, 0)]),
+            vec![AUTHORITY_1],
+            2,
+        ),
+    ] {
+        let recipient = tx.0.base.kind.to().copied();
+        let mut evm =
+            MegaEvm::new(context(db)).with_inspector(ChangedBeforeTheFirstFrame::default());
+        let outcome = evm.execute_transaction(tx).expect("the transaction is valid");
+        assert!(outcome.result.is_success(), "{case}: {:?}", outcome.result);
+        assert_eq!(outcome.usage.write_records, records_kept, "{case}");
+        let changed = evm.inspector().0.clone().expect("the first frame started");
+        for (account, by_nonce) in &changed {
+            assert!(
+                *account == CALLER || authorities.contains(account),
+                "{case}: {account} changed before the first frame: {changed:?}"
+            );
+            if Some(*account) == recipient && *account != CALLER {
+                assert!(by_nonce, "{case}: the recipient {account} differs by its nonce");
+            }
+        }
+        assert!(
+            authorities.iter().all(|authority| changed.contains(&(*authority, true))),
+            "{case}: every applied authority is changed, by its nonce: {changed:?}"
+        );
+    }
 }
 
 /* ---------- whose account a frame's writes find changed ---------- */

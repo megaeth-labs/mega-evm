@@ -395,8 +395,9 @@ impl AdditionalLimit {
     fn push_side(&mut self, depth: usize) {
         let charge = core::mem::replace(&mut self.pending_frame_charge, FrameCharge::NONE);
         let side = if depth == 0 {
-            // The transaction's own frame takes nothing back: its recipient, when it writes one,
-            // is an account the transaction had not changed.
+            // The transaction's own frame takes no record back: before it, the transaction changed
+            // only its sender, to which no value moves, and the authorities it applied, which
+            // differ by a nonce no transfer returns.
             let records = self.pending_top_level_records.take();
             StartSide::new(depth, self.top_level_write_record_gas, 0, false, records)
         } else {
