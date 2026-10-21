@@ -1151,6 +1151,8 @@ where
                 MegaHaltReason::Base(reason)
             }
         });
+        // The run ends here on the result path; `catch_error` is the other end.
+        evm.ctx().on_tx_end();
         // revm 40 attaches journal logs to Success / Revert / Halt alike. Pre-revm-40, Halt had no
         // logs field, so a failed receipt was structurally empty. Restore that invariant at the
         // single result seam shared by transact, inspect, and system-call entry points. Status,
@@ -1163,7 +1165,10 @@ where
         evm: &mut Self::Evm,
         error: Self::Error,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
-        let result = self.op.catch_error(evm, error)?;
+        let result = self.op.catch_error(evm, error);
+        // The run ends here on the error path, with a result (a failed deposit) or without one.
+        evm.ctx().on_tx_end();
+        let result = result?;
         // Belt-and-braces: op-revm already reverts the journal to the default checkpoint before
         // building FailedDeposit, so logs are already empty. Clearing is idempotent.
         Ok(strip_logs_if_not_success(result.map_haltreason(MegaHaltReason::Base)))

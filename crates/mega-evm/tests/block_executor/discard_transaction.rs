@@ -13,24 +13,26 @@
 //! the `catch_unwind` harness have no place in the other executor tests.
 
 use std::{
+    backtrace::Backtrace,
     convert::Infallible,
     panic::{catch_unwind, AssertUnwindSafe},
 };
 
-use alloy_consensus::{transaction::Recovered, Signed, TxLegacy};
+use alloy_consensus::{transaction::Recovered, Sealed, Signed, TxLegacy};
 use alloy_evm::{EvmEnv, EvmFactory};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, ErrorInjectingDatabase, InjectedDbError, MemoryDatabase},
-    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvm, MegaEvmFactory,
+    BlockLimits, LimitUsage, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvm, MegaEvmFactory,
     MegaHardforkConfig, MegaSpecId, MegaTransactionOutcome, MegaTxEnvelope, TestExternalEnvs,
-    ORACLE_CONTRACT_ADDRESS,
+    MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
 };
+use op_alloy_consensus::TxDeposit;
 use op_revm::constants::BASE_FEE_RECIPIENT;
 use revm::{
     bytecode::opcode::{BALANCE, CALL, GAS, MSIZE, MSTORE, POP, RETURN, TIMESTAMP},
-    context::{BlockEnv, ContextError, ContextTr},
+    context::{result::ExecutionResult, BlockEnv, ContextError, ContextTr},
     database::State,
     inspector::NoOpInspector,
     primitives::{StorageKey, StorageValue},
@@ -54,6 +56,10 @@ const ORACLE_CAP: u64 = 1_000_000;
 const PANICKING_SENDER: Address = address!("2000000000000000000000000000000000000001");
 /// Sender of the transaction executed after the panic.
 const NEXT_SENDER: Address = address!("2000000000000000000000000000000000000002");
+/// The sender of the probe transaction of the panic-site sweep; nothing else uses its nonce.
+const PROBE_SENDER: Address = address!("2000000000000000000000000000000000000003");
+/// A depositor without balance, whose deposit with a value fails validation.
+const POOR_DEPOSITOR: Address = address!("2000000000000000000000000000000000000004");
 /// The account whose database read panics. It is never created, so every touch reaches the
 /// database.
 const PANICKING_ACCOUNT: Address = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
@@ -74,6 +80,11 @@ const READ_TIMESTAMP: Address = address!("10000000000000000000000000000000000000
 const CALL_ORACLE_THEN_PANIC: Address = address!("1000000000000000000000000000000000000008");
 /// Contract that writes a storage slot and stops.
 const WRITE_SLOT: Address = address!("1000000000000000000000000000000000000007");
+/// `TIMESTAMP; POP; BALANCE(FAILING_ACCOUNT)`: detains compute gas, then fails with an error.
+const READ_TIMESTAMP_THEN_FAIL: Address = address!("1000000000000000000000000000000000000009");
+/// An account whose read fails with an error once the test arms it, for a transaction that
+/// must fail without panicking.
+const FAILING_ACCOUNT: Address = address!("cccccccccccccccccccccccccccccccccccccccc");
 /// Contract that returns the memory size it starts with.
 const RETURN_MSIZE: Address = address!("1000000000000000000000000000000000000003");
 /// Contract that reads the block beneficiary's balance.
@@ -88,13 +99,18 @@ const CALL_RETURN_MSIZE: Address = address!("10000000000000000000000000000000000
 struct PanickingDatabase {
     inner: ErrorInjectingDatabase,
     panic_on_account: Address,
+    /// The call stack of the last injected panic, for the tests that check where it landed.
+    last_panic_backtrace: Option<String>,
 }
 
 impl Database for PanickingDatabase {
     type Error = InjectedDbError;
 
     fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, InjectedDbError> {
-        assert!(address != self.panic_on_account, "injected panic reading account {address}");
+        if address == self.panic_on_account {
+            self.last_panic_backtrace = Some(Backtrace::force_capture().to_string());
+            panic!("injected panic reading account {address}");
+        }
         self.inner.basic(address)
     }
 
@@ -155,6 +171,7 @@ fn database() -> PanickingDatabase {
     let mut db = MemoryDatabase::default();
     db.set_account_balance(PANICKING_SENDER, U256::from(1_000_000_000_000_000u64));
     db.set_account_balance(NEXT_SENDER, U256::from(1_000_000_000_000_000u64));
+    db.set_account_balance(PROBE_SENDER, U256::from(1_000_000_000_000_000u64));
     let residue_then_panic =
         BytecodeBuilder::default().mstore(0, [0xff; 32]).sstore(U256::ZERO, U256::from(1));
     let residue_then_panic = read_balance(residue_then_panic, BENEFICIARY);
@@ -193,6 +210,12 @@ fn database() -> PanickingDatabase {
         READ_TIMESTAMP,
         BytecodeBuilder::default().append(TIMESTAMP).append(POP).stop().build(),
     );
+    db.set_account_code(
+        READ_TIMESTAMP_THEN_FAIL,
+        read_balance(BytecodeBuilder::default().append(TIMESTAMP).append(POP), FAILING_ACCOUNT)
+            .stop()
+            .build(),
+    );
     let call_oracle = call(BytecodeBuilder::default(), ORACLE_CONTRACT_ADDRESS);
     db.set_account_code(
         CALL_ORACLE_THEN_PANIC,
@@ -205,6 +228,7 @@ fn database() -> PanickingDatabase {
     PanickingDatabase {
         inner: ErrorInjectingDatabase::new(db),
         panic_on_account: PANICKING_ACCOUNT,
+        last_panic_backtrace: None,
     }
 }
 
@@ -281,12 +305,28 @@ fn legacy_tx(sender: Address, nonce: u64, to: Address, input: Bytes) -> Recovere
 /// charged size, so its L1 cost is well above the cost of the empty-calldata transaction that
 /// follows it.
 fn panicking_tx(to: Address) -> Recovered<MegaTxEnvelope> {
-    let input = (0..1024u32).map(|i| (i.wrapping_mul(7919) % 251) as u8).collect::<Vec<_>>();
-    legacy_tx(PANICKING_SENDER, 0, to, input.into())
+    legacy_tx(PANICKING_SENDER, 0, to, panicking_input())
 }
 
 fn next_tx(to: Address) -> Recovered<MegaTxEnvelope> {
     legacy_tx(NEXT_SENDER, 0, to, Bytes::new())
+}
+
+/// A deposit from `from`. The block executor reads the depositor's account before the EVM runs
+/// the transaction, so a deposit from the panicking account unwinds before `on_new_tx`.
+fn deposit_tx(from: Address, to: Address, value: U256, input: Bytes) -> Recovered<MegaTxEnvelope> {
+    let tx = TxDeposit {
+        source_hash: B256::ZERO,
+        from,
+        to: TxKind::Call(to),
+        mint: 0,
+        value,
+        gas_limit: TX_GAS_LIMIT,
+        is_system_transaction: false,
+        input,
+    };
+    let sealed = Sealed::new_unchecked(tx, B256::ZERO);
+    Recovered::new_unchecked(MegaTxEnvelope::Deposit(sealed), from)
 }
 
 /// Executes `tx` on `executor`, asserting that the injected database panic unwinds out of the
@@ -304,12 +344,34 @@ fn reference_outcome(spec: MegaSpecId, tx: &Recovered<MegaTxEnvelope>) -> MegaTr
     executor.execute_mega_transaction(tx).expect("reference tx executes").inner
 }
 
+fn detained_cap(executor: &Executor<'_>) -> u64 {
+    executor.evm.ctx.additional_limit.borrow().detained_compute_gas_limit()
+}
+
+fn usage(executor: &Executor<'_>) -> LimitUsage {
+    executor.evm.ctx.additional_limit.borrow().get_usage()
+}
+
+/// The calldata of every panicking transaction: large enough that the data-size usage its
+/// `on_new_tx` charges differs from whatever the preceding transaction left.
+fn panicking_input() -> Bytes {
+    (0..1024u32).map(|i| (i.wrapping_mul(7919) % 251) as u8).collect::<Vec<_>>().into()
+}
+
 fn assert_same_outcome(actual: &MegaTransactionOutcome, reference: &MegaTransactionOutcome) {
-    assert_eq!(actual.result_and_state, reference.result_and_state);
-    assert_eq!(actual.data_size, reference.data_size);
-    assert_eq!(actual.kv_updates, reference.kv_updates);
-    assert_eq!(actual.compute_gas_used, reference.compute_gas_used);
-    assert_eq!(actual.state_growth_used, reference.state_growth_used);
+    assert_same_outcome_in(actual, reference, "");
+}
+
+fn assert_same_outcome_in(
+    actual: &MegaTransactionOutcome,
+    reference: &MegaTransactionOutcome,
+    row: &str,
+) {
+    assert_eq!(actual.result_and_state, reference.result_and_state, "{row}: result and state");
+    assert_eq!(actual.data_size, reference.data_size, "{row}: data size");
+    assert_eq!(actual.kv_updates, reference.kv_updates, "{row}: kv updates");
+    assert_eq!(actual.compute_gas_used, reference.compute_gas_used, "{row}: compute gas");
+    assert_eq!(actual.state_growth_used, reference.state_growth_used, "{row}: state growth");
 }
 
 /// Everything the panicked transaction left behind is gone: its storage write and nonce bump stay
@@ -444,9 +506,6 @@ fn test_discard_transaction_clears_a_stashed_context_error() {
 fn test_discard_transaction_restores_the_detained_limit_before_rex1() {
     let mut state = State::builder().with_database(database()).build();
     let mut executor = new_executor(&mut state, MegaSpecId::REX);
-    let detained_cap = |executor: &Executor<'_>| {
-        executor.evm.ctx.additional_limit.borrow().detained_compute_gas_limit()
-    };
     assert!(detained_cap(&executor) > DETENTION_CAP);
 
     // A completed transaction's detention is what the panicked one starts under.
@@ -473,6 +532,338 @@ fn test_discard_transaction_restores_the_detained_limit_before_rex1() {
         DETENTION_CAP,
         "the next tx must run under the inherited cap"
     );
+}
+
+/// The block executor reads a deposit's sender before the EVM runs the transaction, so a panic in
+/// that read lands before the transaction's `on_new_tx`. The discard must still restore the cap
+/// the last completed transaction left, not the one that transaction started under.
+#[test]
+fn test_discard_transaction_restores_the_detained_limit_when_the_panic_precedes_on_new_tx() {
+    let mut state = State::builder().with_database(database()).build();
+    let mut executor = new_executor(&mut state, MegaSpecId::REX);
+    assert!(detained_cap(&executor) > DETENTION_CAP);
+
+    let detaining_tx = legacy_tx(NEXT_SENDER, 0, READ_TIMESTAMP, Bytes::new());
+    let outcome = executor.execute_mega_transaction(&detaining_tx).expect("detaining tx executes");
+    executor.commit_execution_outcome(outcome).expect("detaining tx commits");
+    assert_eq!(detained_cap(&executor), DETENTION_CAP);
+
+    execute_panicking(
+        &mut executor,
+        &deposit_tx(PANICKING_ACCOUNT, RETURN_MSIZE, U256::ZERO, Bytes::new()),
+    );
+    assert_eq!(detained_cap(&executor), DETENTION_CAP, "the panic preceded any change");
+
+    executor.discard_transaction();
+    assert_eq!(
+        detained_cap(&executor),
+        DETENTION_CAP,
+        "the cap must be the inherited one, not the one the detaining tx started under"
+    );
+
+    let next_tx = legacy_tx(NEXT_SENDER, 1, RETURN_MSIZE, Bytes::new());
+    let outcome = executor.execute_mega_transaction(&next_tx).expect("next tx executes");
+    assert!(outcome.result_and_state.result.is_success(), "{:?}", outcome.result_and_state.result);
+    assert_eq!(
+        detained_cap(&executor),
+        DETENTION_CAP,
+        "the next tx must run under the inherited cap"
+    );
+}
+
+/// Before REX1 the cap detained by a transaction that then fails with an error carries over to
+/// the next transaction all the same. A discard after a panic that precedes `on_new_tx` must
+/// restore that cap, not the one the failed transaction started under.
+#[test]
+fn test_discard_transaction_restores_the_detained_limit_a_failed_transaction_left_before_rex1() {
+    let mut state = State::builder().with_database(database()).build();
+    let mut executor = new_executor(&mut state, MegaSpecId::REX);
+    assert!(detained_cap(&executor) > DETENTION_CAP);
+
+    executor.evm.db_mut().database.inner.fail_on_account = Some(FAILING_ACCOUNT);
+    let failing_tx = legacy_tx(NEXT_SENDER, 0, READ_TIMESTAMP_THEN_FAIL, Bytes::new());
+    executor.execute_mega_transaction(&failing_tx).expect_err("the account read fails");
+    executor.evm.db_mut().database.inner.fail_on_account = None;
+    assert_eq!(
+        detained_cap(&executor),
+        DETENTION_CAP,
+        "premise: before REX1 a failed tx's detention carries over"
+    );
+
+    execute_panicking(
+        &mut executor,
+        &deposit_tx(PANICKING_ACCOUNT, RETURN_MSIZE, U256::ZERO, Bytes::new()),
+    );
+    executor.discard_transaction();
+    assert_eq!(
+        detained_cap(&executor),
+        DETENTION_CAP,
+        "the cap must be the one the failed tx left, not the one it started under"
+    );
+
+    // The failed tx was not committed, so its nonce is still free.
+    let next_tx = legacy_tx(NEXT_SENDER, 0, RETURN_MSIZE, Bytes::new());
+    let outcome = executor.execute_mega_transaction(&next_tx).expect("next tx executes");
+    assert!(outcome.result_and_state.result.is_success(), "{:?}", outcome.result_and_state.result);
+    assert_eq!(
+        detained_cap(&executor),
+        DETENTION_CAP,
+        "the next tx must run under the inherited cap"
+    );
+}
+
+/// Where along `execute_mega_transaction` the injected panic lands, earliest first. Each site is
+/// a database read the fixture makes panic.
+#[derive(Clone, Copy, Debug)]
+enum PanicSite {
+    /// The block executor's depositor pre-read, before the EVM runs the transaction.
+    DepositorPreRead,
+    /// The system transaction's account inspection in the handler's `before_run`, which precedes
+    /// `on_new_tx` from REX5 on; before REX5 the system address is first read by the caller load
+    /// in pre-execution.
+    SystemTxPreRun,
+    /// The caller load in pre-execution, after `on_new_tx` and before any frame.
+    CallerLoad,
+    /// The load of the call target when the first frame is built.
+    TargetLoad,
+    /// A BALANCE read inside the contract, with a frame open.
+    MidExecution,
+    /// The beneficiary load in the post-execution reward, after the frames returned.
+    BeneficiaryReward,
+}
+
+impl PanicSite {
+    const ALL: [Self; 6] = [
+        Self::DepositorPreRead,
+        Self::SystemTxPreRun,
+        Self::CallerLoad,
+        Self::TargetLoad,
+        Self::MidExecution,
+        Self::BeneficiaryReward,
+    ];
+
+    /// The account whose read panics, and the transaction whose execution reads it there.
+    fn inject(self) -> (Address, Recovered<MegaTxEnvelope>) {
+        let input = panicking_input();
+        match self {
+            Self::DepositorPreRead => {
+                (PANICKING_ACCOUNT, deposit_tx(PANICKING_ACCOUNT, RETURN_MSIZE, U256::ZERO, input))
+            }
+            Self::SystemTxPreRun => (
+                MEGA_SYSTEM_ADDRESS,
+                legacy_tx(MEGA_SYSTEM_ADDRESS, 0, ORACLE_CONTRACT_ADDRESS, input),
+            ),
+            Self::CallerLoad => {
+                (PANICKING_ACCOUNT, legacy_tx(PANICKING_ACCOUNT, 0, RETURN_MSIZE, input))
+            }
+            Self::TargetLoad => {
+                (PANICKING_ACCOUNT, legacy_tx(PANICKING_SENDER, 0, PANICKING_ACCOUNT, input))
+            }
+            Self::MidExecution => {
+                (PANICKING_ACCOUNT, legacy_tx(PANICKING_SENDER, 0, RESIDUE_THEN_PANIC, input))
+            }
+            Self::BeneficiaryReward => {
+                (BENEFICIARY, legacy_tx(PANICKING_SENDER, 0, RETURN_MSIZE, input))
+            }
+        }
+    }
+
+    /// Whether the panic lands before the transaction's `on_new_tx`.
+    fn precedes_on_new_tx(self, spec: MegaSpecId) -> bool {
+        match self {
+            Self::DepositorPreRead => true,
+            Self::SystemTxPreRun => spec.is_enabled(MegaSpecId::REX5),
+            _ => false,
+        }
+    }
+
+    /// Whether the call stack of the injected panic is the one this site stands for.
+    fn landed_as_intended(self, spec: MegaSpecId, backtrace: &str) -> bool {
+        match self {
+            Self::DepositorPreRead => {
+                backtrace.contains("run_transaction_with_sizes") &&
+                    !backtrace.contains("MegaHandler")
+            }
+            Self::SystemTxPreRun if spec.is_enabled(MegaSpecId::REX5) => {
+                backtrace.contains("before_run")
+            }
+            Self::SystemTxPreRun | Self::CallerLoad => {
+                backtrace.contains("validate_against_state_and_deduct_caller")
+            }
+            Self::TargetLoad => {
+                backtrace.contains("frame_init") && !backtrace.contains("frame_run")
+            }
+            Self::MidExecution => backtrace.contains("frame_run"),
+            Self::BeneficiaryReward => backtrace.contains("reward_beneficiary"),
+        }
+    }
+}
+
+/// What the executor did before the panicking transaction.
+#[derive(Clone, Copy, Debug)]
+enum Preceding {
+    /// Nothing: the panicking transaction is the first one.
+    Nothing,
+    /// A TIMESTAMP transaction, executed and committed: before REX1 it detains the next one.
+    CommittedDetaining,
+    /// The same, executed but not committed, as when an embedder skips a transaction.
+    UncommittedDetaining,
+    /// A TIMESTAMP transaction that then failed with a database error: before REX1 its detention
+    /// carries over all the same.
+    FailedDetaining,
+    /// A deposit that failed validation: the `FailedDeposit` halt `catch_error` builds, committed.
+    FailedDeposit,
+}
+
+impl Preceding {
+    const ALL: [Self; 5] = [
+        Self::Nothing,
+        Self::CommittedDetaining,
+        Self::UncommittedDetaining,
+        Self::FailedDetaining,
+        Self::FailedDeposit,
+    ];
+
+    /// Whether the preceding transaction got as far as loading the beneficiary, which leaves it in
+    /// the state cache where no later read of it can reach the panicking database. A database
+    /// error inside a frame is deferred to the result, so that transaction still runs its
+    /// post-execution and the beneficiary reward loads it. A failed deposit reaches post-execution
+    /// too: before REX6 the reward skips deposits, from REX6 the fee-recipient snapshot taken
+    /// there loads the beneficiary first.
+    fn caches_beneficiary(self, spec: MegaSpecId) -> bool {
+        match self {
+            Self::Nothing => false,
+            Self::CommittedDetaining | Self::UncommittedDetaining | Self::FailedDetaining => true,
+            Self::FailedDeposit => spec.is_enabled(MegaSpecId::REX6),
+        }
+    }
+
+    fn apply(self, executor: &mut Executor<'_>) {
+        match self {
+            Self::Nothing => {}
+            Self::CommittedDetaining => {
+                let tx = legacy_tx(NEXT_SENDER, 0, READ_TIMESTAMP, Bytes::new());
+                let outcome =
+                    executor.execute_mega_transaction(&tx).expect("detaining tx executes");
+                executor.commit_execution_outcome(outcome).expect("detaining tx commits");
+            }
+            Self::UncommittedDetaining => {
+                let tx = legacy_tx(NEXT_SENDER, 0, READ_TIMESTAMP, Bytes::new());
+                executor.execute_mega_transaction(&tx).expect("detaining tx executes");
+            }
+            Self::FailedDetaining => {
+                executor.evm.db_mut().database.inner.fail_on_account = Some(FAILING_ACCOUNT);
+                let tx = legacy_tx(NEXT_SENDER, 0, READ_TIMESTAMP_THEN_FAIL, Bytes::new());
+                executor.execute_mega_transaction(&tx).expect_err("the account read fails");
+                executor.evm.db_mut().database.inner.fail_on_account = None;
+            }
+            Self::FailedDeposit => {
+                let tx = deposit_tx(POOR_DEPOSITOR, RETURN_MSIZE, U256::from(1), Bytes::new());
+                let outcome = executor
+                    .execute_mega_transaction(&tx)
+                    .expect("a failed deposit halts rather than errors");
+                assert!(
+                    matches!(outcome.result_and_state.result, ExecutionResult::Halt { .. }),
+                    "{:?}",
+                    outcome.result_and_state.result
+                );
+                executor.commit_execution_outcome(outcome).expect("the failed deposit commits");
+            }
+        }
+    }
+}
+
+/// The discard is right wherever the panic lands and whatever the preceding transaction did:
+/// afterwards the probe transaction behaves exactly as on an executor with the same history and no
+/// panicked transaction, and the detained cap is the one that history left. The rows are
+/// (spec) × (what preceded) × (panic site). Each row also checks that the injected panic landed at
+/// the intended stage, so a site that silently moved fails instead of passing vacuously. The
+/// beneficiary-reward site is unreachable once a preceding transaction has put the beneficiary in
+/// the state cache; those rows are skipped, and the skip set is asserted.
+#[test]
+fn test_discard_transaction_is_right_for_every_panic_site_and_preceding_outcome() {
+    let probe = legacy_tx(PROBE_SENDER, 0, RETURN_MSIZE, Bytes::new());
+    let specs = [MegaSpecId::REX, MegaSpecId::REX5, MegaSpecId::REX6];
+    let (mut rows, mut skipped) = (0, 0);
+    for spec in specs {
+        for preceding in Preceding::ALL {
+            for site in PanicSite::ALL {
+                let row = format!("{spec:?} / {preceding:?} / {site:?}");
+
+                let mut reference_state = State::builder().with_database(database()).build();
+                let mut reference = new_executor(&mut reference_state, spec);
+                preceding.apply(&mut reference);
+                let cap_before = detained_cap(&reference);
+                let expected = reference
+                    .execute_mega_transaction(&probe)
+                    .expect("the probe executes on the reference");
+                let cap_after = detained_cap(&reference);
+
+                let mut state = State::builder().with_database(database()).build();
+                let mut executor = new_executor(&mut state, spec);
+                preceding.apply(&mut executor);
+                let usage_before = usage(&executor);
+                let (panic_on, tx) = site.inject();
+                let cached = executor.evm.db_mut().cache.accounts.contains_key(&panic_on);
+                assert_eq!(
+                    cached,
+                    matches!(site, PanicSite::BeneficiaryReward) &&
+                        preceding.caches_beneficiary(spec),
+                    "{row}: the panicking account is unexpectedly (not) in the state cache"
+                );
+                if cached {
+                    skipped += 1;
+                    continue;
+                }
+                rows += 1;
+                executor.evm.db_mut().database.panic_on_account = panic_on;
+                execute_panicking(&mut executor, &tx);
+                executor.evm.db_mut().database.panic_on_account = PANICKING_ACCOUNT;
+
+                // The injection landed where the row says it does: the call stack of the panic
+                // names the stage, and the trackers show whether `on_new_tx` ran.
+                let backtrace = executor
+                    .evm
+                    .db_mut()
+                    .database
+                    .last_panic_backtrace
+                    .take()
+                    .expect("the injected panic captured its call stack");
+                assert!(
+                    site.landed_as_intended(spec, &backtrace),
+                    "{row}: the panic landed elsewhere:\n{backtrace}"
+                );
+                let usage_after = usage(&executor);
+                assert_eq!(
+                    usage_after.data_size == usage_before.data_size,
+                    site.precedes_on_new_tx(spec),
+                    "{row}: the panic did not land on the intended side of on_new_tx"
+                );
+
+                executor.discard_transaction();
+                assert_eq!(detained_cap(&executor), cap_before, "{row}: the cap after the discard");
+                let cleared = usage(&executor);
+                assert_eq!(
+                    (
+                        cleared.data_size,
+                        cleared.kv_updates,
+                        cleared.compute_gas,
+                        cleared.state_growth
+                    ),
+                    (0, 0, 0, 0),
+                    "{row}: the usage after the discard"
+                );
+
+                let actual = executor
+                    .execute_mega_transaction(&probe)
+                    .expect("the probe executes after the discard");
+                assert_same_outcome_in(&actual, &expected, &row);
+                assert_eq!(detained_cap(&executor), cap_after, "{row}: the cap after the probe");
+            }
+        }
+    }
+    assert_eq!(rows + skipped, specs.len() * Preceding::ALL.len() * PanicSite::ALL.len());
+    assert_eq!(skipped, 3 + 3 + 4, "one beneficiary row per caching history per spec");
 }
 
 /// A transaction that fails with an error after its frame committed into the journal (a database

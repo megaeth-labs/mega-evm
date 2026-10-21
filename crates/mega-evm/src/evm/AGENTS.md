@@ -22,6 +22,7 @@ MegaEVM execution core that wraps revm/op-revm with MegaETH instruction tables, 
 - `MegaEvm` methods read aggregate resource usage from `additional_limit` after execution.
 - Keep inspector and non-inspector paths behaviorally aligned: `inspect_tx` is overridden in `interfaces.rs` to finalize the journal on an error, as `transact` does.
 - A transaction that unwinds with a panic skips the handler's cleanup; `MegaEvm::discard_tx` (`mod.rs`) is the embedder's reset for that case and `MegaContext::discard_tx` (`context.rs`) its `MegaETH` half. A new per-transaction field on `MegaContext` must be reset there unless every transaction overwrites it before reading it.
+- State the next transaction inherits (the pre-REX1 detained compute gas limit) is recorded by `MegaContext::on_tx_end`, which the handler runs at the end of every run (`execution_result` and `catch_error`), so a discard restores what the previous transaction left even when the panic landed before `on_new_tx`.
 
 ## WHERE TO LOOK
 - New spec opcode delta: `instructions.rs` (`mini_rex`, `rex`, `rex2`, `rex3`, `rex4`, `rex5`, `rex6` tables; `rex6` aliases its predecessor, expressing its deltas as `is_enabled` dispatch inside the shared handlers).

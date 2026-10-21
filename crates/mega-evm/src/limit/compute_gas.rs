@@ -38,11 +38,16 @@ pub(crate) struct ComputeGasTracker {
     /// The effective compute gas limit, which may be dynamically lowered by gas detention
     /// (volatile data access). Always <= `frame_tracker.tx_limit()`.
     detained_limit: u64,
-    /// `detained_limit` as it stood when the current transaction started, restored by
-    /// [`Self::discard`]. Before REX1 the detained limit persists across transactions, so a
-    /// transaction that is discarded must hand the next one the limit it inherited, not the one
-    /// it lowered.
-    detained_limit_at_tx_start: u64,
+    /// `detained_limit` as the last completed run left it: what stood between transactions when
+    /// the current one began, restored by [`Self::discard`].
+    ///
+    /// Before REX1 the detained limit persists across transactions, so a transaction that is
+    /// discarded must hand the next one the limit it inherited, not the one it lowered. It is
+    /// recorded when a run ends ([`Self::after_tx_end`]) rather than when the next one starts,
+    /// because a panic can land before the next transaction's `reset` (the block executor reads a
+    /// deposit's sender before the EVM runs) and the discard must then still find the limit that
+    /// transaction inherited, not the one its predecessor started under.
+    inherited_detained_limit: u64,
     frame_tracker: FrameLimitTracker<()>,
 }
 
@@ -50,7 +55,7 @@ impl ComputeGasTracker {
     pub(crate) fn new(spec: MegaSpecId, tx_limit: u64) -> Self {
         Self {
             detained_limit: tx_limit,
-            detained_limit_at_tx_start: tx_limit,
+            inherited_detained_limit: tx_limit,
             frame_tracker: FrameLimitTracker::new(spec, tx_limit),
             rex1_enabled: spec.is_enabled(MegaSpecId::REX1),
             rex4_enabled: spec.is_enabled(MegaSpecId::REX4),
@@ -89,14 +94,23 @@ impl ComputeGasTracker {
     }
 
     /// Drops the usage of a transaction that did not run to completion and puts the detained
-    /// limit back to what it was when that transaction started.
+    /// limit back to the one that transaction inherited.
     ///
     /// The `reset` at the start of a transaction lets the detained limit carry over before REX1;
     /// a discarded transaction must not carry anything over, including a cap it lowered by
     /// accessing volatile data.
     pub(crate) fn discard(&mut self) {
         self.frame_tracker.reset();
-        self.detained_limit = self.detained_limit_at_tx_start;
+        self.detained_limit = self.inherited_detained_limit;
+    }
+
+    /// Records the detained limit as this run leaves it, for [`Self::discard`].
+    ///
+    /// Called when a run ends, with a result or with an error. A discard then puts the tracker
+    /// back to exactly this state, which is where the next transaction's `reset` would otherwise
+    /// have found it: kept as is before REX1, replaced by the transaction limit from REX1 on.
+    pub(crate) fn after_tx_end(&mut self) {
+        self.inherited_detained_limit = self.detained_limit;
     }
 
     /// Returns the remaining compute gas of the current call.
@@ -194,7 +208,6 @@ impl TxRuntimeLimit for ComputeGasTracker {
         if self.rex1_enabled {
             self.detained_limit = self.frame_tracker.tx_limit();
         }
-        self.detained_limit_at_tx_start = self.detained_limit;
     }
 
     /// Returns whether the compute gas limit has been exceeded.

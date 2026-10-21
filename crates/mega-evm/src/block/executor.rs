@@ -766,8 +766,9 @@ where
     /// receipts change only when an outcome is committed, and the depositor pre-read only fills
     /// the database cache. Everything that needs discarding is inside the EVM, so this forwards to
     /// [`MegaEvm::discard_tx`](crate::MegaEvm::discard_tx); see there for what is dropped and for
-    /// the embedder's contract. A transaction that returned an error needs no discarding, and
-    /// calling this after one finds nothing to drop.
+    /// the embedder's contract. A panic in the depositor pre-read, before the EVM has started the
+    /// transaction, is covered the same way. A transaction that returned an error needs no
+    /// discarding, and calling this after one finds nothing to drop.
     ///
     /// This covers a panic during execution. A panic during
     /// [`MegaBlockExecutor::commit_transaction_outcome`] is beyond its reach: the limiter's

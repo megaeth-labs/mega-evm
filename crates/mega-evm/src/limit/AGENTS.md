@@ -20,6 +20,7 @@ Resource metering subsystem for transaction and frame limits across compute gas,
 - Synthetic frame results still require empty-frame pushes for stack alignment.
 - Gas rescue must exclude any system-granted stipend gas.
 - Revert paths must roll back discardable usage for data/KV/state growth trackers.
+- `after_tx_end` records what the next transaction inherits (the pre-REX1 detained limit) at the end of every run; `discard` restores it for a transaction that panicked, however early the panic landed.
 
 ## ANTI-PATTERNS
 - Do not introduce per-frame gas grants without explicit unwind-on-return behavior.
