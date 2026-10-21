@@ -482,10 +482,10 @@ impl Creation {
 /// The creator's nonce adds no record either where the transfer that funded the address changed
 /// the creator already.
 ///
-/// The caller pays the created account's history at the opcode, which cannot tell the address a
-/// `CREATE2` lands on, and gets it back when the creation recorded nothing — and, with everything
-/// else the creation made, when it fails: the history the transaction pays is its body's and the
-/// records it keeps, at the prices in effect.
+/// The creating opcode charges its caller the created account's history only when the transaction
+/// had not changed the address, a `CREATE2`'s as a `CREATE`'s, and the creation's failure gives it
+/// back with everything else the creation made: the history the transaction pays is its body's and
+/// the records it keeps, at the prices in effect.
 ///
 /// Before, a creation recorded the account it creates whatever the address held: an address
 /// funded then created kept two records, and one paid by a destruction then created kept them with
