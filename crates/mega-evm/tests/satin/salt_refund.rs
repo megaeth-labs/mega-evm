@@ -431,6 +431,9 @@ fn charged_call_input(reservoir: u64) -> FrameInput {
         is_static: false,
         reservoir,
         charged_new_account_state_gas: true,
+        charged_start: Default::default(),
+        bytes_share: u64::MAX,
+        history_allowance: 0,
     }))
 }
 

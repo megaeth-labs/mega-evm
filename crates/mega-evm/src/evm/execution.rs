@@ -1497,6 +1497,9 @@ mod tests {
             scheme: CallScheme::Call,
             is_static: false,
             charged_new_account_state_gas: true,
+            charged_start: Default::default(),
+            bytes_share: u64::MAX,
+            history_allowance: 0,
         }))
     }
 
@@ -1532,6 +1535,9 @@ mod tests {
                 scheme: CallScheme::StaticCall,
                 is_static: true,
                 charged_new_account_state_gas: false,
+                charged_start: Default::default(),
+                bytes_share: u64::MAX,
+                history_allowance: 0,
             })),
         }
     }

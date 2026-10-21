@@ -998,6 +998,7 @@ mod tests {
                 &revm::context_interface::host::CompletedWrite::SelfDestruct {
                     address: from,
                     target: to,
+                    balance: U256::ZERO,
                     result: &SelfDestructResult { had_value: true, ..Default::default() },
                 },
             )

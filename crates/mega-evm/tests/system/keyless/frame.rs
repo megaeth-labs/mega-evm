@@ -47,6 +47,9 @@ fn call_frame(code: revm::state::Bytecode, data: Bytes, gas_limit: u64) -> Frame
             scheme: CallScheme::Call,
             is_static: false,
             charged_new_account_state_gas: false,
+            charged_start: Default::default(),
+            bytes_share: u64::MAX,
+            history_allowance: 0,
         })),
     }
 }

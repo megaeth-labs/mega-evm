@@ -57,6 +57,8 @@ Every named entry of the schedule, at the Osaka price, at the Amsterdam (glamste
 | max_refund_quotient | 5 | 5 | 5 |
 | tx_account_write_cost | 0 | 9000 | 9000 |
 | tx_create_access_cost | 0 | 12000 | 12000 |
+| call_history_allowance | 0 | 0 | 0 |
+| bytes_forward_percent | 100 | 100 | 100 |
 | code_deposit_history_gas | 0 | 0 | 88 |
 
 ## Measured transactions

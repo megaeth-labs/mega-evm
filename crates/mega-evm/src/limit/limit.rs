@@ -543,6 +543,9 @@ mod tests {
             is_static: false,
             reservoir: 0,
             charged_new_account_state_gas: false,
+            charged_start: Default::default(),
+            bytes_share: u64::MAX,
+            history_allowance: 0,
         }
     }
 

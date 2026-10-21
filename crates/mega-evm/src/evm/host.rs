@@ -378,7 +378,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
     /// once the forward is back: a failed charge recorded the gas left after the forward was
     /// taken, and a price that could not be computed failed before any charge.
     #[inline]
-    fn frame_starting(&mut self, start: &FrameStart, gas: &mut GasTracker) -> bool {
+    fn frame_starting(&mut self, start: &mut FrameStart, gas: &mut GasTracker) -> bool {
         let records = self.journal_ref().start_records(start);
         if !self.prices_history() {
             self.additional_limit.stage_frame_charge(records, 0, 0, false);

@@ -1444,7 +1444,12 @@ mod tests {
     fn test_a_destruction_counts_its_transfer_log_with_its_records() {
         let moved = SelfDestructResult { had_value: true, ..Default::default() };
         let destruction =
-            |target| CompletedWrite::SelfDestruct { address: CALLEE, target, result: &moved };
+            |target| CompletedWrite::SelfDestruct {
+                address: CALLEE,
+                target,
+                balance: alloy_primitives::U256::ZERO,
+                result: &moved,
+            };
         let mut logging = ledger(EvmTxRuntimeLimits::no_limits(), false, true, 0);
         logging.observe_destruction(RecordDelta { added: 2, taken: 0 });
         let (check, history) = commit(&mut logging, &destruction(TARGET));

@@ -693,7 +693,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextTr for MegaContext<DB, ExtE
     /// A keyless deployment's constructor that returns empty code for the deploy address is
     /// refused the same way, with empty revert data ([`keyless::refuses_empty_deposit`]).
     #[inline]
-    fn admit_code_deposit(&mut self, deposit: &CodeDeposit<'_>) -> Result<(), Bytes> {
+    fn admit_code_deposit(
+        &mut self,
+        deposit: &CodeDeposit<'_>,
+        _gas: &mut revm::context_interface::cfg::gas::GasTracker,
+    ) -> Result<(), Bytes> {
         let destroyed = self
             .journal_ref()
             .state

@@ -70,6 +70,9 @@ fn call_frame_init(depth: usize) -> FrameInit {
             is_static: false,
             reservoir: RESERVOIR,
             charged_new_account_state_gas: false,
+            charged_start: Default::default(),
+            bytes_share: u64::MAX,
+            history_allowance: 0,
         })),
     }
 }

@@ -75,6 +75,7 @@ pub fn synthetic_frame_result(
             address: None,
             charged_create_state_gas: inputs.charged_create_state_gas(),
             charged_state_gas_address: inputs.charged_state_gas_address(),
+            charged_start: Default::default(),
         }),
         FrameInput::Empty => unreachable!("a frame input always names a call or a creation"),
     }
@@ -95,6 +96,7 @@ pub fn synthetic_call_result(
         precompile_call_logs: Default::default(),
         charged_new_account_state_gas: inputs.charged_new_account_state_gas,
         charged_state_gas_address: inputs.target_address,
+        charged_start: Default::default(),
     })
 }
 
@@ -154,6 +156,9 @@ mod tests {
             is_static: false,
             reservoir,
             charged_new_account_state_gas: charged,
+            charged_start: Default::default(),
+            bytes_share: u64::MAX,
+            history_allowance: 0,
         }
     }
 

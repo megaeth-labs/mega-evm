@@ -126,7 +126,7 @@ pub(crate) fn write_effect(
 /// itself, which burns the balance on Satin's base spec.
 pub(crate) fn write_moves_value(write: &CompletedWrite<'_>) -> bool {
     match *write {
-        CompletedWrite::SelfDestruct { address, target, result } => {
+        CompletedWrite::SelfDestruct { address, target, result, .. } => {
             result.had_value && target != address
         }
         CompletedWrite::Sstore { .. } | CompletedWrite::Log { .. } => false,
@@ -165,7 +165,7 @@ mod tests {
     }
 
     fn selfdestruct(result: &SelfDestructResult, target: Address) -> CompletedWrite<'_> {
-        CompletedWrite::SelfDestruct { address: DESTRUCTED, target, result }
+        CompletedWrite::SelfDestruct { address: DESTRUCTED, target, balance: U256::ZERO, result }
     }
 
     const RECORD: (LimitUsage, LimitUsage) = (WRITE_RECORD, LimitUsage::ZERO);
