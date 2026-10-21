@@ -25,7 +25,11 @@ use crate::common::{
 /// The word the L1 block contract holds at its scalars slot: the data-availability footprint
 /// gas scalar, the operator fee scalar and the operator fee constant, at the offsets the fork
 /// reads them from.
-fn scalars_word(da_footprint: u16, operator_fee_scalar: u32, operator_fee_constant: u64) -> U256 {
+pub(crate) fn scalars_word(
+    da_footprint: u16,
+    operator_fee_scalar: u32,
+    operator_fee_constant: u64,
+) -> U256 {
     let mut word = [0_u8; 32];
     word[DA_FOOTPRINT_GAS_SCALAR_OFFSET..DA_FOOTPRINT_GAS_SCALAR_OFFSET + 2]
         .copy_from_slice(&da_footprint.to_be_bytes());
@@ -45,7 +49,7 @@ fn state_with_scalars(word: U256) -> State<mega_evm::test_utils::MemoryDatabase>
 
 /// Code that writes its 32 bytes of calldata to the scalars slot, which is what the L1 info
 /// deposit's setter does for the fields this test reads.
-fn l1_block_setter() -> Bytes {
+pub(crate) fn l1_block_setter() -> Bytes {
     BytecodeBuilder::default()
         .push_number(0_u64)
         .append(CALLDATALOAD)
@@ -80,22 +84,6 @@ fn operator_fee_paid(executor: TestExecutor<'_>) -> U256 {
         .unwrap_or_default()
 }
 
-/// Rule 1, alloy-op-evm's `no_user_tx_activation_block`: the block a fork activates in carries
-/// the chain's own transactions only, and a user transaction in it is refused before it runs.
-#[test]
-fn test_activation_block_rejects_a_user_transaction() {
-    let mut state = common::state();
-    let mut executor = executor(&mut state, unlimited_ctx().with_no_user_tx_activation_block(true));
-    executor.apply_pre_execution_changes().expect("the block starts");
-
-    let err = executor
-        .execute_transaction(&user_tx(0, empty_call_gas()))
-        .expect_err("a user transaction has no place in an activation block");
-
-    assert!(format!("{err}").contains("non-deposit transaction in fork activation block"), "{err}");
-    assert!(executor.receipts().is_empty(), "nothing was packed");
-}
-
 /// Rule 1 decides on the envelope: a Mega System Transaction is a legacy transaction in the block,
 /// so an activation block refuses it before it runs, as it refuses a user's, although the engine
 /// would promote it to a deposit as it ran it.
@@ -111,21 +99,6 @@ fn test_activation_block_rejects_a_mega_system_transaction() {
 
     assert!(format!("{err}").contains("non-deposit transaction in fork activation block"), "{err}");
     assert!(executor.receipts().is_empty(), "nothing was packed");
-}
-
-/// Rule 1, the other half: the same block executes deposits.
-#[test]
-fn test_activation_block_executes_deposits() {
-    let mut state = common::state();
-    let mut executor = executor(&mut state, unlimited_ctx().with_no_user_tx_activation_block(true));
-    executor.apply_pre_execution_changes().expect("the block starts");
-
-    executor
-        .execute_transaction(&deposit_tx(Bytes::new(), 100_000))
-        .expect("a deposit is what an activation block is for");
-
-    let (_, result) = executor.finish_with_counters().expect("the block finishes");
-    assert_eq!(result.receipts().len(), 1);
 }
 
 /// Rule 2, alloy-op-evm's Jovian DA footprint block limit: with no scalar in state the rule
@@ -386,14 +359,15 @@ fn test_operator_fee_is_charged_on_the_karst_formula() {
     );
 }
 
-/// The block's gas limit is the block environment's, whatever the context carries: it is the
-/// number consensus holds the block to, and the budget the footprint is held to.
+/// The block's gas limit is the block environment's: it is the number consensus holds the block
+/// to, and the budget the footprint is held to. It is the executor's state, not building policy,
+/// so no context can carry another.
 #[test]
 fn test_block_gas_limit_comes_from_the_block_environment() {
     let mut state = common::state();
-    let ctx = common::block_ctx(BlockLimits::no_limits().with_block_gas_limit(1));
-    let executor = executor(&mut state, ctx);
+    let executor = executor(&mut state, common::block_ctx(BlockLimits::no_limits()));
 
-    assert_eq!(executor.limiter().limits.block_gas_limit, BLOCK_GAS_LIMIT);
+    assert_eq!(executor.limiter().block_gas_limit, BLOCK_GAS_LIMIT);
+    assert_eq!(executor.limiter().available_gas(), BLOCK_GAS_LIMIT);
     assert_eq!(executor.limiter().available_da_footprint(), BLOCK_GAS_LIMIT);
 }

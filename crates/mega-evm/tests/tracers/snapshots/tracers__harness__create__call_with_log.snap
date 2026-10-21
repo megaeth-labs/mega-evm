@@ -1,0 +1,14 @@
+---
+source: crates/mega-evm/tests/tracers/harness.rs
+expression: "&redacted(&traced.call_frame(true))"
+---
+{
+  "from": "0x0000000000000000000000000000000000400000",
+  "gas": "[gas]",
+  "gasUsed": "[gas]",
+  "input": "0x600361000b5f3960035ff35f5ff3",
+  "output": "0x5f5ff3",
+  "to": "0x84b48846131a217635c4abd490c5e11486253fd9",
+  "type": "CREATE",
+  "value": "0x0"
+}

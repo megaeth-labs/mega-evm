@@ -15,12 +15,12 @@
 //! | the block beneficiary's account | `BALANCE`, `SELFBALANCE`, `EXTCODESIZE`, `EXTCODECOPY`, `EXTCODEHASH`, the four calls (and the EIP-7702 delegate they follow), `SELFDESTRUCT` as either end; a transaction whose sender or recipient is the beneficiary or whose recipient delegates to it, an applied EIP-7702 authority that is, and a keyless deployment's signer that is | [`block_env_access_compute_gas_limit`](crate::EvmTxRuntimeLimits::block_env_access_compute_gas_limit) |
 //! | the Oracle's storage | `SLOAD` in the Oracle's own frame | [`oracle_access_compute_gas_limit`](crate::EvmTxRuntimeLimits::oracle_access_compute_gas_limit) |
 //!
-//! The caps are runtime limits ([`EvmTxRuntimeLimits`](crate::EvmTxRuntimeLimits)): the spec's,
+//! The caps are runtime limits ([`EvmTxRuntimeLimits`](crate::EvmTxRuntimeLimits)), fixed per spec
+//! ([`ProtocolLimits::for_spec`](crate::ProtocolLimits::for_spec)): for Satin
 //! [`BLOCK_ENV_ACCESS_COMPUTE_GAS`](crate::constants::BLOCK_ENV_ACCESS_COMPUTE_GAS) and
-//! [`ORACLE_ACCESS_COMPUTE_GAS`](crate::constants::ORACLE_ACCESS_COMPUTE_GAS), by default. In block
-//! execution they are the chain's ([`ProtocolLimits`](crate::ProtocolLimits)), which must be
-//! below [`MAX_TX_COMPUTE_GAS`](crate::constants::MAX_TX_COMPUTE_GAS), the most compute a
-//! transaction can spend; a standalone EVM's caller may set either. A cap of `u64::MAX` caps
+//! [`ORACLE_ACCESS_COMPUTE_GAS`](crate::constants::ORACLE_ACCESS_COMPUTE_GAS), both below
+//! [`MAX_TX_COMPUTE_GAS`](crate::constants::MAX_TX_COMPUTE_GAS), the most compute a transaction
+//! can spend; a tool or a test may set either on an EVM. A cap of `u64::MAX` caps
 //! nothing, and a transaction whose caps are both unlimited — under
 //! [`no_limits`](crate::EvmTxRuntimeLimits::no_limits), as the execution-spec gate runs — is not
 //! detained. `no_limits` turns detention off together with every other per-transaction limit: it is
@@ -50,8 +50,9 @@
 //! `SELFDESTRUCT`). Burned gas is counted as compute, so the stop comes earlier, never later.
 //! A value call's stipend is not compute either: compute is regular gas drawn from the
 //! transaction's own pools, and the stipend is gas nobody paid. A callee may run up to 2,300 gas
-//! on each value call's stipend, and each value call costs its caller at least 9,100 of compute,
-//! so the gas run after a read is at most about 25% more than the cap.
+//! on each value call's stipend, and a warm value call to an empty account counts 6,800 of compute
+//! (9,100, less the 2,300 stipend the callee leaves unspent and returns to its caller), so the
+//! gas run after a read is at most about 34% (2,300 / 6,800) more than the cap.
 //!
 //! A read sets a limit: the transaction's compute at the read plus the read's cap. The limit only
 //! goes down, so the most restrictive of several reads is the one that binds, whatever their
@@ -87,15 +88,19 @@
 //! # The stop
 //!
 //! A frame whose result carries a crossing record crossed the cap, not its own gas: undetained,
-//! the withheld part would have paid the charge. The frame stops the transaction the way every
-//! transaction-level limit does — it reverts with `MegaLimitExceeded` (kind: compute), the
-//! transaction is latched, no caller resumes, and the transaction settles like an EIP-8037 revert
-//! (see [`AdditionalLimit`](crate::AdditionalLimit)). The stopped frame's gas is put back to what
-//! it had before the charge that crossed, from the record: the charge is not made, the spendable
-//! part the frame had and the withheld part go back to the sender, and the transaction is billed
-//! its compute at the crossing, less than one charge short of the limit. The stop reports that
-//! compute as what was used, the same figure at every site a crossing is made: a frame that ran,
+//! the withheld part would have paid the charge. The frame is stopped the way every limit stops
+//! the frame that crosses it: it reverts alone with `MegaLimitExceeded` (kind: compute), and its
+//! caller resumes as after any revert (see [`AdditionalLimit`](crate::AdditionalLimit)). The
+//! stopped frame's gas is put back to what it had before the charge that crossed, from the record:
+//! the charge is not made, and the spendable part the frame had and the withheld part go back to
+//! its caller, and in the end to the sender. The stop reports the transaction's compute at the
+//! crossing as what was used, the same figure at every site a crossing is made: a frame that ran,
 //! an answer, a precompile; the size of the charge that crossed is not kept.
+//!
+//! The limit holds without stopping the callers: a caller resumes held to what the limit leaves
+//! the transaction, which is less than the charge that crossed, so a regular charge it makes past
+//! that crosses again and stops it in turn. A caller that catches the stop and ends within what is
+//! left ends the transaction within the limit.
 //!
 //! Every other out-of-gas halts and burns as it would without the read: an operand above `usize`,
 //! a failed state or history charge, and a regular charge the frame's whole gas could not pay.
@@ -109,15 +114,15 @@
 //!   read;
 //! - priced past the allowance and within the forward, it needs gas the limit withholds: it is
 //!   answered out of gas without running, the answer is marked as a crossing, and the same rule
-//!   stops the transaction;
+//!   makes it the stop;
 //! - priced past its whole forward, it runs on the forward and runs out of gas, as without the
 //!   read: a failed call that burns its forward and that its caller survives.
 //!
 //! One residual is a choice: the price does not tell whether an input passes the checks a
 //! precompile makes after its gas check, so an input priced between the allowance and the forward
-//! that would fail such a check is the stop, where without the read the check fails the call,
-//! which burns its forward and which its caller survives. Running it to find out would compute
-//! past the limit.
+//! that would fail such a check is the stop, which gives its forward back, where without the read
+//! the check fails the call, which burns its forward. Its caller survives either. Running it to
+//! find out would compute past the limit.
 //!
 //! Every entry of the Satin set is priced, op-revm's size-limited wrappers of the BN254 pairing
 //! and the BLS12-381 MSMs and pairing included. A precompile the engine cannot price — a node's
@@ -125,13 +130,12 @@
 //! the forward back. Within the allowance, it answers as it would without the read. Past it, it
 //! answers out of gas without computing, the answer is marked as a crossing, and it is the stop,
 //! whether its price is within its forward or not: one priced past its whole forward is the stop
-//! too, where without the read it would be a failed call its caller survives. It also sees the
+//! too, where without the read it would be a failed call that burns its forward. It also sees the
 //! allowance as its gas limit.
 //!
 //! An interceptor builds its answer on all the gas the caller forwarded, the caller's withheld
 //! part included: an answer that spent more regular gas than the allowance the frame would have
-//! run on is answered out of gas and marked as a crossing, and the same rule stops the
-//! transaction.
+//! run on is answered out of gas and marked as a crossing, and the same rule makes it the stop.
 //!
 //! A keyless deployment's call is the transaction's own frame, and runs no code: it charges its
 //! own work — the overhead of decoding and recovering the signer, then the `CREATE` opcode's

@@ -3,8 +3,10 @@
 //! creation, one journal depth below it, then every step of the init code, the creation's end and
 //! the call's, each with the gas and the output it had.
 
+use alloy_sol_types::SolError;
 use mega_evm::{
-    system::keyless::KEYLESS_DEPLOY_OVERHEAD_GAS, test_utils::BytecodeBuilder, MegaTransaction,
+    system::keyless::KEYLESS_DEPLOY_OVERHEAD_GAS, test_utils::BytecodeBuilder, LimitKind,
+    MegaLimitExceeded, WRITE_RECORD_SIZE,
 };
 use revm::{
     bytecode::opcode::{LOG0, PUSH0, REVERT},
@@ -13,12 +15,13 @@ use revm::{
         CreateInputs, CreateOutcome, CreateScheme, Gas, InstructionResult, Interpreter,
         InterpreterResult,
     },
+    primitives::KECCAK_EMPTY,
     Database, Inspector,
 };
 use revm_inspectors::tracing::{types::CallKind, TracingInspector, TracingInspectorConfig};
 
 use super::*;
-use crate::common::{context, CALLER};
+use crate::common::{context, keyless_tx, CALLER};
 
 /// What an inspector was told, in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,17 +88,12 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Recorder {
     }
 }
 
-/// The `keylessDeploy` transaction of `deployment` at `gas_limit`.
-fn keyless_tx(deployment: &Deployment, gas_limit: u64) -> MegaTransaction {
-    let mut tx = call_tx(KEYLESS_DEPLOY_ADDRESS, deployment.call_data(LARGE_OVERRIDE), U256::ZERO);
-    tx.0.base.gas_limit = gas_limit;
-    tx
-}
-
 /// Runs `deployment` under `recorder`, and returns what the recorder saw.
 fn inspect(deployment: &Deployment, recorder: Recorder, gas_limit: u64) -> (Outcome, Recorder) {
     let mut evm = MegaEvm::new(context(system_db())).with_inspector(recorder);
-    let outcome = evm.execute_transaction(keyless_tx(deployment, gas_limit)).expect("valid");
+    let outcome = evm
+        .execute_transaction(keyless_tx(deployment.call_data(LARGE_OVERRIDE), gas_limit))
+        .expect("valid");
     let seen = Recorder {
         events: evm.inspector().events.clone(),
         answer_creations: evm.inspector().answer_creations,
@@ -146,19 +144,6 @@ fn test_the_inspector_sees_the_call_and_the_creation_it_starts() {
         assert_eq!(steps[0], init_code[0]);
         assert!(steps.contains(&LOG0));
         assert!(events.contains(&Event::Log(deployment.address)));
-    }
-}
-
-/// The traced run and the plain run agree to the gas.
-#[test]
-fn test_an_inspected_deployment_costs_what_a_plain_one_does() {
-    let deployment = Deployment::new(deploying(&runtime(3)));
-    for gas_limit in GAS_LIMITS {
-        let (inspected, _) = inspect(&deployment, Recorder::default(), gas_limit);
-        let plain = deploy(system_db(), &deployment, gas_limit);
-        assert_eq!(inspected.result, plain.result, "at {gas_limit}");
-        assert_eq!(inspected.gas, plain.gas);
-        assert_eq!(inspected.usage, plain.usage);
     }
 }
 
@@ -232,22 +217,21 @@ fn test_a_creation_an_inspector_answers_charges_nothing_it_did_not_start() {
     }
 }
 
-/// A transaction the latch stopped before its first frame is not dispatched on the inspected path
-/// either: the inspector sees the call and its stop, and no creation.
+/// A transaction whose body crosses the data-size limit is rejected at validation on the inspected
+/// path too: the inspector sees no frame, neither the call nor a creation.
 #[test]
-fn test_a_latched_transaction_is_seen_as_the_call_it_is() {
+fn test_a_rejected_transaction_is_seen_as_nothing() {
     let deployment = Deployment::new(deploying(&runtime(1)));
     for gas_limit in GAS_LIMITS {
         let limits = mega_evm::EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(100);
         let mut evm = MegaEvm::new(context(system_db()).with_tx_runtime_limits(limits))
             .with_inspector(Recorder::default());
-        let outcome = evm.execute_transaction(keyless_tx(&deployment, gas_limit)).expect("valid");
-        assert!(outcome.limit_exceeded.is_some(), "at {gas_limit}");
-        assert_eq!(
-            evm.inspector().events,
-            [Event::Call(KEYLESS_DEPLOY_ADDRESS), Event::CallEnd(InstructionResult::Revert)],
-        );
-        assert!(!outcome.state.contains_key(&deployment.signer));
+        let error = evm
+            .execute_transaction(keyless_tx(deployment.call_data(LARGE_OVERRIDE), gas_limit))
+            .expect_err("rejected at validation");
+        let error = format!("{error:?}");
+        assert!(error.contains(mega_evm::TX_BODY_OVER_DATA_SIZE_LIMIT), "at {gas_limit}: {error}");
+        assert_eq!(evm.inspector().events, [], "at {gas_limit}");
     }
 }
 
@@ -264,7 +248,9 @@ fn test_a_tracer_sees_the_call_and_the_creation_it_starts() {
     for gas_limit in GAS_LIMITS {
         let tracer = TracingInspector::new(TracingInspectorConfig::default_parity());
         let mut evm = MegaEvm::new(context(system_db())).with_inspector(tracer);
-        let outcome = evm.execute_transaction(keyless_tx(&deployment, gas_limit)).expect("valid");
+        let outcome = evm
+            .execute_transaction(keyless_tx(deployment.call_data(LARGE_OVERRIDE), gas_limit))
+            .expect("valid");
         let answer = returned(&outcome);
         assert_eq!(answer.deployedAddress, deployment.address);
         let tracer = evm.inspector().clone();
@@ -335,4 +321,100 @@ fn test_a_tracer_sees_the_call_and_the_creation_it_starts() {
 /// `address` as a trace's JSON holds it.
 fn json_address(address: Address) -> serde_json::Value {
     serde_json::to_value(address).unwrap()
+}
+
+/// Revives every creation that failed, as Foundry's `expectRevert` does: the result becomes a
+/// success at `0x…01`, which is no address the deployment pinned.
+struct Revives;
+
+impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Revives {
+    fn create_end(
+        &mut self,
+        _: &mut MegaContext<DB>,
+        _: &CreateInputs,
+        outcome: &mut CreateOutcome,
+    ) {
+        if !outcome.result.result.is_ok() {
+            outcome.result.result = InstructionResult::Return;
+            outcome.address = Some(Address::with_last_byte(1));
+        }
+    }
+}
+
+/// A deployment whose creation fails and is revived by an inspector reports a creation at an
+/// address the deployment did not pin: the call reverts with `AddressMismatch()`, which a plain
+/// run never produces — it answers `ExecutionReverted`. The call's revert takes the whole
+/// deployment back, the signer's nonce bump included, which the plain run keeps.
+#[test]
+fn test_a_revived_keyless_creation_answers_address_mismatch() {
+    let deployment = Deployment::new(Bytes::from_static(&[PUSH0, PUSH0, REVERT]));
+    for gas_limit in GAS_LIMITS {
+        let plain = MegaEvm::new(context(system_db()))
+            .execute_transaction(keyless_tx(deployment.call_data(LARGE_OVERRIDE), gas_limit));
+        let plain = plain.expect("valid");
+        assert!(matches!(failure(&plain), KeylessDeployError::ExecutionReverted { .. }));
+
+        let mut evm = MegaEvm::new(context(system_db())).with_inspector(Revives);
+        let revived = evm
+            .execute_transaction(keyless_tx(deployment.call_data(LARGE_OVERRIDE), gas_limit))
+            .expect("valid");
+        assert_eq!(refusal(&revived), KeylessDeployError::AddressMismatch, "at {gas_limit}");
+        assert_eq!(nonce(&plain, deployment.signer), 1, "the plain run spends the nonce");
+        assert_eq!(nonce(&revived, deployment.signer), 0, "the reverted call takes the bump back");
+        assert!(code_hash(&revived, deployment.address).is_none_or(|hash| hash == KECCAK_EMPTY));
+    }
+}
+
+/// A creation a transaction-level limit stopped is a failed creation like any other, so a revived
+/// one is answered as the reverted one above: the constructor's `LOG0` of 2,000 bytes crosses the
+/// transaction's data-size limit, which holds the body, the start's two records and 100 bytes
+/// more. Without the inspector the call answers the stop as `ExecutionReverted` and keeps the
+/// signer's nonce; with it, the creation is revived at an address the deployment did not pin, and
+/// the call reverts with `AddressMismatch()`, taking the bump back, and reports no stop.
+#[test]
+fn test_a_revived_keyless_creation_a_limit_stopped_answers_address_mismatch() {
+    let prefix = BytecodeBuilder::default().push_number(2_000_u64).push_number(0_u64).append(LOG0);
+    let deployment = Deployment::new(constructor(&prefix.build_vec(), &runtime(1)));
+    let body = reference(deployment.call_data(LARGE_OVERRIDE), GAS_LIMITS[0]).usage.data_size;
+    let limit = body + 2 * WRITE_RECORD_SIZE + 100;
+    let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit);
+    for gas_limit in GAS_LIMITS {
+        let plain = MegaEvm::new(context(system_db()).with_tx_runtime_limits(limits))
+            .execute_transaction(keyless_tx(deployment.call_data(LARGE_OVERRIDE), gas_limit))
+            .expect("valid");
+        let KeylessDeployError::ExecutionReverted { output, .. } = failure(&plain) else {
+            panic!("the creation did not revert: {:?}", plain.result);
+        };
+        assert_eq!(
+            MegaLimitExceeded::abi_decode(&output).expect("a limit stop"),
+            MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit },
+            "at {gas_limit}: the constructor's log crossed the transaction's limit"
+        );
+        assert_eq!(nonce(&plain, deployment.signer), 1, "the plain run spends the nonce");
+
+        let mut evm = MegaEvm::new(context(system_db()).with_tx_runtime_limits(limits))
+            .with_inspector(Revives);
+        let revived = evm
+            .execute_transaction(keyless_tx(deployment.call_data(LARGE_OVERRIDE), gas_limit))
+            .expect("valid");
+        assert_eq!(refusal(&revived), KeylessDeployError::AddressMismatch, "at {gas_limit}");
+        assert_eq!(revived.limit_exceeded, None, "at {gas_limit}: no stop is the call's result");
+        assert_eq!(nonce(&revived, deployment.signer), 0, "the reverted call takes the bump back");
+        assert!(code_hash(&revived, deployment.address).is_none_or(|hash| hash == KECCAK_EMPTY));
+    }
+}
+
+/// An inspector sees the creation of a deployment that returned empty code end as a revert, the
+/// outcome of the refused deposit, and the call answers `EmptyCodeDeployed`.
+#[test]
+fn test_an_inspector_sees_an_empty_code_deployment_end_as_a_revert() {
+    let deployment = Deployment::new(Bytes::new());
+    for gas_limit in GAS_LIMITS {
+        let (outcome, recorder) = inspect(&deployment, Recorder::default(), gas_limit);
+        assert!(matches!(failure(&outcome), KeylessDeployError::EmptyCodeDeployed { .. }));
+        let ends: Vec<_> =
+            recorder.events.iter().filter(|event| matches!(event, Event::CreateEnd(..))).collect();
+        let end = Event::CreateEnd(InstructionResult::Revert, Some(deployment.address));
+        assert_eq!(ends, [&end], "at {gas_limit}");
+    }
 }

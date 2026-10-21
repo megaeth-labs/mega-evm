@@ -4,8 +4,8 @@
 use alloy_evm::Evm;
 use alloy_primitives::{address, Address, Bytes, Log, U256};
 use mega_evm::{
-    test_utils::{BytecodeBuilder, GasInspector, MemoryDatabase},
-    DeclaredObserver, MegaContext, MegaEvm, FORBIDDEN_CREATE_REVIVAL, WRITE_RECORD_SIZE,
+    test_utils::{transfer_log, BytecodeBuilder, GasInspector, MemoryDatabase},
+    DeclaredObserver, MegaContext, MegaEvm, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 use revm::{
     bytecode::opcode::{CALL, CREATE, GAS, INVALID, PUSH0, REVERT, SSTORE},
@@ -19,7 +19,9 @@ use revm::{
 };
 use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 
-use crate::common::{account_state_gas, body_history, call, context, history, slot_state_gas};
+use crate::common::{
+    account_state_gas, body_history, call, context, execute_under, history, slot_state_gas,
+};
 
 const CALLER: Address = address!("0000000000000000000000000000000000400000");
 const A: Address = address!("00000000000000000000000000000000000000A1");
@@ -238,36 +240,16 @@ fn test_create_end_address_rewrite_reaches_the_caller_not_the_code() {
     assert!(result.state.get(&FAKE).is_none_or(|fake| fake.info.is_empty_code_hash()));
 }
 
-/// A failed creation rewritten into a success is refused: the transaction fails with the
-/// refusal.
+/// A creation its own frame budget stops, revived by an inspector: the stop is the creation's alone
+/// and no stop of the transaction, so the creation failed as any failed creation does and its
+/// revival settles as the failure — the transaction is not refused. Under a data-size limit of the
+/// body and 122 bytes, the creator may keep 122 and the creation 98% of them, 119: the creation's
+/// start makes two records, 80 bytes, and the write in its init code is a third, 40 more, over its
+/// budget, which the transaction's limit still holds. Under the body and 160 bytes the budget holds
+/// it, and so does the transaction's limit once the creator stores the address, a fourth record:
+/// the same creation succeeds.
 #[test]
-fn test_create_revival_is_refused() {
-    let db = MemoryDatabase::default()
-        .account_code(A, create_and_store_address(&[PUSH0, PUSH0, REVERT]));
-    let result = run_with(db, Rewriter { create_succeeds: true, ..Default::default() }, 0);
-    match result {
-        Err(EVMError::Custom(message)) => {
-            assert!(message.starts_with(FORBIDDEN_CREATE_REVIVAL), "{message}")
-        }
-        other => panic!("expected the refusal, got {other:?}"),
-    }
-
-    // A creation that succeeded may be rewritten freely; the refusal is for revivals only.
-    let db = MemoryDatabase::default()
-        .account_code(A, create_and_store_address(&[0x60, 0x01, 0x60, 0x00, 0xf3]));
-    assert!(run_with(db, Rewriter { create_succeeds: true, ..Default::default() }, 0)
-        .unwrap()
-        .result
-        .is_success());
-}
-
-/// A creation its own frame budget stops is refused its revival too: the stop is the creation's
-/// alone and latches nothing, so the creation failed as any failed creation does. Under a KV limit
-/// of three, the creation's start makes two records, and the write in its init code is a third one
-/// over its budget of 98% of the three, which the transaction's limit still holds; under a limit
-/// of four the budget holds it, and the same creation succeeds.
-#[test]
-fn test_a_creation_its_frame_budget_stops_is_refused_its_revival() {
+fn test_a_creation_its_frame_budget_stops_may_be_revived() {
     // A write of 1 to slot 1, short enough for `create_and_store_address`.
     let init_code = BytecodeBuilder::default()
         .push_number(1_u8)
@@ -276,38 +258,45 @@ fn test_a_creation_its_frame_budget_stops_is_refused_its_revival() {
         .stop()
         .build();
     let db = || MemoryDatabase::default().account_code(A, create_and_store_address(&init_code));
-    let under =
-        |records: u64| mega_evm::EvmTxRuntimeLimits::default().with_tx_kv_update_limit(records);
-    let plain = |records: u64| {
-        MegaEvm::new(context(db()).with_tx_runtime_limits(under(records)))
-            .execute_transaction(call(CALLER, A, U256::ZERO, gas_limit()))
-            .unwrap()
+    let under = |bytes: u64| {
+        mega_evm::EvmTxRuntimeLimits::default().with_tx_data_size_limit(TX_BODY_SIZE + bytes)
     };
+    let plain =
+        |bytes: u64| execute_under(db(), call(CALLER, A, U256::ZERO, gas_limit()), under(bytes));
     let created = |outcome: &mega_evm::MegaTransactionOutcome| {
         outcome.state[&A]
             .storage
             .get(&U256::ZERO)
             .is_some_and(|slot| !slot.present_value().is_zero())
     };
-    let roomy = plain(4);
+    let roomy = plain(160);
     assert!(roomy.result.is_success() && created(&roomy), "{:?}", roomy.result);
 
     // Without the inspector the creation fails alone: its creator stores no address and succeeds,
     // and the transaction is not stopped.
-    let stopped = plain(3);
+    let stopped = plain(122);
     assert!(stopped.result.is_success(), "{:?}", stopped.result);
-    assert_eq!(stopped.limit_exceeded, None, "a frame budget latches nothing");
+    assert_eq!(stopped.limit_exceeded, None, "a frame budget below is no stop");
     assert!(!created(&stopped), "the creation failed");
 
-    let limits = under(3);
-    let mut evm = MegaEvm::new(context(db()).with_tx_runtime_limits(limits))
-        .with_inspector(Rewriter { create_succeeds: true, ..Default::default() });
-    match evm.transact_raw(call(CALLER, A, U256::ZERO, gas_limit())) {
-        Err(EVMError::Custom(message)) => {
-            assert!(message.starts_with(FORBIDDEN_CREATE_REVIVAL), "{message}")
-        }
-        other => panic!("expected the refusal, got {other:?}"),
-    }
+    let limits = under(122);
+    let revived = MegaEvm::new(context(db()).with_tx_runtime_limits(limits))
+        .with_inspector(Rewriter { create_succeeds: true, ..Default::default() })
+        .execute_transaction(call(CALLER, A, U256::ZERO, gas_limit()))
+        .unwrap();
+    assert!(revived.result.is_success(), "{:?}", revived.result);
+    assert_eq!(revived.limit_exceeded, None, "and the revival is no stop either");
+    let stored = revived.state[&A].storage[&U256::ZERO].present_value();
+    assert_eq!(Address::from_word(stored.into()), FAKE, "the creator got the revived address");
+    let created_address = A.create(0);
+    assert!(
+        revived
+            .state
+            .get(&created_address)
+            .is_none_or(|account| account.info.is_empty_code_hash() &&
+                account.storage.values().all(|slot| slot.present_value().is_zero())),
+        "the creation kept none of its writes"
+    );
 }
 
 /// A declared observer that writes back fails its declaration in a debug build.
@@ -350,6 +339,32 @@ fn test_declared_tracer_changes_nothing() {
     assert_eq!(plain.result, traced.result);
     assert_eq!(plain.state, traced.state);
     assert_eq!(evm.inspector().0.traces().nodes().len(), 2, "the tracer saw both frames");
+}
+
+/// The gas inspector of the test utilities records a byte no opcode is defined for as `INVALID`,
+/// and keeps the byte, so the undefined byte is told from the designated invalid opcode.
+#[test]
+fn test_the_gas_inspector_keeps_the_byte_of_an_undefined_opcode() {
+    const UNDEFINED: u8 = 0x21;
+    assert!(revm::bytecode::opcode::OpCode::new(UNDEFINED).is_none(), "no opcode is defined");
+    for (code, undefined) in [(UNDEFINED, true), (INVALID, false)] {
+        let db = MemoryDatabase::default()
+            .account_balance(CALLER, U256::from(1_000_000))
+            .account_code(A, Bytes::from(vec![PUSH0, code]));
+        let mut evm = MegaEvm::new(context(db)).with_inspector(GasInspector::new());
+        let outcome = evm.transact_raw(call(CALLER, A, U256::ZERO, gas_limit())).unwrap();
+        assert!(outcome.result.is_halt(), "{:?}", outcome.result);
+        let records = evm.inspector().records();
+        let last = records.last().expect("the frame ran");
+        assert_eq!((last.opcode.get(), last.byte), (INVALID, code));
+        assert_eq!(last.is_undefined(), undefined);
+        assert!(!records[0].is_undefined(), "a defined opcode carries its own byte");
+        assert_eq!(
+            format!("{last:?}").starts_with("UNDEFINED(0x21)"),
+            undefined,
+            "the rendering names the byte: {last:?}"
+        );
+    }
 }
 
 /// The admission gate: only an enabled inspector that did not arrive declared is a rewriting one.
@@ -405,8 +420,8 @@ impl<CTX> Inspector<CTX, EthInterpreter> for Pairs {
 }
 
 /// Every frame the inspector sees start, it sees end: a frame that ran, one answered before it
-/// ran (a value transfer the sender cannot fund, a latched transaction's first frame), and a
-/// creation.
+/// ran (a value transfer the sender cannot fund, a first frame whose start crosses the data-size
+/// limit), and a creation.
 #[test]
 fn test_frame_start_and_end_stay_paired() {
     let pairs = |db: MemoryDatabase, limits: mega_evm::EvmTxRuntimeLimits, value: u64| {
@@ -422,8 +437,9 @@ fn test_frame_start_and_end_stay_paired() {
     let creates = MemoryDatabase::default().account_code(A, create_and_store_address(&[0x00]));
     assert_eq!(pairs(creates, no_limits, 0), (1, 1, 1, 1));
     let funded = MemoryDatabase::default().account_balance(CALLER, U256::from(10));
-    let latched = no_limits.with_tx_data_size_limit(0);
-    assert_eq!(pairs(funded, latched, 1), (1, 1, 0, 0), "the stopped first frame ends too");
+    // The body fits; the record and the transfer log of the first frame's value do not.
+    let stopped_at_its_start = no_limits.with_tx_data_size_limit(mega_evm::TX_BODY_SIZE);
+    assert_eq!(pairs(funded, stopped_at_its_start, 1), (1, 1, 0, 0), "the stopped frame ends too");
 }
 
 /// Counts every callback it gets.
@@ -542,7 +558,39 @@ fn test_declared_observer_forwards_every_callback() {
     assert_eq!(DeclaredObserver::new(Recorder::default()).into_inner(), Recorder::default());
 }
 
+/// Keeps every log handed to `Inspector::log`, the callback for a log journaled outside an
+/// instruction.
+#[derive(Debug, Default)]
+struct FrameStartLogs(Vec<Log>);
+
+impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for FrameStartLogs {
+    fn log(&mut self, _: &mut MegaContext<DB>, log: Log) {
+        self.0.push(log);
+    }
+}
+
+/// A declared observer forwards the EIP-7708 transfer logs a frame's start journals: the
+/// transaction's value into `A`, whose frame runs, and `A`'s value into `B`, an account with no
+/// code, whose frame is answered without running.
+#[test]
+fn test_declared_observer_forwards_the_transfer_logs_of_frame_starts() {
+    let db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(5))
+        .account_code(A, call_b_and_store_flag(2));
+    let mut evm = MegaEvm::new(context(db))
+        .with_trusted_inspector(DeclaredObserver::new(FrameStartLogs::default()));
+    let outcome = evm.transact_raw(call(CALLER, A, U256::from(5), gas_limit())).unwrap();
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    assert_eq!(
+        evm.inspector().0 .0,
+        vec![transfer_log(CALLER, A, U256::from(5)), transfer_log(A, B, U256::from(2))]
+    );
+}
+
 /// Edits a frame's inputs, writes to the journal, or rewrites a frame result, one per flag.
+///
+/// Only the debug-build tests below use it: a release build does not check declarations.
+#[cfg(debug_assertions)]
 #[derive(Default)]
 struct Writer {
     edit_inputs: bool,
@@ -550,6 +598,7 @@ struct Writer {
     rewrite_frame_end: bool,
 }
 
+#[cfg(debug_assertions)]
 impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Writer {
     fn step(&mut self, _interp: &mut Interpreter<EthInterpreter>, context: &mut MegaContext<DB>) {
         if self.log_in_step {
@@ -582,6 +631,7 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Writer {
     }
 }
 
+#[cfg(debug_assertions)]
 fn run_declared(writer: Writer) {
     let mut evm =
         MegaEvm::new(context(writes_two_slots())).with_trusted_inspector(DeclaredObserver(writer));
@@ -669,7 +719,10 @@ fn test_only_the_inspecting_system_call_entry_point_runs_the_inspector() {
     .unwrap();
     assert!(inspected.is_success(), "{inspected:?}");
     assert_eq!(*evm.inspector(), Seen { frames: 1, steps: 3 }, "PUSH0, POP, STOP");
-    assert!(evm.ctx().additional_limit().latched().is_none(), "no limit holds a system call");
+    assert!(
+        evm.ctx().additional_limit().limit_exceeded().is_none(),
+        "no limit holds a system call"
+    );
 }
 
 /// Answers every call itself with a success, and counts the answers.
@@ -692,10 +745,9 @@ impl<CTX> Inspector<CTX, EthInterpreter> for SkipAllCallsInspector {
     }
 }
 
-/// A body over the data-size limit latches the transaction before it runs, and its first frame is
-/// answered with the stop — in place of the answer an inspector that answers every call gives it.
-/// The transaction is the one no inspector runs: the stop, which settles like a revert, so the
-/// sender gets back what the frame did not spend.
+/// A body over the data-size limit is rejected at validation whether or not an inspector would
+/// answer the transaction's first frame: the inspector is never asked, and the refusal is the one
+/// the transaction gets without it.
 #[test]
 fn test_intrinsic_data_size_overflow_with_inspector_early_return() {
     const LIMIT: u64 = 100;
@@ -710,32 +762,12 @@ fn test_intrinsic_data_size_overflow_with_inspector_early_return() {
 
     let plain = MegaEvm::new(context(db()).with_tx_runtime_limits(limits))
         .execute_transaction(tx.clone())
-        .unwrap();
+        .expect_err("rejected");
     let mut evm = MegaEvm::new(context(db()).with_tx_runtime_limits(limits))
         .with_inspector(SkipAllCallsInspector::default());
-    let answered = evm.execute_transaction(tx).unwrap();
+    let inspected = evm.execute_transaction(tx).expect_err("rejected");
 
-    assert_eq!(evm.inspector().answered, 1, "the inspector answered the first frame");
-    let stop = answered.limit_exceeded.expect("the transaction is stopped");
-    assert!(
-        matches!(
-            stop,
-            mega_evm::LimitCheck::ExceedsLimit {
-                kind: mega_evm::LimitKind::DataSize,
-                limit: LIMIT,
-                ..
-            }
-        ),
-        "{stop:?}"
-    );
-    assert!(
-        matches!(&answered.result, revm::context::result::ExecutionResult::Revert { output, .. }
-            if output == &stop.revert_data()),
-        "the stop, not the answer: {:?}",
-        answered.result
-    );
-    assert_eq!(answered.result, plain.result);
-    assert_eq!(answered.gas, plain.gas);
-    assert_eq!(answered.usage, plain.usage);
-    assert!(answered.gas.gas_used < TX_GAS_LIMIT / 100, "the unspent gas comes back");
+    assert_eq!(evm.inspector().answered, 0, "the inspector never saw a frame");
+    assert_eq!(format!("{inspected:?}"), format!("{plain:?}"));
+    assert!(format!("{plain:?}").contains(mega_evm::TX_BODY_OVER_DATA_SIZE_LIMIT), "{plain:?}");
 }

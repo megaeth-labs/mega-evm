@@ -9,7 +9,7 @@ use alloy_evm::{
     block::{BlockExecutionResult, TxResult},
     InvalidTxError,
 };
-use alloy_primitives::TxHash;
+use alloy_primitives::{Address, TxHash, U256};
 use revm::context::result::{InvalidTransaction, ResultAndState};
 
 use crate::{BlockUsage, LimitUsage, MegaGasUsage, MegaHaltReason, MegaTransactionOutcome};
@@ -17,8 +17,9 @@ use crate::{BlockUsage, LimitUsage, MegaGasUsage, MegaHaltReason, MegaTransactio
 /// A block's gas, on the three ledgers its transactions spend on, and the history bytes they
 /// appended.
 ///
-/// The block executor fills it transaction by transaction with [`record`](Self::record) and
-/// holds each counter to its own block limit, where it has one.
+/// The block executor fills it transaction by transaction with [`record`](Self::record). No
+/// block limit holds any of these counters: each is counted and reported. The block's gas limit
+/// is held against the gas its receipts report, which is none of these ledgers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BlockGasCounters {
     /// Regular gas: each transaction's regular ledger, at least its EIP-7623 floor.
@@ -27,15 +28,8 @@ pub struct BlockGasCounters {
     pub state: u64,
     /// History gas.
     pub history: u64,
-    /// The history bytes the block's transactions appended, whoever paid for them. At the cost per
-    /// history byte they are worth [`history`](Self::history) plus what the history allowances of
-    /// value transfers paid, which no gas ledger carries.
-    ///
-    /// They are the history bytes the schedule prices, not the chain's physical growth: the
-    /// block's exempt transactions (its deposits, the transactions the protocol sent) add none,
-    /// each body counts its five fixed write records even when fewer fee accounts are written,
-    /// and the EIP-7708 transfer logs in the block's receipts, which nothing prices, are not in
-    /// them.
+    /// The history bytes the block's transactions appended: the sum of their
+    /// [`MegaGasUsage::history_bytes`], which says what is and is not among them.
     pub history_bytes: u64,
 }
 
@@ -144,40 +138,11 @@ impl InvalidTxError for MegaTxLimitExceededError {
 /// what the block [used](Self::block_used) and the [limit](Self::limit) it is held to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MegaBlockLimitExceededError {
-    /// The block's transactions have spent their execution gas. A deposit is never refused this
-    /// way.
-    ExecutionGasLimit {
-        /// The execution gas the block has spent.
-        block_used: u64,
-        /// The block's execution-gas limit.
-        limit: u64,
-    },
-    /// The block's transactions have reached their state gas, and this transaction adds more.
-    ///
-    /// Only a transaction's own execution tells whether it adds state gas, so this one was
-    /// executed before it was refused; a transaction that adds none still fits the block, and a
-    /// deposit is never refused this way.
-    StateGasLimit {
-        /// The state gas the block has spent.
-        block_used: u64,
-        /// The state gas this transaction would add.
-        tx_used: u64,
-        /// The block's state-gas limit.
-        limit: u64,
-    },
     /// The block's transactions have kept their data-size bytes.
     TransactionDataLimit {
         /// The data-size bytes the block has kept.
         block_used: u64,
         /// The block's data-size limit.
-        limit: u64,
-    },
-    /// The block's transactions have kept their write records, the block's KV count. A deposit is
-    /// never refused this way.
-    KVUpdateLimit {
-        /// The write records the block has kept.
-        block_used: u64,
-        /// The block's KV limit.
         limit: u64,
     },
     /// The transaction's body does not fit in what the block has left.
@@ -204,10 +169,7 @@ impl MegaBlockLimitExceededError {
     /// What the block used of the resource.
     pub const fn block_used(&self) -> u64 {
         match self {
-            Self::ExecutionGasLimit { block_used, .. } |
-            Self::StateGasLimit { block_used, .. } |
             Self::TransactionDataLimit { block_used, .. } |
-            Self::KVUpdateLimit { block_used, .. } |
             Self::TransactionEncodeSizeLimit { block_used, .. } |
             Self::DataAvailabilitySizeLimit { block_used, .. } => *block_used,
         }
@@ -216,10 +178,7 @@ impl MegaBlockLimitExceededError {
     /// The limit of the resource.
     pub const fn limit(&self) -> u64 {
         match self {
-            Self::ExecutionGasLimit { limit, .. } |
-            Self::StateGasLimit { limit, .. } |
             Self::TransactionDataLimit { limit, .. } |
-            Self::KVUpdateLimit { limit, .. } |
             Self::TransactionEncodeSizeLimit { limit, .. } |
             Self::DataAvailabilitySizeLimit { limit, .. } => *limit,
         }
@@ -229,18 +188,8 @@ impl MegaBlockLimitExceededError {
 impl fmt::Display for MegaBlockLimitExceededError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ExecutionGasLimit { block_used, limit } => {
-                write!(f, "Block execution gas limit reached: block_used={block_used} >= limit={limit}")
-            }
-            Self::StateGasLimit { block_used, tx_used, limit } => write!(
-                f,
-                "Block state gas limit reached: block_used={block_used} >= limit={limit}, tx_used={tx_used}"
-            ),
             Self::TransactionDataLimit { block_used, limit } => {
                 write!(f, "Block transactions data limit reached: block_used={block_used} >= limit={limit}")
-            }
-            Self::KVUpdateLimit { block_used, limit } => {
-                write!(f, "Block KV update limit reached: block_used={block_used} >= limit={limit}")
             }
             Self::TransactionEncodeSizeLimit { block_used, tx_used, limit } => write!(
                 f,
@@ -294,9 +243,24 @@ pub struct MegaBlockTxResult<T> {
     pub da_footprint: u64,
     /// Whether the transaction is a deposit.
     pub is_deposit: bool,
+    /// Whether the transaction is a Mega System Transaction: a legacy call from the live system
+    /// address, which the engine runs as the protocol's own. The block decided it before the
+    /// transaction ran, from the registry's system address, and a delayed commit makes the same
+    /// decision. Like a deposit it is never refused by the data-size packing budget or by the
+    /// builder's policy, and counts towards them.
+    pub is_system_transaction: bool,
     /// The nonce the depositor had before execution, which the deposit receipt reports. `Some`
     /// only for a deposit.
     pub depositor_nonce: Option<u64>,
+    /// The transaction's sender: the system address, for a system-address transaction.
+    pub sender: Address,
+    /// The sender's nonce as the transaction executed against it, which a delayed commit checks
+    /// against the block's state then
+    /// ([`commit_transaction_outcome`](crate::MegaBlockExecutor::commit_transaction_outcome)).
+    pub sender_nonce: u64,
+    /// The sender's balance as the transaction executed against it, which a delayed commit checks
+    /// as it checks the nonce.
+    pub sender_balance: U256,
     /// The execution result, the post-state and what `MegaETH` counted, as execution produced
     /// them.
     pub inner: MegaTransactionOutcome,
@@ -306,7 +270,6 @@ impl<T> MegaBlockTxResult<T> {
     /// What this transaction adds to the block's counters.
     pub const fn block_usage(&self) -> BlockUsage {
         BlockUsage {
-            gas_used: self.inner.gas.gas_used,
             gas: self.inner.gas,
             usage: self.inner.usage,
             tx_size: self.tx_size,
@@ -440,14 +403,7 @@ mod tests {
     #[test]
     fn test_block_limit_error_reports_block_usage_and_limit() {
         let cases = [
-            (MegaBlockLimitExceededError::ExecutionGasLimit { block_used: 3, limit: 12 }, 3, 12),
-            (
-                MegaBlockLimitExceededError::StateGasLimit { block_used: 6, tx_used: 2, limit: 15 },
-                6,
-                15,
-            ),
             (MegaBlockLimitExceededError::TransactionDataLimit { block_used: 1, limit: 10 }, 1, 10),
-            (MegaBlockLimitExceededError::KVUpdateLimit { block_used: 7, limit: 16 }, 7, 16),
             (
                 MegaBlockLimitExceededError::TransactionEncodeSizeLimit {
                     block_used: 4,

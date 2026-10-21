@@ -16,7 +16,10 @@
 //! so revm charges it where it writes the code. The schedule gives that entry the cost of one byte
 //! (see the `schedule` module), which is what switches it on.
 
-use revm::context::{transaction::AccessListItemTr, Transaction};
+use revm::{
+    context::{transaction::AccessListItemTr, Transaction},
+    context_interface::cfg::gas::GasTracker,
+};
 
 use crate::{
     evm::prices::active_satin_prices,
@@ -41,11 +44,19 @@ pub fn write_record_history_gas(records: u64) -> Option<u64> {
     history_gas(WRITE_RECORD_SIZE.checked_mul(records)?)
 }
 
-/// The history bytes a `LOG` with `topics` topics and `data_len` bytes of data appends: its own
-/// record for the address that emitted it, one per topic, and the data.
+/// Charges `gas` the history of two sets of write records, `first` and `second`, in one charge,
+/// and answers what each set cost. `None` when a set has no price or `gas` cannot pay the two
+/// together, which is an out-of-gas; nothing is charged then.
 #[inline]
-pub const fn log_history_bytes(topics: u64, data_len: u64) -> u64 {
-    LOG_BASE_SIZE.saturating_add(LOG_TOPIC_SIZE.saturating_mul(topics)).saturating_add(data_len)
+pub(crate) fn charge_write_records_history(
+    gas: &mut GasTracker,
+    first: u64,
+    second: u64,
+) -> Option<(u64, u64)> {
+    let first = write_record_history_gas(first)?;
+    let second = write_record_history_gas(second)?;
+    let cost = first.checked_add(second)?;
+    gas.record_history_cost(cost).then_some((first, second))
 }
 
 /// The history bytes the allowance of a value-transferring call covers: one three-topic event
@@ -113,7 +124,10 @@ pub const fn tx_body_history_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{constants::COST_PER_HISTORY_BYTE, evm::prices::runs_at_measurement_prices};
+    use crate::{
+        constants::COST_PER_HISTORY_BYTE, evm::prices::runs_at_measurement_prices,
+        log_history_bytes,
+    };
 
     /// The byte counts of the three sites that count bytes rather than records.
     #[test]
@@ -322,5 +336,30 @@ mod tests {
             Some(3 * WRITE_RECORD_SIZE * COST_PER_HISTORY_BYTE)
         );
         assert_eq!(write_record_history_gas(u64::MAX), None, "the byte count overflows");
+    }
+
+    /// Two sets of write records are charged in one charge, each answering its own price; a
+    /// charge the gas cannot pay, and a set with no price, charge nothing.
+    #[test]
+    fn test_two_sets_of_write_records_are_charged_in_one() {
+        let mut gas = GasTracker::new(u64::MAX, u64::MAX, 0);
+        assert_eq!(charge_write_records_history(&mut gas, 1, u64::MAX), None, "no price");
+        assert_eq!((gas.remaining(), gas.history_gas_spent()), (u64::MAX, 0));
+
+        let one = write_record_history_gas(1).expect("a record has a price");
+        let two = write_record_history_gas(2).expect("two records have a price");
+        let mut gas = GasTracker::new(one + two, one + two, 0);
+        assert_eq!(charge_write_records_history(&mut gas, 1, 2), Some((one, two)));
+        assert_eq!((gas.remaining(), gas.history_gas_spent()), (0, (one + two) as i64));
+
+        // A charge of nothing is always paid: there is no charge the gas cannot pay.
+        if one + two == 0 {
+            #[cfg(feature = "satin-price-override")]
+            crate::test_utils::note_price_guard("MEGA_SATIN_CPHB prices a history byte at nothing");
+            return;
+        }
+        let mut short = GasTracker::new(one + two, one + two - 1, 0);
+        assert_eq!(charge_write_records_history(&mut short, 1, 2), None);
+        assert_eq!((short.remaining(), short.history_gas_spent()), (one + two - 1, 0));
     }
 }

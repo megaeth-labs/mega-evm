@@ -16,6 +16,13 @@
 //! and they pin both sides, so a divergence is never silently absorbed. Later changes (the
 //! limits) add their own.
 //!
+//! Every Satin transaction also reads the live system address when it is validated, which leaves
+//! the `SequencerRegistry`'s account and its system-address slot in its returned state as a
+//! read-only entry that op-revm's has no counterpart for. A commit skips an account nothing
+//! touched, so the entry changes no committed state; each comparison of the two states takes it
+//! out first ([`take_system_address_read`]), which fails when the entry is missing or is more than
+//! the read, so the difference is pinned on every case rather than absorbed.
+//!
 //! SALT pricing multiplies a state gas charge by the capacity of the bucket it lands in, and
 //! op-revm has no SALT to read. Every baseline case runs without a SALT environment, where every
 //! bucket is minimal and the multiplier is one, so the baseline holds; the last case crowds one
@@ -30,7 +37,8 @@ use mega_evm::{
     },
     satin_gas_params,
     test_utils::{
-        op_transaction, transfer_log, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase,
+        note_price_guard, op_transaction, take_system_address_read, transfer_log,
+        zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase,
     },
     MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransactionOutcome, TX_BODY_SIZE,
     WRITE_RECORD_SIZE,
@@ -81,6 +89,14 @@ fn run_both(db: MemoryDatabase, tx: TxEnv) -> (MegaTransactionOutcome, Outcome, 
     run_both_in(db, tx, block())
 }
 
+/// Runs `tx` on `db` through op-revm's `OpEvm` alone, on the `CfgEnv` a `MegaEvm` context holds:
+/// for a gas limit that is op-revm's own, which Satin, charging the body's history on top, may
+/// refuse at validation.
+fn run_op_alone(db: MemoryDatabase, tx: TxEnv) -> Outcome {
+    let (_, mut op, _) = both_evms(db, block());
+    op.transact(op_transaction(tx)).unwrap()
+}
+
 /// [`run_both`] in `block`.
 fn run_both_in(
     db: MemoryDatabase,
@@ -125,9 +141,9 @@ fn both_evms(
 /// against the EIP-7623 floor, so a floor that binds op-revm's receipt need not bind Satin's;
 /// the whole `ResultGas` is still compared, with the two fields history moves rebuilt.
 ///
-/// The state is compared as it is, which holds because these transactions carry no gas price: a
-/// priced transaction pays the extra gas out of the sender's balance
-/// ([`test_fees_match_op_revm`]).
+/// The state is compared with the read of the live system address taken out, which holds because
+/// these transactions carry no gas price: a priced transaction pays the extra gas out of the
+/// sender's balance ([`test_fees_match_op_revm`]).
 fn assert_same_but_history(mega: &MegaTransactionOutcome, op: &Outcome) {
     let history = mega.gas.history;
     assert!(history >= body_history(0), "every Satin transaction pays for its own body");
@@ -153,7 +169,14 @@ fn assert_same_but_history(mega: &MegaTransactionOutcome, op: &Outcome) {
     assert_eq!(mega.result.logs(), op.result.logs(), "logs");
     assert_eq!(mega.result.output(), op.result.output(), "output");
     assert_eq!(mega.result.is_success(), op.result.is_success(), "success");
-    assert_eq!(mega.state, op.state, "state");
+    assert_eq!(but_the_system_address_read(&mega.state), op.state, "state");
+}
+
+/// `state` with the read of the live system address every Satin transaction makes taken out.
+fn but_the_system_address_read(state: &EvmState) -> EvmState {
+    let mut state = state.clone();
+    take_system_address_read(&mut state);
+    state
 }
 
 /// Asserts the two outcomes agree field by field, then as a whole so a field added later is
@@ -245,6 +268,16 @@ fn test_value_transfer_matches_op_revm() {
 /// cannot see whether the charge survived the frame it started. This one runs the same program
 /// above the cap: op-revm charges nothing for the records, and Satin's total must exceed
 /// op-revm's by exactly the history ledger here too.
+///
+/// The reservoir left at the end holds the child to inheriting its caller's: a caller takes back
+/// the reservoir its child returns as its own, so a child handed none would hand none back, and
+/// the transaction would end with no reservoir rather than what the state and history left. The
+/// child here is answered without running and spends nothing, so this does not show that a child
+/// can spend the whole reservoir it inherits; a child that does is held in the data-size tests.
+///
+/// Rule [S4.10]. Expected values: the history ledger is `constants`, the byte table at the cost
+/// per history byte; the reservoir is an identity against the run's own state and history
+/// ledgers, not a figure of its own; the rest is op-revm's run (`external`).
 #[test]
 fn test_a_nested_value_call_with_a_reservoir_matches_op_revm() {
     if runs_at_measurement_prices() {
@@ -749,5 +782,122 @@ fn test_a_crowded_salt_bucket_is_where_satin_leaves_op_revm() {
     // moves the gas ledgers and nothing else.
     assert_eq!(mega.result.logs(), op.result.logs(), "logs");
     assert_eq!(mega.result.output(), op.result.output(), "output");
-    assert_eq!(mega.state, op.state, "state");
+    assert_eq!(but_the_system_address_read(&mega.state), op.state, "state");
+}
+
+/// A transaction that runs out of gas in the runtime gas phase, before its first frame — here on
+/// EIP-2780's charge for the account its value creates — burns its whole gas limit on both
+/// engines and keeps nothing but its sender's nonce: no reservoir comes back from a transaction
+/// below the execution cap, and Satin's history ledger reads the body, the record its frame
+/// would have made given back.
+///
+/// Each engine runs one gas short of what the same transfer spends on it when it succeeds, so
+/// each falls short on the last charge of the phase at any byte price: op-revm has no history to
+/// charge and needs less by exactly the body's history and the record's, each a charge priced on
+/// its own — nothing where a history byte costs nothing, or so little that both round to nothing.
+/// Where a state byte costs nothing there is no such charge on op-revm, and the case returns
+/// early.
+#[test]
+fn test_an_out_of_gas_before_the_first_frame_matches_op_revm() {
+    if crate::common::state_is_free() {
+        return;
+    }
+    let db = || MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18)));
+    let transfer = |gas_limit| TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(CALLEE),
+        value: U256::from(1_000),
+        gas_limit,
+        ..Default::default()
+    };
+    let (mega_success, op_success, _) = run_both(db(), transfer(1_000_000 + account_state_gas()));
+    assert!(mega_success.result.is_success() && op_success.result.is_success());
+    let mega_limit = mega_success.result.gas().total_gas_spent() - 1;
+    let op_limit = op_success.result.gas().total_gas_spent() - 1;
+    assert_eq!(
+        mega_limit - op_limit,
+        body_history(0) + history(WRITE_RECORD_SIZE),
+        "Satin charges the body's and the record's history on top",
+    );
+
+    let (mega, _, cfg) = run_both(db(), transfer(mega_limit));
+    let op = run_op_alone(db(), transfer(op_limit));
+    assert_satin_cfg(&cfg);
+    for (engine, result, gas_limit) in
+        [("Satin", &mega.result, mega_limit), ("op-revm", &op.result, op_limit)]
+    {
+        assert!(result.is_halt(), "{engine}: {result:?}");
+        let gas = result.gas();
+        assert_eq!(gas.total_gas_spent(), gas_limit, "{engine}: the whole gas limit burns");
+        assert_eq!(gas.reservoir_remaining(), 0, "{engine}: no reservoir comes back");
+        assert_eq!(gas.tx_gas_used(), gas_limit, "{engine}: the receipt bills the gas limit");
+    }
+    assert_eq!(mega.gas.history, body_history(0), "the history ledger reads the body");
+    assert_eq!(mega.gas.history_bytes, TX_BODY_SIZE);
+    assert_eq!(mega.gas.state, 0, "the account was not created");
+    // With no gas price the fee is nothing, so the two states are the same: the sender's nonce
+    // moved and nothing else.
+    assert_eq!(but_the_system_address_read(&mega.state), op.state, "state");
+    assert_eq!(mega.state[&CALLER].info.nonce, 1);
+}
+
+/// A creation transaction that runs out of gas in the runtime gas phase bumps its sender's nonce
+/// on both engines, so an included out-of-gas creation cannot be replayed, and burns its whole gas
+/// limit. Satin runs out on the history of the record its own frame would make, the one charge of
+/// the phase it adds; op-revm on EIP-2780's charge for the created account, its last.
+///
+/// Where a record's history is nothing — a history byte that costs nothing, or so little that a
+/// record rounds to nothing — Satin's phase has nothing of its own left to charge, and the case
+/// returns early with a note.
+#[test]
+fn test_an_out_of_gas_creation_before_the_first_frame_matches_op_revm() {
+    if crate::common::state_is_free() {
+        return;
+    }
+    if history(WRITE_RECORD_SIZE) == 0 {
+        note_price_guard("a write record's history rounds to nothing at these prices");
+        return;
+    }
+    let db = || MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18)));
+    let init_code = BytecodeBuilder::default().stop().build();
+    let creation = |gas_limit| TxEnv {
+        caller: CALLER,
+        kind: TxKind::Create,
+        data: init_code.clone(),
+        gas_limit,
+        ..Default::default()
+    };
+    // A creation whose init code stops spends its intrinsic gas and nothing else on the regular
+    // ledger; the body and the created account's record are its history, the account its state.
+    let (success, op_success, _) = run_both(db(), creation(1_000_000 + account_state_gas()));
+    assert!(success.result.is_success() && op_success.result.is_success());
+    let intrinsic = success.gas.regular;
+    let mega_limit =
+        intrinsic + body_history(init_code.len() as u64) + history(WRITE_RECORD_SIZE) - 1;
+    let op_limit = op_success.result.gas().total_gas_spent() - 1;
+
+    let (mega, _, cfg) = run_both(db(), creation(mega_limit));
+    let op = run_op_alone(db(), creation(op_limit));
+    assert_satin_cfg(&cfg);
+    for (engine, result, gas_limit) in
+        [("Satin", &mega.result, mega_limit), ("op-revm", &op.result, op_limit)]
+    {
+        assert!(result.is_halt(), "{engine}: {result:?}");
+        assert_eq!(
+            result.gas().total_gas_spent(),
+            gas_limit,
+            "{engine}: the whole gas limit burns"
+        );
+        assert_eq!(result.gas().reservoir_remaining(), 0, "{engine}: no reservoir comes back");
+    }
+    assert_eq!(mega.gas.history, body_history(init_code.len() as u64), "the ledger reads the body");
+    // op-revm reaches the charge for the created account and loads its address; Satin falls short
+    // before it, so only the sender is compared: its nonce moved and nothing else.
+    assert_eq!(mega.state[&CALLER], op.state[&CALLER], "the sender's account");
+    assert_eq!(mega.state[&CALLER].info.nonce, 1, "the sender's nonce moves by one");
+    assert!(
+        mega.state.values().all(|account| !account.is_created()),
+        "nothing was created: {:?}",
+        mega.state.keys().collect::<Vec<_>>()
+    );
 }

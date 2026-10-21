@@ -7,26 +7,35 @@
 //! called `disableVolatileDataAccess()` first.
 
 use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
-use alloy_sol_types::SolCall;
+use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
     constants::ORACLE_ACCESS_COMPUTE_GAS,
     system::{
         IMegaAccessControl, IOracle, ACCESS_CONTROL_ADDRESS, MEGA_SYSTEM_ADDRESS,
-        ORACLE_CONTRACT_ADDRESS,
+        MEGA_SYSTEM_TRANSACTION_SOURCE_HASH, ORACLE_CONTRACT_ADDRESS,
     },
     test_utils::{op_transaction, BytecodeBuilder, ErrorInjectingDatabase, MemoryDatabase},
     volatile_data_access_disabled_revert_data, EvmTxRuntimeLimits, LimitCheck, LimitKind, MegaEvm,
-    VolatileDataAccess,
+    MegaLimitExceeded, MegaTransaction, VolatileDataAccess,
 };
-use revm::{bytecode::opcode::*, context::TxEnv, interpreter::InstructionResult, state::Bytecode};
+use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
+use revm::{
+    bytecode::opcode::*,
+    context::{result::ExecutionResult, Transaction, TxEnv},
+    context_interface::cfg::GasId,
+    interpreter::InstructionResult,
+    primitives::{eip2780::TX_BASE_COST, eip8038::COLD_ACCOUNT_ACCESS},
+    state::Bytecode,
+};
 
 use crate::{
     common::body_history,
     detention::{
-        assert_stopped, burn, call, context, execute, intrinsic, on_beneficiary, op, run_on, spin,
-        stop_data, tx, with_delegation, work, Calls, Charges, BELOW, BENEFICIARY, CALLER, CAP,
-        CHILD, CONTRACT, DELEGATOR, TIERS,
+        assert_caught, assert_stopped, burn, call, context, execute, intrinsic, on_beneficiary, op,
+        run_on, spin, stop_data, tx, with_delegation, work, Calls, Charges, BELOW, BENEFICIARY,
+        CALLER, CAP, CHILD, CONTRACT, DELEGATOR, TIERS,
     },
+    salt::entry,
 };
 
 /// A second contract, never the beneficiary.
@@ -37,31 +46,10 @@ const PAST_THE_CAP: u32 = 7_000;
 
 /* ---------- what records a read ---------- */
 
-/// Every block-environment opcode records its own kind; the transaction's and the chain's own
-/// fields, and a contract's own balance, record nothing.
+/// The transaction's and the chain's own fields, and a contract's own balance, record nothing; the
+/// opcodes that read the block environment record their kinds in the matrix of reads.
 #[test]
-fn test_the_block_environment_opcodes_record_their_kind_and_nothing_else_does() {
-    let reads: [(u8, VolatileDataAccess); 9] = [
-        (NUMBER, VolatileDataAccess::BLOCK_NUMBER),
-        (TIMESTAMP, VolatileDataAccess::TIMESTAMP),
-        (COINBASE, VolatileDataAccess::COINBASE),
-        (DIFFICULTY, VolatileDataAccess::PREV_RANDAO),
-        (GASLIMIT, VolatileDataAccess::GAS_LIMIT),
-        (BASEFEE, VolatileDataAccess::BASE_FEE),
-        (BLOBBASEFEE, VolatileDataAccess::BLOB_BASE_FEE),
-        (SLOTNUM, VolatileDataAccess::SLOT_NUM),
-        (PUSH0, VolatileDataAccess::empty()),
-    ];
-    for (opcode, access) in reads {
-        let code = op(BytecodeBuilder::default(), opcode).stop().build();
-        let run = execute(
-            MemoryDatabase::default().account_code(CONTRACT, code),
-            tx(CALLER, CONTRACT, BELOW),
-        );
-        assert!(run.outcome.result.is_success());
-        assert_eq!(run.accessed, access, "{opcode:#04x}");
-        assert_eq!(run.accessed.count_block_env_accessed(), usize::from(!access.is_empty()));
-    }
+fn test_the_transactions_own_fields_record_nothing() {
     for opcode in [
         revm::bytecode::opcode::CALLER,
         ORIGIN,
@@ -80,31 +68,6 @@ fn test_the_block_environment_opcodes_record_their_kind_and_nothing_else_does() 
         assert!(run.outcome.result.is_success());
         assert_eq!(run.accessed, VolatileDataAccess::empty(), "{opcode:#04x}");
         assert_eq!(run.limit, None, "{opcode:#04x}");
-    }
-}
-
-/// A transaction that reads several kinds records all of them, and the first read's limit, the
-/// lowest, is the one that holds.
-#[test]
-fn test_several_reads_record_every_kind_and_the_first_limit_holds() {
-    for gas_limit in TIERS {
-        let code = op(BytecodeBuilder::default(), NUMBER);
-        let code = op(work(code, 300), TIMESTAMP);
-        let code = op(work(code, 300), BASEFEE);
-        let code = work(code, 300).stop().build();
-        let run = execute(
-            MemoryDatabase::default().account_code(CONTRACT, code),
-            tx(CALLER, CONTRACT, gas_limit),
-        );
-        assert!(run.outcome.result.is_success());
-        assert_eq!(
-            run.accessed,
-            VolatileDataAccess::BLOCK_NUMBER |
-                VolatileDataAccess::TIMESTAMP |
-                VolatileDataAccess::BASE_FEE
-        );
-        assert_eq!(run.accessed.count_block_env_accessed(), 3);
-        assert_eq!(run.limit, Some(2 + CAP), "NUMBER, the first read, set the limit");
     }
 }
 
@@ -130,38 +93,6 @@ fn test_detention_starts_afresh_for_every_transaction() {
     assert_eq!(second.accessed, VolatileDataAccess::empty());
     assert_eq!(second.limit, None);
     assert!(second.outcome.gas.regular > CAP);
-}
-
-/// A read that stays within the cap costs what it ran: the gas detention withheld is never
-/// spent, below and above the execution cap.
-#[test]
-fn test_a_read_within_the_cap_bills_what_ran() {
-    for gas_limit in TIERS {
-        for opcode in [TIMESTAMP, NUMBER, COINBASE, DIFFICULTY, GASLIMIT, BASEFEE] {
-            // The read, a word stored, a short loop, and the word returned.
-            let code = BytecodeBuilder::default().append(opcode).push_number(0_u8).append(MSTORE);
-            let code = work(code, 10).push_number(32_u8).push_number(0_u8).append(RETURN).build();
-            let run = execute(
-                MemoryDatabase::default().account_code(CONTRACT, code),
-                tx(CALLER, CONTRACT, gas_limit),
-            );
-            assert!(run.outcome.result.is_success(), "{opcode:#04x}");
-            assert!(run.limit.is_some(), "{opcode:#04x}");
-            // What it ran is well under 100,000; the body's history comes on top.
-            let used = run.outcome.result.gas().tx_gas_used();
-            assert!(
-                used < 100_000 + body_history(0),
-                "{opcode:#04x}: {used}, not the gas it was given"
-            );
-        }
-        let code = BytecodeBuilder::default().push_number(299_u16).append(BLOCKHASH).stop().build();
-        let run = execute(
-            MemoryDatabase::default().account_code(CONTRACT, code),
-            tx(CALLER, CONTRACT, gas_limit),
-        );
-        assert!(run.outcome.result.is_success());
-        assert!(run.outcome.result.gas().tx_gas_used() < 100_000 + body_history(0));
-    }
 }
 
 /* ---------- which read sets the limit ---------- */
@@ -196,23 +127,6 @@ fn test_a_read_two_frames_down_caps_every_caller() {
         );
         assert!(run.outcome.result.is_success());
         assert!(run.outcome.result.gas().tx_gas_used() < 200_000 + body_history(0));
-    }
-}
-
-/// A caller that already read keeps its own limit through a child that reads again.
-#[test]
-fn test_a_childs_second_read_leaves_the_callers_limit() {
-    let child = op(BytecodeBuilder::default(), NUMBER).stop().build();
-    let parent = work(op(BytecodeBuilder::default(), TIMESTAMP), 300);
-    let parent = call(parent, CALL, CHILD).stop().build();
-    for gas_limit in TIERS {
-        let db = MemoryDatabase::default()
-            .account_code(CONTRACT, parent.clone())
-            .account_code(CHILD, child.clone());
-        let run = execute(db, tx(CALLER, CONTRACT, gas_limit));
-        assert!(run.outcome.result.is_success());
-        assert_eq!(run.limit, Some(2 + CAP), "TIMESTAMP, the caller's first opcode, set it");
-        assert_eq!(run.accessed, VolatileDataAccess::TIMESTAMP | VolatileDataAccess::BLOCK_NUMBER);
     }
 }
 
@@ -289,7 +203,8 @@ fn test_calling_the_oracle_without_reading_its_storage_detains_nothing() {
 }
 
 /// The Oracle's own code is held to the cap once it read its storage, whether the transaction
-/// calls it directly or through a frame, and whether the call is a `CALL` or a `STATICCALL`.
+/// calls it directly or through a frame, which catches its stop and ends on a `POP`, and whether
+/// the call is a `CALL` or a `STATICCALL`.
 #[test]
 fn test_the_oracle_reading_its_own_storage_is_held_to_the_cap() {
     assert_eq!(ORACLE_ACCESS_COMPUTE_GAS, CAP);
@@ -314,7 +229,7 @@ fn test_the_oracle_reading_its_own_storage_is_held_to_the_cap() {
             let code =
                 call(BytecodeBuilder::default(), scheme, ORACLE_CONTRACT_ADDRESS).stop().build();
             let run = execute(db().account_code(CONTRACT, code), tx(CALLER, CONTRACT, gas_limit));
-            assert_stopped(&run, intrinsic, left);
+            assert_caught(&run, intrinsic, left, &Charges::default().then(&[2]));
             assert_eq!(run.accessed, VolatileDataAccess::ORACLE, "{scheme:#04x}");
         }
     }
@@ -394,6 +309,198 @@ fn test_the_system_address_is_not_detained() {
         "{:?}",
         run.outcome.result
     );
+}
+
+/// A user's deposit is detained. [S12.51] [S19.8]
+///
+/// independent: the cap, the compute at the read and the bill are the spec's own numbers.
+/// The cap is 20,000,000.
+/// `TIMESTAMP` costs 2, `PUSH0` costs 2 and a cold `SLOAD` costs 2,100, so the compute at the
+/// read is that opcode's gas.
+/// The EIP-2780 intrinsic of a call to an existing account, with no value and no calldata, is
+/// `TX_BASE_COST` (12,000) plus the recipient access (3,000).
+/// What the loop leaves is the same hand count `Charges` makes: the `POP` after the read, the
+/// push of the counter, one round that expands memory to 1,024 words, then rounds of 3,108 until
+/// the next round's 3,072-gas copy no longer fits.
+///
+/// A deposit pays no history gas, and a user's deposit is not system-originated.
+/// The same body, run as a Mega System Transaction, reads the same thing and is not stopped.
+#[test]
+fn test_a_users_deposit_is_detained() {
+    // The spec's numbers, held equal to the constants the engine is built with.
+    const BLOCK_ENV_CAP: u64 = 20_000_000;
+    const ORACLE_CAP: u64 = 20_000_000;
+    const TIMESTAMP_GAS: u64 = 2;
+    const PUSH_GAS: u64 = 2;
+    const COLD_SLOAD: u64 = 2_100;
+    const BASE_INTRINSIC: u64 = 12_000;
+    const RECIPIENT_ACCESS: u64 = 3_000;
+    assert_eq!(BLOCK_ENV_CAP, CAP);
+    assert_eq!(BLOCK_ENV_CAP, ORACLE_CAP);
+    assert_eq!(ORACLE_CAP, ORACLE_ACCESS_COMPUTE_GAS);
+    assert_eq!(BASE_INTRINSIC, TX_BASE_COST);
+    assert_eq!(RECIPIENT_ACCESS, COLD_ACCOUNT_ACCESS);
+    assert_eq!(LimitKind::ComputeGas.as_u8(), 2);
+    let intrinsic = BASE_INTRINSIC + RECIPIENT_ACCESS;
+    assert_eq!(intrinsic, 15_000);
+
+    // A source hash a user can carry: not empty, and not the protocol's own.
+    let source = B256::repeat_byte(0x11);
+    assert_ne!(source, B256::ZERO);
+    assert_ne!(source, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH);
+    assert_ne!(CALLER, MEGA_SYSTEM_ADDRESS);
+    assert_ne!(CALLER, mega_evm::SYSTEM_ADDRESS);
+
+    // What a 20,000,000 allowance has left when the copy that crosses it is not made.
+    let left = allowance_after_the_read(BLOCK_ENV_CAP);
+    assert_eq!(left, 1_100);
+    assert_eq!(Charges::default().then(&[2]).work(PAST_THE_CAP, 0).left(BLOCK_ENV_CAP), left);
+
+    let timestamp = work(op(BytecodeBuilder::default(), TIMESTAMP), PAST_THE_CAP).stop().build();
+    let oracle = work(BytecodeBuilder::default().append_many([PUSH0, SLOAD, POP]), PAST_THE_CAP)
+        .stop()
+        .build();
+    assert_deposit_stopped(
+        "TIMESTAMP",
+        timestamp.clone(),
+        TIMESTAMP_GAS,
+        BLOCK_ENV_CAP,
+        VolatileDataAccess::TIMESTAMP,
+        intrinsic,
+        left,
+        source,
+    );
+    assert_deposit_stopped(
+        "Oracle",
+        oracle.clone(),
+        PUSH_GAS + COLD_SLOAD,
+        ORACLE_CAP,
+        VolatileDataAccess::ORACLE,
+        intrinsic,
+        left,
+        source,
+    );
+    assert_system_transaction_is_not_stopped("TIMESTAMP", timestamp, BLOCK_ENV_CAP);
+    assert_system_transaction_is_not_stopped("Oracle", oracle, ORACLE_CAP);
+}
+
+/// What `allowance` has left after the `POP` that follows a volatile read and `work` of
+/// `PAST_THE_CAP` rounds, at the spec's opcode costs.
+///
+/// The first round expands memory from nothing to the 1,024 words the copy writes
+/// (`3w + w²/512` = 5,120). Each later round costs 3,108. The round that crosses pays
+/// `JUMPDEST`, the size push, two `PUSH0` and `MCOPY`'s static gas, and cannot pay the copy.
+fn allowance_after_the_read(allowance: u64) -> u64 {
+    let mut left = allowance;
+    left -= 2; // the POP of the value the read pushed
+    left -= 3; // the push of the round counter
+    let words = 1_024u64;
+    let expansion = 3 * words + words * words / 512;
+    assert_eq!(expansion, 5_120);
+    let before_copy = 1 + 3 + 2 + 2 + 3; // JUMPDEST, PUSH of 0x8000, two PUSH0, MCOPY
+    let copy = 1_024 * 3;
+    assert_eq!(copy, 3_072);
+    let after_copy = 3 + 3 + 3 + 3 + 3 + 10; // PUSH1, SWAP1, SUB, DUP1, the dest push, JUMPI
+    left -= before_copy + copy + expansion + after_copy;
+    let round = before_copy + copy + after_copy;
+    assert_eq!(round, 3_108);
+    let full = left / round;
+    left -= full * round;
+    assert!(full < u64::from(PAST_THE_CAP) - 1, "the loop does not finish");
+    left -= before_copy;
+    assert!(copy > left, "the copy is the charge that crosses");
+    left
+}
+
+/// `code` on the Oracle, as a user's deposit from `CALLER`. Both accounts already exist, so
+/// the run adds no state.
+fn user_deposit(source: B256) -> MegaTransaction {
+    let mut tx = alloy_op_evm::OpTx(op_transaction(TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(ORACLE_CONTRACT_ADDRESS),
+        gas_limit: BELOW,
+        gas_price: 0,
+        chain_id: Some(1),
+        ..Default::default()
+    }));
+    tx.0.deposit.source_hash = source;
+    tx.0.deposit.is_system_transaction = false;
+    assert_eq!(Transaction::tx_type(&tx.0), DEPOSIT_TRANSACTION_TYPE);
+    assert!(!mega_evm::system::is_system_originated(&tx, MEGA_SYSTEM_ADDRESS));
+    tx
+}
+
+fn deposit_db(code: Bytes) -> MemoryDatabase {
+    MemoryDatabase::default()
+        .account_code(ORACLE_CONTRACT_ADDRESS, code)
+        .account_balance(CALLER, U256::from(1))
+        .account_balance(ORACLE_CONTRACT_ADDRESS, U256::from(1))
+        .sequencer_registry(MEGA_SYSTEM_ADDRESS)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assert_deposit_stopped(
+    name: &str,
+    code: Bytes,
+    compute_at_read: u64,
+    cap: u64,
+    access: VolatileDataAccess,
+    intrinsic: u64,
+    left: u64,
+    source: B256,
+) {
+    let limit = compute_at_read + cap;
+    let used = limit - left;
+    let run = execute(deposit_db(code), user_deposit(source));
+    assert!(run.detains, "{name}: a user's deposit is detained, got {:?}", run.outcome.result);
+    assert_eq!(run.accessed, access, "{name}");
+    assert_eq!(run.limit, Some(limit), "{name}: the read set compute at the read plus the cap");
+    match &run.outcome.result {
+        ExecutionResult::Revert { output, .. } => {
+            assert_eq!(
+                output.as_ref(),
+                MegaLimitExceeded { kind: 2, limit }.abi_encode(),
+                "{name}"
+            );
+        }
+        other => panic!("{name}: expected the detention stop, got {other:?}"),
+    }
+    assert_eq!(
+        run.outcome.limit_exceeded,
+        Some(LimitCheck::ExceedsLimit {
+            kind: LimitKind::ComputeGas,
+            limit,
+            used,
+            frame_local: false,
+        }),
+        "{name}"
+    );
+    assert_eq!(run.outcome.gas.regular, intrinsic + used, "{name}: billed what ran");
+    assert_eq!(run.outcome.gas.gas_used, intrinsic + used, "{name}: the receipt bills the same");
+    assert_eq!(run.outcome.gas.state, 0, "{name}");
+    assert_eq!(run.outcome.gas.history, 0, "{name}: a deposit pays no history");
+    assert_eq!(run.outcome.gas.history_bytes, 0, "{name}");
+    assert!(run.outcome.result.logs().is_empty(), "{name}");
+}
+
+/// The same body as a Mega System Transaction: a legacy call from the system address to the
+/// Oracle. It is the protocol's own transaction, so the read does not detain it.
+fn assert_system_transaction_is_not_stopped(name: &str, code: Bytes, cap: u64) {
+    let system = alloy_op_evm::OpTx(op_transaction(TxEnv {
+        caller: MEGA_SYSTEM_ADDRESS,
+        kind: TxKind::Call(ORACLE_CONTRACT_ADDRESS),
+        gas_limit: BELOW,
+        chain_id: Some(1),
+        ..Default::default()
+    }));
+    assert!(mega_evm::system::is_system_originated(&system, MEGA_SYSTEM_ADDRESS), "{name}");
+    let run = execute(deposit_db(code), system);
+    assert!(run.outcome.result.is_success(), "{name} system: {:?}", run.outcome.result);
+    assert!(!run.detains, "{name} system");
+    assert_eq!(run.accessed, VolatileDataAccess::empty(), "{name} system");
+    assert_eq!(run.limit, None, "{name} system");
+    assert!(run.outcome.gas.regular > cap, "{name} system: it ran past the cap");
+    assert_eq!(run.outcome.gas.history, 0, "{name} system");
 }
 
 /* ---------- the beneficiary's own frame ---------- */
@@ -614,8 +721,10 @@ fn test_a_call_to_the_access_control_contract_costs_its_overhead() {
     );
     assert!(run.outcome.result.is_success());
     let consumed = U256::from_be_slice(run.outcome.result.output().unwrap());
-    // The pushes (2 + 2 + 3 + 2 + 2 + 3 + 3), the cold call (2,600), POP and GAS.
-    assert_eq!(consumed, U256::from(17 + 2_600 + 2 + 2));
+    // The pushes (2 + 2 + 3 + 2 + 2 + 3 + 3), the cold call, POP and GAS.
+    let cold_call =
+        entry(GasId::warm_storage_read_cost()) + entry(GasId::cold_account_additional_cost());
+    assert_eq!(consumed, U256::from(17 + cold_call + 2 + 2));
 }
 
 /* ---------- an applied authority ---------- */

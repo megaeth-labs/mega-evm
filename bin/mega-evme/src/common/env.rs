@@ -12,14 +12,16 @@ use mega_evm::{
         context::{block::BlockEnv, cfg::CfgEnv},
         primitives::eip4844,
     },
-    AHashBucketHasher, MegaContext, MegaHardforks, MegaSpecId, ProtocolLimits, TestExternalEnvs,
+    AHashBucketHasher, MegaContext, MegaSpecId, ProtocolLimits, TestExternalEnvs,
 };
 
 /// External environment type for mega-evme using the real AHash-based SALT bucket hasher.
 pub type EvmeExternalEnvs = TestExternalEnvs<Infallible, AHashBucketHasher>;
 use tracing::{debug, trace};
 
-use super::{parse_limits_override, satin_schedule, EvmeError, LimitsOverride, Result};
+use super::{
+    parse_limits_override, satin_limits, satin_schedule, EvmeError, LimitsOverride, Result,
+};
 
 /// Chain configuration arguments (spec and chain ID)
 #[derive(Args, Debug, Clone)]
@@ -28,7 +30,7 @@ pub struct ChainArgs {
     /// Name of spec to use. `Satin` runs on the Satin engine; `Equivalence`, `MiniRex`,
     /// `MiniRex1`, `MiniRex2`, `Rex`, `Rex1`, `Rex2`, `Rex3`, `Rex4`, `Rex5`, `Rex6` run on the
     /// legacy engine, the released 1.7.1 (`MiniRex1`/`MiniRex2` are alias specs executing
-    /// `Equivalence`/`MiniRex` behavior)
+    /// `Equivalence`/`MiniRex` behavior). Under `--genesis` the default is `Satin`
     #[arg(long = "spec", default_value = "Rex6")]
     pub spec: String,
 
@@ -36,11 +38,10 @@ pub struct ChainArgs {
     #[arg(long = "chain-id", visible_aliases = ["chainid"], default_value = "6342")]
     pub chain_id: u64,
 
-    /// Satin only: run under these protocol limits instead of the chain's, a counterfactual. A
-    /// JSON object in the shape a chain configuration carries `ProtocolLimits` in (camelCase,
-    /// per-transaction limits under `txRuntimeLimits`), inline or in a file; the fields it names
-    /// replace the chain's, every other stays. Refused when it names an unknown field or a value
-    /// no chain may carry
+    /// Satin only: run under these protocol limits instead of the spec's, a counterfactual. A JSON
+    /// object in `ProtocolLimits`' shape (camelCase, per-transaction limits under
+    /// `txRuntimeLimits`), inline or in a file; the fields it names replace the spec's, every
+    /// other stays. Refused when it names an unknown field or a value of the wrong type
     #[arg(long = "override.limits", value_name = "JSON|FILE", value_parser = parse_limits_override)]
     pub limits_override: Option<LimitsOverride>,
 }
@@ -62,15 +63,13 @@ impl ChainArgs {
         Ok(cfg)
     }
 
-    /// The protocol limits a Satin run of this chain at `timestamp` is held to: those of the
-    /// schedule [`satin_schedule`] gives, which for a chain that does not run Satin at `timestamp`
-    /// is a counterfactual on [`ProtocolLimits::DEFAULT`], with `--override.limits` over them.
+    /// The protocol limits a Satin run of this chain at `timestamp` is held to: Satin's
+    /// ([`satin_limits`]), with `--override.limits` over them. The run's schedule
+    /// ([`satin_schedule`]) is checked first, so a run the chain's configuration cannot make —
+    /// one before `--genesis` activates Satin, say — is refused here too.
     pub fn protocol_limits(&self, timestamp: u64) -> Result<ProtocolLimits> {
-        satin_schedule(self.chain_id, timestamp, self.limits_override.as_ref())?
-            .protocol_limits(timestamp)
-            .ok_or_else(|| {
-                EvmeError::Other(format!("the Satin schedule carries no limits at {timestamp}"))
-            })
+        satin_schedule(self.chain_id, timestamp)?;
+        satin_limits(self.limits_override.as_ref())
     }
 }
 
@@ -207,8 +206,8 @@ impl EnvArgs {
         self.ext.create_external_envs()
     }
 
-    /// The protocol limits a Satin run is held to when `--override.limits` replaced the
-    /// schedule's, for its report; `None` without an override.
+    /// The protocol limits a Satin run is held to when `--override.limits` replaced the spec's,
+    /// for its report; `None` without an override.
     pub fn limits_override_in_force(&self) -> Result<Option<Box<ProtocolLimits>>> {
         if self.chain.limits_override.is_none() {
             return Ok(None);
@@ -218,14 +217,12 @@ impl EnvArgs {
 
     /// Creates a [`MegaContext`] with all environment configurations.
     ///
-    /// The transaction is held to the per-transaction limits a block of the chain at the block's
-    /// timestamp would hold it to ([`ChainArgs::protocol_limits`]), as a node's EVM factory holds
-    /// an EVM it builds outside block execution.
+    /// The transaction is held to the per-transaction limits a block would hold it to
+    /// ([`ChainArgs::protocol_limits`]), as a node's EVM factory holds an EVM it builds outside
+    /// block execution.
     ///
-    /// The `system_address` defaults to `MEGA_SYSTEM_ADDRESS`. For `run`/`tx` modes this is
-    /// correct: these paths don't go through the block executor and don't resolve from
-    /// `SequencerRegistry`. If fork-state simulation with a changed sequencer is needed,
-    /// a `--system-address` CLI override can be added in the future.
+    /// This function does not set a system address. A transaction of the system shape reads the
+    /// live address from the `SequencerRegistry` in the database it runs on.
     pub fn create_evm_context<DB: Database>(
         &self,
         db: DB,
@@ -271,19 +268,29 @@ mod tests {
     use super::*;
     use mega_evm::{revm::database::EmptyDB, MegaEvm};
 
-    /// A `run` or `tx` on Satin is held to the chain's per-transaction limits: on the tool's
-    /// default chain, which does not run Satin, the protocol's defaults, where a bare context
-    /// would hold it to gas detention's caps alone.
+    /// A `run` or `tx` on Satin is held to Satin's per-transaction limits, as a bare context of
+    /// the spec is; `--override.limits` replaces the fields it names.
     #[test]
     fn test_a_satin_run_is_held_to_the_protocol_limits() {
+        let satin = ProtocolLimits::for_spec(MegaSpecId::SATIN).tx_runtime_limits;
         let args = EnvArgs::parse_from(["run", "--spec", "Satin"]);
         let evm = MegaEvm::new(args.create_evm_context(EmptyDB::default()).unwrap());
-        assert_eq!(*evm.tx_runtime_limits(), ProtocolLimits::DEFAULT.tx_runtime_limits);
-        assert_ne!(
+        assert_eq!(*evm.tx_runtime_limits(), satin);
+        assert_eq!(
             *MegaEvm::new(MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN))
                 .tx_runtime_limits(),
-            ProtocolLimits::DEFAULT.tx_runtime_limits,
-            "a bare context does not hold the transaction data-size limit"
+            satin,
+            "a bare context holds the same limits"
         );
+
+        let args = EnvArgs::parse_from([
+            "run",
+            "--spec",
+            "Satin",
+            "--override.limits",
+            r#"{"txRuntimeLimits":{"txDataSizeLimit":350}}"#,
+        ]);
+        let evm = MegaEvm::new(args.create_evm_context(EmptyDB::default()).unwrap());
+        assert_eq!(*evm.tx_runtime_limits(), satin.with_tx_data_size_limit(350));
     }
 }

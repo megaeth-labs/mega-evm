@@ -11,16 +11,35 @@ use std::{
     process::Command,
 };
 
-use alloy_primitives::{address, Address, B256};
+use alloy_primitives::{address, Address, B256, U256};
 use mega_evme::block::{CachedBlock, PreAccount};
 use serde_json::Value;
 
 /// The recorded blocks.
 pub(crate) const BLOCKS: [u64; 3] = [26_400_001, 26_400_007, 26_400_110];
 
-/// The EIP-7997 factory, which Satin's pre-block changes deploy and the legacy engine never
-/// reads: the one account a Satin replay reads that the recording does not hold.
+/// The EIP-7997 factory, which Satin's activation block checks and the legacy engine never reads:
+/// the one account a Satin replay of an activation block reads that the recording does not hold.
 pub(crate) const FACTORY: Address = address!("0x4e59b44847b379578588920cA78FbF26c0B4956C");
+
+/// The factory as `MegaETH` mainnet holds it: its code, at the nonce its use has brought it to.
+pub(crate) fn factory_account() -> PreAccount {
+    PreAccount {
+        nonce: 1_443,
+        code_hash: Some(mega_evm::system::CREATE2_FACTORY_CODE_HASH),
+        ..PreAccount::default()
+    }
+}
+
+/// The L1 block contract, whose L1 fee overhead slot Satin's pre-block changes read with the
+/// rest of the L1 block info, whatever the fee scalars hold. The legacy engine reads the slot
+/// only when the scalars are empty, which they are not on these blocks, so no recording holds it.
+pub(crate) const L1_BLOCK: Address = address!("0x4200000000000000000000000000000000000015");
+
+/// The L1 fee overhead slot of [`L1_BLOCK`].
+pub(crate) fn overhead_slot() -> B256 {
+    B256::with_last_byte(5)
+}
 
 /// The recorded block cache.
 pub(crate) fn fixtures() -> &'static Path {
@@ -44,11 +63,19 @@ pub(crate) fn write_block(dir: &Path, number: u64, block: &CachedBlock) {
     std::fs::write(block_path(dir, number), zstd::encode_all(json.as_slice(), 3).unwrap()).unwrap();
 }
 
-/// The code with `hash` from the recorded code store.
+/// The code with `hash` from the recorded code store, or the factory's ([`factory_account`]),
+/// which no recording holds.
 pub(crate) fn code_of(hash: B256) -> Vec<u8> {
+    if hash == mega_evm::system::CREATE2_FACTORY_CODE_HASH {
+        return mega_evm::system::CREATE2_FACTORY_CODE.to_vec();
+    }
+    std::fs::read(code_path(fixtures(), hash)).unwrap()
+}
+
+/// Where the code with `hash` lives in the code store of the cache at `dir`.
+fn code_path(dir: &Path, hash: B256) -> PathBuf {
     let hex = hash.to_string();
-    std::fs::read(fixtures().join("codes").join(&hex[2..4]).join(format!("{}.bin", &hex[2..])))
-        .unwrap()
+    dir.join("codes").join(&hex[2..4]).join(format!("{}.bin", &hex[2..]))
 }
 
 /// A copy of the recorded block cache, so no test can write to the fixtures.
@@ -58,17 +85,30 @@ pub(crate) fn cache_copy() -> tempfile::TempDir {
     dir
 }
 
-/// A copy of the recorded block cache in which every block's pre-state holds the factory, absent:
-/// what a Satin replay needs offline. `block_replay.rs` shows the factory's state changes no
-/// transaction row.
-pub(crate) fn cache_copy_with_absent_factory() -> tempfile::TempDir {
+/// A copy of the recorded block cache in which every block's pre-state holds what a Satin replay
+/// reads beyond the recording: the factory, as the chain holds it ([`factory_account`], its code
+/// in the cache's code store), which only Satin's activation block reads, and the L1 fee overhead,
+/// zero, as the chain held it. `block_replay.rs` shows the overhead's value changes no transaction
+/// row.
+pub(crate) fn cache_copy_for_satin() -> tempfile::TempDir {
     let dir = cache_copy();
+    let factory = factory_account();
+    let code = code_path(dir.path(), factory.code_hash.unwrap());
+    std::fs::create_dir_all(code.parent().unwrap()).unwrap();
+    std::fs::write(code, mega_evm::system::CREATE2_FACTORY_CODE).unwrap();
     for number in BLOCKS {
         let mut block = read_block(dir.path(), number);
-        block.prestate.accounts.insert(FACTORY, PreAccount::default());
+        block.prestate.accounts.insert(FACTORY, factory.clone());
+        set_overhead(&mut block, U256::ZERO);
         write_block(dir.path(), number, &block);
     }
     dir
+}
+
+/// Has `block`'s pre-state hold `value` as the L1 fee overhead.
+pub(crate) fn set_overhead(block: &mut CachedBlock, value: U256) {
+    let l1_block = block.prestate.accounts.get_mut(&L1_BLOCK).expect("every block reads it");
+    l1_block.storage.insert(overhead_slot(), value);
 }
 
 fn copy_dir(from: &Path, to: &Path) {
@@ -101,6 +141,27 @@ impl Run {
     }
 }
 
+/// The reason the block executor gives a transaction whose declared gas limit is more than the
+/// gas its block has left.
+const NO_BLOCK_GAS: &str = "is more than blocks available gas";
+
+/// How many transactions `records`, a replay of one block, shows refused, every one of them for
+/// the gas it declared and the block no longer had.
+///
+/// The recorded transactions declare gas limits close to their block's own, and a Satin replay of
+/// a recorded block spends more gas than the chain did, so a transaction late in the block can
+/// find too little gas left to be included. That is the one refusal a replay whose schedule has
+/// every fork active at the block can make; any other fails the assertion.
+pub(crate) fn refused_for_block_gas(records: &[Value]) -> usize {
+    let refused: Vec<&Value> =
+        records.iter().filter(|r| r["kind"] == "tx" && r["status"] == "refused").collect();
+    for record in &refused {
+        let reason = record["reason"].as_str().unwrap_or_default();
+        assert!(reason.contains(NO_BLOCK_GAS), "a refusal for more than block gas: {record}");
+    }
+    refused.len()
+}
+
 /// Runs `mega-evme` with `args` on a thread of its own, so a test's runtime can serve it a mock.
 pub(crate) fn run_evme<S: AsRef<str>>(args: &[S]) -> Run {
     let args: Vec<String> = args.iter().map(|a| a.as_ref().to_string()).collect();
@@ -114,4 +175,26 @@ pub(crate) fn run_evme<S: AsRef<str>>(args: &[S]) -> Run {
     })
     .join()
     .unwrap()
+}
+
+/// The timestamp of a cached block.
+pub(crate) fn timestamp_of(block: &CachedBlock) -> u64 {
+    let hex = block.block["timestamp"].as_str().expect("a hex timestamp");
+    u64::from_str_radix(hex.trim_start_matches("0x"), 16).expect("a timestamp")
+}
+
+/// Whether the `index`-th transaction of a cached block is a deposit.
+pub(crate) fn is_deposit(block: &CachedBlock, index: usize) -> bool {
+    block.block["transactions"][index]["type"] == "0x7e"
+}
+
+/// A genesis file of chain `chain_id` activating Satin at `satin_time`, written in `dir`; its
+/// path.
+pub(crate) fn satin_genesis(dir: &Path, chain_id: u64, satin_time: u64) -> String {
+    let satin = mega_evm::SatinChainConfig { activation_time: satin_time };
+    let mut config = serde_json::to_value(satin).unwrap();
+    config["chainId"] = chain_id.into();
+    let path = dir.join(format!("satin-genesis-{chain_id}-{satin_time}.json"));
+    std::fs::write(&path, serde_json::json!({ "config": config }).to_string()).unwrap();
+    path.to_str().unwrap().to_string()
 }

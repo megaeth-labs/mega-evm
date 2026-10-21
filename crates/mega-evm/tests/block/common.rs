@@ -1,20 +1,25 @@
 //! Shared setup of the block-executor tests.
 //!
-//! A block on a chain whose schedule activates Satin at genesis, over an in-memory database with
-//! an empty L1 block contract — so the L1 fees, the operator fee and the data-availability
-//! footprint scalar all read as zero unless a test writes them.
+//! A block on a chain whose schedule activates Satin at genesis, over an in-memory database holding
+//! the seven predeploys as a chain that ran Rex6 holds them, and no L1 block contract — so the L1
+//! fees, the operator fee and the data-availability footprint scalar all read as zero unless a test
+//! writes them. Satin activates at genesis, so no block of these tests is its activation block.
 
 use alloy_consensus::{transaction::Recovered, Sealed, Signed, TxLegacy};
+use alloy_eips::{eip2935::HISTORY_STORAGE_ADDRESS, eip4788::BEACON_ROOTS_ADDRESS};
 use alloy_evm::{EvmEnv, EvmFactory};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
-    system::{IOracle, SequencerRegistryConfig, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS},
-    test_utils::MemoryDatabase,
+    system::{
+        system_contract_specs, IOracle, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
+        SEQUENCER_REGISTRY_ADDRESS,
+    },
+    test_utils::{BytecodeBuilder, MemoryDatabase, SequencerRegistryRoles},
     BlockLimits, EmptyExternalEnv, EvmTxRuntimeLimits, MegaBlockExecutionCtx, MegaBlockExecutor,
     MegaBlockExecutorFactory, MegaEvm, MegaEvmFactory, MegaHardforkConfig, MegaSpecId,
-    MegaTxEnvelope, PreBlockStateSource, ProtocolLimits,
+    MegaTxEnvelope, ProtocolLimits,
 };
 use op_alloy_consensus::TxDeposit;
 use revm::{
@@ -24,7 +29,6 @@ use revm::{
     inspector::NoOpInspector,
     state::EvmState,
 };
-use std::sync::{Arc, Mutex};
 
 /// The sender every test transaction comes from.
 pub(crate) const CALLER: Address = address!("0x2000000000000000000000000000000000000002");
@@ -44,9 +48,10 @@ pub(crate) const BLOCK_GAS_LIMIT: u64 = 30_000_000;
 /// The chain id the test transactions carry.
 pub(crate) const CHAIN_ID: u64 = 4_326;
 
-/// The database a block runs on: the caller is funded and the callee has empty code.
+/// The database a block runs on: the seven predeploys as a chain that ran Rex6 holds them, the
+/// registry holding [`registry_roles`]; the caller is funded and the callee has empty code.
 pub(crate) fn database() -> MemoryDatabase {
-    let mut db = MemoryDatabase::default();
+    let mut db = MemoryDatabase::default().rex6_predeploys(registry_roles());
     db.set_account_code(CONTRACT, Bytes::new());
     db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000_u64));
     db
@@ -70,48 +75,62 @@ pub(crate) fn evm_env() -> EvmEnv<MegaSpecId> {
     EvmEnv::new(cfg_env, block_env)
 }
 
-/// The sequencer the tests seed into the registry, distinct from the system address and admin.
+/// The sequencer the tests' registry names, distinct from the system address and admin.
 pub(crate) const SEQUENCER: Address = address!("0x2222222222222222222222222222222222222222");
 
-/// The admin the tests seed into the registry, distinct from the system address and sequencer.
+/// The admin the tests' registry names, distinct from the system address and sequencer.
 pub(crate) const ADMIN: Address = address!("0x3333333333333333333333333333333333333333");
 
-/// Registry params the block tests attach to a Satin-at-genesis schedule.
-pub(crate) fn registry_config() -> SequencerRegistryConfig {
-    SequencerRegistryConfig {
-        initial_system_address: MEGA_SYSTEM_ADDRESS,
-        initial_sequencer: SEQUENCER,
-        initial_admin: ADMIN,
-        initial_from_block: 1,
+/// An address as the word the registry stores it as.
+pub(crate) fn word(address: Address) -> U256 {
+    U256::from_be_bytes(address.into_word().0)
+}
+
+/// Code that writes 1 into the slot named by the first byte of its calldata.
+pub(crate) fn writer() -> Bytes {
+    use revm::bytecode::opcode::{CALLDATALOAD, PUSH0, SHR, SSTORE, STOP};
+    BytecodeBuilder::default()
+        .push_number(1_u8)
+        .append_many([PUSH0, CALLDATALOAD])
+        .push_number(248_u8)
+        .append_many([SHR, SSTORE, STOP])
+        .build()
+}
+
+/// The roles the registry of [`database`] holds: the default system address, and a sequencer and
+/// an admin of their own.
+pub(crate) fn registry_roles() -> SequencerRegistryRoles {
+    SequencerRegistryRoles {
+        system_address: MEGA_SYSTEM_ADDRESS,
+        sequencer: SEQUENCER,
+        admin: ADMIN,
         min_rotation_delay: 100,
     }
 }
 
-/// A schedule that activates Satin at genesis, can seed the `SequencerRegistry`, and holds its
-/// blocks to the loosest limits a chain may carry.
+/// A schedule that activates Satin at genesis.
 ///
-/// Its limits are [`ProtocolLimits::loosest`]: most block tests exercise one mechanism and take
-/// the limits out, and a test that holds a block or a transaction to a limit attaches its own
-/// ([`chain_spec_with`]). Every limit is unlimited but gas detention's caps, which no transaction
-/// of a block this size reaches, so a transaction that reads volatile data is detained and never
-/// stopped.
+/// Its blocks are held to the spec's limits ([`ProtocolLimits::for_spec`]), which no block this
+/// size reaches but gas detention's caps; a test that holds a block or a transaction to another
+/// limit replaces them ([`executor_with_limits`]).
 pub(crate) fn chain_spec() -> MegaHardforkConfig {
-    chain_spec_with(ProtocolLimits::loosest())
+    MegaHardforkConfig::default().with_all_activated()
 }
 
-/// [`chain_spec`], holding its blocks to `limits`, which must be limits a chain may carry: the
-/// block executor refuses a block under any other.
-pub(crate) fn chain_spec_with(limits: ProtocolLimits) -> MegaHardforkConfig {
-    MegaHardforkConfig::default()
-        .with_all_activated()
-        .with_params(registry_config())
-        .with_params(limits)
+/// The loosest limits a block could be held to while a read of volatile data still detains:
+/// every limit unlimited, and gas detention's caps one below the most compute a transaction can
+/// spend, which no transaction of a block this size reaches. For a test that holds a block to
+/// one limit and no other.
+pub(crate) const fn loosest() -> ProtocolLimits {
+    ProtocolLimits::no_limits().with_tx_runtime_limits(loosest_tx())
 }
 
-/// The per-transaction half of [`ProtocolLimits::loosest`], for a test that holds a block's
-/// transactions to one limit and no other.
+/// The per-transaction half of [`loosest`].
 pub(crate) const fn loosest_tx() -> EvmTxRuntimeLimits {
-    ProtocolLimits::loosest().tx_runtime_limits
+    let cap = mega_evm::constants::MAX_TX_COMPUTE_GAS - 1;
+    EvmTxRuntimeLimits::no_limits()
+        .with_block_env_access_compute_gas_limit(cap)
+        .with_oracle_access_compute_gas_limit(cap)
 }
 
 /// The context of a block the builder packs under `policy`.
@@ -169,13 +188,13 @@ pub(crate) fn executor_with_env(
     build(state, ctx, env, chain_spec())
 }
 
-/// An executor over `state`, for a block the chain holds to `limits`, packed under no building
-/// policy.
+/// An executor over `state`, for a block held to `limits` in place of the spec's, packed under no
+/// building policy.
 pub(crate) fn executor_with_limits(
     state: &mut State<MemoryDatabase>,
     limits: ProtocolLimits,
 ) -> TestExecutor<'_> {
-    build(state, unlimited_ctx(), evm_env(), chain_spec_with(limits))
+    build(state, unlimited_ctx(), evm_env(), chain_spec()).with_protocol_limits(limits)
 }
 
 /// An executor over `state`, for a block on the chain `spec` describes.
@@ -208,24 +227,68 @@ fn build(
     MegaBlockExecutor::new(evm, ctx, spec, OpAlloyReceiptBuilder::default())
 }
 
-/// Shared log of pre-block states an executor observer records.
-pub(crate) type PreBlockLog = Arc<Mutex<Vec<(PreBlockStateSource, EvmState)>>>;
-
-/// Installs a recording observer on `executor` and returns the log it writes.
-pub(crate) fn record_pre_block(executor: &mut TestExecutor<'_>) -> PreBlockLog {
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let captured = Arc::clone(&log);
-    executor.set_pre_block_observer(Some(Box::new(
-        move |source: PreBlockStateSource, state: &EvmState| {
-            captured.lock().expect("pre-block observer").push((source, state.clone()));
-        },
-    )));
-    log
+/// The one account each of `states` names, in commit order: what each pre-block step committed
+/// is about. A pre-block call names its target, the activation block's check the predeploy it
+/// read, the read of the registry's pending changes and the call that applies them the registry,
+/// and the read of the L1 block info the L1 block contract.
+///
+/// # Panics
+///
+/// On a state that names more than one account, as a pre-block call whose code reaches another
+/// contract does.
+pub(crate) fn named_accounts(states: &[EvmState]) -> Vec<Address> {
+    states
+        .iter()
+        .map(|state| {
+            assert_eq!(state.len(), 1, "a pre-block step names one account: {state:?}");
+            *state.keys().next().expect("one account")
+        })
+        .collect()
 }
 
-/// The states the log holds, in execution order.
-pub(crate) fn pre_block_states(log: &PreBlockLog) -> Vec<(PreBlockStateSource, EvmState)> {
-    log.lock().expect("pre-block observer").clone()
+/// The committed state of the pre-block call to `target` among `states`: the first that names it.
+///
+/// # Panics
+///
+/// When no state names `target`.
+pub(crate) fn call_state(states: &[EvmState], target: Address) -> &EvmState {
+    states
+        .iter()
+        .find(|state| state.contains_key(&target))
+        .unwrap_or_else(|| panic!("no committed state names {target}"))
+}
+
+/// The contracts the EIP-2935 and EIP-4788 calls committed in `states` targeted, in commit order:
+/// a call's state names its target.
+pub(crate) fn eip_calls(states: &[EvmState]) -> Vec<Address> {
+    states
+        .iter()
+        .filter_map(|state| {
+            [HISTORY_STORAGE_ADDRESS, BEACON_ROOTS_ADDRESS]
+                .into_iter()
+                .find(|target| state.contains_key(target))
+        })
+        .collect()
+}
+
+/// Whether `state` is the activation block's check of a predeploy: one of the seven accounts
+/// alone, read only, with no slot. The read of the registry's pending changes names the registry
+/// alone too, with the slots it read.
+pub(crate) fn is_predeploy_check(state: &EvmState) -> bool {
+    state.len() == 1 &&
+        system_contract_specs().iter().any(|spec| {
+            state.get(&spec.address).is_some_and(|account| {
+                !account.is_touched() && !account.is_created() && account.storage.is_empty()
+            })
+        })
+}
+
+/// Whether one of `states` is the `applyPendingChanges()` call: a state that touched the
+/// registry. The read of its pending changes leaves the registry untouched.
+pub(crate) fn applies_pending_changes(states: &[EvmState]) -> bool {
+    states.iter().any(|state| {
+        state.get(&SEQUENCER_REGISTRY_ADDRESS).is_some_and(|registry| registry.is_touched())
+    })
 }
 
 /// The history gas the body of a legacy transaction carrying `calldata_len` bytes of calldata
@@ -241,22 +304,35 @@ pub(crate) fn empty_call_gas() -> u64 {
     100_000 + body_history(0)
 }
 
+/// A legacy transaction from `sender`.
+///
+/// The hash is derived from the sender and the nonce. Nothing in these tests pins it: a receipt
+/// carries none, and a block that executes two transactions from one sender at one nonce tells
+/// them apart by the sender's account, which is what the stale-outcome check reads.
+pub(crate) fn legacy_from(
+    sender: Address,
+    nonce: u64,
+    kind: TxKind,
+    value: U256,
+    input: Bytes,
+    gas_limit: u64,
+    gas_price: u128,
+) -> Recovered<MegaTxEnvelope> {
+    let tx =
+        TxLegacy { chain_id: Some(CHAIN_ID), nonce, gas_price, gas_limit, to: kind, value, input };
+    let hash = B256::from(alloy_primitives::keccak256(
+        [sender.as_slice(), &nonce.to_be_bytes(), &[0u8]].concat(),
+    ));
+    Recovered::new_unchecked(
+        MegaTxEnvelope::Legacy(Signed::new_unchecked(tx, Signature::test_signature(), hash)),
+        sender,
+    )
+}
+
 /// A legacy transaction from [`CALLER`].
 pub(crate) fn tx(nonce: u64, to: Address, input: Bytes, gas_limit: u64) -> MegaTxEnvelope {
-    let tx_legacy = TxLegacy {
-        chain_id: Some(CHAIN_ID),
-        nonce,
-        gas_price: 1_000_000,
-        gas_limit,
-        to: TxKind::Call(to),
-        value: U256::ZERO,
-        input,
-    };
-    MegaTxEnvelope::Legacy(Signed::new_unchecked(
-        tx_legacy,
-        Signature::test_signature(),
-        B256::repeat_byte(nonce as u8 + 1),
-    ))
+    legacy_from(CALLER, nonce, TxKind::Call(to), U256::ZERO, input, gas_limit, 1_000_000)
+        .into_inner()
 }
 
 /// A legacy transaction from [`CALLER`], with its sender recovered.

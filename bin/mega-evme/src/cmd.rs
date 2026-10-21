@@ -3,8 +3,13 @@ use std::ffi::OsString;
 use clap::{parser::ValueSource, ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand};
 use tracing::error;
 
+use mega_evm::MegaSpecId;
+
 use crate::{
-    common::{EvmeError, LimitsOverride, LogArgs},
+    common::{
+        check_genesis_chain, parse_genesis, sanitize_terminal_text, use_genesis, EvmeError,
+        GenesisChain, LimitsOverride, LogArgs,
+    },
     engine::Engine,
 };
 
@@ -15,6 +20,14 @@ pub struct MainCmd {
     /// Logging configuration
     #[command(flatten)]
     pub log: LogArgs,
+
+    /// Satin only: the genesis file of the chain the command runs on. Its `config` object's
+    /// `chainId` and Satin key (`satinTime`) replace the engine's table for that chain: which
+    /// blocks run Satin, and the schedule they run under.
+    /// `run` and `tx` default to `--spec Satin` under it. A run on another chain, on a legacy
+    /// spec, before the file's `satinTime`, or on a file without Satin keys is refused
+    #[arg(long = "genesis", global = true, value_name = "FILE", value_parser = parse_genesis)]
+    pub genesis: Option<GenesisChain>,
 
     /// Subcommand to execute
     #[command(subcommand)]
@@ -53,43 +66,59 @@ pub enum Error {
 pub async fn run_cli(args: Vec<OsString>) -> Result<(), Error> {
     let matches = MainCmd::command().get_matches_from(&args);
     let spec_is_default = spec_is_default(&matches);
-    let cmd = MainCmd::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    let mut cmd = MainCmd::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    if let Some(genesis) = &cmd.genesis {
+        use_genesis(genesis.clone())?;
+        // The file configures Satin alone, so a `run` or `tx` that left `--spec` out runs it.
+        if spec_is_default {
+            cmd.command.set_spec(MegaSpecId::SATIN.to_string());
+        }
+    }
+    // The chain is checked before the engine is picked: a run on another chain than the file's is
+    // refused for its chain, whatever its spec.
+    if let Some(chain_id) = cmd.command.chain_id() {
+        check_genesis_chain(chain_id)?;
+    }
 
     // Whole-block replay runs here for both engines, choosing one per block.
     let engine = match &cmd.command {
         Commands::Replay(replay) if replay.replays_blocks() => Ok(Engine::Satin),
         command => command.engine().await,
-    };
-    let engine = match engine {
-        Ok(engine) => engine,
-        Err(e) => {
-            eprintln!("{e}");
-            std::process::exit(1);
-        }
-    };
+    }?;
     match engine {
         // The released CLI knows no such flag: its engine holds a transaction to its spec's own
         // limits. Refused here rather than left to its parser.
-        Engine::Legacy if cmd.command.limits_override().is_some() => {
-            eprintln!(
-                "{}",
-                EvmeError::InvalidInput(
-                    "--override.limits applies to Satin only: the legacy engine holds a \
-                     transaction to its spec's own limits"
-                        .to_string()
-                )
-            );
-            std::process::exit(1);
-        }
+        Engine::Legacy if cmd.command.limits_override().is_some() => Err(EvmeError::InvalidInput(
+            "--override.limits applies to Satin only: the legacy engine holds a \
+             transaction to its spec's own limits"
+                .to_string(),
+        )
+        .into()),
+        Engine::Legacy if cmd.genesis.is_some() => Err(EvmeError::InvalidInput(
+            "--genesis applies to Satin only: the legacy engine runs a chain on its own \
+             table"
+                .to_string(),
+        )
+        .into()),
         Engine::Legacy => {
-            if let Err(e) = crate::engine::run_legacy(args, spec_is_default).await {
-                eprintln!("{e}");
-                std::process::exit(1);
-            }
-            Ok(())
+            crate::engine::run_legacy(args, spec_is_default).await.map_err(Into::into)
         }
         Engine::Satin => cmd.run().await,
     }
+}
+
+/// Writes `message` as one line, without terminal controls.
+///
+/// A write that fails, a closed pipe included, is dropped: the exit status reports the failure.
+pub(crate) fn write_cli_error(mut out: impl std::io::Write, message: &str) {
+    let message = sanitize_terminal_text(message);
+    let _ = writeln!(out, "{message}");
+}
+
+/// Prints `err` to stderr and exits 1, whether or not stderr could take the line.
+pub fn report_cli_error(err: &Error) -> ! {
+    write_cli_error(std::io::stderr().lock(), &err.to_string());
+    std::process::exit(1);
 }
 
 /// Whether `run`'s or `tx`'s `--spec` was left at its default. Always `false` for `replay`, which
@@ -108,6 +137,25 @@ impl Commands {
             Self::Run(cmd) => Engine::of_spec(&cmd.env_args.chain.spec),
             Self::Tx(cmd) => Engine::of_spec(&cmd.env_args.chain.spec),
             Self::Replay(cmd) => cmd.engine().await,
+        }
+    }
+
+    /// The chain `run` or `tx` runs on (`--chain-id`); `None` for `replay`, which learns its
+    /// chain from the source it replays.
+    pub const fn chain_id(&self) -> Option<u64> {
+        match self {
+            Self::Run(cmd) => Some(cmd.env_args.chain.chain_id),
+            Self::Tx(cmd) => Some(cmd.env_args.chain.chain_id),
+            Self::Replay(_) => None,
+        }
+    }
+
+    /// Sets the spec of `run` or `tx` (`--spec`) to `spec`; `replay` has none.
+    fn set_spec(&mut self, spec: String) {
+        match self {
+            Self::Run(cmd) => cmd.env_args.chain.spec = spec,
+            Self::Tx(cmd) => cmd.env_args.chain.spec = spec,
+            Self::Replay(_) => {}
         }
     }
 
@@ -136,8 +184,45 @@ impl MainCmd {
         };
         result.map_err(Error::from).inspect_err(|e| {
             error!(err = ?e, "Error executing command");
-            eprintln!("{e}");
-            std::process::exit(1);
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{self, Write};
+
+    use super::write_cli_error;
+
+    /// A writer that refuses every write with a broken pipe.
+    struct Closed;
+
+    impl Write for Closed {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_a_command_error_is_one_line_on_the_writer() {
+        let mut out = Vec::new();
+        write_cli_error(&mut out, "Failed to read file");
+        assert_eq!(out, b"Failed to read file\n");
+    }
+
+    #[test]
+    fn test_a_reported_error_strips_terminal_controls() {
+        let mut out = Vec::new();
+        write_cli_error(&mut out, "Invalid input: \u{1b}[2Jpath\r");
+        assert_eq!(out, b"Invalid input: path\n");
+    }
+
+    #[test]
+    fn test_a_closed_writer_drops_the_error_line() {
+        write_cli_error(Closed, "Failed to read file");
     }
 }

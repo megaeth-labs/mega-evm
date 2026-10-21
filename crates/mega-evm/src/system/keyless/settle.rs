@@ -9,7 +9,9 @@ use revm::{
         result::{HaltReason, OutOfGasError},
         ContextError, ContextTr, FrameStack, JournalTr,
     },
-    context_interface::{cfg::gas::GasTracker, journaled_state::account::JournaledAccountTr},
+    context_interface::{
+        cfg::gas::GasTracker, context::CodeDeposit, journaled_state::account::JournaledAccountTr,
+    },
     handler::{handle_reservoir_remaining_gas, EthFrame, FrameResult},
     interpreter::{
         interpreter::EthInterpreter, Gas, InstructionResult, InterpreterAction, SuccessOrHalt,
@@ -88,6 +90,32 @@ fn returns_into_the_call(stack: &mut FrameStack<EthFrame<EthInterpreter>>) -> bo
     top == usize::from(stack.get().is_finished())
 }
 
+/// Whether the code `deposit` makes is the empty code a keyless deployment's constructor returned
+/// for the deploy address, which the deployment refuses: the creation reverts and the call answers
+/// `EmptyCodeDeployed`, leaving the address deployable.
+///
+/// Only the deposit at the deploy address while the creation runs is refused. A creation the
+/// constructor makes itself, which may return empty code, deposits at another address, and a
+/// constructor that destroyed its own account (`destroyed`) is left as it is: the account does not
+/// keep what it returned, and the answer reads that off the journal ([`holds_code`]).
+pub(crate) fn refuses_empty_deposit(
+    frame: &mut Option<KeylessFrame>,
+    deposit: &CodeDeposit<'_>,
+    destroyed: bool,
+) -> bool {
+    match frame {
+        Some(KeylessFrame::Deploying(started))
+            if deposit.code.is_empty() &&
+                deposit.address == started.deploy_address &&
+                !destroyed =>
+        {
+            started.empty_deposit_refused = true;
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Settles `creation`, which revm has just merged into the `keylessDeploy` call whose gas is
 /// `gas`, and keeps what the call answers from on its resume ([`answer`]).
 ///
@@ -111,7 +139,7 @@ fn returns_into_the_call(stack: &mut FrameStack<EthFrame<EthInterpreter>>) -> bo
 /// above 1, and a resubmission is refused `SignerNonceTooHigh`.
 ///
 /// It runs before the call resumes, because the record it takes back may be what put the call
-/// over its budget: the call is held to its limits again without it, and the stop it returns on
+/// over a limit: the call is held to its limits again without it, and the stop it returns on
 /// its resume, if any, is the one that stands then.
 pub(crate) fn settle<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
@@ -170,6 +198,9 @@ fn answer_of<DB: Database, ExtEnvs: ExternalEnvTypes>(
 ) -> (InstructionResult, Bytes) {
     let Returned { started, creation } = returned;
     let gas_used = creation.gas_used;
+    if started.empty_deposit_refused {
+        return failed(KeylessDeployError::EmptyCodeDeployed { gas_used }, gas_used);
+    }
     if creation.result.is_revert() {
         let output = creation.output.clone();
         return failed(KeylessDeployError::ExecutionReverted { gas_used, output }, gas_used);

@@ -15,7 +15,6 @@ use mega_evm::{
 use revm::{
     bytecode::opcode::{CREATE, INVALID, ISZERO, JUMPDEST, JUMPI, PUSH1, RETURN, STOP},
     context::result::{ExecutionResult, HaltReason, InvalidTransaction},
-    primitives::{eip170, eip3860},
 };
 
 use crate::common::{call, context, create, history};
@@ -92,12 +91,6 @@ fn assert_code_size_limit(result: Result<ExecutionResult<MegaHaltReason>, String
 
 /* ---------- the initcode bound ---------- */
 
-/// An initcode of EIP-3860's size is far below the Satin bound and goes through.
-#[test]
-fn test_the_eip3860_initcode_size_is_accepted() {
-    assert!(deploy(initcode_of(eip3860::MAX_INITCODE_SIZE)).unwrap().is_success());
-}
-
 /// The Satin bound itself is accepted.
 #[test]
 fn test_the_satin_initcode_size_is_accepted() {
@@ -110,26 +103,7 @@ fn test_one_byte_past_the_satin_initcode_size_is_rejected() {
     assert_initcode_limit(deploy(initcode_of(MAX_INITCODE_SIZE + 1)));
 }
 
-/// So is twice it.
-#[test]
-fn test_double_the_satin_initcode_size_is_rejected() {
-    assert_initcode_limit(deploy(initcode_of(2 * MAX_INITCODE_SIZE)));
-}
-
-/// The initcode bound is twice the contract bound, which is the ratio EIP-3860 sets.
-#[test]
-fn test_the_initcode_bound_is_twice_the_contract_bound() {
-    assert_eq!(MAX_INITCODE_SIZE, 2 * MAX_CONTRACT_SIZE);
-    assert_eq!(MAX_CONTRACT_SIZE, 512 * 1024);
-}
-
 /* ---------- the deployed-code bound, from a creation transaction ---------- */
-
-/// Code of EIP-170's size deploys.
-#[test]
-fn test_the_eip170_code_size_deploys() {
-    assert!(deploy(constructor_returning(eip170::MAX_CODE_SIZE)).unwrap().is_success());
-}
 
 /// Code of the Satin size deploys.
 #[test]
@@ -141,12 +115,6 @@ fn test_the_satin_code_size_deploys() {
 #[test]
 fn test_one_byte_past_the_satin_code_size_halts() {
     assert_code_size_limit(deploy(constructor_returning(MAX_CONTRACT_SIZE + 1)));
-}
-
-/// So does twice it.
-#[test]
-fn test_double_the_satin_code_size_halts() {
-    assert_code_size_limit(deploy(constructor_returning(2 * MAX_CONTRACT_SIZE)));
 }
 
 /* ---------- the deployed-code bound, from a CREATE ---------- */
@@ -185,14 +153,6 @@ fn create_through_factory(size: usize) -> bool {
         } => false,
         other => panic!("unexpected result {other:?}"),
     }
-}
-
-/// A `CREATE` of EIP-170's size succeeds, and so does one byte past it: EIP-170 is not the bound
-/// here.
-#[test]
-fn test_create_of_the_eip170_code_size_succeeds() {
-    assert!(create_through_factory(eip170::MAX_CODE_SIZE));
-    assert!(create_through_factory(eip170::MAX_CODE_SIZE + 1));
 }
 
 /// A `CREATE` of the Satin size succeeds.

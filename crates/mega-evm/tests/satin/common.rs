@@ -2,14 +2,15 @@
 
 use alloy_evm::Evm;
 use alloy_op_evm::OpTx;
-use alloy_primitives::{Address, Bytes, TxKind, U256};
+use alloy_primitives::{Address, Bytes, TxKind, B256, U256};
 use mega_evm::{
     active_satin_prices,
-    test_utils::{note_price_guard, op_transaction, zero_fee_l1_block_info},
-    LimitUsage, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MegaTransactionOutcome,
+    test_utils::{note_price_guard, op_transaction, zero_fee_l1_block_info, BytecodeBuilder},
+    EvmTxRuntimeLimits, LimitUsage, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
+    MegaTransaction, MegaTransactionOutcome,
 };
 use revm::{
+    bytecode::opcode::{PUSH0, RETURN},
     context::{result::ResultAndState, BlockEnv, TxEnv},
     Database,
 };
@@ -37,17 +38,6 @@ pub(crate) fn call_with_data(
     gas_limit: u64,
 ) -> MegaTransaction {
     tx(caller, TxKind::Call(to), data, U256::ZERO, gas_limit)
-}
-
-/// A call from `caller` to `to` carrying `value` and `data`.
-pub(crate) fn call_with_value_and_data(
-    caller: Address,
-    to: Address,
-    value: U256,
-    data: Bytes,
-    gas_limit: u64,
-) -> MegaTransaction {
-    tx(caller, TxKind::Call(to), data, value, gas_limit)
 }
 
 /// A creation from `caller` running `init_code`.
@@ -118,6 +108,40 @@ pub(crate) fn execute<DB: alloy_evm::Database>(
     MegaEvm::new(context(db)).execute_transaction(tx).expect("the transaction is valid")
 }
 
+/// Runs `tx` on a fresh Satin EVM over `db` held to `limits` and returns its outcome.
+pub(crate) fn execute_under<DB: alloy_evm::Database>(
+    db: DB,
+    tx: MegaTransaction,
+    limits: EvmTxRuntimeLimits,
+) -> MegaTransactionOutcome {
+    MegaEvm::new(context(db).with_tx_runtime_limits(limits))
+        .execute_transaction(tx)
+        .expect("the transaction is valid")
+}
+
+/// 98% of `remaining`, the share a child frame is given.
+pub(crate) fn share(remaining: u64) -> u64 {
+    (u128::from(remaining) * u128::from(mega_evm::FRAME_DATA_SHARE_NUMERATOR) /
+        u128::from(mega_evm::FRAME_DATA_SHARE_DENOMINATOR)) as u64
+}
+
+/// `tx` as a user's deposit: no fee, and a source hash a user's transaction could carry.
+pub(crate) fn deposit(mut tx: MegaTransaction) -> MegaTransaction {
+    tx.0.deposit.source_hash = B256::repeat_byte(0x11);
+    tx.0.base.gas_price = 0;
+    tx
+}
+
+/// Init code that returns `len` bytes of zeros as the deployed code.
+pub(crate) fn deploying(len: u64) -> Bytes {
+    BytecodeBuilder::default().push_number(len).append_many([PUSH0, RETURN]).build()
+}
+
+/// Init code that returns `size` zero bytes as the deployed contract.
+pub(crate) fn constructor_returning(size: u64) -> Bytes {
+    BytecodeBuilder::default().push_number(size).push_number(0_u8).append(RETURN).build()
+}
+
 /// Whether this process prices bytes at something other than the constants the spec fixes.
 ///
 /// Only a measurement build can arrange that — the `satin-price-override` feature, through
@@ -164,6 +188,22 @@ pub(crate) fn history_is_free() -> bool {
     true
 }
 
+/// Whether a history byte costs a fraction of a gas at the prices in effect.
+///
+/// Only a measurement build arranges that, as the grid's 0.001 does. Each history charge is then
+/// rounded to the nearest gas on its own, so a small charge — a body, a record — can cost nothing,
+/// and the history of bytes charged apart is not the history of their sum. No test is held to
+/// its history figures there: a test whose figures add history over several charges, or need a
+/// record to cost something, returns early, or leaves those figures out, with a note like
+/// [`history_is_free`]'s.
+pub(crate) fn history_rounds() -> bool {
+    if active_satin_prices().cphb.milli_gas().is_multiple_of(1_000) {
+        return false;
+    }
+    note_price_guard("MEGA_SATIN_CPHB prices a history byte at a fraction of a gas");
+    true
+}
+
 /// The state gas one fresh storage slot costs at the byte prices in effect, in the minimum
 /// bucket.
 pub(crate) fn slot_state_gas() -> u64 {
@@ -175,13 +215,24 @@ pub(crate) fn account_state_gas() -> u64 {
     mega_evm::satin_gas_params().get(revm::context_interface::cfg::GasId::new_account_state_gas())
 }
 
-/// The history gas `bytes` bytes cost at the byte prices in effect.
+/// The history gas `bytes` bytes cost at the byte prices in effect, by hand rather than through
+/// the engine's pricing: the bytes times `COST_PER_HISTORY_BYTE`, 88 gas, at the spec's price.
+///
+/// A measurement build may price a history byte with a fraction of a gas, kept in thousandths of
+/// a gas; the charge for the bytes is then rounded to the nearest gas, halves up.
 pub(crate) fn history(bytes: u64) -> u64 {
-    mega_evm::history_gas(bytes).expect("the bytes have a price")
+    use mega_evm::constants::COST_PER_HISTORY_BYTE;
+    let milli_gas = mega_evm::active_satin_prices().cphb.milli_gas();
+    if milli_gas == COST_PER_HISTORY_BYTE * 1_000 {
+        return bytes * COST_PER_HISTORY_BYTE;
+    }
+    let milli_gas = u128::from(bytes) * u128::from(milli_gas);
+    u64::try_from((milli_gas + 500) / 1_000).expect("the history of the bytes fits a u64")
 }
 
 /// The history gas the body of a transaction carrying `calldata_len` bytes of calldata, and no
-/// access list or authorization, pays at the byte prices in effect.
+/// access list or authorization, pays at the byte prices in effect, by hand: `TX_BODY_SIZE`, 310
+/// bytes, and one byte per byte of calldata.
 pub(crate) fn body_history(calldata_len: u64) -> u64 {
-    history(mega_evm::tx_body_history_bytes(calldata_len, 0, 0, 0))
+    history(mega_evm::TX_BODY_SIZE + calldata_len)
 }

@@ -28,7 +28,10 @@ use mega_evm::{
     MegaEvm, MegaTransaction, MegaTransactionOutcome, WRITE_RECORD_SIZE,
 };
 use revm::{
-    bytecode::opcode::{CALL, POP, PUSH0, RETURN, REVERT, STOP},
+    bytecode::{
+        opcode::{CALL, POP, PUSH0, RETURN, REVERT, STOP},
+        Bytecode,
+    },
     context::{ContextTr, JournalTr},
     context_interface::{cfg::GasId, journaled_state::account::JournaledAccountTr, Transaction},
     interpreter::{
@@ -39,12 +42,9 @@ use revm::{
     Inspector,
 };
 
-use crate::{
-    common::state_is_free,
-    salt::{
-        create_with, crowded_account, db, entry, minimal_envs, salt_context, tx_with_gas,
-        value_call, SaltEnvs, CALLER, CONTRACT, EMPTY,
-    },
+use crate::salt::{
+    create_with, crowded_account, db, entry, minimal_envs, salt_context, tx_with_gas, value_call,
+    SaltEnvs, CALLER, CONTRACT, EMPTY,
 };
 
 /// A contract `CONTRACT` calls.
@@ -417,33 +417,169 @@ fn test_the_transactions_own_creation_an_inspector_answers_keeps_nothing() {
 }
 
 /// A value call an inspector answers leaves its caller holding none of the state gas its `CALL`
-/// was charged for the account: the charge came back, so it never stands against the state-gas
-/// limit. The caller then fills a slot, and a limit one gas short of the slot and the account
-/// together stops the caller whose call ran, and not the one whose call was answered.
+/// was charged for the account: the charge came back. The caller then fills a slot, and holds the
+/// slot alone, where the caller whose call ran holds the slot and the account.
 #[test]
-fn test_an_answered_call_holds_nothing_against_the_state_gas_limit() {
-    // A slot and an account that add no state gas have no state-gas limit to cross.
-    if state_is_free() {
-        return;
-    }
+fn test_an_answered_call_leaves_its_caller_none_of_the_accounts_state_gas() {
     let caller =
         || value_call(EMPTY).append(POP).sstore(U256::from(1), U256::from(1)).stop().build();
     let slot = entry(GasId::sstore_set_state_gas());
-    let limit = slot + entry(GasId::new_account_state_gas()) - 1;
-    let limits = mega_evm::EvmTxRuntimeLimits::no_limits().with_tx_state_gas_limit(limit);
     let tx = to(CONTRACT, 0, Bytes::new(), GAS_LIMITS[0]);
-    let context = || salt_context(db(caller()), minimal_envs()).with_tx_runtime_limits(limits);
+    let context = || salt_context(db(caller()), minimal_envs());
 
     let ran = MegaEvm::new(context()).execute_transaction(tx.clone()).unwrap();
-    assert!(ran.limit_exceeded.is_some(), "the account and the slot cross: {:?}", ran.result);
+    assert!(ran.result.is_success(), "{:?}", ran.result);
+    assert_eq!(
+        ran.gas.state,
+        slot + entry(GasId::new_account_state_gas()),
+        "the slot and the account"
+    );
 
     let answered = MegaEvm::new(context())
         .with_inspector(Answers::call(EMPTY, InstructionResult::Stop))
         .execute_transaction(tx)
         .unwrap();
-    assert_eq!(answered.limit_exceeded, None, "{:?}", answered.result);
     assert!(answered.result.is_success(), "{:?}", answered.result);
     assert_eq!(answered.gas.state, slot, "the slot alone");
+}
+
+/* ---------- a call an inspector retargets ---------- */
+
+/// The address `Retargets` sends a call to.
+const RETARGET: Address = address!("0000000000000000000000000000000000c00020");
+
+/// Rewrites every call to `from` into a call to `RETARGET`, whose code it supplies, in the
+/// inspector's `call` hook, and answers it with `answer` when it has one: a tool that redirects a
+/// call after the opcode charged for the account it was made to.
+struct Retargets {
+    from: Address,
+    code: Bytecode,
+    answer: Option<InstructionResult>,
+}
+
+impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for Retargets {
+    fn call(&mut self, context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
+        if inputs.target_address != self.from {
+            return None;
+        }
+        // The new target is loaded before the frame starts, as a hook that redirects a call must.
+        context.journal_mut().load_account(RETARGET).expect("in memory");
+        inputs.target_address = RETARGET;
+        inputs.bytecode_address = RETARGET;
+        inputs.known_bytecode = (self.code.hash_slow(), self.code.clone());
+        self.answer.map(|result| {
+            CallOutcome::new(
+                InterpreterResult::new(result, Bytes::new(), untouched_call_gas(inputs)),
+                inputs.return_memory_offset.clone(),
+            )
+        })
+    }
+}
+
+/// A value call to an account that does not exist charges that account's state gas upfront, in its
+/// SALT bucket. An inspector that redirects the call to another account, whose bucket is priced
+/// otherwise, changes which account the charge comes back for: it comes back at the price it was
+/// made at, the original account's, whatever the new target costs. Both ways — the account dearer
+/// than the new target (`m` = 8 and 1) and cheaper (1 and 8) — the call answered in place of
+/// running, and the call that runs and reverts, keep nothing: no state gas, the body's history
+/// alone, and the reservoir back where it started. A refund at the new target's price would leave
+/// state gas behind in one direction and drive the state ledger negative, growing the reservoir,
+/// in the other.
+#[test]
+fn test_a_retargeted_value_calls_upfront_charge_comes_back_at_the_price_it_was_made_at() {
+    let caller = || value_call(EMPTY).append(POP).stop().build();
+    let reverts = Bytecode::new_raw(Bytes::from_static(&[PUSH0, PUSH0, REVERT]));
+    for (account_m, retarget_m) in [(8, 1), (1, 8)] {
+        let envs = || {
+            crowded_account(crowded_account(minimal_envs(), EMPTY, account_m), RETARGET, retarget_m)
+        };
+        let db = || db(caller()).account_code(RETARGET, reverts.original_bytes());
+        for gas_limit in GAS_LIMITS {
+            let tx = to(CONTRACT, 0, Bytes::new(), gas_limit);
+            let ran = plain(db(), envs(), tx.clone());
+            assert_eq!(
+                ran.gas.state,
+                account_m * entry(GasId::new_account_state_gas()),
+                "{account_m}/{retarget_m}: run, the call adds the account in its bucket"
+            );
+            for (name, answer) in
+                [("answered", Some(InstructionResult::Stop)), ("running and reverting", None)]
+            {
+                let case = format!("{name}, m {account_m}/{retarget_m}, gas limit {gas_limit}");
+                let inspector = Retargets { from: EMPTY, code: reverts.clone(), answer };
+                let outcome = inspected(db(), envs(), tx.clone(), inspector);
+                assert!(outcome.result.is_success(), "{case}: {:?}", outcome.result);
+                assert_keeps_only_its_body(&case, &tx, &outcome);
+                assert!(!holds_something(&outcome, EMPTY), "{case}: no account");
+            }
+        }
+    }
+}
+
+/* ---------- a failed creation rewritten into a success ---------- */
+
+/// Turns every failed creation result into a success at `0x…01`, as Foundry's `expectRevert` on a
+/// creation does: the revert's output and gas stay as they are, and the address is one the
+/// creation never made.
+struct RevivesCreations;
+
+impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for RevivesCreations {
+    fn create_end(&mut self, _: &mut CTX, _: &CreateInputs, outcome: &mut CreateOutcome) {
+        if !outcome.result.result.is_ok() {
+            outcome.result.result = InstructionResult::Return;
+            outcome.address = Some(Address::with_last_byte(1));
+        }
+    }
+}
+
+/// A creation whose init code fills a fresh slot, logs a word and reverts, rewritten into a
+/// success, is the failure it was to everything but the address its creator is handed: every
+/// ledger, the counts and the state are those of the run no inspector touches. The upfront charge
+/// the `CREATE` made for the account comes back, priced at the account it was made for — its bucket
+/// is crowded (`m = 3`) — and the slot, the log and the account are not kept. At the transaction's
+/// own frame and one call down, carrying no value and one wei, below and above the execution cap;
+/// run, the creation adds its account.
+#[test]
+fn test_a_failed_creation_rewritten_into_a_success_settles_as_the_failure() {
+    let writes = || BytecodeBuilder::default().sstore(U256::from(1), U256::from(1)).log3_word();
+    let (reverting, stopping) = (writes().revert().build(), writes().stop().build());
+    for (gas_limit, value) in GAS_LIMITS.into_iter().flat_map(|limit| [(limit, 0), (limit, 1)]) {
+        let creates = |init: &[u8]| {
+            BytecodeBuilder::default().create(U256::from(value), init).append(POP).stop().build()
+        };
+        let own = |init: &[u8]| {
+            let data = Bytes::copy_from_slice(init);
+            (Bytes::new(), tx_with_gas(TxKind::Create, data, U256::from(value), gas_limit))
+        };
+        let down = |init: &[u8]| (creates(init), to(CONTRACT, 0, Bytes::new(), gas_limit));
+        let cases: [(&str, Address, CreationSetup<'_>); 2] = [
+            ("the transaction's own", CALLER.create(0), &own),
+            ("one call down", CONTRACT.create(0), &down),
+        ];
+        for (at, created, setup) in cases {
+            let envs = || crowded_account(minimal_envs(), created, 3);
+            let case = format!("{at}, value {value}, gas limit {gas_limit}");
+            let (code, tx) = setup(&stopping[..]);
+            let ran = plain(db(code), envs(), tx);
+            assert!(holds_something(&ran, created), "{case}: run, the creation adds its account");
+            assert_eq!(
+                ran.gas.state,
+                3 * entry(GasId::create_state_gas()) + entry(GasId::sstore_set_state_gas()),
+                "{case}: the account in its bucket and the slot"
+            );
+
+            let (code, tx) = setup(&reverting[..]);
+            let failed = plain(db(code.clone()), envs(), tx.clone());
+            assert!(!holds_something(&failed, created), "{case}: reverting, it adds none");
+            let rewritten = inspected(db(code), envs(), tx.clone(), RevivesCreations);
+            assert!(rewritten.result.is_success(), "{case}: {:?}", rewritten.result);
+            assert!(!holds_something(&rewritten, created), "{case}: no account");
+            assert!(rewritten.result.logs().is_empty(), "{case}: no log");
+            assert_eq!(rewritten.gas, failed.gas, "{case}: every ledger");
+            assert_eq!(rewritten.usage, failed.usage, "{case}: every count");
+            assert_eq!(rewritten.state, failed.state, "{case}: the state");
+        }
+    }
 }
 
 /* ---------- a success rewritten into a failure ---------- */

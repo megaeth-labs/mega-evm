@@ -14,6 +14,9 @@ on:
   # weekly once `satin` is the default branch. Until then, dispatch it by hand on `satin`.
   schedule:
     - cron: "0 4 * * 1" # Weekly, Monday 4:00 UTC
+  # Engine source is not a path here. This job runs the revm fork's own runner
+  # at the revision Cargo.lock pins, so a change to the engine cannot move its
+  # result. exec-spec-satin.yml runs when the engine changes.
   pull_request:
     paths:
       - Cargo.lock

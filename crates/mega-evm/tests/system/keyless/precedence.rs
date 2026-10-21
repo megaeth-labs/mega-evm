@@ -339,3 +339,43 @@ fn test_the_creations_charges_can_refuse_a_call_no_rule_refuses() {
     ];
     cases.into_iter().for_each(Case::check);
 }
+
+/// An out-of-gas at step 14 halts the call, consuming its regular gas, and gives back the state
+/// and history gas the call was charged: the transaction's gas used is its gas limit, its state
+/// ledger is empty and its history ledger is its body's.
+///
+/// Two calls run out at the `CREATE` opcode's regular gas: one whose signer holds a wei, which
+/// was charged nothing before, and one whose signer has no account, which step 10 charged its
+/// account's state gas first. Below the execution cap that charge spilled onto the regular gas:
+/// the halt gives it back to the state ledger and then consumes it with the rest, so the second
+/// call's gas used is its whole gas limit too. Neither creation started, so the signer's nonce is
+/// unspent.
+///
+/// Rules [S15.8], [S15.22]. Expected values `independent`: the gas limit is the transaction's own,
+/// and the empty ledgers are zero; the body's history is the schedule's price of its bytes
+/// (`constants`).
+#[test]
+fn test_an_out_of_gas_at_the_creations_charges_consumes_the_regular_gas_alone() {
+    let small = signed(1_000, 0);
+    let data = small.call_data(LARGE_OVERRIDE);
+    for (signer, db, left) in [
+        ("holding a wei", funded(system_db(), &small), 1_500),
+        ("without an account", system_db(), crate::common::account_state_gas() + 1_500),
+    ] {
+        let gas_limit = leaving(&data, left);
+        let outcome = run_with(db, data.clone(), gas_limit, EvmTxRuntimeLimits::no_limits());
+        assert!(
+            matches!(outcome.result, ExecutionResult::Halt { .. }),
+            "a signer {signer}: {:?}",
+            outcome.result
+        );
+        assert_eq!(outcome.result.tx_gas_used(), gas_limit, "a signer {signer}: the regular gas");
+        assert_eq!(outcome.gas.state, 0, "a signer {signer}: the state gas is given back");
+        assert_eq!(
+            outcome.gas.history,
+            crate::common::body_history(data.len() as u64),
+            "a signer {signer}: the history gas is the body's",
+        );
+        assert_eq!(nonce(&outcome, small.signer), 0, "a signer {signer}: no creation started");
+    }
+}

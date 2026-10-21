@@ -6,10 +6,10 @@
 //! its mint is not; a system transaction, as the sequencer builds it, moves no value and logs no
 //! transfer.
 
-use alloy_consensus::{transaction::Recovered, Sealed, Signed, TxLegacy, TxReceipt};
+use alloy_consensus::{transaction::Recovered, Sealed, TxReceipt};
 use alloy_evm::block::BlockExecutor;
 use alloy_primitives::{
-    address, logs_bloom, Address, BloomInput, Bytes, Log, Signature, TxKind, B256, U256,
+    address, keccak256, logs_bloom, Address, BloomInput, Bytes, Log, TxKind, B256, U256,
 };
 use alloy_sol_types::SolCall;
 use mega_evm::{
@@ -20,9 +20,14 @@ use mega_evm::{
     WRITE_RECORD_SIZE,
 };
 use op_alloy_consensus::{OpReceiptEnvelope, TxDeposit};
-use revm::{bytecode::opcode::LOG1, database::State};
+use revm::{
+    bytecode::opcode::{LOG1, POP},
+    context::ContextTr,
+    database::State,
+    Database,
+};
 
-use crate::common::{self, executor, CALLER, CHAIN_ID};
+use crate::common::{self, executor, CALLER};
 
 /// An account with no code.
 const PAYEE: Address = address!("0x7000000000000000000000000000000000000001");
@@ -74,21 +79,7 @@ fn legacy(
     value: u64,
     input: Bytes,
 ) -> Recovered<MegaTxEnvelope> {
-    let tx = TxLegacy {
-        chain_id: Some(CHAIN_ID),
-        nonce,
-        gas_price: 1_000_000,
-        gas_limit: gas_limit(),
-        to,
-        value: U256::from(value),
-        input,
-    };
-    let signed = Signed::new_unchecked(
-        tx,
-        Signature::test_signature(),
-        B256::repeat_byte(nonce as u8 + 0x10),
-    );
-    Recovered::new_unchecked(MegaTxEnvelope::Legacy(signed), signer)
+    common::legacy_from(signer, nonce, to, U256::from(value), input, gas_limit(), 1_000_000)
 }
 
 /// A deposit from [`DEPOSITOR`] to [`PAYEE`] minting `mint` and moving `value`.
@@ -234,4 +225,93 @@ fn test_a_system_transaction_receipt_logs_no_transfer() {
 
     let [receipt] = executor.receipts() else { panic!("one receipt") };
     assert!(!logs_of(receipt).iter().any(is_transfer_log), "no value moved, nothing logged");
+}
+
+/// [S14.9] [S14] The balance of an account destroyed earlier in the transaction is burned at its
+/// end without a log. A factory creates a child endowed with 17 wei whose constructor destructs to
+/// [`PAYEE`], moving the 17 on, then sends the destroyed child 5 wei. The receipt carries exactly
+/// the three transfers — the endowment, the destruction's move and the late value — and nothing
+/// for the burn, no `Burn` log of any EIP-7708 revision either. The 5 wei are no account's: across
+/// every account the transaction touched, the fees included, the balances add up to 5 less than
+/// before, and once the block finishes the child is gone, the payee holds the 17 and the factory
+/// nothing.
+///
+/// Expected values: independent.
+#[test]
+fn test_a_value_left_on_a_destroyed_account_is_burned_without_a_log() {
+    const FACTORY: Address = address!("0x7000000000000000000000000000000000000005");
+    const ENDOWMENT: u64 = 17;
+    const LATE: u64 = 5;
+    let child = FACTORY.create(1);
+    let constructor = BytecodeBuilder::default().selfdestruct(PAYEE).build();
+    let factory = BytecodeBuilder::default()
+        .create(U256::from(ENDOWMENT), &constructor)
+        .append(POP)
+        .call(child, U256::from(LATE))
+        .append(POP)
+        .stop()
+        .build();
+    let mut db = common::database();
+    db.set_account_code(FACTORY, factory);
+    db.set_account_nonce(FACTORY, 1);
+    db.set_account_balance(FACTORY, U256::from(ENDOWMENT + LATE));
+    let mut state = State::builder().with_database(db).build();
+
+    let mut executor = executor(&mut state, common::unlimited_ctx());
+    executor.apply_pre_execution_changes().expect("the block starts");
+    // 1,000,000 of regular gas on top of what the byte prices in effect charge: the state of up
+    // to three new accounts — the child, the payee, the child again for the late value — the
+    // history of the body, and 64 times the history of the creation's two start records, because
+    // the factory forwards all but a 64th of its gas and pays a start's records from the 64th it
+    // keeps. The creation returns its unused gas before the late value call, whose single record
+    // costs less: the factory's is already written in this frame.
+    let gas_limit = 1_000_000 +
+        3 * common::new_account_state_gas() +
+        common::body_history(0) +
+        64 * mega_evm::write_record_history_gas(2).expect("two records have a price");
+    let tx = common::legacy_from(
+        CALLER,
+        0,
+        TxKind::Call(FACTORY),
+        U256::ZERO,
+        Bytes::new(),
+        gas_limit,
+        1_000_000,
+    );
+    let outcome = executor.run_transaction(&tx).expect("it executes");
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    // Value is conserved across every account the transaction touched, its fees included, but
+    // for the late value: a destroyed account holds nothing once the transaction ends.
+    let (mut before, mut after) = (U256::ZERO, U256::ZERO);
+    for (address, account) in &outcome.state {
+        let db = executor.evm_mut().ctx_mut().db_mut();
+        before += db.basic(*address).expect("readable").map_or(U256::ZERO, |info| info.balance);
+        if !account.is_selfdestructed() {
+            after += account.info.balance;
+        }
+    }
+    assert_eq!(before - after, U256::from(LATE), "the late value is no account's");
+    executor.commit_transaction_outcome(outcome).expect("the block has room");
+
+    let [receipt] = executor.receipts() else { panic!("one receipt") };
+    let logs = logs_of(receipt);
+    assert_eq!(
+        logs,
+        [
+            transfer_log(FACTORY, child, U256::from(ENDOWMENT)),
+            transfer_log(child, PAYEE, U256::from(ENDOWMENT)),
+            transfer_log(FACTORY, child, U256::from(LATE)),
+        ],
+        "the three transfers, and nothing for the burn"
+    );
+    let burn = keccak256("Burn(address,uint256)");
+    assert!(logs.iter().all(|log| !log.topics().contains(&burn)), "no Burn log");
+
+    executor.finish_with_counters().expect("the block finishes");
+    let balance = |state: &mut State<mega_evm::test_utils::MemoryDatabase>, address| {
+        state.basic(address).expect("readable").map(|account| account.balance)
+    };
+    assert_eq!(balance(&mut state, child), None, "the destroyed child is gone");
+    assert_eq!(balance(&mut state, PAYEE), Some(U256::from(ENDOWMENT)));
+    assert_eq!(balance(&mut state, FACTORY), Some(U256::ZERO), "the factory sent everything");
 }

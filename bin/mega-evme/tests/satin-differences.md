@@ -6,7 +6,7 @@ Legacy is `Rex6` on the released `mega-evm` 1.7.1. Satin is the in-tree engine a
 
 What the Satin columns show:
 
-- **Regular**: execution, at the Satin schedule (Amsterdam's, with the entries EIP-8038 repriced back at Osaka's) and EIP-2780's intrinsic cost.
+- **Regular**: execution, at the Satin schedule (Amsterdam's, EIP-8038's state-access prices included) and EIP-2780's intrinsic cost.
 - **State**: EIP-8037 state gas for the state a transaction adds (a slot, an account, deployed code), at the cost per state byte.
 - **History**: gas for the bytes a transaction appends to history (its body, one 40-byte record per kept write, its logs, its deployed code), at the cost per history byte; **History bytes** is their count. The legacy engine has neither ledger.
 - **Logs**: Satin emits an EIP-7708 `Transfer` log for every value movement; the legacy engine does not.
@@ -21,7 +21,7 @@ Each fixture's command run on both engines: `tests/fixtures/test_<name>.json` an
 | run_basic_return | success 60018 | success 42298 | -17720 | 15018 | 0 | 27280 | 310 | 0 -> 0 | history |
 | run_codefile | success 60018 | success 42298 | -17720 | 15018 | 0 | 27280 | 310 | 0 -> 0 | history |
 | run_create | success 103716 | success 241060 | +137344 | 24162 | 185130 | 31768 | 361 | 0 -> 0 | history, state |
-| run_dump_inline | success 82106 | success 165826 | +83720 | 37106 | 97920 | 30800 | 350 | 0 -> 0 | history, state |
+| run_dump_inline | success 82106 | success 155826 | +73720 | 27106 | 97920 | 30800 | 350 | 0 -> 0 | history, state |
 | run_input | success 60726 | success 42718 | -18008 | 15086 | 0 | 27632 | 314 | 0 -> 0 | history |
 | run_prestate | success 62118 | success 44398 | -17720 | 17118 | 0 | 27280 | 310 | 0 -> 0 | history |
 | run_revert | revert 60004 | revert 42284 | -17720 | 15004 | 0 | 27280 | 310 | 0 -> 0 | history |
@@ -39,9 +39,9 @@ The three Rex6 blocks of `tests/fixtures/blocks`, each replayed on both engines.
 
 | Block | Transactions | Legacy gas | Satin gas | Satin / legacy | Regular | State | History | Status differs | Logs | Refused |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|
-| 26400001 | 39 | 10592072 | 12252942 | 1.15 | 7185347 | 0 | 5065016 | 13 | 138 -> 121 | 0 |
-| 26400007 | 25 | 8428932 | 8956346 | 1.06 | 4457736 | 0 | 4493720 | 0 | 119 -> 119 | 0 |
-| 26400110 | 27 | 8051381 | 8678731 | 1.07 | 4182321 | 0 | 4491520 | 0 | 121 -> 121 | 0 |
+| 26400001 | 39 | 10592072 | 13873243 | 1.30 | 8818227 | 0 | 5065016 | 17 | 138 -> 121 | 4 |
+| 26400007 | 25 | 8428932 | 10696856 | 1.26 | 6203136 | 0 | 4493720 | 0 | 119 -> 119 | 0 |
+| 26400110 | 27 | 8051381 | 10550686 | 1.31 | 6059166 | 0 | 4491520 | 1 | 121 -> 121 | 1 |
 
 ## Recorded transactions by call target
 
@@ -49,30 +49,30 @@ The transactions of the three blocks grouped by the contract they call and the s
 
 | Call target | Selector | Transactions | Legacy gas | Satin gas | Satin / legacy | State gas | Status differs | Logs |
 |---|---|---:|---:|---:|---:|---:|---:|---|
-| 0x6342000000000000000000000000000000000001 | 0x01caec13 | 31 | 2532545 | 853864 | 0.33 | 0 | 0 | 0 -> 0 |
-| 0x897a33a0af45b3ba097bd6045187d622252e6acd | 0x9aec351f | 30 | 18019164 | 21657264 | 1.20 | 0 | 0 | 330 -> 330 |
-| deposit | - | 3 | 304908 | 120588 | 0.39 | 0 | 0 | 0 -> 0 |
-| 0x12759afca690637b425ffba3265f0dc2f6242a8d | 0x21d5c9bb | 2 | 601407 | 643335 | 1.06 | 0 | 0 | 6 -> 6 |
-| 0x57677bdc4f24d5c08ddce87e06670c26a00cac0b | 0xb7a16251 | 2 | 1559890 | 1509424 | 0.96 | 0 | 0 | 19 -> 19 |
-| 0x681e908b8ab57c49c74d770f369754ccc3e1ae09 | 0x6aa4fad7 | 2 | 151028 | 121524 | 0.80 | 0 | 0 | 0 -> 0 |
+| 0x6342000000000000000000000000000000000001 | 0x01caec13 | 31 | 2532545 | 771030 | 0.30 | 0 | 5 | 0 -> 0 |
+| 0x897a33a0af45b3ba097bd6045187d622252e6acd | 0x9aec351f | 30 | 18019164 | 26445264 | 1.46 | 0 | 0 | 330 -> 330 |
+| deposit | - | 3 | 304908 | 141288 | 0.46 | 0 | 0 | 0 -> 0 |
+| 0x12759afca690637b425ffba3265f0dc2f6242a8d | 0x21d5c9bb | 2 | 601407 | 832935 | 1.38 | 0 | 0 | 6 -> 6 |
+| 0x57677bdc4f24d5c08ddce87e06670c26a00cac0b | 0xb7a16251 | 2 | 1559890 | 1647024 | 1.05 | 0 | 0 | 19 -> 19 |
+| 0x681e908b8ab57c49c74d770f369754ccc3e1ae09 | 0x6aa4fad7 | 2 | 151028 | 135924 | 0.89 | 0 | 0 | 0 -> 0 |
 | 0x0b5cca2dd7bcc50b17213aa4828fc8e4bf9bcfc2 | 0xf7a30806 | 1 | 161042 | 220000 | 1.36 | 0 | 1 | 1 -> 0 |
-| 0x12759afca690637b425ffba3265f0dc2f6242a8d | 0x93ca625d | 1 | 314985 | 340081 | 1.07 | 0 | 0 | 5 -> 5 |
+| 0x12759afca690637b425ffba3265f0dc2f6242a8d | 0x93ca625d | 1 | 314985 | 413681 | 1.31 | 0 | 0 | 5 -> 5 |
 | 0x256307f3b2fd8468afd2070e349d8dd033e56e2e | 0xf7a30806 | 1 | 160658 | 220000 | 1.36 | 0 | 1 | 1 -> 0 |
 | 0x2d35f7dc723f7e16416a1113c7f11ebb68490769 | 0x38dd01ff | 1 | 235148 | 400000 | 1.70 | 0 | 1 | 2 -> 0 |
 | 0x3b4c89aabae1804a631d51b3d9dc0e3da228a701 | 0xf7a30806 | 1 | 161122 | 220000 | 1.36 | 0 | 1 | 1 -> 0 |
 | 0x3fc0045863135c4a4eaee7e3a4d167508269bd7e | 0x38dd01ff | 1 | 235545 | 400000 | 1.69 | 0 | 1 | 2 -> 0 |
 | 0x4d184a91727f98b75b557dd209903b71c7184739 | 0xf7a30806 | 1 | 160658 | 220000 | 1.36 | 0 | 1 | 1 -> 0 |
 | 0x5b00d5668600db5803073677f51bd6698531a93b | 0xf7a30806 | 1 | 160658 | 220000 | 1.36 | 0 | 1 | 1 -> 0 |
-| 0x5e3ae52eba0f9740364bd5dd39738e1336086a8b | 0x91680b93 | 1 | 649146 | 593610 | 0.91 | 0 | 0 | 0 -> 0 |
+| 0x5e3ae52eba0f9740364bd5dd39738e1336086a8b | 0x91680b93 | 1 | 649146 | 630510 | 0.97 | 0 | 0 | 0 -> 0 |
 | 0x609ca0a22ed2e361a2787939f4903b1fd4bc54ca | 0x38dd01ff | 1 | 235544 | 400000 | 1.69 | 0 | 1 | 2 -> 0 |
-| 0x681e908b8ab57c49c74d770f369754ccc3e1ae09 | 0x6aa4fadc | 1 | 75514 | 60762 | 0.80 | 0 | 0 | 0 -> 0 |
-| 0x681e908b8ab57c49c74d770f369754ccc3e1ae09 | 0x6aa4fadd | 1 | 75514 | 60762 | 0.80 | 0 | 0 | 0 -> 0 |
-| 0x681e908b8ab57c49c74d770f369754ccc3e1ae09 | 0x6aa4fb42 | 1 | 75514 | 60762 | 0.80 | 0 | 0 | 0 -> 0 |
-| 0x681e908b8ab57c49c74d770f369754ccc3e1ae09 | 0x6aa4fb43 | 1 | 75514 | 60762 | 0.80 | 0 | 0 | 0 -> 0 |
+| 0x681e908b8ab57c49c74d770f369754ccc3e1ae09 | 0x6aa4fadc | 1 | 75514 | 67962 | 0.89 | 0 | 0 | 0 -> 0 |
+| 0x681e908b8ab57c49c74d770f369754ccc3e1ae09 | 0x6aa4fadd | 1 | 75514 | 67962 | 0.89 | 0 | 0 | 0 -> 0 |
+| 0x681e908b8ab57c49c74d770f369754ccc3e1ae09 | 0x6aa4fb42 | 1 | 75514 | 67962 | 0.89 | 0 | 0 | 0 -> 0 |
+| 0x681e908b8ab57c49c74d770f369754ccc3e1ae09 | 0x6aa4fb43 | 1 | 75514 | 67962 | 0.89 | 0 | 0 | 0 -> 0 |
 | 0x6b2b9db1413cbf64572c320d6b7c941c57901794 | 0xf7a30806 | 1 | 161042 | 220000 | 1.36 | 0 | 1 | 1 -> 0 |
 | 0x8c0e2c6916a5437ae65c51439ce986d38b09c0db | 0xf7a30806 | 1 | 160658 | 220000 | 1.36 | 0 | 1 | 1 -> 0 |
 | 0xaef423246a0851139e115403c6924c94fd6804ef | 0x38dd01ff | 1 | 235148 | 400000 | 1.70 | 0 | 1 | 2 -> 0 |
 | 0xbfd77de81cf6200203889a56c4c0812ffee1bc03 | - | 1 | 60000 | 39280 | 0.65 | 0 | 0 | 0 -> 0 |
-| 0xcc13277a5d6b3dd640981ff39da89672828e2ba3 | 0xdd1b6137 | 1 | 188717 | 186001 | 0.98 | 0 | 0 | 1 -> 1 |
+| 0xcc13277a5d6b3dd640981ff39da89672828e2ba3 | 0xdd1b6137 | 1 | 188717 | 212001 | 1.12 | 0 | 0 | 1 -> 1 |
 | 0xf1641c9d17e7a783441b48ab65d55fdaa7d920f2 | 0xf7a30806 | 1 | 160658 | 220000 | 1.36 | 0 | 1 | 1 -> 0 |
 | 0xfb6c17f7510308e054daa72e5a5c1a3a8bfaaf42 | 0xf7a30806 | 1 | 160658 | 220000 | 1.36 | 0 | 1 | 1 -> 0 |

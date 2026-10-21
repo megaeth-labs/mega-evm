@@ -100,6 +100,21 @@ These flags apply to all commands.
 | `--log.file <PATH>` | stderr  | `--log-file`     | Write logs to a file instead of stderr                                                      |
 | `--log.no-color`    | `false` | `--log-no-color` | Disable colored console output                                                              |
 
+## Output and Exit Status
+
+An error is written once, as one line on stderr, and nothing is written to stdout.
+The exit code is 1, whether or not stderr could take the line.
+A command that prints its result to a stdout that was closed (`mega-evme … | head -0`) ends quietly with the status it had.
+
+Text a person reads on a terminal is filtered: escape sequences, control characters (the C0 and C1 ranges, including the one-character CSI and OSC introducers), DEL and the bidirectional overrides are dropped, and line breaks and tabs stay.
+This covers error lines and a transaction's revert reason.
+`--json` output is not filtered: a JSON string carries the same characters, escaped.
+
+The URL given to `--rpc` is written to no log line, error or cache file name with its userinfo (`user:password@`).
+The userinfo is the part of the authority before its last `@`, and it is removed from a URL written without its scheme too.
+A credential anywhere else in the URL, such as an API key in the path or the query, is not recognised and is printed with the URL.
+The URL has to start with `http://` or `https://`.
+
 ## Read more
 
 - **[Cookbook](cookbook.md)** — Real-world recipes and worked examples.

@@ -41,10 +41,6 @@
 //!   checked against a limit it is about to reach (`satin`); the same one byte short of it, so the
 //!   last log crosses and the transaction is stopped (`stopped`); and through op-revm, which has no
 //!   limit to check (`op_revm`).
-//! - `state_limits`: the same transaction under a state-gas limit and a KV limit equal to exactly
-//!   the state gas and the write records it keeps, so every fresh slot is held to both as it is
-//!   written (`satin`); and under a state-gas limit one gas short, so the last slot crosses and the
-//!   transaction is stopped (`stopped`). Its op-revm baseline is `data_size_limit/op_revm`.
 //! - `keyless_deploy`: a `keylessDeploy` of the canonical `CREATE2` factory, which Satin runs as a
 //!   native creation below the call (`satin`), next to op-revm running the same init code as a
 //!   creation transaction (`op_revm`). The gap is what the keyless path adds to a creation:
@@ -65,9 +61,7 @@
 //! Every workload is run once before it is measured, and the run is held to what it must draw:
 //! each pays its body's history, the logging one pays for the bytes its logs append and the
 //! calldata one for the bytes it carries, and the data-size one keeps exactly the bytes and
-//! records it is sized for, and stops at its last log one byte short of them; the state-limit one
-//! keeps exactly the state gas and records its limits allow, and stops at its last slot one gas
-//! short of them. A workload that
+//! records it is sized for, and stops at its last log one byte short of them. A workload that
 //! stopped drawing what it is here to measure would otherwise still benchmark, and measure the
 //! wrong thing.
 #![allow(missing_docs)]
@@ -97,7 +91,7 @@ use mega_evm::{
 use op_revm::{L1BlockInfo, OpEvm, OpSpecId, OpTransaction};
 use revm::{
     bytecode::opcode::{
-        ADDRESS, BALANCE, CALL, CALLDATACOPY, CALLDATALOAD, CODECOPY, DUP1, EXP, GAS, ISZERO,
+        ADD, ADDRESS, BALANCE, CALL, CALLDATACOPY, CALLDATALOAD, CODECOPY, DUP1, EXP, GAS, ISZERO,
         JUMPDEST, JUMPI, KECCAK256, LOG0, LOG2, MCOPY, MSTORE, NUMBER, POP, PUSH0, PUSH1,
         RETURNDATACOPY, SLOAD, SSTORE, STATICCALL, STOP, SUB, SWAP1, TIMESTAMP,
     },
@@ -121,6 +115,11 @@ const VOLATILE: Address = address!("0x000000000000000000000000000000000010000b")
 const HASHER: Address = address!("0x000000000000000000000000000000000010000c");
 const VALUE_CALLER: Address = address!("0x000000000000000000000000000000000010000d");
 const QUERIER: Address = address!("0x000000000000000000000000000000000010000e");
+/// The callers of the three system-call workloads again, summing the success bits of their calls
+/// where the measured ones discard them. Run once by the checks, never measured.
+const INTERCEPTED_COUNT: Address = address!("0x0000000000000000000000000000000000100010");
+const MISSING_COUNT: Address = address!("0x0000000000000000000000000000000000100011");
+const QUERIER_COUNT: Address = address!("0x0000000000000000000000000000000000100012");
 
 /// The block beneficiary of the benchmark's block, `BlockEnv`'s default.
 const BENEFICIARY: Address = Address::ZERO;
@@ -324,7 +323,19 @@ fn salt_context(
 /// `STATICCALL`s the system contract at `target` with `selector` `REPEAT` times, discarding the
 /// answers.
 fn system_caller_code(target: Address, selector: [u8; 4]) -> Bytes {
+    system_calls(target, selector, false)
+}
+
+/// The same calls, returning how many of them succeeded.
+fn system_caller_count_code(target: Address, selector: [u8; 4]) -> Bytes {
+    system_calls(target, selector, true)
+}
+
+fn system_calls(target: Address, selector: [u8; 4], count: bool) -> Bytes {
     let mut code = BytecodeBuilder::default().mstore(0x0, selector);
+    if count {
+        code = code.push_number(0_u64);
+    }
     for _ in 0..REPEAT {
         code = code
             .push_number(0_u64) // retSize
@@ -334,9 +345,13 @@ fn system_caller_code(target: Address, selector: [u8; 4]) -> Bytes {
             .push_address(target)
             .push_number(100_000_u64)
             .append(STATICCALL)
-            .append(POP);
+            .append(if count { ADD } else { POP });
     }
-    code.stop().build()
+    if count {
+        code.return_top().build()
+    } else {
+        code.stop().build()
+    }
 }
 
 fn call_tx(to: Address, data: Bytes, gas_limit: u64) -> OpTransaction<TxEnv> {
@@ -385,6 +400,18 @@ fn bench_transact(c: &mut Criterion) {
         .account_code(INTERCEPTED, system_caller_code(ACCESS_CONTROL_ADDRESS, IS_DISABLED))
         .account_code(MISSING, system_caller_code(ACCESS_CONTROL_ADDRESS, UNKNOWN_SELECTOR))
         .account_code(QUERIER, system_caller_code(LIMIT_CONTROL_ADDRESS, REMAINING_COMPUTE_GAS))
+        .account_code(
+            INTERCEPTED_COUNT,
+            system_caller_count_code(ACCESS_CONTROL_ADDRESS, IS_DISABLED),
+        )
+        .account_code(
+            MISSING_COUNT,
+            system_caller_count_code(ACCESS_CONTROL_ADDRESS, UNKNOWN_SELECTOR),
+        )
+        .account_code(
+            QUERIER_COUNT,
+            system_caller_count_code(LIMIT_CONTROL_ADDRESS, REMAINING_COMPUTE_GAS),
+        )
         .account_code(LIMITED, limited_code())
         .account_balance(VALUE_CALLER, U256::from(REPEAT))
         .account_code(VALUE_CALLER, value_caller_code())
@@ -473,6 +500,25 @@ fn bench_transact(c: &mut Criterion) {
                     "every transfer log was counted, which is what this arm measures",
                 );
             }
+            "intercepted_calls" | "system_address_misses" | "remaining_compute_gas" => {
+                // The measured callers discard the answers; the same calls, summed, show what
+                // they answered: every interceptor's answer succeeds, and every call that falls
+                // through to the contract's own code reverts.
+                let counter = match workload {
+                    "intercepted_calls" => INTERCEPTED_COUNT,
+                    "system_address_misses" => MISSING_COUNT,
+                    _ => QUERIER_COUNT,
+                };
+                let succeeded = if workload == "system_address_misses" { 0 } else { REPEAT };
+                let counted = MegaEvm::new(mega_context(db.clone()))
+                    .execute_transaction(OpTx(call_tx(counter, Bytes::new(), 30_000_000)))
+                    .unwrap();
+                assert_eq!(
+                    counted.result.output().cloned().unwrap_or_default(),
+                    Bytes::copy_from_slice(&U256::from(succeeded).to_be_bytes::<32>()),
+                    "{workload}: {succeeded} of the {REPEAT} calls succeed",
+                );
+            }
             _ => {}
         }
         group.bench_function(format!("{workload}/satin"), |b| {
@@ -545,49 +591,6 @@ fn bench_transact(c: &mut Criterion) {
             BatchSize::SmallInput,
         );
     });
-
-    // The state-limit arms: the same transaction under a state-gas and a KV limit it exactly
-    // reaches, and under a state-gas limit one gas short of it.
-    let state_gas = MegaEvm::new(mega_context(db.clone()))
-        .execute_transaction(OpTx(limited_tx.clone()))
-        .unwrap()
-        .gas
-        .state;
-    let state_limited = |limit| {
-        mega_context(db.clone()).with_tx_runtime_limits(
-            EvmTxRuntimeLimits::default()
-                .with_tx_state_gas_limit(limit)
-                .with_tx_kv_update_limit(REPEAT),
-        )
-    };
-    let at_limit = MegaEvm::new(state_limited(state_gas))
-        .execute_transaction(OpTx(limited_tx.clone()))
-        .unwrap();
-    assert!(at_limit.result.is_success(), "state_limits: {:?}", at_limit.result);
-    assert_eq!(at_limit.gas.state, state_gas, "state_limits: the arm must reach its state gas");
-    assert_eq!(at_limit.usage.write_records, REPEAT, "state_limits: and its records");
-    let stopped = MegaEvm::new(state_limited(state_gas - 1))
-        .execute_transaction(OpTx(limited_tx.clone()))
-        .unwrap();
-    assert_eq!(
-        stopped.limit_exceeded,
-        Some(LimitCheck::ExceedsLimit {
-            kind: LimitKind::StateGrowth,
-            limit: state_gas - 1,
-            used: state_gas,
-            frame_local: false,
-        }),
-        "state_limits/stopped: the last slot must be the gas that crosses",
-    );
-    for (arm, limit) in [("satin", state_gas), ("stopped", state_gas - 1)] {
-        group.bench_function(format!("state_limits/{arm}"), |b| {
-            b.iter_batched(
-                || MegaEvm::new(state_limited(limit)),
-                |mut evm| evm.transact(OpTx(limited_tx.clone())).unwrap(),
-                BatchSize::SmallInput,
-            );
-        });
-    }
 
     // The Oracle's storage answered by the oracle service, every slot of it: each slot is loaded
     // all the same, and each read is priced as the database's is.

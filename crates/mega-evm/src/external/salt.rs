@@ -42,9 +42,9 @@ pub const MIN_BUCKET_SIZE: usize = 1 << MIN_BUCKET_SIZE_BITS;
 ///
 /// # Bucket ID Calculation
 ///
-/// The trait provides default methods [`bucket_id_for_account`](SaltEnv::bucket_id_for_account)
-/// and [`bucket_id_for_slot`](SaltEnv::bucket_id_for_slot) that can be overridden by
-/// implementations to customize bucket assignment logic.
+/// Every implementation supplies [`bucket_id_for_account`](SaltEnv::bucket_id_for_account) and
+/// [`bucket_id_for_slot`](SaltEnv::bucket_id_for_slot), which assign a key its bucket: the trait
+/// has no default for either.
 #[auto_impl(&, Box, Rc, Arc)]
 pub trait SaltEnv: Debug + Unpin {
     /// Error type returned when bucket capacity cannot be retrieved.
@@ -76,7 +76,6 @@ pub trait SaltEnv: Debug + Unpin {
     /// Maps an account address to its bucket ID.
     ///
     /// This method determines which bucket tracks the account creation gas costs.
-    /// The default implementation can be overridden to customize bucket assignment.
     ///
     /// # Arguments
     ///
@@ -86,7 +85,6 @@ pub trait SaltEnv: Debug + Unpin {
     /// Maps a storage slot to its bucket ID.
     ///
     /// This method determines which bucket tracks the storage slot's gas costs.
-    /// The default implementation can be overridden to customize bucket assignment.
     ///
     /// # Arguments
     ///

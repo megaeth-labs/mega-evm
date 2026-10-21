@@ -3,10 +3,13 @@
 //!
 //! Every block runs as a node runs one:
 //!
-//! - on a state that already holds the seven predeploys, which a chain deploys once, in its first
-//!   block after activation: the state the previous block's pre-block changes left;
-//! - under the chain's default limits, `ProtocolLimits::DEFAULT`: the production data-size limits
-//!   and gas detention's caps, with no building policy on top (`BlockLimits::default()`);
+//! - on a state that holds the seven predeploys as a chain that ran Rex6 holds them, with what the
+//!   previous block's pre-block changes left: no block but Satin's activation block reads the
+//!   predeploys, and none deploys them;
+//! - with the EIP-2935 and EIP-4788 contracts' own code, so the pre-block calls record the parent
+//!   hash and the beacon root;
+//! - under the spec's limits, `ProtocolLimits::for_spec`: the production data-size limits and gas
+//!   detention's caps, with no building policy on top (`BlockLimits::default()`);
 //! - from a fresh `State` over that database, as a node starts each block.
 //!
 //! Two workloads of `N` transactions each, whose per-transaction work beyond the transaction
@@ -20,26 +23,27 @@
 //!   counters, with a log-free receipt.
 //!
 //! The measurement runs `apply_pre_execution_changes`, the transactions and `finish` — the whole
-//! block a node executes — and hands the state back, so dropping it is not measured. Two more
-//! arms measure `apply_pre_execution_changes` alone:
-//!
-//! - `steady_pre_block`: on the steady state, the per-block cost of the idempotent check of the
-//!   predeploys and of the pre-block system calls;
-//! - `activation_pre_block`: on a state without the predeploys, the first block after activation,
-//!   which deploys all seven. A chain pays it once; it is the one arm that runs the deploys.
+//! block a node executes — and hands the state back, so dropping it is not measured. One more arm,
+//! `steady_pre_block`, measures `apply_pre_execution_changes` alone on the steady state: the
+//! per-block cost of the pre-block system calls and reads.
 #![allow(missing_docs)]
 
 use alloy_consensus::{transaction::Recovered, Signed, TxLegacy};
+use alloy_eips::{
+    eip2935::{HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE},
+    eip4788::{BEACON_ROOTS_ADDRESS, BEACON_ROOTS_CODE},
+};
 use alloy_evm::{block::BlockExecutor, EvmEnv, EvmFactory};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use mega_evm::{
-    system::{SequencerRegistryConfig, SYSTEM_CONTRACT_DEPLOY_COUNT},
-    test_utils::{BytecodeBuilder, MemoryDatabase},
+    system::{MEGA_SYSTEM_ADDRESS, SEQUENCER_REGISTRY_ADDRESS},
+    test_utils::{BytecodeBuilder, CommittedStates, MemoryDatabase},
     BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardforkConfig,
-    MegaSpecId, MegaTxEnvelope, PreBlockStateSource, ProtocolLimits,
+    MegaSpecId, MegaTxEnvelope,
 };
+use op_revm::constants::L1_BLOCK_CONTRACT;
 use revm::{
     bytecode::opcode::{CALLDATALOAD, SSTORE},
     context::{BlockEnv, CfgEnv},
@@ -47,10 +51,7 @@ use revm::{
     state::EvmState,
     DatabaseCommit,
 };
-use std::{
-    hint::black_box,
-    sync::{Arc, Mutex},
-};
+use std::hint::black_box;
 
 /// Transactions in the block.
 const N: u64 = 64;
@@ -64,13 +65,14 @@ const BLOCK_NUMBER: u64 = 1_000;
 /// The timestamp of the block the bench executes.
 const BLOCK_TIMESTAMP: u64 = 1_800_000_000;
 
+/// A non-zero parent hash and beacon root. A zero stored over an empty slot is not a write, so
+/// the pre-block calls would leave no storage behind.
+const PARENT_HASH: B256 = B256::repeat_byte(0xab);
+const PARENT_BEACON_ROOT: B256 = B256::repeat_byte(0xcd);
+
 const SENDER: Address = address!("0x2000000000000000000000000000000000000002");
 const RECIPIENT: Address = address!("0x3000000000000000000000000000000000000003");
 const WRITER: Address = address!("0x1000000000000000000000000000000000000001");
-
-/// What the pre-block changes of a block handed their observer, in the order the executor
-/// commits them.
-type PreBlockStates = Arc<Mutex<Vec<(PreBlockStateSource, EvmState)>>>;
 
 /// Code that writes 1 to the slot its first calldata word names, so every call that names a slot
 /// of its own changes storage and leaves a write record behind.
@@ -90,12 +92,15 @@ fn slot_calldata(nonce: u64) -> Bytes {
     Bytes::from(U256::from(nonce + 1).to_be_bytes::<32>())
 }
 
-/// The accounts the workloads use, and nothing the chain deploys.
+/// The accounts the workloads use, the EIP-2935 and EIP-4788 contracts' code, and the seven
+/// predeploys as a chain that ran Rex6 holds them.
 fn database() -> MemoryDatabase {
-    let mut db = MemoryDatabase::default();
+    let mut db = MemoryDatabase::default().rex6_predeploys(MEGA_SYSTEM_ADDRESS);
     db.set_account_code(WRITER, writer_code());
     db.set_account_code(RECIPIENT, Bytes::new());
     db.set_account_balance(SENDER, U256::from(1_000_000_000_000_000_u64));
+    db.set_account_code(HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE.clone());
+    db.set_account_code(BEACON_ROOTS_ADDRESS, BEACON_ROOTS_CODE.clone());
     db
 }
 
@@ -122,7 +127,12 @@ fn evm_env() -> EvmEnv<MegaSpecId> {
 /// A block packed under no building policy, as a validator executes one: the chain's limits
 /// alone hold it.
 fn block_ctx() -> MegaBlockExecutionCtx {
-    MegaBlockExecutionCtx::new(B256::ZERO, Some(B256::ZERO), Bytes::new(), BlockLimits::default())
+    MegaBlockExecutionCtx::new(
+        PARENT_HASH,
+        Some(PARENT_BEACON_ROOT),
+        Bytes::new(),
+        BlockLimits::default(),
+    )
 }
 
 /// `N` transactions to `to`, one per nonce, each carrying the input `input` builds for it.
@@ -151,75 +161,70 @@ fn transactions(
 }
 
 fn chain_spec() -> MegaHardforkConfig {
-    MegaHardforkConfig::default()
-        .with_all_activated()
-        .with_params(SequencerRegistryConfig::placeholder())
-        .with_params(ProtocolLimits::DEFAULT)
+    MegaHardforkConfig::default().with_all_activated()
 }
 
-/// Runs the pre-block changes of block `number` on `db` and returns what they handed their
-/// observer, without committing anything to `db`.
-fn pre_block_states(db: MemoryDatabase, number: u64) -> Vec<(PreBlockStateSource, EvmState)> {
+/// Runs the pre-block changes of block `number` on a state over `db` and returns what they
+/// committed to it, in order, as a commit hook on the state receives it; `db` itself is not
+/// changed.
+fn pre_block_states(db: MemoryDatabase, number: u64) -> Vec<EvmState> {
     let spec = chain_spec();
     let mut state = State::builder().with_database(db).build();
+    let committed = CommittedStates::install(&mut state);
     let evm = MegaEvmFactory::new().create_evm(&mut state, evm_env_at(number));
     let mut executor =
         MegaBlockExecutor::new(evm, block_ctx(), &spec, OpAlloyReceiptBuilder::default());
-    let log = PreBlockStates::default();
-    let captured = Arc::clone(&log);
-    executor.set_pre_block_observer(Some(Box::new(
-        move |source: PreBlockStateSource, state: &EvmState| {
-            captured.lock().expect("pre-block observer").push((source, state.clone()));
-        },
-    )));
     executor.apply_pre_execution_changes().expect("the pre-block changes apply");
     drop(executor);
-    let states = std::mem::take(&mut *log.lock().expect("pre-block observer"));
-    states
+    committed.states()
 }
 
 /// The database the chain's steady state starts a block from: [`database`] with what the
-/// previous block's pre-block changes left in it, the seven predeploys among them, committed in
-/// the order the executor commits them.
+/// previous block's pre-block changes left in it, committed in the order the executor commits
+/// them.
 fn steady_database() -> MemoryDatabase {
     let mut db = database();
-    let states = pre_block_states(db.clone(), BLOCK_NUMBER - 1);
-    let deployed = states
-        .iter()
-        .filter(|(source, _)| matches!(source, PreBlockStateSource::SystemContract(_)))
-        .filter(|(_, state)| state.values().any(|account| account.is_created()))
-        .count();
-    assert_eq!(deployed, SYSTEM_CONTRACT_DEPLOY_COUNT, "the previous block deploys all seven");
-    for (_, state) in states {
+    for state in pre_block_states(db.clone(), BLOCK_NUMBER - 1) {
         db.commit(state);
     }
     db
 }
 
-/// Asserts that the pre-block changes of the bench's block on `db` find every predeploy in place:
-/// each is a read-only witness entry, neither created nor touched.
-fn assert_predeploys_in_place(db: &MemoryDatabase) {
+/// Asserts that the pre-block changes of the bench's block on `db` are a steady block's: the two
+/// calls, which write their contracts, then the reads of the registry's pending changes and of the
+/// L1 block info, and no read of a predeploy, which only Satin's activation block makes. Each step
+/// names one account.
+fn assert_steady_pre_block(db: &MemoryDatabase) {
     let states = pre_block_states(db.clone(), BLOCK_NUMBER);
-    let deploys: Vec<_> = states
+    let named: Vec<_> = states
         .iter()
-        .filter(|(source, _)| matches!(source, PreBlockStateSource::SystemContract(_)))
+        .map(|state| {
+            assert_eq!(state.len(), 1, "a pre-block step names one account: {state:?}");
+            *state.keys().next().expect("one account")
+        })
         .collect();
-    assert_eq!(deploys.len(), SYSTEM_CONTRACT_DEPLOY_COUNT);
-    for (source, state) in &deploys {
-        assert_eq!(state.len(), 1, "{source:?} is one witness account");
-        let account = state.values().next().expect("the account is present");
-        assert!(!account.is_touched(), "{source:?} is not touched");
-        assert!(!account.is_created(), "{source:?} is not created");
+    assert_eq!(
+        named,
+        [
+            HISTORY_STORAGE_ADDRESS,
+            BEACON_ROOTS_ADDRESS,
+            SEQUENCER_REGISTRY_ADDRESS,
+            L1_BLOCK_CONTRACT
+        ],
+        "a steady block reads no predeploy"
+    );
+    // Outside every measured section: both calls wrote the contract the bench seeded.
+    for (call, address) in states.iter().zip([HISTORY_STORAGE_ADDRESS, BEACON_ROOTS_ADDRESS]) {
+        let writes = call[&address].storage.values().filter(|slot| slot.is_changed()).count();
+        assert!(writes > 0, "the call to {address} wrote its contract's storage");
     }
-    assert_eq!(states[0].0, PreBlockStateSource::Eip2935);
-    assert_eq!(states[1].0, PreBlockStateSource::Eip4788);
 }
 
 fn bench_block(c: &mut Criterion) {
     let spec = chain_spec();
     let steady = steady_database();
-    // Checked once before measurement, so a block that would deploy is not measured as steady.
-    assert_predeploys_in_place(&steady);
+    // Checked once before measurement, so a block that is not a steady one is not measured as one.
+    assert_steady_pre_block(&steady);
 
     let workloads = [
         // Both budgets clear the state gas the Satin gas table charges: a transfer to an account
@@ -301,34 +306,6 @@ fn bench_block(c: &mut Criterion) {
         );
     });
 
-    // The first block after activation deploys all seven, checked once before measurement.
-    let deployed = pre_block_states(database(), BLOCK_NUMBER)
-        .iter()
-        .filter(|(source, _)| matches!(source, PreBlockStateSource::SystemContract(_)))
-        .filter(|(_, state)| state.values().any(|account| account.is_created()))
-        .count();
-    assert_eq!(deployed, SYSTEM_CONTRACT_DEPLOY_COUNT, "the first block deploys all seven");
-
-    group.bench_function("activation_pre_block", |b| {
-        b.iter_batched(
-            || State::builder().with_database(database()).build(),
-            |mut state| {
-                let used = {
-                    let evm = MegaEvmFactory::new().create_evm(&mut state, evm_env());
-                    let mut executor = MegaBlockExecutor::new(
-                        evm,
-                        block_ctx(),
-                        &spec,
-                        OpAlloyReceiptBuilder::default(),
-                    );
-                    executor.apply_pre_execution_changes().unwrap();
-                    executor.limiter().block_gas_used
-                };
-                (state, black_box(used))
-            },
-            BatchSize::SmallInput,
-        );
-    });
     group.finish();
 }
 

@@ -74,7 +74,7 @@ impl Cmd {
         debug!(sender = %sender, "State initialized");
 
         // Install Satin's predeploys
-        state.deploy_system_contracts();
+        state.deploy_system_contracts()?;
         debug!("System contracts deployed");
 
         let pre_execution_nonce = state.basic_ref(sender)?.map(|acc| acc.nonce).unwrap_or(0);
@@ -82,8 +82,7 @@ impl Cmd {
 
         // Run-specific: If not in create mode, set the code at the receiver address
         if !self.tx_args.create() && !code.is_empty() {
-            let bytecode = Bytecode::new_raw_checked(code.clone())
-                .unwrap_or_else(|_| Bytecode::new_legacy(code.clone()));
+            let bytecode = checked_run_bytecode(code.clone())?;
             debug!(receiver = %self.tx_args.receiver(), "Setting code at receiver address");
             state.set_account_code(self.tx_args.receiver(), bytecode);
         }
@@ -107,8 +106,11 @@ impl Cmd {
         // Create EVM context and execute transaction
         let evm_context = self.env_args.create_evm_context(&mut state)?;
         let start = Instant::now();
-        let (exec_result, evm_state, trace_data, mut satin) =
+        let (exec_result, mut evm_state, trace_data, mut satin) =
             self.trace_args.execute_transaction(evm_context, tx)?;
+        if self.dump_args.dump {
+            crate::materialize_dumped_code(&state, &mut evm_state)?;
+        }
         satin.limits_override = self.env_args.limits_override_in_force()?;
         let exec_time = start.elapsed();
 
@@ -175,5 +177,31 @@ impl Cmd {
         }
 
         Ok(())
+    }
+}
+
+/// Bytecode placed at the receiver.
+///
+/// A designation that is not valid EIP-7702 bytecode is an error, rather than code to execute.
+fn checked_run_bytecode(code: alloy_primitives::Bytes) -> Result<Bytecode> {
+    Bytecode::new_raw_checked(code).map_err(RunError::InvalidBytecode)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_run_bytecode_rejects_a_broken_delegation() {
+        let err = checked_run_bytecode(alloy_primitives::Bytes::from_static(&[0xef, 0x01]))
+            .expect_err("a truncated EIP-7702 designation is not bytecode");
+        assert!(matches!(err, RunError::InvalidBytecode(_)));
+    }
+
+    #[test]
+    fn test_run_bytecode_accepts_ordinary_code() {
+        let bytecode = checked_run_bytecode(alloy_primitives::Bytes::from_static(&[0x00]))
+            .expect("STOP is valid code");
+        assert_eq!(bytecode.original_bytes().as_ref(), &[0x00]);
     }
 }
