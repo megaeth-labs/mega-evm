@@ -27,7 +27,7 @@
 use crate::{
     gen::{
         case::Case,
-        program::{End, Program},
+        program::{End, Forward, InitCode, Op, Program, Scheme, Target},
         tx::{GasTier, Price, Shape, Tx},
         world::{AccountShape, Balance, BeneficiaryIs, BlockShape, Limits, Salt, World},
         Value, Who,
@@ -147,4 +147,78 @@ fn test_an_out_of_gas_before_the_first_frame_pays_the_operator_fee_on_the_whole_
         U256::ZERO,
         "the recipient is created empty: the frame never runs, so the value does not move\n{rendered}"
     );
+}
+
+/// A program that funds the account its `CREATE2` lands on, named by [`Target::Created`], then
+/// creates it, keeps one record for the account and one for itself: the transfer changed both, so
+/// neither the creation nor the bump of the program's nonce adds a record. The creation lands on
+/// the funded address, which pins that the target resolves to the address the op creates at.
+///
+/// Before the created account followed the net-change rule, the creation recorded it a second
+/// time: three records where two stand, and a record's history more.
+#[test]
+fn test_a_program_that_funds_the_account_it_then_creates_keeps_one_record_for_it() {
+    use alloy_primitives::{keccak256, B256, U256};
+    use mega_evm::{LimitUsage, TRANSFER_LOG_SIZE, WRITE_RECORD_SIZE};
+
+    const SALT: u8 = 2;
+    let main = Program {
+        ops: vec![
+            Op::Call {
+                scheme: Scheme::Call,
+                target: Target::Created { nth: 0 },
+                value: Value::One,
+                forward: Forward::All,
+                args_len: 0,
+            },
+            Op::Create { value: Value::Zero, salt: Some(SALT), init: InitCode::Empty },
+        ],
+        end: End::Stop,
+    };
+    let mut world = plain_world();
+    world.contract.balance = Balance::Small;
+    let case = Case {
+        world,
+        tx: Tx {
+            shape: Shape::Call { to: Who::Contract, data_len: 0, access_list: vec![] },
+            value: Value::Zero,
+            gas: GasTier::Medium,
+            price: Price::Free,
+            nonce_ok: true,
+        },
+        main,
+        a: stop(),
+        b: stop(),
+    };
+    let execution = case.execute();
+    let outcome = execution.as_ref().expect("the transaction is valid");
+    let rendered = render(&execution);
+    assert!(outcome.result.is_success(), "{rendered}");
+
+    let created = Who::Contract
+        .address()
+        .create2(B256::from(U256::from(SALT)), keccak256(InitCode::Empty.assemble()));
+    let account = outcome.state.get(&created).expect("the account is created");
+    assert_eq!(
+        (account.info.nonce, account.info.balance),
+        (1, U256::from(1)),
+        "the creation landed on the account the program funded\n{rendered}"
+    );
+    let body = mega_evm::transaction_body_bytes(&case.transaction());
+    assert_eq!(
+        outcome.usage,
+        LimitUsage {
+            data_size: body + 2 * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE,
+            write_records: 2,
+        },
+        "the contract and the account it funded and created, and the transfer log\n{rendered}"
+    );
+    if !runs_at_measurement_prices() {
+        assert_eq!(
+            outcome.gas.history,
+            mega_evm::history_gas(body + 2 * WRITE_RECORD_SIZE).expect("the bytes have a price"),
+            "the history of the body and two records: the creation's charge for the account came \
+             back\n{rendered}"
+        );
+    }
 }
