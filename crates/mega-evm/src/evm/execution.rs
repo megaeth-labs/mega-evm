@@ -51,7 +51,7 @@ use crate::{
     charge_write_records_history,
     evm::inspector::{frame_end_checked, ResultSource, StepGuard, UpfrontRecord},
     history_gas,
-    limit::{FrameIdentity, Mark, StartFacts, StartReport},
+    limit::{FrameIdentity, FrameStartRecords, Mark, StartFacts, StartReport},
     synthetic_frame_result,
     system::keyless,
     Detention, ExternalEnvTypes, LimitCheck, LimitKind, MegaContext, MegaEvm, MegaInstructions,
@@ -1428,8 +1428,9 @@ fn record_applied_authorities<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// The recipient's record is predicted as the journal's state stands before the first frame
 /// ([`MegaJournal::transfer_records`](crate::MegaJournal)): a recipient that is the sender, or an
 /// authority the transaction applied, is changed already, and gets none; the sender's side never
-/// makes one, validation having changed its account. A creation's account is a record whatever
-/// the address held.
+/// makes one, validation having changed its account. A creation's account is charged as a record,
+/// as a `CREATE` opcode charges it; the transaction has changed no account but its sender before
+/// its first frame, so the account it creates is one it had not changed, and the ledger counts it.
 ///
 /// The authorities' records are the transaction's own and outlive a first frame that fails; the
 /// first frame's record does not, so what it cost is kept for the settlement to give back when the
@@ -1450,14 +1451,15 @@ fn charge_records_made_outside_a_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
     }
     let tx = ctx.tx();
     let records = match tx.kind() {
-        TxKind::Create => 1,
+        TxKind::Create => FrameStartRecords { created: true, ..FrameStartRecords::NONE },
         TxKind::Call(to) => {
             let predicted = ctx.journal_ref().transfer_records(tx.caller(), to, tx.value());
             debug_assert_eq!(predicted.taken, 0, "the sender's value returns no account");
-            predicted.added
+            FrameStartRecords { on_level: predicted, ..FrameStartRecords::NONE }
         }
     };
-    let Some((top_level, _)) = charge_write_records_history(gas, records, applied_authorities)
+    let Some((top_level, _)) =
+        charge_write_records_history(gas, records.added_on_level(), applied_authorities)
     else {
         return false;
     };

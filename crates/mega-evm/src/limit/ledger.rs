@@ -136,9 +136,16 @@ pub(crate) struct StartFacts {
 /// The write records a frame's start makes, split by whose failure takes them back.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct FrameStartRecords {
-    /// The records on the frame's own level, which its failure takes back: the accounts a value
-    /// transfer changes and returns, a creation's created account.
+    /// The records a call's value transfer makes and takes back on the frame's own level, which
+    /// its failure takes back: the accounts it changes from what the transaction loaded, and those
+    /// it returns to that.
     pub(crate) on_level: RecordDelta,
+    /// Whether the start records the account a creation creates, on the frame's own level, which
+    /// its failure takes back. The ledger counts it when the creation changed an account the
+    /// transaction had not changed; a charge made before revm decides the start counts it for
+    /// every creation, the address a `CREATE2` lands on not being known there, and the refund
+    /// gives back what the count fell short of.
+    pub(crate) created: bool,
     /// Whether the start writes its creator's nonce record, on the creating frame, which the
     /// creation's failure leaves there.
     pub(crate) creator: bool,
@@ -146,7 +153,24 @@ pub(crate) struct FrameStartRecords {
 
 impl FrameStartRecords {
     /// No record at all.
-    pub(crate) const NONE: Self = Self { on_level: RecordDelta::NONE, creator: false };
+    pub(crate) const NONE: Self =
+        Self { on_level: RecordDelta::NONE, created: false, creator: false };
+
+    /// The records the start adds on the frame's own level: the accounts a transfer changes, and
+    /// the created account.
+    pub(crate) const fn added_on_level(self) -> u64 {
+        self.on_level.added + self.created as u64
+    }
+
+    /// Whether a charge computed from `self` paid for the records `counted`: the same records,
+    /// but for the created account, which the charge counts for every creation and the ledger only
+    /// where the creation changed it.
+    #[cfg(debug_assertions)]
+    fn covers(self, counted: Self) -> bool {
+        self.on_level == counted.on_level &&
+            self.creator == counted.creator &&
+            (self.created || !counted.created)
+    }
 }
 
 /// The start window, open while revm decides one frame start.
@@ -629,7 +653,7 @@ impl Ledger {
         self.counts.refund = self.counts.refund.saturating_add(WRITE_RECORD.times(records.taken));
         let verdict = self.check();
         let report = self.report_mut();
-        report.records = FrameStartRecords { on_level: records, creator: false };
+        report.records = FrameStartRecords { on_level: records, ..FrameStartRecords::NONE };
         report.transfer_log = logged;
         report.verdict = Some(verdict);
     }
@@ -659,15 +683,19 @@ impl Ledger {
     }
 
     /// revm opened (`Some`) or failed to open (`None`) the account checkpoint of a creation, and
-    /// journaled a transfer log or not (`logged`): opens the creation's frame level, counts the
-    /// created account and the log on it, then holds the start to the limits. The creator's nonce
-    /// record is below the creation's level; its revert keeps it.
+    /// journaled a transfer log or not (`logged`): opens the creation's frame level, counts on it
+    /// the created account's record when the creation changed an account the transaction had not
+    /// changed (`created_unchanged`), and the log, then holds the start to the limits. A creation
+    /// sets the account's nonce to one, so it leaves the account changed, and never returns it to
+    /// what the transaction loaded. The creator's nonce record is below the creation's level; its
+    /// revert keeps it.
     ///
     /// A checkpoint opened outside a creation's start window opens a rollback level.
     pub(crate) fn after_creation(
         &mut self,
         start: Option<CreationStart>,
         opened: Option<JournalCheckpoint>,
+        created_unchanged: bool,
         logged: bool,
     ) {
         let Some(start) = start else {
@@ -680,10 +708,11 @@ impl Ledger {
         let Some(opened_at) = opened else { return };
         debug_assert!(start.depth == self.window.map_or(start.depth, |window| window.facts.depth));
         self.open_frame_level(opened_at, start.budget);
-        self.counts.used = self.counts.used.saturating_add(with_transfer_log(WRITE_RECORD, logged));
+        let created = WRITE_RECORD.times(u64::from(created_unchanged));
+        self.counts.used = self.counts.used.saturating_add(with_transfer_log(created, logged));
         let verdict = self.check();
         let report = self.report_mut();
-        report.records.on_level = RecordDelta { added: 1, taken: 0 };
+        report.records.created = created_unchanged;
         report.transfer_log = logged;
         report.verdict = Some(verdict);
     }
@@ -900,6 +929,11 @@ impl StartSide {
     /// runs between the two, and can split them: under one the start is not checked. Only a start
     /// revm made and held to the limits is checked: one it refused, or failed before its level
     /// opened, counted nothing, and the charge comes back.
+    ///
+    /// The one record the charge may count where the ledger does not is a creation's created
+    /// account ([`FrameStartRecords::created`]): the charge cannot tell the address a `CREATE2`
+    /// lands on, and counts it for every creation; the refund gives back what it paid for a record
+    /// the ledger did not count.
     pub(crate) fn attach(&mut self, report: StartReport, built: Option<(StartId, Rollback)>) {
         self.start = report.start;
         self.counted = report.records;
@@ -911,9 +945,11 @@ impl StartSide {
         if let Some(charged) =
             self.charged.filter(|_| report.start.is_some() && report.verdict.is_some())
         {
-            debug_assert_eq!(
-                charged, report.records,
-                "the records a frame's start makes changed after its caller was charged for them",
+            debug_assert!(
+                charged.covers(report.records),
+                "the records a frame's start makes changed after its caller was charged for them: \
+                 charged {charged:?}, counted {:?}",
+                report.records,
             );
         }
     }
@@ -955,17 +991,19 @@ impl StartSide {
     /// The records on the start's own level are held when that level was kept — committed, and not
     /// taken back since — and so is what the start took back there: the caller then gets back the
     /// price of every record the start returned to what the transaction loaded, which nobody paid
-    /// for again. A creator's nonce record, counted below the creation's level, is held unless a
-    /// revert to before the start took it back. So a start answered before revm decided it, or
-    /// refused before its writes, gets everything back; a call answered with a success keeps its
-    /// records; a failed precompile, and a frame that fails, give theirs back, a creator's
-    /// surviving record aside, and give back nothing for a take-back their failure undid.
+    /// for again, and of a created account's record it paid for and the ledger did not count, the
+    /// account having been changed before. A creator's nonce record, counted below the creation's
+    /// level, is held unless a revert to before the start took it back. So a start answered before
+    /// revm decided it, or refused before its writes, gets everything back; a call answered with a
+    /// success keeps its records; a failed precompile, and a frame that fails, give theirs back, a
+    /// creator's surviving record aside, and give back nothing for a take-back their failure
+    /// undid.
     pub(crate) fn refund(&self, ledger: &Ledger) -> u64 {
         let (level_kept, start_kept) =
             self.start.map_or((false, false), |start| ledger.fate(start));
         let on_level = self.counted.on_level;
         let mut refund = if level_kept {
-            let kept = records_history_gas(on_level.added);
+            let kept = records_history_gas(self.counted.added_on_level());
             let taken = if self.priced { records_history_gas(on_level.taken) } else { 0 };
             self.added_charge.saturating_sub(kept).saturating_add(taken)
         } else {
@@ -1311,7 +1349,7 @@ mod tests {
             if failed {
                 ledger.open_start(StartFacts { depth: 1, creation: true, transfers_value: false });
                 let start = ledger.before_creation(true);
-                ledger.after_creation(start, Some(checkpoint(&ledger)), false);
+                ledger.after_creation(start, Some(checkpoint(&ledger)), true, false);
                 let _ = ledger.close_start();
             } else {
                 start_call(&mut ledger, 1, 0, RecordDelta::NONE);
@@ -1327,31 +1365,39 @@ mod tests {
 
     /// A creation's creator record is the creating frame's, counted when the bump changed an
     /// account the transaction had not changed, and never for the transaction's own creation,
-    /// whose creator is the sender, whom the body counts.
+    /// whose creator is the sender, whom the body counts. The created account's record is the
+    /// creation's own, counted on its level when the creation changed an account the transaction
+    /// had not changed, at any depth.
     #[test]
     fn test_a_creators_record_is_counted_below_the_creations_level() {
         for (depth, creator_unchanged, expected) in
             [(1, true, true), (1, false, false), (0, true, false), (0, false, false)]
         {
-            let mut ledger = ledger(EvmTxRuntimeLimits::no_limits(), false, false, 0);
-            if depth > 0 {
-                start_call(&mut ledger, 0, 0, RecordDelta::NONE);
+            for created_unchanged in [true, false] {
+                let mut ledger = ledger(EvmTxRuntimeLimits::no_limits(), false, false, 0);
+                if depth > 0 {
+                    start_call(&mut ledger, 0, 0, RecordDelta::NONE);
+                }
+                ledger.open_start(StartFacts { depth, creation: true, transfers_value: false });
+                let start = ledger.before_creation(creator_unchanged);
+                ledger.after_creation(start, Some(checkpoint(&ledger)), created_unchanged, false);
+                let report = ledger.close_start();
+                let case = format!(
+                    "depth {depth}, creator unchanged {creator_unchanged}, created account \
+                     unchanged {created_unchanged}"
+                );
+                assert_eq!(report.records.creator, expected, "{case}");
+                assert_eq!(report.records.created, created_unchanged, "{case}");
+                assert_eq!(report.records.on_level, RecordDelta::NONE, "{case}");
+                let records = u64::from(created_unchanged) + u64::from(expected);
+                assert_eq!(ledger.usage(), WRITE_RECORD.times(records), "{case}");
+                end_frame(&mut ledger, true);
+                assert_eq!(
+                    ledger.usage(),
+                    WRITE_RECORD.times(u64::from(expected)),
+                    "{case}: the creator's record survives the creation's failure"
+                );
             }
-            ledger.open_start(StartFacts { depth, creation: true, transfers_value: false });
-            let start = ledger.before_creation(creator_unchanged);
-            ledger.after_creation(start, Some(checkpoint(&ledger)), false);
-            let report = ledger.close_start();
-            let case = format!("depth {depth}, creator unchanged {creator_unchanged}");
-            assert_eq!(report.records.creator, expected, "{case}");
-            assert_eq!(report.records.on_level, RecordDelta { added: 1, taken: 0 }, "{case}");
-            let records = 1 + u64::from(expected);
-            assert_eq!(ledger.usage(), WRITE_RECORD.times(records), "{case}");
-            end_frame(&mut ledger, true);
-            assert_eq!(
-                ledger.usage(),
-                WRITE_RECORD.times(u64::from(expected)),
-                "{case}: the creator's record survives the creation's failure"
-            );
         }
     }
 

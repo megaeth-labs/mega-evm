@@ -82,11 +82,11 @@
 //! The write-record count the ledger keeps is the KV count a node reports: one record per account
 //! or storage write the transaction keeps, following the net change — a slot's while its value
 //! differs from its original, an account's while its nonce, balance or code differs from what the
-//! transaction loaded — taken back by a write that returns the slot or the account and with the
-//! frame that fails. The sender's account and the accounts fees are credited to are the body's, not
-//! records. No limit holds the count: a record weighs [`WRITE_RECORD_SIZE`] bytes of data size,
-//! counted and taken back with them, so the data-size limit bounds the records, and history gas
-//! prices each of them.
+//! transaction loaded, whichever writes changed it, a creation's created account included — taken
+//! back by a write that returns the slot or the account and with the frame that fails. The sender's
+//! account and the accounts fees are credited to are the body's, not records. No limit holds the
+//! count: a record weighs [`WRITE_RECORD_SIZE`] bytes of data size, counted and taken back with
+//! them, so the data-size limit bounds the records, and history gas prices each of them.
 //!
 //! # State growth
 //!

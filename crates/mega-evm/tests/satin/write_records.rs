@@ -10,14 +10,15 @@
 //! An account's record follows the net change of its info within the transaction: a write that
 //! makes an unchanged account's nonce, balance or code differ from what the transaction loaded
 //! creates the record, a write that returns it to that takes the record back, and a write to an
-//! account that already differs adds nothing. A creation records the account it creates. The
-//! records a frame made are discarded with the frame that fails; a creator's nonce record is the
-//! creating frame's, and survives the creation's failure.
+//! account that already differs adds nothing. A creation's created account follows the same rule:
+//! the creation records it when the address was unchanged, and an address the transaction changed
+//! before keeps the one record it has. The records a frame made are discarded with the frame that
+//! fails; a creator's nonce record is the creating frame's, and survives the creation's failure.
 //!
 //! Every value movement also leaves an EIP-7708 transfer log, which is data size and not a record:
 //! the figures below carry [`TRANSFER_LOG_SIZE`] for each one a transaction keeps.
 
-use alloy_primitives::{address, Address, Bytes, Log, LogData, B256, U256};
+use alloy_primitives::{address, keccak256, Address, Bytes, Log, LogData, B256, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
     system::{
@@ -439,6 +440,113 @@ fn test_a_destruction_to_a_fresh_and_to_a_changed_beneficiary() {
         );
         assert!(outcome.result.is_success(), "{case}: {:?}", outcome.result);
         assert_eq!(outcome.usage, expected, "{case}");
+    }
+}
+
+/// A creation by `CALLEE`, whose nonce is zero: a `CREATE2` with salt zero, or a `CREATE`.
+#[derive(Clone, Copy, Debug)]
+enum Creation {
+    Create2,
+    Create,
+}
+
+impl Creation {
+    /// The address a creation of `init_code` lands on.
+    fn address(self, init_code: &[u8]) -> Address {
+        match self {
+            Self::Create2 => CALLEE.create2(B256::ZERO, keccak256(init_code)),
+            Self::Create => CALLEE.create(0),
+        }
+    }
+
+    /// Appends the creation of `init_code`, endowed with `value` wei, and drops its address.
+    fn append(self, code: BytecodeBuilder, init_code: &[u8], value: u8) -> BytecodeBuilder {
+        let value = U256::from(value);
+        match self {
+            Self::Create2 => code.create2(value, init_code, U256::ZERO),
+            Self::Create => code.create(value, init_code),
+        }
+        .append(POP)
+    }
+}
+
+/// A creation records the account it creates by the rule every account write follows: when the
+/// creation changes an account the transaction had not changed. An address the transaction funded,
+/// or a `SELFDESTRUCT` paid, before a creation lands on it is changed already and keeps the one
+/// record its first change made, whatever the creation then writes to it, an endowment included.
+/// The creator's nonce adds no record either where the transfer that funded the address changed
+/// the creator already.
+///
+/// The caller pays the created account's history at the opcode, which cannot tell the address a
+/// `CREATE2` lands on, and gets it back when the creation recorded nothing — and, with everything
+/// else the creation made, when it fails: the history the transaction pays is its body's and the
+/// records it keeps, at the prices in effect.
+///
+/// Before, a creation recorded the account it creates whatever the address held: an address
+/// funded then created kept two records, and one paid by a destruction then created kept them with
+/// the destructed account's and the creator's.
+#[test]
+fn test_a_creation_records_its_account_only_when_it_changes_it() {
+    const DESTRUCTOR: Address = address!("000000000000000000000000000000000000DE57");
+    const SUCCEEDS: &[u8] = &[];
+    const FAILS: &[u8] = &[PUSH0, PUSH0, REVERT];
+    /// What `CALLEE` runs before the creation, given the address X the creation lands on.
+    type Prelude = fn(BytecodeBuilder, Address) -> BytecodeBuilder;
+    /// The creation's init code and endowment, if one runs.
+    type Created = Option<(&'static [u8], u8)>;
+    let nothing: Prelude = |code, _| code;
+    let fund: Prelude = |code, x| code.call(x, U256::from(5)).append(POP);
+    let destruct: Prelude = |code, _| code.call(DESTRUCTOR, U256::ZERO).append(POP);
+    // (case, what runs before the creation, the creation, the records kept, the transfer logs
+    // kept)
+    let rows: [(&str, Prelude, Created, u64, u64); 6] = [
+        ("fund X only: CALLEE and X", fund, None, 2, 1),
+        ("create X only: CALLEE's nonce and X", nothing, Some((SUCCEEDS, 0)), 2, 0),
+        ("fund X, then create X: CALLEE and X", fund, Some((SUCCEEDS, 0)), 2, 1),
+        ("fund X, then create X with an endowment: CALLEE and X", fund, Some((SUCCEEDS, 1)), 2, 2),
+        (
+            "a destruction pays X, then create X: DESTRUCTOR, X and CALLEE's nonce",
+            destruct,
+            Some((SUCCEEDS, 0)),
+            3,
+            1,
+        ),
+        ("fund X, then a creation at X that fails: CALLEE and X", fund, Some((FAILS, 0)), 2, 1),
+    ];
+    for creation in [Creation::Create2, Creation::Create] {
+        for (case, prelude, created, records_kept, logs) in rows {
+            let case = format!("{creation:?}, {case}");
+            let x = creation.address(created.map_or(SUCCEEDS, |(init, _)| init));
+            let mut code = prelude(BytecodeBuilder::default(), x);
+            if let Some((init, value)) = created {
+                code = creation.append(code, init, value);
+            }
+            let db = funded()
+                .account_code(CALLEE, code.stop().build())
+                .account_code(DESTRUCTOR, BytecodeBuilder::default().selfdestruct(x).build())
+                .account_balance(DESTRUCTOR, U256::from(7));
+            let outcome =
+                crate::common::execute(db, call(CALLER, CALLEE, U256::ZERO, value_call_room()));
+            assert!(outcome.result.is_success(), "{case}: {:?}", outcome.result);
+            let deployed = created.is_some_and(|(init, _)| init == SUCCEEDS);
+            assert_eq!(
+                outcome.state.get(&x).map(|account| account.info.nonce),
+                Some(u64::from(deployed)),
+                "{case}: X is created where the creation succeeds"
+            );
+            assert_eq!(
+                outcome.usage,
+                with_extra(records(records_kept), logs * TRANSFER_LOG_SIZE),
+                "{case}"
+            );
+            if !crate::common::history_rounds() {
+                assert_eq!(
+                    outcome.gas.history,
+                    history(TX_BODY_SIZE + records_kept * WRITE_RECORD_SIZE),
+                    "{case}: the body and the records kept, and nothing for a record not made"
+                );
+            }
+        }
     }
 }
 

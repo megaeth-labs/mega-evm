@@ -12,7 +12,6 @@ use std::vec::Vec;
 
 use super::{
     ledger::{FrameStartRecords, Ledger, Rollback, StartId, StartSide},
-    record::RecordDelta,
     EvmTxRuntimeLimits, LimitCheck, LimitKind, StartReport, WRITE_RECORD_SIZE,
 };
 use crate::storage_call_stipend;
@@ -80,7 +79,7 @@ pub struct AdditionalLimit {
     /// The write records the transaction's own frame makes, as the charge of their history before
     /// execution found them, for the frame's side to hold the ledger's count to. See
     /// [`stage_top_level_records`](Self::stage_top_level_records).
-    pending_top_level_records: Option<u64>,
+    pending_top_level_records: Option<FrameStartRecords>,
     /// The history gas the running opcode charged its own frame for the records the frame it is
     /// starting will make, waiting for that frame's side to be pushed.
     pending_frame_charge: FrameCharge,
@@ -319,7 +318,7 @@ impl AdditionalLimit {
     /// decided the start ([`attach_start`](Self::attach_start)).
     ///
     /// Only a transaction that pays history is charged, and so leaves one.
-    pub(crate) const fn stage_top_level_records(&mut self, records: u64) {
+    pub(crate) const fn stage_top_level_records(&mut self, records: FrameStartRecords) {
         self.pending_top_level_records = Some(records);
     }
 
@@ -398,10 +397,7 @@ impl AdditionalLimit {
         let side = if depth == 0 {
             // The transaction's own frame takes nothing back: its recipient, when it writes one,
             // is an account the transaction had not changed.
-            let records = self.pending_top_level_records.take().map(|added| FrameStartRecords {
-                on_level: RecordDelta { added, taken: 0 },
-                creator: false,
-            });
+            let records = self.pending_top_level_records.take();
             StartSide::new(depth, self.top_level_write_record_gas, 0, false, records)
         } else {
             StartSide::new(depth, charge.added, charge.creator, charge.priced, charge.records)
@@ -517,7 +513,11 @@ impl FrameCharge {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{limit::StartFacts, test_utils::MemoryDatabase, MegaContext, MegaSpecId};
+    use crate::{
+        limit::{RecordDelta, StartFacts},
+        test_utils::MemoryDatabase,
+        MegaContext, MegaSpecId,
+    };
     use alloy_primitives::{address, Address, Bytes, U256};
     use revm::{
         context::{ContextTr, JournalTr},
@@ -554,21 +554,26 @@ mod tests {
         }))
     }
 
-    /// What the ledger reports of a start revm made and held to the limits: `added` records on
-    /// the frame's level, and the creator's own record (`creator`) below it.
-    fn report(added: u64, creator: bool) -> StartReport {
+    /// What the ledger reports of a start revm made and held to the limits: `records`.
+    fn report(records: FrameStartRecords) -> StartReport {
         StartReport {
             start: Some(StartId::default()),
-            records: records(added, creator),
+            records,
             transfer_log: false,
             refused: false,
             verdict: Some(LimitCheck::WithinLimit),
         }
     }
 
-    /// `added` records on the frame's level, and the creator's own record (`creator`) below it.
-    const fn records(added: u64, creator: bool) -> FrameStartRecords {
-        FrameStartRecords { on_level: RecordDelta { added, taken: 0 }, creator }
+    /// `added` records a call's value transfer makes on the frame's level.
+    const fn transfer(added: u64) -> FrameStartRecords {
+        FrameStartRecords { on_level: RecordDelta { added, taken: 0 }, ..FrameStartRecords::NONE }
+    }
+
+    /// A creation's records: its created account's on the frame's level (`created`), and its
+    /// creator's own below it (`creator`).
+    const fn creation(created: bool, creator: bool) -> FrameStartRecords {
+        FrameStartRecords { on_level: RecordDelta::NONE, created, creator }
     }
 
     /// The allowance follows the transfer, and only the two schemes that can carry one: a `CALL`
@@ -651,25 +656,60 @@ mod tests {
 
     /// The records the ledger counts for a start are the records its caller was charged for: a
     /// value transfer records the caller's account and the recipient's, the two the charge was
-    /// computed from, and a creation the created account and its creator's nonce. A start revm
-    /// refused, or failed before its level opened, counted nothing and is not held to the charge.
+    /// computed from, and a creation the created account and its creator's nonce. The charge counts
+    /// the created account for every creation, the address not being known at the opcode, so a
+    /// creation onto an account the transaction changed already counts less than it was charged
+    /// for. A start revm refused, or failed before its level opened, counted nothing and is not
+    /// held to the charge.
     #[test]
     fn test_the_records_counted_are_the_records_the_caller_was_charged_for() {
         let mut limit = AdditionalLimit::default();
         limit.push_start(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
         let inner = call_from_to(CALLEE, TARGET, U256::from(1));
-        limit.stage_frame_charge(records(2, false), 2, 0, true);
-        limit.push_start(&inner, 1);
-        limit.attach_start(report(2, false), None);
+        for (charged, counted) in [
+            (transfer(2), transfer(2)),
+            (creation(true, true), creation(true, true)),
+            (creation(true, true), creation(false, true)),
+            (creation(true, false), creation(false, false)),
+        ] {
+            limit.stage_frame_charge(charged, 2, 0, true);
+            limit.push_start(&inner, 1);
+            limit.attach_start(report(counted), None);
+        }
 
-        limit.stage_frame_charge(records(1, true), 1, 1, true);
+        limit.stage_frame_charge(transfer(2), 2, 0, true);
         limit.push_start(&inner, 1);
-        limit.attach_start(report(1, true), None);
-
-        limit.stage_frame_charge(records(2, false), 2, 0, true);
-        limit.push_start(&inner, 1);
-        let refused = StartReport { verdict: None, refused: true, ..report(0, false) };
+        let refused =
+            StartReport { verdict: None, refused: true, ..report(FrameStartRecords::NONE) };
         limit.attach_start(refused, None);
+    }
+
+    /// Every record but a creation's created account is held to the charge exactly: a transfer
+    /// that counts fewer records than its caller was charged for trips, as one that counts more
+    /// does, and so does a creator's nonce record counted where none was charged.
+    #[test]
+    #[cfg(debug_assertions)]
+    fn test_only_the_created_account_may_count_less_than_it_was_charged() {
+        let trips = |charged: FrameStartRecords, counted: FrameStartRecords| {
+            std::panic::catch_unwind(move || {
+                let mut limit = AdditionalLimit::default();
+                limit.push_start(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
+                limit.stage_frame_charge(charged, 0, 0, true);
+                limit.push_start(&call_from_to(CALLEE, TARGET, U256::from(1)), 1);
+                limit.attach_start(report(counted), None);
+            })
+            .is_err()
+        };
+        assert!(trips(transfer(2), transfer(1)), "a transfer that counts one record fewer");
+        assert!(trips(creation(true, false), creation(true, true)), "a creator record not charged");
+        assert!(
+            trips(creation(false, false), creation(true, false)),
+            "a created account not charged"
+        );
+        assert!(
+            !trips(creation(true, false), creation(false, false)),
+            "a created account not made"
+        );
     }
 
     /// A charge computed from a different answer than the count is what a rewrite that turns one
@@ -683,18 +723,18 @@ mod tests {
         limit.push_start(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
         limit.stage_frame_charge(FrameStartRecords::NONE, 0, 0, true);
         limit.push_start(&call_from_to(CALLEE, TARGET, U256::from(1)), 1);
-        limit.attach_start(report(2, false), None);
+        limit.attach_start(report(transfer(2)), None);
     }
 
     /// The transaction's own frame is held to the records its history was charged for before
     /// execution: its value's recipient, or the account a creation makes.
     #[test]
     fn test_the_transactions_own_frame_counts_the_records_its_history_paid_for() {
-        for added in [0, 1] {
+        for records in [transfer(0), transfer(1), creation(true, false)] {
             let mut limit = AdditionalLimit::default();
-            limit.stage_top_level_records(added);
-            limit.push_start(&call_from_to(SENDER, CALLEE, U256::from(added)), 0);
-            limit.attach_start(report(added, false), None);
+            limit.stage_top_level_records(records);
+            limit.push_start(&call_from_to(SENDER, CALLEE, U256::from(1)), 0);
+            limit.attach_start(report(records), None);
         }
     }
 
@@ -706,9 +746,9 @@ mod tests {
     #[should_panic(expected = "changed after its caller was charged for them")]
     fn test_a_top_level_record_its_history_did_not_pay_for_trips() {
         let mut limit = AdditionalLimit::default();
-        limit.stage_top_level_records(0);
+        limit.stage_top_level_records(transfer(0));
         limit.push_start(&call_from_to(SENDER, CALLEE, U256::from(1)), 0);
-        limit.attach_start(report(1, false), None);
+        limit.attach_start(report(transfer(1)), None);
     }
 
     /// Under an inspector that may rewrite a start, the check is waived: the start its charge paid
@@ -716,14 +756,14 @@ mod tests {
     #[test]
     fn test_a_waived_start_is_not_held_to_its_charge() {
         let mut limit = AdditionalLimit::default();
-        limit.stage_top_level_records(0);
+        limit.stage_top_level_records(transfer(0));
         limit.waive_start_check();
         limit.push_start(&call_from_to(SENDER, CALLEE, U256::from(1)), 0);
-        limit.attach_start(report(1, false), None);
+        limit.attach_start(report(transfer(1)), None);
         limit.stage_frame_charge(FrameStartRecords::NONE, 0, 0, true);
         limit.waive_start_check();
         limit.push_start(&call_from_to(CALLEE, TARGET, U256::from(1)), 1);
-        limit.attach_start(report(2, false), None);
+        limit.attach_start(report(transfer(2)), None);
     }
 
     /// A frame answered without running — by the depth guard, a stop, an interceptor or an
@@ -746,7 +786,7 @@ mod tests {
             let mut limit = AdditionalLimit::default();
             limit.push_start(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
             let inner = call_from_to(CALLEE, TARGET, U256::from(1));
-            limit.stage_frame_charge(records(1, true), 1_000, 2_000, true);
+            limit.stage_frame_charge(creation(true, true), 1_000, 2_000, true);
             limit.push_answered_start(1);
             let result = crate::synthetic_frame_result(&inner, answer, Bytes::new());
             let (_, refund) = limit.on_start_return(ledger, &result).expect("the side");

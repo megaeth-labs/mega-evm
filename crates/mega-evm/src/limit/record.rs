@@ -13,8 +13,10 @@ use super::{log_history_bytes, LimitUsage, WRITE_RECORD};
 /// the transaction loaded, and the records it takes back, for accounts it returns to that.
 ///
 /// A value transfer moves at most one record per side, and a `SELFDESTRUCT` one per account it
-/// writes; a creation's created account is one record, and its creator's nonce bump another, kept
-/// apart from this delta because it lands on the creating frame.
+/// writes. A creation's records are kept apart from this delta
+/// ([`FrameStartRecords`](super::FrameStartRecords)): its created account, which the creation
+/// leaves changed and never returns, and its creator's nonce bump, which lands on the creating
+/// frame.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct RecordDelta {
     /// Records created.

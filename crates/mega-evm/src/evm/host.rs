@@ -350,9 +350,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
     /// Charges the running frame the history of the write records the frame it is starting makes
     /// — the accounts a value transfer changes from what the transaction loaded, a creation's
     /// created account and its creator's nonce — as the journal predicts them from its state
-    /// ([`MegaJournal::start_records`](crate::MegaJournal)). revm calls it at `CALL`, `CALLCODE`,
-    /// `DELEGATECALL`, `STATICCALL`, `CREATE` and `CREATE2`, once the opcode made every charge
-    /// and took the gas it forwards, and before it builds the frame's input.
+    /// ([`MegaJournal::start_records`](crate::MegaJournal)). The created account is charged for
+    /// every creation: the address a `CREATE2` lands on is not known here, and a creation onto an
+    /// address the transaction changed already makes no record for it. revm calls it at `CALL`,
+    /// `CALLCODE`, `DELEGATECALL`, `STATICCALL`, `CREATE` and `CREATE2`, once the opcode made
+    /// every charge and took the gas it forwards, and before it builds the frame's input.
     ///
     /// The charge comes out of what the caller kept rather than out of what the callee gets, so
     /// the frame's allowance is free for what the recipient does; the frame's side keeps it, and
@@ -380,7 +382,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
             return true;
         }
         let charged =
-            charge_write_records_history(gas, records.on_level.added, u64::from(records.creator));
+            charge_write_records_history(gas, records.added_on_level(), u64::from(records.creator));
         let Some((added, creator)) = charged else {
             gas.erase_cost(start.forward);
             gas.set_failed_charge_remaining(Some(gas.remaining()));

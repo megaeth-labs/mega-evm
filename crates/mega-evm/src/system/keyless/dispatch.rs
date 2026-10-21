@@ -433,7 +433,7 @@ fn prepare<DB: Database, ExtEnvs: ExternalEnvTypes>(
     let record_charges = if ctx.prices_history() {
         let charged = charge_write_records_history(
             gas.tracker_mut(),
-            records.on_level.added,
+            records.added_on_level(),
             u64::from(records.creator),
         );
         if charged.is_none() {

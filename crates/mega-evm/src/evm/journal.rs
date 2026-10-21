@@ -18,7 +18,8 @@
 //!   write, and tells the ledger which accounts the write changed and which it returned
 //!   ([`RecordDelta`]). The same prediction, on the journal's state as it stands, is what the
 //!   frame-start hook charges a start's records from
-//!   ([`start_records`](MegaJournal::start_records)).
+//!   ([`start_records`](MegaJournal::start_records)), but for a creation's created account, which
+//!   the hook charges for every creation, not knowing the address.
 //! - **Levels and the transaction's end.** `checkpoint`, `checkpoint_commit` and
 //!   `checkpoint_revert` open and close the ledger's levels with revm's checkpoints; `commit_tx`,
 //!   `discard_tx` and `finalize` close them all.
@@ -187,26 +188,30 @@ impl<DB: Database> MegaJournal<DB> {
         self.balance_change(from, from_after).with(self.balance_change(to, to_after))
     }
 
-    /// The records a creation by `creator` with an endowment of `value` makes: the account it
-    /// creates, and the creator's nonce, when the bump changes an account the transaction had not
-    /// changed; nothing for an endowment `creator` cannot fund, which revm refuses before it bumps
-    /// the nonce.
+    /// The records a creation by `creator` with an endowment of `value` may make, for a charge made
+    /// before revm decides the start: the creator's nonce, when the bump changes an account the
+    /// transaction had not changed, and the account it creates, counted as a record whatever the
+    /// address held — the address a `CREATE2` lands on is not known before revm decides the
+    /// start, and the refund gives back the record when the creation made none. Nothing for an
+    /// endowment `creator` cannot fund, which revm refuses before it bumps the nonce.
     pub(crate) fn creation_records(&self, creator: Address, value: U256) -> FrameStartRecords {
         if self.balance(creator) < value {
             return FrameStartRecords::NONE;
         }
         FrameStartRecords {
-            on_level: RecordDelta { added: 1, taken: 0 },
+            on_level: RecordDelta::NONE,
+            created: true,
             creator: !self.is_changed(creator),
         }
     }
 
     /// The records the frame `start` makes, for the frame-start hook to charge its caller for: a
-    /// call's value transfer ([`transfer_records`](Self::transfer_records)), a creation's created
-    /// account and creator nonce ([`creation_records`](Self::creation_records)). The transfer of a
-    /// `CALLCODE` is from the calling account to itself, and a `DELEGATECALL` or `STATICCALL`
-    /// carries none: neither makes a record. Nor does a start whose value the caller cannot fund,
-    /// which revm refuses on the caller's account.
+    /// call's value transfer ([`transfer_records`](Self::transfer_records)), a creation's creator
+    /// nonce and, as an upper bound, its created account
+    /// ([`creation_records`](Self::creation_records)). The transfer of a `CALLCODE` is from the
+    /// calling account to itself, and a `DELEGATECALL` or `STATICCALL` carries none: neither makes
+    /// a record. Nor does a start whose value the caller cannot fund, which revm refuses on the
+    /// caller's account.
     pub(crate) fn start_records(&self, start: &FrameStart) -> FrameStartRecords {
         match start.kind {
             FrameStartKind::Create | FrameStartKind::Create2 => {
@@ -219,7 +224,7 @@ impl<DB: Database> MegaJournal<DB> {
                 on_level: start.target.map_or(RecordDelta::NONE, |target| {
                     self.transfer_records(start.caller, target, start.value)
                 }),
-                creator: false,
+                ..FrameStartRecords::NONE
             },
         }
     }
@@ -384,7 +389,8 @@ impl<DB: Database> JournalTr for MegaJournal<DB> {
 
     /// Counted inside a creation's start window: the creator's nonce record before the creation's
     /// level opens, when the bump revm made changed an account the transaction had not changed,
-    /// then the created account and the transfer log on it.
+    /// then, on the creation's level, the created account's record, when the creation changes an
+    /// account the transaction had not changed, and the transfer log.
     fn create_account_checkpoint(
         &mut self,
         caller: Address,
@@ -393,10 +399,11 @@ impl<DB: Database> JournalTr for MegaJournal<DB> {
         spec_id: SpecId,
     ) -> Result<JournalCheckpoint, TransferError> {
         let start = self.ledger.before_creation(!self.is_changed_before_bump(caller));
+        let created_unchanged = !self.is_changed(address);
         let logs = self.revm.logs().len();
         let opened = self.revm.create_account_checkpoint(caller, address, balance, spec_id);
         let logged = self.revm.logs().len() > logs;
-        self.ledger.after_creation(start, opened.ok(), logged);
+        self.ledger.after_creation(start, opened.ok(), created_unchanged, logged);
         self.assert_levels();
         opened
     }
@@ -896,6 +903,38 @@ mod tests {
                 LimitCheck::WithinLimit
             };
             assert_eq!(report.verdict, Some(verdict), "{case}");
+        }
+    }
+
+    /// A creation records the account it creates as every counted write records an account: when
+    /// the creation changes an account the transaction had not changed. An address a transfer
+    /// funded is changed already, and the creation adds no record for it, however it then changes
+    /// it. The records the frame-start hook charges from count the account for every creation, the
+    /// address not being known there.
+    #[test]
+    fn test_a_creation_records_its_account_by_the_net_change() {
+        for funded in [false, true] {
+            let mut journal = journal(EvmTxRuntimeLimits::no_limits());
+            let _ = start_call(&mut journal, 0, SENDER, A, 0);
+            if funded {
+                let _ = start_call(&mut journal, 1, A, CREATED, 1);
+                end_frame(&mut journal, None);
+            }
+            let charged = journal.creation_records(B, U256::from(1));
+            assert_eq!(
+                charged,
+                FrameStartRecords { on_level: RecordDelta::NONE, created: true, creator: true },
+                "funded {funded}: charged for the created account and B's nonce"
+            );
+            let (_, report) = start_creation(&mut journal, 1, B, CREATED, 1);
+            assert_eq!(
+                report.records,
+                FrameStartRecords { on_level: RecordDelta::NONE, created: !funded, creator: true },
+                "funded {funded}: the created account is counted where the creation changed it"
+            );
+            let (records, logs) = if funded { (3, 2) } else { (2, 1) };
+            assert_eq!(journal.ledger().usage(), kept(records, logs), "funded {funded}");
+            assert!(journal.is_changed(CREATED), "funded {funded}: the creation changed it");
         }
     }
 
