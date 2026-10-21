@@ -411,7 +411,12 @@ where
     /// once.
     ///
     /// The inspector and the database, including its caches and previously committed state, are
-    /// untouched. A panic during database commit is outside this method's recovery contract.
+    /// untouched. So is the SALT bucket-multiplier cache: it keeps the panicked transaction's
+    /// bucket lookups as it keeps those of a transaction that ran but was not committed, which
+    /// changes no result because the multipliers are fixed for the block, and the accessed
+    /// bucket ids it reports include them. Oracle hints already delivered to the oracle
+    /// environment cannot be recalled. A panic during database commit is outside this method's
+    /// recovery contract.
     pub fn discard_tx(&mut self) {
         let ctx = &mut self.inner.ctx;
         // `finalize` is the whole journal reset `transact` ends every transaction with: it takes

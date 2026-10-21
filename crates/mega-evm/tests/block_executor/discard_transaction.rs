@@ -33,7 +33,7 @@ use op_alloy_consensus::TxDeposit;
 use op_revm::constants::BASE_FEE_RECIPIENT;
 use revm::{
     bytecode::opcode::{BALANCE, CALL, GAS, MSIZE, MSTORE, POP, RETURN, TIMESTAMP},
-    context::{result::ExecutionResult, BlockEnv, ContextError, ContextSetters, ContextTr},
+    context::{result::ExecutionResult, BlockEnv, ContextSetters, ContextTr},
     database::State,
     handler::SYSTEM_ADDRESS,
     inspector::NoOpInspector,
@@ -505,22 +505,42 @@ fn test_discard_transaction_restores_beneficiary_marking_before_rex6() {
     );
 }
 
-/// A database error that a load stashed in the context is normally taken by the handler when it
-/// builds the result; an unwind in between leaves it there, and the next transaction would fail
-/// with it. The discard clears the slot. The stash is injected directly, since the panicking
-/// database cannot both fail a read and panic before the handler takes the error.
+/// A database error that a load inside a frame stashes in the context is taken by the handler only
+/// when it builds the result, after post-execution. A panic in between, here in the beneficiary
+/// read of the fee reward, leaves the error stashed, and the next transaction would fail with it.
+/// The discard clears the slot.
 #[test]
 fn test_discard_transaction_clears_a_stashed_context_error() {
-    let mut state = State::builder().with_database(database()).build();
-    let mut executor = new_executor(&mut state, MegaSpecId::REX6);
+    for discard in [false, true] {
+        let mut state = State::builder().with_database(database()).build();
+        let mut executor = new_executor(&mut state, MegaSpecId::REX6);
 
-    execute_panicking(&mut executor, &panicking_tx(RESIDUE_THEN_PANIC));
-    *executor.evm.ctx.error() = Err(ContextError::Custom("stashed by the panicked tx".into()));
-    executor.discard_transaction();
+        let database = &mut executor.evm.db_mut().database;
+        database.inner.fail_on_account = Some(FAILING_ACCOUNT);
+        database.panic_on_account = BENEFICIARY;
+        let tx = legacy_tx(PANICKING_SENDER, 0, READ_TIMESTAMP_THEN_FAIL, Bytes::new());
+        execute_panicking(&mut executor, &tx);
+        let database = &mut executor.evm.db_mut().database;
+        database.inner.fail_on_account = None;
+        database.panic_on_account = PANICKING_ACCOUNT;
+        let backtrace = database.last_panic_backtrace.take().expect("the panic captured its stack");
+        assert!(
+            backtrace.contains("reward_beneficiary"),
+            "the panic landed elsewhere:\n{backtrace}"
+        );
+        assert!(executor.evm.ctx.error().is_err(), "premise: the in-frame error is still stashed");
 
-    let next_tx = next_tx(RETURN_MSIZE);
-    let outcome = executor.execute_mega_transaction(&next_tx).expect("next tx executes");
-    assert_same_outcome(&outcome, &reference_outcome(MegaSpecId::REX6, &next_tx));
+        let next_tx = next_tx(RETURN_MSIZE);
+        if discard {
+            executor.discard_transaction();
+            let outcome = executor.execute_mega_transaction(&next_tx).expect("next tx executes");
+            assert_same_outcome(&outcome, &reference_outcome(MegaSpecId::REX6, &next_tx));
+        } else {
+            executor
+                .execute_mega_transaction(&next_tx)
+                .expect_err("premise: without the discard the stashed error fails the next tx");
+        }
+    }
 }
 
 /// Before REX1 the compute gas limit detained by a volatile access persists across transactions,
@@ -703,7 +723,10 @@ impl PanicSite {
         }
     }
 
-    /// Whether the call stack of the injected panic is the one this site stands for.
+    /// Whether the call stack of the injected panic is the one this site stands for. It matches
+    /// function names in the captured backtrace, so it relies on the debug test profile keeping
+    /// symbols and not inlining these functions, and on their names: renaming one of them fails
+    /// the sweep here.
     fn landed_as_intended(self, spec: MegaSpecId, backtrace: &str) -> bool {
         match self {
             Self::DepositorPreRead => {
