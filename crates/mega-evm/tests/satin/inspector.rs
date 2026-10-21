@@ -1,16 +1,14 @@
-//! Inspectors on Satin: what a rewriting inspector gets, the one rewrite refused, and the
-//! admission gate block execution keys on.
+//! Inspectors on Satin: what a rewriting inspector gets and what its rewrites do not change.
 
 use alloy_evm::Evm;
 use alloy_primitives::{address, Address, Bytes, Log, U256};
 use mega_evm::{
-    test_utils::{transfer_log, BytecodeBuilder, GasInspector, MemoryDatabase},
-    DeclaredObserver, MegaContext, MegaEvm, TX_BODY_SIZE, WRITE_RECORD_SIZE,
+    test_utils::{transfer_log, BytecodeBuilder, GasInspector, MemoryDatabase, ReadOnlyObserver},
+    MegaContext, MegaEvm, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 use revm::{
     bytecode::opcode::{CALL, CREATE, GAS, INVALID, PUSH0, REVERT, SSTORE},
     context::result::EVMError,
-    inspector::NoOpInspector,
     interpreter::{
         interpreter::EthInterpreter, interpreter_types::Jumps, CallInputs, CallOutcome, CallValue,
         CreateInputs, CreateOutcome, Gas, InstructionResult, Interpreter, InterpreterResult,
@@ -299,33 +297,33 @@ fn test_a_creation_its_frame_budget_stops_may_be_revived() {
     );
 }
 
-/// A declared observer that writes back fails its declaration in a debug build.
+/// A read-only observer that writes back fails its declaration in a debug build.
 #[test]
 #[cfg(debug_assertions)]
-#[should_panic(expected = "a declared observer wrote to the interpreter in `step_end`")]
-fn test_false_declaration_fails_in_debug() {
+#[should_panic(expected = "a read-only observer wrote to the interpreter in `step_end`")]
+fn test_false_read_only_claim_fails_in_debug() {
     let rewriter = Rewriter { charge_after_sstore: 1, ..Default::default() };
-    let mut evm = MegaEvm::new(context(writes_two_slots()))
-        .with_trusted_inspector(DeclaredObserver(rewriter));
+    let mut evm =
+        MegaEvm::new(context(writes_two_slots())).with_inspector(ReadOnlyObserver(rewriter));
     let _ = evm.transact_raw(call(CALLER, A, U256::ZERO, gas_limit()));
 }
 
-/// A declared call rewrite fails too.
+/// A read-only observer's call rewrite fails too.
 #[test]
 #[cfg(debug_assertions)]
-#[should_panic(expected = "a declared observer rewrote a call result")]
-fn test_false_declaration_of_a_call_rewrite_fails_in_debug() {
+#[should_panic(expected = "a read-only observer rewrote a call result")]
+fn test_false_read_only_claim_of_a_call_rewrite_fails_in_debug() {
     let db = MemoryDatabase::default()
         .account_code(A, call_b_and_store_flag(0))
         .account_code(B, Bytes::from_static(&[INVALID]));
     let rewriter = Rewriter { call_succeeds: true, ..Default::default() };
-    let mut evm = MegaEvm::new(context(db)).with_trusted_inspector(DeclaredObserver(rewriter));
+    let mut evm = MegaEvm::new(context(db)).with_inspector(ReadOnlyObserver(rewriter));
     let _ = evm.transact_raw(call(CALLER, A, U256::ZERO, gas_limit()));
 }
 
-/// A declared observer that only reads produces the transaction no inspector produces.
+/// A read-only observer that only reads produces the transaction no inspector produces.
 #[test]
-fn test_declared_tracer_changes_nothing() {
+fn test_read_only_tracer_changes_nothing() {
     let db = || {
         MemoryDatabase::default()
             .account_code(A, call_b_and_store_flag(0))
@@ -334,7 +332,7 @@ fn test_declared_tracer_changes_nothing() {
     let plain =
         MegaEvm::new(context(db())).transact_raw(call(CALLER, A, U256::ZERO, gas_limit())).unwrap();
     let tracer = TracingInspector::new(TracingInspectorConfig::default_parity());
-    let mut evm = MegaEvm::new(context(db())).with_trusted_inspector(DeclaredObserver(tracer));
+    let mut evm = MegaEvm::new(context(db())).with_inspector(ReadOnlyObserver(tracer));
     let traced = evm.transact_raw(call(CALLER, A, U256::ZERO, gas_limit())).unwrap();
     assert_eq!(plain.result, traced.result);
     assert_eq!(plain.state, traced.state);
@@ -365,27 +363,6 @@ fn test_the_gas_inspector_keeps_the_byte_of_an_undefined_opcode() {
             "the rendering names the byte: {last:?}"
         );
     }
-}
-
-/// The admission gate: only an enabled inspector that did not arrive declared is a rewriting one.
-#[test]
-fn test_has_rewriting_inspector_truth_table() {
-    let evm = || MegaEvm::new(context(MemoryDatabase::default()));
-    assert!(!evm().has_rewriting_inspector(), "no inspector");
-    assert!(evm().with_inspector(NoOpInspector).has_rewriting_inspector(), "a tool's inspector");
-    assert!(
-        evm().with_inspector(GasInspector::new()).has_rewriting_inspector(),
-        "test utilities are tools"
-    );
-    assert!(!evm().with_trusted_inspector(NoOpInspector).has_rewriting_inspector());
-    let tracer = TracingInspector::new(TracingInspectorConfig::default_parity());
-    assert!(!evm().with_trusted_inspector(DeclaredObserver(tracer)).has_rewriting_inspector());
-
-    let mut disabled = evm().with_inspector(Rewriter::default());
-    disabled.set_inspector_enabled(false);
-    assert!(!disabled.has_rewriting_inspector(), "a disabled inspector does not run");
-    disabled.set_inspector_enabled(true);
-    assert!(disabled.has_rewriting_inspector());
 }
 
 /// Counts frame starts and ends.
@@ -530,13 +507,13 @@ fn busy_contract() -> MemoryDatabase {
     MemoryDatabase::default().account_code(A, code).account_code(B, Bytes::from_static(&[0x00]))
 }
 
-/// A declared observer forwards every callback to the inspector inside.
+/// A read-only observer forwards every callback to the inspector inside.
 #[test]
-fn test_declared_observer_forwards_every_callback() {
+fn test_read_only_observer_forwards_every_callback() {
     let mut plain = MegaEvm::new(context(busy_contract())).with_inspector(Recorder::default());
     plain.transact_raw(call(CALLER, A, U256::ZERO, gas_limit())).unwrap();
     let mut declared = MegaEvm::new(context(busy_contract()))
-        .with_trusted_inspector(DeclaredObserver::new(Recorder::default()));
+        .with_inspector(ReadOnlyObserver::new(Recorder::default()));
     declared.transact_raw(call(CALLER, A, U256::ZERO, gas_limit())).unwrap();
 
     let seen = plain.inspector().clone();
@@ -555,7 +532,7 @@ fn test_declared_observer_forwards_every_callback() {
             seen.selfdestruct > 0,
         "every callback ran: {seen:?}"
     );
-    assert_eq!(DeclaredObserver::new(Recorder::default()).into_inner(), Recorder::default());
+    assert_eq!(ReadOnlyObserver::new(Recorder::default()).into_inner(), Recorder::default());
 }
 
 /// Keeps every log handed to `Inspector::log`, the callback for a log journaled outside an
@@ -569,16 +546,16 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for FrameStartLogs
     }
 }
 
-/// A declared observer forwards the EIP-7708 transfer logs a frame's start journals: the
+/// A read-only observer forwards the EIP-7708 transfer logs a frame's start journals: the
 /// transaction's value into `A`, whose frame runs, and `A`'s value into `B`, an account with no
 /// code, whose frame is answered without running.
 #[test]
-fn test_declared_observer_forwards_the_transfer_logs_of_frame_starts() {
+fn test_read_only_observer_forwards_the_transfer_logs_of_frame_starts() {
     let db = MemoryDatabase::default()
         .account_balance(CALLER, U256::from(5))
         .account_code(A, call_b_and_store_flag(2));
-    let mut evm = MegaEvm::new(context(db))
-        .with_trusted_inspector(DeclaredObserver::new(FrameStartLogs::default()));
+    let mut evm =
+        MegaEvm::new(context(db)).with_inspector(ReadOnlyObserver::new(FrameStartLogs::default()));
     let outcome = evm.transact_raw(call(CALLER, A, U256::from(5), gas_limit())).unwrap();
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
     assert_eq!(
@@ -634,32 +611,32 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Writer {
 #[cfg(debug_assertions)]
 fn run_declared(writer: Writer) {
     let mut evm =
-        MegaEvm::new(context(writes_two_slots())).with_trusted_inspector(DeclaredObserver(writer));
+        MegaEvm::new(context(writes_two_slots())).with_inspector(ReadOnlyObserver(writer));
     let _ = evm.transact_raw(call(CALLER, A, U256::ZERO, gas_limit()));
 }
 
-/// A declared observer that edits a frame's inputs fails its declaration in a debug build.
+/// A read-only observer that edits a frame's inputs fails its declaration in a debug build.
 #[test]
 #[cfg(debug_assertions)]
-#[should_panic(expected = "a declared observer rewrote a frame's inputs")]
-fn test_false_declaration_of_an_input_edit_fails_in_debug() {
+#[should_panic(expected = "a read-only observer rewrote a frame's inputs")]
+fn test_false_read_only_claim_of_an_input_edit_fails_in_debug() {
     run_declared(Writer { edit_inputs: true, ..Default::default() });
 }
 
-/// A declared observer that writes to the journal fails its declaration in a debug build.
+/// A read-only observer that writes to the journal fails its declaration in a debug build.
 #[test]
 #[cfg(debug_assertions)]
-#[should_panic(expected = "a declared observer wrote to the journal in `step`")]
-fn test_false_declaration_of_a_journal_write_fails_in_debug() {
+#[should_panic(expected = "a read-only observer wrote to the journal in `step`")]
+fn test_false_read_only_claim_of_a_journal_write_fails_in_debug() {
     run_declared(Writer { log_in_step: true, ..Default::default() });
 }
 
-/// A declared observer that rewrites a frame result in `frame_end` fails its declaration in a
+/// A read-only observer that rewrites a frame result in `frame_end` fails its declaration in a
 /// debug build.
 #[test]
 #[cfg(debug_assertions)]
-#[should_panic(expected = "a declared observer rewrote a frame result in `frame_end`")]
-fn test_false_declaration_of_a_frame_end_rewrite_fails_in_debug() {
+#[should_panic(expected = "a read-only observer rewrote a frame result in `frame_end`")]
+fn test_false_read_only_claim_of_a_frame_end_rewrite_fails_in_debug() {
     run_declared(Writer { rewrite_frame_end: true, ..Default::default() });
 }
 

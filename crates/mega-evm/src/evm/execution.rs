@@ -748,7 +748,6 @@ where
         &mut self,
         mut frame_init: FrameInit,
     ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
-        let rewriting = self.has_rewriting_inspector();
         // A start past the call-stack limit is answered by the depth guard, wherever it comes from.
         if frame_init.depth <= CALL_STACK_LIMIT as usize {
             assert_running_frame(&self.inner.ctx, frame_init.depth);
@@ -761,11 +760,9 @@ where
             let output = answered_by_inspector(ctx, inspector, &frame_init, output, upfront);
             return Ok(ItemOrResult::Result(output));
         }
-        if rewriting {
-            // The start its charge paid for — the calling opcode's, or the transaction's for its
-            // own frame — may not be the one the inspector lets start.
-            ctx.additional_limit.waive_start_check();
-        }
+        // The start its charge paid for — the calling opcode's, or the transaction's for its own
+        // frame — may not be the one the inspector lets start.
+        ctx.additional_limit.waive_start_check();
         let (frame_input, depth) = (frame_init.frame_input.clone(), frame_init.depth);
         // What the start journals begins here. A start answered with a success without a frame
         // is revm's — a call to a precompile or to an account with no code, which takes its

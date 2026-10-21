@@ -127,7 +127,7 @@ For each module: where it is, what to check, the spec sections, and the `AGENTS.
   - A deposit and an MST are never refused by the packing budget or building policy and count towards them; the header gas limit (`BlockLimiter::pre_execution_check`) and the DA footprint (`check_da_footprint`) still apply.
   - `commit_transaction_outcome` refuses a stale outcome: the sender's nonce or balance moved since the candidate executed (`StaleOutcome`, internal).
   - Pre-block order: EIP-2935, EIP-4788, in Satin's activation block alone the check of the six system contracts and the EIP-7997 factory, the registry's due change, the read of the L1 block info; a pre-block call that does not succeed makes the block invalid, and a fatal database error is an internal error.
-  - A rewriting inspector is refused at every block-execution entry, as an internal error.
+  - Block execution admits any inspector; the node decides which run on block production.
   - The block's ledgers: regular as `max(regular, floor)`, state, history, plus history bytes, data size and write records; reported, not limited.
   - When the OP base moves, diff the file against the new base's `OpBlockExecutor`.
 - **Spec:** §1, §18, §19, §20, §21.
@@ -225,7 +225,7 @@ Each is a decision with its reason; "in this pull request" means review the code
 - **Creation revival by an inspector is allowed** (Foundry parity), settled as a frame that kept nothing; the upfront refund is given back at the price it was charged at.
 - **The Amsterdam regular gas table is taken wholesale**: the earlier press-back to Osaka priced creation twice.
 - **`validate_schedule` checks that base forks are active by `satinTime`**; engine-built schedules activate them from the first block, which no Satin block can tell apart. An unknown chain has no schedule (`hardfork_schedule` answers `None`).
-- **A rewriting inspector in block execution is an internal error**, not a block verdict: the inspector is the node's own choice.
+- **Block execution admits any inspector**: which inspectors run on block production is the node's decision.
 - **Explicit crate-root exports; dead helpers and legacy-era remnants are deleted.**
 - **Satin carries no fork parameter**, and the fork-parameter mechanism was removed with nothing using it.
 - **An absurd state-gas price makes the operation run out of gas**; no reachable divergence.
@@ -240,7 +240,7 @@ Each is a decision with its reason; "in this pull request" means review the code
 - **Answered-frame settlement stays in mega-evm**, and `OpBlockExecutor` is not composed (it requires `PostExecEvm` and returns `OpTxResult`).
 - **The 98/100 frame budget and dropping a hint from a frame whose volatile access is off are kept**: without a latch the budget protects the caller's own work.
 - **An inspector answer with effects is mis-accounted** (a mock that transfers value, an isolated run): the settlement assumes none; tools only, kept.
-- **Mechanisms kept as in the legacy engine** (not under review): `MegaAccessControl`, gas detention's two categories and 20M caps, `remainingComputeGas()`, the Oracle, keyless deployment, the Mega System Transaction, the registry and rotation, the high-precision timestamp, SALT bucket pricing, the history allowance, the data-size limit's 98/100 share, the 200M execution cap with 512 KiB code size and the KZG price, the deposit-caller account charge, the DA footprint, and the inspector admission gate.
+- **Mechanisms kept as in the legacy engine** (not under review): `MegaAccessControl`, gas detention's two categories and 20M caps, `remainingComputeGas()`, the Oracle, keyless deployment, the Mega System Transaction, the registry and rotation, the high-precision timestamp, SALT bucket pricing, the history allowance, the data-size limit's 98/100 share, the 200M execution cap with 512 KiB code size and the KZG price, the deposit-caller account charge, the DA footprint.
 - **The upstream revm change `new_answer`** for answers to frames that did not run (`bluealloy/revm#3979`) is opt-in: the handler does not normalise answers, because real inspectors' answers can have effects.
 
 ## What follows

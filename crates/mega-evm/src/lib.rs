@@ -51,11 +51,11 @@ pub use evm::{
     settle_frame_result, spec_cfg, storage_call_stipend, synthetic_call_result,
     synthetic_frame_result, transaction_body_bytes, tx_body_history_bytes, untouched_call_gas,
     untouched_create_gas, validate_transaction_stateless, with_pools_of, write_record_history_gas,
-    BlockHashRecord, BucketRecord, BytePrice, DeclaredObserver, DynPrecompilesBuilder, EthSpecId,
-    IntrinsicGas, MegaContext, MegaEvm, MegaEvmError, MegaEvmFactory, MegaGasUsage, MegaHandler,
-    MegaJournal, MegaSpecId, MegaTransactionOutcome, OpSpecId, OracleRead, OracleReadRecord,
-    ParseMegaSpecError, SatinPriceError, SatinPrices, TrustedObserver, CPHB_ENV_VAR, CPSB_ENV_VAR,
-    HISTORY_GAS_PRICED, LEGACY_SPEC_NAMES, STATE_GAS_REPRICED, STORAGE_CALL_STIPEND_BYTES,
+    BlockHashRecord, BucketRecord, BytePrice, DynPrecompilesBuilder, EthSpecId, IntrinsicGas,
+    MegaContext, MegaEvm, MegaEvmError, MegaEvmFactory, MegaGasUsage, MegaHandler, MegaJournal,
+    MegaSpecId, MegaTransactionOutcome, OpSpecId, OracleRead, OracleReadRecord, ParseMegaSpecError,
+    SatinPriceError, SatinPrices, CPHB_ENV_VAR, CPSB_ENV_VAR, HISTORY_GAS_PRICED,
+    LEGACY_SPEC_NAMES, STATE_GAS_REPRICED, STORAGE_CALL_STIPEND_BYTES,
     SYSTEM_CALL_REGULAR_GAS_LIMIT,
 };
 #[cfg(any(test, feature = "test-utils"))]

@@ -4,16 +4,15 @@ use alloy_consensus::transaction::Recovered;
 use alloy_eips::{Decodable2718, Encodable2718};
 use alloy_primitives::U256;
 use mega_evm::{
-    alloy_evm::{block::BlockExecutor, EvmEnv},
+    alloy_evm::{block::BlockExecutor, EvmEnv, EvmFactory},
     alloy_op_evm::block::OpAlloyReceiptBuilder,
     revm::{
         context::{result::ExecutionResult, BlockEnv, CfgEnv},
         database::State,
-        inspector::NoOpInspector,
         primitives::eip4844,
     },
-    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory,
-    MegaHardforkConfig, MegaHardforks, MegaSpecId, MegaTxEnvelope, ProtocolLimits,
+    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardforkConfig,
+    MegaHardforks, MegaSpecId, MegaTxEnvelope, ProtocolLimits,
 };
 
 use super::{
@@ -68,11 +67,7 @@ pub(super) fn execute(
     for &(bucket, capacity) in bucket_capacities {
         envs = envs.with_bucket_capacity(bucket, capacity);
     }
-    let factory = MegaBlockExecutorFactory::new(
-        OpAlloyReceiptBuilder::default(),
-        &hardforks,
-        MegaEvmFactory::new().with_external_env_factory(envs),
-    );
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(envs);
     let only_deposits =
         admits_only_deposits(&hardforks, header.number, parent_timestamp, header.timestamp)?;
     // Without the parent's timestamp the block admits every transaction only where no fork the
@@ -90,12 +85,9 @@ pub(super) fn execute(
 
     let result = {
         let mut db = State::builder().with_database(SatinDb(state)).with_bundle_update().build();
-        let mut executor = factory.create_executor_with_trusted_inspector(
-            &mut db,
-            EvmEnv::new(cfg, block_env),
-            block_ctx,
-            NoOpInspector,
-        );
+        let evm = evm_factory.create_evm(&mut db, EvmEnv::new(cfg, block_env));
+        let mut executor =
+            MegaBlockExecutor::new(evm, block_ctx, &hardforks, OpAlloyReceiptBuilder::default());
         if let Some(limits) = limits_override {
             executor = executor.with_protocol_limits(limits);
         }

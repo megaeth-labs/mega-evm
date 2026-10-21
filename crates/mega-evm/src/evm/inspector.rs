@@ -30,25 +30,11 @@
 //! - **The end of a block** runs no code: the post-block balance increments are database writes. No
 //!   callback runs, and the EVM handed back carries the inspector with what it collected.
 //!
-//! # The admission gate
+//! # Block execution
 //!
-//! [`TrustedObserver`] is a declaration, made in source about one inspector type, that none of its
-//! callbacks writes anything back. A [`MegaEvm`](crate::MegaEvm) built with
-//! [`with_trusted_inspector`](crate::MegaEvm::with_trusted_inspector) carries the declaration, and
-//! [`has_rewriting_inspector`](crate::MegaEvm::has_rewriting_inspector) is what block execution
-//! refuses on: a rewriting inspector has no route to a block. [`DeclaredObserver`] carries the
-//! declaration for a tracer whose type cannot, and in debug builds checks it around every callback.
-//!
-//! Block execution checks the gate before anything changes wherever an outcome is produced or
-//! chosen: the pre-block changes, the execution of a transaction — a system transaction as a user
-//! one — the end of the block, and
-//! [`commit_transaction_outcome`](crate::MegaBlockExecutor::commit_transaction_outcome), the commit
-//! of an outcome a builder chose among candidates. alloy-evm's `commit_transaction` checks nothing
-//! and needs no check: it cannot fail, runs no code, and commits the outcome the last execution
-//! produced, which passed the gate before it ran and which no inspector enabled since can reach.
-//! So a declared observer sees the block's transactions, user and system alike, and a rewriting
-//! inspector sees nothing of a block: it is refused before the pre-block calls, which it would not
-//! run on anyway, and before any transaction.
+//! Block execution admits any inspector: the journal's ledger follows the journal, so a rewrite
+//! cannot put the ledger out of step with state, and which inspectors may run on block production
+//! is a node's decision, not the engine's.
 //!
 //! # What a rewrite does not change
 //!
@@ -108,201 +94,18 @@
 //!   included.
 
 use revm::{
-    context::{ContextTr, JournalTr},
+    context::ContextTr,
     context_interface::{cfg::StateGasCharge, Host},
     handler::FrameResult,
-    inspector::{handler::frame_end, JournalExt, NoOpInspector},
+    inspector::handler::frame_end,
     interpreter::{
-        gas::WithheldCrossing, CallInputs, CallOutcome, CreateInputs, CreateOutcome, FrameInput,
-        Gas, InstructionResult, Interpreter, InterpreterTypes,
+        gas::WithheldCrossing, FrameInput, Gas, InstructionResult, Interpreter, InterpreterTypes,
     },
     primitives::{Address, Bytes, Log, U256},
     Database, Inspector,
 };
 
 use crate::{limit::Mark, synthetic_frame_result, ExternalEnvTypes, MegaContext};
-
-/// A declaration, made in source about one inspector type, that none of its callbacks writes
-/// anything back to the EVM: nothing to an interpreter's gas or pending action, nothing to a
-/// frame's inputs, nothing to a result's classification, gas or output, and no frame answered
-/// itself. It may read anything and write its own state.
-///
-/// The declaration is what block execution admits an inspected transaction on.
-///
-/// - Implement it for one concrete type at a time, never as a blanket implementation, so each
-///   declaration is a line someone wrote about a type they had read.
-/// - Do not implement it for an inspector that answers a frame, edits inputs or rewrites a result,
-///   however rarely.
-/// - A foreign inspector type (a `revm-inspectors` tracer) is wrapped in [`DeclaredObserver`],
-///   which is local here and carries the declaration.
-/// - The test utilities' inspectors are not declared: they are not part of the gate.
-pub trait TrustedObserver {}
-
-/// The inspector an EVM runs with when none was given observes nothing.
-impl TrustedObserver for NoOpInspector {}
-
-/// A declared observer lent by reference stays declared: `&mut T` is declared exactly when `T`
-/// is.
-impl<T: TrustedObserver + ?Sized> TrustedObserver for &mut T {}
-
-/// Carries a [`TrustedObserver`] declaration for an inspector whose type cannot carry one.
-///
-/// It forwards every callback to the inspector inside and adds nothing. `DeclaredObserver(tracer)`
-/// says "this tracer writes nothing back", moved from a type definition to the line that wraps
-/// the value.
-///
-/// A debug build checks the declaration around every callback and panics at the one that breaks
-/// it: the interpreter's gas, pending action, stack depth and memory size, the frame's inputs,
-/// the frame result, and the journal's entries and logs must be as they were, and no frame may be
-/// answered. Writes the check cannot see (a stack word replaced in place, a context field outside
-/// the journal) are still false declarations; the check is a tripwire, not a proof.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct DeclaredObserver<I>(pub I);
-
-impl<I> DeclaredObserver<I> {
-    /// Declares `inspector` a read-only observer.
-    pub const fn new(inspector: I) -> Self {
-        Self(inspector)
-    }
-
-    /// The inspector inside.
-    pub fn into_inner(self) -> I {
-        self.0
-    }
-}
-
-impl<I> TrustedObserver for DeclaredObserver<I> {}
-
-impl<I, CTX, INTR> Inspector<CTX, INTR> for DeclaredObserver<I>
-where
-    I: Inspector<CTX, INTR>,
-    CTX: ContextTr<Journal: JournalExt>,
-    INTR: InterpreterTypes,
-{
-    #[inline]
-    fn initialize_interp(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX) {
-        let before = snapshot(interp, context);
-        self.0.initialize_interp(interp, context);
-        assert_unwritten(before, interp, context, "initialize_interp");
-    }
-
-    #[inline]
-    fn step(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX) {
-        let before = snapshot(interp, context);
-        self.0.step(interp, context);
-        assert_unwritten(before, interp, context, "step");
-    }
-
-    #[inline]
-    fn step_end(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX) {
-        let before = snapshot(interp, context);
-        self.0.step_end(interp, context);
-        assert_unwritten(before, interp, context, "step_end");
-    }
-
-    #[inline]
-    fn log(&mut self, context: &mut CTX, log: Log) {
-        let before = journal_snapshot(context);
-        self.0.log(context, log);
-        assert_journal_unwritten(before, context, "log");
-    }
-
-    #[inline]
-    fn log_full(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX, log: Log) {
-        let before = snapshot(interp, context);
-        self.0.log_full(interp, context, log);
-        assert_unwritten(before, interp, context, "log_full");
-    }
-
-    #[inline]
-    fn frame_start(
-        &mut self,
-        context: &mut CTX,
-        frame_input: &mut FrameInput,
-    ) -> Option<FrameResult> {
-        let before =
-            cfg!(debug_assertions).then(|| (frame_input.clone(), journal_snapshot(context)));
-        let answer = self.0.frame_start(context, frame_input);
-        debug_assert!(answer.is_none(), "a declared observer answered a frame in `frame_start`");
-        if let Some((input, journal)) = before {
-            debug_assert!(&input == frame_input, "a declared observer rewrote a frame's inputs");
-            assert_journal_unwritten(journal, context, "frame_start");
-        }
-        answer
-    }
-
-    #[inline]
-    fn frame_end(
-        &mut self,
-        context: &mut CTX,
-        frame_input: &FrameInput,
-        frame_result: &mut FrameResult,
-    ) {
-        let before = result_snapshot(frame_result);
-        let journal = journal_snapshot(context);
-        self.0.frame_end(context, frame_input, frame_result);
-        assert_result_unwritten(before, frame_result, "frame_end");
-        assert_journal_unwritten(journal, context, "frame_end");
-    }
-
-    #[inline]
-    fn call(&mut self, context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
-        let before = cfg!(debug_assertions).then(|| inputs.clone());
-        let journal = journal_snapshot(context);
-        let answer = self.0.call(context, inputs);
-        debug_assert!(answer.is_none(), "a declared observer answered a call");
-        if let Some(before) = before {
-            debug_assert!(&before == inputs, "a declared observer rewrote a call's inputs");
-        }
-        assert_journal_unwritten(journal, context, "call");
-        answer
-    }
-
-    #[inline]
-    fn call_end(&mut self, context: &mut CTX, inputs: &CallInputs, outcome: &mut CallOutcome) {
-        let before = cfg!(debug_assertions).then(|| outcome.clone());
-        let journal = journal_snapshot(context);
-        self.0.call_end(context, inputs, outcome);
-        if let Some(before) = before {
-            debug_assert!(&before == outcome, "a declared observer rewrote a call result");
-        }
-        assert_journal_unwritten(journal, context, "call_end");
-    }
-
-    #[inline]
-    fn create(&mut self, context: &mut CTX, inputs: &mut CreateInputs) -> Option<CreateOutcome> {
-        let before = cfg!(debug_assertions).then(|| inputs.clone());
-        let journal = journal_snapshot(context);
-        let answer = self.0.create(context, inputs);
-        debug_assert!(answer.is_none(), "a declared observer answered a creation");
-        if let Some(before) = before {
-            debug_assert!(&before == inputs, "a declared observer rewrote a creation's inputs");
-        }
-        assert_journal_unwritten(journal, context, "create");
-        answer
-    }
-
-    #[inline]
-    fn create_end(
-        &mut self,
-        context: &mut CTX,
-        inputs: &CreateInputs,
-        outcome: &mut CreateOutcome,
-    ) {
-        let before = cfg!(debug_assertions).then(|| outcome.clone());
-        let journal = journal_snapshot(context);
-        self.0.create_end(context, inputs, outcome);
-        if let Some(before) = before {
-            debug_assert!(&before == outcome, "a declared observer rewrote a creation result");
-        }
-        assert_journal_unwritten(journal, context, "create_end");
-    }
-
-    #[inline]
-    fn selfdestruct(&mut self, contract: Address, target: Address, value: U256) {
-        self.0.selfdestruct(contract, target, value);
-    }
-}
 
 /// Hands a running frame's instruction-loop callbacks to the inspector inside, and keeps what they
 /// do to the interpreter's gas from classifying the frame.
@@ -380,103 +183,6 @@ const fn gas_records(gas: &Gas) -> GasRecords {
 const fn restore_gas_records(gas: &mut Gas, (crossing, failed): GasRecords) {
     gas.set_withheld_crossing(crossing);
     gas.set_failed_charge_remaining(failed);
-}
-
-/// The journal's entry and log counts, for the debug-build proof. `None` in release builds.
-type JournalSnapshot = Option<(usize, usize)>;
-
-#[inline]
-fn journal_snapshot<CTX: ContextTr<Journal: JournalExt>>(context: &CTX) -> JournalSnapshot {
-    cfg!(debug_assertions)
-        .then(|| (context.journal_ref().journal().len(), context.journal_ref().logs().len()))
-}
-
-#[inline]
-fn assert_journal_unwritten<CTX: ContextTr<Journal: JournalExt>>(
-    before: JournalSnapshot,
-    context: &CTX,
-    callback: &str,
-) {
-    if let Some(before) = before {
-        debug_assert_eq!(
-            before,
-            journal_snapshot(context).expect("debug build"),
-            "a declared observer wrote to the journal in `{callback}`"
-        );
-    }
-}
-
-/// An interpreter's and the journal's state, for the debug-build proof.
-type Snapshot = (GasSnapshot, JournalSnapshot);
-
-#[inline]
-fn snapshot<INTR: InterpreterTypes, CTX: ContextTr<Journal: JournalExt>>(
-    interp: &Interpreter<INTR>,
-    context: &CTX,
-) -> Snapshot {
-    (gas_snapshot(interp), journal_snapshot(context))
-}
-
-#[inline]
-fn assert_unwritten<INTR: InterpreterTypes, CTX: ContextTr<Journal: JournalExt>>(
-    (gas, journal): Snapshot,
-    interp: &Interpreter<INTR>,
-    context: &CTX,
-    callback: &str,
-) {
-    assert_gas_unwritten(gas, interp, callback);
-    assert_journal_unwritten(journal, context, callback);
-}
-
-/// An interpreter's gas, pending action, stack depth and memory size, for the debug-build proof.
-/// `None` in release builds.
-type GasSnapshot = Option<(revm::interpreter::Gas, bool, usize, usize)>;
-
-#[inline]
-fn gas_snapshot<INTR: InterpreterTypes>(interp: &Interpreter<INTR>) -> GasSnapshot {
-    use revm::interpreter::interpreter_types::{LoopControl, MemoryTr, StackTr};
-    cfg!(debug_assertions)
-        .then(|| (interp.gas, interp.bytecode.is_end(), interp.stack.len(), interp.memory.size()))
-}
-
-#[inline]
-fn assert_gas_unwritten<INTR: InterpreterTypes>(
-    before: GasSnapshot,
-    interp: &Interpreter<INTR>,
-    callback: &str,
-) {
-    if let Some(before) = before {
-        debug_assert_eq!(
-            before,
-            gas_snapshot(interp).expect("debug build"),
-            "a declared observer wrote to the interpreter in `{callback}`"
-        );
-    }
-}
-
-/// A frame result's classification, gas and output, and a creation's address, for the
-/// debug-build proof.
-type ResultSnapshot = Option<(revm::interpreter::InterpreterResult, Option<Address>)>;
-
-#[inline]
-fn result_snapshot(result: &FrameResult) -> ResultSnapshot {
-    cfg!(debug_assertions).then(|| {
-        let address = match result {
-            FrameResult::Call(_) => None,
-            FrameResult::Create(outcome) => outcome.address,
-        };
-        (result.interpreter_result().clone(), address)
-    })
-}
-
-#[inline]
-fn assert_result_unwritten(before: ResultSnapshot, result: &FrameResult, callback: &str) {
-    if let Some(before) = before {
-        debug_assert!(
-            before == result_snapshot(result).expect("debug build"),
-            "a declared observer rewrote a frame result in `{callback}`"
-        );
-    }
 }
 
 /// What the calling opcode charged upfront for a call, as it stood before the inspector could see

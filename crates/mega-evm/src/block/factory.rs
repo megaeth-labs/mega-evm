@@ -4,14 +4,14 @@ use alloy_consensus::{Transaction, TxReceipt};
 use alloy_eips::Encodable2718;
 use alloy_evm::{
     block::{BlockExecutorFactory, StateDB},
-    EvmEnv, EvmFactory, FromRecoveredTx, FromTxWithEncoded,
+    FromRecoveredTx, FromTxWithEncoded,
 };
 use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
 use revm::Inspector;
 
 use crate::{
     ExternalEnvFactory, MegaBlockExecutionCtx, MegaBlockExecutor, MegaBlockTxResult, MegaContext,
-    MegaEvm, MegaEvmFactory, MegaHardforks, MegaSpecId, MegaTransaction, TrustedObserver,
+    MegaEvm, MegaEvmFactory, MegaHardforks, MegaTransaction,
 };
 
 /// Creates the block executors a node drives.
@@ -51,36 +51,6 @@ impl<R, Spec, EvmF> MegaBlockExecutorFactory<R, Spec, EvmF> {
     }
 }
 
-impl<R, Spec, ExtEnvFactory> MegaBlockExecutorFactory<R, Spec, MegaEvmFactory<ExtEnvFactory>>
-where
-    ExtEnvFactory: ExternalEnvFactory,
-    Spec: MegaHardforks,
-    R: OpReceiptBuilder,
-{
-    /// Creates an executor over an EVM that runs a declared observer.
-    ///
-    /// This is the one way an inspected transaction reaches a block: the inspector's type
-    /// declares that it writes nothing back ([`TrustedObserver`]), so what the block executes is
-    /// what the chain executes, and this bound is the compile-time proof of it. An inspector
-    /// that arrives through [`create_executor`](BlockExecutorFactory::create_executor) carries no
-    /// such proof, so block execution checks it at every entry point instead and refuses it with
-    /// `RewritingInspector`.
-    pub fn create_executor_with_trusted_inspector<DB, I>(
-        &self,
-        db: DB,
-        evm_env: EvmEnv<MegaSpecId>,
-        ctx: MegaBlockExecutionCtx,
-        inspector: I,
-    ) -> MegaBlockExecutor<MegaEvm<DB, I, ExtEnvFactory::EnvTypes>, &R, &Spec>
-    where
-        DB: StateDB,
-        I: TrustedObserver + Inspector<MegaContext<DB, ExtEnvFactory::EnvTypes>>,
-    {
-        let evm = self.evm_factory.create_evm(db, evm_env).with_trusted_inspector(inspector);
-        MegaBlockExecutor::new(evm, ctx, &self.spec, &self.receipt_builder)
-    }
-}
-
 impl<R, Spec, ExtEnvFactory> BlockExecutorFactory
     for MegaBlockExecutorFactory<R, Spec, MegaEvmFactory<ExtEnvFactory>>
 where
@@ -108,10 +78,8 @@ where
     /// The spec's limits are installed by [`MegaBlockExecutor::new`], so an EVM the caller built
     /// with others still runs the block's transactions under them.
     ///
-    /// alloy-evm asks for an executor for every `I: Inspector`, so this route cannot refuse a
-    /// rewriting inspector by its type; the executor checks the EVM at every entry point instead.
-    /// [`create_executor_with_trusted_inspector`](Self::create_executor_with_trusted_inspector) is
-    /// the route whose bound proves the inspector observes only.
+    /// The EVM may carry any inspector: the engine does not refuse one, and a node decides which
+    /// inspectors run on block production.
     fn create_executor<'a, DB, I>(
         &'a self,
         evm: MegaEvm<DB, I, ExtEnvFactory::EnvTypes>,

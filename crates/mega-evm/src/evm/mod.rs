@@ -27,7 +27,6 @@ pub use execution::*;
 pub use factory::*;
 pub use frame::*;
 pub use history::*;
-pub use inspector::*;
 pub use journal::*;
 pub use precompiles::*;
 pub use prices::*;
@@ -94,9 +93,6 @@ pub struct MegaEvm<DB: Database, INSP, ExtEnvs: ExternalEnvTypes = EmptyExternal
     inner: MegaInnerEvm<DB, INSP, ExtEnvs>,
     /// Whether [`alloy_evm::Evm::transact_raw`] runs the inspector.
     inspect: bool,
-    /// Whether the inspector's type carries a [`TrustedObserver`] declaration. Set only by the
-    /// constructors that require the declaration; true without an inspector.
-    trusted_inspector: bool,
     /// Which precompile calls gas detention may price from the Satin table.
     priced_precompiles: PricedPrecompiles,
 }
@@ -112,12 +108,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, NoOpInspector, ExtEnvs
             precompiles: satin_precompiles_map(),
             frame_stack: FrameStack::new_prealloc(8),
         };
-        Self {
-            inner,
-            inspect: false,
-            trusted_inspector: true,
-            priced_precompiles: PricedPrecompiles::default(),
-        }
+        Self { inner, inspect: false, priced_precompiles: PricedPrecompiles::default() }
     }
 }
 
@@ -125,40 +116,15 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     /// Replaces the inspector with a tool's. The new inspector runs on every alloy-evm
     /// [`transact`](alloy_evm::Evm::transact) until it is disabled again.
     ///
-    /// The inspector may rewrite what execution produces (see the `inspector` module), so the
-    /// EVM reports [`has_rewriting_inspector`](Self::has_rewriting_inspector) while it runs, and
-    /// block execution refuses it.
+    /// The inspector may rewrite what execution produces (see the `inspector` module). The engine
+    /// does not refuse one in block execution: a node decides which inspectors run on block
+    /// production.
     pub fn with_inspector<I>(self, inspector: I) -> MegaEvm<DB, I, ExtEnvs> {
         MegaEvm {
             inner: self.inner.with_inspector(inspector),
             inspect: true,
-            trusted_inspector: false,
             priced_precompiles: self.priced_precompiles,
         }
-    }
-
-    /// Replaces the inspector with one whose type is declared a [`TrustedObserver`]: it writes
-    /// nothing back, so the transactions it observes are the ones the chain executes, and block
-    /// execution admits them.
-    pub fn with_trusted_inspector<I: TrustedObserver>(
-        self,
-        inspector: I,
-    ) -> MegaEvm<DB, I, ExtEnvs> {
-        MegaEvm {
-            inner: self.inner.with_inspector(inspector),
-            inspect: true,
-            trusted_inspector: true,
-            priced_precompiles: self.priced_precompiles,
-        }
-    }
-
-    /// Whether the EVM runs an inspector that may rewrite what execution produces: an enabled
-    /// inspector that did not arrive through
-    /// [`with_trusted_inspector`](Self::with_trusted_inspector).
-    ///
-    /// The admission gate block execution refuses a transaction on.
-    pub const fn has_rewriting_inspector(&self) -> bool {
-        self.inspect && !self.trusted_inspector
     }
 
     /// The execution context.
