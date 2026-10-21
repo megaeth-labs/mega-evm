@@ -230,21 +230,15 @@ where
         self.op.validate_against_state_and_deduct_caller(evm, init_and_floor_gas)
     }
 
-    /// revm's intrinsic gas, with the history gas of the transaction's body added to the
-    /// EIP-8037 intrinsic state-gas slot.
+    /// revm's intrinsic gas, held to a gas limit that covers the history gas of the transaction's
+    /// body as well, which [`tx_gas`](Handler::tx_gas) charges.
     ///
     /// The body's bytes are fixed before the transaction runs, so their price is part of what a
     /// gas limit has to cover for the transaction to be valid at all: a limit that falls short is
     /// rejected before inclusion rather than included as an out-of-gas that burns the whole limit.
     /// revm made that check on its own figure, so the grown figure is checked again here, with the
-    /// same error naming the same two numbers.
-    ///
-    /// The slot it rides in is the state one because that is the pool EIP-8037 pays it from: the
-    /// reservoir first, spilling onto the regular budget only past it, so a body does not take the
-    /// execution cap away from computation. The cap check revm made stands as it was — it tests
-    /// the regular intrinsic gas, which this does not touch — and
-    /// [`post_execution`](Handler::post_execution) takes the body back out of the state gas the
-    /// result reports.
+    /// same error naming the same two numbers. The cap check revm made stands as it was: it tests
+    /// the regular intrinsic gas, which the body's history does not touch.
     ///
     /// A transaction exempt from history gas carries none of it
     /// ([`MegaContext::prices_history`](crate::MegaContext::prices_history)), so its intrinsic gas
@@ -265,7 +259,7 @@ where
         if !evm.ctx_ref().additional_limit.admits_tx_body(authorizations) {
             return Err(InvalidTransaction::Str(TX_BODY_OVER_DATA_SIZE_LIMIT.into()).into());
         }
-        let mut gas = self.op.validate_initial_tx_gas(evm)?;
+        let gas = self.op.validate_initial_tx_gas(evm)?;
         if !evm.ctx_ref().prices_history() {
             return Ok(gas);
         }
@@ -282,15 +276,23 @@ where
                 InvalidTransaction::CallGasCostMoreThanGasLimit { gas_limit, initial_gas }.into()
             );
         }
-        gas.set_initial_state_gas(gas.initial_state_gas_final() + history);
         evm.ctx_mut().additional_limit.set_intrinsic_history(history, bytes);
         Ok(gas)
     }
 
-    /// revm's transaction-level gas, with a system call's split as EIP-8037 has it: at most
-    /// [`SYSTEM_CALL_REGULAR_GAS_LIMIT`] of its gas limit is regular gas, which is what `GAS`
-    /// reads inside it, and the rest is its state-gas reservoir, which the state it writes draws
-    /// first.
+    /// revm's transaction-level gas, with the history gas of the transaction's body charged on
+    /// it, and a system call's split as EIP-8037 has it: at most [`SYSTEM_CALL_REGULAR_GAS_LIMIT`]
+    /// of its gas limit is regular gas, which is what `GAS` reads inside it, and the rest is its
+    /// state-gas reservoir, which the state it writes draws first.
+    ///
+    /// The body's history is intrinsic: it comes out of the reservoir first and its excess off the
+    /// regular budget, as EIP-8037's intrinsic state gas does, so a body does not take the
+    /// execution cap away from computation; and, as intrinsic gas, no reservoir a frame hands back
+    /// unwinds it onto the regular budget, so it is charged as no spill. It is charged here rather
+    /// than before the first frame because revm's runtime out-of-gas fallback rebuilds the
+    /// transaction's gas through this phase, and a transaction that runs out of gas there keeps its
+    /// body charged. Validation admitted no gas limit that cannot pay for it
+    /// ([`validate_initial_tx_gas`](Handler::validate_initial_tx_gas)).
     ///
     /// revm builds a system call's gas here, on no intrinsic gas, and so does its runtime
     /// out-of-gas fallback, which a system call does not reach: it carries no value and its target
@@ -299,6 +301,13 @@ where
     /// the neutral configuration a system call's is not split, as revm's own runner has it.
     fn tx_gas(&self, evm: &mut Self::Evm, init_and_floor_gas: &InitialAndFloorGas) -> GasTracker {
         let mut gas = self.op.tx_gas(evm, init_and_floor_gas);
+        let history = evm.ctx_ref().additional_limit.intrinsic_history_gas();
+        if history != 0 {
+            let spilled = gas.state_gas_spilled();
+            let charged = gas.record_history_cost(history);
+            debug_assert!(charged, "validation admits no gas limit that cannot pay for the body");
+            gas.set_state_gas_spilled(spilled);
+        }
         if evm.ctx_ref().splits_system_call_gas() {
             let margin = gas.remaining().saturating_sub(SYSTEM_CALL_REGULAR_GAS_LIMIT);
             gas.set_remaining(gas.remaining() - margin);
@@ -356,9 +365,9 @@ where
     /// [`frame_return_result`](EvmTr::frame_return_result) — revm's answer to the first frame, an
     /// interceptor's, an inspector's — closes its start and gives up its stop here.
     ///
-    /// Keeps the history gas the transaction spent: what the body was charged, and what the frames
-    /// charged net of what they gave back; and the history bytes it appended, which are what those
-    /// charges were made for.
+    /// Keeps the history gas the transaction spent, which its gas holds once the frame settled into
+    /// it: what the body was charged, and what the frames charged net of what they gave back; and
+    /// the history bytes it appended, which are what those charges were made for.
     fn last_frame_result(
         &mut self,
         evm: &mut Self::Evm,
@@ -370,21 +379,15 @@ where
         layer.take_frame_stop(frame_result, true);
         self.op.last_frame_result(evm, frame_result, parent_gas)?;
         let priced = evm.ctx_ref().prices_history();
-        let layer = &mut evm.ctx_mut().additional_limit;
-        let history = layer
-            .intrinsic_history_gas()
-            .saturating_add_signed(frame_result.gas().history_gas_spent());
-        layer.settle_history(priced, history);
+        let history = 0_u64.saturating_add_signed(frame_result.gas().history_gas_spent());
+        evm.ctx_mut().additional_limit.settle_history(priced, history);
         Ok(())
     }
 
-    /// revm's post-execution, on the intrinsic gas with the body's history taken back out of the
-    /// state slot it rode in: the result's state gas is state gas alone, and the history the
-    /// transaction spent is reported on its own ledger.
-    ///
-    /// The reservoir the transaction leaves unspent is read first, where revm builds the result's
-    /// gas: before the EIP-7623 floor check, which absorbs the reservoir into the floor's cost
-    /// when the floor binds. The refund before it does not move the reservoir.
+    /// revm's post-execution, with the reservoir the transaction leaves unspent read first, where
+    /// revm builds the result's gas: before the EIP-7623 floor check, which absorbs the reservoir
+    /// into the floor's cost when the floor binds. The refund before it does not move the
+    /// reservoir.
     fn post_execution(
         &self,
         evm: &mut Self::Evm,
@@ -393,9 +396,6 @@ where
         eip7702_gas_refund: i64,
     ) -> Result<ResultGas, Self::Error> {
         self.settled_reservoir.set(Some(exec_result.gas().reservoir()));
-        let history = evm.ctx_ref().additional_limit.intrinsic_history_gas();
-        let init_and_floor_gas = init_and_floor_gas
-            .with_initial_state_gas(init_and_floor_gas.initial_state_gas_final() - history);
         self.op.post_execution(evm, exec_result, init_and_floor_gas, eip7702_gas_refund)
     }
 
