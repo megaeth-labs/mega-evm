@@ -980,7 +980,8 @@ The witness is defined by what the block's execution returns and exports, and a 
     A validator without a service that finds another value in the slot computes another block; a transaction that wrote the value but was dropped by the builder wrote nothing the chain holds.
     Hints reach the service alone: they are not in the witness, and change nothing a validator computes except through the answers the service then gives, which the records carry.
 - **The check.**
-  A block replayed on exactly its witness MUST produce the same receipts, state changes, gas ledgers, logs, block counters and exports as the block's execution, and MUST read nothing the witness does not hold.
+  A block replayed on exactly its witness MUST produce the same receipts, state changes, gas ledgers, logs and block counters as the block's execution, and MUST read nothing the witness does not hold.
+  Its exports MUST be a subset of the building node's and MAY be a proper one: the building node's also hold the buckets and block hashes that candidates it executed and dropped asked for, which the replay, running the included transactions alone, never asks for.
 
 ## Developer Impact
 
