@@ -583,12 +583,17 @@ mod tests {
 
     /// The allowance is the started frame's, below the transaction's own frame: its side draws on
     /// it, and nothing is left once the side is popped. The transaction's own frame is granted
-    /// none, however it was started.
+    /// none, however it was started. At a history price of nothing the allowance is nothing, and
+    /// there is nothing to draw.
     #[test]
     fn test_the_allowance_is_granted_to_the_frame_a_value_call_starts() {
         let ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
         let ledger = ctx.ledger();
         let stipend = storage_call_stipend();
+        if stipend == 0 {
+            crate::test_utils::note_price_guard("MEGA_SATIN_CPHB prices a history byte at nothing");
+            return;
+        }
         let mut limit = AdditionalLimit::default();
         limit.push_start(&call_from_to(SENDER, CALLEE, U256::from(1)), 0);
         assert_eq!(limit.try_consume_stipend(1), 0, "the transaction's own frame has none");
