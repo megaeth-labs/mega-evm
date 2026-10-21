@@ -1455,7 +1455,7 @@ fn charge_records_made_outside_a_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
         TxKind::Call(to) => {
             let predicted = ctx.journal_ref().transfer_records(tx.caller(), to, tx.value());
             debug_assert_eq!(predicted.taken, 0, "the sender's value returns no account");
-            FrameStartRecords { on_level: predicted, ..FrameStartRecords::NONE }
+            FrameStartRecords::of_transfer(predicted)
         }
     };
     let Some((top_level, _)) =

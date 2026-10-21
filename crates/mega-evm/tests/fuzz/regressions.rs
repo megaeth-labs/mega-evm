@@ -32,7 +32,7 @@ use crate::{
         world::{AccountShape, Balance, BeneficiaryIs, BlockShape, Limits, Salt, World},
         Value, Who,
     },
-    harness::runs_at_measurement_prices,
+    harness::{history_rounds, runs_at_measurement_prices},
     render::render,
 };
 
@@ -182,7 +182,7 @@ fn test_a_program_that_funds_the_account_it_then_creates_keeps_one_record_for_it
         tx: Tx {
             shape: Shape::Call { to: Who::Contract, data_len: 0, access_list: vec![] },
             value: Value::Zero,
-            gas: GasTier::Medium,
+            gas: GasTier::Large,
             price: Price::Free,
             nonce_ok: true,
         },
@@ -213,7 +213,7 @@ fn test_a_program_that_funds_the_account_it_then_creates_keeps_one_record_for_it
         },
         "the contract and the account it funded and created, and the transfer log\n{rendered}"
     );
-    if !runs_at_measurement_prices() {
+    if !history_rounds() {
         assert_eq!(
             outcome.gas.history,
             mega_evm::history_gas(body + 2 * WRITE_RECORD_SIZE).expect("the bytes have a price"),

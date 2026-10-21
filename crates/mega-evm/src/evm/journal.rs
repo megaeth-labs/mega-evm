@@ -199,7 +199,7 @@ impl<DB: Database> MegaJournal<DB> {
             return FrameStartRecords::NONE;
         }
         FrameStartRecords {
-            on_level: RecordDelta::NONE,
+            transfer: RecordDelta::NONE,
             created: true,
             creator: !self.is_changed(creator),
         }
@@ -220,12 +220,11 @@ impl<DB: Database> MegaJournal<DB> {
             FrameStartKind::Call |
             FrameStartKind::CallCode |
             FrameStartKind::DelegateCall |
-            FrameStartKind::StaticCall => FrameStartRecords {
-                on_level: start.target.map_or(RecordDelta::NONE, |target| {
+            FrameStartKind::StaticCall => {
+                FrameStartRecords::of_transfer(start.target.map_or(RecordDelta::NONE, |target| {
                     self.transfer_records(start.caller, target, start.value)
-                }),
-                ..FrameStartRecords::NONE
-            },
+                }))
+            }
         }
     }
 }
@@ -738,7 +737,7 @@ mod tests {
         assert_eq!(journal.transfer_records(A, B, U256::from(1)), both);
 
         let (_, report) = start_call(&mut journal, 1, A, B, 1);
-        assert_eq!(report.records.on_level, both, "counted as predicted");
+        assert_eq!(report.records.transfer, both, "counted as predicted");
         end_frame(&mut journal, None);
         assert_eq!(
             journal.transfer_records(B, A, U256::from(1)),
@@ -751,7 +750,7 @@ mod tests {
             "B returns, C changes"
         );
         let (_, report) = start_call(&mut journal, 1, B, A, 1);
-        assert_eq!(report.records.on_level, RecordDelta { added: 0, taken: 2 });
+        assert_eq!(report.records.transfer, RecordDelta { added: 0, taken: 2 });
         assert_eq!(journal.ledger().usage(), kept(0, 2), "the records went, the logs stay");
     }
 
@@ -774,7 +773,7 @@ mod tests {
             let tool = journal.checkpoint();
             let (_, report) = start_call(&mut journal, 1, A, B, 1);
             assert_eq!(
-                (report.records.on_level, report.transfer_log),
+                (report.records.transfer, report.transfer_log),
                 (RecordDelta { added: 2, taken: 0 }, true),
                 "{case}: B's record, A's, and the log"
             );
@@ -792,7 +791,7 @@ mod tests {
 
             let (_, later) = start_call(&mut journal, 1, A, C, 1);
             let records = if reverted { 2 } else { 1 };
-            assert_eq!(later.records.on_level.added, records, "{case}: A's account");
+            assert_eq!(later.records.transfer.added, records, "{case}: A's account");
             end_frame(&mut journal, None);
             let records = if reverted { 2 } else { 3 };
             assert_eq!(journal.ledger().usage(), kept(records, if reverted { 1 } else { 2 }));
@@ -923,13 +922,13 @@ mod tests {
             let charged = journal.creation_records(B, U256::from(1));
             assert_eq!(
                 charged,
-                FrameStartRecords { on_level: RecordDelta::NONE, created: true, creator: true },
+                FrameStartRecords { transfer: RecordDelta::NONE, created: true, creator: true },
                 "funded {funded}: charged for the created account and B's nonce"
             );
             let (_, report) = start_creation(&mut journal, 1, B, CREATED, 1);
             assert_eq!(
                 report.records,
-                FrameStartRecords { on_level: RecordDelta::NONE, created: !funded, creator: true },
+                FrameStartRecords { transfer: RecordDelta::NONE, created: !funded, creator: true },
                 "funded {funded}: the created account is counted where the creation changed it"
             );
             let (records, logs) = if funded { (3, 2) } else { (2, 1) };

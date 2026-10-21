@@ -567,13 +567,13 @@ mod tests {
 
     /// `added` records a call's value transfer makes on the frame's level.
     const fn transfer(added: u64) -> FrameStartRecords {
-        FrameStartRecords { on_level: RecordDelta { added, taken: 0 }, ..FrameStartRecords::NONE }
+        FrameStartRecords::of_transfer(RecordDelta { added, taken: 0 })
     }
 
     /// A creation's records: its created account's on the frame's level (`created`), and its
     /// creator's own below it (`creator`).
     const fn creation(created: bool, creator: bool) -> FrameStartRecords {
-        FrameStartRecords { on_level: RecordDelta::NONE, created, creator }
+        FrameStartRecords { transfer: RecordDelta::NONE, created, creator }
     }
 
     /// The allowance follows the transfer, and only the two schemes that can carry one: a `CALL`
@@ -683,32 +683,41 @@ mod tests {
         limit.attach_start(refused, None);
     }
 
+    /// Attaches to a value call's side, charged for `charged`, a start the ledger counted
+    /// `counted` for: what the check below holds every start to.
+    fn attach_counted_against_charged(charged: FrameStartRecords, counted: FrameStartRecords) {
+        let mut limit = AdditionalLimit::default();
+        limit.push_start(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
+        limit.stage_frame_charge(charged, 0, 0, true);
+        limit.push_start(&call_from_to(CALLEE, TARGET, U256::from(1)), 1);
+        limit.attach_start(report(counted), None);
+    }
+
     /// Every record but a creation's created account is held to the charge exactly: a transfer
-    /// that counts fewer records than its caller was charged for trips, as one that counts more
-    /// does, and so does a creator's nonce record counted where none was charged.
+    /// that counts one record fewer than its caller was charged for trips, as one that counts more
+    /// does.
     #[test]
     #[cfg(debug_assertions)]
-    fn test_only_the_created_account_may_count_less_than_it_was_charged() {
-        let trips = |charged: FrameStartRecords, counted: FrameStartRecords| {
-            std::panic::catch_unwind(move || {
-                let mut limit = AdditionalLimit::default();
-                limit.push_start(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
-                limit.stage_frame_charge(charged, 0, 0, true);
-                limit.push_start(&call_from_to(CALLEE, TARGET, U256::from(1)), 1);
-                limit.attach_start(report(counted), None);
-            })
-            .is_err()
-        };
-        assert!(trips(transfer(2), transfer(1)), "a transfer that counts one record fewer");
-        assert!(trips(creation(true, false), creation(true, true)), "a creator record not charged");
-        assert!(
-            trips(creation(false, false), creation(true, false)),
-            "a created account not charged"
-        );
-        assert!(
-            !trips(creation(true, false), creation(false, false)),
-            "a created account not made"
-        );
+    #[should_panic(expected = "changed after its caller was charged for them")]
+    fn test_a_transfer_counting_fewer_records_than_charged_trips() {
+        attach_counted_against_charged(transfer(2), transfer(1));
+    }
+
+    /// A creator's nonce record the ledger counted where none was charged trips.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "changed after its caller was charged for them")]
+    fn test_a_creator_record_not_charged_trips() {
+        attach_counted_against_charged(creation(true, false), creation(true, true));
+    }
+
+    /// A created account's record the ledger counted where none was charged trips: the charge may
+    /// count it where the ledger does not, never the reverse.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "changed after its caller was charged for them")]
+    fn test_a_created_account_not_charged_trips() {
+        attach_counted_against_charged(creation(false, false), creation(true, false));
     }
 
     /// A charge computed from a different answer than the count is what a rewrite that turns one

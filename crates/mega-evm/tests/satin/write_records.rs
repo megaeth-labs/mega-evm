@@ -1464,22 +1464,28 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for ChangedBeforeT
 /// for a record taken back; this holds it for every transaction shape, in the release build too.
 #[test]
 fn test_before_its_own_frame_a_transaction_changed_only_its_sender_and_authorities() {
-    let funded = || MemoryDatabase::default().account_balance(CALLER, U256::from(1_000));
+    let sender_funded = || MemoryDatabase::default().account_balance(CALLER, U256::from(1_000));
     let mut minted = deposit(call(CALLER, CONTRACT, U256::from(1), value_call_room()));
     minted.0.deposit.mint = Some(5);
     let one = U256::from(1);
     for (case, db, tx, authorities, records_kept) in [
-        ("a value call", funded(), call(CALLER, CONTRACT, one, value_call_room()), vec![], 1),
+        (
+            "a value call",
+            sender_funded(),
+            call(CALLER, CONTRACT, one, value_call_room()),
+            vec![],
+            1,
+        ),
         (
             "a value call to the sender",
-            funded(),
+            sender_funded(),
             call(CALLER, CALLER, one, value_call_room()),
             vec![],
             0,
         ),
         (
             "a creation",
-            funded(),
+            sender_funded(),
             create(CALLER, Bytes::from_static(&[STOP]), value_call_room()),
             vec![],
             1,
@@ -1487,14 +1493,14 @@ fn test_before_its_own_frame_a_transaction_changed_only_its_sender_and_authoriti
         ("a deposit that mints and moves value", MemoryDatabase::default(), minted, vec![], 1),
         (
             "a value call to the authority it applies",
-            funded(),
+            sender_funded(),
             authorizing_call(AUTHORITY_1, 1, &[(AUTHORITY_1, 0)]),
             vec![AUTHORITY_1],
             1,
         ),
         (
             "a value call past the authority it applies",
-            funded(),
+            sender_funded(),
             authorizing_call(CONTRACT, 1, &[(AUTHORITY_1, 0)]),
             vec![AUTHORITY_1],
             2,

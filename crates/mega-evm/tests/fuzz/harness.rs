@@ -220,6 +220,22 @@ pub(crate) fn runs_at_measurement_prices() -> bool {
     true
 }
 
+/// Whether a history byte costs a fraction of a gas at the prices in effect, as the byte-price
+/// grid's 0.001 does: each history charge is then rounded on its own, and the history of bytes
+/// charged apart is not the history of their sum. A history figure computed from a sum of bytes
+/// holds at every other price, and the caller leaves it out here; this leaves the note the
+/// byte-price grid counts.
+pub(crate) fn history_rounds() -> bool {
+    if mega_evm::active_satin_prices().cphb.milli_gas().is_multiple_of(1_000) {
+        return false;
+    }
+    mega_evm::test_utils::note_price_guard(&format!(
+        "{} prices a history byte at a fraction of a gas",
+        mega_evm::CPHB_ENV_VAR
+    ));
+    true
+}
+
 /// Holds a property's coverage claim: `missing` lists the classes its run did not reach.
 ///
 /// On the default run (see [`FuzzConfig::requires_coverage`]) and at the spec's byte prices a

@@ -139,7 +139,7 @@ pub(crate) struct FrameStartRecords {
     /// The records a call's value transfer makes and takes back on the frame's own level, which
     /// its failure takes back: the accounts it changes from what the transaction loaded, and those
     /// it returns to that.
-    pub(crate) on_level: RecordDelta,
+    pub(crate) transfer: RecordDelta,
     /// Whether the start records the account a creation creates, on the frame's own level, which
     /// its failure takes back. The ledger counts it when the creation changed an account the
     /// transaction had not changed; a charge made before revm decides the start counts it for
@@ -154,12 +154,17 @@ pub(crate) struct FrameStartRecords {
 impl FrameStartRecords {
     /// No record at all.
     pub(crate) const NONE: Self =
-        Self { on_level: RecordDelta::NONE, created: false, creator: false };
+        Self { transfer: RecordDelta::NONE, created: false, creator: false };
+
+    /// The records of a call's value transfer, which makes and takes back `records`.
+    pub(crate) const fn of_transfer(records: RecordDelta) -> Self {
+        Self { transfer: records, ..Self::NONE }
+    }
 
     /// The records the start adds on the frame's own level: the accounts a transfer changes, and
     /// the created account.
     pub(crate) const fn added_on_level(self) -> u64 {
-        self.on_level.added + self.created as u64
+        self.transfer.added + self.created as u64
     }
 
     /// Whether a charge computed from `self` paid for the records `counted`: the same records,
@@ -167,7 +172,7 @@ impl FrameStartRecords {
     /// where the creation changed it.
     #[cfg(debug_assertions)]
     fn covers(self, counted: Self) -> bool {
-        self.on_level == counted.on_level &&
+        self.transfer == counted.transfer &&
             self.creator == counted.creator &&
             (self.created || !counted.created)
     }
@@ -649,7 +654,7 @@ impl Ledger {
         self.counts.refund = self.counts.refund.saturating_add(WRITE_RECORD.times(records.taken));
         let verdict = self.check();
         let report = self.report_mut();
-        report.records = FrameStartRecords { on_level: records, ..FrameStartRecords::NONE };
+        report.records = FrameStartRecords::of_transfer(records);
         report.transfer_log = logged;
         report.verdict = Some(verdict);
     }
@@ -997,10 +1002,10 @@ impl StartSide {
     pub(crate) fn refund(&self, ledger: &Ledger) -> u64 {
         let (level_kept, start_kept) =
             self.start.map_or((false, false), |start| ledger.fate(start));
-        let on_level = self.counted.on_level;
         let mut refund = if level_kept {
             let kept = records_history_gas(self.counted.added_on_level());
-            let taken = if self.priced { records_history_gas(on_level.taken) } else { 0 };
+            let taken =
+                if self.priced { records_history_gas(self.counted.transfer.taken) } else { 0 };
             self.added_charge.saturating_sub(kept).saturating_add(taken)
         } else {
             self.added_charge
@@ -1268,7 +1273,7 @@ mod tests {
         assert_eq!(ledger.usage(), LimitUsage { data_size: 40 + 160, write_records: 1 });
         // The recipient hands the value back: its own record goes, the sender's is the body's.
         let report = start_call(&mut ledger, 1, 1, RecordDelta { added: 0, taken: 1 });
-        assert_eq!(report.records.on_level, RecordDelta { added: 0, taken: 1 });
+        assert_eq!(report.records.transfer, RecordDelta { added: 0, taken: 1 });
         assert_eq!(report.verdict, Some(LimitCheck::WithinLimit));
         assert_eq!(
             ledger.usage(),
@@ -1384,7 +1389,7 @@ mod tests {
                 );
                 assert_eq!(report.records.creator, expected, "{case}");
                 assert_eq!(report.records.created, created_unchanged, "{case}");
-                assert_eq!(report.records.on_level, RecordDelta::NONE, "{case}");
+                assert_eq!(report.records.transfer, RecordDelta::NONE, "{case}");
                 let records = u64::from(created_unchanged) + u64::from(expected);
                 assert_eq!(ledger.usage(), WRITE_RECORD.times(records), "{case}");
                 end_frame(&mut ledger, true);
