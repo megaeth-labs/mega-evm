@@ -8,8 +8,8 @@
 //! - a frame start that moves value — the transaction's own value, a value `CALL`, a creation's
 //!   endowment — counts its log with the frame's records, held to the limits once revm decided the
 //!   start, so a crossing stops the frame before it runs and takes the move back;
-//! - a `SELFDESTRUCT` that moves a balance counts its log with the beneficiary's record, once the
-//!   opcode completed, and a crossing stops the destructing frame, which takes the move back.
+//! - a `SELFDESTRUCT` that moves a balance counts its log with its records, once the opcode
+//!   completed, and a crossing stops the destructing frame, which takes the move back.
 //!
 //! Every site runs below the execution cap and above it, and is pinned four ways: the exact bytes
 //! it adds and the log the receipt carries; a frame budget one byte short of them, which stops the

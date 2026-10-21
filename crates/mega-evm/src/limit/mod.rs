@@ -40,8 +40,8 @@
 //! - the body, before any frame; neither a revert nor an out-of-gas takes it back;
 //! - the records of the applied EIP-7702 authorities, before the first frame;
 //! - the records a frame's start makes, when the frame starts;
-//! - a storage write's record, a log's bytes and the record of a `SELFDESTRUCT`'s beneficiary, once
-//!   the opcode completed;
+//! - a storage write's record, a log's bytes and the records of a `SELFDESTRUCT` — the account it
+//!   clears and its beneficiary — once the opcode completed;
 //! - deployed code, on the creation's level before the creation is committed, so a crossing leaves
 //!   no code behind. Only code revm would deposit counts: code starting with `0xEF` or over the
 //!   code-size limit, and a creation that cannot pay for its deposit, fail the creation alone and
@@ -80,11 +80,13 @@
 //! # Write records
 //!
 //! The write-record count the ledger keeps is the KV count a node reports: one record per account
-//! or storage write the transaction keeps, deduplicated per frame, taken back with a slot written
-//! back to its original value and with the frame that fails. The sender's account and the accounts
-//! fees are credited to are the body's, not records. No limit holds the count: a record weighs
-//! [`WRITE_RECORD_SIZE`] bytes of data size, counted and taken back with them, so the data-size
-//! limit bounds the records, and history gas prices each of them.
+//! or storage write the transaction keeps, following the net change — a slot's while its value
+//! differs from its original, an account's while its nonce, balance or code differs from what the
+//! transaction loaded — taken back by a write that returns the slot or the account and with the
+//! frame that fails. The sender's account and the accounts fees are credited to are the body's, not
+//! records. No limit holds the count: a record weighs [`WRITE_RECORD_SIZE`] bytes of data size,
+//! counted and taken back with them, so the data-size limit bounds the records, and history gas
+//! prices each of them.
 //!
 //! # State growth
 //!

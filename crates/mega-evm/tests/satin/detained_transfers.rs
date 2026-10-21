@@ -1,11 +1,11 @@
 //! Gas detention against EIP-7708 transfer logs: value that moves after a read of volatile data.
 //!
 //! The two meet where a frame starts and at `SELFDESTRUCT`. A frame start counts its transfer log
-//! with its records, held to the limits once revm decided the frame — revm moves the value,
-//! answers the frame or refuses it on the caller's account — and a precompile started after a read
-//! runs on what the compute limit leaves its frame. A `SELFDESTRUCT` counts its log with its
-//! beneficiary's record once the opcode completed, and revm journals the move before the opcode's
-//! last charge, which the cap can fail.
+//! with its records, held to the limits once revm decided the frame — revm moves the value, answers
+//! the frame or refuses it on the caller's account — and a precompile started after a read runs on
+//! what the compute limit leaves its frame. A `SELFDESTRUCT` counts its log with its records once
+//! the opcode completed, and revm journals the move before the opcode's last charge, which the cap
+//! can fail.
 //!
 //! Whatever detention does to the movement, the transfer logs a receipt carries are the ones the
 //! data size kept: a transaction keeps its body, forty bytes a write record and 160 a transfer

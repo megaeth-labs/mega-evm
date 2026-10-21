@@ -3,9 +3,9 @@
 //! A write record is one account or storage write, 40 bytes of data size. The sites: the first
 //! change of a slot in the transaction (taken back when the slot is written back), a value
 //! transfer's sender and recipient, a creation's creator nonce and created account, a
-//! `SELFDESTRUCT` that moves value to another account, an applied EIP-7702 authority, and the
-//! transaction's own value recipient or created account. The sender's own account is part of the
-//! transaction body and is not a record.
+//! `SELFDESTRUCT` that moves value to another account (the account it clears and its beneficiary),
+//! an applied EIP-7702 authority, and the transaction's own value recipient or created account.
+//! The sender's own account is part of the transaction body and is not a record.
 //!
 //! An account's record follows the net change of its info within the transaction: a write that
 //! makes an unchanged account's nonce, balance or code differ from what the transaction loaded

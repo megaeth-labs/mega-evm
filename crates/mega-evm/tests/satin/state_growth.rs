@@ -522,7 +522,7 @@ fn test_a_state_charge_the_frame_cannot_pay_runs_out_of_gas_whatever_the_limit()
                 entry(GasId::cold_account_additional_cost()) +
                 entry(GasId::warm_storage_read_cost()),
             account_state_gas(),
-            // The beneficiary's record is held before its history is charged.
+            // The destruction's records are held before their history is charged.
             0,
             false,
         ),
