@@ -10,7 +10,7 @@
 //! when revm would deposit it.
 
 use alloy_evm::Evm;
-use alloy_primitives::{address, keccak256, Address, Bytes, U256};
+use alloy_primitives::{address, keccak256, Address, Bytes, B256, U256};
 use alloy_sol_types::SolError;
 use mega_evm::{
     constants::{MAX_CONTRACT_SIZE, TX_GAS_LIMIT_CAP},
@@ -1625,6 +1625,65 @@ fn test_a_failed_creations_nonce_record_holds_its_creator_to_its_budget() {
                 MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit: b_budget }
                     .abi_encode(),
                 "{case}: B reverted on its own budget",
+            );
+        }
+    }
+}
+
+/// A creation's start is held to the transaction's limit even when it counts nothing: the record of
+/// its creator's nonce lands on the creator unchecked, and the creation's start is where the
+/// transaction first meets it.
+///
+/// `A` funds `X`, the address `B`'s empty `CREATE2` lands on, keeping two records and the transfer
+/// log, and then calls `B`. `B`'s creation records nothing of its own — `X` is changed already, and
+/// it carries no endowment — but the record of `B`'s nonce puts the transaction one byte over its
+/// limit: the creation returns the stop before its first instruction, `B` returns it once the
+/// creation returned into it, its nonce and its record going with its revert, and `A` resumes and
+/// keeps what it kept.
+#[test]
+fn test_a_creation_counting_nothing_is_stopped_by_its_creators_record() {
+    let x = B.create2(B256::ZERO, keccak256([]));
+    let a = then_call(BytecodeBuilder::default().call(x, U256::from(1)), B).append(STOP).build();
+    let b = BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
+        .append(CREATE2)
+        .append(POP)
+        .append(STOP)
+        .build();
+    let kept = mega_evm::TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE;
+    let limit = kept + WRITE_RECORD_SIZE - 1;
+    let stop =
+        Bytes::from(MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit }.abi_encode());
+    for inspect in [false, true] {
+        let db = funded()
+            .account_code(A, a.clone())
+            .account_balance(A, U256::from(1))
+            .account_code(B, b.clone());
+        let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit);
+        let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits))
+            .with_inspector(Probe::default());
+        Evm::set_inspector_enabled(&mut evm, inspect);
+        let outcome = evm.execute_transaction(call(CALLER, A, U256::ZERO, GAS_LIMIT)).unwrap();
+        assert!(outcome.result.is_success(), "inspect {inspect}: {:?}", outcome.result);
+        assert_eq!(outcome.limit_exceeded, None, "inspect {inspect}: A caught it");
+        assert_eq!(
+            outcome.usage,
+            LimitUsage { data_size: kept, write_records: 2 },
+            "inspect {inspect}: A's transfer alone",
+        );
+        assert!(outcome.state.get(&B).is_none_or(|b| b.info.nonce == 0), "inspect {inspect}");
+        assert_eq!(outcome.state[&x].info.nonce, 0, "inspect {inspect}: nothing created at X");
+        if inspect {
+            let probe = evm.inspector();
+            assert_eq!(
+                probe.creates,
+                vec![(InstructionResult::Revert, stop.clone())],
+                "the creation returns the transaction's stop before its first instruction",
+            );
+            assert!(
+                probe.calls.contains(&(B, InstructionResult::Revert, stop.clone())),
+                "B returns it once the creation returned into it: {:?}",
+                probe.calls,
             );
         }
     }

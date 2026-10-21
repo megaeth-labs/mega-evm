@@ -487,12 +487,21 @@ impl AdditionalLimit {
     /// `counted`, the records and transfer log it made, on that pool ([`draw`](Self::draw)): the
     /// verdict is the stop the frame returns before it runs, or the one its answer gives way to.
     /// `credit` is what the start's caller gets back once the frame returned with its start kept.
+    ///
+    /// A start is held to the transaction's limit whatever it counts, nothing included: a
+    /// creation's creator record lands on the creator unchecked
+    /// ([`count_creator_record`](Self::count_creator_record)), and the creation's start is where
+    /// the transaction first meets it.
     pub(crate) fn count_start(
         &mut self,
         gas: &mut GasTracker,
         counted: &Counted,
         credit: u64,
     ) -> LimitCheck {
+        let check = self.check_transaction(counted);
+        if check.exceeded_limit() {
+            return check;
+        }
         let check = self.draw(gas, counted);
         if check.within_limit() {
             if let Some(start) = self.decided.last_mut() {
