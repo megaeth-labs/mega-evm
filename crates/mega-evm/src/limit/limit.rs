@@ -560,7 +560,6 @@ mod tests {
             start: Some(StartId::default()),
             records,
             transfer_log: false,
-            refused: false,
             verdict: Some(LimitCheck::WithinLimit),
         }
     }
@@ -679,8 +678,7 @@ mod tests {
 
         limit.stage_frame_charge(transfer(2), 2, 0, true);
         limit.push_start(&inner, 1);
-        let refused =
-            StartReport { verdict: None, refused: true, ..report(FrameStartRecords::NONE) };
+        let refused = StartReport { verdict: None, ..report(FrameStartRecords::NONE) };
         limit.attach_start(refused, None);
     }
 

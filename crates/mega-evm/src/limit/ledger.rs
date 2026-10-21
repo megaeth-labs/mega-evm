@@ -194,8 +194,6 @@ pub(crate) struct StartReport {
     pub(crate) records: FrameStartRecords,
     /// Whether the start counted the transfer log revm journaled for it.
     pub(crate) transfer_log: bool,
-    /// Whether revm refused the start's value transfer.
-    pub(crate) refused: bool,
     /// The verdict on the start, held to the limits while its level was open; `None` when nothing
     /// was held: a refused transfer, a creation that failed before its level opened, a start revm
     /// never decided.
@@ -640,9 +638,7 @@ impl Ledger {
         }
         window.counted = true;
         if refused {
-            let report = self.report_mut();
-            report.refused = true;
-            report.verdict = None;
+            self.report_mut().verdict = None;
             return;
         }
         if !window.facts.transfers_value {
