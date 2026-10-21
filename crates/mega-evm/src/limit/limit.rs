@@ -168,9 +168,24 @@ impl AdditionalLimit {
     /// Each tracker internally handles spec-gated behavior (e.g., `ComputeGasTracker`
     /// resets the detained limit only for Rex1+).
     pub fn reset(&mut self) {
+        self.reset_verdict_and_trackers();
+        self.compute_gas.reset();
+    }
+
+    /// Drops the usage of a transaction that did not run to completion.
+    ///
+    /// Unlike [`Self::reset`], which prepares the next transaction and lets the pre-REX1
+    /// detained compute gas limit persist across transactions, this restores the detained limit
+    /// that was in force when the discarded transaction started, so nothing the transaction did
+    /// survives it.
+    pub fn discard(&mut self) {
+        self.reset_verdict_and_trackers();
+        self.compute_gas.discard();
+    }
+
+    fn reset_verdict_and_trackers(&mut self) {
         self.has_exceeded_limit = LimitCheck::WithinLimit;
         self.rescued_gas = 0;
-        self.compute_gas.reset();
         self.state_growth.reset();
         self.data_size.reset();
         self.kv_update.reset();

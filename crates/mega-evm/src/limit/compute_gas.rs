@@ -38,6 +38,11 @@ pub(crate) struct ComputeGasTracker {
     /// The effective compute gas limit, which may be dynamically lowered by gas detention
     /// (volatile data access). Always <= `frame_tracker.tx_limit()`.
     detained_limit: u64,
+    /// `detained_limit` as it stood when the current transaction started, restored by
+    /// [`Self::discard`]. Before REX1 the detained limit persists across transactions, so a
+    /// transaction that is discarded must hand the next one the limit it inherited, not the one
+    /// it lowered.
+    detained_limit_at_tx_start: u64,
     frame_tracker: FrameLimitTracker<()>,
 }
 
@@ -45,6 +50,7 @@ impl ComputeGasTracker {
     pub(crate) fn new(spec: MegaSpecId, tx_limit: u64) -> Self {
         Self {
             detained_limit: tx_limit,
+            detained_limit_at_tx_start: tx_limit,
             frame_tracker: FrameLimitTracker::new(spec, tx_limit),
             rex1_enabled: spec.is_enabled(MegaSpecId::REX1),
             rex4_enabled: spec.is_enabled(MegaSpecId::REX4),
@@ -80,6 +86,17 @@ impl ComputeGasTracker {
             cap
         };
         self.detained_limit = self.detained_limit.min(new_limit);
+    }
+
+    /// Drops the usage of a transaction that did not run to completion and puts the detained
+    /// limit back to what it was when that transaction started.
+    ///
+    /// The `reset` at the start of a transaction lets the detained limit carry over before REX1;
+    /// a discarded transaction must not carry anything over, including a cap it lowered by
+    /// accessing volatile data.
+    pub(crate) fn discard(&mut self) {
+        self.frame_tracker.reset();
+        self.detained_limit = self.detained_limit_at_tx_start;
     }
 
     /// Returns the remaining compute gas of the current call.
@@ -177,6 +194,7 @@ impl TxRuntimeLimit for ComputeGasTracker {
         if self.rex1_enabled {
             self.detained_limit = self.frame_tracker.tx_limit();
         }
+        self.detained_limit_at_tx_start = self.detained_limit;
     }
 
     /// Returns whether the compute gas limit has been exceeded.

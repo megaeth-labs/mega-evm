@@ -758,6 +758,23 @@ where
     pub fn take_pending_commit_error(&mut self) -> Option<BlockExecutionError> {
         self.pending_commit_error.take()
     }
+
+    /// Discards a transaction whose execution unwound with a panic instead of returning, so that
+    /// the next transaction on this executor starts from the state before the panicked one.
+    ///
+    /// The block executor itself has nothing to undo: the block limiter's counters and the
+    /// receipts change only when an outcome is committed, and the depositor pre-read only fills
+    /// the database cache. Everything that needs discarding is inside the EVM, so this forwards to
+    /// [`MegaEvm::discard_tx`](crate::MegaEvm::discard_tx); see there for what is dropped and for
+    /// the embedder's contract. A transaction that returned an error needs no discarding, and
+    /// calling this after one finds nothing to drop.
+    ///
+    /// This covers a panic during execution. A panic during
+    /// [`MegaBlockExecutor::commit_transaction_outcome`] is beyond its reach: the limiter's
+    /// counters and the database may already hold part of the outcome.
+    pub fn discard_transaction(&mut self) {
+        self.evm.discard_tx();
+    }
 }
 
 /// Block-hash accessors that require the concrete revm [`State`] database.

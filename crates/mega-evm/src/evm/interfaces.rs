@@ -186,6 +186,24 @@ where
         let mut h = MegaHandler::<_, _, EthFrame<EthInterpreter>>::new();
         revm::inspector::InspectorHandler::inspect_run(&mut h, self)
     }
+
+    /// Finalizes the journal whether or not the transaction succeeded, as
+    /// [`ExecuteEvm::transact`](revm::ExecuteEvm::transact) does.
+    ///
+    /// The trait's default returns before finalizing when the transaction fails, and the handler's
+    /// `catch_error` does not revert a non-deposit transaction's journal, so a failed inspected
+    /// transaction would leave its writes and loaded accounts in the journal for the next
+    /// transaction to report as its own. Finalizing on both outcomes keeps the inspected path's
+    /// after-error state the same as the plain path's.
+    fn inspect_tx(
+        &mut self,
+        tx: Self::Tx,
+    ) -> Result<ExecResultAndState<Self::ExecutionResult, Self::State>, Self::Error> {
+        let output_or_error = self.inspect_one_tx(tx);
+        let state = revm::ExecuteEvm::finalize(self);
+        let output = output_or_error?;
+        Ok(ExecResultAndState::new(output, state))
+    }
 }
 
 impl<DB, INSP, ExtEnvs: ExternalEnvTypes> revm::InspectCommitEvm for MegaEvm<DB, INSP, ExtEnvs>

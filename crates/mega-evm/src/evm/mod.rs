@@ -60,7 +60,7 @@ use alloy_evm::{
     Database,
 };
 use revm::{
-    context::{BlockEnv, CfgEnv, ContextTr},
+    context::{BlockEnv, CfgEnv, ContextTr, JournalTr, LocalContextTr},
     handler::{EthFrame, EvmTr},
     inspector::NoOpInspector,
     interpreter::interpreter::EthInterpreter,
@@ -369,6 +369,45 @@ where
             compute_gas_used: compute_gas,
             state_growth_used: state_growth,
         })
+    }
+
+    /// Discards the transaction whose execution did not return, restoring the EVM to where it
+    /// stood before that transaction's [`MegaEvm::execute_transaction`] call.
+    ///
+    /// A transaction that fails with an error is already cleaned up: the handler's `catch_error`
+    /// clears the local context, the frame stack and the cached L1 cost, and `transact` (as well
+    /// as this crate's `inspect_tx`) finalizes the journal before returning the error. A panic
+    /// that unwinds out of execution skips all of that and leaves the panicked transaction's state
+    /// writes, logs and loaded accounts in the journal, its frames on the frame stack, its L1 cost
+    /// in the chain context and its `MegaETH` per-transaction state in the context, so the next
+    /// transaction would commit that state as its own. An embedder that catches such a panic
+    /// (with `std::panic::catch_unwind`, which this `no_std` crate cannot do itself) must call
+    /// this before executing another transaction on the same EVM.
+    ///
+    /// Calling this after a transaction that returned an error finds nothing to discard, and
+    /// calling it twice is the same as calling it once. It does not touch the inspector, which the
+    /// embedder owns, nor the database's own caches, which hold what was read from the database
+    /// and what earlier transactions committed.
+    pub fn discard_tx(&mut self) {
+        let ctx = &mut self.inner.ctx;
+        // `finalize` is the whole journal reset `transact` ends every transaction with: it takes
+        // the state map (dropped here, writes and loaded accounts alike), clears the entries, logs,
+        // transient storage and warm sets, and restarts the transaction id. Reverting the entries
+        // first, as revm's own `catch_error` does, would only change a map that is dropped anyway.
+        let _discarded = ctx.journal_mut().finalize();
+        // The L1 cost cached for the panicked transaction would be charged to the next one.
+        ctx.chain_mut().clear_tx_l1_cost();
+        // The shared memory buffer still holds the panicked transaction's expansion, which the
+        // next transaction's first frame would start from.
+        ctx.local_mut().clear();
+        // A database error stashed by a load and never taken by the handler would fail the next
+        // transaction.
+        *ctx.error() = Ok(());
+        ctx.discard_tx();
+        // The stack cursor decides whether a frame init is the transaction's first frame; left on
+        // the panicked transaction's frame, it would make the next transaction's first frame a
+        // child frame.
+        self.inner.frame_stack.clear();
     }
 
     /// Inspect a transaction and return the outcome. The inspector used is the one set up already

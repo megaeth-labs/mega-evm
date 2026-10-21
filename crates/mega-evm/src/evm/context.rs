@@ -694,6 +694,25 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         }
     }
 
+    /// Drops the per-transaction state of a transaction that did not run to completion.
+    ///
+    /// Each piece of state here is normally put back by the code that owns it: the CALL-family
+    /// handlers close the target-resolution scope they open, and [`Self::on_new_tx`] resets the
+    /// trackers at the start of the next transaction. A panic that unwinds out of execution skips
+    /// the handlers' close and leaves the scope open across transactions, where the next
+    /// transaction's account loads would be classified as that CALL's delegate hop; and until the
+    /// next transaction starts, the trackers still report the panicked transaction's usage, and
+    /// before REX1 the compute gas limit it detained would carry over. This puts all of it back to
+    /// what it was when the transaction started. The pending first-frame bytecode read needs no
+    /// reset: every first frame sets it before anything reads it. This is the `MegaETH` half of
+    /// [`MegaEvm::discard_tx`](crate::MegaEvm::discard_tx); the revm half (journal, frame stack,
+    /// cached L1 cost) lives there.
+    pub(crate) fn discard_tx(&mut self) {
+        self.call_target_load_phase = CallTargetLoadPhase::Idle;
+        self.reset_volatile_data_access();
+        self.additional_limit.borrow_mut().discard();
+    }
+
     /// Resets the internal state for a new transaction.
     ///
     /// This method is called when starting a new transaction and resets
