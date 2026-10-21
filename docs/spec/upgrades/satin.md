@@ -1072,7 +1072,7 @@ A node, a stateless validator and a replay tool must agree on everything below, 
   No key names a limit: the limits are the spec's (see [Resource Limits](#10-resource-limits)).
   No key names the `SequencerRegistry`'s roles either: the registry is the one the legacy forks left (see [System Calls and Pre-Block Calls](#18-system-calls-and-pre-block-calls)).
   A key that starts with `satin`, in any ASCII letter case, and is not `satinTime` exactly is refused, so a file written against an earlier version of the format, which named the registry's roles (`satinInitialSystemAddress`, `satinInitialSequencer`, `satinInitialAdmin`, `satinMinRotationDelay`), `satinInitialFromBlock` or the limits, does not load, whether or not it carries `satinTime`.
-  A key given twice is refused only where the reader still sees both copies, as a parser handed the object's text does; a reader that first parses the file into a JSON value, as the reference CLI and a node do, sees only the last copy and reads it.
+  A key given twice is read as its last copy by every reader, whether it is handed the object's text or first parses the file into a JSON value, as the reference CLI and a node do, which keeps the last copy alone.
   `satinTime` is a JSON number up to 2^64 − 1.
   The key format is provisional until a network publishes a genesis file carrying it.
 
