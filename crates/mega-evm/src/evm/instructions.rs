@@ -17,12 +17,17 @@
 //! `SLOAD`, the four calls and `SELFDESTRUCT` — runs in a wrapper that settles the reads its Host
 //! calls made (see the `access` module):
 //!
-//! 1. discard any read observed or refused before the opcode;
-//! 2. keep the frame's gas, when the frame's reads are refused;
-//! 3. run revm's instruction, whose Host calls observe or refuse the reads;
-//! 4. on a refusal, hand the frame back the gas it had before the opcode and revert it with
+//! 1. keep the frame's gas, when the frame's reads are refused;
+//! 2. run revm's instruction as a read, whose Host calls observe or refuse the reads;
+//! 3. on a refusal, hand the frame back the gas it had before the opcode and revert it with
 //!    `VolatileDataAccessDisabled`; otherwise, once the opcode completed, commit the reads, which
 //!    holds the frame's spendable gas to what the compute limit leaves it.
+//!
+//! The Host observes or refuses a load only while a wrapper runs its opcode. `CREATE` and
+//! `CREATE2` are not wrapped: they load their creator's account and the created address's through
+//! the Host, to check the creator's balance and nonce and to price the created account, and those
+//! loads are no volatile reads, neither refused nor marked, whichever of the two accounts is the
+//! block beneficiary's: a value call's check of its caller's balance is no read either.
 //!
 //! An opcode whose charge fails with an out-of-gas halts its frame, and the halt zeroes the gas
 //! the frame had left before the frame returns. The revm fork records that gas first, before
@@ -135,9 +140,10 @@ fn read_volatile<DB: Database, ExtEnvs: ExternalEnvTypes>(
     inner: impl FnOnce(Ctx<'_, DB, ExtEnvs>) -> InstructionExecResult,
 ) -> InstructionExecResult {
     let InstructionContext { interpreter, host } = context;
-    host.detention.discard_stale_reads();
+    host.detention.begin_read();
     let gas = host.detention.is_refusing().then_some(interpreter.gas);
     let result = inner(InstructionContext { interpreter: &mut *interpreter, host: &mut *host });
+    host.detention.end_read();
     if !host.detention.has_reads() {
         return result;
     }

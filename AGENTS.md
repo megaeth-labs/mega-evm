@@ -324,6 +324,7 @@ Detention caps how much a transaction may still compute once it read such data (
   Neither is a transaction under `no_limits()`, which the execution-spec gate's runner installs.
 - **Where a read is marked.**
   Where the Host loads the value (`evm/host.rs`), and committed by the opcode's wrapper once the opcode completed (`evm/instructions.rs`), as a write record is; a load that fails, and a read whose opcode then fails, mark nothing.
+  The Host refuses and marks a load only while a wrapper runs its opcode (`Detention::begin_read`): `CREATE`'s and `CREATE2`'s loads of their creator and created address, which revm makes through the Host, and an inspector's loads are no reads, neither refused nor marked, as a value call's check of its caller's balance is none.
 - **The cap.**
   Compute is the regular gas the transaction spends on what it runs, read off `Gas`: a frame's limit less what it has left — its withheld part included, so withheld gas is never spent — less the state and history gas that spilled onto its regular gas; what a halting frame burns is not compute either.
   The transaction's compute is the running frame's regular gas spent plus every suspended caller's, each less the gas it forwarded its child, plus the stipends of the value calls that returned, less what halts burned: every regular charge an instruction makes, whoever funds it, the burns taken out.

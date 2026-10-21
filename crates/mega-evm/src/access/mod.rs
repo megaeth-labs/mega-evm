@@ -40,6 +40,12 @@
 //! the Host only marks the read, and the opcode's wrapper commits it once the opcode completed, as
 //! a write record is counted only once its opcode completed.
 //!
+//! A load is a read only when one of those opcodes makes it, inside its wrapper. `CREATE` and
+//! `CREATE2` load their creator's account and the created address's through the same Host load,
+//! to check the creator's balance and nonce and to price the created account; those loads are the
+//! creation's own checks, as a value call's check of its caller's balance is the call's, and are
+//! neither marked nor refused, whichever of the two accounts is the beneficiary's.
+//!
 //! # The cap
 //!
 //! Compute is the regular gas the transaction spends on what it runs, read off revm's `Gas`: state

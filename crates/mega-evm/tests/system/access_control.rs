@@ -7,7 +7,7 @@
 //! The legacy engine's rows, on Satin's switch. The beneficiary is the block's, `Address::ZERO` in
 //! these tests.
 
-use alloy_primitives::{address, Address, Bytes, U256};
+use alloy_primitives::{address, keccak256, Address, Bytes, B256, U256};
 use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
     constants::TX_GAS_LIMIT_CAP,
@@ -19,7 +19,7 @@ use mega_evm::{
     volatile_data_access_disabled_revert_data, ExternalEnvs, MegaContext, MegaEvm, MegaSpecId,
     MegaTransaction, TestExternalEnvs, VolatileDataAccess,
 };
-use revm::bytecode::opcode::*;
+use revm::{bytecode::opcode::*, context::BlockEnv};
 
 use crate::common::{block, call_tx_with_gas, steer, system_db, Run, GAS_LIMIT};
 
@@ -40,10 +40,15 @@ const DISABLED_BY_PARENT: [u8; 4] = IMegaAccessControl::DisabledByParent::SELECT
 
 /// Runs `tx` over `db`, with an oracle service that holds slot 0 of the Oracle.
 fn execute(db: MemoryDatabase, tx: MegaTransaction) -> Run {
+    execute_in(db, tx, block())
+}
+
+/// [`execute`] in `block`.
+fn execute_in(db: MemoryDatabase, tx: MegaTransaction, block: BlockEnv) -> Run {
     let envs = TestExternalEnvs::<core::convert::Infallible>::new()
         .with_oracle_storage(U256::ZERO, U256::from(0x1234));
     let ctx = MegaContext::new_with_external_envs(db, MegaSpecId::SATIN, ExternalEnvs::from(envs))
-        .with_block(block())
+        .with_block(block)
         .with_chain(zero_fee_l1_block_info());
     let mut evm = MegaEvm::new(ctx);
     let outcome = evm.execute_transaction(tx).expect("the transaction is valid");
@@ -327,6 +332,126 @@ fn test_selfdestruct_beneficiary_not_restricted_without_disable() {
         log_status(call(BytecodeBuilder::default(), CALL, CHILD, 50_000_000)).stop().build();
     let run = run(&[(PARENT, parent), (CHILD, reads_account(SELFDESTRUCT, BENEFICIARY))]);
     assert!(run.logged_status(0));
+}
+
+/* ---------- 4b. a creation's own loads ---------- */
+
+/// Appends a creation through `scheme` of empty init code carrying `value`, salt zero for a
+/// `CREATE2`, leaving the created address on the stack.
+fn create_empty(code: BytecodeBuilder, scheme: u8, value: u8) -> BytecodeBuilder {
+    let code = if scheme == CREATE2 { code.append(PUSH0) } else { code };
+    code.append_many([PUSH0, PUSH0]).push_number(value).append(scheme)
+}
+
+/// Where a creation of empty init code by `creator`, whose nonce is `nonce`, lands through
+/// `scheme`.
+fn created_address(creator: Address, scheme: u8, nonce: u64) -> Address {
+    if scheme == CREATE2 {
+        creator.create2(B256::ZERO, keccak256([]))
+    } else {
+        creator.create(nonce)
+    }
+}
+
+/// Asserts that the account at `address` was created, holding `balance`.
+fn assert_created(run: &Run, address: Address, balance: u64, case: &str) {
+    let account = run.outcome.state.get(&address).unwrap_or_else(|| panic!("{case}: not created"));
+    assert_eq!(account.info.nonce, 1, "{case}: a created account's nonce");
+    assert_eq!(account.info.balance, U256::from(balance), "{case}");
+}
+
+/// The status of the call the parent logged last, after the logs its callee left.
+fn last_logged_status(run: &Run) -> bool {
+    run.logged_status(run.outcome.result.logs().len() - 1)
+}
+
+/// A frame running as the beneficiary that switched access off creates: a `CREATE` carrying value
+/// and a `CREATE2` load the creator's account, which is the beneficiary's, for its balance and
+/// nonce, and neither load is a volatile read, so neither is refused. The beneficiary's frame
+/// succeeds and both accounts are created, the first holding the value.
+#[test]
+fn test_a_beneficiary_frame_with_access_off_creates() {
+    let beneficiary =
+        create_empty(create_empty(disable(BytecodeBuilder::default()), CREATE, 1), CREATE2, 0);
+    let parent =
+        log_status(call(BytecodeBuilder::default(), CALL, BENEFICIARY, 50_000_000)).stop().build();
+    let db = system_db()
+        .account_code(PARENT, parent)
+        .account_code(BENEFICIARY, beneficiary.stop().build())
+        .account_balance(BENEFICIARY, U256::from(10));
+    let run = execute(db, call_tx_with_gas(PARENT, [], U256::ZERO, GAS_LIMIT));
+    assert!(last_logged_status(&run), "the beneficiary's frame succeeded");
+    assert_created(&run, created_address(BENEFICIARY, CREATE, 0), 1, "CREATE");
+    assert_created(&run, created_address(BENEFICIARY, CREATE2, 1), 0, "CREATE2");
+    assert_eq!(run.accessed, VolatileDataAccess::BENEFICIARY_BALANCE, "the parent's call of it");
+}
+
+/// A value `CALL` from a frame running as the beneficiary that switched access off moves the
+/// value: the check of the caller's balance is no volatile read, as a creation's is not.
+#[test]
+fn test_a_value_call_from_a_beneficiary_frame_with_access_off_moves_the_value() {
+    let beneficiary = disable(BytecodeBuilder::default())
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
+        .push_number(1_u8)
+        .push_address(SIBLING)
+        .push_number(100_000_u32)
+        .append_many([CALL, STOP]);
+    let parent =
+        log_status(call(BytecodeBuilder::default(), CALL, BENEFICIARY, 50_000_000)).stop().build();
+    let db = system_db()
+        .account_code(PARENT, parent)
+        .account_code(BENEFICIARY, beneficiary.build())
+        .account_balance(BENEFICIARY, U256::from(10));
+    let run = execute(db, call_tx_with_gas(PARENT, [], U256::ZERO, GAS_LIMIT));
+    assert!(last_logged_status(&run), "the beneficiary's frame succeeded");
+    assert_eq!(run.outcome.state[&SIBLING].info.balance, U256::ONE, "the value moved");
+}
+
+/// A frame running as the beneficiary that switched access off is still refused its explicit reads
+/// of its own account: `SELFBALANCE`, and `BALANCE` and `EXTCODESIZE` of `ADDRESS`.
+#[test]
+fn test_a_beneficiary_frame_with_access_off_is_refused_its_own_account() {
+    for (name, read) in [
+        ("SELFBALANCE", &[SELFBALANCE][..]),
+        ("BALANCE", &[ADDRESS, BALANCE][..]),
+        ("EXTCODESIZE", &[ADDRESS, EXTCODESIZE][..]),
+    ] {
+        let beneficiary = disable(BytecodeBuilder::default())
+            .append_many(read.iter().copied())
+            .append_many([POP, STOP])
+            .build();
+        let parent = call_and_return_data(BytecodeBuilder::default(), BENEFICIARY);
+        let run = run(&[(PARENT, parent), (BENEFICIARY, beneficiary)]);
+        assert_eq!(refused_type(&run.output()), VolatileDataAccessType::Beneficiary, "{name}");
+    }
+}
+
+/// A `CREATE` or `CREATE2` whose created address is the block beneficiary loads that address's
+/// account to decide the created account's state gas, and the load is no volatile read: it marks
+/// nothing and sets no compute limit with access on, and is not refused with access off. The
+/// creating frame then runs a wrapped read of non-volatile data, `SLOAD` of its own slot, which
+/// commits nothing either.
+#[test]
+fn test_a_creation_at_the_beneficiary_is_no_read() {
+    const NONCE: u64 = 1;
+    for scheme in [CREATE, CREATE2] {
+        for switched_off in [false, true] {
+            let case = format!("{scheme:#04x}, access off: {switched_off}");
+            let code = BytecodeBuilder::default();
+            let code = if switched_off { disable(code) } else { code };
+            let parent = log_status(create_empty(code, scheme, 0).append_many([PUSH0, SLOAD, POP]))
+                .stop()
+                .build();
+            let created = created_address(PARENT, scheme, NONCE);
+            let db = system_db().account_code(PARENT, parent).account_nonce(PARENT, NONCE);
+            let block = BlockEnv { beneficiary: created, ..block() };
+            let run = execute_in(db, call_tx_with_gas(PARENT, [], U256::ZERO, GAS_LIMIT), block);
+            assert!(run.outcome.result.is_success(), "{case}: {:?}", run.outcome.result);
+            assert_created(&run, created, 0, &case);
+            assert_eq!(run.accessed, VolatileDataAccess::empty(), "{case}");
+            assert_eq!(run.limit, None, "{case}");
+        }
+    }
 }
 
 /* ---------- 5. a refused read reads nothing ---------- */

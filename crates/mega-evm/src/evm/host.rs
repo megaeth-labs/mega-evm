@@ -192,7 +192,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
         self.inner.sload_skip_cold_load(address, key, skip_cold_load)
     }
 
-    /// Loads the account, marking a read of the block beneficiary's.
+    /// Loads the account, marking a read of the block beneficiary's, or refusing it in a frame
+    /// whose volatile-data access is off, when the load is a read: when an opcode's read wrapper
+    /// makes it. `CREATE`'s and `CREATE2`'s loads of their creator and of the created address are
+    /// no reads (see [`Detention`](crate::Detention)).
     #[inline]
     fn load_account_info_skip_cold_load(
         &mut self,

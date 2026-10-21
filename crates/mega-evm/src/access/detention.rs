@@ -170,12 +170,24 @@ impl FrameFigures {
 /// `VolatileDataAccessDisabled`. The switch is scoped to the frame that turned it off and the
 /// frames below it, and turns back on when that frame returns. `MegaAccessControl`'s interceptor
 /// steers it for the frame that calls the contract.
+///
+/// # What is a read
+///
+/// The Host refuses and marks a load only while the wrapper of an opcode that reads volatile data
+/// runs ([`begin_read`](Self::begin_read)). A load made anywhere else is no volatile read: it is
+/// neither refused nor marked. That is `CREATE`'s and `CREATE2`'s loads of their creator and of
+/// the created address, which revm makes through the Host to check the creator's balance and
+/// nonce and to price the created account — a value call's check of its caller's balance is no
+/// read either — and an inspector's load through the Host.
 #[derive(Clone, Debug, Default)]
 pub struct Detention {
     /// What the Host loaded for the running opcode, waiting for its wrapper.
     observed: Cell<VolatileDataAccess>,
     /// What the Host refused to load for the running opcode, waiting for its wrapper.
     refused: Cell<VolatileDataAccess>,
+    /// Whether the wrapper of an opcode that reads volatile data runs it: the Host refuses and
+    /// marks a load only then.
+    reading: bool,
     /// Whether the transaction's reads are held to a cap. A system-originated transaction's are
     /// not, and neither are a transaction's whose caps are both unlimited.
     detains: bool,
@@ -213,6 +225,7 @@ impl Detention {
     pub(crate) fn reset(&mut self, detains: bool, block_env_cap: u64, oracle_cap: u64) {
         self.observed.set(VolatileDataAccess::empty());
         self.refused.set(VolatileDataAccess::empty());
+        self.reading = false;
         self.detains = detains && (block_env_cap != u64::MAX || oracle_cap != u64::MAX);
         self.block_env_cap = block_env_cap;
         self.oracle_cap = oracle_cap;
@@ -263,23 +276,23 @@ impl Detention {
 
     /* The Host */
 
-    /// Whether the Host refuses a load of `access`: the running frame is in a subtree where
-    /// volatile-data access is switched off. A refusal is recorded for the running opcode's
-    /// wrapper, which reverts the frame.
+    /// Whether the Host refuses a load of `access`: a read wrapper's opcode makes it, in a frame
+    /// in a subtree where volatile-data access is switched off. A refusal is recorded for the
+    /// wrapper, which reverts the frame. A load outside a wrapper is never refused.
     #[inline]
     pub(crate) fn refuses(&self, access: VolatileDataAccess) -> bool {
-        if !self.refusing {
+        if !(self.refusing && self.reading) {
             return false;
         }
         self.refused.set(access);
         true
     }
 
-    /// Records that the Host loaded `access` for the running opcode. Its wrapper commits the read
-    /// once the opcode completed.
+    /// Records that the Host loaded `access` for the running read wrapper's opcode. The wrapper
+    /// commits the read once the opcode completed. A load outside a wrapper marks nothing.
     #[inline]
     pub(crate) fn observe(&self, access: VolatileDataAccess) {
-        if self.detains {
+        if self.detains && self.reading {
             self.observed.set(self.observed.get() | access);
         }
     }
@@ -293,12 +306,21 @@ impl Detention {
         self.refusing
     }
 
-    /// Forgets what the Host observed or refused outside an opcode's wrapper, so it is not
-    /// committed for the wrong opcode.
+    /// A read wrapper starts its opcode: the Host's loads are reads until [`end_read`]. Nothing is
+    /// observed or refused before, since only a wrapper's opcode observes or refuses, and its
+    /// wrapper takes what it did.
+    ///
+    /// [`end_read`]: Self::end_read
     #[inline]
-    pub(crate) fn discard_stale_reads(&self) {
-        self.observed.set(VolatileDataAccess::empty());
-        self.refused.set(VolatileDataAccess::empty());
+    pub(crate) fn begin_read(&mut self) {
+        debug_assert!(!self.has_reads(), "a read left over from before the opcode");
+        self.reading = true;
+    }
+
+    /// The read wrapper's opcode returned: the Host's loads are no reads again.
+    #[inline]
+    pub(crate) const fn end_read(&mut self) {
+        self.reading = false;
     }
 
     /// Whether the Host observed or refused anything for the running opcode.
@@ -1236,8 +1258,10 @@ mod tests {
         detention.disable_access(2);
         assert!(detention.is_access_disabled(1), "a deeper frame keeps the shallower switch");
         assert!(!detention.enable_access(2), "a frame below cannot switch it back on");
+        detention.begin_read();
         assert!(detention.refuses(VolatileDataAccess::BLOCK_NUMBER));
         detention.name_refusal(VolatileDataAccess::BLOCK_HASH);
+        detention.end_read();
         assert_eq!(detention.take_refused(), Some(VolatileDataAccess::BLOCK_HASH));
         detention.name_refusal(VolatileDataAccess::BLOCK_HASH);
         assert_eq!(detention.take_refused(), None, "nothing refused, nothing named");
@@ -1249,10 +1273,42 @@ mod tests {
 
         detention.disable_access(0);
         detention.on_frame_run(&mut frame, 0);
+        detention.begin_read();
         assert!(detention.refuses(VolatileDataAccess::TIMESTAMP));
+        detention.end_read();
+        assert_eq!(detention.take_refused(), Some(VolatileDataAccess::TIMESTAMP));
         assert!(detention.enable_access(0), "the frame that switched it off switches it on");
         detention.on_frame_run(&mut frame, 0);
+        detention.begin_read();
         assert!(!detention.refuses(VolatileDataAccess::TIMESTAMP));
+        detention.end_read();
+    }
+
+    /// The Host refuses and marks a load only while a read wrapper runs its opcode: a load outside
+    /// one — a creation's of its creator or created address, an inspector's — is neither refused
+    /// nor marked, whether the frame's access is on or off.
+    #[test]
+    fn test_only_a_read_wrappers_load_is_refused_or_marked() {
+        let beneficiary = VolatileDataAccess::BENEFICIARY_BALANCE;
+        let mut detention = detaining();
+        let mut frame = gas(1_000_000, 0);
+        detention.on_frame_run(&mut frame, 0);
+        detention.observe(beneficiary);
+        assert!(!detention.has_reads(), "a load outside a read marks nothing");
+        detention.begin_read();
+        detention.observe(beneficiary);
+        detention.end_read();
+        assert_eq!(detention.take_observed(), beneficiary);
+
+        detention.disable_access(0);
+        detention.on_frame_run(&mut frame, 0);
+        assert!(detention.is_refusing());
+        assert!(!detention.refuses(beneficiary), "a load outside a read is not refused");
+        assert!(!detention.has_reads());
+        detention.begin_read();
+        assert!(detention.refuses(beneficiary));
+        detention.end_read();
+        assert_eq!(detention.take_refused(), Some(beneficiary));
     }
 
     /// A refusal's revert data decodes back to the kind it names, for every kind the engine
