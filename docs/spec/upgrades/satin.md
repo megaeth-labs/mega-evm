@@ -1074,6 +1074,7 @@ A node, a stateless validator and a replay tool must agree on everything below, 
   A key that starts with `satin`, in any ASCII letter case, and is not `satinTime` exactly is refused, so a file written against an earlier version of the format, which named the registry's roles (`satinInitialSystemAddress`, `satinInitialSequencer`, `satinInitialAdmin`, `satinMinRotationDelay`), `satinInitialFromBlock` or the limits, does not load, whether or not it carries `satinTime`.
   A key given twice is read as its last copy by every reader, whether it is handed the object's text or first parses the file into a JSON value, as the reference CLI and a node do, which keeps the last copy alone.
   `satinTime` is a JSON number up to 2^64 − 1.
+  It may also be given as the object `{"$serde_json::private::Number": "<digits>"}`, read as the number its decimal digits write, with the same range: that is the form `serde_json` hands a number over in when its `arbitrary_precision` feature is on, and a reader cannot tell it from the same object written in the file.
   The key format is provisional until a network publishes a genesis file carrying it.
 
   The Satin key does not time the forks Satin runs on: Optimism Karst and the Ethereum forks it includes, Osaka among them, are timed by the configuration's own keys for them, and a node must check their timing against `satinTime` both ways when it loads the configuration.
