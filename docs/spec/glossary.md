@@ -85,7 +85,7 @@ _(Satin, unstable)_ The [EIP-8037](https://eips.ethereum.org/EIPS/eip-8037) stat
 
 ## Write record
 
-_(Satin, unstable)_ One account or storage write a transaction keeps, 40 bytes of data size and of [history gas](#history-gas).
+_(Satin, unstable)_ One account or storage write a transaction keeps, 40 bytes of data size and of [history gas](#history-gas): an account's record exists while the account's nonce, balance or code differs from what the transaction loaded, a slot's while its value differs from its original value in the transaction.
 The KV-update count is the number of write records.
 
 ## History allowance
