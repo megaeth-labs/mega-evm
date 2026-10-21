@@ -146,9 +146,24 @@ impl Site {
         }
     }
 
-    /// The bytes the move counts on its frame's lane: its records and its transfer log.
+    /// The bytes the move counts: its records and its transfer log.
     const fn bytes(self) -> u64 {
         self.records() * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE
+    }
+
+    /// The bytes of the move the creating frame keeps below the moving frame's lane: a creation's
+    /// creator nonce record, counted on the creator before the creation's budget is taken.
+    const fn below_the_frame(self) -> u64 {
+        match self {
+            Self::Create | Self::Create2 => WRITE_RECORD_SIZE,
+            _ => 0,
+        }
+    }
+
+    /// The bytes the move counts on the moving frame's own lane: its records there and its
+    /// transfer log.
+    const fn frame_bytes(self) -> u64 {
+        self.bytes() - self.below_the_frame()
     }
 
     /// What a stop at the move leaves counted beside the body: the nonce record a creation
@@ -295,6 +310,24 @@ fn cap_for(depth: u32, bytes: u64) -> u64 {
     cap
 }
 
+/// The budget of `site`'s moving frame under a frame cap of `cap`, when no frame above it has
+/// kept anything but what the move itself puts below the frame: a creation's creator nonce record,
+/// which the creator keeps before the creation's budget is taken from what it has left.
+fn frame_budget(site: Site, cap: u64) -> u64 {
+    match site.depth() {
+        0 => cap,
+        depth => share(budget(depth - 1, cap).saturating_sub(site.below_the_frame())),
+    }
+}
+
+/// The smallest frame cap under which `site`'s moving frame has exactly `bytes` of budget.
+fn cap_for_site(site: Site, bytes: u64) -> u64 {
+    let cap = (bytes..).find(|cap| frame_budget(site, *cap) >= bytes).unwrap();
+    assert_eq!(frame_budget(site, cap), bytes, "a cap that gives exactly the bytes");
+    assert_eq!(frame_budget(site, cap - 1), bytes - 1, "and one byte less under one less");
+    cap
+}
+
 /// A deposit from [`DEPOSITOR`] of `value`, with `mint` credited to it before any frame.
 fn deposit(kind: TxKind, mint: u128, value: u64) -> MegaTransaction {
     let mut tx = OpTx(op_transaction(TxEnv {
@@ -419,18 +452,20 @@ fn test_each_site_counts_its_transfer_log() {
     }
 }
 
-/// A frame budget holds the move at exactly its bytes, and one byte short of them stops the frame
-/// that moves the value, which keeps nothing of the move, frame-locally: the caller resumes — the
-/// relay and the actor return the stop as their output — and the transaction reports no stop. The
-/// transaction's own frame has no caller, so its stop reverts the transaction, and the outcome
-/// names it, the crossing that produced that frame's result.
+/// A frame budget holds the move at exactly the bytes it counts on the moving frame's lane, and
+/// one byte short of them stops the frame that moves the value, which keeps nothing of the move,
+/// frame-locally: the caller resumes — the relay and the actor return the stop as their output —
+/// and the transaction reports no stop. The transaction's own frame has no caller, so its stop
+/// reverts the transaction, and the outcome names it, the crossing that produced that frame's
+/// result. A creation's creator nonce record is below the creation's lane, on the creator, which
+/// keeps it before the creation's budget is taken.
 ///
 /// A `LOG3` of one word where the transfer log is, after the same bytes of records, stops the
 /// same frame at the same budget with the same revert.
 #[test]
 fn test_each_site_stops_one_byte_short_of_its_frame_budget() {
     for site in Site::ALL {
-        let cap = cap_for(site.depth(), site.bytes());
+        let cap = cap_for_site(site, site.frame_bytes());
         for gas_limit in GAS_LIMITS {
             for variant in [Variant::Plain, Variant::Twin] {
                 let case = format!("{site:?} {variant:?} at {gas_limit}");
@@ -448,8 +483,8 @@ fn test_each_site_stops_one_byte_short_of_its_frame_budget() {
                 let (over, body) = run(cap - 1);
                 let own_frames = (site.depth() == 0).then_some(LimitCheck::ExceedsLimit {
                     kind: LimitKind::DataSize,
-                    limit: site.bytes() - 1,
-                    used: site.bytes(),
+                    limit: site.frame_bytes() - 1,
+                    used: site.frame_bytes(),
                     frame_local: true,
                 });
                 assert_eq!(
@@ -464,7 +499,7 @@ fn test_each_site_stops_one_byte_short_of_its_frame_budget() {
                 );
                 let stop = MegaLimitExceeded {
                     kind: LimitKind::DataSize.as_u8(),
-                    limit: site.bytes() - 1,
+                    limit: site.frame_bytes() - 1,
                 };
                 match variant {
                     Variant::Plain => assert_stopped_at_the_move(&case, site, &over, body, stop),

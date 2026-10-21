@@ -34,9 +34,9 @@
 //! - the records of the applied EIP-7702 authorities, inside the pre-execution level;
 //! - a frame start's records and its transfer log, inside the start window, at the two writes revm
 //!   makes for the start: a call's value transfer, and a creation's account checkpoint. A
-//!   creation's creator nonce record is counted before the creation's level opens, so the
-//!   creation's failure leaves it with the creator, and the creation's budget and usage are
-//!   measured from before it;
+//!   creation's creator nonce record is the creating frame's: counted on its level before the
+//!   creation's budget is taken from what it has left, so the creation's failure leaves it with the
+//!   creator, and the creator is held to its own budget with it;
 //! - a completed write's record, on the running frame's level, fed by the Host's completed-write
 //!   hook;
 //! - deployed code, on the creation's level before revm commits it.
@@ -102,9 +102,6 @@ struct FrameLevel {
     depth: usize,
     /// The most data-size bytes the frame may keep.
     budget: u64,
-    /// Whether the frame's start counted its creator's nonce record, right before its level
-    /// opened: the frame's usage is measured from before it.
-    creator_record: bool,
     /// Whether the frame is returning, so revm may close its level.
     returning: bool,
 }
@@ -215,10 +212,10 @@ pub(crate) struct Mark {
     own_start: Option<StartId>,
 }
 
-/// The facts of a creation's start, taken before anything of it is counted.
+/// The facts of a creation's start, taken as its creator's nonce record is counted.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct CreationStart {
-    /// The creation's budget, from what its creator had left before its nonce record.
+    /// The creation's budget, from what its creator has left after its nonce record.
     budget: u64,
     /// Whether the creator's nonce record was counted.
     creator_record: bool,
@@ -339,17 +336,12 @@ impl Ledger {
     }
 
     /// What `frame` keeps so far, the children it kept included: what was counted since its level
-    /// opened, and its creator's nonce record, counted right before.
+    /// opened.
     fn frame_usage(&self, frame: &FrameLevel) -> LimitUsage {
         let at_open = &self.levels[frame.level].at_open;
-        let base = if frame.creator_record {
-            at_open.used.saturating_sub(WRITE_RECORD)
-        } else {
-            at_open.used
-        };
         self.counts
             .used
-            .saturating_sub(base)
+            .saturating_sub(at_open.used)
             .saturating_sub(self.counts.refund.saturating_sub(at_open.refund))
     }
 
@@ -575,15 +567,9 @@ impl Ledger {
         });
     }
 
-    /// Opens the frame level of the window's start at `opened_at`, under `budget`, its usage
-    /// measured from before its creator's nonce record when the start counted one
-    /// (`creator_record`): the frame the window's start builds.
-    fn open_frame_level(
-        &mut self,
-        opened_at: JournalCheckpoint,
-        budget: u64,
-        creator_record: bool,
-    ) {
+    /// Opens the frame level of the window's start at `opened_at`, under `budget`: the frame the
+    /// window's start builds.
+    fn open_frame_level(&mut self, opened_at: JournalCheckpoint, budget: u64) {
         let Some(window) = &mut self.window else {
             unreachable!("a frame level opens inside its start's window")
         };
@@ -595,7 +581,6 @@ impl Ledger {
             start,
             depth,
             budget,
-            creator_record,
             returning: false,
         });
     }
@@ -611,7 +596,7 @@ impl Ledger {
             // A creation's frame level is the one its account checkpoint opens.
             return self.open_level(opened_at, false);
         }
-        self.open_frame_level(opened_at, self.child_budget(), false);
+        self.open_frame_level(opened_at, self.child_budget());
         // A start that moves value is held once its transfer is counted (`on_transfer`); any
         // other has nothing of its own to count, and is held now.
         if !window.facts.transfers_value {
@@ -650,11 +635,14 @@ impl Ledger {
     }
 
     /// revm is about to open a creation's account checkpoint for the start of the window, having
-    /// bumped its creator's nonce: takes the creation's budget and base, then counts the creator's
-    /// nonce record when the bump changed an account the transaction had not changed
-    /// (`creator_unchanged`), before anything of the creation. The transaction's own creation
-    /// writes its sender's nonce, which the body counts. `None` outside a creation's start
-    /// window.
+    /// bumped its creator's nonce: counts the creator's nonce record on the creating frame's level
+    /// when the bump changed an account the transaction had not changed (`creator_unchanged`),
+    /// then takes the creation's budget from what the creator has left. The transaction's own
+    /// creation writes its sender's nonce, which the body counts. `None` outside a creation's
+    /// start window.
+    ///
+    /// The record is the creator's to keep within its budget, not the creation's: it lands on the
+    /// creator unchecked, and the creator is held to its limits with it as the creation returns.
     pub(crate) fn before_creation(&mut self, creator_unchanged: bool) -> Option<CreationStart> {
         let window = self.window.as_mut()?;
         if window.counted || !window.facts.creation {
@@ -662,18 +650,18 @@ impl Ledger {
         }
         window.counted = true;
         let depth = window.facts.depth;
-        let budget = self.child_budget();
         let creator_record = depth > 0 && creator_unchanged;
         if creator_record {
             self.counts.used = self.counts.used.saturating_add(WRITE_RECORD);
         }
+        let budget = self.child_budget();
         Some(CreationStart { budget, creator_record, depth })
     }
 
     /// revm opened (`Some`) or failed to open (`None`) the account checkpoint of a creation, and
     /// journaled a transfer log or not (`logged`): opens the creation's frame level, counts the
-    /// created account and the log on it, then holds the start to the limits. The creation's usage
-    /// includes its creator's nonce record; its revert keeps it.
+    /// created account and the log on it, then holds the start to the limits. The creator's nonce
+    /// record is below the creation's level; its revert keeps it.
     ///
     /// A checkpoint opened outside a creation's start window opens a rollback level.
     pub(crate) fn after_creation(
@@ -691,7 +679,7 @@ impl Ledger {
         self.report_mut().records.creator = start.creator_record;
         let Some(opened_at) = opened else { return };
         debug_assert!(start.depth == self.window.map_or(start.depth, |window| window.facts.depth));
-        self.open_frame_level(opened_at, start.budget, start.creator_record);
+        self.open_frame_level(opened_at, start.budget);
         self.counts.used = self.counts.used.saturating_add(with_transfer_log(WRITE_RECORD, logged));
         let verdict = self.check();
         let report = self.report_mut();
@@ -793,9 +781,8 @@ impl Ledger {
     }
 
     /// What a frame revm just built is taken back to when it is rewritten into a failure, with its
-    /// start: the counts its level opened with — after a creation's creator record. Never where
-    /// the frame's usage is measured from, which for a creation is before the creator's record.
-    /// The frame's side keeps it past the level's commit, for the mark the rewrite reverts to
+    /// start: the counts its level opened with, after a creation's creator record. The frame's
+    /// side keeps it past the level's commit, for the mark the rewrite reverts to
     /// ([`StartSide::built_mark`]).
     pub(crate) fn frame_start_rollback(&self) -> Option<(StartId, Rollback)> {
         let level = self.levels.last()?;

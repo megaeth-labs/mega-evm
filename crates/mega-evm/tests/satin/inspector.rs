@@ -241,11 +241,11 @@ fn test_create_end_address_rewrite_reaches_the_caller_not_the_code() {
 /// A creation its own frame budget stops, revived by an inspector: the stop is the creation's alone
 /// and no stop of the transaction, so the creation failed as any failed creation does and its
 /// revival settles as the failure — the transaction is not refused. Under a data-size limit of the
-/// body and 122 bytes, the creator may keep 122 and the creation 98% of them, 119: the creation's
-/// start makes two records, 80 bytes, and the write in its init code is a third, 40 more, over its
-/// budget, which the transaction's limit still holds. Under the body and 160 bytes the budget holds
-/// it, and so does the transaction's limit once the creator stores the address, a fourth record:
-/// the same creation succeeds.
+/// body and 121 bytes, the creator keeps its nonce record, 40, and the creation 98% of the 81
+/// left, 79: the creation's start makes the created account's record, 40 bytes, and the write in
+/// its init code a second, 40 more, over its budget, which the transaction's limit still holds.
+/// Under the body and 160 bytes the budget holds it, and so does the transaction's limit once the
+/// creator stores the address, a fourth record: the same creation succeeds.
 #[test]
 fn test_a_creation_its_frame_budget_stops_may_be_revived() {
     // A write of 1 to slot 1, short enough for `create_and_store_address`.
@@ -272,12 +272,12 @@ fn test_a_creation_its_frame_budget_stops_may_be_revived() {
 
     // Without the inspector the creation fails alone: its creator stores no address and succeeds,
     // and the transaction is not stopped.
-    let stopped = plain(122);
+    let stopped = plain(121);
     assert!(stopped.result.is_success(), "{:?}", stopped.result);
     assert_eq!(stopped.limit_exceeded, None, "a frame budget below is no stop");
     assert!(!created(&stopped), "the creation failed");
 
-    let limits = under(122);
+    let limits = under(121);
     let revived = MegaEvm::new(context(db()).with_tx_runtime_limits(limits))
         .with_inspector(Rewriter { create_succeeds: true, ..Default::default() })
         .execute_transaction(call(CALLER, A, U256::ZERO, gas_limit()))

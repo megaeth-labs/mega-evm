@@ -123,8 +123,10 @@ fn test_a_deployment_crossing_its_data_size_budget_reverts_alone() {
             gas_limit,
             EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(1_000),
         );
-        // The call's own lane gets the frame cap, and its creation 98% of that.
-        assert_eq!(creation_stop(&outcome), MegaLimitExceeded { kind: 0, limit: 980 });
+        // The call's own lane gets the frame cap, which the signer's nonce record, counted on the
+        // call before the creation's budget is taken, takes 40 of; the creation gets 98% of the
+        // 960 left. Before the record moved to the call the creation got 98% of the cap, 980.
+        assert_eq!(creation_stop(&outcome), MegaLimitExceeded { kind: 0, limit: 940 });
         assert_eq!(outcome.limit_exceeded, None);
         assert_eq!(nonce(&outcome, deployment.signer), 1);
         assert_eq!(outcome.usage.write_records, 1, "the signer's nonce record");
@@ -200,8 +202,10 @@ fn test_a_failure_from_nonce_one_leaves_the_call_within_its_budget() {
             gas_limit,
             EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(39),
         );
-        // The call's lane gets the frame cap, and its creation 98% of that.
-        assert_eq!(creation_stop(&outcome), MegaLimitExceeded { kind: 0, limit: 38 });
+        // The call's lane gets the frame cap, which the signer's nonce record, counted on the
+        // call before the creation's budget is taken, uses up: the creation gets 98% of nothing.
+        // Before the record moved to the call the creation got 98% of the cap, 38.
+        assert_eq!(creation_stop(&outcome), MegaLimitExceeded { kind: 0, limit: 0 });
         assert_eq!(outcome.limit_exceeded, None);
         assert_eq!(nonce(&outcome, deployment.signer), 1, "at {gas_limit}");
         assert_eq!(outcome.usage.write_records, 0, "at {gas_limit}");

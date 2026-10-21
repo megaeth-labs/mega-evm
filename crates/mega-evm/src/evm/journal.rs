@@ -833,18 +833,23 @@ mod tests {
         journal.checkpoint_revert(tool);
     }
 
-    /// A creation's budget and usage are measured from before its creator's nonce record, and its
-    /// level opens after it: with `R` bytes left to an unchanged creator, the creation gets
-    /// `R − ⌈R / 50⌉` and starts with the created account's record and the creator's, 80 bytes.
-    /// At 81 bytes that is a budget of 79, which the start crosses; at 100, a budget of 98, which
-    /// leaves the creation 18 bytes. An endowment adds its transfer log to the start.
+    /// A creation's creator nonce record is the creating frame's, counted on its level before the
+    /// creation's budget is taken from what it has left: with `R` bytes left to an unchanged
+    /// creator, the record leaves it `R − 40`, the creation gets `(R − 40) − ⌈(R − 40) / 50⌉`, and
+    /// starts with the created account's record alone, 40 bytes. At 81 bytes that is a budget of
+    /// 40, which the start fills exactly; at 100, a budget of 58, which leaves the creation 18
+    /// bytes. An endowment adds its transfer log to the start.
+    ///
+    /// Before the creator's record moved to the creating frame, the creation's budget was taken
+    /// from `R` and its usage was measured from before the record: a budget of 79 against 80 bytes
+    /// at 81, which the start crossed, and of 98 against 80 at 100, the same 18 bytes left.
     #[test]
-    fn test_a_creation_is_budgeted_from_before_its_creators_record() {
+    fn test_a_creation_is_budgeted_after_its_creators_record() {
         let log = TRANSFER_LOG_SIZE;
         for (left, value, budget) in
-            [(81, 0, 79), (100, 0, 98), (81 + log, 1, 236), (100 + log, 1, 254)]
+            [(81, 0, 40), (100, 0, 58), (81 + log, 1, 196), (100 + log, 1, 215)]
         {
-            let start = start_bytes(2, value != 0);
+            let start = start_bytes(1, value != 0);
             let limits =
                 EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(TX_BODY_SIZE + left);
             let mut journal = journal(limits);
@@ -852,8 +857,13 @@ mod tests {
             let (_, report) = start_creation(&mut journal, 1, A, CREATED, value);
             let case = format!("{left} bytes left, value {value}");
             assert!(report.records.creator, "{case}: the creator's record is the start's");
-            let used = LimitUsage { data_size: start, write_records: 2 };
+            let used = LimitUsage { data_size: start, write_records: 1 };
             assert_eq!(journal.ledger().running_budget(), Some((budget, used)), "{case}");
+            assert_eq!(
+                journal.ledger().usage(),
+                kept(2, u64::from(value != 0)),
+                "{case}: the creator's record is counted, below the creation's level"
+            );
             let verdict = if start > budget {
                 LimitCheck::ExceedsLimit {
                     kind: LimitKind::DataSize,
@@ -868,9 +878,9 @@ mod tests {
         }
     }
 
-    /// A creation's start mark is its level's opening — after the creator's record — never where
-    /// its usage is measured from: a creation rewritten into a failure is taken back to it, and
-    /// keeps its creator's record, as a creation that fails does, the creator's nonce standing.
+    /// A creation's start mark is its level's opening, after the creator's record: a creation
+    /// rewritten into a failure is taken back to it, and keeps its creator's record, as a creation
+    /// that fails does, the creator's nonce standing.
     #[test]
     fn test_a_creations_start_mark_keeps_its_creators_record() {
         let mut journal = journal(EvmTxRuntimeLimits::no_limits());

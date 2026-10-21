@@ -337,10 +337,11 @@ fn test_deployed_code_one_byte_over_the_transaction_limit_is_not_left_deployed()
 #[test]
 fn test_deployed_code_over_the_frame_budget_reverts_the_creation_alone() {
     const CAP: u64 = 1_000;
-    // The transaction's frame is capped at `CAP` and has spent nothing, so the creation gets 98%
-    // of that. Its start records the created account and the creator's nonce before the code.
-    let child_budget = share(CAP);
-    let at_start = 2 * WRITE_RECORD_SIZE;
+    // The transaction's frame is capped at `CAP` and has spent nothing but its nonce record,
+    // counted on it as the creation starts, so the creation gets 98% of what the record leaves.
+    // Its start records the created account before the code.
+    let child_budget = share(CAP - WRITE_RECORD_SIZE);
+    let at_start = WRITE_RECORD_SIZE;
     let fits = child_budget - at_start;
     let db = |deployed| funded().account_code(A, factory_deploying(deployed));
     let limits = EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(CAP);
@@ -365,7 +366,11 @@ fn test_deployed_code_over_the_frame_budget_reverts_the_creation_alone() {
         assert_eq!(stop, None);
         assert_eq!(
             usage,
-            LimitUsage { data_size: mega_evm::TX_BODY_SIZE + child_budget, write_records: 2 }
+            LimitUsage {
+                data_size: mega_evm::TX_BODY_SIZE + WRITE_RECORD_SIZE + child_budget,
+                write_records: 2,
+            },
+            "the creator's nonce record, and the creation's whole budget"
         );
         assert_eq!(kept.state[&created].info.code_hash, keccak256(vec![0_u8; fits as usize]));
 
@@ -410,16 +415,20 @@ fn create_returning_its_output(init: &Bytes, value: u64) -> Bytes {
 }
 
 /// A creation's start counts against the creation's own budget — the share of what its creator
-/// has left — the created account's record and its creator's nonce record, the creator not having
-/// recorded its account, and with an endowment the transfer log. The creator here is the
-/// transaction's own frame, with `R` bytes left under the transaction's limit.
+/// has left once the creator's own nonce record is counted on the creator — the created account's
+/// record, and with an endowment the transfer log. The creator here is the transaction's own
+/// frame, with `R` bytes left under the transaction's limit, of which its nonce record takes 40.
 ///
-/// The largest `R` whose share falls short of the start stops the creation at its start, which
-/// keeps its creator's nonce record: 81 without an endowment, a share of 79 against 80 bytes. One
-/// byte more, a share of 80, starts it. With 100 left the share is 98, so the creation may deposit
-/// the 18 bytes beyond its start, and the 19th stops it at its deposit; with an endowment, 260
-/// left leave room for 14. A stopped creation keeps nothing of its own, and its creator resumes
-/// with the nonce record alone.
+/// The largest `R` whose remainder's share falls short of the start stops the creation at its
+/// start, which keeps its creator's nonce record: 80 without an endowment, a share of 39 against
+/// 40 bytes. One byte more, a share of 40, starts it. With 100 left the share of the 60 left is
+/// 58, so the creation may deposit the 18 bytes beyond its start, and the 19th stops it at its
+/// deposit; with an endowment, 260 left leave room for 15. A stopped creation keeps nothing of
+/// its own, and its creator resumes with the nonce record alone.
+///
+/// Before the creator's record moved to the creating frame the creation's budget was the share of
+/// the whole `R`, against a start of 80 bytes: 81 stopped it and 82 started it, 100 left the same
+/// 18 bytes, and 260 with an endowment left 14.
 #[test]
 fn test_a_creation_is_held_to_its_share_from_its_start() {
     let run = |left: u64, endowment: u64, deployed: u64| {
@@ -453,27 +462,37 @@ fn test_a_creation_is_held_to_its_share_from_its_start() {
         );
     };
 
+    // The creation's budget: the share of what the creator has left after its nonce record.
+    let budget = |left: u64| share(left - WRITE_RECORD_SIZE);
     for endowment in [0, 1] {
         let log = if endowment == 0 { 0 } else { TRANSFER_LOG_SIZE };
-        let at_start = 2 * WRITE_RECORD_SIZE + log;
-        let starts = child_room(at_start);
+        let at_start = WRITE_RECORD_SIZE + log;
+        let starts = WRITE_RECORD_SIZE + child_room(at_start);
 
         let case = format!("endowment {endowment}, {} left", starts - 1);
-        assert_stopped(&run(starts - 1, endowment, 0), share(starts - 1), &case);
+        assert_stopped(&run(starts - 1, endowment, 0), budget(starts - 1), &case);
 
         let case = format!("endowment {endowment}, {starts} left");
         let started = run(starts, endowment, 0);
         assert!(started.result.is_success(), "{case}: {:?}", started.result);
         assert_eq!(started.result.output().unwrap(), &Bytes::new(), "{case}: it started");
-        assert_eq!(started.usage, usage(at_start, 2), "{case}: both records and the log");
+        assert_eq!(
+            started.usage,
+            usage(WRITE_RECORD_SIZE + at_start, 2),
+            "{case}: both records and the log"
+        );
 
         let left = 100 + log;
-        let room = share(left) - at_start;
+        let room = budget(left) - at_start;
         let case = format!("endowment {endowment}, {left} left, {room} bytes deployed");
         let fits = run(left, endowment, room);
         assert!(fits.result.is_success(), "{case}: {:?}", fits.result);
         assert_eq!(fits.result.output().unwrap(), &Bytes::new(), "{case}: it deployed");
-        assert_eq!(fits.usage, usage(share(left), 2), "{case}: exactly its share");
+        assert_eq!(
+            fits.usage,
+            usage(WRITE_RECORD_SIZE + budget(left), 2),
+            "{case}: the creator's record, and exactly the creation's share"
+        );
         assert_eq!(
             fits.state[&A.create(0)].info.code_hash,
             keccak256(vec![0_u8; room as usize]),
@@ -481,13 +500,14 @@ fn test_a_creation_is_held_to_its_share_from_its_start() {
         );
 
         let case = format!("endowment {endowment}, {left} left, {} bytes deployed", room + 1);
-        assert_stopped(&run(left, endowment, room + 1), share(left), &case);
+        assert_stopped(&run(left, endowment, room + 1), budget(left), &case);
 
         if endowment == 0 {
-            assert_eq!((starts - 1, share(starts - 1), starts), (81, 79, 82));
-            assert_eq!((share(left), room), (98, 18));
+            assert_eq!((starts - 1, budget(starts - 1), starts), (80, 39, 81));
+            assert_eq!((budget(left), room), (58, 18));
         } else {
-            assert_eq!((share(left), room), (254, 14));
+            assert_eq!((starts - 1, budget(starts - 1), starts), (244, 199, 245));
+            assert_eq!((budget(left), room), (215, 15));
         }
     }
 }
@@ -1543,13 +1563,13 @@ fn call_and_return_its_output(target: Address) -> Bytes {
 /// that write outlives the creation: it lands on the creator's own lane. The creator is held to
 /// its budget with it before it runs on.
 ///
-/// `A` calls `B` with 4,000 bytes left, so `B` may keep 3,920. `B` logs, then creates: the
-/// creation's start records the created account and `B`'s nonce, 80 bytes against a share below
-/// 80, so it is stopped with room to spare in the transaction. When the log left `B` 40 bytes,
-/// `B` keeps the nonce record at exactly its budget and succeeds. When it left 39, the record puts
-/// `B` one byte over: `B` reverts alone, its log and its nonce with it, and `A` resumes and
-/// returns `B`'s revert. Either way the history the transaction pays is that of the bytes it
-/// keeps.
+/// `A` calls `B` with 4,000 bytes left, so `B` may keep 3,920. `B` logs, then creates: `B`'s nonce
+/// record is counted on `B` first, and the creation's start records the created account, 40
+/// bytes against a share of what the record left `B`, which is below 40, so it is stopped with
+/// room to spare in the transaction. When the log left `B` 40 bytes, `B` keeps the nonce record at
+/// exactly its budget and succeeds. When it left 39, the record puts `B` one byte over: `B`
+/// reverts alone, its log and its nonce with it, and `A` resumes and returns `B`'s revert. Either
+/// way the history the transaction pays is that of the bytes it keeps.
 #[test]
 fn test_a_failed_creations_nonce_record_holds_its_creator_to_its_budget() {
     const A_BUDGET: u64 = 4_000;
