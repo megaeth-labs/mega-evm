@@ -1460,8 +1460,9 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for ChangedBeforeT
 /// it later, and which no value goes to. So the transaction's own value, which the history charged
 /// before execution prices as the records it makes, takes no record back: its recipient is an
 /// account the transaction had not changed, an authority whose nonce no transfer returns, or the
-/// sender itself, to which nothing moves. The frame's side builds on that, giving back no price
-/// for a record taken back; this holds it for every transaction shape, in the release build too.
+/// sender itself, to which nothing moves. The first frame's start builds on that: it carries no
+/// credit for a record taken back; this holds it for every transaction shape, in the release build
+/// too.
 #[test]
 fn test_before_its_own_frame_a_transaction_changed_only_its_sender_and_authorities() {
     let sender_funded = || MemoryDatabase::default().account_balance(CALLER, U256::from(1_000));

@@ -238,9 +238,8 @@ where
 
 /// An inspector that answers the calls below the transaction's own frame rewrites what execution
 /// produces. Block execution does not refuse it, and on the EVM alike its answer stands in for the
-/// frame: a side of its own keeps the frame sides aligned
-/// with the frames, the answered call ends as every call does, and the transaction settles as one
-/// whose nested call never ran.
+/// frame: it settles with the share and the start charge the frame was given, the answered call
+/// ends as every call does, and the transaction settles as one whose nested call never ran.
 #[test]
 fn test_inspector_early_return_with_additional_limits() {
     let caller = BytecodeBuilder::default().call(CONTRACT_B, U256::ZERO).append(POP).stop().build();
