@@ -1973,10 +1973,11 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for KvWeighsNoMore
 
 /// The KV count a node reads is the write-record count, and it never weighs more than the data
 /// size: every record is forty bytes of it, counted with it and taken back with it. Across the
-/// corpus — slots written back, a slot rewritten, accounts recorded once per frame, failed
-/// children, a hint — `KV × 40 ≤ data size` holds after every instruction a transaction runs, and
-/// what it keeps parts from the records by exactly the bytes that are not records: the body, the
-/// logs — the transfer logs among them — the deployed code and the hint's payload.
+/// corpus — slots written back, a slot rewritten, accounts written again while they differ from
+/// what was loaded, failed children, a hint — `KV × 40 ≤ data size` holds after every instruction
+/// a transaction runs, and what it keeps parts from the records by exactly the bytes that are not
+/// records: the body, the logs — the transfer logs among them — the deployed code and the hint's
+/// payload.
 ///
 /// So the data-size limit bounds the records: at the production data-size caps a transaction keeps
 /// at most 327,680 of them.

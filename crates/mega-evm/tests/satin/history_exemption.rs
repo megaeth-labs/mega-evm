@@ -79,9 +79,9 @@ const DEPLOYED_BYTES: u64 = 32;
 
 /// The history bytes a user transaction running the program from [`CALLER`] appends: its body
 /// with no calldata; the program's four write records — the new slot, then `CONTRACT` (the
-/// transfer's sender and the creator, recorded once in its frame), `PAYEE` and the created
-/// account; its log of one word with no topic; and the deployed code. The transfer's log is data
-/// size and appends no history.
+/// transfer's sender and the creator, recorded once: the transfer changed it, and its nonce bump
+/// adds nothing), `PAYEE` and the created account; its log of one word with no topic; and the
+/// deployed code. The transfer's log is data size and appends no history.
 const PROGRAM_HISTORY_BYTES: u64 =
     TX_BODY_SIZE + 4 * WRITE_RECORD_SIZE + (LOG_BASE_SIZE + 32) + DEPLOYED_BYTES;
 
