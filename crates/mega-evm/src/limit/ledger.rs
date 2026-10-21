@@ -74,14 +74,6 @@ pub(crate) struct Counts {
     log_and_code_bytes: u64,
 }
 
-impl Counts {
-    /// What was counted since `base`, an earlier snapshot of the same count, net of what was taken
-    /// back since: a frame's usage when `base` is where the frame began.
-    const fn usage_since(&self, base: &Self) -> LimitUsage {
-        self.used.saturating_sub(base.used).saturating_sub(self.refund.saturating_sub(base.refund))
-    }
-}
-
 /// A frame start's number in its transaction, in the order the starts were handed to revm.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct StartId(u64);
@@ -95,16 +87,16 @@ pub(crate) struct FrameIdentity {
     pub(crate) start: StartId,
 }
 
-/// A frame level's frame: who it is, and what it may keep.
+/// A frame level's frame: who it is, and what it may keep. Kept beside the levels, the running
+/// frame's last, so that the running frame and its caller are found without a scan.
 #[derive(Clone, Copy, Debug)]
 struct FrameLevel {
+    /// The frame's level: its index among the open levels.
+    level: usize,
     /// The frame's start.
     start: StartId,
     /// The frame's depth.
     depth: usize,
-    /// Where the frame's usage is measured from: where its level opened, or, for a creation,
-    /// before its creator's nonce record.
-    at_base: Counts,
     /// The most data-size bytes the frame may keep.
     budget: u64,
     /// The account the frame runs as.
@@ -112,20 +104,11 @@ struct FrameLevel {
     /// Whether a write to the frame's own account is already counted, so a value transfer or a
     /// creation from the frame does not count it again.
     recorded: bool,
+    /// Whether the frame's start counted its creator's nonce record, right before its level
+    /// opened: the frame's usage is measured from before it.
+    creator_record: bool,
     /// Whether the frame is returning, so revm may close its level.
     returning: bool,
-}
-
-impl FrameLevel {
-    /// What the frame keeps so far, the children it kept included.
-    const fn usage(&self, counts: &Counts) -> LimitUsage {
-        counts.usage_since(&self.at_base)
-    }
-
-    /// The data-size bytes the frame may still keep.
-    const fn remaining(&self, counts: &Counts) -> u64 {
-        self.budget.saturating_sub(self.usage(counts).data_size)
-    }
 }
 
 /// One open checkpoint of revm's journal.
@@ -141,8 +124,9 @@ struct Level {
     /// The start the next frame start would be when it opened: a start at or after it began
     /// inside it.
     next_start_at_open: StartId,
-    /// The frame, for a frame level; `None` for a rollback level.
-    frame: Option<FrameLevel>,
+    /// Whether it is a frame level, whose frame is the last of the frames when it is the latest
+    /// level; a rollback level otherwise.
+    frame: bool,
 }
 
 /// What the engine tells the ledger about a frame start it is about to hand revm.
@@ -218,21 +202,28 @@ struct Fate {
     start_kept: bool,
 }
 
+/// What a revert of the ledger restores: the counts, the running frame's flag and the levels open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Rollback {
+    /// The counts.
+    counts: Counts,
+    /// Whether the nearest frame level had its account recorded; `None` when there is none.
+    recorded: Option<bool>,
+    /// The number of levels open: a revert finds at most these.
+    levels: usize,
+}
+
 /// A point the ledger and revm's journal can be taken back to together
 /// ([`MegaJournal::revert_to`](crate::MegaJournal)).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Mark {
     /// Where revm's journal stood.
     pub(crate) position: JournalCheckpoint,
-    /// The counts.
-    counts: Counts,
-    /// Whether the nearest frame level had its account recorded; `None` when there is none.
-    recorded: Option<bool>,
+    /// What the ledger goes back to.
+    rollback: Rollback,
     /// The start the next frame start would be: a start at or after it is taken back with the
     /// mark.
     next_start: StartId,
-    /// The number of levels open: a revert to the mark finds at most these.
-    levels: usize,
     /// For a built frame's own mark, its start, whose creator record the mark keeps.
     own_start: Option<StartId>,
 }
@@ -242,8 +233,6 @@ pub(crate) struct Mark {
 pub(crate) struct CreationStart {
     /// The creation's budget, from what its creator had left before its nonce record.
     budget: u64,
-    /// Where the creation's usage is measured from: before its creator's nonce record.
-    at_base: Counts,
     /// Whether the creator's nonce record was counted.
     creator_record: bool,
     /// The creation's depth.
@@ -260,6 +249,8 @@ pub(crate) struct Ledger {
     hints: u64,
     /// One level per checkpoint revm's journal holds open, the latest last.
     levels: Vec<Level>,
+    /// The frames whose levels are open, the running frame last.
+    frames: Vec<FrameLevel>,
     /// The start window, while one is open.
     window: Option<Window>,
     /// What the start of the window counted.
@@ -302,6 +293,7 @@ impl Ledger {
         self.body = body;
         self.hints = 0;
         self.levels.clear();
+        self.frames.clear();
         self.window = None;
         self.last_start = None;
         self.last_decided = None;
@@ -360,17 +352,38 @@ impl Ledger {
 
     /// The running frame's level: the nearest frame level.
     fn frame_level(&self) -> Option<&FrameLevel> {
-        self.levels.iter().rev().find_map(|level| level.frame.as_ref())
+        self.frames.last()
     }
 
     /// The running frame's level, mutably.
     fn frame_level_mut(&mut self) -> Option<&mut FrameLevel> {
-        self.levels.iter_mut().rev().find_map(|level| level.frame.as_mut())
+        self.frames.last_mut()
     }
 
     /// The level of the frame below the running one: the one that started it.
     fn calling_level_mut(&mut self) -> Option<&mut FrameLevel> {
-        self.levels.iter_mut().rev().filter_map(|level| level.frame.as_mut()).nth(1)
+        let caller = self.frames.len().checked_sub(2)?;
+        self.frames.get_mut(caller)
+    }
+
+    /// What `frame` keeps so far, the children it kept included: what was counted since its level
+    /// opened, and its creator's nonce record, counted right before.
+    fn frame_usage(&self, frame: &FrameLevel) -> LimitUsage {
+        let at_open = &self.levels[frame.level].at_open;
+        let base = if frame.creator_record {
+            at_open.used.saturating_sub(WRITE_RECORD)
+        } else {
+            at_open.used
+        };
+        self.counts
+            .used
+            .saturating_sub(base)
+            .saturating_sub(self.counts.refund.saturating_sub(at_open.refund))
+    }
+
+    /// The data-size bytes `frame` may still keep.
+    fn frame_remaining(&self, frame: &FrameLevel) -> u64 {
+        frame.budget.saturating_sub(self.frame_usage(frame).data_size)
     }
 
     /// Who the running frame is: the identity its level was opened with.
@@ -388,7 +401,7 @@ impl Ledger {
     /// The running frame's budget and what it keeps so far.
     #[cfg(test)]
     pub(crate) fn running_budget(&self) -> Option<(u64, LimitUsage)> {
-        self.frame_level().map(|level| (level.budget, level.usage(&self.counts)))
+        self.frame_level().map(|frame| (frame.budget, self.frame_usage(frame)))
     }
 
     /// What became of `start`, which must be the last start revm decided: whether its level was
@@ -418,10 +431,10 @@ impl Ledger {
         if kept.exceeds_data_size(limit) {
             return self.crossed(limit, kept.data_size, false);
         }
-        if let Some(level) = self.frame_level() {
-            let used = level.usage(&self.counts);
-            if used.exceeds_data_size(level.budget) {
-                return self.crossed(level.budget, used.data_size, true);
+        if let Some(frame) = self.frame_level() {
+            let used = self.frame_usage(frame);
+            if used.exceeds_data_size(frame.budget) {
+                return self.crossed(frame.budget, used.data_size, true);
             }
         }
         LimitCheck::WithinLimit
@@ -431,7 +444,7 @@ impl Ledger {
     /// the transaction's own frame, what the transaction has left, under the frame cap.
     fn child_budget(&self) -> u64 {
         let forwarded = match self.frame_level() {
-            Some(parent) => share_of_remaining(parent.remaining(&self.counts)),
+            Some(parent) => share_of_remaining(self.frame_remaining(parent)),
             None => self.limits.tx_data_size_limit.saturating_sub(self.usage().data_size),
         };
         forwarded.min(self.limits.frame_data_size_limit)
@@ -670,8 +683,8 @@ impl Ledger {
 
     /* Levels */
 
-    /// Opens a level at `opened_at`, a frame level when `frame` is given.
-    fn open_level(&mut self, opened_at: JournalCheckpoint, frame: Option<FrameLevel>) {
+    /// Opens a level at `opened_at`, a frame level when `frame`.
+    fn open_level(&mut self, opened_at: JournalCheckpoint, frame: bool) {
         let recorded_at_open = self.frame_level().is_some_and(|level| level.recorded);
         self.levels.push(Level {
             opened_at,
@@ -682,32 +695,33 @@ impl Ledger {
         });
     }
 
-    /// Opens the frame level of the window's start at `opened_at`, its usage measured from
-    /// `at_base` under `budget`, running as `account`, recorded or not: the frame the window's
-    /// start builds.
+    /// Opens the frame level of the window's start at `opened_at`, under `budget`, running as
+    /// `account`, recorded or not, its usage measured from before its creator's nonce record when
+    /// the start counted one (`creator_record`): the frame the window's start builds.
     fn open_frame_level(
         &mut self,
         opened_at: JournalCheckpoint,
-        at_base: Counts,
         budget: u64,
         account: Address,
         recorded: bool,
+        creator_record: bool,
     ) {
         let Some(window) = &mut self.window else {
             unreachable!("a frame level opens inside its start's window")
         };
         window.opened = true;
         let (start, depth) = (window.start, window.facts.depth);
-        let frame = FrameLevel {
+        self.open_level(opened_at, true);
+        self.frames.push(FrameLevel {
+            level: self.levels.len() - 1,
             start,
             depth,
-            at_base,
             budget,
             account: Some(account),
             recorded,
+            creator_record,
             returning: false,
-        };
-        self.open_level(opened_at, Some(frame));
+        });
     }
 
     /// revm's journal opened a checkpoint at `opened_at`: the frame level of a call whose start the
@@ -715,12 +729,12 @@ impl Ledger {
     /// otherwise.
     pub(crate) fn on_checkpoint(&mut self, opened_at: JournalCheckpoint) {
         let Some(window) = self.window.filter(|window| !window.opened) else {
-            return self.open_level(opened_at, None);
+            return self.open_level(opened_at, false);
         };
         let StartFacts { depth, caller, target, transfers_value } = window.facts;
         let Some(target) = target else {
             // A creation's frame level is the one its account checkpoint opens.
-            return self.open_level(opened_at, None);
+            return self.open_level(opened_at, false);
         };
         // The one start rule that stays an interpretation of the input: whether the frame's own
         // account is recorded before anything of the frame is counted.
@@ -732,9 +746,13 @@ impl Ledger {
                 .is_some_and(|parent| parent.account == Some(target) && parent.recorded);
             inherited || target == self.sender || transfers_value
         };
-        self.open_frame_level(opened_at, self.counts, self.child_budget(), target, recorded);
-        let verdict = self.check();
-        self.report_mut().verdict = Some(verdict);
+        self.open_frame_level(opened_at, self.child_budget(), target, recorded, false);
+        // A start that moves value is held once its transfer is counted (`on_transfer`); any
+        // other has nothing of its own to count, and is held now.
+        if !transfers_value {
+            let verdict = self.check();
+            self.report_mut().verdict = Some(verdict);
+        }
     }
 
     /// revm moved `value` from `from` to `to` for the call whose start the window is open for
@@ -791,7 +809,7 @@ impl Ledger {
         }
         window.counted = true;
         let depth = window.facts.depth;
-        let (budget, at_base) = (self.child_budget(), self.counts);
+        let budget = self.child_budget();
         let mut creator_record = false;
         if depth > 0 {
             if let Some(level) = self.frame_level_mut() {
@@ -802,7 +820,7 @@ impl Ledger {
         if creator_record {
             self.counts.used = self.counts.used.saturating_add(WRITE_RECORD);
         }
-        Some(CreationStart { budget, at_base, creator_record, depth })
+        Some(CreationStart { budget, creator_record, depth })
     }
 
     /// revm opened (`Some`) or failed to open (`None`) the account checkpoint of a creation at
@@ -820,14 +838,14 @@ impl Ledger {
     ) {
         let Some(start) = start else {
             if let Some(opened_at) = opened {
-                self.open_level(opened_at, None);
+                self.open_level(opened_at, false);
             }
             return;
         };
         self.report_mut().creator_record = start.creator_record;
         let Some(opened_at) = opened else { return };
         debug_assert!(start.depth == self.window.map_or(start.depth, |window| window.facts.depth));
-        self.open_frame_level(opened_at, start.at_base, start.budget, address, true);
+        self.open_frame_level(opened_at, start.budget, address, true, start.creator_record);
         self.counts.used = self.counts.used.saturating_add(with_transfer_log(WRITE_RECORD, logged));
         let verdict = self.check();
         let report = self.report_mut();
@@ -858,7 +876,10 @@ impl Ledger {
     /// its frame's flag to a caller running as the same account.
     pub(crate) fn on_commit(&mut self) {
         let Some(level) = self.levels.pop() else { return };
-        let Some(frame) = level.frame else { return };
+        if !level.frame {
+            return;
+        }
+        let frame = self.pop_frame();
         self.assert_frame_closes(&frame);
         if let Some(caller) = self.frame_level_mut() {
             if frame.account.is_some() && frame.account == caller.account {
@@ -881,11 +902,12 @@ impl Ledger {
             level.opened_at == checkpoint,
             "a revert closes the latest level: a revert below a level still open is not supported"
         );
+        let frame = level.frame.then(|| self.pop_frame());
         self.counts = level.at_open;
         if let Some(caller) = self.frame_level_mut() {
             caller.recorded = level.recorded_at_open;
         }
-        match level.frame {
+        match frame {
             Some(frame) => {
                 self.assert_frame_closes(&frame);
                 self.last_decided =
@@ -893,6 +915,13 @@ impl Ledger {
             }
             None => self.take_back_starts_from(level.next_start_at_open, None),
         }
+    }
+
+    /// Pops the frame of the frame level just popped.
+    fn pop_frame(&mut self) -> FrameLevel {
+        let frame = self.frames.pop().expect("a frame level has its frame");
+        debug_assert!(frame.level == self.levels.len(), "the frames follow the frame levels");
+        frame
     }
 
     /// Notes that the last start decided is taken back when it is `start` or later: its level is no
@@ -910,6 +939,7 @@ impl Ledger {
     /// until the next transaction begins.
     pub(crate) fn on_transaction_end(&mut self) {
         self.levels.clear();
+        self.frames.clear();
         self.window = None;
     }
 
@@ -919,52 +949,72 @@ impl Ledger {
     pub(crate) fn mark(&self, position: JournalCheckpoint) -> Mark {
         Mark {
             position,
-            counts: self.counts,
-            recorded: self.frame_level().map(|level| level.recorded),
+            rollback: Rollback {
+                counts: self.counts,
+                recorded: self.frame_level().map(|level| level.recorded),
+                levels: self.levels.len(),
+            },
             next_start: self.next_start,
-            levels: self.levels.len(),
             own_start: None,
         }
     }
 
-    /// The mark a frame revm just built is taken back to when it is rewritten into a failure: its
-    /// own checkpoint, the counts its level opened with — after a creation's creator record — and
-    /// whether the frame below had its account recorded then. Never where the frame's usage is
-    /// measured from, which for a creation is before the creator's record.
-    pub(crate) fn frame_start_mark(&self) -> Option<Mark> {
+    /// What a frame revm just built is taken back to when it is rewritten into a failure, with its
+    /// start: the counts its level opened with — after a creation's creator record — and whether
+    /// the frame below had its account recorded then. Never where the frame's usage is measured
+    /// from, which for a creation is before the creator's record. The frame's side keeps it past
+    /// the level's commit, for the mark the rewrite reverts to ([`StartSide::built_mark`]).
+    pub(crate) fn frame_start_rollback(&self) -> Option<(StartId, Rollback)> {
         let level = self.levels.last()?;
-        let frame = level.frame?;
+        if !level.frame {
+            return None;
+        }
+        let frame = self.frames.last()?;
         let below = self.levels.len() - 1;
-        let caller = self.levels[..below].iter().rev().any(|level| level.frame.is_some());
-        Some(Mark {
-            position: level.opened_at,
+        let caller = self.frames.len() > 1;
+        let rollback = Rollback {
             counts: level.at_open,
             recorded: caller.then_some(level.recorded_at_open),
-            next_start: frame.start,
             levels: below,
-            own_start: Some(frame.start),
-        })
+        };
+        Some((frame.start, rollback))
+    }
+
+    /// The mark a frame revm just built is taken back to when it is rewritten into a failure
+    /// ([`frame_start_rollback`](Self::frame_start_rollback), at the frame's own checkpoint).
+    #[cfg(test)]
+    pub(crate) fn frame_start_mark(&self) -> Option<Mark> {
+        let (start, rollback) = self.frame_start_rollback()?;
+        Some(Mark::of_built(self.levels.last()?.opened_at, start, rollback))
     }
 
     /// Takes the ledger back to `mark`, which revm's journal is being reverted to: the counts, the
     /// running frame's flag, and what became of the last start decided.
     pub(crate) fn revert_to(&mut self, mark: &Mark) {
         debug_assert!(
-            self.levels.len() <= mark.levels,
+            self.levels.len() <= mark.rollback.levels,
             "a revert to a mark finds every level opened since closed"
         );
-        self.counts = mark.counts;
-        if let (Some(recorded), Some(level)) = (mark.recorded, self.frame_level_mut()) {
+        self.counts = mark.rollback.counts;
+        if let (Some(recorded), Some(level)) = (mark.rollback.recorded, self.frame_level_mut()) {
             level.recorded = recorded;
         }
         self.take_back_starts_from(mark.next_start, mark.own_start);
     }
 }
 
+impl Mark {
+    /// The mark of a frame revm built at `position`, its own checkpoint: `rollback` is what its
+    /// level opened with, and `start` the frame's, whose creator record the mark keeps.
+    const fn of_built(position: JournalCheckpoint, start: StartId, rollback: Rollback) -> Self {
+        Self { position, rollback, next_start: start, own_start: Some(start) }
+    }
+}
+
 /// Satin's side of one frame start: what its caller paid for the records it makes, what the
 /// ledger saw it count, the history allowance the frame was granted, and, for a frame revm built,
-/// the mark it is taken back to when it is rewritten into a failure. One per frame result revm
-/// will return.
+/// what it is taken back to when it is rewritten into a failure. One per frame result revm will
+/// return.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct StartSide {
     /// The frame's depth.
@@ -973,14 +1023,19 @@ pub(crate) struct StartSide {
     on_level_charge: u64,
     /// What the caller paid for the record of its own account.
     caller_charge: u64,
-    /// What the ledger saw the start count; the default for a start answered before revm decided
-    /// it, which counted nothing.
-    report: StartReport,
-    /// The mark of a frame revm built.
-    mark: Option<Mark>,
     /// What is left of the history allowance the frame was granted, if it was granted one. It
     /// never enters the frame's gas, and what it does not spend disappears with the frame.
     stipend: u64,
+    /// The start, once revm decided it; `None` for a start answered before, which counted nothing.
+    start: Option<StartId>,
+    /// Whether the start counted records on its own level.
+    on_level: bool,
+    /// Whether the start counted its caller's record on its own level: a value transfer's sender.
+    caller_on_level: bool,
+    /// Whether the start counted its creator's nonce record, below its own level.
+    creator_record: bool,
+    /// What a frame revm built is taken back to when it is rewritten into a failure.
+    rollback: Option<Rollback>,
     /// The records the charge was computed from, when the charge was made from one and nothing
     /// could rewrite the start between the two: what a debug build holds the ledger's count to.
     #[cfg(debug_assertions)]
@@ -1002,24 +1057,19 @@ impl StartSide {
             depth,
             on_level_charge,
             caller_charge,
-            report: StartReport {
-                start: None,
-                on_level: 0,
-                caller_on_level: false,
-                creator_record: false,
-                transfer_log: false,
-                refused: false,
-                verdict: None,
-            },
-            mark: None,
             stipend: 0,
+            start: None,
+            on_level: false,
+            caller_on_level: false,
+            creator_record: false,
+            rollback: None,
             #[cfg(debug_assertions)]
             charged,
         }
     }
 
-    /// Attaches what the ledger saw the start count and the built frame's mark, and holds the
-    /// count to the records the start's charge was computed from.
+    /// Attaches what the ledger saw the start count and, for a frame revm built, what it is taken
+    /// back to, and holds the count to the records the start's charge was computed from.
     ///
     /// The two are separate answers to one question, asked at two points: the charge at the
     /// opcode, on the facts revm's instruction hands the frame-start hook — or before execution,
@@ -1032,9 +1082,15 @@ impl StartSide {
     /// inspector that may rewrite the start runs between the two, and can split them: under one
     /// the start is not checked. Only a start revm made and held to the limits is checked: one it
     /// refused, or failed before its level opened, counted nothing, and the charge comes back.
-    pub(crate) fn attach(&mut self, report: StartReport, mark: Option<Mark>) {
-        self.report = report;
-        self.mark = mark;
+    pub(crate) fn attach(&mut self, report: StartReport, built: Option<(StartId, Rollback)>) {
+        self.start = report.start;
+        self.on_level = report.on_level > 0;
+        self.caller_on_level = report.caller_on_level;
+        self.creator_record = report.creator_record;
+        self.rollback = built.map(|(start, rollback)| {
+            debug_assert!(report.start == Some(start), "a built frame's rollback is its start's");
+            rollback
+        });
         #[cfg(debug_assertions)]
         if let Some(charged) =
             self.charged.filter(|_| report.start.is_some() && report.verdict.is_some())
@@ -1070,12 +1126,14 @@ impl StartSide {
 
     /// The start, once revm decided it.
     pub(crate) const fn start(&self) -> Option<StartId> {
-        self.report.start
+        self.start
     }
 
-    /// The mark of a frame revm built.
-    pub(crate) const fn mark(&self) -> Option<&Mark> {
-        self.mark.as_ref()
+    /// The mark a frame revm built is taken back to when it is rewritten into a failure, at
+    /// `position`, the frame's own checkpoint; `None` for a frame revm did not build.
+    pub(crate) fn built_mark(&self, position: JournalCheckpoint) -> Option<Mark> {
+        let (start, rollback) = self.start.zip(self.rollback)?;
+        Some(Mark::of_built(position, start, rollback))
     }
 
     /// The history gas the caller gets back once the frame returned: what it paid less the price
@@ -1089,10 +1147,9 @@ impl StartSide {
     /// surviving record aside.
     pub(crate) fn refund(&self, ledger: &Ledger) -> u64 {
         let (level_kept, start_kept) =
-            self.report.start.map_or((false, false), |start| ledger.fate(start));
-        let on_level = level_kept && self.report.on_level > 0;
-        let caller = (level_kept && self.report.caller_on_level) ||
-            (start_kept && self.report.creator_record);
+            self.start.map_or((false, false), |start| ledger.fate(start));
+        let on_level = level_kept && self.on_level;
+        let caller = (level_kept && self.caller_on_level) || (start_kept && self.creator_record);
         let mut refund = 0;
         if !on_level {
             refund += self.on_level_charge;

@@ -11,7 +11,7 @@ use alloc as std;
 use std::vec::Vec;
 
 use super::{
-    ledger::{FrameStartRecords, Ledger, Mark, StartSide},
+    ledger::{FrameStartRecords, Ledger, Rollback, StartId, StartSide},
     EvmTxRuntimeLimits, LimitCheck, LimitKind, StartReport, WRITE_RECORD_SIZE,
 };
 use crate::storage_call_stipend;
@@ -403,12 +403,12 @@ impl AdditionalLimit {
         self.starts.push(StartSide::new(depth, on_level, caller, records));
     }
 
-    /// Attaches what the journal's ledger saw the latest start count, and the mark a frame revm
-    /// built is taken back to, to that start's side, and holds the count to the records the start's
+    /// Attaches what the journal's ledger saw the latest start count, and what a frame revm built
+    /// is taken back to, to that start's side, and holds the count to the records the start's
     /// charge was computed from ([`StartSide::attach`]).
-    pub(crate) fn attach_start(&mut self, report: StartReport, mark: Option<Mark>) {
+    pub(crate) fn attach_start(&mut self, report: StartReport, built: Option<(StartId, Rollback)>) {
         if let Some(side) = self.starts.last_mut() {
-            side.attach(report, mark);
+            side.attach(report, built);
         }
     }
 
@@ -509,11 +509,7 @@ impl FrameCharge {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        limit::{ledger::StartId, StartFacts},
-        test_utils::MemoryDatabase,
-        MegaContext, MegaSpecId,
-    };
+    use crate::{limit::StartFacts, test_utils::MemoryDatabase, MegaContext, MegaSpecId};
     use alloy_primitives::{address, Address, Bytes, U256};
     use revm::{
         context::{ContextTr, JournalTr},

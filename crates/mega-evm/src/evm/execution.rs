@@ -594,9 +594,9 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
                     ctx.keyless_frame = Some(keyless::KeylessFrame::Built);
                 }
                 ctx.additional_limit.hold_start(report.verdict);
-                let mark = ctx.ledger().frame_start_mark();
-                debug_assert!(mark.is_some(), "a frame revm built has its level open");
-                ctx.additional_limit.attach_start(report, mark);
+                let built = ctx.ledger().frame_start_rollback();
+                debug_assert!(built.is_some(), "a frame revm built has its level open");
+                ctx.additional_limit.attach_start(report, built);
                 Ok(ItemOrResult::Item(self.inner.frame_stack.get()))
             }
             Err(mut result) => {
@@ -1287,17 +1287,15 @@ fn inspect_logs<DB: Database, ExtEnvs: ExternalEnvTypes, INSP>(
 }
 
 /// The mark the built frame `frame` is taken back to when an inspector rewrites its success into a
-/// failure: the one its start's side kept, which is the frame's own checkpoint, with the counts its
-/// level opened with.
+/// failure: the frame's own checkpoint, with what its start's side kept of the counts its level
+/// opened with.
 fn built_frame_mark<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &MegaContext<DB, ExtEnvs>,
     frame: &EthFrame<EthInterpreter>,
 ) -> Mark {
-    let kept = ctx.additional_limit.running_start().and_then(|side| side.mark()).copied();
-    debug_assert!(
-        kept.is_some_and(|mark| mark.position == frame.checkpoint),
-        "a built frame's start side keeps the mark of its own checkpoint"
-    );
+    let kept =
+        ctx.additional_limit.running_start().and_then(|side| side.built_mark(frame.checkpoint));
+    debug_assert!(kept.is_some(), "a built frame's start side keeps what it is taken back to");
     kept.unwrap_or_else(|| ctx.ledger().mark(frame.checkpoint))
 }
 
