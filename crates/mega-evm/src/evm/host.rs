@@ -301,10 +301,13 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
     ///
     /// A log's history is drawn from the frame's history allowance first, and the frame's gas pays
     /// the rest ([`storage_call_stipend`](crate::storage_call_stipend)): a write record is the
-    /// frame's own to pay for, and a record taken back — a slot written back to its original value
-    /// — gives back what the frame's gas paid, never what an allowance did. Both sides are priced
-    /// the same way, so a record taken back cancels its own charge exactly, whichever frame made
-    /// it: a refill below zero is reconciled when the frame merges into its caller.
+    /// frame's own to pay for, and a record taken back — a slot written back to its original
+    /// value, an account a `SELFDESTRUCT` returns to what the transaction loaded — gives back what
+    /// the frame's gas paid, never what an allowance did. Both sides are priced the same way, so a
+    /// record taken back cancels its own charge exactly, whichever frame made it: a refill below
+    /// zero is reconciled when the frame merges into its caller. A write that takes records back
+    /// and makes others is refilled before it is charged, so what it nets to nothing costs
+    /// nothing.
     ///
     /// A completed `SSTORE` holds the frame to the compute limit again: a slot restored to its
     /// original value refills the state gas (revm, before this hook) and the history gas (here)
@@ -322,20 +325,20 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
             return WriteVerdict::Revert(self.additional_limit.note_frame_stop(&check));
         }
         if self.prices_history() {
-            match history {
-                HistoryBytes::None => {}
-                HistoryBytes::Appended(bytes) => {
-                    let Some(cost) = history_gas(bytes) else { return WriteVerdict::OutOfGas };
-                    let drawn = if from_allowance {
-                        self.additional_limit.try_consume_stipend(cost)
-                    } else {
-                        0
-                    };
-                    if !gas.record_history_cost(cost - drawn) {
-                        return WriteVerdict::OutOfGas;
-                    }
+            let HistoryBytes { appended, taken } = history;
+            if taken != 0 {
+                gas.refill_history(history_gas(taken).unwrap_or(0));
+            }
+            if appended != 0 {
+                let Some(cost) = history_gas(appended) else { return WriteVerdict::OutOfGas };
+                let drawn = if from_allowance {
+                    self.additional_limit.try_consume_stipend(cost)
+                } else {
+                    0
+                };
+                if !gas.record_history_cost(cost - drawn) {
+                    return WriteVerdict::OutOfGas;
                 }
-                HistoryBytes::Taken(bytes) => gas.refill_history(history_gas(bytes).unwrap_or(0)),
             }
         }
         if holds_again {
@@ -345,20 +348,22 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
     }
 
     /// Charges the running frame the history of the write records the frame it is starting makes
-    /// — a value transfer's sender and recipient, a creation's creator nonce and created account.
-    /// revm calls it at `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, `CREATE` and `CREATE2`,
-    /// once the opcode made every charge and took the gas it forwards, and before it builds the
-    /// frame's input.
+    /// — the accounts a value transfer changes from what the transaction loaded, a creation's
+    /// created account and its creator's nonce — as the journal predicts them from its state
+    /// ([`MegaJournal::start_records`](crate::MegaJournal)). revm calls it at `CALL`, `CALLCODE`,
+    /// `DELEGATECALL`, `STATICCALL`, `CREATE` and `CREATE2`, once the opcode made every charge
+    /// and took the gas it forwards, and before it builds the frame's input.
     ///
     /// The charge comes out of what the caller kept rather than out of what the callee gets, so
     /// the frame's allowance is free for what the recipient does; the frame's side keeps it, and
-    /// gives back on return what the journal's ledger reports the start did not keep. The frame's
-    /// input copies the caller's reservoir after the charge, so the frame, or the answer revm
-    /// gives in its place, inherits the reservoir the charge left. An opcode that starts no frame —
-    /// a creation the balance, the nonce or the depth refuses, an out-of-gas before the forward
-    /// — never calls it, and makes no records. A start revm then refuses — a value the caller
-    /// cannot fund, a frame past the call-stack limit — makes no records, and the charge comes
-    /// back when it returns, as does what a frame that ran did not keep.
+    /// gives back on return what the journal's ledger reports the start did not keep, and the
+    /// price of the records a transfer returned to what the transaction loaded, once that stands.
+    /// The frame's input copies the caller's reservoir after the charge, so the frame, or the
+    /// answer revm gives in its place, inherits the reservoir the charge left. An opcode that
+    /// starts no frame — a creation the balance, the nonce or the depth refuses, an out-of-gas
+    /// before the forward — never calls it, and makes no records. A start revm then refuses — a
+    /// value the caller cannot fund, a frame past the call-stack limit — makes no records, and the
+    /// charge comes back when it returns, as does what a frame that ran did not keep.
     ///
     /// A charge the caller cannot pay, or a price that does not fit in a `u64`, fails the opcode
     /// with an out-of-gas and starts no frame, even where revm would have refused the start. The
@@ -369,18 +374,19 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
     /// taken, and a price that could not be computed failed before any charge.
     #[inline]
     fn frame_starting(&mut self, start: &FrameStart, gas: &mut GasTracker) -> bool {
-        let records = self.ledger().start_records(start);
+        let records = self.journal_ref().start_records(start);
         if !self.prices_history() {
+            self.additional_limit.stage_frame_charge(records, 0, 0, false);
             return true;
         }
         let charged =
-            charge_write_records_history(gas, records.on_level, u64::from(records.caller));
-        let Some((on_level, caller)) = charged else {
+            charge_write_records_history(gas, records.on_level.added, u64::from(records.creator));
+        let Some((added, creator)) = charged else {
             gas.erase_cost(start.forward);
             gas.set_failed_charge_remaining(Some(gas.remaining()));
             return false;
         };
-        self.additional_limit.stage_frame_charge(records, on_level, caller);
+        self.additional_limit.stage_frame_charge(records, added, creator, true);
         true
     }
 }

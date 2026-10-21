@@ -138,8 +138,8 @@ fn test_a_blocks_receipts_carry_its_transfer_logs_in_execution_order() {
         vec![transfer_log(DESTRUCTOR, PAYEE, U256::from(DESTRUCTOR_BALANCE))],
     ];
     // The records each keeps: the recipient; the forwarder and the payee; the created account;
-    // the destruction's beneficiary.
-    let records = [1, 2, 1, 1];
+    // the destructed account, whose balance the destruction clears, and its beneficiary.
+    let records = [1, 2, 1, 2];
 
     let mut data_size = 0;
     let mut history_bytes = 0;

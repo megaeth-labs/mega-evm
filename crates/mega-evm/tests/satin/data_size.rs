@@ -883,9 +883,9 @@ const FRESH_SLOT_COUNTED_AT: u64 = 152_306;
 /// out-of-gas boundary down by exactly the record's history, at a storage write, a log and a
 /// `SELFDESTRUCT` alike.
 ///
-/// A `SELFDESTRUCT` that moves value counts its transfer log with its beneficiary's record, in one
-/// check, so the two cross together; the log is data size and not history, so the boundary moves
-/// by the record's history alone.
+/// A `SELFDESTRUCT` that moves value counts its transfer log with its two records — the account
+/// it clears and its beneficiary — in one check, so the three cross together; the log is data
+/// size and not history, so the boundary moves by the records' history alone.
 #[test]
 fn test_whichever_of_gas_and_data_size_binds_first_is_reported() {
     let selfdestruct = BytecodeBuilder::default().push_address(B).append(SELFDESTRUCT).build();
@@ -895,8 +895,8 @@ fn test_whichever_of_gas_and_data_size_binds_first_is_reported() {
         (
             "a SELFDESTRUCT that moves value",
             selfdestruct,
-            WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE,
-            WRITE_RECORD_SIZE,
+            2 * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE,
+            2 * WRITE_RECORD_SIZE,
         ),
     ];
     for (name, code, bytes, history_bytes) in sites {
@@ -1155,8 +1155,8 @@ fn test_whichever_of_gas_and_data_size_binds_first_is_reported_at_a_childs_write
         (
             "a SELFDESTRUCT that moves value",
             selfdestruct_to_c(),
-            WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE,
-            WRITE_RECORD_SIZE,
+            2 * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE,
+            2 * WRITE_RECORD_SIZE,
         ),
     ];
     for (name, code, bytes, history_bytes) in sites {
@@ -1241,9 +1241,9 @@ fn test_a_record_a_limit_refuses_is_not_charged_where_the_reservoir_has_one_gas_
             selfdestruct_to_c(),
             3 + (5_000 + params.selfdestruct_cost(true, true)),
             account_state_gas(),
-            WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE,
-            WRITE_RECORD_SIZE,
-            1,
+            2 * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE,
+            2 * WRITE_RECORD_SIZE,
+            2,
         ),
     ];
     let body = body_history(0);

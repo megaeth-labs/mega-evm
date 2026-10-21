@@ -42,8 +42,8 @@ expression: "serde_json::json!({\n    \"summary\":\n    {\n        \"cases\": ca
     "the signer sends it @ 50000000 | keccak256=0xf4b217ee909a34fa24eb33e69e22d991934921666a4b7c09575b408d26a8b649",
     "the signer sends it, and it reverts @ 50000000 | keccak256=0x68fc6964cb808234a2d1d33f585fb4c9657f484b0d356ffd331bf6397d41128d",
     "a delegated signer @ 50000000 | keccak256=0x7330f3b25240cd042d903a307ceebd468712ab0e0c9bc53956b352a836793277",
-    "a delegated signer spending nonces, deploys @ 50000000 | keccak256=0xdd703fa6882916d0ca48e3fd6471a71950ba478f7d2efd69c8e3801c81dbe3b2",
-    "a delegated signer spending nonces, reverts @ 50000000 | keccak256=0x41ee8ae476e6201aaa92cdd797aaff01b27948cf491fa6c3c56cdc0424fd1724",
+    "a delegated signer spending nonces, deploys @ 50000000 | keccak256=0xe7d24ab0f4d912f15fb76b088ccecc75ffdf592db8046874805a7cc617effc3c",
+    "a delegated signer spending nonces, reverts @ 50000000 | keccak256=0xd71d46b795d405e858eef0b6f1d6e6731fe1aa4c8718389b46a8f7c0694303a2",
     "limit: tx data size, nonce 0 @ 50000000 | keccak256=0x37a162d66e66eaef26783bc9561e06aba6dce9824835444dfc73e7034f404684",
     "limit: compute, nonce 0 @ 50000000 | keccak256=0xc2631c368e7d21e89e7323514c180d9b25e176ed5f9670dbd34913cd5187eff7",
     "limit: frame data size, nonce 0 @ 50000000 | keccak256=0xa65b39c137245c46091e529c2f7944aa2e62cf30dcbc9a73becaf82c0896fb43",
@@ -107,8 +107,8 @@ expression: "serde_json::json!({\n    \"summary\":\n    {\n        \"cases\": ca
     "the signer sends it @ 400000000 | keccak256=0x23d3e43c0591e50bead0e091db67aef632a77f7b789a26ab426cfc7a69814e21",
     "the signer sends it, and it reverts @ 400000000 | keccak256=0xa530a2b24e4f4c977e1a73999e343d6230c3372f7467d49901451ab310e9df54",
     "a delegated signer @ 400000000 | keccak256=0xe0d591f3e38dda862488a1009602e3f3b24a7ba333a9fbda56fc2f8c0caaa7a7",
-    "a delegated signer spending nonces, deploys @ 400000000 | keccak256=0x0b7d568b7270ccde9eb252f3a60aef197c80f4e4720c9f673d6b09da8538aa6c",
-    "a delegated signer spending nonces, reverts @ 400000000 | keccak256=0xa2c3e89c11a418a2ad592b75dbf3ba4ef19f95e5634dbdd9a2552f4cbbb223b9",
+    "a delegated signer spending nonces, deploys @ 400000000 | keccak256=0x8ef3d795d097ab68240ed2275bc691470ad3c4a72869cb570ad0efc0add5437d",
+    "a delegated signer spending nonces, reverts @ 400000000 | keccak256=0xad96560f17165fc62cb06d04e4a2ffc2bacb69852fe08b0b1aef0d9dec664690",
     "limit: tx data size, nonce 0 @ 400000000 | keccak256=0x3fda5141c92c11c841821a4754de70393a313b6384e6e0bf8d2606dbe6d03f02",
     "limit: compute, nonce 0 @ 400000000 | keccak256=0x02f6f21cfc59e30ec997eaf750e39eba6a2b2cce4844e781dbcf118e2be5a1f1",
     "limit: frame data size, nonce 0 @ 400000000 | keccak256=0xa3d35dab98f17e60684b7fbcdb827fe82f004950301da26d87e78d7ba5125ec1",
@@ -145,7 +145,7 @@ expression: "serde_json::json!({\n    \"summary\":\n    {\n        \"cases\": ca
     "rule: init code over the limit @ 2000000000 | keccak256=0x58da5d395d2b47867b957a47072721843bc4fd359f62379c21e38c78965b156c"
   ],
   "summary": {
-    "bytes": 2407322,
+    "bytes": 2407306,
     "cases": 139,
     "lines": 11452,
     "runs": 556

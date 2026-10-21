@@ -9,7 +9,7 @@ use alloy_evm::Database;
 use alloy_primitives::{Address, Bytes, U256};
 use alloy_sol_types::SolCall;
 use revm::{
-    context::{Cfg, ContextError, ContextTr, JournalTr, Transaction},
+    context::{Cfg, ContextError, ContextTr, JournalTr},
     context_interface::{
         cfg::{GasId, StateGasCharge, StateGasSite},
         Host,
@@ -61,11 +61,10 @@ pub(crate) struct Started {
     /// What the call was charged for the signer's account, which the creation's start creates:
     /// zero when the signer had one.
     pub(super) signer_account_charge: u64,
-    /// The history the call paid for the signer's nonce record: zero when the signer is the
-    /// transaction's sender, which makes no record, or when the transaction pays no history.
+    /// The history the call paid for the signer's nonce record: zero when the transaction had
+    /// changed the signer's account already — the transaction's sender among them — which makes
+    /// no record, or when the transaction pays no history.
     pub(super) signer_record_charge: u64,
-    /// Whether the creation moves value out of the signer's account.
-    pub(super) moves_value: bool,
     /// Whether the deposit of empty code at the deploy address was refused, which reverts the
     /// creation ([`refuses_empty_deposit`](settle::refuses_empty_deposit)).
     pub(super) empty_deposit_refused: bool,
@@ -225,10 +224,13 @@ fn start<DB: Database, ExtEnvs: ExternalEnvTypes>(
             return Ok(InterpreterAction::new_return(result, output, *gas));
         }
     };
-    ctx.ledger_mut().set_frame_creator(deployment.signer);
-    if let Some((on_level, caller)) = deployment.record_charges {
-        ctx.additional_limit.stage_frame_charge(deployment.records, on_level, caller);
-    }
+    let (added, creator) = deployment.record_charges.unwrap_or((0, 0));
+    ctx.additional_limit.stage_frame_charge(
+        deployment.records,
+        added,
+        creator,
+        deployment.record_charges.is_some(),
+    );
     let mut create = CreateInputs::new(
         deployment.signer,
         CreateScheme::Custom { address: deployment.deploy_address },
@@ -244,8 +246,7 @@ fn start<DB: Database, ExtEnvs: ExternalEnvTypes>(
         signer: deployment.signer,
         signer_nonce: deployment.signer_nonce,
         signer_account_charge: deployment.signer_account_charge,
-        signer_record_charge: deployment.record_charges.map_or(0, |(_, caller)| caller),
-        moves_value: !deployment.value.is_zero(),
+        signer_record_charge: deployment.record_charges.map_or(0, |(_, creator)| creator),
         empty_deposit_refused: false,
     }));
     Ok(InterpreterAction::NewFrame(FrameInput::Create(Box::new(create))))
@@ -266,8 +267,8 @@ struct Deployment {
     charged_create_state_gas: bool,
     /// The records the creation's start makes.
     records: FrameStartRecords,
-    /// What the call paid for them: the created account's, and the signer's. `None` when the
-    /// transaction pays no history.
+    /// What the call paid for them: the created account's, and the signer's nonce. `None` when
+    /// the transaction pays no history.
     record_charges: Option<(u64, u64)>,
 }
 
@@ -428,12 +429,12 @@ fn prepare<DB: Database, ExtEnvs: ExternalEnvTypes>(
             return Ok(Err(Refusal::OutOfGas));
         }
     }
-    let records = FrameStartRecords { on_level: 1, caller: signer != ctx.tx().caller() };
+    let records = ctx.journal_ref().creation_records(signer, tx.value);
     let record_charges = if ctx.prices_history() {
         let charged = charge_write_records_history(
             gas.tracker_mut(),
-            records.on_level,
-            u64::from(records.caller),
+            records.on_level.added,
+            u64::from(records.creator),
         );
         if charged.is_none() {
             return Ok(Err(Refusal::OutOfGas));

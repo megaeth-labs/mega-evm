@@ -233,7 +233,8 @@ fn test_a_creation_whose_creator_cannot_pay_its_records_starts_no_frame() {
 /// little once it forwarded, and starts no frame; given that gas in full it starts the frame and
 /// pays the price, the reservoir first and then its own gas. Below the execution cap there is no
 /// reservoir; above it the reservoir holds half the price. A `DELEGATECALL` or a `STATICCALL`
-/// moves no value and makes no records: from the same gas it starts, and pays no history.
+/// moves no value, and a `CALLCODE` moves it from the calling account to itself: none makes a
+/// record, so from the same gas each starts, and pays no history.
 ///
 /// `CALLEE` calls `CONTRACT` with the gas each case gives it and returns the call's flag, so the
 /// flag says whether `CONTRACT`'s own start happened. `TARGET` holds a balance and no code, so the
@@ -284,7 +285,7 @@ fn test_every_call_kind_charges_its_records_after_its_forward() {
         (started, outcome)
     };
 
-    for (scheme, records) in [(CALL, 2), (CALLCODE, 1)] {
+    for (scheme, records) in [(CALL, 2)] {
         let price = records * WRITE_RECORD_SIZE * CPHB;
         for reservoir in [None, Some(price / 2)] {
             let case = format!("scheme {scheme:#04x}, reservoir {reservoir:?}");
@@ -310,7 +311,9 @@ fn test_every_call_kind_charges_its_records_after_its_forward() {
                 assert_eq!(exact.gas.reservoir_remaining, 0, "{case}: the reservoir paid first");
             }
 
-            for scheme in [DELEGATECALL, STATICCALL] {
+            // A value `CALLCODE` moves the value from the calling account to itself and makes
+            // no record, as the two schemes that carry no value make none.
+            for scheme in [CALLCODE, DELEGATECALL, STATICCALL] {
                 let case = format!("{case}, then scheme {scheme:#04x} from the same gas");
                 let (code, _) = start(scheme, forward);
                 let (started, outcome) = run(code, charges + forward + spill - 1, reservoir);

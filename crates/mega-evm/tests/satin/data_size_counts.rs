@@ -259,21 +259,23 @@ fn test_what_each_transaction_keeps() {
             records(1),
         ),
         (
-            "a SELFDESTRUCT that moves value to an existing account",
+            "a SELFDESTRUCT that moves value to an existing account: the account it clears, and \
+             the beneficiary",
             with_code(
                 BytecodeBuilder::default().push_address(EXISTING).append(SELFDESTRUCT).build(),
             )
             .account_balance(CALLEE, U256::from(1_000))
             .account_balance(EXISTING, U256::from(1)),
             call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT),
-            records_and_moves(1, 1),
+            records_and_moves(2, 1),
         ),
         (
-            "a SELFDESTRUCT that moves value to the sender: the body counts the sender",
+            "a SELFDESTRUCT that moves value to the sender: the account it clears alone, the \
+             sender's account being changed already",
             with_code(BytecodeBuilder::default().push_address(CALLER).append(SELFDESTRUCT).build())
                 .account_balance(CALLEE, U256::from(1_000)),
             call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT),
-            records_and_moves(0, 1),
+            records_and_moves(1, 1),
         ),
         (
             "a SELFDESTRUCT to itself, which moves nothing",

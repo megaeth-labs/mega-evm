@@ -13,17 +13,22 @@
 //! - a **frame level**, for each frame revm starts: the first checkpoint revm opens while it
 //!   decides a call's start, or the one a creation's account checkpoint returns. Only the engine's
 //!   start window ([`open_start`](Ledger::open_start)) opens one. It carries the frame's data-size
-//!   budget, the account the frame runs as and whether that account is already recorded;
+//!   budget;
 //! - a **rollback level**, for every other checkpoint: the pre-execution phase's, a system call's,
 //!   a precompile's, a tool's. It carries what its revert restores and nothing else.
 //!
-//! Budgets, the per-frame dedup of a frame's own account and the running frame's check use the
-//! nearest frame level. A rollback level may enclose a frame start (a tool's checkpoint opened
-//! before a call and closed after it) as long as the two close in order. A revert that would close
-//! a level from below — a checkpoint reverted while a level opened after it is still open — is not
-//! supported, and trips in debug builds.
+//! Budgets and the running frame's check use the nearest frame level. A rollback level may enclose
+//! a frame start (a tool's checkpoint opened before a call and closed after it) as long as the two
+//! close in order. A revert that would close a level from below — a checkpoint reverted while a
+//! level opened after it is still open — is not supported, and trips in debug builds.
 //!
 //! # What is counted where
+//!
+//! An account's write record follows the net change of its info within the transaction: the
+//! journal tells the ledger, at each write, which accounts the write changed from what the
+//! transaction loaded and which it returned to that ([`RecordDelta`]), and the ledger counts a
+//! record for the first and takes one back for the second. A storage slot's record follows the
+//! slot's original value the same way. So:
 //!
 //! - the body and the Oracle hints, as the ledger's base, which no revert takes back;
 //! - the records of the applied EIP-7702 authorities, inside the pre-execution level;
@@ -49,17 +54,14 @@
 use alloc as std;
 use std::vec::Vec;
 
-use alloy_primitives::{Address, U256};
-use revm::context_interface::{
-    host::{CompletedWrite, FrameStart, FrameStartKind},
-    journaled_state::JournalCheckpoint,
-};
+use revm::context_interface::{host::CompletedWrite, journaled_state::JournalCheckpoint};
 
 use super::{
-    record::{write_effect, write_moves_value, HistoryBytes, RecordEffect, WriteCount},
+    record::{write_effect, write_moves_value, HistoryBytes, RecordDelta, WriteCount},
     EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, FRAME_DATA_SHARE_DENOMINATOR,
     FRAME_DATA_SHARE_NUMERATOR, TRANSFER_LOG, WRITE_RECORD,
 };
+use crate::write_record_history_gas;
 
 /// What the ledger counts that the journal rewinds: additions and refunds, kept apart so that a
 /// frame's own usage saturates at zero on its own — a child can take back a slot its parent
@@ -68,7 +70,8 @@ use super::{
 pub(crate) struct Counts {
     /// What was counted.
     used: LimitUsage,
-    /// What was taken back: a slot written back to its original value.
+    /// What was taken back: a slot written back to its original value, an account returned to
+    /// what the transaction loaded.
     refund: LimitUsage,
     /// The log and code bytes among [`used`](Self::used).
     log_and_code_bytes: u64,
@@ -99,11 +102,6 @@ struct FrameLevel {
     depth: usize,
     /// The most data-size bytes the frame may keep.
     budget: u64,
-    /// The account the frame runs as.
-    account: Option<Address>,
-    /// Whether a write to the frame's own account is already counted, so a value transfer or a
-    /// creation from the frame does not count it again.
-    recorded: bool,
     /// Whether the frame's start counted its creator's nonce record, right before its level
     /// opened: the frame's usage is measured from before it.
     creator_record: bool,
@@ -118,9 +116,6 @@ struct Level {
     opened_at: JournalCheckpoint,
     /// The counts its revert restores.
     at_open: Counts,
-    /// Whether the nearest frame level below it had its account recorded when it opened, which its
-    /// revert restores.
-    recorded_at_open: bool,
     /// The start the next frame start would be when it opened: a start at or after it began
     /// inside it.
     next_start_at_open: StartId,
@@ -134,10 +129,8 @@ struct Level {
 pub(crate) struct StartFacts {
     /// The frame's depth.
     pub(crate) depth: usize,
-    /// The account starting the frame.
-    pub(crate) caller: Address,
-    /// The call's target; `None` for a creation.
-    pub(crate) target: Option<Address>,
+    /// Whether the start is a creation; a call otherwise.
+    pub(crate) creation: bool,
     /// Whether the start transfers value: a call carrying a non-zero transfer, or a creation with
     /// an endowment.
     pub(crate) transfers_value: bool,
@@ -146,15 +139,17 @@ pub(crate) struct StartFacts {
 /// The write records a frame's start makes, split by whose failure takes them back.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct FrameStartRecords {
-    /// Records on the frame's own level, which its failure takes back.
-    pub(crate) on_level: u64,
-    /// Whether the frame's start also writes its caller's account.
-    pub(crate) caller: bool,
+    /// The records on the frame's own level, which its failure takes back: the accounts a value
+    /// transfer changes and returns, a creation's created account.
+    pub(crate) on_level: RecordDelta,
+    /// Whether the start writes its creator's nonce record, on the creating frame, which the
+    /// creation's failure leaves there.
+    pub(crate) creator: bool,
 }
 
 impl FrameStartRecords {
     /// No record at all.
-    pub(crate) const NONE: Self = Self { on_level: 0, caller: false };
+    pub(crate) const NONE: Self = Self { on_level: RecordDelta::NONE, creator: false };
 }
 
 /// The start window, open while revm decides one frame start.
@@ -174,14 +169,8 @@ struct Window {
 pub(crate) struct StartReport {
     /// The start, once revm decided it in a start window; `None` for a start answered before.
     pub(crate) start: Option<StartId>,
-    /// The records counted on the start's own level: a value call's recipient, a creation's
-    /// account.
-    pub(crate) on_level: u64,
-    /// Whether the start counted its caller's record on its own level: a value transfer's sender.
-    pub(crate) caller_on_level: bool,
-    /// Whether the start counted its creator's nonce record, below its own level, where the
-    /// creation's failure leaves it.
-    pub(crate) creator_record: bool,
+    /// The records the start counted: on its own level, and its creator's below it.
+    pub(crate) records: FrameStartRecords,
     /// Whether the start counted the transfer log revm journaled for it.
     pub(crate) transfer_log: bool,
     /// Whether revm refused the start's value transfer.
@@ -202,13 +191,11 @@ struct Fate {
     start_kept: bool,
 }
 
-/// What a revert of the ledger restores: the counts, the running frame's flag and the levels open.
+/// What a revert of the ledger restores: the counts and the levels open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Rollback {
     /// The counts.
     counts: Counts,
-    /// Whether the nearest frame level had its account recorded; `None` when there is none.
-    recorded: Option<bool>,
     /// The number of levels open: a revert finds at most these.
     levels: usize,
 }
@@ -259,11 +246,9 @@ pub(crate) struct Ledger {
     last_decided: Option<Fate>,
     /// The next frame start.
     next_start: StartId,
-    /// The transaction's sender, whose account the body counts.
-    sender: Address,
-    /// Whether the transaction's call target is an applied EIP-7702 authority, whose record the
-    /// authorities' records hold.
-    target_is_authority: bool,
+    /// The records the journal saw the last `SELFDESTRUCT` make and take back, for the
+    /// completed-write hook to count once the opcode completed.
+    destruction: RecordDelta,
     /// Whether a value movement journals an EIP-7708 transfer log.
     transfer_logs: bool,
     limits: EvmTxRuntimeLimits,
@@ -298,8 +283,7 @@ impl Ledger {
         self.last_start = None;
         self.last_decided = None;
         self.next_start = StartId::default();
-        self.sender = Address::ZERO;
-        self.target_is_authority = false;
+        self.destruction = RecordDelta::NONE;
         self.transfer_logs = transfer_logs;
         self.exempt = exempt;
     }
@@ -339,12 +323,6 @@ impl Ledger {
                 .exceeds_data_size(self.limits.tx_data_size_limit)
     }
 
-    /// Whether the transaction's call target is an applied EIP-7702 authority, whose record the
-    /// authorities' records hold, so the transaction's own frame writes no recipient.
-    pub(crate) const fn target_is_authority(&self) -> bool {
-        self.target_is_authority
-    }
-
     /// The number of levels open, which is revm's journal depth.
     pub(crate) fn depth(&self) -> usize {
         self.levels.len()
@@ -358,12 +336,6 @@ impl Ledger {
     /// The running frame's level, mutably.
     fn frame_level_mut(&mut self) -> Option<&mut FrameLevel> {
         self.frames.last_mut()
-    }
-
-    /// The level of the frame below the running one: the one that started it.
-    fn calling_level_mut(&mut self) -> Option<&mut FrameLevel> {
-        let caller = self.frames.len().checked_sub(2)?;
-        self.frames.get_mut(caller)
     }
 
     /// What `frame` keeps so far, the children it kept included: what was counted since its level
@@ -393,7 +365,6 @@ impl Ledger {
 
     /// Whether the transaction's value movements journal EIP-7708 transfer logs, which the ledger
     /// counts where the value moves.
-    #[cfg(test)]
     pub(crate) const fn counts_transfer_logs(&self) -> bool {
         self.transfer_logs
     }
@@ -450,87 +421,24 @@ impl Ledger {
         forwarded.min(self.limits.frame_data_size_limit)
     }
 
-    /// The records a value call from `from` to `to` at `depth` makes: its recipient, on its own
-    /// level, and whether it records its caller's account, which the calling frame has
-    /// (`caller_recorded`) or has not recorded yet.
-    ///
-    /// The transaction's own frame records the recipient unless it is the sender or an applied
-    /// authority. Any other records the recipient unless it is the caller or the sender, and the
-    /// caller's own account once per frame; a `CALLCODE` or a call to itself records the caller
-    /// although revm moves nothing.
-    fn call_records(
-        &self,
-        depth: usize,
-        from: Address,
-        to: Address,
-        caller_recorded: bool,
-    ) -> (u64, bool) {
-        if depth == 0 {
-            return (u64::from(to != from && !self.target_is_authority), false);
-        }
-        (u64::from(to != from && to != self.sender), !caller_recorded)
-    }
-
-    /// The write records the start `start` describes makes, for the opcode about to start it,
-    /// which pays for them once it took the gas it forwards: the frame's own budget carries none
-    /// of them, which is what lets a value transfer's allowance pay for what the recipient does
-    /// with it.
-    ///
-    /// A call that moves no value writes nothing. A value call writes its recipient, unless that
-    /// is the caller itself or the transaction's sender, whose account the body counts. A creation
-    /// writes the account it creates. Either writes the caller's account — a transfer's sender, a
-    /// creation's creator nonce — unless the running frame already recorded it. They are the
-    /// records the start is counted by once revm makes it ([`on_transfer`](Self::on_transfer),
-    /// [`before_creation`](Self::before_creation)); a debug build holds the two answers to each
-    /// other where the frame starts.
-    pub(crate) fn start_records(&self, start: &FrameStart) -> FrameStartRecords {
-        let recorded = self.frame_level().is_some_and(|level| level.recorded);
-        let target = match start.kind {
-            FrameStartKind::Create | FrameStartKind::Create2 => {
-                return FrameStartRecords { on_level: 1, caller: !recorded };
-            }
-            FrameStartKind::Call |
-            FrameStartKind::CallCode |
-            FrameStartKind::DelegateCall |
-            FrameStartKind::StaticCall => start.target,
-        };
-        match target {
-            Some(target) if !start.value.is_zero() => {
-                // An opcode runs inside a frame, so the frame it starts is below the
-                // transaction's own.
-                let depth = self.frame_level().map_or(1, |level| level.depth + 1);
-                let (on_level, caller) = self.call_records(depth, start.caller, target, recorded);
-                FrameStartRecords { on_level, caller }
-            }
-            _ => FrameStartRecords::NONE,
-        }
-    }
-
     /// The verdict on a start revm is not asked to decide — a call gas detention answers without
-    /// running the precompile it targets — had revm made it: the records it would count and the
-    /// transfer log of the value it would move, held to the transaction's limit and to the budget
-    /// its frame would get. Nothing is counted.
-    pub(crate) fn hypothetical_start(&self, facts: &StartFacts) -> LimitCheck {
-        let Some(target) = facts.target else {
-            unreachable!("only a call is answered without revm deciding its start")
-        };
-        let counted = if facts.transfers_value {
-            let recorded = self.frame_level().is_some_and(|level| level.recorded);
-            let (on_level, caller) = self.call_records(facts.depth, facts.caller, target, recorded);
-            with_transfer_log(
-                WRITE_RECORD.times(on_level + u64::from(caller)),
-                self.transfer_logs && target != facts.caller,
-            )
-        } else {
-            LimitUsage::ZERO
-        };
-        let (kept, limit) = (self.usage().saturating_add(counted), self.limits.tx_data_size_limit);
+    /// running the precompile it targets — had revm made it: the records its value transfer would
+    /// make and take back (`records`, as the journal predicts them) and the transfer log of the
+    /// value it would move (`logged`), held to the transaction's limit and to the budget its frame
+    /// would get. Nothing is counted.
+    pub(crate) fn hypothetical_start(&self, records: RecordDelta, logged: bool) -> LimitCheck {
+        let added = with_transfer_log(WRITE_RECORD.times(records.added), logged);
+        let taken = WRITE_RECORD.times(records.taken);
+        let (kept, limit) = (
+            self.usage().saturating_add(added).saturating_sub(taken),
+            self.limits.tx_data_size_limit,
+        );
         if kept.exceeds_data_size(limit) {
             return self.crossed(limit, kept.data_size, false);
         }
-        let budget = self.child_budget();
-        if counted.exceeds_data_size(budget) {
-            return self.crossed(budget, counted.data_size, true);
+        let (budget, used) = (self.child_budget(), added.saturating_sub(taken));
+        if used.exceeds_data_size(budget) {
+            return self.crossed(budget, used.data_size, true);
         }
         LimitCheck::WithinLimit
     }
@@ -538,20 +446,13 @@ impl Ledger {
     /* What the transaction counts outside the journal's writes */
 
     /// Counts the records of the applied EIP-7702 authorities, `authorities` distinct accounts
-    /// other than the transaction's `sender`, `target_is_authority` if the call target is one.
-    /// Inside the pre-execution level, whose revert takes them back.
+    /// other than the transaction's sender. Inside the pre-execution level, whose revert takes
+    /// them back.
     ///
     /// The records cannot cross the data-size limit: validation admitted the body with a record for
     /// every entry of the authorization list ([`admits_tx_body`](Self::admits_tx_body)), and only
     /// an entry can apply. A debug build asserts it.
-    pub(crate) fn count_authorities(
-        &mut self,
-        sender: Address,
-        authorities: u64,
-        target_is_authority: bool,
-    ) {
-        self.sender = sender;
-        self.target_is_authority = target_is_authority;
+    pub(crate) fn count_authorities(&mut self, authorities: u64) {
         self.counts.used = self.counts.used.saturating_add(WRITE_RECORD.times(authorities));
         debug_assert!(
             self.exempt || !self.usage().exceeds_data_size(self.limits.tx_data_size_limit),
@@ -574,40 +475,40 @@ impl Ledger {
         LimitCheck::WithinLimit
     }
 
-    /// What `write`, which the running opcode completed, keeps, and the history bytes it appends or
-    /// takes back: what [`count_write`](Self::count_write) counts, and what the Host's
-    /// completed-write hook charges.
+    /// Notes the records the journal saw a `SELFDESTRUCT` make and take back, for the
+    /// completed-write hook to count once the opcode completed; a `SELFDESTRUCT` whose opcode
+    /// then fails leaves them for the next one to overwrite.
+    pub(crate) const fn observe_destruction(&mut self, records: RecordDelta) {
+        self.destruction = records;
+    }
+
+    /// What `write`, which the running opcode completed, keeps and takes back, and the history
+    /// bytes it appends and takes back: what [`count_write`](Self::count_write) counts, and what
+    /// the Host's completed-write hook charges and refills.
     ///
     /// A `SELFDESTRUCT` that moved value to another account also keeps the EIP-7708 transfer log
-    /// revm journaled for the move, with the beneficiary's record. The log is the running frame's,
-    /// as the move is: the frame's own journal checkpoint takes both back when the frame fails. It
-    /// is data size and nothing else — no write record, and no history: the bytes reported are the
-    /// record's alone.
+    /// revm journaled for the move, with the records its move made. The log is the running
+    /// frame's, as the move is: the frame's own journal checkpoint takes both back when the frame
+    /// fails. It is data size and nothing else — no write record, and no history: the bytes
+    /// reported are the records' alone.
     pub(crate) fn write_count(&self, write: &CompletedWrite<'_>) -> (WriteCount, HistoryBytes) {
-        let effect = write_effect(write, self.sender);
-        let history = effect.history_bytes();
-        let added = match effect {
-            RecordEffect::None => LimitUsage::ZERO,
-            RecordEffect::Record(usage) => usage,
-            RecordEffect::Refund(usage) => {
-                return (WriteCount { taken: usage, ..WriteCount::NONE }, history);
-            }
-        };
+        let (added, taken) = write_effect(write, self.destruction);
+        let history = HistoryBytes { appended: added.data_size, taken: taken.data_size };
         // A log's bytes are history beside the write records; a record's are counted as one.
         let log_bytes = match write {
             CompletedWrite::Log { .. } => added.data_size,
             CompletedWrite::Sstore { .. } | CompletedWrite::SelfDestruct { .. } => 0,
         };
         let added = with_transfer_log(added, self.transfer_logs && write_moves_value(write));
-        (WriteCount { added, log_bytes, ..WriteCount::NONE }, history)
+        (WriteCount { added, taken, log_bytes }, history)
     }
 
-    /// Counts what a completed write keeps on the running frame's level: what it adds, or what it
-    /// takes back. The verdict is the check after an addition; a record taken back holds nothing.
+    /// Counts what a completed write keeps on the running frame's level: what it takes back, then
+    /// what it adds. The verdict is the check after an addition; a write that adds nothing holds
+    /// nothing.
     pub(crate) fn count_write(&mut self, count: &WriteCount) -> LimitCheck {
         if count.taken != LimitUsage::ZERO {
             self.counts.refund = self.counts.refund.saturating_add(count.taken);
-            return LimitCheck::WithinLimit;
         }
         self.counts.log_and_code_bytes =
             self.counts.log_and_code_bytes.saturating_add(count.log_bytes);
@@ -629,27 +530,11 @@ impl Ledger {
         self.check()
     }
 
-    /// Runs the running frame — a `keylessDeploy` call's — as `creator`, whose nonce the creation
-    /// it starts writes: recorded already when the creator is the transaction's sender.
-    pub(crate) fn set_frame_creator(&mut self, creator: Address) {
-        let sender = self.sender;
-        if let Some(level) = self.frame_level_mut() {
-            level.account = Some(creator);
-            level.recorded = creator == sender;
-        }
-    }
-
-    /// Takes back the nonce record a creation left the running frame, a `keylessDeploy` call's,
-    /// when its nonce bump is taken back. `false` when there was none to take.
-    pub(crate) fn take_back_creator_record(&mut self) -> bool {
-        let sender = self.sender;
-        let Some(level) = self.frame_level_mut() else { return false };
-        if level.account == Some(sender) || !level.recorded {
-            return false;
-        }
-        level.recorded = false;
-        self.counts.used = self.counts.used.saturating_sub(WRITE_RECORD);
-        true
+    /// Takes back one write record on the running frame's level, for an account a write outside
+    /// the journal's counted writes returned to what the transaction loaded: a `keylessDeploy`
+    /// call's signer, whose nonce the settlement sets back.
+    pub(crate) fn take_back_record(&mut self) {
+        self.counts.refund = self.counts.refund.saturating_add(WRITE_RECORD);
     }
 
     /* The start window */
@@ -657,9 +542,6 @@ impl Ledger {
     /// Opens the start window for the start `facts` describes, which revm decides next.
     pub(crate) fn open_start(&mut self, facts: StartFacts) {
         debug_assert!(self.window.is_none(), "start windows do not nest");
-        if facts.depth == 0 {
-            self.sender = facts.caller;
-        }
         let start = self.next_start;
         self.next_start = StartId(start.0 + 1);
         self.last_start = Some(StartReport { start: Some(start), ..Default::default() });
@@ -685,25 +567,21 @@ impl Ledger {
 
     /// Opens a level at `opened_at`, a frame level when `frame`.
     fn open_level(&mut self, opened_at: JournalCheckpoint, frame: bool) {
-        let recorded_at_open = self.frame_level().is_some_and(|level| level.recorded);
         self.levels.push(Level {
             opened_at,
             at_open: self.counts,
-            recorded_at_open,
             next_start_at_open: self.next_start,
             frame,
         });
     }
 
-    /// Opens the frame level of the window's start at `opened_at`, under `budget`, running as
-    /// `account`, recorded or not, its usage measured from before its creator's nonce record when
-    /// the start counted one (`creator_record`): the frame the window's start builds.
+    /// Opens the frame level of the window's start at `opened_at`, under `budget`, its usage
+    /// measured from before its creator's nonce record when the start counted one
+    /// (`creator_record`): the frame the window's start builds.
     fn open_frame_level(
         &mut self,
         opened_at: JournalCheckpoint,
         budget: u64,
-        account: Address,
-        recorded: bool,
         creator_record: bool,
     ) {
         let Some(window) = &mut self.window else {
@@ -717,8 +595,6 @@ impl Ledger {
             start,
             depth,
             budget,
-            account: Some(account),
-            recorded,
             creator_record,
             returning: false,
         });
@@ -731,108 +607,78 @@ impl Ledger {
         let Some(window) = self.window.filter(|window| !window.opened) else {
             return self.open_level(opened_at, false);
         };
-        let StartFacts { depth, caller, target, transfers_value } = window.facts;
-        let Some(target) = target else {
+        if window.facts.creation {
             // A creation's frame level is the one its account checkpoint opens.
             return self.open_level(opened_at, false);
-        };
-        // The one start rule that stays an interpretation of the input: whether the frame's own
-        // account is recorded before anything of the frame is counted.
-        let recorded = if depth == 0 {
-            target == caller || self.target_is_authority || transfers_value
-        } else {
-            let inherited = self
-                .frame_level()
-                .is_some_and(|parent| parent.account == Some(target) && parent.recorded);
-            inherited || target == self.sender || transfers_value
-        };
-        self.open_frame_level(opened_at, self.child_budget(), target, recorded, false);
+        }
+        self.open_frame_level(opened_at, self.child_budget(), false);
         // A start that moves value is held once its transfer is counted (`on_transfer`); any
         // other has nothing of its own to count, and is held now.
-        if !transfers_value {
+        if !window.facts.transfers_value {
             let verdict = self.check();
             self.report_mut().verdict = Some(verdict);
         }
     }
 
-    /// revm moved `value` from `from` to `to` for the call whose start the window is open for
-    /// (`refused` when it could not), and journaled a transfer log or not (`logged`): counts the
-    /// records the transfer makes on the call's level ([`call_records`](Self::call_records)), then
-    /// holds the start to the limits.
-    pub(crate) fn on_transfer(
-        &mut self,
-        from: Address,
-        to: Address,
-        value: U256,
-        refused: bool,
-        logged: bool,
-    ) {
+    /// revm moved the value of the call whose start the window is open for (`refused` when it
+    /// could not), changing and returning the accounts `records` says, and journaled a transfer
+    /// log or not (`logged`): counts the records on the call's level, then holds the start to the
+    /// limits.
+    pub(crate) fn on_transfer(&mut self, records: RecordDelta, refused: bool, logged: bool) {
         let Some(window) = &mut self.window else { return };
-        if window.counted || !window.opened || window.facts.target.is_none() {
+        if window.counted || !window.opened || window.facts.creation {
             return;
         }
         window.counted = true;
-        let depth = window.facts.depth;
         if refused {
             let report = self.report_mut();
             report.refused = true;
             report.verdict = None;
             return;
         }
-        if value.is_zero() {
+        if !window.facts.transfers_value {
             return;
         }
-        let caller_recorded = self.calling_level_mut().is_none_or(|caller| caller.recorded);
-        let (on_level, caller_on_level) = self.call_records(depth, from, to, caller_recorded);
-        if caller_on_level {
-            if let Some(caller) = self.calling_level_mut() {
-                caller.recorded = true;
-            }
-        }
-        let counted = WRITE_RECORD.times(on_level + u64::from(caller_on_level));
-        self.counts.used = self.counts.used.saturating_add(with_transfer_log(counted, logged));
+        let added = with_transfer_log(WRITE_RECORD.times(records.added), logged);
+        self.counts.used = self.counts.used.saturating_add(added);
+        self.counts.refund = self.counts.refund.saturating_add(WRITE_RECORD.times(records.taken));
         let verdict = self.check();
         let report = self.report_mut();
-        report.on_level = on_level;
-        report.caller_on_level = caller_on_level;
+        report.records = FrameStartRecords { on_level: records, creator: false };
         report.transfer_log = logged;
         report.verdict = Some(verdict);
     }
 
-    /// revm is about to open a creation's account checkpoint for the start of the window: takes the
-    /// creation's budget and base, then counts the creator's nonce record, before anything of the
-    /// creation. `None` outside a creation's start window.
-    pub(crate) fn before_creation(&mut self) -> Option<CreationStart> {
+    /// revm is about to open a creation's account checkpoint for the start of the window, having
+    /// bumped its creator's nonce: takes the creation's budget and base, then counts the creator's
+    /// nonce record when the bump changed an account the transaction had not changed
+    /// (`creator_unchanged`), before anything of the creation. The transaction's own creation
+    /// writes its sender's nonce, which the body counts. `None` outside a creation's start
+    /// window.
+    pub(crate) fn before_creation(&mut self, creator_unchanged: bool) -> Option<CreationStart> {
         let window = self.window.as_mut()?;
-        if window.counted || window.facts.target.is_some() {
+        if window.counted || !window.facts.creation {
             return None;
         }
         window.counted = true;
         let depth = window.facts.depth;
         let budget = self.child_budget();
-        let mut creator_record = false;
-        if depth > 0 {
-            if let Some(level) = self.frame_level_mut() {
-                creator_record = !level.recorded;
-                level.recorded = true;
-            }
-        }
+        let creator_record = depth > 0 && creator_unchanged;
         if creator_record {
             self.counts.used = self.counts.used.saturating_add(WRITE_RECORD);
         }
         Some(CreationStart { budget, creator_record, depth })
     }
 
-    /// revm opened (`Some`) or failed to open (`None`) the account checkpoint of a creation at
-    /// `address`, and journaled a transfer log or not (`logged`): opens the creation's frame level,
-    /// counts the created account and the log on it, then holds the start to the limits. The
-    /// creation's usage includes its creator's nonce record; its revert keeps it.
+    /// revm opened (`Some`) or failed to open (`None`) the account checkpoint of a creation, and
+    /// journaled a transfer log or not (`logged`): opens the creation's frame level, counts the
+    /// created account and the log on it, then holds the start to the limits. The creation's usage
+    /// includes its creator's nonce record; its revert keeps it.
     ///
     /// A checkpoint opened outside a creation's start window opens a rollback level.
     pub(crate) fn after_creation(
         &mut self,
         start: Option<CreationStart>,
-        address: Address,
         opened: Option<JournalCheckpoint>,
         logged: bool,
     ) {
@@ -842,14 +688,14 @@ impl Ledger {
             }
             return;
         };
-        self.report_mut().creator_record = start.creator_record;
+        self.report_mut().records.creator = start.creator_record;
         let Some(opened_at) = opened else { return };
         debug_assert!(start.depth == self.window.map_or(start.depth, |window| window.facts.depth));
-        self.open_frame_level(opened_at, start.budget, address, true, start.creator_record);
+        self.open_frame_level(opened_at, start.budget, start.creator_record);
         self.counts.used = self.counts.used.saturating_add(with_transfer_log(WRITE_RECORD, logged));
         let verdict = self.check();
         let report = self.report_mut();
-        report.on_level = 1;
+        report.records.on_level = RecordDelta { added: 1, taken: 0 };
         report.transfer_log = logged;
         report.verdict = Some(verdict);
     }
@@ -872,8 +718,8 @@ impl Ledger {
         );
     }
 
-    /// revm's journal committed its latest checkpoint: the level closes, and a frame level hands
-    /// its frame's flag to a caller running as the same account.
+    /// revm's journal committed its latest checkpoint: the level closes, and what it counted stays
+    /// with the level below.
     pub(crate) fn on_commit(&mut self) {
         let Some(level) = self.levels.pop() else { return };
         if !level.frame {
@@ -881,17 +727,11 @@ impl Ledger {
         }
         let frame = self.pop_frame();
         self.assert_frame_closes(&frame);
-        if let Some(caller) = self.frame_level_mut() {
-            if frame.account.is_some() && frame.account == caller.account {
-                caller.recorded |= frame.recorded;
-            }
-        }
         self.last_decided = Some(Fate { start: frame.start, level_kept: true, start_kept: true });
     }
 
     /// revm's journal reverted to `checkpoint`: the latest level, which must be the one opened
-    /// there, closes, and the counts and the flag of the nearest frame level below it are what they
-    /// were when it opened.
+    /// there, closes, and the counts are what they were when it opened.
     ///
     /// A frame level's revert keeps what its start counted below it, a creator's nonce record. A
     /// rollback level a start began inside — a tool's checkpoint around a call — takes everything
@@ -904,9 +744,6 @@ impl Ledger {
         );
         let frame = level.frame.then(|| self.pop_frame());
         self.counts = level.at_open;
-        if let Some(caller) = self.frame_level_mut() {
-            caller.recorded = level.recorded_at_open;
-        }
         match frame {
             Some(frame) => {
                 self.assert_frame_closes(&frame);
@@ -949,34 +786,24 @@ impl Ledger {
     pub(crate) fn mark(&self, position: JournalCheckpoint) -> Mark {
         Mark {
             position,
-            rollback: Rollback {
-                counts: self.counts,
-                recorded: self.frame_level().map(|level| level.recorded),
-                levels: self.levels.len(),
-            },
+            rollback: Rollback { counts: self.counts, levels: self.levels.len() },
             next_start: self.next_start,
             own_start: None,
         }
     }
 
     /// What a frame revm just built is taken back to when it is rewritten into a failure, with its
-    /// start: the counts its level opened with — after a creation's creator record — and whether
-    /// the frame below had its account recorded then. Never where the frame's usage is measured
-    /// from, which for a creation is before the creator's record. The frame's side keeps it past
-    /// the level's commit, for the mark the rewrite reverts to ([`StartSide::built_mark`]).
+    /// start: the counts its level opened with — after a creation's creator record. Never where
+    /// the frame's usage is measured from, which for a creation is before the creator's record.
+    /// The frame's side keeps it past the level's commit, for the mark the rewrite reverts to
+    /// ([`StartSide::built_mark`]).
     pub(crate) fn frame_start_rollback(&self) -> Option<(StartId, Rollback)> {
         let level = self.levels.last()?;
         if !level.frame {
             return None;
         }
         let frame = self.frames.last()?;
-        let below = self.levels.len() - 1;
-        let caller = self.frames.len() > 1;
-        let rollback = Rollback {
-            counts: level.at_open,
-            recorded: caller.then_some(level.recorded_at_open),
-            levels: below,
-        };
+        let rollback = Rollback { counts: level.at_open, levels: self.levels.len() - 1 };
         Some((frame.start, rollback))
     }
 
@@ -988,17 +815,14 @@ impl Ledger {
         Some(Mark::of_built(self.levels.last()?.opened_at, start, rollback))
     }
 
-    /// Takes the ledger back to `mark`, which revm's journal is being reverted to: the counts, the
-    /// running frame's flag, and what became of the last start decided.
+    /// Takes the ledger back to `mark`, which revm's journal is being reverted to: the counts, and
+    /// what became of the last start decided.
     pub(crate) fn revert_to(&mut self, mark: &Mark) {
         debug_assert!(
             self.levels.len() <= mark.rollback.levels,
             "a revert to a mark finds every level opened since closed"
         );
         self.counts = mark.rollback.counts;
-        if let (Some(recorded), Some(level)) = (mark.rollback.recorded, self.frame_level_mut()) {
-            level.recorded = recorded;
-        }
         self.take_back_starts_from(mark.next_start, mark.own_start);
     }
 }
@@ -1011,6 +835,12 @@ impl Mark {
     }
 }
 
+/// The history gas `records` write records cost; nothing for a count with no price, which no
+/// charge was made for.
+fn records_history_gas(records: u64) -> u64 {
+    write_record_history_gas(records).unwrap_or(0)
+}
+
 /// Satin's side of one frame start: what its caller paid for the records it makes, what the
 /// ledger saw it count, the history allowance the frame was granted, and, for a frame revm built,
 /// what it is taken back to when it is rewritten into a failure. One per frame result revm will
@@ -1019,21 +849,20 @@ impl Mark {
 pub(crate) struct StartSide {
     /// The frame's depth.
     depth: usize,
-    /// What the caller paid for the records on the frame's own level.
-    on_level_charge: u64,
-    /// What the caller paid for the record of its own account.
-    caller_charge: u64,
+    /// What the caller paid for the records the start adds on the frame's own level.
+    added_charge: u64,
+    /// What the caller paid for the record of its own nonce, for a creation.
+    creator_charge: u64,
+    /// Whether the transaction prices history, so that a record the start took back is history
+    /// the caller gets back.
+    priced: bool,
     /// What is left of the history allowance the frame was granted, if it was granted one. It
     /// never enters the frame's gas, and what it does not spend disappears with the frame.
     stipend: u64,
     /// The start, once revm decided it; `None` for a start answered before, which counted nothing.
     start: Option<StartId>,
-    /// Whether the start counted records on its own level.
-    on_level: bool,
-    /// Whether the start counted its caller's record on its own level: a value transfer's sender.
-    caller_on_level: bool,
-    /// Whether the start counted its creator's nonce record, below its own level.
-    creator_record: bool,
+    /// The records the ledger saw the start count.
+    counted: FrameStartRecords,
     /// What a frame revm built is taken back to when it is rewritten into a failure.
     rollback: Option<Rollback>,
     /// The records the charge was computed from, when the charge was made from one and nothing
@@ -1043,25 +872,26 @@ pub(crate) struct StartSide {
 }
 
 impl StartSide {
-    /// The side of a start at `depth` whose caller paid `on_level_charge` and `caller_charge` for
-    /// the records `charged`, when the charge was computed from them.
+    /// The side of a start at `depth` whose caller paid `added_charge` and `creator_charge` for
+    /// the records `charged`, when the charge was computed from them, in a transaction that
+    /// prices history or not (`priced`).
     pub(crate) const fn new(
         depth: usize,
-        on_level_charge: u64,
-        caller_charge: u64,
+        added_charge: u64,
+        creator_charge: u64,
+        priced: bool,
         charged: Option<FrameStartRecords>,
     ) -> Self {
         #[cfg(not(debug_assertions))]
         let _ = charged;
         Self {
             depth,
-            on_level_charge,
-            caller_charge,
+            added_charge,
+            creator_charge,
+            priced,
             stipend: 0,
             start: None,
-            on_level: false,
-            caller_on_level: false,
-            creator_record: false,
+            counted: FrameStartRecords::NONE,
             rollback: None,
             #[cfg(debug_assertions)]
             charged,
@@ -1072,21 +902,20 @@ impl StartSide {
     /// back to, and holds the count to the records the start's charge was computed from.
     ///
     /// The two are separate answers to one question, asked at two points: the charge at the
-    /// opcode, on the facts revm's instruction hands the frame-start hook — or before execution,
-    /// on the transaction, for its own frame; or at a `keylessDeploy` call's first run, on the
-    /// creation it starts — and the count, on the writes revm made for the start. They agree
-    /// because the start revm makes carries the caller, target and value the charge was computed
-    /// from, and nothing between the two changes it: an interceptor answers a frame or lets it
-    /// start as it is, and a creation reaches none. A divergence trips in a debug build rather
-    /// than mis-charging the caller and mis-splitting the refund its failure gets back. An
-    /// inspector that may rewrite the start runs between the two, and can split them: under one
-    /// the start is not checked. Only a start revm made and held to the limits is checked: one it
-    /// refused, or failed before its level opened, counted nothing, and the charge comes back.
+    /// opcode, on the journal's state as revm's instruction hands the frame-start hook the start —
+    /// or before execution, on the transaction, for its own frame; or at a `keylessDeploy` call's
+    /// first run, on the creation it starts — and the count, on the writes revm made for the
+    /// start. They agree because the start revm makes carries the caller, target and value the
+    /// charge was computed from, and nothing between the two changes it or the accounts it
+    /// writes: an interceptor answers a frame or lets it start as it is, and a creation reaches
+    /// none. A divergence trips in a debug build rather than mis-charging the caller and
+    /// mis-splitting the refund its failure gets back. An inspector that may rewrite the start
+    /// runs between the two, and can split them: under one the start is not checked. Only a start
+    /// revm made and held to the limits is checked: one it refused, or failed before its level
+    /// opened, counted nothing, and the charge comes back.
     pub(crate) fn attach(&mut self, report: StartReport, built: Option<(StartId, Rollback)>) {
         self.start = report.start;
-        self.on_level = report.on_level > 0;
-        self.caller_on_level = report.caller_on_level;
-        self.creator_record = report.creator_record;
+        self.counted = report.records;
         self.rollback = built.map(|(start, rollback)| {
             debug_assert!(report.start == Some(start), "a built frame's rollback is its start's");
             rollback
@@ -1095,12 +924,8 @@ impl StartSide {
         if let Some(charged) =
             self.charged.filter(|_| report.start.is_some() && report.verdict.is_some())
         {
-            let counted = FrameStartRecords {
-                on_level: report.on_level,
-                caller: report.caller_on_level || report.creator_record,
-            };
             debug_assert_eq!(
-                charged, counted,
+                charged, report.records,
                 "the records a frame's start makes changed after its caller was charged for them",
             );
         }
@@ -1136,26 +961,31 @@ impl StartSide {
         Some(Mark::of_built(position, start, rollback))
     }
 
-    /// The history gas the caller gets back once the frame returned: what it paid less the price
-    /// of the start's records `ledger` holds.
+    /// The history gas the caller gets back once the frame returned: what it paid for the start's
+    /// records less the price of those `ledger` holds, and the price of the records the start took
+    /// back, when it stands.
     ///
     /// The records on the start's own level are held when that level was kept — committed, and not
-    /// taken back since; a creator's nonce record, counted below the creation's level, unless a
+    /// taken back since — and so is what the start took back there: the caller then gets back the
+    /// price of every record the start returned to what the transaction loaded, which nobody paid
+    /// for again. A creator's nonce record, counted below the creation's level, is held unless a
     /// revert to before the start took it back. So a start answered before revm decided it, or
     /// refused before its writes, gets everything back; a call answered with a success keeps its
     /// records; a failed precompile, and a frame that fails, give theirs back, a creator's
-    /// surviving record aside.
+    /// surviving record aside, and give back nothing for a take-back their failure undid.
     pub(crate) fn refund(&self, ledger: &Ledger) -> u64 {
         let (level_kept, start_kept) =
             self.start.map_or((false, false), |start| ledger.fate(start));
-        let on_level = level_kept && self.on_level;
-        let caller = (level_kept && self.caller_on_level) || (start_kept && self.creator_record);
-        let mut refund = 0;
-        if !on_level {
-            refund += self.on_level_charge;
-        }
-        if !caller {
-            refund += self.caller_charge;
+        let on_level = self.counted.on_level;
+        let mut refund = if level_kept {
+            let kept = records_history_gas(on_level.added);
+            let taken = if self.priced { records_history_gas(on_level.taken) } else { 0 };
+            self.added_charge.saturating_sub(kept).saturating_add(taken)
+        } else {
+            self.added_charge
+        };
+        if !(start_kept && self.counted.creator) {
+            refund = refund.saturating_add(self.creator_charge);
         }
         refund
     }
@@ -1179,27 +1009,24 @@ const fn share_of_remaining(remaining: u64) -> u64 {
 mod tests {
     use super::*;
     use crate::{AUTHORIZATION_SIZE, TRANSFER_LOG_SIZE, TX_BODY_SIZE, WRITE_RECORD_SIZE};
-    use alloy_primitives::address;
+    use alloy_primitives::{address, Address};
     use revm::context_interface::context::SelfDestructResult;
 
     const SENDER: Address = address!("00000000000000000000000000000000000f0001");
     const CALLEE: Address = address!("00000000000000000000000000000000000f0002");
     const TARGET: Address = address!("00000000000000000000000000000000000f0003");
 
+    /// Two records added: a value transfer between two accounts the transaction has not changed.
+    const BOTH: RecordDelta = RecordDelta { added: 2, taken: 0 };
+    /// One record added: a transfer whose sender the transaction changed already.
+    const ONE: RecordDelta = RecordDelta { added: 1, taken: 0 };
+
     /// A ledger holding a transaction with a body of `body` bytes under `limits`, exempt or not,
-    /// whose value movements journal transfer logs when `transfer_logs`. The sender is whoever
-    /// starts the transaction's own frame.
+    /// whose value movements journal transfer logs when `transfer_logs`.
     fn ledger(limits: EvmTxRuntimeLimits, exempt: bool, transfer_logs: bool, body: u64) -> Ledger {
         let mut ledger = Ledger::default();
         ledger.set_limits(limits);
         ledger.begin_transaction(exempt, transfer_logs, body);
-        ledger
-    }
-
-    /// [`ledger`], with [`SENDER`] as the transaction's sender before any frame starts.
-    fn ledger_from_sender(limits: EvmTxRuntimeLimits, transfer_logs: bool) -> Ledger {
-        let mut ledger = ledger(limits, false, transfer_logs, 0);
-        ledger.count_authorities(SENDER, 0, false);
         ledger
     }
 
@@ -1213,21 +1040,20 @@ mod tests {
         JournalCheckpoint { log_i: 0, journal_i: ledger.depth(), selfdestructed_i: 0 }
     }
 
-    /// Starts a call from `caller` to `target` at `depth` as revm starts one, moving `value`, and
-    /// journaling a transfer log for it when the ledger's transaction does; reports what the start
-    /// counted.
+    /// Starts a call at `depth` as revm starts one, moving `value` to another account, which
+    /// changes and returns the accounts `records` says, and journaling a transfer log for it when
+    /// the ledger's transaction does; reports what the start counted.
     fn start_call(
         ledger: &mut Ledger,
         depth: usize,
-        caller: Address,
-        target: Address,
         value: u64,
+        records: RecordDelta,
     ) -> StartReport {
-        let facts = StartFacts { depth, caller, target: Some(target), transfers_value: value != 0 };
+        let facts = StartFacts { depth, creation: false, transfers_value: value != 0 };
         ledger.open_start(facts);
         ledger.on_checkpoint(checkpoint(ledger));
-        let logged = ledger.transfer_logs && value != 0 && target != caller;
-        ledger.on_transfer(caller, target, U256::from(value), false, logged);
+        let logged = ledger.transfer_logs && value != 0;
+        ledger.on_transfer(if value == 0 { RecordDelta::NONE } else { records }, false, logged);
         ledger.close_start()
     }
 
@@ -1293,20 +1119,20 @@ mod tests {
         let mut ledger = ledger(limits, false, false, 310);
         let budget = |ledger: &Ledger| ledger.running_budget().expect("a frame is running").0;
 
-        start_call(&mut ledger, 0, SENDER, CALLEE, 0);
+        start_call(&mut ledger, 0, 0, RecordDelta::NONE);
         let first = 10_000 - 310;
         assert_eq!(budget(&ledger), first);
 
-        start_call(&mut ledger, 1, CALLEE, TARGET, 0);
+        start_call(&mut ledger, 1, 0, RecordDelta::NONE);
         let child = share_of_remaining(first);
         assert_eq!(child, 9_496);
         assert_eq!(budget(&ledger), child);
 
-        start_call(&mut ledger, 2, TARGET, SENDER, 0);
+        start_call(&mut ledger, 2, 0, RecordDelta::NONE);
         let grandchild = share_of_remaining(child);
         assert_eq!(budget(&ledger), grandchild);
 
-        start_call(&mut ledger, 3, SENDER, CALLEE, 0);
+        start_call(&mut ledger, 3, 0, RecordDelta::NONE);
         assert_eq!(
             budget(&ledger),
             share_of_remaining(grandchild),
@@ -1319,9 +1145,9 @@ mod tests {
     fn test_the_frame_cap_binds_when_it_is_tighter_than_the_share() {
         let limits = EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(100);
         let mut ledger = ledger(limits, false, false, 0);
-        start_call(&mut ledger, 0, SENDER, CALLEE, 0);
+        start_call(&mut ledger, 0, 0, RecordDelta::NONE);
         assert_eq!(ledger.running_budget().map(|(budget, _)| budget), Some(100));
-        start_call(&mut ledger, 1, CALLEE, TARGET, 0);
+        start_call(&mut ledger, 1, 0, RecordDelta::NONE);
         assert_eq!(ledger.running_budget().map(|(budget, _)| budget), Some(98));
     }
 
@@ -1333,8 +1159,8 @@ mod tests {
     fn test_a_transaction_is_stopped_where_it_crosses_unless_exempt() {
         for exempt in [false, true] {
             let mut ledger = ledger(zero_limits(), exempt, false, TX_BODY_SIZE);
-            let first = start_call(&mut ledger, 0, SENDER, CALLEE, 0);
-            let second = start_call(&mut ledger, 1, CALLEE, TARGET, 1);
+            let first = start_call(&mut ledger, 0, 0, RecordDelta::NONE);
+            let second = start_call(&mut ledger, 1, 1, BOTH);
             let verdicts = (first.verdict, second.verdict, ledger.check());
             let expected = if exempt {
                 (
@@ -1369,14 +1195,14 @@ mod tests {
         let limits = EvmTxRuntimeLimits::no_limits()
             .with_tx_data_size_limit(TX_BODY_SIZE + WRITE_RECORD_SIZE);
         let mut ledger = ledger(limits, false, false, TX_BODY_SIZE);
-        ledger.count_authorities(SENDER, 2, false);
+        ledger.count_authorities(2);
     }
 
     /// Applied authorities are recorded for an exempt transaction, whatever they cross.
     #[test]
     fn test_an_exempt_transaction_records_its_authorities() {
         let mut ledger = ledger(zero_limits(), true, false, 0);
-        ledger.count_authorities(SENDER, 2, false);
+        ledger.count_authorities(2);
         assert_eq!(ledger.usage(), WRITE_RECORD.times(2));
     }
 
@@ -1385,15 +1211,16 @@ mod tests {
     #[test]
     fn test_a_transfer_log_is_data_size_and_never_history() {
         let mut ledger = ledger(EvmTxRuntimeLimits::no_limits(), false, true, TX_BODY_SIZE);
-        start_call(&mut ledger, 0, SENDER, CALLEE, 1);
-        start_call(&mut ledger, 1, CALLEE, TARGET, 1);
+        start_call(&mut ledger, 0, 1, ONE);
+        start_call(&mut ledger, 1, 1, ONE);
         assert_eq!(
             ledger.usage(),
             LimitUsage {
                 data_size: TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE + 2 * TRANSFER_LOG_SIZE,
                 write_records: 2,
             },
-            "the recipient of each move — the inner one's caller is the outer one's — and two logs",
+            "the recipient of each move — the inner one's sender is the outer one's recipient — \
+             and two logs",
         );
         assert_eq!(ledger.log_and_code_bytes(), 0, "no history byte beside the records");
     }
@@ -1403,11 +1230,42 @@ mod tests {
     #[test]
     fn test_a_failed_frame_gives_its_transfer_log_back() {
         let mut ledger = ledger(EvmTxRuntimeLimits::no_limits(), false, true, 0);
-        start_call(&mut ledger, 0, SENDER, CALLEE, 0);
-        start_call(&mut ledger, 1, CALLEE, TARGET, 1);
+        start_call(&mut ledger, 0, 0, RecordDelta::NONE);
+        start_call(&mut ledger, 1, 1, BOTH);
         assert_eq!(ledger.usage().data_size, 2 * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE);
         end_frame(&mut ledger, true);
         assert_eq!(ledger.usage(), LimitUsage::ZERO);
+    }
+
+    /// A transfer that returns an account to what the transaction loaded takes its record back on
+    /// the call's level: the usage falls by the record, the frame's own usage saturates at nothing,
+    /// and the call's failure puts the record back with the rest.
+    #[test]
+    fn test_a_transfer_that_returns_an_account_takes_its_record_back() {
+        let mut ledger = ledger(EvmTxRuntimeLimits::no_limits(), false, true, 0);
+        start_call(&mut ledger, 0, 1, ONE);
+        assert_eq!(ledger.usage(), LimitUsage { data_size: 40 + 160, write_records: 1 });
+        // The recipient hands the value back: its own record goes, the sender's is the body's.
+        let report = start_call(&mut ledger, 1, 1, RecordDelta { added: 0, taken: 1 });
+        assert_eq!(report.records.on_level, RecordDelta { added: 0, taken: 1 });
+        assert_eq!(report.verdict, Some(LimitCheck::WithinLimit));
+        assert_eq!(
+            ledger.usage(),
+            LimitUsage { data_size: 2 * TRANSFER_LOG_SIZE, write_records: 0 },
+            "the record went; both logs stay"
+        );
+        assert_eq!(
+            ledger.running_budget().map(|(_, used)| used),
+            Some(LimitUsage { data_size: TRANSFER_LOG_SIZE - WRITE_RECORD_SIZE, write_records: 0 }),
+            "the returning frame's own usage is its log less the record it took back, and its \
+             record count saturates at nothing"
+        );
+        end_frame(&mut ledger, true);
+        assert_eq!(
+            ledger.usage(),
+            LimitUsage { data_size: 40 + 160, write_records: 1 },
+            "the failed return puts the record back"
+        );
     }
 
     /// A frame start whose transfer log crosses a limit is stopped at its start, with a stop that
@@ -1423,8 +1281,8 @@ mod tests {
         for (cap, fits) in [(cap, true), (cap - 1, false)] {
             let limits = EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(cap);
             let mut ledger = ledger(limits, false, true, 0);
-            start_call(&mut ledger, 0, SENDER, CALLEE, 0);
-            let report = start_call(&mut ledger, 1, CALLEE, TARGET, 1);
+            start_call(&mut ledger, 0, 0, RecordDelta::NONE);
+            let report = start_call(&mut ledger, 1, 1, BOTH);
             let expected =
                 if fits { LimitCheck::WithinLimit } else { stop(needs - 1, needs, true) };
             assert_eq!(report.verdict, Some(expected), "a cap of {cap}");
@@ -1435,7 +1293,7 @@ mod tests {
         for (tx_limit, fits) in [(needs, true), (needs - 1, false), (WRITE_RECORD_SIZE, false)] {
             let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(tx_limit);
             let mut ledger = ledger(limits, false, true, 0);
-            let report = start_call(&mut ledger, 0, SENDER, CALLEE, 1);
+            let report = start_call(&mut ledger, 0, 1, ONE);
             let expected =
                 if fits { LimitCheck::WithinLimit } else { stop(tx_limit, needs, false) };
             assert_eq!(report.verdict, Some(expected), "a limit of {tx_limit}");
@@ -1456,7 +1314,7 @@ mod tests {
             ("a failed creation's nonce record, over the budget", 61, true, true),
         ] {
             let mut ledger = ledger(limits, false, false, 0);
-            start_call(&mut ledger, 0, SENDER, CALLEE, 0);
+            start_call(&mut ledger, 0, 0, RecordDelta::NONE);
             // What the caller kept of its own before the start.
             let count = WriteCount {
                 added: LimitUsage { data_size: left, write_records: 0 },
@@ -1464,17 +1322,12 @@ mod tests {
             };
             assert_eq!(ledger.count_write(&count), LimitCheck::WithinLimit, "{case}");
             if failed {
-                ledger.open_start(StartFacts {
-                    depth: 1,
-                    caller: CALLEE,
-                    target: None,
-                    transfers_value: false,
-                });
-                let start = ledger.before_creation();
-                ledger.after_creation(start, TARGET, Some(checkpoint(&ledger)), false);
+                ledger.open_start(StartFacts { depth: 1, creation: true, transfers_value: false });
+                let start = ledger.before_creation(true);
+                ledger.after_creation(start, Some(checkpoint(&ledger)), false);
                 let _ = ledger.close_start();
             } else {
-                start_call(&mut ledger, 1, CALLEE, TARGET, 0);
+                start_call(&mut ledger, 1, 0, RecordDelta::NONE);
             }
             end_frame(&mut ledger, failed);
             let check = ledger.check();
@@ -1482,6 +1335,36 @@ mod tests {
             if stopped {
                 assert_eq!(check, stop(100, left + WRITE_RECORD_SIZE, true), "{case}");
             }
+        }
+    }
+
+    /// A creation's creator record is the creating frame's, counted when the bump changed an
+    /// account the transaction had not changed, and never for the transaction's own creation,
+    /// whose creator is the sender, whom the body counts.
+    #[test]
+    fn test_a_creators_record_is_counted_below_the_creations_level() {
+        for (depth, creator_unchanged, expected) in
+            [(1, true, true), (1, false, false), (0, true, false), (0, false, false)]
+        {
+            let mut ledger = ledger(EvmTxRuntimeLimits::no_limits(), false, false, 0);
+            if depth > 0 {
+                start_call(&mut ledger, 0, 0, RecordDelta::NONE);
+            }
+            ledger.open_start(StartFacts { depth, creation: true, transfers_value: false });
+            let start = ledger.before_creation(creator_unchanged);
+            ledger.after_creation(start, Some(checkpoint(&ledger)), false);
+            let report = ledger.close_start();
+            let case = format!("depth {depth}, creator unchanged {creator_unchanged}");
+            assert_eq!(report.records.creator, expected, "{case}");
+            assert_eq!(report.records.on_level, RecordDelta { added: 1, taken: 0 }, "{case}");
+            let records = 1 + u64::from(expected);
+            assert_eq!(ledger.usage(), WRITE_RECORD.times(records), "{case}");
+            end_frame(&mut ledger, true);
+            assert_eq!(
+                ledger.usage(),
+                WRITE_RECORD.times(u64::from(expected)),
+                "{case}: the creator's record survives the creation's failure"
+            );
         }
     }
 
@@ -1516,28 +1399,45 @@ mod tests {
         (ledger.count_write(&count), history)
     }
 
-    /// A `SELFDESTRUCT` that moved value to another account counts its transfer log with the
-    /// beneficiary's record, in one check, and reports the record's history alone. To the sender,
-    /// whose account the body counts, it is the log alone, and the log alone can cross; and nothing
-    /// counts a log when the transaction's value movements journal none.
+    /// A `SELFDESTRUCT` that moved value to another account counts the records the journal saw its
+    /// move make and take back, with its transfer log, in one check, and reports the records'
+    /// history alone: appended for a record made, taken for one taken back. Where the move
+    /// changes nothing — a beneficiary that is the sender, whose account the transaction changed,
+    /// and a destructed account the transaction gave its balance — it is the log alone, and the
+    /// log alone can cross; and nothing counts a log when the transaction's value movements
+    /// journal none.
     #[test]
-    fn test_a_destruction_counts_its_transfer_log_with_its_beneficiary() {
+    fn test_a_destruction_counts_its_transfer_log_with_its_records() {
         let moved = SelfDestructResult { had_value: true, ..Default::default() };
         let destruction =
             |target| CompletedWrite::SelfDestruct { address: CALLEE, target, result: &moved };
-        let mut logging = ledger_from_sender(EvmTxRuntimeLimits::no_limits(), true);
+        let mut logging = ledger(EvmTxRuntimeLimits::no_limits(), false, true, 0);
+        logging.observe_destruction(RecordDelta { added: 2, taken: 0 });
         let (check, history) = commit(&mut logging, &destruction(TARGET));
         assert_eq!(check, LimitCheck::WithinLimit);
-        assert_eq!(history, HistoryBytes::Appended(WRITE_RECORD_SIZE), "the record's alone");
+        assert_eq!(history, HistoryBytes { appended: 2 * WRITE_RECORD_SIZE, taken: 0 });
         assert_eq!(
             logging.usage(),
+            LimitUsage { data_size: 2 * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE, write_records: 2 },
+        );
+
+        let mut returning = ledger(EvmTxRuntimeLimits::no_limits(), false, true, 0);
+        returning.count_authorities(1);
+        returning.observe_destruction(RecordDelta { added: 1, taken: 1 });
+        let (check, history) = commit(&mut returning, &destruction(TARGET));
+        assert_eq!(check, LimitCheck::WithinLimit);
+        assert_eq!(history, HistoryBytes { appended: WRITE_RECORD_SIZE, taken: WRITE_RECORD_SIZE });
+        assert_eq!(
+            returning.usage(),
             LimitUsage { data_size: WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE, write_records: 1 },
+            "one record made, one taken back, and the log"
         );
 
         let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(TRANSFER_LOG_SIZE - 1);
-        let mut tight = ledger_from_sender(limits, true);
+        let mut tight = ledger(limits, false, true, 0);
+        tight.observe_destruction(RecordDelta::NONE);
         let (check, history) = commit(&mut tight, &destruction(SENDER));
-        assert_eq!(history, HistoryBytes::None);
+        assert_eq!(history, HistoryBytes::default());
         assert_eq!(
             check,
             LimitCheck::ExceedsLimit {
@@ -1549,8 +1449,42 @@ mod tests {
             "the log alone crosses",
         );
 
-        let mut silent = ledger_from_sender(EvmTxRuntimeLimits::no_limits(), false);
+        let mut silent = ledger(EvmTxRuntimeLimits::no_limits(), false, false, 0);
+        silent.observe_destruction(RecordDelta { added: 1, taken: 0 });
         let _ = commit(&mut silent, &destruction(TARGET));
         assert_eq!(silent.usage(), WRITE_RECORD, "no log, no bytes");
+    }
+
+    /// The hypothetical start a call gas detention answers without running counts the records
+    /// its transfer would make and take back and the log it would journal, against the
+    /// transaction's limit and the budget its frame would get, and counts nothing.
+    #[test]
+    fn test_a_hypothetical_start_counts_what_its_transfer_would() {
+        let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(WRITE_RECORD_SIZE);
+        let mut ledger = ledger(limits, false, true, 0);
+        start_call(&mut ledger, 0, 0, RecordDelta::NONE);
+        assert_eq!(
+            ledger.hypothetical_start(BOTH, true),
+            stop(WRITE_RECORD_SIZE, 2 * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE, false)
+        );
+        assert_eq!(
+            ledger.hypothetical_start(RecordDelta { added: 1, taken: 1 }, false),
+            LimitCheck::WithinLimit,
+            "a record taken back pays for one made"
+        );
+        assert_eq!(ledger.usage(), LimitUsage::ZERO, "nothing was counted");
+    }
+
+    /// A record taken back outside the journal's counted writes — a `keylessDeploy` signer's nonce
+    /// set back — is a refund on the running frame's level, which its failure puts back.
+    #[test]
+    fn test_a_record_taken_back_by_hand_goes_with_the_level() {
+        let mut ledger = ledger(EvmTxRuntimeLimits::no_limits(), false, false, 0);
+        start_call(&mut ledger, 0, 0, RecordDelta::NONE);
+        ledger.count_authorities(1);
+        ledger.take_back_record();
+        assert_eq!(ledger.usage(), LimitUsage::ZERO);
+        end_frame(&mut ledger, true);
+        assert_eq!(ledger.usage(), LimitUsage::ZERO, "the record and its take-back went together");
     }
 }

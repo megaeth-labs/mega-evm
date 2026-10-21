@@ -12,6 +12,7 @@ use std::vec::Vec;
 
 use super::{
     ledger::{FrameStartRecords, Ledger, Rollback, StartId, StartSide},
+    record::RecordDelta,
     EvmTxRuntimeLimits, LimitCheck, LimitKind, StartReport, WRITE_RECORD_SIZE,
 };
 use crate::storage_call_stipend;
@@ -323,9 +324,11 @@ impl AdditionalLimit {
     }
 
     /// Leaves the history gas the running opcode just charged its frame for the records the frame
-    /// it starts will make: `on_level` for the records that frame's failure takes back, `caller`
-    /// for the record of the caller's own account, and `records`, the answer the charge was
-    /// computed from, for the frame's side to hold the ledger's count to.
+    /// it starts will make: `added` for the records that frame's failure takes back, `creator` for
+    /// the record of the creator's own nonce, and `records`, the answer the charge was computed
+    /// from, for the frame's side to hold the ledger's count to; `priced` says whether the
+    /// transaction prices history at all, so that a record the start takes back is history the
+    /// caller gets back.
     ///
     /// The next side pushed takes it, whether that is the frame's own or that of a frame answered
     /// without running.
@@ -333,10 +336,11 @@ impl AdditionalLimit {
     pub(crate) const fn stage_frame_charge(
         &mut self,
         records: FrameStartRecords,
-        on_level: u64,
-        caller: u64,
+        added: u64,
+        creator: u64,
+        priced: bool,
     ) {
-        self.pending_frame_charge = FrameCharge { records: Some(records), on_level, caller };
+        self.pending_frame_charge = FrameCharge { records: Some(records), added, creator, priced };
     }
 
     /// Leaves the frame about to start unchecked against the answer its charge was computed from
@@ -391,16 +395,18 @@ impl AdditionalLimit {
     /// execution for the write record it makes.
     fn push_side(&mut self, depth: usize) {
         let charge = core::mem::replace(&mut self.pending_frame_charge, FrameCharge::NONE);
-        let (on_level, caller, records) = if depth == 0 {
-            let records = self
-                .pending_top_level_records
-                .take()
-                .map(|on_level| FrameStartRecords { on_level, caller: false });
-            (self.top_level_write_record_gas, 0, records)
+        let side = if depth == 0 {
+            // The transaction's own frame takes nothing back: its recipient, when it writes one,
+            // is an account the transaction had not changed.
+            let records = self.pending_top_level_records.take().map(|added| FrameStartRecords {
+                on_level: RecordDelta { added, taken: 0 },
+                creator: false,
+            });
+            StartSide::new(depth, self.top_level_write_record_gas, 0, false, records)
         } else {
-            (charge.on_level, charge.caller, charge.records)
+            StartSide::new(depth, charge.added, charge.creator, charge.priced, charge.records)
         };
-        self.starts.push(StartSide::new(depth, on_level, caller, records));
+        self.starts.push(side);
     }
 
     /// Attaches what the journal's ledger saw the latest start count, and what a frame revm built
@@ -493,17 +499,19 @@ fn grants_stipend(inputs: &CallInputs) -> bool {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct FrameCharge {
     /// The records the charge was computed from, when an opcode made one. The transaction's own
-    /// frame has no such opcode, and neither has a frame of a transaction that prices no history.
+    /// frame has no such opcode.
     records: Option<FrameStartRecords>,
-    /// What the records on the frame's own level cost.
-    on_level: u64,
-    /// What the record of the caller's own account cost.
-    caller: u64,
+    /// What the records the start adds on the frame's own level cost.
+    added: u64,
+    /// What the record of the creator's own nonce cost.
+    creator: u64,
+    /// Whether the transaction prices history.
+    priced: bool,
 }
 
 impl FrameCharge {
     /// Nothing charged.
-    const NONE: Self = Self { records: None, on_level: 0, caller: 0 };
+    const NONE: Self = Self { records: None, added: 0, creator: 0, priced: false };
 }
 
 #[cfg(test)]
@@ -546,18 +554,21 @@ mod tests {
         }))
     }
 
-    /// What the ledger reports of a start revm made and held to the limits: `on_level` records on
-    /// the frame's level, and the caller's own record (`caller`) on it or, for a creation, below.
-    fn report(on_level: u64, caller: bool, creation: bool) -> StartReport {
+    /// What the ledger reports of a start revm made and held to the limits: `added` records on
+    /// the frame's level, and the creator's own record (`creator`) below it.
+    fn report(added: u64, creator: bool) -> StartReport {
         StartReport {
             start: Some(StartId::default()),
-            on_level,
-            caller_on_level: caller && !creation,
-            creator_record: caller && creation,
+            records: records(added, creator),
             transfer_log: false,
             refused: false,
             verdict: Some(LimitCheck::WithinLimit),
         }
+    }
+
+    /// `added` records on the frame's level, and the creator's own record (`creator`) below it.
+    const fn records(added: u64, creator: bool) -> FrameStartRecords {
+        FrameStartRecords { on_level: RecordDelta { added, taken: 0 }, creator }
     }
 
     /// The allowance follows the transfer, and only the two schemes that can carry one: a `CALL`
@@ -647,17 +658,17 @@ mod tests {
         let mut limit = AdditionalLimit::default();
         limit.push_start(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
         let inner = call_from_to(CALLEE, TARGET, U256::from(1));
-        limit.stage_frame_charge(FrameStartRecords { on_level: 1, caller: true }, 1, 1);
+        limit.stage_frame_charge(records(2, false), 2, 0, true);
         limit.push_start(&inner, 1);
-        limit.attach_start(report(1, true, false), None);
+        limit.attach_start(report(2, false), None);
 
-        limit.stage_frame_charge(FrameStartRecords { on_level: 1, caller: false }, 1, 0);
+        limit.stage_frame_charge(records(1, true), 1, 1, true);
         limit.push_start(&inner, 1);
-        limit.attach_start(report(1, false, true), None);
+        limit.attach_start(report(1, true), None);
 
-        limit.stage_frame_charge(FrameStartRecords { on_level: 1, caller: true }, 1, 1);
+        limit.stage_frame_charge(records(2, false), 2, 0, true);
         limit.push_start(&inner, 1);
-        let refused = StartReport { verdict: None, refused: true, ..report(0, false, false) };
+        let refused = StartReport { verdict: None, refused: true, ..report(0, false) };
         limit.attach_start(refused, None);
     }
 
@@ -670,20 +681,20 @@ mod tests {
     fn test_a_charge_computed_from_another_answer_trips() {
         let mut limit = AdditionalLimit::default();
         limit.push_start(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
-        limit.stage_frame_charge(FrameStartRecords::NONE, 0, 0);
+        limit.stage_frame_charge(FrameStartRecords::NONE, 0, 0, true);
         limit.push_start(&call_from_to(CALLEE, TARGET, U256::from(1)), 1);
-        limit.attach_start(report(1, true, false), None);
+        limit.attach_start(report(2, false), None);
     }
 
     /// The transaction's own frame is held to the records its history was charged for before
     /// execution: its value's recipient, or the account a creation makes.
     #[test]
     fn test_the_transactions_own_frame_counts_the_records_its_history_paid_for() {
-        for records in [0, 1] {
+        for added in [0, 1] {
             let mut limit = AdditionalLimit::default();
-            limit.stage_top_level_records(records);
-            limit.push_start(&call_from_to(SENDER, CALLEE, U256::from(records)), 0);
-            limit.attach_start(report(records, false, false), None);
+            limit.stage_top_level_records(added);
+            limit.push_start(&call_from_to(SENDER, CALLEE, U256::from(added)), 0);
+            limit.attach_start(report(added, false), None);
         }
     }
 
@@ -697,7 +708,7 @@ mod tests {
         let mut limit = AdditionalLimit::default();
         limit.stage_top_level_records(0);
         limit.push_start(&call_from_to(SENDER, CALLEE, U256::from(1)), 0);
-        limit.attach_start(report(1, false, false), None);
+        limit.attach_start(report(1, false), None);
     }
 
     /// Under an inspector that may rewrite a start, the check is waived: the start its charge paid
@@ -708,11 +719,11 @@ mod tests {
         limit.stage_top_level_records(0);
         limit.waive_start_check();
         limit.push_start(&call_from_to(SENDER, CALLEE, U256::from(1)), 0);
-        limit.attach_start(report(1, false, false), None);
-        limit.stage_frame_charge(FrameStartRecords::NONE, 0, 0);
+        limit.attach_start(report(1, false), None);
+        limit.stage_frame_charge(FrameStartRecords::NONE, 0, 0, true);
         limit.waive_start_check();
         limit.push_start(&call_from_to(CALLEE, TARGET, U256::from(1)), 1);
-        limit.attach_start(report(1, true, false), None);
+        limit.attach_start(report(2, false), None);
     }
 
     /// A frame answered without running — by the depth guard, a stop, an interceptor or an
@@ -735,7 +746,7 @@ mod tests {
             let mut limit = AdditionalLimit::default();
             limit.push_start(&call_from_to(SENDER, CALLEE, U256::ZERO), 0);
             let inner = call_from_to(CALLEE, TARGET, U256::from(1));
-            limit.stage_frame_charge(FrameStartRecords { on_level: 1, caller: true }, 1_000, 2_000);
+            limit.stage_frame_charge(records(1, true), 1_000, 2_000, true);
             limit.push_answered_start(1);
             let result = crate::synthetic_frame_result(&inner, answer, Bytes::new());
             let (_, refund) = limit.on_start_return(ledger, &result).expect("the side");
@@ -763,12 +774,11 @@ mod tests {
             ctx.ledger_mut().begin_transaction(false, false, 0);
             ctx.ledger_mut().open_start(StartFacts {
                 depth: 0,
-                caller: SENDER,
-                target: Some(CALLEE),
+                creation: false,
                 transfers_value: true,
             });
             let checkpoint = ctx.journal_mut().checkpoint();
-            ctx.ledger_mut().on_transfer(SENDER, CALLEE, U256::from(1), false, false);
+            ctx.ledger_mut().on_transfer(RecordDelta { added: 1, taken: 0 }, false, false);
             let report = ctx.ledger_mut().close_start();
             limit.attach_start(report, None);
             ctx.ledger_mut().frame_returning();

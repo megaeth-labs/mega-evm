@@ -465,8 +465,8 @@ fn test_a_call_without_value_gets_no_allowance() {
 }
 
 /// `CALLCODE` transfers value and is granted one; `DELEGATECALL` carries none and is not.
-/// `CALLCODE` runs the callee's code in the caller's own account, so its transfer writes one
-/// account rather than two.
+/// `CALLCODE` runs the callee's code in the caller's own account, so its transfer moves the value
+/// from the calling account to itself and writes no account at all.
 ///
 /// `STATICCALL` carries no value either, and a static frame may not emit a log at all, so there
 /// is nothing an allowance could buy it.
@@ -484,7 +484,7 @@ fn test_callcode_is_granted_one_and_delegatecall_is_not() {
 
     let call_code = at(CALLCODE, 1);
     assert!(call_code.result.is_success(), "{:?}", call_code.result);
-    assert_eq!(call_code.gas.history, body() + record(), "one record, and the allowance paid");
+    assert_eq!(call_code.gas.history, body(), "no record, and the allowance paid for the event");
 
     let delegate = at(DELEGATECALL, 0);
     assert!(delegate.result.is_success(), "{:?}", delegate.result);
@@ -665,10 +665,11 @@ fn test_a_chain_of_transfers_grants_each_frame_its_own_allowance() {
     assert_eq!(events(&outcome).len(), 2, "both hops emitted their event");
     assert_eq!(outcome.result.logs().len(), 4, "beside the two transfers' logs");
     // The first transfer writes the sender's account and the middle one's; the second writes the
-    // receiver's, the middle account being recorded already by the value it received.
+    // receiver's and returns the middle account to what the transaction loaded, taking its record
+    // back: the middle hop passed on exactly the wei it received.
     assert_eq!(
         outcome.gas.history,
-        body() + 3 * record(),
+        body() + 2 * record(),
         "the transfers' account writes, and no event on any ledger",
     );
 }
@@ -709,8 +710,8 @@ fn self_calling_loop() -> Bytes {
 ///
 /// The allowance is drawn before the frame's own gas rather than after it, so it is a discount on
 /// the first 160 bytes of every value-transferring call rather than a fallback for a frame that
-/// cannot pay. A contract that calls itself pays its own account's record once and nothing after
-/// that, so the grant is repeatable for as long as the transaction's gas lasts: the loop below
+/// cannot pay. A contract that calls itself moves nothing and pays for no record at all, so the
+/// grant is repeatable for as long as the transaction's gas lasts: the loop below
 /// costs about 10,000 gas a turn, which is some twenty thousand turns inside one transaction at
 /// the execution cap — around three megabytes of log bytes, and close to 280,000,000 of history
 /// gas, on no gas ledger.
@@ -732,22 +733,22 @@ fn test_the_gap_the_allowance_opens_between_bytes_and_gas_is_pinned() {
 
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
     assert_eq!(outcome.result.logs().len(), GRANTS as usize, "every frame emitted its event");
-    // A self-call writes no recipient, and the caller's own account is written once, so the whole
-    // loop leaves one record behind.
-    assert_eq!(outcome.usage.write_records, 1);
+    // A self-call moves the value from the calling account to itself: no account changes, so the
+    // whole loop leaves no record behind.
+    assert_eq!(outcome.usage.write_records, 0);
     assert_eq!(
         outcome.usage.data_size,
-        TX_BODY_SIZE + WRITE_RECORD_SIZE + GRANTS * STORAGE_CALL_STIPEND_BYTES,
-        "the body, the record and every event's bytes are counted",
+        TX_BODY_SIZE + GRANTS * STORAGE_CALL_STIPEND_BYTES,
+        "the body and every event's bytes are counted",
     );
     assert_eq!(
         outcome.gas.history,
-        body() + record(),
-        "and the history gas is the body and that one record: no event is on it",
+        body(),
+        "and the history gas is the body alone: no event is on it",
     );
     assert_eq!(
         outcome.gas.history_bytes,
-        TX_BODY_SIZE + WRITE_RECORD_SIZE + GRANTS * STORAGE_CALL_STIPEND_BYTES,
+        TX_BODY_SIZE + GRANTS * STORAGE_CALL_STIPEND_BYTES,
         "the byte column has every event on it",
     );
 

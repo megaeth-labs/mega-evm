@@ -6,11 +6,19 @@
 //!
 //! - **Counted writes.** A call's value transfer (`transfer_loaded`) and a creation's account
 //!   checkpoint (`create_account_checkpoint`) are counted when revm makes them for a frame start,
-//!   inside the start window the engine opens around revm's frame start, and only there. Every
-//!   other write — `sstore`, `log`, `selfdestruct`, a `transfer`, anything through an account
-//!   handle — is forwarded and counts nothing: a write an opcode completed reaches the ledger from
-//!   the Host's completed-write hook, and a write a tool or a precompile makes is not the
-//!   transaction's own execution.
+//!   inside the start window the engine opens around revm's frame start, and only there. A
+//!   `SELFDESTRUCT`'s move (`selfdestruct`) is observed here and counted by the Host's
+//!   completed-write hook once the opcode completed. Every other write — `sstore`, `log`, a
+//!   `transfer`, anything through an account handle — is forwarded and counts nothing: a write an
+//!   opcode completed reaches the ledger from the Host's completed-write hook, and a write a tool
+//!   or a precompile makes is not the transaction's own execution.
+//! - **What a write counts.** An account's write record follows the net change of its info within
+//!   the transaction: the journal compares the account's nonce, balance and code hash with what the
+//!   transaction loaded ([`is_changed`](MegaJournal::is_changed)) before and after each counted
+//!   write, and tells the ledger which accounts the write changed and which it returned
+//!   ([`RecordDelta`]). The same prediction, on the journal's state as it stands, is what the
+//!   frame-start hook charges a start's records from
+//!   ([`start_records`](MegaJournal::start_records)).
 //! - **Levels and the transaction's end.** `checkpoint`, `checkpoint_commit` and
 //!   `checkpoint_revert` open and close the ledger's levels with revm's checkpoints; `commit_tx`,
 //!   `discard_tx` and `finalize` close them all.
@@ -39,17 +47,20 @@ use revm::{
         },
         JournalTr,
     },
-    context_interface::context::{SStoreResult, SelfDestructResult, StateLoad},
+    context_interface::{
+        context::{SStoreResult, SelfDestructResult, StateLoad},
+        host::{FrameStart, FrameStartKind},
+    },
     inspector::JournalExt,
     primitives::{
         hardfork::SpecId, Address, AddressMap, AddressSet, Bytes, HashSet, Log, StorageKey,
         StorageValue, B256, U256,
     },
-    state::{Account, Bytecode, EvmState},
+    state::{Account, AccountInfo, Bytecode, EvmState},
     Database, Journal, JournalEntry,
 };
 
-use crate::limit::{Ledger, Mark};
+use crate::limit::{FrameStartRecords, Ledger, Mark, RecordDelta};
 
 /// The journal of the Satin engine: revm's journal, and the ledger of what the transaction's own
 /// execution keeps. See the module documentation.
@@ -63,6 +74,14 @@ pub struct MegaJournal<DB: Database> {
     revm: Journal<DB>,
     /// The ledger, kept in step with `revm`'s checkpoints.
     ledger: Ledger,
+}
+
+/// Whether `info` differs from `original` in what a write record stands for: the nonce, the
+/// balance or the code.
+fn differs(info: &AccountInfo, original: &AccountInfo) -> bool {
+    info.nonce != original.nonce ||
+        info.balance != original.balance ||
+        info.code_hash != original.code_hash
 }
 
 impl<DB: Database> MegaJournal<DB> {
@@ -103,6 +122,106 @@ impl<DB: Database> MegaJournal<DB> {
             self.ledger.depth() == self.revm.depth,
             "the ledger holds one level per open checkpoint"
         );
+    }
+
+    /* What a write changes */
+
+    /// The account at `address` as the transaction loaded it and holds it now: `None` for one
+    /// the transaction has not loaded, which it has not changed either.
+    fn loaded(&self, address: Address) -> Option<&Account> {
+        self.revm
+            .state
+            .get(&address)
+            .filter(|account| account.transaction_id == self.revm.transaction_id)
+    }
+
+    /// Whether the transaction changed the account at `address` from what it loaded: its nonce,
+    /// balance or code differs from the account's original info, which revm sets at the account's
+    /// first load in the transaction. An account the transaction has not loaded is unchanged.
+    pub(crate) fn is_changed(&self, address: Address) -> bool {
+        self.loaded(address).is_some_and(|account| differs(&account.info, &account.original_info()))
+    }
+
+    /// Whether the transaction changed the account at `address` from what it loaded, before the
+    /// nonce bump revm just made on it: the creator of a creation, whose nonce revm bumps before
+    /// it asks for the creation's account checkpoint.
+    fn is_changed_before_bump(&self, address: Address) -> bool {
+        self.loaded(address).is_some_and(|account| {
+            let before =
+                AccountInfo { nonce: account.info.nonce.wrapping_sub(1), ..account.info.clone() };
+            differs(&before, &account.original_info())
+        })
+    }
+
+    /// How the record of the account at `address` moves when its balance becomes `balance`: a
+    /// record when the write changes an account the transaction had not changed, a record back when
+    /// it returns a changed one to what the transaction loaded.
+    fn balance_change(&self, address: Address, balance: U256) -> RecordDelta {
+        let Some(account) = self.loaded(address) else {
+            // An account the transaction has not loaded is unchanged, and a balance it did not
+            // hold changes it: what the transaction loads for it will be what the chain holds.
+            return RecordDelta::of_account(false, balance != U256::ZERO);
+        };
+        let original = account.original_info();
+        let after = AccountInfo { balance, ..account.info.clone() };
+        RecordDelta::of_account(differs(&account.info, &original), differs(&after, &original))
+    }
+
+    /// The current balance of the account at `address`, as the transaction holds it; nothing for
+    /// one it has not loaded.
+    fn balance(&self, address: Address) -> U256 {
+        self.loaded(address).map_or(U256::ZERO, |account| account.info.balance)
+    }
+
+    /// The records a transfer of `value` from `from` to `to` makes and takes back, as the journal's
+    /// state stands: nothing for a transfer to the same account or of nothing, which revm moves
+    /// nothing for, and nothing for a value `from` cannot fund, which revm refuses.
+    pub(crate) fn transfer_records(&self, from: Address, to: Address, value: U256) -> RecordDelta {
+        if from == to || value.is_zero() {
+            return RecordDelta::NONE;
+        }
+        let Some(from_after) = self.balance(from).checked_sub(value) else {
+            return RecordDelta::NONE;
+        };
+        let to_after = self.balance(to).saturating_add(value);
+        self.balance_change(from, from_after).with(self.balance_change(to, to_after))
+    }
+
+    /// The records a creation by `creator` with an endowment of `value` makes: the account it
+    /// creates, and the creator's nonce, when the bump changes an account the transaction had not
+    /// changed; nothing for an endowment `creator` cannot fund, which revm refuses before it bumps
+    /// the nonce.
+    pub(crate) fn creation_records(&self, creator: Address, value: U256) -> FrameStartRecords {
+        if self.balance(creator) < value {
+            return FrameStartRecords::NONE;
+        }
+        FrameStartRecords {
+            on_level: RecordDelta { added: 1, taken: 0 },
+            creator: !self.is_changed(creator),
+        }
+    }
+
+    /// The records the frame `start` makes, for the frame-start hook to charge its caller for: a
+    /// call's value transfer ([`transfer_records`](Self::transfer_records)), a creation's created
+    /// account and creator nonce ([`creation_records`](Self::creation_records)). The transfer of a
+    /// `CALLCODE` is from the calling account to itself, and a `DELEGATECALL` or `STATICCALL`
+    /// carries none: neither makes a record. Nor does a start whose value the caller cannot fund,
+    /// which revm refuses on the caller's account.
+    pub(crate) fn start_records(&self, start: &FrameStart) -> FrameStartRecords {
+        match start.kind {
+            FrameStartKind::Create | FrameStartKind::Create2 => {
+                self.creation_records(start.caller, start.value)
+            }
+            FrameStartKind::Call |
+            FrameStartKind::CallCode |
+            FrameStartKind::DelegateCall |
+            FrameStartKind::StaticCall => FrameStartRecords {
+                on_level: start.target.map_or(RecordDelta::NONE, |target| {
+                    self.transfer_records(start.caller, target, start.value)
+                }),
+                creator: false,
+            },
+        }
     }
 }
 
@@ -167,12 +286,6 @@ impl<DB: Database> JournalTr for MegaJournal<DB> {
             fn log(&mut self, log: Log);
             fn take_logs(&mut self) -> Vec<Log>;
             fn logs(&self) -> &[Log];
-            fn selfdestruct(
-                &mut self,
-                address: Address,
-                target: Address,
-                skip_cold_load: bool,
-            ) -> Result<StateLoad<SelfDestructResult>, JournalLoadError<DB::Error>>;
             fn warm_access_list(&mut self, access_list: AddressMap<HashSet<StorageKey>>);
             fn warm_coinbase_account(&mut self, address: Address);
             fn warm_precompiles(&mut self, addresses: &AddressSet);
@@ -245,22 +358,33 @@ impl<DB: Database> JournalTr for MegaJournal<DB> {
         }
     }
 
-    /// Counted inside a call's start window: the records the transfer makes and its transfer log.
+    /// Counted inside a call's start window: the records the transfer makes and takes back, as
+    /// the accounts it writes stand before and after it, and its transfer log.
     fn transfer_loaded(
         &mut self,
         from: Address,
         to: Address,
         balance: U256,
     ) -> Option<TransferError> {
+        let moves = from != to && !balance.is_zero();
+        let before = moves.then(|| (self.is_changed(from), self.is_changed(to)));
         let logs = self.revm.logs().len();
         let refused = self.revm.transfer_loaded(from, to, balance);
         let logged = self.revm.logs().len() > logs;
-        self.ledger.on_transfer(from, to, balance, refused.is_some(), logged);
+        let records = match before.filter(|_| refused.is_none()) {
+            Some((from_before, to_before)) => {
+                RecordDelta::of_account(from_before, self.is_changed(from))
+                    .with(RecordDelta::of_account(to_before, self.is_changed(to)))
+            }
+            None => RecordDelta::NONE,
+        };
+        self.ledger.on_transfer(records, refused.is_some(), logged);
         refused
     }
 
     /// Counted inside a creation's start window: the creator's nonce record before the creation's
-    /// level opens, then the created account and the transfer log on it.
+    /// level opens, when the bump revm made changed an account the transaction had not changed,
+    /// then the created account and the transfer log on it.
     fn create_account_checkpoint(
         &mut self,
         caller: Address,
@@ -268,13 +392,34 @@ impl<DB: Database> JournalTr for MegaJournal<DB> {
         balance: U256,
         spec_id: SpecId,
     ) -> Result<JournalCheckpoint, TransferError> {
-        let start = self.ledger.before_creation();
+        let start = self.ledger.before_creation(!self.is_changed_before_bump(caller));
         let logs = self.revm.logs().len();
         let opened = self.revm.create_account_checkpoint(caller, address, balance, spec_id);
         let logged = self.revm.logs().len() > logs;
-        self.ledger.after_creation(start, address, opened.ok(), logged);
+        self.ledger.after_creation(start, opened.ok(), logged);
         self.assert_levels();
         opened
+    }
+
+    /// Observed for the completed-write hook: the records the destruction makes and takes back, as
+    /// the destructed account and its beneficiary stand before and after the move. The hook counts
+    /// them once the opcode completed; the write itself counts nothing here.
+    fn selfdestruct(
+        &mut self,
+        address: Address,
+        target: Address,
+        skip_cold_load: bool,
+    ) -> Result<StateLoad<SelfDestructResult>, JournalLoadError<DB::Error>> {
+        let before = (self.is_changed(address), self.is_changed(target));
+        let result = self.revm.selfdestruct(address, target, skip_cold_load);
+        let records = if result.is_ok() {
+            RecordDelta::of_account(before.0, self.is_changed(address))
+                .with(RecordDelta::of_account(before.1, self.is_changed(target)))
+        } else {
+            RecordDelta::NONE
+        };
+        self.ledger.observe_destruction(records);
+        result
     }
 
     fn checkpoint(&mut self) -> JournalCheckpoint {
@@ -330,7 +475,7 @@ impl<DB: Database> JournalExt for MegaJournal<DB> {
 mod tests {
     use super::*;
     use crate::{
-        limit::{Mark, StartFacts, StartReport, StartSide},
+        limit::{HistoryBytes, Mark, StartFacts, StartReport, StartSide},
         test_utils::MemoryDatabase,
         EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, TRANSFER_LOG_SIZE, TX_BODY_SIZE,
         WRITE_RECORD_SIZE,
@@ -369,7 +514,8 @@ mod tests {
     }
 
     /// A journal on Satin's base spec, with transfer logs, every account funded, holding a
-    /// transaction from [`SENDER`] under `limits`.
+    /// transaction from [`SENDER`] under `limits`. The sender is changed as validation leaves it:
+    /// its nonce bumped.
     fn journal(limits: EvmTxRuntimeLimits) -> MegaJournal<MemoryDatabase> {
         let db = [SENDER, A, B, C].into_iter().fold(MemoryDatabase::default(), |db, account| {
             db.account_balance(account, U256::from(10))
@@ -380,6 +526,7 @@ mod tests {
         for account in [SENDER, A, B, C, CREATED] {
             journal.load_account(account).unwrap();
         }
+        let _ = journal.load_account_mut(SENDER).unwrap().data.bump_nonce();
         journal.ledger_mut().set_limits(limits);
         journal.ledger_mut().begin_transaction(false, true, TX_BODY_SIZE);
         journal
@@ -395,8 +542,7 @@ mod tests {
         value: u64,
     ) -> (JournalCheckpoint, StartReport) {
         let value = U256::from(value);
-        let facts =
-            StartFacts { depth, caller, target: Some(target), transfers_value: !value.is_zero() };
+        let facts = StartFacts { depth, creation: false, transfers_value: !value.is_zero() };
         journal.ledger_mut().open_start(facts);
         let checkpoint = journal.checkpoint();
         assert!(journal.transfer_loaded(caller, target, value).is_none());
@@ -413,8 +559,7 @@ mod tests {
         value: u64,
     ) -> (JournalCheckpoint, StartReport) {
         let value = U256::from(value);
-        let facts =
-            StartFacts { depth, caller: creator, target: None, transfers_value: !value.is_zero() };
+        let facts = StartFacts { depth, creation: true, transfers_value: !value.is_zero() };
         journal.ledger_mut().open_start(facts);
         let _ = journal.load_account_mut(creator).unwrap().data.bump_nonce();
         let checkpoint =
@@ -434,7 +579,8 @@ mod tests {
 
     /// The journal's own write methods count nothing, inside a frame start's window and outside
     /// it: a write an opcode completed is counted by the Host's completed-write hook, and any other
-    /// is not the transaction's own execution.
+    /// is not the transaction's own execution. A `SELFDESTRUCT` is observed for that hook, and
+    /// counts nothing until the hook counts it.
     #[test]
     fn test_the_journals_own_writes_count_nothing() {
         let mut journal = journal(EvmTxRuntimeLimits::no_limits());
@@ -451,8 +597,7 @@ mod tests {
 
         journal.ledger_mut().open_start(StartFacts {
             depth: 1,
-            caller: A,
-            target: Some(B),
+            creation: false,
             transfers_value: false,
         });
         let _ = journal.checkpoint();
@@ -539,12 +684,70 @@ mod tests {
         assert_eq!(journal.ledger().usage(), kept(2, 1), "readable until the next transaction");
     }
 
+    /// An account is changed once its nonce, balance or code differs from what the transaction
+    /// loaded, and unchanged again once a write returns it; one the transaction has not loaded is
+    /// unchanged. The sender is changed from the start, by the nonce validation bumped.
+    #[test]
+    fn test_an_account_is_changed_while_its_info_differs_from_what_was_loaded() {
+        let mut journal = journal(EvmTxRuntimeLimits::no_limits());
+        assert!(journal.is_changed(SENDER), "validation bumped its nonce");
+        assert!(!journal.is_changed(A));
+        assert!(
+            !journal.is_changed(address!("00000000000000000000000000000000000a00ff")),
+            "not loaded"
+        );
+        assert_eq!(journal.transfer(A, B, U256::from(3)).unwrap(), None);
+        assert!(journal.is_changed(A) && journal.is_changed(B));
+        assert_eq!(journal.transfer(B, A, U256::from(3)).unwrap(), None);
+        assert!(!journal.is_changed(A) && !journal.is_changed(B), "both returned");
+        let _ = journal.load_account_mut(A).unwrap().data.bump_nonce();
+        assert!(journal.is_changed(A), "a nonce bump changes it");
+        assert!(!journal.is_changed_before_bump(A), "but not before the bump");
+        journal.set_code(B, Bytecode::new_raw(Bytes::from_static(&[0x00])));
+        assert!(journal.is_changed(B), "code changes it");
+    }
+
+    /// The records a transfer makes are predicted from the journal's state as the hook sees it and
+    /// counted as revm makes the transfer, and the two agree: a transfer that changes both
+    /// accounts, one whose sender the transaction changed, one that returns an account, and the
+    /// moves that make none — to the same account, of nothing, of more than the sender holds.
+    #[test]
+    fn test_the_records_predicted_for_a_transfer_are_the_records_counted() {
+        let mut journal = journal(EvmTxRuntimeLimits::no_limits());
+        let _ = start_call(&mut journal, 0, SENDER, A, 0);
+        let none = RecordDelta::NONE;
+        let both = RecordDelta { added: 2, taken: 0 };
+        let recipient = RecordDelta { added: 1, taken: 0 };
+        assert_eq!(journal.transfer_records(A, A, U256::from(1)), none, "to itself");
+        assert_eq!(journal.transfer_records(A, B, U256::ZERO), none, "of nothing");
+        assert_eq!(journal.transfer_records(A, B, U256::from(11)), none, "unfunded");
+        assert_eq!(journal.transfer_records(SENDER, B, U256::from(1)), recipient, "the sender");
+        assert_eq!(journal.transfer_records(A, B, U256::from(1)), both);
+
+        let (_, report) = start_call(&mut journal, 1, A, B, 1);
+        assert_eq!(report.records.on_level, both, "counted as predicted");
+        end_frame(&mut journal, None);
+        assert_eq!(
+            journal.transfer_records(B, A, U256::from(1)),
+            RecordDelta { added: 0, taken: 2 },
+            "the return takes both back"
+        );
+        assert_eq!(
+            journal.transfer_records(B, C, U256::from(1)),
+            RecordDelta { added: 1, taken: 1 },
+            "B returns, C changes"
+        );
+        let (_, report) = start_call(&mut journal, 1, B, A, 1);
+        assert_eq!(report.records.on_level, RecordDelta { added: 0, taken: 2 });
+        assert_eq!(journal.ledger().usage(), kept(0, 2), "the records went, the logs stay");
+    }
+
     /// A tool's checkpoint around a call's start — opened before the start, closed after the frame
     /// returned — is a rollback level the frame's level sits above. Committed, it changes nothing:
-    /// the frame's records stand, its refund is none, and its caller's account stays recorded, so a
+    /// the frame's records stand, its refund is none, and its caller's account stays changed, so a
     /// later value call from it records only its recipient. Reverted, it takes back what the frame
-    /// kept: the records, the caller's flag and the frame's refund all go back to before the
-    /// start, and the later call records the caller again.
+    /// kept: the records and the frame's refund all go back to before the start, and the later
+    /// call finds the caller unchanged and records it again.
     #[test]
     fn test_a_tool_checkpoint_around_a_call_closes_in_order() {
         for reverted in [false, true] {
@@ -554,24 +757,25 @@ mod tests {
             let tool = journal.checkpoint();
             let (_, report) = start_call(&mut journal, 1, A, B, 1);
             assert_eq!(
-                (report.on_level, report.caller_on_level, report.transfer_log),
-                (1, true, true),
+                (report.records.on_level, report.transfer_log),
+                (RecordDelta { added: 2, taken: 0 }, true),
                 "{case}: B's record, A's, and the log"
             );
             end_frame(&mut journal, None);
-            let mut side = StartSide::new(1, 7, 11, None);
+            let mut side = StartSide::new(1, 7, 0, true, None);
             side.attach(report, None);
             if reverted {
                 journal.checkpoint_revert(tool);
             } else {
                 journal.checkpoint_commit();
             }
-            let refund = if reverted { 7 + 11 } else { 0 };
+            let refund = if reverted { 7 } else { 0 };
             assert_eq!(side.refund(journal.ledger()), refund, "{case}: B's refund");
             assert_eq!(journal.ledger().usage(), if reverted { body() } else { kept(2, 1) });
 
             let (_, later) = start_call(&mut journal, 1, A, C, 1);
-            assert_eq!(later.caller_on_level, reverted, "{case}: A's flag");
+            let records = if reverted { 2 } else { 1 };
+            assert_eq!(later.records.on_level.added, records, "{case}: A's account");
             end_frame(&mut journal, None);
             let records = if reverted { 2 } else { 3 };
             assert_eq!(journal.ledger().usage(), kept(records, if reverted { 1 } else { 2 }));
@@ -581,10 +785,10 @@ mod tests {
     /// A tool's checkpoint around a creation's start closes in order as one around a call does, and
     /// a revert of it takes back the creator's nonce record with the rest, which the creation's own
     /// failure leaves: the creator's caller gets back the charge for that record too, and the
-    /// creator's account is unrecorded again, so its next creation records it.
+    /// creator's account is unchanged again, so its next creation records it.
     #[test]
     fn test_a_tool_checkpoint_around_a_creation_takes_its_creators_record_back() {
-        for (case, failed, reverted, refund, creator_recorded) in [
+        for (case, failed, reverted, refund, creator_changed) in [
             ("a creation that succeeds, the tool's checkpoint committed", false, false, 0, true),
             ("a creation that fails, the tool's checkpoint committed", true, false, 7, true),
             (
@@ -601,9 +805,9 @@ mod tests {
             let _ = start_call(&mut journal, 1, A, B, 0);
             let tool = journal.checkpoint();
             let (checkpoint, report) = start_creation(&mut journal, 2, B, CREATED, 1);
-            assert!(report.creator_record, "{case}: B's nonce record is the start's");
+            assert!(report.records.creator, "{case}: B's nonce record is the start's");
             end_frame(&mut journal, failed.then_some(checkpoint));
-            let mut side = StartSide::new(2, 7, 11, None);
+            let mut side = StartSide::new(2, 7, 11, true, None);
             side.attach(report, None);
             if reverted {
                 journal.checkpoint_revert(tool);
@@ -612,7 +816,7 @@ mod tests {
             }
             assert_eq!(side.refund(journal.ledger()), refund, "{case}: the refund");
             let (_, later) = start_creation(&mut journal, 2, B, C, 0);
-            assert_eq!(!later.creator_record, creator_recorded, "{case}: B's flag");
+            assert_eq!(!later.records.creator, creator_changed, "{case}: B's account");
         }
     }
 
@@ -630,7 +834,7 @@ mod tests {
     }
 
     /// A creation's budget and usage are measured from before its creator's nonce record, and its
-    /// level opens after it: with `R` bytes left to an unrecorded creator, the creation gets
+    /// level opens after it: with `R` bytes left to an unchanged creator, the creation gets
     /// `R − ⌈R / 50⌉` and starts with the created account's record and the creator's, 80 bytes.
     /// At 81 bytes that is a budget of 79, which the start crosses; at 100, a budget of 98, which
     /// leaves the creation 18 bytes. An endowment adds its transfer log to the start.
@@ -647,7 +851,7 @@ mod tests {
             let _ = start_call(&mut journal, 0, SENDER, A, 0);
             let (_, report) = start_creation(&mut journal, 1, A, CREATED, value);
             let case = format!("{left} bytes left, value {value}");
-            assert!(report.creator_record, "{case}: the creator's record is the start's");
+            assert!(report.records.creator, "{case}: the creator's record is the start's");
             let used = LimitUsage { data_size: start, write_records: 2 };
             assert_eq!(journal.ledger().running_budget(), Some((budget, used)), "{case}");
             let verdict = if start > budget {
@@ -666,7 +870,7 @@ mod tests {
 
     /// A creation's start mark is its level's opening — after the creator's record — never where
     /// its usage is measured from: a creation rewritten into a failure is taken back to it, and
-    /// keeps its creator's record and flag, as a creation that fails does.
+    /// keeps its creator's record, as a creation that fails does, the creator's nonce standing.
     #[test]
     fn test_a_creations_start_mark_keeps_its_creators_record() {
         let mut journal = journal(EvmTxRuntimeLimits::no_limits());
@@ -680,7 +884,7 @@ mod tests {
         journal.revert_to(&mark);
         assert_eq!(journal.ledger().usage(), kept(1, 0), "the creator's record stays");
         let (_, later) = start_creation(&mut journal, 1, A, C, 0);
-        assert!(!later.creator_record, "A stays recorded");
+        assert!(!later.records.creator, "A stays changed");
     }
 
     /// The hypothetical start a call gas detention answers without running is held to the limits
@@ -703,10 +907,50 @@ mod tests {
                 let _ = start_call(&mut journal, 0, SENDER, A, 0);
                 A
             };
-            let facts = StartFacts { depth, caller, target: Some(B), transfers_value: value != 0 };
-            let hypothetical = journal.ledger().hypothetical_start(&facts);
+            let records = journal.transfer_records(caller, B, U256::from(value));
+            let logged = journal.ledger().counts_transfer_logs() && value != 0;
+            let hypothetical = journal.ledger().hypothetical_start(records, logged);
             let (_, report) = start_call(&mut journal, depth, caller, B, value);
             assert_eq!(Some(hypothetical), report.verdict, "depth {depth}, value {value}, {room}");
         }
+    }
+
+    /// A `SELFDESTRUCT` is observed for the completed-write hook as its move leaves the two
+    /// accounts: the destructed account, whose balance it clears, and the beneficiary. A
+    /// beneficiary the transaction gave its balance is returned by the move; a destruction to
+    /// itself, of an account the transaction did not create, moves nothing.
+    #[test]
+    fn test_a_destruction_is_observed_for_the_hook() {
+        let mut journal = journal(EvmTxRuntimeLimits::no_limits());
+        let _ = start_call(&mut journal, 0, SENDER, A, 0);
+        let records = |journal: &mut MegaJournal<MemoryDatabase>, from, to| {
+            journal.selfdestruct(from, to, false).unwrap();
+            journal.ledger().write_count(
+                &revm::context_interface::host::CompletedWrite::SelfDestruct {
+                    address: from,
+                    target: to,
+                    result: &SelfDestructResult { had_value: true, ..Default::default() },
+                },
+            )
+        };
+        let (count, history) = records(&mut journal, A, B);
+        assert_eq!(
+            count.added,
+            LimitUsage { data_size: 2 * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE, write_records: 2 }
+        );
+        assert_eq!(count.taken, LimitUsage::ZERO);
+        assert_eq!(history, HistoryBytes { appended: 2 * WRITE_RECORD_SIZE, taken: 0 });
+
+        // C gives three of its ten to an account that holds nothing, which destructs back to C:
+        // both are as the transaction loaded them again.
+        assert_eq!(journal.transfer(C, CREATED, U256::from(3)).unwrap(), None);
+        let (count, history) = records(&mut journal, CREATED, C);
+        assert_eq!(count.added, LimitUsage { data_size: TRANSFER_LOG_SIZE, write_records: 0 });
+        assert_eq!(count.taken, LimitUsage { data_size: 2 * WRITE_RECORD_SIZE, write_records: 2 });
+        assert_eq!(history, HistoryBytes { appended: 0, taken: 2 * WRITE_RECORD_SIZE });
+
+        let (count, _) = records(&mut journal, C, C);
+        assert_eq!(count.added, LimitUsage::ZERO, "a destruction to itself moves nothing");
+        assert_eq!(count.taken, LimitUsage::ZERO);
     }
 }

@@ -1863,7 +1863,8 @@ fn test_a_history_refill_after_the_read_does_not_lift_the_cap() {
 /// `MIDDLE` starts each kind of frame that makes records, with all but a 64th of what it holds, a
 /// 64th short of the records' price; and a value call with an explicit forward that leaves it one
 /// gas short. One gas less forwarded leaves it the price: that frame starts, its callee returns
-/// the stipend, and the transaction computes the same.
+/// the stipend, and the transaction computes the same. A value `CALLCODE` is not among them: it
+/// moves nothing and makes no record, so there is no price to fall short of.
 #[test]
 fn test_a_start_its_caller_cannot_pay_for_counts_none_of_its_forward() {
     // Records that cost nothing leave no price to be short of, and records priced at a fraction of
@@ -1916,14 +1917,6 @@ fn test_a_start_its_caller_cannot_pay_for_counts_none_of_its_forward() {
             code: value_call(CALL, None),
             charges: value_call_charges(false),
             price: price(2),
-            spilled: 0,
-            given: None,
-        },
-        Start {
-            name: "a value CALLCODE",
-            code: value_call(CALLCODE, None),
-            charges: value_call_charges(false),
-            price: price(1),
             spilled: 0,
             given: None,
         },

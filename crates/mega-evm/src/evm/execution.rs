@@ -577,7 +577,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             // revm never decides the start, so the ledger counts nothing; what it would have
             // counted is held to the limits as the hypothetical the answer gives way to.
             let report = StartReport {
-                verdict: Some(ctx.ledger().hypothetical_start(&start.facts)),
+                verdict: Some(hypothetical_start(ctx, &frame_init.frame_input)),
                 ..Default::default()
             };
             (Err(crossing_answer(&frame_init.frame_input)), report)
@@ -1129,6 +1129,25 @@ fn take_back_a_stopped_answer<DB: Database, ExtEnvs: ExternalEnvTypes>(
     }
 }
 
+/// The verdict the journal's ledger gives a call `input` starts had revm made it: the records its
+/// transfer would make and take back, as the journal predicts them, and the transfer log of the
+/// value it would move, for a start the engine answers without revm deciding it
+/// ([`Ledger::hypothetical_start`](crate::limit::Ledger)).
+fn hypothetical_start<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &MegaContext<DB, ExtEnvs>,
+    input: &FrameInput,
+) -> LimitCheck {
+    let FrameInput::Call(inputs) = input else {
+        unreachable!("only a call is answered without revm deciding its start")
+    };
+    let value = inputs.value.get();
+    let records = ctx.journal_ref().transfer_records(inputs.caller, inputs.target_address, value);
+    let logged = ctx.ledger().counts_transfer_logs() &&
+        !value.is_zero() &&
+        inputs.target_address != inputs.caller;
+    ctx.ledger().hypothetical_start(records, logged)
+}
+
 /// Settles `output`, the answer an inspector gave the frame `frame_init` starts in its place, as
 /// [`EvmTr::frame_init`] settles an answer: the depth guard still holds, so an answer cannot reach
 /// past the call-stack limit; a side of its own stands in for the frame, and the answer is held to
@@ -1180,21 +1199,11 @@ impl FrameStart {
         let (input, depth) = (&frame_init.frame_input, frame_init.depth);
         let (facts, reservoir) = match input {
             FrameInput::Call(inputs) => (
-                StartFacts {
-                    depth,
-                    caller: inputs.caller,
-                    target: Some(inputs.target_address),
-                    transfers_value: inputs.transfers_value(),
-                },
+                StartFacts { depth, creation: false, transfers_value: inputs.transfers_value() },
                 inputs.reservoir,
             ),
             FrameInput::Create(inputs) => (
-                StartFacts {
-                    depth,
-                    caller: inputs.caller(),
-                    target: None,
-                    transfers_value: !inputs.value().is_zero(),
-                },
+                StartFacts { depth, creation: true, transfers_value: !inputs.value().is_zero() },
                 inputs.reservoir(),
             ),
             FrameInput::Empty => unreachable!(
@@ -1394,7 +1403,6 @@ fn record_applied_authorities<DB: Database, ExtEnvs: ExternalEnvTypes>(
         return 0;
     }
     let caller = ctx.tx().caller();
-    let target = ctx.tx().kind().to().copied();
     let mut authorities: Vec<Address> = ctx.journal_ref().journal()[journal_i..]
         .iter()
         .filter_map(|entry| match entry {
@@ -1404,10 +1412,8 @@ fn record_applied_authorities<DB: Database, ExtEnvs: ExternalEnvTypes>(
         .collect();
     authorities.sort_unstable();
     authorities.dedup();
-    let target_is_authority =
-        target.is_some_and(|target| authorities.binary_search(&target).is_ok());
     let applied = authorities.len() as u64;
-    ctx.ledger_mut().count_authorities(caller, applied, target_is_authority);
+    ctx.ledger_mut().count_authorities(applied);
     // An applied authority that is the block beneficiary wrote the beneficiary's account.
     if authorities.binary_search(&ctx.block().beneficiary).is_ok() {
         ctx.detention.mark_before_execution(VolatileDataAccess::BENEFICIARY_BALANCE);
@@ -1416,8 +1422,14 @@ fn record_applied_authorities<DB: Database, ExtEnvs: ExternalEnvTypes>(
 }
 
 /// Charges the history of the write records a transaction makes outside any frame: one per
-/// applied authority, and the one its own frame makes — the recipient of its value, or the
-/// account it creates.
+/// applied authority, and the one its own frame makes — the recipient of its value, when the
+/// value changes an account the transaction has not changed, or the account it creates.
+///
+/// The recipient's record is predicted as the journal's state stands before the first frame
+/// ([`MegaJournal::transfer_records`](crate::MegaJournal)): a recipient that is the sender, or an
+/// authority the transaction applied, is changed already, and gets none; the sender's side never
+/// makes one, validation having changed its account. A creation's account is a record whatever
+/// the address held.
 ///
 /// The authorities' records are the transaction's own and outlive a first frame that fails; the
 /// first frame's record does not, so what it cost is kept for the settlement to give back when the
@@ -1437,13 +1449,14 @@ fn charge_records_made_outside_a_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
         return true;
     }
     let tx = ctx.tx();
-    let writes_a_record = match tx.kind() {
-        TxKind::Create => true,
+    let records = match tx.kind() {
+        TxKind::Create => 1,
         TxKind::Call(to) => {
-            !tx.value().is_zero() && to != tx.caller() && !ctx.ledger().target_is_authority()
+            let predicted = ctx.journal_ref().transfer_records(tx.caller(), to, tx.value());
+            debug_assert_eq!(predicted.taken, 0, "the sender's value returns no account");
+            predicted.added
         }
     };
-    let records = u64::from(writes_a_record);
     let Some((top_level, _)) = charge_write_records_history(gas, records, applied_authorities)
     else {
         return false;

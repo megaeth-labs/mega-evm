@@ -162,7 +162,7 @@ pub(crate) fn settle<DB: Database, ExtEnvs: ExternalEnvTypes>(
     // the call started from, and it is taken back only when it is the last one: a later bump the
     // signer's own code made may stand for an account, so the nonce is never moved back under it.
     if started.signer_nonce > 0 && nonce == started.signer_nonce + 1 {
-        take_back_bump(ctx, gas, &started, creation.result)?;
+        take_back_bump(ctx, gas, &started)?;
     }
     ctx.keyless_frame = Some(KeylessFrame::Returned(Returned { started, creation }));
     Ok(())
@@ -239,21 +239,19 @@ fn holds_code<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// record and that record's history, so what stands is what would stand had the creation's start
 /// not bumped the nonce: the signer stays at 1, however many deployments it makes.
 ///
-/// The record goes unless the signer's account keeps another write it stands for: the value a
-/// creation that succeeded moved out of it. A creation that failed took its value transfer back
-/// with the rest of its writes.
+/// The record follows the signer's account: it goes when the nonce set back leaves the account
+/// as the transaction loaded it, and stays when the account keeps another write it stands for —
+/// the value a creation that succeeded moved out of it, or into it. A creation that failed took
+/// its value transfer back with the rest of its writes.
 fn take_back_bump<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     gas: &mut Gas,
     started: &Started,
-    result: InstructionResult,
 ) -> Result<(), ContextError<DB::Error>> {
+    let changed = ctx.journal_ref().is_changed(started.signer);
     ctx.journal_mut().load_account_mut(started.signer)?.data.set_nonce(started.signer_nonce);
-    let moved_value = started.moves_value && result.is_ok();
-    if moved_value {
-        return Ok(());
-    }
-    if ctx.ledger_mut().take_back_creator_record() {
+    if changed && !ctx.journal_ref().is_changed(started.signer) {
+        ctx.ledger_mut().take_back_record();
         // A stop the record left the call, by putting it over a limit, goes with it: the call is
         // held to its limits again without the record.
         let check = ctx.ledger().check();

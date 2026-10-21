@@ -137,10 +137,11 @@ impl Site {
     }
 
     /// The write records the move makes: the recipient's or the created account's, and the
-    /// caller's own below the transaction's frame; a destruction's beneficiary alone.
+    /// caller's own below the transaction's frame; a destruction's beneficiary and the account it
+    /// clears.
     const fn records(self) -> u64 {
         match self {
-            Self::TxValue | Self::TxEndowment | Self::SelfDestruct => 1,
+            Self::TxValue | Self::TxEndowment => 1,
             _ => 2,
         }
     }
@@ -686,9 +687,9 @@ fn test_no_transfer_log_where_no_value_moves_to_another_account() {
         .append_many(self_call.build_vec())
         .append(JUMPDEST);
     let cases: [(&str, MemoryDatabase, MegaTransaction, u64, usize); 7] = [
-        ("a CALLCODE", db(actor().callcode(RECEIVER, value)), call(ACTOR, 0), 1, 0),
-        // The move's sender and recipient are one account, recorded once.
-        ("a CALL to itself", db(calls_itself_once), call(ACTOR, 0), 1, 0),
+        // The move's sender and recipient are one account, which it leaves as it was: no record.
+        ("a CALLCODE", db(actor().callcode(RECEIVER, value)), call(ACTOR, 0), 0, 0),
+        ("a CALL to itself", db(calls_itself_once), call(ACTOR, 0), 0, 0),
         ("a zero-value CALL", db(actor().call(RECEIVER, U256::ZERO)), call(ACTOR, 0), 0, 0),
         ("a transaction's value to its sender", db(actor()), call(CALLER, VALUE), 0, 0),
         (
@@ -731,10 +732,11 @@ fn test_no_transfer_log_where_no_value_moves_to_another_account() {
 /// A start revm refuses on its caller's account moves nothing and writes nothing, so nothing is
 /// counted for it, and no limit stops it for what it would have counted: it runs as it does with
 /// no limit. Here, a value call its caller cannot fund, which revm answers with `OutOfFunds` and no
-/// data, which the actor returns: a `CALL`, whose move would count two records and a transfer log,
-/// and a `CALLCODE`, whose move to its own account would count the caller's record alone. Neither
-/// the transaction's limit nor the frame's budget one byte short of those bytes changes anything.
-/// The same call funded to the last wei is made, and both stop it there.
+/// data, which the actor returns: a `CALL`, whose move would count two records and a transfer log.
+/// Neither the transaction's limit nor the frame's budget one byte short of those bytes changes
+/// anything. The same call funded to the last wei is made, and both stop it there. A `CALLCODE`
+/// is not among the cases: its move is to the calling account itself, which counts nothing funded
+/// or not, so no limit can stop it.
 #[test]
 fn test_a_value_call_its_caller_cannot_fund_runs_as_without_a_limit() {
     let value = U256::from(VALUE);
@@ -753,18 +755,11 @@ fn test_a_value_call_its_caller_cannot_fund_runs_as_without_a_limit() {
     }));
     let body = transaction_body_bytes(&tx);
     let actor = |call: BytecodeBuilder| call.append(POP).return_returndata().build();
-    let cases = [
-        (
-            "a CALL",
-            actor(BytecodeBuilder::default().call(RECEIVER, value)),
-            2 * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE,
-        ),
-        (
-            "a CALLCODE",
-            actor(BytecodeBuilder::default().callcode(RECEIVER, value)),
-            WRITE_RECORD_SIZE,
-        ),
-    ];
+    let cases = [(
+        "a CALL",
+        actor(BytecodeBuilder::default().call(RECEIVER, value)),
+        2 * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE,
+    )];
     for (name, actor, bytes) in cases {
         let tx_limit = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(body + bytes - 1);
         let frame_budget =
@@ -803,14 +798,18 @@ fn test_a_value_call_its_caller_cannot_fund_runs_as_without_a_limit() {
     }
 }
 
-/// A value call its caller cannot fund is charged the history of the records it would make at its
-/// opcode, as every start is, before revm decides it, and gets the charge back once revm refused
-/// it: given room for the charge, the caller runs on past the refused call, billed its body's
-/// history alone and counting nothing more. A caller that keeps less than those records cost,
-/// once it has forwarded all it can, runs out of gas at the opcode, as it does when it can fund the
-/// value.
+/// A value call its caller cannot fund is charged nothing at its opcode: the frame-start hook,
+/// which charges a start's records from the journal's state, sees the caller cannot fund the value
+/// revm then refuses, and the refused call makes no record. So the caller runs on past the refused
+/// call, billed its body's history alone and counting nothing more, even where it keeps less than
+/// the records would have cost once it has forwarded all it can; the same caller, able to fund the
+/// value, runs out of gas at the opcode on the records' history.
+///
+/// Before the net-change rule the opcode charged the records whether or not the caller could fund
+/// the value, and the charge came back when the refused start returned; a caller that could not
+/// pay it halted at the opcode though the start would have been refused.
 #[test]
-fn test_a_value_call_its_caller_cannot_fund_gets_its_charge_back() {
+fn test_a_value_call_its_caller_cannot_fund_is_charged_nothing() {
     let actor =
         BytecodeBuilder::default().call(RECEIVER, U256::from(VALUE)).append(POP).stop().build();
     let db = |held: u64| {
@@ -857,11 +856,13 @@ fn test_a_value_call_its_caller_cannot_fund_gets_its_charge_back() {
     }
     assert!(actor_gas / 64 < records, "the actor keeps less than the records cost");
     let gas_limit = 21_000 + history_gas(body).unwrap() + actor_gas;
-    for held in [VALUE - 1, VALUE] {
-        let short = execute_under(db(held), tx(gas_limit), EvmTxRuntimeLimits::no_limits());
-        assert!(short.result.is_halt(), "holding {held}: {:?}", short.result);
-        assert_eq!(short.gas.gas_used, gas_limit, "holding {held}: the halt used the gas limit");
-    }
+    let unfunded = execute_under(db(VALUE - 1), tx(gas_limit), EvmTxRuntimeLimits::no_limits());
+    assert!(unfunded.result.is_success(), "unfunded: charged nothing: {:?}", unfunded.result);
+    assert_eq!(unfunded.usage, refused.usage, "unfunded: nothing counted");
+    assert_eq!(unfunded.gas.history, refused.gas.history, "unfunded: the body's history alone");
+    let funded = execute_under(db(VALUE), tx(gas_limit), EvmTxRuntimeLimits::no_limits());
+    assert!(funded.result.is_halt(), "funded: out of gas on the records: {:?}", funded.result);
+    assert_eq!(funded.gas.gas_used, gas_limit, "funded: the halt used the gas limit");
 }
 
 /// Raises the value of every call to [`RECEIVER`] by one wei as the call starts: an inspector's

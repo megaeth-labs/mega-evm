@@ -141,7 +141,7 @@ mod record;
 pub(crate) use ledger::StartSide;
 pub(crate) use ledger::{FrameIdentity, FrameStartRecords, Ledger, Mark, StartFacts, StartReport};
 pub use limit::AdditionalLimit;
-pub(crate) use record::HistoryBytes;
+pub(crate) use record::{HistoryBytes, RecordDelta};
 
 use alloy_primitives::Bytes;
 use alloy_sol_types::SolError;

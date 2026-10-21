@@ -406,12 +406,12 @@ fn destruct_after_read() -> u64 {
 /// A `SELFDESTRUCT` of a balance, after a read, whose frame the cap stops.
 ///
 /// - Destructing in the transaction's own frame under a cap that pays exactly the opcode, the
-///   balance moves and the receipt carries the log the data size counted with the beneficiary's
-///   record, as without the read. A unit less and the cold access, charged after revm journaled the
-///   move and the log, crosses the cap: the opcode failed, so nothing is counted, and the stop
-///   takes the move and the log back. Less than the opcode's own price, and its static charge
-///   crosses before revm moves anything: the same stop.
-/// - Destructing in a child, the record and the log land on the child's lane and merge into its
+///   balance moves and the receipt carries the log the data size counted with the two records — the
+///   destructed account's and the beneficiary's — as without the read. A unit less and the cold
+///   access, charged after revm journaled the move and the log, crosses the cap: the opcode failed,
+///   so nothing is counted, and the stop takes the move and the log back. Less than the opcode's
+///   own price, and its static charge crosses before revm moves anything: the same stop.
+/// - Destructing in a child, the records and the log land on the child's lane and merge into its
 ///   caller's. The caller then computes past the cap: the stop takes back the child's move and log
 ///   with the caller's lane, and the transaction keeps its body alone. Without the spin, the same
 ///   call keeps the log and the bytes, read or not.
@@ -435,7 +435,10 @@ fn test_a_selfdestructs_transfer_log_goes_with_the_frame_the_cap_stops() {
         assert_as_without_read(&detained, &plain, "a cap that pays the destruction");
         let logs = assert_counts_its_transfer_logs(&detained, body, "a destruction the cap pays");
         assert_eq!(logs, [transfer_log(CONTRACT, RECEIVER, U256::from(VALUE))]);
-        assert_eq!(detained.outcome.usage.write_records, 1, "the beneficiary's record");
+        assert_eq!(
+            detained.outcome.usage.write_records, 2,
+            "the destructed account's record and the beneficiary's"
+        );
         for cap in [destruct_after_read() - 1, destruct_after_read() - cold_access() - 1] {
             let stopped = run_own(TIMESTAMP, cap);
             let left = Charges::default().then(&[2, 3, 5_000, cold_access()]).left(cap);
