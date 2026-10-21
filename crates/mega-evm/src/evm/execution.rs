@@ -779,15 +779,16 @@ where
         // What the calling opcode charged upfront, before the inspector's hooks can rewrite the
         // call it charged for.
         let upfront = UpfrontRecord::of(&frame_init.frame_input);
-        if let Some(output) = frame_start(ctx, inspector, &mut frame_init.frame_input) {
-            let output = answered_by_inspector(ctx, inspector, &frame_init, output, upfront);
-            return Ok(ItemOrResult::Result(output));
-        }
         // The start its charge paid for — the calling opcode's, or the transaction's for its own
-        // frame — may not be the one the inspector lets start.
+        // frame — may not be the one the inspector lets start, and one it answers never reaches
+        // revm: either way the records go with this start.
         #[cfg(debug_assertions)]
         {
             ctx.charged_records = None;
+        }
+        if let Some(output) = frame_start(ctx, inspector, &mut frame_init.frame_input) {
+            let output = answered_by_inspector(ctx, inspector, &frame_init, output, upfront);
+            return Ok(ItemOrResult::Result(output));
         }
         let (frame_input, depth) = (frame_init.frame_input.clone(), frame_init.depth);
         // What the start journals begins here. A start answered with a success without a frame

@@ -494,6 +494,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         // A transaction that failed with an error, or was stopped, left its `keylessDeploy` call
         // unanswered.
         self.keyless_frame = None;
+        // A start an inspector answered left the records its hook charged for.
+        #[cfg(debug_assertions)]
+        {
+            self.charged_records = None;
+        }
         self.system_originated = system_originated;
         let exempt = self.inner.tx.tx_type() == DEPOSIT_TRANSACTION_TYPE || system_originated;
         self.set_history_exempt(exempt);
