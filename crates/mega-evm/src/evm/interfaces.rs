@@ -150,14 +150,16 @@ where
         self.inner.ctx.journal_mut().finalize()
     }
 
+    /// Finalizes the journal whether or not the transaction succeeded, as
+    /// [`transact`](revm::ExecuteEvm::transact) does; see [`MegaEvm`] on the entry points and the
+    /// journal. revm's own `Evm::replay` finalizes only on success.
     fn replay(
         &mut self,
     ) -> Result<ExecResultAndState<Self::ExecutionResult, Self::State>, Self::Error> {
-        let mut h = MegaHandler::<_, _, EthFrame<EthInterpreter>>::new();
-        revm::handler::Handler::run(&mut h, self).map(|result| {
-            let state = self.finalize();
-            ExecResultAndState::new(result, state)
-        })
+        let mut h = MegaHandler::<_, Self::Error, EthFrame<EthInterpreter>>::new();
+        let output_or_error = revm::handler::Handler::run(&mut h, self);
+        let state = self.finalize();
+        Ok(ExecResultAndState::new(output_or_error?, state))
     }
 }
 
@@ -167,6 +169,15 @@ where
 {
     fn commit(&mut self, state: Self::State) {
         self.ctx().db_mut().commit(state);
+    }
+
+    /// Finalizes the journal whether or not the transaction succeeded, and commits it only on
+    /// success. The trait's default commits through `transact_one` and leaves the journal
+    /// unfinalized on an error.
+    fn transact_commit(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {
+        let ExecResultAndState { result, state } = revm::ExecuteEvm::transact(self, tx)?;
+        self.commit(state);
+        Ok(result)
     }
 }
 
@@ -186,6 +197,29 @@ where
         let mut h = MegaHandler::<_, _, EthFrame<EthInterpreter>>::new();
         revm::inspector::InspectorHandler::inspect_run(&mut h, self)
     }
+
+    /// Finalizes the journal whether or not the transaction succeeded, as
+    /// [`ExecuteEvm::transact`](revm::ExecuteEvm::transact) does; see [`MegaEvm`] on the entry
+    /// points and the journal. The trait's provided method returns before finalizing on an error.
+    fn inspect_tx(
+        &mut self,
+        tx: Self::Tx,
+    ) -> Result<ExecResultAndState<Self::ExecutionResult, Self::State>, Self::Error> {
+        let output_or_error = self.inspect_one_tx(tx);
+        let state = revm::ExecuteEvm::finalize(self);
+        let output = output_or_error?;
+        Ok(ExecResultAndState::new(output, state))
+    }
+
+    /// Sets the inspector and runs [`Self::inspect_tx`], which finalizes on both outcomes.
+    fn inspect(
+        &mut self,
+        tx: Self::Tx,
+        inspector: Self::Inspector,
+    ) -> Result<ExecResultAndState<Self::ExecutionResult, Self::State>, Self::Error> {
+        self.set_inspector(inspector);
+        self.inspect_tx(tx)
+    }
 }
 
 impl<DB, INSP, ExtEnvs: ExternalEnvTypes> revm::InspectCommitEvm for MegaEvm<DB, INSP, ExtEnvs>
@@ -193,6 +227,24 @@ where
     DB: Database + DatabaseCommit,
     INSP: Inspector<MegaContext<DB, ExtEnvs>>,
 {
+    /// Finalizes the journal whether or not the transaction succeeded, and commits it only on
+    /// success. The trait's default leaves the journal unfinalized on an error.
+    fn inspect_tx_commit(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {
+        let ExecResultAndState { result, state } = self.inspect_tx(tx)?;
+        revm::ExecuteCommitEvm::commit(self, state);
+        Ok(result)
+    }
+
+    /// Sets the inspector and runs
+    /// [`inspect_tx_commit`](revm::InspectCommitEvm::inspect_tx_commit).
+    fn inspect_commit(
+        &mut self,
+        tx: Self::Tx,
+        inspector: Self::Inspector,
+    ) -> Result<Self::ExecutionResult, Self::Error> {
+        self.set_inspector(inspector);
+        self.inspect_tx_commit(tx)
+    }
 }
 
 impl<DB, INSP, ExtEnvs: ExternalEnvTypes> revm::SystemCallEvm for MegaEvm<DB, INSP, ExtEnvs>
@@ -214,6 +266,19 @@ where
         self.ctx().set_tx(tx);
         let mut h = MegaHandler::<_, _, EthFrame<EthInterpreter>>::new();
         revm::handler::Handler::run_system_call(&mut h, self)
+    }
+
+    /// Finalizes the journal whether or not the system call succeeded. The trait's default
+    /// returns before finalizing on an error.
+    fn system_call_with_caller(
+        &mut self,
+        caller: Address,
+        contract: Address,
+        data: Bytes,
+    ) -> Result<ExecResultAndState<Self::ExecutionResult, Self::State>, Self::Error> {
+        let output_or_error = self.system_call_one_with_caller(caller, contract, data);
+        let state = revm::ExecuteEvm::finalize(self);
+        Ok(ExecResultAndState::new(output_or_error?, state))
     }
 }
 
@@ -242,10 +307,13 @@ where
             <MegaTransaction as SystemCallTx>::new_system_tx_with_caller(caller, contract, data);
         tx.base.gas_limit = gas_limit;
         self.ctx().set_tx(tx);
-        let mut h = MegaHandler::<_, _, EthFrame<EthInterpreter>>::new();
-        revm::handler::Handler::run_system_call(&mut h, self).map(|result| {
-            let state = self.inner.ctx.journal_mut().finalize();
-            ResultAndState { result, state }
-        })
+        let mut h = MegaHandler::<
+            _,
+            EVMError<DB::Error, MegaTransactionError>,
+            EthFrame<EthInterpreter>,
+        >::new();
+        let output_or_error = revm::handler::Handler::run_system_call(&mut h, self);
+        let state = self.inner.ctx.journal_mut().finalize();
+        Ok(ResultAndState { result: output_or_error?, state })
     }
 }

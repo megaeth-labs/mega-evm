@@ -321,6 +321,10 @@ When the agent is requested to implement a new feature or bug fix, it should con
   The default implementation accepts any value silently.
   Override it with field-level invariant checks (e.g., non-zero addresses) so that `with_params()` panics loudly at chain-config load time rather than allowing the error to surface at the first block where the fork activates.
   Also register the fork-requires-params rule in `MegaHardforks::validate_schedule` so a schedule that activates the fork without its params fails validation, not the fork's first block.
+- **Reset new per-transaction state in `MegaContext::discard_tx`.**
+  An embedder that catches a panic out of transaction execution calls `MegaBlockExecutor::discard_transaction` (which forwards to `MegaEvm::discard_tx`) before the next transaction, because the unwind skips the handler's own cleanup.
+  A new per-transaction field on `MegaContext` must be reset there as well, unless every transaction overwrites it before reading it, and the case belongs in `tests/block_executor/discard_transaction.rs`.
+  State the next transaction inherits from the previous one (the pre-REX1 detained compute gas limit) is recorded in `MegaContext::on_tx_end` at the end of every run, not snapshotted at `on_new_tx`: the panic can land before `on_new_tx` runs, as in the block executor's deposit sender read.
 - **Pre-block helpers must return state, not commit directly.**
   Any helper participating in `pre_execution_changes` (system contract deploys, pre-block system calls, etc.) MUST return `Option<EvmState>` and never call `db.commit(...)` directly.
   Full convention: `crates/mega-evm/src/system/AGENTS.md` → `PRE-BLOCK STATE CHANGE CONTRACT`.
