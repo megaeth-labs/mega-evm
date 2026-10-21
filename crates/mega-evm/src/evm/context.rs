@@ -494,7 +494,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         // A transaction that failed with an error, or was stopped, left its `keylessDeploy` call
         // unanswered.
         self.keyless_frame = None;
-        // A start an inspector answered left the records its hook charged for.
+        // The records a start's hook charged for are that start's, and no start outlives its
+        // transaction.
         #[cfg(debug_assertions)]
         {
             self.charged_records = None;
