@@ -289,11 +289,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
         Ok(load)
     }
 
-    /// Commits the record of a write an opcode completed — to the running frame's lane, and to the
-    /// running frame's level of the journal's ledger — holds it to the limits, and charges the
-    /// frame the history it costs. revm calls it at the end of `SSTORE`, `LOG0`..`LOG4` and
-    /// `SELFDESTRUCT`, after every charge the opcode makes, so a write the opcode's own failure
-    /// takes back is never counted.
+    /// Commits the record of a write an opcode completed to the running frame's level of the
+    /// journal's ledger — and to the running frame's lane, until the lanes go — holds it to the
+    /// limits, and charges the frame the history it costs. revm calls it at the end of `SSTORE`,
+    /// `LOG0`..`LOG4` and `SELFDESTRUCT`, after every charge the opcode makes, so a write the
+    /// opcode's own failure takes back is never counted.
     ///
     /// The record is held to the limits first, and only then is its history charged: a record the
     /// limit rejects is not kept, so its history is no charge, and the stop is what the frame
@@ -319,11 +319,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
             CompletedWrite::Log { .. } => (true, false),
             CompletedWrite::SelfDestruct { .. } => (false, false),
         };
-        // One count, committed to the lanes, which decide, and to the journal's ledger.
-        let (count, history) = self.additional_limit.write_count(&write);
-        let check = self.additional_limit.commit_count(&count);
-        let journaled = self.ledger_mut().count_write(&count);
-        shadow::completed_write(&self.additional_limit, self.ledger(), check, journaled);
+        // One count, committed to the journal's ledger, which decides, and to the lanes.
+        let (count, history) = self.ledger().write_count(&write);
+        let lanes = self.additional_limit.commit_count(&count);
+        let check = self.ledger_mut().count_write(&count);
+        shadow::completed_write(&self.additional_limit, self.ledger(), lanes, check);
         if check.exceeded_limit() {
             return WriteVerdict::Revert(self.additional_limit.note_frame_stop(&check));
         }
@@ -374,7 +374,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
     /// taken, and a price that could not be computed failed before any charge.
     #[inline]
     fn frame_starting(&mut self, start: &FrameStart, gas: &mut GasTracker) -> bool {
-        let records = self.additional_limit.opcode_start_records(start);
+        let records = self.ledger().start_records(start);
         if !self.prices_history() {
             return true;
         }
@@ -495,7 +495,7 @@ mod tests {
         Host::log(&mut ctx, log);
         let destructed = Host::selfdestruct(&mut ctx, CONTRACT, BENEFICIARY, false).unwrap();
         assert!(destructed.data.had_value);
-        assert_eq!(ctx.additional_limit.usage(), LimitUsage::ZERO, "the Host counts nothing");
+        assert_eq!(ctx.limit_usage(), LimitUsage::ZERO, "the Host counts nothing");
 
         // The hook is what counts: the slot's first change is one write record.
         let mut gas = GasTracker::new(1_000_000, 1_000_000, 0);
@@ -503,8 +503,8 @@ mod tests {
             CompletedWrite::Sstore { address: CONTRACT, key: U256::from(1), result: &slot.data };
         assert_eq!(Host::write_completed(&mut ctx, write, &mut gas), WriteVerdict::Continue);
         assert_eq!(
-            ctx.additional_limit.usage(),
-            LimitUsage { data_size: WRITE_RECORD_SIZE, write_records: 1 },
+            ctx.limit_usage(),
+            LimitUsage { data_size: WRITE_RECORD_SIZE, write_records: 1 }
         );
     }
 }

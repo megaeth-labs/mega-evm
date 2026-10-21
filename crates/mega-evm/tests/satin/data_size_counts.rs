@@ -397,6 +397,6 @@ fn test_each_transaction_counts_from_zero() {
     for run in 0..2 {
         let result = evm.transact_raw(call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT)).unwrap();
         assert!(result.result.is_success(), "{:?}", result.result);
-        assert_eq!(evm.ctx().additional_limit().usage(), records(1), "run {run}");
+        assert_eq!(evm.ctx().limit_usage(), records(1), "run {run}");
     }
 }

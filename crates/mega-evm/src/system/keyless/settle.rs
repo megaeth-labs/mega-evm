@@ -254,12 +254,16 @@ fn take_back_bump<DB: Database, ExtEnvs: ExternalEnvTypes>(
     if moved_value {
         return Ok(());
     }
-    let taken = ctx.additional_limit.take_back_creator_record();
-    let journaled = ctx.ledger_mut().take_back_creator_record();
-    shadow::keyless_take_back(&ctx.additional_limit, ctx.ledger(), taken, journaled);
+    let lanes = ctx.additional_limit.take_back_creator_record();
+    let taken = ctx.ledger_mut().take_back_creator_record();
     if taken {
+        // A stop the record left the call, by putting it over a limit, goes with it: the call is
+        // held to its limits again without the record.
+        let check = ctx.ledger().check();
+        ctx.additional_limit.hold_running_frame(check);
         gas.refill_history(started.signer_record_charge);
     }
+    shadow::keyless_take_back(&ctx.additional_limit, ctx.ledger(), lanes, taken);
     Ok(())
 }
 

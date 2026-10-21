@@ -599,13 +599,13 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for LayerProbe {
     fn step(&mut self, interp: &mut Interpreter<EthInterpreter>, context: &mut MegaContext<DB>) {
         self.opcode = interp.bytecode.opcode();
         if self.log_before_sstore && self.opcode == SSTORE {
-            let before = context.additional_limit().usage();
+            let before = context.limit_usage();
             let log = Log {
                 address: CALLEE,
                 data: LogData::new(vec![B256::ZERO], Bytes::new()).unwrap(),
             };
             revm::context_interface::Host::log(context, log);
-            assert_eq!(context.additional_limit().usage(), before, "a tool's log counts nothing");
+            assert_eq!(context.limit_usage(), before, "a tool's log counts nothing");
         }
     }
 
@@ -614,7 +614,7 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for LayerProbe {
         _interp: &mut Interpreter<EthInterpreter>,
         context: &mut MegaContext<DB>,
     ) {
-        self.steps.push((self.opcode, context.additional_limit().usage()));
+        self.steps.push((self.opcode, context.limit_usage()));
     }
 }
 
@@ -809,7 +809,7 @@ fn test_creation_failing_before_the_nonce_bump_records_nothing() {
             .unwrap();
     assert!(result.result.is_success());
     assert_eq!(result.state[&CALLEE].info.nonce, 0, "the nonce was never bumped");
-    assert_eq!(evm.ctx().additional_limit().usage(), body_only());
+    assert_eq!(evm.ctx().limit_usage(), body_only());
 }
 
 /// A creation that collides with an existing account fails after bumping the creator's nonce, so
@@ -847,7 +847,7 @@ fn test_creation_stopped_at_init_bumps_the_creator_nonce() {
     assert!(result.result.is_success(), "{:?}", result.result);
     assert_eq!(result.state[&CALLEE].info.nonce, 1, "the stopped creation bumped the nonce");
     assert_eq!(result.state[&CALLEE].storage[&U256::ZERO].present_value(), U256::ZERO, "it failed");
-    assert_eq!(evm.ctx().additional_limit().usage(), records(2), "slot 1 and the creator's nonce");
+    assert_eq!(evm.ctx().limit_usage(), records(2), "slot 1 and the creator's nonce");
 }
 
 /// A transaction is held at validation to its body and a record for every entry of its
@@ -1138,7 +1138,7 @@ fn test_inspector_answered_call_keeps_the_caller_lane() {
             .unwrap();
     assert!(result.result.is_success());
     assert_eq!(
-        evm.ctx().additional_limit().usage(),
+        evm.ctx().limit_usage(),
         with_extra(records(2), TRANSFER_LOG_SIZE),
         "CALLEE and CONTRACT2, and the transfer log"
     );
@@ -1483,10 +1483,7 @@ fn test_an_inspector_answered_value_call_gives_its_history_back() {
                 let mut evm = MegaEvm::new(context(db)).with_inspector(inspector);
                 let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
                 assert!(result.result.is_success(), "{:?}", result.result);
-                (
-                    evm.ctx().additional_limit().usage(),
-                    evm.ctx().additional_limit().history_gas_spent(),
-                )
+                (evm.ctx().limit_usage(), evm.ctx().additional_limit().history_gas_spent())
             }
             None => {
                 let outcome = crate::common::execute(db, tx);
@@ -1525,7 +1522,7 @@ struct KvWeighsNoMore {
 impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for KvWeighsNoMore {
     fn step_end(&mut self, _: &mut Interpreter<EthInterpreter>, context: &mut MegaContext<DB>) {
         self.steps += 1;
-        let usage = context.additional_limit().usage();
+        let usage = context.limit_usage();
         if usage.write_records * WRITE_RECORD_SIZE > usage.data_size {
             self.over.get_or_insert(usage);
         }

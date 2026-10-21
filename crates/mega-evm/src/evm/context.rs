@@ -30,8 +30,8 @@ use crate::{
     },
     AdditionalLimit, BlockHashRecord, BucketError, BucketId, BucketMultipliers, BucketRecord,
     Detention, EmptyExternalEnv, EthSpecId, EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs,
-    MegaJournal, MegaSpecId, MegaTransaction, OracleReadRecord, ProtocolLimits, SaltEnv,
-    VolatileDataAccess,
+    LimitUsage, MegaJournal, MegaSpecId, MegaTransaction, OracleReadRecord, ProtocolLimits,
+    SaltEnv, VolatileDataAccess,
 };
 
 /// The revm context the Satin engine runs on: op-revm's context shape with the `MegaETH`
@@ -303,6 +303,15 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// The common execution layer's state for the running (or last) transaction.
     pub const fn additional_limit(&self) -> &AdditionalLimit {
         &self.additional_limit
+    }
+
+    /// What the running (or last) transaction keeps so far: its data-size bytes and write records,
+    /// with every running frame counted as if it succeeds. It is what the transaction's outcome
+    /// reports ([`MegaTransactionOutcome::usage`](crate::MegaTransactionOutcome::usage)) once it
+    /// ran, and what the data-size limit holds it to; it is read off the journal's ledger, which
+    /// the next transaction or system call resets.
+    pub fn limit_usage(&self) -> LimitUsage {
+        self.ledger().usage()
     }
 
     /// The journal's ledger of what the running (or last) transaction keeps.
@@ -669,11 +678,19 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextTr for MegaContext<DB, ExtE
         }
     }
 
-    /// Holds the code a creation deposits to the data-size limit, and counts its history bytes,
-    /// once `return_create` made every charge for the deposit and before it commits the creation
-    /// ([`AdditionalLimit::on_code_deposit`]); the journal's ledger counts it on the creation's
-    /// level. A crossing refuses the deposit with the stop's revert data: the creation reverts
-    /// with it, on the gas it had before the deposit.
+    /// Holds the code a creation deposits to the data-size limit, and counts its history bytes, on
+    /// the creation's level of the journal's ledger, once `return_create` made every charge for
+    /// the deposit and before it commits the creation. A crossing refuses the deposit with the
+    /// stop's revert data: `return_create` reverts the creation's checkpoint, so the code is not
+    /// written and the level takes the bytes back, puts the frame's gas back to what it had before
+    /// the deposit's charges, and ends the creation as a revert carrying the stop.
+    ///
+    /// A creation `return_create` fails itself is never offered: a revert or a halt of the init
+    /// code, code it refuses — starting with `0xEF`, or over the code-size limit — and a creation
+    /// that cannot pay one of the deposit's charges, which runs out of gas whatever the limit.
+    /// Empty code deposits nothing and is held to nothing. The same bytes are history beside the
+    /// write records, so the history a transaction reports it appended and the data size it kept
+    /// move together: a creation that deposits nothing, or whose deposit fails, appends neither.
     ///
     /// A keyless deployment's constructor that returns empty code for the deploy address is
     /// refused the same way, with empty revert data ([`keyless::refuses_empty_deposit`]).
@@ -687,10 +704,13 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextTr for MegaContext<DB, ExtE
         if keyless::refuses_empty_deposit(&mut self.keyless_frame, deposit, destroyed) {
             return Err(Bytes::new());
         }
-        let admitted = self.additional_limit.on_code_deposit(deposit);
-        let journaled = self.ledger_mut().count_code(deposit.code.len() as u64);
-        shadow::code_deposit(&self.additional_limit, self.ledger(), admitted.is_err(), journaled);
-        admitted
+        let lanes = self.additional_limit.on_code_deposit(deposit);
+        let check = self.ledger_mut().count_code(deposit.code.len() as u64);
+        shadow::code_deposit(&self.additional_limit, self.ledger(), lanes, check);
+        if check.exceeded_limit() {
+            return Err(self.additional_limit.note_frame_stop(&check));
+        }
+        Ok(())
     }
 }
 

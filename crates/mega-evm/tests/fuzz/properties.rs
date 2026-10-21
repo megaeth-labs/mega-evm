@@ -279,7 +279,7 @@ fn test_property_kv_weighs_no_more_than_data_size() {
             context: &mut MegaContext<MemoryDatabase, Envs>,
         ) {
             self.steps += 1;
-            let usage = context.additional_limit().usage();
+            let usage = context.limit_usage();
             if usage.write_records * WRITE_RECORD_SIZE > usage.data_size {
                 self.over.get_or_insert((usage, self.steps));
             }

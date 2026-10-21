@@ -95,7 +95,7 @@ pub(crate) fn run<DB: alloy_evm::Database>(
 ) -> (ResultAndState<MegaHaltReason>, LimitUsage) {
     let mut evm = MegaEvm::new(context(db));
     let result = evm.transact_raw(tx).expect("the transaction is valid");
-    let usage = evm.ctx().additional_limit().usage();
+    let usage = evm.ctx().limit_usage();
     (result, usage)
 }
 

@@ -39,20 +39,26 @@
 //! Nothing a tool or a precompile writes through the journal is counted: the journal's own write
 //! methods count nothing, and the start window is open only while revm decides a start.
 //!
-//! The lanes ([`AdditionalLimit`](crate::AdditionalLimit)) count the same quantities and stay the
-//! ones every decision is taken on; under the `ledger-shadow` feature the two are compared where
-//! they must agree.
+//! The ledger takes every decision: the counts, the frame budgets, the start verdicts, the
+//! refunds of the history a caller paid for a start's records, and the check of a caller its child
+//! returns into. The lanes ([`AdditionalLimit`](crate::AdditionalLimit)) count the same quantities
+//! beside it until their deletion; under the `ledger-shadow` feature they are held to the ledger
+//! wherever the two must agree.
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
 use std::vec::Vec;
 
 use alloy_primitives::{Address, U256};
-use revm::context_interface::journaled_state::JournalCheckpoint;
+use revm::context_interface::{
+    host::{CompletedWrite, FrameStart, FrameStartKind},
+    journaled_state::JournalCheckpoint,
+};
 
 use super::{
-    limit::share_of_remaining, record::WriteCount, EvmTxRuntimeLimits, LimitCheck, LimitKind,
-    LimitUsage, TRANSFER_LOG, WRITE_RECORD,
+    limit::share_of_remaining,
+    record::{write_effect, write_moves_value, HistoryBytes, RecordEffect, WriteCount},
+    EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, TRANSFER_LOG, WRITE_RECORD,
 };
 
 /// Asserts an invariant of the ledger's levels in debug builds and in `ledger-shadow` builds; in
@@ -162,6 +168,20 @@ pub(crate) struct StartFacts {
     /// Whether the start transfers value: a call carrying a non-zero transfer, or a creation with
     /// an endowment.
     pub(crate) transfers_value: bool,
+}
+
+/// The write records a frame's start makes, split by whose failure takes them back.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct FrameStartRecords {
+    /// Records on the frame's own level, which its failure takes back.
+    pub(crate) on_lane: u64,
+    /// Whether the frame's start also writes its caller's account.
+    pub(crate) caller: bool,
+}
+
+impl FrameStartRecords {
+    /// No record at all.
+    pub(crate) const NONE: Self = Self { on_lane: 0, caller: false };
 }
 
 /// The start window, open while revm decides one frame start.
@@ -323,9 +343,34 @@ impl Ledger {
 
     /// The history bytes the transaction keeps beside its write records: its logs and the code it
     /// deposited.
-    #[cfg(feature = "ledger-shadow")]
     pub(crate) const fn log_and_code_bytes(&self) -> u64 {
         self.counts.log_and_code_bytes
+    }
+
+    /// The data-size bytes of the transaction's body, which the transaction counts before any
+    /// frame and no revert takes back.
+    pub(crate) const fn body(&self) -> u64 {
+        self.body
+    }
+
+    /// Whether the transaction's body, with one write record for each of its `authorizations`,
+    /// fits its data-size limit: what validation holds a transaction to.
+    ///
+    /// Every entry of the authorization list counts, whether it will apply or not, so the figure is
+    /// an upper bound on what the transaction counts before its first frame — the body, then one
+    /// record for each distinct authority that applies — and a transaction validation admits
+    /// cannot cross the limit there. An exempt transaction is held to nothing.
+    pub(crate) fn admits_tx_body(&self, authorizations: u64) -> bool {
+        self.exempt ||
+            !LimitUsage { data_size: self.body, write_records: 0 }
+                .saturating_add(WRITE_RECORD.times(authorizations))
+                .exceeds_data_size(self.limits.tx_data_size_limit)
+    }
+
+    /// Whether the transaction's call target is an applied EIP-7702 authority, whose record the
+    /// authorities' records hold, so the transaction's own frame writes no recipient.
+    pub(crate) const fn target_is_authority(&self) -> bool {
+        self.target_is_authority
     }
 
     /// The number of levels open, which is revm's journal depth.
@@ -438,6 +483,41 @@ impl Ledger {
         (u64::from(to != from && to != self.sender), !caller_recorded)
     }
 
+    /// The write records the start `start` describes makes, for the opcode about to start it,
+    /// which pays for them once it took the gas it forwards: the frame's own budget carries none
+    /// of them, which is what lets a value transfer's allowance pay for what the recipient does
+    /// with it.
+    ///
+    /// A call that moves no value writes nothing. A value call writes its recipient, unless that
+    /// is the caller itself or the transaction's sender, whose account the body counts. A creation
+    /// writes the account it creates. Either writes the caller's account — a transfer's sender, a
+    /// creation's creator nonce — unless the running frame already recorded it. They are the
+    /// records the start is counted by once revm makes it ([`on_transfer`](Self::on_transfer),
+    /// [`before_creation`](Self::before_creation)); a debug build holds the two answers to each
+    /// other where the frame starts.
+    pub(crate) fn start_records(&self, start: &FrameStart) -> FrameStartRecords {
+        let recorded = self.frame_level().is_some_and(|level| level.recorded);
+        let target = match start.kind {
+            FrameStartKind::Create | FrameStartKind::Create2 => {
+                return FrameStartRecords { on_lane: 1, caller: !recorded };
+            }
+            FrameStartKind::Call |
+            FrameStartKind::CallCode |
+            FrameStartKind::DelegateCall |
+            FrameStartKind::StaticCall => start.target,
+        };
+        match target {
+            Some(target) if !start.value.is_zero() => {
+                // An opcode runs inside a frame, so the frame it starts is below the
+                // transaction's own.
+                let depth = self.frame_level().map_or(1, |level| level.depth + 1);
+                let (on_lane, caller) = self.call_records(depth, start.caller, target, recorded);
+                FrameStartRecords { on_lane, caller }
+            }
+            _ => FrameStartRecords::NONE,
+        }
+    }
+
     /// The verdict on a start revm is not asked to decide — a call gas detention answers without
     /// running the precompile it targets — had revm made it: the records it would count and the
     /// transfer log of the value it would move, held to the transaction's limit and to the budget
@@ -496,6 +576,34 @@ impl Ledger {
         }
         self.hints = self.hints.saturating_add(bytes);
         LimitCheck::WithinLimit
+    }
+
+    /// What `write`, which the running opcode completed, keeps, and the history bytes it appends or
+    /// takes back: what [`count_write`](Self::count_write) counts, and what the Host's
+    /// completed-write hook charges.
+    ///
+    /// A `SELFDESTRUCT` that moved value to another account also keeps the EIP-7708 transfer log
+    /// revm journaled for the move, with the beneficiary's record. The log is the running frame's,
+    /// as the move is: the frame's own journal checkpoint takes both back when the frame fails. It
+    /// is data size and nothing else — no write record, and no history: the bytes reported are the
+    /// record's alone.
+    pub(crate) fn write_count(&self, write: &CompletedWrite<'_>) -> (WriteCount, HistoryBytes) {
+        let effect = write_effect(write, self.sender);
+        let history = effect.history_bytes();
+        let added = match effect {
+            RecordEffect::None => LimitUsage::ZERO,
+            RecordEffect::Record(usage) => usage,
+            RecordEffect::Refund(usage) => {
+                return (WriteCount { taken: usage, ..WriteCount::NONE }, history);
+            }
+        };
+        // A log's bytes are history beside the write records; a record's are counted as one.
+        let log_bytes = match write {
+            CompletedWrite::Log { .. } => added.data_size,
+            CompletedWrite::Sstore { .. } | CompletedWrite::SelfDestruct { .. } => 0,
+        };
+        let added = with_transfer_log(added, self.transfer_logs && write_moves_value(write));
+        (WriteCount { added, log_bytes, ..WriteCount::NONE }, history)
     }
 
     /// Counts what a completed write keeps on the running frame's level: what it adds, or what it
@@ -880,8 +988,9 @@ impl Ledger {
 }
 
 /// Satin's side of one frame start: what its caller paid for the records it makes, what the
-/// ledger saw it count, and, for a frame revm built, the mark it is taken back to when it is
-/// rewritten into a failure. One per frame result revm will return, as the lanes are.
+/// ledger saw it count, the history allowance the frame was granted, and, for a frame revm built,
+/// the mark it is taken back to when it is rewritten into a failure. One per frame result revm
+/// will return.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct StartSide {
     /// The frame's depth.
@@ -895,6 +1004,9 @@ pub(crate) struct StartSide {
     report: StartReport,
     /// The mark of a frame revm built.
     mark: Option<Mark>,
+    /// What is left of the history allowance the frame was granted, if it was granted one. It
+    /// never enters the frame's gas, and what it does not spend disappears with the frame.
+    stipend: u64,
     /// Whether the records the lanes counted for the start are those its charge paid for.
     #[cfg(feature = "ledger-shadow")]
     comparable: bool,
@@ -917,6 +1029,7 @@ impl StartSide {
                 verdict: None,
             },
             mark: None,
+            stipend: 0,
             #[cfg(feature = "ledger-shadow")]
             comparable: true,
         }
@@ -946,6 +1059,19 @@ impl StartSide {
         self.depth
     }
 
+    /// Grants the frame a history allowance of `amount`.
+    pub(crate) const fn grant_stipend(&mut self, amount: u64) {
+        self.stipend = amount;
+    }
+
+    /// Draws up to `amount` from the frame's history allowance and reports what it gave; the frame
+    /// pays the rest out of its gas.
+    pub(crate) const fn consume_stipend(&mut self, amount: u64) -> u64 {
+        let drawn = if self.stipend < amount { self.stipend } else { amount };
+        self.stipend -= drawn;
+        drawn
+    }
+
     /// The start, once revm decided it.
     pub(crate) const fn start(&self) -> Option<StartId> {
         self.report.start
@@ -965,7 +1091,6 @@ impl StartSide {
     /// refused before its writes, gets everything back; a call answered with a success keeps its
     /// records; a failed precompile, and a frame that fails, give theirs back, a creator's
     /// surviving record aside.
-    #[cfg_attr(not(feature = "ledger-shadow"), allow(dead_code))]
     pub(crate) fn refund(&self, ledger: &Ledger) -> u64 {
         let (level_kept, start_kept) =
             self.report.start.map_or((false, false), |start| ledger.fate(start));
@@ -980,5 +1105,96 @@ impl StartSide {
             refund += self.caller_charge;
         }
         refund
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AUTHORIZATION_SIZE, TRANSFER_LOG_SIZE, TX_BODY_SIZE, WRITE_RECORD_SIZE};
+    use alloy_primitives::address;
+    use revm::context_interface::context::SelfDestructResult;
+
+    const SENDER: Address = address!("00000000000000000000000000000000000f0001");
+    const CALLEE: Address = address!("00000000000000000000000000000000000f0002");
+    const TARGET: Address = address!("00000000000000000000000000000000000f0003");
+
+    /// A ledger holding a transaction from [`SENDER`] with a body of `body` bytes under `limits`,
+    /// exempt or not, whose value movements journal transfer logs when `transfer_logs`.
+    fn ledger(limits: EvmTxRuntimeLimits, exempt: bool, transfer_logs: bool, body: u64) -> Ledger {
+        let mut ledger = Ledger::default();
+        ledger.set_limits(limits);
+        ledger.begin_transaction(exempt, transfer_logs, body);
+        ledger.count_authorities(SENDER, 0, false);
+        ledger
+    }
+
+    /// Validation admits a body whose bytes, with one record for each entry of the authorization
+    /// list, are within the transaction's limit, and nothing over it; an exempt transaction
+    /// whatever it carries.
+    #[test]
+    fn test_validation_admits_a_body_and_its_authority_records_within_the_limit() {
+        let body = TX_BODY_SIZE + 2 * AUTHORIZATION_SIZE;
+        let at = body + 2 * WRITE_RECORD_SIZE;
+        let under = |limit: u64, exempt: bool| {
+            ledger(
+                EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit),
+                exempt,
+                false,
+                body,
+            )
+        };
+        assert!(under(at, false).admits_tx_body(2), "at the limit");
+        assert!(!under(at - 1, false).admits_tx_body(2), "one byte over it");
+        assert!(under(at - 1, false).admits_tx_body(1), "one record fewer");
+        assert!(!under(body - 1, false).admits_tx_body(0), "the body alone over it");
+        assert!(under(0, true).admits_tx_body(2), "an exempt transaction");
+        assert_eq!(under(at, false).body(), body);
+        assert_eq!(under(at, false).usage().data_size, body, "the body is counted");
+    }
+
+    /// Counts `write` on `ledger` as the completed-write hook does, and reports the verdict and
+    /// the history bytes.
+    fn commit(ledger: &mut Ledger, write: &CompletedWrite<'_>) -> (LimitCheck, HistoryBytes) {
+        let (count, history) = ledger.write_count(write);
+        (ledger.count_write(&count), history)
+    }
+
+    /// A `SELFDESTRUCT` that moved value to another account counts its transfer log with the
+    /// beneficiary's record, in one check, and reports the record's history alone. To the sender,
+    /// whose account the body counts, it is the log alone, and the log alone can cross; and nothing
+    /// counts a log when the transaction's value movements journal none.
+    #[test]
+    fn test_a_destruction_counts_its_transfer_log_with_its_beneficiary() {
+        let moved = SelfDestructResult { had_value: true, ..Default::default() };
+        let destruction =
+            |target| CompletedWrite::SelfDestruct { address: CALLEE, target, result: &moved };
+        let mut logging = ledger(EvmTxRuntimeLimits::no_limits(), false, true, 0);
+        let (check, history) = commit(&mut logging, &destruction(TARGET));
+        assert_eq!(check, LimitCheck::WithinLimit);
+        assert_eq!(history, HistoryBytes::Appended(WRITE_RECORD_SIZE), "the record's alone");
+        assert_eq!(
+            logging.usage(),
+            LimitUsage { data_size: WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE, write_records: 1 },
+        );
+
+        let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(TRANSFER_LOG_SIZE - 1);
+        let mut tight = ledger(limits, false, true, 0);
+        let (check, history) = commit(&mut tight, &destruction(SENDER));
+        assert_eq!(history, HistoryBytes::None);
+        assert_eq!(
+            check,
+            LimitCheck::ExceedsLimit {
+                kind: LimitKind::DataSize,
+                limit: TRANSFER_LOG_SIZE - 1,
+                used: TRANSFER_LOG_SIZE,
+                frame_local: false,
+            },
+            "the log alone crosses",
+        );
+
+        let mut silent = ledger(EvmTxRuntimeLimits::no_limits(), false, false, 0);
+        let _ = commit(&mut silent, &destruction(TARGET));
+        assert_eq!(silent.usage(), WRITE_RECORD, "no log, no bytes");
     }
 }

@@ -220,7 +220,7 @@ fn test_short_circuited_value_call_moves_no_value() {
     );
     assert_eq!(result.state[&A].info.balance, U256::from(100), "no value left A");
     assert!(result.state.get(&B).is_none_or(|b| b.info.balance.is_zero()), "no value reached B");
-    assert_eq!(evm.ctx().additional_limit().usage().write_records, 1, "only A's slot 0");
+    assert_eq!(evm.ctx().limit_usage().write_records, 1, "only A's slot 0");
 }
 
 /// An address rewritten in `create_end` is what the caller sees, but the code is where the

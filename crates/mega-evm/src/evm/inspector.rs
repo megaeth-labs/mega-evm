@@ -607,11 +607,14 @@ pub(crate) fn frame_end_checked<DB, ExtEnvs, INTR, INSP>(
 /// - its state and history charges are rolled back and its refunds dropped, as a failure's are,
 ///   before its caller merges them;
 /// - the upfront charge comes back through it: the result holds it as state its frame gave back, as
-///   a frame that restored a slot its caller filled does, and its caller's merge nets it out;
-/// - for the transaction's own frame, the history of the write record charged before execution for
-///   its start comes back the same way;
-/// - its lane is discarded as a failure's is, so nothing it counted reaches its caller, which gets
-///   back the history it paid for the records.
+///   a frame that restored a slot its caller filled does, and its caller's merge nets it out.
+///
+/// What the frame counted is the journal's ledger's, which the frame's checkpoint took back with
+/// the frame's writes, or which never counted the start of a frame the inspector answered: its
+/// caller gets back the history it paid for the start's records once the frame returns, and the
+/// transaction the history of its own frame's record at the settlement, as for any frame that kept
+/// nothing. The lanes, which follow frames rather than the journal, are settled as the failure's
+/// until they go.
 fn settle_kept_nothing<DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: &mut MegaContext<DB, ExtEnvs>,
     input: &FrameInput,
@@ -637,12 +640,11 @@ fn settle_kept_nothing<DB: Database, ExtEnvs: ExternalEnvTypes>(
     let upfront = upfront_charge(input).filter(|_| result.refundable_state_gas_charge().is_none());
     // A failed lookup records its cause, which fails the transaction before the result settles.
     let upfront = upfront.map_or(Some(0), |charge| context.state_gas_charge(charge));
-    let history =
-        if depth == 0 { context.additional_limit.top_level_write_record_gas() } else { 0 };
-    context.additional_limit.note_top_level_refund(history);
-    let gas = result.gas_mut();
-    gas.refill_reservoir(upfront.unwrap_or_default());
-    gas.refill_history(history);
+    result.gas_mut().refill_reservoir(upfront.unwrap_or_default());
+    if depth == 0 {
+        let history = context.additional_limit.top_level_write_record_gas();
+        context.additional_limit.note_top_level_refund(history);
+    }
     context.additional_limit.discard_returning_lane();
 }
 

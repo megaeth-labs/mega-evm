@@ -54,8 +54,8 @@ use crate::{
     limit::{ledger_assert, shadow, FrameIdentity, Mark, StartFacts, StartReport},
     synthetic_frame_result,
     system::keyless,
-    Detention, ExternalEnvTypes, LimitKind, MegaContext, MegaEvm, MegaInstructions, MegaJournal,
-    PricedPrecompiles, VolatileDataAccess, TX_BODY_OVER_DATA_SIZE_LIMIT,
+    Detention, ExternalEnvTypes, LimitCheck, LimitKind, MegaContext, MegaEvm, MegaInstructions,
+    MegaJournal, PricedPrecompiles, VolatileDataAccess, TX_BODY_OVER_DATA_SIZE_LIMIT,
 };
 
 /// The regular gas a system call runs on, at most: EIP-8037's system-call budget. The rest of its
@@ -244,8 +244,8 @@ where
     /// is revm's own.
     ///
     /// Before any of it, the body and a write record for each entry of the authorization list are
-    /// held to the transaction's data-size limit, on the body count the common execution layer
-    /// keeps, the one the history gas prices: a transaction over it is refused
+    /// held to the transaction's data-size limit, on the body count the journal's ledger keeps,
+    /// the one the history gas prices: a transaction over it is refused
     /// ([`TX_BODY_OVER_DATA_SIZE_LIMIT`]), whatever its gas, a deposit included, which op-revm
     /// then includes as a failed deposit. Those are the only bytes a transaction counts before its
     /// first frame, so one that passes cannot cross the limit there. A system-originated
@@ -255,14 +255,14 @@ where
         evm: &mut Self::Evm,
     ) -> Result<InitialAndFloorGas, Self::Error> {
         let authorizations = evm.ctx_ref().tx().authorization_list_len() as u64;
-        if !evm.ctx_ref().additional_limit.admits_tx_body(authorizations) {
+        if !evm.ctx_ref().ledger().admits_tx_body(authorizations) {
             return Err(InvalidTransaction::Str(TX_BODY_OVER_DATA_SIZE_LIMIT.into()).into());
         }
         let mut gas = self.op.validate_initial_tx_gas(evm)?;
         if !evm.ctx_ref().prices_history() {
             return Ok(gas);
         }
-        let bytes = evm.ctx_ref().additional_limit.body_bytes();
+        let bytes = evm.ctx_ref().ledger().body();
         // A byte count with no price saturates, which no gas limit covers: the transaction is
         // rejected for not covering its own intrinsic gas.
         let history = history_gas(bytes).unwrap_or(u64::MAX);
@@ -325,10 +325,19 @@ where
         Ok(Some(frame))
     }
 
-    /// Settles the outermost frame: pops its lane, then settles its gas into the transaction's as
-    /// op-revm does (op-revm replaces revm's settlement, so revm's never runs here): a transaction
-    /// whose own frame a limit stopped settles like an EIP-8037 revert, its unspent regular gas
-    /// and reservoir back to the sender.
+    /// Settles the outermost frame: pops its start's side, then settles its gas into the
+    /// transaction's as op-revm does (op-revm replaces revm's settlement, so revm's never runs
+    /// here): a transaction whose own frame a limit stopped settles like an EIP-8037 revert, its
+    /// unspent regular gas and reservoir back to the sender.
+    ///
+    /// The write record the transaction's own frame makes was charged before execution, and the
+    /// history of it comes back here, at this one site, when the frame did not keep the record —
+    /// it failed, or it is a success that kept nothing: a creation revm refused on its sender's
+    /// nonce, a frame an inspector answered or revived — the way EIP-8037 gives back the state gas
+    /// of the account that frame would have created. The journal's ledger says whether the record
+    /// is held ([`StartSide::refund`](crate::limit::StartSide)); the refund lands in the pools the
+    /// charge came from, and a halt burns what of it the regular gas holds.
+    ///
     /// Keeps the history gas the transaction spent: what the body was charged, and what the frames
     /// charged net of what they gave back; and the history bytes it appended, which are what those
     /// charges were made for.
@@ -342,29 +351,31 @@ where
         ctx.additional_limit.on_last_frame_return(frame_result);
         // The transaction's own frame, answered without returning through `frame_return_result`.
         if ctx.additional_limit.starts_open() != 0 {
-            on_start_return(ctx, 0);
+            on_start_return(ctx, frame_result, 0);
         }
         self.op.last_frame_result(evm, frame_result, parent_gas)?;
-        // The write record the transaction's own frame makes was charged before execution; a
-        // frame that failed keeps no such write, so the charge goes back the way EIP-8037 gives
-        // back the state gas of the account that frame would have created.
         let instruction_result = frame_result.instruction_result();
         if !instruction_result.is_ok() {
+            // The lanes' site of the refund, noted for the shadow.
             let top_level = evm.ctx_ref().additional_limit.top_level_write_record_gas();
             evm.ctx_mut().additional_limit.note_top_level_refund(top_level);
-            parent_gas.refill_history(top_level);
-            if instruction_result.is_halt() {
-                parent_gas.spend_all();
-            }
-            *frame_result.gas_mut().tracker_mut() = *parent_gas;
         }
+        parent_gas.refill_history(evm.ctx_mut().additional_limit.take_top_level_refund());
+        if instruction_result.is_halt() {
+            parent_gas.spend_all();
+        }
+        *frame_result.gas_mut().tracker_mut() = *parent_gas;
         let priced = evm.ctx_ref().prices_history();
+        let (kept, log_and_code_bytes) = {
+            let ledger = evm.ctx_ref().ledger();
+            (ledger.usage(), ledger.log_and_code_bytes())
+        };
         let layer = &mut evm.ctx_mut().additional_limit;
         let history = layer
             .intrinsic_history_gas()
             .saturating_add_signed(frame_result.gas().history_gas_spent());
         layer.set_history_gas_spent(history);
-        layer.settle_history_bytes(priced);
+        layer.settle_history_bytes(priced, kept.write_records, log_and_code_bytes);
         let ctx = evm.ctx_ref();
         shadow::settlement(&ctx.additional_limit, ctx.ledger());
         Ok(())
@@ -505,14 +516,15 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     ///    frame whose actions [`keyless::run`] makes ([`keyless::ready`]);
     /// 3. system contract interception ([`MegaEvm::intercept`]), for any other frame, which answers
     ///    the frame or lets it start;
-    /// 4. the frame's lane is pushed and the writes its start makes are counted, and where the
-    ///    journal stands is marked;
-    /// 5. revm builds the frame, or answers it, and the start is held to the limits now that revm
-    ///    decided it ([`hold_answered_start`]): a frame revm built returns the stop on its first
-    ///    run when its start crossed a limit, and an answer gives way to the stop, what its start
-    ///    moved taken back to the mark, as revm takes back a frame that fails
-    ///    ([`take_back_a_stopped_answer`]). A start revm refuses on its caller's account wrote
-    ///    nothing, and counts nothing.
+    /// 4. the frame's lane is pushed and the writes its start makes are counted on it, and where
+    ///    the journal stands is marked;
+    /// 5. revm builds the frame, or answers it, inside the journal's start window, where the ledger
+    ///    counts what revm writes for the start and holds it to the limits while the frame's level
+    ///    is open: a frame revm built returns the stop on its first run when its start crossed a
+    ///    limit ([`AdditionalLimit::hold_start`](crate::AdditionalLimit)), and an answer gives way
+    ///    to the stop ([`hold_answered_start`]), what its start moved taken back to the mark, as
+    ///    revm takes back a frame that fails ([`take_back_a_stopped_answer`]). A start revm refuses
+    ///    on its caller's account wrote nothing, counts nothing, and has no verdict.
     ///
     /// A frame answered at step 2, 3 or 5 — a `keylessDeploy` call carrying value, an
     /// interceptor's answer, a precompile's, revm's for a call it did not start — is held to the
@@ -590,11 +602,12 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
                 }
                 #[cfg(debug_assertions)]
                 start.assert_transfer_log_journaled(ctx, Some(address));
-                let check = ctx.additional_limit.hold_built_start();
+                let lanes = ctx.additional_limit.hold_built_start();
+                ctx.additional_limit.hold_start(report.verdict);
                 let mark = ctx.ledger().frame_start_mark();
                 ledger_assert!(mark.is_some(), "a frame revm built has its level open");
                 ctx.additional_limit.attach_start(report, mark);
-                shadow::built_start(&ctx.additional_limit, ctx.ledger(), check, &report);
+                shadow::built_start(&ctx.additional_limit, ctx.ledger(), lanes, &report);
                 Ok(ItemOrResult::Item(self.inner.frame_stack.get()))
             }
             Err(mut result) => {
@@ -648,8 +661,9 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         })
     }
 
-    /// Pops the returning frame's lane (merged on success, discarded on failure), then returns the
-    /// result to the caller as revm does.
+    /// Pops the returning frame's start side, which settles what the frame's start leaves its
+    /// caller ([`on_start_return`]), and its lane (merged on success, discarded on failure), then
+    /// returns the result to the caller as revm does.
     ///
     /// The creation a `keylessDeploy` call started returns into the call: what the call answers is
     /// read off the creation's result before revm merges it ([`keyless::returning`]), and settled
@@ -659,8 +673,8 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         &mut self,
         result: FrameResult,
     ) -> Result<Option<FrameResult>, ContextDbError<Self::Context>> {
-        let refund = self.inner.ctx.additional_limit.on_frame_return(&result);
-        on_start_return(&mut self.inner.ctx, refund);
+        let lanes = self.inner.ctx.additional_limit.on_frame_return(&result);
+        let refund = on_start_return(&mut self.inner.ctx, &result, lanes);
         let creation = keyless::returning(&self.inner.ctx, &mut self.inner.frame_stack, &result);
         let returned = self.inner.frame_return_result(result)?;
         // The history of the records the caller paid for and the frame did not keep, given back
@@ -1249,24 +1263,43 @@ impl FrameStart {
 /// revm decided it: `answer` is revm's answer, or gas detention's to a precompile whose price
 /// crosses the compute limit, given without running it.
 ///
-/// A call revm refused to move value for — a value its caller cannot fund — moved nothing and is
-/// held to nothing: its lane goes with its failure. Any other call's start moved its value,
-/// whatever the answer made of it then, and is held to the limits, before gas detention holds the
-/// answer: a crossing is the stop, which the answer gives way to, on the gas its caller forwarded,
-/// untouched, as a frame stopped before it ran. What a successful answer's start moved is taken
-/// back with it ([`take_back_a_stopped_answer`]); a failed one's revm took back itself.
+/// The verdict is the journal's ledger's (`report`), taken while the start's level was open,
+/// before revm committed or reverted it — or, for the call gas detention answers, the hypothetical
+/// one: a crossing is the stop, which the answer gives way to, on the gas its caller forwarded,
+/// untouched, as a frame stopped before it ran, and before gas detention holds the answer. What a
+/// successful answer's start moved is taken back with it ([`take_back_a_stopped_answer`]); a
+/// failed one's revm took back itself.
 ///
-/// A creation revm answers moved nothing and kept no account. It bumped its creator's nonce
-/// unless it refused the creation on the creator's account — an endowment it cannot fund, a nonce
-/// it cannot bump — which then counts nothing ([`withdraw_refused_start`](crate::AdditionalLimit));
-/// a creation it fails after the bump, onto an occupied address, is held to nothing at its start:
-/// its failure takes the created account's record and the transfer log back, and the nonce record,
-/// which outlives it, lands on the creator, which is held to its limits with it.
+/// A call revm refused to move value for — a value its caller cannot fund — moved nothing and has
+/// no verdict. Neither has a creation revm answers, which moved nothing and kept no account:
+/// refused on its creator's account — an endowment it cannot fund, a nonce it cannot bump — it
+/// bumped nothing and counts nothing; failed after the bump, onto an occupied address, it is held
+/// to nothing at its start: its failure takes the created account's record and the transfer log
+/// back, and the nonce record, which outlives it, lands on the creator, which is held to its
+/// limits with it once the answer returns ([`AdditionalLimit::on_start_return`]).
 fn hold_answered_start<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     start: &FrameStart,
     report: &StartReport,
     answer: &mut FrameResult,
+) {
+    hold_answered_start_on_lanes(ctx, start, report, answer);
+    if let Some(stop) = report.verdict.filter(LimitCheck::exceeded_limit) {
+        let output = ctx.additional_limit.note_frame_stop(&stop);
+        stop_the_answer(answer, start, output);
+    }
+}
+
+/// What the lanes make of a start revm answered, for the shadow to hold to the ledger's verdict: a
+/// call revm refused is held to nothing, any other call to the lanes' check; a creation revm
+/// refused before it bumped its creator's nonce, read off the journal since the mark, has its
+/// count withdrawn ([`withdraw_refused_start`](crate::AdditionalLimit)), and, as the transaction's
+/// own frame answered with a success, the history of its record noted as given back.
+fn hold_answered_start_on_lanes<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    start: &FrameStart,
+    report: &StartReport,
+    answer: &FrameResult,
 ) {
     let Some(creator) = start.creator() else {
         if matches!(
@@ -1280,12 +1313,8 @@ fn hold_answered_start<DB: Database, ExtEnvs: ExternalEnvTypes>(
         if answer.instruction_result().is_ok() {
             start.assert_transfer_log_journaled(ctx, None);
         }
-        let check = ctx.additional_limit.check_start();
-        shadow::answered_start(ctx.ledger(), Some(check), report);
-        if check.exceeded_limit() {
-            let output = ctx.additional_limit.note_frame_stop(&check);
-            stop_the_answer(answer, start, output);
-        }
+        let lanes = ctx.additional_limit.check_start();
+        shadow::answered_start(ctx.ledger(), Some(lanes), report);
         return;
     };
     let bumped = ctx.journal_ref().journal()[start.mark.position.journal_i..]
@@ -1298,11 +1327,10 @@ fn hold_answered_start<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx.additional_limit.withdraw_refused_start();
     // revm answers a creation whose creator's nonce cannot be bumped with a success. The
     // transaction's own frame, refused so, makes none of the records charged before execution for
-    // it, and the history they cost comes back with the answer, as for a frame that kept nothing.
+    // it: the lanes' site of the refund, noted for the shadow.
     if start.facts.depth == 0 && answer.instruction_result().is_ok() {
         let top_level = ctx.additional_limit.top_level_write_record_gas();
         ctx.additional_limit.note_top_level_refund(top_level);
-        answer.gas_mut().refill_history(top_level);
     }
 }
 
@@ -1392,19 +1420,27 @@ fn assert_running_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
     );
 }
 
-/// Pops the side of the start of the frame returning now, once the lanes popped its lane and gave
-/// its caller back `refund` of the history it paid for the start's records, and asserts the frame's
-/// own level, and every level opened inside it, closed: the journal's nearest frame level is the
-/// caller's.
+/// Pops the side of the start of the frame `result` returns from, once revm closed the frame's
+/// level, and answers the history its caller gets back for the start's records the journal's
+/// ledger no longer holds; the caller is held to its limits with what the frame left it
+/// ([`AdditionalLimit::on_start_return`](crate::AdditionalLimit)). The transaction's own frame has
+/// no caller: its record's refund is kept for the settlement.
 ///
-/// Under the shadow, the ledger is held to the lanes: the refund by the formula, the check of the
-/// caller the frame returns into, and what the two hold the transaction to. The transaction's own
-/// frame has no caller to refund or check: its record's refund is held at the settlement.
+/// Asserts the frame's own level, and every level opened inside it, closed: the journal's nearest
+/// frame level is the caller's.
+///
+/// Under the shadow, the lanes are held to the ledger: the refund they would give (`lanes`), the
+/// stop they would leave the caller the frame returns into, and what the two hold the transaction
+/// to.
 fn on_start_return<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
-    refund: u64,
-) {
-    let Some(side) = ctx.additional_limit.pop_start() else { return };
+    result: &FrameResult,
+    lanes: u64,
+) -> u64 {
+    let ledger = ctx.inner.journaled_state.ledger();
+    let Some((side, refund)) = ctx.additional_limit.on_start_return(ledger, result) else {
+        return 0;
+    };
     let caller = ctx.additional_limit.running_start().and_then(|side| side.start());
     let expected = side
         .depth()
@@ -1418,9 +1454,10 @@ fn on_start_return<DB: Database, ExtEnvs: ExternalEnvTypes>(
     shadow::frame_return(
         &mut ctx.additional_limit,
         ctx.inner.journaled_state.ledger(),
-        refund,
+        lanes,
         &side,
     );
+    refund
 }
 
 /// Whether executing this transaction creates its caller's account: a deposit-like transaction
@@ -1515,9 +1552,7 @@ fn charge_records_made_outside_a_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
     let writes_a_record = match tx.kind() {
         TxKind::Create => true,
         TxKind::Call(to) => {
-            !tx.value().is_zero() &&
-                to != tx.caller() &&
-                !ctx.additional_limit.target_is_authority()
+            !tx.value().is_zero() && to != tx.caller() && !ctx.ledger().target_is_authority()
         }
     };
     let records = u64::from(writes_a_record);

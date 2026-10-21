@@ -119,11 +119,7 @@ fn test_a_system_call_is_held_to_no_limit() {
         let mut evm = MegaEvm::new(context(db()).with_tx_runtime_limits(limits));
         let result = Evm::transact_system_call(&mut evm, CALLER, CONTRACT, Bytes::new())
             .expect("the system call runs");
-        (
-            result,
-            evm.ctx().additional_limit().usage(),
-            evm.ctx().additional_limit().limit_exceeded().copied(),
-        )
+        (result, evm.ctx().limit_usage(), evm.ctx().additional_limit().limit_exceeded().copied())
     };
     let (free, free_usage, _) = run(EvmTxRuntimeLimits::no_limits());
     assert!(free.result.is_success(), "{:?}", free.result);

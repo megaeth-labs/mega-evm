@@ -152,7 +152,7 @@ fn test_depth_guard_answers_a_creation_and_every_call_scheme() {
         if let FrameResult::Create(outcome) = &result {
             assert_eq!(outcome.address, None, "{what}");
         }
-        assert_eq!(evm.ctx().additional_limit().usage(), LimitUsage::ZERO, "{what}: counted");
+        assert_eq!(evm.ctx().limit_usage(), LimitUsage::ZERO, "{what}: counted");
         assert!(!evm.ctx().journal_ref().state.contains_key(&CALLER), "{what}: no nonce bumped");
     }
 }

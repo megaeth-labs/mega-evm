@@ -1,10 +1,10 @@
-//! The shadow: the journal's ledger held to the lanes wherever the two must agree.
+//! The shadow: the lanes held to the journal's ledger wherever the two must agree.
 //!
-//! The lanes ([`AdditionalLimit`]) take every decision; the ledger ([`Ledger`]) counts the same
-//! writes beside them. Under the `ledger-shadow` feature the engine compares the two at the points
-//! of a transaction's life where both describe the same thing, and panics on the first mismatch.
-//! Each point is a function here, called where the point is; without the feature every one of them
-//! compiles to nothing.
+//! The ledger ([`Ledger`]) takes every decision; the lanes ([`AdditionalLimit`]) count the same
+//! writes beside it until they go. Under the `ledger-shadow` feature the engine compares the two
+//! at the points of a transaction's life where both describe the same thing, and panics on the
+//! first mismatch. Each point is a function here, called where the point is; without the feature
+//! every one of them compiles to nothing.
 //!
 //! - After a completed write is counted, a code deposit, an admitted hint and the keyless take-back
 //!   of a creator's record: the verdicts, then what the transaction keeps, the history bytes beside
@@ -116,25 +116,22 @@ pub(crate) fn completed_write(
     let _ = (lanes, ledger, lanes_verdict, ledger_verdict);
 }
 
-/// A creation's deposited code, counted on both: the lanes refused it (`refused`) or not, and the
-/// ledger reached `ledger_verdict`.
+/// A creation's deposited code, counted on both with the lanes' verdict and the ledger's.
 #[inline(always)]
 pub(crate) fn code_deposit(
     lanes: &AdditionalLimit,
     ledger: &Ledger,
-    refused: bool,
+    lanes_verdict: LimitCheck,
     ledger_verdict: LimitCheck,
 ) {
     #[cfg(feature = "ledger-shadow")]
     {
         let at = "a code deposit";
-        let lanes_verdict = refused.then(|| lanes.shadow_view().check);
-        let ledger_verdict = ledger_verdict.exceeded_limit().then_some(ledger_verdict);
-        compare::verdict(lanes_verdict, ledger_verdict, ledger, at);
+        compare::verdict(Some(lanes_verdict), Some(ledger_verdict), ledger, at);
         compare::agree(lanes, ledger, at);
     }
     #[cfg(not(feature = "ledger-shadow"))]
-    let _ = (lanes, ledger, refused, ledger_verdict);
+    let _ = (lanes, ledger, lanes_verdict, ledger_verdict);
 }
 
 /// An Oracle hint, admitted or refused by both with the lanes' verdict and the ledger's.

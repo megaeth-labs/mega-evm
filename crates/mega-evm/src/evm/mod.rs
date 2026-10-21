@@ -292,8 +292,8 @@ where
     ExtEnvs: ExternalEnvTypes,
 {
     /// Executes `tx`, through the inspector when one is enabled, and returns its outcome: the
-    /// result and state, the gas by ledger, the usage the common execution layer counted, the
-    /// limit that stopped the transaction, if any, and the reads of the Oracle's storage it made
+    /// result and state, the gas by ledger, the usage the journal's ledger counted, the limit
+    /// that stopped the transaction, if any, and the reads of the Oracle's storage it made
     /// through the oracle service. Nothing is committed.
     pub fn execute_transaction(
         &mut self,
@@ -310,7 +310,7 @@ where
         Ok(MegaTransactionOutcome {
             result_and_state,
             gas,
-            usage: layer.usage(),
+            usage: self.inner.ctx.limit_usage(),
             limit_exceeded: layer.limit_exceeded().copied(),
             oracle_reads: self.inner.ctx.oracle_reads().reads().to_vec(),
         })

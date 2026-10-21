@@ -298,7 +298,7 @@ fn test_cap_crossed_before_the_first_frame_reverts_without_running() {
     assert_eq!(result.state.get(&B).map(|b| b.info.balance).unwrap_or_default(), U256::ZERO);
 
     assert_eq!(
-        evm.ctx().additional_limit().usage(),
+        evm.ctx().limit_usage(),
         mega_evm::LimitUsage { data_size: mega_evm::TX_BODY_SIZE, write_records: 0 },
         "the body stays; the recipient record does not"
     );
@@ -400,7 +400,7 @@ fn test_the_stop_does_not_outlive_its_transaction() {
         .is_success());
     assert!(!stopped(&evm));
     assert_eq!(
-        evm.ctx().additional_limit().usage(),
+        evm.ctx().limit_usage(),
         mega_evm::LimitUsage { data_size: mega_evm::TX_BODY_SIZE, write_records: 0 },
         "an empty call keeps its body"
     );

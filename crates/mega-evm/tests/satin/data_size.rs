@@ -119,11 +119,7 @@ fn test_depth_3_frame_budget_reverts_the_child_and_the_parents_resume() {
         let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits));
         let gas_limit = gas_for_history(budget);
         let result = evm.transact_raw(call(CALLER, A, U256::ZERO, gas_limit)).unwrap();
-        (
-            result,
-            evm.ctx().additional_limit().limit_exceeded().copied(),
-            evm.ctx().additional_limit().usage(),
-        )
+        (result, evm.ctx().additional_limit().limit_exceeded().copied(), evm.ctx().limit_usage())
     };
 
     // 32 bytes for the log's address, and the data. Exactly the budget.
@@ -357,7 +353,7 @@ fn test_deployed_code_over_the_frame_budget_reverts_the_creation_alone() {
         let result = evm.transact_raw(call(CALLER, A, U256::ZERO, GAS_LIMIT)).unwrap();
         (
             result,
-            evm.ctx().additional_limit().usage(),
+            evm.ctx().limit_usage(),
             evm.ctx().additional_limit().limit_exceeded().copied(),
             evm.inspector().clone(),
         )
