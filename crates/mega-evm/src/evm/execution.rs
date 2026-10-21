@@ -76,7 +76,10 @@ pub struct MegaHandler<EVM, ERROR, FRAME> {
     deposit_creates_caller: Cell<bool>,
     /// The reservoir the transaction's result settled with, read by
     /// [`post_execution`](Handler::post_execution) where revm builds the result's gas, and
-    /// reported once the result is built ([`execution_result`](Handler::execution_result)).
+    /// consumed by the report once the result is built
+    /// ([`execution_result`](Handler::execution_result)) or by the error path
+    /// ([`catch_error`](Handler::catch_error)), so a handler reused for a system call, whose path
+    /// makes no capture, reports the system call's own reservoir.
     settled_reservoir: Cell<Option<u64>>,
 }
 
@@ -425,7 +428,8 @@ where
     /// ([`AdditionalLimit::reservoir_remaining`](crate::AdditionalLimit::reservoir_remaining)).
     ///
     /// revm's system-call path settles without [`post_execution`](Handler::post_execution): the
-    /// result it hands over here is the settled one. A deposit that halts is not a result: op-revm
+    /// result it hands over here is the settled one, and the capture it finds is none, since the
+    /// report of the execution before consumed it. A deposit that halts is not a result: op-revm
     /// turns it into a failed deposit, which leaves no reservoir.
     fn execution_result(
         &mut self,
@@ -433,7 +437,7 @@ where
         result: FrameResult,
         result_gas: revm::context::result::ResultGas,
     ) -> Result<revm::context::result::ExecutionResult<Self::HaltReason>, Self::Error> {
-        let reservoir = self.settled_reservoir.get().unwrap_or_else(|| result.gas().reservoir());
+        let reservoir = self.settled_reservoir.take().unwrap_or_else(|| result.gas().reservoir());
         let result = self.op.execution_result(evm, result, result_gas)?;
         evm.ctx_mut().additional_limit.set_reservoir_remaining(reservoir);
         Ok(result)
@@ -443,12 +447,14 @@ where
     /// halt and discards everything the deposit did. The halt is what the transaction reports;
     /// what the deposit counted stands, the body and the Oracle hints it forwarded before it
     /// halted, as for any transaction that halts. Any other error refuses the transaction, and the
-    /// layer's state is reset by the next one.
+    /// layer's state is reset by the next one. A reservoir captured for a result that is not
+    /// reported is dropped here, so the next execution on this handler does not report it.
     fn catch_error(
         &self,
         evm: &mut Self::Evm,
         error: Self::Error,
     ) -> Result<revm::context::result::ExecutionResult<Self::HaltReason>, Self::Error> {
+        self.settled_reservoir.take();
         self.op.catch_error(evm, error)
     }
 }
@@ -1728,6 +1734,80 @@ mod tests {
             take_back_a_stopped_answer(&mut ctx, &start, succeeded, &answer);
             let nonce = ctx.journal_ref().state.get(&TARGET).map_or(0, |a| a.info.nonce);
             assert_eq!(nonce, u64::from(!taken_back), "{case}");
+        }
+    }
+
+    /// One handler runs one transaction, and what a phase learns about it is kept on the handler:
+    /// the reservoir the transaction settled with is read where revm builds its result's gas and
+    /// reported once the result is built. A handler reused for a system call, whose path builds
+    /// no result gas and skips that read, reports the system call's own reservoir: the capture is
+    /// consumed by the report, and by the error path, which gives no report. A transaction below
+    /// the execution cap leaves a capture of nothing, one above it a capture of its own margin, and
+    /// a deposit that halts a capture its failed-deposit result never reports; after each, a
+    /// system call on revm's default gas limit reports the margin above the system-call budget.
+    #[test]
+    fn test_a_reused_handler_reports_each_executions_own_reservoir() {
+        use crate::{
+            constants::TX_GAS_LIMIT_CAP,
+            test_utils::{op_transaction, zero_fee_l1_block_info},
+            MegaTransaction, SYSTEM_CALL_REGULAR_GAS_LIMIT,
+        };
+        use alloy_op_evm::OpTx;
+        use revm::{
+            context::{ContextSetters, TxEnv},
+            handler::{system_call::SYSTEM_CALL_GAS_LIMIT, SystemCallTx},
+            inspector::NoOpInspector,
+        };
+        const HALTS: Address = address!("00000000000000000000000000000000000e0003");
+        const DEFAULT_RESERVOIR: u64 = SYSTEM_CALL_GAS_LIMIT - SYSTEM_CALL_REGULAR_GAS_LIMIT;
+
+        let db = MemoryDatabase::default()
+            .account_balance(CALLER, U256::from(10u64.pow(18)))
+            .account_code(TARGET, Bytes::new())
+            .account_code(HALTS, Bytes::from_static(&[revm::bytecode::opcode::INVALID]));
+        let mut evm = MegaEvm::new(
+            MegaContext::new(db, MegaSpecId::SATIN).with_chain(zero_fee_l1_block_info()),
+        );
+        let mut handler = MegaHandler::<
+            MegaEvm<MemoryDatabase, NoOpInspector>,
+            crate::MegaEvmError<core::convert::Infallible>,
+            EthFrame<EthInterpreter>,
+        >::new();
+        let room = 100_000 + history_gas(crate::TX_BODY_SIZE).unwrap();
+        let tx = |to: Address, gas_limit: u64, nonce: u64| {
+            OpTx(op_transaction(TxEnv {
+                caller: CALLER,
+                nonce,
+                gas_limit,
+                kind: TxKind::Call(to),
+                ..Default::default()
+            }))
+        };
+        let mut deposit = tx(HALTS, room, 0);
+        deposit.0.deposit.source_hash = alloy_primitives::B256::repeat_byte(0x11);
+        deposit.0.base.gas_price = 0;
+
+        for (case, tx, succeeds) in [
+            ("below the cap", tx(TARGET, room, 0), true),
+            ("above the cap", tx(TARGET, TX_GAS_LIMIT_CAP + 10_000_000, 1), true),
+            ("a halting deposit", deposit, false),
+        ] {
+            evm.inner.ctx.set_tx(tx);
+            let result = handler.run(&mut evm).expect(case);
+            assert_eq!(result.is_success(), succeeds, "{case}: {result:?}");
+            let settled = evm.ctx().additional_limit().reservoir_remaining();
+            assert_ne!(settled, DEFAULT_RESERVOIR, "{case}: the capture would show");
+
+            let call = MegaTransaction::new_system_tx_with_caller(CALLER, TARGET, Bytes::new());
+            evm.inner.ctx.set_tx(call);
+            evm.inner.ctx.on_new_system_call();
+            let result = handler.run_system_call(&mut evm).expect("the system call runs");
+            assert!(result.is_success(), "{case}: {result:?}");
+            assert_eq!(
+                evm.ctx().additional_limit().reservoir_remaining(),
+                DEFAULT_RESERVOIR,
+                "{case}: the system call's own reservoir, not the capture"
+            );
         }
     }
 }
