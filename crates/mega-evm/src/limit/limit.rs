@@ -176,8 +176,8 @@ impl AdditionalLimit {
     ///
     /// Unlike [`Self::reset`], which prepares the next transaction and lets the pre-REX1
     /// detained compute gas limit persist across transactions, this restores the detained limit
-    /// the discarded transaction inherited, as recorded by [`Self::after_tx_end`] when the
-    /// previous transaction ended, so nothing the transaction did survives it.
+    /// the discarded transaction inherited, as recorded by `after_tx_end` when the previous
+    /// transaction ended, so nothing the transaction did survives it.
     pub fn discard(&mut self) {
         self.reset_verdict_and_trackers();
         self.compute_gas.discard();

@@ -6,8 +6,9 @@
 //! state are still in the EVM when the next transaction starts. These tests drive that path with
 //! a database that panics on one account read, and check that after `discard_transaction` the
 //! next transaction executes exactly as it does on a fresh executor. They also pin the other half
-//! of the contract: a transaction that returns an error leaves nothing behind on its own, on the
-//! plain and on the inspected execution path alike.
+//! of the contract: a call that returns an error leaves none of its writes behind, through every
+//! public entry point, and the entry points that finalize the journal on success also finalize it
+//! on an error.
 //!
 //! The tests live in a module of their own because the panic seam (a database that panics) and
 //! the `catch_unwind` harness have no place in the other executor tests.
@@ -19,25 +20,27 @@ use std::{
 };
 
 use alloy_consensus::{transaction::Recovered, Sealed, Signed, TxLegacy};
-use alloy_evm::{EvmEnv, EvmFactory};
+use alloy_evm::{EvmEnv, EvmFactory, IntoTxEnv};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, ErrorInjectingDatabase, InjectedDbError, MemoryDatabase},
     BlockLimits, LimitUsage, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvm, MegaEvmFactory,
-    MegaHardforkConfig, MegaSpecId, MegaTransactionOutcome, MegaTxEnvelope, TestExternalEnvs,
-    MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
+    MegaHardforkConfig, MegaSpecId, MegaTransaction, MegaTransactionOutcome, MegaTxEnvelope,
+    TestExternalEnvs, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
 };
 use op_alloy_consensus::TxDeposit;
 use op_revm::constants::BASE_FEE_RECIPIENT;
 use revm::{
     bytecode::opcode::{BALANCE, CALL, GAS, MSIZE, MSTORE, POP, RETURN, TIMESTAMP},
-    context::{result::ExecutionResult, BlockEnv, ContextError, ContextTr},
+    context::{result::ExecutionResult, BlockEnv, ContextError, ContextSetters, ContextTr},
     database::State,
+    handler::SYSTEM_ADDRESS,
     inspector::NoOpInspector,
     primitives::{StorageKey, StorageValue},
     state::{AccountInfo, Bytecode, EvmState},
-    Database, DatabaseCommit,
+    Database, DatabaseCommit, ExecuteCommitEvm, ExecuteEvm, InspectCommitEvm, InspectEvm,
+    SystemCallEvm,
 };
 
 const CHAIN_ID: u64 = 8453;
@@ -54,6 +57,8 @@ const ORACLE_CAP: u64 = 1_000_000;
 
 /// Sender of the transaction that panics.
 const PANICKING_SENDER: Address = address!("2000000000000000000000000000000000000001");
+/// The balance every funded sender starts with.
+const SENDER_BALANCE: u64 = 1_000_000_000_000_000;
 /// Sender of the transaction executed after the panic.
 const NEXT_SENDER: Address = address!("2000000000000000000000000000000000000002");
 /// The sender of the probe transaction of the panic-site sweep; nothing else uses its nonce.
@@ -82,6 +87,12 @@ const CALL_ORACLE_THEN_PANIC: Address = address!("100000000000000000000000000000
 const WRITE_SLOT: Address = address!("1000000000000000000000000000000000000007");
 /// `TIMESTAMP; POP; BALANCE(FAILING_ACCOUNT)`: detains compute gas, then fails with an error.
 const READ_TIMESTAMP_THEN_FAIL: Address = address!("1000000000000000000000000000000000000009");
+/// Contract that calls the oracle, lowering the inherited cap before REX3, then returns a DB error.
+const CALL_ORACLE_THEN_FAIL: Address = address!("100000000000000000000000000000000000000a");
+/// `SSTORE(0, 1); BALANCE(FAILING_ACCOUNT)`: writes, then fails with an error.
+const WRITE_THEN_FAIL: Address = address!("100000000000000000000000000000000000000b");
+/// `SSTORE(0, 1)`, for the call a `_one` entry point's journal holds before the failing one.
+const WRITE_KEPT_SLOT: Address = address!("100000000000000000000000000000000000000c");
 /// An account whose read fails with an error once the test arms it, for a transaction that
 /// must fail without panicking.
 const FAILING_ACCOUNT: Address = address!("cccccccccccccccccccccccccccccccccccccccc");
@@ -137,11 +148,10 @@ impl DatabaseCommit for PanickingDatabase {
     }
 }
 
-type Executor<'a> = MegaBlockExecutor<
-    MegaHardforkConfig,
-    MegaEvm<&'a mut State<PanickingDatabase>, NoOpInspector, TestExternalEnvs<Infallible>>,
-    OpAlloyReceiptBuilder,
->;
+type Evm<'a> =
+    MegaEvm<&'a mut State<PanickingDatabase>, NoOpInspector, TestExternalEnvs<Infallible>>;
+
+type Executor<'a> = MegaBlockExecutor<MegaHardforkConfig, Evm<'a>, OpAlloyReceiptBuilder>;
 
 /// `CALL(GAS, target, 0, 0, 0, 0, 0); POP`.
 fn call(builder: BytecodeBuilder, target: Address) -> BytecodeBuilder {
@@ -169,9 +179,9 @@ fn read_balance(builder: BytecodeBuilder, address: Address) -> BytecodeBuilder {
 
 fn database() -> PanickingDatabase {
     let mut db = MemoryDatabase::default();
-    db.set_account_balance(PANICKING_SENDER, U256::from(1_000_000_000_000_000u64));
-    db.set_account_balance(NEXT_SENDER, U256::from(1_000_000_000_000_000u64));
-    db.set_account_balance(PROBE_SENDER, U256::from(1_000_000_000_000_000u64));
+    db.set_account_balance(PANICKING_SENDER, U256::from(SENDER_BALANCE));
+    db.set_account_balance(NEXT_SENDER, U256::from(SENDER_BALANCE));
+    db.set_account_balance(PROBE_SENDER, U256::from(SENDER_BALANCE));
     let residue_then_panic =
         BytecodeBuilder::default().mstore(0, [0xff; 32]).sstore(U256::ZERO, U256::from(1));
     let residue_then_panic = read_balance(residue_then_panic, BENEFICIARY);
@@ -216,6 +226,12 @@ fn database() -> PanickingDatabase {
             .stop()
             .build(),
     );
+    db.set_account_code(
+        CALL_ORACLE_THEN_FAIL,
+        read_balance(call(BytecodeBuilder::default(), ORACLE_CONTRACT_ADDRESS), FAILING_ACCOUNT)
+            .stop()
+            .build(),
+    );
     let call_oracle = call(BytecodeBuilder::default(), ORACLE_CONTRACT_ADDRESS);
     db.set_account_code(
         CALL_ORACLE_THEN_PANIC,
@@ -224,6 +240,16 @@ fn database() -> PanickingDatabase {
     db.set_account_code(
         WRITE_SLOT,
         BytecodeBuilder::default().sstore(U256::ZERO, U256::from(1)).stop().build(),
+    );
+    db.set_account_code(
+        WRITE_KEPT_SLOT,
+        BytecodeBuilder::default().sstore(U256::ZERO, U256::from(1)).stop().build(),
+    );
+    db.set_account_code(
+        WRITE_THEN_FAIL,
+        read_balance(BytecodeBuilder::default().sstore(U256::ZERO, U256::from(1)), FAILING_ACCOUNT)
+            .stop()
+            .build(),
     );
     PanickingDatabase {
         inner: ErrorInjectingDatabase::new(db),
@@ -907,4 +933,359 @@ fn test_error_path_leaves_nothing_behind_without_inspector() {
 #[test]
 fn test_error_path_leaves_nothing_behind_with_inspector() {
     assert_error_path_leaves_nothing_behind(true);
+}
+
+/// Panic recovery clears the whole journal, including successful transactions accumulated with
+/// `transact_one`. Only state already committed to the database survives.
+#[test]
+fn test_discard_transaction_drops_unfinalized_history_and_preserves_committed_state() {
+    let mut state = State::builder().with_database(database()).build();
+    let mut executor = new_executor(&mut state, MegaSpecId::REX6);
+    let committed = legacy_tx(NEXT_SENDER, 0, WRITE_SLOT, Bytes::new());
+    let outcome = executor.execute_mega_transaction(&committed).expect("first tx executes");
+    executor.commit_execution_outcome(outcome).expect("first tx commits");
+
+    let unfinalized = legacy_tx(PROBE_SENDER, 0, RETURN_MSIZE, Bytes::new());
+    let result = executor.evm.transact_one((&unfinalized).into_tx_env()).expect("tx executes");
+    assert!(result.is_success());
+    execute_panicking(&mut executor, &panicking_tx(RESIDUE_THEN_PANIC));
+
+    executor.discard_transaction();
+    executor.discard_transaction();
+    assert!(executor.evm.finalize().is_empty(), "the whole journal was discarded");
+    let outcome = executor.execute_mega_transaction(&unfinalized).expect("nonce remains free");
+    assert!(outcome.result_and_state.result.is_success());
+    let touched = &outcome.result_and_state.state;
+    assert!(!touched.contains_key(&PANICKING_SENDER));
+    assert!(!touched.contains_key(&RESIDUE_THEN_PANIC));
+    drop(executor);
+
+    assert_eq!(state.basic(NEXT_SENDER).unwrap().unwrap().nonce, 1);
+    assert_eq!(state.storage(WRITE_SLOT, U256::ZERO).unwrap(), U256::from(1));
+    assert_eq!(state.basic(PROBE_SENDER).unwrap().unwrap().nonce, 0);
+    assert_eq!(state.basic(PANICKING_SENDER).unwrap().unwrap().nonce, 0);
+    assert_eq!(state.storage(RESIDUE_THEN_PANIC, U256::ZERO).unwrap(), U256::ZERO);
+}
+
+/// Discard after an ordinary error preserves the compute cap that completed runs leave behind,
+/// even when the error precedes `on_new_tx`. It also leaves the next transaction's outcome equal
+/// to an executor with the same history that did not call discard.
+#[test]
+fn test_discard_after_error_preserves_inherited_cap_and_next_outcome() {
+    for spec in [MegaSpecId::REX, MegaSpecId::REX5, MegaSpecId::REX6] {
+        for inspect in [false, true] {
+            for before_run in [false, true] {
+                let row = format!("{spec:?} / inspect={inspect} / before_run={before_run}");
+                let mut reference_state = State::builder().with_database(database()).build();
+                let mut reference = new_executor_with(&mut reference_state, spec, inspect);
+                let mut state = State::builder().with_database(database()).build();
+                let mut executor = new_executor_with(&mut state, spec, inspect);
+                let failing = if before_run {
+                    legacy_tx(MEGA_SYSTEM_ADDRESS, 0, RETURN_MSIZE, Bytes::new())
+                } else {
+                    legacy_tx(PROBE_SENDER, 0, CALL_ORACLE_THEN_FAIL, Bytes::new())
+                };
+                for target in [&mut reference, &mut executor] {
+                    Preceding::CommittedDetaining.apply(target);
+                    if !spec.is_enabled(MegaSpecId::REX1) {
+                        assert_eq!(detained_cap(target), DETENTION_CAP, "{row}: prior detention");
+                    }
+                    target.evm.db_mut().database.inner.fail_on_account = Some(FAILING_ACCOUNT);
+                    let error = target.execute_mega_transaction(&failing).expect_err("tx errors");
+                    assert_eq!(
+                        error.to_string().contains("callee is not in the whitelist"),
+                        before_run,
+                        "{row}: error must originate at the intended stage"
+                    );
+                    target.evm.db_mut().database.inner.fail_on_account = None;
+                }
+                let cap = detained_cap(&reference);
+                if !spec.is_enabled(MegaSpecId::REX1) {
+                    let expected_cap = if before_run { DETENTION_CAP } else { ORACLE_CAP };
+                    assert_eq!(cap, expected_cap, "{row}: error leaves the expected cap");
+                }
+                executor.discard_transaction();
+                executor.discard_transaction();
+                assert_eq!(detained_cap(&executor), cap, "{row}: discard preserves the cap");
+                let probe = legacy_tx(PROBE_SENDER, 0, RETURN_MSIZE, Bytes::new());
+                let expected = reference.execute_mega_transaction(&probe).expect("reference runs");
+                let actual = executor.execute_mega_transaction(&probe).expect("probe runs");
+                assert_same_outcome_in(&actual, &expected, &row);
+                assert_eq!(detained_cap(&executor), detained_cap(&reference), "{row}: next cap");
+                assert_eq!(executor.receipts.len(), 1, "{row}: only the prior tx committed");
+            }
+        }
+    }
+}
+
+/// Every public way to run a transaction or a system call on `MegaEvm`: inherent methods, and the
+/// required and provided methods of every execution trait it implements. Deprecated aliases are
+/// included because they are still callable and route through the provided methods.
+#[derive(Clone, Copy, Debug)]
+enum EntryPoint {
+    ExecuteTransaction,
+    DeprecatedInspectTransaction,
+    Transact,
+    TransactMany,
+    TransactManyFinalize,
+    Replay,
+    TransactCommit,
+    TransactManyCommit,
+    ReplayCommit,
+    InspectTx,
+    Inspect,
+    InspectTxCommit,
+    InspectCommit,
+    SystemCall,
+    SystemCallWithCaller,
+    DeprecatedTransactSystemCallFinalize,
+    DeprecatedTransactSystemCallWithCallerFinalize,
+    TransactSystemCallWithGasLimit,
+    AlloyTransact,
+    AlloyTransactRaw,
+    AlloyTransactCommit,
+    AlloyTransactSystemCall,
+    TransactOne,
+    InspectOneTx,
+    InspectOne,
+    SystemCallOne,
+    SystemCallOneWithCaller,
+    DeprecatedTransactSystemCall,
+    DeprecatedTransactSystemCallWithCaller,
+}
+
+impl EntryPoint {
+    const ALL: [Self; 29] = [
+        Self::ExecuteTransaction,
+        Self::DeprecatedInspectTransaction,
+        Self::Transact,
+        Self::TransactMany,
+        Self::TransactManyFinalize,
+        Self::Replay,
+        Self::TransactCommit,
+        Self::TransactManyCommit,
+        Self::ReplayCommit,
+        Self::InspectTx,
+        Self::Inspect,
+        Self::InspectTxCommit,
+        Self::InspectCommit,
+        Self::SystemCall,
+        Self::SystemCallWithCaller,
+        Self::DeprecatedTransactSystemCallFinalize,
+        Self::DeprecatedTransactSystemCallWithCallerFinalize,
+        Self::TransactSystemCallWithGasLimit,
+        Self::AlloyTransact,
+        Self::AlloyTransactRaw,
+        Self::AlloyTransactCommit,
+        Self::AlloyTransactSystemCall,
+        Self::TransactOne,
+        Self::InspectOneTx,
+        Self::InspectOne,
+        Self::SystemCallOne,
+        Self::SystemCallOneWithCaller,
+        Self::DeprecatedTransactSystemCall,
+        Self::DeprecatedTransactSystemCallWithCaller,
+    ];
+
+    /// Whether the entry point finalizes the journal itself. The `_one` ones leave it to the
+    /// caller by design, so that several calls can share one journal.
+    fn finalizes(self) -> bool {
+        !matches!(
+            self,
+            Self::TransactOne |
+                Self::InspectOneTx |
+                Self::InspectOne |
+                Self::SystemCallOne |
+                Self::SystemCallOneWithCaller |
+                Self::DeprecatedTransactSystemCall |
+                Self::DeprecatedTransactSystemCallWithCaller
+        )
+    }
+
+    /// Whether the entry point runs a system call rather than a transaction.
+    fn is_system_call(self) -> bool {
+        matches!(
+            self,
+            Self::SystemCall |
+                Self::SystemCallWithCaller |
+                Self::DeprecatedTransactSystemCallFinalize |
+                Self::DeprecatedTransactSystemCallWithCallerFinalize |
+                Self::TransactSystemCallWithGasLimit |
+                Self::AlloyTransactSystemCall |
+                Self::SystemCallOne |
+                Self::SystemCallOneWithCaller |
+                Self::DeprecatedTransactSystemCall |
+                Self::DeprecatedTransactSystemCallWithCaller
+        )
+    }
+
+    /// Runs `tx`, or for a system-call entry point a system call from the system address to the
+    /// same contract, and returns whether it failed with an error.
+    #[allow(deprecated)]
+    fn run_fails(self, evm: &mut Evm<'_>, tx: MegaTransaction) -> bool {
+        let to = tx.base.kind.to().copied().expect("a call");
+        let data = Bytes::new();
+        match self {
+            Self::ExecuteTransaction => evm.execute_transaction(tx).is_err(),
+            Self::DeprecatedInspectTransaction => evm.inspect_transaction(tx).is_err(),
+            Self::Transact => ExecuteEvm::transact(evm, tx).is_err(),
+            Self::TransactMany => evm.transact_many(std::iter::once(tx)).is_err(),
+            Self::TransactManyFinalize => evm.transact_many_finalize(std::iter::once(tx)).is_err(),
+            Self::Replay => {
+                evm.ctx.set_tx(tx);
+                evm.replay().is_err()
+            }
+            Self::TransactCommit => ExecuteCommitEvm::transact_commit(evm, tx).is_err(),
+            Self::TransactManyCommit => evm.transact_many_commit(std::iter::once(tx)).is_err(),
+            Self::ReplayCommit => {
+                evm.ctx.set_tx(tx);
+                evm.replay_commit().is_err()
+            }
+            Self::InspectTx => evm.inspect_tx(tx).is_err(),
+            Self::Inspect => InspectEvm::inspect(evm, tx, NoOpInspector).is_err(),
+            Self::InspectTxCommit => evm.inspect_tx_commit(tx).is_err(),
+            Self::InspectCommit => evm.inspect_commit(tx, NoOpInspector).is_err(),
+            Self::SystemCall => evm.system_call(to, data).is_err(),
+            Self::SystemCallWithCaller => {
+                evm.system_call_with_caller(SYSTEM_ADDRESS, to, data).is_err()
+            }
+            Self::DeprecatedTransactSystemCallFinalize => {
+                evm.transact_system_call_finalize(to, data).is_err()
+            }
+            Self::DeprecatedTransactSystemCallWithCallerFinalize => {
+                evm.transact_system_call_with_caller_finalize(SYSTEM_ADDRESS, to, data).is_err()
+            }
+            Self::TransactSystemCallWithGasLimit => evm
+                .transact_system_call_with_gas_limit(SYSTEM_ADDRESS, to, data, TX_GAS_LIMIT)
+                .is_err(),
+            Self::AlloyTransact => alloy_evm::Evm::transact(evm, tx).is_err(),
+            Self::AlloyTransactRaw => alloy_evm::Evm::transact_raw(evm, tx).is_err(),
+            Self::AlloyTransactCommit => alloy_evm::Evm::transact_commit(evm, tx).is_err(),
+            Self::AlloyTransactSystemCall => {
+                alloy_evm::Evm::transact_system_call(evm, SYSTEM_ADDRESS, to, data).is_err()
+            }
+            Self::TransactOne => evm.transact_one(tx).is_err(),
+            Self::InspectOneTx => evm.inspect_one_tx(tx).is_err(),
+            Self::InspectOne => evm.inspect_one(tx, NoOpInspector).is_err(),
+            Self::SystemCallOne => evm.system_call_one(to, data).is_err(),
+            Self::SystemCallOneWithCaller => {
+                evm.system_call_one_with_caller(SYSTEM_ADDRESS, to, data).is_err()
+            }
+            Self::DeprecatedTransactSystemCall => {
+                SystemCallEvm::transact_system_call(evm, to, data).is_err()
+            }
+            Self::DeprecatedTransactSystemCallWithCaller => {
+                evm.transact_system_call_with_caller(SYSTEM_ADDRESS, to, data).is_err()
+            }
+        }
+    }
+}
+
+/// Where a failing call's error comes from.
+#[derive(Clone, Copy, Debug)]
+enum FailureSite {
+    /// A database read inside the frame (`WRITE_THEN_FAIL`): the frame halts and reverts its own
+    /// writes, so what is left are the writes made outside it, a transaction's nonce bump and fee.
+    InFrame,
+    /// The fee recipient's read in post-execution (`WRITE_SLOT`), after the frame has committed
+    /// its storage write. System calls have no post-execution, so this site is transaction-only.
+    AfterFrame,
+}
+
+impl FailureSite {
+    /// The contract the failing call runs and the account whose read fails.
+    fn arm(self) -> (Address, Address) {
+        match self {
+            Self::InFrame => (WRITE_THEN_FAIL, FAILING_ACCOUNT),
+            Self::AfterFrame => (WRITE_SLOT, BASE_FEE_RECIPIENT),
+        }
+    }
+}
+
+/// A call that writes and then fails with an error leaves none of its writes behind, whichever
+/// public entry point ran it and wherever the error arose. An entry point that finalizes the
+/// journal on success hands it back empty on an error too, so the next transaction runs as on a
+/// fresh EVM. A `_one` entry point leaves the journal to the caller: the earlier call it holds
+/// survives the failed one, and the failed one's writes do not. `MINI_REX` is left out because
+/// its 2M storage gas for the `SSTORE` exceeds the transaction's gas limit, so the call halts
+/// instead of failing; the entry points and the error path do not depend on the spec.
+#[test]
+fn test_every_entry_point_leaves_no_writes_of_a_failed_call() {
+    let (mut rows, mut skipped) = (0, 0);
+    for spec in [MegaSpecId::EQUIVALENCE, MegaSpecId::REX, MegaSpecId::REX5, MegaSpecId::REX6] {
+        for inspect in [false, true] {
+            for site in [FailureSite::InFrame, FailureSite::AfterFrame] {
+                for entry in EntryPoint::ALL {
+                    if matches!(site, FailureSite::AfterFrame) && entry.is_system_call() {
+                        skipped += 1;
+                        continue;
+                    }
+                    rows += 1;
+                    assert_failed_call_leaves_no_writes(spec, inspect, site, entry);
+                }
+            }
+        }
+    }
+    let system_calls = EntryPoint::ALL.iter().filter(|entry| entry.is_system_call()).count();
+    assert_eq!(skipped, 4 * 2 * system_calls);
+    assert_eq!(rows + skipped, 4 * 2 * 2 * EntryPoint::ALL.len());
+}
+
+fn assert_failed_call_leaves_no_writes(
+    spec: MegaSpecId,
+    inspect: bool,
+    site: FailureSite,
+    entry: EntryPoint,
+) {
+    let row = format!("{spec:?} / inspect={inspect} / {site:?} / {entry:?}");
+    let mut state = State::builder().with_database(database()).build();
+    let mut executor = new_executor_with(&mut state, spec, inspect);
+
+    let evm = &mut executor.evm;
+    if !entry.finalizes() {
+        // A system call, which has no post-execution, so the fee recipient is not cached yet when
+        // the failing call reads it.
+        let result = evm
+            .system_call_one_with_caller(SYSTEM_ADDRESS, WRITE_KEPT_SLOT, Bytes::new())
+            .expect("the earlier call executes");
+        assert!(result.is_success(), "{row}: {result:?}");
+    }
+    let (to, failing_account) = site.arm();
+    evm.db_mut().database.inner.fail_on_account = Some(failing_account);
+    let failing = legacy_tx(PANICKING_SENDER, 0, to, Bytes::new());
+    assert!(entry.run_fails(evm, (&failing).into_tx_env()), "{row}: the call must fail");
+    evm.db_mut().database.inner.fail_on_account = None;
+
+    if entry.finalizes() {
+        assert!(
+            ExecuteEvm::finalize(evm).is_empty(),
+            "{row}: the journal must be handed back empty"
+        );
+        let probe = legacy_tx(PROBE_SENDER, 0, RETURN_MSIZE, Bytes::new());
+        let actual = executor.execute_mega_transaction(&probe).expect("the probe executes");
+        assert_same_outcome_in(&actual, &reference_outcome(spec, &probe), &row);
+    } else {
+        let journal = ExecuteEvm::finalize(evm);
+        ExecuteCommitEvm::commit(evm, journal);
+    }
+    drop(executor);
+
+    for contract in [WRITE_THEN_FAIL, WRITE_SLOT] {
+        assert_eq!(
+            state.storage(contract, U256::ZERO).unwrap(),
+            U256::ZERO,
+            "{row}: the failed call's storage write to {contract}"
+        );
+    }
+    let sender = state.basic(PANICKING_SENDER).unwrap().unwrap();
+    assert_eq!(
+        (sender.nonce, sender.balance),
+        (0, U256::from(SENDER_BALANCE)),
+        "{row}: the failed call's nonce bump and fee"
+    );
+    assert_eq!(
+        state.storage(WRITE_KEPT_SLOT, U256::ZERO).unwrap(),
+        U256::from(!entry.finalizes()),
+        "{row}: the earlier call's storage write"
+    );
 }
