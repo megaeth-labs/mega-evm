@@ -16,13 +16,15 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{
-        CALL, CREATE, DELEGATECALL, GAS, INVALID, LOG0, LOG1, POP, PUSH0, RETURN, SELFDESTRUCT,
-        SLOAD, SSTORE, STATICCALL, STOP,
+        CALL, CREATE, DELEGATECALL, GAS, INVALID, LOG0, LOG1, POP, PUSH0, SELFDESTRUCT, SLOAD,
+        SSTORE, STATICCALL, STOP,
     },
     context::result::ExecutionResult,
 };
 
-use crate::common::{call, call_with_data, context, create, execute};
+use crate::common::{
+    call, call_with_data, constructor_returning, context, create, execute, execute_under,
+};
 
 const CALLER: Address = address!("0000000000000000000000000000000000400000");
 const CALLEE: Address = address!("0000000000000000000000000000000000400001");
@@ -49,11 +51,6 @@ const fn records(records: u64) -> LimitUsage {
 /// `records` write records and the transfer logs of `moves` value movements.
 const fn records_and_moves(records: u64, moves: u64) -> LimitUsage {
     kept(0, records * WRITE_RECORD_SIZE + moves * TRANSFER_LOG_SIZE, records)
-}
-
-/// Init code that returns `size` zero bytes as the deployed contract.
-fn constructor_returning(size: u64) -> Bytes {
-    BytecodeBuilder::default().push_number(size).push_number(0_u8).append(RETURN).build()
 }
 
 /// A contract that `CREATE`s `init` and stops.
@@ -380,16 +377,11 @@ fn test_a_limit_equal_to_what_is_kept_does_not_stop() {
     let db = || funded().account_code(CALLEE, BytecodeBuilder::default().stop().build());
     for calldata in [0_usize, 500] {
         let limit = TX_BODY_SIZE + calldata as u64;
-        let outcome = MegaEvm::new(context(db()).with_tx_runtime_limits(
+        let outcome = execute_under(
+            db(),
+            call_with_data(CALLER, CALLEE, Bytes::from(vec![0xab; calldata]), GAS_LIMIT),
             EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit),
-        ))
-        .execute_transaction(call_with_data(
-            CALLER,
-            CALLEE,
-            Bytes::from(vec![0xab; calldata]),
-            GAS_LIMIT,
-        ))
-        .unwrap();
+        );
         assert!(outcome.result.is_success(), "{calldata} bytes: {:?}", outcome.result);
         assert_eq!(outcome.usage.data_size, limit);
         assert_eq!(outcome.limit_exceeded, None);

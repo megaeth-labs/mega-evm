@@ -2,27 +2,20 @@
 //!
 //! This is the single place that records when each [`MegaHardfork`] activates on the known
 //! `MegaETH` chains. The node chainspecs decide the schedule; this table mirrors it for tools
-//! that replay a real chain, and [`hardfork_schedule`] turns a chain ID into the schedule block
-//! execution reads.
+//! that replay a real chain, and [`hardfork_schedule`] turns a known chain's ID into the schedule
+//! block execution reads. A chain this table does not know has no schedule here: Satin runs on a
+//! chain that ran the legacy forks, and whoever runs another names its schedule.
 
 use alloy_hardforks::ForkCondition;
 use alloy_primitives::BlockTimestamp;
 
-use crate::{system::SequencerRegistryConfig, MegaHardfork, MegaHardforkConfig, MegaSpecId};
+use crate::{MegaHardfork, MegaHardforkConfig};
 
 /// `MegaETH` mainnet chain ID.
 pub const MAINNET_CHAIN_ID: u64 = 4326;
 
 /// `MegaETH` testnet v2 chain ID.
 pub const TESTNET_CHAIN_ID: u64 = 6343;
-
-/// The rung an unknown chain runs, from genesis.
-///
-/// Pinned, not taken from [`MegaSpecId::default`]: an unknown chain runs this spec from block
-/// zero with no fork boundary, so introducing a spec must leave it alone — registering a fork
-/// above the pin would rewrite what history such a chain has already produced means. Raising the
-/// pin is a decision of its own, made by editing this constant.
-pub const FALLBACK_RUNG: MegaSpecId = MegaSpecId::SATIN;
 
 /// Activation timestamps of the Satin-engine hardforks on one chain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,38 +69,15 @@ pub fn testnet_hardforks() -> MegaHardforkConfig {
     chain_activation(TESTNET_CHAIN_ID).expect("testnet is in the activation table").hardforks()
 }
 
-/// The schedule an unknown chain runs: every fork up to [`FALLBACK_RUNG`], active at genesis.
-///
-/// Satin requires a [`SequencerRegistryConfig`]. An unknown chain has no published roles, so
-/// every role is seeded with [`MEGA_SYSTEM_ADDRESS`], `_initialFromBlock` is zero, and
-/// `_minRotationDelay` is [`crate::system::PLACEHOLDER_MIN_ROTATION_DELAY`]. The placeholder
-/// only matters when bootstrapping a fresh registry: on a chain whose registry is already
-/// deployed, the live roles are read from storage.
-pub fn all_activated_hardforks() -> MegaHardforkConfig {
-    let mut config = MegaHardforkConfig::new();
-    for fork in MegaHardfork::VARIANTS {
-        let condition = if fork.spec_id() <= FALLBACK_RUNG {
-            ForkCondition::Timestamp(0)
-        } else {
-            ForkCondition::Never
-        };
-        config.insert(*fork, condition);
-    }
-    config.with_params(SequencerRegistryConfig::placeholder())
-}
-
-/// The hardfork schedule of `chain_id`: a known chain's table, or the unknown-chain fallback.
-pub fn hardfork_schedule(chain_id: u64) -> MegaHardforkConfig {
-    chain_activation(chain_id).map_or_else(all_activated_hardforks, |a| a.hardforks())
+/// The hardfork schedule of `chain_id`, a known chain's table; `None` for any other chain.
+pub fn hardfork_schedule(chain_id: u64) -> Option<MegaHardforkConfig> {
+    chain_activation(chain_id).map(|activation| activation.hardforks())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        system::{MEGA_SYSTEM_ADDRESS, PLACEHOLDER_MIN_ROTATION_DELAY},
-        MegaHardforks,
-    };
+    use crate::{MegaHardforks, MegaSpecId};
 
     #[test]
     fn test_known_chains_have_satin_unscheduled() {
@@ -142,109 +112,26 @@ mod tests {
     /// A scheduled chain resolves the spec its table gives, at the timestamp the table gives.
     #[test]
     fn test_a_scheduled_activation_resolves_at_its_timestamp() {
-        let hf = ChainActivation { chain_id: MAINNET_CHAIN_ID, satin: Some(1_800_000_000) }
-            .hardforks()
-            .with_params(SequencerRegistryConfig::placeholder());
+        let hf =
+            ChainActivation { chain_id: MAINNET_CHAIN_ID, satin: Some(1_800_000_000) }.hardforks();
 
         assert_eq!(hf.spec_id(1_799_999_999), None);
         assert_eq!(hf.spec_id(1_800_000_000), Some(MegaSpecId::SATIN));
         assert_eq!(hf.validate_schedule(), Ok(()));
     }
 
+    /// A known chain's schedule is its table's; another chain has none: the engine names no
+    /// schedule for a chain it does not know.
     #[test]
     fn test_schedule_dispatch_by_chain_id() {
-        assert_eq!(hardfork_schedule(MAINNET_CHAIN_ID).spec_id(0), None);
-        assert_eq!(hardfork_schedule(TESTNET_CHAIN_ID).spec_id(0), None);
-        // Unknown chain: every fork up to the pinned rung, active at genesis.
-        assert_eq!(hardfork_schedule(1).spec_id(0), Some(FALLBACK_RUNG));
-    }
-
-    /// The fallback schedule is one a chain can run: it carries placeholder registry params, so
-    /// an unknown chain ID starts rather than failing at its first block.
-    #[test]
-    fn test_unknown_chain_fallback_is_a_runnable_schedule() {
-        let hf = hardfork_schedule(999_999);
-
-        assert_eq!(hf.spec_id(0), Some(FALLBACK_RUNG));
-        assert_eq!(hf.validate_schedule(), Ok(()));
-        let params = hf
-            .fork_params::<SequencerRegistryConfig>()
-            .expect("fallback schedule must carry a SequencerRegistryConfig");
-        assert_eq!(params.initial_system_address, MEGA_SYSTEM_ADDRESS);
-        assert_eq!(params.initial_sequencer, MEGA_SYSTEM_ADDRESS);
-        assert_eq!(params.initial_admin, MEGA_SYSTEM_ADDRESS);
-        assert_eq!(params.initial_from_block, 0);
-        assert_eq!(params.min_rotation_delay, PLACEHOLDER_MIN_ROTATION_DELAY);
-        assert_ne!(params.min_rotation_delay, 0);
-    }
-
-    /// [`SequencerRegistryConfig::placeholder`] is attached only by the unknown-chain fallback.
-    ///
-    /// [`hardfork_schedule`] returns it exactly when the chain ID is absent from the activation
-    /// table. A known chain ID resolves to that chain's own table, which never carries the
-    /// placeholder.
-    #[test]
-    fn test_the_placeholder_is_only_the_unknown_chain_fallback() {
-        let placeholder = SequencerRegistryConfig::placeholder();
-        let fallback = all_activated_hardforks();
-        assert_eq!(
-            fallback.fork_params::<SequencerRegistryConfig>(),
-            Some(&placeholder),
-            "the unknown-chain fallback is what attaches the placeholder"
-        );
-
-        for chain_id in [0_u64, 1, 999_999] {
-            assert_eq!(chain_activation(chain_id), None, "{chain_id} is not a known chain");
-            assert_eq!(
-                hardfork_schedule(chain_id).fork_params::<SequencerRegistryConfig>(),
-                Some(&placeholder),
-                "chain {chain_id} reaches the placeholder only by taking the fallback"
-            );
-        }
-
         for activation in CHAIN_ACTIVATIONS {
-            let schedule = hardfork_schedule(activation.chain_id);
-            assert_eq!(
-                schedule.fork_params::<SequencerRegistryConfig>(),
-                activation.hardforks().fork_params::<SequencerRegistryConfig>(),
-                "chain {} resolves to its own table",
-                activation.chain_id
-            );
-            assert_ne!(
-                schedule.fork_params::<SequencerRegistryConfig>(),
-                Some(&placeholder),
-                "chain {} must not return the placeholder",
-                activation.chain_id
-            );
+            let schedule = hardfork_schedule(activation.chain_id).expect("a known chain");
+            for fork in MegaHardfork::VARIANTS {
+                assert_eq!(schedule.get(*fork), Some(&activation.condition(*fork)));
+            }
         }
-    }
-
-    /// The fallback rung is pinned, not inherited from [`MegaSpecId::default`].
-    ///
-    /// Unknown chains run their rung from genesis, so it is their semantics from block zero with
-    /// no fork boundary. Introducing a spec must therefore leave them alone. What this pins is
-    /// drift: the fallback silently following `MegaSpecId::default` again, and the rung advancing
-    /// without [`FALLBACK_RUNG`] being edited in the same change.
-    #[test]
-    fn test_unknown_chain_fallback_pins_its_rung() {
-        let hf = all_activated_hardforks();
-        const RUNG: MegaSpecId = MegaSpecId::SATIN;
-
-        assert_eq!(FALLBACK_RUNG, RUNG, "the pin moves only by editing it here too");
-        assert_eq!(hf.spec_id(0), Some(RUNG), "the rung applies from genesis");
-        assert_eq!(
-            hf.spec_id(u64::MAX),
-            Some(RUNG),
-            "and is terminal — no later fork is registered"
-        );
-
-        for fork in MegaHardfork::VARIANTS {
-            let registered = hf.mega_fork_activation(*fork) != ForkCondition::Never;
-            assert_eq!(
-                registered,
-                fork.spec_id() <= RUNG,
-                "{fork:?} registration must follow the pinned rung, not MegaSpecId::default()"
-            );
+        for chain_id in [0, 1, 6342, 999_999] {
+            assert!(hardfork_schedule(chain_id).is_none(), "chain {chain_id} is unknown");
         }
     }
 }

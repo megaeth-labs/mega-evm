@@ -23,7 +23,7 @@ use mega_evm::{
         ORACLE_CONTRACT_CODE,
     },
     test_utils::MemoryDatabase,
-    EvmTxRuntimeLimits, LimitKind, MegaEvm,
+    EvmTxRuntimeLimits, LimitUsage, MegaEvm,
 };
 use revm::{
     context::{result::ExecutionResult, ContextTr, JournalTr},
@@ -32,7 +32,8 @@ use revm::{
     interpreter::{
         interpreter::SharedMemory, interpreter_action::FrameInit,
         interpreter_types::InterpreterTypes, CallInput, CallInputs, CallOutcome, CallScheme,
-        CallValue, FrameInput, Gas, InstructionResult, InterpreterResult,
+        CallValue, CreateInputs, CreateScheme, FrameInput, Gas, InstructionResult,
+        InterpreterResult,
     },
     primitives::CALL_STACK_LIMIT,
     Inspector,
@@ -104,6 +105,58 @@ fn test_depth_guard_returns_call_too_deep_with_the_inherited_reservoir() {
     assert_call_too_deep(&result);
 }
 
+/// Every start past the call-stack limit is answered by the guard as revm answers it — a creation
+/// and every call scheme alike — with the forwarded gas untouched and the inherited reservoir
+/// carried, before anything reads its caller's account or counts its start: nothing is counted,
+/// and the creator's nonce is not bumped, so no nonce record outlives the answer.
+#[test]
+fn test_depth_guard_answers_a_creation_and_every_call_scheme() {
+    let past = CALL_STACK_LIMIT as usize + 1;
+    let creation = FrameInit {
+        depth: past,
+        memory: SharedMemory::new(),
+        frame_input: FrameInput::Create(Box::new(CreateInputs::new(
+            CALLER,
+            CreateScheme::Create,
+            U256::from(1),
+            Bytes::new(),
+            GAS_LIMIT,
+            RESERVOIR,
+        ))),
+    };
+    let mut inits = vec![creation];
+    for (scheme, value) in [
+        (CallScheme::Call, CallValue::Transfer(U256::from(1))),
+        (CallScheme::CallCode, CallValue::Transfer(U256::from(1))),
+        (CallScheme::DelegateCall, CallValue::Apparent(U256::from(1))),
+        (CallScheme::StaticCall, CallValue::Transfer(U256::ZERO)),
+    ] {
+        let mut init = call_frame_init(past);
+        if let FrameInput::Call(inputs) = &mut init.frame_input {
+            inputs.scheme = scheme;
+            inputs.value = value;
+            inputs.is_static = scheme == CallScheme::StaticCall;
+        }
+        inits.push(init);
+    }
+    for init in inits {
+        let what = format!("{:?}", init.frame_input);
+        // The caller's account is never loaded: nothing reads it for a start the guard answers.
+        let mut evm = MegaEvm::new(context(MemoryDatabase::default()));
+        let result = EvmTr::frame_init(&mut evm, init).expect("frame_init does not fail");
+        let ItemOrResult::Result(result) = result else { panic!("{what}: no frame is built") };
+        let gas = result.gas();
+        assert_eq!(result.instruction_result(), InstructionResult::CallTooDeep, "{what}");
+        assert_eq!(gas.remaining(), GAS_LIMIT, "{what}: the forwarded gas is untouched");
+        assert_eq!(gas.reservoir(), RESERVOIR, "{what}: the inherited reservoir is carried");
+        if let FrameResult::Create(outcome) = &result {
+            assert_eq!(outcome.address, None, "{what}");
+        }
+        assert_eq!(evm.ctx().additional_limit().usage(), LimitUsage::ZERO, "{what}: counted");
+        assert!(!evm.ctx().journal_ref().state.contains_key(&CALLER), "{what}: no nonce bumped");
+    }
+}
+
 /// `CALL_STACK_LIMIT` itself is the last permitted depth: the guard does not fire there.
 #[test]
 fn test_depth_boundary_allows_call_at_limit() {
@@ -165,30 +218,15 @@ fn test_inspect_frame_init_depth_guard_overrides_inspector() {
     );
 }
 
-/// A latched transaction's frame is answered with the stop, even past the call-stack limit: the
-/// latch is checked first, and its answer carries the reservoir too.
-#[test]
-fn test_exceeded_tx_limit_wins_over_call_too_deep() {
-    let mut evm = MegaEvm::new(context(MemoryDatabase::default()));
-    let stop = evm.ctx_mut().additional_limit_mut().latch(LimitKind::KVUpdate, 0, 1);
-    let result = EvmTr::frame_init(&mut evm, call_frame_init(CALL_STACK_LIMIT as usize + 1))
-        .expect("frame_init does not fail");
-    let ItemOrResult::Result(FrameResult::Call(outcome)) = result else {
-        panic!("a latched transaction's frame is answered");
-    };
-    assert_eq!(outcome.result.result, InstructionResult::Revert, "the stop, not CallTooDeep");
-    assert_eq!(outcome.result.output, stop.revert_data());
-    assert_eq!(outcome.result.gas.remaining(), GAS_LIMIT);
-    assert_eq!(outcome.result.gas.reservoir(), RESERVOIR);
-}
-
-/// A first frame answered with the stop before it runs gives the whole reservoir back, and costs
-/// the same at a gas limit under the execution cap and far above it.
+/// A first frame answered with the stop before it runs — its body fits the limit, the record and
+/// the transfer log of its value do not — gives the whole reservoir back, and costs the same at a
+/// gas limit under the execution cap and far above it.
 #[test]
 fn test_stopped_first_frame_keeps_the_reservoir_at_any_gas_limit() {
     let at = |gas_limit: u64| {
         let db = MemoryDatabase::default().account_balance(CALLER, U256::from(1_000));
-        let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(0);
+        let limits =
+            EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(mega_evm::TX_BODY_SIZE);
         let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits));
         let result =
             alloy_evm::Evm::transact_raw(&mut evm, call(CALLER, TARGET, U256::from(1), gas_limit))
@@ -437,16 +475,16 @@ fn test_a_forwarded_hint_keeps_the_reservoir() {
 }
 
 /// A dispatched `keylessDeploy` call is charged its overhead out of regular gas, so it costs the
-/// same whether there is a pool or not and the pool comes back whole. The charge is not an
-/// answer: the deployed bytecode runs after it and reverts with `NotIntercepted()`, because the
-/// rewrite that turns the call into a deployment is not here yet.
+/// same whether there is a pool or not and the pool comes back whole. A call the rules refuse —
+/// here one whose bytes are not a signed transaction — is answered after the overhead with the
+/// rule's error, and the answer carries the reservoir.
 #[test]
 fn test_the_keyless_overhead_comes_out_of_regular_gas() {
     assert_the_reservoir_survives(
         KEYLESS_DEPLOY_ADDRESS,
         keyless_deploy_call(),
         U256::ZERO,
-        Expected::Revert(Bytes::from_static(&IKeylessDeploy::NotIntercepted::SELECTOR)),
+        Expected::Revert(Bytes::from_static(&IKeylessDeploy::MalformedEncoding::SELECTOR)),
     );
 }
 
@@ -482,9 +520,9 @@ fn test_the_keyless_value_refusal_keeps_the_reservoir() {
     }
 }
 
-/// A `keylessDeploy` call forwarded less regular gas than the overhead is answered out of gas,
-/// with the reservoir it inherited carried, and that answer settles into a caller exactly as
-/// revm's own frame return settles a frame that ran out.
+/// A `keylessDeploy` call forwarded less regular gas than the overhead runs out of gas on its
+/// first run, with the reservoir it inherited carried, and that result settles into a caller
+/// exactly as revm's own frame return settles a frame that ran out.
 #[test]
 fn test_a_keyless_call_below_the_overhead_runs_out_of_gas() {
     use core::convert::Infallible;
@@ -494,11 +532,19 @@ fn test_a_keyless_call_below_the_overhead_runs_out_of_gas() {
 
     let forwarded = KEYLESS_DEPLOY_OVERHEAD_GAS - 1;
     let mut evm = MegaEvm::new(context(system_db()));
+    // The accounts a transaction's validation and its first frame input load.
+    let journal = evm.ctx_mut().journal_mut();
+    journal.load_account(CALLER).unwrap();
+    journal.load_account_with_code(KEYLESS_DEPLOY_ADDRESS).unwrap();
     let init = call_frame_init_to(0, KEYLESS_DEPLOY_ADDRESS, keyless_deploy_call(), forwarded);
-    let ItemOrResult::Result(result) =
+    let ItemOrResult::Item(_) =
         EvmTr::frame_init(&mut evm, init).expect("frame_init does not fail")
     else {
-        panic!("a call that cannot pay the overhead starts no frame");
+        panic!("the call's frame is built");
+    };
+    let ItemOrResult::Result(result) = EvmTr::frame_run(&mut evm).expect("frame_run does not fail")
+    else {
+        panic!("a call that cannot pay the overhead starts no creation");
     };
     let FrameResult::Call(outcome) = &result else { panic!("expected a call result: {result:?}") };
     assert_eq!(outcome.result.result, InstructionResult::OutOfGas);

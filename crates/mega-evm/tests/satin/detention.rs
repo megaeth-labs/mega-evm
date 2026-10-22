@@ -3,9 +3,11 @@
 //! The cap is relative: at the read, the transaction's compute — its regular gas, without state
 //! and history gas that spilled onto it — may grow by at most the cap. Crossing it stops the
 //! transaction with the revert-class stop every transaction-level limit uses. The limit a read
-//! sets is its compute then plus the cap, so a transaction that stops has spent exactly its limit
-//! and its intrinsic gas on the regular ledger: the allowance it had left when the charge failed
-//! is spent, and the gas detention withheld is not.
+//! sets is its compute then plus the cap, so a transaction that stops has spent its intrinsic gas
+//! and its compute up to the charge that would have crossed the limit on the regular ledger: that
+//! charge is not made, and the frame keeps what it had before it, the spendable part and the part
+//! detention withheld. Where a stop lands follows from the charges a program makes after its read
+//! ([`Charges`]).
 //!
 //! Every case runs below the execution cap, without a reservoir, and above it, with one.
 
@@ -14,16 +16,18 @@ use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
 use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
     constants::{BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS, TX_GAS_LIMIT_CAP},
+    history_gas,
     system::{IMegaLimitControl, LIMIT_CONTROL_ADDRESS, ORACLE_CONTRACT_ADDRESS},
     test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
-    volatile_data_access_disabled_revert_data, BlockLimits, EvmTxRuntimeLimits, LimitCheck,
-    LimitKind, MegaContext, MegaEvm, MegaLimitExceeded, MegaSpecId, MegaTransaction,
-    MegaTransactionOutcome, VolatileDataAccess,
+    volatile_data_access_disabled_revert_data, write_record_history_gas, EvmTxRuntimeLimits,
+    LimitCheck, LimitKind, LimitUsage, MegaContext, MegaEvm, MegaLimitExceeded, MegaSpecId,
+    MegaTransaction, MegaTransactionOutcome, OracleRead, ProtocolLimits, VolatileDataAccess,
+    TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 use revm::{
     bytecode::opcode::*,
     context::{result::ExecutionResult, BlockEnv, TxEnv},
-    context_interface::block::BlobExcessGasAndPrice,
+    context_interface::{block::BlobExcessGasAndPrice, cfg::GasId},
     interpreter::{
         interpreter::EthInterpreter, CallInputs, CallOutcome, InstructionResult, Interpreter,
     },
@@ -43,6 +47,49 @@ pub(crate) const BELOW: u64 = 100_000_000;
 /// Above it: a reservoir of 100,000,000.
 pub(crate) const ABOVE: u64 = TX_GAS_LIMIT_CAP + 100_000_000;
 pub(crate) const TIERS: [u64; 2] = [BELOW, ABOVE];
+
+/// The compute of a write to a fresh, cold slot as [`BytecodeBuilder::sstore`] makes it: its two
+/// pushes and `SSTORE`'s static and dynamic gas, 12,106 at the schedule's prices.
+pub(crate) fn fresh_write() -> u64 {
+    3 + 3 + sstore_static() + fresh_sstore()
+}
+
+/// `SSTORE`'s static gas, which it charges before its dynamic gas.
+pub(crate) fn sstore_static() -> u64 {
+    crate::salt::entry(GasId::sstore_static())
+}
+
+/// `SSTORE`'s dynamic gas on a fresh, cold slot: the cold access and the storage write.
+pub(crate) fn fresh_sstore() -> u64 {
+    crate::salt::entry(GasId::cold_storage_cost()) +
+        crate::salt::entry(GasId::sstore_set_without_load_cost())
+}
+
+/// What the store of a failed call's status charges once the call returned: the push of the slot,
+/// then `SSTORE`'s static gas and the cold access of a slot that holds zero, which the status,
+/// zero, leaves as it is.
+pub(crate) fn failed_status_store() -> Charges {
+    Charges::default().then(&[3, sstore_static(), crate::salt::entry(GasId::cold_storage_cost())])
+}
+
+/// What a call reaching a cold account pays for the access: the warm base and the cold surcharge,
+/// 3,000 at the schedule's prices.
+pub(crate) fn cold_access() -> u64 {
+    crate::salt::entry(GasId::warm_storage_read_cost()) +
+        crate::salt::entry(GasId::cold_account_additional_cost())
+}
+
+/// What a call carrying value pays for the transfer, the callee's stipend included.
+pub(crate) fn value_transfer() -> u64 {
+    crate::salt::entry(GasId::transfer_value_cost())
+}
+
+/// What a write to a fresh slot costs beside its compute: the slot's state gas and its record's
+/// history, at the prices the schedule was built with.
+pub(crate) fn fresh_write_spill() -> u64 {
+    crate::salt::entry(GasId::sstore_set_state_gas()) +
+        write_record_history_gas(1).expect("a record has a price")
+}
 
 /// Rounds of [`work`] spent before a read: 5,283,600 of compute.
 pub(crate) const WORK: u32 = 1_700;
@@ -155,30 +202,185 @@ pub(crate) fn stop_data(limit: u64) -> Bytes {
     MegaLimitExceeded { kind: LimitKind::ComputeGas.as_u8(), limit }.abi_encode().into()
 }
 
-/// Asserts the transaction was stopped by detention, having spent exactly its limit.
-pub(crate) fn assert_stopped(run: &Run, intrinsic: u64) -> u64 {
+/// Asserts the transaction was stopped by detention, having computed up to the charge that
+/// crossed its limit and not one unit past it: the stopped frame keeps what it had before that
+/// charge, `left` short of the limit, so the transaction's compute, which the stop reports and its
+/// regular ledger bills, is the limit less `left`. Returns the limit.
+pub(crate) fn assert_stopped(run: &Run, intrinsic: u64, left: u64) -> u64 {
     let limit = run.limit.expect("a read set a limit");
     match &run.outcome.result {
         ExecutionResult::Revert { output, .. } => assert_eq!(output, &stop_data(limit)),
         other => panic!("expected the detention stop, got {other:?}"),
     }
+    let used = limit - left;
     assert_eq!(
         run.outcome.limit_exceeded,
         Some(LimitCheck::ExceedsLimit {
             kind: LimitKind::ComputeGas,
             limit,
-            used: limit,
+            used,
             frame_local: false
         })
     );
     assert_eq!(
         run.outcome.gas.regular,
-        intrinsic + limit,
-        "the transaction computed up to its limit and not one unit past it"
+        intrinsic + used,
+        "the transaction computed up to the charge that crossed its limit and not one unit past it"
     );
     assert_eq!(run.outcome.gas.state, 0, "a stop keeps no state");
     assert!(run.outcome.result.logs().is_empty(), "a stop keeps no log");
     limit
+}
+
+/// Asserts that a frame below the transaction's own crossed the limit `left` short of it, and that
+/// the transaction's own frame, its caller, caught the stop and ran `after` on what the limit left
+/// it, the `left` the crossing charge was not made from.
+///
+/// When `after` ends within it, the transaction succeeds, billed its compute at the crossing and
+/// `after` on top: within the limit, which reports no stop. When it does not, the caller's own
+/// charge crosses the limit again, and that is the stop the transaction reports
+/// ([`assert_stopped`]). Returns the limit.
+pub(crate) fn assert_caught(run: &Run, intrinsic: u64, left: u64, after: &Charges) -> u64 {
+    if let Some(left) = after.crossing(left) {
+        return assert_stopped(run, intrinsic, left);
+    }
+    let limit = run.limit.expect("a read set a limit");
+    assert!(
+        run.outcome.result.is_success(),
+        "the caller caught the stop: {:?}",
+        run.outcome.result
+    );
+    assert_eq!(run.outcome.limit_exceeded, None, "a stop below the transaction's own frame");
+    assert_eq!(
+        run.outcome.gas.regular,
+        intrinsic + limit - left + after.total(),
+        "the transaction computed up to the charge that crossed, then what its caller ran"
+    );
+    assert!(run.outcome.gas.regular <= intrinsic + limit, "within the limit");
+    limit
+}
+
+/* ---------- where a stop lands ---------- */
+
+/// The regular charges a program makes after its read, in the order the interpreter makes them:
+/// each instruction's static gas, then its dynamic charges. Each part is a run of charges made
+/// some number of times, or forever.
+///
+/// The stop lands on the first charge the limit leaves no room for: that charge is not made, and
+/// the stopped frame keeps what it had before it ([`left`](Self::left)).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Charges(Vec<(Vec<u64>, Option<u64>)>);
+
+impl Charges {
+    /// `charges`, once.
+    pub(crate) fn then(self, charges: &[u64]) -> Self {
+        self.repeat(charges, 1)
+    }
+
+    /// `charges`, `times` times over.
+    pub(crate) fn repeat(mut self, charges: &[u64], times: u64) -> Self {
+        self.0.push((charges.to_vec(), Some(times)));
+        self
+    }
+
+    /// `charges`, over and over.
+    pub(crate) fn forever(mut self, charges: &[u64]) -> Self {
+        self.0.push((charges.to_vec(), None));
+        self
+    }
+
+    /// What the charges add up to, for a program that ends.
+    pub(crate) fn total(&self) -> u64 {
+        self.0
+            .iter()
+            .map(|(charges, times)| {
+                charges.iter().sum::<u64>() * times.expect("a program that ends")
+            })
+            .sum()
+    }
+
+    /// What `allowance` has left when the first charge it cannot pay comes: what a frame the limit
+    /// left `allowance` at the read has when it crosses the limit.
+    pub(crate) fn left(&self, allowance: u64) -> u64 {
+        self.crossing(allowance).expect("the program ends within the allowance")
+    }
+
+    /// [`left`](Self::left), or `None` when the program ends within `allowance`.
+    pub(crate) fn crossing(&self, mut allowance: u64) -> Option<u64> {
+        for (charges, times) in &self.0 {
+            let round: u64 = charges.iter().sum();
+            if round == 0 {
+                continue;
+            }
+            let rounds = allowance / round;
+            if times.is_some_and(|times| rounds >= times) {
+                allowance -= round * times.unwrap();
+                continue;
+            }
+            allowance -= round * rounds;
+            for charge in charges {
+                if *charge > allowance {
+                    return Some(allowance);
+                }
+                allowance -= charge;
+            }
+            unreachable!("a round the allowance cannot pay whole has a charge it cannot pay");
+        }
+        None
+    }
+
+    /// The charges of [`spin`]'s loop in a frame whose memory holds `words` words: `JUMPDEST`, the
+    /// copy — a push, two `PUSH0`, and `MCOPY`'s static gas, then its copy, then the memory it
+    /// expands to the 32 KiB it copies ([`expansion`]) — then the push of the loop's start and
+    /// `JUMP`.
+    pub(crate) fn spin(self, words: u64) -> Self {
+        self.then(&[1, 3, 2, 2, 3, 3_072, expansion(words), 3, 8])
+            .forever(&[1, 3, 2, 2, 3, 3_072, 3, 8])
+    }
+
+    /// The charges of [`work`]'s `rounds` rounds in a frame whose memory holds `words` words: the
+    /// push of the counter, then each round — `JUMPDEST`, the copy as [`spin`](Self::spin) makes
+    /// it, `PUSH1`, `SWAP1`, `SUB`, `DUP1`, the push of the loop's start and `JUMPI` — then the
+    /// `POP` of the counter.
+    pub(crate) fn work(self, rounds: u32, words: u64) -> Self {
+        let round = [1, 3, 2, 2, 3, 3_072, 3, 3, 3, 3, 3, 10];
+        let charges = self.then(&[3]);
+        let charges = match rounds {
+            0 => charges,
+            rounds => charges
+                .then(&[1, 3, 2, 2, 3, 3_072, expansion(words), 3, 3, 3, 3, 3, 10])
+                .repeat(&round, u64::from(rounds) - 1),
+        };
+        charges.then(&[2])
+    }
+
+    /// The charges of [`burn`]'s `rounds` rounds: the push of the counter, then each round —
+    /// `JUMPDEST`, `PUSH1`, `SWAP1`, `SUB`, `DUP1`, the push of the loop's start and `JUMPI` —
+    /// then the `POP` of the counter.
+    pub(crate) fn burn(self, rounds: u32) -> Self {
+        self.then(&[3]).repeat(&[1, 3, 3, 3, 3, 3, 10], u64::from(rounds)).then(&[2])
+    }
+
+    /// The charges of `count` writes of a fresh, cold slot, each pushing its value and its slot:
+    /// two pushes, then `SSTORE`'s static gas and its dynamic gas, the cold access and the set.
+    /// Their state and history gas are not compute.
+    pub(crate) fn fresh_writes(self, count: u64) -> Self {
+        self.repeat(&[3, 3, sstore_static(), fresh_sstore()], count)
+    }
+}
+
+/// What a frame's memory of `words` words costs: `3 w + w² / 512`.
+pub(crate) const fn memory_cost(words: u64) -> u64 {
+    3 * words + words * words / 512
+}
+
+/// What expanding a frame's memory from `words` words to the 1,024 words of [`copy`] costs.
+pub(crate) const fn expansion(words: u64) -> u64 {
+    if words >= 1_024 {
+        0
+    } else {
+        memory_cost(1_024) - memory_cost(words)
+    }
 }
 
 /* ---------- every read ---------- */
@@ -186,13 +388,14 @@ pub(crate) fn assert_stopped(run: &Run, intrinsic: u64) -> u64 {
 /// A piece of code appended to a program.
 type Append = fn(BytecodeBuilder) -> BytecodeBuilder;
 
-/// One volatile read: the code that makes it, what else the database needs, and the kind it
-/// records.
+/// One volatile read: the code that makes it, what else the database needs, the kind it records,
+/// and the regular charges its code makes after the read is committed.
 struct Read {
     name: &'static str,
     code: Append,
     db: fn(MemoryDatabase) -> MemoryDatabase,
     access: VolatileDataAccess,
+    after: &'static [u64],
 }
 
 fn no_setup(db: MemoryDatabase) -> MemoryDatabase {
@@ -215,72 +418,84 @@ fn reads() -> Vec<Read> {
             code: |c| op(c, NUMBER),
             db: no_setup,
             access: VolatileDataAccess::BLOCK_NUMBER,
+            after: &[2],
         },
         Read {
             name: "TIMESTAMP",
             code: |c| op(c, TIMESTAMP),
             db: no_setup,
             access: VolatileDataAccess::TIMESTAMP,
+            after: &[2],
         },
         Read {
             name: "COINBASE",
             code: |c| op(c, COINBASE),
             db: no_setup,
             access: VolatileDataAccess::COINBASE,
+            after: &[2],
         },
         Read {
             name: "PREVRANDAO",
             code: |c| op(c, DIFFICULTY),
             db: no_setup,
             access: VolatileDataAccess::PREV_RANDAO,
+            after: &[2],
         },
         Read {
             name: "GASLIMIT",
             code: |c| op(c, GASLIMIT),
             db: no_setup,
             access: VolatileDataAccess::GAS_LIMIT,
+            after: &[2],
         },
         Read {
             name: "BASEFEE",
             code: |c| op(c, BASEFEE),
             db: no_setup,
             access: VolatileDataAccess::BASE_FEE,
+            after: &[2],
         },
         Read {
             name: "BLOBBASEFEE",
             code: |c| op(c, BLOBBASEFEE),
             db: no_setup,
             access: VolatileDataAccess::BLOB_BASE_FEE,
+            after: &[2],
         },
         Read {
             name: "SLOTNUM",
             code: |c| op(c, SLOTNUM),
             db: no_setup,
             access: VolatileDataAccess::SLOT_NUM,
+            after: &[2],
         },
         Read {
             name: "BLOCKHASH",
             code: |c| c.push_number(299_u16).append(BLOCKHASH).append(POP),
             db: no_setup,
             access: VolatileDataAccess::BLOCK_NUMBER | VolatileDataAccess::BLOCK_HASH,
+            after: &[2],
         },
         Read {
             name: "BALANCE",
             code: |c| on_beneficiary(c, BALANCE),
             db: no_setup,
             access: VolatileDataAccess::BENEFICIARY_BALANCE,
+            after: &[2],
         },
         Read {
             name: "EXTCODESIZE",
             code: |c| on_beneficiary(c, EXTCODESIZE),
             db: no_setup,
             access: VolatileDataAccess::BENEFICIARY_BALANCE,
+            after: &[2],
         },
         Read {
             name: "EXTCODEHASH",
             code: |c| on_beneficiary(c, EXTCODEHASH),
             db: no_setup,
             access: VolatileDataAccess::BENEFICIARY_BALANCE,
+            after: &[2],
         },
         Read {
             name: "EXTCODECOPY",
@@ -292,36 +507,43 @@ fn reads() -> Vec<Read> {
             },
             db: no_setup,
             access: VolatileDataAccess::BENEFICIARY_BALANCE,
+            // The copy leaves nothing on the stack.
+            after: &[],
         },
         Read {
             name: "CALL",
             code: |c| call(c, CALL, BENEFICIARY),
             db: no_setup,
             access: VolatileDataAccess::BENEFICIARY_BALANCE,
+            after: &[2],
         },
         Read {
             name: "CALLCODE",
             code: |c| call(c, CALLCODE, BENEFICIARY),
             db: no_setup,
             access: VolatileDataAccess::BENEFICIARY_BALANCE,
+            after: &[2],
         },
         Read {
             name: "DELEGATECALL",
             code: |c| call(c, DELEGATECALL, BENEFICIARY),
             db: no_setup,
             access: VolatileDataAccess::BENEFICIARY_BALANCE,
+            after: &[2],
         },
         Read {
             name: "STATICCALL",
             code: |c| call(c, STATICCALL, BENEFICIARY),
             db: no_setup,
             access: VolatileDataAccess::BENEFICIARY_BALANCE,
+            after: &[2],
         },
         Read {
             name: "CALL to an EIP-7702 delegator of the beneficiary",
             code: |c| call(c, CALL, DELEGATOR),
             db: |db| with_delegation(db, DELEGATOR, BENEFICIARY),
             access: VolatileDataAccess::BENEFICIARY_BALANCE,
+            after: &[2],
         },
         Read {
             name: "SELFDESTRUCT to the beneficiary",
@@ -336,6 +558,7 @@ fn reads() -> Vec<Read> {
                 )
             },
             access: VolatileDataAccess::BENEFICIARY_BALANCE,
+            after: &[2],
         },
         Read {
             name: "SLOAD of the Oracle's storage",
@@ -347,6 +570,8 @@ fn reads() -> Vec<Read> {
                 )
             },
             access: VolatileDataAccess::ORACLE,
+            // The Oracle's `POP`, then its caller's.
+            after: &[2, 2],
         },
     ]
 }
@@ -368,8 +593,9 @@ pub(crate) fn with_delegation(
 }
 
 /// Every read caps the transaction from where it read, not from its start: the transaction first
-/// spends more compute than the cap, then reads, then computes forever, and it stops having spent
-/// exactly its compute at the read plus the cap.
+/// spends [`WORK`] rounds of work, less compute than the cap, then reads, then computes forever,
+/// and it stops at the first charge past its compute at the read plus the cap, having spent
+/// everything before it. A spend larger than the cap before the read is the next test's.
 #[test]
 fn test_every_volatile_read_caps_the_transaction_from_where_it_read() {
     for gas_limit in TIERS {
@@ -378,7 +604,9 @@ fn test_every_volatile_read_caps_the_transaction_from_where_it_read() {
             let code = spin((read.code)(work(BytecodeBuilder::default(), WORK)));
             let db = (read.db)(MemoryDatabase::default().account_code(CONTRACT, code));
             let run = execute(db, tx(CALLER, CONTRACT, gas_limit));
-            let limit = assert_stopped(&run, intrinsic);
+            // The work expanded the memory the loop copies.
+            let left = Charges::default().then(read.after).spin(1_024).left(CAP);
+            let limit = assert_stopped(&run, intrinsic, left);
             let at_read = limit - CAP;
             assert!(
                 at_read > u64::from(WORK) * WORK_ROUND &&
@@ -387,6 +615,14 @@ fn test_every_volatile_read_caps_the_transaction_from_where_it_read() {
                 read.name
             );
             assert_eq!(run.accessed, read.access, "{}", read.name);
+            // Only a read of the Oracle's storage goes through the oracle service: its slot zero,
+            // which the service, absent from this context, does not answer.
+            let oracle_reads: &[OracleRead] = if read.access == VolatileDataAccess::ORACLE {
+                &[OracleRead { slot: U256::ZERO, answer: None }]
+            } else {
+                &[]
+            };
+            assert_eq!(run.outcome.oracle_reads, oracle_reads, "{}: the oracle reads", read.name);
         }
     }
 }
@@ -402,7 +638,8 @@ fn test_the_cap_counts_from_a_spend_larger_than_itself() {
             MemoryDatabase::default().account_code(CONTRACT, code),
             tx(CALLER, CONTRACT, gas_limit),
         );
-        let limit = assert_stopped(&run, intrinsic(gas_limit));
+        let left = Charges::default().then(&[2]).spin(1_024).left(CAP);
+        let limit = assert_stopped(&run, intrinsic(gas_limit), left);
         assert!(limit - CAP > u64::from(before) * WORK_ROUND, "{limit}");
         assert!(limit - CAP > CAP);
 
@@ -438,51 +675,17 @@ fn test_without_a_read_nothing_is_capped() {
     }
 }
 
-/// A transaction whose sender, recipient or applied EIP-7702 authority is the beneficiary is
-/// detained from its first instruction: its limit is the cap.
+/// A transaction whose sender is the beneficiary is detained from its first instruction: its limit
+/// is the cap.
 #[test]
-fn test_a_transaction_touching_the_beneficiary_is_detained_from_the_start() {
-    use revm::{
-        context::transaction::TransactionType,
-        context_interface::{
-            either::Either,
-            transaction::{Authorization, RecoveredAuthority, RecoveredAuthorization},
-        },
-    };
+fn test_a_transaction_from_the_beneficiary_is_detained_from_the_start() {
     for gas_limit in TIERS {
-        let intrinsic = intrinsic(gas_limit);
-        let spinner = spin(BytecodeBuilder::default());
-
-        // The sender.
-        let db = MemoryDatabase::default().account_code(CONTRACT, spinner.clone());
-        let run_sender = execute(db, tx(BENEFICIARY, CONTRACT, gas_limit));
+        // Detained before its first instruction: the whole program runs after the read.
+        let left = Charges::default().spin(0).left(CAP);
+        let db = MemoryDatabase::default().account_code(CONTRACT, spin(BytecodeBuilder::default()));
+        let run = execute(db, tx(BENEFICIARY, CONTRACT, gas_limit));
         // A sender's intrinsic gas is the same whoever it is.
-        assert_eq!(assert_stopped(&run_sender, intrinsic), CAP, "the sender");
-
-        // The recipient.
-        let db = MemoryDatabase::default().account_code(BENEFICIARY, spinner.clone());
-        let run_recipient = execute(db, tx(CALLER, BENEFICIARY, gas_limit));
-        assert_eq!(assert_stopped(&run_recipient, intrinsic), CAP, "the recipient");
-
-        // An applied authority.
-        let authorization = Either::Right(RecoveredAuthorization::new_unchecked(
-            Authorization { chain_id: U256::ZERO, address: CHILD, nonce: 0 },
-            RecoveredAuthority::Valid(BENEFICIARY),
-        ));
-        let authorizing = OpTx(op_transaction(TxEnv {
-            tx_type: TransactionType::Eip7702 as u8,
-            caller: CALLER,
-            kind: TxKind::Call(CONTRACT),
-            gas_limit,
-            gas_priority_fee: Some(0),
-            authorization_list: vec![authorization],
-            ..Default::default()
-        }));
-        let db = MemoryDatabase::default().account_code(CONTRACT, spinner);
-        let run_authority = execute(db, authorizing);
-        assert_eq!(run_authority.limit, Some(CAP), "the authority");
-        assert!(matches!(run_authority.outcome.result, ExecutionResult::Revert { .. }));
-        assert_eq!(run_authority.accessed, VolatileDataAccess::BENEFICIARY_BALANCE);
+        assert_eq!(assert_stopped(&run, intrinsic(gas_limit), left), CAP, "the sender");
     }
 }
 
@@ -604,7 +807,31 @@ fn test_the_most_restrictive_limit_binds_whatever_the_order() {
                 .account_code(CONTRACT, code)
                 .account_code(ORACLE_CONTRACT_ADDRESS, oracle.clone());
             let run = execute(db, tx(CALLER, CONTRACT, gas_limit));
-            let limit = assert_stopped(&run, intrinsic);
+            // What the program charges after the first read, which sets the limit: the loop
+            // expands the memory its work copies first.
+            let charges = if block_env_first {
+                // The `POP`, the work, then the call to the Oracle — five pushes, its address,
+                // `GAS` and the cold access — the Oracle's push, cold `SLOAD` and `POP`, and the
+                // caller's `POP`.
+                Charges::default().then(&[2]).work(300, 0).then(&[
+                    2,
+                    2,
+                    2,
+                    2,
+                    2,
+                    3,
+                    2,
+                    cold_access(),
+                    2,
+                    2_100,
+                    2,
+                    2,
+                ])
+            } else {
+                // The Oracle's `POP` and its caller's, the work, then `TIMESTAMP` and its `POP`.
+                Charges::default().then(&[2, 2]).work(300, 0).then(&[2, 2])
+            };
+            let limit = assert_stopped(&run, intrinsic, charges.spin(1_024).left(CAP));
             assert!(limit < CAP + 100_000, "the first read set the limit: {limit}");
             assert_eq!(run.accessed, VolatileDataAccess::TIMESTAMP | VolatileDataAccess::ORACLE);
         }
@@ -630,15 +857,19 @@ fn test_a_callers_limits_set_the_caps() {
             run_on(&mut evm, tx(CALLER, CONTRACT, gas_limit))
         };
 
-        // `TIMESTAMP` is the first instruction: 2 of compute at the read.
+        // `TIMESTAMP` is the first instruction: 2 of compute at the read. Its `POP` and the loop
+        // come after it.
         let run = run_under(limits, spin(op(BytecodeBuilder::default(), TIMESTAMP)));
-        assert_eq!(assert_stopped(&run, intrinsic), 2 + 1_000_000);
+        let left = Charges::default().then(&[2]).spin(0).left(1_000_000);
+        assert_eq!(assert_stopped(&run, intrinsic, left), 2 + 1_000_000);
 
         let run = run_under(
             limits,
             spin(call(BytecodeBuilder::default(), CALL, ORACLE_CONTRACT_ADDRESS)),
         );
-        let limit = assert_stopped(&run, intrinsic);
+        // The Oracle's `POP` and its caller's, then the loop.
+        let left = Charges::default().then(&[2, 2]).spin(0).left(2_000_000);
+        let limit = assert_stopped(&run, intrinsic, left);
         assert!((2_000_000..2_100_000).contains(&limit), "the Oracle's own cap: {limit}");
         assert_eq!(run.accessed, VolatileDataAccess::ORACLE);
 
@@ -658,15 +889,18 @@ fn test_a_callers_limits_set_the_caps() {
 }
 
 /// The default runtime limits detain: [`EvmTxRuntimeLimits::default`], and the transaction half
-/// of [`BlockLimits::default`] that a block executor installs, hold each kind of read to the
-/// spec's cap. It is `no_limits` that turns detention off, with every other per-transaction limit.
+/// of [`ProtocolLimits::for_spec`] that a context starts with and a block executor installs, hold
+/// each kind of read to the spec's cap.
 #[test]
 fn test_the_default_limits_detain() {
     let oracle = BytecodeBuilder::default().append_many([PUSH0, SLOAD, POP, STOP]).build();
     let timestamp = op(BytecodeBuilder::default(), TIMESTAMP).stop().build();
     let reads_oracle =
         call(BytecodeBuilder::default(), CALL, ORACLE_CONTRACT_ADDRESS).stop().build();
-    for limits in [EvmTxRuntimeLimits::default(), BlockLimits::default().tx_runtime_limits] {
+    for limits in [
+        EvmTxRuntimeLimits::default(),
+        ProtocolLimits::for_spec(MegaSpecId::SATIN).tx_runtime_limits,
+    ] {
         let run_under = |limits: EvmTxRuntimeLimits, code: &Bytes| {
             let db = MemoryDatabase::default()
                 .account_code(CONTRACT, code.clone())
@@ -683,10 +917,6 @@ fn test_the_default_limits_detain() {
             (ORACLE_ACCESS_COMPUTE_GAS..ORACLE_ACCESS_COMPUTE_GAS + 100_000).contains(&limit),
             "{limit}"
         );
-
-        let run = run_under(EvmTxRuntimeLimits::no_limits(), &timestamp);
-        assert!(!run.detains);
-        assert_eq!(run.limit, None);
     }
 }
 
@@ -710,22 +940,22 @@ fn test_spending_exactly_the_cap_completes() {
         assert_eq!(run.outcome.gas.regular, intrinsic(gas_limit) + spent);
 
         // One more round crosses it.
-        let code =
-            burn(op(BytecodeBuilder::default(), TIMESTAMP), u32::try_from(rounds).unwrap() + 1)
-                .stop()
-                .build();
+        let more = u32::try_from(rounds).unwrap() + 1;
+        let code = burn(op(BytecodeBuilder::default(), TIMESTAMP), more).stop().build();
         let run = execute(
             MemoryDatabase::default().account_code(CONTRACT, code),
             tx(CALLER, CONTRACT, gas_limit),
         );
-        assert_stopped(&run, intrinsic(gas_limit));
+        let left = Charges::default().then(&[2]).burn(more).left(CAP);
+        assert_stopped(&run, intrinsic(gas_limit), left);
     }
 }
 
 /// A value call's stipend is gas nobody paid, so what the callee runs on it is not compute beyond
 /// what its caller's ledger shows: a value-carrying child that reads and spins stops with the
-/// regular ledger at exactly the limit, and so does a transaction carrying value, whose own frame
-/// is given what the transaction has left and no stipend.
+/// regular ledger at its compute before the charge that crossed, which its caller catches and
+/// ends on, and so does a transaction carrying value, whose own frame is given what the
+/// transaction has left and no stipend.
 #[test]
 fn test_a_stipend_is_not_compute() {
     let child = spin(op(BytecodeBuilder::default(), TIMESTAMP));
@@ -733,7 +963,7 @@ fn test_a_stipend_is_not_compute() {
         .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
         .push_number(1_u8)
         .push_address(CHILD)
-        .append_many([GAS, CALL, POP, STOP])
+        .append_many([GAS, CALL, STOP])
         .build();
     for gas_limit in TIERS {
         let db = MemoryDatabase::default()
@@ -741,7 +971,9 @@ fn test_a_stipend_is_not_compute() {
             .account_balance(CONTRACT, U256::from(1))
             .account_code(CHILD, child.clone());
         let run = execute(db, tx(CALLER, CONTRACT, gas_limit));
-        assert_stopped(&run, intrinsic(gas_limit));
+        // Either way the reading frame's `POP` and its loop come after the read.
+        let left = Charges::default().then(&[2]).spin(0).left(CAP);
+        assert_caught(&run, intrinsic(gas_limit), left, &Charges::default());
 
         let db = MemoryDatabase::default()
             .account_code(CONTRACT, spin(op(BytecodeBuilder::default(), TIMESTAMP)))
@@ -749,7 +981,7 @@ fn test_a_stipend_is_not_compute() {
         let mut valued = tx(CALLER, CONTRACT, gas_limit);
         valued.0.base.value = U256::from(1);
         let run = execute(db, valued);
-        let limit = assert_stopped(&run, intrinsic_of_a_value_call(gas_limit));
+        let limit = assert_stopped(&run, intrinsic_of_a_value_call(gas_limit), left);
         assert_eq!(limit, CAP + 2, "TIMESTAMP was the first opcode");
     }
 }
@@ -763,7 +995,7 @@ fn test_a_call_that_reads_counts_from_what_its_caller_paid() {
         // PUSH0 x4, PUSH0, PUSH20, GAS and a warm CALL.
         (false, 2 * 4 + 2 + 3 + 2 + 100),
         // PUSH0 x4, PUSH1, PUSH20, GAS, a warm CALL and the value transfer.
-        (true, 2 * 4 + 3 + 3 + 2 + 100 + 9_000),
+        (true, 2 * 4 + 3 + 3 + 2 + 100 + value_transfer()),
     ] {
         let code = BytecodeBuilder::default().append_many([PUSH0, PUSH0, PUSH0, PUSH0]);
         let code = if value { code.push_number(1_u8) } else { code.append(PUSH0) };
@@ -804,15 +1036,19 @@ fn test_a_childs_read_caps_its_caller() {
             .account_code(CONTRACT, parent)
             .account_code(CHILD, child.clone());
         let run = execute(db, tx(CALLER, CONTRACT, gas_limit));
-        let limit = assert_stopped(&run, intrinsic);
+        // The child's `POP` and work, then its caller's `POP` and loop, each in its own memory.
+        let left = Charges::default().then(&[2]).work(500, 0).then(&[2]).spin(0).left(CAP);
+        let limit = assert_stopped(&run, intrinsic, left);
         assert!(limit < CAP + 100_000, "the child read near the start: {limit}");
     }
 }
 
-/// When a child crosses the cap, no caller resumes: the caller's code after the call — a write
-/// and a log — never runs, and every frame returns the stop.
+/// When a child crosses the cap, it reverts alone and its caller resumes, held to what the limit
+/// leaves the transaction, which is less than the charge that crossed: the caller's code after
+/// the call — a write and a log — runs until one of its charges crosses the limit again, and the
+/// caller returns the same stop, keeping nothing. The caller runs the last step.
 #[test]
-fn test_no_caller_resumes_after_the_stop() {
+fn test_a_caller_resumes_after_the_stop_held_to_what_is_left() {
     let child = spin(op(BytecodeBuilder::default(), TIMESTAMP));
     let parent = call(BytecodeBuilder::default(), CALL, CHILD)
         .sstore(U256::from(1), U256::from(1))
@@ -826,7 +1062,11 @@ fn test_no_caller_resumes_after_the_stop() {
             .account_code(CHILD, child.clone());
         let mut evm = MegaEvm::new(context(db)).with_inspector(Calls::default());
         let run = run_on(&mut evm, tx(CALLER, CONTRACT, gas_limit));
-        let limit = assert_stopped(&run, intrinsic);
+        let left = Charges::default().then(&[2]).spin(0).left(CAP);
+        // The caller's `POP`, then its write, which the room the spin left cannot pay.
+        let after = Charges::default().then(&[2]).fresh_writes(1);
+        assert!(after.crossing(left).is_some(), "the write crosses the limit again");
+        let limit = assert_caught(&run, intrinsic, left, &after);
         assert!(run.outcome.state[&CONTRACT].storage.values().all(|slot| !slot.is_changed()));
         let calls = &evm.inspector().calls;
         assert_eq!(
@@ -836,7 +1076,9 @@ fn test_no_caller_resumes_after_the_stop() {
                 (CONTRACT, InstructionResult::Revert, stop_data(limit)),
             ]
         );
-        assert!(!evm.inspector().opcodes.contains(&SSTORE), "the caller did not resume");
+        assert!(evm.inspector().opcodes.contains(&SSTORE), "the caller resumed");
+        assert!(!evm.inspector().opcodes.contains(&LOG0), "and stopped at its write");
+        assert_eq!(evm.inspector().last_frame, Some(CONTRACT), "the caller ran the last step");
     }
 }
 
@@ -855,7 +1097,14 @@ fn test_the_stop_bills_the_same_above_and_below_the_execution_cap() {
                 .account_code(CONTRACT, parent.clone())
                 .account_code(CHILD, child.clone());
             let run = execute(db, tx(CALLER, CONTRACT, *gas_limit));
-            assert_stopped(&run, intrinsic(*gas_limit));
+            // The child's `POP` and spin, then its caller's, which resumes on what is left.
+            let left = Charges::default().then(&[2]).spin(0).left(CAP);
+            assert_caught(
+                &run,
+                intrinsic(*gas_limit),
+                left,
+                &Charges::default().then(&[2]).spin(0),
+            );
             let body_history = run.outcome.gas.history;
             let reservoir = gas_limit.saturating_sub(TX_GAS_LIMIT_CAP).saturating_sub(body_history);
             assert_eq!(run.outcome.gas.reservoir_remaining, reservoir, "the reservoir came back");
@@ -908,30 +1157,41 @@ fn test_running_out_of_the_frames_own_gas_still_halts() {
 }
 
 /// Writes after a read are held to the cap by the regular gas they spend. With room in the
-/// reservoir for their state and history gas, a thousand fresh slots — 22,100,000 of compute —
-/// cross it and stop the transaction. Without that room the writes drain the withheld gas first
-/// and the frame runs out of its own gas where it would have undetained: it halts.
+/// reservoir for their state and history gas, one fresh slot more than the cap's compute pays for
+/// — 1,653 at the schedule's prices, 20,011,218 of compute — crosses it and stops the transaction,
+/// at the first write's charge past it. Without a reservoir,
+/// and with less gas than the writes spend before their compute reaches the cap, the writes drain
+/// the withheld gas first and the frame runs out of its own gas where it would have undetained: it
+/// halts.
 #[test]
 fn test_writes_after_a_read_stop_at_the_cap_or_run_out_of_their_own_gas() {
+    let slots = CAP / fresh_write() + 1;
     let mut code = op(BytecodeBuilder::default(), TIMESTAMP);
-    for slot in 1..=1_000_u64 {
+    for slot in 1..=slots {
         code = code.sstore(U256::from(slot), U256::from(1));
     }
     let code = code.stop().build();
 
+    // A reservoir that pays every write's state gas and history.
+    let gas_limit = TX_GAS_LIMIT_CAP + slots * fresh_write_spill();
     let run = execute(
         MemoryDatabase::default().account_code(CONTRACT, code.clone()),
-        tx(CALLER, CONTRACT, ABOVE),
+        tx(CALLER, CONTRACT, gas_limit),
     );
-    assert_stopped(&run, intrinsic(ABOVE));
+    let left = Charges::default().then(&[2]).fresh_writes(slots).left(CAP);
+    assert_stopped(&run, intrinsic(gas_limit), left);
 
+    // The cap, and half of what the writes that fit in it spill: more than the cap, so the read
+    // withholds gas, and less than those writes spend, so the gas runs out before the compute
+    // reaches the cap. Below the execution cap either way.
+    let gas_limit = BELOW.min(CAP + CAP / fresh_write() * fresh_write_spill() / 2);
     let run = execute(
         MemoryDatabase::default().account_code(CONTRACT, code),
-        tx(CALLER, CONTRACT, BELOW),
+        tx(CALLER, CONTRACT, gas_limit),
     );
     assert!(matches!(run.outcome.result, ExecutionResult::Halt { .. }), "{:?}", run.outcome.result);
     assert_eq!(run.outcome.limit_exceeded, None);
-    assert_eq!(run.outcome.result.gas().tx_gas_used(), BELOW, "a halt burns the gas");
+    assert_eq!(run.outcome.result.gas().tx_gas_used(), gas_limit, "a halt burns the gas");
 }
 
 /* ---------- what is not marked ---------- */
@@ -941,20 +1201,21 @@ fn test_writes_after_a_read_stop_at_the_cap_or_run_out_of_their_own_gas() {
 ///
 /// - The Oracle's slot is cold and the frame cannot pay the cold access, so the Host does not load
 ///   it. (The block beneficiary is always warm, so its load cannot be skipped this way.)
-/// - A value transfer to the empty beneficiary loads it, then cannot pay the new account, and the
+/// - A value transfer to the empty beneficiary loads it, then cannot pay the transfer, and the
 ///   `CALL` fails.
 #[test]
 fn test_a_failed_load_caps_nothing() {
     // The push and SLOAD's static 100 leave less than the 2,000 more a cold slot costs.
     let oracle = BytecodeBuilder::default().append_many([PUSH0, SLOAD, STOP]).build();
-    // 9,000 for the transfer and 25,000 for the new account do not fit in 30,000.
+    // The child's pushes and the warm access leave less than the value transfer.
     let child = BytecodeBuilder::default()
         .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
         .push_number(1_u8)
         .push_address(BENEFICIARY)
         .append_many([PUSH0, CALL, STOP])
         .build();
-    for (callee, gas) in [(ORACLE_CONTRACT_ADDRESS, 2_000_u32), (CHILD, 30_000)] {
+    let transfer = u32::try_from(value_transfer()).expect("the transfer's price fits a PUSH4");
+    for (callee, gas) in [(ORACLE_CONTRACT_ADDRESS, 2_000_u32), (CHILD, transfer)] {
         let parent = BytecodeBuilder::default()
             .append_many([PUSH0, PUSH0, PUSH0, PUSH0, PUSH0])
             .push_address(callee)
@@ -1018,11 +1279,13 @@ fn test_an_inspectors_reads_are_not_the_transactions() {
 
 /* ---------- refused reads ---------- */
 
-/// Records every call's result and the gas it spent, and every opcode that ran.
+/// Records every call's result and the gas it spent, every opcode that ran, and the frame the
+/// last one ran in.
 #[derive(Default)]
 pub(crate) struct Calls {
     pub(crate) calls: Vec<CallRecord>,
     pub(crate) opcodes: Vec<u8>,
+    pub(crate) last_frame: Option<Address>,
 }
 
 pub(crate) struct CallRecord {
@@ -1030,12 +1293,17 @@ pub(crate) struct CallRecord {
     pub(crate) result: InstructionResult,
     pub(crate) output: Bytes,
     pub(crate) spent: u64,
+    /// The gas the caller forwarded.
+    pub(crate) forward: u64,
+    /// Whether revm ran a precompile for the call.
+    pub(crate) precompile_ran: bool,
 }
 
 impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Calls {
     fn step(&mut self, interp: &mut Interpreter<EthInterpreter>, _context: &mut MegaContext<DB>) {
         use revm::interpreter::interpreter_types::Jumps;
         self.opcodes.push(interp.bytecode.opcode());
+        self.last_frame = Some(interp.input.target_address);
     }
 
     fn call_end(
@@ -1050,6 +1318,8 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Calls {
             result: outcome.result.result,
             output: outcome.result.output.clone(),
             spent: gas.limit() - gas.remaining(),
+            forward: inputs.gas_limit,
+            precompile_ran: outcome.was_precompile_called,
         });
     }
 }
@@ -1094,7 +1364,8 @@ fn test_a_refused_read_reverts_the_frame_and_charges_its_static_gas() {
                 .push_address(BENEFICIARY)
                 .append(EXTCODECOPY)
                 .build(),
-            3 + 2 + 2 + 3 + 100,
+            // `EXTCODECOPY`'s static gas is EIP-8038's two warm reads, the account and its code.
+            3 + 2 + 2 + 3 + 200,
             VolatileDataAccess::BENEFICIARY_BALANCE,
         ),
         (
@@ -1154,9 +1425,10 @@ fn test_a_refused_read_reverts_the_frame_and_charges_its_static_gas() {
     }
 }
 
-/// The refusal of a `SLOTNUM` names access type 12, one past the contract's enum; the others name
-/// their enum variant, `BLOCKHASH`'s the hash it reads (7), as on the legacy engine, although
-/// revm's instruction loads the block number first.
+/// The refusal names its enum variant, `BLOCKHASH`'s the hash it reads (7), as on the legacy
+/// engine, although revm's instruction loads the block number first. The `SLOTNUM` refusal, access
+/// type 12, one past the contract's enum, is pinned by the access-control tests and the decoder's
+/// unit test.
 #[test]
 fn test_the_refusal_names_the_access_type() {
     use mega_evm::system::{IMegaAccessControl, VolatileDataAccessType};
@@ -1173,14 +1445,6 @@ fn test_the_refusal_names_the_access_type() {
         );
     }
     assert_eq!(VolatileDataAccessType::BlockHash as u8, 7);
-    let slot_num = volatile_data_access_disabled_revert_data(VolatileDataAccess::SLOT_NUM);
-    assert_eq!(&slot_num[..4], IMegaAccessControl::VolatileDataAccessDisabled::SELECTOR.as_slice());
-    assert_eq!(U256::from_be_slice(&slot_num[4..]), U256::from(12));
-    assert_eq!(mega_evm::system::SLOT_NUM_ACCESS_TYPE, 12);
-    assert_eq!(
-        mega_evm::decode_volatile_data_access_disabled(&slot_num),
-        Some(VolatileDataAccess::SLOT_NUM)
-    );
 }
 
 /// The switch holds for the frame it is off from and every frame below, and a frame above it
@@ -1230,7 +1494,7 @@ fn test_the_switch_is_scoped_to_its_subtree() {
 /// its own regular gas with the forward counted back, the gas `GAS` reads after the call plus the
 /// `POP` and the `GAS` it costs to read it; after the read, the cap less what the caller spent
 /// since the read — the read's `POP`, the calldata's `MSTORE` with its push and its memory, the
-/// call's five pushes and its `GAS`, and the cold access to the contract: 2,631.
+/// call's five pushes and its `GAS`, and the cold access to the contract: 3,031.
 #[test]
 fn test_an_interceptors_answer_does_not_lift_the_cap() {
     let calldata = IMegaLimitControl::remainingComputeGasCall {}.abi_encode();
@@ -1255,7 +1519,14 @@ fn test_an_interceptors_answer_does_not_lift_the_cap() {
             MemoryDatabase::default().account_code(CONTRACT, code),
             tx(CALLER, CONTRACT, gas_limit),
         );
-        assert_stopped(&run, intrinsic);
+        // What is spent up to the call's cold access, 31 and the access itself; the answer, which
+        // spends nothing; the `POP`, the push, `MLOAD`, the push and a fresh, cold slot's write;
+        // then the loop, in a memory of one word.
+        let left = Charges::default()
+            .then(&[31 + cold_access(), 2, 3, 3, 3, sstore_static(), fresh_sstore()])
+            .spin(1)
+            .left(CAP);
+        assert_stopped(&run, intrinsic, left);
 
         // The answer and the gas the caller holds after the call, read without the loop, after
         // the read and after a push in its place.
@@ -1289,7 +1560,7 @@ fn test_an_interceptors_answer_does_not_lift_the_cap() {
         let (undetained, held_without_the_read) = answer(PUSH0);
         assert_eq!(held, held_without_the_read, "the forward came back whole");
         assert_eq!(undetained, held + U256::from(2 + 2), "the caller's own gas: POP and GAS");
-        assert_eq!(detained, U256::from(CAP - 2_631), "what the cap leaves");
+        assert_eq!(detained, U256::from(CAP - 31 - cold_access()), "what the cap leaves");
     }
 }
 
@@ -1322,23 +1593,64 @@ fn test_a_frames_return_hands_back_what_was_withheld() {
 }
 
 /// State and history gas are not compute, whether they come out of the reservoir or spill onto
-/// regular gas: after the read, a frame writes more state gas than the cap and still completes.
+/// regular gas: after the read, a frame spends more than the cap on fresh slots and still
+/// completes, its compute within the cap and their state and history gas past it.
 #[test]
 fn test_state_and_history_gas_are_not_compute() {
-    // 300 fresh slots: 29,376,000 of state gas and 1,056,000 of history, 6,630,000 of compute.
+    // As many fresh slots as the cap leaves compute for, and as a gas limit below the execution
+    // cap pays for with a million to spare: at the spec's prices, more state gas than the cap.
+    let spill = fresh_write_spill();
+    // A write that spills nothing, where a state byte and a record's history are both free, has
+    // nothing beside its compute to leave out of it.
+    if spill == 0 {
+        return;
+    }
+    let slots = (CAP / fresh_write()).min((BELOW - 1_000_000) / (fresh_write() + spill));
+    assert!(slots * (fresh_write() + spill) > CAP, "counted as compute, the writes cross the cap");
     let mut code = op(BytecodeBuilder::default(), TIMESTAMP);
-    for slot in 1..=300_u64 {
+    for slot in 1..=slots {
         code = code.sstore(U256::from(slot), U256::from(1));
     }
     let code = code.stop().build();
+    // What the run must report, from the schedule at the prices in effect: each slot's state gas;
+    // the body's history bytes and one record a slot; and the compute of TIMESTAMP and its POP,
+    // two each, then the writes, on top of the intrinsic gas.
+    let state = slots * crate::salt::entry(GasId::sstore_set_state_gas());
+    let history_bytes = TX_BODY_SIZE + slots * WRITE_RECORD_SIZE;
+    // The body and each slot's record are charges of their own, each priced on its own.
+    let history = history_gas(TX_BODY_SIZE).expect("the body has a price") +
+        slots * history_gas(WRITE_RECORD_SIZE).expect("a record has a price");
+    let compute = 2 + 2 + slots * fresh_write();
+    assert!(compute < CAP, "the writes' compute fits under the cap");
+    // Each slot as (slot, original, present), by slot.
+    let written: Vec<_> =
+        (1..=slots).map(|slot| (U256::from(slot), U256::ZERO, U256::from(1))).collect();
     for gas_limit in TIERS {
         let run = execute(
             MemoryDatabase::default().account_code(CONTRACT, code.clone()),
             tx(CALLER, CONTRACT, gas_limit),
         );
         assert!(run.outcome.result.is_success(), "{:?}", run.outcome.result);
-        assert!(run.outcome.gas.state > CAP, "{}", run.outcome.gas.state);
-        assert!(run.outcome.gas.regular < CAP);
+        let case = format!("gas limit {gas_limit}");
+        let contract = &run.outcome.state[&CONTRACT];
+        assert!(contract.is_touched(), "{case}: the contract wrote its slots");
+        let mut storage: Vec<_> = contract
+            .changed_storage_slots()
+            .map(|(slot, value)| (*slot, value.original_value, value.present_value))
+            .collect();
+        storage.sort_unstable();
+        assert_eq!(storage, written, "{case}: each of the {slots} slots went from 0 to 1");
+        let gas = run.outcome.gas;
+        assert_eq!(gas.state, state, "{case}: each fresh slot's state gas");
+        assert_eq!(gas.history_bytes, history_bytes, "{case}: the body and a record a slot");
+        assert_eq!(gas.history, history, "{case}: the history of those bytes");
+        assert_eq!(gas.regular, intrinsic(gas_limit) + compute, "{case}: the compute alone");
+        assert_eq!(run.limit, Some(2 + CAP), "{case}: TIMESTAMP set the limit, first");
+        assert_eq!(
+            run.outcome.usage,
+            LimitUsage { data_size: history_bytes, write_records: slots },
+            "{case}: one write record a slot",
+        );
     }
 }
 
@@ -1358,9 +1670,10 @@ fn test_gas_spilled_before_the_read_is_not_compute() {
             MemoryDatabase::default().account_code(CONTRACT, code.clone()),
             tx(CALLER, CONTRACT, gas_limit),
         );
-        let limit = assert_stopped(&run, intrinsic(gas_limit));
-        // Two pushes and a fresh slot's 22,100 of regular gas, a hundred times, then TIMESTAMP.
-        assert_eq!(limit - CAP, 100 * (3 + 3 + 22_100) + 2, "{gas_limit}");
+        let left = Charges::default().then(&[2]).spin(0).left(CAP);
+        let limit = assert_stopped(&run, intrinsic(gas_limit), left);
+        // Two pushes and a fresh slot's regular gas, a hundred times, then TIMESTAMP.
+        assert_eq!(limit - CAP, 100 * fresh_write() + 2, "{gas_limit}");
     }
 }
 
@@ -1375,5 +1688,64 @@ fn test_a_refill_after_the_read_does_not_lift_the_cap() {
         MemoryDatabase::default().account_code(CONTRACT, code),
         tx(CALLER, CONTRACT, BELOW),
     );
-    assert_stopped(&run, intrinsic(BELOW));
+    // The `POP`, then the restoring write — two pushes and `SSTORE`'s static gas, the whole of a
+    // warm write that restores its slot's original value — then the loop.
+    let left = Charges::default().then(&[2, 3, 3, 100]).spin(0).left(CAP);
+    assert_stopped(&run, intrinsic(BELOW), left);
+}
+
+/// A chain's caps must be below [`MAX_TX_COMPUTE_GAS`], the most compute a transaction can
+/// spend. The transaction that can spend it pays the least a frame that runs code can before its
+/// first instruction — a call to its own sender, which EIP-2780 charges its base cost alone, whose
+/// delegate, the block beneficiary, is warm — and is detained from its start, since its recipient
+/// delegates to the beneficiary; above the execution cap its body's history is the reservoir's.
+/// Its frame holds exactly the most compute, so a cap there never stops it, and it runs out of its
+/// own gas; a cap below what it holds by more than any one charge of its loop stops it.
+#[test]
+fn test_the_most_compute_a_transaction_can_spend_bounds_the_caps() {
+    use mega_evm::constants::MAX_TX_COMPUTE_GAS;
+    let intrinsic = TX_GAS_LIMIT_CAP - MAX_TX_COMPUTE_GAS;
+    let run_under = |cap: u64, code: Bytes| {
+        let db = with_delegation(
+            MemoryDatabase::default()
+                .account_code(BENEFICIARY, code)
+                .account_balance(DELEGATOR, U256::from(1_u64 << 60)),
+            DELEGATOR,
+            BENEFICIARY,
+        );
+        let limits = EvmTxRuntimeLimits::default()
+            .with_block_env_access_compute_gas_limit(cap)
+            .with_oracle_access_compute_gas_limit(cap);
+        run_on(
+            &mut MegaEvm::new(context(db).with_tx_runtime_limits(limits)),
+            tx(DELEGATOR, DELEGATOR, ABOVE),
+        )
+    };
+
+    // `GAS` answers what the frame holds, less its own 2.
+    let answers_gas = BytecodeBuilder::default()
+        .append(GAS)
+        .append_many([PUSH0, MSTORE])
+        .push_number(32_u8)
+        .append_many([PUSH0, RETURN])
+        .build();
+    let run = run_under(MAX_TX_COMPUTE_GAS, answers_gas);
+    assert_eq!(run.limit, Some(MAX_TX_COMPUTE_GAS), "detained from the start");
+    let output = run.outcome.result.output().expect("the frame returns");
+    assert_eq!(U256::from_be_slice(output), U256::from(MAX_TX_COMPUTE_GAS - 2));
+    assert_eq!(run.outcome.gas.regular, intrinsic + 15, "the program's 15 is its only compute");
+
+    let spinner = spin(BytecodeBuilder::default());
+    let run = run_under(MAX_TX_COMPUTE_GAS, spinner.clone());
+    assert_eq!(run.limit, Some(MAX_TX_COMPUTE_GAS));
+    assert_eq!(run.outcome.limit_exceeded, None, "a cap at the most compute never stops it");
+    assert!(
+        matches!(run.outcome.result, ExecutionResult::Halt { .. }),
+        "it runs out of its own gas: {:?}",
+        run.outcome.result
+    );
+
+    let cap = MAX_TX_COMPUTE_GAS - 10_000;
+    let run = run_under(cap, spinner);
+    assert_eq!(assert_stopped(&run, intrinsic, Charges::default().spin(0).left(cap)), cap);
 }

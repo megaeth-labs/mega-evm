@@ -1,26 +1,35 @@
 //! The system-address transaction: what it may do, what it pays, and what still validates it.
 
 use alloy_evm::Evm;
-use alloy_op_evm::OpTx;
+use alloy_op_evm::{OpTx, OpTxError};
 use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
     system::{
-        is_deposit_like_transaction, is_mega_system_transaction_with, IOracle, ISequencerRegistry,
-        MEGA_SYSTEM_ADDRESS, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH, ORACLE_CONTRACT_ADDRESS,
-        SEQUENCER_REGISTRY_ADDRESS,
+        is_mega_system_transaction_with, IOracle, ISequencerRegistry, MEGA_SYSTEM_ADDRESS,
+        MEGA_SYSTEM_TRANSACTION_SOURCE_HASH, ORACLE_CONTRACT_ADDRESS, SEQUENCER_REGISTRY_ADDRESS,
+        SYSTEM_ADDRESS_WITHOUT_SYSTEM_SHAPE,
     },
-    test_utils::{op_transaction, MemoryDatabase},
-    EvmTxRuntimeLimits, LimitUsage, MegaContext, MegaEvm, MegaTransaction, MegaTransactionOutcome,
+    test_utils::{op_transaction, ErrorInjectingDatabase, GasInspector, MemoryDatabase},
+    EvmTxRuntimeLimits, LimitUsage, MegaContext, MegaEvm, MegaHaltReason, MegaTransaction,
+    MegaTransactionOutcome,
 };
 use mega_system_contracts::sequencer_registry::storage_slots::CURRENT_SYSTEM_ADDRESS;
+use op_revm::{transaction::deposit::DEPOSIT_TRANSACTION_TYPE, OpTransactionError};
 use revm::{
-    context::{result::ExecutionResult, CfgEnv, TxEnv},
-    database::State,
+    bytecode::opcode::{SLOAD, STOP},
+    context::{
+        result::{EVMError, ExecutionResult, InvalidTransaction},
+        transaction::{AccessList, AccessListItem},
+        CfgEnv, TxEnv,
+    },
+    database::{states::bundle_state::BundleRetention, State},
     DatabaseCommit,
 };
 
-use crate::common::{block, context, system_db, CALLER, GAS_LIMIT};
+use crate::common::{
+    account_state_gas, block, context, state_is_free, system_db, CALLER, GAS_LIMIT,
+};
 
 /// The chain the tests run on.
 const CHAIN_ID: u64 = 4326;
@@ -28,23 +37,17 @@ const CHAIN_ID: u64 = 4326;
 /// A contract that is not on the whitelist.
 const OFF_WHITELIST: Address = address!("0x00000000000000000000000000000000000dead1");
 
-/// The refusal every transaction from the system address that is not a system transaction gets:
-/// the rule it broke, whichever way it broke it.
-const NOT_A_SYSTEM_TRANSACTION: &str =
-    "a transaction from the system address must be a legacy call to a whitelisted contract";
+/// A balance that pays any fee the tests' transactions carry.
+const FUNDS: u64 = 1_000_000_000_000_000;
 
 /// The Oracle's slot the system transactions write.
 const ORACLE_SLOT: U256 = U256::ZERO;
 
 /// A database with the system contracts in place and the registry naming
-/// [`MEGA_SYSTEM_ADDRESS`] the current system address, which is what lets an Oracle write from
-/// it through.
+/// [`MEGA_SYSTEM_ADDRESS`] the current system address: that is what makes a legacy call from it
+/// to the Oracle a system-address transaction, and what lets its Oracle write through.
 fn chain_db() -> MemoryDatabase {
-    system_db().account_storage(
-        SEQUENCER_REGISTRY_ADDRESS,
-        CURRENT_SYSTEM_ADDRESS,
-        U256::from_be_slice(MEGA_SYSTEM_ADDRESS.as_slice()),
-    )
+    system_db().sequencer_registry(MEGA_SYSTEM_ADDRESS)
 }
 
 /// A legacy transaction from `caller`, as the sequencer builds one.
@@ -153,7 +156,6 @@ fn test_a_system_transaction_is_promoted_to_a_deposit() {
     let mut evm = MegaEvm::new(chain_context(chain_db()));
     let tx = system_tx(0, B256::with_last_byte(0x11));
     assert!(is_mega_system_transaction_with(&tx, MEGA_SYSTEM_ADDRESS));
-    assert!(is_deposit_like_transaction(&tx, MEGA_SYSTEM_ADDRESS));
 
     assert!(evm.transact_raw(tx).expect("the transaction is valid").result.is_success());
     assert_eq!(
@@ -190,13 +192,6 @@ fn test_a_system_transaction_pays_no_fee() {
     );
 }
 
-/// A system transaction needs no balance at all: nothing is deducted from its caller.
-#[test]
-fn test_a_system_transaction_needs_no_balance() {
-    let outcome = run_outcome(chain_db(), system_tx(0, B256::with_last_byte(0x33)));
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-}
-
 /// A system transaction that carries value moves exactly that value, and no fee with it.
 #[test]
 fn test_a_system_transaction_moves_only_its_value() {
@@ -218,33 +213,180 @@ fn test_a_system_transaction_moves_only_its_value() {
     assert_eq!(outcome.state[&ORACLE_CONTRACT_ADDRESS].info.balance, transferred);
 }
 
-/// A transaction from the system address to a contract that is not on the whitelist is
-/// rejected, and so is one that creates a contract.
-#[test]
-fn test_the_whitelist_is_what_the_system_address_may_call() {
-    let off_whitelist =
-        legacy_tx(MEGA_SYSTEM_ADDRESS, TxKind::Call(OFF_WHITELIST), Bytes::new(), 0);
-    let refused = rejection(chain_db(), off_whitelist);
-    assert!(refused.contains(NOT_A_SYSTEM_TRANSACTION), "{refused}");
-
-    let creation = legacy_tx(
-        MEGA_SYSTEM_ADDRESS,
-        TxKind::Create,
-        Bytes::from_static(&[0x60, 0x00, 0x60, 0x00, 0xf3]),
-        0,
-    );
-    let refused = rejection(chain_db(), creation);
-    assert!(refused.contains(NOT_A_SYSTEM_TRANSACTION), "{refused}");
+/// `tx` with its type set to `tx_type`: an EIP-2930 (1) or EIP-1559 (2) transaction with the same
+/// fields and an empty access list. An EIP-1559 one tips its whole fee cap, so it pays the price
+/// the legacy one does on a block with no base fee.
+fn typed(mut tx: MegaTransaction, tx_type: u8) -> MegaTransaction {
+    tx.0.base.tx_type = tx_type;
+    if tx_type == 2 {
+        tx.0.base.gas_priority_fee = Some(tx.0.base.gas_price);
+    }
+    tx
 }
 
-/// A transaction from the system address that is not a legacy one is refused whatever it calls:
-/// the sequencer builds the legacy shape, and the promotion is what turns it into a deposit.
+/// A call to the Oracle's `getSlot`, which reads nothing of the registry itself.
+fn get_slot() -> Bytes {
+    IOracle::getSlotCall { slot: ORACLE_SLOT }.abi_encode().into()
+}
+
+/// The transactions from `caller` that do not have the system shape: a legacy call off the
+/// whitelist, a legacy creation, and an EIP-2930 and an EIP-1559 call to the Oracle.
+fn other_shapes(caller: Address) -> [(&'static str, MegaTransaction); 4] {
+    let oracle = TxKind::Call(ORACLE_CONTRACT_ADDRESS);
+    [
+        ("off the whitelist", legacy_tx(caller, TxKind::Call(OFF_WHITELIST), Bytes::new(), 0)),
+        ("a creation", legacy_tx(caller, TxKind::Create, Bytes::from_static(&[STOP]), 0)),
+        ("EIP-2930", typed(legacy_tx(caller, oracle, get_slot(), 0), 1)),
+        ("EIP-1559", typed(legacy_tx(caller, oracle, get_slot(), 0), 2)),
+    ]
+}
+
+/// A transaction from the live system address that does not have the system shape — off the
+/// whitelist, a creation, another type than legacy — is invalid: refused with the same error
+/// whether or not the system address could pay its fee, and changing nothing.
 #[test]
-fn test_a_non_legacy_transaction_from_the_system_address_is_refused() {
-    let mut tx = system_tx(0, B256::with_last_byte(0xaf));
-    tx.0.base.tx_type = 2; // EIP-1559
-    let refused = rejection(chain_db(), tx);
-    assert!(refused.contains(NOT_A_SYSTEM_TRANSACTION), "{refused}");
+fn test_another_shape_from_the_live_system_address_is_invalid() {
+    let db = || chain_db().account_code(OFF_WHITELIST, Bytes::from_static(&[STOP]));
+    for (shape, tx) in other_shapes(MEGA_SYSTEM_ADDRESS) {
+        for db in [db(), db().account_balance(MEGA_SYSTEM_ADDRESS, U256::from(FUNDS))] {
+            let error = MegaEvm::new(chain_context(db))
+                .execute_transaction(tx.clone())
+                .expect_err("the system address sends the system shape alone");
+            let EVMError::Transaction(OpTxError(OpTransactionError::Base(
+                InvalidTransaction::Str(message),
+            ))) = &error
+            else {
+                panic!("{shape}: not the shape's refusal: {error:?}");
+            };
+            assert_eq!(message, SYSTEM_ADDRESS_WITHOUT_SYSTEM_SHAPE, "{shape}");
+        }
+    }
+}
+
+/// Every transaction reads the registry when it is validated, whatever its shape and whoever
+/// sends it: its returned state holds the registry's account, untouched, and the system-address
+/// slot, unchanged, and a database that cannot serve the registry's account or that slot fails it
+/// with the database's error, a deposit included.
+#[test]
+fn test_every_transaction_reads_the_registry() {
+    let funded = || {
+        chain_db()
+            .account_code(OFF_WHITELIST, Bytes::from_static(&[STOP]))
+            .account_balance(CALLER, U256::from(FUNDS))
+    };
+    let shaped = legacy_tx(CALLER, TxKind::Call(ORACLE_CONTRACT_ADDRESS), get_slot(), 0);
+    let deposit = deposit_tx(CALLER, TxKind::Call(OFF_WHITELIST), U256::ZERO, 0);
+    let transactions = other_shapes(CALLER)
+        .into_iter()
+        .chain([("the system shape", shaped), ("a deposit", deposit)]);
+    for (shape, tx) in transactions {
+        let outcome = MegaEvm::new(chain_context(funded()))
+            .execute_transaction(tx.clone())
+            .expect("an ordinary transaction");
+        assert!(outcome.result.is_success(), "{shape}: {:?}", outcome.result);
+        let registry = &outcome.state[&SEQUENCER_REGISTRY_ADDRESS];
+        assert!(!registry.is_touched(), "{shape}: a read-only entry");
+        let slot = &registry.storage[&CURRENT_SYSTEM_ADDRESS];
+        assert!(!slot.is_changed(), "{shape}");
+        assert_eq!(slot.present_value(), U256::from_be_slice(MEGA_SYSTEM_ADDRESS.as_slice()));
+
+        let mut account = ErrorInjectingDatabase::new(funded());
+        account.fail_on_account = Some(SEQUENCER_REGISTRY_ADDRESS);
+        let mut slot = ErrorInjectingDatabase::new(funded());
+        slot.fail_on_storage = Some((SEQUENCER_REGISTRY_ADDRESS, CURRENT_SYSTEM_ADDRESS));
+        for db in [account, slot] {
+            let error = MegaEvm::new(chain_context(db))
+                .execute_transaction(tx.clone())
+                .expect_err("the registry is read");
+            assert!(matches!(error, EVMError::Database(_)), "{shape}: {error:?}");
+        }
+    }
+}
+
+/// Every transaction starts with the registry's account and its system-address slot warm, as
+/// EIP-3651 starts the block beneficiary warm: validation reads the live system address for every
+/// transaction, whatever its shape. A user's call to the Oracle's `setSlots` makes the Oracle ask
+/// the registry for the system address itself, and that `SLOAD` pays the warm price, as a legacy
+/// call, as an EIP-2930 call, and as one whose access list names the slot alike: the shape of the
+/// envelope changes nothing the transaction pays, and the access list adds only its own
+/// intrinsic cost.
+#[test]
+fn test_every_transaction_warms_the_registry_and_its_slot() {
+    let run = |tx: MegaTransaction| {
+        let mut evm =
+            MegaEvm::new(chain_context(chain_db().account_balance(CALLER, U256::from(FUNDS))))
+                .with_inspector(GasInspector::new());
+        let outcome = evm.execute_transaction(tx).expect("an ordinary transaction");
+        assert!(!outcome.result.is_success(), "the Oracle refuses a write from a user");
+        let sloads: Vec<u64> = evm
+            .inspector()
+            .records()
+            .iter()
+            // The transaction's frame is at journal depth 1, the registry's call below it at 2.
+            .filter(|record| record.opcode.get() == SLOAD && record.depth == 2)
+            .map(|record| record.gas_cost())
+            .collect();
+        assert_eq!(sloads.len(), 1, "the registry reads its one slot: {sloads:?}");
+        (outcome, sloads[0])
+    };
+    let write = || {
+        legacy_tx(
+            CALLER,
+            TxKind::Call(ORACLE_CONTRACT_ADDRESS),
+            set_slot(ORACLE_SLOT, B256::with_last_byte(1)),
+            0,
+        )
+    };
+
+    let warm = mega_evm::satin_gas_params().warm_storage_read_cost();
+
+    let (shaped, legacy) = run(write());
+    let (unshaped, typed_call) = run(typed(write(), 1));
+    for (shape, outcome) in [("legacy", &shaped), ("EIP-2930", &unshaped)] {
+        let registry = &outcome.state[&SEQUENCER_REGISTRY_ADDRESS];
+        assert!(!registry.is_touched(), "{shape}: the read writes nothing");
+        assert!(registry.storage.contains_key(&CURRENT_SYSTEM_ADDRESS), "{shape}: the slot");
+    }
+    assert_eq!(legacy, warm, "the legacy call's SLOAD is warm");
+    assert_eq!(typed_call, warm, "and so is the EIP-2930 call's");
+    assert_eq!(shaped.gas, unshaped.gas, "the two spend the same gas on every ledger");
+
+    let mut listed = typed(write(), 1);
+    listed.0.base.access_list = AccessList(vec![AccessListItem {
+        address: SEQUENCER_REGISTRY_ADDRESS,
+        storage_keys: vec![B256::from(CURRENT_SYSTEM_ADDRESS)],
+    }]);
+    let (_, listed) = run(listed);
+    assert_eq!(listed, warm, "an access list naming the slot makes it no warmer");
+}
+
+/// The registry's account and slot every transaction reads are an untouched entry of its state,
+/// and a commit skips an account nothing touched: committing a transaction writes nothing of the
+/// registry, whether the state holds a registry or not, so the state root moves as it would
+/// without the read.
+#[test]
+fn test_committing_a_transaction_writes_nothing_of_the_registry() {
+    for (holds, db) in [("a registry", chain_db()), ("no registry", MemoryDatabase::default())] {
+        let db = db
+            .account_balance(CALLER, U256::from(FUNDS))
+            .account_code(OFF_WHITELIST, Bytes::from_static(&[STOP]));
+        let mut state = State::builder().with_database(db).with_bundle_update().build();
+        let mut evm = MegaEvm::new(chain_context(&mut state));
+        let tx = legacy_tx(CALLER, TxKind::Call(OFF_WHITELIST), Bytes::new(), 0);
+        let outcome = evm.execute_transaction(tx).expect("an ordinary transaction");
+        assert!(outcome.result.is_success(), "{holds}: {:?}", outcome.result);
+        assert!(outcome.state.contains_key(&SEQUENCER_REGISTRY_ADDRESS), "{holds}: it was read");
+        drop(evm);
+        state.commit(outcome.state.clone());
+
+        state.merge_transitions(BundleRetention::Reverts);
+        let bundle = state.take_bundle();
+        assert!(bundle.state.contains_key(&CALLER), "{holds}: the commit wrote the sender");
+        assert!(
+            !bundle.state.contains_key(&SEQUENCER_REGISTRY_ADDRESS),
+            "{holds}: and nothing of the registry"
+        );
+    }
 }
 
 /// The whitelist holds for the system address alone: anyone else may call anything, and pays
@@ -272,7 +414,7 @@ fn test_a_user_deposit_is_not_a_system_transaction() {
     let mut tx = legacy_tx(CALLER, TxKind::Call(OFF_WHITELIST), Bytes::new(), 0);
     tx.0.deposit.source_hash = B256::repeat_byte(0x11);
 
-    assert!(is_deposit_like_transaction(&tx, MEGA_SYSTEM_ADDRESS));
+    assert_eq!(revm::context::Transaction::tx_type(&tx), DEPOSIT_TRANSACTION_TYPE);
     assert!(!is_mega_system_transaction_with(&tx, MEGA_SYSTEM_ADDRESS));
     let outcome = run_outcome(db, tx);
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
@@ -370,29 +512,48 @@ fn test_a_system_address_with_code_is_refused() {
     assert!(rejected.contains("RejectCallerWithCode"), "{rejected}");
 }
 
-/// The checks a caller switches off for user transactions are switched off here too: one shape
-/// of validation, not two.
+/// Runs `tx` on `db` under the chain's configuration with `mutate` applied.
+fn run_with(
+    mutate: fn(&mut CfgEnv<mega_evm::MegaSpecId>),
+    db: MemoryDatabase,
+    tx: MegaTransaction,
+) -> Result<MegaTransactionOutcome, EVMError<core::convert::Infallible, OpTxError>> {
+    let mut cfg = CfgEnv::new_with_spec(mega_evm::MegaSpecId::SATIN);
+    cfg.chain_id = CHAIN_ID;
+    mutate(&mut cfg);
+    MegaEvm::new(context(db).with_cfg(cfg)).execute_transaction(tx)
+}
+
+/// The chain id is checked whatever the caller's configuration says: the spec fixes the check on.
+/// A transaction carrying another chain's id is refused, a system transaction as a user's, and a
+/// typed transaction must carry one; a user's legacy transaction may carry none (pre-EIP-155), a
+/// system transaction may not.
+#[test]
+fn test_the_chain_id_is_checked_whatever_the_configuration_says() {
+    let off = |cfg: &mut CfgEnv<mega_evm::MegaSpecId>| cfg.tx_chain_id_check = false;
+    let funded = || chain_db().account_balance(CALLER, U256::from(FUNDS));
+    let oracle = TxKind::Call(ORACLE_CONTRACT_ADDRESS);
+    let write = || set_slot(ORACLE_SLOT, B256::with_last_byte(0xee));
+    let refusal = |db, tx| format!("{:?}", run_with(off, db, tx).expect_err("refused"));
+
+    let foreign_system = legacy_tx_with_chain_id(MEGA_SYSTEM_ADDRESS, oracle, write(), 0, Some(1));
+    assert!(refusal(chain_db(), foreign_system).contains("InvalidChainId"));
+    let bare_system = legacy_tx_with_chain_id(MEGA_SYSTEM_ADDRESS, oracle, write(), 0, None);
+    assert!(refusal(chain_db(), bare_system).contains("MissingChainId"));
+
+    let foreign_user = legacy_tx_with_chain_id(CALLER, oracle, get_slot(), 0, Some(1));
+    assert!(refusal(funded(), foreign_user.clone()).contains("InvalidChainId"));
+    assert!(refusal(funded(), typed(foreign_user, 2)).contains("InvalidChainId"));
+    let bare_user = legacy_tx_with_chain_id(CALLER, oracle, get_slot(), 0, None);
+    assert!(refusal(funded(), typed(bare_user.clone(), 2)).contains("MissingChainId"));
+    let outcome = run_with(off, funded(), bare_user).expect("a pre-EIP-155 transaction is valid");
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+}
+
+/// The nonce and code checks a caller switches off for user transactions are switched off here
+/// too: one shape of validation, not two.
 #[test]
 fn test_the_configuration_switches_hold_for_system_transactions() {
-    let run_with = |mutate: fn(&mut CfgEnv<mega_evm::MegaSpecId>), db: MemoryDatabase, tx| {
-        let mut cfg = CfgEnv::new_with_spec(mega_evm::MegaSpecId::SATIN);
-        cfg.chain_id = CHAIN_ID;
-        mutate(&mut cfg);
-        MegaEvm::new(context(db).with_cfg(cfg)).execute_transaction(tx)
-    };
-
-    // A foreign chain id goes through when the chain-id check is off.
-    let foreign = legacy_tx_with_chain_id(
-        MEGA_SYSTEM_ADDRESS,
-        TxKind::Call(ORACLE_CONTRACT_ADDRESS),
-        set_slot(ORACLE_SLOT, B256::with_last_byte(0xee)),
-        0,
-        Some(31_337),
-    );
-    let outcome = run_with(|cfg| cfg.tx_chain_id_check = false, chain_db(), foreign)
-        .expect("the chain-id check is off");
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-
     // A stale nonce goes through when the nonce check is off.
     let db = chain_db().account_nonce(MEGA_SYSTEM_ADDRESS, 7);
     let outcome = run_with(|cfg| cfg.disable_nonce_check = true, db, system_tx(0, B256::ZERO))
@@ -407,10 +568,11 @@ fn test_the_configuration_switches_hold_for_system_transactions() {
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
 }
 
-/// Validating a system transaction does not warm the system address: the transaction pays the
-/// cold access its first touch of any account would.
+/// Validating a system transaction reads the system address's account, the transaction's caller,
+/// which every transaction starts warm: the system transaction pays for its own account what any
+/// sender pays for its own.
 #[test]
-fn test_validating_a_system_transaction_does_not_warm_the_system_address() {
+fn test_validating_a_system_transaction_charges_its_caller_as_any_senders() {
     // `getSlot` reads one slot and writes nothing, so what the two transactions differ by is
     // the access to the caller's own account.
     let read = Bytes::from(IOracle::getSlotCall { slot: ORACLE_SLOT }.abi_encode());
@@ -452,7 +614,7 @@ fn test_a_deposit_creates_its_caller_and_pays_for_it_once() {
             tx
         });
     let one_account = reference.gas.state;
-    assert!(one_account > 0, "a fresh recipient costs state gas");
+    assert_eq!(one_account, account_state_gas(), "a fresh recipient costs state gas");
 
     // A system transaction whose sender does not exist yet creates it, for the same charge.
     let created = run_outcome(chain_db(), system_tx(0, B256::with_last_byte(0x77)));
@@ -470,19 +632,6 @@ fn test_a_deposit_creates_its_caller_and_pays_for_it_once() {
         one_account,
         "the caller's account costs one account creation, and the slot the same either way",
     );
-}
-
-/// A deposit-like transaction whose caller already exists pays no account-creation charge for
-/// it.
-#[test]
-fn test_a_deposit_with_an_existing_caller_pays_nothing_extra() {
-    let existing = chain_db().account_balance(MEGA_SYSTEM_ADDRESS, U256::from(1));
-    let fresh = chain_db();
-    let (existing, fresh) = (
-        run_outcome(existing, system_tx(0, B256::with_last_byte(0x88))).gas.state,
-        run_outcome(fresh, system_tx(0, B256::with_last_byte(0x88))).gas.state,
-    );
-    assert!(fresh > existing, "{fresh} is not above {existing}");
 }
 
 /// A deposit whose recipient is its own caller pays for that one account once: by the time the
@@ -520,42 +669,75 @@ fn test_a_deposit_that_creates_two_accounts_pays_for_both() {
     assert_eq!(two, one * 2, "two accounts created, two charges");
 }
 
-/// A deposit that cannot pay for the account it creates for its caller is an out-of-gas halt,
-/// as a transaction that runs out in its runtime phase is.
-#[test]
-fn test_a_deposit_that_cannot_pay_for_its_caller_halts() {
-    let sender = address!("0x00000000000000000000000000000000000f0006");
+/// A deposit from `sender`, an account that does not exist, to the Oracle, whose gas limit is one
+/// short of its intrinsic gas and the account it creates for its caller, at the byte prices in
+/// effect. It carries no value and no calldata, so its intrinsic gas, which is its floor too, is
+/// EIP-2780's base of 12,000 and 3,000 for the recipient.
+fn deposit_one_short_of_its_caller(sender: Address) -> MegaTransaction {
+    const INTRINSIC: u64 = 12_000 + 3_000;
     let mut tx = deposit_tx(sender, TxKind::Call(ORACLE_CONTRACT_ADDRESS), U256::ZERO, 0);
-    tx.0.base.gas_limit = 30_000;
-
-    let outcome = run_outcome(chain_db(), tx);
-    assert!(
-        matches!(outcome.result, ExecutionResult::Halt { .. }),
-        "{:?} is not a halt",
-        outcome.result,
-    );
+    tx.0.base.gas_limit = INTRINSIC + account_state_gas() - 1;
+    tx
 }
 
-/// The account a deposit creates for its caller exists whatever the deposit does, so a stop the
-/// deposit's body latched does not waive its charge: a deposit that cannot pay for it is still an
-/// out-of-gas halt, and the halt is not a data-size stop.
+/// A deposit that cannot pay for the account it creates for its caller runs out of gas before its
+/// first frame, and a deposit that does is a failed deposit: the `FailedDeposit` halt, not an
+/// out-of-gas, billed its whole gas limit.
+///
+/// Rules: [S5], [S21.5], [S21.7], [S5.12]. Independence: constants — the intrinsic gas is
+/// EIP-2780's, the caller account's state gas the schedule's entry at the price in effect.
 #[test]
-fn test_a_deposit_over_the_data_size_limit_that_cannot_pay_for_its_caller_halts() {
+fn test_a_deposit_that_cannot_pay_for_its_caller_is_a_failed_deposit() {
+    // An account that costs nothing is one any deposit can pay for.
+    if state_is_free() {
+        return;
+    }
+    let sender = address!("0x00000000000000000000000000000000000f0006");
+    let tx = deposit_one_short_of_its_caller(sender);
+    let gas_limit = tx.0.base.gas_limit;
+    let outcome = run_outcome(chain_db(), tx);
+    assert!(
+        matches!(
+            outcome.result,
+            ExecutionResult::Halt { reason: MegaHaltReason::FailedDeposit, .. }
+        ),
+        "{:?} is not a failed deposit",
+        outcome.result,
+    );
+    assert_eq!(outcome.gas.gas_used, gas_limit, "a failed deposit bills its whole gas limit");
+}
+
+/// The account a deposit creates for its caller is charged before its first frame, and a body over
+/// the data-size limit does not waive the charge: a deposit that cannot pay for it is a failed
+/// deposit, which reports the failure and not the data-size stop, and keeps its body counted.
+///
+/// Rules: [S11], [S10.15], [S21.7]. Independence: constants — the body is `TX_BODY_SIZE`, the gas
+/// limit as [`deposit_one_short_of_its_caller`] works it out.
+#[test]
+fn test_a_deposit_over_the_data_size_limit_that_cannot_pay_for_its_caller_is_a_failed_deposit() {
+    // An account that costs nothing is one any deposit can pay for.
+    if state_is_free() {
+        return;
+    }
     let sender = address!("0x00000000000000000000000000000000000f0008");
-    let mut tx = deposit_tx(sender, TxKind::Call(ORACLE_CONTRACT_ADDRESS), U256::ZERO, 0);
-    tx.0.base.gas_limit = 30_000;
     let limits =
         EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(mega_evm::TX_BODY_SIZE - 1);
 
+    let tx = deposit_one_short_of_its_caller(sender);
+    let gas_limit = tx.0.base.gas_limit;
     let outcome = MegaEvm::new(chain_context(chain_db()).with_tx_runtime_limits(limits))
         .execute_transaction(tx)
         .expect("the deposit is included");
     assert!(
-        matches!(outcome.result, ExecutionResult::Halt { .. }),
-        "{:?} is not a halt",
+        matches!(
+            outcome.result,
+            ExecutionResult::Halt { reason: MegaHaltReason::FailedDeposit, .. }
+        ),
+        "{:?} is not a failed deposit",
         outcome.result,
     );
-    assert_eq!(outcome.limit_exceeded, None, "the halt is not a data-size stop");
+    assert_eq!(outcome.gas.gas_used, gas_limit, "a failed deposit bills its whole gas limit");
+    assert_eq!(outcome.limit_exceeded, None, "the failure is not a data-size stop");
     assert_eq!(
         outcome.usage,
         LimitUsage { data_size: mega_evm::TX_BODY_SIZE, write_records: 0 },
@@ -563,8 +745,8 @@ fn test_a_deposit_over_the_data_size_limit_that_cannot_pay_for_its_caller_halts(
     );
 }
 
-/// The registry the Oracle reads the current system address from is seeded as the chain seeds
-/// it, so a write from the system address is the one the Oracle accepts.
+/// The registry the Oracle reads the current system address from holds it as a chain's registry
+/// does, so a write from the system address is the one the Oracle accepts.
 #[test]
 fn test_the_oracle_accepts_the_system_address_the_registry_names() {
     let current = ISequencerRegistry::currentSystemAddressCall {}.abi_encode();
@@ -653,25 +835,34 @@ fn test_a_deposit_that_creates_a_contract_pays_for_its_caller_too() {
 
     assert!(fresh.result.is_success(), "{:?}", fresh.result);
     assert!(existing.result.is_success(), "{:?}", existing.result);
-    assert!(
-        fresh.gas.state > existing.gas.state,
+    assert_eq!(
+        fresh.gas.state,
+        existing.gas.state + account_state_gas(),
         "the created caller costs state gas on top of the created contract",
     );
 }
 
-/// A transaction that already carries the system source hash is not executed as one: the
-/// promotion is the engine's own, made once per execution, and a transaction that arrives
-/// promoted has skipped the validation that precedes it.
+/// A transaction that already carries the system source hash is a deposit by type, so it does
+/// not have the system shape: from the live system address it is a failed deposit, as every
+/// deposit from that address is. No promotion is made for
+/// it, so none of the promotion's checks runs: its nonce is not the system address's.
 ///
 /// A block's transactions are decoded from their legacy encoding, which carries no source hash,
 /// so this is the shape a caller hands the engine directly, not one a block holds.
 #[test]
-fn test_a_transaction_that_arrives_promoted_is_refused() {
-    let mut tx = system_tx(0, B256::with_last_byte(0xaf));
+fn test_a_transaction_that_arrives_promoted_is_a_failed_deposit() {
+    let mut tx =
+        legacy_tx(MEGA_SYSTEM_ADDRESS, TxKind::Call(ORACLE_CONTRACT_ADDRESS), get_slot(), 7);
     tx.0.deposit.source_hash = MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
-    let refused = rejection(chain_db(), tx);
+    let outcome = MegaEvm::new(chain_context(chain_db()))
+        .execute_transaction(tx)
+        .expect("a deposit is not refused");
     assert!(
-        refused.contains(NOT_A_SYSTEM_TRANSACTION),
-        "the refusal names the rule, not the whitelist alone: {refused}",
+        matches!(
+            outcome.result,
+            ExecutionResult::Halt { reason: MegaHaltReason::FailedDeposit, .. }
+        ),
+        "{:?}",
+        outcome.result
     );
 }

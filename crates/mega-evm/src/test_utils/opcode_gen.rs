@@ -142,6 +142,7 @@ impl BytecodeBuilder {
     ///
     /// This snippet will left the stack unchanged after execution.
     pub fn assert_stack_value(mut self, stack_position: usize, value: U256) -> Self {
+        assert!(stack_position < 16, "stack position {stack_position} is past DUP16");
         self = self
             .append(DUP1 + stack_position as u8) // duplicate the value at the given stack position to check
             .push_u256(value)
@@ -333,5 +334,17 @@ mod tests {
         let bytecode = builder.build();
         let result = execute_bytecode(bytecode);
         assert!(result.unwrap().result.is_halt(), "Transaction should fail");
+    }
+
+    #[test]
+    fn test_assert_stack_value_reaches_the_sixteenth_slot() {
+        let code = BytecodeBuilder::default().assert_stack_value(15, U256::ZERO).build();
+        assert_eq!(code[0], DUP1 + 15);
+    }
+
+    #[test]
+    #[should_panic(expected = "stack position 16 is past DUP16")]
+    fn test_assert_stack_value_rejects_a_position_past_dup16() {
+        let _ = BytecodeBuilder::default().assert_stack_value(16, U256::ZERO);
     }
 }

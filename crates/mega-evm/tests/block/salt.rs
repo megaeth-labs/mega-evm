@@ -40,8 +40,14 @@ const BEACON_ROOTS_BUFFER_LENGTH: u64 = 8191;
 const HEAVY: u64 = 100_000;
 
 /// The gas limit the control arm's user transaction carries: plenty at the minimum bucket, and
-/// nowhere near enough at [`HEAVY`].
-const USER_GAS_LIMIT: u64 = 1_000_000;
+/// nowhere near enough at [`HEAVY`]. 1,000,000 of regular gas on top of what the slot, its record
+/// and the body cost at the minimum bucket and the byte prices in effect.
+fn user_gas_limit() -> u64 {
+    1_000_000 +
+        common::slot_state_gas() +
+        common::body_history(0) +
+        mega_evm::write_record_history_gas(1).expect("a record has a price")
+}
 
 /// The external environments of these tests: every bucket at `m` times the minimum, so the
 /// capacity bites wherever a charge lands.
@@ -154,21 +160,25 @@ fn test_the_pre_block_calls_commit_at_any_capacity() {
 /// passing because the environment was never crowded.
 #[test]
 fn test_a_user_transaction_in_the_crowded_block_pays_the_crowded_price() {
+    // A slot that costs nothing costs nothing in a crowded bucket either.
+    if common::state_is_free() {
+        return;
+    }
     let affordable = {
         let mut state = state_with_contracts();
         let mut executor = executor(&mut state, envs_at(1));
         executor.apply_pre_execution_changes().expect("the block starts");
-        executor.run_transaction(&common::user_tx(0, USER_GAS_LIMIT)).expect("it executes")
+        executor.run_transaction(&common::user_tx(0, user_gas_limit())).expect("it executes")
     };
     assert!(affordable.result.is_success(), "{:?}", affordable.result);
-    assert!(affordable.gas.state > 0, "the write is charged state gas");
+    assert_eq!(affordable.gas.state, common::slot_state_gas(), "the write is charged state gas");
 
     let envs = envs_at(HEAVY);
     let crowded = {
         let mut state = state_with_contracts();
         let mut executor = executor(&mut state, envs.clone());
         executor.apply_pre_execution_changes().expect("the block starts");
-        executor.run_transaction(&common::user_tx(0, USER_GAS_LIMIT)).expect("it executes")
+        executor.run_transaction(&common::user_tx(0, user_gas_limit())).expect("it executes")
     };
     assert!(
         crowded.result.is_halt(),

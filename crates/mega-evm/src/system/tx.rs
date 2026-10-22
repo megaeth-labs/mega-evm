@@ -1,52 +1,69 @@
 //! The system-address transaction: how the protocol maintains its own state.
 //!
 //! The sequencer writes what the protocol owes the chain — the oracle values it served, for one
-//! — through transactions sent from [`MEGA_SYSTEM_ADDRESS`]. They carry no signature and pay no
-//! fee, so they are executed as deposit transactions: the engine stamps
-//! [`MEGA_SYSTEM_TRANSACTION_SOURCE_HASH`] on one before it validates it, and op-revm's deposit
-//! path takes it from there.
+//! — through transactions sent from the system address the `SequencerRegistry` names. They pay
+//! no fee, so they are executed as deposit transactions: the engine stamps
+//! [`MEGA_SYSTEM_TRANSACTION_SOURCE_HASH`] on one before op-revm validates it, and op-revm's
+//! deposit path takes it from there.
+//!
+//! A system-address transaction has a fixed shape
+//! ([`has_system_transaction_shape`]): a legacy transaction calling a contract on
+//! [`MEGA_SYSTEM_TX_WHITELIST`]. Every transaction reads the live system address out of the
+//! registry when it is validated
+//! ([`load_system_address`](crate::system::load_system_address)), and one of the system shape
+//! whose caller is that address is a system-address transaction. A transaction from that address
+//! of any other shape is invalid ([`SYSTEM_ADDRESS_WITHOUT_SYSTEM_SHAPE`]): the Oracle's
+//! `onlySystemAddress` tests the sender alone, so the system key must send nothing the Oracle
+//! would accept as an ordinary transaction. A deposit is never of the system shape, so a deposit
+//! from the address is invalid too, and op-revm includes it as a failed deposit, which runs no
+//! call. Every other sender is an ordinary one, an address a rotation retired included.
 //!
 //! A deposit is unvalidated by construction, so the engine validates what still matters itself
 //! before promoting the transaction ([`validate_and_promote`]):
 //!
-//! - it may only call a contract on [`MEGA_SYSTEM_TX_WHITELIST`], never create one;
 //! - its chain id must be the chain's, so a transaction cannot be replayed on another chain;
 //! - its nonce must be the system address's, so it cannot be replayed on this one;
 //! - the system address must have no code of its own (EIP-3607).
 //!
-//! The configuration switches that turn those checks off for a user transaction
-//! (`tx_chain_id_check`, `disable_nonce_check`, `disable_eip3607`) turn them off here too: a
-//! caller simulating a transaction sees one shape of validation, not two.
-
-#[cfg(not(feature = "std"))]
-use alloc as std;
-use std::string::ToString;
+//! The chain id is checked whatever the configuration says, as it is for a user transaction: the
+//! spec fixes the check on. A system-address transaction must carry one, which a user's legacy
+//! transaction need not. The configuration switches that turn the other two checks off for a user
+//! transaction (`disable_nonce_check`, `disable_eip3607`) turn them off here too: a caller
+//! simulating a transaction sees one shape of validation, not two.
 
 use alloy_evm::Database;
 use alloy_primitives::{address, b256, Address, TxKind, B256};
-use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 use revm::{
-    context::{result::FromStringError, ContextTr, Transaction},
+    context::{ContextTr, JournalTr, Transaction},
     context_interface::{cfg::Cfg, result::InvalidTransaction},
     handler::pre_execution::validate_account_nonce_and_code,
 };
 
 use crate::{
-    system::ORACLE_CONTRACT_ADDRESS, types::MegaTransaction, ExternalEnvTypes, JournalInspectTr,
-    MegaContext,
+    system::ORACLE_CONTRACT_ADDRESS, types::MegaTransaction, ExternalEnvTypes, MegaContext,
 };
 
-/// The address the sequencer sends the protocol's own transactions from.
+/// The initial system address of the `SequencerRegistry`: the one Rex5 created it naming, which a
+/// chain's registry holds until a rotation.
 ///
-/// A transaction from it is executed as a deposit: no signature, no nonce check of op-revm's own
-/// and no fee. Which address it is can be rotated through the `SequencerRegistry`; reading the
-/// rotated one out of the registry's storage belongs to system contract deployment, and until
-/// then this is the address.
+/// A system-address transaction is executed as a deposit: no nonce check of op-revm's own and no
+/// fee. Which address sends them is the registry's to say, and it can be rotated through the
+/// registry: the engine reads the live one out of the registry for every transaction, and never
+/// falls back to this address.
 pub const MEGA_SYSTEM_ADDRESS: Address = address!("0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d");
 
 /// The contracts a system-address transaction may call. It may call nothing else and create
 /// nothing.
 pub const MEGA_SYSTEM_TX_WHITELIST: &[Address] = &[ORACLE_CONTRACT_ADDRESS];
+
+/// The message of the [`InvalidTransaction::Str`] a transaction is refused with when it is sent
+/// from the live system address without the system shape ([`has_system_transaction_shape`]).
+///
+/// A transaction other than a deposit is rejected with it, by a pool as by block execution; a
+/// deposit, which op-revm does not refuse for a transaction error, is included as a failed
+/// deposit instead, which bumps its sender's nonce, keeps its mint and runs nothing.
+pub const SYSTEM_ADDRESS_WITHOUT_SYSTEM_SHAPE: &str =
+    "a transaction from the system address must be a legacy call to a whitelisted contract";
 
 /// The `source_hash` of a promoted system-address transaction,
 /// `keccak256("MEGA_SYSTEM_TRANSACTION")`.
@@ -56,119 +73,136 @@ pub const MEGA_SYSTEM_TX_WHITELIST: &[Address] = &[ORACLE_CONTRACT_ADDRESS];
 pub const MEGA_SYSTEM_TRANSACTION_SOURCE_HASH: B256 =
     b256!("852c082c0faff590c6300c2c34815d1f79882552fa95ba413cd5aeb1dba84957");
 
-/// Whether `tx` was sent from `system_address`.
-pub fn sent_from_system_address(tx: &MegaTransaction, system_address: Address) -> bool {
-    tx.caller() == system_address
-}
-
-/// Whether `tx` is a system-address transaction: a legacy transaction from `system_address` to a
-/// contract on [`MEGA_SYSTEM_TX_WHITELIST`].
+/// Whether `tx` is a system-address transaction when `system_address` is the live system
+/// address: a legacy transaction from it to a contract on [`MEGA_SYSTEM_TX_WHITELIST`].
 pub fn is_mega_system_transaction_with(tx: &MegaTransaction, system_address: Address) -> bool {
     check_if_mega_system_transaction(tx.caller(), tx.tx_type(), tx.kind(), system_address)
 }
 
-/// Whether a transaction with these fields is a system-address transaction.
-///
-/// It is one when it was sent from `system_address` as a legacy transaction (type `0x0`, the
-/// shape the sequencer builds) and calls a contract on [`MEGA_SYSTEM_TX_WHITELIST`]. A creation
-/// is never one: the protocol maintains the contracts it deployed, it does not deploy new ones
-/// this way.
+/// Whether a transaction with these fields is a system-address transaction when `system_address`
+/// is the live system address: it was sent from it and has the system shape
+/// ([`has_system_transaction_shape`]).
 pub fn check_if_mega_system_transaction(
     tx_signer: Address,
     tx_type: u8,
     tx_kind: TxKind,
     system_address: Address,
 ) -> bool {
-    if tx_type != 0x0 || tx_signer != system_address {
-        return false;
-    }
-    match tx_kind {
-        TxKind::Create => false,
-        TxKind::Call(address) => MEGA_SYSTEM_TX_WHITELIST.contains(&address),
-    }
+    tx_signer == system_address && has_system_transaction_shape(tx_type, tx_kind)
 }
 
-/// Whether `tx` is executed on the deposit path: a deposit transaction, or a system-address
-/// transaction, which is promoted to one.
-pub fn is_deposit_like_transaction(tx: &MegaTransaction, system_address: Address) -> bool {
-    tx.tx_type() == DEPOSIT_TRANSACTION_TYPE || is_mega_system_transaction_with(tx, system_address)
+/// Whether a transaction with these fields has the shape every system-address transaction has: a
+/// legacy transaction (type `0x0`, the shape the sequencer builds) calling a contract on
+/// [`MEGA_SYSTEM_TX_WHITELIST`]. A creation never has it: the protocol maintains the contracts it
+/// deployed, it does not deploy new ones this way.
+///
+/// It looks at the transaction's own fields only: the type, then the destination against the
+/// one-entry whitelist.
+pub fn has_system_transaction_shape(tx_type: u8, tx_kind: TxKind) -> bool {
+    tx_type == 0x0 &&
+        match tx_kind {
+            TxKind::Create => false,
+            TxKind::Call(address) => MEGA_SYSTEM_TX_WHITELIST.contains(&address),
+        }
 }
 
-/// Whether `tx` was produced by the protocol itself rather than by a user.
+/// Whether `tx` is a system-address transaction when `system_address` is the live system address,
+/// or the error it is refused with when it is sent from the live system address without the
+/// system shape ([`SYSTEM_ADDRESS_WITHOUT_SYSTEM_SHAPE`]).
+///
+/// The system key sends the system shape and nothing else: whatever else it signs — a typed
+/// transaction, a call off the whitelist, a creation — is invalid, and so is a deposit from the
+/// address, which is never of the system shape, and which op-revm then includes as a failed
+/// deposit. An address the registry no longer names, or never named, is an ordinary sender.
+pub(crate) fn classify_system_transaction(
+    tx: &MegaTransaction,
+    system_address: Option<Address>,
+) -> Result<bool, InvalidTransaction> {
+    if system_address != Some(tx.caller()) {
+        return Ok(false);
+    }
+    if !has_system_transaction_shape(tx.tx_type(), tx.kind()) {
+        return Err(InvalidTransaction::Str(SYSTEM_ADDRESS_WITHOUT_SYSTEM_SHAPE.into()));
+    }
+    Ok(true)
+}
+
+/// Whether `tx` was produced by the protocol itself rather than by a user, when `system_address`
+/// is the live system address.
 ///
 /// That is the case for a call the engine makes on the chain's behalf (the EIP-2935 and EIP-4788
 /// pre-block calls, whose caller is the EIP-4788 system address) and for a system-address
 /// transaction, before or after it was promoted. A user's deposit transaction is not
 /// system-originated, however deposit-like it is: it carries another source hash and another
-/// caller.
+/// caller. A deposit that carries the promotion's source hash is system-originated whoever sends
+/// it; from the live system address it is also invalid, as every deposit from that address is
+/// ([`SYSTEM_ADDRESS_WITHOUT_SYSTEM_SHAPE`]), so a transaction handed to the engine already
+/// promoted is a failed deposit.
+///
+/// Only a deposit carries a source hash: op-revm reads a transaction's type off it, so a
+/// transaction that carries one is a deposit, and is executed as one, whatever type its other
+/// fields declare. Testing the source hash is therefore testing for a deposit that carries it.
 ///
 /// It is what exempts the protocol's own work from the metering `MegaETH` holds users to — the
 /// history gas of a system transaction is not charged, and no per-transaction limit stops it, so
-/// the protocol's maintenance cannot fail on a resource limit. The mechanisms that meter read it
-/// as they land.
+/// the protocol's maintenance cannot fail on a resource limit. The engine makes the same decision
+/// for the running transaction with the address it read itself
+/// ([`MegaContext::is_system_originated`]).
 pub fn is_system_originated(tx: &MegaTransaction, system_address: Address) -> bool {
-    tx.caller() == alloy_eips::eip4788::SYSTEM_ADDRESS ||
-        tx.deposit.source_hash == MEGA_SYSTEM_TRANSACTION_SOURCE_HASH ||
-        is_mega_system_transaction_with(tx, system_address)
+    originates_from_the_protocol(tx, is_mega_system_transaction_with(tx, system_address))
 }
 
-/// Validates a transaction sent from the system address and promotes it to a deposit; does
-/// nothing to any other transaction.
+/// [`is_system_originated`], given whether `tx` is a system-address transaction.
+pub(crate) fn originates_from_the_protocol(tx: &MegaTransaction, system_transaction: bool) -> bool {
+    system_transaction ||
+        tx.caller() == alloy_eips::eip4788::SYSTEM_ADDRESS ||
+        // A source hash makes the transaction a deposit, whatever type its fields declare.
+        tx.deposit.source_hash == MEGA_SYSTEM_TRANSACTION_SOURCE_HASH
+}
+
+/// Validates a system-address transaction and promotes it to a deposit.
 ///
-/// Runs before op-revm validates the transaction, so op-revm sees the promoted shape: a deposit,
-/// whose signature, nonce and fee it does not check. The checks the deposit path drops and this
-/// chain still wants are made here (see the module documentation), each under the configuration
-/// switch a user transaction obeys.
+/// Called for the running transaction once validation found it is one, before
+/// op-revm validates it, so op-revm sees the promoted shape: a deposit, whose signature, nonce and
+/// fee it does not check. The checks the deposit path drops and this chain still wants are made
+/// here (see the module documentation): the chain id always, the nonce and the code each under
+/// the configuration switch a user transaction obeys.
 ///
-/// A transaction from the system address that is not a system transaction is rejected outright:
-/// the sequencer has no business sending it, and promoting it would give it the deposit path's
-/// exemptions. That covers a creation, a call to a contract that is not on the whitelist, and
-/// any shape that is not a legacy transaction — an EIP-1559 one, or one that already carries a
-/// source hash, which has skipped the validation the promotion runs.
+/// The system address's nonce and code are the state's: they are checked when `check_account`
+/// says so, which is always in execution. Validation without state leaves them to the state, as
+/// it leaves every sender's.
 pub(crate) fn validate_and_promote<DB, ExtEnvs, ERROR>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
-    system_address: Address,
+    check_account: bool,
 ) -> Result<(), ERROR>
 where
     DB: Database,
     ExtEnvs: ExternalEnvTypes,
-    ERROR: From<InvalidTransaction> + From<DB::Error> + FromStringError,
+    ERROR: From<InvalidTransaction> + From<DB::Error>,
 {
-    if !sent_from_system_address(ctx.tx(), system_address) {
-        return Ok(());
-    }
-    if !is_mega_system_transaction_with(ctx.tx(), system_address) {
-        return Err(ERROR::from_string(
-            "a transaction from the system address must be a legacy call to a whitelisted \
-             contract"
-                .to_string(),
-        ));
-    }
-
     let cfg = ctx.cfg();
-    let (chain_id, chain_id_check) = (cfg.chain_id(), cfg.tx_chain_id_check);
+    let chain_id = cfg.chain_id();
     let (eip3607_disabled, nonce_check_disabled) =
         (cfg.is_eip3607_disabled(), cfg.is_nonce_check_disabled());
-    if chain_id_check {
-        match ctx.tx().chain_id() {
-            None => return Err(InvalidTransaction::MissingChainId.into()),
-            Some(id) if id != chain_id => return Err(InvalidTransaction::InvalidChainId.into()),
-            Some(_) => {}
-        }
+    match ctx.tx().chain_id() {
+        None => return Err(InvalidTransaction::MissingChainId.into()),
+        Some(id) if id != chain_id => return Err(InvalidTransaction::InvalidChainId.into()),
+        Some(_) => {}
     }
 
-    // Read the system address without warming it: validation must not leave the account in the
-    // EIP-2929 access list, which would make the transaction's first touch of it cheaper than
-    // the same transaction from anyone else. Its code is loaded, so EIP-3607 sees a lazy
-    // database's code too.
-    let tx_nonce = ctx.tx().nonce();
-    let account = ctx.journal_mut().inspect_account(system_address, true)?;
-    validate_account_nonce_and_code(
-        &account.info,
-        tx_nonce,
-        eip3607_disabled,
-        nonce_check_disabled,
-    )?;
+    // The system address is the transaction's caller, which the transaction starts warm, so the
+    // load changes nothing it pays. Its code is loaded, so EIP-3607 sees a lazy database's code
+    // too.
+    if check_account {
+        let (system_address, tx_nonce) = (ctx.tx().caller(), ctx.tx().nonce());
+        let account = ctx.journal_mut().load_account_with_code(system_address)?.data;
+        validate_account_nonce_and_code(
+            &account.info,
+            tx_nonce,
+            eip3607_disabled,
+            nonce_check_disabled,
+        )?;
+    }
 
     // The deposit shape: op-revm skips the signature, the nonce and every fee for it. The gas
     // price goes to zero with it, so the fee accounting of the block degenerates to nothing.
@@ -182,6 +216,7 @@ where
 mod tests {
     use super::*;
     use alloy_primitives::TxKind;
+    use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 
     const EIP_SYSTEM_ADDRESS: Address = alloy_eips::eip4788::SYSTEM_ADDRESS;
     const USER: Address = address!("0x0000000000000000000000000000000000009999");
@@ -211,12 +246,6 @@ mod tests {
         assert!(is_system_originated(&tx, MEGA_SYSTEM_ADDRESS));
     }
 
-    #[test]
-    fn test_is_system_originated_rejects_system_caller_to_non_whitelist() {
-        let tx = legacy_call_tx(MEGA_SYSTEM_ADDRESS, NOT_WHITELISTED);
-        assert!(!is_system_originated(&tx, MEGA_SYSTEM_ADDRESS));
-    }
-
     /// The promotion stamps the source hash and flips the transaction's type to a deposit; the
     /// promoted shape is still system-originated, through the source hash.
     #[test]
@@ -231,20 +260,27 @@ mod tests {
         assert!(is_system_originated(&tx, MEGA_SYSTEM_ADDRESS), "the source hash does");
     }
 
+    /// A transaction that carries the promotion's source hash is a deposit whatever type it
+    /// declares, so it is system-originated as the deposit it is, whoever sends it: no transaction
+    /// of another type carries the hash.
     #[test]
-    fn test_is_system_originated_rejects_user_tx() {
-        let tx = legacy_call_tx(USER, ORACLE_CONTRACT_ADDRESS);
-        assert!(!is_system_originated(&tx, MEGA_SYSTEM_ADDRESS));
+    fn test_a_transaction_carrying_the_source_hash_is_a_deposit_whatever_type_it_declares() {
+        for declared in [0, 1, 2, 4] {
+            let mut tx = legacy_call_tx(USER, NOT_WHITELISTED);
+            tx.base.tx_type = declared;
+            tx.deposit.source_hash = MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
+            assert_eq!(tx.tx_type(), DEPOSIT_TRANSACTION_TYPE, "declared {declared}");
+            assert!(is_system_originated(&tx, MEGA_SYSTEM_ADDRESS), "declared {declared}");
+        }
     }
 
-    /// A user's deposit transaction is deposit-like but not system-originated: otherwise a user
-    /// could buy the protocol's exemptions by sending one.
+    /// A user's deposit transaction is not system-originated: otherwise a user could buy the
+    /// protocol's exemptions by sending one.
     #[test]
     fn test_is_system_originated_rejects_user_deposit_tx() {
         let mut tx = legacy_call_tx(USER, ORACLE_CONTRACT_ADDRESS);
         tx.deposit.source_hash = B256::repeat_byte(0x11);
         assert_eq!(tx.tx_type(), DEPOSIT_TRANSACTION_TYPE);
-        assert!(is_deposit_like_transaction(&tx, MEGA_SYSTEM_ADDRESS));
         assert!(!is_system_originated(&tx, MEGA_SYSTEM_ADDRESS));
     }
 
@@ -281,6 +317,23 @@ mod tests {
             ),
             "the sequencer builds a legacy transaction",
         );
+    }
+
+    /// The shape is the transaction's own fields alone: a legacy call to a whitelisted contract,
+    /// whoever sends it. A creation, another type and a promoted transaction (a deposit by type)
+    /// do not have it.
+    #[test]
+    fn test_the_system_shape_is_a_legacy_call_to_a_whitelisted_contract() {
+        let oracle = TxKind::Call(ORACLE_CONTRACT_ADDRESS);
+        assert!(has_system_transaction_shape(0, oracle));
+        assert!(!has_system_transaction_shape(0, TxKind::Call(NOT_WHITELISTED)));
+        assert!(!has_system_transaction_shape(0, TxKind::Create));
+        for tx_type in [1, 2, 3, 4, DEPOSIT_TRANSACTION_TYPE] {
+            assert!(!has_system_transaction_shape(tx_type, oracle), "type {tx_type}");
+        }
+        let mut promoted = legacy_call_tx(USER, ORACLE_CONTRACT_ADDRESS);
+        promoted.deposit.source_hash = MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
+        assert!(!has_system_transaction_shape(promoted.tx_type(), promoted.kind()));
     }
 
     /// The source hash is the hash of the name it stands for.

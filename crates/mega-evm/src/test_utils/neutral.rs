@@ -11,10 +11,16 @@
 //! The resource limits `MegaETH` sets are not part of the configuration: they live on the EVM's
 //! common execution layer, and the gate's runner installs
 //! [`EvmTxRuntimeLimits::no_limits`](crate::EvmTxRuntimeLimits::no_limits) in equivalence mode,
-//! under which neither the data-size, the KV nor the state-gas limit binds, at the transaction or
-//! at a frame, and gas detention's caps are unlimited, so no transaction is detained. A limit
-//! added later is unlimited there as long as `no_limits` leaves it unlimited, which the limit
-//! module's own test pins field by field.
+//! under which the data-size limit binds at neither the transaction nor a frame, and gas
+//! detention's caps are unlimited, so no transaction is detained. A limit added later is unlimited
+//! there as long as `no_limits` leaves it unlimited, which the limit module's own test pins field
+//! by field.
+//!
+//! Every Satin transaction reads the live system address when it is validated, under the neutral
+//! configuration too, which leaves the `SequencerRegistry`'s account and one slot in its returned
+//! state, read-only: an engine that makes no such read returns no such entry, and a comparison
+//! with one takes it out first ([`take_system_address_read`]). A commit skips an account nothing
+//! touched, so the entry parts no committed state.
 //!
 //! Satin's base spec is Osaka, and a configuration cannot take a rule the base spec gates on its
 //! own id away or add one: an Osaka rule stays on under an older fork's fixtures, and an
@@ -30,9 +36,13 @@ use revm::{
     interpreter::instructions::{gas_table_spec, GasTable},
     precompile::{PrecompileSpecId, Precompiles},
     primitives::eip7954,
+    state::{Account, EvmState},
 };
 
-use crate::{EthSpecId, ExternalEnvTypes, MegaEvm, MegaSpecId};
+use crate::{
+    system::{storage_slots::CURRENT_SYSTEM_ADDRESS, SEQUENCER_REGISTRY_ADDRESS},
+    EthSpecId, ExternalEnvTypes, MegaEvm, MegaSpecId,
+};
 
 /// The configuration `fork`'s fixtures run under on Satin's machinery, or `None` for a fork
 /// Satin's Osaka base cannot be configured to.
@@ -47,6 +57,12 @@ use crate::{EthSpecId, ExternalEnvTypes, MegaEvm, MegaSpecId};
 /// - **Amsterdam**: Amsterdam's schedule; EIP-8037 and EIP-2780 on; EIP-7708 on, which revm
 ///   otherwise keys on the spec id; EIP-7825's execution cap; the EIP-7954 code-size limits, set
 ///   explicitly for the same reason.
+///
+/// On both, a system call's whole gas limit is regular gas, as revm's runner has it: the switch
+/// that makes the part above 30,000,000 a state-gas reservoir, which Satin sets, is off. Under
+/// Osaka it would do nothing, EIP-8037 being off. Under Amsterdam upstream revm splits no system
+/// call's gas, and no state fixture makes a system call, so neither release the gate runs can
+/// tell the two apart.
 ///
 /// Every other field is revm's default: chain id 1, which a caller replaces with the fixture's.
 pub fn neutral_cfg(fork: EthSpecId) -> Option<CfgEnv<MegaSpecId>> {
@@ -84,7 +100,7 @@ pub fn neutral_precompiles(fork: EthSpecId) -> Option<PrecompilesMap> {
 /// revm keeps part of a fork's gas table out of the schedule: the static price every opcode pays
 /// before its dynamic cost lives in the instruction table, keyed on the spec id. Amsterdam's
 /// differs from Osaka's in EIP-8038's two-read base for `EXTCODESIZE` and `EXTCODECOPY`; Satin's
-/// instruction table carries its Osaka base's.
+/// instruction table carries Amsterdam's.
 pub fn neutral_gas_table(fork: EthSpecId) -> Option<GasTable> {
     neutral_cfg(fork)?;
     Some(gas_table_spec(fork))
@@ -101,10 +117,32 @@ pub fn neutralize_evm<DB: Database, INSP, ExtEnvs: ExternalEnvTypes>(
     fork: EthSpecId,
 ) -> Option<()> {
     let (precompiles, gas_table) = (neutral_precompiles(fork)?, neutral_gas_table(fork)?);
-    let (_, instructions, evm_precompiles, _) = evm.all_mut();
-    *evm_precompiles = precompiles;
+    evm.replace_precompile_set(precompiles);
+    let (_, instructions, _, _) = evm.all_mut();
     *instructions.gas_table_mut() = gas_table;
     Some(())
+}
+
+/// Takes out of a Satin transaction's returned `state` the entry its validation's read of the live
+/// system address left, and answers it: the `SequencerRegistry`'s account and its
+/// `_currentSystemAddress` slot, loaded and never written. What is left is what an engine that
+/// makes no such read returns for the same transaction, op-revm's or Ethereum's.
+///
+/// # Panics
+///
+/// When `state` holds no entry for the registry, or one that is more than the read: the account
+/// touched, another slot loaded, or the slot changed. Each is a difference of its own, which a
+/// comparison must not take out with the read.
+pub fn take_system_address_read(state: &mut EvmState) -> Account {
+    let registry =
+        state.remove(&SEQUENCER_REGISTRY_ADDRESS).expect("every transaction reads the registry");
+    assert!(!registry.is_touched(), "the registry was written, not only read: {registry:?}");
+    assert!(
+        registry.storage.keys().eq([&CURRENT_SYSTEM_ADDRESS]),
+        "the registry holds more than the system address's slot: {registry:?}"
+    );
+    assert!(!registry.storage[&CURRENT_SYSTEM_ADDRESS].is_changed(), "the slot was written");
+    registry
 }
 
 #[cfg(test)]
@@ -147,6 +185,8 @@ mod tests {
         assert_eq!(cfg.max_initcode_size(), eip3860::MAX_INITCODE_SIZE);
         assert_eq!(cfg.max_code_size(), osaka.max_code_size());
         assert_eq!(cfg.max_initcode_size(), osaka.max_initcode_size());
+        assert!(!cfg.system_call_state_gas_margin_in_reservoir());
+        assert!(!osaka.system_call_state_gas_margin_in_reservoir());
     }
 
     /// Amsterdam's configuration carries what revm's runner derives from the Amsterdam spec id,
@@ -163,6 +203,8 @@ mod tests {
         assert_eq!(cfg.max_code_size(), amsterdam.max_code_size());
         assert_eq!(cfg.max_initcode_size(), amsterdam.max_initcode_size());
         assert_eq!(cfg.max_code_size(), eip7954::MAX_CODE_SIZE);
+        assert!(!cfg.system_call_state_gas_margin_in_reservoir());
+        assert!(!amsterdam.system_call_state_gas_margin_in_reservoir());
     }
 
     /// Neither configuration is Satin's, and both run Satin's spec.
@@ -215,21 +257,22 @@ mod tests {
         }
     }
 
-    /// Satin's instruction table prices opcodes as its Osaka base does, so Osaka's static prices
-    /// change nothing; Amsterdam's differ in EIP-8038's two-read base for `EXTCODESIZE` and
-    /// `EXTCODECOPY` alone.
+    /// Satin's instruction table prices opcodes as Amsterdam does, so Amsterdam's static prices
+    /// change nothing; Osaka's differ in EIP-8038's two-read base for `EXTCODESIZE` and
+    /// `EXTCODECOPY` alone, which the neutral configuration puts back for an Osaka fixture.
     #[test]
     fn test_neutral_gas_tables() {
         use revm::bytecode::opcode::{EXTCODECOPY, EXTCODESIZE};
-        let mut evm = MegaEvm::new(context(EthSpecId::OSAKA));
+        let mut evm = MegaEvm::new(context(EthSpecId::AMSTERDAM));
         let satin = *evm.all_mut().1.gas_table();
-        assert_eq!(neutral_gas_table(EthSpecId::OSAKA), Some(satin));
+        assert_eq!(neutral_gas_table(EthSpecId::AMSTERDAM), Some(satin));
 
-        let amsterdam = neutral_gas_table(EthSpecId::AMSTERDAM).expect("a neutral fork");
+        let osaka = neutral_gas_table(EthSpecId::OSAKA).expect("a neutral fork");
         let changed: Vec<_> =
-            (0..=u8::MAX).filter(|&op| amsterdam[op as usize] != satin[op as usize]).collect();
+            (0..=u8::MAX).filter(|&op| osaka[op as usize] != satin[op as usize]).collect();
         assert_eq!(changed, vec![EXTCODESIZE, EXTCODECOPY]);
-        assert_eq!(amsterdam[EXTCODESIZE as usize], 200);
+        assert_eq!(osaka[EXTCODESIZE as usize], 100);
+        assert_eq!(satin[EXTCODESIZE as usize], 200);
         assert!(neutral_gas_table(EthSpecId::PRAGUE).is_none());
     }
 
@@ -239,11 +282,11 @@ mod tests {
     #[test]
     fn test_neutralize_evm_installs_the_fork_s_static_prices() {
         use revm::bytecode::opcode::EXTCODESIZE;
-        let mut evm = MegaEvm::new(context(EthSpecId::AMSTERDAM));
+        let mut evm = MegaEvm::new(context(EthSpecId::OSAKA));
         assert!(neutralize_evm(&mut evm, EthSpecId::PRAGUE).is_none());
-        assert_eq!(evm.all_mut().1.gas_table()[EXTCODESIZE as usize], 100);
-
-        assert!(neutralize_evm(&mut evm, EthSpecId::AMSTERDAM).is_some());
         assert_eq!(evm.all_mut().1.gas_table()[EXTCODESIZE as usize], 200);
+
+        assert!(neutralize_evm(&mut evm, EthSpecId::OSAKA).is_some());
+        assert_eq!(evm.all_mut().1.gas_table()[EXTCODESIZE as usize], 100);
     }
 }

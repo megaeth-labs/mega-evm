@@ -7,24 +7,18 @@
 //! forward back untouched, so the caller's own gas at the call is that reading plus the `POP` of
 //! the call's status and the `GAS` itself, four gas.
 
-use alloy_op_evm::OpTx;
-use alloy_primitives::{address, Address, Bytes, TxKind, U256};
+use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
     constants::{BLOCK_ENV_ACCESS_COMPUTE_GAS, TX_GAS_LIMIT_CAP},
     system::{IMegaLimitControl, IOracle, LIMIT_CONTROL_ADDRESS, ORACLE_CONTRACT_ADDRESS},
-    test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
+    test_utils::{zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, LimitCheck, LimitKind, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
     MegaTransactionOutcome,
 };
-use revm::{
-    bytecode::opcode::*,
-    context::{BlockEnv, TxEnv},
-    interpreter::{interpreter::EthInterpreter, CallInputs, CallOutcome, Interpreter},
-    Inspector,
-};
+use revm::{bytecode::opcode::*, context::BlockEnv};
 
-use crate::common::{system_db, CALLER};
+use crate::common::{body_history, call_tx_with_gas, system_db, AnswerAndResume, CALLER};
 
 const CONTRACT: Address = address!("0x0000000000000000000000000000000000300001");
 const CONTRACT2: Address = address!("0x0000000000000000000000000000000000300002");
@@ -51,13 +45,7 @@ fn block(beneficiary: Address) -> BlockEnv {
 
 /// A transaction from [`CALLER`] to `to` with `data`, carrying `gas_limit`.
 fn tx(to: Address, data: &[u8], gas_limit: u64) -> MegaTransaction {
-    OpTx(op_transaction(TxEnv {
-        caller: CALLER,
-        kind: TxKind::Call(to),
-        data: Bytes::copy_from_slice(data),
-        gas_limit,
-        ..Default::default()
-    }))
+    call_tx_with_gas(to, data, U256::ZERO, gas_limit)
 }
 
 /// Runs `tx` over `db` in a block whose beneficiary is `beneficiary`, under the default limits,
@@ -139,10 +127,17 @@ fn test_direct_tx_remaining_compute_gas() {
         )
         .unwrap();
         if gas_limit < TX_GAS_LIMIT_CAP {
-            assert_eq!(answer, gas_limit - outcome.result.tx_gas_used(), "below the cap");
+            // What it paid before the frame, which the answer spends nothing of: the receipt's
+            // figure where the EIP-7623 floor does not bind, as it does not at the spec's prices.
+            let paid = outcome.result.gas().total_gas_spent();
+            assert_eq!(answer, gas_limit - paid, "below the cap");
         } else {
             assert_eq!(answer, TX_GAS_LIMIT_CAP - outcome.gas.regular, "above the cap");
-            assert!(outcome.gas.history > 0, "the body's history came out of the reservoir");
+            assert_eq!(
+                outcome.gas.history,
+                body_history(SELECTOR.len() as u64),
+                "the body's history came out of the reservoir",
+            );
         }
     }
 }
@@ -198,7 +193,7 @@ fn test_remaining_compute_gas_exact_value_matches_tracker() {
         outcome.result.output().unwrap(),
     )
     .unwrap();
-    assert_eq!(answer, 1_000_000 - outcome.result.tx_gas_used());
+    assert_eq!(answer, 1_000_000 - outcome.result.gas().total_gas_spent());
 }
 
 /// A caller that forwards the query little still hears its own gas, not the forward: the answer
@@ -297,7 +292,7 @@ fn test_a_detained_transactions_own_call_hears_the_cap() {
         outcome.result.output().unwrap(),
     )
     .unwrap();
-    assert_eq!(answer, 10_000_000 - outcome.result.tx_gas_used());
+    assert_eq!(answer, 10_000_000 - outcome.result.gas().total_gas_spent());
 }
 
 /// A contract's query, without a read and after one, below and above the execution cap: its own
@@ -362,28 +357,6 @@ fn test_a_childs_read_binds_its_callers_answer() {
 }
 
 /* ---------- the answer is what the caller can spend when it resumes ---------- */
-
-/// Records every answer a query returns, next to the spendable regular gas its caller resumes
-/// with: what a regular charge of the caller could draw at its next instruction.
-#[derive(Debug, Default)]
-struct AnswerAndResume {
-    pending: Option<u64>,
-    pairs: Vec<(u64, u64)>,
-}
-
-impl<CTX> Inspector<CTX, EthInterpreter> for AnswerAndResume {
-    fn step(&mut self, interp: &mut Interpreter<EthInterpreter>, _context: &mut CTX) {
-        if let Some(answer) = self.pending.take() {
-            self.pairs.push((answer, interp.gas.tracker().spendable()));
-        }
-    }
-
-    fn call_end(&mut self, _context: &mut CTX, inputs: &CallInputs, outcome: &mut CallOutcome) {
-        if inputs.target_address == LIMIT_CONTROL_ADDRESS && outcome.result.is_ok() {
-            self.pending = Some(U256::from_be_slice(&outcome.result.output).to::<u64>());
-        }
-    }
-}
 
 /// Runs `tx` over `db` in a block whose beneficiary is `beneficiary`, under the default limits,
 /// and returns every answer with the spendable gas its caller resumed with.

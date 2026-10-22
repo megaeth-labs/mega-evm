@@ -1,0 +1,29 @@
+{
+  "description": "Satin: cREATE mode deploys contract, returns runtime bytecode and contract address",
+  "args": [
+    "run",
+    "--create",
+    "true",
+    "0x60fe60005360016000f3",
+    "--spec",
+    "Satin"
+  ],
+  "expected": {
+    "success": true,
+    "gas_used": 241060,
+    "output": "0xfe",
+    "contract_address": "0x5fbdb2315678afecb367f032d93f642f64180aa3",
+    "logs_count": 0,
+    "satin": {
+      "regular_gas": 24162,
+      "state_gas": 185130,
+      "history_gas": 31768,
+      "history_bytes": 361,
+      "reservoir_remaining": 0,
+      "floor_gas": 24640,
+      "data_size": 361,
+      "write_records": 1,
+      "limit_exceeded": null
+    }
+  }
+}

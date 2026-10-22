@@ -19,8 +19,8 @@ use mega_evm::{
         ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE,
     },
     test_utils::{is_transfer_log, BytecodeBuilder, MemoryDatabase},
-    LimitCheck, LimitKind, LimitUsage, MegaContext, MegaEvm, StagedRecord, TRANSFER_LOG_SIZE,
-    TX_BODY_SIZE, WRITE_RECORD_SIZE,
+    LimitUsage, MegaContext, MegaEvm, StagedRecord, TRANSFER_LOG_SIZE, TX_BODY_SIZE,
+    WRITE_RECORD_SIZE,
 };
 use revm::{
     bytecode::opcode::{
@@ -31,15 +31,18 @@ use revm::{
     Database, Inspector,
 };
 
-use crate::common::{call, call_with_data, context, create, run};
+use crate::common::{account_state_gas, call, call_with_data, context, create, history, run};
 
 const CALLER: Address = address!("0000000000000000000000000000000000100000");
 const CALLEE: Address = address!("0000000000000000000000000000000000100001");
 const CONTRACT: Address = address!("0000000000000000000000000000000000100002");
 const CONTRACT2: Address = address!("0000000000000000000000000000000000100003");
 /// Room for the state gas of several new accounts, including in a frame that resumes after a
-/// child burned the 63/64 it was forwarded.
-const GAS_LIMIT: u64 = 50_000_000;
+/// child burned the 63/64 it was forwarded: at least 50,000,000, and 64 times what a value call to
+/// a new account costs its caller at the byte prices in effect.
+fn gas_limit() -> u64 {
+    (64 * (account_state_gas() + history(4 * WRITE_RECORD_SIZE) + 50_000)).max(50_000_000)
+}
 
 /// The transaction body and nothing else.
 const fn body_only() -> LimitUsage {
@@ -90,7 +93,7 @@ fn test_two_value_calls_record_the_sender_once() {
     let code = append_value_call(BytecodeBuilder::default(), CONTRACT, 1).append(POP);
     let code = append_value_call(code, CONTRACT2, 1).append(POP).append(STOP).build();
     let (result, usage) =
-        run(funded().account_code(CALLEE, code), call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
+        run(funded().account_code(CALLEE, code), call(CALLER, CALLEE, U256::ZERO, gas_limit()));
     assert!(result.result.is_success());
     assert_eq!(
         usage,
@@ -105,7 +108,7 @@ fn test_create_then_call_record_the_frame_account_once() {
     let code = append_value_create(BytecodeBuilder::default()).append(POP);
     let code = append_value_call(code, CONTRACT, 1).append(POP).append(STOP).build();
     let (result, usage) =
-        run(funded().account_code(CALLEE, code), call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
+        run(funded().account_code(CALLEE, code), call(CALLER, CALLEE, U256::ZERO, gas_limit()));
     assert!(result.result.is_success());
     assert_eq!(
         usage,
@@ -120,7 +123,7 @@ fn test_two_creates_record_the_creator_once() {
     let code = append_value_create(BytecodeBuilder::default()).append(POP);
     let code = append_value_create(code).append(POP).append(STOP).build();
     let (result, usage) =
-        run(funded().account_code(CALLEE, code), call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
+        run(funded().account_code(CALLEE, code), call(CALLER, CALLEE, U256::ZERO, gas_limit()));
     assert!(result.result.is_success());
     assert_eq!(
         usage,
@@ -136,7 +139,7 @@ fn test_failed_child_discards_its_transfer_records() {
         append_value_call(BytecodeBuilder::default(), CONTRACT, 1).append(POP).append(STOP).build();
     let db =
         funded().account_code(CALLEE, code).account_code(CONTRACT, Bytes::from_static(&[INVALID]));
-    let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
+    let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, gas_limit()));
     assert!(result.result.is_success(), "the outer call succeeds although the child halts");
     assert_eq!(usage, body_only());
 }
@@ -161,7 +164,7 @@ fn test_failed_first_child_lets_the_next_transfer_record_the_sender() {
         .build();
     let db =
         funded().account_code(CALLEE, code).account_code(CONTRACT, Bytes::from_static(&[INVALID]));
-    let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
+    let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, gas_limit()));
     assert!(result.result.is_success());
     assert_eq!(
         usage,
@@ -183,21 +186,12 @@ fn reverting_creations(n: usize) -> Bytes {
     code.into()
 }
 
-/// A reverted creation keeps the creator's nonce record: the nonce bump survives the revert.
-#[test]
-fn test_reverted_nested_create_keeps_the_creator_nonce_record() {
-    let db = funded().account_code(OUTER_CREATOR, reverting_creations(1));
-    let (result, usage) = run(db, call(CALLER, OUTER_CREATOR, U256::ZERO, GAS_LIMIT));
-    assert!(result.result.is_success());
-    assert_eq!(usage, records(1), "the creator's nonce; the created account is gone");
-}
-
 /// Two reverted creations record the creator once: the first record survives, so the second
 /// finds the creator recorded.
 #[test]
 fn test_reverted_then_retried_create_records_the_creator_once() {
     let db = funded().account_code(OUTER_CREATOR, reverting_creations(2));
-    let (result, usage) = run(db, call(CALLER, OUTER_CREATOR, U256::ZERO, GAS_LIMIT));
+    let (result, usage) = run(db, call(CALLER, OUTER_CREATOR, U256::ZERO, gas_limit()));
     assert!(result.result.is_success());
     assert_eq!(usage, records(1));
 }
@@ -214,7 +208,7 @@ fn test_creation_without_funds_records_nothing() {
         .stop()
         .build();
     let db = MemoryDatabase::default().account_code(CALLEE, code);
-    let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
+    let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, gas_limit()));
     assert!(result.result.is_success());
     assert_eq!(usage, body_only());
     assert_eq!(result.state[&CALLEE].info.nonce, 0, "the nonce was never bumped");
@@ -226,8 +220,8 @@ const SELF_CALLER: Address = address!("000000000000000000000000000000005E1F0004"
 
 fn value_delta(to: Address) -> LimitUsage {
     let db = || MemoryDatabase::default().account_balance(A, U256::from(1_000_000));
-    let (with_value, usage_value) = run(db(), call(A, to, U256::from(1), GAS_LIMIT));
-    let (zero_value, usage_zero) = run(db(), call(A, to, U256::ZERO, GAS_LIMIT));
+    let (with_value, usage_value) = run(db(), call(A, to, U256::from(1), gas_limit()));
+    let (zero_value, usage_zero) = run(db(), call(A, to, U256::ZERO, gas_limit()));
     assert!(with_value.result.is_success() && zero_value.result.is_success());
     usage_value.saturating_sub(usage_zero)
 }
@@ -272,7 +266,7 @@ fn nested_delta(targets: &[Address]) -> LimitUsage {
             .account_balance(SELF_CALLER, U256::from(1_000_000))
             .account_code(SELF_CALLER, self_calling_code(targets, value));
         let (result, usage) =
-            run(db, call_with_data(A, SELF_CALLER, Bytes::from_static(&[1]), GAS_LIMIT));
+            run(db, call_with_data(A, SELF_CALLER, Bytes::from_static(&[1]), gas_limit()));
         assert!(result.result.is_success());
         usage
     };
@@ -316,7 +310,7 @@ fn test_sstore_first_change_records_and_write_back_refunds() {
         let db = MemoryDatabase::default()
             .account_code(CALLEE, code.stop().build())
             .account_storage(CALLEE, U256::ZERO, U256::from(original));
-        let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
+        let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, gas_limit()));
         assert!(result.result.is_success());
         assert_eq!(usage, expected, "writes {writes:?} over original {original}");
     }
@@ -343,30 +337,10 @@ fn test_write_back_in_a_child_refunds_the_caller_record() {
             .build();
         let db =
             MemoryDatabase::default().account_code(CALLEE, parent).account_code(CONTRACT, code);
-        let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
+        let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, gas_limit()));
         assert!(result.result.is_success());
         assert_eq!(usage, expected);
     }
-}
-
-/// A log counts 32 bytes for its address, 32 per topic and its data; no write record.
-#[test]
-fn test_log_counts_its_bytes() {
-    let code = BytecodeBuilder::default()
-        .push_number(0x22_u8)
-        .push_number(0x11_u8)
-        .push_number(10_u8)
-        .append(PUSH0)
-        .append(LOG2)
-        .stop()
-        .build();
-    let (result, usage) = run(
-        MemoryDatabase::default().account_code(CALLEE, code),
-        call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT),
-    );
-    assert!(result.result.is_success());
-    assert_eq!(result.result.logs().len(), 1);
-    assert_eq!(usage, with_extra(body_only(), 32 + 2 * 32 + 10));
 }
 
 /// `SELFDESTRUCT` records the beneficiary only when value moves to another account than the
@@ -387,7 +361,7 @@ fn test_selfdestruct_records_the_beneficiary_when_value_moves() {
         let db = MemoryDatabase::default()
             .account_code(CALLEE, destruct_to(beneficiary))
             .account_balance(CALLEE, balance);
-        let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
+        let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, gas_limit()));
         assert!(result.result.is_success());
         assert_eq!(usage, expected, "balance {balance}, beneficiary {beneficiary}");
     }
@@ -398,14 +372,155 @@ fn test_selfdestruct_records_the_beneficiary_when_value_moves() {
 fn test_top_level_create_records_the_created_account() {
     // `STOP` is one byte of init code and deposits nothing.
     let (result, usage) =
-        run(MemoryDatabase::default(), create(CALLER, Bytes::from_static(&[STOP]), GAS_LIMIT));
+        run(MemoryDatabase::default(), create(CALLER, Bytes::from_static(&[STOP]), gas_limit()));
     assert!(result.result.is_success());
     assert_eq!(usage, with_extra(records(1), 1));
 
     let (result, usage) =
-        run(MemoryDatabase::default(), create(CALLER, Bytes::from_static(&[INVALID]), GAS_LIMIT));
+        run(MemoryDatabase::default(), create(CALLER, Bytes::from_static(&[INVALID]), gas_limit()));
     assert!(!result.result.is_success());
     assert_eq!(usage, with_extra(body_only(), 1));
+}
+
+/* ---------- the fee accounts and the sender ---------- */
+
+/// The block beneficiary of the fee-account rows: an account of its own, not the zero address.
+const COINBASE: Address = address!("00000000000000000000000000000000000C0B00");
+
+/// How execution reaches an account in the rows of
+/// [`test_execution_writes_to_the_fee_accounts_are_records`].
+#[derive(Clone, Copy, Debug)]
+enum FeeRowPath {
+    /// `CALLEE` sends it one wei with a `CALL`.
+    ValueTransfer,
+    /// `CALLEE` destructs itself naming it as beneficiary, which moves `CALLEE`'s balance to it.
+    SelfDestruct,
+}
+
+/// A write execution makes to one of the four accounts a transaction's fees are credited to is a
+/// record like a write to any other account: the body's five fixed records bound the fee credits
+/// the settlement makes, not what the transaction's frames write. The sender's account is the
+/// converse: the body counts it, so nothing execution writes to it is recorded again, and that
+/// holds for a fee account that is the sender too.
+///
+/// Every row runs from a contract frame, `CALLEE`, which the transaction calls without value and
+/// which holds ten million wei. A value transfer records its sender, `CALLEE`, and its recipient;
+/// a `SELFDESTRUCT` of an account the transaction did not create records its beneficiary alone.
+/// Each row moves value to another account, so each keeps one EIP-7708 transfer log, which is
+/// data size and neither a record nor history. The fee accounts exist before the transaction, so
+/// no row adds state; the transaction pays a fee at a gas price of ten over a base fee of one, so
+/// the settlement credits the beneficiary and the base fee vault on top of what execution wrote.
+///
+/// A record weighs `WRITE_RECORD_SIZE` bytes of data size and history and is one KV update; the
+/// history is its bytes at the cost per history byte, on top of the body's `TX_BODY_SIZE`.
+///
+/// Rules: [S10.17], [S10.19], [S10.22], [S10.28], [S10.29], [S7], [S10]. Independence: constants —
+/// the record counts are written out per row, and the data size, KV count and history are hand
+/// arithmetic from `TX_BODY_SIZE`, `WRITE_RECORD_SIZE`, `TRANSFER_LOG_SIZE` and the cost per
+/// history byte in effect.
+#[test]
+fn test_execution_writes_to_the_fee_accounts_are_records() {
+    use op_revm::constants::{BASE_FEE_RECIPIENT, L1_FEE_RECIPIENT, OPERATOR_FEE_RECIPIENT};
+    use FeeRowPath::{SelfDestruct, ValueTransfer};
+
+    // (row, the transaction's sender, the account execution writes, the path, the records kept)
+    let rows: [(&str, Address, Address, FeeRowPath, u64); 12] = [
+        ("the block beneficiary, by a value transfer", CALLER, COINBASE, ValueTransfer, 2),
+        ("the block beneficiary, by a SELFDESTRUCT", CALLER, COINBASE, SelfDestruct, 1),
+        ("the L1 fee vault, by a value transfer", CALLER, L1_FEE_RECIPIENT, ValueTransfer, 2),
+        ("the L1 fee vault, by a SELFDESTRUCT", CALLER, L1_FEE_RECIPIENT, SelfDestruct, 1),
+        ("the base fee vault, by a value transfer", CALLER, BASE_FEE_RECIPIENT, ValueTransfer, 2),
+        ("the base fee vault, by a SELFDESTRUCT", CALLER, BASE_FEE_RECIPIENT, SelfDestruct, 1),
+        (
+            "the operator fee vault, by a value transfer",
+            CALLER,
+            OPERATOR_FEE_RECIPIENT,
+            ValueTransfer,
+            2,
+        ),
+        (
+            "the operator fee vault, by a SELFDESTRUCT",
+            CALLER,
+            OPERATOR_FEE_RECIPIENT,
+            SelfDestruct,
+            1,
+        ),
+        ("the sender, by a value transfer", CALLER, CALLER, ValueTransfer, 1),
+        ("the sender, by a SELFDESTRUCT", CALLER, CALLER, SelfDestruct, 0),
+        (
+            "the block beneficiary that is the sender, by a value transfer",
+            COINBASE,
+            COINBASE,
+            ValueTransfer,
+            1,
+        ),
+        (
+            "the block beneficiary that is the sender, by a SELFDESTRUCT",
+            COINBASE,
+            COINBASE,
+            SelfDestruct,
+            0,
+        ),
+    ];
+    for (row, sender, target, path, records) in rows {
+        let code = match path {
+            ValueTransfer => append_value_call(BytecodeBuilder::default(), target, 1)
+                .append(POP)
+                .append(STOP)
+                .build(),
+            SelfDestruct => {
+                BytecodeBuilder::default().push_address(target).append(SELFDESTRUCT).build()
+            }
+        };
+        let mut db = funded().account_code(CALLEE, code).account_balance(sender, U256::MAX >> 2);
+        for account in [COINBASE, L1_FEE_RECIPIENT, BASE_FEE_RECIPIENT, OPERATOR_FEE_RECIPIENT] {
+            if account != sender {
+                db = db.account_balance(account, U256::from(1));
+            }
+        }
+        let mut tx = call(sender, CALLEE, U256::ZERO, gas_limit());
+        tx.0.base.gas_price = 10;
+        let block =
+            revm::context::BlockEnv { beneficiary: COINBASE, basefee: 1, ..crate::common::block() };
+        let outcome = MegaEvm::new(context(db).with_block(block))
+            .execute_transaction(tx)
+            .expect("the transaction is valid");
+        assert!(outcome.result.is_success(), "{row}: {:?}", outcome.result);
+        assert_eq!(transfer_logs(&outcome.result), 1, "{row}: the transfer log");
+        // The settlement credited the fees on top of what execution moved: the priority fee of
+        // nine a gas to the beneficiary, the base fee of one a gas to the base fee vault.
+        for (credited, per_gas) in [(COINBASE, 9u64), (BASE_FEE_RECIPIENT, 1)] {
+            if credited == sender {
+                continue;
+            }
+            let moved = match path {
+                _ if credited != target => 0,
+                ValueTransfer => 1,
+                SelfDestruct => 10_000_000,
+            };
+            assert_eq!(
+                outcome.state[&credited].info.balance,
+                U256::from(1 + moved + outcome.gas.gas_used * per_gas),
+                "{row}: the fee credited to {credited}"
+            );
+        }
+
+        let history_bytes = TX_BODY_SIZE + records * WRITE_RECORD_SIZE;
+        assert_eq!(outcome.usage.write_records, records, "{row}: the records, the KV count");
+        assert_eq!(
+            outcome.usage.data_size,
+            history_bytes + TRANSFER_LOG_SIZE,
+            "{row}: the data size: the body, the records and the transfer log"
+        );
+        assert_eq!(outcome.gas.history_bytes, history_bytes, "{row}: the history bytes");
+        if !crate::common::history_rounds() {
+            assert_eq!(
+                outcome.gas.history,
+                history(history_bytes),
+                "{row}: the history gas: the body and the records at the cost per history byte"
+            );
+        }
+    }
 }
 
 /* ---------- the commit happens after the opcode ---------- */
@@ -467,7 +582,7 @@ fn after_sstore(steps: &[(u8, bool, LimitUsage)]) -> (bool, LimitUsage) {
 #[test]
 fn test_completed_sstore_commits_its_record() {
     let code = BytecodeBuilder::default().sstore(U256::ZERO, U256::from(1)).stop().build();
-    let steps = probe(MemoryDatabase::default().account_code(CALLEE, code), GAS_LIMIT, false);
+    let steps = probe(MemoryDatabase::default().account_code(CALLEE, code), gas_limit(), false);
     let (staged, usage) = after_sstore(&steps);
     assert!(!staged);
     assert_eq!(usage, records(1));
@@ -488,7 +603,7 @@ fn test_sstore_out_of_gas_after_the_write_discards_the_record() {
         .stop()
         .build();
     let db = MemoryDatabase::default().account_code(CALLEE, parent).account_code(CONTRACT, child);
-    let steps = probe(db, GAS_LIMIT, false);
+    let steps = probe(db, gas_limit(), false);
     let (staged, usage) = after_sstore(&steps);
     assert!(!staged, "the record is discarded, not left for the next opcode");
     assert_eq!(usage, body_only(), "a failed opcode's write is not counted");
@@ -499,7 +614,7 @@ fn test_sstore_out_of_gas_after_the_write_discards_the_record() {
 #[test]
 fn test_wrapper_discards_a_stale_record_on_entry() {
     let code = BytecodeBuilder::default().sstore(U256::ZERO, U256::from(1)).stop().build();
-    let steps = probe(MemoryDatabase::default().account_code(CALLEE, code), GAS_LIMIT, true);
+    let steps = probe(MemoryDatabase::default().account_code(CALLEE, code), gas_limit(), true);
     let (staged, usage) = after_sstore(&steps);
     assert!(!staged);
     assert_eq!(usage, records(1), "the SSTORE's record, and not the stale log's bytes");
@@ -518,32 +633,14 @@ fn authorizing_call(
     value: u64,
     authorizations: &[(Address, u64)],
 ) -> mega_evm::MegaTransaction {
-    use revm::{
-        context::{transaction::TransactionType, TxEnv},
-        context_interface::{
-            either::Either,
-            transaction::{Authorization, RecoveredAuthority, RecoveredAuthorization},
-        },
-    };
-    let authorization_list = authorizations
-        .iter()
-        .map(|(authority, nonce)| {
-            Either::Right(RecoveredAuthorization::new_unchecked(
-                Authorization { chain_id: U256::ZERO, address: DELEGATE, nonce: *nonce },
-                RecoveredAuthority::Valid(*authority),
-            ))
-        })
-        .collect();
-    alloy_op_evm::OpTx(mega_evm::test_utils::op_transaction(TxEnv {
-        tx_type: TransactionType::Eip7702 as u8,
-        caller: CALLER,
-        kind: alloy_primitives::TxKind::Call(to),
-        value: U256::from(value),
-        gas_limit: GAS_LIMIT,
-        gas_priority_fee: Some(0),
-        authorization_list,
-        ..Default::default()
-    }))
+    crate::common::authorizing_call(
+        CALLER,
+        to,
+        U256::from(value),
+        gas_limit(),
+        DELEGATE,
+        authorizations,
+    )
 }
 
 /// Each distinct applied authority is one record, however many of its authorizations applied;
@@ -565,14 +662,6 @@ fn test_applied_authorities_record_once_each() {
         usage,
         with_extra(body_only(), mega_evm::AUTHORIZATION_SIZE),
         "a wrong nonce applies nothing, and its tuple is still in the body"
-    );
-
-    let (result, usage) = run(db(), authorizing_call(CONTRACT, 0, &[(CALLER, 1)]));
-    assert!(result.result.is_success());
-    assert_eq!(
-        usage,
-        with_extra(body_only(), mega_evm::AUTHORIZATION_SIZE),
-        "the sender's own account is part of the body"
     );
 }
 
@@ -637,7 +726,7 @@ fn test_frames_running_as_the_sender_do_not_record_it() {
     let account = db.load_account(CALLER).unwrap();
     account.info.code_hash = delegation.hash_slow();
     account.info.code = Some(delegation);
-    let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
+    let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, gas_limit()));
     assert!(result.result.is_success(), "{:?}", result.result);
     assert_eq!(result.state[&CONTRACT2].info.balance, U256::from(1), "the transfer happened");
     assert_eq!(
@@ -669,7 +758,7 @@ fn test_creation_failing_before_the_nonce_bump_records_nothing() {
     let mut evm = MegaEvm::new(context(funded().account_code(CALLEE, code)))
         .with_inspector(OverfundCreations);
     let result =
-        alloy_evm::Evm::transact_raw(&mut evm, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT))
+        alloy_evm::Evm::transact_raw(&mut evm, call(CALLER, CALLEE, U256::ZERO, gas_limit()))
             .unwrap();
     assert!(result.result.is_success());
     assert_eq!(result.state[&CALLEE].info.nonce, 0, "the nonce was never bumped");
@@ -682,7 +771,7 @@ fn test_creation_failing_before_the_nonce_bump_records_nothing() {
 fn test_colliding_creation_keeps_the_creator_record() {
     let code = append_value_create(BytecodeBuilder::default()).append(POP).append(STOP).build();
     let db = funded().account_code(CALLEE, code).account_nonce(CALLEE.create(0), 1);
-    let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
+    let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, gas_limit()));
     assert!(result.result.is_success());
     assert_eq!(result.state[&CALLEE].info.nonce, 1, "the collision comes after the bump");
     assert_eq!(usage, records(1), "the creator's nonce only");
@@ -706,7 +795,7 @@ fn test_creation_stopped_at_init_bumps_the_creator_nonce() {
     let limits = mega_evm::EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(100);
     let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits));
     let result =
-        alloy_evm::Evm::transact_raw(&mut evm, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT))
+        alloy_evm::Evm::transact_raw(&mut evm, call(CALLER, CALLEE, U256::ZERO, gas_limit()))
             .unwrap();
     assert!(result.result.is_success(), "{:?}", result.result);
     assert_eq!(result.state[&CALLEE].info.nonce, 1, "the stopped creation bumped the nonce");
@@ -714,66 +803,71 @@ fn test_creation_stopped_at_init_bumps_the_creator_nonce() {
     assert_eq!(evm.ctx().additional_limit().usage(), records(2), "slot 1 and the creator's nonce");
 }
 
-/// Authorities whose records would cross the transaction's data-size limit are not applied: the
-/// limit is enforced before the writes it guards, and the transaction is stopped before its first
-/// frame.
+/// A transaction is held at validation to its body and a record for every entry of its
+/// authorization list, against the data-size limit: the largest transaction that fits runs with
+/// its authority applied, and with one byte of limit less it is rejected before anything is
+/// applied. The bound counts every entry, applied or not: a list naming one authority twice is held
+/// to two records, though the one authority makes one.
 #[test]
-fn test_authorities_crossing_the_cap_are_not_applied() {
+fn test_authority_records_are_held_to_the_limit_at_validation() {
     let db = || MemoryDatabase::default().account_balance(CALLER, U256::from(1_000));
-    let with_cap = |cap| {
+    let with_cap = |cap, authorizations: &[(Address, u64)]| {
         let limits = mega_evm::EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(cap);
         MegaEvm::new(context(db()).with_tx_runtime_limits(limits))
-            .execute_transaction(authorizing_call(CONTRACT, 0, &[(AUTHORITY_1, 0)]))
-            .unwrap()
+            .execute_transaction(authorizing_call(CONTRACT, 0, authorizations))
+    };
+    let refused = |cap, authorizations: &[(Address, u64)]| {
+        let error = with_cap(cap, authorizations).expect_err("rejected at validation");
+        format!("{error:?}").contains(mega_evm::TX_BODY_OVER_DATA_SIZE_LIMIT)
     };
     // The body carries the authorization tuple; the applied authority is one record on top.
     let tuple = mega_evm::AUTHORIZATION_SIZE;
-    let at_the_cap = with_cap(TX_BODY_SIZE + tuple + WRITE_RECORD_SIZE);
-    assert!(at_the_cap.result.is_success(), "records equal to the cap do not cross it");
+    let once = [(AUTHORITY_1, 0)];
+    let largest = TX_BODY_SIZE + tuple + WRITE_RECORD_SIZE;
+    let at_the_cap = with_cap(largest, &once).expect("a transaction at the limit is valid");
+    assert!(at_the_cap.result.is_success(), "{:?}", at_the_cap.result);
     assert_eq!(at_the_cap.usage, with_extra(records(1), tuple));
+    let code = at_the_cap.state[&AUTHORITY_1].info.code.as_ref();
+    assert_eq!(code.and_then(|code| code.eip7702_address()), Some(DELEGATE), "it is applied");
+    assert!(refused(largest - 1, &once), "one byte of limit less rejects it");
 
-    let limit = TX_BODY_SIZE + tuple + WRITE_RECORD_SIZE - 1;
-    let outcome = with_cap(limit);
-    assert!(!outcome.result.is_success() && !outcome.result.is_halt(), "{:?}", outcome.result);
-    assert_eq!(
-        outcome.limit_exceeded,
-        Some(LimitCheck::ExceedsLimit {
-            kind: LimitKind::DataSize,
-            limit,
-            used: limit + 1,
-            frame_local: false,
-        }),
-        "the authority record is the byte that crosses, and nothing after it is counted"
-    );
-    let authority = outcome.state.get(&AUTHORITY_1);
-    assert!(
-        authority.is_none_or(|a| a.info.nonce == 0 && a.info.is_empty_code_hash()),
-        "the delegation was not applied: {authority:?}"
-    );
-    assert_eq!(outcome.usage, with_extra(body_only(), mega_evm::AUTHORIZATION_SIZE));
+    let twice = [(AUTHORITY_1, 0), (AUTHORITY_1, 1)];
+    let bound = TX_BODY_SIZE + 2 * tuple + 2 * WRITE_RECORD_SIZE;
+    assert!(refused(bound - 1, &twice), "two entries are held to two records");
+    let ran = with_cap(bound, &twice).expect("valid at two records");
+    assert!(ran.result.is_success(), "{:?}", ran.result);
+    assert_eq!(ran.usage, with_extra(records(1), 2 * tuple), "the one authority makes one record");
 }
 
-/// A transaction that runs out of gas after its authorities were applied, before its first frame,
-/// keeps none of their records: the out-of-gas takes the delegations back.
-#[test]
-fn test_runtime_out_of_gas_after_authorities_keeps_no_record() {
-    // The call target is an authority the transaction delegates: calling it pays for the
-    // delegation target's access after the authorities were applied. Find the gas limit one short
-    // of the whole runtime phase.
-    let db = || MemoryDatabase::default().account_balance(CALLER, U256::from(1_000_000_000));
-    let tx = |gas_limit| {
-        let mut tx = authorizing_call(AUTHORITY_1, 0, &[(AUTHORITY_1, 0)]);
-        tx.0.base.gas_limit = gas_limit;
-        tx
+/// A funded caller's database, for the runtime out-of-gas tests.
+fn runtime_oog_db() -> MemoryDatabase {
+    MemoryDatabase::default().account_balance(CALLER, U256::from(1_000_000_000))
+}
+
+/// A call to an authority the transaction delegates, at `gas_limit`: calling it pays for the
+/// delegation target's access after the authorities were applied.
+fn runtime_oog_tx(gas_limit: u64) -> mega_evm::MegaTransaction {
+    let mut tx = authorizing_call(AUTHORITY_1, 0, &[(AUTHORITY_1, 0)]);
+    tx.0.base.gas_limit = gas_limit;
+    tx
+}
+
+/// The gas limit one short of [`runtime_oog_tx`]'s whole runtime phase: the transaction is
+/// included, its authorities are applied, and it runs out of gas before its first frame.
+fn one_short_of_the_runtime_phase() -> u64 {
+    let run_at = |gas_limit| {
+        MegaEvm::new(context(runtime_oog_db())).execute_transaction(runtime_oog_tx(gas_limit))
     };
-    let run_at = |gas_limit| MegaEvm::new(context(db())).execute_transaction(tx(gas_limit));
     // A limit below the intrinsic charge is a validation rejection rather than a run, which is a
     // failure for the search all the same.
     let succeeds_at = |gas_limit| run_at(gas_limit).is_ok_and(|o| o.result.is_success());
     // Gas is monotone here: every limit above the smallest one that succeeds succeeds too. Search
     // for that smallest limit rather than walking up to it, which the delegation's state gas puts
     // several hundred thousand gas away.
-    let (mut fails, mut succeeds) = (0u64, 1_000_000u64);
+    // 1,000,000 of regular gas on top of the authority's account and delegation and a kilobyte of
+    // history, at the byte prices in effect.
+    let high = 1_000_000 + 2 * account_state_gas() + history(1_000);
+    let (mut fails, mut succeeds) = (0u64, high);
     assert!(succeeds_at(succeeds), "the high bound must succeed");
     while succeeds - fails > 1 {
         let middle = fails + (succeeds - fails) / 2;
@@ -783,7 +877,16 @@ fn test_runtime_out_of_gas_after_authorities_keeps_no_record() {
             fails = middle;
         }
     }
-    let outcome = run_at(succeeds - 1).expect("one gas short of succeeding is still included");
+    succeeds - 1
+}
+
+/// A transaction that runs out of gas after its authorities were applied, before its first frame,
+/// keeps none of their records: the out-of-gas takes the delegations back.
+#[test]
+fn test_runtime_out_of_gas_after_authorities_keeps_no_record() {
+    let outcome = MegaEvm::new(context(runtime_oog_db()))
+        .execute_transaction(runtime_oog_tx(one_short_of_the_runtime_phase()))
+        .expect("one gas short of succeeding is still included");
     assert!(outcome.result.is_halt(), "{:?}", outcome.result);
     assert_eq!(
         outcome.usage,
@@ -795,6 +898,30 @@ fn test_runtime_out_of_gas_after_authorities_keeps_no_record() {
         outcome.state.get(&AUTHORITY_1).is_none_or(|a| a.info.nonce == 0),
         "the out-of-gas took the delegation back"
     );
+}
+
+/// The inspected path unwinds a transaction that runs out of gas before its first frame as the
+/// plain one does: the delegation is taken back, and the result, the ledgers, the usage and the
+/// state are the same.
+#[test]
+fn test_an_inspected_runtime_out_of_gas_unwinds_as_a_plain_one() {
+    let gas_limit = one_short_of_the_runtime_phase();
+    let plain = MegaEvm::new(context(runtime_oog_db()))
+        .execute_transaction(runtime_oog_tx(gas_limit))
+        .expect("included");
+    let inspected = MegaEvm::new(context(runtime_oog_db()))
+        .with_inspector(revm::inspector::NoOpInspector)
+        .execute_transaction(runtime_oog_tx(gas_limit))
+        .expect("included");
+    assert!(inspected.result.is_halt(), "{:?}", inspected.result);
+    assert!(
+        inspected.state.get(&AUTHORITY_1).is_none_or(|a| a.info.nonce == 0),
+        "the out-of-gas took the delegation back"
+    );
+    assert_eq!(inspected.result, plain.result);
+    assert_eq!(inspected.gas, plain.gas);
+    assert_eq!(inspected.usage, plain.usage);
+    assert_eq!(inspected.state, plain.state);
 }
 
 /* ---------- which frame's account counts as recorded ---------- */
@@ -812,7 +939,7 @@ fn test_value_receiving_child_records_itself_once() {
         .append(STOP)
         .build();
     let db = funded().account_code(CALLEE, a).account_code(CONTRACT, b);
-    let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
+    let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, gas_limit()));
     assert!(result.result.is_success());
     assert_eq!(result.state[&CONTRACT2].info.balance, U256::from(1));
     assert_eq!(
@@ -842,7 +969,7 @@ fn test_zero_value_child_starts_unrecorded() {
         .account_code(CALLEE, a)
         .account_code(CONTRACT, b)
         .account_balance(CONTRACT, U256::from(5));
-    let (result, usage) = run(db, call(CALLER, CALLEE, U256::from(1), GAS_LIMIT));
+    let (result, usage) = run(db, call(CALLER, CALLEE, U256::from(1), gas_limit()));
     assert!(result.result.is_success());
     assert_eq!(
         usage,
@@ -871,7 +998,7 @@ fn test_delegatecall_child_inherits_the_frame_account_record() {
         .append(STOP)
         .build();
     let db = funded().account_code(CALLEE, delegate_to_d()).account_code(D, d);
-    let (result, usage) = run(db, call(CALLER, CALLEE, U256::from(1), GAS_LIMIT));
+    let (result, usage) = run(db, call(CALLER, CALLEE, U256::from(1), gas_limit()));
     assert!(result.result.is_success());
     assert_eq!(result.state[&CONTRACT2].info.balance, U256::from(1), "CALLEE's value moved");
     assert_eq!(
@@ -891,7 +1018,7 @@ fn test_created_frame_delegatecall_inherits_the_created_account_record() {
         .build();
     let db = funded().account_code(D, d);
     let tx = {
-        let mut tx = create(CALLER, delegate_to_d(), GAS_LIMIT);
+        let mut tx = create(CALLER, delegate_to_d(), gas_limit());
         tx.0.base.value = U256::from(5);
         tx
     };
@@ -918,7 +1045,7 @@ fn test_top_level_self_call_counts_the_sender_as_recorded() {
     let account = db.load_account(CALLER).unwrap();
     account.info.code_hash = delegation.hash_slow();
     account.info.code = Some(delegation);
-    let (result, usage) = run(db, call(CALLER, CALLER, U256::ZERO, GAS_LIMIT));
+    let (result, usage) = run(db, call(CALLER, CALLER, U256::ZERO, gas_limit()));
     assert!(result.result.is_success(), "{:?}", result.result);
     assert_eq!(result.state[&CONTRACT2].info.balance, U256::from(1));
     assert_eq!(usage, with_extra(records(1), TRANSFER_LOG_SIZE), "CONTRACT2 and its log only");
@@ -960,7 +1087,7 @@ fn test_inspector_answered_call_keeps_the_caller_lane() {
     let mut evm =
         MegaEvm::new(context(funded().account_code(CALLEE, a))).with_inspector(AnswerContract);
     let result =
-        alloy_evm::Evm::transact_raw(&mut evm, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT))
+        alloy_evm::Evm::transact_raw(&mut evm, call(CALLER, CALLEE, U256::ZERO, gas_limit()))
             .unwrap();
     assert!(result.result.is_success());
     assert_eq!(
@@ -1033,7 +1160,7 @@ fn paired_corpus() -> Vec<Paired> {
         beneficiary: Address::ZERO,
     };
     let to_callee = |code: Bytes| funded().account_code(CALLEE, code);
-    let plain = || call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT);
+    let plain = || call(CALLER, CALLEE, U256::ZERO, gas_limit());
     let calling = |target, value| {
         append_value_call(BytecodeBuilder::default(), target, value)
             .append(POP)
@@ -1052,6 +1179,7 @@ fn paired_corpus() -> Vec<Paired> {
         case("an empty call", to_callee(Bytes::new()), plain(), 0, 0),
         case("three fresh slots", to_callee(storing(&[(1, 1), (2, 1), (3, 1)])), plain(), 0, 3),
         case("a slot written and restored", to_callee(storing(&[(1, 1), (1, 0)])), plain(), 0, 0),
+        case("zero written to an empty slot", to_callee(storing(&[(1, 0)])), plain(), 0, 0),
         case(
             "a slot rewritten twice",
             to_callee(storing(&[(1, 1), (1, 2), (1, 3)])),
@@ -1069,6 +1197,14 @@ fn paired_corpus() -> Vec<Paired> {
             plain(),
             0,
             0,
+        ),
+        // Its sender is its recipient: one account, one record, and no transfer log.
+        case(
+            "a value call to the calling account itself",
+            to_callee(self_calling_code(&[CALLEE], 1)),
+            call_with_data(CALLER, CALLEE, Bytes::from_static(&[1]), gas_limit()),
+            0,
+            1,
         ),
         case(
             "a log over one word",
@@ -1104,7 +1240,7 @@ fn paired_corpus() -> Vec<Paired> {
         case(
             "a creation whose init code reverts",
             funded().account_code(OUTER_CREATOR, reverting_creations(1)),
-            call(CALLER, OUTER_CREATOR, U256::ZERO, GAS_LIMIT),
+            call(CALLER, OUTER_CREATOR, U256::ZERO, gas_limit()),
             0,
             1,
         ),
@@ -1133,7 +1269,7 @@ fn paired_corpus() -> Vec<Paired> {
         case(
             "a transaction carrying calldata",
             to_callee(Bytes::new()),
-            call_with_data(CALLER, CALLEE, Bytes::from(vec![7u8; 100]), GAS_LIMIT),
+            call_with_data(CALLER, CALLEE, Bytes::from(vec![7u8; 100]), gas_limit()),
             0,
             0,
         ),
@@ -1142,7 +1278,7 @@ fn paired_corpus() -> Vec<Paired> {
             ..case(
                 "a value transaction",
                 funded(),
-                call(CALLER, CONTRACT, U256::from(1), GAS_LIMIT),
+                call(CALLER, CONTRACT, U256::from(1), gas_limit()),
                 0,
                 1,
             )
@@ -1150,22 +1286,22 @@ fn paired_corpus() -> Vec<Paired> {
         case(
             "a value transaction the recipient reverts",
             funded().account_code(CONTRACT, reverting),
-            call(CALLER, CONTRACT, U256::from(1), GAS_LIMIT),
+            call(CALLER, CONTRACT, U256::from(1), gas_limit()),
             0,
             0,
         ),
-        case("a creation transaction", funded(), create(CALLER, Bytes::new(), GAS_LIMIT), 0, 1),
+        case("a creation transaction", funded(), create(CALLER, Bytes::new(), gas_limit()), 0, 1),
         case(
             "a creation that deploys code",
             funded(),
-            create(CALLER, constructor_returning(32), GAS_LIMIT),
+            create(CALLER, constructor_returning(32), gas_limit()),
             32,
             1,
         ),
         case(
             "a creation whose revert data is not deployed code",
             funded(),
-            create(CALLER, reverting_with(10), GAS_LIMIT),
+            create(CALLER, reverting_with(10), gas_limit()),
             0,
             0,
         ),
@@ -1181,7 +1317,7 @@ fn paired_corpus() -> Vec<Paired> {
                     CALLER,
                     ORACLE_CONTRACT_ADDRESS,
                     send_hint(b"a hint the transaction pays data size for"),
-                    GAS_LIMIT,
+                    gas_limit(),
                 ),
                 0,
                 0,
@@ -1196,7 +1332,7 @@ fn paired_corpus() -> Vec<Paired> {
                 {
                     // A fee the beneficiary is actually credited, so the account the transfer
                     // records is one the body's five already bound.
-                    let mut tx = call(CALLER, CONTRACT, U256::from(1), GAS_LIMIT);
+                    let mut tx = call(CALLER, CONTRACT, U256::from(1), gas_limit());
                     tx.0.base.gas_price = 10;
                     tx
                 },
@@ -1288,7 +1424,7 @@ fn test_an_inspector_answered_value_call_gives_its_history_back() {
         append_value_call(BytecodeBuilder::default(), CONTRACT, 1).append(POP).append(STOP).build();
     let run_with = |inspector: Option<AnswerContract>| {
         let db = funded().account_code(CALLEE, code.clone());
-        let tx = call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT);
+        let tx = call(CALLER, CALLEE, U256::ZERO, gas_limit());
         match inspector {
             Some(inspector) => {
                 let mut evm = MegaEvm::new(context(db)).with_inspector(inspector);
@@ -1350,8 +1486,8 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for KvWeighsNoMore
 /// what it keeps parts from the records by exactly the bytes that are not records: the body, the
 /// logs — the transfer logs among them — the deployed code and the hint's payload.
 ///
-/// So a KV limit binds only below the data-size limit's fortieth: at the production data-size
-/// caps a transaction keeps at most 327,680 records, whatever its KV limit.
+/// So the data-size limit bounds the records: at the production data-size caps a transaction keeps
+/// at most 327,680 of them.
 #[test]
 fn test_the_kv_count_never_weighs_more_than_the_data_size() {
     assert_eq!(mega_evm::constants::TX_DATA_LIMIT / WRITE_RECORD_SIZE, 327_680);

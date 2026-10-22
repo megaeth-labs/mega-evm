@@ -9,9 +9,9 @@
 //!
 //! Whatever detention does to the movement, the transfer logs a receipt carries are the ones the
 //! data size kept: a transaction keeps its body, forty bytes a write record and 160 a transfer
-//! log, and a transaction the cap stops keeps its body alone. A debug build also asserts at every
-//! frame start that revm refused exactly the start predicted and journaled exactly the log
-//! counted, so every case below runs that check too.
+//! log, and a frame the cap stops keeps nothing, its movement and its log included. A debug build
+//! also asserts at every frame start that revm refused exactly the start predicted and journaled
+//! exactly the log counted, so every case below runs that check too.
 //!
 //! Each case runs with a read of the block's timestamp first, and with `PUSH0`, which costs the
 //! same two gas and reads nothing, in its place.
@@ -23,12 +23,16 @@ use mega_evm::{
     transaction_body_bytes, EvmTxRuntimeLimits, LimitUsage, MegaEvm, MegaTransaction,
     TRANSFER_LOG_SIZE, WRITE_RECORD_SIZE,
 };
-use revm::{bytecode::opcode::*, context::TxEnv, interpreter::InstructionResult};
+use revm::{
+    bytecode::opcode::*, context::TxEnv, context_interface::cfg::GasId,
+    interpreter::InstructionResult,
+};
 
 use crate::{
     detention::{
-        assert_stopped, context, intrinsic, op, run_on, spin, Calls, Run, BENEFICIARY, CALLER, CAP,
-        CHILD, CONTRACT, TIERS,
+        assert_caught, assert_stopped, cold_access, context, failed_status_store, intrinsic,
+        memory_cost, op, run_on, spin, value_transfer, Calls, Charges, Run, BENEFICIARY, CALLER,
+        CAP, CHILD, CONTRACT, TIERS,
     },
     withheld_gas::{costly_modexp_input, intrinsic_with},
 };
@@ -63,6 +67,44 @@ fn calls_with_value(first: u8, to: Address, gas: Option<u32>) -> Bytes {
         None => code.append(GAS),
     };
     code.append(CALL).push_number(0_u8).append(SSTORE).stop().build()
+}
+
+/// The regular charges [`calls_with_value`] makes after its first instruction reads, with calldata
+/// of `len` bytes, up to the call: the read's `POP`; `CALLDATASIZE`, two `PUSH0` and
+/// `CALLDATACOPY` — its static gas, the copy and the memory it expands — the call's four pushes,
+/// the value's and the address's, and `GAS`; and the call's own charges, `call`, less the stipend
+/// the callee is given, which nobody paid and is not compute.
+fn charges_to_the_call(len: u64, call: u64) -> Charges {
+    let words = len.div_ceil(32);
+    Charges::default().then(&[
+        2,
+        2,
+        2,
+        2,
+        3,
+        3 * words,
+        memory_cost(words),
+        2,
+        2,
+        2,
+        2,
+        3,
+        3,
+        2,
+        call - 2_300,
+    ])
+}
+
+/// A value call's own charges to a cold contract: the cold access and the transfer.
+fn call_to_a_contract() -> u64 {
+    cold_access() + value_transfer()
+}
+
+/// A value call's own charges to a precompile whose account is empty: the warm access, the
+/// transfer, and the regular price of the account the transfer adds, which is nothing at the
+/// schedule's prices: the account is paid for in state gas.
+fn call_to_an_empty_precompile() -> u64 {
+    100 + value_transfer() + crate::salt::entry(GasId::new_account_cost())
 }
 
 /// The accounts every case runs against: [`CONTRACT`] running `code` and holding `held`, a
@@ -159,13 +201,14 @@ fn balance(run: &Run, address: Address) -> U256 {
 ///
 /// - Priced within the allowance, modexp computes, the value moves, and the receipt carries the log
 ///   the data size counted, as without the read.
-/// - Priced past the allowance but within the forward, modexp runs out of the allowance without
-///   computing, the frame's checkpoint takes the move and the log back, and the transaction stops
-///   at the limit, billed its intrinsic gas and the limit and keeping its body alone. Without the
-///   read the call succeeds, and its log is kept.
+/// - Priced past the allowance but within the forward, modexp is answered without running, with the
+///   stop: nothing moves and no log is journaled. The contract catches it and stores the failed
+///   call's status on what the limit leaves it, ending within the limit or crossing it at the
+///   store, and the transaction keeps its body alone either way. Without the read the call
+///   succeeds, and its log is kept.
 /// - Sent with value by the beneficiary straight to modexp, the transaction's own frame is detained
-///   from its start and runs on the cap: priced past it, the same stop, and the value the
-///   transaction carries does not move.
+///   from its start with the cap as its allowance: priced past it, the same stop, billed its
+///   intrinsic gas alone, and the value the transaction carries does not move.
 #[test]
 fn test_a_value_call_to_a_precompile_after_a_read_keeps_the_log_it_counted() {
     let (within, above) = (costly_modexp_input(32, 32), costly_modexp_input(64, 0));
@@ -188,11 +231,14 @@ fn test_a_value_call_to_a_precompile_after_a_read_keeps_the_log_it_counted() {
 
         let ((detained, calls), body) = exec(TIMESTAMP, &above);
         let ((plain, _), _) = exec(PUSH0, &above);
-        assert_stopped(&detained, intrinsic_with(&above, gas_limit));
-        // The answer is the stop, having spent the allowance it ran on.
-        let (result, allowance) = ended(&calls, MODEXP);
-        assert_eq!(result, InstructionResult::Revert);
-        assert!(allowance < detained.limit.unwrap(), "{allowance}");
+        // The price is the charge past what the limit leaves the call, a precompile's warm access.
+        let price = mega_evm::satin_precompiles().get(&MODEXP).unwrap().required_gas(&above);
+        let charges = charges_to_the_call(above.len() as u64, call_to_an_empty_precompile())
+            .then(&[price.unwrap()]);
+        let intrinsic = intrinsic_with(&above, gas_limit);
+        assert_caught(&detained, intrinsic, charges.left(CAP), &failed_status_store());
+        // The answer is the stop, having spent nothing.
+        assert_eq!(ended(&calls, MODEXP), (InstructionResult::Revert, 0));
         assert_eq!(detained.outcome.usage, LimitUsage { data_size: body, write_records: 0 });
         assert_counts_its_transfer_logs(&detained, body, "priced past the allowance");
         assert_eq!(balance(&detained, MODEXP), U256::ZERO, "nothing moved");
@@ -215,8 +261,11 @@ fn test_a_value_call_to_a_precompile_after_a_read_keeps_the_log_it_counted() {
         let price = ended(&calls, MODEXP).1;
         let ((detained, calls), body) = sent(BENEFICIARY);
         assert_eq!(detained.limit, Some(CAP), "the sender is the beneficiary");
-        assert_eq!(ended(&calls, MODEXP), (InstructionResult::Revert, CAP));
-        assert_stopped(&detained, plain.outcome.gas.regular - price);
+        assert_eq!(ended(&calls, MODEXP), (InstructionResult::Revert, 0));
+        // Nothing is charged before the call: all the cap is left when its price does not fit it.
+        let left = Charges::default().then(&[price]).left(CAP);
+        assert_eq!(left, CAP);
+        assert_stopped(&detained, plain.outcome.gas.regular - price, left);
         assert_eq!(detained.outcome.usage, LimitUsage { data_size: body, write_records: 0 });
         assert_eq!(balance(&detained, MODEXP), U256::ZERO, "the transaction's value did not move");
     }
@@ -270,8 +319,10 @@ fn test_a_value_call_its_caller_cannot_fund_after_a_read_runs_as_without_it() {
 
 /// What a frame computes from a timestamp read to a completed `SELFDESTRUCT` of its balance to a
 /// cold contract: the read's `POP`, the beneficiary's `PUSH20`, the opcode's 5,000 and the cold
-/// access of 2,600, which revm charges after it journaled the move and its transfer log.
-const DESTRUCT_AFTER_READ: u64 = 2 + 3 + 5_000 + 2_600;
+/// access, which revm charges after it journaled the move and its transfer log.
+fn destruct_after_read() -> u64 {
+    2 + 3 + 5_000 + cold_access()
+}
 
 /// A `SELFDESTRUCT` of a balance, after a read, whose frame the cap stops.
 ///
@@ -301,14 +352,15 @@ fn test_a_selfdestructs_transfer_log_goes_with_the_frame_the_cap_stops() {
             run_tx(accounts(own(first).build(), VALUE), tx.clone(), under(cap), false).0
         };
         let (detained, plain) =
-            (run_own(TIMESTAMP, DESTRUCT_AFTER_READ), run_own(PUSH0, DESTRUCT_AFTER_READ));
+            (run_own(TIMESTAMP, destruct_after_read()), run_own(PUSH0, destruct_after_read()));
         assert_as_without_read(&detained, &plain, "a cap that pays the destruction");
         let logs = assert_counts_its_transfer_logs(&detained, body, "a destruction the cap pays");
         assert_eq!(logs, [transfer_log(CONTRACT, RECEIVER, U256::from(VALUE))]);
         assert_eq!(detained.outcome.usage.write_records, 1, "the beneficiary's record");
-        for cap in [DESTRUCT_AFTER_READ - 1, DESTRUCT_AFTER_READ - 2_600 - 1] {
+        for cap in [destruct_after_read() - 1, destruct_after_read() - cold_access() - 1] {
             let stopped = run_own(TIMESTAMP, cap);
-            assert_stopped(&stopped, intrinsic(gas_limit));
+            let left = Charges::default().then(&[2, 3, 5_000, cold_access()]).left(cap);
+            assert_stopped(&stopped, intrinsic(gas_limit), left);
             assert_eq!(stopped.limit, Some(2 + cap));
             assert_eq!(stopped.outcome.usage, LimitUsage { data_size: body, write_records: 0 });
             assert_eq!(balance(&stopped, RECEIVER), U256::ZERO, "under {cap}, nothing moved");
@@ -332,7 +384,13 @@ fn test_a_selfdestructs_transfer_log_goes_with_the_frame_the_cap_stops() {
             false,
         )
         .0;
-        assert_stopped(&stopped, intrinsic(gas_limit));
+        // The read's `POP`, the call's five pushes, its address, `GAS` and cold access, the child's
+        // `PUSH20` and destruction to a cold account, the caller's `POP`, then its loop.
+        let left = Charges::default()
+            .then(&[2, 2, 2, 2, 2, 2, 3, 2, cold_access(), 3, 5_000, cold_access(), 2])
+            .spin(0)
+            .left(CAP);
+        assert_stopped(&stopped, intrinsic(gas_limit), left);
         assert_eq!(stopped.outcome.usage, LimitUsage { data_size: body, write_records: 0 });
         assert_eq!(balance(&stopped, RECEIVER), U256::ZERO, "the child's move was taken back");
     }
@@ -350,8 +408,9 @@ struct Start {
     input: fn() -> Vec<u8>,
     /// What [`CONTRACT`] holds.
     held: u64,
-    /// Whether the cap stops the transaction.
-    stops: bool,
+    /// When the cap stops the call: the regular charges the transaction makes after the read up to
+    /// the one that crosses, with calldata of the given length.
+    stops: Option<fn(u64) -> Charges>,
 }
 
 /// Every path a frame start takes through detention, each moving value or refused on its caller's
@@ -363,7 +422,9 @@ struct Start {
 ///
 /// Every transaction keeps the data size of the transfer logs its receipt carries: a debug build
 /// asserts at each start that revm journaled exactly the log counted, and the receipt shows what
-/// that means for the transaction. Every case the cap does not stop runs as without the read.
+/// that means for the transaction. Every case the cap does not stop runs as without the read; in
+/// one it stops, the call is the stop, which the contract catches before it stores the call's
+/// status.
 #[test]
 fn test_every_detained_frame_start_keeps_the_log_it_counted() {
     let none = Vec::new;
@@ -373,63 +434,70 @@ fn test_every_detained_frame_start_keeps_the_log_it_counted() {
             code: |first| calls_with_value(first, RECEIVER, None),
             input: none,
             held: VALUE,
-            stops: false,
+            stops: None,
         },
         Start {
             name: "a value call to a contract the cap then stops",
             code: |first| calls_with_value(first, CHILD, None),
             input: none,
             held: VALUE,
-            stops: true,
+            // The call to the child's cold account, then the child's loop.
+            stops: Some(|len| charges_to_the_call(len, call_to_a_contract()).spin(0)),
         },
         Start {
             name: "a value call to an account with no code",
             code: |first| calls_with_value(first, PAYEE, None),
             input: none,
             held: VALUE,
-            stops: false,
+            stops: None,
         },
         Start {
             name: "a value call to a precompile forwarded less than the allowance",
             code: |first| calls_with_value(first, IDENTITY, Some(100_000)),
             input: || vec![0xab; 64],
             held: VALUE,
-            stops: false,
+            stops: None,
         },
         Start {
             name: "a value call to a precompile the allowance pays",
             code: |first| calls_with_value(first, IDENTITY, None),
             input: || vec![0xab; 64],
             held: VALUE,
-            stops: false,
+            stops: None,
         },
         Start {
             name: "a value call to a precompile priced past the allowance",
             code: |first| calls_with_value(first, MODEXP, None),
             input: || costly_modexp_input(64, 0),
             held: VALUE,
-            stops: true,
+            // The call to the precompile's warm account, then its price.
+            stops: Some(|len| {
+                let input = costly_modexp_input(64, 0);
+                let price =
+                    mega_evm::satin_precompiles().get(&MODEXP).unwrap().required_gas(&input);
+                charges_to_the_call(len, call_to_an_empty_precompile()).then(&[price.unwrap()])
+            }),
         },
         Start {
             name: "a value call to a precompile whose input fails past its gas check",
             code: |first| calls_with_value(first, EC_PAIRING, None),
             input: || vec![0; 3 * 192 + 1],
             held: VALUE,
-            stops: false,
+            stops: None,
         },
         Start {
             name: "a value call its caller cannot fund",
             code: |first| calls_with_value(first, RECEIVER, None),
             input: none,
             held: VALUE - 1,
-            stops: false,
+            stops: None,
         },
         Start {
             name: "a value call to a precompile its caller cannot fund",
             code: |first| calls_with_value(first, MODEXP, None),
             input: || costly_modexp_input(64, 0),
             held: VALUE - 1,
-            stops: false,
+            stops: None,
         },
         Start {
             name: "a CREATE with an endowment",
@@ -442,7 +510,7 @@ fn test_every_detained_frame_start_keeps_the_log_it_counted() {
             },
             input: none,
             held: VALUE,
-            stops: false,
+            stops: None,
         },
         Start {
             name: "a CREATE2 with an endowment",
@@ -455,7 +523,7 @@ fn test_every_detained_frame_start_keeps_the_log_it_counted() {
             },
             input: none,
             held: VALUE,
-            stops: false,
+            stops: None,
         },
         Start {
             name: "a CREATE its creator cannot fund",
@@ -468,7 +536,7 @@ fn test_every_detained_frame_start_keeps_the_log_it_counted() {
             },
             input: none,
             held: VALUE - 1,
-            stops: false,
+            stops: None,
         },
         Start {
             name: "a call to a contract that destructs",
@@ -479,7 +547,7 @@ fn test_every_detained_frame_start_keeps_the_log_it_counted() {
             },
             input: none,
             held: VALUE,
-            stops: false,
+            stops: None,
         },
     ];
     for gas_limit in TIERS {
@@ -496,8 +564,10 @@ fn test_every_detained_frame_start_keeps_the_log_it_counted() {
                 };
                 let detained = exec(TIMESTAMP);
                 assert_counts_its_transfer_logs(&detained, body, &case);
-                if start.stops {
-                    assert_stopped(&detained, intrinsic_with(&input, gas_limit));
+                if let Some(charges) = start.stops {
+                    let left = charges(input.len() as u64).left(CAP);
+                    let intrinsic = intrinsic_with(&input, gas_limit);
+                    assert_caught(&detained, intrinsic, left, &failed_status_store());
                     assert_eq!(detained.outcome.usage.write_records, 0, "{case}");
                 } else {
                     let plain = exec(PUSH0);

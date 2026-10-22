@@ -8,8 +8,8 @@ use crate::MegaHaltReason;
 
 /// Error types for keyless deployment operations.
 ///
-/// Most variants map directly to Solidity errors defined in `IKeylessDeploy`.
-/// Internal-only variants are mapped at the ABI boundary by `encode_error_result`.
+/// Every variant maps to the Solidity error of the same name in `IKeylessDeploy`;
+/// [`encode_error_result`] and [`decode_error_result`] convert at the ABI boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeylessDeployError {
     /// The transaction data is malformed (invalid RLP encoding)
@@ -27,9 +27,8 @@ pub enum KeylessDeployError {
     NoEtherTransfer,
     /// Failed to recover signer from signature (invalid signature)
     InvalidSignature,
-    /// The signer does not have enough balance to cover the sandbox tx's pre-execution
-    /// debit: `gas_limit × gas_price + value` on pre-Rex5 specs, `value` only on Rex5+
-    /// (where the sandbox tx is fee-free and only the `value` transfer needs funding).
+    /// The signer cannot fund the deployment's value. The deployment pays no gas out of the
+    /// signer's balance, so the value is all it must hold.
     InsufficientBalance,
     /// The deploy address already has code (contract already exists)
     ContractAlreadyExists,
@@ -38,30 +37,20 @@ pub enum KeylessDeployError {
         /// The on-chain nonce of the recovered signer
         signer_nonce: u64,
     },
-    /// The sandbox execution reverted
+    /// The deployment's creation reverted.
     ExecutionReverted {
         /// The gas used
         gas_used: u64,
         /// The output
         output: Bytes,
     },
-    /// The sandbox execution halted (out of gas, stack overflow, etc.)
+    /// The deployment's creation halted (out of gas, an invalid opcode, code the creation
+    /// refuses).
     ExecutionHalted {
         /// The gas used
         gas_used: u64,
         /// The reason
         reason: MegaHaltReason,
-    },
-    /// The call's remaining budget in some resource dimension was below the deployment's
-    /// known upfront usage, so the deployment was not started.
-    ParentBudgetExceeded {
-        /// The resource dimension, as the raw `kind` code of the `IKeylessDeploy` error. The
-        /// Satin resource dimensions and their codes are not defined yet.
-        kind: u8,
-        /// The remaining budget in that dimension.
-        limit: u64,
-        /// The deployment's known upfront usage in that dimension.
-        used: u64,
     },
     /// Contract creation succeeded but returned empty bytecode
     EmptyCodeDeployed {
@@ -79,41 +68,17 @@ pub enum KeylessDeployError {
         /// The gas limit override provided by the caller
         provided_gas_limit: u64,
     },
-    /// The remaining compute gas is insufficient to pay for the keyless deploy overhead.
-    InsufficientComputeGas {
-        /// The configured compute gas limit
-        limit: u64,
-        /// The actual compute gas usage
-        used: u64,
-    },
-    /// The keyless transaction's init code exceeds the configured maximum init code size.
-    ///
-    /// Rex5+ only: the sandbox runs as an OP deposit-like transaction which bypasses
-    /// op-revm's `validate_env` (where revm's EIP-3860 size check lives), so the sandbox
-    /// must re-enforce the limit itself against `cfg().max_initcode_size()`.
+    /// The keyless transaction's init code exceeds the configured maximum init code size
+    /// (EIP-3860), which no validation of the outer transaction holds it to.
     InitCodeTooLarge {
         /// The init code length in bytes.
         size: u64,
         /// The configured max init code size.
         max: u64,
     },
-    /// The recovered signer has non-empty, non-EIP-7702 bytecode in parent state.
-    ///
-    /// Rex5+ only: the deposit-style sandbox bypasses op-revm's EIP-3607 check (which
-    /// normally lives in `validate_account_nonce_and_code`), so the sandbox enforces it
-    /// itself before constructing the sandbox transaction.
+    /// The recovered signer has non-empty, non-EIP-7702 bytecode: EIP-3607 for a creator that
+    /// is not the transaction's sender, which no validation of the outer transaction checks.
     SignerHasCode,
-    /// Internal sandbox failure (DB I/O, header validation, etc.).
-    /// Selector-only so the top-level error ABI stays stable and does not depend on
-    /// upstream revm/op-revm `Display` text. The interceptor only runs at call depth 0,
-    /// so this returndata has no inner caller to read it and never reaches a consensus
-    /// root; the selector-only shape is for off-chain decoder/tooling stability.
-    InternalError,
-    /// Sandbox rejected the inner transaction as a tx-validation error
-    /// (`IsTxError::is_tx_error() == true`). A dedicated selector lets relayer-side
-    /// decoders distinguish this from a genuine internal failure. Selector-only for the
-    /// same ABI-stability reason as `InternalError`.
-    InvalidTransaction,
     /// The keylessDeploy call was not intercepted (only returned by Solidity contract for inner
     /// calls)
     NotIntercepted,
@@ -155,9 +120,6 @@ pub fn encode_error_result(error: KeylessDeployError) -> Bytes {
         KeylessDeployError::ExecutionHalted { gas_used, .. } => {
             IKeylessDeploy::ExecutionHalted { gasUsed: gas_used }.abi_encode().into()
         }
-        KeylessDeployError::ParentBudgetExceeded { kind, limit, used } => {
-            IKeylessDeploy::ParentBudgetExceeded { kind, limit, used }.abi_encode().into()
-        }
         KeylessDeployError::EmptyCodeDeployed { gas_used } => {
             IKeylessDeploy::EmptyCodeDeployed { gasUsed: gas_used }.abi_encode().into()
         }
@@ -175,17 +137,10 @@ pub fn encode_error_result(error: KeylessDeployError) -> Bytes {
             .abi_encode()
             .into()
         }
-        KeylessDeployError::InsufficientComputeGas { limit, used } => {
-            IKeylessDeploy::InsufficientComputeGas { limit, used }.abi_encode().into()
-        }
         KeylessDeployError::InitCodeTooLarge { size, max } => {
             IKeylessDeploy::InitCodeTooLarge { size, max }.abi_encode().into()
         }
         KeylessDeployError::SignerHasCode => IKeylessDeploy::SignerHasCode {}.abi_encode().into(),
-        KeylessDeployError::InternalError => IKeylessDeploy::InternalError {}.abi_encode().into(),
-        KeylessDeployError::InvalidTransaction => {
-            IKeylessDeploy::InvalidTransaction {}.abi_encode().into()
-        }
         KeylessDeployError::NotIntercepted => IKeylessDeploy::NotIntercepted {}.abi_encode().into(),
     }
 }
@@ -239,13 +194,6 @@ pub fn decode_error_result(output: &[u8]) -> Option<KeylessDeployError> {
             )),
         });
     }
-    if let Ok(e) = IKeylessDeploy::ParentBudgetExceeded::abi_decode(output) {
-        return Some(KeylessDeployError::ParentBudgetExceeded {
-            kind: e.kind,
-            limit: e.limit,
-            used: e.used,
-        });
-    }
     if let Ok(e) = IKeylessDeploy::EmptyCodeDeployed::abi_decode(output) {
         return Some(KeylessDeployError::EmptyCodeDeployed { gas_used: e.gasUsed });
     }
@@ -267,12 +215,6 @@ pub fn decode_error_result(output: &[u8]) -> Option<KeylessDeployError> {
     if IKeylessDeploy::SignerHasCode::abi_decode(output).is_ok() {
         return Some(KeylessDeployError::SignerHasCode);
     }
-    if IKeylessDeploy::InvalidTransaction::abi_decode(output).is_ok() {
-        return Some(KeylessDeployError::InvalidTransaction);
-    }
-    if IKeylessDeploy::InternalError::abi_decode(output).is_ok() {
-        return Some(KeylessDeployError::InternalError);
-    }
     if IKeylessDeploy::NotIntercepted::abi_decode(output).is_ok() {
         return Some(KeylessDeployError::NotIntercepted);
     }
@@ -282,28 +224,6 @@ pub fn decode_error_result(output: &[u8]) -> Option<KeylessDeployError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// `InternalError` and `InvalidTransaction` carry no payload on the wire, so a
-    /// roundtrip MUST produce the same variant. Pinned because these selectors are the
-    /// off-chain error ABI (RPC, traces, relayer decoders); a divergence between
-    /// `encode_error_result` and `decode_error_result` would silently break those decoders.
-    #[test]
-    fn test_internal_error_roundtrip_is_selector_only() {
-        let encoded = encode_error_result(KeylessDeployError::InternalError);
-        // Selector-only: the encoded form is exactly the 4-byte Solidity selector.
-        assert_eq!(encoded.len(), 4, "InternalError must be selector-only");
-        assert!(matches!(decode_error_result(&encoded), Some(KeylessDeployError::InternalError)));
-    }
-
-    #[test]
-    fn test_invalid_transaction_roundtrip_is_selector_only() {
-        let encoded = encode_error_result(KeylessDeployError::InvalidTransaction);
-        assert_eq!(encoded.len(), 4, "InvalidTransaction must be selector-only");
-        assert!(matches!(
-            decode_error_result(&encoded),
-            Some(KeylessDeployError::InvalidTransaction)
-        ));
-    }
 
     /// `InitCodeTooLarge { size, max }` is an externally visible ABI selector. Pinning the
     /// round-trip catches any drift between the Solidity error definition and the Rust
@@ -315,16 +235,6 @@ mod tests {
         let encoded = encode_error_result(original.clone());
         let decoded = decode_error_result(&encoded).expect("must decode");
         assert_eq!(decoded, original);
-    }
-
-    /// `ParentBudgetExceeded` keeps every field of the ABI error through a round-trip.
-    #[test]
-    fn test_parent_budget_exceeded_roundtrip_preserves_fields() {
-        let original =
-            KeylessDeployError::ParentBudgetExceeded { kind: 3, limit: 1_000, used: 1_001 };
-        let encoded = encode_error_result(original.clone());
-        assert_eq!(encoded[..4], IKeylessDeploy::ParentBudgetExceeded::SELECTOR);
-        assert_eq!(decode_error_result(&encoded), Some(original));
     }
 
     /// `SignerHasCode` is selector-only; pinning the round-trip catches arm drift.
