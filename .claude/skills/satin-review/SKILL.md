@@ -14,12 +14,15 @@ The guide describes the code at `cz/feat/satin-w2`; #407 updates it when it merg
 
 ## What is under review
 
-- The Satin engine, in pull request #386 (`cz/feat/satin-w2` into `satin`), judged at its final state.
+- The Satin engine, in pull request #386 (`cz/feat/satin-w2`), judged at its final state.
   The stacked pull requests #387, #388, #390, #399 and #400 (with #404, merged into #400's branch) have merged into it; each description explains its part as it was merged, and a later part may have changed an earlier one.
-- The review range is `a8f8c7c9..<head>`, `<head>` being the head of #386.
-  `a8f8c7c9` is the CI-only commit on `satin` before the Satin skeleton; the skeleton (#385) merged into `satin` before #386, so GitHub's diff of #386 no longer shows it, but it is part of the engine under review.
-  See the whole range with `git diff a8f8c7c9...<head>`.
+- The review range is the pull request's own diff.
+  Its base, `cz/feat/satin-review-base`, is `satin` before the Satin skeleton: `a8f8c7c9`, the CI-only commit before it.
+  So GitHub's "Files changed" holds the skeleton (#385) and every later series: the whole engine.
+  The local equivalent is `git diff a8f8c7c9...<head>`, `<head>` being the head of #386.
   Most of its deletions are the legacy engine the skeleton removed (183 files): skim them, or hide them with `--diff-filter=d`.
+- #386 targets the review base only while it is reviewed.
+  It is retargeted to `satin` before it merges, after #407 has merged into it, and it must never be merged into the review base.
 - One pull request still changes part of the engine: #407 (`cz/feat/satin-w9` into this branch), which merges before #386 merges into `satin`; see "What is still moving".
 - Judge the final code.
   A defect an earlier commit introduced and a later one fixed is not a defect; history only explains why something is as it is.
@@ -41,8 +44,8 @@ The guide describes the code at `cz/feat/satin-w2`; #407 updates it when it merg
 ## What is still moving
 
 #407 changes part of the engine before #386 merges.
-It meters writes and frame starts in the revm fork's instruction hooks on a per-frame byte pool, and changes the gas detention and write-record rules with it.
-The work still to land in it deletes the inspector's rewrite settlement and admission gate, gives the pre-block calls one fixed gas budget, and restores the KV and state-growth limits, the 98/100 per-frame shares and the refunds for an account created and destroyed in the same transaction.
+It meters writes and frame starts in the revm fork's instruction hooks on a per-frame byte pool, changes the gas detention and write-record rules with it, and deletes the inspector admission gate.
+The work still to land in it runs inspectors on revm's own inspected lifecycle, removing the engine's inspected copies of the frame lifecycle, its step guard and the inspector's rewrite settlement; gives the pre-block calls one fixed gas budget; and restores the KV and state-growth limits, the 98/100 per-frame shares and the refunds for an account created and destroyed in the same transaction.
 Review the stable modules now and a changing one after #407 merges into this branch; if you read a changing module earlier, report a defect only if #407 would not remove it.
 This table is updated when #407 merges.
 Paths are relative to `crates/mega-evm/` unless they start with another top-level directory.
@@ -57,7 +60,7 @@ Paths are relative to `crates/mega-evm/` unless they start with another top-leve
 | Limits                                  | `src/limit/`, `src/block/limit.rs`, `src/constants.rs`                                                                       | Changing: the byte pool replaces the lanes; KV and state-growth limits per transaction, frame and block            |
 | Execution and frames                    | `src/evm/`: `execution.rs`, `context.rs`, `frame.rs`, `host.rs`, `instructions.rs`, `result.rs`, `mod.rs`                    | Changing: writes and frame starts in the fork's hooks; the per-frame shares; the destruction refunds               |
 | Gas detention                           | `src/access/`                                                                                                                | Changing: stipend-funded work is compute; a halting frame's burn is read off the fork                              |
-| Inspector contract                      | `src/evm/inspector.rs` and the admission gate                                                                                | Changing: deleted; block execution admits any inspector                                                            |
+| Inspector contract                      | `src/evm/inspector.rs` and the admission gate                                                                                | Changing: deleted; inspectors run on revm's inspected lifecycle, and block execution admits any inspector          |
 | Keyless deployment                      | `src/system/keyless/`                                                                                                        | Changing                                                                                                           |
 | Gas schedule                            | `src/evm/schedule.rs`                                                                                                        | Changing: the history allowance and the frame byte share enter the schedule                                        |
 | Pre-block calls                         | `src/block/eips.rs`                                                                                                          | Changing: one fixed gas budget                                                                                     |
