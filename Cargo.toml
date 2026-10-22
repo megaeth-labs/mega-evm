@@ -232,20 +232,20 @@ codegen-units = 1
 [patch.crates-io]
 # megaeth fork of revm (revm 40.0.3 + the revm 43 gas core + the megaeth hooks).
 # All twelve crates move together, otherwise the build resolves a second copy of revm.
-revm = { git = "file:///Users/cz/work/mega-revm", rev = "42e4c3543af170ca911cbb52e68de1ecd8cd443e" }
-revm-primitives = { git = "file:///Users/cz/work/mega-revm", rev = "42e4c3543af170ca911cbb52e68de1ecd8cd443e" }
-revm-interpreter = { git = "file:///Users/cz/work/mega-revm", rev = "42e4c3543af170ca911cbb52e68de1ecd8cd443e" }
-revm-context = { git = "file:///Users/cz/work/mega-revm", rev = "42e4c3543af170ca911cbb52e68de1ecd8cd443e" }
-revm-context-interface = { git = "file:///Users/cz/work/mega-revm", rev = "42e4c3543af170ca911cbb52e68de1ecd8cd443e" }
-revm-handler = { git = "file:///Users/cz/work/mega-revm", rev = "42e4c3543af170ca911cbb52e68de1ecd8cd443e" }
-revm-database = { git = "file:///Users/cz/work/mega-revm", rev = "42e4c3543af170ca911cbb52e68de1ecd8cd443e" }
-revm-database-interface = { git = "file:///Users/cz/work/mega-revm", rev = "42e4c3543af170ca911cbb52e68de1ecd8cd443e" }
-revm-state = { git = "file:///Users/cz/work/mega-revm", rev = "42e4c3543af170ca911cbb52e68de1ecd8cd443e" }
-revm-bytecode = { git = "file:///Users/cz/work/mega-revm", rev = "42e4c3543af170ca911cbb52e68de1ecd8cd443e" }
-revm-precompile = { git = "file:///Users/cz/work/mega-revm", rev = "42e4c3543af170ca911cbb52e68de1ecd8cd443e" }
-revm-inspector = { git = "file:///Users/cz/work/mega-revm", rev = "42e4c3543af170ca911cbb52e68de1ecd8cd443e" }
+revm = { git = "https://github.com/megaeth-labs/revm", rev = "42e4c3543af170ca911cbb52e68de1ecd8cd443e" }
+revm-primitives = { git = "https://github.com/megaeth-labs/revm", rev = "42e4c3543af170ca911cbb52e68de1ecd8cd443e" }
+revm-interpreter = { git = "https://github.com/megaeth-labs/revm", rev = "42e4c3543af170ca911cbb52e68de1ecd8cd443e" }
+revm-context = { git = "https://github.com/megaeth-labs/revm", rev = "42e4c3543af170ca911cbb52e68de1ecd8cd443e" }
+revm-context-interface = { git = "https://github.com/megaeth-labs/revm", rev = "42e4c3543af170ca911cbb52e68de1ecd8cd443e" }
+revm-handler = { git = "https://github.com/megaeth-labs/revm", rev = "42e4c3543af170ca911cbb52e68de1ecd8cd443e" }
+revm-database = { git = "https://github.com/megaeth-labs/revm", rev = "42e4c3543af170ca911cbb52e68de1ecd8cd443e" }
+revm-database-interface = { git = "https://github.com/megaeth-labs/revm", rev = "42e4c3543af170ca911cbb52e68de1ecd8cd443e" }
+revm-state = { git = "https://github.com/megaeth-labs/revm", rev = "42e4c3543af170ca911cbb52e68de1ecd8cd443e" }
+revm-bytecode = { git = "https://github.com/megaeth-labs/revm", rev = "42e4c3543af170ca911cbb52e68de1ecd8cd443e" }
+revm-precompile = { git = "https://github.com/megaeth-labs/revm", rev = "42e4c3543af170ca911cbb52e68de1ecd8cd443e" }
+revm-inspector = { git = "https://github.com/megaeth-labs/revm", rev = "42e4c3543af170ca911cbb52e68de1ecd8cd443e" }
 
 [patch."https://github.com/ethereum-optimism/optimism"]
 # megaeth fork of op-revm (the OP monorepo copy ported to the revm fork's gas core), built
 # against the revm pin above.
-op-revm = { git = "file:///Users/cz/work/op-revm", rev = "af071cc255f058bebce27df45a3245332a211dd8" }
+op-revm = { git = "https://github.com/megaeth-labs/op-revm", rev = "e33fb15b416008ac9d45c52a2b1edd0a286ff521" }
