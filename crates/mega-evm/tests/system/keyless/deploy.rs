@@ -884,11 +884,10 @@ fn test_a_deployment_carrying_value_logs_the_move() {
     }
 }
 
-/// The transfer log is counted with the creation's start, before revm builds the creation and
-/// moves the value: a creation whose budget holds its two records and not the log is stopped at
-/// its start, alone, with the value unmoved and no log journaled — the debug build's check of
-/// every frame start holds it to exactly that. The same deployment without value deploys under
-/// the same limit.
+/// The transfer log is counted with the creation's start: a creation whose budget holds its two
+/// records and not the log is stopped at its start, alone, before it runs, and its revert takes
+/// back the value revm moved and the log it journaled. The same deployment without value deploys
+/// under the same limit.
 #[test]
 fn test_a_creation_is_stopped_on_its_transfer_log_before_the_value_moves() {
     let with_value = Deployment::with_value(deploying(&runtime(1)), U256::from(7_777));

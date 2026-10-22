@@ -549,9 +549,9 @@ fn log0_size(data_len: u8) -> u64 {
 
 /// A first frame whose start crosses the transaction's data-size limit, at the smallest limit
 /// validation admits the transaction under: its body fits, and the record and the transfer log of
-/// its value do not. The frame is answered with the stop before it runs, so it runs no instruction
-/// and its value never moves. A body over the limit is no scenario: validation rejects it, and a
-/// rejected transaction has no trace.
+/// its value do not. The frame returns the stop before it runs an instruction, and its revert takes
+/// back the value revm moved for it. A body over the limit is no scenario: validation rejects it,
+/// and a rejected transaction has no trace.
 #[test]
 fn test_data_size_limit_stops_the_first_frame_at_its_start() {
     let limit = TX_BODY_SIZE;

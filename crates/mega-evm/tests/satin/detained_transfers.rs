@@ -1,17 +1,17 @@
 //! Gas detention against EIP-7708 transfer logs: value that moves after a read of volatile data.
 //!
 //! The two meet where a frame starts and at `SELFDESTRUCT`. A frame start counts its transfer log
-//! with its records before revm decides the frame — revm then moves the value, answers the frame
-//! or refuses it on the caller's account — and a precompile started after a read runs on what the
-//! compute limit leaves its frame. A `SELFDESTRUCT` counts its log with its beneficiary's record
-//! once the opcode completed, and revm journals the move before the opcode's last charge, which
-//! the cap can fail.
+//! with its records, held to the limits once revm decided the frame — revm moves the value,
+//! answers the frame or refuses it on the caller's account — and a precompile started after a read
+//! runs on what the compute limit leaves its frame. A `SELFDESTRUCT` counts its log with its
+//! beneficiary's record once the opcode completed, and revm journals the move before the opcode's
+//! last charge, which the cap can fail.
 //!
 //! Whatever detention does to the movement, the transfer logs a receipt carries are the ones the
 //! data size kept: a transaction keeps its body, forty bytes a write record and 160 a transfer
 //! log, and a frame the cap stops keeps nothing, its movement and its log included. A debug build
-//! also asserts at every frame start that revm refused exactly the start predicted and journaled
-//! exactly the log counted, so every case below runs that check too.
+//! also asserts at every start revm made and kept that it journaled exactly the log counted, so
+//! every case below runs that check too.
 //!
 //! Each case runs with a read of the block's timestamp first, and with `PUSH0`, which costs the
 //! same two gas and reads nothing, in its place.
@@ -30,9 +30,9 @@ use revm::{
 
 use crate::{
     detention::{
-        assert_caught, assert_stopped, cold_access, context, failed_status_store, intrinsic,
-        memory_cost, op, run_on, spin, value_transfer, Calls, Charges, Run, BENEFICIARY, CALLER,
-        CAP, CHILD, CONTRACT, TIERS,
+        assert_caught_with_stipends, assert_stopped, call_stipend, cold_access, context,
+        failed_status_store, intrinsic, memory_cost, op, run_on, spin, value_transfer, Calls,
+        Charges, Run, BENEFICIARY, CALLER, CAP, CHILD, CONTRACT, TIERS,
     },
     withheld_gas::{costly_modexp_input, intrinsic_with},
 };
@@ -72,8 +72,8 @@ fn calls_with_value(first: u8, to: Address, gas: Option<u32>) -> Bytes {
 /// The regular charges [`calls_with_value`] makes after its first instruction reads, with calldata
 /// of `len` bytes, up to the call: the read's `POP`; `CALLDATASIZE`, two `PUSH0` and
 /// `CALLDATACOPY` — its static gas, the copy and the memory it expands — the call's four pushes,
-/// the value's and the address's, and `GAS`; and the call's own charges, `call`, less the stipend
-/// the callee is given, which nobody paid and is not compute.
+/// the value's and the address's, and `GAS`; and the call's own charges, `call`, in full: the
+/// stipend revm gives the callee is not taken off, since what the callee runs on it is compute.
 fn charges_to_the_call(len: u64, call: u64) -> Charges {
     let words = len.div_ceil(32);
     Charges::default().then(&[
@@ -91,7 +91,7 @@ fn charges_to_the_call(len: u64, call: u64) -> Charges {
         3,
         3,
         2,
-        call - 2_300,
+        call,
     ])
 }
 
@@ -236,7 +236,16 @@ fn test_a_value_call_to_a_precompile_after_a_read_keeps_the_log_it_counted() {
         let charges = charges_to_the_call(above.len() as u64, call_to_an_empty_precompile())
             .then(&[price.unwrap()]);
         let intrinsic = intrinsic_with(&above, gas_limit);
-        assert_caught(&detained, intrinsic, charges.left(CAP), &failed_status_store());
+        // The call carried value: its stipend, which came back with the answer, is gas the ledger
+        // never billed.
+        let left = charges.left(CAP);
+        assert_caught_with_stipends(
+            &detained,
+            intrinsic,
+            left,
+            &failed_status_store(),
+            call_stipend(),
+        );
         // The answer is the stop, having spent nothing.
         assert_eq!(ended(&calls, MODEXP), (InstructionResult::Revert, 0));
         assert_eq!(detained.outcome.usage, LimitUsage { data_size: body, write_records: 0 });
@@ -274,11 +283,11 @@ fn test_a_value_call_to_a_precompile_after_a_read_keeps_the_log_it_counted() {
 /* ---------- a value call its caller cannot fund ---------- */
 
 /// A value call its caller cannot fund, after a read: revm refuses it on the caller's account
-/// before anything moves, so its start counts no record and no log and is charged nothing, and
-/// detention settles the refusal as it settles any answer. A precompile forwarded more than the
-/// allowance, run on the allowance, gets the rest of its forward back. The transaction runs as
-/// without the read: the call fails with the whole forward back, nothing moves, no log, and the
-/// transaction keeps its body alone.
+/// before anything moves, so its start counts no record and no log, the charge for its records
+/// comes back, and detention settles the refusal as it settles any answer. A precompile forwarded
+/// more than the allowance, run on the allowance, gets the rest of its forward back. The
+/// transaction runs as without the read: the call fails with the whole forward back, nothing moves,
+/// no log, and the transaction keeps its body alone.
 #[test]
 fn test_a_value_call_its_caller_cannot_fund_after_a_read_runs_as_without_it() {
     let cases: [(&str, Address, Option<u32>); 4] = [
@@ -567,7 +576,9 @@ fn test_every_detained_frame_start_keeps_the_log_it_counted() {
                 if let Some(charges) = start.stops {
                     let left = charges(input.len() as u64).left(CAP);
                     let intrinsic = intrinsic_with(&input, gas_limit);
-                    assert_caught(&detained, intrinsic, left, &failed_status_store());
+                    // The stopped call carried value: its stipend is gas the ledger never billed.
+                    let after = failed_status_store();
+                    assert_caught_with_stipends(&detained, intrinsic, left, &after, call_stipend());
                     assert_eq!(detained.outcome.usage.write_records, 0, "{case}");
                 } else {
                     let plain = exec(PUSH0);

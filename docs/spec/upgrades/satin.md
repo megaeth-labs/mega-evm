@@ -349,6 +349,7 @@ When each charge is made:
 A record an opcode commits — a storage write, a log, a `SELFDESTRUCT`'s beneficiary — MUST be checked against the limits before its history is charged, so a record a limit refuses is not charged.
 A frame that cannot pay that history charge MUST halt with out-of-gas, keeping neither the record nor its bytes.
 At a frame start the order is the reverse: the calling opcode pays for the records before the frame starts and they are counted, so a caller that cannot pay runs out of gas first, and the charge for a start a limit stops is given back when the stopped frame returns.
+The opcode pays for them whether or not the start then happens: a start refused on its caller's account — a value the caller cannot fund, a creation whose creator's nonce cannot be bumped — makes no record and MUST give the charge back when its failed frame returns, and a caller that cannot pay the charge MUST halt with out-of-gas at the opcode though the start would have been refused.
 
 These MUST NOT pay history gas:
 
@@ -429,9 +430,9 @@ One dimension is limited per transaction, data size; compute is not one (see [Tw
   That the bound stays within the state growth the chain's storage sustains is a property of the state-gas prices, not of a limit.
 - **Order at one site.**
   A record that crosses the transaction's data-size limit and its frame's budget at once MUST stop its frame with the transaction's limit in the revert data: the transaction limit is checked before the frame budget.
-- **A frame start** is counted before the frame is built.
-  A start the caller's account refuses — a value the caller cannot fund, a creation whose creator nonce cannot be bumped — MUST count nothing, be charged nothing, and be stopped by no limit.
-  A creation onto an occupied address is counted, and a crossing it causes stops it where it would otherwise have failed on the collision.
+- **A frame start** is held to the limits once it is decided: once the value moved and, for a creation, the creator's nonce was bumped and the created account made.
+  A start the caller's account refuses — a value the caller cannot fund, a creation whose creator nonce cannot be bumped — MUST count nothing and be stopped by no limit; its caller is charged for the records at its opcode and gets the charge back (see [History Gas](#7-history-gas)).
+  A creation onto an occupied address fails on the collision after its creator's nonce was bumped, and MUST NOT be stopped for what its start would count: its failure discards the created account's record and its transfer log, and the creator's nonce record, which survives it, lands on the creator, which MUST be held to its limits with it.
 - **The limits are fixed per spec.**
   The transaction's data-size limit, the per-frame share, the detention caps (see [Gas Detention on Withheld Gas](#12-gas-detention-on-withheld-gas)) and the block's data-size limit (see [Block Limits](#20-block-limits)) are protocol values of the Satin spec, the same on every chain.
   They are not chain configuration: no chain configuration carries them, and a node MUST hold every Satin transaction and block to them, never to values a configuration names or a node is handed with a block.
@@ -475,10 +476,11 @@ What was applied before the first frame is not the frames' doing, and a stop of 
 An Oracle hint a frame admitted is not the frames' state either: it MUST stay counted as data size through any stop, whether its payload reached the oracle service or failed to decode (see [Oracle Storage Reads and Hints](#16-oracle-storage-reads-and-hints)).
 A hint that would itself cross the data-size limit is neither forwarded nor counted.
 
-A limit is enforced before the writes it guards:
+A limit is enforced on the writes it guards before anything runs on them:
 
-- A frame whose start would cross a limit MUST be answered with the stop before it is built, so no value moves.
-  A stopped creation still bumps its creator's nonce, and that write's record lands on the creator, which MUST be held to its limits with it before it runs on and be stopped if it crosses one.
+- A frame whose start crosses a limit MUST be stopped before it runs an instruction, and what its start moved MUST be reverted with it: the value, the transfer log, a created account.
+  A frame answered without running — a call to an account with no code, a precompile, whatever it answered — MUST have its answer replaced by the stop, on the gas its caller forwarded, untouched.
+  A stopped creation keeps its creator's nonce bump, and that write's record lands on the creator, which MUST be held to its limits with it before it runs on and be stopped if it crosses one.
 - A frame answered without running whose answer is then rewritten to the stop (see [Gas Detention on Withheld Gas](#12-gas-detention-on-withheld-gas)) MUST have what its start moved reverted with it, as a frame that fails has.
 - Nothing counted before the first frame — the body, and the records of the EIP-7702 authorities applied — crosses the data-size limit: validation rejects a transaction whose body, with a record for each entry of its authorization list, would (see [Two-Pool Gas](#4-two-pool-gas-eip-8037-replaces-the-dual-gas-model)).
 
@@ -513,9 +515,12 @@ A contract can revert with the same bytes, and so can a caller that re-raises th
   `BLOCKHASH` loads the block number before it decides whether its operand is in range, so every `BLOCKHASH` is a read of the block environment, one of the current block, a future block or a block outside the last 256 included, and one in range reads the hash as well.
   A `CREATE` or `CREATE2` MUST NOT be marked as a read, even when its creator or its created address is the block beneficiary: the loads it makes of them — the creator's, to check its balance and nonce, and the created address's, to decide the created account's state gas — mark nothing, and a frame then running as the beneficiary marks the beneficiary's account by its own `SELFBALANCE`, `SELFDESTRUCT` and the other reads above (see [Volatile-Data Access Control](#13-volatile-data-access-control-and-remainingcomputegas) for what those loads do with access off).
 - **Compute.**
-  A transaction's compute is its regular ledger — the running frame's regular gas spent, plus every suspended caller's, each less its child's whole gas limit — less the state and history gas that spilled onto regular gas, and less what halting frames burned.
-  A child's gas limit includes a value call's 2,300 stipend, which its caller did not spend: what the callee spends of it is not compute, and what the callee leaves of it lowers the caller's spent regular gas when it returns.
+  A transaction's compute is every regular charge its frames make, whoever funds it: the running frame's regular gas spent, plus every suspended caller's, each less the gas it forwarded its child, less the state and history gas that spilled onto regular gas, and less what halting frames burned.
+  A value call's 2,300 stipend is not forwarded gas: what the callee runs on it MUST count as compute, as the rest of what it runs does.
+  The stipend MUST NOT lower compute either: when a value call returns, what the callee left of the stipend comes back to its caller with the rest of the callee's gas, and compute MUST NOT fall with the caller's spent regular gas.
+  So compute exceeds the transaction's regular ledger by the stipends of its value calls, gas no pool of the transaction paid.
   What a halting frame burns is not compute, with one exception: when an opcode's static gas cannot be paid, what the halting frame had left counts as compute.
+  A precompile that runs out of gas counts nothing of its forward as compute: it burns the forward, a value call's stipend included, as a halting frame burns what it had left, unless it is the crossing (see Precompiles, below), and then the forward returns to its caller.
 - **The limit.**
   A read MUST set `limit = compute_at_read + cap`, with `cap` = `BLOCK_ENV_ACCESS_COMPUTE_GAS` = 20,000,000 for the block environment and the beneficiary and `ORACLE_ACCESS_COMPUTE_GAS` = 20,000,000 for the Oracle; the limit only goes down, so the most restrictive read binds.
   The caps are protocol values fixed per spec with the other limits (see [Resource Limits](#10-resource-limits)).
@@ -614,10 +619,10 @@ A node MUST apply [EIP-7708](https://eips.ethereum.org/EIPS/eip-7708):
 - A deposit's value is logged; its mint is not.
 - Satin applies the `Transfer` log of EIP-7708 and nothing else of any revision of that EIP: [EIP-8246](https://eips.ethereum.org/EIPS/eip-8246), which EIP-7708 lists among its requirements, MUST NOT be applied, so a balance can still be burned, and a burn MUST NOT log — no `Burn` log is ever emitted, whatever revision of EIP-7708 defines one.
   Two burns remain, both silent: a `SELFDESTRUCT` to itself of an account created in the same transaction burns the balance at once, and an account destroyed in the transaction is removed at its end with whatever balance it then holds, a value it received after its destruction included (the `CALL` that sent it logged the transfer).
-- A transfer log is data size (`TRANSFER_LOG_SIZE` = 160 bytes), counted where the value moves: with the start of the frame that moves it, before any value moves, or with the `SELFDESTRUCT` that moves it.
+- A transfer log is data size (`TRANSFER_LOG_SIZE` = 160 bytes), counted where the value moves: with the start of the frame that moves it, held to the limits with the start's records, or with the `SELFDESTRUCT` that moves it.
   It is not a write record, pays no history gas, and does not draw on a history allowance.
 - A frame start that the caller's account refuses moves nothing and logs nothing.
-- A creation with an endowment onto an occupied address counts its transfer log with its start, as any creation with an endowment does, though the collision then moves nothing and logs nothing: a crossing the count causes stops it first (see [Resource Limits](#10-resource-limits)), and otherwise the count is discarded with the failed creation.
+- A creation with an endowment onto an occupied address moves nothing and logs nothing: the collision fails it before the endowment moves, and nothing of the log is counted or held to a limit (see [Resource Limits](#10-resource-limits)).
 
 ### 15. Native Keyless Deployment
 

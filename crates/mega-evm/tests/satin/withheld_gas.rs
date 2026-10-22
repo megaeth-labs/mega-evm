@@ -1538,6 +1538,69 @@ fn test_the_kzg_point_evaluation_is_priced_and_keeps_no_clamp() {
     }
 }
 
+/// Upstream's KZG point evaluation, which costs 50,000, put at the KZG address in place of the
+/// Satin entry, which costs 100,000, and called as above, after a read with 80,000 under a cap of
+/// 50,000, whose allowance pays neither price. Gas detention decides the same call two ways,
+/// priced and unpriced — a failed call against a crossing — and which way follows the route that
+/// installed the precompile, not the precompile:
+///
+/// - installed through `with_dyn_precompiles`, the route a node changes its set by, it is not
+///   priced: it is run on the allowance, runs out of it, and is the stop, which gives its forward
+///   back and which its caller catches before it stores the failure;
+/// - put in the map around the engine, through the mutable reference `EvmTr::all_mut` hands out,
+///   under the Satin entry's id, it is still priced from the Satin table: priced past its forward,
+///   it runs on the forward, as the Satin entry does, and fails — on its input, past its own gas
+///   check — a failed call that burns its forward, which its caller survives to store. A valid
+///   input would compute there, past the cap: the boundary a node keeps to by changing its set
+///   through the engine.
+#[test]
+fn test_a_priced_and_an_unpriced_precompile_part_as_a_failed_call_and_a_crossing() {
+    let kzg = vec![0_u8; 192];
+    let kzg_address = mega_evm::kzg_point_evaluation::ADDRESS;
+    let upstream = || {
+        DynPrecompile::new(PrecompileId::KzgPointEvaluation, |input| {
+            let result = revm::precompile::kzg_point_evaluation::run(input.data, input.gas);
+            Ok(PrecompileOutput::from_eth_result(result, input.reservoir))
+        })
+    };
+    let cap = 50_000;
+    let limits = EvmTxRuntimeLimits::default().with_block_env_access_compute_gas_limit(cap);
+    let allowance = cap - charges_to_the_precompile(kzg.len(), Some(80_000)).total();
+    assert!(allowance < 50_000, "the allowance pays neither price");
+    for gas_limit in TIERS {
+        let evm = || {
+            let db = MemoryDatabase::default()
+                .account_code(CONTRACT, calls_precompile(TIMESTAMP, kzg_address, Some(80_000)));
+            MegaEvm::new(context(db).with_tx_runtime_limits(limits))
+        };
+        let ended = |evm: &MegaEvm<MemoryDatabase, Calls>| {
+            let call = evm.inspector().calls.iter().find(|call| call.target == kzg_address);
+            let call = call.expect("the call ended");
+            assert_eq!(call.forward, 80_000);
+            (call.result, call.precompile_ran)
+        };
+
+        let mut unpriced = evm()
+            .with_dyn_precompiles(HashMap::from_iter([(kzg_address, upstream())]))
+            .with_inspector(Calls::default());
+        let run = run_on(&mut unpriced, tx_with(&kzg, gas_limit));
+        let intrinsic = intrinsic_with(&kzg, gas_limit);
+        assert_caught(&run, intrinsic, allowance, &failed_status_store());
+        assert_eq!(ended(&unpriced), (InstructionResult::Revert, true), "the stop, run on the cap");
+
+        let mut priced = evm().with_inspector(Calls::default());
+        revm::handler::EvmTr::all_mut(&mut priced)
+            .2
+            .apply_precompile(&kzg_address, |_| Some(upstream()));
+        let run = run_on(&mut priced, tx_with(&kzg, gas_limit));
+        assert!(run.outcome.result.is_success(), "{:?}", run.outcome.result);
+        assert_eq!(run.outcome.limit_exceeded, None, "a failed call, no stop");
+        let ran_and_failed = (InstructionResult::PrecompileError, true);
+        assert_eq!(ended(&priced), ran_and_failed, "run on its forward, failed on its input");
+        assert_eq!(slot(&run, 0), Some(U256::ZERO), "the call fails and its caller goes on");
+    }
+}
+
 /// A precompile priced between the allowance and its forward whose input fails a check made after
 /// its gas check: the BN254 pairing of three pairs and a stray byte, priced 147,000 for its three
 /// whole pairs, which checks the input's length after its gas. Under a cap of 100,000 it is

@@ -88,7 +88,7 @@ use crate::{
     volatile_data_access_disabled_revert_data, ExternalEnvTypes, MegaContext, VolatileDataAccess,
 };
 
-use super::{caller_refuses_start, satin_gas_table, MegaInstructions};
+use super::{input_gas_limit, satin_gas_table, value_call_stipend, MegaInstructions};
 
 /// The context an instruction of the Satin engine runs with.
 type Ctx<'a, DB, ExtEnvs> = InstructionContext<'a, MegaContext<DB, ExtEnvs>, EthInterpreter>;
@@ -278,12 +278,12 @@ fn selfdestruct<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// The charge is made after revm's instruction has computed the gas it forwards, so it comes out
 /// of what the caller kept rather than out of what the callee gets. An opcode that starts no frame
 /// — a creation the balance, the nonce or the depth refuses, an out-of-gas — makes no records and
-/// is charged nothing. Neither is a frame revm will refuse on its caller's account — a value call
-/// the caller cannot fund ([`caller_refuses_start`]) — which the data size does not count either;
-/// the answer is left for the frame's init, which would otherwise read the caller's account again.
-/// A frame revm refuses for another reason — one past the call-stack limit — makes no records,
-/// and its failure gives the charge back. A charge the caller cannot pay fails the opcode with an
-/// out-of-gas, which takes the frame the opcode was suspending on with it ([`abandon_frame`]).
+/// is charged nothing. Every frame an opcode starts is charged, revm deciding the start only once
+/// the frame's init asks it: a start revm then refuses — a value the caller cannot fund, a frame
+/// past the call-stack limit — makes no records, and gives the charge back when it returns. A
+/// charge the caller cannot pay fails the opcode with an out-of-gas, which takes the frame the
+/// opcode was suspending on with it ([`abandon_frame`]), even where revm would have refused the
+/// start.
 ///
 /// revm's instruction has also charged the caller the state gas of the account the frame would
 /// add — a value transfer's new recipient, a created account; a frame revm refuses gives it back.
@@ -302,11 +302,6 @@ fn charge_frame_start<DB: Database, ExtEnvs: ExternalEnvTypes>(
     // makes no records.
     let records = match interpreter.bytecode.action() {
         Some(InterpreterAction::NewFrame(input)) => {
-            let refused = caller_refuses_start(host, input);
-            host.additional_limit.stage_start_refused(refused);
-            if refused {
-                return result;
-            }
             host.additional_limit.frame_start_records(input)
         }
         _ => return note_halt(interpreter, host, result),
@@ -471,7 +466,7 @@ fn settle_reads<DB: Database, ExtEnvs: ExternalEnvTypes>(
         }
         _ => 0,
     };
-    host.detention.commit_reads(observed, &mut interpreter.gas, interpreter.input.depth, forwarded);
+    host.detention.commit_reads(observed, &mut interpreter.gas, forwarded);
     result
 }
 
@@ -500,14 +495,7 @@ fn refuse(
 /// The regular gas the running frame paid for the frame `input` starts: the frame's limit, less
 /// a value call's stipend, which nobody paid.
 fn forwarded_gas(input: &FrameInput, call_stipend: u64) -> u64 {
-    match input {
-        FrameInput::Call(inputs) if inputs.transfers_value() => {
-            inputs.gas_limit.saturating_sub(call_stipend)
-        }
-        FrameInput::Call(inputs) => inputs.gas_limit,
-        FrameInput::Create(inputs) => inputs.gas_limit(),
-        FrameInput::Empty => 0,
-    }
+    input_gas_limit(input).saturating_sub(value_call_stipend(input, call_stipend))
 }
 
 /// Defines an opcode that reads volatile data — a block-environment field, an account or a slot —

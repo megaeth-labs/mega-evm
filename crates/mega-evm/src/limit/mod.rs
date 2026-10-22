@@ -45,27 +45,27 @@
 //! - an Oracle hint's payload, on the transaction's own lane, before it is forwarded;
 //! - an EIP-7708 transfer log, which revm journals itself for every value movement, where the value
 //!   moves: with the records of the frame start that moves it — the transaction's own value, a
-//!   value `CALL`, a creation's endowment — before revm builds the frame, so a crossing answers the
-//!   frame with the stop before any value moves; and with a `SELFDESTRUCT`'s beneficiary once the
-//!   opcode completed. Each is counted by the rule a `LOG3` of one word is ([`TRANSFER_LOG_SIZE`]),
-//!   on the lane of the frame whose journal checkpoint holds the move, so the failure that takes
-//!   the move back takes the bytes back.
+//!   value `CALL`, a creation's endowment — and with a `SELFDESTRUCT`'s beneficiary once the opcode
+//!   completed. Each is counted by the rule a `LOG3` of one word is ([`TRANSFER_LOG_SIZE`]), on the
+//!   lane of the frame whose journal checkpoint holds the move, so the failure that takes the move
+//!   back takes the bytes back.
 //!
-//! A frame start is counted before revm decides it, so what it counts is a prediction of what revm
-//! will do. As far as the caller's account decides it, the prediction is revm's own: a start revm
-//! refuses there — a value its caller cannot fund, a creation whose creator's nonce cannot be
-//! bumped — moves and writes nothing, so it counts nothing and is charged nothing, and no limit
-//! stops it. The caller's account is read from the journal without loading anything. The one
-//! refusal decided after the count is a creation onto an occupied address, which revm reads off
-//! the created address's account only once it builds the frame: its records and transfer log are
-//! counted, so a crossing they cause stops the creation where revm would have failed it, and
-//! without a crossing the failure discards them.
+//! A frame start is counted as the frame starts and held to the limits once revm decided it, on
+//! what revm then did. A frame revm builds returns the stop on its first run when its start crossed
+//! a limit, and its revert takes back the value revm moved and the transfer log it journaled; an
+//! answer revm gives without building a frame — a call to an account with no code, to a precompile
+//! — gives way to the stop, and what its start moved is taken back with it. A start revm refuses on
+//! its caller's account — a value its caller cannot fund, a creation whose creator's nonce cannot
+//! be bumped — moves and writes nothing, so it counts nothing, gets back what its caller paid for
+//! its records, and no limit stops it. A creation revm fails after it bumped its creator's nonce,
+//! onto an occupied address, is held to nothing at its start: its failure discards its records and
+//! transfer log, but for the nonce record, which lands on the creator.
 //!
 //! A record is checked against the limits before its history is charged: a record the limit
 //! rejects is not kept, so it is not charged, and the stop is what its frame reports. At a frame
 //! start the order is the other way round — the caller pays for the records at its opcode, before
-//! the frame starts and its records are counted — so a caller that cannot pay runs out of gas
-//! first.
+//! revm decides the start and its records are held to the limits — so a caller that cannot pay
+//! runs out of gas first, whether or not revm would have refused the start.
 //!
 //! Nothing counted before the first frame crosses the limit: validation refuses a transaction
 //! whose body, with a record for each entry of its authorization list, exceeds it
@@ -430,11 +430,12 @@ pub enum LimitCheck {
         /// The usage that crossed it.
         ///
         /// For [`LimitKind::ComputeGas`] it is the transaction's compute before the charge that
-        /// would have crossed the limit, which the regular ledger bills: gas detention stops a
-        /// frame on a regular charge its spendable gas could not pay, does not make it, and puts
-        /// the frame's gas back to what it had before it. The charge's size is not kept, so this
-        /// is at most the limit, unless a halting frame's leftover, counted as compute, took the
-        /// transaction past it before the charge.
+        /// would have crossed the limit, which the regular ledger bills less the stipends of the
+        /// transaction's value calls, gas nobody paid: gas detention stops a frame on a regular
+        /// charge its spendable gas could not pay, does not make it, and puts the frame's gas
+        /// back to what it had before it. The charge's size is not kept, so this is at most the
+        /// limit, unless a halting frame's leftover, counted as compute, took the transaction past
+        /// it before the charge.
         used: u64,
         /// Whether the limit is a frame budget rather than a transaction-level limit.
         frame_local: bool,

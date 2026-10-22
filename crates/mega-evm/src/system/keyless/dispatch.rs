@@ -381,7 +381,7 @@ fn prepare<DB: Database, ExtEnvs: ExternalEnvTypes>(
     // in a frame of it, which a read of the account started. The call is the transaction's own
     // frame, at depth 0.
     if signer == ctx.block().beneficiary {
-        ctx.detention.read_by_frame(VolatileDataAccess::BENEFICIARY_BALANCE, gas, 0);
+        ctx.detention.read_by_frame(VolatileDataAccess::BENEFICIARY_BALANCE, gas);
     }
     if signer_info.nonce > 1 {
         refuse!(KeylessDeployError::SignerNonceTooHigh { signer_nonce: signer_info.nonce });

@@ -521,10 +521,11 @@ fn test_the_answer_is_what_the_caller_resumes_with() {
     }
 }
 
-/// A callee a value call started hears the stipend counted, whether or not the transaction is
-/// detained: detention counts the stipend outside compute, so its allowance carries it as the
-/// callee's own gas does, and the callee hears the stipend more than the same callee a call
-/// without value started.
+/// A callee a value call started hears the stipend with its own gas, whether or not the
+/// transaction is detained, and so the stipend more than the same callee a call without value
+/// started: its own gas binds, the cap leaving far more than the call forwarded. What the callee
+/// runs on the stipend is compute like the rest, so once the cap binds the stipend adds nothing
+/// to what the limit leaves.
 #[test]
 fn test_a_value_called_callee_hears_its_stipend_whether_or_not_detained() {
     let stipend = 2_300;

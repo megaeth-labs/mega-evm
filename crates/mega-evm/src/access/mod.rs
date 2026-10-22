@@ -48,11 +48,12 @@
 //! The one burn counted as compute is what a frame has left when an opcode's static gas fails,
 //! which no wrapper sees: per halting frame, under the failed charge's price (at most 4,999, on
 //! `SELFDESTRUCT`). Burned gas is counted as compute, so the stop comes earlier, never later.
-//! A value call's stipend is not compute either: compute is regular gas drawn from the
-//! transaction's own pools, and the stipend is gas nobody paid. A callee may run up to 2,300 gas
-//! on each value call's stipend, and a warm value call to an empty account counts 6,800 of compute
-//! (9,100, less the 2,300 stipend the callee leaves unspent and returns to its caller), so the
-//! gas run after a read is at most about 34% (2,300 / 6,800) more than the cap.
+//! What a callee runs on a value call's stipend is compute, as everything a frame runs is: compute
+//! counts every regular charge an instruction makes, whoever funds it, so the gas run after a read
+//! is at most the cap, but for what halting frames leave. The stipend itself is gas nobody paid,
+//! so the regular ledger bills the transaction its compute less the stipends of its value calls.
+//! A precompile that runs out of gas counts nothing of its forward: it burns it, as a halting
+//! frame burns what it has left.
 //!
 //! A read sets a limit: the transaction's compute at the read plus the read's cap. The limit only
 //! goes down, so the most restrictive of several reads is the one that binds, whatever their

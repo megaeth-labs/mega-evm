@@ -1378,7 +1378,7 @@ enum Answered {
     /// of it without computing.
     Precompile,
     /// `C` sends a wei to [`EMPTY`], whose start's records and transfer log cross the data-size
-    /// limit, before revm builds the frame.
+    /// limit once revm answered the call.
     StartRecords,
 }
 
@@ -1625,11 +1625,11 @@ fn test_an_answer_three_calls_down_is_the_stop_its_caller_catches_at_either_tier
 }
 
 /// A frame three calls down whose start's records and transfer log cross the data-size limit is
-/// answered with the stop before revm builds it: no value moves and no account is added. Its
-/// caller catches the stop, below the execution cap and above it, with and without the rewriting
-/// inspector.
+/// answered with the stop once revm answered it, and what its start moved goes back with it: no
+/// value stays moved and no account is added. Its caller catches the stop, below the execution
+/// cap and above it, with and without the rewriting inspector.
 #[test]
-fn test_a_start_three_calls_down_crossing_the_limit_is_stopped_before_it_is_built() {
+fn test_a_start_three_calls_down_crossing_the_limit_is_stopped_at_its_start() {
     for gas_limit in TIERS {
         assert_answered_cell(Answered::StartRecords, gas_limit);
     }

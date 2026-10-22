@@ -589,7 +589,7 @@ fn test_a_storage_write_one_byte_over_stops_on_the_write() {
 
 /// A value transfer's recipient is one 40-byte record, and the move leaves a transfer log; both are
 /// counted when the transaction's frame starts. A limit either of them crosses stops the frame
-/// there, before any value moves and before the recipient's code runs.
+/// there, before the recipient's code runs, and the value goes back with the stop.
 #[test]
 fn test_an_account_write_one_byte_over_stops_on_the_recipient() {
     let db = || {
