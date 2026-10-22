@@ -1,0 +1,1119 @@
+---
+source: crates/mega-evm/tests/tracers/harness.rs
+expression: "&redacted(&traced.struct_logs())"
+---
+{
+  "failed": true,
+  "gas": "[gas]",
+  "returnValue": "MegaLimitExceeded(2, [gas])",
+  "structLogs": [
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH0",
+      "pc": 0,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "POP",
+      "pc": 1,
+      "refund": "[gas]",
+      "stack": [
+        "0x0"
+      ]
+    },
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "TIMESTAMP",
+      "pc": 2,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "POP",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": [
+        "0x6553f100"
+      ]
+    },
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH0",
+      "pc": 4,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH0",
+      "pc": 5,
+      "refund": "[gas]",
+      "stack": [
+        "0x0"
+      ]
+    },
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH0",
+      "pc": 6,
+      "refund": "[gas]",
+      "stack": [
+        "0x0",
+        "0x0"
+      ]
+    },
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH0",
+      "pc": 7,
+      "refund": "[gas]",
+      "stack": [
+        "0x0",
+        "0x0",
+        "0x0"
+      ]
+    },
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH32",
+      "pc": 8,
+      "refund": "[gas]",
+      "stack": [
+        "0x0",
+        "0x0",
+        "0x0",
+        "0x0"
+      ]
+    },
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH20",
+      "pc": 41,
+      "refund": "[gas]",
+      "stack": [
+        "0x0",
+        "0x0",
+        "0x0",
+        "0x0",
+        "0x0"
+      ]
+    },
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "GAS",
+      "pc": 62,
+      "refund": "[gas]",
+      "stack": [
+        "0x0",
+        "0x0",
+        "0x0",
+        "0x0",
+        "0x0",
+        "0x400003"
+      ]
+    },
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "CALL",
+      "pc": 63,
+      "refund": "[gas]",
+      "stack": [
+        "0x0",
+        "0x0",
+        "0x0",
+        "0x0",
+        "0x0",
+        "0x400003",
+        "[gas]"
+      ]
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 0,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH1",
+      "pc": 1,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": [
+        "0x0"
+      ]
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 0,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH1",
+      "pc": 1,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": [
+        "0x0"
+      ]
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 0,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH1",
+      "pc": 1,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": [
+        "0x0"
+      ]
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 0,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH1",
+      "pc": 1,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": [
+        "0x0"
+      ]
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 0,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH1",
+      "pc": 1,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": [
+        "0x0"
+      ]
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 0,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH1",
+      "pc": 1,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": [
+        "0x0"
+      ]
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 0,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH1",
+      "pc": 1,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": [
+        "0x0"
+      ]
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 0,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH1",
+      "pc": 1,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": [
+        "0x0"
+      ]
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 0,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH1",
+      "pc": 1,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": [
+        "0x0"
+      ]
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 0,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH1",
+      "pc": 1,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": [
+        "0x0"
+      ]
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 0,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH1",
+      "pc": 1,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": [
+        "0x0"
+      ]
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 0,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH1",
+      "pc": 1,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": [
+        "0x0"
+      ]
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 0,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH1",
+      "pc": 1,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": [
+        "0x0"
+      ]
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 0,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH1",
+      "pc": 1,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": [
+        "0x0"
+      ]
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 0,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH1",
+      "pc": 1,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": [
+        "0x0"
+      ]
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 0,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH1",
+      "pc": 1,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": [
+        "0x0"
+      ]
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 0,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH1",
+      "pc": 1,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": [
+        "0x0"
+      ]
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 0,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH1",
+      "pc": 1,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": [
+        "0x0"
+      ]
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 0,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH1",
+      "pc": 1,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": [
+        "0x0"
+      ]
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 0,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH1",
+      "pc": 1,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": [
+        "0x0"
+      ]
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 0,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH1",
+      "pc": 1,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": [
+        "0x0"
+      ]
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 0,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH1",
+      "pc": 1,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": [
+        "0x0"
+      ]
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 0,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH1",
+      "pc": 1,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": [
+        "0x0"
+      ]
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 0,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH1",
+      "pc": 1,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": [
+        "0x0"
+      ]
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 0,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH1",
+      "pc": 1,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": [
+        "0x0"
+      ]
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 0,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH1",
+      "pc": 1,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": [
+        "0x0"
+      ]
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 0,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH1",
+      "pc": 1,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": [
+        "0x0"
+      ]
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 0,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH1",
+      "pc": 1,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": [
+        "0x0"
+      ]
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 0,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH1",
+      "pc": 1,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": [
+        "0x0"
+      ]
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 0,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH1",
+      "pc": 1,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": [
+        "0x0"
+      ]
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 0,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH1",
+      "pc": 1,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": [
+        "0x0"
+      ]
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 0,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH1",
+      "pc": 1,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 2,
+      "error": "Some(OutOfGas)",
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": [
+        "0x0"
+      ]
+    },
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "POP",
+      "pc": 64,
+      "refund": "[gas]",
+      "stack": [
+        "0x0"
+      ]
+    },
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH32",
+      "pc": 65,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 1,
+      "error": "Some(OutOfGas)",
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH32",
+      "pc": 98,
+      "refund": "[gas]",
+      "stack": [
+        "0x1"
+      ]
+    }
+  ]
+}

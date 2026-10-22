@@ -4,8 +4,13 @@
 //! equivalence mode and exits non-zero when a failure is not explained by a registered deviation;
 //! `--mode satin` runs the same entries under Satin's own configuration and only reports. See the
 //! `mega-state-test` crate for what the two modes are.
+//!
+//! `state-test btest <paths>` imports the blockchain tests through Satin's block executor
+//! ([`btest`]).
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
+
+mod btest;
 
 use std::{path::PathBuf, process::ExitCode};
 
@@ -21,7 +26,11 @@ const LISTED_FAILURES: usize = 50;
 
 /// Command-line arguments.
 #[derive(Parser, Debug)]
-#[command(name = "state-test", about = "Runs execution-spec state tests on the Satin engine")]
+#[command(
+    name = "state-test",
+    about = "Runs execution-spec state tests on the Satin engine",
+    after_help = "`state-test btest --help` describes the blockchain tests' subcommand."
+)]
 struct Cmd {
     /// Fixture files, or directories searched recursively for `.json` files.
     #[arg(required = true, num_args = 1..)]
@@ -57,6 +66,12 @@ struct Cmd {
 }
 
 fn main() -> ExitCode {
+    // `btest` names the blockchain tests' subcommand; anything else is the state tests' command,
+    // whose arguments are unchanged.
+    let mut args = std::env::args_os();
+    if args.nth(1).is_some_and(|first| first == "btest") {
+        return btest::main(std::env::args_os().skip(1));
+    }
     let cmd = Cmd::parse();
     let mut files = Vec::new();
     for path in &cmd.paths {

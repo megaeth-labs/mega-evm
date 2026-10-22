@@ -19,13 +19,13 @@ mod result;
 mod schedule;
 mod spec;
 mod state;
+mod validation;
 
 pub use context::*;
 pub use execution::*;
 pub use factory::*;
 pub use frame::*;
 pub use history::*;
-pub use host::*;
 pub use inspector::*;
 pub use precompiles::*;
 pub use prices::*;
@@ -33,10 +33,11 @@ pub use result::*;
 pub use schedule::*;
 pub use spec::*;
 pub use state::*;
+pub use validation::*;
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, vec::Vec};
 
 use alloy_evm::{
     precompiles::{DynPrecompile, PrecompilesMap},
@@ -62,7 +63,7 @@ use revm::{
     DatabaseCommit, ExecuteCommitEvm, ExecuteEvm,
 };
 
-use crate::{EmptyExternalEnv, ExternalEnvTypes, MegaTransaction, MegaTransactionError};
+use crate::{BucketId, EmptyExternalEnv, ExternalEnvTypes, MegaTransaction, MegaTransactionError};
 
 /// The instruction table of the Satin engine.
 pub(crate) type MegaInstructions<DB, ExtEnvs> =
@@ -207,8 +208,11 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
 
     /// Enforces `limits` on every transaction this EVM runs from now on.
     ///
-    /// Block execution installs the block's limits this way, so a transaction runs under them
-    /// whatever the caller configured when it built the EVM.
+    /// Every EVM already runs under its spec's limits
+    /// ([`ProtocolLimits::for_spec`](crate::ProtocolLimits::for_spec)), and block execution
+    /// installs them again this way before every transaction, so a block's transaction runs under
+    /// them whatever the caller configured on the EVM. Outside block execution — a tool, a test —
+    /// this is how a caller runs a counterfactual under others.
     #[must_use]
     pub fn with_tx_runtime_limits(mut self, limits: crate::EvmTxRuntimeLimits) -> Self {
         self.set_tx_runtime_limits(limits);
@@ -250,6 +254,33 @@ where
     pub fn clear_accessed_block_hashes(&mut self) {
         self.ctx_mut().clear_block_hash_record();
     }
+
+    /// The SALT buckets the SALT environment answered with a valid capacity on this EVM so far,
+    /// in ascending order.
+    ///
+    /// A bucket's capacity is read through a side channel no database sees, so this is where a
+    /// stateless witness learns which buckets it must prove. The record holds what this EVM
+    /// executed since it was last cleared, dropped candidates included and lookups that failed
+    /// left out: it starts empty, block execution empties it when a block starts, and nothing
+    /// empties it between the transactions of a block, as the per-transaction multiplier cache
+    /// is. An EVM reused across blocks outside a block executor reports every block it ran since
+    /// it was last cleared; a node that executes on several EVMs takes the union of their records.
+    pub fn get_accessed_bucket_ids(&self) -> Vec<BucketId> {
+        self.ctx().bucket_record().to_vec()
+    }
+
+    /// Forgets the SALT buckets asked about so far, so the next asks are attributable to one
+    /// transaction. The record decides nothing, so clearing it changes no execution result.
+    pub fn clear_accessed_bucket_ids(&mut self) {
+        self.ctx_mut().clear_bucket_record();
+    }
+
+    /// The reads of the Oracle's storage the running (or last) transaction or system call made
+    /// through the oracle service, in order, each with the service's answer. It is emptied before
+    /// every transaction and system call; a transaction's outcome carries a copy.
+    pub fn oracle_reads(&self) -> &[OracleRead] {
+        self.ctx().oracle_reads().reads()
+    }
 }
 
 impl<DB, INSP, ExtEnvs> MegaEvm<DB, INSP, ExtEnvs>
@@ -259,8 +290,9 @@ where
     ExtEnvs: ExternalEnvTypes,
 {
     /// Executes `tx`, through the inspector when one is enabled, and returns its outcome: the
-    /// result and state, the gas by ledger, the usage the common execution layer counted and the
-    /// limit that stopped the transaction, if any. Nothing is committed.
+    /// result and state, the gas by ledger, the usage the common execution layer counted, the
+    /// limit that stopped the transaction, if any, and the reads of the Oracle's storage it made
+    /// through the oracle service. Nothing is committed.
     pub fn execute_transaction(
         &mut self,
         tx: MegaTransaction,
@@ -276,17 +308,11 @@ where
             result_and_state,
             gas,
             usage: layer.usage(),
-            limit_exceeded: layer.latched().copied(),
+            limit_exceeded: layer.limit_exceeded().copied(),
+            oracle_reads: self.inner.ctx.oracle_reads().reads().to_vec(),
         })
     }
-}
 
-impl<DB, INSP, ExtEnvs> MegaEvm<DB, INSP, ExtEnvs>
-where
-    DB: Database,
-    INSP: Inspector<MegaContext<DB, ExtEnvs>, EthInterpreter>,
-    ExtEnvs: ExternalEnvTypes,
-{
     /// Runs `tx` through the inspector when one is enabled, without committing.
     fn run_transaction(
         &mut self,
@@ -366,30 +392,18 @@ where
 {
 }
 
-/// The transaction a system call runs, on the gas limit its caller names.
-trait SystemCallTxWithGasLimit: SystemCallTx {
-    /// revm's system-call transaction from `caller` to `contract` with `data`
-    /// ([`SystemCallTx::new_system_tx_with_caller`]), on `gas_limit` instead of revm's
-    /// [`SYSTEM_CALL_GAS_LIMIT`](revm::handler::SYSTEM_CALL_GAS_LIMIT).
-    fn new_system_tx_with_gas_limit(
-        caller: Address,
-        contract: Address,
-        data: Bytes,
-        gas_limit: u64,
-    ) -> Self;
-}
-
-impl SystemCallTxWithGasLimit for MegaTransaction {
-    fn new_system_tx_with_gas_limit(
-        caller: Address,
-        contract: Address,
-        data: Bytes,
-        gas_limit: u64,
-    ) -> Self {
-        let mut tx = Self::new_system_tx_with_caller(caller, contract, data);
-        tx.0.base.gas_limit = gas_limit;
-        tx
-    }
+/// revm's system-call transaction from `caller` to `contract` with `data`
+/// ([`SystemCallTx::new_system_tx_with_caller`]), on `gas_limit` instead of revm's
+/// [`SYSTEM_CALL_GAS_LIMIT`](revm::handler::SYSTEM_CALL_GAS_LIMIT).
+fn system_tx_with_gas_limit(
+    caller: Address,
+    contract: Address,
+    data: Bytes,
+    gas_limit: u64,
+) -> MegaTransaction {
+    let mut tx = MegaTransaction::new_system_tx_with_caller(caller, contract, data);
+    tx.0.base.gas_limit = gas_limit;
+    tx
 }
 
 impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> SystemCallEvm for MegaEvm<DB, INSP, ExtEnvs> {
@@ -426,7 +440,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
         data: Bytes,
         gas_limit: u64,
     ) -> Result<ResultAndState<OpHaltReason>, EVMError<DB::Error, MegaTransactionError>> {
-        let tx = MegaTransaction::new_system_tx_with_gas_limit(caller, contract, data, gas_limit);
+        let tx = system_tx_with_gas_limit(caller, contract, data, gas_limit);
         let result = self.run_system_call(tx).map_err(map_op_err)?;
         Ok(ResultAndState::new(result, ExecuteEvm::finalize(self)))
     }
@@ -596,11 +610,17 @@ mod tests {
     }
 
     /// A call to `CALLEE`, with room for the state gas a value transfer to it draws: `CALLEE`
-    /// holds nothing, so a transfer creates it and pays the new account's state gas.
+    /// holds nothing, so a transfer creates it and pays the new account's state gas. The room is
+    /// counted at the byte prices in effect, with the history of the body and of the recipient's
+    /// write record on top of 100,000 of regular gas.
     fn tx(value: U256) -> MegaTransaction {
+        use revm::context_interface::cfg::GasId;
+        let gas_limit = 100_000 +
+            crate::satin_gas_params().get(GasId::new_account_state_gas()) +
+            crate::history_gas(crate::TX_BODY_SIZE + crate::WRITE_RECORD_SIZE).unwrap();
         OpTx(op_transaction(TxEnv {
             caller: CALLER,
-            gas_limit: 300_000,
+            gas_limit,
             kind: TxKind::Call(CALLEE),
             value,
             ..Default::default()

@@ -377,6 +377,7 @@ fn registry_of(report: &Report, path: &'static str) -> &'static [Deviation] {
         reason: "the reason",
         fork: Fork::Osaka,
         entries: entries.leak(),
+        blockchain_entries: &[],
     }]))
 }
 

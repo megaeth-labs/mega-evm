@@ -8,3 +8,8 @@
 
 # Python bytecode cache (scripts/)
 __pycache__/
+
+# insta's pending snapshots: a differing snapshot's new value, written beside it outside CI, until
+# it is reviewed and accepted (or rejected) with `cargo insta review`.
+*.snap.new
+*.pending-snap

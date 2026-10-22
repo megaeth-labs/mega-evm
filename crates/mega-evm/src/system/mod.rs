@@ -5,8 +5,8 @@
 //! [`MegaAccessControl`](control), [`MegaLimitControl`](limit_control) and the
 //! [`SequencerRegistry`](sequencer_registry). Each module carries its address, the code and code
 //! hash the `mega-system-contracts` crate ships, and its ABI. The EIP-7997 `CREATE2` factory
-//! lives at its canonical address beside them; [`deploy`] is the single list that deploys all
-//! seven.
+//! lives at its canonical address beside them; [`predeploys`] is the single list of all seven,
+//! with the check Satin's activation block makes of them.
 //!
 //! Four of them have an interceptor: a `CALL` or `STATICCALL` to one of their intercepted
 //! selectors is answered by the engine instead of by the contract's code (see the `intercept`
@@ -19,25 +19,25 @@
 pub mod keyless;
 
 mod control;
-mod deploy;
 mod intercept;
 mod limit_control;
 mod oracle;
+mod predeploys;
 mod sequencer_registry;
 mod timestamp;
 mod tx;
 
 pub use control::*;
-pub use deploy::*;
 pub use intercept::NON_ZERO_TRANSFER_REVERT_DATA;
 pub use limit_control::*;
 pub use oracle::*;
+pub use predeploys::*;
 pub use sequencer_registry::*;
 pub use timestamp::*;
 pub use tx::*;
 
 pub(crate) use intercept::intercept;
-pub(crate) use tx::validate_and_promote;
+pub(crate) use tx::{classify_system_transaction, validate_and_promote};
 
 #[cfg(test)]
 mod tests {
@@ -60,8 +60,8 @@ mod tests {
         ]
     }
 
-    /// The code hash of every contract is the hash of the code it ships with: Satin deploys the
-    /// contracts as they are, so a Solidity change that moved a hash shows up here.
+    /// The code hash of every contract is the hash of the code it ships with: Satin's activation
+    /// block checks the hash a chain holds, so a Solidity change that moved a hash shows up here.
     #[test]
     fn test_every_system_contract_code_hashes_to_its_pinned_hash() {
         for (address, code, hash) in system_contracts() {

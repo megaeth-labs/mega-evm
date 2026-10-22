@@ -9,10 +9,7 @@ use mega_evm::{
 };
 use revm::bytecode::opcode::{CALL, CALLCODE, DELEGATECALL, STATICCALL};
 
-use crate::common::{
-    call_tx, calls_with, output, revert_data, run, split_outcome, system_db, with_contract,
-    CONTRACT,
-};
+use crate::common::{call_tx, output, revert_data, run, system_db};
 
 const DISABLE: [u8; 4] = IMegaAccessControl::disableVolatileDataAccessCall::SELECTOR;
 const ENABLE: [u8; 4] = IMegaAccessControl::enableVolatileDataAccessCall::SELECTOR;
@@ -21,11 +18,7 @@ const NOT_INTERCEPTED: [u8; 4] = IMegaAccessControl::NotIntercepted::SELECTOR;
 
 /// A call from a contract to the access control contract, run as a transaction.
 fn through_contract(scheme: u8, data: &[u8], value: u64) -> (bool, Bytes) {
-    let code = calls_with(scheme, ACCESS_CONTROL_ADDRESS, data, value);
-    let result = run(with_contract(code), call_tx(CONTRACT, [], U256::ZERO));
-    let outcome = output(&result);
-    let (status, data) = split_outcome(&outcome);
-    (status, Bytes::copy_from_slice(data))
+    crate::common::through_contract(ACCESS_CONTROL_ADDRESS, scheme, data, value)
 }
 
 /// The three methods are intercepted: the two switches return nothing and the query answers

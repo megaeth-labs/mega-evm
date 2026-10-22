@@ -10,10 +10,10 @@ interface IMegaLimitControl {
     /// @notice The call carries non-zero transferred ETH for a view/control method.
     error NonZeroTransfer();
 
-    /// @notice Returns remaining compute gas of the current call.
-    /// @dev In Rex4+, returns the caller's per-frame remaining compute gas (not the 98/100 forwarded child budget).
-    /// @dev For direct TX calls with no active frame, returns TX compute limit minus intrinsic compute gas.
-    /// @dev In pre-Rex4, this falls back to transaction-level remaining compute gas.
-    /// @return remaining The remaining compute gas of the current call.
+    /// @notice Returns the compute gas the calling frame can still spend.
+    /// @dev The figure is read when the call reaches the EVM, after the calling opcode charged its
+    ///      own costs. The gas forwarded to this call comes back untouched, so it is not deducted.
+    ///      How compute gas is metered, and what limits it, is the active spec's.
+    /// @return remaining The compute gas the calling frame can still spend.
     function remainingComputeGas() external view returns (uint64 remaining);
 }

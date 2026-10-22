@@ -1,0 +1,26 @@
+{
+  "description": "Satin: rEVERT with empty data",
+  "args": [
+    "run",
+    "0x5f5ffd",
+    "--spec",
+    "Satin"
+  ],
+  "expected": {
+    "success": false,
+    "gas_used": 42284,
+    "logs_count": 0,
+    "revert_reason": "(empty)",
+    "satin": {
+      "regular_gas": 15004,
+      "state_gas": 0,
+      "history_gas": 27280,
+      "history_bytes": 310,
+      "reservoir_remaining": 0,
+      "floor_gas": 15000,
+      "data_size": 310,
+      "write_records": 0,
+      "limit_exceeded": null
+    }
+  }
+}

@@ -11,8 +11,8 @@ use revm::interpreter::{gas::WithheldCrossing, Gas, InstructionResult, Interpret
 use super::VolatileDataAccess;
 use crate::system::VOLATILE_DATA_ACCESS_DISABLED_SELECTOR;
 
-/// A transaction gas detention stops: the compute limit it crossed, and its compute at the
-/// crossing.
+/// A crossing gas detention stops a frame for: the compute limit the transaction crossed, and its
+/// compute at the crossing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ComputeStop {
     /// The most compute the transaction may reach.
@@ -146,9 +146,11 @@ impl FrameFigures {
 ///
 /// The stipend stays outside compute on purpose: compute is regular gas drawn from the
 /// transaction's own pools. A callee may run up to 2,300 gas on each value call's stipend beyond
-/// the compute counted, and each value call costs its caller at least 9,100 of compute — the
-/// 9,000 of the value transfer and a warm access of 100 — so the gas run after a read is at most
-/// about 25% (2,300 / 9,100) more than the cap.
+/// the compute counted. A value call costs its caller 9,100 of compute — the 11,300 of the value
+/// transfer less the 2,300 stipend it carries, and a warm access of 100 — and a callee that leaves
+/// the stipend unspent returns it, which lowers the caller's spent regular gas: a warm value call
+/// to an empty account counts 9,100 − 2,300 = 6,800. So the gas run after a read is at most about
+/// 34% (2,300 / 6,800) more than the cap.
 ///
 /// A keyless deployment's call is the transaction's own frame, and runs no code: it charges its
 /// own work — the overhead of decoding the signed transaction and recovering its signer, and the
@@ -209,6 +211,10 @@ pub struct Detention {
     /// The depth the switch starts off from in every transaction: test tooling.
     #[cfg(any(test, feature = "test-utils"))]
     disabled_from_at_start: Option<usize>,
+    /// The depth of the frame an answer being settled switches volatile-data access off for, if
+    /// it does: applied once the answer settles without a crossing. See
+    /// [`disable_access_on_answer`](Self::disable_access_on_answer).
+    answer_disables_from: Option<usize>,
     /// What the transaction read.
     accessed: VolatileDataAccess,
     /// The most compute the transaction may reach, once it read volatile data.
@@ -242,6 +248,7 @@ impl Detention {
         self.block_env_cap = block_env_cap;
         self.oracle_cap = oracle_cap;
         self.refusing = false;
+        self.answer_disables_from = None;
         #[cfg(any(test, feature = "test-utils"))]
         {
             self.disabled_from = self.disabled_from_at_start;
@@ -535,8 +542,8 @@ impl Detention {
     /// the frame, or a frame below it, turned it off. A frame that halts burns what it had left.
     ///
     /// Returns the stop when the frame ran out of gas on a charge the withheld part of its gas
-    /// would have paid ([`stop`](Self::stop)): the frame crossed the limit, and must stop the
-    /// transaction rather than halt. The stop's compute is the transaction's with the frame's gas
+    /// would have paid ([`stop`](Self::stop)): the frame crossed the limit, and must revert with
+    /// the stop rather than halt. The stop's compute is the transaction's with the frame's gas
     /// put back.
     #[inline]
     pub(crate) fn on_frame_end(
@@ -597,8 +604,30 @@ impl Detention {
     ///
     /// Until a read sets a limit an answer can only burn: nothing it spends can cross a limit, and
     /// only the engine marks an answer as a crossing, which it does only under a limit.
+    ///
+    /// A switch-off the answer staged
+    /// ([`disable_access_on_answer`](Self::disable_access_on_answer)) is applied when the
+    /// answer did not cross, and dropped when it did.
     #[inline]
     pub(crate) fn on_answer(
+        &mut self,
+        result: &mut InterpreterResult,
+        depth: usize,
+        gas_limit: u64,
+    ) -> Option<ComputeStop> {
+        let stop = self.classify_answer(result, depth, gas_limit);
+        if let Some(caller) = self.answer_disables_from.take() {
+            if stop.is_none() {
+                self.disable_access(caller);
+            }
+        }
+        stop
+    }
+
+    /// [`on_answer`](Self::on_answer)'s verdict on `result`, the answer to the frame at `depth`
+    /// whose gas limit was `gas_limit`.
+    #[inline]
+    fn classify_answer(
         &mut self,
         result: &mut InterpreterResult,
         depth: usize,
@@ -721,6 +750,15 @@ impl Detention {
     /// The frame that steers the switch reads it when it resumes, after the call that steered it.
     pub fn disable_access(&mut self, depth: usize) {
         self.disabled_from = Some(self.disabled_from.map_or(depth, |from| from.min(depth)));
+    }
+
+    /// Switches volatile-data access off for the frame at `depth`, as
+    /// [`disable_access`](Self::disable_access) does, once the answer being built for a call it
+    /// made settles without crossing the compute limit ([`on_answer`](Self::on_answer)): an answer
+    /// that becomes the stop did not succeed, and the frame that catches it resumes with the
+    /// switch as it was.
+    pub(crate) const fn disable_access_on_answer(&mut self, depth: usize) {
+        self.answer_disables_from = Some(depth);
     }
 
     /// Switches volatile-data access back on for the frame at `depth`, and reports whether it
@@ -1206,6 +1244,45 @@ mod tests {
         }
     }
 
+    /// A switch-off an answer stages applies once the answer settles without a crossing: an
+    /// answer gas detention turns into the stop leaves access as it was, one that settles within
+    /// the limit switches it off, and so does one of a transaction that is not detained. A staged
+    /// switch goes with the answer it was staged for, whatever that answer settled as.
+    #[test]
+    fn test_an_answer_switches_access_off_only_when_it_does_not_cross() {
+        let mut detention = detaining();
+        let mut caller = gas(100_000_000, 0);
+        detention.on_frame_run(&mut caller, 0);
+        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut caller, 0, 0);
+        assert!(caller.record_withheld_first_cost(90_000_000));
+        detention.on_frame_suspend(&caller, 0);
+        let answer = |spent: u64| {
+            let mut gas = gas(90_000_000, 0);
+            assert!(gas.record_regular_cost(spent));
+            InterpreterResult::new(InstructionResult::Return, Bytes::new(), gas)
+        };
+
+        detention.disable_access_on_answer(0);
+        let mut beyond = answer(BLOCK_ENV_ACCESS_COMPUTE_GAS + 1);
+        assert!(detention.on_answer(&mut beyond, 1, 90_000_000).is_some(), "the answer crossed");
+        assert!(!detention.is_access_disabled(0), "and access stays on");
+
+        let mut unstaged = answer(0);
+        assert_eq!(detention.on_answer(&mut unstaged, 1, 90_000_000), None);
+        assert!(!detention.is_access_disabled(0), "the crossing answer took its switch with it");
+
+        detention.disable_access_on_answer(0);
+        let mut within = answer(0);
+        assert_eq!(detention.on_answer(&mut within, 1, 90_000_000), None);
+        assert!(detention.is_access_disabled(0), "an answer within the limit switches it off");
+
+        let mut free = Detention::default();
+        assert!(!free.detains());
+        free.disable_access_on_answer(0);
+        assert_eq!(free.on_answer(&mut answer(0), 1, 90_000_000), None);
+        assert!(free.is_access_disabled(0), "a transaction that is not detained switches it off");
+    }
+
     /// A precompile run on the allowance gets the rest of the forward back: a success keeps it
     /// unspent, a halt burns the forward as it would without the read, and an out-of-gas on the
     /// allowance is a crossing, which the answer's settlement stops with the whole forward back.
@@ -1269,14 +1346,14 @@ mod tests {
         detention.on_frame_run(&mut call, 0);
         assert_eq!(call.spendable(), BLOCK_ENV_ACCESS_COMPUTE_GAS);
 
-        assert!(call.record_regular_cost(132_000));
+        assert!(call.record_regular_cost(112_000));
         assert!(call.record_withheld_first_cost(50_000_000));
         detention.on_frame_suspend(&call, 0);
         let mut creation = gas(50_000_000, 0);
         detention.on_frame_run(&mut creation, 1);
-        assert_eq!(detention.compute(&creation), 132_000, "the charges, not the forward");
-        assert_eq!(creation.spendable(), BLOCK_ENV_ACCESS_COMPUTE_GAS - 132_000);
-        assert_eq!(detention.allowance(2, 0), Some(BLOCK_ENV_ACCESS_COMPUTE_GAS - 132_000));
+        assert_eq!(detention.compute(&creation), 112_000, "the charges, not the forward");
+        assert_eq!(creation.spendable(), BLOCK_ENV_ACCESS_COMPUTE_GAS - 112_000);
+        assert_eq!(detention.allowance(2, 0), Some(BLOCK_ENV_ACCESS_COMPUTE_GAS - 112_000));
     }
 
     /// A frame's own read is committed as an opcode's is: the limit is its compute at the read

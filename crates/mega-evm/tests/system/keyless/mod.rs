@@ -13,6 +13,7 @@ mod differential;
 mod dispatch;
 mod frame;
 mod inspector;
+mod interface;
 mod limits;
 mod precedence;
 mod rules;
@@ -27,8 +28,8 @@ use mega_evm::{
         decode_error_result, IKeylessDeploy, KeylessDeployError, KEYLESS_DEPLOY_ADDRESS,
     },
     test_utils::MemoryDatabase,
-    write_record_history_gas, BucketId, EvmTxRuntimeLimits, ExternalEnvs, MegaContext, MegaEvm,
-    MegaSpecId, MegaTransactionOutcome, SaltEnv, TestExternalEnvs, MIN_BUCKET_SIZE,
+    BucketId, EvmTxRuntimeLimits, ExternalEnvs, MegaContext, MegaEvm, MegaSpecId,
+    MegaTransactionOutcome, SaltEnv, TestExternalEnvs, MIN_BUCKET_SIZE,
 };
 use revm::{
     bytecode::opcode::{CODECOPY, PUSH0, RETURN},
@@ -40,6 +41,20 @@ use crate::common::{block, call_tx, context, system_db};
 
 /// A gas limit under the execution cap, and one above it.
 pub(crate) const GAS_LIMITS: [u64; 2] = [TX_GAS_LIMIT_CAP / 4, TX_GAS_LIMIT_CAP * 2];
+
+/// The gas limits a transaction carrying `calldata_len` bytes of calldata runs at: three quarters
+/// of the execution cap, below it, where the body's history is paid out of regular gas; and ten
+/// times the cap, above it, where the reservoir pays it.
+///
+/// The tier below the cap is left out where the body's history at the byte prices in effect leaves
+/// it less than 25,000,000 and two new accounts for the rest: no transaction that large can pay for
+/// its own body below the cap there.
+pub(crate) fn tiers_carrying(calldata_len: usize) -> Vec<u64> {
+    let below = TX_GAS_LIMIT_CAP * 3 / 4;
+    let room = 25_000_000 + 2 * crate::common::account_state_gas();
+    let fits = crate::common::body_history(calldata_len as u64) + room <= below;
+    [below, 10 * TX_GAS_LIMIT_CAP].into_iter().filter(|&tier| fits || tier > below).collect()
+}
 
 /// The gas limit the tests sign their deployments with.
 pub(crate) const SIGNED_GAS_LIMIT: u64 = 1_000_000;
@@ -131,6 +146,15 @@ pub(crate) fn constructor(prefix: &[u8], runtime: &[u8]) -> Bytes {
 /// A runtime of `len` bytes that stops.
 pub(crate) fn runtime(len: usize) -> Vec<u8> {
     vec![0x00; len]
+}
+
+/// Init code that logs `len` bytes of data and deploys a one-byte runtime.
+pub(crate) fn logging(len: u64) -> Bytes {
+    use mega_evm::test_utils::BytecodeBuilder;
+    use revm::bytecode::opcode::LOG0;
+    let prefix =
+        BytecodeBuilder::default().push_number(len).push_number(0_u64).append(LOG0).build_vec();
+    constructor(&prefix, &runtime(1))
 }
 
 /// A database holding the system contracts, the relayer's balance and `balance` on the signer of
@@ -251,14 +275,23 @@ pub(crate) fn create_regular(len: usize) -> u64 {
     satin_gas_params().create_cost() + satin_gas_params().initcode_cost(len)
 }
 
-/// The history gas of one write record.
+/// The history gas of one write record, `WRITE_RECORD_SIZE` bytes, by hand.
 pub(crate) fn record() -> u64 {
-    write_record_history_gas(1).expect("a record has a price")
+    history(mega_evm::WRITE_RECORD_SIZE)
 }
 
-/// The history gas of `bytes` bytes.
+/// The history gas of `bytes` bytes, by hand.
 pub(crate) fn history(bytes: u64) -> u64 {
-    mega_evm::history_gas(bytes).expect("a byte count has a price")
+    crate::common::history(bytes)
+}
+
+/// The intrinsic gas a call carrying `data` pays below the execution cap, by hand: EIP-2780's
+/// `TX_BASE_COST` of 12,000 and 3,000 for the recipient's access, the calldata at 4 gas a zero
+/// byte and 16 a non-zero one, and the history of the body, which spills onto the regular gas
+/// where there is no reservoir.
+pub(crate) fn intrinsic(data: &[u8]) -> u64 {
+    let calldata: u64 = data.iter().map(|&byte| if byte == 0 { 4 } else { 16 }).sum();
+    12_000 + 3_000 + calldata + crate::common::body_history(data.len() as u64)
 }
 
 /// A Satin context over `db` reading `envs`.

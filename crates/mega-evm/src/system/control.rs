@@ -63,7 +63,9 @@ pub const SLOT_NUM_ACCESS_TYPE: u8 = 12;
 /// for the frame that made the call — the caller, one level above the frame the call would start:
 ///
 /// - `disableVolatileDataAccess()` switches volatile-data access off for the caller and every frame
-///   below it. A switch already off from a frame above stays as it is.
+///   below it, once its answer settles without crossing gas detention's compute limit: an answer
+///   that becomes the stop leaves the switch as it was. A switch already off from a frame above
+///   stays as it is.
 /// - `enableVolatileDataAccess()` switches it back on, and reverts with `DisabledByParent()` when a
 ///   frame above the caller switched it off: a frame cannot lift a restriction its caller placed.
 ///   Switching on what is not off succeeds and changes nothing.
@@ -105,7 +107,7 @@ pub(crate) fn intercept<DB: Database, ExtEnvs: ExternalEnvTypes>(
     let (result, output) = match method {
         Method::Disable => {
             if let Some(caller) = caller {
-                detention.disable_access(caller);
+                detention.disable_access_on_answer(caller);
             }
             (InstructionResult::Return, Bytes::new())
         }

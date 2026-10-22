@@ -1,0 +1,126 @@
+name: Randomized tests, long mode
+
+# Runs the randomized tests of the Satin engine (crates/mega-evm/tests/fuzz) in their long mode:
+# many more cases per property than the bounded run every pull request makes, drawn from a seed
+# this run chooses (or the one given), in a debug build, where every debug assertion runs, and in
+# a release build, where none does. A failure prints the seed and the case count that reproduce it
+# and the minimal case it shrank to; the job's log is the record.
+#
+# It also runs the byte-price record at two prices and compares them: where a case followed the
+# same path at both, its state gas must not fall as the cost per state byte rises, nor its history
+# gas as the cost per history byte rises (scripts/fuzz_price_monotonic.py).
+#
+# Dispatch only: a scheduled trigger fires on the default branch alone, which the Satin
+# integration branch is not. Dispatch it from the branch to test, with a seed to reproduce a run
+# or none to draw a new one.
+#
+# The two inputs, and how they meet the long mode:
+#
+# - `cases` empty (the default): each property runs fifty times its own bounded count, 6,400 to
+#   38,400 cases, which is what `MEGA_FUZZ_LONG=1` means on its own.
+# - `cases` set: every property runs exactly that many cases. The count replaces the bounded count
+#   and the multiplier alike; it is not multiplied by fifty.
+# - `seed` empty: the run draws one seed from the clock, prints it, and uses it for every property
+#   and both profiles, so one number reproduces the run.
+#
+# The runner itself reads an empty `MEGA_FUZZ_CASES` or `MEGA_FUZZ_SEED` as unset, so an input left
+# empty cannot fail the run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      cases:
+        description: "Cases per property, exactly; empty runs each at fifty times its bounded count"
+        required: false
+        default: ""
+      seed:
+        description: "The seed to draw the cases from; empty draws one from the clock"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  seed:
+    name: the run's seed
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      seed: ${{ steps.seed.outputs.seed }}
+    steps:
+      - name: Take the seed given, or draw one
+        id: seed
+        env:
+          GIVEN: ${{ inputs.seed }}
+        run: |
+          seed="$GIVEN"
+          [ -n "$seed" ] || seed="$(date +%s)"
+          echo "seed=$seed" >> "$GITHUB_OUTPUT"
+          echo "Seed \`$seed\`: reproduce with \`MEGA_FUZZ_SEED=$seed\` and the case count each property prints." >> "$GITHUB_STEP_SUMMARY"
+
+  long:
+    name: long mode (${{ matrix.profile }})
+    needs: seed
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [debug, release]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Run the properties
+        env:
+          MEGA_FUZZ_LONG: "1"
+          # Empty unless the dispatch named a count, and then every property runs exactly it.
+          MEGA_FUZZ_CASES: ${{ inputs.cases }}
+          MEGA_FUZZ_SEED: ${{ needs.seed.outputs.seed }}
+        run: |
+          if [ "${{ matrix.profile }}" = "release" ]; then
+            cargo test --release --locked -p mega-evm --test fuzz -- --nocapture
+          else
+            cargo test --locked -p mega-evm --test fuzz -- --nocapture
+          fi
+
+  price-monotonicity:
+    name: state and history gas along the byte prices
+    needs: seed
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      # Both records are drawn from the same seed and the same case count, so the cases match by
+      # index: the long mode's count unless the dispatch named one.
+      - name: Record the cases at the constants and at dearer bytes
+        env:
+          MEGA_FUZZ_LONG: "1"
+          MEGA_FUZZ_CASES: ${{ inputs.cases }}
+          MEGA_FUZZ_SEED: ${{ needs.seed.outputs.seed }}
+        run: |
+          cargo test --release --locked -p mega-evm --features satin-price-override,test-utils --test fuzz --no-run
+          MEGA_FUZZ_PRICE_RECORD="$PWD/target/price-low.txt" \
+            cargo test --release --locked -p mega-evm --features satin-price-override,test-utils --test fuzz -- price_record
+          MEGA_SATIN_CPSB=2000 MEGA_SATIN_CPHB=100 MEGA_FUZZ_PRICE_RECORD="$PWD/target/price-high.txt" \
+            cargo test --release --locked -p mega-evm --features satin-price-override,test-utils --test fuzz -- price_record
+
+      - name: Compare the records
+        run: python3 scripts/fuzz_price_monotonic.py target/price-low.txt target/price-high.txt

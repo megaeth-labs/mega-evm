@@ -5,16 +5,19 @@
 //! the stop, what gas detention made of the transaction, and every event the inspector saw with
 //! the journal depth it saw it at.
 //!
-//! The record is the way to hold a change to the engine's frame lifecycle to what it changes:
-//! when `MEGA_KEYLESS_RECORD` names a file, the record is written there, and the records of two
-//! builds can be compared line by line. The test itself holds every scenario's recorded run to its
-//! plain one, on everything but the events.
+//! An in-tree insta snapshot pins one line per case: its name and the keccak256 digest of its
+//! complete four-mode record, including line endings, plus the record's case, run, byte and line
+//! counts. It compares at the spec's byte prices; the recorded-versus-plain assertions run at
+//! every price. Review digest changes with the full dump: when `MEGA_KEYLESS_RECORD` names a
+//! file, the record is written there, and two builds can be compared line by line. The test also
+//! holds every scenario's recorded run to its plain one, on everything but the events.
 //!
 //! The scenarios: every rule a call can be refused by, and every charge it can run out of gas
 //! on; a deployment from nonce 0 and from nonce 1, one that moves value, one by a delegated
 //! signer, a constructor that reverts, halts, logs, writes, and destroys itself; the limits a
 //! deployment crosses, from either nonce; gas detention holding the call and its creation; a
-//! latched body; a system call; and the calls that are not dispatched. Each at a gas limit below
+//! body over the limit, which validation rejects; a system call; and the calls that are not
+//! dispatched. Each at a gas limit below
 //! the execution cap and one above it, where it can run there.
 
 use std::fmt::Write as _;
@@ -34,8 +37,8 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{
-        CALL, CALLER, CREATE, GAS, INVALID, LOG0, POP, PUSH0, REVERT, SELFDESTRUCT, STATICCALL,
-        STOP, TIMESTAMP,
+        CALL, CALLER, CREATE, GAS, INVALID, POP, PUSH0, REVERT, SELFDESTRUCT, STATICCALL, STOP,
+        TIMESTAMP,
     },
     context::{BlockEnv, CfgEnv, ContextTr, JournalTr},
     interpreter::{
@@ -52,12 +55,14 @@ use crate::common::{context, CALLER as RELAYER};
 /// Where the record is written, when set.
 const RECORD_PATH: &str = "MEGA_KEYLESS_RECORD";
 
-/// Every scenario, in every mode: the recorded runs match the plain ones, and the record is
-/// written where `MEGA_KEYLESS_RECORD` says.
+/// Every scenario, in every mode: the recorded runs match the plain ones, the case digests are
+/// snapshotted, and the full record is written where `MEGA_KEYLESS_RECORD` says.
 #[test]
 fn test_keyless_differential_record() {
     let mut record = String::new();
+    let mut cases = Vec::new();
     for scenario in scenarios() {
+        let start = record.len();
         let plain = scenario.run(Mode::Plain);
         let recorded = scenario.run(Mode::Recorded);
         assert_eq!(
@@ -77,10 +82,24 @@ fn test_keyless_differential_record() {
             scenario.name, recorded.outcome, recorded.events
         )
         .unwrap();
+        cases.push(format!(
+            "{} | keccak256={}",
+            scenario.name,
+            keccak256(&record.as_bytes()[start..])
+        ));
     }
     if let Ok(path) = std::env::var(RECORD_PATH) {
-        std::fs::write(&path, record).expect("the record is written");
+        std::fs::write(&path, &record).expect("the record is written");
     }
+    crate::assert_sorted_json_snapshot!(serde_json::json!({
+        "summary": {
+            "cases": cases.len(),
+            "runs": cases.len() * 4,
+            "bytes": record.len(),
+            "lines": record.lines().count(),
+        },
+        "cases": cases,
+    }));
 }
 
 /* ---------- the scenarios ---------- */
@@ -253,13 +272,6 @@ impl Mode {
             Self::Answered => Some(Recorder { answer_creations: true, ..Default::default() }),
         }
     }
-}
-
-/// Init code that logs `len` bytes of data and deploys a one-byte runtime.
-fn logging(len: u64) -> Bytes {
-    let prefix =
-        BytecodeBuilder::default().push_number(len).push_number(0_u64).append(LOG0).build_vec();
-    constructor(&prefix, &runtime(1))
 }
 
 /// Init code that fills a fresh slot and deploys a one-byte runtime.
@@ -528,7 +540,6 @@ fn scenarios() -> Vec<Scenario> {
         /* Limits. */
         let data_size = Deployment::new(logging(2_000));
         let body = reference(data_size.call_data(LARGE_OVERRIDE), GAS_LIMITS[0]).usage.data_size;
-        let slot = Deployment::new(filling_a_slot());
         let compute = Deployment::new(reads_then_burns(TIMESTAMP, 1_000));
         for nonce in [0, 1] {
             let db = |d: &Deployment| system_db().account_nonce(d.signer, nonce);
@@ -540,18 +551,6 @@ fn scenarios() -> Vec<Scenario> {
                     gas_limit,
                 )
                 .limits(EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(body + 80 + 100)),
-            );
-            let signer = if nonce == 0 { entry(GasId::new_account_state_gas()) } else { 0 };
-            let used =
-                signer + entry(GasId::create_state_gas()) + entry(GasId::sstore_set_state_gas());
-            all.push(
-                Scenario::deploying(
-                    format!("limit: state gas, nonce {nonce}"),
-                    db(&slot),
-                    &slot,
-                    gas_limit,
-                )
-                .limits(EvmTxRuntimeLimits::no_limits().with_tx_state_gas_limit(used - 1)),
             );
             all.push(
                 Scenario::deploying(
@@ -584,24 +583,6 @@ fn scenarios() -> Vec<Scenario> {
             );
             all.push(
                 Scenario::deploying(
-                    format!("limit: tx KV, nonce {nonce}"),
-                    db(&slot),
-                    &slot,
-                    gas_limit,
-                )
-                .limits(EvmTxRuntimeLimits::no_limits().with_tx_kv_update_limit(2)),
-            );
-            all.push(
-                Scenario::deploying(
-                    format!("limit: frame KV, nonce {nonce}"),
-                    db(&slot),
-                    &slot,
-                    gas_limit,
-                )
-                .limits(EvmTxRuntimeLimits::no_limits().with_frame_kv_update_limit(3)),
-            );
-            all.push(
-                Scenario::deploying(
                     format!("limit: the creation's start, nonce {nonce}"),
                     db(&small),
                     &small,
@@ -609,19 +590,9 @@ fn scenarios() -> Vec<Scenario> {
                 )
                 .limits(EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(body + 40)),
             );
-            let upfront = entry(GasId::new_account_state_gas()) + entry(GasId::create_state_gas());
-            all.push(
-                Scenario::deploying(
-                    format!("limit: upfront state gas, nonce {nonce}"),
-                    db(&small),
-                    &small,
-                    gas_limit,
-                )
-                .limits(EvmTxRuntimeLimits::no_limits().with_tx_state_gas_limit(upfront - 1)),
-            );
         }
         all.push(
-            Scenario::deploying("limit: a latched body", system_db(), &small, gas_limit)
+            Scenario::deploying("limit: a body over the limit", system_db(), &small, gas_limit)
                 .limits(EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(100)),
         );
         all.push(
