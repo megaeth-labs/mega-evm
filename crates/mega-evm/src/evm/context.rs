@@ -19,6 +19,8 @@ use revm::{
     Database,
 };
 
+#[cfg(debug_assertions)]
+use crate::limit::StartRecords;
 use crate::{
     constants,
     evm::{
@@ -26,7 +28,7 @@ use crate::{
         inspector::UpfrontRecord,
         schedule::{satin_gas_params, satin_gas_params_history_exempt},
     },
-    limit::{Accounts, Counted, StartRecords},
+    limit::{Accounts, Counted},
     system::{
         self,
         keyless::{self, KeylessFrame},

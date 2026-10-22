@@ -144,7 +144,9 @@ mod record;
 
 pub use limit::AdditionalLimit;
 pub(crate) use limit::{Counted, CreatorRecord};
-pub(crate) use record::{Accounts, HistoryBytes, RecordDelta, StartRecords};
+#[cfg(debug_assertions)]
+pub(crate) use record::RecordDelta;
+pub(crate) use record::{Accounts, HistoryBytes, StartRecords};
 
 use alloy_primitives::Bytes;
 use alloy_sol_types::SolError;

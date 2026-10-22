@@ -49,12 +49,14 @@ use revm::{
     Inspector,
 };
 
+#[cfg(debug_assertions)]
+use crate::limit::StartRecords;
 use crate::{
     access::ComputeStop,
     charge_write_records_history,
     evm::inspector::{frame_end_checked, ResultSource, StepGuard, UpfrontRecord},
     history_gas,
-    limit::{Counted, CreatorRecord, StartRecords},
+    limit::{Counted, CreatorRecord},
     synthetic_frame_result,
     system::keyless,
     write_record_history_gas, Detention, ExternalEnvTypes, LimitCheck, LimitKind, MegaContext,
