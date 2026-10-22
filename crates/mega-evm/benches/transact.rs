@@ -1,96 +1,174 @@
-//! Benchmarks for the `ExecuteEvm::transact()` interface.
+//! `ExecuteEvm::transact` on the Satin engine next to op-revm's `OpEvm` on the same `CfgEnv`.
 //!
-//! Each workload runs against four vanilla baselines (`revm_pinned`,
-//! `revm_latest`, `op_revm_pinned`, `op_revm_latest`) and four mega specs
-//! (`EQUIVALENCE`, `MINI_REX`, `REX4`, `REX5`) so a single bench produces a
-//! cross-row gap table.
+//! Each workload runs through `MegaEvm` (`satin`) and through `OpEvm` (`op_revm`), so the gap is
+//! the wrapper's own cost. EVM construction is setup and is not measured.
+//!
+//! - `empty_transaction`, `ether_transfer`: the per-transaction cost.
+//! - `deep_calls`: a contract calling itself 64 deep, each frame writing a slot and logging, so
+//!   every frame pays the frame lifecycle's lanes and every `SSTORE` and `LOG` its commit wrapper.
+//! - `storage_writes`: 200 first writes to fresh slots, then 200 writes back, in one frame: the
+//!   `SSTORE` wrapper's commit and refund.
+//! - `logs`: 200 two-topic logs in one frame: the `LOG` wrapper's commit.
 #![allow(missing_docs)]
 
-use alloy_primitives::{address, bytes, Address, Bytes, U256};
-use criterion::{criterion_group, criterion_main, Criterion};
-use revm::primitives::{keccak256, B256};
+use alloy_op_evm::OpTx;
+use alloy_primitives::{address, Address, Bytes, TxKind, U256};
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use mega_evm::{
+    test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
+    MegaContext, MegaEvm, MegaSpecId,
+};
+use op_revm::{L1BlockInfo, OpEvm, OpSpecId, OpTransaction};
+use revm::{
+    bytecode::opcode::{
+        ADDRESS, CALL, CALLDATALOAD, DUP1, GAS, ISZERO, JUMPDEST, JUMPI, LOG0, LOG2, MSTORE, PUSH0,
+        PUSH1, SSTORE, STOP, SUB, SWAP1,
+    },
+    context::{BlockEnv, CfgEnv, Context, ContextTr, TxEnv},
+    inspector::NoOpInspector,
+    ExecuteEvm, Journal,
+};
 
-mod common;
-use common::{register_all, Account, TxSpec, Workload};
+const CALLER: Address = address!("0x0000000000000000000000000000000000100000");
+const CALLEE: Address = address!("0x0000000000000000000000000000000000100001");
+const RECURSIVE: Address = address!("0x0000000000000000000000000000000000100002");
+const WRITER: Address = address!("0x0000000000000000000000000000000000100003");
+const LOGGER: Address = address!("0x0000000000000000000000000000000000100004");
 
-const CALLER: Address = address!("0000000000000000000000000000000000100000");
-const CALLEE: Address = address!("0000000000000000000000000000000000100001");
-const WETH9_ADDRESS: Address = address!("C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
+/// Depth the recursive contract reaches.
+const DEPTH: u8 = 64;
+/// Slots written, then written back, by the storage workload; logs emitted by the log workload.
+const REPEAT: u64 = 200;
 
-/// WETH9 deployed runtime bytecode.
-const WETH9_RUNTIME_CODE: Bytes = bytes!("6060604052600436106100af576000357c0100000000000000000000000000000000000000000000000000000000900463ffffffff16806306fdde03146100b9578063095ea7b31461014757806318160ddd146101a157806323b872dd146101ca5780632e1a7d4d14610243578063313ce5671461026657806370a082311461029557806395d89b41146102e2578063a9059cbb14610370578063d0e30db0146103ca578063dd62ed3e146103d4575b6100b7610440565b005b34156100c457600080fd5b6100cc6104dd565b6040518080602001828103825283818151815260200191508051906020019080838360005b8381101561010c5780820151818401526020810190506100f1565b50505050905090810190601f1680156101395780820380516001836020036101000a031916815260200191505b509250505060405180910390f35b341561015257600080fd5b610187600480803573ffffffffffffffffffffffffffffffffffffffff1690602001909190803590602001909190505061057b565b604051808215151515815260200191505060405180910390f35b34156101ac57600080fd5b6101b461066d565b6040518082815260200191505060405180910390f35b34156101d557600080fd5b610229600480803573ffffffffffffffffffffffffffffffffffffffff1690602001909190803573ffffffffffffffffffffffffffffffffffffffff1690602001909190803590602001909190505061068c565b604051808215151515815260200191505060405180910390f35b341561024e57600080fd5b61026460048080359060200190919050506109d9565b005b341561027157600080fd5b610279610b05565b604051808260ff1660ff16815260200191505060405180910390f35b34156102a057600080fd5b6102cc600480803573ffffffffffffffffffffffffffffffffffffffff16906020019091905050610b18565b6040518082815260200191505060405180910390f35b34156102ed57600080fd5b6102f5610b30565b6040518080602001828103825283818151815260200191508051906020019080838360005b8381101561033557808201518184015260208101905061031a565b50505050905090810190601f1680156103625780820380516001836020036101000a031916815260200191505b509250505060405180910390f35b341561037b57600080fd5b6103b0600480803573ffffffffffffffffffffffffffffffffffffffff16906020019091908035906020019091905050610bce565b604051808215151515815260200191505060405180910390f35b6103d2610440565b005b34156103df57600080fd5b61042a600480803573ffffffffffffffffffffffffffffffffffffffff1690602001909190803573ffffffffffffffffffffffffffffffffffffffff16906020019091905050610be3565b6040518082815260200191505060405180910390f35b34600360003373ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff168152602001908152602001600020600082825401925050819055503373ffffffffffffffffffffffffffffffffffffffff167fe1fffcc4923d04b559f4d29a8bfc6cda04eb5b0d3c460751c2402c5c5cc9109c346040518082815260200191505060405180910390a2565b60008054600181600116156101000203166002900480601f0160208091040260200160405190810160405280929190818152602001828054600181600116156101000203166002900480156105735780601f1061054857610100808354040283529160200191610573565b820191906000526020600020905b81548152906001019060200180831161055657829003601f168201915b505050505081565b600081600460003373ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff16815260200190815260200160002060008573ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff168152602001908152602001600020819055508273ffffffffffffffffffffffffffffffffffffffff163373ffffffffffffffffffffffffffffffffffffffff167f8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925846040518082815260200191505060405180910390a36001905092915050565b60003073ffffffffffffffffffffffffffffffffffffffff1631905090565b600081600360008673ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff16815260200190815260200160002054101515156106dc57600080fd5b3373ffffffffffffffffffffffffffffffffffffffff168473ffffffffffffffffffffffffffffffffffffffff16141580156107b457507fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff600460008673ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff16815260200190815260200160002060003373ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff1681526020019081526020016000205414155b156108cf5781600460008673ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff16815260200190815260200160002060003373ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff168152602001908152602001600020541015151561084457600080fd5b81600460008673ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff16815260200190815260200160002060003373ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff168152602001908152602001600020600082825403925050819055505b81600360008673ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff1681526020019081526020016000206000828254039250508190555081600360008573ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff168152602001908152602001600020600082825401925050819055508273ffffffffffffffffffffffffffffffffffffffff168473ffffffffffffffffffffffffffffffffffffffff167fddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef846040518082815260200191505060405180910390a3600190509392505050565b80600360003373ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff1681526020019081526020016000205410151515610a2757600080fd5b80600360003373ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff168152602001908152602001600020600082825403925050819055503373ffffffffffffffffffffffffffffffffffffffff166108fc829081150290604051600060405180830381858888f193505050501515610ab457600080fd5b3373ffffffffffffffffffffffffffffffffffffffff167f7fcf532c15f0a6db0bd6d0e038bea71d30d808c7d98cb3bf7268a95bf5081b65826040518082815260200191505060405180910390a250565b600260009054906101000a900460ff1681565b60036020528060005260406000206000915090505481565b60018054600181600116156101000203166002900480601f016020809104026020016040519081016040528092919081815260200182805460018160011615610100020316600290048015610bc65780601f10610b9b57610100808354040283529160200191610bc6565b820191906000526020600020905b815481529060010190602001808311610ba957829003601f168201915b505050505081565b6000610bdb33848461068c565b905092915050565b60046020528160005260406000206020528060005260406000206000915091505054815600a165627a7a72305820deb4c2ccab3c2fdca32ab3f46728389c2fe2c165d5fafa07661e4e004f6c344a0029");
+/// Offset of the `JUMPDEST` the recursion ends at.
+const DONE: u8 = 0x1f;
 
-/// Calculate the storage slot for an ERC20 balance mapping.
-/// Solidity mapping storage slot = keccak256(abi.encode(key, slot))
-fn erc20_balance_slot(address: Address, mapping_slot: u8) -> B256 {
-    let mut data = [0u8; 64];
-    // Encode address (left-padded to 32 bytes)
-    data[12..32].copy_from_slice(address.as_slice());
-    // Encode mapping slot
-    data[63] = mapping_slot;
-    keccak256(data)
+/// Reads `n` from calldata; while `n > 0` it writes slot `n`, logs, and calls itself with `n - 1`.
+fn recursive_code() -> Bytes {
+    #[rustfmt::skip]
+    let body = [
+        PUSH0, CALLDATALOAD,                             // n
+        DUP1, ISZERO, PUSH1, DONE, JUMPI,                // n == 0: done
+        DUP1, PUSH1, 1, SWAP1, SSTORE,                   // storage[n] = 1
+        PUSH0, PUSH0, LOG0,                              // an empty log
+        PUSH1, 1, SWAP1, SUB, PUSH0, MSTORE,             // memory[0..32] = n - 1
+        PUSH0, PUSH0, PUSH1, 0x20, PUSH0, PUSH0, ADDRESS, GAS, CALL, // call self with n - 1
+        STOP,
+        JUMPDEST, STOP,                                  // done
+    ];
+    assert_eq!(body[DONE as usize], JUMPDEST);
+    Bytes::from(body.to_vec())
 }
 
-/// Benchmark empty transaction (call with no value or data).
-fn bench_empty_transaction(c: &mut Criterion) {
-    let mut group = c.benchmark_group("empty_transaction");
-    // No accounts seeded — caller and callee don't exist (gas price is zero, so
-    // the caller needs no balance), matching the original workload.
-    let workload = Workload::single(vec![], TxSpec::call(CALLER, CALLEE));
-    register_all(&mut group, &workload);
+/// Writes `REPEAT` fresh slots, then writes each back to zero.
+fn writer_code() -> Bytes {
+    let mut code = BytecodeBuilder::default();
+    for slot in 0..REPEAT {
+        code = code.sstore(U256::from(slot), U256::from(1));
+    }
+    for slot in 0..REPEAT {
+        code = code.sstore(U256::from(slot), U256::ZERO);
+    }
+    code.stop().build()
+}
+
+/// Emits `REPEAT` two-topic logs of 32 bytes.
+fn logger_code() -> Bytes {
+    let mut code = BytecodeBuilder::default();
+    for topic in 0..REPEAT {
+        code = code
+            .push_number(topic)
+            .push_number(topic)
+            .push_number(32_u8)
+            .append(PUSH0)
+            .append(LOG2);
+    }
+    code.stop().build()
+}
+
+fn call_tx(to: Address, data: Bytes, gas_limit: u64) -> OpTransaction<TxEnv> {
+    op_transaction(TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(to),
+        data,
+        gas_limit,
+        ..Default::default()
+    })
+}
+
+type OpContext = Context<
+    BlockEnv,
+    OpTransaction<TxEnv>,
+    CfgEnv<OpSpecId>,
+    MemoryDatabase,
+    Journal<MemoryDatabase>,
+    L1BlockInfo,
+>;
+
+fn tx(value: U256) -> OpTransaction<TxEnv> {
+    op_transaction(TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(CALLEE),
+        value,
+        gas_limit: 1_000_000,
+        ..Default::default()
+    })
+}
+
+fn mega_context(db: MemoryDatabase) -> MegaContext<MemoryDatabase> {
+    MegaContext::new(db, MegaSpecId::SATIN).with_chain(zero_fee_l1_block_info())
+}
+
+fn bench_transact(c: &mut Criterion) {
+    let db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(10u64.pow(18)))
+        .account_balance(CALLEE, U256::from(1))
+        .account_code(RECURSIVE, recursive_code())
+        .account_code(WRITER, writer_code())
+        .account_code(LOGGER, logger_code());
+    let cfg = mega_context(db.clone()).cfg().clone();
+
+    let mut depth = [0u8; 32];
+    depth[31] = DEPTH;
+    let workloads = [
+        ("empty_transaction", tx(U256::ZERO)),
+        ("ether_transfer", tx(U256::from(1))),
+        ("deep_calls", call_tx(RECURSIVE, Bytes::from(depth.to_vec()), 30_000_000)),
+        ("storage_writes", call_tx(WRITER, Bytes::new(), 30_000_000)),
+        ("logs", call_tx(LOGGER, Bytes::new(), 30_000_000)),
+    ];
+
+    let mut group = c.benchmark_group("transact");
+    for (workload, tx) in workloads {
+        let satin = MegaEvm::new(mega_context(db.clone())).transact(OpTx(tx.clone())).unwrap();
+        assert!(satin.result.is_success(), "{workload}: {:?}", satin.result);
+        if workload == "deep_calls" {
+            let written =
+                satin.state[&RECURSIVE].storage.values().filter(|s| s.is_changed()).count();
+            assert_eq!(written, DEPTH as usize, "every frame of the recursion ran");
+        }
+        group.bench_function(format!("{workload}/satin"), |b| {
+            b.iter_batched(
+                || MegaEvm::new(mega_context(db.clone())),
+                |mut evm| evm.transact(OpTx(tx.clone())).unwrap(),
+                BatchSize::SmallInput,
+            );
+        });
+        group.bench_function(format!("{workload}/op_revm"), |b| {
+            b.iter_batched(
+                || {
+                    let ctx = OpContext::new(db.clone(), OpSpecId::KARST)
+                        .with_cfg(cfg.clone())
+                        .with_chain(zero_fee_l1_block_info());
+                    OpEvm::new(ctx, NoOpInspector)
+                },
+                |mut evm| evm.transact(tx.clone()).unwrap(),
+                BatchSize::SmallInput,
+            );
+        });
+    }
     group.finish();
 }
 
-/// Benchmark simple ether transfer between existing accounts.
-fn bench_simple_ether_transfer(c: &mut Criterion) {
-    let mut group = c.benchmark_group("simple_ether_transfer");
-    let workload = Workload::single(
-        vec![
-            Account::new(CALLER).balance(U256::from(1000)),
-            Account::new(CALLEE).balance(U256::from(100)),
-        ],
-        TxSpec::call(CALLER, CALLEE),
-    );
-    register_all(&mut group, &workload);
-    group.finish();
-}
-
-/// Benchmark WETH9 ERC20 transfer.
-fn bench_weth9_transfer(c: &mut Criterion) {
-    let mut group = c.benchmark_group("weth9_transfer");
-
-    // Transfer amount: 100 WETH
-    let transfer_amount = U256::from(100) * U256::from(10).pow(U256::from(18));
-
-    // Encode transfer(address,uint256) call. Function selector: 0xa9059cbb.
-    let mut calldata = Vec::with_capacity(68);
-    calldata.extend_from_slice(&[0xa9, 0x05, 0x9c, 0xbb]);
-    calldata.extend_from_slice(&[0u8; 12]);
-    calldata.extend_from_slice(CALLEE.as_slice());
-    calldata.extend_from_slice(&transfer_amount.to_be_bytes::<32>());
-    let calldata = Bytes::from(calldata);
-
-    let caller_weth_balance = U256::from(1000) * U256::from(10).pow(U256::from(18));
-    let caller_gas_balance = U256::from(10).pow(U256::from(18));
-    let balance_slot: U256 = erc20_balance_slot(CALLER, 3).into();
-
-    let workload = Workload::single(
-        vec![
-            Account::new(WETH9_ADDRESS)
-                .code(WETH9_RUNTIME_CODE)
-                .storage(balance_slot, caller_weth_balance),
-            Account::new(CALLER).balance(caller_gas_balance),
-        ],
-        TxSpec::call(CALLER, WETH9_ADDRESS).data(calldata),
-    );
-    register_all(&mut group, &workload);
-    group.finish();
-}
-
-criterion_group!(
-    benches,
-    bench_empty_transaction,
-    bench_simple_ether_transfer,
-    bench_weth9_transfer
-);
+criterion_group!(benches, bench_transact);
 criterion_main!(benches);

@@ -15,32 +15,25 @@ workspace = true
 [dependencies]
 # alloy
 alloy-consensus = { workspace = true, features = ["k256"] }
-alloy-eips.workspace = true
 alloy-evm.workspace = true
 alloy-hardforks.workspace = true
 alloy-op-evm.workspace = true
-alloy-op-hardforks.workspace = true
 alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
 op-alloy-consensus.workspace = true
-op-alloy-flz.workspace = true
-op-revm = { workspace = true, features = ["dev", "serde", "kzg-rs"] }
+op-revm = { workspace = true, features = ["dev", "serde"] }
 
 # revm
-revm = { workspace = true, features = ["dev", "serde", "kzg-rs"] }
+revm = { workspace = true, features = ["dev", "serde"] }
 
 # megaeth
 mega-system-contracts = { workspace = true, default-features = false }
 
 # misc
 auto_impl.workspace = true
-bitflags.workspace = true
 delegate.workspace = true
-derive_more.workspace = true
-once_cell.workspace = true
+derive_more = { workspace = true, optional = true, features = ["debug", "deref", "deref_mut", "display", "error"] }
 serde = { workspace = true, features = ["derive"] }
-thiserror.workspace = true
-tracing.workspace = true
 
 [dev-dependencies]
 # CodSpeed drop-in: `codspeed-criterion-compat` re-exports criterion's API, so
@@ -48,47 +41,31 @@ tracing.workspace = true
 # it behaves exactly like criterion; under `cargo codspeed` it runs each bench
 # once under valgrind and reports layout-insensitive instruction counts.
 criterion = { package = "codspeed-criterion-compat", version = "5.0.1", default-features = false, features = ["cargo_bench_support", "html_reports", "plotters"] }
-hex.workspace = true
 mega-evm = { path = ".", features = ["test-utils"] }
-op-revm-latest = { package = "op-revm", version = "20.0.0", default-features = false, features = ["dev", "serde", "std"] }
-rand = { workspace = true, features = ["thread_rng"] }
 revm-inspectors = { workspace = true, features = ["std"] }
-# Pin to the revm version `op-revm-latest` depends on so both `_latest` baselines share one revm tree.
-revm-latest = { package = "revm", version = "38.0.0", default-features = false, features = ["dev", "serde", "std"] }
-serde_json.workspace = true
-sha2.workspace = true
+serde_json = { workspace = true, features = ["std"] }
 
 [features]
 default = ["std", "revm/default", "op-revm/default"]
-std = ["revm/std", "op-revm/std", "revm/alloydb", "mega-system-contracts/std"]
-test-utils = []
+std = [
+    "alloy-evm/std",
+    "alloy-op-evm/std",
+    "mega-system-contracts/std",
+    "op-revm/std",
+    "revm/std",
+]
+test-utils = ["dep:derive_more"]
 
+# The Satin bench set: `transact` (MegaEvm next to op-revm), `corpus` (the JSON scenarios under
+# benches/scenarios, a bench input) and `factory` (EVM construction). The inputs under
+# benches/data (revm_bench) and benches/fixtures (attack_replay) stay for the rebuild of the rest
+# of the suite.
 [[bench]]
-name = "attack_replay"
+name = "corpus"
 harness = false
 
 [[bench]]
-name = "block_bench"
-harness = false
-
-[[bench]]
-name = "comp_cost"
-harness = false
-
-[[bench]]
-name = "ctt"
-harness = false
-
-[[bench]]
-name = "enriched_tx"
-harness = false
-
-[[bench]]
-name = "mega_bench"
-harness = false
-
-[[bench]]
-name = "revm_bench"
+name = "factory"
 harness = false
 
 [[bench]]

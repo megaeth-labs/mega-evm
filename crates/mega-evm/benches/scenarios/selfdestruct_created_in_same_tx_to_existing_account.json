@@ -1,0 +1,27 @@
+{
+  "name": "selfdestruct_created_in_same_tx_to_existing_account",
+  "description": "A contract created in the transaction self-destructs to an existing account from its init code: it is destroyed and the beneficiary gets its endowment.",
+  "coinbase": "0x0000000000000000000000000000000000000c01",
+  "pre": {
+    "0x0000000000000000000000000000000000000aaa": {
+      "balance": "0xde0b6b3a7640000"
+    },
+    "0x0000000000000000000000000000000000000fac": {
+      "balance": "0x64",
+      "code": "0x3660006000373660006007f060005500"
+    },
+    "0x0000000000000000000000000000000000000bee": {
+      "balance": "0x5"
+    }
+  },
+  "txs": [
+    {
+      "caller": "0x0000000000000000000000000000000000000aaa",
+      "to": "0x0000000000000000000000000000000000000fac",
+      "data": "0x730000000000000000000000000000000000000beeff",
+      "value": "0x0",
+      "gas_limit": 1000000,
+      "kind": "call"
+    }
+  ]
+}

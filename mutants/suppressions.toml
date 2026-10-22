@@ -43,85 +43,7 @@
 # entries against real source for exactly this reason.
 
 # ─────────────────────────────────────────────────────────────────────────────
-# crates/mega-evm/src/limit/ survivors.
-#
-# The real test gap here — `AdditionalLimit::before_frame_run -> None`
-# (limit.rs:585) — is closed behaviorally by
-# `crates/mega-evm/tests/mutation/limit.rs`. The remaining survivors below are
-# provably equivalent / dead and are recorded here with justification.
-
-# --- Dead `tx_limit()` trait methods (equivalent: zero call sites) ----------------
-#
-# `<impl TxRuntimeLimit for {DataSize,KVUpdate,StateGrowth}Tracker>::tx_limit` is a
-# trivial passthrough to the inherent `FrameLimitTracker::tx_limit()`. Every internal
-# consumer (each tracker's own `check_limit()` / `current_call_remaining()`, and
-# `AdditionalLimit`) calls `self.frame_tracker.tx_limit()` directly; the *trait* method
-# on these three trackers is never invoked anywhere in the crate (verified by grepping
-# all `.tx_limit()` call sites — only `ComputeGasTracker`'s trait method is live, since
-# its `check_limit` calls `self.tx_limit()` and composes it with `detained_limit`).
-# Because the function is dead, replacing its body (`-> 0` / `-> 1`) cannot change any
-# observable behavior: the full mega-evm test suite passes with the mutation applied.
-# These are required only to satisfy the `TxRuntimeLimit` trait contract.
-[[suppress]]
-kind = "function"
-category = "dead"
-file = "crates/mega-evm/src/limit/data_size.rs"
-pattern = "<impl TxRuntimeLimit for DataSizeTracker>::tx_limit"
-justification = "Dead/equivalent: this trait method has zero call sites; all callers use the inherent frame_tracker.tx_limit(). Mutating it (-> 0 / -> 1) changes no observable behavior (full suite green with the mutant). Required only to satisfy the TxRuntimeLimit trait."
-reviewer = "improve-mutation-score (William Aaron Cheung)"
-
-[[suppress]]
-kind = "function"
-category = "dead"
-file = "crates/mega-evm/src/limit/kv_update.rs"
-pattern = "<impl TxRuntimeLimit for KVUpdateTracker>::tx_limit"
-justification = "Dead/equivalent: this trait method has zero call sites; all callers use the inherent frame_tracker.tx_limit(). Mutating it (-> 0 / -> 1) changes no observable behavior (full suite green with the mutant). Required only to satisfy the TxRuntimeLimit trait."
-reviewer = "improve-mutation-score (William Aaron Cheung)"
-
-[[suppress]]
-kind = "function"
-category = "dead"
-file = "crates/mega-evm/src/limit/state_growth.rs"
-pattern = "<impl TxRuntimeLimit for StateGrowthTracker>::tx_limit"
-justification = "Dead/equivalent: this trait method has zero call sites; all callers use the inherent frame_tracker.tx_limit(). Mutating it (-> 0 / -> 1) changes no observable behavior (full suite green with the mutant). Required only to satisfy the TxRuntimeLimit trait."
-reviewer = "improve-mutation-score (William Aaron Cheung)"
-
-# --- effective_remaining_for_rescue boundary (equivalent) -------------------------
-#
-# `if stipend > 0 { gas.remaining().min(gas.limit() - stipend) } else { gas.remaining() }`.
-# The `> 0` -> `>= 0` mutant only diverges when `stipend == 0`, in which case the then-
-# branch computes `gas.remaining().min(gas.limit() - 0) = gas.remaining().min(gas.limit())`.
-# Since `gas.remaining() <= gas.limit()` is invariant in revm (remaining starts at limit and
-# only decreases; the REX4 stipend inflates both limit and remaining together), this equals
-# `gas.remaining()` — identical to the else-branch. The four other mutants in this function
-# are caught by the rex4 storage_call_stipend tests; only this true boundary equivalent
-# survives.
-[[suppress]]
-kind = "line"
-category = "equivalent"
-file = "crates/mega-evm/src/limit/storage_call_stipend.rs"
-mutant = "replace > with >= in StorageCallStipendTracker::effective_remaining_for_rescue"
-justification = "Equivalent: the > vs >= boundary only differs when stipend == 0, where the then-branch reduces to gas.remaining().min(gas.limit()) == gas.remaining() (the else-branch) because remaining <= limit is invariant. No reachable input observes the difference."
-reviewer = "improve-mutation-score (William Aaron Cheung)"
-
-# --- before_frame_return_result de-dup flag (equivalent) --------------------------
-#
-# `let duplicate_return_frame_result = LAST_FRAME && !has_active_frame();`. The `&&` -> `||`
-# mutant can only diverge when (a) LAST_FRAME is true while a frame is still active, or
-# (b) LAST_FRAME is false while no frame is active. Neither is reachable: the `<true>`
-# (`last_frame_result`) call always runs after the frame's tracker has already been popped
-# by the preceding `<false>` (`frame_return_result`) pass, so `has_active_frame()` is always
-# false at `<true>` calls (making `&& X` == `|| X` == true); and at `<false>` calls
-# LAST_FRAME is false. The full mega-evm suite — including all nested/parent-child/sibling
-# and top-level frame-local & TX-level-detention exceed tests — passes with the mutant
-# applied, confirming no observable difference.
-[[suppress]]
-kind = "line"
-category = "equivalent"
-file = "crates/mega-evm/src/limit/limit.rs"
-mutant = "replace && with || in AdditionalLimit::before_frame_return_result"
-justification = "Equivalent: at every <true> (last_frame_result) call has_active_frame() is already false (the frame was popped by the preceding <false> frame_return_result pass), so LAST_FRAME && !has_active == LAST_FRAME || !has_active == true; at <false> calls LAST_FRAME is false in both. Full suite (incl. all multi-frame exceed tests) green with the mutant."
-reviewer = "improve-mutation-score (William Aaron Cheung)"
+# crates/mega-evm/src/external/ survivors.
 
 # --- EmptyExternalEnv::external_envs (equivalent) ---------------------------------
 # EmptyExternalEnv is a unit struct. The real body constructs
@@ -259,60 +181,108 @@ justification = "Equivalent (line 109 `> 16`): the > vs >= boundary only differs
 reviewer = "improve-mutation-score (William Aaron Cheung)"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# spec-gate operator survivors (universalmutator + comby; scripts/umutate.py).
-#
-# Equivalent mutants of backward-compat spec gates in src/limit/. The one real
-# survivor (limit.rs:203) is closed behaviorally by
-# `test_intrinsic_check_for_tx_requires_rex5_spec`. The state_growth entries use
-# the full `file:line:col:` form because three sites share identical source text.
+# crates/mega-evm/src/evm/ survivors.
 
-# --- data_size.rs:173 defensive invariant guard (equivalent) -----------------
+# --- From<MegaSpecId> for EthSpecId (equivalent while revm's default is Osaka) -----
+# `MegaSpecId` has the single variant SATIN, which maps to OSAKA. revm 40's
+# `SpecId::default()` is also OSAKA, so the `Default::default()` mutant returns the
+# same value for every input. A line entry keeps the mutant generated: once a revm
+# upgrade moves the default, `test_all_specs_map_to_karst_and_osaka` kills it and this
+# entry becomes a no-op.
 [[suppress]]
 kind = "line"
 category = "equivalent"
-file = "crates/mega-evm/src/limit/data_size.rs"
-mutant = "spec-gate rex5_enabled: spec.is_enabled(MegaSpecId::REX5), -> rex5_enabled: spec.is_enabled(MegaSpecId::REX4),"
-justification = "Equivalent: rex5_enabled only feeds the debug_assert! at data_size.rs:173, which executes only inside the `used > limit` branch with an active frame — a TX-level data-size exceed while a frame is live. Pre-REX5 that state is unreachable in valid execution (before_tx_start, the only mid-execution tx_entry writer, runs before any frame; an exceed there halts before a frame is pushed). Relaxing the guard to REX4 cannot change behavior on any reachable input."
-reviewer = "improve-mutation-score (William Aaron Cheung)"
+file = "crates/mega-evm/src/evm/spec.rs"
+mutant = "replace <impl From<MegaSpecId> for EthSpecId>::from -> Self with Default::default()"
+justification = "Equivalent: revm's SpecId::OSAKA carries #[default], and Satin's sole rung (SATIN) maps to EthSpecId::OSAKA, so Default::default() returns the same value on every current input. test_all_specs_map_to_karst_and_osaka pins the mapping; if the upstream default moves, that test kills this mutant and the entry becomes a no-op."
+reviewer = "RealiCZ"
 
-# --- frame_limit.rs:113 per-frame derivation gate (equivalent: coupled) -------
+# ─────────────────────────────────────────────────────────────────────────────
+# Infrastructure scope (.cargo/mutants-infra.toml) survivors.
+
+# --- Scenario::block field deletions that restore the same value (equivalent) ------
+# `Scenario::block` writes five fields over `..Default::default()`. Three of them write
+# exactly what revm 40's `BlockEnv::default()` already holds — `timestamp: U256::ONE`,
+# `basefee: 0`, `gas_limit: u64::MAX` — so deleting the field yields the identical
+# BlockEnv for every scenario, and no scenario or unit test can distinguish it. The two
+# that do differ from the default (`number`, and `beneficiary`, which carries the
+# scenario's coinbase) are killed by `test_block_is_fixed_except_for_the_beneficiary`,
+# which pins all five values: if a revm upgrade moves one of these defaults, that test
+# kills the mutant and the entry below becomes a no-op. Line entries, so they stay
+# generated and are re-checked on every run.
 [[suppress]]
 kind = "line"
 category = "equivalent"
-file = "crates/mega-evm/src/limit/frame_limit.rs"
-mutant = "spec-gate rex4_enabled: spec.is_enabled(MegaSpecId::REX4), -> rex4_enabled: spec.is_enabled(MegaSpecId::REX3),"
-justification = "Equivalent (coupled gates): frame_limit rex4_enabled gates only per-frame limit DERIVATION (push_call_frame_info, line 339). ENFORCEMENT (exceeds_current_frame_limit) is gated separately on each dimension's own REX4 check. Shifting derivation to REX3 sets per-frame limits that no dimension checks at REX3 — their checks stay TX-level — so net_usage and every limit outcome are unchanged."
-reviewer = "improve-mutation-score (William Aaron Cheung)"
-
-# --- state_growth.rs REX4 per-frame gates (equivalent: coupled/REX5-only) -----
-[[suppress]]
-kind = "line"
-category = "equivalent"
-file = "crates/mega-evm/src/limit/state_growth.rs"
-mutant = "crates/mega-evm/src/limit/state_growth.rs:121:1: spec-gate if self.spec.is_enabled(MegaSpecId::REX4) { -> if self.spec.is_enabled(MegaSpecId::REX3) {"
-justification = "Equivalent (coupled): push_frame shifted to REX3 derives per-frame state-growth limits at REX3, but check_limit (line 206, unmutated) skips the per-frame check pre-REX4 and uses TX-level net_usage only. The derived frame limits are never read, so no observable change."
-reviewer = "improve-mutation-score (William Aaron Cheung)"
-
-[[suppress]]
-kind = "line"
-category = "equivalent"
-file = "crates/mega-evm/src/limit/state_growth.rs"
-mutant = "crates/mega-evm/src/limit/state_growth.rs:206:1: spec-gate if self.spec.is_enabled(MegaSpecId::REX4) { -> if self.spec.is_enabled(MegaSpecId::REX3) {"
-justification = "Equivalent (coupled): check_limit shifted to REX3 runs the per-frame check at REX3, but push_frame (line 121, unmutated) pushes frames with u64::MAX limit pre-REX4, so exceeds_current_frame_limit never fires and control falls through to the identical TX-level check."
-reviewer = "improve-mutation-score (William Aaron Cheung)"
+file = "crates/mega-evm/src/test_utils/scenario.rs"
+mutant = "delete field timestamp from struct BlockEnv expression in Scenario::block"
+justification = "Equivalent: the field writes U256::from(1) and revm 40's BlockEnv::default() already has timestamp: U256::ONE, so the struct is identical with or without it. test_block_is_fixed_except_for_the_beneficiary pins the value, so the mutant becomes killable the moment the upstream default moves."
+reviewer = "RealiCZ"
 
 [[suppress]]
 kind = "line"
 category = "equivalent"
-file = "crates/mega-evm/src/limit/state_growth.rs"
-mutant = "crates/mega-evm/src/limit/state_growth.rs:169:1: spec-gate if self.spec.is_enabled(MegaSpecId::REX4) { -> if self.spec.is_enabled(MegaSpecId::REX3) {"
-justification = "Equivalent: current_call_remaining is only read when building a child sandbox budget (sandbox/execution.rs:1037, KeylessDeploy, REX5+); it is never called at REX3/REX4. And at REX3 frames carry u64::MAX limits (push_frame, line 121), so frame_remaining.min(tx_remaining) == tx_remaining regardless."
-reviewer = "improve-mutation-score (William Aaron Cheung)"
+file = "crates/mega-evm/src/test_utils/scenario.rs"
+mutant = "delete field basefee from struct BlockEnv expression in Scenario::block"
+justification = "Equivalent: the field writes 0 and revm 40's BlockEnv::default() already has basefee: 0, so the struct is identical with or without it. test_block_is_fixed_except_for_the_beneficiary pins the value, so the mutant becomes killable the moment the upstream default moves."
+reviewer = "RealiCZ"
 
 [[suppress]]
 kind = "line"
 category = "equivalent"
-file = "crates/mega-evm/src/limit/state_growth.rs"
-mutant = "crates/mega-evm/src/limit/state_growth.rs:169:1: spec-gate if self.spec.is_enabled(MegaSpecId::REX4) { -> if self.spec.is_enabled(MegaSpecId::REX5) {"
-justification = "Equivalent: current_call_remaining is only read by the REX5+ KeylessDeploy sandbox (sandbox/execution.rs:1037). The REX4->REX5 shift differs only at exactly REX4, where the function is never called — no observable change."
-reviewer = "improve-mutation-score (William Aaron Cheung)"
+file = "crates/mega-evm/src/test_utils/scenario.rs"
+mutant = "delete field gas_limit from struct BlockEnv expression in Scenario::block"
+justification = "Equivalent: the field writes u64::MAX and revm 40's BlockEnv::default() already has gas_limit: u64::MAX, so the struct is identical with or without it. test_block_is_fixed_except_for_the_beneficiary pins the value, so the mutant becomes killable the moment the upstream default moves."
+reviewer = "RealiCZ"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# crates/mega-evm/src/ survivors of the common execution layer.
+
+# --- inspect_frame_init: logs journaled by frame init (dead while EIP-7708 is off) --------
+# `inspect_frame_init` mirrors revm's: after `frame_init`, the logs journaled since `logs_i`
+# (EIP-7708 transfer logs, a precompile's logs) go to the inspector's `log` callback. Satin's
+# spec configuration fixes EIP-7708 off (`MegaContext::with_cfg`), and op-revm's precompile set
+# journals no log, so frame init never journals one: the length comparisons are always false
+# and `inspect_logs` is never entered. Flipping `!=` to `==` would call `inspect_logs` over an
+# empty range, a no-op; stubbing it changes nothing reachable. Live again when the Satin gas
+# table switches EIP-7708 on, at which point a transfer-log test kills them.
+[[suppress]]
+kind = "line"
+category = "dead"
+file = "crates/mega-evm/src/evm/execution.rs"
+mutant = "replace != with == in <impl InspectorEvmTr for MegaEvm<DB, INSP, ExtEnvs>>::inspect_frame_init"
+justification = "Dead in Satin: frame init journals no log (EIP-7708 is fixed off by the spec configuration, op-revm's precompiles journal none), so both `logs().len() != logs_i` comparisons are always false; with `==` the call hands the inspector an empty range, a no-op. Becomes live, and killable, when EIP-7708 is switched on."
+reviewer = "RealiCZ"
+
+[[suppress]]
+kind = "line"
+category = "dead"
+file = "crates/mega-evm/src/evm/execution.rs"
+mutant = "replace inspect_logs with ()"
+justification = "Dead in Satin: only called for logs journaled by frame init, which Satin never journals (EIP-7708 fixed off, no logging precompile). Becomes live, and killable, when EIP-7708 is switched on."
+reviewer = "RealiCZ"
+
+# --- DeclaredObserver::log forwarding (dead while EIP-7708 is off) ----------------------
+# revm hands a log to `Inspector::log` (without an interpreter) only from the frame-init path
+# above; every log an opcode emits goes to `log_full`, which the forwarding test covers.
+[[suppress]]
+kind = "line"
+category = "dead"
+file = "crates/mega-evm/src/evm/inspector.rs"
+mutant = "replace <impl Inspector<CTX, INTR> for DeclaredObserver<I>>::log with ()"
+justification = "Dead in Satin: revm calls `Inspector::log` only for logs journaled by frame init, which Satin never journals (EIP-7708 fixed off, no logging precompile); opcode logs reach `log_full`, which test_declared_observer_forwards_every_callback covers. Becomes live when EIP-7708 is switched on."
+reviewer = "RealiCZ"
+
+# --- AdditionalLimit::discard_stale_record (equivalent) ---------------------------------
+# Every wrapper discards a record staged before its opcode on entry. The three wrapped opcodes
+# each stage their own record through the Host whenever they complete (SSTORE through
+# sstore_skip_cold_load, LOG through log, SELFDESTRUCT through selfdestruct), which overwrites a
+# stale one, and a failing opcode's wrapper discards whatever is staged. So a stale record can
+# never be committed with or without the entry discard; it is the contract's guard for a future
+# wrapped opcode that completes without a Host call.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/limit/limit.rs"
+mutant = "replace AdditionalLimit::discard_stale_record with ()"
+justification = "Equivalent: each wrapped opcode (SSTORE, LOG0-4, SELFDESTRUCT) stages its own record through the Host whenever it completes, overwriting a stale one, and a failing opcode's wrapper discards the staged record, so no stale record can be committed with or without the entry discard (test_wrapper_discards_a_stale_record_on_entry shows the stale log is not counted either way)."
+reviewer = "RealiCZ"

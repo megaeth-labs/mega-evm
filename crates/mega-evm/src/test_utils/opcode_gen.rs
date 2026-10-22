@@ -163,14 +163,11 @@ mod tests {
     use core::convert::Infallible;
 
     use alloy_primitives::address;
-    use revm::context::{
-        result::{EVMError, ResultAndState},
-        tx::TxEnvBuilder,
-    };
+    use revm::context::result::{EVMError, ResultAndState};
 
     use crate::{
-        test_utils::MemoryDatabase, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-        MegaTransaction, MegaTransactionError,
+        test_utils::{transact, MemoryDatabase},
+        MegaHaltReason, MegaSpecId, MegaTransactionError,
     };
 
     use super::*;
@@ -178,19 +175,19 @@ mod tests {
     fn execute_bytecode(
         bytecode: Bytes,
     ) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+        let caller = address!("0000000000000000000000000000000000100000");
         let contract = address!("0000000000000000000000000000000000100001");
         let mut db = MemoryDatabase::default();
         db.set_account_code(contract, bytecode);
-        let mut context = MegaContext::new(&mut db, MegaSpecId::MINI_REX);
-        context.modify_chain(|chain| {
-            chain.operator_fee_scalar = Some(U256::from(0));
-            chain.operator_fee_constant = Some(U256::from(0));
-        });
-        let mut evm = MegaEvm::new(context);
-        let tx = TxEnvBuilder::default().call(contract).gas_limit(1_000_000_000).build_fill();
-        let mut tx = MegaTransaction::new(tx);
-        tx.enveloped_tx = Some(Bytes::new());
-        alloy_evm::Evm::transact_raw(&mut evm, tx)
+        transact(
+            MegaSpecId::SATIN,
+            &mut db,
+            caller,
+            Some(contract),
+            Bytes::new(),
+            U256::ZERO,
+            1_000_000,
+        )
     }
 
     #[test]

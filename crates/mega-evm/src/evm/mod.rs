@@ -1,299 +1,158 @@
-//! EVM implementation for the `MegaETH` chain.
+//! The Satin EVM.
 //!
-//! This module provides the core EVM implementation specifically tailored for the `MegaETH`
-//! chain, built on top of the Optimism EVM (`op-revm`) with MegaETH-specific customizations
-//! and optimizations.
-//!
-//! # Architecture
-//!
-//! The EVM implementation consists of two main components:
-//!
-//! 1. **`EvmFactory`**: Factory for creating EVM instances with `MegaETH` specifications
-//! 2. **`Evm`**: The main EVM instance that wraps the Optimism EVM with `MegaETH` customizations
-//!
-//! # EVM Specifications
-//!
-//! `MegaETH` supports multiple EVM specifications:
-//!
-//! - **`EQUIVALENCE`**: Maintains equivalence with Optimism Isthmus EVM
-//! - **`MINI_REX`**: Enhanced version with quadratic LOG costs and disabled SELFDESTRUCT
-//! - **`REX`**: Fixes `MiniRex` call opcode inconsistencies and refines storage gas
-//! - **`REX1`**: Resets compute gas limits between transactions
-//! - **`REX2`**: Re-enables SELFDESTRUCT with EIP-6780 semantics
-//! - **`REX3`**: Increases oracle gas limit to 20M, moves oracle detention to SLOAD-based, tracks
-//!   keyless deploy compute gas
-//! - **`REX4`**: Per-call-frame resource budgets, relative gas detention, storage gas stipend,
-//!   `MegaAccessControl` and `MegaLimitControl` system contracts
+//! [`MegaEvm`] runs transactions on a [`MegaContext`] configured for the Satin spec through
+//! [`MegaHandler`], which wraps op-revm's handler. The EVM implements revm's frame lifecycle
+//! itself (see [`execution`](self::execution)), which is where `MegaETH`'s frame-level mechanisms
+//! plug in.
 
 mod context;
 mod execution;
 mod factory;
+mod frame;
 mod host;
+mod inspector;
 mod instructions;
-mod interfaces;
-mod limit;
-mod precompiles;
 mod result;
 mod spec;
-mod state;
 
-#[cfg(not(feature = "std"))]
-use alloc as std;
-use std::{collections::BTreeMap, vec::Vec};
-
-use alloy_primitives::{Address, B256};
 pub use context::*;
 pub use execution::*;
 pub use factory::*;
+pub use frame::*;
 pub use host::*;
-pub use instructions::*;
-#[allow(unused_imports, unreachable_pub)]
-pub use interfaces::*;
-pub use limit::*;
-pub use precompiles::*;
+pub use inspector::*;
 pub use result::*;
 pub use spec::*;
-pub use state::*;
 
-use alloy_evm::{
-    precompiles::{DynPrecompile, PrecompilesMap},
-    Database,
-};
+use alloy_evm::EvmEnv;
+use alloy_op_evm::map_op_err;
+use op_revm::{precompiles::OpPrecompiles, OpHaltReason, OpTransactionError};
 use revm::{
-    context::{result::ResultAndState, BlockEnv, ContextTr},
-    handler::{EthFrame, EvmTr},
-    inspector::NoOpInspector,
+    context::{
+        result::{EVMError, ExecResultAndState, ExecutionResult, ResultAndState},
+        BlockEnv, CfgEnv, ContextSetters, ContextTr, FrameStack, JournalTr,
+    },
+    handler::{
+        instructions::EthInstructions, system_call::SystemCallEvm, EthFrame, Handler, SystemCallTx,
+    },
+    inspector::{
+        InspectCommitEvm, InspectEvm, InspectSystemCallEvm, Inspector, InspectorHandler,
+        NoOpInspector,
+    },
     interpreter::interpreter::EthInterpreter,
-    primitives::HashMap,
-    ExecuteEvm, InspectEvm, Inspector, Journal,
+    primitives::{Address, Bytes},
+    state::EvmState,
+    Database, DatabaseCommit, ExecuteCommitEvm, ExecuteEvm,
 };
 
-use crate::{BucketId, ExternalEnvTypes, LimitUsage, MegaTransaction};
+use crate::{EmptyExternalEnv, ExternalEnvTypes, MegaTransaction, MegaTransactionError};
 
-/// The main EVM implementation for the `MegaETH` chain.
+/// The instruction table of the Satin engine.
+pub(crate) type MegaInstructions<DB, ExtEnvs> =
+    EthInstructions<EthInterpreter, MegaContext<DB, ExtEnvs>>;
+
+/// The revm EVM a [`MegaEvm`] wraps.
 ///
-/// This struct wraps the underlying Optimism EVM (`OpEvm`) with `MegaETH`-specific customizations
-/// and optimizations. It provides access to enhanced security features, increased limits, and
-/// block environment access tracking capabilities.
+/// It runs op-revm's precompile set for the base spec until the Satin precompile set lands.
+pub(crate) type MegaInnerEvm<DB, INSP, ExtEnvs> = revm::context::Evm<
+    MegaContext<DB, ExtEnvs>,
+    INSP,
+    MegaInstructions<DB, ExtEnvs>,
+    OpPrecompiles,
+    EthFrame<EthInterpreter>,
+>;
+
+/// The Satin EVM.
 ///
-/// # Type Parameters
-///
-/// - `DB`: The database type implementing [`Database`]
-/// - `INSP`: The inspector type implementing [`Inspector`]
-/// - `Oracle`: The `external_envs` type implementing [`ExternalEnvs`]
-///
-/// # Implementation Details
-///
-/// The EVM uses delegation to efficiently wrap the underlying Optimism EVM while providing
-/// `MegaETH`-specific customizations through the configured context, instructions, and precompiles.
+/// Executes transactions through [`MegaHandler`] on a [`MegaContext`]. It implements revm's
+/// execution traits ([`ExecuteEvm`], [`InspectEvm`], [`SystemCallEvm`] and their commit
+/// variants) and alloy-evm's [`Evm`](alloy_evm::Evm), which is what a node's block executor
+/// drives.
 #[allow(missing_debug_implementations)]
-#[allow(clippy::type_complexity)]
-pub struct MegaEvm<DB: Database, INSP, ExtEnvTypes: ExternalEnvTypes> {
-    inner: revm::context::Evm<
-        MegaContext<DB, ExtEnvTypes>,
-        INSP,
-        MegaInstructions<DB, ExtEnvTypes>,
-        PrecompilesMap,
-        EthFrame<EthInterpreter>,
-    >,
-    /// Whether to enable the inspector at runtime.
+pub struct MegaEvm<DB: Database, INSP, ExtEnvs: ExternalEnvTypes = EmptyExternalEnv> {
+    inner: MegaInnerEvm<DB, INSP, ExtEnvs>,
+    /// Whether [`alloy_evm::Evm::transact_raw`] runs the inspector.
     inspect: bool,
-}
-
-impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> core::fmt::Debug
-    for MegaEvm<DB, INSP, ExtEnvs>
-{
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("MegaethEvm").field("inspect", &self.inspect).finish_non_exhaustive()
-    }
-}
-
-impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> core::ops::Deref
-    for MegaEvm<DB, INSP, ExtEnvs>
-{
-    type Target = revm::context::Evm<
-        MegaContext<DB, ExtEnvs>,
-        INSP,
-        MegaInstructions<DB, ExtEnvs>,
-        PrecompilesMap,
-        EthFrame<EthInterpreter>,
-    >;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> core::ops::DerefMut
-    for MegaEvm<DB, INSP, ExtEnvs>
-{
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
-    }
+    /// Whether the inspector's type carries a [`TrustedObserver`] declaration. Set only by the
+    /// constructors that require the declaration; true without an inspector.
+    trusted_inspector: bool,
 }
 
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, NoOpInspector, ExtEnvs> {
-    /// Creates a new `MegaETH` EVM instance.
-    ///
-    /// # Parameters
-    ///
-    /// - `context`: The `MegaETH` context containing database, configuration, and `external_envs`
-    /// - `inspect`: The inspector to use for debugging and monitoring
-    ///
-    /// # Returns
-    ///
-    /// A new `Evm` instance configured with the provided context and inspector.
-    pub fn new(context: MegaContext<DB, ExtEnvs>) -> Self {
-        let spec = context.mega_spec();
-        Self {
-            inner: revm::context::Evm::new_with_inspector(
-                context,
-                NoOpInspector,
-                MegaInstructions::new(spec),
-                PrecompilesMap::from_static(MegaPrecompiles::new_with_spec(spec).precompiles()),
-            ),
-            inspect: false,
-        }
+    /// Creates an EVM over `ctx`, without an inspector.
+    pub fn new(ctx: MegaContext<DB, ExtEnvs>) -> Self {
+        let spec = ctx.cfg().spec;
+        let inner = revm::context::Evm {
+            ctx,
+            inspector: NoOpInspector,
+            instruction: instructions::mega_instructions(spec.into()),
+            precompiles: OpPrecompiles::new_with_spec(spec),
+            frame_stack: FrameStack::new_prealloc(8),
+        };
+        Self { inner, inspect: false, trusted_inspector: true }
     }
 }
 
 impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
-    /// Creates a new `MegaETH` EVM instance with the given inspector enabled at runtime.
+    /// Replaces the inspector with a tool's. The new inspector runs on every alloy-evm
+    /// [`transact`](alloy_evm::Evm::transact) until it is disabled again.
     ///
-    /// # Parameters
-    ///
-    /// - `inspector`: The new inspector to use for debugging and monitoring
-    ///
-    /// # Returns
-    ///
-    /// A new `Evm` instance with the specified inspector enabled.
+    /// The inspector may rewrite what execution produces (see the `inspector` module), so the
+    /// EVM reports [`has_rewriting_inspector`](Self::has_rewriting_inspector) while it runs, and
+    /// block execution refuses it.
     pub fn with_inspector<I>(self, inspector: I) -> MegaEvm<DB, I, ExtEnvs> {
-        let inner = revm::context::Evm::new_with_inspector(
-            self.inner.ctx,
-            inspector,
-            self.inner.instruction,
-            self.inner.precompiles,
-        );
-        MegaEvm { inner, inspect: true }
-    }
-
-    /// Creates a new `MegaETH` EVM instance with the inspector disabled at runtime.
-    ///
-    /// # Returns
-    ///
-    /// A new `Evm` instance with the inspector disabled.
-    pub fn without_inspector(self) -> MegaEvm<DB, NoOpInspector, ExtEnvs> {
-        let inner = revm::context::Evm::new_with_inspector(
-            self.inner.ctx,
-            NoOpInspector,
-            self.inner.instruction,
-            self.inner.precompiles,
-        );
-        MegaEvm { inner, inspect: false }
-    }
-
-    /// Sets the transaction runtime limits for the EVM.
-    pub fn with_tx_runtime_limits(self, tx_limits: EvmTxRuntimeLimits) -> Self {
-        let inner = revm::context::Evm {
-            ctx: self.inner.ctx.with_tx_runtime_limits(tx_limits),
-            inspector: self.inner.inspector,
-            instruction: self.inner.instruction,
-            precompiles: self.inner.precompiles,
-            frame_stack: self.inner.frame_stack,
-        };
-        Self { inner, inspect: self.inspect }
-    }
-
-    /// Adds or overrides dynamic precompiles in the EVM.
-    ///
-    /// # Parameters
-    ///
-    /// - `dyn_precompiles`: The dynamic precompiles to add to the EVM, overriding the existing
-    ///   precompiles if they already exist.
-    ///
-    /// # Returns
-    ///
-    /// A new `Evm` instance with the dynamic precompiles added.
-    fn with_dyn_precompiles(self, dyn_precompiles: HashMap<Address, DynPrecompile>) -> Self {
-        let mut precompiles = self.inner.precompiles;
-        // Apply the dynamic precompiles to the precompiles map. If the precompile already exists,
-        // it will be overridden with the dynamic precompile.
-        for (address, dyn_precompile) in dyn_precompiles {
-            precompiles.apply_precompile(&address, move |_| Some(dyn_precompile));
+        MegaEvm {
+            inner: self.inner.with_inspector(inspector),
+            inspect: true,
+            trusted_inspector: false,
         }
-        let inner = revm::context::Evm {
-            ctx: self.inner.ctx,
-            inspector: self.inner.inspector,
-            instruction: self.inner.instruction,
-            precompiles,
-            frame_stack: self.inner.frame_stack,
-        };
-        Self { inner, inspect: self.inspect }
-    }
-}
-
-impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
-    /// Provides a reference to the block environment.
-    ///
-    /// The block environment contains information about the current block being processed,
-    /// including block number, timestamp, gas limit, and other block-specific data.
-    #[inline]
-    pub fn block_env_ref(&self) -> &BlockEnv {
-        &self.ctx_ref().block
     }
 
-    /// Provides a mutable reference to the block environment.
-    ///
-    /// This allows modification of block environment data during EVM execution,
-    /// which is useful for testing and simulation scenarios.
-    #[inline]
-    pub fn block_env_mut(&mut self) -> &mut BlockEnv {
-        &mut self.ctx().block
-    }
-
-    /// Provides a reference to the journaled state.
-    ///
-    /// The journaled state tracks all state changes during transaction execution,
-    /// enabling rollback capabilities and state management.
-    #[inline]
-    pub fn journaled_state(&self) -> &Journal<DB> {
-        &self.ctx_ref().journaled_state
-    }
-
-    /// Provides a mutable reference to the journaled state.
-    ///
-    /// This allows direct manipulation of the journaled state for advanced
-    /// use cases and testing scenarios.
-    #[inline]
-    pub fn journaled_state_mut(&mut self) -> &mut Journal<DB> {
-        &mut self.ctx().journaled_state
-    }
-
-    /// Consumes self and returns the journaled state.
-    ///
-    /// This is useful when you need to extract the final state after EVM execution
-    /// and no longer need the EVM instance.
-    #[inline]
-    #[deprecated(note = "Use `into_inner` instead")]
-    pub fn into_journaled_state(self) -> Journal<DB> {
-        self.inner.ctx.inner.journaled_state
-    }
-
-    /// Consumes the `MegaEvm` instance and returns the inner EVM.
-    ///
-    /// This method is typically used after EVM execution when you need to access
-    /// the underlying EVM components and no longer require the `MegaEvm` wrapper.
-    #[inline]
-    #[allow(clippy::type_complexity)]
-    pub fn into_inner(
+    /// Replaces the inspector with one whose type is declared a [`TrustedObserver`]: it writes
+    /// nothing back, so the transactions it observes are the ones the chain executes, and block
+    /// execution admits them.
+    pub fn with_trusted_inspector<I: TrustedObserver>(
         self,
-    ) -> revm::context::Evm<
-        MegaContext<DB, ExtEnvs>,
-        INSP,
-        MegaInstructions<DB, ExtEnvs>,
-        PrecompilesMap,
-        EthFrame<EthInterpreter>,
-    > {
+        inspector: I,
+    ) -> MegaEvm<DB, I, ExtEnvs> {
+        MegaEvm {
+            inner: self.inner.with_inspector(inspector),
+            inspect: true,
+            trusted_inspector: true,
+        }
+    }
+
+    /// Whether the EVM runs an inspector that may rewrite what execution produces: an enabled
+    /// inspector that did not arrive through
+    /// [`with_trusted_inspector`](Self::with_trusted_inspector).
+    ///
+    /// The admission gate block execution refuses a transaction on.
+    pub const fn has_rewriting_inspector(&self) -> bool {
+        self.inspect && !self.trusted_inspector
+    }
+
+    /// The execution context.
+    pub const fn ctx(&self) -> &MegaContext<DB, ExtEnvs> {
+        &self.inner.ctx
+    }
+
+    /// The execution context, mutably.
+    pub const fn ctx_mut(&mut self) -> &mut MegaContext<DB, ExtEnvs> {
+        &mut self.inner.ctx
+    }
+
+    /// The inspector.
+    pub const fn inspector(&self) -> &INSP {
+        &self.inner.inspector
+    }
+
+    /// Whether alloy-evm's [`transact`](alloy_evm::Evm::transact) runs the inspector.
+    pub const fn is_inspecting(&self) -> bool {
+        self.inspect
+    }
+
+    /// Consumes the EVM and returns the revm EVM it wraps.
+    pub(crate) fn into_inner(self) -> MegaInnerEvm<DB, INSP, ExtEnvs> {
         self.inner
     }
 }
@@ -301,322 +160,368 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
 impl<DB, INSP, ExtEnvs> MegaEvm<DB, INSP, ExtEnvs>
 where
     DB: Database,
-    INSP: Inspector<MegaContext<DB, ExtEnvs>>,
+    INSP: Inspector<MegaContext<DB, ExtEnvs>, EthInterpreter>,
     ExtEnvs: ExternalEnvTypes,
 {
-    /// Execute a transaction and return the outcome. If the inspector is set, it will be used to
-    /// inspect the transaction.
-    /// Users can use [`MegaEvm::with_inspector`] to set up a custom inspector.
-    /// Users can use [`MegaEvm::without_inspector`] to disable the inspector.
-    ///
-    /// # Parameters
-    ///
-    /// - `tx`: The transaction to execute
-    ///
-    /// # Returns
-    ///
-    /// The outcome of the transaction.
+    /// Executes `tx`, through the inspector when one is enabled, and returns its outcome: the
+    /// result and state, the gas by ledger, the usage the common execution layer counted and the
+    /// limit that stopped the transaction, if any. Nothing is committed.
     pub fn execute_transaction(
         &mut self,
         tx: MegaTransaction,
     ) -> Result<MegaTransactionOutcome, EVMError<DB::Error, MegaTransactionError>> {
-        let ResultAndState { result, state } = if self.inspect {
-            InspectEvm::inspect_tx(self, tx)?
-        } else {
-            ExecuteEvm::transact(self, tx)?
-        };
-        let additional_limit = self.ctx().additional_limit.borrow();
-        let LimitUsage { data_size, kv_updates, compute_gas, state_growth } =
-            additional_limit.get_usage();
+        let result_and_state = self.run_transaction(tx)?;
+        let layer = &self.inner.ctx.additional_limit;
+        let gas = MegaGasUsage::new(result_and_state.result.gas(), layer.history_gas_spent());
         Ok(MegaTransactionOutcome {
-            result,
-            state,
-            data_size,
-            kv_updates,
-            compute_gas_used: compute_gas,
-            state_growth_used: state_growth,
+            result_and_state,
+            gas,
+            usage: layer.usage(),
+            limit_exceeded: layer.latched().copied(),
         })
-    }
-
-    /// Inspect a transaction and return the outcome. The inspector used is the one set up already
-    /// in the EVM. Use [`MegaEvm::with_inspector`] to set up a custom inspector.
-    ///
-    /// # Parameters
-    ///
-    /// - `tx`: The transaction to inspect
-    ///
-    /// # Returns
-    ///
-    /// The outcome of the transaction.
-    #[deprecated(
-        since = "1.0.2",
-        note = "Use `MegaEvm::execute_transaction` instead, which will automatically use the inspector if it is set up"
-    )]
-    pub fn inspect_transaction(
-        &mut self,
-        tx: MegaTransaction,
-    ) -> Result<MegaTransactionOutcome, EVMError<DB::Error, MegaTransactionError>> {
-        let ResultAndState { result, state } = InspectEvm::inspect_tx(self, tx)?;
-        let additional_limit = self.ctx().additional_limit.borrow();
-        let LimitUsage { data_size, kv_updates, compute_gas, state_growth } =
-            additional_limit.get_usage();
-        Ok(MegaTransactionOutcome {
-            result,
-            state,
-            data_size,
-            kv_updates,
-            compute_gas_used: compute_gas,
-            state_growth_used: state_growth,
-        })
-    }
-
-    /// Get the bucket IDs used during transaction execution.
-    ///
-    /// # Returns
-    ///
-    /// Returns the bucket IDs used during transaction execution.
-    pub fn get_accessed_bucket_ids(&self) -> Vec<BucketId> {
-        self.ctx_ref().dynamic_storage_gas_cost.borrow().get_bucket_ids()
     }
 }
 
-impl<DB: Database + BlockHashes, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
-    /// Get the block hashes used during transaction execution.
+impl<DB, INSP, ExtEnvs> MegaEvm<DB, INSP, ExtEnvs>
+where
+    DB: Database,
+    INSP: Inspector<MegaContext<DB, ExtEnvs>, EthInterpreter>,
+    ExtEnvs: ExternalEnvTypes,
+{
+    /// Runs `tx` through the inspector when one is enabled, without committing.
+    fn run_transaction(
+        &mut self,
+        tx: MegaTransaction,
+    ) -> Result<ResultAndState<OpHaltReason>, EVMError<DB::Error, MegaTransactionError>> {
+        let result = if self.inspect {
+            InspectEvm::inspect_tx(self, tx)
+        } else {
+            ExecuteEvm::transact(self, tx)
+        };
+        result.map_err(map_op_err)
+    }
+}
+
+/// The error a [`MegaEvm`] reports through revm's execution traits.
+pub type MegaEvmError<DBError> = EVMError<DBError, OpTransactionError>;
+
+impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> ExecuteEvm for MegaEvm<DB, INSP, ExtEnvs> {
+    type ExecutionResult = ExecutionResult<OpHaltReason>;
+    type State = EvmState;
+    type Error = MegaEvmError<DB::Error>;
+    type Tx = MegaTransaction;
+    type Block = BlockEnv;
+
+    fn set_block(&mut self, block: Self::Block) {
+        self.inner.ctx.set_block(block);
+    }
+
+    fn transact_one(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {
+        self.inner.ctx.set_tx(tx);
+        self.inner.ctx.on_new_tx();
+        MegaHandler::<_, Self::Error, _>::new().run(self)
+    }
+
+    fn finalize(&mut self) -> Self::State {
+        self.inner.ctx.journal_mut().finalize()
+    }
+
+    fn replay(
+        &mut self,
+    ) -> Result<ExecResultAndState<Self::ExecutionResult, Self::State>, Self::Error> {
+        self.inner.ctx.on_new_tx();
+        let result = MegaHandler::<_, Self::Error, _>::new().run(self)?;
+        Ok(ExecResultAndState::new(result, self.finalize()))
+    }
+}
+
+impl<DB: Database + DatabaseCommit, INSP, ExtEnvs: ExternalEnvTypes> ExecuteCommitEvm
+    for MegaEvm<DB, INSP, ExtEnvs>
+{
+    fn commit(&mut self, state: Self::State) {
+        self.inner.ctx.db_mut().commit(state);
+    }
+}
+
+impl<DB, INSP, ExtEnvs> InspectEvm for MegaEvm<DB, INSP, ExtEnvs>
+where
+    DB: Database,
+    INSP: Inspector<MegaContext<DB, ExtEnvs>, EthInterpreter>,
+    ExtEnvs: ExternalEnvTypes,
+{
+    type Inspector = INSP;
+
+    fn set_inspector(&mut self, inspector: Self::Inspector) {
+        self.inner.inspector = inspector;
+    }
+
+    fn inspect_one_tx(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {
+        self.inner.ctx.set_tx(tx);
+        self.inner.ctx.on_new_tx();
+        MegaHandler::<_, Self::Error, _>::new().inspect_run(self)
+    }
+}
+
+impl<DB, INSP, ExtEnvs> InspectCommitEvm for MegaEvm<DB, INSP, ExtEnvs>
+where
+    DB: Database + DatabaseCommit,
+    INSP: Inspector<MegaContext<DB, ExtEnvs>, EthInterpreter>,
+    ExtEnvs: ExternalEnvTypes,
+{
+}
+
+impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> SystemCallEvm for MegaEvm<DB, INSP, ExtEnvs> {
+    fn system_call_one_with_caller(
+        &mut self,
+        caller: Address,
+        system_contract_address: Address,
+        data: Bytes,
+    ) -> Result<Self::ExecutionResult, Self::Error> {
+        self.inner.ctx.set_tx(MegaTransaction::new_system_tx_with_caller(
+            caller,
+            system_contract_address,
+            data,
+        ));
+        self.inner.ctx.on_new_tx();
+        MegaHandler::<_, Self::Error, _>::new().run_system_call(self)
+    }
+}
+
+impl<DB, INSP, ExtEnvs> InspectSystemCallEvm for MegaEvm<DB, INSP, ExtEnvs>
+where
+    DB: Database,
+    INSP: Inspector<MegaContext<DB, ExtEnvs>, EthInterpreter>,
+    ExtEnvs: ExternalEnvTypes,
+{
+    fn inspect_one_system_call_with_caller(
+        &mut self,
+        caller: Address,
+        system_contract_address: Address,
+        data: Bytes,
+    ) -> Result<Self::ExecutionResult, Self::Error> {
+        self.inner.ctx.set_tx(MegaTransaction::new_system_tx_with_caller(
+            caller,
+            system_contract_address,
+            data,
+        ));
+        self.inner.ctx.on_new_tx();
+        MegaHandler::<_, Self::Error, _>::new().inspect_run_system_call(self)
+    }
+}
+
+impl<DB, INSP, ExtEnvs> alloy_evm::Evm for MegaEvm<DB, INSP, ExtEnvs>
+where
+    DB: alloy_evm::Database,
+    INSP: Inspector<MegaContext<DB, ExtEnvs>, EthInterpreter>,
+    ExtEnvs: ExternalEnvTypes,
+{
+    type DB = DB;
+    type Tx = MegaTransaction;
+    type Error = EVMError<DB::Error, MegaTransactionError>;
+    type HaltReason = OpHaltReason;
+    type Spec = MegaSpecId;
+    type BlockEnv = BlockEnv;
+    /// op-revm's precompile set for the base spec.
     ///
-    /// # Returns
-    ///
-    /// Returns the block hashes used during transaction execution.
-    pub fn get_accessed_block_hashes(&self) -> BTreeMap<u64, B256> {
-        self.db_ref().get_accessed_block_hashes()
+    /// Provisional: the Satin precompile provider replaces this type when it lands, and code that
+    /// names `OpPrecompiles` through this associated type has no source-compatibility promise
+    /// across that change.
+    type Precompiles = OpPrecompiles;
+    type Inspector = INSP;
+
+    fn block(&self) -> &BlockEnv {
+        self.ctx().block()
+    }
+
+    fn cfg_env(&self) -> &CfgEnv<MegaSpecId> {
+        self.ctx().mega_cfg()
+    }
+
+    fn chain_id(&self) -> u64 {
+        self.ctx().mega_cfg().chain_id
+    }
+
+    fn transact_raw(
+        &mut self,
+        tx: Self::Tx,
+    ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
+        self.run_transaction(tx)
+    }
+
+    fn transact_system_call(
+        &mut self,
+        caller: Address,
+        contract: Address,
+        data: Bytes,
+    ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
+        SystemCallEvm::system_call_with_caller(self, caller, contract, data).map_err(map_op_err)
+    }
+
+    fn finish(self) -> (Self::DB, EvmEnv<Self::Spec, Self::BlockEnv>) {
+        let (db, cfg_env, block_env) = self.into_inner().ctx.into_parts();
+        (db, EvmEnv { cfg_env, block_env })
+    }
+
+    fn set_inspector_enabled(&mut self, enabled: bool) {
+        self.inspect = enabled;
+    }
+
+    fn components(&self) -> (&Self::DB, &Self::Inspector, &Self::Precompiles) {
+        let evm = &self.inner;
+        (evm.ctx.db(), &evm.inspector, &evm.precompiles)
+    }
+
+    fn components_mut(&mut self) -> (&mut Self::DB, &mut Self::Inspector, &mut Self::Precompiles) {
+        let evm = &mut self.inner;
+        (evm.ctx.db_mut(), &mut evm.inspector, &mut evm.precompiles)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{test_utils::MemoryDatabase, EmptyExternalEnv};
-    use alloy_primitives::{address, Bytes, U256};
+    use crate::test_utils::{op_transaction, zero_fee_l1_block_info, MemoryDatabase};
+    use alloy_evm::{Evm, EvmError};
+    use alloy_op_evm::OpTx;
+    use alloy_primitives::{address, TxKind, U256};
     use revm::{
-        context::{
-            result::{ExecResultAndState, ExecutionResult},
-            ContextSetters, TxEnv,
-        },
+        context::{result::InvalidTransaction, ContextSetters, TxEnv},
         database::State,
-        inspector::NoOpInspector,
-        state::EvmState,
-        ExecuteCommitEvm, ExecuteEvm, InspectEvm, SystemCallEvm,
+        DatabaseRef,
     };
+    use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 
-    const CALLER: Address = address!("4000000000000000000000000000000000000001");
-    const CALLEE: Address = address!("5000000000000000000000000000000000000001");
+    const CALLER: Address = address!("0x4000000000000000000000000000000000000001");
+    const CALLEE: Address = address!("0x5000000000000000000000000000000000000001");
 
-    fn configure_context<DB: Database>(db: DB) -> MegaContext<DB, EmptyExternalEnv> {
-        let mut context = MegaContext::new(db, MegaSpecId::REX4);
-        context.modify_chain(|chain| {
-            chain.operator_fee_scalar = Some(U256::ZERO);
-            chain.operator_fee_constant = Some(U256::ZERO);
-        });
-        context
+    fn context<DB: Database>(db: DB) -> MegaContext<DB> {
+        MegaContext::new(db, MegaSpecId::SATIN).with_chain(zero_fee_l1_block_info())
     }
 
-    fn tx_env() -> TxEnv {
-        TxEnv {
+    fn tx(value: U256) -> MegaTransaction {
+        OpTx(op_transaction(TxEnv {
             caller: CALLER,
             gas_limit: 100_000,
-            kind: alloy_primitives::TxKind::Call(CALLEE),
-            value: U256::ZERO,
-            data: Bytes::new(),
+            kind: TxKind::Call(CALLEE),
+            value,
             ..Default::default()
-        }
+        }))
     }
 
-    fn mega_tx() -> MegaTransaction {
-        let mut tx = MegaTransaction::new(tx_env());
-        tx.enveloped_tx = Some(Bytes::new());
-        tx
+    fn funded_db() -> MemoryDatabase {
+        MemoryDatabase::default()
+            .account_balance(CALLER, U256::from(1_000_000))
+            .account_code(CALLEE, Bytes::new())
     }
 
     #[test]
     fn test_mega_evm_builder_chain_produces_working_evm() {
-        let mut db = MemoryDatabase::default()
-            .account_balance(CALLER, U256::from(1_000_000))
-            .account_code(CALLEE, Bytes::new());
-        let context = configure_context(&mut db);
-        let evm = MegaEvm::new(context);
+        let mut db = funded_db();
+        let evm = MegaEvm::new(context(&mut db));
+        assert!(!evm.is_inspecting());
 
-        let limits = EvmTxRuntimeLimits::no_limits().with_tx_compute_gas_limit(777);
-        let evm = evm.with_tx_runtime_limits(limits);
-        assert_eq!(evm.ctx_ref().additional_limit.borrow().limits.tx_compute_gas_limit, 777);
-
-        let evm = evm.with_dyn_precompiles(HashMap::default());
-        let evm = evm.with_inspector(NoOpInspector);
-        let evm = evm.without_inspector();
+        let mut evm = evm.with_inspector(NoOpInspector);
+        assert!(evm.is_inspecting());
+        assert!(evm.transact_raw(tx(U256::ZERO)).unwrap().result.is_success());
 
         let inner = evm.into_inner();
-        assert_eq!(inner.ctx.block.gas_limit, u64::MAX);
+        assert_eq!(inner.ctx.spec(), MegaSpecId::SATIN);
     }
 
     #[test]
     fn test_alloy_evm_interface_methods_execute_transactions() {
-        let mut db = MemoryDatabase::default()
-            .account_balance(CALLER, U256::from(1_000_000))
-            .account_code(CALLEE, Bytes::new());
-        let mut evm = MegaEvm::new(configure_context(&mut db));
+        let mut db = funded_db();
+        let mut evm = MegaEvm::new(
+            context(&mut db).with_block(BlockEnv { gas_limit: 222_222, ..Default::default() }),
+        );
 
-        assert_eq!(alloy_evm::Evm::chain_id(&evm), evm.ctx_ref().cfg.chain_id);
-        assert_eq!(alloy_evm::Evm::block(&evm).gas_limit, evm.ctx_ref().block.gas_limit);
+        assert_eq!(evm.chain_id(), evm.ctx().cfg().chain_id);
+        assert_eq!(evm.cfg_env().spec, MegaSpecId::SATIN);
+        assert_eq!(evm.block().gas_limit, 222_222);
 
-        alloy_evm::Evm::set_inspector_enabled(&mut evm, true);
-        assert!(evm.inspect);
-        let (_db_ref, _inspector, _precompiles) = alloy_evm::Evm::components(&evm);
-        let (_db_ref_mut, _inspector_mut, _precompiles_mut) =
-            alloy_evm::Evm::components_mut(&mut evm);
+        evm.set_inspector_enabled(true);
+        assert!(evm.is_inspecting());
+        evm.set_inspector_enabled(false);
+        let (_db, _inspector, _precompiles) = evm.components();
+        let (_db, _inspector, _precompiles) = evm.components_mut();
 
-        let result = alloy_evm::Evm::transact_raw(&mut evm, mega_tx()).unwrap();
-        assert!(result.result.is_success());
+        assert!(evm.transact_raw(tx(U256::ZERO)).unwrap().result.is_success());
+        let system_call = Evm::transact_system_call(&mut evm, CALLER, CALLEE, Bytes::new());
+        assert!(system_call.unwrap().result.is_success());
 
-        let system_call =
-            alloy_evm::Evm::transact_system_call(&mut evm, CALLER, CALLEE, Bytes::new()).unwrap();
-        assert!(system_call.result.is_success());
-
-        let (_db_back, evm_env) = alloy_evm::Evm::finish(evm);
-        assert_eq!(evm_env.cfg_env.spec, MegaSpecId::REX4);
+        let (_db, evm_env) = evm.finish();
+        assert_eq!(evm_env.cfg_env.spec, MegaSpecId::SATIN);
+        assert_eq!(evm_env.cfg_env.tx_gas_limit_cap, Some(crate::constants::TX_GAS_LIMIT_CAP));
+        assert_eq!(evm_env.block_env.gas_limit, 222_222);
     }
 
     #[test]
     fn test_revm_execute_one_finalize_commit_works() {
-        let mut db = MemoryDatabase::default()
-            .account_balance(CALLER, U256::from(1_000_000))
-            .account_code(CALLEE, Bytes::new());
-        let mut evm = MegaEvm::new(configure_context(&mut db));
-        let block = revm::context::BlockEnv { gas_limit: 222_222, ..Default::default() };
-        ExecuteEvm::set_block(&mut evm, block);
-        assert_eq!(evm.block_env_ref().gas_limit, 222_222);
+        let mut db = funded_db();
+        let mut evm = MegaEvm::new(context(&mut db));
+        ExecuteEvm::set_block(&mut evm, BlockEnv { gas_limit: 222_222, ..Default::default() });
+        assert_eq!(evm.block().gas_limit, 222_222);
 
-        let one: ExecutionResult<MegaHaltReason> =
-            ExecuteEvm::transact_one(&mut evm, mega_tx()).unwrap();
-        assert!(one.is_success());
+        let result = ExecuteEvm::transact_one(&mut evm, tx(U256::from(7))).unwrap();
+        assert!(result.is_success());
         let state = ExecuteEvm::finalize(&mut evm);
         ExecuteCommitEvm::commit(&mut evm, state);
+        drop(evm);
+
+        assert_eq!(db.basic_ref(CALLEE).unwrap().unwrap().balance, U256::from(7));
     }
 
     #[test]
     fn test_revm_replay_works() {
-        let mut db = MemoryDatabase::default()
-            .account_balance(CALLER, U256::from(1_000_000))
-            .account_code(CALLEE, Bytes::new());
-        let mut evm = MegaEvm::new(configure_context(&mut db));
-        evm.ctx().set_tx(mega_tx());
-        let replay: ExecResultAndState<ExecutionResult<MegaHaltReason>, EvmState> =
-            ExecuteEvm::replay(&mut evm).unwrap();
+        let mut db = funded_db();
+        let mut evm = MegaEvm::new(context(&mut db));
+        evm.ctx_mut().set_tx(tx(U256::ZERO));
+        let replay = ExecuteEvm::replay(&mut evm).unwrap();
         assert!(replay.result.is_success());
+        assert!(replay.state.contains_key(&CALLER));
     }
 
     #[test]
     fn test_revm_inspect_one_tx_works() {
-        let mut db = MemoryDatabase::default()
-            .account_balance(CALLER, U256::from(1_000_000))
-            .account_code(CALLEE, Bytes::new());
-        let mut evm = MegaEvm::new(configure_context(&mut db));
-        InspectEvm::set_inspector(&mut evm, NoOpInspector);
-        let inspected: ExecutionResult<MegaHaltReason> =
-            InspectEvm::inspect_one_tx(&mut evm, mega_tx()).unwrap();
-        assert!(inspected.is_success());
-    }
+        let mut db = funded_db();
+        let mut evm = MegaEvm::new(context(&mut db))
+            .with_inspector(TracingInspector::new(TracingInspectorConfig::default_parity()));
+        let result = InspectEvm::inspect_one_tx(&mut evm, tx(U256::ZERO)).unwrap();
+        assert!(result.is_success());
 
-    #[test]
-    fn test_revm_system_call_with_caller_works() {
-        let mut db = MemoryDatabase::default()
-            .account_balance(CALLER, U256::from(1_000_000))
-            .account_code(CALLEE, Bytes::new());
-        let mut evm = MegaEvm::new(configure_context(&mut db));
-        let system_call: ExecutionResult<MegaHaltReason> =
-            SystemCallEvm::transact_system_call_with_caller(&mut evm, CALLER, CALLEE, Bytes::new())
-                .unwrap();
-        assert!(system_call.is_success());
-    }
+        // The arena starts with one placeholder root node; the call fills it in.
+        let traces = evm.inspector().traces();
+        assert_eq!(traces.nodes().len(), 1, "one call frame");
+        assert_eq!(traces.nodes()[0].trace.address, CALLEE);
 
-    #[test]
-    fn test_transact_system_call_with_gas_limit_uses_passed_value() {
-        let mut db = MemoryDatabase::default()
-            .account_balance(CALLER, U256::from(1_000_000))
-            .account_code(CALLEE, Bytes::new());
-        let mut evm = MegaEvm::new(configure_context(&mut db));
-
-        let result = evm
-            .transact_system_call_with_gas_limit(CALLER, CALLEE, Bytes::new(), 123_456_789)
-            .unwrap();
-        assert!(result.result.is_success());
-        // The custom gas limit must be applied to the underlying tx.
-        assert_eq!(evm.inner.ctx.tx.base.gas_limit, 123_456_789);
-    }
-
-    #[test]
-    fn test_default_system_call_keeps_upstream_30m_gas_limit() {
-        let mut db = MemoryDatabase::default()
-            .account_balance(CALLER, U256::from(1_000_000))
-            .account_code(CALLEE, Bytes::new());
-        let mut context = MegaContext::new(&mut db, MegaSpecId::REX5);
-        context.modify_chain(|chain| {
-            chain.operator_fee_scalar = Some(U256::ZERO);
-            chain.operator_fee_constant = Some(U256::ZERO);
-        });
-        context.block.gas_limit = 100_000_000;
-        let mut evm = MegaEvm::new(context);
-
-        // The default system-call entry point must NOT be widened by REX5 — only the
-        // explicit `transact_system_call_with_gas_limit` path should pick up the live
-        // block budget. This preserves byte-level behavior of EIP-2935 / EIP-4788
-        // pre-block calls across all specs.
-        SystemCallEvm::transact_system_call_with_caller(&mut evm, CALLER, CALLEE, Bytes::new())
-            .unwrap();
-        // Literal, not `SYSTEM_CALL_GAS_LIMIT_FLOOR`: this assertion verifies revm's
-        // upstream hardcoded default. If upstream ever drifts from our floor, this
-        // test should fail loudly rather than be auto-aligned by our constant.
-        assert_eq!(evm.inner.ctx.tx.base.gas_limit, 30_000_000);
-    }
-
-    #[test]
-    fn test_mega_evm_exposes_state_wrapper_block_hashes() {
-        let mut db = MemoryDatabase::default();
-        let mut state = State::builder().with_database(&mut db).build();
-        state.block_hashes.insert(7, B256::from([7_u8; 32]));
-
-        let evm = MegaEvm::new(configure_context(&mut state));
-        assert_eq!(evm.get_accessed_block_hashes().get(&7), Some(&B256::from([7_u8; 32])));
-    }
-
-    #[test]
-    fn test_convenience_execution_methods_work() {
-        let mut db = MemoryDatabase::default()
-            .account_balance(CALLER, U256::from(1_000_000))
-            .account_code(CALLEE, Bytes::new());
-        let mut evm = MegaEvm::new(configure_context(&mut db)).with_inspector(NoOpInspector);
-
-        let executed = evm.execute_transaction(mega_tx()).unwrap();
-        assert!(executed.result.is_success());
-
-        #[allow(deprecated)]
-        let inspected = evm.inspect_transaction(mega_tx()).unwrap();
-        assert!(inspected.result.is_success());
+        // A fresh inspector replaces the one that recorded the call.
+        InspectEvm::set_inspector(
+            &mut evm,
+            TracingInspector::new(TracingInspectorConfig::default_parity()),
+        );
+        assert_eq!(evm.inspector().traces().nodes()[0].trace.address, Address::ZERO);
     }
 
     #[test]
     fn test_execute_transaction_fails_with_insufficient_balance() {
         let mut db = MemoryDatabase::default().account_code(CALLEE, Bytes::new());
-        let mut evm = MegaEvm::new(configure_context(&mut db));
+        let mut evm = MegaEvm::new(context(&mut db));
 
-        let mut tx = MegaTransaction::new(TxEnv {
-            caller: CALLER,
-            gas_limit: 100_000,
-            kind: alloy_primitives::TxKind::Call(CALLEE),
-            value: U256::from(1_000_000),
-            data: Bytes::new(),
-            ..Default::default()
-        });
-        tx.enveloped_tx = Some(Bytes::new());
+        let err = evm.transact_raw(tx(U256::from(1_000_000))).unwrap_err();
+        let invalid =
+            err.as_invalid_tx_err().and_then(alloy_evm::InvalidTxError::as_invalid_tx_err);
+        assert!(matches!(invalid, Some(InvalidTransaction::LackOfFundForMaxFee { .. })), "{err:?}");
+    }
 
-        let result = evm.execute_transaction(tx);
-        assert!(result.is_err());
+    #[test]
+    fn test_finish_returns_the_database() {
+        let mut state = State::builder().with_database(funded_db()).build();
+        let mut evm = MegaEvm::new(context(&mut state));
+        assert!(Evm::transact_commit(&mut evm, tx(U256::from(5))).unwrap().is_success());
+        let (db, _) = evm.finish();
+        assert_eq!(
+            db.cache.accounts[&CALLEE].account.as_ref().unwrap().info.balance,
+            U256::from(5)
+        );
     }
 }

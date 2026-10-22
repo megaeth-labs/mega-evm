@@ -1,42 +1,145 @@
+//! Resource limits of the Satin engine.
+//!
+//! The common execution layer defines what a limit reports when it is crossed: the dimension
+//! ([`LimitKind`]), the verdict of a check ([`LimitCheck`]) and the revert data a stopped frame
+//! returns ([`MegaLimitExceeded`]). The mechanisms that meter a dimension (the data-size limit,
+//! detention, the state-growth and KV limits) fill these in.
+//!
+//! It also counts what those limits meter at the sites the data-size limit counts: data-size
+//! bytes and write records, on a lane per frame ([`AdditionalLimit`]). The Host stages what it
+//! observes ([`StagedRecord`]) and the opcode commits it once it completed.
+
+mod frame_limit;
+#[allow(clippy::module_inception)]
+mod limit;
+mod record;
+
+pub use limit::AdditionalLimit;
+pub use record::StagedRecord;
+
 use alloy_primitives::Bytes;
 use alloy_sol_types::SolError;
 
-mod compute_gas;
-mod data_size;
-mod frame_limit;
-mod kv_update;
-#[allow(clippy::module_inception)]
-mod limit;
-mod state_growth;
-mod storage_call_stipend;
+/// Bytes of one write record: the key and value delta one account or storage write leaves in
+/// the state diff.
+pub const WRITE_RECORD_SIZE: u64 = 40;
 
-pub use data_size::*;
-pub(crate) use frame_limit::{FrameLimitTracker, TxRuntimeLimit};
-pub use limit::*;
+/// Bytes every log counts for the address it carries.
+pub const LOG_BASE_SIZE: u64 = 32;
 
-use crate::MegaHaltReason;
+/// Bytes every log topic counts.
+pub const LOG_TOPIC_SIZE: u64 = 32;
+
+/// What a transaction or a frame counts: data-size bytes and write records.
+///
+/// The KV count a node reports is the write-record count; it has no tracker of its own.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct LimitUsage {
+    /// Data-size bytes.
+    pub data_size: u64,
+    /// Account and storage write records.
+    pub write_records: u64,
+}
+
+/// Limits the common execution layer enforces on one transaction, for exercising the abort
+/// protocol before the mechanisms that own the limits land. Both default to unlimited.
+///
+/// The data-size limit replaces them with its own limit and per-frame budget rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct EvmTxRuntimeLimits {
+    /// The most data-size bytes the transaction may keep. Crossing it stops the transaction.
+    pub tx_data_size_limit: u64,
+    /// The most data-size bytes one frame may keep, children included, and never more than
+    /// what its caller has left. Crossing it reverts the frame alone.
+    pub frame_data_size_limit: u64,
+}
+
+impl Default for EvmTxRuntimeLimits {
+    fn default() -> Self {
+        Self::no_limits()
+    }
+}
+
+impl EvmTxRuntimeLimits {
+    /// No limit at all.
+    pub const fn no_limits() -> Self {
+        Self { tx_data_size_limit: u64::MAX, frame_data_size_limit: u64::MAX }
+    }
+
+    /// Sets the transaction's data-size limit.
+    pub const fn with_tx_data_size_limit(mut self, limit: u64) -> Self {
+        self.tx_data_size_limit = limit;
+        self
+    }
+
+    /// Sets the per-frame data-size budget.
+    pub const fn with_frame_data_size_limit(mut self, limit: u64) -> Self {
+        self.frame_data_size_limit = limit;
+        self
+    }
+}
+
+/// One write record.
+pub(crate) const WRITE_RECORD: LimitUsage =
+    LimitUsage { data_size: WRITE_RECORD_SIZE, write_records: 1 };
+
+impl LimitUsage {
+    /// Nothing counted.
+    pub const ZERO: Self = Self { data_size: 0, write_records: 0 };
+
+    /// Both counters added, saturating.
+    pub const fn saturating_add(self, other: Self) -> Self {
+        Self {
+            data_size: self.data_size.saturating_add(other.data_size),
+            write_records: self.write_records.saturating_add(other.write_records),
+        }
+    }
+
+    /// Both counters subtracted, saturating at zero.
+    pub const fn saturating_sub(self, other: Self) -> Self {
+        Self {
+            data_size: self.data_size.saturating_sub(other.data_size),
+            write_records: self.write_records.saturating_sub(other.write_records),
+        }
+    }
+
+    /// Both counters multiplied by `n`, saturating.
+    pub const fn times(self, n: u64) -> Self {
+        Self {
+            data_size: self.data_size.saturating_mul(n),
+            write_records: self.write_records.saturating_mul(n),
+        }
+    }
+}
 
 alloy_sol_types::sol! {
-    /// ABI-encoded error emitted as revert data when a frame-local resource limit is exceeded.
+    /// The revert data of a frame a resource limit stopped.
+    ///
+    /// `kind` is the [`LimitKind`] discriminant and `limit` the limit that was crossed. A frame
+    /// can revert with the same bytes on its own; whether a limit stopped the transaction is
+    /// reported by the transaction outcome, not read off the output.
     #[derive(Debug, PartialEq, Eq)]
     error MegaLimitExceeded(uint8 kind, uint64 limit);
 }
 
-/// Identifies which resource limit was exceeded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// A resource dimension a limit meters.
+///
+/// The discriminants are the `kind` of [`MegaLimitExceeded`] and keep the values the legacy engine
+/// encoded, so a contract that decodes the legacy revert data decodes Satin's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LimitKind {
-    /// Data size limit (bytes of data transmitted and stored).
+    /// Bytes of data a transaction produces; metered by the data-size limit.
     DataSize,
-    /// Key-value update limit (number of state-modifying operations).
+    /// Key-value updates; metered by the state-growth and KV limits.
     KVUpdate,
-    /// Compute gas limit (cumulative EVM instruction gas).
+    /// Compute gas, the regular gas a transaction spends; capped by detention.
     ComputeGas,
-    /// State growth limit (net new accounts and storage slots).
+    /// Net new state; metered by the state-growth and KV limits.
     StateGrowth,
 }
 
 impl LimitKind {
-    /// Returns the discriminant value used in ABI-encoded revert data.
+    /// The `kind` of [`MegaLimitExceeded`].
     pub const fn as_u8(&self) -> u8 {
         match self {
             Self::DataSize => 0,
@@ -46,7 +149,7 @@ impl LimitKind {
         }
     }
 
-    /// Converts a discriminant value back to a `LimitKind`.
+    /// The dimension a `kind` of [`MegaLimitExceeded`] names, if any.
     pub const fn from_u8(kind: u8) -> Option<Self> {
         match kind {
             0 => Some(Self::DataSize),
@@ -58,73 +161,58 @@ impl LimitKind {
     }
 }
 
-/// Result of a limit check.
+/// The verdict of a limit check.
 ///
-/// Carries three semantically distinct states: limits passed; a limit was exceeded (with
-/// metadata for the halt path); or per-tx metering is exempt (REX6+ system-originated tx —
-/// see [`crate::is_system_originated`]). The `Exempt` state is **sticky**: once `AdditionalLimit`
-/// stores it in `has_exceeded_limit`, `check_limit` short-circuits and the sub-tracker checks
-/// are skipped, so no later overflow can overwrite it.
-#[derive(Debug, Default, Clone, Copy)]
+/// A transaction-level exceed stops the transaction: the frame that crosses it reverts, the
+/// transaction is latched and every frame above reverts in turn. A frame-local exceed (a frame
+/// budget) reverts the frame alone and its caller resumes. `Exempt` is sticky for the
+/// transaction: nothing it does is stopped by a limit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LimitCheck {
-    /// All limits are within their configured thresholds.
+    /// Every limit holds.
     #[default]
     WithinLimit,
-    /// A limit has been exceeded.
+    /// A limit was crossed.
     ExceedsLimit {
-        /// Which resource limit was exceeded.
+        /// The dimension crossed.
         kind: LimitKind,
-        /// The configured limit.
+        /// The limit crossed.
         limit: u64,
-        /// The current usage.
+        /// The usage that crossed it.
         used: u64,
-        /// Whether this exceed is from a frame-local budget (absorbable at frame boundary)
-        /// vs a TX-level limit (must propagate to halt the transaction).
+        /// Whether the limit is a frame budget rather than a transaction-level limit.
         frame_local: bool,
     },
-    /// Per-tx metering is exempt: REX6+ system-originated tx (see
-    /// [`crate::is_system_originated`]). Behaves as not-exceeded for halt decisions; sticky as
-    /// described on the enum. Sub-tracker `check_limit` impls never produce this variant —
-    /// only `AdditionalLimit::has_exceeded_limit` carries it, set via
-    /// [`AdditionalLimit::mark_exempt`](super::AdditionalLimit::mark_exempt).
+    /// The transaction is exempt from metering.
     Exempt,
 }
 
 impl LimitCheck {
-    /// Returns `true` if a resource limit has been exceeded.
-    ///
-    /// `Exempt` returns `false`: per-tx metering is suppressed, so the halt path must not fire.
+    /// Whether a limit was crossed. `Exempt` is not.
     #[inline]
     pub const fn exceeded_limit(&self) -> bool {
         matches!(self, Self::ExceedsLimit { .. })
     }
 
-    /// Returns `true` strictly when no limit check has been performed yet or the last check passed.
-    ///
-    /// `Exempt` returns `false`: it is a distinct sticky state, not a "passed" result. Callers
-    /// that just want to gate the halt path should use [`exceeded_limit`](Self::exceeded_limit)
-    /// (its negation), not this predicate.
+    /// Whether the check passed. `Exempt` is a state of its own, not a pass.
     #[inline]
     pub const fn within_limit(&self) -> bool {
         matches!(self, Self::WithinLimit)
     }
 
-    /// Returns `true` when per-tx metering is suppressed for the current transaction.
+    /// Whether the transaction is exempt from metering.
     #[inline]
     pub const fn is_exempt(&self) -> bool {
         matches!(self, Self::Exempt)
     }
 
-    /// Returns whether this is a frame-local exceed.
+    /// Whether a frame budget, rather than a transaction-level limit, was crossed.
     #[inline]
     pub const fn is_frame_local(&self) -> bool {
         matches!(self, Self::ExceedsLimit { frame_local: true, .. })
     }
 
-    /// Returns ABI-encoded revert data for a frame-local limit exceed.
-    ///
-    /// Encodes as `MegaLimitExceeded(uint8 kind, uint64 limit)`. Returns empty bytes for
-    /// `WithinLimit` and `Exempt` (neither produces a frame-local revert).
+    /// The [`MegaLimitExceeded`] revert data of a crossed limit; empty otherwise.
     pub fn revert_data(&self) -> Bytes {
         match self {
             Self::ExceedsLimit { kind, limit, .. } => {
@@ -133,36 +221,26 @@ impl LimitCheck {
             Self::WithinLimit | Self::Exempt => Bytes::new(),
         }
     }
-
-    /// Returns the [`MegaHaltReason`] if a limit has been exceeded.
-    ///
-    /// `WithinLimit` and `Exempt` both return `None`: neither halts the transaction.
-    pub fn maybe_halt_reason(&self) -> Option<MegaHaltReason> {
-        match self {
-            Self::ExceedsLimit { kind: LimitKind::DataSize, limit, used, .. } => {
-                Some(MegaHaltReason::DataLimitExceeded { limit: *limit, actual: *used })
-            }
-            Self::ExceedsLimit { kind: LimitKind::KVUpdate, limit, used, .. } => {
-                Some(MegaHaltReason::KVUpdateLimitExceeded { limit: *limit, actual: *used })
-            }
-            Self::ExceedsLimit { kind: LimitKind::ComputeGas, limit, used, .. } => {
-                Some(MegaHaltReason::ComputeGasLimitExceeded { limit: *limit, actual: *used })
-            }
-            Self::ExceedsLimit { kind: LimitKind::StateGrowth, limit, used, .. } => {
-                Some(MegaHaltReason::StateGrowthLimitExceeded { limit: *limit, actual: *used })
-            }
-            Self::WithinLimit | Self::Exempt => None,
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Pins the predicate truth-table for the `Exempt` variant so a future change that flips one
-    /// predicate (e.g., reverting `exceeded_limit` to `!matches!(WithinLimit)`) is caught here
-    /// rather than silently re-enabling halts for exempt txs.
+    #[test]
+    fn test_limit_usage_arithmetic_saturates() {
+        let max = LimitUsage { data_size: u64::MAX, write_records: u64::MAX };
+        assert_eq!(max.saturating_add(WRITE_RECORD), max);
+        assert_eq!(LimitUsage::ZERO.saturating_sub(WRITE_RECORD), LimitUsage::ZERO);
+        assert_eq!(WRITE_RECORD.times(3), LimitUsage { data_size: 120, write_records: 3 });
+        assert_eq!(WRITE_RECORD.times(u64::MAX).data_size, u64::MAX);
+        assert_eq!(
+            WRITE_RECORD.saturating_add(WRITE_RECORD).saturating_sub(WRITE_RECORD),
+            WRITE_RECORD
+        );
+    }
+
+    /// `Exempt` passes no predicate that would stop a frame, and has no revert data.
     #[test]
     fn test_limit_check_exempt_predicate_truth_table() {
         let exempt = LimitCheck::Exempt;
@@ -171,10 +249,9 @@ mod tests {
         assert!(exempt.is_exempt());
         assert!(!exempt.is_frame_local());
         assert!(exempt.revert_data().is_empty());
-        assert!(exempt.maybe_halt_reason().is_none());
     }
 
-    /// `within_limit` must mirror the enum variant exactly, not return a constant.
+    /// `within_limit` follows the variant.
     #[test]
     fn test_within_limit_reflects_variant() {
         assert!(LimitCheck::WithinLimit.within_limit());
@@ -185,18 +262,32 @@ mod tests {
             frame_local: false,
         };
         assert!(!exceeded.within_limit());
+        assert!(exceeded.exceeded_limit());
+        assert!(!exceeded.is_frame_local());
+        assert!(!exceeded.is_exempt());
+        assert!(!LimitCheck::WithinLimit.is_exempt());
+        assert!(!LimitCheck::WithinLimit.exceeded_limit());
+        assert!(LimitCheck::WithinLimit.revert_data().is_empty());
+        let frame_local = LimitCheck::ExceedsLimit {
+            kind: LimitKind::DataSize,
+            limit: 100,
+            used: 150,
+            frame_local: true,
+        };
+        assert!(frame_local.is_frame_local());
+        assert!(frame_local.exceeded_limit());
     }
 
-    /// Every `LimitKind` discriminant must survive an `as_u8` -> `from_u8` round-trip,
-    /// and unknown discriminants must map to `None`.
+    /// Every discriminant survives the round trip, and an unknown one maps to nothing.
     #[test]
     fn test_limit_kind_u8_roundtrip() {
-        for kind in [
-            LimitKind::DataSize,
-            LimitKind::KVUpdate,
-            LimitKind::ComputeGas,
-            LimitKind::StateGrowth,
+        for (kind, expected) in [
+            (LimitKind::DataSize, 0),
+            (LimitKind::KVUpdate, 1),
+            (LimitKind::ComputeGas, 2),
+            (LimitKind::StateGrowth, 3),
         ] {
+            assert_eq!(kind.as_u8(), expected, "{kind:?}");
             assert_eq!(
                 LimitKind::from_u8(kind.as_u8()),
                 Some(kind),
@@ -204,5 +295,21 @@ mod tests {
             );
         }
         assert_eq!(LimitKind::from_u8(4), None);
+    }
+
+    /// The revert data is the ABI encoding of `MegaLimitExceeded(uint8,uint64)`.
+    #[test]
+    fn test_revert_data_encodes_mega_limit_exceeded() {
+        let check = LimitCheck::ExceedsLimit {
+            kind: LimitKind::StateGrowth,
+            limit: 7,
+            used: 9,
+            frame_local: true,
+        };
+        let data = check.revert_data();
+        assert_eq!(&data[..4], MegaLimitExceeded::SELECTOR.as_slice());
+        let decoded = MegaLimitExceeded::abi_decode(&data).unwrap();
+        assert_eq!(decoded, MegaLimitExceeded { kind: 3, limit: 7 });
+        assert_eq!(MegaLimitExceeded::SIGNATURE, "MegaLimitExceeded(uint8,uint64)");
     }
 }

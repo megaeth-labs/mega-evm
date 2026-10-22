@@ -1,11 +1,13 @@
 name: Mutation Testing
 
-# All mutation-testing CI lives here. Three concerns, one file:
+# All mutation-testing CI lives here. Four concerns, one file:
 #   * cargo-mutants gate   — generic operators (diff-scoped on PRs, full nightly)
+#   * infrastructure gate  — the same operators on the code that implements the
+#                            test gates, which the production scope excludes
 #   * spec-gate            — universalmutator + comby custom operators for
 #                            backward-compat spec gates (diff PR + nightly sweep)
 #   * suppression hygiene  — flag suppressions that no longer match a live mutant
-# All three share the scorer scripts/mutation_gate.py. See mutants/README.md.
+# All four share the scorer scripts/mutation_gate.py. See mutants/README.md.
 
 on:
   workflow_dispatch:
@@ -123,6 +125,64 @@ jobs:
             target/mutants/mutants.out
             target/mutants.diff
             mutation-report.md
+          if-no-files-found: ignore
+
+  # ── cargo-mutants: the test gates' own infrastructure ──────────────────────
+  # The second mutation scope (.cargo/mutants-infra.toml): the scenario runner's
+  # transaction conversion and execute/commit loop. The production scope
+  # excludes test helpers as noise, so this executable logic is never mutated
+  # there. 39 mutants today, so the whole set runs rather than a diff
+  # slice. Informational: it is not a required check.
+  infra-mutants:
+    name: cargo-mutants infrastructure
+    needs: changes
+    # Always on nightly/dispatch; on PRs only when the mutated code, its
+    # configuration or the driver changed.
+    if: |
+      always() &&
+      (github.event_name != 'pull_request' || needs.changes.outputs.infra == 'true')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants@27.1.0
+
+      - name: Warm build cache
+        run: cargo nextest run -p mega-evm --all-features --no-run
+
+      - name: Run mutation testing
+        env:
+          OUT_DIR: target/mutants-infra
+        run: scripts/mutation_test.sh infra
+
+      - name: Score and gate
+        run: |
+          python3 scripts/mutation_gate.py report \
+            --results target/mutants-infra/mutants.out \
+            --suppressions mutants/suppressions.toml \
+            --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload mutation artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-results-infra
+          path: target/mutants-infra/mutants.out
           if-no-files-found: ignore
 
   # ── spec-gate: diff-scoped blocking gate on PRs ────────────────────────────
@@ -260,12 +320,14 @@ jobs:
 
   # ── suppression hygiene: gate on relevant PR changes, plus nightly ─────────
   # `changes` scopes the hygiene job to PRs that could orphan a suppression
-  # (suppressions, operators, or src edits); nightly/dispatch always run it.
+  # (suppressions, operators, or src edits) and the infrastructure job to PRs
+  # that touch its scope; nightly/dispatch always run both.
   changes:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     outputs:
       hygiene: ${{ steps.filter.outputs.hygiene }}
+      infra: ${{ steps.filter.outputs.infra }}
     steps:
       - uses: dorny/paths-filter@v3
         id: filter
@@ -275,6 +337,11 @@ jobs:
               - 'mutants/suppressions.toml'
               - 'mutants/operators/**'
               - 'crates/mega-evm/src/**'
+            infra:
+              - '.cargo/mutants-infra.toml'
+              - 'crates/mega-evm/src/test_utils/scenario.rs'
+              - 'scripts/mutation_gate.py'
+              - 'scripts/mutation_test.sh'
 
   orphan-suppressions:
     name: suppression hygiene
@@ -306,10 +373,10 @@ jobs:
           sudo curl -fsSL https://github.com/comby-tools/comby/releases/download/1.8.1/comby-1.8.1-x86_64-linux -o /usr/local/bin/comby
           sudo chmod +x /usr/local/bin/comby
           comby -version
-      - name: Build the full mutant universe (both engines)
+      - name: Build the full mutant universe (both engines, both scopes)
         run: |
-          # --package mega-evm: match the driver's scope (otherwise --list also
-          #   covers the CLI bins in the virtual workspace's default-members, so a
+          # --package mega-evm: match the driver's production scope (otherwise --list
+          #   also covers the CLI bins in the virtual workspace's default-members, so a
           #   stale mega-evm suppression could be kept alive by a same-named mutant
           #   in another crate).
           # No --exclude-re here, so function-suppressed mutants are included —
@@ -317,8 +384,19 @@ jobs:
           # --colors never: CI forces CARGO_TERM_COLOR=always, which would otherwise
           #   embed ANSI codes and break exact suppression matching.
           cargo mutants --list --package mega-evm --colors never > universe.txt
-          python3 scripts/umutate.py plan --packs spec-gate \
-            | grep -oE 'crates/mega-evm/[^:]+:[0-9]+:[0-9]+: spec-gate .*' >> universe.txt
+          # The infrastructure scope is a second mutant population and a suppression may live in
+          # it, so it joins the universe. Listed through the driver, so its file list stays in
+          # one place, with SUPPRESS=/dev/null so the driver emits no --exclude-re and function-
+          # suppressed mutants stay in the universe here too. The grep drops the driver's
+          # trailing progress lines and fails the step if the scope lists nothing.
+          SUPPRESS=/dev/null scripts/mutation_test.sh infra --list --colors never \
+            | grep -oE 'crates/[^:]+:[0-9]+:[0-9]+: .*' >> universe.txt
+          # The plan runs on its own so a planner failure still fails the step.
+          # Its mutant lines are grepped separately: a single-spec engine (the
+          # satin branch) has no spec gates and the pack finds nothing. grep's
+          # "no match" (exit 1) is accepted; a grep error (exit 2) still fails.
+          python3 scripts/umutate.py plan --packs spec-gate > spec-gate-plan.txt
+          grep -oE 'crates/mega-evm/[^:]+:[0-9]+:[0-9]+: spec-gate .*' spec-gate-plan.txt >> universe.txt || [ $? -eq 1 ]
           echo "universe: $(wc -l < universe.txt) mutants"
       - name: Check for orphan suppressions
         run: |

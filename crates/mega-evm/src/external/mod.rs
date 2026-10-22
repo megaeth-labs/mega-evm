@@ -19,7 +19,6 @@ use auto_impl::auto_impl;
 use core::fmt::Debug;
 
 mod factory;
-mod gas;
 #[cfg(any(test, feature = "test-utils"))]
 mod hasher;
 mod oracle;
@@ -28,7 +27,6 @@ mod salt;
 mod test_utils;
 
 pub use factory::*;
-pub use gas::*;
 #[cfg(any(test, feature = "test-utils"))]
 pub use hasher::*;
 pub use oracle::*;
