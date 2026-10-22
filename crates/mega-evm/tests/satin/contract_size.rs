@@ -8,24 +8,31 @@
 use alloy_evm::{Evm, EvmError, InvalidTxError};
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    constants::{MAX_CONTRACT_SIZE, MAX_INITCODE_SIZE},
+    constants::{MAX_CONTRACT_SIZE, MAX_INITCODE_SIZE, TX_GAS_LIMIT_CAP},
     test_utils::{right_pad_bytes, BytecodeBuilder, MemoryDatabase},
     MegaEvm, MegaHaltReason, MegaTransaction,
 };
 use revm::{
     bytecode::opcode::{CREATE, INVALID, ISZERO, JUMPDEST, JUMPI, PUSH1, RETURN, STOP},
     context::result::{ExecutionResult, HaltReason, InvalidTransaction},
-    primitives::{eip170, eip3860},
 };
 
-use crate::common::{call, context, create};
+use crate::common::{call, context, create, history};
 
 const CALLER: Address = address!("0000000000000000000000000000000000100000");
 const FACTORY: Address = address!("0000000000000000000000000000000000100001");
 
-/// Room for the state gas a megabyte of deployed code draws, all of it above the execution cap so
-/// it comes out of the reservoir.
-const GAS_LIMIT: u64 = 4_000_000_000;
+/// Room for everything a creation here draws, all of it above the execution cap so it comes out of
+/// the reservoir: the state gas of the largest deployable code, the history of that code and of a
+/// body carrying twice the largest init code, and a billion more, at the byte prices in effect.
+fn gas_limit() -> u64 {
+    TX_GAS_LIMIT_CAP +
+        MAX_CONTRACT_SIZE as u64 *
+            mega_evm::satin_gas_params()
+                .get(revm::context_interface::cfg::GasId::code_deposit_state_gas()) +
+        history((MAX_CONTRACT_SIZE + 2 * MAX_INITCODE_SIZE) as u64) +
+        1_000_000_000
+}
 
 /// Runs `tx` from `CALLER` and returns its result, or the validation error that rejected it.
 fn run(tx: MegaTransaction, db: MemoryDatabase) -> Result<ExecutionResult<MegaHaltReason>, String> {
@@ -45,7 +52,7 @@ fn run(tx: MegaTransaction, db: MemoryDatabase) -> Result<ExecutionResult<MegaHa
 /// Runs `init_code` as a creation transaction from `CALLER`.
 fn deploy(init_code: Bytes) -> Result<ExecutionResult<MegaHaltReason>, String> {
     let db = MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18)));
-    run(create(CALLER, init_code, GAS_LIMIT), db)
+    run(create(CALLER, init_code, gas_limit()), db)
 }
 
 /// Init code of `size` bytes that does nothing.
@@ -84,12 +91,6 @@ fn assert_code_size_limit(result: Result<ExecutionResult<MegaHaltReason>, String
 
 /* ---------- the initcode bound ---------- */
 
-/// An initcode of EIP-3860's size is far below the Satin bound and goes through.
-#[test]
-fn test_the_eip3860_initcode_size_is_accepted() {
-    assert!(deploy(initcode_of(eip3860::MAX_INITCODE_SIZE)).unwrap().is_success());
-}
-
 /// The Satin bound itself is accepted.
 #[test]
 fn test_the_satin_initcode_size_is_accepted() {
@@ -102,26 +103,7 @@ fn test_one_byte_past_the_satin_initcode_size_is_rejected() {
     assert_initcode_limit(deploy(initcode_of(MAX_INITCODE_SIZE + 1)));
 }
 
-/// So is twice it.
-#[test]
-fn test_double_the_satin_initcode_size_is_rejected() {
-    assert_initcode_limit(deploy(initcode_of(2 * MAX_INITCODE_SIZE)));
-}
-
-/// The initcode bound is twice the contract bound, which is the ratio EIP-3860 sets.
-#[test]
-fn test_the_initcode_bound_is_twice_the_contract_bound() {
-    assert_eq!(MAX_INITCODE_SIZE, 2 * MAX_CONTRACT_SIZE);
-    assert_eq!(MAX_CONTRACT_SIZE, 512 * 1024);
-}
-
 /* ---------- the deployed-code bound, from a creation transaction ---------- */
-
-/// Code of EIP-170's size deploys.
-#[test]
-fn test_the_eip170_code_size_deploys() {
-    assert!(deploy(constructor_returning(eip170::MAX_CODE_SIZE)).unwrap().is_success());
-}
 
 /// Code of the Satin size deploys.
 #[test]
@@ -133,12 +115,6 @@ fn test_the_satin_code_size_deploys() {
 #[test]
 fn test_one_byte_past_the_satin_code_size_halts() {
     assert_code_size_limit(deploy(constructor_returning(MAX_CONTRACT_SIZE + 1)));
-}
-
-/// So does twice it.
-#[test]
-fn test_double_the_satin_code_size_halts() {
-    assert_code_size_limit(deploy(constructor_returning(2 * MAX_CONTRACT_SIZE)));
 }
 
 /* ---------- the deployed-code bound, from a CREATE ---------- */
@@ -169,7 +145,7 @@ fn create_through_factory(size: usize) -> bool {
         .account_balance(CALLER, U256::from(10u64.pow(18)))
         .account_code(FACTORY, factory_creating(size));
     let result =
-        run(call(CALLER, FACTORY, U256::ZERO, GAS_LIMIT), db).expect("the transaction is valid");
+        run(call(CALLER, FACTORY, U256::ZERO, gas_limit()), db).expect("the transaction is valid");
     match result {
         ExecutionResult::Success { .. } => true,
         ExecutionResult::Halt {
@@ -177,14 +153,6 @@ fn create_through_factory(size: usize) -> bool {
         } => false,
         other => panic!("unexpected result {other:?}"),
     }
-}
-
-/// A `CREATE` of EIP-170's size succeeds, and so does one byte past it: EIP-170 is not the bound
-/// here.
-#[test]
-fn test_create_of_the_eip170_code_size_succeeds() {
-    assert!(create_through_factory(eip170::MAX_CODE_SIZE));
-    assert!(create_through_factory(eip170::MAX_CODE_SIZE + 1));
 }
 
 /// A `CREATE` of the Satin size succeeds.

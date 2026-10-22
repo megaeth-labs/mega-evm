@@ -3,6 +3,7 @@
 The execution-spec state-test runner of the Satin engine.
 It runs Ethereum's execution-spec state-test fixtures through `MegaEvm`; the `state-test` CLI (`crates/state-test`) is its front end.
 The library keeps the `state_test` import name.
+It also imports the execution-spec blockchain tests through Satin's block executor ([Blockchain tests](#blockchain-tests)).
 
 ## Two modes
 
@@ -11,7 +12,7 @@ The library keeps the `state_test` import name.
   Every test either passes, is skipped for a reason the reference runner shares, or fails on a [registered deviation](DEVIATIONS.md); one failure no deviation explains fails the gate.
 - **Satin** — a report.
   The same fixtures under Satin's own configuration, counted by outcome.
-  Satin prices state, history and the access entries it pressed back on purpose, and logs every value movement (EIP-7708) where Osaka's fixtures log none, so almost every stateful fixture differs; the count is what CI shows, and it never fails the job.
+  Satin prices state and history on purpose, prices state access as Amsterdam does (EIP-8038), and logs every value movement (EIP-7708) where Osaka's fixtures log none, so almost every stateful fixture differs; the count is what CI shows, and it never fails the job.
 
 A run executes the entries one fork defines: Osaka's in the main fixture release, Amsterdam's in the glamsterdam devnet release.
 Satin's base spec is Osaka, so those are the two forks it can be configured to.
@@ -56,6 +57,83 @@ cargo run --release -p state-test -- --mode satin --fork Osaka <main>/state_test
 
 `--expect-executed`, `--expect-skipped` and `--expect-deviations` turn a full run into the pinned gate CI runs (`.github/workflows/exec-spec-satin.yml`).
 `--json-outcome` prints one JSON line per test, a failure's produced hashes included, and `--trace` runs each test under an EIP-3155 tracer.
+
+## Blockchain tests
+
+`state-test btest` imports the execution-spec blockchain tests through Satin's block executor (`src/blockchain/`): the tests of the main release's `blockchain_tests` filled for Osaka, the release and the network the state-test gate's Osaka run uses.
+The devnet release's blockchain tests are not run, as the revm fork's own runner does not run them.
+A blockchain test is a chain: a pre-state, a genesis block, and blocks a node imports one after the other, several transactions to a block and several blocks to a test, some of which it must refuse.
+
+### How a block is imported
+
+Every block is decoded from its RLP, as a node receives it, and runs through `MegaBlockExecutor` on `MegaEvm` in equivalence mode's configuration — the neutral Osaka configuration, the fork's precompile set and static opcode prices — over a copy of the state the chain holds.
+The executor makes the EIP-2935 and EIP-4788 pre-block system calls before the transactions, as it does for every block; `BLOCKHASH` reads the hashes of the chain's own blocks.
+Satin runs on a chain that holds its predeploys — the six `MegaETH` system contracts and the EIP-7997 factory — and deploys none of them, so the runner seeds each one the fixture's pre-state lacks into the chain's genesis state, as a chain that ran Rex6 holds it, the `SequencerRegistry` naming roles that promote no fixture's transaction (`blockchain::registry_roles`).
+The runner holds the blocks to no protocol limit in place of Satin's, through the executor's test-and-tool override, as equivalence mode holds a state test's transaction to none.
+Each block is told whether it admits only deposits, and whether Satin activates in it, as a node works them out, from the schedule (`blockchain::chain_spec`) and its parent's timestamp; the schedule activates every fork at genesis, so no block the runner imports is either.
+
+### How a block is judged
+
+- A block the fixture expects to be valid must be accepted, and must produce the gas used, logs bloom, receipts root and state root its header carries.
+- A block the fixture expects to be invalid for a `TransactionException` must be refused for one of the exceptions it names (`src/exceptions.rs`), not for any error, and leaves the chain at the previous block.
+- Once every block is imported, the chain must end at the fixture's last block, holding the fixture's post-state.
+
+A receipt of an OP transaction that is not a deposit encodes as an Ethereum receipt, so the receipts root is Ethereum's.
+
+The runner and a Satin block add accounts to the state an Ethereum block leaves, and the runner takes them out of the post-state before computing its root (`blockchain::SATIN_ACCOUNTS`):
+
+- the seven predeploys the runner seeds: the six `MegaETH` system contracts and the EIP-7997 factory, each taken out when it holds exactly what the seed wrote — the code, the nonce, the storage and no balance;
+- OP's base-fee vault, which holds the base fee Ethereum burns, taken out when it holds exactly the base fees of the blocks the chain accepted;
+- OP's L1-fee and operator-fee vaults, credited nothing under the neutral configuration, taken out when they hold nothing.
+
+An account on the list is taken out only when the fixture's pre-state does not hold it.
+Any other account that differs, and an account on the list that holds anything else, moves the root, and the block fails.
+
+### Skips
+
+A test is skipped only for a class decided from its content before anything runs, never from how it fares, and each class is counted apart; the printed summary and the JSON summary (`skip_reasons`) give each class's reason beside its count:
+
+- `withdrawals`: a block carries withdrawals, which an OP chain does not process;
+- `blob-transactions`: a block carries a blob transaction, or expects an exception only a blob transaction raises; an OP chain has no blob transactions;
+- `requests`: the test is an EIP-7002, EIP-7251 or EIP-7685 request test, or a block expects an exception about requests; an OP chain makes no requests and no post-block system call;
+- `header-or-body`: a block expects only `BlockException`s for its header or body — its gas limit, base fee, blob gas fields, size, encoding, withdrawals root or hash — a consensus check a node makes before execution; a `BlockException` outside the list is compared, so the executor must refuse the block;
+- `undecodable-invalid-transaction`: a block the fixture expects to be invalid carries a transaction an OP block cannot encode — an EIP-7702 transaction without a recipient, or a fee wider than 128 bits — the transactions the state-test gate skips as unbuildable;
+- `create-collision-with-storage`: the state-test gate's EIP-7610 files (`src/skips.rs`), whose collisions with storage revm cannot see.
+
+The EIP-2935 and EIP-4788 tests are not skipped: their system calls are made and compared like everything else.
+
+### The gate
+
+A deviation the registry already has may list a test block by block: every block whose outcome is not its header's, with the outcome Satin produces for it — its gas used, the keccak hash of its logs bloom, its receipts root and its state root — and why it differs: the deviation's rule acts in it, or it runs as on Ethereum and differs only in the state an earlier listed block left.
+A block that differs passes only when its test's entry lists that block with exactly that outcome; the chain is imported on from Satin's own state, so every later block is held to its header or to its own listed outcome in turn, and a block that differs and is not listed fails the test.
+The chain's head is always compared, and its post-state too when the chain ends on a state its last header describes; when it ends on a state a listed block left, the entry must say so and why.
+A listed test that does not deviate exactly as listed fails, and the summary counts the blocks checked against Ethereum — matched or refused as the fixture expects — apart from the blocks matched to a deviation.
+`--expect-executed`, `--expect-skipped REASON=N` (every class) and `--expect-deviations` pin a full run, as `.github/workflows/exec-spec-satin.yml` does:
+
+```bash
+cargo run --release -p state-test -- btest <main>/blockchain_tests --expect-executed <N> \
+  --expect-skipped withdrawals=<N> ... --expect-deviations
+```
+
+### The legacy state tests
+
+The legacy `GeneralStateTests` are covered through the release's `static/state_tests`: the same tests re-filled for Osaka, which the state-test gate runs as state tests and this gate runs as blockchain tests.
+The `ethereum/legacytests` repository holds no Osaka entries, and Satin's neutral configuration exists for Osaka and Amsterdam only.
+
+## Replaying from a witness
+
+`witness::check_replay` executes an entry on a database and environments that record every read, then replays it twice on a strict database and environments that serve exactly a witness and refuse everything else: once on the record of every database read, once on the witness a node builds from the transaction's returned state and the engine's exports, with the oracle reads the transaction recorded.
+Each replay is held to the first run: the result, the state, the gas by ledger, the usage, the stop, the state changes, and the buckets and block hashes the engine exported.
+The replay on the channel witness is the check a stateless validator's witness must pass, run on Ethereum's fixtures; the database-level replay shows the transaction reads nothing outside its database and environments.
+An entry the engine rejects replays on the record of every database read alone: it has no returned state to build the channel witness from, and is in no block.
+`check_replay` says which witnesses an entry replayed on (`Replayed`), and the fixture test counts the two apart: the entries executed and replayed on both witnesses, and the entries rejected and replayed on the database record alone.
+A fixture written into the test always runs, an executed one and a rejected one; the test over the execution-spec fixtures is always ignored by default and runs only with `-- --ignored` (or `--include-ignored`) and `MEGA_STATE_TEST_FIXTURES` set, as `.github/workflows/exec-spec-satin.yml` runs it for every file of both releases in both modes:
+
+```bash
+MEGA_STATE_TEST_FIXTURES=$PWD/<main>/state_tests cargo test -p mega-state-test --release --test witness -- --ignored
+```
+
+`MEGA_STATE_TEST_SAMPLE` is how many fixture files to take, spread over the tree (300 unless set, 0 for all), `MEGA_STATE_TEST_FORK` the fork (`Osaka` unless set) and `MEGA_STATE_TEST_MODE` the mode (`satin` unless set).
 
 ## Deviations
 

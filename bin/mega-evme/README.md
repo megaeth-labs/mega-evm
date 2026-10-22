@@ -17,11 +17,28 @@ A command-line tool for executing and debugging EVM bytecode, similar to go-ethe
 
 `mega-evme` provides three main commands for EVM execution:
 
-| Command  | Description                                     |
-| -------- | ----------------------------------------------- |
-| `run`    | Execute arbitrary EVM bytecode directly         |
-| `tx`     | Run a transaction with full transaction context |
-| `replay` | Replay an existing transaction from RPC         |
+| Command  | Description                                                              |
+| -------- | ------------------------------------------------------------------------ |
+| `run`    | Execute arbitrary EVM bytecode directly                                  |
+| `tx`     | Run a transaction with full transaction context                          |
+| `replay` | Replay an existing transaction, or whole blocks compared with the chain |
+
+### Two engines
+
+Every command runs on the engine its spec names.
+`Satin` runs on the Satin engine, this repository's `mega-evm`.
+`Equivalence` through `Rex6` run on the legacy engine: the released `mega-evme` and `mega-evm` 1.7.1, linked in as `mega-evme-legacy` and `mega-evm-legacy`, which receive the command's arguments unchanged, so a legacy spec prints exactly what the 1.7.1 tool printed.
+`Rex7` is refused: it never activated on a chain, and Satin supersedes it.
+
+On Satin every output field keeps its legacy name and meaning, and a `satin` object is added with the gas by ledger (`regular_gas`, `state_gas`, `history_gas`, `history_bytes`, `reservoir_remaining`, `floor_gas`) and the limits' counts (`data_size`, `write_records`, `limit_exceeded`, and under `--override.limits` the limits the run was held to, `limits_override`).
+`tests/integration.rs` checks that on every fixture pair, and `tests/satin-differences.md` pins what the two engines produce on the same inputs.
+
+A Satin run is held to Satin's protocol limits, which the spec fixes for every chain.
+`--override.limits <JSON|FILE>` on `run`, `tx` and `replay` replaces the fields it names of those limits, a counterfactual; it is refused on a legacy spec.
+`--genesis <FILE>` gives a chain the tool does not know, a devnet for one, its own Satin configuration: its genesis file's `satinTime` replaces the tool's table for that chain, read with the parser a node reads it with.
+Under it `run` and `tx` default to `--spec Satin`, and a run the file cannot configure — on another chain, on a legacy spec, before the file's `satinTime`, or on a file without Satin keys — is refused rather than run on the tool's table.
+
+The legacy leg is the default feature `legacy`; `--no-default-features` builds a Satin-only binary.
 
 ## Installation
 
@@ -34,9 +51,12 @@ cargo install mega-evme --locked
 Or build from source:
 
 ```bash
-cargo build --release -p mega-evme
+cargo build --release --manifest-path bin/mega-evme/Cargo.toml
 # The binary will be at target/release/mega-evme
 ```
+
+Select the tool by manifest path, not with `-p mega-evme`: it links the released `mega-evme` 1.7.1, a package of the same name, so `-p mega-evme` names two packages.
+The same holds for its tests: `cargo test --manifest-path bin/mega-evme/Cargo.toml`.
 
 The `--locked` flag ensures the exact tested dependency versions are used.
 
@@ -100,7 +120,7 @@ mega-evme run --create 0x6080604052...
 | `--input <HEX>`      | Input data as hex string           |
 | `--inputfile <PATH>` | Path to file containing input data |
 
-For detailed documentation, see [run/README.md](src/run/README.md).
+For detailed documentation, see [the `run` command's page](../../docs/mega-evme/commands/run.md).
 
 ---
 
@@ -113,10 +133,10 @@ Run a transaction with full transaction context. Similar to `run`, but with addi
 mega-evme tx --input 0x1234 --receiver 0x1234...
 
 # Fork state from remote RPC
-mega-evme tx --fork --fork.rpc https://rpc.example.com --receiver 0x1234...
+mega-evme tx --fork --rpc https://rpc.example.com --receiver 0x1234...
 
 # Fork from specific block
-mega-evme tx --fork --fork.block 12345678 --receiver 0x1234...
+mega-evme tx --fork --rpc https://rpc.example.com --fork.block 12345678 --receiver 0x1234...
 ```
 
 #### Transaction Options
@@ -189,27 +209,25 @@ mega-evme tx --tx-type 4 \
 
 #### Fork Options
 
-| Option                  | Default               | Description                          |
-| ----------------------- | --------------------- | ------------------------------------ |
-| `--fork`                | false                 | Enable state forking from RPC        |
-| `--fork.rpc <URL>`      | http://localhost:8545 | RPC URL for forking (env: `RPC_URL`) |
-| `--fork.block <NUMBER>` | latest                | Block number to fork from            |
+| Option                  | Default         | Description                                                                                  |
+| ----------------------- | --------------- | -------------------------------------------------------------------------------------------- |
+| `--fork`                | false           | Enable state forking from RPC                                                                |
+| `--rpc <URL>`           | none — required | RPC URL for forking (alias `--rpc-url`; `--fork.rpc` is accepted); `RPC_URL` is not read     |
+| `--fork.block <NUMBER>` | latest          | Block number to fork from                                                                    |
 
 ---
 
 ### replay Command
 
 Replay an existing transaction from RPC. Fetches the transaction and its execution context from a remote node and re-executes it locally.
+The spec, and so the engine, comes from the chain's schedule at the block's timestamp; `--override.spec Satin` replays the transaction as it would run on Satin.
 
 ```bash
 # Replay a transaction
-mega-evme replay 0x1234...txhash...5678
-
-# Replay with custom RPC
-mega-evme replay 0x1234...txhash --rpc https://rpc.example.com
+mega-evme replay 0x1234...txhash...5678 --rpc https://rpc.example.com
 
 # Replay with execution trace
-mega-evme replay 0x1234...txhash --trace
+mega-evme replay 0x1234...txhash --rpc https://rpc.example.com --trace
 ```
 
 #### Arguments
@@ -220,9 +238,9 @@ mega-evme replay 0x1234...txhash --trace
 
 #### Options
 
-| Option        | Default               | Description                       |
-| ------------- | --------------------- | --------------------------------- |
-| `--rpc <URL>` | http://localhost:8545 | RPC URL to fetch transaction from |
+| Option        | Default         | Description                                                                                                 |
+| ------------- | --------------- | ----------------------------------------------------------------------------------------------------------- |
+| `--rpc <URL>` | none — required | RPC URL to fetch the transaction from (alias `--rpc-url`; `--fork.rpc` is accepted); `RPC_URL` is not read |
 
 #### Transaction Override Options
 
@@ -246,6 +264,28 @@ mega-evme replay 0x1234...txhash --override.input 0xabcdef
 mega-evme replay 0x1234...txhash --override.input-file calldata.hex
 ```
 
+#### Whole Blocks
+
+`--block N[..M]` replays whole blocks, each on the engine its spec names, and compares every receipt (status, gas used, cumulative gas used, logs) and the receipts root with the chain's; the state the block leaves is not compared with the header's state root.
+
+| Option                | Description                                                                                             |
+| --------------------- | ------------------------------------------------------------------------------------------------------- |
+| `--block <N[..M]>`    | Replay block N, or blocks N through M                                                                    |
+| `--block-cache <DIR>` | Read blocks from DIR; write blocks fetched over `--rpc` to it, with what their replay read beyond the trace |
+| `--verify`            | Exit with code 2 when a block differs from the chain                                                     |
+| `--json`              | One JSON record per transaction and per block                                                            |
+
+```bash
+# Check 200 blocks against the chain and record them
+mega-evme replay --block 26400000..26400199 --rpc https://mainnet.megaeth.com/rpc --block-cache ./blocks --verify
+
+# The same blocks on Satin, as NDJSON (the first Satin run reads the L1 fee overhead slot over RPC;
+# later runs of the same blocks can drop --rpc)
+mega-evme replay --block 26400000..26400199 --rpc https://mainnet.megaeth.com/rpc --block-cache ./blocks --override.spec Satin --json > satin.ndjson
+```
+
+Fetching a block needs an archive endpoint with the `debug` namespace (`debug_traceBlockByNumber` with `prestateTracer`); a cached block replays offline.
+
 ---
 
 ## Common Options
@@ -265,7 +305,7 @@ These options are available across all commands.
 
 | Option                 | Default | Description                               |
 | ---------------------- | ------- | ----------------------------------------- |
-| `--spec <SPEC>`        | Rex6    | Spec: `Equivalence`, `MiniRex`, `MiniRex1`, `MiniRex2`, `Rex`, `Rex1`, `Rex2`, `Rex3`, `Rex4`, `Rex5`, `Rex6` (`MiniRex1`/`MiniRex2` are aliases executing `Equivalence`/`MiniRex` behavior) |
+| `--spec <SPEC>`        | Rex6    | Spec: `Satin` (the Satin engine), or `Equivalence`, `MiniRex`, `MiniRex1`, `MiniRex2`, `Rex`, `Rex1`, `Rex2`, `Rex3`, `Rex4`, `Rex5`, `Rex6` (the legacy engine; `MiniRex1`/`MiniRex2` are aliases executing `Equivalence`/`MiniRex` behavior); `Satin` by default under `--genesis` |
 | `--chain-id <ID>`      | 6342    | Chain ID                                  |
 
 ### Block Environment
@@ -350,7 +390,7 @@ mega-evme run --create 0x6080604052... --dump
 # Fork mainnet state and execute against a contract
 mega-evme tx \
   --fork \
-  --fork.rpc https://eth-mainnet.example.com \
+  --rpc https://eth-mainnet.example.com \
   --receiver 0xContractAddress \
   --input 0xMethodSelector...
 ```
@@ -408,4 +448,4 @@ State files use JSON format with Ethereum quantity encoding:
 
 ## See Also
 
-- [run Command Documentation](src/run/README.md)
+- [The `run`, `tx` and `replay` command pages](../../docs/mega-evme/commands/)

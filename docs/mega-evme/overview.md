@@ -7,12 +7,20 @@ description: Execute and debug EVM bytecode locally with MegaETH's gas model, tr
 A command-line tool for executing and debugging EVM bytecode on MegaETH specs.
 Similar to go-ethereum's `evm` command, `mega-evme` provides full control over the execution environment — including MegaETH-specific features like SALT bucket configuration, multidimensional resource limits, and gas detention.
 
+`mega-evme` carries two engines and runs every command on the one its spec names.
+`Satin` runs on the Satin engine.
+`Equivalence` through `Rex6`, the specs the chain has run, run on the legacy engine, the released `mega-evme` and `mega-evm` 1.7.1, so they print exactly what the 1.7.1 tool printed.
+See [Chain and Spec](configuration/chain-and-spec.md#engines).
+
 ## Installation
 
 ```bash
-cargo build --release -p mega-evme
+cargo build --release --manifest-path bin/mega-evme/Cargo.toml
 # Binary: target/release/mega-evme
 ```
+
+The tool is selected by its manifest path rather than with `-p mega-evme`, because it links the released `mega-evme` 1.7.1, a package of the same name.
+`--no-default-features` builds a binary that runs Satin only, without the legacy engine.
 
 ### Prebuilt binary
 
@@ -33,7 +41,7 @@ The same binary is published to the MegaETH artifact registry for internal use.
 | ------------------------------ | ------------------------------------------------------------------------------ |
 | [`run`](commands/run.md)       | Execute arbitrary EVM bytecode directly                                        |
 | [`tx`](commands/tx.md)         | Run a transaction with full transaction context and optional RPC state forking |
-| [`replay`](commands/replay.md) | Replay an existing on-chain transaction from RPC                               |
+| [`replay`](commands/replay.md) | Replay an on-chain transaction, or whole blocks compared with the chain        |
 
 ## Quick Start
 
@@ -69,6 +77,19 @@ mega-evme replay 0xabc123... \
   --trace --tracer opcode
 ```
 
+Run the same bytecode on Satin, which adds the gas by ledger to the output:
+
+```bash
+mega-evme run 0x60016000526001601ff3 --spec Satin --json
+```
+
+Replay a range of blocks and check every receipt against the chain:
+
+```bash
+mega-evme replay --block 26400000..26400009 \
+  --rpc https://mainnet.megaeth.com/rpc --block-cache ./blocks --verify
+```
+
 ## Global Options
 
 These flags apply to all commands.
@@ -78,6 +99,21 @@ These flags apply to all commands.
 | `-v`                | 0       | N/A              | Increase log verbosity (`-v`=error, `-vv`=warn, `-vvv`=info, `-vvvv`=debug, `-vvvvv`=trace) |
 | `--log.file <PATH>` | stderr  | `--log-file`     | Write logs to a file instead of stderr                                                      |
 | `--log.no-color`    | `false` | `--log-no-color` | Disable colored console output                                                              |
+
+## Output and Exit Status
+
+An error is written once, as one line on stderr, and nothing is written to stdout.
+The exit code is 1, whether or not stderr could take the line.
+A command that prints its result to a stdout that was closed (`mega-evme … | head -0`) ends quietly with the status it had.
+
+Text a person reads on a terminal is filtered: escape sequences, control characters (the C0 and C1 ranges, including the one-character CSI and OSC introducers), DEL and the bidirectional overrides are dropped, and line breaks and tabs stay.
+This covers error lines and a transaction's revert reason.
+`--json` output is not filtered: a JSON string carries the same characters, escaped.
+
+The URL given to `--rpc` is written to no log line, error or cache file name with its userinfo (`user:password@`).
+The userinfo is the part of the authority before its last `@`, and it is removed from a URL written without its scheme too.
+A credential anywhere else in the URL, such as an API key in the path or the query, is not recognised and is printed with the URL.
+The URL has to start with `http://` or `https://`.
 
 ## Read more
 

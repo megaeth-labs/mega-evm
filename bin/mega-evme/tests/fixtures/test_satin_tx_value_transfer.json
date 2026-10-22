@@ -1,0 +1,65 @@
+{
+  "description": "Satin: simple value transfer: send 1000 wei to address 0x01",
+  "args": [
+    "tx",
+    "--sender",
+    "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+    "--receiver",
+    "0x0000000000000000000000000000000000000001",
+    "--value",
+    "1000",
+    "--sender.balance",
+    "1ether",
+    "--spec",
+    "Satin"
+  ],
+  "expected": {
+    "success": true,
+    "gas_used": 238400,
+    "logs_count": 1,
+    "receipt": {
+      "type": "0x0",
+      "status": "0x1",
+      "cumulativeGasUsed": "0x3a340",
+      "logs": [
+        {
+          "address": "0xfffffffffffffffffffffffffffffffffffffffe",
+          "topics": [
+            "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+            "0x000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+            "0x0000000000000000000000000000000000000000000000000000000000000001"
+          ],
+          "data": "0x00000000000000000000000000000000000000000000000000000000000003e8",
+          "blockHash": null,
+          "blockNumber": "0x1",
+          "blockTimestamp": "0x1",
+          "transactionHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "transactionIndex": "0x0",
+          "logIndex": "0x0",
+          "removed": false
+        }
+      ],
+      "logsBloom": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000040000000000000000000000000008000000000000000000040000000000000000000000000000000000002000000100000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002000000200008000000000000000000002000000000000000000040400000000000000000000000000000000000000000000000000000000000000000",
+      "transactionHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "transactionIndex": "0x0",
+      "blockHash": null,
+      "blockNumber": "0x1",
+      "gasUsed": "0x3a340",
+      "effectiveGasPrice": "0x0",
+      "from": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+      "to": "0x0000000000000000000000000000000000000001",
+      "contractAddress": null
+    },
+    "satin": {
+      "regular_gas": 24000,
+      "state_gas": 183600,
+      "history_gas": 30800,
+      "history_bytes": 350,
+      "reservoir_remaining": 0,
+      "floor_gas": 21000,
+      "data_size": 510,
+      "write_records": 1,
+      "limit_exceeded": null
+    }
+  }
+}

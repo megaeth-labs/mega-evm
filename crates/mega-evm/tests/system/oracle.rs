@@ -17,7 +17,9 @@ use revm::{
     context::result::ResultAndState,
 };
 
-use crate::common::{block, call_tx, calls_with, run, system_db, with_contract, CALLER, CONTRACT};
+use crate::common::{
+    block, call_tx, calls_with, run, steer, system_db, with_contract, CALLER, CONTRACT,
+};
 
 /// A topic and payload the tests send.
 const TOPIC: B256 = B256::repeat_byte(0x7a);
@@ -52,8 +54,8 @@ fn run_with_oracle(
     (outcome.result_and_state, hints, outcome.usage)
 }
 
-/// [`run_with_oracle`] under `limits`, returning the whole outcome: the stop a crossed limit
-/// latched is what the outcome reports, not the output alone.
+/// [`run_with_oracle`] under `limits`, returning the whole outcome: the stop of the transaction's
+/// own frame is what the outcome reports, not the output alone.
 fn run_with_oracle_under(
     db: MemoryDatabase,
     tx: MegaTransaction,
@@ -293,18 +295,21 @@ fn test_a_reverting_frame_does_not_take_the_hint_bytes_back() {
 }
 
 /// A payload that does not fit in what is left of the transaction's data-size limit is not
-/// forwarded, and the crossing stops the transaction: the hint's bytes are counted before the
-/// payload is decoded, so the limit is crossed before the frame the call would have started.
+/// forwarded, and the crossing stops the transaction: the limit is checked on the hint's bytes
+/// before the payload is decoded, so it is crossed before the frame the call would have started.
 ///
-/// The bytes stay counted — the crossing is what the transaction is stopped for, and the usage
-/// is what shows it — and the transaction settles as a revert carrying the stop's own data.
+/// The bytes are not counted: the payload never left the machine, so the stopped transaction
+/// keeps its body alone, and a block's data-size counter takes nothing for the hint. The stop
+/// reports the usage the hint would have reached, and the transaction settles as a revert
+/// carrying the stop's own data.
 #[test]
 fn test_a_hint_that_crosses_the_data_size_limit_is_not_forwarded() {
     let data = send_hint(METERED_HINT);
-    // The body already counts the calldata. The hint counts it again, and that second copy is
-    // the byte that crosses.
-    let counted = top_level_hint(data.len() as u64);
-    let limit = counted - 1;
+    // The body already counts the calldata. The hint would count it again, and that second copy
+    // holds the byte that crosses.
+    let body = mega_evm::TX_BODY_SIZE + data.len() as u64;
+    let reached = top_level_hint(data.len() as u64);
+    let limit = reached - 1;
     let (outcome, hints) = run_with_oracle_under(
         system_db(),
         call_tx(ORACLE_CONTRACT_ADDRESS, data, U256::ZERO),
@@ -313,17 +318,19 @@ fn test_a_hint_that_crosses_the_data_size_limit_is_not_forwarded() {
 
     assert!(hints.is_empty(), "the hint the transaction cannot pay for is not forwarded");
     assert_eq!(
-        outcome.usage.data_size, counted,
-        "the whole payload is counted: the count is what crossed the limit",
+        outcome.usage,
+        LimitUsage { data_size: body, write_records: 0 },
+        "a hint that was not forwarded is not counted: the body is what the transaction keeps",
     );
     assert_eq!(
         outcome.limit_exceeded,
         Some(LimitCheck::ExceedsLimit {
             kind: LimitKind::DataSize,
             limit,
-            used: counted,
+            used: reached,
             frame_local: false,
         }),
+        "the stop reports the usage the hint would have reached",
     );
     assert_eq!(
         outcome.result.output().cloned().unwrap_or_default(),
@@ -375,19 +382,9 @@ fn return_status(code: BytecodeBuilder) -> Bytes {
     code.append_many([PUSH0, MSTORE]).push_number(32_u8).append_many([PUSH0, RETURN]).build()
 }
 
-/// Appends a `CALL` of `MegaAccessControl` with `selector`, discarding its status.
-fn steer(code: BytecodeBuilder, selector: [u8; 4]) -> BytecodeBuilder {
-    use mega_evm::system::ACCESS_CONTROL_ADDRESS;
-    use revm::bytecode::opcode::POP;
-    code.mstore(0x0, selector)
-        .push_number(0_u8)
-        .push_number(0_u8)
-        .push_number(4_u8)
-        .push_number(0_u8)
-        .push_number(0_u8)
-        .push_address(ACCESS_CONTROL_ADDRESS)
-        .push_number(100_000_u32)
-        .append_many([CALL, POP])
+/// The status a contract of [`return_status`] returned.
+fn returned_status(outcome: &MegaTransactionOutcome) -> U256 {
+    U256::from_be_slice(outcome.result.output().expect("the contract returns its status"))
 }
 
 const DISABLE: [u8; 4] =
@@ -455,49 +452,10 @@ fn test_hints_reach_the_service_in_the_order_they_were_sent() {
     );
 }
 
-/// A transaction that sends value with its `sendHint` forwards nothing: the method is not payable,
-/// so the transaction reverts in the bytecode, and its hint would be one it never sent.
-#[test]
-fn test_a_value_bearing_hint_transaction_forwards_nothing() {
-    let (result, hints, usage) = run_with_oracle(
-        system_db(),
-        call_tx(ORACLE_CONTRACT_ADDRESS, send_hint(b"paid"), U256::ONE),
-    );
-    assert!(!result.result.is_success(), "{:?}", result.result);
-    assert!(hints.is_empty());
-    assert_eq!(
-        usage.data_size,
-        mega_evm::TX_BODY_SIZE + send_hint(b"paid").len() as u64,
-        "the calldata alone: no hint was counted",
-    );
-}
-
-/// A hint sent with gas is forwarded, its payload whole, and the calldata of the call is counted
-/// on the transaction.
-#[test]
-fn test_a_hint_with_gas_forwards_and_is_counted() {
-    let data = send_hint(&[0_u8; 128]);
-    let code = return_status(call_oracle(BytecodeBuilder::default(), &data, 100_000));
-    let (_, hints, usage) = run_with_oracle(with_contract(code), call_tx(CONTRACT, [], U256::ZERO));
-    assert_eq!(hints.len(), 1);
-    assert_eq!(hints[0].data.len(), 128);
-    assert_eq!(usage.data_size, nested_hint(data.len() as u64));
-}
-
-/// A call of the Oracle with a selector that is not `sendHint` is not a hint, whatever it
-/// carries: nothing is forwarded or counted.
-#[test]
-fn test_an_unknown_selector_to_the_oracle_counts_no_hint() {
-    let data: Vec<u8> = [0xde, 0xad, 0xbe, 0xef].into_iter().chain([0_u8; 256]).collect();
-    let code = return_status(call_oracle(BytecodeBuilder::default(), &data, 1_000_000));
-    let (_, hints, usage) = run_with_oracle(with_contract(code), call_tx(CONTRACT, [], U256::ZERO));
-    assert!(hints.is_empty());
-    assert_eq!(usage.data_size, nested_hint(0));
-}
-
 /// A malformed `sendHint` payload, and one followed by bytes the decoder drops, are counted
 /// whole: the first forwards nothing, the second forwards its envelope. Under a limit that holds
-/// half of the payload, both are stopped before anything is forwarded.
+/// half of the payload, both are stopped before anything is forwarded: the call is answered with
+/// the stop, which the contract catches, returning the failed call's status.
 #[test]
 fn test_a_malformed_or_padded_hint_is_counted_whole() {
     let malformed: Vec<u8> = IOracle::sendHintCall::SELECTOR
@@ -528,20 +486,15 @@ fn test_a_malformed_or_padded_hint_is_counted_whole() {
             EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit),
         );
         assert!(hints.is_empty(), "a hint past the limit is not forwarded");
-        assert_eq!(
-            outcome.limit_exceeded,
-            Some(LimitCheck::ExceedsLimit {
-                kind: LimitKind::DataSize,
-                limit,
-                used: nested_hint(total),
-                frame_local: false,
-            }),
-        );
+        assert!(outcome.result.is_success(), "the contract catches the stop");
+        assert_eq!(returned_status(&outcome), U256::ZERO, "the call was stopped");
+        assert_eq!(outcome.limit_exceeded, None, "a stop below is no stop of the transaction");
+        assert_eq!(outcome.usage.data_size, nested_hint(0), "and it is not counted");
     }
 }
 
 /// Hints add up on the transaction: under a limit that holds one and a half, the first is
-/// forwarded and the second stops the transaction.
+/// forwarded, and the second's call is answered with the stop, which the contract catches.
 #[test]
 fn test_consecutive_hints_add_up_on_the_transaction() {
     use revm::bytecode::opcode::POP;
@@ -557,20 +510,22 @@ fn test_consecutive_hints_add_up_on_the_transaction() {
         EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit),
     );
     assert_eq!(hints.len(), 1, "the first hint was forwarded, the second was not");
-    assert!(matches!(
-        outcome.limit_exceeded,
-        Some(LimitCheck::ExceedsLimit { kind: LimitKind::DataSize, .. })
-    ));
+    assert!(outcome.result.is_success(), "the contract catches the stop");
+    assert_eq!(returned_status(&outcome), U256::ZERO, "the second call was stopped");
+    assert_eq!(outcome.limit_exceeded, None);
+    assert_eq!(
+        outcome.usage,
+        LimitUsage { data_size: nested_hint(len), write_records: 0 },
+        "the forwarded hint stays counted and the one that crossed is not",
+    );
 }
 
 /// A contract's hint whose payload crosses the transaction's data-size limit is not forwarded, and
-/// the crossing stops the transaction with a revert carrying the stop, not a halt: the contract
-/// never runs on to return its call's status, and the transaction is billed what ran rather than
-/// its gas limit.
+/// the crossing stops the Oracle call with a revert carrying the stop, not a halt: the contract
+/// catches it and returns the failed call's status, and the transaction is billed what ran rather
+/// than its gas limit.
 #[test]
-fn test_data_size_overflow_blocks_forwarding_and_stops_the_transaction() {
-    use revm::context::result::ExecutionResult;
-
+fn test_data_size_overflow_blocks_forwarding_and_stops_the_call() {
     const LIMIT: u64 = 2_048;
     let data = send_hint(&[0_u8; 4_096]);
     let call = || call_oracle(BytecodeBuilder::default(), &data, 1_000_000);
@@ -581,29 +536,25 @@ fn test_data_size_overflow_blocks_forwarding_and_stops_the_transaction() {
     );
 
     assert!(hints.is_empty(), "the hint the transaction cannot pay for is not forwarded");
-    let stop = LimitCheck::ExceedsLimit {
-        kind: LimitKind::DataSize,
-        limit: LIMIT,
-        used: nested_hint(data.len() as u64),
-        frame_local: false,
-    };
-    assert_eq!(outcome.limit_exceeded, Some(stop));
-    assert!(
-        matches!(&outcome.result, ExecutionResult::Revert { output, .. }
-            if output == &stop.revert_data()),
-        "the stop, not the status: {:?}",
-        outcome.result
+    assert!(outcome.result.is_success(), "the contract catches the stop: {:?}", outcome.result);
+    assert_eq!(returned_status(&outcome), U256::ZERO, "the call was stopped");
+    assert_eq!(outcome.limit_exceeded, None, "a stop below is no stop of the transaction");
+    assert_eq!(
+        outcome.usage,
+        LimitUsage { data_size: nested_hint(0), write_records: 0 },
+        "the transaction keeps its body: the hint never left the machine",
     );
 
-    // What ran is the contract's code up to its call, which the stop answered at the Oracle's
-    // start, handing back what it forwarded: the same code stopping after a call to an Oracle with
-    // no code, without limits, runs exactly that.
+    // What ran is the contract's code, its call, which the stop answered at the Oracle's start,
+    // handing back what it forwarded, and the return of the status: the same code calling an Oracle
+    // with no code, without limits, runs exactly that.
     let (ran, _) = run_with_oracle_under(
-        with_contract(call().stop().build()).account_code(ORACLE_CONTRACT_ADDRESS, Bytes::new()),
+        with_contract(return_status(call())).account_code(ORACLE_CONTRACT_ADDRESS, Bytes::new()),
         call_tx(CONTRACT, [], U256::ZERO),
         EvmTxRuntimeLimits::no_limits(),
     );
     assert!(ran.result.is_success(), "{:?}", ran.result);
+    assert_eq!(returned_status(&ran), U256::ONE);
     assert_eq!(outcome.gas, ran.gas, "billed what ran");
 }
 

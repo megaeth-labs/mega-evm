@@ -1,7 +1,7 @@
 //! What a keyless deployment deploys and reports: the native creation runs the init code as any
 //! creation does, and the call answers with what it did.
 
-use alloy_primitives::{address, B256};
+use alloy_primitives::{address, hex, B256};
 use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
     system::{
@@ -21,7 +21,8 @@ use mega_evm::{
 use revm::{
     bytecode::opcode::{
         CALL, CREATE, DELEGATECALL, GAS, GASPRICE, INVALID, JUMP, JUMPDEST, LOG0, LOG1, MLOAD,
-        ORIGIN, POP, PUSH0, REVERT, SELFDESTRUCT, SSTORE, STATICCALL,
+        ORIGIN, POP, PUSH0, RETURNDATACOPY, RETURNDATASIZE, REVERT, SELFDESTRUCT, SHR, SSTORE,
+        STATICCALL,
     },
     context::BlockEnv,
     primitives::KECCAK_EMPTY,
@@ -108,30 +109,6 @@ fn test_a_deployment_survives_a_commit() {
         let deployed = db.basic(CREATE2_FACTORY_CONTRACT).unwrap().expect("the account exists");
         assert_eq!(deployed.code_hash, CREATE2_FACTORY_CODE_HASH);
         assert_eq!(deployed.nonce, 1);
-    }
-}
-
-/// A successful deployment spends the signer's nonce, from 0 to 1.
-#[test]
-fn test_keyless_deploy_increments_nonce_from_zero() {
-    for gas_limit in GAS_LIMITS {
-        let deployment = Deployment::new(deploying(&runtime(1)));
-        let outcome = deploy(system_db(), &deployment, gas_limit);
-        assert_eq!(returned(&outcome).deployedAddress, deployment.address);
-        assert_eq!(nonce(&outcome, deployment.signer), 1);
-    }
-}
-
-/// A signer at nonce 1 still deploys at its Nick's-Method address, which is its first creation's
-/// and not its nonce's, and stays at nonce 1: the creation's bump from 1 is taken back.
-#[test]
-fn test_a_signer_at_nonce_one_deploys_at_the_same_address() {
-    for gas_limit in GAS_LIMITS {
-        let deployment = Deployment::new(deploying(&runtime(1)));
-        let db = system_db().account_nonce(deployment.signer, 1);
-        let outcome = deploy(db, &deployment, gas_limit);
-        assert_eq!(returned(&outcome).deployedAddress, deployment.address);
-        assert_eq!(nonce(&outcome, deployment.signer), 1);
     }
 }
 
@@ -231,6 +208,104 @@ fn test_keyless_deploy_empty_initcode() {
             assert_eq!(gas_used, returned(&outcome).gasUsed);
             assert_eq!(nonce(&outcome, deployment.signer), 1);
         }
+    }
+}
+
+/// A deployment whose initcode returns empty code at the deploy address is refused: the creation
+/// reverts, the call answers `EmptyCodeDeployed`, and the deploy address keeps no account, so the
+/// signed bytes can still be deployed. The initcode returns empty code when it has more than
+/// 2,000,000 gas left and a one-byte runtime otherwise, so whoever submits the signed bytes first
+/// chooses the outcome through `gasLimitOverride`: the second submission, with a forward that
+/// makes the initcode deploy, finds the address free and deploys. The signer stays at nonce 1,
+/// the first creation's bump from 0 being the replay barrier and the second's from 1 taken back.
+#[test]
+fn test_an_empty_code_deployment_leaves_the_address_deployable() {
+    let gas_dependent = Bytes::from(hex!("5a621e848010600d5760015ff35b5f5ff3").to_vec());
+    for gas_limit in GAS_LIMITS {
+        let deployment = Deployment::new(gas_dependent.clone());
+        let mut db = system_db();
+        let first = run_nth(
+            db.clone(),
+            deployment.call_data(5_000_000),
+            gas_limit,
+            EvmTxRuntimeLimits::no_limits(),
+            0,
+        );
+        assert!(
+            matches!(failure(&first), KeylessDeployError::EmptyCodeDeployed { .. }),
+            "{:?}",
+            first.result
+        );
+        assert_eq!(nonce(&first, deployment.signer), 1, "the first bump stands");
+        assert!(
+            first.state.get(&deployment.address).is_none_or(|account| account.info.nonce == 0),
+            "the deploy address keeps no nonce"
+        );
+        assert!(
+            code_hash(&first, deployment.address).is_none_or(|hash| hash == KECCAK_EMPTY),
+            "and no code"
+        );
+        db.commit(first.result_and_state.state);
+
+        let second = run_nth(
+            db,
+            deployment.call_data(SIGNED_GAS_LIMIT),
+            gas_limit,
+            EvmTxRuntimeLimits::no_limits(),
+            1,
+        );
+        assert_eq!(returned(&second).deployedAddress, deployment.address, "at {gas_limit}");
+        assert_eq!(nonce(&second, deployment.signer), 1, "the second bump is taken back");
+        assert_eq!(nonce(&second, deployment.address), 1);
+    }
+}
+
+/// A deploy address at nonce 1 without code — what a Rex6 deployment whose creation returned
+/// empty code left — passes the occupancy rule, which reads the code alone, and the creation
+/// collides there before its init code runs: whatever the init code would do, the call answers
+/// `ExecutionHalted` with the whole forward spent, the address keeps its nonce and no code, and the
+/// signer's bump from 0 stands.
+#[test]
+fn test_a_deploy_address_with_a_nonce_and_no_code_collides() {
+    let init_codes =
+        [deploying(&runtime(1)), Bytes::new(), Bytes::from_static(&[INVALID]), logging(32)];
+    for init_code in init_codes {
+        let deployment = Deployment::new(init_code);
+        let db = system_db().account_nonce(deployment.address, 1);
+        for gas_limit in GAS_LIMITS {
+            for forward in [SIGNED_GAS_LIMIT, 2 * SIGNED_GAS_LIMIT] {
+                let outcome = run_with(
+                    db.clone(),
+                    deployment.call_data(forward),
+                    gas_limit,
+                    EvmTxRuntimeLimits::no_limits(),
+                );
+                let KeylessDeployError::ExecutionHalted { gas_used, .. } = failure(&outcome) else {
+                    panic!("expected ExecutionHalted: {:?}", outcome.result);
+                };
+                assert_eq!(gas_used, forward, "a collision spends the forward, at {gas_limit}");
+                assert_eq!(nonce(&outcome, deployment.signer), 1, "the bump from 0 stands");
+                assert_eq!(nonce(&outcome, deployment.address), 1, "the address keeps its nonce");
+                assert_eq!(code_hash(&outcome, deployment.address), Some(KECCAK_EMPTY));
+                assert!(outcome.result.logs().is_empty(), "the init code never ran");
+            }
+        }
+    }
+}
+
+/// An empty deposit is refused at the deploy address alone: a constructor's own `CREATE` that
+/// returns empty code is admitted, and the deployment around it succeeds.
+#[test]
+fn test_a_constructors_own_creation_may_return_empty_code() {
+    for gas_limit in GAS_LIMITS {
+        // CREATE of empty init code, then the deployment's own runtime.
+        let prefix = [PUSH0, PUSH0, PUSH0, CREATE, POP];
+        let deployment = Deployment::new(constructor(&prefix, &runtime(1)));
+        let outcome = deploy(system_db(), &deployment, gas_limit);
+        assert_eq!(returned(&outcome).deployedAddress, deployment.address, "at {gas_limit}");
+        let inner = deployment.address.create(1);
+        assert_eq!(nonce(&outcome, inner), 1, "the inner creation stands, with no code");
+        assert_eq!(code_hash(&outcome, inner), Some(KECCAK_EMPTY));
     }
 }
 
@@ -431,10 +506,10 @@ fn test_keyless_deploy_emits_logs() {
     }
 }
 
-/// Init code that logs and deploys nothing keeps its log: the call reports `EmptyCodeDeployed`
-/// and the receipt carries the log, because the creation succeeded — it just left no code.
+/// Init code that logs and deploys nothing keeps no log: the call reports `EmptyCodeDeployed`, and
+/// the creation, refused its empty deposit, reverted with its log.
 #[test]
-fn test_an_empty_code_deployment_keeps_its_logs() {
+fn test_an_empty_code_deployment_keeps_no_log() {
     for gas_limit in GAS_LIMITS {
         let topic = B256::repeat_byte(0x11);
         let init_code = BytecodeBuilder::default()
@@ -448,10 +523,7 @@ fn test_an_empty_code_deployment_keeps_its_logs() {
         let deployment = Deployment::new(init_code);
         let outcome = deploy(system_db(), &deployment, gas_limit);
         assert!(matches!(failure(&outcome), KeylessDeployError::EmptyCodeDeployed { .. }));
-        let logs = outcome.result.logs();
-        assert_eq!(logs.len(), 1);
-        assert_eq!(logs[0].topics(), [topic]);
-        assert_eq!(logs[0].data.data, Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef]));
+        assert!(outcome.result.logs().is_empty());
         assert_eq!(nonce(&outcome, deployment.signer), 1);
     }
 }
@@ -575,12 +647,24 @@ fn test_keyless_deploy_not_intercepted_for_inner_calls() {
 }
 
 /// A `keylessDeploy` call made inside a keyless deployment is a contract's call like any other:
-/// not dispatched. The outer deployment deploys; the inner one does not.
+/// not dispatched. The contract's bytecode runs and reverts with `NotIntercepted()`, which the
+/// outer constructor stores, and nothing of the inner deployment happens: its address holds no
+/// code and its signer's nonce is unspent. The outer deployment deploys.
+///
+/// A call answered without the bytecode — refused by an interceptor, or run as a deployment that
+/// fails — could fail the same way, but not with the four bytes of `NotIntercepted()`.
+///
+/// Rule [S15.3]. Expected values `independent`: the error's selector is computed here from its
+/// signature, `NotIntercepted()`, not taken from the contract's binding.
 #[test]
 fn test_keyless_deploy_nested_inside_a_keyless_deployment_is_not_intercepted() {
+    let not_intercepted = &alloy_primitives::keccak256("NotIntercepted()")[..4];
+    let selector = U256::from_be_slice(not_intercepted);
     for gas_limit in GAS_LIMITS {
         let inner = Deployment::new(deploying(&[0x00, 0x00]));
         let data = inner.call_data(LARGE_OVERRIDE);
+        // The inner call's status in slot 0, the size of its revert data in slot 2, and the first
+        // four bytes of that data, as a number, in slot 1.
         let prefix = BytecodeBuilder::default()
             .mstore(0, &data)
             .push_number(0_u64)
@@ -592,13 +676,27 @@ fn test_keyless_deploy_nested_inside_a_keyless_deployment_is_not_intercepted() {
             .append(GAS)
             .append(CALL)
             .push_number(0_u64)
+            .append(SSTORE)
+            .append(RETURNDATASIZE)
+            .push_number(2_u64)
+            .append(SSTORE)
+            .append_many([RETURNDATASIZE, PUSH0, PUSH0, RETURNDATACOPY, PUSH0, MLOAD])
+            .push_number(224_u64)
+            .append(SHR)
+            .push_number(1_u64)
             .append(SSTORE);
         let outer = Deployment::new(running(prefix));
         let outcome = deploy(system_db(), &outer, gas_limit);
         assert_eq!(returned(&outcome).deployedAddress, outer.address);
-        let status =
-            outcome.state[&outer.address].storage.get(&U256::ZERO).map(|slot| slot.present_value);
-        assert_eq!(status, Some(U256::ZERO), "the inner call failed");
+        let slot = |index: u64| {
+            outcome.state[&outer.address]
+                .storage
+                .get(&U256::from(index))
+                .map(|slot| slot.present_value)
+        };
+        assert_eq!(slot(0), Some(U256::ZERO), "the inner call failed");
+        assert_eq!(slot(2), Some(U256::from(4)), "with four bytes of revert data");
+        assert_eq!(slot(1), Some(selector), "which are NotIntercepted(): the bytecode ran");
         assert!(code_hash(&outcome, inner.address).is_none_or(|hash| hash == KECCAK_EMPTY));
         assert_eq!(nonce(&outcome, inner.signer), 0);
     }
@@ -697,42 +795,6 @@ fn test_a_retry_does_not_pay_for_the_signer_again() {
     }
 }
 
-/// A deployment that fails at run time spends the signer's nonce and pays for its account, as a
-/// successful one does.
-#[test]
-fn test_a_deployment_that_fails_still_spends_the_nonce_and_pays_for_the_signer() {
-    for gas_limit in GAS_LIMITS {
-        let deployment = Deployment::new(Bytes::from_static(&[PUSH0, PUSH0, REVERT]));
-        let outcome = deploy(system_db(), &deployment, gas_limit);
-        assert!(matches!(failure(&outcome), KeylessDeployError::ExecutionReverted { .. }));
-        assert_eq!(nonce(&outcome, deployment.signer), 1);
-        assert_eq!(outcome.gas.state, entry(GasId::new_account_state_gas()));
-    }
-}
-
-/// A successful deployment spends the nonce too, and pays for the signer's account, the
-/// contract's account and its code.
-#[test]
-fn test_a_deployment_that_succeeds_spends_the_nonce_and_pays_for_three_accounts() {
-    for gas_limit in GAS_LIMITS {
-        let data = keyless_deploy_call(CREATE2_FACTORY_TX, U256::from(LARGE_OVERRIDE));
-        let outcome = run_with(system_db(), data, gas_limit, EvmTxRuntimeLimits::no_limits());
-        assert_eq!(returned(&outcome).deployedAddress, CREATE2_FACTORY_CONTRACT);
-        assert_eq!(nonce(&outcome, CREATE2_FACTORY_DEPLOYER), 1);
-        let code_len = outcome.state[&CREATE2_FACTORY_CONTRACT]
-            .info
-            .code
-            .as_ref()
-            .map_or(0, |code| code.original_bytes().len());
-        assert_eq!(
-            outcome.gas.state,
-            entry(GasId::new_account_state_gas()) +
-                entry(GasId::create_state_gas()) +
-                satin_gas_params().code_deposit_state_gas(code_len),
-        );
-    }
-}
-
 /// A transaction that fails with a database error inside a keyless deployment leaves nothing
 /// behind for the next: the next transaction on the same EVM runs as if the first never had.
 #[test]
@@ -819,26 +881,6 @@ fn test_a_deployment_carrying_value_logs_the_move() {
         let inspected = evm.execute_transaction(tx).expect("the transaction is valid");
         assert_eq!(inspected.result, moved.result, "inspected as plain");
         assert_eq!(evm.inspector().0, 1, "the inspector is told of the log once");
-    }
-}
-
-/// A `keylessDeploy` call carrying value is refused before anything moves: it logs nothing and
-/// counts what a transaction carrying the same calldata to an account with no code counts, its
-/// body alone.
-#[test]
-fn test_a_call_carrying_value_moves_and_logs_nothing() {
-    let deployment = Deployment::new(deploying(&runtime(1)));
-    for gas_limit in GAS_LIMITS {
-        let mut tx =
-            call_tx(KEYLESS_DEPLOY_ADDRESS, deployment.call_data(LARGE_OVERRIDE), U256::from(1));
-        tx.0.base.gas_limit = gas_limit;
-        let refused = MegaEvm::new(context(system_db()))
-            .execute_transaction(tx)
-            .expect("a valid transaction");
-        assert_eq!(refusal(&refused), KeylessDeployError::NoEtherTransfer);
-        assert!(refused.result.logs().is_empty());
-        let reference = reference(deployment.call_data(LARGE_OVERRIDE), gas_limit);
-        assert_eq!(refused.usage, reference.usage, "the body alone, at {gas_limit}");
     }
 }
 

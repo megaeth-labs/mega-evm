@@ -26,8 +26,8 @@
 //! - A call carrying value is refused `NoEtherTransfer()`, having paid the overhead, before revm
 //!   builds its frame: no value moves, and nothing its start would write is counted.
 //! - The dispatch is by address and selector, whatever the address holds: where the state holds no
-//!   contract code, the frame is built on the contract's own. A chain holds it from the fork that
-//!   deploys it on.
+//!   contract code, the frame is built on the contract's own. A chain Satin runs on holds it, as
+//!   Rex2 deployed it, and Satin's activation block checks it.
 //! - `ORIGIN` and `GASPRICE` in the init code are the transaction's own.
 //! - The creation runs at depth 1, as the call's child: one level below the same init code sent as
 //!   a creation transaction, which runs at depth 0. Its frames reach the call-stack limit one frame
@@ -50,6 +50,13 @@
 //!   do that, with a `CREATE` or `CREATE2`, successful or not: a signer with other code is refused
 //!   `SignerHasCode()` unless EIP-3607 is disabled. The nonce is never moved back under a later
 //!   bump, because a later bump may stand for an account.
+//! - A constructor that returns empty code for the deploy address is refused its empty deposit: the
+//!   creation reverts, taking its logs and writes with it, and the call answers
+//!   `EmptyCodeDeployed()`, so the address stays deployable. A constructor that destroys its own
+//!   account (EIP-6780) is left as it is and gets the same answer, since the account keeps no code.
+//!   A creation the constructor makes itself may return empty code. Whoever submits the signed
+//!   bytes chooses the forward through `gasLimitOverride`, so an init code that branches on its gas
+//!   cannot be made to occupy the address without code.
 //! - A signer with no account is charged its account as state gas, once, by the call: the nonce
 //!   bump creates it, and no other charge does.
 //! - The call pays what the `CREATE` opcode charges its frame: its regular gas, which stays spent,
@@ -58,22 +65,30 @@
 //! - `gasUsed` is what the creation spent, with no transaction intrinsic: the sandbox of the legacy
 //!   engine ran the deployment as a transaction of its own, this engine does not. It is counted
 //!   before refunds: a refund the creation earns goes to the transaction, as any frame's does.
-//! - A limit the deployment crosses stops it as it stops any frame: a frame budget reverts the
-//!   creation, and the call returns `ExecutionReverted` with the limit's revert data; a transaction
-//!   limit stops the transaction, and the call reverts with the stop, taking back the signer's
-//!   nonce with everything else.
+//! - A limit the deployment crosses stops the frame that crosses it, as it stops any frame. The
+//!   creation crossing a limit — its budget or the transaction's, its start's records or its init
+//!   code's work — reverts with the stop, and the call returns `ExecutionReverted` with the stop's
+//!   revert data, keeping what the creation's start wrote. The call crossing one itself — its own
+//!   charges past gas detention's limit, or a limit the nonce record a failed creation leaves it
+//!   crosses — reverts with the stop, taking back the signer's nonce with everything else.
+//!
+//! A creation an inspector revives — a tool's `create_end` that turns a failed creation into a
+//! success at an address of its own, as Foundry's `expectRevert` does — settles as a frame that
+//! kept nothing, and the call answers `AddressMismatch()` when that address is not the deploy
+//! address.
 //!
 //! # The error ABI
 //!
-//! The contract's errors are unchanged, and so are the rules that produce them and the order they
-//! are checked in, so a call several rules refuse reports the legacy engine's error. Four have
-//! no producer here: `ParentBudgetExceeded` and `InvalidTransaction` were the sandbox's, which had
-//! a budget of its own to preflight and a transaction of its own to validate;
-//! `InsufficientComputeGas` was the compute-gas limit's, which is the execution cap on the regular
-//! pool here, so a call that cannot pay the overhead runs out of gas; and `InternalError` was a
-//! failed read, which fails the transaction with its cause here, as it does at every other site.
-//! `AddressMismatch` and `NoContractCreated` stay as the answers to a creation revm reports at an
-//! address other than the pinned one, which no deployment reaches.
+//! The rules that produce the contract's errors are the legacy engine's, and so is the order they
+//! are checked in, so a call several rules refuse reports the legacy engine's error. The interface
+//! no longer declares the four errors only the legacy engine produced: `ParentBudgetExceeded` and
+//! `InvalidTransaction` were the sandbox's, which had a budget of its own to preflight and a
+//! transaction of its own to validate; `InsufficientComputeGas` was the compute-gas limit's, which
+//! is the execution cap on the regular pool here, so a call that cannot pay the overhead runs out
+//! of gas; and `InternalError` was a failed read, which fails the transaction with its cause here,
+//! as it does at every other site. Dropping them changes no deployed byte: the contract's bytecode
+//! never names them. `AddressMismatch` and `NoContractCreated` stay as the answers to a creation
+//! revm reports at an address other than the pinned one, which no deployment reaches.
 //!
 //! # The contract
 //!
@@ -94,7 +109,7 @@ pub use error::*;
 pub use tx::*;
 
 pub(crate) use dispatch::{is_dispatched, ready, run, runs, KeylessFrame};
-pub(crate) use settle::{returning, settle};
+pub(crate) use settle::{refuses_empty_deposit, returning, settle};
 
 use alloy_primitives::{address, Address};
 

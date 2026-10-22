@@ -18,7 +18,7 @@ use std::vec::Vec;
 
 use alloy_primitives::Address;
 
-use super::{LimitUsage, UNLIMITED, WRITE_RECORD};
+use super::{LimitUsage, WRITE_RECORD};
 
 /// One frame's lane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,9 +51,8 @@ pub(crate) struct Lane {
     /// Whether the caller's record on this lane is a creator's nonce, which survives the
     /// creation's failure once the nonce was bumped.
     pub(crate) creator_record: bool,
-    /// The most the frame may keep: data-size bytes and write records, each `u64::MAX` where the
-    /// frame has no budget.
-    pub(crate) budget: LimitUsage,
+    /// The most data-size bytes the frame may keep, `u64::MAX` where the frame has no budget.
+    pub(crate) budget: u64,
     /// What is left of the history allowance this frame was granted, if it was granted one. It
     /// never enters the frame's gas, and what it does not spend disappears with the frame.
     pub(crate) stipend_remaining: u64,
@@ -69,7 +68,7 @@ impl Lane {
     pub(crate) const fn new(
         address: Option<Address>,
         account_recorded: bool,
-        budget: LimitUsage,
+        budget: u64,
         history_charge: u64,
     ) -> Self {
         Self {
@@ -91,7 +90,7 @@ impl Lane {
     /// A lane for a frame that does not run: a result built without an interpreter. Its caller
     /// paid `history_charge` for records nothing made, so all of it comes back.
     pub(crate) const fn empty(history_charge: u64) -> Self {
-        Self { records_made: false, ..Self::new(None, false, UNLIMITED, history_charge) }
+        Self { records_made: false, ..Self::new(None, false, u64::MAX, history_charge) }
     }
 
     /// The history gas the caller gets back when this frame returns.
@@ -124,7 +123,9 @@ impl Lane {
     /// is at most the share of what the caller had left.
     pub(crate) const fn hands_caller_unchecked(&self, success: bool) -> bool {
         if success {
-            self.net().crossing(self.budget).is_some()
+            // A lane that stands in for a creation's discarded one carries its creator's nonce
+            // record, which the discard already landed on the creator.
+            self.net().exceeds_data_size(self.budget) || (!self.records_made && self.creator_record)
         } else {
             self.creator_record
         }
@@ -135,9 +136,9 @@ impl Lane {
         self.used.saturating_sub(self.refund)
     }
 
-    /// What the frame may still keep: the data-size bytes and the write records.
-    pub(crate) const fn remaining_budget(&self) -> LimitUsage {
-        self.budget.saturating_sub(self.net())
+    /// The data-size bytes the frame may still keep.
+    pub(crate) const fn remaining_budget(&self) -> u64 {
+        self.budget.saturating_sub(self.net().data_size)
     }
 }
 
@@ -272,38 +273,6 @@ impl FrameLimitTracker {
         self.total_used = self.total_used.saturating_add(WRITE_RECORD);
     }
 
-    /// Drops the caller's record from the running frame's lane: the frame failed before the
-    /// write it stands for happened (a creation that did not bump the creator's nonce).
-    pub(crate) fn drop_caller_record(&mut self) {
-        let [.., caller, lane] = self.lanes.as_mut_slice() else { return };
-        if !lane.holds_caller_record {
-            return;
-        }
-        caller.account_recorded = false;
-        lane.holds_caller_record = false;
-        lane.creator_record = false;
-        lane.used = lane.used.saturating_sub(WRITE_RECORD);
-        self.total_used = self.total_used.saturating_sub(WRITE_RECORD);
-    }
-
-    /// Takes back everything the running frame's start counted, its caller's record included
-    /// ([`drop_caller_record`](Self::drop_caller_record)): the start did not happen after all, so
-    /// the lane keeps nothing whatever the frame's answer, and its caller gets back all it paid
-    /// for the records. Must run before the frame runs, when its start is all the lane holds.
-    pub(crate) fn undo_frame_start(&mut self) {
-        self.drop_caller_record();
-        let Some(lane) = self.lanes.last_mut() else { return };
-        debug_assert_eq!(
-            lane.refund,
-            LimitUsage::ZERO,
-            "a frame that has not run took nothing back"
-        );
-        debug_assert_eq!(lane.log_and_code_bytes, 0, "a frame that has not run logged nothing");
-        self.total_used = self.total_used.saturating_sub(lane.used);
-        lane.used = LimitUsage::ZERO;
-        lane.records_made = false;
-    }
-
     /// Settles the running frame's lane as its failure would, before the frame returns: what it
     /// counted is discarded, its caller's record with it, and an empty lane stands in for it,
     /// holding the history its caller gets back for records the failure did not keep. So the frame
@@ -311,9 +280,15 @@ impl FrameLimitTracker {
     ///
     /// For a frame whose journal checkpoint was reverted and whose result then became a success
     /// all the same: the lane follows the checkpoint, not the result.
+    ///
+    /// A creation's nonce record outlives its failure, so it has landed on the creator's lane
+    /// unchecked, and the stand-in remembers it: the creator is held to its budget when the
+    /// stand-in returns, as it is when the creation fails.
     pub(crate) fn discard_running_lane(&mut self) {
         let Some(lane) = self.pop(false) else { return };
-        self.lanes.push(Lane::empty(lane.history_refund(false)));
+        let mut standing_in = Lane::empty(lane.history_refund(false));
+        standing_in.creator_record = lane.creator_record;
+        self.lanes.push(standing_in);
     }
 
     /// Takes the record of the running frame's own account back from its lane, where a child
@@ -412,13 +387,13 @@ mod tests {
         let mut t = FrameLimitTracker::default();
         assert_eq!(t.depth(), 0);
         assert!(t.current().is_none(), "no frame has started");
-        t.push(Lane::new(Some(ADDR), false, bytes(7), 0));
+        t.push(Lane::new(Some(ADDR), false, 7, 0));
         t.push(Lane::empty(0));
         assert_eq!(t.depth(), 2);
         assert_eq!(t.current().unwrap().address, None, "the empty lane is the running one");
         assert!(t.pop(false).is_some());
         assert_eq!(t.depth(), 1);
-        assert_eq!(t.current().unwrap().budget, bytes(7));
+        assert_eq!(t.current().unwrap().budget, 7);
         assert!(t.pop(true).is_some());
         assert_eq!(t.depth(), 0);
         assert!(t.current().is_none());
@@ -431,7 +406,7 @@ mod tests {
         let mut t = FrameLimitTracker::default();
         t.record_caller(true, 0);
         assert_eq!(t.net(), LimitUsage::ZERO);
-        t.push(Lane::new(Some(ADDR), false, UNLIMITED, 0));
+        t.push(Lane::new(Some(ADDR), false, u64::MAX, 0));
         t.record_caller(true, 0);
         assert_eq!(t.net(), LimitUsage::ZERO);
         assert!(!t.current().unwrap().holds_caller_record);
@@ -441,11 +416,11 @@ mod tests {
     #[test]
     fn test_record_caller_records_a_caller_once() {
         let mut t = FrameLimitTracker::default();
-        t.push(Lane::new(Some(ADDR), false, UNLIMITED, 0));
-        t.push(Lane::new(None, true, UNLIMITED, 0));
+        t.push(Lane::new(Some(ADDR), false, u64::MAX, 0));
+        t.push(Lane::new(None, true, u64::MAX, 0));
         t.record_caller(true, 0);
         assert!(t.pop(true).is_some());
-        t.push(Lane::new(None, true, UNLIMITED, 0));
+        t.push(Lane::new(None, true, u64::MAX, 0));
         t.record_caller(true, 0);
         assert!(!t.current().unwrap().holds_caller_record, "the caller is recorded already");
         assert_eq!(t.net(), WRITE_RECORD);
@@ -465,19 +440,19 @@ mod tests {
         assert_eq!(t.net(), bytes(100));
 
         // Frame 1.
-        t.push(Lane::new(Some(ADDR), false, UNLIMITED, 0));
+        t.push(Lane::new(Some(ADDR), false, u64::MAX, 0));
         t.record(bytes(30));
         t.refund(bytes(10));
         assert_eq!(t.net(), t.net_uncached());
 
         // Frame 2, nested.
-        t.push(Lane::new(None, false, UNLIMITED, 0));
+        t.push(Lane::new(None, false, u64::MAX, 0));
         t.record(bytes(15));
         t.refund(bytes(3));
         assert_eq!(t.net(), t.net_uncached());
 
         // Frame 3 fails: its usage and refund leave the totals.
-        t.push(Lane::new(None, false, UNLIMITED, 0));
+        t.push(Lane::new(None, false, u64::MAX, 0));
         t.record(bytes(11));
         t.refund(bytes(2));
         let before_revert = t.net();
@@ -487,7 +462,7 @@ mod tests {
         assert_eq!(t.net(), bytes(before_revert.data_size - 9));
 
         // Frame 3 again, succeeding: merging moves usage, the totals do not change.
-        t.push(Lane::new(None, false, UNLIMITED, 0));
+        t.push(Lane::new(None, false, u64::MAX, 0));
         t.record(bytes(6));
         t.refund(bytes(1));
         let before_success = t.net();
@@ -516,9 +491,9 @@ mod tests {
     fn test_log_and_code_bytes_follow_their_frame() {
         let mut t = FrameLimitTracker::default();
         t.record_log_and_code_bytes(5);
-        t.push(Lane::new(Some(ADDR), false, UNLIMITED, 0));
+        t.push(Lane::new(Some(ADDR), false, u64::MAX, 0));
         t.record_log_and_code_bytes(10);
-        t.push(Lane::new(None, false, UNLIMITED, 0));
+        t.push(Lane::new(None, false, u64::MAX, 0));
         t.record_log_and_code_bytes(100);
         assert_eq!(t.log_and_code_bytes(), 115);
 
@@ -526,7 +501,7 @@ mod tests {
         assert_eq!(failed.log_and_code_bytes, 100);
         assert_eq!(t.log_and_code_bytes(), 15, "the failed child's bytes are gone");
 
-        t.push(Lane::new(None, false, UNLIMITED, 0));
+        t.push(Lane::new(None, false, u64::MAX, 0));
         t.record_log_and_code_bytes(20);
         t.pop(true);
         assert_eq!(t.log_and_code_bytes(), 35);
@@ -539,7 +514,7 @@ mod tests {
         t.pop(false);
         assert_eq!(t.log_and_code_bytes(), 5, "only what was outside the outermost frame is left");
 
-        t.push(Lane::new(Some(ADDR), false, UNLIMITED, 0));
+        t.push(Lane::new(Some(ADDR), false, u64::MAX, 0));
         t.record_log_and_code_bytes(7);
         t.pop(true);
         assert_eq!(t.log_and_code_bytes(), 12, "the outermost frame's success keeps its bytes");
@@ -552,7 +527,7 @@ mod tests {
     #[test]
     fn test_net_usage_saturates_when_refund_exceeds_used() {
         let mut t = FrameLimitTracker::default();
-        t.push(Lane::new(None, false, UNLIMITED, 0));
+        t.push(Lane::new(None, false, u64::MAX, 0));
         t.record(bytes(10));
         t.refund(bytes(100));
         assert_eq!(t.net(), LimitUsage::ZERO);
@@ -567,16 +542,16 @@ mod tests {
     #[test]
     fn test_failed_child_discards_sender_record_but_keeps_creator_record() {
         let mut t = FrameLimitTracker::default();
-        t.push(Lane::new(Some(ADDR), false, UNLIMITED, 0));
+        t.push(Lane::new(Some(ADDR), false, u64::MAX, 0));
 
-        t.push(Lane::new(None, true, UNLIMITED, 0));
+        t.push(Lane::new(None, true, u64::MAX, 0));
         t.record_caller(false, 0);
         t.record(WRITE_RECORD);
         t.pop(false);
         assert_eq!(t.net(), LimitUsage::ZERO);
         assert!(!t.current().unwrap().account_recorded, "the sender record died with the child");
 
-        t.push(Lane::new(None, true, UNLIMITED, 0));
+        t.push(Lane::new(None, true, u64::MAX, 0));
         t.record_caller(true, 0);
         t.record(WRITE_RECORD);
         t.pop(false);
@@ -591,7 +566,7 @@ mod tests {
     /// nothing.
     #[test]
     fn test_what_a_return_hands_its_caller_unchecked() {
-        let budget = LimitUsage { data_size: 200, write_records: 10 };
+        let budget = 200;
         // The record of the caller's account the child holds (a creator's or a sender's), the
         // bytes it counted beside it, and whether it succeeded.
         for (creator, counted, success, unchecked) in [
@@ -604,14 +579,14 @@ mod tests {
         ] {
             let case = format!("creator {creator}, {counted} bytes, success {success}");
             let mut t = FrameLimitTracker::default();
-            t.push(Lane::new(Some(ADDR), false, UNLIMITED, 0));
+            t.push(Lane::new(Some(ADDR), false, u64::MAX, 0));
             t.push(Lane::new(None, true, budget, 0));
             t.record_caller(creator, 0);
             t.record(bytes(counted));
             let lane = t.pop(success).unwrap();
             assert_eq!(lane.hands_caller_unchecked(success), unchecked, "{case}");
             let handed = t.net();
-            let past_budget = handed.crossing(budget).is_some();
+            let past_budget = handed.exceeds_data_size(budget);
             if success {
                 assert_eq!(past_budget, unchecked, "{case}: a success hands over what it kept");
             } else {
@@ -624,15 +599,14 @@ mod tests {
     /// is no lane left to hand it to. With a frame below it, the same return does.
     #[test]
     fn test_a_return_into_no_lane_hands_nothing_unchecked() {
-        let budget = LimitUsage { data_size: 200, write_records: 10 };
         let mut t = FrameLimitTracker::default();
-        t.push(Lane::new(Some(ADDR), false, budget, 0));
+        t.push(Lane::new(Some(ADDR), false, 200, 0));
         t.record(bytes(201));
         let lane = t.pop(true).unwrap();
         assert!(lane.hands_caller_unchecked(true), "it kept more than its budget");
         assert!(!t.hands_unchecked(&lane, true), "but no frame is left to hand it to");
 
-        t.push(Lane::new(Some(ADDR), false, UNLIMITED, 0));
+        t.push(Lane::new(Some(ADDR), false, u64::MAX, 0));
         assert!(t.hands_unchecked(&lane, true), "a caller is");
         assert!(!t.hands_unchecked(&lane, false), "which a failure hands nothing");
     }
@@ -644,9 +618,9 @@ mod tests {
     #[test]
     fn test_a_discarded_lane_keeps_nothing_and_gives_the_failures_history_back() {
         let mut t = FrameLimitTracker::default();
-        t.push(Lane::new(Some(ADDR), false, UNLIMITED, 0));
+        t.push(Lane::new(Some(ADDR), false, u64::MAX, 0));
         t.record(bytes(10));
-        t.push(Lane::new(None, false, bytes(100), 7));
+        t.push(Lane::new(None, false, 100, 7));
         t.record_caller(false, 3);
         t.record(WRITE_RECORD);
         t.record_log_and_code_bytes(5);
@@ -657,7 +631,7 @@ mod tests {
         assert!(!lane.records_made);
         assert_eq!(lane.used, LimitUsage::ZERO);
         assert_eq!(lane.address, None);
-        assert_eq!(lane.budget, UNLIMITED);
+        assert_eq!(lane.budget, u64::MAX);
         assert_eq!(t.net(), bytes(10), "only the caller's count is left");
         assert_eq!(t.net(), t.net_uncached());
         assert_eq!(t.log_and_code_bytes(), 0);
@@ -670,32 +644,18 @@ mod tests {
 
         // A creator's nonce record outlives the creation: the discard lands it on the creator,
         // and the history the creator paid for it is not given back.
-        t.push(Lane::new(None, false, UNLIMITED, 0));
+        t.push(Lane::new(None, false, u64::MAX, 0));
         t.record_caller(true, 4);
         t.discard_running_lane();
         assert_eq!(t.net(), bytes(10).saturating_add(WRITE_RECORD));
-        assert_eq!(t.pop(true).unwrap().history_refund(true), 0);
+        let popped = t.pop(true).unwrap();
+        assert_eq!(popped.history_refund(true), 0);
+        assert!(t.hands_unchecked(&popped, true), "the creator is held to its budget with it");
 
         // With no lane to discard, nothing happens.
         let mut empty = FrameLimitTracker::default();
         empty.discard_running_lane();
         assert_eq!(empty.depth(), 0);
-    }
-
-    /// A creation that fails before bumping the nonce takes the creator record back.
-    #[test]
-    fn test_drop_caller_record_rearms_the_caller() {
-        let mut t = FrameLimitTracker::default();
-        t.push(Lane::new(Some(ADDR), false, UNLIMITED, 0));
-        t.push(Lane::new(None, true, UNLIMITED, 0));
-        t.record_caller(true, 0);
-        t.drop_caller_record();
-        t.drop_caller_record();
-        assert_eq!(t.net(), LimitUsage::ZERO);
-        assert!(!t.lanes[0].account_recorded);
-        t.pop(false);
-        assert_eq!(t.net(), LimitUsage::ZERO);
-        assert_eq!(t.net(), t.net_uncached());
     }
 
     /// The creator record a failed creation left its creator is taken back once, and a lane with
@@ -704,9 +664,9 @@ mod tests {
     fn test_take_back_own_record_takes_the_creator_record_once() {
         let mut t = FrameLimitTracker::default();
         assert!(!t.take_back_own_record(), "no lane");
-        t.push(Lane::new(Some(ADDR), false, UNLIMITED, 0));
+        t.push(Lane::new(Some(ADDR), false, u64::MAX, 0));
         t.record(bytes(7));
-        t.push(Lane::new(None, true, UNLIMITED, 0));
+        t.push(Lane::new(None, true, u64::MAX, 0));
         t.record_caller(true, 0);
         t.pop(false);
         assert_eq!(t.net(), bytes(7).saturating_add(WRITE_RECORD));
@@ -723,23 +683,23 @@ mod tests {
     #[test]
     fn test_same_account_child_merges_the_recorded_flag() {
         let mut t = FrameLimitTracker::default();
-        t.push(Lane::new(Some(ADDR), false, UNLIMITED, 0));
-        t.push(Lane::new(Some(ADDR), true, UNLIMITED, 0));
+        t.push(Lane::new(Some(ADDR), false, u64::MAX, 0));
+        t.push(Lane::new(Some(ADDR), true, u64::MAX, 0));
         t.pop(true);
         assert!(t.current().unwrap().account_recorded);
 
         let other = address!("0000000000000000000000000000000000005678");
-        t.push(Lane::new(Some(other), false, UNLIMITED, 0));
-        t.push(Lane::new(Some(other), false, UNLIMITED, 0));
+        t.push(Lane::new(Some(other), false, u64::MAX, 0));
+        t.push(Lane::new(Some(other), false, u64::MAX, 0));
         t.current_mut().unwrap().account_recorded = true;
         t.pop(false);
         assert!(!t.current().unwrap().account_recorded, "a failed child hands nothing back");
 
-        t.push(Lane::new(Some(ADDR), true, UNLIMITED, 0));
+        t.push(Lane::new(Some(ADDR), true, u64::MAX, 0));
         assert_eq!(t.depth(), 3);
         t.pop(true);
         assert!(!t.current().unwrap().account_recorded, "another account's flag is its own");
-        t.push(Lane::new(None, true, UNLIMITED, 0));
+        t.push(Lane::new(None, true, u64::MAX, 0));
         t.pop(true);
         assert!(!t.current().unwrap().account_recorded, "an unknown account is not the caller's");
     }

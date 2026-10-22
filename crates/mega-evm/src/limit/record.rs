@@ -3,7 +3,7 @@
 use alloy_primitives::Address;
 use revm::interpreter::SStoreResult;
 
-use super::{LimitUsage, LOG_BASE_SIZE, LOG_TOPIC_SIZE, WRITE_RECORD};
+use super::{log_history_bytes, LimitUsage, WRITE_RECORD};
 
 /// What the Host saw an opcode do, staged until the opcode completes.
 ///
@@ -27,8 +27,6 @@ pub enum StagedRecord {
     SelfDestruct {
         /// Whether the destructed account had a balance to move.
         had_value: bool,
-        /// Whether the beneficiary existed before.
-        target_exists: bool,
         /// Whether the beneficiary is another account than the destructed one.
         to_other_account: bool,
         /// The beneficiary.
@@ -99,9 +97,7 @@ impl StagedRecord {
                 }
             }
             Self::Log { topics, data_len } => RecordEffect::Record(LimitUsage {
-                data_size: LOG_BASE_SIZE
-                    .saturating_add(LOG_TOPIC_SIZE.saturating_mul(*topics as u64))
-                    .saturating_add(*data_len),
+                data_size: log_history_bytes(u64::from(*topics), *data_len),
                 write_records: 0,
             }),
             Self::SelfDestruct { had_value, to_other_account, beneficiary, .. } => {
@@ -186,7 +182,6 @@ mod tests {
         );
         let to_other = StagedRecord::SelfDestruct {
             had_value: true,
-            target_exists: true,
             to_other_account: true,
             beneficiary: OTHER,
         };
@@ -201,13 +196,7 @@ mod tests {
     fn test_selfdestruct_record_rules() {
         let sd = |had_value, to_other_account| {
             let beneficiary = OTHER;
-            StagedRecord::SelfDestruct {
-                had_value,
-                target_exists: true,
-                to_other_account,
-                beneficiary,
-            }
-            .effect(SENDER)
+            StagedRecord::SelfDestruct { had_value, to_other_account, beneficiary }.effect(SENDER)
         };
         assert_eq!(sd(true, true), RecordEffect::Record(WRITE_RECORD));
         assert_eq!(sd(true, false), RecordEffect::None);
@@ -215,7 +204,6 @@ mod tests {
         assert_eq!(sd(false, false), RecordEffect::None);
         let to_sender = StagedRecord::SelfDestruct {
             had_value: true,
-            target_exists: true,
             to_other_account: true,
             beneficiary: SENDER,
         };
@@ -228,7 +216,6 @@ mod tests {
     fn test_only_a_destruction_to_another_account_moves_value() {
         let sd = |had_value, to_other_account, beneficiary| StagedRecord::SelfDestruct {
             had_value,
-            target_exists: true,
             to_other_account,
             beneficiary,
         };

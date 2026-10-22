@@ -12,6 +12,9 @@ Two scopes, mutated and gated separately:
 
 The two scopes are disjoint; a mutant belongs to exactly one of them.
 
+The infrastructure job runs nightly, and on a pull request only when it changes `.cargo/mutants-infra.toml`, the scenario runner, `scripts/mutation_test.sh` or `scripts/mutation_gate.py` (the `infra` path filter in `.github/workflows/mutation.yml`).
+It never reads `.cargo/mutants.toml`, and a change to `mutants/suppressions.toml` alone does not start it on a pull request: the suppression-hygiene job and the nightly run cover that file.
+
 ## Layout
 
 | Path | Purpose |
@@ -162,4 +165,7 @@ python3 scripts/umutate.py run --packs spec-gate --diff origin/main --output tar
 ## Suppressions and CI
 
 Spec-gate equivalents (e.g. a gate guarding a state no test exercises — expect a meaningful rate) go in the **same** `suppressions.toml`, as `kind = "line"` entries matching the mutant text, prefixed with the pack name.
-The PR gate runs diff-scoped (instant on PRs that touch no gate lines); the full crate sweep runs on a nightly schedule (the `spec-gate-sweep` job in `.github/workflows/mutation.yml`).
+A single-spec engine has no spec gate for these operators to mutate, so mutation CI does not run the pack.
+The operator pack stays on disk.
+Suppression hygiene still plans it and accepts an empty plan.
+The commands above run it by hand once a later spec has a gate to mutate.

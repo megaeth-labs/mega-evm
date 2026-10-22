@@ -1,0 +1,28 @@
+{
+  "description": "Satin: calldata is passed to bytecode and echoed back via CALLDATACOPY + RETURN",
+  "args": [
+    "run",
+    "--input",
+    "0xdeadbeef",
+    "0x366000600037366000f3",
+    "--spec",
+    "Satin"
+  ],
+  "expected": {
+    "success": true,
+    "gas_used": 42718,
+    "output": "0xdeadbeef",
+    "logs_count": 0,
+    "satin": {
+      "regular_gas": 15086,
+      "state_gas": 0,
+      "history_gas": 27632,
+      "history_bytes": 314,
+      "reservoir_remaining": 0,
+      "floor_gas": 15256,
+      "data_size": 314,
+      "write_records": 0,
+      "limit_exceeded": null
+    }
+  }
+}
