@@ -184,7 +184,7 @@ These checks guard every change to the Satin engine.
 - GitHub fires a `schedule` trigger only from the default branch's copy of a workflow, so the schedules in `satin`'s copies (nightly mutation, doc-audit, the weekly execution-spec run, the nightly byte-price grid) stay inert until `satin` is the default branch.
 - Run them on `satin` by hand: `gh workflow run <workflow>.yml --ref satin` runs `satin`'s copy of the workflow on `satin`'s head, so none of them needs a `ref` input.
   - `mutation.yml`: the whole-crate cargo-mutants run and suppression hygiene.
-  - `exec-spec.yml`: the execution-spec fixtures at the pinned fork tag.
+  - `exec-spec.yml`: the execution-spec fixtures at the pinned fork commit.
   - `doc-audit.yml`: the documentation audit of `satin`'s docs.
   - `price-grid.yml`: the whole byte-price grid.
 

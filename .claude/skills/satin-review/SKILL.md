@@ -21,7 +21,7 @@ Implementation detail lives in [`AGENTS.md`](../../../AGENTS.md) and the specifi
   Satin is a new spec: simpler semantics win over parity with the legacy engine.
 - Out of scope: the legacy engine (`main`, frozen), which runs every block before Satin activates.
   Satin never executes or decodes legacy-era data, so "Satin cannot handle legacy data" is not a defect, and code kept only for that purpose is dead code.
-- Fork code: the `megaeth-labs/revm` (`v40.0.3-mega.4`) and `megaeth-labs/op-revm` (`v20.0.0-mega.3`) forks at their tags are pinned dependencies with their own review; their diff is not part of this pull request.
+- Fork code: the `megaeth-labs/revm` and `megaeth-labs/op-revm` forks at the commits the patch blocks pin by `rev` (megaeth-labs/revm#76, megaeth-labs/op-revm#8) are pinned dependencies with their own review; their diff is not part of this pull request.
   A finding about a fork function is about how mega-evm uses it, unless it shows the fork breaking its own documented default behaviour.
   The fork functions the engine relies on are listed in [`AGENTS.md`, "Dependencies on the forks"](../../../AGENTS.md#dependencies-on-the-forks).
 - Where code belongs: upstream revm first, then the fork, then mega-evm.
