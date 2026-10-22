@@ -140,10 +140,10 @@ fn render() -> String {
     out.push_str("## Schedule entries\n\n");
     out.push_str(
         "Every named entry of the schedule, at the Osaka price, at the Amsterdam (glamsterdam \
-         devnet-8) price and at the Satin price. Satin is Amsterdam with the EIP-8038 repricing \
-         pressed back to Osaka and the EIP-8037 state entries rebuilt at `MegaETH`'s cost per \
-         state byte; the `Satin` column differs from `Amsterdam` in exactly the entries where one \
-         of those two applies.\n\n",
+         devnet-8) price and at the Satin price. Satin is Amsterdam with the EIP-8037 state \
+         entries rebuilt at `MegaETH`'s cost per state byte and deposited code priced at \
+         `MegaETH`'s cost per history byte; the `Satin` column differs from `Amsterdam` in \
+         exactly the entries where one of those two applies.\n\n",
     );
     out.push_str("| Gas id | Osaka | Amsterdam | Satin |\n|---|---:|---:|---:|\n");
     for slot in 0..=u8::MAX {
@@ -179,10 +179,10 @@ fn render() -> String {
     out.push_str("\n## SALT scaling\n\n");
     out.push_str(
         "The same probes again, with the SALT bucket the state charge lands in at `m` times the \
-         minimum capacity. `m` multiplies the state ledger and nothing else: the regular column \
-         is the same on all three rows of a probe, and `gas used` grows by exactly the state \
-         column's growth, because these probes run below the execution cap and every state \
-         charge spills onto the regular budget.\n\n",
+         minimum capacity. `m` multiplies the state ledger and nothing else: the regular and the \
+         history columns are the same on all three rows of a probe, and `gas used` grows by \
+         exactly the state column's growth, because these probes run below the execution cap \
+         and every state charge spills onto the regular budget.\n\n",
     );
     out.push_str(
         "| Probe | m | gas used | regular | state | history |\n|---|---:|---:|---:|---:|---:|\n",
@@ -305,36 +305,22 @@ fn test_the_table_shows_where_satin_differs_from_amsterdam() {
         })
         .collect();
 
-    // The pressed-back entries whose Osaka and Amsterdam prices are not the same number. The
-    // other three of the seventeen — `warm_storage_read_cost`, `sstore_static` and
-    // `cold_storage_additional_cost` — EIP-8038 left where they were, so pressing them back
-    // moves nothing. The state entries are rebuilt rather than copied, and land on Amsterdam's
-    // numbers because the provisional cost per state byte is the one Glamsterdam uses.
+    // Every regular entry is Amsterdam's. The state entries are rebuilt rather than copied, and
+    // land on Amsterdam's numbers because the provisional cost per state byte is the one
+    // Glamsterdam uses. The history entry is the one Satin adds: upstream prices no history byte
+    // at all.
     assert_eq!(
         differing,
-        [
-            "create",
-            "transfer_value_cost",
-            "cold_account_additional_cost",
-            "new_account_cost",
-            "sstore_set_without_load_cost",
-            "sstore_reset_without_cold_load_cost",
-            "sstore_clearing_slot_refund",
-            "cold_storage_cost",
-            "new_account_cost_for_selfdestruct",
-            "tx_access_list_address_cost",
-            "tx_access_list_storage_key_cost",
-            "tx_create_cost",
-            "sstore_set_refund",
-            "sstore_reset_refund",
-        ],
+        ["code_deposit_history_gas"],
         "the entries Satin prices differently from Amsterdam"
     );
 }
 
-/// The SALT scaling section says what it claims: on each probe the regular ledger is the same at
-/// every multiplier and the state ledger is the minimum bucket's times the multiplier. Read off
-/// the rendered table rather than the engine, so the table cannot drift from the claim above it.
+/// The SALT scaling section says what it claims: on each probe the regular ledger and the
+/// history ledger are the same at every multiplier [S6.5] — history gas is not scaled by SALT
+/// [S7.2] — and the state ledger is the minimum bucket's times the multiplier. Read off the
+/// rendered table rather than the engine, so the table cannot drift from the claim above it
+/// (`constants`: the relation across `m` is the spec's; the `m` = 1 row is the table's own).
 #[test]
 fn test_the_table_shows_the_multiplier_on_the_state_ledger_alone() {
     if runs_at_measurement_prices() {
@@ -344,7 +330,7 @@ fn test_the_table_shows_the_multiplier_on_the_state_ledger_alone() {
     let section = rendered.split("## SALT scaling").nth(1).expect("the scaling section");
     let section = section.split("\n## ").next().expect("the section ends at the next heading");
 
-    let mut baselines: Vec<(String, u64, u64)> = Vec::new();
+    let mut baselines: Vec<(String, u64, u64, u64)> = Vec::new();
     for line in section.lines().filter(|l| l.starts_with("| ") && l.matches('|').count() == 7) {
         let mut cells = line.split('|').map(str::trim).skip(1);
         let probe = cells.next().expect("probe").to_string();
@@ -356,18 +342,24 @@ fn test_the_table_shows_the_multiplier_on_the_state_ledger_alone() {
         let _gas_used = cells.next();
         let regular: u64 = cells.next().expect("regular").parse().expect("a number");
         let state: u64 = cells.next().expect("state").parse().expect("a number");
+        let history: u64 = cells.next().expect("history").parse().expect("a number");
 
         match baselines.iter().find(|(name, ..)| *name == probe) {
             None => {
                 assert_eq!(m, 1, "{probe}: the first row of a probe is the minimum bucket");
-                baselines.push((probe, regular, state));
+                baselines.push((probe, regular, state, history));
             }
-            Some((_, base_regular, base_state)) => {
+            Some((_, base_regular, base_state, base_history)) => {
                 assert_eq!(regular, *base_regular, "{probe} at m = {m}: regular gas moved");
                 assert_eq!(state, base_state * m, "{probe} at m = {m}: state gas");
+                assert_eq!(history, *base_history, "{probe} at m = {m}: history gas moved");
             }
         }
     }
     assert_eq!(baselines.len(), 2, "one slot-scoped probe and one account-scoped probe");
-    assert!(baselines.iter().all(|(_, _, state)| *state > 0), "a probe must charge state gas");
+    assert!(baselines.iter().all(|(_, _, state, _)| *state > 0), "a probe must charge state gas");
+    assert!(
+        baselines.iter().all(|(_, _, _, history)| *history > 0),
+        "a probe must pay history gas, or the column would hold constant for nothing"
+    );
 }

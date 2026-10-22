@@ -1,19 +1,35 @@
 //! The execution context of the Satin engine.
 
+#[cfg(not(feature = "std"))]
+use alloc as std;
+use std::vec::Vec;
+
 use delegate::delegate;
-use op_revm::{L1BlockInfo, OpSpecId};
+use op_revm::{transaction::deposit::DEPOSIT_TRANSACTION_TYPE, L1BlockInfo, OpSpecId};
 use revm::{
-    context::{BlockEnv, CfgEnv, Context, ContextError, ContextSetters, ContextTr, LocalContext},
-    primitives::{Address, StorageKey},
+    context::{
+        BlockEnv, Cfg, CfgEnv, Context, ContextError, ContextSetters, ContextTr, LocalContext,
+        Transaction,
+    },
+    context_interface::{cfg::GasId, context::CodeDeposit},
+    primitives::{Address, Bytes, StorageKey},
     Database, Journal,
 };
 
 use crate::{
     constants,
-    evm::schedule::satin_gas_params,
-    system::{self, MEGA_SYSTEM_ADDRESS},
-    AdditionalLimit, BlockHashRecord, BucketError, BucketMultipliers, EmptyExternalEnv,
-    EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs, MegaSpecId, MegaTransaction, SaltEnv,
+    evm::{
+        history::transaction_body_bytes,
+        inspector::UpfrontRecord,
+        schedule::{satin_gas_params, satin_gas_params_history_exempt},
+    },
+    system::{
+        self,
+        keyless::{self, KeylessFrame},
+    },
+    AdditionalLimit, BlockHashRecord, BucketError, BucketId, BucketMultipliers, BucketRecord,
+    Detention, EmptyExternalEnv, EthSpecId, EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs,
+    MegaSpecId, MegaTransaction, OracleReadRecord, ProtocolLimits, SaltEnv, VolatileDataAccess,
 };
 
 /// The revm context the Satin engine runs on: op-revm's context shape with the `MegaETH`
@@ -26,36 +42,64 @@ pub(crate) type MegaInnerContext<DB> =
 /// It wraps op-revm's context and adds what `MegaETH` execution needs on top: the `MegaETH`
 /// spec and the external environments (SALT, oracle). The configuration is kept twice: the
 /// [`MegaSpecId`] view that callers see and the [`OpSpecId`] view op-revm executes on. Both are
-/// written together, only through [`MegaContext::with_cfg`], so they cannot drift apart.
+/// written together, only through [`MegaContext::with_cfg`] (and the test tooling's neutral
+/// configuration), so they cannot drift apart.
 ///
 /// Every context accessor delegates to the wrapped context, and so does every
 /// [`Host`](revm::interpreter::Host) method except the three that stage what a state-writing
-/// opcode did (see the `host` module). It also carries the common execution layer's state for the
-/// running transaction ([`AdditionalLimit`]) and the SALT bucket multipliers that transaction has
-/// priced state gas with ([`BucketMultipliers`]).
+/// opcode did and the ones that load volatile data (see the `host` module). It also carries the
+/// common execution layer's state for the running transaction ([`AdditionalLimit`]), gas
+/// detention's ([`Detention`]), the SALT bucket multipliers that transaction has priced state
+/// gas with ([`BucketMultipliers`]) and the reads of the Oracle's storage it made through the
+/// oracle service ([`OracleReadRecord`]).
 #[derive(Debug)]
 pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes = EmptyExternalEnv> {
     pub(crate) inner: MegaInnerContext<DB>,
     cfg: CfgEnv<MegaSpecId>,
     external_envs: ExternalEnvs<ExtEnvs>,
     pub(crate) additional_limit: AdditionalLimit,
+    /// Gas detention for the running transaction.
+    pub(crate) detention: Detention,
+    /// What the calling opcode charged upfront for each running frame of an inspected transaction,
+    /// by depth, taken before the inspector could rewrite the call.
+    pub(crate) upfront_records: Vec<Option<UpfrontRecord>>,
     pub(crate) block_hash_record: BlockHashRecord,
     /// The SALT bucket multipliers the running transaction has read.
     bucket_multipliers: BucketMultipliers,
-    /// Whether the running transaction is system-originated, and so prices its state gas at the
-    /// minimum bucket. See [`system::is_system_originated`].
+    /// The SALT buckets execution has asked the environment about, over the block.
+    bucket_record: BucketRecord,
+    /// The reads of the Oracle's storage the running transaction made through the oracle
+    /// service, with the service's answers.
+    pub(crate) oracle_reads: OracleReadRecord,
+    /// Whether the running transaction is the protocol's own, decided when it is validated. See
+    /// [`MegaContext::is_system_originated`].
     system_originated: bool,
+    /// Whether the running execution is a system call rather than a transaction. See
+    /// [`MegaContext::is_system_call`].
+    system_call: bool,
+    /// Whether the running transaction pays history gas. See [`MegaContext::prices_history`].
+    prices_history: bool,
+    /// Where the running transaction's `keylessDeploy` call stands, from the start of its frame
+    /// to its answer. See the [`keyless`](crate::system::keyless) module.
+    pub(crate) keyless_frame: Option<KeylessFrame>,
+    /// Whether the context runs the neutral configuration. See [`MegaContext::with_neutral_cfg`].
+    #[cfg(any(test, feature = "test-utils"))]
+    neutral: bool,
 }
 
 impl<DB: Database> MegaContext<DB, EmptyExternalEnv> {
     /// Creates a context over `db` that executes `spec`, without external environments.
+    ///
+    /// It runs every transaction under `spec`'s limits ([`ProtocolLimits::for_spec`]), as block
+    /// execution does; [`with_tx_runtime_limits`](Self::with_tx_runtime_limits) replaces them.
     pub fn new(db: DB, spec: MegaSpecId) -> Self {
         Self::new_with_external_envs(db, spec, ExternalEnvs::default())
     }
 }
 
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
-    /// Creates a context over `db` that executes `spec` with the given external environments.
+    /// Creates a context over `db` that executes `spec` with the given external environments,
+    /// under `spec`'s limits ([`ProtocolLimits::for_spec`]).
     pub fn new_with_external_envs(
         db: DB,
         spec: MegaSpecId,
@@ -67,24 +111,91 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
             inner,
             cfg,
             external_envs,
-            additional_limit: AdditionalLimit::default(),
+            additional_limit: AdditionalLimit::new(
+                ProtocolLimits::for_spec(spec).tx_runtime_limits,
+            ),
+            detention: Detention::default(),
+            upfront_records: Vec::new(),
             block_hash_record: BlockHashRecord::default(),
             bucket_multipliers: BucketMultipliers::default(),
+            bucket_record: BucketRecord::default(),
+            oracle_reads: OracleReadRecord::default(),
             system_originated: false,
+            system_call: false,
+            prices_history: true,
+            keyless_frame: None,
+            #[cfg(any(test, feature = "test-utils"))]
+            neutral: false,
         }
     }
 
     /// Replaces the configuration.
     ///
     /// The fields the spec fixes are set from the spec, whatever `cfg` holds: the gas schedule,
-    /// the EIP-8037 and EIP-2780 switches, the execution cap, the EIP-7708 switch, the
-    /// system-call state-gas margin and the two code-size limits. Every other field (chain id,
-    /// disabled checks, blob schedule) is taken from `cfg`.
+    /// the EIP-8037 and EIP-2780 switches, the execution cap, the EIP-7708 switch and its
+    /// disabling flag, the system-call state-gas margin, the chain-id check and the two code-size
+    /// limits. Every other field (chain id, the other disabled checks, blob schedule) is taken
+    /// from `cfg`.
+    ///
+    /// A context that ran the neutral configuration returns to the spec's.
     pub fn with_cfg(mut self, cfg: CfgEnv<MegaSpecId>) -> Self {
         let cfg = spec_cfg(cfg);
         self.inner = self.inner.with_cfg(op_cfg(&cfg));
         self.cfg = cfg;
+        #[cfg(any(test, feature = "test-utils"))]
+        {
+            self.neutral = false;
+        }
         self
+    }
+
+    /// Replaces the configuration with `cfg` as it is given, and turns off every dimension of
+    /// pricing only `MegaETH` has: the neutral configuration.
+    ///
+    /// It is test tooling, behind the `test-utils` feature, for the execution-spec gate, which
+    /// runs Ethereum's fixtures through Satin's machinery — its handler, frame lifecycle, Host
+    /// and instruction table — priced as the fixture's own fork prices them, so that what is
+    /// left to differ is what the machinery does rather than what `MegaETH` charges for.
+    ///
+    /// - Every field is taken from `cfg`, including the ones [`with_cfg`](Self::with_cfg) sets from
+    ///   the spec: the gas schedule, the EIP-8037, EIP-2780 and EIP-7708 switches, the execution
+    ///   cap and the code-size limits.
+    /// - No transaction pays history gas, and none has its schedule swapped for its history
+    ///   exemption: every transaction runs `cfg`'s schedule.
+    /// - SALT pricing needs nothing here: without a SALT environment every bucket is minimal, and
+    ///   the multiplier is one.
+    /// - Gas detention is not part of the configuration: its caps are runtime limits, which the
+    ///   gate's runner leaves unlimited with every other one ([`EvmTxRuntimeLimits::no_limits`]),
+    ///   and then no read of volatile data caps anything.
+    ///
+    /// The spec stays [`MegaSpecId::SATIN`], and with it the base spec the handler and the
+    /// journal execute. The precompile set is the EVM's, not the context's: a caller that wants
+    /// the fixture fork's replaces it on the [`MegaEvm`](crate::MegaEvm).
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn with_neutral_cfg(mut self, cfg: CfgEnv<MegaSpecId>) -> Self {
+        self.inner = self.inner.with_cfg(op_cfg(&cfg));
+        self.cfg = cfg;
+        self.neutral = true;
+        self.prices_history = false;
+        self
+    }
+
+    /// The spec's configuration with EIP-7708 switched off in both views, for the unit tests that
+    /// hold a transaction with its transfer logs to the same transaction without them. No
+    /// configuration a caller can build runs Satin without them.
+    #[cfg(test)]
+    pub(crate) fn without_transfer_logs(mut self) -> Self {
+        self.cfg.enable_amsterdam_eip7708 = false;
+        self.inner = self.inner.with_cfg(op_cfg(&self.cfg));
+        self
+    }
+
+    /// Whether the context runs the neutral configuration ([`with_neutral_cfg`]).
+    ///
+    /// [`with_neutral_cfg`]: Self::with_neutral_cfg
+    #[cfg(any(test, feature = "test-utils"))]
+    pub const fn is_neutral(&self) -> bool {
+        self.neutral
     }
 
     /// Replaces the block environment.
@@ -127,7 +238,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         &self.external_envs
     }
 
-    /// Enforces `limits` on every transaction from now on.
+    /// Enforces `limits` on every transaction from now on, in place of the spec's: a tool's or a
+    /// test's counterfactual.
     pub fn with_tx_runtime_limits(mut self, limits: EvmTxRuntimeLimits) -> Self {
         self.additional_limit.set_limits(limits);
         self
@@ -146,16 +258,53 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         self.block_hash_record.clear();
     }
 
+    /// The SALT buckets execution has asked the environment about on this context.
+    ///
+    /// The record belongs to one block: it is not forgotten between transactions, as the
+    /// multipliers are ([`bucket_multipliers`](Self::bucket_multipliers)), and block execution
+    /// empties it when the block starts.
+    pub const fn bucket_record(&self) -> &BucketRecord {
+        &self.bucket_record
+    }
+
+    /// Forgets the SALT buckets asked about so far.
+    pub fn clear_bucket_record(&mut self) {
+        self.bucket_record.clear();
+    }
+
+    /// The reads of the Oracle's storage the running (or last) transaction made through the
+    /// oracle service, in order, each with the service's answer.
+    ///
+    /// The record belongs to one transaction: it is emptied before every transaction and system
+    /// call, and the transaction's outcome carries a copy
+    /// ([`MegaTransactionOutcome::oracle_reads`](crate::MegaTransactionOutcome::oracle_reads)),
+    /// which is where a node takes the reads of the transactions it includes from.
+    pub const fn oracle_reads(&self) -> &OracleReadRecord {
+        &self.oracle_reads
+    }
+
     /// The common execution layer's state for the running (or last) transaction.
     pub const fn additional_limit(&self) -> &AdditionalLimit {
         &self.additional_limit
     }
 
-    /// The common execution layer's state, mutably. For tests and tools that drive the abort
-    /// protocol directly.
+    /// Gas detention for the running (or last) transaction: the volatile data it read and the
+    /// compute limit that set. See the `access` module.
+    pub const fn detention(&self) -> &Detention {
+        &self.detention
+    }
+
+    /// Starts every transaction with volatile-data access switched off for the frame at `depth`
+    /// and every frame below it, as if that frame had called
+    /// `MegaAccessControl.disableVolatileDataAccess()` before its first instruction. The switch
+    /// turns back on when that frame returns.
+    ///
+    /// It is test tooling, behind the `test-utils` feature, for a switch set without a call: on
+    /// the chain, a frame switches it off by calling the contract, whose interceptor steers it.
     #[cfg(any(test, feature = "test-utils"))]
-    pub const fn additional_limit_mut(&mut self) -> &mut AdditionalLimit {
-        &mut self.additional_limit
+    pub fn with_volatile_access_disabled_from(mut self, depth: usize) -> Self {
+        self.detention.set_disabled_from_at_start(Some(depth));
+        self
     }
 
     /// The SALT bucket multiplier of the account `address`'s own state lives in: the capacity of
@@ -166,11 +315,15 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// from [`BucketMultipliers`] afterwards. A bucket the environment could not report, and one
     /// it reported below the minimum capacity a bucket can hold, both fail
     /// ([`BucketError`](crate::BucketError)).
+    ///
+    /// The bucket is recorded for the block's witness ([`bucket_record`](Self::bucket_record))
+    /// once the environment answered it with a valid capacity; see
+    /// [`bucket_multiplier`](Self::bucket_multiplier).
     pub fn account_bucket_multiplier(
         &mut self,
         address: Address,
     ) -> Result<u64, BucketError<<ExtEnvs::SaltEnv as SaltEnv>::Error>> {
-        self.bucket_multipliers.account(&self.external_envs.salt_env, address)
+        self.bucket_multiplier(<ExtEnvs::SaltEnv as SaltEnv>::bucket_id_for_account(address))
     }
 
     /// The SALT bucket multiplier of the slot `key` of `address`, which scales every slot-scoped
@@ -181,7 +334,28 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         address: Address,
         key: StorageKey,
     ) -> Result<u64, BucketError<<ExtEnvs::SaltEnv as SaltEnv>::Error>> {
-        self.bucket_multipliers.slot(&self.external_envs.salt_env, address, key)
+        self.bucket_multiplier(<ExtEnvs::SaltEnv as SaltEnv>::bucket_id_for_slot(address, key))
+    }
+
+    /// The multiplier of `bucket`: the one the running transaction already read, or the one the
+    /// environment answers, which is cached for the transaction and recorded for the block's
+    /// witness.
+    ///
+    /// The record is written on the cache miss alone, once the environment answered with a valid
+    /// capacity: a cache hit adds nothing the miss did not, and a lookup that failed, with an error
+    /// or with a capacity below the minimum bucket, fails the transaction with its cause, so the
+    /// transaction is in no block and a validator never makes the lookup — a proof of that bucket
+    /// is one nobody uses, and a builder whose environment failed on it must not have to prove it.
+    fn bucket_multiplier(
+        &mut self,
+        bucket: BucketId,
+    ) -> Result<u64, BucketError<<ExtEnvs::SaltEnv as SaltEnv>::Error>> {
+        if let Some(multiplier) = self.bucket_multipliers.cached(bucket) {
+            return Ok(multiplier);
+        }
+        let multiplier = self.bucket_multipliers.fetch(&self.external_envs.salt_env, bucket)?;
+        self.bucket_record.record(bucket);
+        Ok(multiplier)
     }
 
     /// The SALT bucket multipliers the running (or last) transaction read.
@@ -190,30 +364,160 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     }
 
     /// Whether the running (or last) transaction is system-originated, and so prices every
-    /// EIP-8037 state gas charge at the minimum bucket. See [`system::is_system_originated`].
+    /// EIP-8037 state gas charge at the minimum bucket and is held to no per-transaction limit
+    /// (see [`system::is_system_originated`]). A system call always is.
+    ///
+    /// A transaction's answer is decided when it is validated: a system-address transaction is
+    /// recognised by the live system address its validation reads out of the `SequencerRegistry`
+    /// in the state the EVM runs on, so every EVM answers as block execution does, however it was
+    /// built.
     pub const fn is_system_originated(&self) -> bool {
         self.system_originated
     }
 
-    /// Prepares the common execution layer for a new transaction or system call. Every entry
-    /// point of [`MegaEvm`](crate::MegaEvm) calls it before it runs the handler.
+    /// Whether the running (or last) transaction pays history gas for the bytes it appends.
     ///
-    /// The SALT bucket multipliers go with it: they are what one transaction read, so the next
-    /// one reads its own.
-    pub(crate) fn on_new_tx(&mut self) {
-        self.additional_limit.reset();
-        self.bucket_multipliers.reset();
-        self.system_originated = system::is_system_originated(&self.inner.tx, MEGA_SYSTEM_ADDRESS);
+    /// Three kinds of transaction pay none: a deposit, a transaction the protocol itself produced
+    /// ([`system::is_system_originated`]) and a system call. What they append is the chain
+    /// carrying its own weight — a deposit the sequencer relays, the maintenance a system
+    /// transaction performs, the pre-block calls the protocol makes — and there is no sender to
+    /// charge for it.
+    ///
+    /// The two predicates are distinct and both are needed. A deposit is not system-originated:
+    /// it carries a user's source hash and a user's caller, so it prices its state gas by the
+    /// SALT bucket like any other transaction — it is exempt from history alone, because the
+    /// bytes it appends were paid for on L1. A system transaction is both: it prices at the
+    /// minimum bucket *and* pays no history.
+    pub const fn prices_history(&self) -> bool {
+        self.prices_history
+    }
+
+    /// Prepares the common execution layer for a new transaction, which is a system-address
+    /// transaction or not as `system_transaction` says. The handler calls it first thing, once
+    /// validation has read the live system address, so the layer is prepared before anything
+    /// else of the transaction runs.
+    pub(crate) fn on_new_tx(&mut self, system_transaction: bool) {
+        self.prepare(system::originates_from_the_protocol(&self.inner.tx, system_transaction));
+        self.system_call = false;
     }
 
     /// Prepares the context for a system call. Every system-call entry point of
-    /// [`MegaEvm`](crate::MegaEvm) calls it instead of [`on_new_tx`](Self::on_new_tx).
+    /// [`MegaEvm`](crate::MegaEvm) calls it before it runs the handler's system-call path, which
+    /// skips validation and so [`on_new_tx`](Self::on_new_tx).
     ///
     /// A system call is system-originated whatever caller it names: it is the protocol running,
     /// not a transaction anybody sent.
     pub(crate) fn on_new_system_call(&mut self) {
-        self.on_new_tx();
-        self.system_originated = true;
+        self.prepare(true);
+        self.system_call = true;
+    }
+
+    /// Whether the running execution is a system call: the protocol's own call, such as a
+    /// pre-block call, rather than a transaction of the block.
+    ///
+    /// A system call is a function of the chain's state alone, so it never asks the oracle
+    /// service: the service's answers reach a stateless validator through the included
+    /// transactions' records, and a system call has none. Set when the call is prepared and
+    /// cleared when the next transaction is, so it cannot outlive the call.
+    #[inline]
+    pub(crate) const fn is_system_call(&self) -> bool {
+        self.system_call
+    }
+
+    /// Prepares the common execution layer for a transaction or a system call that is, or is not,
+    /// `system_originated`.
+    ///
+    /// The SALT bucket multipliers and the oracle reads go with it: they are what one transaction
+    /// read, so the next one reads its own.
+    ///
+    /// A system-originated transaction is exempt from every per-transaction limit — the data size
+    /// and its frame budgets — before anything is counted, its body included: the protocol's own
+    /// work must not fail on a resource limit, as it pays no history gas for the same reason. What
+    /// it uses is counted all the same. A user's deposit is not system-originated and is held
+    /// to every one of them.
+    fn prepare(&mut self, system_originated: bool) {
+        self.additional_limit.reset();
+        self.additional_limit.set_transfer_logs(emits_transfer_logs(&self.inner.cfg));
+        self.bucket_multipliers.reset();
+        self.oracle_reads.clear();
+        // A transaction that failed with an error, or was stopped, left its `keylessDeploy` call
+        // unanswered.
+        self.keyless_frame = None;
+        self.system_originated = system_originated;
+        let exempt = self.inner.tx.tx_type() == DEPOSIT_TRANSACTION_TYPE || system_originated;
+        self.set_history_exempt(exempt);
+        if system_originated {
+            self.additional_limit.exempt();
+        }
+        // The body is data size whether or not the transaction pays history for it. A deposit,
+        // a system transaction and a system call are exempt from the charge, not from the count.
+        self.additional_limit.record_tx_body(transaction_body_bytes(self.tx()));
+        // The protocol's own transactions are not detained: they maintain the volatile data.
+        let limits = self.additional_limit.limits();
+        self.detention.reset(
+            !system_originated,
+            limits.block_env_access_compute_gas_limit,
+            limits.oracle_access_compute_gas_limit,
+        );
+        self.mark_beneficiary_transaction();
+    }
+
+    /// Marks a read of the block beneficiary's account when the transaction's sender or its
+    /// recipient is the beneficiary: the transaction reads and writes that account whatever it
+    /// runs, so it is detained from its first instruction.
+    fn mark_beneficiary_transaction(&mut self) {
+        let beneficiary = self.inner.block.beneficiary;
+        let tx = &self.inner.tx;
+        if tx.caller() == beneficiary || tx.kind().to() == Some(&beneficiary) {
+            self.detention.mark_before_execution(VolatileDataAccess::BENEFICIARY_BALANCE);
+        }
+    }
+
+    /// Marks a read of the block beneficiary's account when the transaction's recipient is an
+    /// EIP-7702 delegator whose delegate is the beneficiary: its first frame runs the
+    /// beneficiary's code, as a call a contract makes to the same delegator does.
+    ///
+    /// revm resolves the delegate of the transaction's own frame through the journal rather than
+    /// through the Host, so the load the Host marks for a contract's call never happens for it.
+    /// Called once revm has prepared the first frame, when the recipient is loaded with the
+    /// delegation any applied authorization left; read from the journal as it stands, without
+    /// loading or warming anything.
+    pub(crate) fn mark_beneficiary_delegate(&mut self) {
+        let Some(&recipient) = self.inner.tx.kind().to() else { return };
+        let delegate = self
+            .journal_ref()
+            .state
+            .get(&recipient)
+            .and_then(|account| account.info.code.as_ref())
+            .and_then(|code| code.eip7702_address());
+        if delegate == Some(self.inner.block.beneficiary) {
+            self.detention.mark_before_execution(VolatileDataAccess::BENEFICIARY_BALANCE);
+        }
+    }
+
+    /// Records whether the running transaction is exempt from history gas, and installs the
+    /// schedule that matches.
+    ///
+    /// The engine's own history charges read [`prices_history`](Self::prices_history); the one
+    /// charge revm makes itself reads the schedule, so an exempt transaction runs the schedule
+    /// that prices a deposited byte at zero. Both configuration views move together, and only
+    /// when the transaction's exemption differs from the one in place: the two tables are built
+    /// once for the process, so the swap is a shared clone.
+    ///
+    /// The neutral configuration prices no history and keeps its own schedule.
+    fn set_history_exempt(&mut self, exempt: bool) {
+        #[cfg(any(test, feature = "test-utils"))]
+        if self.neutral {
+            self.prices_history = false;
+            return;
+        }
+        self.prices_history = !exempt;
+        let id = GasId::code_deposit_history_gas();
+        let params = if exempt { satin_gas_params_history_exempt() } else { satin_gas_params() };
+        if self.inner.cfg.gas_params.get(id) != params.get(id) {
+            self.cfg.gas_params = params.clone();
+            self.inner.cfg.gas_params = params;
+        }
     }
 
     /// Consumes the context and returns the database, the configuration and the block.
@@ -223,26 +527,62 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     }
 }
 
-/// Sets the configuration fields the spec fixes.
+/// The configuration Satin runs on: `cfg` with every field the spec fixes set from the spec, and
+/// every other field (chain id, disabled checks, blob schedule) as `cfg` holds it.
+///
+/// It is the function [`MegaContext::with_cfg`] applies, so an EVM created from an alloy-evm
+/// `EvmEnv` runs `spec_cfg(env.cfg_env)` whatever the env held. A node that builds an `EvmEnv`
+/// passes its configuration through it too: what reads the env before an EVM exists — reth's gas
+/// estimation reads the execution cap off it — then reads the configuration the EVM runs with.
+/// Applying it twice changes nothing.
+///
+/// A deposit, a system-originated transaction and a system call pay no history gas, and the EVM
+/// runs them on a schedule that prices a deposited byte at nothing; it installs that schedule for
+/// such a transaction and the spec's own for every other, so a configuration never carries it.
 ///
 /// Satin runs the Satin gas schedule (see [`satin_gas_params`]) on its Karst base, with EIP-8037
 /// state gas and the EIP-2780 intrinsic cost switched on and gas above the execution cap going to
 /// the state-gas reservoir. It raises the code-size limits to `MegaETH`'s own.
 ///
-/// Two switches are set off rather than left alone, because the base spec would turn them on and
-/// Satin does not take them: EIP-7708 mints a transfer log for every value movement, which
-/// `MegaETH` meters through its own write records instead, and the system-call reservoir margin
-/// belongs to the system-call reservoir split.
-fn spec_cfg(mut cfg: CfgEnv<MegaSpecId>) -> CfgEnv<MegaSpecId> {
+/// It takes EIP-7708 from Amsterdam as well: every value movement emits a transfer log into the
+/// receipt. The switch is set on and EIP-7708 is not left disabled, because a log in a receipt is
+/// part of what a block commits to, not something a caller's configuration may take out. A
+/// transfer log is data size like any log, and pays no history gas: Ethereum prices it at
+/// nothing, and it is not a byte the transaction chose to write (see the `limit` module).
+///
+/// A system call runs as EIP-8037 has it: on at most the base 30,000,000 of regular gas, the
+/// rest of its gas limit being its state-gas reservoir, which the state it writes draws first.
+/// The switch for it is set on whatever the caller's configuration says, because which pool pays
+/// the protocol's own state writes, and what `GAS` reads inside a system contract, are part of
+/// executing the chain. It reaches system calls only: every transaction's gas is split by the
+/// execution cap as before, the system-address transaction's included, which is a deposit and
+/// not a system call.
+///
+/// The chain-id check is on, whatever the caller's configuration says: a transaction that carries
+/// a chain id must carry the chain's, and one of a type other than legacy must carry one. Which
+/// transactions a chain accepts is the chain's rule, not a caller's choice.
+pub fn spec_cfg(mut cfg: CfgEnv<MegaSpecId>) -> CfgEnv<MegaSpecId> {
     cfg.gas_params = satin_gas_params();
     cfg.enable_amsterdam_eip8037 = true;
     cfg.enable_amsterdam_eip2780 = true;
     cfg.tx_gas_limit_cap = Some(constants::TX_GAS_LIMIT_CAP);
-    cfg.enable_amsterdam_eip7708 = false;
-    cfg.system_call_state_gas_margin_in_reservoir = false;
+    cfg.enable_amsterdam_eip7708 = true;
+    cfg.amsterdam_eip7708_disabled = false;
+    cfg.system_call_state_gas_margin_in_reservoir = true;
+    cfg.tx_chain_id_check = true;
     cfg.limit_contract_code_size = Some(constants::MAX_CONTRACT_SIZE);
     cfg.limit_contract_initcode_size = Some(constants::MAX_INITCODE_SIZE);
     cfg
+}
+
+/// Whether a value movement journals an EIP-7708 transfer log under `cfg`: from Amsterdam on, or
+/// with the switch on, unless EIP-7708 is disabled. It is the rule revm's journal applies, read
+/// off the configuration the journal was synced with, so the data size counts a transfer log
+/// exactly where revm emits one.
+fn emits_transfer_logs(cfg: &CfgEnv<OpSpecId>) -> bool {
+    let spec = EthSpecId::from(cfg.spec);
+    (spec.is_enabled_in(EthSpecId::AMSTERDAM) || cfg.enable_amsterdam_eip7708()) &&
+        !cfg.is_eip7708_disabled()
 }
 
 /// The op-revm view of `cfg`: the same fields, keyed by the Optimism spec.
@@ -285,6 +625,26 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextTr for MegaContext<DB, ExtE
             fn error(&mut self) -> &mut Result<(), ContextError<DB::Error>>;
         }
     }
+
+    /// Holds the code a creation deposits to the data-size limit, and counts its history bytes,
+    /// once `return_create` made every charge for the deposit and before it commits
+    /// the creation ([`AdditionalLimit::on_code_deposit`]). A crossing refuses the deposit with the
+    /// stop's revert data: the creation reverts with it, on the gas it had before the deposit.
+    ///
+    /// A keyless deployment's constructor that returns empty code for the deploy address is
+    /// refused the same way, with empty revert data ([`keyless::refuses_empty_deposit`]).
+    #[inline]
+    fn admit_code_deposit(&mut self, deposit: &CodeDeposit<'_>) -> Result<(), Bytes> {
+        let destroyed = self
+            .journal_ref()
+            .state
+            .get(&deposit.address)
+            .is_some_and(|account| account.is_selfdestructed());
+        if keyless::refuses_empty_deposit(&mut self.keyless_frame, deposit, destroyed) {
+            return Err(Bytes::new());
+        }
+        self.additional_limit.on_code_deposit(deposit)
+    }
 }
 
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextSetters for MegaContext<DB, ExtEnvs> {
@@ -313,8 +673,10 @@ mod tests {
             assert!(cfg.eip8037, "EIP-8037 must be on");
             assert!(cfg.eip2780, "EIP-2780 must be on");
             assert_eq!(cfg.cap, Some(constants::TX_GAS_LIMIT_CAP), "execution cap");
-            assert!(!cfg.eip7708, "EIP-7708 stays off");
-            assert!(!cfg.margin, "the system-call reservoir margin stays off");
+            assert!(cfg.eip7708, "EIP-7708 must be on");
+            assert!(!cfg.eip7708_disabled, "EIP-7708 must not be disabled");
+            assert!(cfg.margin, "a system call's gas above 30M must be its reservoir");
+            assert!(cfg.chain_id_check, "the chain id must be checked");
             assert_eq!(cfg.code_size, Some(constants::MAX_CONTRACT_SIZE), "contract size");
             assert_eq!(cfg.initcode_size, Some(constants::MAX_INITCODE_SIZE), "initcode size");
             assert_eq!(cfg.gas_params.table(), satin_gas_params().table(), "gas schedule");
@@ -327,7 +689,9 @@ mod tests {
         eip2780: bool,
         cap: Option<u64>,
         eip7708: bool,
+        eip7708_disabled: bool,
         margin: bool,
+        chain_id_check: bool,
         code_size: Option<usize>,
         initcode_size: Option<usize>,
         gas_params: &'a GasParams,
@@ -340,7 +704,9 @@ mod tests {
                 eip2780: cfg.enable_amsterdam_eip2780,
                 cap: cfg.tx_gas_limit_cap,
                 eip7708: cfg.enable_amsterdam_eip7708,
+                eip7708_disabled: cfg.amsterdam_eip7708_disabled,
                 margin: cfg.system_call_state_gas_margin_in_reservoir,
+                chain_id_check: cfg.tx_chain_id_check,
                 code_size: cfg.limit_contract_code_size,
                 initcode_size: cfg.limit_contract_initcode_size,
                 gas_params: &cfg.gas_params,
@@ -362,6 +728,23 @@ mod tests {
         assert_satin_cfg(&ctx);
     }
 
+    /// A bare context runs under its spec's limits, the data-size limit included, as block
+    /// execution does: no caller has to hand them over. A caller's limits replace them, and a
+    /// configuration does not.
+    #[test]
+    fn test_a_bare_context_runs_under_the_specs_limits() {
+        let satin = ProtocolLimits::for_spec(MegaSpecId::SATIN).tx_runtime_limits;
+        let ctx = MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN);
+        assert_eq!(*ctx.additional_limit().limits(), satin);
+        assert_eq!(ctx.additional_limit().limits().tx_data_size_limit, 13_107_200);
+
+        let ctx = ctx.with_cfg(CfgEnv::new_with_spec(MegaSpecId::SATIN));
+        assert_eq!(*ctx.additional_limit().limits(), satin, "a configuration sets no limit");
+
+        let ctx = ctx.with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits());
+        assert_eq!(*ctx.additional_limit().limits(), EvmTxRuntimeLimits::no_limits());
+    }
+
     /// A caller's configuration cannot switch off what the spec fixes; every other field is
     /// taken from it.
     #[test]
@@ -371,8 +754,10 @@ mod tests {
             cfg.enable_amsterdam_eip8037 = false;
             cfg.enable_amsterdam_eip2780 = false;
             cfg.tx_gas_limit_cap = Some(1 << 24);
-            cfg.enable_amsterdam_eip7708 = true;
-            cfg.system_call_state_gas_margin_in_reservoir = true;
+            cfg.enable_amsterdam_eip7708 = false;
+            cfg.amsterdam_eip7708_disabled = true;
+            cfg.system_call_state_gas_margin_in_reservoir = false;
+            cfg.tx_chain_id_check = false;
             cfg.limit_contract_code_size = Some(24 * 1024);
             cfg.limit_contract_initcode_size = Some(48 * 1024);
             cfg.gas_params = GasParams::new_spec(EthSpecId::AMSTERDAM);
@@ -381,51 +766,6 @@ mod tests {
         assert_satin_cfg(&ctx);
         assert_eq!(ctx.mega_cfg().chain_id, 4326);
         assert_eq!(ctx.cfg().chain_id, 4326);
-    }
-
-    /// Each switch on its own: setting only that field the other way is overwritten, and the
-    /// rest of the configuration is untouched by the attempt.
-    #[test]
-    fn test_eip8037_stays_on() {
-        assert_satin_cfg(&context_with(|cfg| cfg.enable_amsterdam_eip8037 = false));
-    }
-
-    #[test]
-    fn test_eip2780_stays_on() {
-        assert_satin_cfg(&context_with(|cfg| cfg.enable_amsterdam_eip2780 = false));
-    }
-
-    #[test]
-    fn test_eip7708_stays_off() {
-        assert_satin_cfg(&context_with(|cfg| cfg.enable_amsterdam_eip7708 = true));
-    }
-
-    #[test]
-    fn test_the_system_call_reservoir_margin_stays_off() {
-        assert_satin_cfg(&context_with(|cfg| cfg.system_call_state_gas_margin_in_reservoir = true));
-    }
-
-    #[test]
-    fn test_the_execution_cap_is_the_spec_s() {
-        assert_satin_cfg(&context_with(|cfg| cfg.tx_gas_limit_cap = None));
-        assert_satin_cfg(&context_with(|cfg| cfg.tx_gas_limit_cap = Some(u64::MAX)));
-    }
-
-    #[test]
-    fn test_the_code_size_limits_are_the_spec_s() {
-        assert_satin_cfg(&context_with(|cfg| cfg.limit_contract_code_size = Some(24 * 1024)));
-        assert_satin_cfg(&context_with(|cfg| cfg.limit_contract_initcode_size = None));
-    }
-
-    /// The schedule is the Satin one whatever the caller passed, and it is the same table
-    /// object every time: it is built once, not per configuration.
-    #[test]
-    fn test_the_gas_schedule_is_the_satin_one() {
-        for spec in [EthSpecId::OSAKA, EthSpecId::AMSTERDAM, EthSpecId::PRAGUE] {
-            let ctx = context_with(|cfg| cfg.gas_params = GasParams::new_spec(spec));
-            assert_satin_cfg(&ctx);
-            assert_ne!(ctx.mega_cfg().gas_params.table(), GasParams::new_spec(spec).table());
-        }
     }
 
     /// The op-revm view is the `MegaETH` view keyed by the base spec, field for field.
@@ -472,10 +812,95 @@ mod tests {
         assert_eq!(ctx.account_bucket_multiplier(ACCOUNT), Ok(4));
         assert_eq!(env.bucket_queries(bucket), 1, "the second charge came from the cache");
 
-        ctx.on_new_tx();
+        ctx.on_new_tx(false);
         assert_eq!(ctx.bucket_multipliers().cached_buckets().len(), 0);
         assert_eq!(ctx.account_bucket_multiplier(ACCOUNT), Ok(4));
         assert_eq!(env.bucket_queries(bucket), 2, "the next transaction read it again");
+    }
+
+    /// The bucket record outlives the multipliers: a bucket a transaction asked about stays
+    /// recorded once the next transaction has forgotten its multiplier, a slot's bucket and an
+    /// account's are both recorded, a bucket whose lookup failed is not, a cache hit records
+    /// nothing new, and a system call, which prices at the minimum bucket, records nothing.
+    /// Clearing empties it.
+    #[test]
+    fn test_the_bucket_record_holds_every_ask_over_the_block() {
+        const ACCOUNT: alloy_primitives::Address =
+            alloy_primitives::address!("00000000000000000000000000000000000000a1");
+        const OTHER: alloy_primitives::Address =
+            alloy_primitives::address!("00000000000000000000000000000000000000a2");
+        let account = <TestExternalEnvs as SaltEnv>::bucket_id_for_account(ACCOUNT);
+        let slot = <TestExternalEnvs as SaltEnv>::bucket_id_for_slot(ACCOUNT, U256::from(3));
+        let failing = <TestExternalEnvs as SaltEnv>::bucket_id_for_account(OTHER);
+        let env = TestExternalEnvs::<String>::new()
+            .with_failing_bucket(failing, "salt backend unreachable".into());
+        let mut ctx = MegaContext::new_with_external_envs(
+            EmptyDB::default(),
+            MegaSpecId::SATIN,
+            ExternalEnvs::<TestExternalEnvs<String>> {
+                salt_env: env.clone(),
+                oracle_env: env.clone(),
+            },
+        );
+        assert!(ctx.bucket_record().is_empty());
+
+        assert_eq!(ctx.account_bucket_multiplier(ACCOUNT), Ok(1));
+        ctx.on_new_tx(false);
+        assert_eq!(ctx.bucket_multipliers().cached_buckets().len(), 0, "the multiplier is gone");
+        assert_eq!(ctx.bucket_record().to_vec(), vec![account], "the record is not");
+
+        assert_eq!(ctx.slot_bucket_multiplier(ACCOUNT, U256::from(3)), Ok(1));
+        assert!(ctx.account_bucket_multiplier(OTHER).is_err(), "the lookup fails");
+        let mut expected = vec![account, slot];
+        expected.sort_unstable();
+        assert_eq!(ctx.bucket_record().to_vec(), expected, "every answered ask, not the failed");
+        assert_eq!(ctx.slot_bucket_multiplier(ACCOUNT, U256::from(3)), Ok(1), "a cache hit");
+        assert_eq!(ctx.bucket_record().to_vec(), expected, "which records nothing new");
+        assert_eq!(env.bucket_queries(slot), 1, "and asked the environment nothing");
+
+        ctx.on_new_system_call();
+        assert_eq!(ctx.bucket_record().to_vec(), expected, "a system call forgets nothing");
+
+        ctx.clear_bucket_record();
+        assert!(ctx.bucket_record().is_empty());
+        assert_eq!(ctx.account_bucket_multiplier(ACCOUNT), Ok(1));
+        assert_eq!(ctx.bucket_record().to_vec(), vec![account], "and records again after");
+    }
+
+    /// The oracle read record is one transaction's: a transaction and a system call each start
+    /// with an empty one.
+    #[test]
+    fn test_the_oracle_reads_are_forgotten_before_the_next_transaction() {
+        let mut ctx = MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN);
+        assert!(ctx.oracle_reads().is_empty());
+
+        ctx.oracle_reads.record(U256::from(42), Some(U256::from(1)));
+        assert_eq!(ctx.oracle_reads().reads().len(), 1);
+
+        ctx.on_new_tx(false);
+        assert!(ctx.oracle_reads().is_empty(), "the next transaction starts with none");
+
+        ctx.oracle_reads.record(U256::from(42), None);
+        ctx.on_new_system_call();
+        assert!(ctx.oracle_reads().is_empty(), "so does a system call");
+    }
+
+    /// The system-call mark is the call's own: it is set when a system call is prepared and
+    /// cleared by the next transaction, a Mega System Transaction included.
+    #[test]
+    fn test_the_system_call_mark_does_not_outlive_the_call() {
+        let mut ctx = MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN);
+        assert!(!ctx.is_system_call());
+
+        ctx.on_new_system_call();
+        assert!(ctx.is_system_call());
+
+        ctx.on_new_tx(false);
+        assert!(!ctx.is_system_call(), "a transaction is not a system call");
+
+        ctx.on_new_system_call();
+        ctx.on_new_tx(true);
+        assert!(!ctx.is_system_call(), "nor is a system transaction, which the protocol sends");
     }
 
     /// Two contexts may read one SALT environment — a node builds an EVM per transaction over
@@ -522,5 +947,153 @@ mod tests {
         assert_eq!(ctx.spec(), MegaSpecId::SATIN);
         assert_eq!(ctx.external_envs().salt_env.get_bucket_capacity(7).unwrap(), 1_024);
         assert_satin_cfg(&ctx);
+    }
+
+    /// An Osaka configuration, every field the spec fixes set the other way from Satin's.
+    fn osaka_cfg() -> CfgEnv<MegaSpecId> {
+        let mut cfg = CfgEnv::new_with_spec(MegaSpecId::SATIN);
+        cfg.chain_id = 1;
+        cfg.gas_params = GasParams::new_spec(EthSpecId::OSAKA);
+        cfg.enable_amsterdam_eip8037 = false;
+        cfg.enable_amsterdam_eip2780 = false;
+        cfg.tx_gas_limit_cap = None;
+        cfg.enable_amsterdam_eip7708 = false;
+        cfg.amsterdam_eip7708_disabled = true;
+        cfg.limit_contract_code_size = None;
+        cfg.limit_contract_initcode_size = None;
+        cfg
+    }
+
+    /// Asserts both configuration views carry `cfg` field for field.
+    fn assert_cfg_is(ctx: &MegaContext<EmptyDB, impl ExternalEnvTypes>, cfg: &CfgEnv<MegaSpecId>) {
+        assert_eq!(ctx.mega_cfg(), cfg);
+        assert_eq!(ctx.cfg(), &op_cfg(cfg));
+        assert_eq!(ctx.cfg().gas_params.table(), cfg.gas_params.table());
+    }
+
+    fn call_from(caller: Address) -> MegaTransaction {
+        alloy_op_evm::OpTx(crate::test_utils::op_transaction(revm::context::TxEnv {
+            caller,
+            ..Default::default()
+        }))
+    }
+
+    /// The neutral configuration takes every field from the caller — the ones the spec fixes
+    /// included — and prices no history.
+    #[test]
+    fn test_neutral_cfg_takes_every_field_as_given() {
+        let cfg = osaka_cfg();
+        let ctx =
+            MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN).with_neutral_cfg(cfg.clone());
+
+        assert!(ctx.is_neutral());
+        assert!(!ctx.prices_history());
+        assert_eq!(ctx.spec(), MegaSpecId::SATIN);
+        assert_eq!(ctx.cfg().spec, OpSpecId::KARST);
+        assert_cfg_is(&ctx, &cfg);
+    }
+
+    /// A new transaction neither prices history nor swaps the schedule for its history
+    /// exemption, whichever kind of transaction it is: a user's, a system call, a deposit.
+    #[test]
+    fn test_neutral_cfg_survives_every_kind_of_transaction() {
+        let cfg = osaka_cfg();
+        let mut ctx =
+            MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN).with_neutral_cfg(cfg.clone());
+
+        ctx.set_tx(call_from(Address::repeat_byte(0x11)));
+        ctx.on_new_tx(false);
+        assert!(!ctx.prices_history(), "a user's transaction pays no history");
+        assert_cfg_is(&ctx, &cfg);
+
+        ctx.on_new_system_call();
+        assert!(!ctx.prices_history());
+        assert_cfg_is(&ctx, &cfg);
+
+        let mut deposit = call_from(Address::repeat_byte(0x22));
+        deposit.0.deposit.source_hash = revm::primitives::B256::repeat_byte(1);
+        deposit.0.base.tx_type = DEPOSIT_TRANSACTION_TYPE;
+        ctx.set_tx(deposit);
+        ctx.on_new_tx(false);
+        assert!(!ctx.prices_history());
+        assert_cfg_is(&ctx, &cfg);
+
+        // And back to a user's transaction, after an exempt one would have swapped the schedule.
+        ctx.set_tx(call_from(Address::repeat_byte(0x11)));
+        ctx.on_new_tx(false);
+        assert!(!ctx.prices_history());
+        assert_cfg_is(&ctx, &cfg);
+    }
+
+    /// [`MegaContext::with_cfg`] returns a neutral context to the spec's configuration, and its
+    /// transactions pay history again.
+    #[test]
+    fn test_with_cfg_leaves_the_neutral_configuration() {
+        let mut ctx = MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN)
+            .with_neutral_cfg(osaka_cfg())
+            .with_cfg(osaka_cfg());
+
+        assert!(!ctx.is_neutral());
+        assert_satin_cfg(&ctx);
+        ctx.set_tx(call_from(Address::repeat_byte(0x11)));
+        ctx.on_new_tx(false);
+        assert!(ctx.prices_history());
+        assert_satin_cfg(&ctx);
+    }
+
+    /// Whether a transaction counts transfer logs follows the rule revm's journal emits them by:
+    /// the switch turns them on below Amsterdam, and disabling EIP-7708 wins over it. Each
+    /// transaction reads the configuration afresh, and Satin's emits them.
+    #[test]
+    fn test_a_transaction_counts_transfer_logs_where_revm_emits_them() {
+        let endowed_creation =
+            revm::interpreter::FrameInput::Create(Box::new(revm::interpreter::CreateInputs::new(
+                Address::repeat_byte(0x11),
+                revm::interpreter::CreateScheme::Create,
+                U256::from(1),
+                revm::primitives::Bytes::new(),
+                0,
+                0,
+            )));
+        let counts = |cfg: CfgEnv<MegaSpecId>| {
+            let mut ctx =
+                MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN).with_neutral_cfg(cfg);
+            ctx.set_tx(call_from(Address::repeat_byte(0x11)));
+            ctx.on_new_tx(false);
+            assert_eq!(
+                ctx.additional_limit.frame_start_transfer_log(&endowed_creation),
+                emits_transfer_logs(ctx.cfg()),
+            );
+            emits_transfer_logs(ctx.cfg())
+        };
+        let with = |enabled: bool, disabled: bool| {
+            let mut cfg = osaka_cfg();
+            cfg.enable_amsterdam_eip7708 = enabled;
+            cfg.amsterdam_eip7708_disabled = disabled;
+            cfg
+        };
+        assert!(counts(with(true, false)));
+        assert!(!counts(with(false, false)), "the base spec is below Amsterdam");
+        assert!(!counts(with(true, true)), "disabling wins over the switch");
+        assert!(!counts(with(false, true)));
+
+        // Satin's own configuration emits them, whatever the caller's said.
+        let mut ctx = context_with(|cfg| {
+            cfg.enable_amsterdam_eip7708 = false;
+            cfg.amsterdam_eip7708_disabled = true;
+        });
+        ctx.set_tx(call_from(Address::repeat_byte(0x11)));
+        ctx.on_new_tx(false);
+        assert!(ctx.additional_limit.frame_start_transfer_log(&endowed_creation));
+    }
+
+    /// A context is not neutral unless it is asked to be.
+    #[test]
+    fn test_a_new_context_is_not_neutral() {
+        let mut ctx = MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN);
+        assert!(!ctx.is_neutral());
+        ctx.set_tx(call_from(Address::repeat_byte(0x11)));
+        ctx.on_new_tx(false);
+        assert!(ctx.prices_history());
     }
 }

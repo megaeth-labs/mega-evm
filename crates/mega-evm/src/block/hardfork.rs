@@ -8,8 +8,8 @@
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use core::{any::Any, fmt};
-use std::{boxed::Box, string::String, sync::Arc, vec, vec::Vec};
+use core::fmt;
+use std::{boxed::Box, vec, vec::Vec};
 
 use alloy_hardforks::{hardfork, EthereumHardfork, EthereumHardforks, ForkCondition, Hardfork};
 use alloy_op_hardforks::{OpHardfork, OpHardforks};
@@ -18,11 +18,34 @@ use auto_impl::auto_impl;
 
 use crate::MegaSpecId;
 
+/// The Ethereum forks Satin runs on that a schedule activates by timestamp: every one from the
+/// first after the Merge up to Osaka.
+const SATIN_BASE_ETHEREUM_FORKS: [EthereumHardfork; 4] = [
+    EthereumHardfork::Shanghai,
+    EthereumHardfork::Cancun,
+    EthereumHardfork::Prague,
+    EthereumHardfork::Osaka,
+];
+
+/// The Optimism forks Satin runs on that a schedule activates by timestamp: every one from the
+/// first after Bedrock up to Karst.
+const SATIN_BASE_OP_FORKS: [OpHardfork; 9] = [
+    OpHardfork::Regolith,
+    OpHardfork::Canyon,
+    OpHardfork::Ecotone,
+    OpHardfork::Fjord,
+    OpHardfork::Granite,
+    OpHardfork::Holocene,
+    OpHardfork::Isthmus,
+    OpHardfork::Jovian,
+    OpHardfork::Karst,
+];
+
 hardfork! {
     /// `MegaETH` network upgrades that schedule a Satin-engine spec. It is expected to mix with
     /// `EthereumHardfork` and `OpHardfork`.
     ///
-    /// The forks of the legacy engine (`MiniRex` through `Rex7`) are not variants here; a chain
+    /// The forks of the legacy engine (`MiniRex` through `Rex6`) are not variants here; a chain
     /// runs them on the legacy engine up to the Satin activation.
     #[derive(serde::Serialize, serde::Deserialize)]
     MegaHardfork {
@@ -40,43 +63,6 @@ impl MegaHardfork {
     }
 }
 
-/// An invalid value of a [`HardforkParams`] type, as its
-/// [`validate`](HardforkParams::validate) reports it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HardforkParamsError {
-    /// Which field or invariant is wrong.
-    pub message: String,
-}
-
-impl fmt::Display for HardforkParamsError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl core::error::Error for HardforkParamsError {}
-
-/// Parameters a fork needs from the chain configuration.
-///
-/// A params type belongs to exactly one fork ([`FORK`](Self::FORK)), so
-/// [`fork_params`](MegaHardforks::fork_params) returns it without the caller naming the fork
-/// twice. [`validate`](Self::validate) states the invariants of the value itself;
-/// [`MegaHardforkConfig::with_params`] runs it when the configuration is built, so a bad value
-/// fails at load. A fork that cannot run without its parameters also registers the requirement in
-/// [`validate_schedule`](MegaHardforks::validate_schedule).
-pub trait HardforkParams: Any + fmt::Debug + Send + Sync {
-    /// The hardfork these parameters belong to.
-    const FORK: MegaHardfork;
-
-    /// How [`ScheduleError::MissingParams`] names this type.
-    const NAME: &'static str;
-
-    /// Checks the invariants of this value. The default accepts anything.
-    fn validate(&self) -> Result<(), HardforkParamsError> {
-        Ok(())
-    }
-}
-
 /// Extends [`OpHardforks`] with the `MegaETH` forks.
 ///
 /// Satin is the only `MegaETH` fork, so a schedule answers two questions: whether the chain has
@@ -88,16 +74,6 @@ pub trait MegaHardforks: OpHardforks {
     /// The activation condition of `fork`, or [`ForkCondition::Never`] if the schedule does not
     /// carry it.
     fn mega_fork_activation(&self, fork: MegaHardfork) -> ForkCondition;
-
-    /// The parameters attached to `fork`, type-erased. Forks without parameters answer `None`.
-    fn fork_params_any(&self, _fork: MegaHardfork) -> Option<&(dyn Any + Send + Sync)> {
-        None
-    }
-
-    /// The parameters of the fork `P` belongs to, or `None` when the schedule carries none.
-    fn fork_params<P: HardforkParams>(&self) -> Option<&P> {
-        self.fork_params_any(P::FORK)?.downcast_ref::<P>()
-    }
 
     /// The latest `MegaETH` fork active at `timestamp`, or `None` before the first one.
     ///
@@ -122,6 +98,17 @@ pub trait MegaHardforks: OpHardforks {
         self.mega_fork_activation(MegaHardfork::Satin).active_at_timestamp(timestamp)
     }
 
+    /// Whether the block at `block_timestamp`, whose parent is at `parent_timestamp`, is the one
+    /// in which Satin activates: Satin is active at the block and not at its parent.
+    ///
+    /// A chain whose schedule has Satin from genesis has no such block, and neither does a
+    /// schedule that never activates it. A block that follows a gap in the timestamps is the
+    /// activation block when the activation falls in the gap.
+    fn is_satin_activation_block(&self, parent_timestamp: u64, block_timestamp: u64) -> bool {
+        self.is_satin_active_at_timestamp(block_timestamp) &&
+            !self.is_satin_active_at_timestamp(parent_timestamp)
+    }
+
     /// Whether the block at `block_timestamp`, whose parent is at `parent_timestamp`, admits
     /// only deposit transactions.
     ///
@@ -137,19 +124,6 @@ pub trait MegaHardforks: OpHardforks {
         }) || self.is_no_user_tx_activation_block(parent_timestamp, block_timestamp)
     }
 
-    /// Refuses a schedule that activates `P::FORK` without attaching `P`.
-    ///
-    /// This is the rule [`validate_schedule`](Self::validate_schedule) applies to every params
-    /// type a fork requires; it is public so a params type can be checked on its own.
-    fn require_params<P: HardforkParams>(&self) -> Result<(), ScheduleError> {
-        if self.mega_fork_activation(P::FORK) != ForkCondition::Never &&
-            self.fork_params::<P>().is_none()
-        {
-            return Err(ScheduleError::MissingParams { fork: P::FORK, params: P::NAME });
-        }
-        Ok(())
-    }
-
     /// Checks that this schedule is one a chain can run, so a configuration mistake is caught
     /// when the chain configuration is loaded rather than at the fork's first block.
     ///
@@ -158,10 +132,12 @@ pub trait MegaHardforks: OpHardforks {
     /// - Every registered `MegaETH` fork activates by [`ForkCondition::Timestamp`] (or is
     ///   [`ForkCondition::Never`]). Resolution is timestamp-scoped, so a block-number or
     ///   total-difficulty condition would silently never activate the fork.
-    /// - The parameters every scheduled fork requires are attached
-    ///   ([`require_params`](Self::require_params)). Satin requires none yet: a mechanism that
-    ///   brings a [`HardforkParams`] type registers it here, in the block marked below, and the
-    ///   requirement is enforced from that change on.
+    /// - Every fork Satin runs on that the schedule activates by timestamp — the Ethereum forks
+    ///   from Shanghai to Osaka and the Optimism forks from Regolith to Karst — is active at
+    ///   Satin's activation, so the engine and the rest of the node, which reads the same schedule,
+    ///   do not apply different rules to one block. The other half of that timing rule, that
+    ///   Jovian, Karst and Osaka do not activate before Satin, is the node's to check: before Satin
+    ///   the chain runs its pre-Satin engine, which this crate does not execute.
     ///
     /// There is no ordering or gap check: a single fork has nothing to be out of order with. The
     /// spec that follows Satin brings the ladder back, and with it those checks.
@@ -173,10 +149,42 @@ pub trait MegaHardforks: OpHardforks {
             }
         }
 
-        // Required parameters, one `self.require_params::<P>()?` per params type. Satin has none.
-
-        Ok(())
+        require_base_forks(self)
     }
+}
+
+/// Refuses a schedule that activates Satin at a timestamp at which a fork it runs on is not
+/// active: the half of the timing rule
+/// [`validate_schedule`](MegaHardforks::validate_schedule) states that the engine checks.
+///
+/// The forks checked are those a schedule activates by timestamp, the Ethereum forks from Shanghai
+/// to Osaka and the Optimism forks from Regolith to Karst, each read as block execution reads
+/// it: active at Satin's activation timestamp. A fork scheduled by block number or total
+/// difficulty instead, or not at all, is not active at any timestamp, and is refused. The forks
+/// up to the Merge, and Bedrock, are scheduled by block number or total difficulty, which a
+/// timestamp cannot be compared with, and every one of them precedes the first fork scheduled
+/// by timestamp; they are not checked. A schedule that does not activate Satin is not checked
+/// either.
+fn require_base_forks<H: MegaHardforks + ?Sized>(schedule: &H) -> Result<(), ScheduleError> {
+    let ForkCondition::Timestamp(satin_time) = schedule.mega_fork_activation(MegaHardfork::Satin)
+    else {
+        return Ok(());
+    };
+    let ethereum = SATIN_BASE_ETHEREUM_FORKS
+        .iter()
+        .map(|fork| (fork.name(), schedule.ethereum_fork_activation(*fork)));
+    let op =
+        SATIN_BASE_OP_FORKS.iter().map(|fork| (fork.name(), schedule.op_fork_activation(*fork)));
+    for (base, condition) in ethereum.chain(op) {
+        if !condition.active_at_timestamp(satin_time) {
+            return Err(ScheduleError::InactiveBaseFork {
+                fork: MegaHardfork::Satin,
+                activation: satin_time,
+                base,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// A schedule a chain cannot run, as [`MegaHardforks::validate_schedule`] reports it.
@@ -188,12 +196,14 @@ pub enum ScheduleError {
         /// The fork with the wrong condition.
         fork: MegaHardfork,
     },
-    /// A scheduled fork requires parameters that the schedule does not carry.
-    MissingParams {
+    /// A fork a scheduled `MegaETH` fork runs on is not active when that fork activates.
+    InactiveBaseFork {
         /// The scheduled fork.
         fork: MegaHardfork,
-        /// The required params type, as [`HardforkParams::NAME`] names it.
-        params: &'static str,
+        /// The timestamp it activates at.
+        activation: BlockTimestamp,
+        /// The fork it runs on that is not active then, as [`Hardfork::name`] names it.
+        base: &'static str,
     },
 }
 
@@ -203,10 +213,11 @@ impl fmt::Display for ScheduleError {
             Self::NonTimestampActivation { fork } => {
                 write!(f, "hardfork {fork:?} must activate by timestamp, not block number or TTD")
             }
-            Self::MissingParams { fork, params } => {
+            Self::InactiveBaseFork { fork, activation, base } => {
                 write!(
                     f,
-                    "hardfork {fork:?} is scheduled but its {params} params are not configured"
+                    "hardfork {fork:?} activates at timestamp {activation}, where the {base} fork \
+                     it runs on is not active"
                 )
             }
         }
@@ -215,25 +226,24 @@ impl fmt::Display for ScheduleError {
 
 impl core::error::Error for ScheduleError {}
 
-/// One fork of a schedule: which fork, when it activates, and the parameters it carries.
+/// One fork of a schedule: which fork, and when it activates.
 #[derive(Debug)]
 struct ForkEntry {
     fork: Box<dyn Hardfork>,
     condition: ForkCondition,
-    params: Option<Arc<dyn Any + Send + Sync>>,
 }
 
 impl Clone for ForkEntry {
     fn clone(&self) -> Self {
-        Self { fork: self.fork.clone(), condition: self.condition, params: self.params.clone() }
+        Self { fork: self.fork.clone(), condition: self.condition }
     }
 }
 
 /// A chain's hardfork schedule.
 ///
 /// [`new`](Self::new) activates every Ethereum and Optimism fork up to and including the base
-/// Satin runs on (Osaka / Karst) at genesis, and no `MegaETH` fork:  those the caller schedules,
-/// with [`with`](Self::with) or [`with_all_activated`](Self::with_all_activated).
+/// Satin runs on (Osaka / Karst) from the first block, and no `MegaETH` fork: those the caller
+/// schedules, with [`with`](Self::with) or [`with_all_activated`](Self::with_all_activated).
 #[derive(Debug, Clone)]
 pub struct MegaHardforkConfig {
     entries: Vec<ForkEntry>,
@@ -256,7 +266,6 @@ where
                 .map(|(fork, condition)| ForkEntry {
                     fork: Box::new(fork) as Box<dyn Hardfork>,
                     condition,
-                    params: None,
                 })
                 .collect(),
         }
@@ -264,12 +273,13 @@ where
 }
 
 impl MegaHardforkConfig {
-    /// A schedule with every Ethereum and Optimism fork up to Osaka / Karst active at genesis,
-    /// and no `MegaETH` fork.
+    /// A schedule with every Ethereum and Optimism fork up to Osaka / Karst active from the first
+    /// block, and no `MegaETH` fork.
     ///
     /// Karst is the base [`MegaSpecId::SATIN`] runs on, so a chain executing Satin has already
     /// passed every fork below it; the schedule states that rather than leaving the node to
-    /// repeat it.
+    /// repeat it. A chain that ran the legacy forks activated them later than its first block, by
+    /// Satin's activation, which no Satin block can tell apart from the first block.
     pub fn new() -> Self {
         let forks: Vec<(Box<dyn Hardfork>, ForkCondition)> = vec![
             (EthereumHardfork::Frontier.boxed(), ForkCondition::Block(0)),
@@ -309,7 +319,7 @@ impl MegaHardforkConfig {
         Self {
             entries: forks
                 .into_iter()
-                .map(|(fork, condition)| ForkEntry { fork, condition, params: None })
+                .map(|(fork, condition)| ForkEntry { fork, condition })
                 .collect(),
         }
     }
@@ -319,32 +329,6 @@ impl MegaHardforkConfig {
         for fork in MegaHardfork::VARIANTS {
             self.insert(*fork, ForkCondition::Timestamp(0));
         }
-        self
-    }
-
-    /// Attaches `params` to the fork they belong to.
-    ///
-    /// # Panics
-    ///
-    /// If the fork is not registered in this schedule, or if `params.validate()` refuses the
-    /// value — a chain configuration is built once, at load, and a bad one must not start.
-    pub fn with_params<P: HardforkParams>(mut self, params: P) -> Self {
-        if let Err(e) = params.validate() {
-            panic!("Invalid params for fork {:?}: {}", P::FORK, e.message);
-        }
-        let entry = self
-            .entries
-            .iter_mut()
-            .find(|entry| entry.fork.name() == P::FORK.name())
-            .unwrap_or_else(|| {
-                panic!(
-                    "Cannot attach params to fork {:?}: fork not registered in config. \
-                     Call .with({:?}, condition) first.",
-                    P::FORK,
-                    P::FORK,
-                )
-            });
-        entry.params = Some(Arc::new(params));
         self
     }
 
@@ -360,14 +344,13 @@ impl MegaHardforkConfig {
         self
     }
 
-    /// Adds `hardfork` with `condition`. An entry that is already there keeps its parameters and
-    /// takes the new condition.
+    /// Adds `hardfork` with `condition`. An entry that is already there takes the new condition.
     pub fn insert(&mut self, hardfork: impl Hardfork, condition: ForkCondition) {
         let index = self.entries.iter().position(|entry| entry.fork.name() == hardfork.name());
         if let Some(index) = index {
             self.entries[index].condition = condition;
         } else {
-            self.entries.push(ForkEntry { fork: Box::new(hardfork), condition, params: None });
+            self.entries.push(ForkEntry { fork: Box::new(hardfork), condition });
         }
     }
 
@@ -396,43 +379,12 @@ impl MegaHardforks for MegaHardforkConfig {
     fn mega_fork_activation(&self, fork: MegaHardfork) -> ForkCondition {
         self.get(fork).copied().unwrap_or(ForkCondition::Never)
     }
-
-    fn fork_params_any(&self, fork: MegaHardfork) -> Option<&(dyn Any + Send + Sync)> {
-        self.entries
-            .iter()
-            .find(|entry| entry.fork.name() == fork.name())
-            .and_then(|entry| entry.params.as_deref())
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::address;
     use core::str::FromStr;
-
-    /// A params type of this test module alone: the fork-requires-params rule is a mechanism
-    /// here, and Satin has no params type of its own yet.
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    struct TestParams {
-        sequencer: alloy_primitives::Address,
-    }
-
-    impl HardforkParams for TestParams {
-        const FORK: MegaHardfork = MegaHardfork::Satin;
-        const NAME: &'static str = "TestParams";
-
-        fn validate(&self) -> Result<(), HardforkParamsError> {
-            if self.sequencer.is_zero() {
-                return Err(HardforkParamsError { message: "sequencer must be set".into() });
-            }
-            Ok(())
-        }
-    }
-
-    fn params() -> TestParams {
-        TestParams { sequencer: address!("0x2222222222222222222222222222222222222222") }
-    }
 
     #[test]
     fn test_satin_fork_schedules_the_satin_spec() {
@@ -445,7 +397,7 @@ mod tests {
     #[test]
     fn test_legacy_fork_names_do_not_parse() {
         assert_eq!(MegaHardfork::from_str("Satin").unwrap(), MegaHardfork::Satin);
-        for legacy in ["MiniRex", "MiniRex1", "MiniRex2", "Rex", "Rex1", "Rex6", "Rex7"] {
+        for legacy in ["MiniRex", "MiniRex1", "MiniRex2", "Rex", "Rex1", "Rex6"] {
             assert!(MegaHardfork::from_str(legacy).is_err(), "{legacy} must not parse");
         }
     }
@@ -469,7 +421,6 @@ mod tests {
         assert_eq!(config.op_fork_activation(OpHardfork::Isthmus), ForkCondition::Timestamp(0));
         assert_eq!(config.op_fork_activation(OpHardfork::Karst), ForkCondition::Timestamp(0));
         assert_eq!(config.mega_fork_activation(MegaHardfork::Satin), ForkCondition::Never);
-        assert!(config.fork_params::<TestParams>().is_none());
     }
 
     #[test]
@@ -514,51 +465,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_fork_params_typed_access() {
-        let config = MegaHardforkConfig::default()
-            .with(MegaHardfork::Satin, ForkCondition::Timestamp(0))
-            .with_params(params());
-
-        let retrieved = config.fork_params::<TestParams>().expect("params were attached");
-        assert_eq!(retrieved, &params());
-    }
-
-    #[test]
-    fn test_fork_params_none_when_not_configured() {
-        let config =
-            MegaHardforkConfig::default().with(MegaHardfork::Satin, ForkCondition::Timestamp(0));
-
-        assert!(config.fork_params::<TestParams>().is_none());
-    }
-
-    #[test]
-    fn test_default_validate_accepts_any_value() {
-        #[derive(Debug)]
-        struct NullParams;
-
-        impl HardforkParams for NullParams {
-            const FORK: MegaHardfork = MegaHardfork::Satin;
-            const NAME: &'static str = "NullParams";
-        }
-
-        assert!(NullParams.validate().is_ok());
-    }
-
-    #[test]
-    fn test_hardfork_params_error_display() {
-        let e = HardforkParamsError { message: "something went wrong".into() };
-        assert_eq!(e.to_string(), "something went wrong");
-    }
-
-    #[test]
-    #[should_panic(expected = "Invalid params for fork")]
-    fn test_with_params_panics_on_validation_error() {
-        MegaHardforkConfig::default()
-            .with_all_activated()
-            .with_params(TestParams { sequencer: alloy_primitives::Address::ZERO });
-    }
-
     /// Documented domain limit: resolution is timestamp-scoped, so a `MegaHardfork` registered by
     /// block number never contributes its spec. `validate_schedule` rejects such a schedule at
     /// load rather than leaving the fork silently inactive.
@@ -578,28 +484,6 @@ mod tests {
         );
     }
 
-    /// A scheduled fork whose required params are missing fails at validation time instead of at
-    /// the first block of the fork.
-    #[test]
-    fn test_validate_schedule_requires_scheduled_fork_params() {
-        let unscheduled = MegaHardforkConfig::default();
-        assert_eq!(unscheduled.require_params::<TestParams>(), Ok(()));
-
-        let no_params = MegaHardforkConfig::default().with_all_activated();
-        assert_eq!(
-            no_params.require_params::<TestParams>(),
-            Err(ScheduleError::MissingParams { fork: MegaHardfork::Satin, params: "TestParams" })
-        );
-        assert_eq!(
-            no_params.require_params::<TestParams>().unwrap_err().to_string(),
-            "hardfork Satin is scheduled but its TestParams params are not configured"
-        );
-
-        let with_params = no_params.with_params(params());
-        assert_eq!(with_params.require_params::<TestParams>(), Ok(()));
-        assert_eq!(with_params.validate_schedule(), Ok(()));
-    }
-
     /// The block a fork activates in carries the chain's own transactions only, and only that
     /// block: the one before it and the ones after it are ordinary.
     #[test]
@@ -611,6 +495,34 @@ mod tests {
         assert!(config.admits_only_deposits(99, 101), "and the first block after a gap");
         assert!(!config.admits_only_deposits(98, 99), "not before the activation");
         assert!(!config.admits_only_deposits(100, 101), "and not once the parent had it too");
+    }
+
+    /// Satin's activation block is the block at which Satin is active and at whose parent it is
+    /// not: the first block at the activation, and the first after a gap over it; not the block
+    /// after it, nor any block of a chain with Satin from genesis or without Satin. An Optimism
+    /// fork's activation block, which admits only deposits too, is not Satin's.
+    #[test]
+    fn test_satin_activation_block_follows_the_parent_timestamp() {
+        let satin_at = |timestamp| {
+            MegaHardforkConfig::default()
+                .with(MegaHardfork::Satin, ForkCondition::Timestamp(timestamp))
+        };
+        let config = satin_at(100);
+        assert!(config.is_satin_activation_block(99, 100), "the activation block");
+        assert!(config.is_satin_activation_block(90, 105), "the first block after a gap over it");
+        assert!(!config.is_satin_activation_block(100, 101), "the block after it");
+        assert!(!config.is_satin_activation_block(98, 99), "a block before it");
+
+        let genesis = satin_at(0);
+        assert!(!genesis.is_satin_activation_block(0, 1), "Satin from genesis has none");
+        assert!(!genesis.is_satin_activation_block(99, 100));
+        assert!(!MegaHardforkConfig::default().is_satin_activation_block(99, 100), "nor no Satin");
+
+        let jovian = genesis
+            .with(OpHardfork::Jovian, ForkCondition::Timestamp(100))
+            .with(OpHardfork::Karst, ForkCondition::Timestamp(200));
+        assert!(jovian.admits_only_deposits(99, 100), "Jovian's activation block is deposit-only");
+        assert!(!jovian.is_satin_activation_block(99, 100), "but not Satin's activation block");
     }
 
     #[test]

@@ -1,12 +1,14 @@
 # AGENTS.md
 
 ## OVERVIEW
-Thin CLI front-end over the `mega-state-test` runner library (`crates/mega-state-test`), used to run Ethereum state tests against MegaEVM.
-This crate is not published; the runner, fixture types, and validation logic all live in `mega-state-test`.
+Thin CLI front end over the `mega-state-test` runner library (`crates/mega-state-test`), which runs Ethereum's execution-spec state tests on the Satin engine.
+This crate is not published; the runner, the modes, the deviation registry and the fixture types all live in `mega-state-test`.
 
 ## STRUCTURE
-- `src/main.rs`: CLI entrypoint, flag parsing, and path-level orchestration.
+- `src/main.rs`: flag parsing, the printed summary, and the exit-code contract.
+- `src/btest.rs`: the `btest` subcommand, the blockchain tests' gate, with the same contract; `main` hands it every argument after `btest`, so the state tests' command is unchanged.
+- `tests/cli.rs`: the exit-code contract CI relies on.
 
 ## WHERE TO LOOK
-- Change CLI flags or path handling: `src/main.rs`.
-- Anything about test execution, validation, skip policy, or fixture types: `crates/mega-state-test` (see its `AGENTS.md`).
+- Change CLI flags, the summary or the exit codes: `src/main.rs`, and `src/btest.rs` for the blockchain tests.
+- Anything about execution, judging, skips, deviations or fixture types: `crates/mega-state-test` (see its `AGENTS.md`).

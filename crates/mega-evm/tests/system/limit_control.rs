@@ -4,23 +4,16 @@
 use alloy_primitives::{Bytes, U256};
 use alloy_sol_types::{SolCall, SolError};
 use mega_evm::system::{IMegaLimitControl, LIMIT_CONTROL_ADDRESS, NON_ZERO_TRANSFER_REVERT_DATA};
-use revm::bytecode::opcode::{CALL, CALLCODE, DELEGATECALL, STATICCALL};
+use revm::bytecode::opcode::{CALL, CALLCODE, DELEGATECALL};
 
-use crate::common::{
-    call_tx, calls_with, output, revert_data, run, split_outcome, system_db, with_contract,
-    CONTRACT, GAS_LIMIT,
-};
+use crate::common::{call_tx, output, revert_data, run, system_db, GAS_LIMIT};
 
 const REMAINING_COMPUTE_GAS: [u8; 4] = IMegaLimitControl::remainingComputeGasCall::SELECTOR;
 const NOT_INTERCEPTED: [u8; 4] = IMegaLimitControl::NotIntercepted::SELECTOR;
 
 /// A call from a contract to the limit control contract, run as a transaction.
 fn through_contract(scheme: u8, data: &[u8], value: u64) -> (bool, Bytes) {
-    let code = calls_with(scheme, LIMIT_CONTROL_ADDRESS, data, value);
-    let result = run(with_contract(code), call_tx(CONTRACT, [], U256::ZERO));
-    let outcome = output(&result);
-    let (status, data) = split_outcome(&outcome);
-    (status, Bytes::copy_from_slice(data))
+    crate::common::through_contract(LIMIT_CONTROL_ADDRESS, scheme, data, value)
 }
 
 /// Decodes what `remainingComputeGas()` answered.
@@ -29,8 +22,9 @@ fn remaining(data: &Bytes) -> u64 {
         .expect("the answer is a uint64")
 }
 
-/// `remainingComputeGas()` is intercepted and answers the regular gas the call was forwarded,
-/// which is below the execution cap and below what the caller had.
+/// `remainingComputeGas()` is intercepted and answers the caller's regular gas, which is below the
+/// execution cap and below what the transaction had. What the figure is exactly is in
+/// `remaining_compute_gas`.
 #[test]
 fn test_remaining_compute_gas_is_intercepted() {
     let (status, data) = through_contract(CALL, &REMAINING_COMPUTE_GAS, 0);
@@ -42,57 +36,6 @@ fn test_remaining_compute_gas_is_intercepted() {
         remaining <= mega_evm::constants::TX_GAS_LIMIT_CAP,
         "regular gas never exceeds the execution cap",
     );
-}
-
-/// A transaction calling the contract directly is intercepted, and answers a figure below the
-/// transaction's own gas limit.
-#[test]
-fn test_a_direct_transaction_is_intercepted() {
-    let result =
-        run(system_db(), call_tx(LIMIT_CONTROL_ADDRESS, REMAINING_COMPUTE_GAS, U256::ZERO));
-    let answer = remaining(&output(&result));
-    assert!(
-        answer > 0 && answer < GAS_LIMIT,
-        "{answer} is not between the intrinsic cost and the limit"
-    );
-}
-
-/// A `STATICCALL` reaches the interceptor: the method only reads.
-#[test]
-fn test_a_static_call_is_intercepted() {
-    let (status, data) = through_contract(STATICCALL, &REMAINING_COMPUTE_GAS, 0);
-    assert!(status);
-    assert!(remaining(&data) > 0);
-}
-
-/// The answer falls as the caller spends: a second query further along the same frame reports
-/// less than the first.
-#[test]
-fn test_the_answer_falls_as_the_caller_spends() {
-    use mega_evm::test_utils::BytecodeBuilder;
-    use revm::bytecode::opcode::{GAS, POP, RETURN};
-
-    // Two queries in a row, both written into memory and returned.
-    let mut code = BytecodeBuilder::default().mstore(0x0, REMAINING_COMPUTE_GAS);
-    for slot in [0x20_u64, 0x40] {
-        code = code
-            .push_number(32_u64) // retSize
-            .push_number(slot) // retOffset
-            .push_number(4_u64) // argsSize
-            .push_number(0_u64) // argsOffset
-            .push_number(0_u64) // value
-            .push_address(LIMIT_CONTROL_ADDRESS)
-            .append(GAS)
-            .append(CALL)
-            .append(POP);
-    }
-    let code = code.push_number(64_u64).push_number(0x20_u64).append(RETURN).build();
-
-    let result = run(with_contract(code), call_tx(CONTRACT, [], U256::ZERO));
-    let outcome = output(&result);
-    let first = U256::from_be_slice(&outcome[..32]);
-    let second = U256::from_be_slice(&outcome[32..64]);
-    assert!(second < first, "{second} is not below {first}");
 }
 
 /// A call that carries value is refused with `NonZeroTransfer()`: the method reads and takes no

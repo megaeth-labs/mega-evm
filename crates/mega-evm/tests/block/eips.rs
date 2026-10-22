@@ -2,26 +2,40 @@
 //!
 //! Every helper hands its state back rather than committing it, and the executor is what commits:
 //! a call the fork makes is in the state the block's transactions run on, and a call it does not
-//! make leaves that state alone.
+//! make leaves that state alone. A call that does not succeed refuses the block, and its state is
+//! never committed: neither a commit hook nor the database sees it.
+//!
+//! Each call runs on the pre-block budget: the block's gas limit, and never less than 30M, of
+//! which at most 30M is regular gas and the rest the call's state-gas reservoir.
 
-use alloy_eips::{eip2935::HISTORY_STORAGE_ADDRESS, eip4788::BEACON_ROOTS_ADDRESS};
+use alloy_eips::{
+    eip2935::{HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE},
+    eip4788::{BEACON_ROOTS_ADDRESS, BEACON_ROOTS_CODE},
+};
 use alloy_evm::{
     block::{BlockExecutionError, BlockExecutor, BlockValidationError},
-    EvmEnv,
+    EvmEnv, EvmFactory,
 };
 use alloy_hardforks::{EthereumHardfork, ForkCondition};
-use alloy_primitives::{Bytes, B256, U256};
+use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
+use alloy_primitives::{Address, Bytes, B256, U256};
 use mega_evm::{
-    test_utils::{BytecodeBuilder, MemoryDatabase},
-    BlockLimits, MegaBlockExecutionCtx, MegaHardforkConfig, MegaSpecId,
+    constants::SLOT_STATE_GAS,
+    pre_block_call_gas_limit,
+    test_utils::{BytecodeBuilder, CommittedStates, ErrorInjectingDatabase, MemoryDatabase},
+    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardforkConfig,
+    MegaSpecId,
 };
 use revm::{
-    bytecode::opcode::{CALLDATALOAD, SSTORE},
+    bytecode::opcode::{CALLDATALOAD, MLOAD, SSTORE},
     database::State,
+    handler::SYSTEM_CALL_REGULAR_GAS_LIMIT,
     Database,
 };
 
-use crate::common::{self, executor_with_env, executor_with_env_and_spec, BLOCK_NUMBER};
+use crate::common::{
+    self, call_state, eip_calls, executor_with_env, executor_with_env_and_spec, BLOCK_NUMBER,
+};
 
 /// The parent hash the EIP-2935 call records.
 const PARENT_HASH: B256 = B256::repeat_byte(0xab);
@@ -37,6 +51,19 @@ fn recorder() -> Bytes {
         .append(CALLDATALOAD)
         .push_number(0_u32)
         .append(SSTORE)
+        .stop()
+        .build()
+}
+
+/// Code that stores the word it was called with in slot zero, as [`recorder`] does, and one in slot
+/// one: two writes, so two write records.
+fn recorder_writing_twice() -> Bytes {
+    BytecodeBuilder::default()
+        .push_number(0_u32)
+        .append(CALLDATALOAD)
+        .push_number(0_u32)
+        .append(SSTORE)
+        .sstore(U256::from(1), U256::from(1))
         .stop()
         .build()
 }
@@ -94,6 +121,54 @@ fn pre_block_calls(
     recorded(&mut state)
 }
 
+/// The contracts the pre-block calls a block at `number` on the chain `spec` describes committed
+/// a state for, in order, and whether the block started.
+fn committed_calls(
+    spec: MegaHardforkConfig,
+    number: u64,
+    ctx: MegaBlockExecutionCtx,
+) -> (Vec<Address>, Result<(), BlockExecutionError>) {
+    let mut state = state_with_recorders();
+    let committed = CommittedStates::install(&mut state);
+    let mut executor = executor_with_env_and_spec(&mut state, ctx, env_at_block(number), spec);
+    let started = executor.apply_pre_execution_changes();
+    (eip_calls(&committed.states()), started)
+}
+
+/// The environment of a block at [`BLOCK_NUMBER`] whose gas limit is `gas_limit`.
+fn env_with_gas_limit(gas_limit: u64) -> EvmEnv<MegaSpecId> {
+    let mut env = env_at_block(BLOCK_NUMBER);
+    env.block_env.gas_limit = gas_limit;
+    env
+}
+
+/// Code whose one instruction expands memory past what 30M of regular gas pays for: it halts out
+/// of gas on the regular budget, however much reservoir the call carries.
+fn memory_hog() -> Bytes {
+    BytecodeBuilder::default().push_number(0x40_0000_u32).append(MLOAD).stop().build()
+}
+
+/// Code that writes `slots` fresh storage slots, `SSTORE(i, 1)` for each.
+fn fresh_writes(slots: u16) -> Bytes {
+    (0..slots)
+        .fold(BytecodeBuilder::default(), |code, slot| code.sstore(U256::from(slot), U256::from(1)))
+        .stop()
+        .build()
+}
+
+/// Starts a block at [`BLOCK_NUMBER`] in `env` over `db` and reports the contracts the pre-block
+/// calls committed a state for, and how the block's start ended.
+fn start_block(
+    db: MemoryDatabase,
+    env: EvmEnv<MegaSpecId>,
+) -> (Vec<Address>, Result<(), BlockExecutionError>) {
+    let mut state = State::builder().with_database(db).build();
+    let committed = CommittedStates::install(&mut state);
+    let mut executor = executor_with_env(&mut state, ctx(), env);
+    let started = executor.apply_pre_execution_changes();
+    (eip_calls(&committed.states()), started)
+}
+
 /// Both calls run on a block of a chain past Prague and Cancun, and the executor commits what
 /// they produced: the block's transactions see the parent hash and the parent beacon root.
 #[test]
@@ -104,6 +179,100 @@ fn test_the_pre_block_calls_record_the_parent_hash_and_the_beacon_root() {
     );
 }
 
+/// The pre-block calls are the protocol's own work, held to no per-transaction limit: under the
+/// smallest value a chain may carry for each limit, which their bodies and their writes cross, both
+/// calls still record.
+///
+/// Each contract writes two slots, so each call keeps two write records: the body (`TX_BODY_SIZE`
+/// and 32 bytes of calldata) crosses the transaction's data size, and a record the frame's. The
+/// states the block commits show the two writes. Each limit is set alone as well as both
+/// together.
+///
+/// Rule [S19.3]. Expected values `independent`: the parent hash and the beacon root are the
+/// block's own inputs, and the crossings are counted here from the writes the calls made.
+#[test]
+fn test_the_pre_block_calls_are_held_to_no_limit() {
+    let loosest = common::loosest_tx();
+    let every =
+        loosest.with_tx_data_size_limit(mega_evm::TX_BODY_SIZE).with_frame_data_size_limit(1);
+    for (name, limits) in [
+        ("the transaction's data size", loosest.with_tx_data_size_limit(mega_evm::TX_BODY_SIZE)),
+        ("a frame's data size", loosest.with_frame_data_size_limit(1)),
+        ("both limits at once", every),
+    ] {
+        let limits = common::loosest().with_tx_runtime_limits(limits);
+        let mut db = common::database();
+        db.set_account_code(HISTORY_STORAGE_ADDRESS, recorder_writing_twice());
+        db.set_account_code(BEACON_ROOTS_ADDRESS, recorder_writing_twice());
+        let mut state = State::builder().with_database(db).build();
+        let committed = CommittedStates::install(&mut state);
+        {
+            let mut executor = executor_with_env_and_spec(
+                &mut state,
+                ctx(),
+                env_at_block(BLOCK_NUMBER),
+                common::chain_spec(),
+            )
+            .with_protocol_limits(limits);
+            executor
+                .apply_pre_execution_changes()
+                .unwrap_or_else(|error| panic!("{name}: the block starts: {error}"));
+        }
+        let states = committed.states();
+
+        assert_eq!(eip_calls(&states), [HISTORY_STORAGE_ADDRESS, BEACON_ROOTS_ADDRESS], "{name}");
+        for address in [HISTORY_STORAGE_ADDRESS, BEACON_ROOTS_ADDRESS] {
+            let call = call_state(&states, address);
+            let writes = call[&address].storage.values().filter(|slot| slot.is_changed()).count();
+            assert_eq!(writes, 2, "{name}: the call to {address} made two writes, two records");
+        }
+        assert_eq!(recorded(&mut state), (PARENT_HASH, PARENT_BEACON_ROOT), "{name}");
+    }
+}
+
+/// The pre-block calls count towards none of the block's counters or budgets. With the EIP-2935
+/// and EIP-4788 contracts' own code in state, both calls write their contracts' storage; after the
+/// pre-block phase every counter of the block is still zero, and a block whose data-size budget is
+/// one byte — reached by anything counted — still admits its first transaction.
+///
+/// Rule [S19.7]. Expected values `independent`: zeros, and the first transaction admitted.
+#[test]
+fn test_the_pre_block_calls_count_towards_no_counter_or_budget() {
+    let policy = BlockLimits::no_limits().with_block_txs_data_limit(1);
+    let ctx =
+        MegaBlockExecutionCtx::new(PARENT_HASH, Some(PARENT_BEACON_ROOT), Bytes::new(), policy);
+    let mut db = common::database();
+    db.set_account_code(HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE.clone());
+    db.set_account_code(BEACON_ROOTS_ADDRESS, BEACON_ROOTS_CODE.clone());
+    let mut state = State::builder().with_database(db).build();
+    let committed = CommittedStates::install(&mut state);
+    let mut executor = executor_with_env(&mut state, ctx, env_at_block(BLOCK_NUMBER));
+    executor.apply_pre_execution_changes().expect("the block starts");
+
+    let states = committed.states();
+    assert_eq!(eip_calls(&states), [HISTORY_STORAGE_ADDRESS, BEACON_ROOTS_ADDRESS]);
+    for address in [HISTORY_STORAGE_ADDRESS, BEACON_ROOTS_ADDRESS] {
+        let call = call_state(&states, address);
+        let writes = call[&address].storage.values().filter(|slot| slot.is_changed()).count();
+        assert!(writes > 0, "the call to {address} wrote its contract's storage");
+    }
+    let limiter = executor.limiter();
+    assert_eq!(
+        (limiter.gas.execution, limiter.gas.state, limiter.gas.history, limiter.gas.history_bytes),
+        (0, 0, 0, 0),
+        "no gas ledger of the block counts the calls",
+    );
+    assert_eq!(
+        (limiter.usage.data_size, limiter.usage.write_records),
+        (0, 0),
+        "nor its data size or writes"
+    );
+    assert_eq!(limiter.block_gas_used, 0, "nor the gas its receipts report");
+    executor
+        .execute_transaction(&common::user_tx(0, common::empty_call_gas()))
+        .expect("the first transaction is admitted under budgets of one");
+}
+
 /// A chain that has not reached Prague makes no block hashes call; the beacon root call is
 /// unaffected.
 #[test]
@@ -111,10 +280,14 @@ fn test_the_block_hashes_call_waits_for_prague() {
     let before_prague = common::chain_spec().with(EthereumHardfork::Prague, ForkCondition::Never);
 
     assert_eq!(
-        pre_block_calls(before_prague, BLOCK_NUMBER, ctx()),
+        pre_block_calls(before_prague.clone(), BLOCK_NUMBER, ctx()),
         (B256::ZERO, PARENT_BEACON_ROOT),
         "nothing was recorded for the parent hash"
     );
+
+    let (calls, started) = committed_calls(before_prague, BLOCK_NUMBER, ctx());
+    started.expect("a block before Prague starts");
+    assert_eq!(calls, [BEACON_ROOTS_ADDRESS], "no block hashes call was committed");
 }
 
 /// A chain that has not reached Cancun makes no beacon root call, and needs no root; the block
@@ -124,10 +297,14 @@ fn test_the_beacon_root_call_waits_for_cancun() {
     let before_cancun = common::chain_spec().with(EthereumHardfork::Cancun, ForkCondition::Never);
 
     assert_eq!(
-        pre_block_calls(before_cancun, BLOCK_NUMBER, ctx_without_beacon_root()),
+        pre_block_calls(before_cancun.clone(), BLOCK_NUMBER, ctx_without_beacon_root()),
         (PARENT_HASH, B256::ZERO),
         "nothing was recorded for the beacon root"
     );
+
+    let (calls, started) = committed_calls(before_cancun, BLOCK_NUMBER, ctx_without_beacon_root());
+    started.expect("a block before Cancun starts");
+    assert_eq!(calls, [HISTORY_STORAGE_ADDRESS], "no beacon root call was committed");
 }
 
 /// The genesis block makes neither call: it has no parent to record. Its parent beacon root is
@@ -142,22 +319,23 @@ fn test_the_genesis_block_makes_no_pre_block_call() {
     );
 
     assert_eq!(
-        pre_block_calls(common::chain_spec(), 0, genesis),
+        pre_block_calls(common::chain_spec(), 0, genesis.clone()),
         (B256::ZERO, B256::ZERO),
         "neither contract was called"
     );
+
+    let (calls, started) = committed_calls(common::chain_spec(), 0, genesis);
+    started.expect("the genesis block starts");
+    assert!(calls.is_empty(), "no pre-block call was committed: {calls:?}");
 }
 
 /// A genesis block carrying a non-zero parent beacon block root is refused, as EIP-4788
-/// requires.
+/// requires. The block hashes call makes no call at genesis, so no call was committed.
 #[test]
 fn test_the_genesis_block_refuses_a_non_zero_beacon_root() {
-    let mut state = state_with_recorders();
-    let mut executor = executor_with_env(&mut state, ctx(), env_at_block(0));
-
-    let err = executor
-        .apply_pre_execution_changes()
-        .expect_err("the genesis block's parent beacon block root must be zero");
+    let (calls, started) = committed_calls(common::chain_spec(), 0, ctx());
+    let err = started.expect_err("the genesis block's parent beacon block root must be zero");
+    assert!(calls.is_empty(), "{calls:?}");
 
     assert!(
         matches!(
@@ -172,16 +350,14 @@ fn test_the_genesis_block_refuses_a_non_zero_beacon_root() {
     );
 }
 
-/// A block of a chain past Cancun that carries no parent beacon block root is refused.
+/// A block of a chain past Cancun that carries no parent beacon block root is refused. The block
+/// hashes call ran first, and succeeded.
 #[test]
 fn test_a_block_without_a_parent_beacon_root_is_refused() {
-    let mut state = state_with_recorders();
-    let mut executor =
-        executor_with_env(&mut state, ctx_without_beacon_root(), env_at_block(BLOCK_NUMBER));
-
-    let err = executor
-        .apply_pre_execution_changes()
-        .expect_err("a Cancun block carries a parent beacon block root");
+    let (calls, started) =
+        committed_calls(common::chain_spec(), BLOCK_NUMBER, ctx_without_beacon_root());
+    let err = started.expect_err("a Cancun block carries a parent beacon block root");
+    assert_eq!(calls, [HISTORY_STORAGE_ADDRESS]);
 
     assert!(
         matches!(
@@ -190,4 +366,232 @@ fn test_a_block_without_a_parent_beacon_root_is_refused() {
         ),
         "{err}"
     );
+}
+
+/// With the contracts' own code, both calls succeed and are committed, in order and each on its
+/// own: the parent hash in the EIP-2935 ring buffer, the timestamp and the root in the EIP-4788
+/// one.
+#[test]
+fn test_the_successful_pre_block_calls_commit_normally() {
+    let mut db = common::database();
+    db.set_account_code(HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE.clone());
+    db.set_account_code(BEACON_ROOTS_ADDRESS, BEACON_ROOTS_CODE.clone());
+    let mut state = State::builder().with_database(db).build();
+    let committed = CommittedStates::install(&mut state);
+    let mut executor = executor_with_env(&mut state, ctx(), env_at_block(BLOCK_NUMBER));
+    executor.apply_pre_execution_changes().expect("both calls succeed");
+    let calls = common::named_accounts(&committed.states());
+    assert_eq!(&calls[..2], [HISTORY_STORAGE_ADDRESS, BEACON_ROOTS_ADDRESS]);
+    drop(executor);
+
+    let ring = 8191;
+    let parent = state.storage(HISTORY_STORAGE_ADDRESS, U256::from(BLOCK_NUMBER - 1)).unwrap();
+    assert_eq!(B256::from(parent.to_be_bytes()), PARENT_HASH);
+    let timestamp_slot = U256::from(common::BLOCK_TIMESTAMP % ring);
+    let root_slot = timestamp_slot + U256::from(ring);
+    assert_eq!(
+        state.storage(BEACON_ROOTS_ADDRESS, timestamp_slot).unwrap(),
+        U256::from(common::BLOCK_TIMESTAMP)
+    );
+    assert_eq!(
+        B256::from(state.storage(BEACON_ROOTS_ADDRESS, root_slot).unwrap().to_be_bytes()),
+        PARENT_BEACON_ROOT
+    );
+}
+
+/// A block hashes call that halts refuses the block with the EIP-2935 error, and its state is
+/// never committed; the beacon root call after it never runs. It
+/// halts on regular gas, which is at most 30M however large the block: the pre-block budget's
+/// part above 30M is reservoir, and no regular charge draws it.
+#[test]
+fn test_a_block_is_refused_when_its_block_hashes_call_halts() {
+    let mut db = common::database();
+    db.set_account_code(HISTORY_STORAGE_ADDRESS, memory_hog());
+    db.set_account_code(BEACON_ROOTS_ADDRESS, recorder());
+    let (calls, started) = start_block(db, env_with_gas_limit(250_000_000));
+
+    let err = started.expect_err("a halted block hashes call refuses the block");
+    assert!(
+        matches!(
+            &err,
+            BlockExecutionError::Validation(BlockValidationError::BlockHashContractCall { message })
+                if message.contains("did not succeed") && message.contains("OutOfGas")
+        ),
+        "{err}"
+    );
+    assert!(calls.is_empty(), "{calls:?}");
+}
+
+/// A beacon root call that halts refuses the block with the EIP-4788 error, naming the root. The
+/// block hashes call before it succeeded: its contract has no code.
+#[test]
+fn test_a_block_is_refused_when_its_beacon_root_call_halts() {
+    let mut db = common::database();
+    db.set_account_code(BEACON_ROOTS_ADDRESS, memory_hog());
+    let (calls, started) = start_block(db, env_with_gas_limit(250_000_000));
+
+    let err = started.expect_err("a halted beacon root call refuses the block");
+    assert!(
+        matches!(
+            &err,
+            BlockExecutionError::Validation(BlockValidationError::BeaconRootContractCall {
+                parent_beacon_block_root,
+                message,
+            }) if **parent_beacon_block_root == PARENT_BEACON_ROOT
+                && message.contains("did not succeed")
+        ),
+        "{err}"
+    );
+    assert_eq!(calls, [HISTORY_STORAGE_ADDRESS]);
+}
+
+/// The pre-block budget follows the block's gas limit, so a pre-block call that costs more than
+/// 30M in all still succeeds in a block that can hold it: 400 fresh slots are 39M of state gas,
+/// which the reservoir above 30M pays. In a block of 30M the call has no reservoir, the state
+/// gas spills onto the 30M of regular gas, and the call runs out of it.
+#[test]
+fn test_the_block_aware_budget_accepts_a_pre_block_call_above_30m() {
+    const SLOTS: u16 = 400;
+    assert_eq!(pre_block_call_gas_limit(250_000_000), 250_000_000);
+    assert_eq!(pre_block_call_gas_limit(1_000_000), SYSTEM_CALL_REGULAR_GAS_LIMIT);
+    // The slot count is sized at Satin's own price; other byte prices move the 30M boundary.
+    if !mega_evm::active_satin_prices().is_constants() {
+        return;
+    }
+    assert!(u64::from(SLOTS) * SLOT_STATE_GAS > SYSTEM_CALL_REGULAR_GAS_LIMIT);
+
+    let database = || {
+        let mut db = common::database();
+        db.set_account_code(HISTORY_STORAGE_ADDRESS, fresh_writes(SLOTS));
+        db.set_account_code(BEACON_ROOTS_ADDRESS, fresh_writes(SLOTS));
+        db
+    };
+
+    let mut state = State::builder().with_database(database()).build();
+    let committed = CommittedStates::install(&mut state);
+    let mut executor = executor_with_env(&mut state, ctx(), env_with_gas_limit(250_000_000));
+    executor.apply_pre_execution_changes().expect("a 250M block holds both calls");
+    let states = committed.states();
+    assert_eq!(states[0][&HISTORY_STORAGE_ADDRESS].storage.len(), usize::from(SLOTS));
+    assert_eq!(states[1][&BEACON_ROOTS_ADDRESS].storage.len(), usize::from(SLOTS));
+    drop(executor);
+
+    let (calls, started) = start_block(database(), common::evm_env());
+    assert_eq!(common::BLOCK_GAS_LIMIT, SYSTEM_CALL_REGULAR_GAS_LIMIT);
+    let err = started.expect_err("a 30M block gives the call no reservoir");
+    assert!(
+        matches!(
+            &err,
+            BlockExecutionError::Validation(BlockValidationError::BlockHashContractCall { message })
+                if message.contains("OutOfGas")
+        ),
+        "{err}"
+    );
+    assert!(calls.is_empty(), "{calls:?}");
+}
+
+/// Starts a block at [`BLOCK_NUMBER`] over `db`.
+fn start_block_over(db: ErrorInjectingDatabase) -> Result<(), BlockExecutionError> {
+    let mut state = State::builder().with_database(db).build();
+    let evm = MegaEvmFactory::new().create_evm(&mut state, env_at_block(BLOCK_NUMBER));
+    let mut executor =
+        MegaBlockExecutor::new(evm, ctx(), common::chain_spec(), OpAlloyReceiptBuilder::default());
+    executor.apply_pre_execution_changes()
+}
+
+/// A database that fails to load `address`, over contracts that record what they are called
+/// with.
+fn failing_on(address: Address) -> ErrorInjectingDatabase {
+    let mut db = common::database();
+    db.set_account_code(HISTORY_STORAGE_ADDRESS, recorder());
+    db.set_account_code(BEACON_ROOTS_ADDRESS, recorder());
+    let mut db = ErrorInjectingDatabase::new(db);
+    db.fail_on_account = Some(address);
+    db
+}
+
+/// A database error in the block hashes call is an internal error carrying the database's
+/// message, not a verdict on the block: the block is not refused as invalid.
+#[test]
+fn test_a_database_error_in_the_block_hashes_call_is_internal() {
+    let err = start_block_over(failing_on(HISTORY_STORAGE_ADDRESS))
+        .expect_err("a failed read stops the block");
+    assert!(matches!(err, BlockExecutionError::Internal(_)), "{err:?}");
+    assert!(err.to_string().contains("injected basic() error"), "{err}");
+}
+
+/// A database error in the beacon root call is an internal error carrying the database's
+/// message, not a verdict on the block; the block hashes call before it read what it needed.
+#[test]
+fn test_a_database_error_in_the_beacon_root_call_is_internal() {
+    let err = start_block_over(failing_on(BEACON_ROOTS_ADDRESS))
+        .expect_err("a failed read stops the block");
+    assert!(matches!(err, BlockExecutionError::Internal(_)), "{err:?}");
+    assert!(err.to_string().contains("injected basic() error"), "{err}");
+}
+
+/// What the block commits for a pre-block call is the state op-revm's own system call produces
+/// for it: the same call from the same state, on the same configuration — the split
+/// switched on — and the same pre-block budget. The contract stores the regular gas it had, which
+/// is 30M of the 250M budget, and the word it was called with.
+#[test]
+fn test_a_pre_block_call_commits_the_state_op_revm_produces() {
+    use op_revm::{handler::OpHandler, L1BlockInfo, OpEvm, OpSpecId, OpTransaction};
+    use revm::{
+        bytecode::opcode::{GAS, PUSH0, PUSH1, STOP},
+        context::{result::EVMError, BlockEnv, CfgEnv, Context, ContextSetters, ContextTr, TxEnv},
+        handler::{EthFrame, ExecuteEvm, Handler, SystemCallTx},
+        inspector::NoOpInspector,
+        interpreter::interpreter::EthInterpreter,
+        Journal,
+    };
+    type OpContext = Context<
+        BlockEnv,
+        OpTransaction<TxEnv>,
+        CfgEnv<OpSpecId>,
+        MemoryDatabase,
+        Journal<MemoryDatabase>,
+        L1BlockInfo,
+    >;
+
+    let code = BytecodeBuilder::default()
+        .append_many([GAS, PUSH0, SSTORE])
+        .append_many([PUSH0, CALLDATALOAD, PUSH1, 1, SSTORE, STOP])
+        .build();
+    let mut db = common::database();
+    db.set_account_code(HISTORY_STORAGE_ADDRESS, code);
+    db.set_account_code(BEACON_ROOTS_ADDRESS, recorder());
+
+    let mut state = State::builder().with_database(db.clone()).build();
+    let committed = CommittedStates::install(&mut state);
+    let mut executor = executor_with_env(&mut state, ctx(), env_with_gas_limit(250_000_000));
+    executor.apply_pre_execution_changes().expect("the block starts");
+    let delivered = committed.states().into_iter().next().expect("a first step");
+    assert!(delivered.contains_key(&HISTORY_STORAGE_ADDRESS), "the block hashes call is first");
+    let (cfg, block) = (executor.evm().ctx().cfg().clone(), executor.evm().ctx().block().clone());
+    assert!(cfg.system_call_state_gas_margin_in_reservoir);
+    drop(executor);
+
+    let mut op = OpEvm::new(
+        OpContext::new(db, OpSpecId::KARST).with_cfg(cfg).with_block(block),
+        NoOpInspector,
+    );
+    let mut tx = OpTransaction::<TxEnv>::new_system_tx_with_caller(
+        mega_evm::SYSTEM_ADDRESS,
+        HISTORY_STORAGE_ADDRESS,
+        PARENT_HASH.0.into(),
+    );
+    tx.base.gas_limit = pre_block_call_gas_limit(250_000_000);
+    op.0.ctx.set_tx(tx);
+    let result: Result<_, EVMError<core::convert::Infallible, op_revm::OpTransactionError>> =
+        OpHandler::<_, _, EthFrame<EthInterpreter>>::new().run_system_call(&mut op);
+    assert!(result.expect("op-revm runs the call").is_success());
+    let expected = op.finalize();
+
+    assert_eq!(delivered, expected, "the block commits op-revm's state");
+    let stored = &delivered[&HISTORY_STORAGE_ADDRESS].storage;
+    let gas = stored[&U256::ZERO].present_value();
+    assert!(gas < U256::from(SYSTEM_CALL_REGULAR_GAS_LIMIT), "30M of regular gas: {gas}");
+    assert!(gas > U256::from(SYSTEM_CALL_REGULAR_GAS_LIMIT - 10), "all of it: {gas}");
+    assert_eq!(B256::from(stored[&U256::from(1)].present_value().to_be_bytes()), PARENT_HASH);
 }

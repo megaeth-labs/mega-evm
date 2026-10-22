@@ -10,8 +10,8 @@ use op_revm::constants::{
     DA_FOOTPRINT_GAS_SCALAR_OFFSET, DA_FOOTPRINT_GAS_SCALAR_SLOT, L1_BLOCK_CONTRACT,
 };
 use revm::{
-    bytecode::opcode::LOG0,
-    context::{BlockEnv, ContextTr},
+    bytecode::opcode::{ADD, DUP1, LOG0, SLOAD, SSTORE},
+    context::{result::ExecutionResult, BlockEnv, ContextTr},
     Database as _,
 };
 
@@ -28,6 +28,15 @@ fn log_generating_contract(data_size: usize) -> Bytes {
         .append(LOG0)
         .stop()
         .build()
+}
+
+/// A gas limit for a call to the contract that logs `data_size` bytes: 1,000,000 of regular gas on
+/// top of what the log and the body cost at the byte prices in effect.
+fn log_call_gas(data_size: usize) -> u64 {
+    1_000_000 +
+        common::body_history(0) +
+        mega_evm::history_gas(mega_evm::log_history_bytes(0, data_size as u64))
+            .expect("the log has a price")
 }
 
 /// A state whose callee emits a log of `data_size` bytes on every call.
@@ -60,11 +69,11 @@ fn test_block_custom_data_limit() {
     );
     executor.apply_pre_execution_changes().expect("the block starts");
 
-    let first = user_tx(0, 1_000_000);
+    let first = user_tx(0, log_call_gas(2_000));
     let gas = executor.execute_transaction(&first).expect("the first transaction is packed");
     assert!(gas.tx_gas_used() < first.gas_limit());
 
-    let second = user_tx(1, 1_000_000);
+    let second = user_tx(1, log_call_gas(2_000));
     let gas = executor
         .execute_transaction(&second)
         .expect("the transaction that crosses the limit is packed too");
@@ -72,52 +81,69 @@ fn test_block_custom_data_limit() {
     assert!(executor.limiter().usage.data_size >= 2_500, "the block has crossed its limit");
 
     let err = executor
-        .execute_transaction(&user_tx(2, 1_000_000))
+        .execute_transaction(&user_tx(2, log_call_gas(2_000)))
         .expect_err("the block has no data-size left");
     assert!(format!("{err}").contains("Block transactions data limit reached"), "{err}");
 }
 
-/// Transactions that stay inside the block's limits are all packed.
-#[test]
-fn test_block_multiple_transactions_within_limits() {
-    let mut state = state_with_log_contract(100);
-    let mut executor = executor(
-        &mut state,
-        common::block_ctx(BlockLimits::no_limits().with_block_txs_data_limit(10_000)),
-    );
-    executor.apply_pre_execution_changes().expect("the block starts");
-
-    for nonce in 0..5 {
-        let tx = user_tx(nonce, 1_000_000);
-        let gas = executor.execute_transaction(&tx).expect("the transaction is packed");
-        assert!(gas.tx_gas_used() < tx.gas_limit(), "transaction {nonce}");
+/// Code that adds one to each of the slots `1..=writes`, so every call keeps `writes` write
+/// records whatever the calls before it wrote.
+fn incrementing_contract(writes: u64) -> Bytes {
+    let mut code = BytecodeBuilder::default();
+    for slot in 1..=writes {
+        code = code
+            .push_number(slot)
+            .append(DUP1)
+            .append(SLOAD)
+            .push_number(1_u8)
+            .append(ADD)
+            .append(revm::bytecode::opcode::SWAP1)
+            .append(SSTORE);
     }
-
-    let (_, result) = executor.finish_with_counters().expect("the block finishes");
-    assert_eq!(result.receipts().len(), 5);
+    code.stop().build()
 }
 
-/// The same limit mid-block: the transactions before the crossing are packed, the crossing one
-/// is packed, and the block ends there.
+/// A gas limit for a call to the contract that increments `writes` fresh slots: 10,000,000 of
+/// regular gas on top of what the slots, their records and the body cost at the byte prices in
+/// effect.
+fn incrementing_gas(writes: u64) -> u64 {
+    10_000_000 +
+        writes * common::slot_state_gas() +
+        common::body_history(0) +
+        mega_evm::write_record_history_gas(writes).expect("the records have a price")
+}
+
+/// A state whose callee keeps `writes` write records on every call.
+fn state_with_incrementing_contract(
+    writes: u64,
+) -> revm::database::State<mega_evm::test_utils::MemoryDatabase> {
+    let mut db = common::database();
+    db.set_account_code(CONTRACT, incrementing_contract(writes));
+    revm::database::State::builder().with_database(db).build()
+}
+
+/// The block's KV count is the write records its transactions kept, summed, and no limit refuses a
+/// transaction on it: three transactions that keep fifty records each are all packed.
 #[test]
-fn test_block_data_limit_exceeded_mid_block() {
-    let mut state = state_with_log_contract(2_000);
-    let mut executor = executor(
-        &mut state,
-        common::block_ctx(BlockLimits::no_limits().with_block_txs_data_limit(6_000)),
-    );
+fn test_the_block_reports_its_kv_count_and_refuses_nothing_on_it() {
+    let mut state = state_with_incrementing_contract(50);
+    // Room in the block's gas for every transaction whatever fifty slots cost.
+    let mut env = common::evm_env();
+    env.block_env.gas_limit = 10_000_000_000;
+    let mut executor =
+        common::executor_with_env(&mut state, common::block_ctx(BlockLimits::no_limits()), env);
     executor.apply_pre_execution_changes().expect("the block starts");
 
     for nonce in 0..3 {
-        executor.execute_transaction(&user_tx(nonce, 1_000_000)).expect("packed");
+        executor
+            .execute_transaction(&user_tx(nonce, incrementing_gas(50)))
+            .unwrap_or_else(|err| panic!("transaction {nonce} is packed: {err}"));
     }
-    assert!(
-        executor.execute_transaction(&user_tx(3, 1_000_000)).is_err(),
-        "the block has no data-size left"
-    );
+    assert_eq!(executor.limiter().usage.write_records, 150);
 
     let (_, result) = executor.finish_with_counters().expect("the block finishes");
-    assert_eq!(result.receipts().len(), 3, "the fourth transaction never ran");
+    assert_eq!(result.receipts().len(), 3);
+    assert_eq!(result.usage.write_records, 150, "the block reports its KV count");
 }
 
 /// A transaction refused before it runs changes nothing: no receipt, and no state.
@@ -152,6 +178,39 @@ fn test_block_no_state_commit_on_limit_exceeded() {
     assert!(result.receipts().is_empty());
 }
 
+/// The per-transaction data-size limit is not a block limit: a deposit whose body crosses it fails
+/// validation, as any transaction with that body does, and is included as a failed deposit with a
+/// failed receipt.
+#[test]
+fn test_a_deposit_over_the_transaction_data_size_limit_is_still_included() {
+    let limit = mega_evm::TX_BODY_SIZE + 10;
+    let mut state = common::state();
+    let mut executor = common::executor_with_limits(
+        &mut state,
+        common::loosest()
+            .with_tx_runtime_limits(common::loosest_tx().with_tx_data_size_limit(limit)),
+    );
+    executor.apply_pre_execution_changes().expect("the block starts");
+
+    let deposit = common::deposit_tx(Bytes::from(vec![0xab; 11]), 1_000_000);
+    let outcome = executor.run_transaction(&deposit).expect("a deposit is not refused");
+    assert!(
+        matches!(
+            outcome.inner.result,
+            ExecutionResult::Halt { reason: op_revm::OpHaltReason::FailedDeposit, .. }
+        ),
+        "{:?}",
+        outcome.inner.result
+    );
+    assert_eq!(outcome.inner.limit_exceeded, None, "the failure is what the deposit reports");
+    assert_eq!(outcome.inner.usage.data_size, limit + 1, "its body stays counted");
+    executor.commit_transaction_outcome(outcome).expect("the deposit is included");
+
+    let (_, result) = executor.finish_with_counters().expect("the block finishes");
+    assert_eq!(result.receipts().len(), 1);
+    assert!(!result.receipts()[0].status(), "the failed deposit's receipt reports a failure");
+}
+
 /// With no size limit configured, a transaction of any size is admitted.
 #[test]
 fn test_block_tx_size_limit_default_unlimited() {
@@ -159,27 +218,11 @@ fn test_block_tx_size_limit_default_unlimited() {
     let mut executor = executor(&mut state, common::unlimited_ctx());
     executor.apply_pre_execution_changes().expect("the block starts");
 
-    let big = common::user_tx_with_input(0, incompressible(20_000), 3_000_000);
+    let gas_limit = 3_000_000 + common::body_history(20_000) + log_call_gas(100);
+    let big = common::user_tx_with_input(0, incompressible(20_000), gas_limit);
     assert!(MegaTransactionExt::tx_size(&big) > 20_000);
 
     executor.execute_transaction(&big).expect("no limit, no refusal");
-}
-
-/// Several transactions fit while their bodies together stay under the block's limit.
-#[test]
-fn test_block_tx_size_limit_allows_multiple_transactions() {
-    let mut state = state_with_log_contract(100);
-    let one = MegaTransactionExt::tx_size(&user_tx(0, 1_000_000));
-    let mut executor = executor(
-        &mut state,
-        common::block_ctx(BlockLimits::no_limits().with_block_txs_encode_size_limit(one * 3)),
-    );
-    executor.apply_pre_execution_changes().expect("the block starts");
-
-    for nonce in 0..3 {
-        executor.execute_transaction(&user_tx(nonce, 1_000_000)).expect("the body fits");
-    }
-    assert_eq!(executor.limiter().block_tx_size_used, one * 3);
 }
 
 /// A first transaction whose body is larger than the block's limit is refused, and the block
@@ -228,8 +271,12 @@ fn test_block_tx_size_limit_exceeded_mid_block() {
 #[test]
 fn test_block_tx_size_limit_with_varying_sizes() {
     let mut state = state_with_log_contract(100);
-    let small = user_tx(0, 1_000_000);
-    let large = common::user_tx_with_input(1, incompressible(4_096), 3_000_000);
+    let small = user_tx(0, log_call_gas(100));
+    let large = common::user_tx_with_input(
+        1,
+        incompressible(4_096),
+        3_000_000 + common::body_history(4_096) + log_call_gas(100),
+    );
     let (small_size, large_size) =
         (MegaTransactionExt::tx_size(&small), MegaTransactionExt::tx_size(&large));
     assert!(large_size > small_size);
@@ -247,7 +294,50 @@ fn test_block_tx_size_limit_with_varying_sizes() {
     executor.execute_transaction(&large).expect("the large body fits exactly");
     assert_eq!(executor.limiter().block_tx_size_used, small_size + large_size);
 
-    executor.execute_transaction(&user_tx(2, 1_000_000)).expect_err("nothing fits any more");
+    executor
+        .execute_transaction(&user_tx(2, log_call_gas(100)))
+        .expect_err("nothing fits any more");
+}
+
+/// alloy-evm's commit cannot refuse, and its contract is that an outcome commits before the next
+/// transaction executes. A builder that breaks it — two candidates executed against the same
+/// pre-state, then both committed through the trait — would pack what the checked commit refuses.
+/// The trait's commit makes the same check in a debug build and trips on it: here the block's
+/// data-size budget has room for one of the two.
+#[cfg(debug_assertions)]
+#[test]
+fn test_the_trait_commit_trips_on_an_outcome_the_block_has_no_room_for() {
+    // The body and a log of 100 bytes: what each candidate keeps.
+    let kept = mega_evm::TX_BODY_SIZE + mega_evm::LOG_BASE_SIZE + 100;
+    let tx_gas_limit = log_call_gas(100);
+    let mut db = common::database();
+    db.set_account_code(CONTRACT, log_generating_contract(100));
+    db.set_account_balance(CALLER2, U256::from(1_000_000_000_000_000_u64));
+    let mut state = revm::database::State::builder().with_database(db).build();
+    let limits = BlockLimits::no_limits().with_block_txs_data_limit(kept);
+    let mut executor = executor(&mut state, common::block_ctx(limits));
+    executor.apply_pre_execution_changes().expect("the block starts");
+
+    let first = executor
+        .execute_transaction_without_commit(&tx_from(CALLER, 0, tx_gas_limit))
+        .expect("the block has room");
+    let second = executor
+        .execute_transaction_without_commit(&tx_from(CALLER2, 0, tx_gas_limit))
+        .expect("nothing has committed yet");
+    assert_eq!(second.usage.data_size, kept);
+
+    BlockExecutor::commit_transaction(&mut executor, first);
+    assert_eq!(executor.limiter().usage.data_size, kept, "the block has kept exactly its limit");
+    let tripped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        BlockExecutor::commit_transaction(&mut executor, second);
+    }))
+    .expect_err("the commit trips");
+    let message = tripped
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| tripped.downcast_ref::<&str>().copied())
+        .unwrap_or_default();
+    assert!(message.contains("an outcome the block no longer has room for"), "{message}");
 }
 
 /// The block's counters may move between a transaction executing and its commit, so what it
@@ -257,7 +347,10 @@ fn test_block_tx_size_limit_with_varying_sizes() {
 /// commit and fill the block, and the third is refused at commit.
 #[test]
 fn test_commit_time_pre_execution_check_parallel_simulation() {
-    const TX_GAS_LIMIT: u64 = 100_000;
+    // 100,000 of regular gas on top of the history the body and the log cost.
+    let tx_gas_limit = 100_000 +
+        common::body_history(0) +
+        mega_evm::history_gas(mega_evm::log_history_bytes(0, 100)).expect("the log has a price");
 
     let db = || {
         let mut db = common::database();
@@ -274,11 +367,11 @@ fn test_commit_time_pre_execution_check_parallel_simulation() {
         let mut probe = executor(&mut state, common::unlimited_ctx());
         probe.apply_pre_execution_changes().expect("the block starts");
         probe
-            .execute_transaction(&tx_from(CALLER, 0, TX_GAS_LIMIT))
+            .execute_transaction(&tx_from(CALLER, 0, tx_gas_limit))
             .expect("the probe transaction executes")
             .tx_gas_used()
     };
-    let block_gas_limit = spent + TX_GAS_LIMIT;
+    let block_gas_limit = spent + tx_gas_limit;
 
     let mut state = db();
     let mut env = common::evm_env();
@@ -286,9 +379,9 @@ fn test_commit_time_pre_execution_check_parallel_simulation() {
     let mut executor = common::executor_with_env(&mut state, common::unlimited_ctx(), env);
     executor.apply_pre_execution_changes().expect("the block starts");
 
-    let first = tx_from(CALLER, 0, TX_GAS_LIMIT);
-    let second = tx_from(CALLER2, 0, TX_GAS_LIMIT);
-    let third = tx_from(CALLER3, 0, TX_GAS_LIMIT);
+    let first = tx_from(CALLER, 0, tx_gas_limit);
+    let second = tx_from(CALLER2, 0, tx_gas_limit);
+    let third = tx_from(CALLER3, 0, tx_gas_limit);
 
     let first = executor.run_transaction(&first).expect("the block has room");
     let second = executor.run_transaction(&second).expect("nothing has committed yet");
@@ -348,7 +441,7 @@ fn test_run_transaction_rejects_understated_cached_da_size() {
 /// The common case of the same path: figures that agree with the transaction are used as they
 /// are, and the outcome carries them.
 #[test]
-fn test_execute_mega_transaction_succeeds_with_accurate_cache() {
+fn test_run_transaction_succeeds_with_accurate_cache() {
     let mut state = common::state();
     let mut executor = executor(&mut state, common::unlimited_ctx());
     executor.apply_pre_execution_changes().expect("the block starts");
@@ -359,7 +452,7 @@ fn test_execute_mega_transaction_succeeds_with_accurate_cache() {
     let enriched = EnrichedMegaTx::new_slow(Recovered::new_unchecked(&envelope, CALLER));
 
     let outcome = executor
-        .execute_mega_transaction(&enriched)
+        .run_transaction(&enriched)
         .expect("figures that agree with the transaction are used as they are");
 
     assert_eq!(outcome.da_size, expected_da_size);
@@ -415,56 +508,42 @@ fn test_regular_transaction_rejected_by_single_tx_da_limit() {
     );
 }
 
-/// A deposit is exempt from the block's data-availability size too, and adds nothing to it.
+/// No building policy refuses a deposit, which the block derived from L1 must include: a builder
+/// holding transactions to a declared gas, an encoded size and a block encoded size that one
+/// deposit is over on each packs it, and counts its encoding towards the block's. A user
+/// transaction over the same policy is refused.
 #[test]
-fn test_deposit_exempt_from_block_da_limit() {
-    const DA_SIZE_LIMIT: u64 = 100;
+fn test_no_building_policy_refuses_a_deposit() {
+    const GAS_LIMIT: u64 = 3_000_000;
+    const CALLDATA: usize = 1_000;
+    let policy = BlockLimits::no_limits()
+        .with_tx_gas_limit(GAS_LIMIT - 1)
+        .with_tx_encode_size_limit(CALLDATA as u64)
+        .with_block_txs_encode_size_limit(CALLDATA as u64);
     let mut state = common::state();
-    let mut executor = executor(
-        &mut state,
-        common::block_ctx(
-            BlockLimits::no_limits()
-                .with_tx_da_size_limit(DA_SIZE_LIMIT * 10_000)
-                .with_block_da_size_limit(DA_SIZE_LIMIT),
-        ),
-    );
+    let mut executor = executor(&mut state, common::block_ctx(policy));
     executor.apply_pre_execution_changes().expect("the block starts");
 
-    executor
-        .execute_transaction(&common::deposit_tx(incompressible(100_000), 3_000_000))
-        .expect("a deposit is exempt");
+    let deposit = common::deposit_tx(Bytes::from(vec![0xab; CALLDATA]), GAS_LIMIT);
+    let tx_size = MegaTransactionExt::tx_size(&deposit);
+    assert!(tx_size > CALLDATA as u64, "the deposit's encoding is over both size limits");
+    executor.execute_transaction(&deposit).expect("no building policy refuses a deposit");
+    assert_eq!(executor.limiter().block_tx_size_used, tx_size, "and it counts its encoding");
 
-    assert_eq!(executor.limiter().block_da_size_used, 0, "and adds nothing to the block's");
-    let (_, result) = executor.finish_with_counters().expect("the block finishes");
-    assert_eq!(result.receipts().len(), 1);
-}
-
-/// The three cases in one block: a small user transaction, a large deposit, a large user
-/// transaction.
-#[test]
-fn test_mixed_deposit_and_regular_transactions() {
-    const DA_SIZE_LIMIT: u64 = 100;
-    let mut state = common::state();
-    let mut executor = executor(
-        &mut state,
-        common::block_ctx(
-            BlockLimits::no_limits()
-                .with_tx_da_size_limit(DA_SIZE_LIMIT)
-                .with_block_da_size_limit(DA_SIZE_LIMIT * 10),
+    for (tx, refusal) in [
+        (common::user_tx_with_input(0, Bytes::new(), GAS_LIMIT), "Transaction gas limit exceeded"),
+        (
+            common::user_tx_with_input(0, Bytes::from(vec![0xab; CALLDATA]), GAS_LIMIT - 1),
+            "Transaction encode size limit exceeded",
         ),
-    );
-    executor.apply_pre_execution_changes().expect("the block starts");
-
-    executor.execute_transaction(&user_tx(0, 100_000)).expect("a small user transaction fits");
-    executor
-        .execute_transaction(&common::deposit_tx(incompressible(100_000), 3_000_000))
-        .expect("a deposit is exempt");
-    executor
-        .execute_transaction(&common::user_tx_with_input(1, incompressible(100_000), 3_000_000))
-        .expect_err("a large user transaction is not");
+        (common::user_tx_with_input(0, Bytes::new(), GAS_LIMIT - 1), "block_used="),
+    ] {
+        let err = executor.execute_transaction(&tx).expect_err("the policy binds a transaction");
+        assert!(format!("{err}").contains(refusal), "{refusal}: {err}");
+    }
 
     let (_, result) = executor.finish_with_counters().expect("the block finishes");
-    assert_eq!(result.receipts().len(), 2);
+    assert_eq!(result.receipts().len(), 1, "the deposit alone is packed");
 }
 
 /// The data-availability footprint is re-checked at commit too: two candidates that each fit the
@@ -476,16 +555,18 @@ fn test_mixed_deposit_and_regular_transactions() {
 #[test]
 fn test_commit_time_da_footprint_check_parallel_simulation() {
     const SCALAR: u16 = u16::MAX;
-    const TX_GAS_LIMIT: u64 = 200_000;
+    // Above what two thousand calldata bytes cost: the body's history at the byte prices in
+    // effect, and 64 gas a calldata byte, which covers both its intrinsic charge and its floor.
+    let tx_gas_limit = common::body_history(2_000) + 15_000 + 64 * 2_000;
 
-    let first = tx_with_input(CALLER, incompressible(2_000), TX_GAS_LIMIT);
-    let second = tx_with_input(CALLER2, incompressible(1_999), TX_GAS_LIMIT);
+    let first = tx_with_input(CALLER, incompressible(2_000), tx_gas_limit);
+    let second = tx_with_input(CALLER2, incompressible(1_999), tx_gas_limit);
     let footprint = |tx: &Recovered<MegaTxEnvelope>| {
         MegaTransactionExt::estimated_da_size(tx) * u64::from(SCALAR)
     };
     // The block holds exactly the larger of the two, so each fits alone and the two do not.
     let budget = footprint(&first).max(footprint(&second));
-    assert!(budget >= TX_GAS_LIMIT, "the budget is the block's gas limit, which must fit a tx");
+    assert!(budget >= tx_gas_limit, "the budget is the block's gas limit, which must fit a tx");
 
     let mut db = common::database();
     db.set_account_balance(CALLER2, U256::from(1_000_000_000_000_000_u64));

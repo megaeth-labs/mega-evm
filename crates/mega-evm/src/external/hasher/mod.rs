@@ -122,6 +122,25 @@ mod tests {
         assert_eq!(bucket_id(&[0u8; 20]), 12_666_336);
     }
 
+    /// Eight bytes, the longest input the small branch of `write` reads (`read_small`).
+    ///
+    /// The id is `salt::state::hasher::bucket_id`'s at salt v1.0.6 (and v1.0.5), computed once:
+    /// salt is not a dependency of this workspace.
+    #[test]
+    fn test_bucket_id_at_the_small_input_boundary() {
+        assert_eq!(bucket_id(&[1, 2, 3, 4, 5, 6, 7, 8]), 1_978_187);
+    }
+
+    /// Thirty-two bytes: after the large branch of `write` reads the last sixteen and one block,
+    /// exactly sixteen are left, which the block loop does not read again.
+    ///
+    /// The id is `salt::state::hasher::bucket_id`'s at salt v1.0.6 (and v1.0.5), computed once:
+    /// salt is not a dependency of this workspace.
+    #[test]
+    fn test_bucket_id_at_the_block_loop_boundary() {
+        assert_eq!(bucket_id(&[0x22; 32]), 10_093_090);
+    }
+
     #[test]
     fn test_hash_all_write_branches() {
         let h0 = hash(b"");

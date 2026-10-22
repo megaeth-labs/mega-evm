@@ -1,0 +1,14 @@
+---
+source: crates/mega-evm/tests/tracers/harness.rs
+expression: "&redacted(&traced.call_frame(true))"
+---
+{
+  "from": "0x0000000000000000000000000000000000400000",
+  "gas": "[gas]",
+  "gasUsed": "[gas]",
+  "input": "0xdeadbeef",
+  "output": "0xdeadbeef",
+  "to": "0x0000000000000000000000000000000000000004",
+  "type": "CALL",
+  "value": "0x0"
+}

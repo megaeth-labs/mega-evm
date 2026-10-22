@@ -1,28 +1,36 @@
-//! The intrinsic phase: the EIP-7976 calldata floor, the EIP-7981 access-list data charge, and
-//! what the execution cap admits.
+//! The intrinsic phase: the EIP-7976 calldata floor, the EIP-7981 access-list data charge, the
+//! history gas of the transaction's body, and what the execution cap admits.
 //!
 //! Satin keeps Amsterdam's floor: a base of 12,000 with the recipient and value charges on top,
 //! and every calldata byte at 64 gas whether it is zero or not. EIP-7981 puts the access list's
-//! own bytes in the floor at the same rate, while the per-item intrinsic charge stays at its
-//! pre-EIP-8038 value. A transaction whose floor is above the 200M execution cap is rejected
-//! before it runs, which is what bounds the calldata a transaction may carry.
+//! own bytes in the floor at the same rate, and its per-item intrinsic charge is Amsterdam's:
+//! EIP-8038's cold premium with those bytes at 64 gas each on top. A transaction whose floor is
+//! above the 200M execution cap is rejected before it runs, which is what bounds the calldata a
+//! transaction may carry.
+//!
+//! The floor is still computed and still validated, and it no longer decides what anyone pays:
+//! history gas charges the same bytes at a higher rate, so a Satin transaction is always above
+//! its own floor ([`test_the_calldata_floor_never_binds_once_history_is_charged`]). The floor
+//! tests below read the floor off the result rather than off the bill.
 
 use alloy_evm::{Evm, EvmError, InvalidTxError};
 use alloy_op_evm::OpTx;
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
-    constants::{ACCOUNT_STATE_GAS, TX_GAS_LIMIT_CAP},
+    constants::{ACCOUNT_STATE_GAS, COST_PER_HISTORY_BYTE, TX_GAS_LIMIT_CAP},
     test_utils::{op_transaction, MemoryDatabase},
-    MegaEvm, MegaTransaction,
+    MegaEvm, MegaTransaction, TX_BODY_SIZE,
 };
+use op_revm::OpTransactionError;
 use revm::{
     context::{
-        result::{ExecutionResult, InvalidTransaction},
+        result::{EVMError, ExecutionResult, InvalidTransaction},
         transaction::{AccessList, AccessListItem, TransactionType},
         TxEnv,
     },
+    context_interface::cfg::GasId,
     primitives::B256,
-    Database,
+    Database, ExecuteCommitEvm, ExecuteEvm,
 };
 
 use crate::common::{call, context, create, runs_at_measurement_prices};
@@ -33,14 +41,24 @@ const CALLEE: Address = address!("0000000000000000000000000000000000800001");
 /// The intrinsic gas of a plain call to an account that is not the sender: the EIP-2780 sender
 /// base of 12,000 plus 3,000 for reaching the recipient.
 ///
-/// The 3,000 is EIP-2780's own fixed charge, not the schedule's cold-account entry: inside
-/// execution the schedule prices a cold account access at 2,600 — 100 for the read and 2,500 for
-/// the cold surcharge — so repricing that entry would leave this number where it is.
+/// The 3,000 is EIP-2780's own fixed charge, EIP-8038's cold account access, not the schedule's
+/// cold-account entry: inside execution the schedule prices the same access as 100 for the read
+/// and 2,900 for the cold surcharge, so repricing that entry would leave this number where it is.
 const EMPTY_CALL: u64 = 15_000;
 
 /// What one byte of anything a transaction carries costs in the EIP-7976 / EIP-7981 floor: four
 /// floor tokens at 16 gas each.
 const FLOOR_PER_BYTE: u64 = 64;
+
+/// What one byte of anything a transaction carries costs on the history ledger, at the spec's own
+/// price.
+const HISTORY_PER_BYTE: u64 = COST_PER_HISTORY_BYTE;
+
+/// The history gas a transaction carrying `bytes` bytes beside its envelope pays for its body, at
+/// the price the engine runs.
+fn body_history(bytes: u64) -> u64 {
+    mega_evm::history_gas(TX_BODY_SIZE + bytes).expect("a body has a price")
+}
 
 /// A database where the sender can pay and `CALLEE` exists.
 fn funded() -> MemoryDatabase {
@@ -51,11 +69,29 @@ fn funded() -> MemoryDatabase {
 
 /// Runs `tx` and returns the gas it used, or the validation error that rejected it.
 fn gas_used(db: MemoryDatabase, tx: MegaTransaction) -> Result<u64, String> {
+    charged(db, tx).map(|charged| charged.gas_used)
+}
+
+/// Runs `tx` and returns the EIP-7623 floor it was measured against, or the validation error
+/// that rejected it.
+fn floor(db: MemoryDatabase, tx: MegaTransaction) -> Result<u64, String> {
+    charged(db, tx).map(|charged| charged.floor)
+}
+
+/// What a transaction was charged: the receipt's figure and the floor it was measured against.
+struct Charged {
+    gas_used: u64,
+    floor: u64,
+}
+
+/// Runs `tx` and reports what it was charged, or the validation error that rejected it.
+fn charged(db: MemoryDatabase, tx: MegaTransaction) -> Result<Charged, String> {
     let mut evm = MegaEvm::new(context(db));
     match evm.transact_raw(tx) {
         Ok(outcome) => {
             assert!(outcome.result.is_success(), "{:?}", outcome.result);
-            Ok(outcome.result.gas().tx_gas_used())
+            let gas = outcome.result.gas();
+            Ok(Charged { gas_used: gas.tx_gas_used(), floor: gas.floor_gas() })
         }
         Err(err) => {
             let invalid = err
@@ -74,18 +110,17 @@ fn with_calldata(len: usize, byte: u8) -> MegaTransaction {
     crate::common::call_with_data(CALLER, CALLEE, Bytes::from(vec![byte; len]), 10_000_000)
 }
 
-/// Empty calldata pays the intrinsic gas alone: the floor is the same number, so neither is the
-/// binding one.
+/// Empty calldata's floor is the intrinsic gas itself, so neither is the binding one.
 #[test]
 fn test_the_floor_of_empty_calldata_is_the_intrinsic_gas() {
-    assert_eq!(gas_used(funded(), with_calldata(0, 0)), Ok(EMPTY_CALL));
+    assert_eq!(floor(funded(), with_calldata(0, 0)), Ok(EMPTY_CALL));
+    assert_eq!(gas_used(funded(), with_calldata(0, 0)), Ok(EMPTY_CALL + body_history(0)));
 }
 
-/// One byte of calldata costs 64 gas in the floor, which is above what the intrinsic phase
-/// charges for it, so the floor is what the transaction pays.
+/// One byte of calldata costs 64 gas in the floor.
 #[test]
 fn test_one_calldata_byte_costs_sixty_four_gas() {
-    assert_eq!(gas_used(funded(), with_calldata(1, 0x42)), Ok(EMPTY_CALL + FLOOR_PER_BYTE));
+    assert_eq!(floor(funded(), with_calldata(1, 0x42)), Ok(EMPTY_CALL + FLOOR_PER_BYTE));
 }
 
 /// A hundred bytes, and a kilobyte: the floor is linear in the byte count at the same rate.
@@ -93,7 +128,7 @@ fn test_one_calldata_byte_costs_sixty_four_gas() {
 fn test_the_floor_is_sixty_four_gas_for_every_calldata_byte() {
     for len in [100u64, 1_024, 4_096] {
         assert_eq!(
-            gas_used(funded(), with_calldata(len as usize, 0x42)),
+            floor(funded(), with_calldata(len as usize, 0x42)),
             Ok(EMPTY_CALL + FLOOR_PER_BYTE * len),
             "{len} bytes"
         );
@@ -101,13 +136,45 @@ fn test_the_floor_is_sixty_four_gas_for_every_calldata_byte() {
 }
 
 /// A zero byte costs the same as a non-zero one in the floor: EIP-7976 prices the space a byte
-/// takes in a block, not its value.
+/// takes in a block, not its value. On the history ledger it costs the same too, and for the same
+/// reason; only the intrinsic token rate tells the two apart, which is why the bill does. The bill
+/// is the larger of the intrinsic charge with the body's history and the floor, so where a history
+/// byte is cheap enough for the floor to bind, it binds both alike.
 #[test]
 fn test_a_zero_calldata_byte_costs_the_same_as_a_non_zero_one() {
-    let zeros = gas_used(funded(), with_calldata(1_024, 0x00));
-    let non_zeros = gas_used(funded(), with_calldata(1_024, 0xff));
-    assert_eq!(zeros, non_zeros);
-    assert_eq!(zeros, Ok(EMPTY_CALL + FLOOR_PER_BYTE * 1_024));
+    let zeros = charged(funded(), with_calldata(1_024, 0x00)).expect("valid");
+    let non_zeros = charged(funded(), with_calldata(1_024, 0xff)).expect("valid");
+    assert_eq!(zeros.floor, non_zeros.floor);
+    assert_eq!(zeros.floor, EMPTY_CALL + FLOOR_PER_BYTE * 1_024);
+    let bill =
+        |per_byte: u64| (EMPTY_CALL + per_byte * 1_024 + body_history(1_024)).max(zeros.floor);
+    assert_eq!(zeros.gas_used, bill(4), "a zero byte: four gas and its history");
+    assert_eq!(
+        non_zeros.gas_used,
+        bill(16),
+        "only the intrinsic token rate, four against sixteen, tells them apart",
+    );
+}
+
+/// The floor is computed and validated as it always was, and it never decides the bill: history
+/// gas charges every calldata byte 88 where the floor charges it 64, on a base that is already
+/// larger, so a Satin transaction is above its own floor from the first byte on.
+#[test]
+fn test_the_calldata_floor_never_binds_once_history_is_charged() {
+    if runs_at_measurement_prices() {
+        return;
+    }
+    const { assert!(HISTORY_PER_BYTE > FLOOR_PER_BYTE) };
+    for len in [0u64, 1, 100, 4_096] {
+        let charged = charged(funded(), with_calldata(len as usize, 0x00)).expect("valid");
+        assert_eq!(charged.floor, EMPTY_CALL + FLOOR_PER_BYTE * len, "{len} bytes: the floor");
+        assert_eq!(
+            charged.gas_used,
+            EMPTY_CALL + 4 * len + body_history(len),
+            "{len} bytes: the intrinsic charge and the body, both above the floor",
+        );
+        assert!(charged.gas_used > charged.floor, "{len} bytes: the floor does not bind");
+    }
 }
 
 /* ---------- the EIP-7981 access-list data charge ---------- */
@@ -129,35 +196,53 @@ fn with_access_list(keys: usize) -> MegaTransaction {
     }))
 }
 
-/// An access-list address costs 2,400 in the intrinsic phase — its pre-EIP-8038 price — and its
-/// twenty bytes cost 64 each in the floor. With one address alone the intrinsic charge is the
-/// larger of the two, so that is what the transaction pays.
+/// An access-list address costs the schedule's entry in the intrinsic phase — 4,180, EIP-8038's
+/// cold premium of 2,900 with its twenty bytes at 64 gas each on top — and its twenty bytes cost
+/// 64 each in the floor. The intrinsic charge carries the floor's bytes and more, so it is what
+/// the transaction pays.
 #[test]
-fn test_an_access_list_address_is_priced_at_the_pre_eip8038_rate() {
-    assert_eq!(gas_used(funded(), with_access_list(0)), Ok(EMPTY_CALL + 2_400));
+fn test_an_access_list_address_pays_its_cold_premium_and_its_bytes() {
+    assert_eq!(floor(funded(), with_access_list(0)), Ok(EMPTY_CALL + 20 * FLOOR_PER_BYTE));
+    assert_eq!(
+        gas_used(funded(), with_access_list(0)),
+        Ok(EMPTY_CALL + address_entry() + body_history(20)),
+        "the intrinsic charge and the address's twenty bytes of history",
+    );
 }
 
-/// A storage key costs 1,900 in the intrinsic phase and its thirty-two bytes cost 2,048 in the
-/// floor, so every key pushes the floor further above the intrinsic sum. Past the address's
-/// 1,120-gas head start the floor takes over, and from there the transaction pays the bytes.
+/// A storage key costs the schedule's entry in the intrinsic phase — 4,048, EIP-8038's cold
+/// premium of 2,000 with its thirty-two bytes at 64 gas each on top — and those bytes cost 2,048
+/// in the floor. The bytes are in both, and the intrinsic charge has the premium besides, so
+/// however many keys there are the floor stays below what the transaction pays.
 #[test]
 fn test_access_list_bytes_are_counted_in_the_floor_at_sixty_four_each() {
     let address_bytes = 20 * FLOOR_PER_BYTE;
     let key_bytes = 32 * FLOOR_PER_BYTE;
-    for keys in [0u64, 1, 7] {
+    for keys in [0u64, 1, 7, 8, 16, 64] {
         assert_eq!(
-            gas_used(funded(), with_access_list(keys as usize)),
-            Ok(EMPTY_CALL + 2_400 + 1_900 * keys),
-            "{keys} keys: the intrinsic charge is still the larger"
-        );
-    }
-    for keys in [8u64, 16, 64] {
-        assert_eq!(
-            gas_used(funded(), with_access_list(keys as usize)),
+            floor(funded(), with_access_list(keys as usize)),
             Ok(EMPTY_CALL + address_bytes + key_bytes * keys),
-            "{keys} keys: the floor is the larger"
+            "{keys} keys: the floor counts every byte at the same rate"
+        );
+        let floor = EMPTY_CALL + address_bytes + key_bytes * keys;
+        let intrinsic = EMPTY_CALL + address_entry() + key_entry() * keys;
+        assert!(intrinsic > floor, "{keys} keys: the intrinsic charge carries the floor's bytes");
+        assert_eq!(
+            gas_used(funded(), with_access_list(keys as usize)),
+            Ok(intrinsic + body_history(20 + 32 * keys)),
+            "{keys} keys: the intrinsic charge and the entry's bytes of history"
         );
     }
+}
+
+/// The intrinsic charge of an access-list address, at the schedule's price.
+fn address_entry() -> u64 {
+    mega_evm::satin_gas_params().get(GasId::tx_access_list_address_cost())
+}
+
+/// The intrinsic charge of an access-list storage key, at the schedule's price.
+fn key_entry() -> u64 {
+    mega_evm::satin_gas_params().get(GasId::tx_access_list_storage_key_cost())
 }
 
 /* ---------- the execution cap ---------- */
@@ -166,19 +251,25 @@ fn test_access_list_bytes_are_counted_in_the_floor_at_sixty_four_each() {
 /// to a whole byte.
 const LARGEST_CALLDATA: u64 = 3_124_765;
 
-/// A call carrying `len` calldata bytes with a gas limit above the execution cap, so the cap is
-/// what the floor is measured against.
+/// A call carrying `len` calldata bytes with a gas limit that covers everything it has to pay,
+/// above the execution cap, so the cap is what the floor is measured against.
+///
+/// The body's history is not held to the cap — it comes out of the reservoir — so the limit has
+/// to be above the cap by more than the body costs.
 fn with_calldata_over_the_cap(len: u64) -> MegaTransaction {
     crate::common::call_with_data(
         CALLER,
         CALLEE,
         Bytes::from(vec![0u8; len as usize]),
-        TX_GAS_LIMIT_CAP + 1_000_000,
+        TX_GAS_LIMIT_CAP + body_history(len) + 1_000_000,
     )
 }
 
-/// At the bound the transaction is admitted and pays its floor; one byte more and the floor is
-/// above the execution cap, which rejects it before it runs.
+/// At the bound the transaction is admitted; one byte more and the floor is above the execution
+/// cap, which rejects it before it runs.
+///
+/// The bound is the floor's, not the bill's: history gas is charged on top of it and neither the
+/// floor nor the cap counts it, so what the transaction pays is far above the cap.
 #[test]
 fn test_the_execution_cap_bounds_the_calldata_a_transaction_may_carry() {
     let floor = EMPTY_CALL + FLOOR_PER_BYTE * LARGEST_CALLDATA;
@@ -189,7 +280,14 @@ fn test_the_execution_cap_bounds_the_calldata_a_transaction_may_carry() {
     );
 
     let db = funded().account_balance(CALLER, U256::from(10u128.pow(24)));
-    assert_eq!(gas_used(db.clone(), with_calldata_over_the_cap(LARGEST_CALLDATA)), Ok(floor));
+    let charged = charged(db.clone(), with_calldata_over_the_cap(LARGEST_CALLDATA)).expect("valid");
+    assert_eq!(charged.floor, floor);
+    // The floor binds where a history byte is cheaper than the floor's rate less the intrinsic
+    // one: the bill is the larger of the two.
+    assert_eq!(
+        charged.gas_used,
+        (EMPTY_CALL + 4 * LARGEST_CALLDATA + body_history(LARGEST_CALLDATA)).max(floor)
+    );
 
     let expected = format!(
         "{:?}",
@@ -202,7 +300,10 @@ fn test_the_execution_cap_bounds_the_calldata_a_transaction_may_carry() {
 }
 
 /// A floor above the transaction's own gas limit is rejected too, below the cap: the floor is
-/// measured against whichever of the two is smaller.
+/// measured against whichever of the two is smaller. The rejection leaves the sender as it was.
+///
+/// Rules: [S4.26], [S21.1], [S21.2]. Independence: independent — the base, the floor's rate and the
+/// sender's funding are written out.
 #[test]
 fn test_a_floor_above_the_gas_limit_is_rejected() {
     let gas_limit = 100_000;
@@ -213,47 +314,49 @@ fn test_a_floor_above_the_gas_limit_is_rejected() {
         Bytes::from(vec![0u8; len as usize]),
         gas_limit,
     );
-    let expected = format!(
-        "{:?}",
+    assert_rejected_and_sender_untouched(
+        tx,
         InvalidTransaction::GasFloorMoreThanGasLimit {
             gas_floor: EMPTY_CALL + FLOOR_PER_BYTE * len,
             gas_limit,
-        }
+        },
     );
-    assert_eq!(gas_used(funded(), tx), Err(expected));
-    assert_sender_untouched();
 }
 
-/// The sender's nonce and balance are untouched by a transaction validation rejected.
-fn assert_sender_untouched() {
-    let mut db = funded();
-    let info = db.basic(CALLER).unwrap().unwrap();
-    assert_eq!(info.nonce, 0);
-    assert_eq!(info.balance, U256::from(10u64.pow(18)));
+/// Validation rejects `tx` with `expected` on an EVM over [`funded`], through alloy-evm and through
+/// revm's own entry point, and the sender is untouched in the database the second EVM ran on.
+///
+/// That EVM runs `tx` as a block builder runs one transaction after another, without finalizing
+/// it, and then commits what its journal holds: whatever the rejection left behind for the next
+/// transaction reaches the database, where [`assert_sender_untouched`] reads the sender.
+fn assert_rejected_and_sender_untouched(tx: MegaTransaction, expected: InvalidTransaction) {
+    assert_eq!(gas_used(funded(), tx.clone()), Err(format!("{expected:?}")), "through alloy-evm");
+    let mut evm = MegaEvm::new(context(funded()));
+    match ExecuteEvm::transact_one(&mut evm, tx) {
+        Err(EVMError::Transaction(invalid)) => assert_eq!(
+            format!("{invalid:?}"),
+            format!("{:?}", OpTransactionError::Base(expected)),
+            "the rejection"
+        ),
+        other => panic!("expected the rejection {expected:?}, got {other:?}"),
+    }
+    ExecuteCommitEvm::commit_inner(&mut evm);
+    assert_sender_untouched(evm.db_mut());
+}
+
+/// The sender's nonce and balance in `db`, the database a rejected transaction ran on, are what
+/// [`funded`] gave it.
+fn assert_sender_untouched(db: &mut MemoryDatabase) {
+    let info = db.basic(CALLER).expect("the database reads").expect("the sender exists");
+    assert_eq!(info.nonce, 0, "the sender's nonce");
+    assert_eq!(info.balance, U256::from(10u64.pow(18)), "the sender's balance");
 }
 
 /* ---------- the state component is charged where it happens ---------- */
 
-/// A transfer whose recipient must be created needs the account's state gas on top of the
-/// intrinsic charge. The state gas is not part of the intrinsic phase, so a gas limit that covers
-/// the intrinsic charge alone is accepted and then runs out of gas, charging the sender.
-#[test]
-fn test_a_transfer_that_cannot_pay_the_new_account_runs_out_of_gas() {
-    if runs_at_measurement_prices() {
-        return;
-    }
-    let db = MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18)));
-    let mut evm = MegaEvm::new(context(db));
-    let outcome = evm
-        .transact_raw(call(CALLER, CALLEE, U256::from(1), 21_000 + ACCOUNT_STATE_GAS - 1))
-        .expect("the transaction is admitted");
-
-    assert!(matches!(outcome.result, ExecutionResult::Halt { .. }), "{:?}", outcome.result);
-    assert_eq!(outcome.state[&CALLER].info.nonce, 1, "the sender paid for the attempt");
-}
-
-/// The same for a creation: the created account's state gas is charged as the frame starts, not
-/// at validation.
+/// A creation transaction's created account's state gas is charged as the frame starts, not at
+/// validation: a gas limit that covers the intrinsic charge alone is accepted and then runs out of
+/// gas, charging the sender.
 #[test]
 fn test_a_creation_that_cannot_pay_its_account_runs_out_of_gas() {
     if runs_at_measurement_prices() {
@@ -262,30 +365,74 @@ fn test_a_creation_that_cannot_pay_its_account_runs_out_of_gas() {
     let db = MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18)));
     let mut evm = MegaEvm::new(context(db));
     let outcome = evm
-        .transact_raw(create(CALLER, Bytes::new(), 24_000 + ACCOUNT_STATE_GAS - 1))
+        .execute_transaction(create(CALLER, Bytes::new(), 24_000 + ACCOUNT_STATE_GAS - 1))
         .expect("the transaction is admitted");
 
     assert!(matches!(outcome.result, ExecutionResult::Halt { .. }), "{:?}", outcome.result);
     assert_eq!(outcome.state[&CALLER].info.nonce, 1, "the sender paid for the attempt");
+    assert_eq!(outcome.gas.gas_used, 24_000 + ACCOUNT_STATE_GAS - 1, "its whole gas limit");
+    assert_eq!(outcome.gas.state, 0, "and the account it could not pay for is not created");
 }
 
 /// A gas limit below the intrinsic charge itself is a validation rejection, which leaves the
 /// sender untouched.
+///
+/// The figure the error carries is one reading of a point the spec leaves open. The spec fixes
+/// the rejection and its error, `CallGasCostMoreThanGasLimit`, for a gas limit below the intrinsic
+/// regular gas plus the body's history, but not which figure the error names. Here, below the
+/// intrinsic regular gas alone, it names that charge without the body's history; a gas limit that
+/// covers the intrinsic charge but not the body is named with the whole minimum (the next test).
+/// Whether the error should name one figure in both cases is undecided, so a change to it is not
+/// a change of the rules this test holds: the rejection, and a sender left untouched.
+///
+/// Rules: [S4.25], [S21.1]. Independence: independent — the intrinsic charge and the sender's
+/// funding are written out.
 #[test]
 fn test_a_gas_limit_below_the_intrinsic_charge_is_rejected() {
-    let expected = format!(
-        "{:?}",
+    assert_rejected_and_sender_untouched(
+        call(CALLER, CALLEE, U256::ZERO, EMPTY_CALL - 1),
         InvalidTransaction::CallGasCostMoreThanGasLimit {
             gas_limit: EMPTY_CALL - 1,
             initial_gas: EMPTY_CALL,
-        }
+        },
     );
-    assert_eq!(gas_used(funded(), call(CALLER, CALLEE, U256::ZERO, EMPTY_CALL - 1)), Err(expected));
-    assert_sender_untouched();
 }
 
 /// A plain call within its limits still goes through, so the checks above are not too eager.
 #[test]
 fn test_a_valid_call_still_passes() {
-    assert_eq!(gas_used(funded(), call(CALLER, CALLEE, U256::ZERO, 1_000_000)), Ok(EMPTY_CALL));
+    assert_eq!(
+        gas_used(funded(), call(CALLER, CALLEE, U256::ZERO, 1_000_000)),
+        Ok(EMPTY_CALL + body_history(0)),
+    );
+}
+
+/// A gas limit that covers the intrinsic charge but not the body's history is a validation
+/// rejection too, naming the whole figure: the bytes a transaction carries are part of what makes
+/// it valid, so a transaction that cannot pay for them is never included, and leaves the sender
+/// untouched.
+///
+/// The figure the error carries — the whole minimum, the intrinsic charge and the body's history
+/// together — is one reading of a point the spec leaves open: the spec fixes the rejection and its
+/// error, not which figure the error names, and below the intrinsic charge alone the error names
+/// that charge without the body (the test above). Whether it should name one figure in both cases
+/// is undecided, so a change to it is not a change of the rules this test holds: the rejection, a
+/// sender left untouched, and a gas limit of the whole minimum admitted.
+///
+/// Rules: [S4.25], [S7.17], [S21.1]. Independence: independent for the intrinsic charge and the
+/// sender's funding, which are written out; the body's history is priced by the production
+/// helper.
+#[test]
+fn test_a_gas_limit_short_of_the_body_is_rejected() {
+    if runs_at_measurement_prices() {
+        return;
+    }
+    let minimum = EMPTY_CALL + body_history(0);
+    for gas_limit in [EMPTY_CALL, EMPTY_CALL + 1, minimum - 1] {
+        assert_rejected_and_sender_untouched(
+            call(CALLER, CALLEE, U256::ZERO, gas_limit),
+            InvalidTransaction::CallGasCostMoreThanGasLimit { gas_limit, initial_gas: minimum },
+        );
+    }
+    assert_eq!(gas_used(funded(), call(CALLER, CALLEE, U256::ZERO, minimum)), Ok(minimum));
 }

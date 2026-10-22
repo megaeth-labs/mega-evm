@@ -18,13 +18,18 @@ use revm::{
 };
 
 use crate::common::{
-    self, deposit_tx, executor, unlimited_ctx, user_tx, TestExecutor, BLOCK_GAS_LIMIT, BLOCK_NUMBER,
+    self, deposit_tx, empty_call_gas, executor, system_tx, unlimited_ctx, user_tx, TestExecutor,
+    BLOCK_GAS_LIMIT, BLOCK_NUMBER,
 };
 
 /// The word the L1 block contract holds at its scalars slot: the data-availability footprint
 /// gas scalar, the operator fee scalar and the operator fee constant, at the offsets the fork
 /// reads them from.
-fn scalars_word(da_footprint: u16, operator_fee_scalar: u32, operator_fee_constant: u64) -> U256 {
+pub(crate) fn scalars_word(
+    da_footprint: u16,
+    operator_fee_scalar: u32,
+    operator_fee_constant: u64,
+) -> U256 {
     let mut word = [0_u8; 32];
     word[DA_FOOTPRINT_GAS_SCALAR_OFFSET..DA_FOOTPRINT_GAS_SCALAR_OFFSET + 2]
         .copy_from_slice(&da_footprint.to_be_bytes());
@@ -44,7 +49,7 @@ fn state_with_scalars(word: U256) -> State<mega_evm::test_utils::MemoryDatabase>
 
 /// Code that writes its 32 bytes of calldata to the scalars slot, which is what the L1 info
 /// deposit's setter does for the fields this test reads.
-fn l1_block_setter() -> Bytes {
+pub(crate) fn l1_block_setter() -> Bytes {
     BytecodeBuilder::default()
         .push_number(0_u64)
         .append(CALLDATALOAD)
@@ -79,35 +84,21 @@ fn operator_fee_paid(executor: TestExecutor<'_>) -> U256 {
         .unwrap_or_default()
 }
 
-/// Rule 1, alloy-op-evm's `no_user_tx_activation_block`: the block a fork activates in carries
-/// the chain's own transactions only, and a user transaction in it is refused before it runs.
+/// Rule 1 decides on the envelope: a Mega System Transaction is a legacy transaction in the block,
+/// so an activation block refuses it before it runs, as it refuses a user's, although the engine
+/// would promote it to a deposit as it ran it.
 #[test]
-fn test_activation_block_rejects_a_user_transaction() {
+fn test_activation_block_rejects_a_mega_system_transaction() {
     let mut state = common::state();
     let mut executor = executor(&mut state, unlimited_ctx().with_no_user_tx_activation_block(true));
     executor.apply_pre_execution_changes().expect("the block starts");
 
     let err = executor
-        .execute_transaction(&user_tx(0, 100_000))
-        .expect_err("a user transaction has no place in an activation block");
+        .execute_transaction(&system_tx())
+        .expect_err("a legacy envelope has no place in an activation block");
 
     assert!(format!("{err}").contains("non-deposit transaction in fork activation block"), "{err}");
     assert!(executor.receipts().is_empty(), "nothing was packed");
-}
-
-/// Rule 1, the other half: the same block executes deposits.
-#[test]
-fn test_activation_block_executes_deposits() {
-    let mut state = common::state();
-    let mut executor = executor(&mut state, unlimited_ctx().with_no_user_tx_activation_block(true));
-    executor.apply_pre_execution_changes().expect("the block starts");
-
-    executor
-        .execute_transaction(&deposit_tx(Bytes::new(), 100_000))
-        .expect("a deposit is what an activation block is for");
-
-    let (_, result) = executor.finish_with_counters().expect("the block finishes");
-    assert_eq!(result.receipts().len(), 1);
 }
 
 /// Rule 2, alloy-op-evm's Jovian DA footprint block limit: with no scalar in state the rule
@@ -118,7 +109,7 @@ fn test_da_footprint_is_inert_without_a_scalar() {
     let mut executor = executor(&mut state, unlimited_ctx());
     executor.apply_pre_execution_changes().expect("the block starts");
 
-    executor.execute_transaction(&user_tx(0, 100_000)).expect("the transaction executes");
+    executor.execute_transaction(&user_tx(0, empty_call_gas())).expect("the transaction executes");
 
     let (_, result) = executor.finish_with_counters().expect("the block finishes");
     assert_eq!(result.blob_gas_used, 0, "no scalar, no footprint");
@@ -133,8 +124,8 @@ fn test_da_footprint_within_the_block_budget_is_reported_as_blob_gas() {
     let mut executor = executor(&mut state, unlimited_ctx());
     executor.apply_pre_execution_changes().expect("the block starts");
 
-    let first = user_tx(0, 100_000);
-    let second = user_tx(1, 100_000);
+    let first = user_tx(0, empty_call_gas());
+    let second = user_tx(1, empty_call_gas());
     let expected = (mega_evm::MegaTransactionExt::estimated_da_size(&first) +
         mega_evm::MegaTransactionExt::estimated_da_size(&second)) *
         u64::from(SCALAR);
@@ -145,6 +136,29 @@ fn test_da_footprint_within_the_block_budget_is_reported_as_blob_gas() {
     assert_eq!(executor.limiter().block_da_footprint_used, expected);
     let (_, result) = executor.finish_with_counters().expect("the block finishes");
     assert_eq!(result.blob_gas_used, expected, "the block reports its footprint as blob gas");
+}
+
+/// Rule 2 decides on the envelope too: a Mega System Transaction, which the engine runs as the
+/// protocol's own, costs the block the data-availability footprint of the legacy transaction it
+/// is, and counts towards the block's data-availability size, where a deposit costs neither. The
+/// packing budgets read the same envelope.
+#[test]
+fn test_a_mega_system_transaction_costs_its_da_footprint() {
+    const SCALAR: u16 = 3;
+    let mut state = state_with_scalars(scalars_word(SCALAR, 0, 0));
+    let mut executor = executor(&mut state, unlimited_ctx());
+    executor.apply_pre_execution_changes().expect("the block starts");
+
+    let system = system_tx();
+    let da_size = mega_evm::MegaTransactionExt::estimated_da_size(&system);
+    let outcome = executor.run_transaction(&system).expect("the system transaction executes");
+    assert!(outcome.inner.result.is_success(), "{:?}", outcome.inner.result);
+    assert!(executor.evm().ctx().is_system_originated(), "the engine ran it as the protocol's own");
+    assert!(!outcome.is_deposit, "the block did not: its envelope is legacy");
+    executor.commit_transaction(outcome);
+
+    assert_eq!(executor.limiter().block_da_footprint_used, da_size * u64::from(SCALAR));
+    assert_eq!(executor.limiter().block_da_size_used, da_size);
 }
 
 /// Rule 2: a transaction whose footprint does not fit in the block's budget — the block's gas
@@ -173,21 +187,29 @@ fn test_da_footprint_over_the_block_budget_refuses_the_transaction() {
 /// is admitted, and the block has nothing left for the next transaction.
 #[test]
 fn test_da_footprint_that_exactly_fills_the_block_budget_is_admitted() {
-    const SCALAR: u16 = 128;
-    // Above the transaction's calldata floor under the Satin gas table, and below the footprint
-    // the scalar yields, so the block's gas limit still fits the transaction's gas.
-    const GAS_LIMIT: u64 = 1_300_000;
+    const CALLDATA: u64 = 20_000;
+    // Above what the transaction has to pay under the Satin gas table: its body's history, at the
+    // price the engine runs, and 64 gas a calldata byte, which covers both its intrinsic charge and
+    // its floor.
+    let gas_limit = mega_evm::history_gas(mega_evm::TX_BODY_SIZE + CALLDATA)
+        .expect("the body has a price") +
+        15_000 +
+        64 * CALLDATA;
 
-    let tx = common::user_tx_with_input(0, common::incompressible(20_000), GAS_LIMIT);
-    let footprint = mega_evm::MegaTransactionExt::estimated_da_size(&tx) * u64::from(SCALAR);
-    assert!(footprint >= GAS_LIMIT, "the block's gas limit must also fit the transaction's gas");
+    let tx = common::user_tx_with_input(0, common::incompressible(CALLDATA as usize), gas_limit);
+    let da_size = mega_evm::MegaTransactionExt::estimated_da_size(&tx);
+    // The smallest scalar whose footprint fits the transaction's gas, so the block's gas limit —
+    // the footprint's budget — still fits it too.
+    let scalar = u16::try_from(gas_limit.div_ceil(da_size)).expect("the scalar fits its field");
+    let footprint = da_size * u64::from(scalar);
+    assert!(footprint >= gas_limit, "the block's gas limit must also fit the transaction's gas");
 
     // The block's gas limit is the footprint's budget, so a block with exactly this gas limit
     // has exactly this transaction's footprint.
     let mut env = common::evm_env();
     env.block_env.gas_limit = footprint;
 
-    let mut state = state_with_scalars(scalars_word(SCALAR, 0, 0));
+    let mut state = state_with_scalars(scalars_word(scalar, 0, 0));
     let mut executor = common::executor_with_env(&mut state, unlimited_ctx(), env);
     executor.apply_pre_execution_changes().expect("the block starts");
 
@@ -223,7 +245,7 @@ fn test_l1_block_info_is_read_by_the_first_transaction_that_prices_against_it() 
     assert_eq!(executor.evm().ctx().chain().l2_block, None, "the block starts with no info");
 
     executor
-        .execute_transaction(&user_tx(0, 100_000))
+        .execute_transaction(&user_tx(0, empty_call_gas()))
         .expect("an empty L1 block contract is not an error");
 
     let chain = executor.evm().ctx().chain();
@@ -251,7 +273,9 @@ fn test_l1_block_info_of_this_block_is_not_overwritten() {
     });
 
     executor.apply_pre_execution_changes().expect("the block starts");
-    let gas = executor.execute_transaction(&user_tx(0, 100_000)).expect("the transaction executes");
+    let gas = executor
+        .execute_transaction(&user_tx(0, empty_call_gas()))
+        .expect("the transaction executes");
 
     let chain = executor.evm().ctx().chain();
     assert_eq!(
@@ -298,7 +322,9 @@ fn test_the_l1_info_deposit_prices_the_transactions_after_it() {
     assert_eq!(state_scalars(&mut executor), word, "the deposit wrote the block's scalars");
 
     // The deposit bumped the sender's nonce, so the user transaction after it carries nonce 1.
-    let gas = executor.execute_transaction(&user_tx(1, 100_000)).expect("the transaction executes");
+    let gas = executor
+        .execute_transaction(&user_tx(1, empty_call_gas()))
+        .expect("the transaction executes");
 
     let paid = operator_fee_paid(executor);
     assert_eq!(
@@ -322,7 +348,9 @@ fn test_operator_fee_is_charged_on_the_karst_formula() {
     let mut executor = executor(&mut state, unlimited_ctx());
     executor.apply_pre_execution_changes().expect("the block starts");
 
-    let gas = executor.execute_transaction(&user_tx(0, 100_000)).expect("the transaction executes");
+    let gas = executor
+        .execute_transaction(&user_tx(0, empty_call_gas()))
+        .expect("the transaction executes");
 
     assert_eq!(
         operator_fee_paid(executor),
@@ -331,14 +359,15 @@ fn test_operator_fee_is_charged_on_the_karst_formula() {
     );
 }
 
-/// The block's gas limit is the block environment's, whatever the context carries: it is the
-/// number consensus holds the block to, and the budget the footprint is held to.
+/// The block's gas limit is the block environment's: it is the number consensus holds the block
+/// to, and the budget the footprint is held to. It is the executor's state, not building policy,
+/// so no context can carry another.
 #[test]
 fn test_block_gas_limit_comes_from_the_block_environment() {
     let mut state = common::state();
-    let ctx = common::block_ctx(BlockLimits::no_limits().with_block_gas_limit(1));
-    let executor = executor(&mut state, ctx);
+    let executor = executor(&mut state, common::block_ctx(BlockLimits::no_limits()));
 
-    assert_eq!(executor.limiter().limits.block_gas_limit, BLOCK_GAS_LIMIT);
+    assert_eq!(executor.limiter().block_gas_limit, BLOCK_GAS_LIMIT);
+    assert_eq!(executor.limiter().available_gas(), BLOCK_GAS_LIMIT);
     assert_eq!(executor.limiter().available_da_footprint(), BLOCK_GAS_LIMIT);
 }

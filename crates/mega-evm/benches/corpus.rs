@@ -1,11 +1,15 @@
 //! A set of JSON scenarios through `MegaEvm`.
 //!
 //! The inputs are the scenarios under `benches/scenarios` (the `test_utils::Scenario` format),
-//! picked to spread over the mechanisms the engine runs. They are bench inputs, not a conformance
-//! suite: nothing here compares their outcome with another engine, so an instruction-count change
-//! means only that the execution or the pricing of those scenarios moved. Each scenario runs all
-//! its transactions, one fresh `MegaEvm` per transaction; building the pre-state is setup and is
-//! not measured.
+//! picked to spread over the mechanisms the engine runs. They are bench inputs. Their outcome
+//! and gas are pinned by a test, `tests/satin/corpus.rs`, so a pricing change that takes a
+//! shorter path fails there instead of being timed here.
+//!
+//! A scenario is a block: one `MegaEvm`, built with the pre-state in the setup, runs all its
+//! transactions and commits each before the next (`Scenario::run_on`). What is measured is the
+//! transactions and their commits; building the EVM, like building the pre-state, is setup and is
+//! not measured, as in `transact`, so the two families measure per-transaction execution alike.
+//! The one difference is the commit to the in-memory database, which `transact` does not do.
 #![allow(missing_docs)]
 
 use std::path::Path;
@@ -33,30 +37,29 @@ const SLICE: &[(&str, &str)] = &[
     ("modexp", "precompile_modexp"),
 ];
 
-fn load(path: &str) -> Scenario {
-    let file = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("benches/scenarios")
-        .join(format!("{path}.json"));
-    let text = std::fs::read_to_string(&file).unwrap_or_else(|err| panic!("{file:?}: {err}"));
-    let scenario: Scenario = serde_json::from_str(&text).unwrap();
-    scenario.validate().unwrap();
-    scenario
-}
-
 fn bench_corpus(c: &mut Criterion) {
     let mut group = c.benchmark_group("corpus");
-    for (id, path) in SLICE {
-        let scenario = load(path);
-        // The measured path must be the scenario's execution, not a rejected transaction.
-        let (outcomes, _) = scenario.run(scenario.database());
-        for (i, outcome) in outcomes.iter().enumerate() {
-            assert!(outcome.is_ok(), "{path}: tx[{i}] is rejected: {outcome:?}");
-        }
+    for (id, name) in SLICE {
+        let scenario = load(name);
         group.bench_function(*id, |b| {
-            b.iter_batched(|| scenario.database(), |db| scenario.run(db), BatchSize::SmallInput);
+            b.iter_batched(
+                || scenario.evm(scenario.database()),
+                |mut evm| scenario.run_on(&mut evm),
+                BatchSize::SmallInput,
+            );
         });
     }
     group.finish();
+}
+
+fn load(name: &str) -> Scenario {
+    let file = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("benches/scenarios/{name}.json"));
+    let text = std::fs::read_to_string(&file).unwrap_or_else(|err| panic!("{file:?}: {err}"));
+    let scenario: Scenario = serde_json::from_str(&text).unwrap_or_else(|err| {
+        panic!("{file:?}: {err}");
+    });
+    scenario.validate().unwrap_or_else(|err| panic!("{file:?}: {err}"));
+    scenario
 }
 
 criterion_group!(benches, bench_corpus);

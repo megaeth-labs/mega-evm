@@ -58,6 +58,41 @@ Because it is never part of a frame's gas, any undrawn allowance is not returned
 
 See the [Rex4](upgrades/rex4.md) and [Rex5](upgrades/rex5.md) network upgrades for details.
 
+## State gas
+
+_(Satin, unstable)_ The [EIP-8037](https://eips.ethereum.org/EIPS/eip-8037) gas a transaction pays for the state it adds — a fresh storage slot, a new account, deployed code, an EIP-7702 delegation indicator — priced at MegaETH's cost per state byte and scaled by the [multiplier](#multiplier) of the [SALT bucket](#salt-bucket) the state lands in.
+
+Drawn from the [reservoir](#reservoir) first, then from regular gas.
+
+See the [Satin](upgrades/satin.md) network upgrade.
+
+## History gas
+
+_(Satin, unstable)_ Gas a transaction pays for the bytes it appends to the chain's history — its body, its logs, its [write records](#write-record) and its deployed code — at MegaETH's cost per history byte.
+
+Drawn from the [reservoir](#reservoir) first, then from regular gas, and never scaled by SALT.
+
+See the [Satin](upgrades/satin.md) network upgrade.
+
+## Execution cap
+
+_(Satin, unstable)_ The most regular gas one transaction may spend: 200,000,000.
+Gas limit above the cap goes to the [reservoir](#reservoir).
+
+## Reservoir
+
+_(Satin, unstable)_ The [EIP-8037](https://eips.ethereum.org/EIPS/eip-8037) state-gas reservoir: the part of a transaction's gas limit above the [execution cap](#execution-cap), which pays [state gas](#state-gas) and [history gas](#history-gas) before they spill onto regular gas.
+
+## Write record
+
+_(Satin, unstable)_ One account or storage write a transaction keeps, 40 bytes of data size and of [history gas](#history-gas).
+The KV-update count is the number of write records.
+
+## History allowance
+
+_(Satin, unstable)_ A 160-byte allowance of [history gas](#history-gas) that a value-transferring `CALL` or `CALLCODE` below the transaction's own frame grants the frame it starts, drawn only by that frame's logs.
+Replaces the [storage gas stipend](#storage-gas-stipend) under Satin.
+
 ## SALT
 
 Small Authentication Large Trie.
@@ -99,6 +134,14 @@ At `multiplier = 1` (minimum bucket), SSTORE/account/contract creation storage g
 At `multiplier > 1`, storage gas scales linearly.
 
 The multiplier is determined per-account and per-storage-slot based on which SALT bucket they reside in.
+
+## Stateless witness
+
+_(Satin, unstable)_ What a validator re-executing a block is given: every account and storage slot the block's pre-block steps and included transactions load, in any frame, reverted or halted ones and those of a deposit that failed included, as the chain held it before the block — absent accounts as absent, with no slot of theirs, and zero slots of held accounts as zero — with the code of every account named, whether or not the load that named it loaded its code; the hashes `BLOCKHASH` read and the capacities of the [SALT buckets](#salt-bucket) its state charges were priced in, both exported by the block's execution; and the oracle service's answers the included transactions recorded, or the chain's slots holding them where every answer is the slot's value at its read.
+
+A stateless validator re-executes the block from it, and must produce the same receipts, state changes, gas ledgers and block counters.
+
+See the [Satin](upgrades/satin.md) network upgrade.
 
 ## Gas detention
 
@@ -163,7 +206,8 @@ A set of MegaETH verifiable behaviors: the complete definition of what a correct
 
 Captures the execution-layer semantics that determine node correctness.
 
-Progression: `EQUIVALENCE → MINI_REX → MINI_REX_1 → MINI_REX_2 → REX → REX1 → REX2 → REX3 → REX4 → REX5 → REX6 → REX7`.
+Progression: `EQUIVALENCE → MINI_REX → MINI_REX_1 → MINI_REX_2 → REX → REX1 → REX2 → REX3 → REX4 → REX5 → REX6 → SATIN`.
+`SATIN` is unstable.
 `MINI_REX_1` and `MINI_REX_2` are [alias rungs](#alias-spec) executing `EQUIVALENCE` and `MINI_REX` behavior respectively.
 
 ## Alias Spec

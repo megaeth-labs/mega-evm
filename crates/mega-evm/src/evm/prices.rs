@@ -2,7 +2,8 @@
 //! at prices other than the constants.
 //!
 //! Every Satin schedule entry that depends on a byte price reads it through
-//! [`active_satin_prices`]: today the EIP-8037 state-gas entries, later the history entries.
+//! [`active_satin_prices`]: the EIP-8037 state-gas entries and the history price of deposited
+//! code. The history charges the engine makes itself read the same prices.
 //!
 //! Without the `satin-price-override` feature [`active_satin_prices`] is a constant, so a build
 //! that does not opt in prices with [`COST_PER_STATE_BYTE`] and [`COST_PER_HISTORY_BYTE`] and has
@@ -153,9 +154,6 @@ impl FromStr for BytePrice {
 }
 
 /// The cost per state byte and the cost per history byte the Satin gas table is built from.
-///
-/// `cphb` is carried and installable, but prices no schedule entry yet: history gas lands as its
-/// own mechanism, and until then the schedule's history entry stays zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SatinPrices {
     /// Cost per state byte: what one byte added to the world state costs.
@@ -277,25 +275,17 @@ pub fn active_satin_prices() -> SatinPrices {
 /// number in the schedule. A test that asserts one of those numbers returns early instead of
 /// failing on a price the developer asked for.
 ///
-/// The notice goes straight to stderr and only once: the harness captures the print macros of a
-/// test that passes, so a message written with them would never be read.
+/// Each test that returns early leaves a note (`note_price_guard`), which the byte-price
+/// grid counts.
 #[cfg(test)]
 pub(crate) fn runs_at_measurement_prices() -> bool {
     if active_satin_prices().is_constants() {
         return false;
     }
     #[cfg(feature = "satin-price-override")]
-    {
-        use std::io::Write;
-        static NOTICE: std::sync::Once = std::sync::Once::new();
-        NOTICE.call_once(|| {
-            let _ = writeln!(
-                std::io::stderr(),
-                "note: skipping the tests that assert the spec's byte prices, because \
-                 {CPSB_ENV_VAR} or {CPHB_ENV_VAR} fixed other ones; unset them to run those tests"
-            );
-        });
-    }
+    crate::test_utils::note_price_guard(&format!(
+        "{CPSB_ENV_VAR} or {CPHB_ENV_VAR} fixed prices other than the spec's"
+    ));
     true
 }
 
@@ -427,8 +417,8 @@ mod tests {
         let stderr = String::from_utf8_lossy(&run.stderr);
         assert!(run.status.success(), "the probe failed:\n{stdout}\n{stderr}");
         assert!(
-            stdout.contains("sstore_set_state_gas = 20000"),
-            "the probe must report the repriced entry; a run that selected no test reports \
+            stdout.contains("sstore_set_state_gas = 20000, code_deposit_history_gas = 400"),
+            "the probe must report the repriced entries; a run that selected no test reports \
              nothing:\n{stdout}"
         );
     }
@@ -441,12 +431,17 @@ mod tests {
     fn test_the_environment_prices_build_the_schedule() {
         use revm::context_interface::cfg::GasId;
 
-        let state_gas = crate::satin_gas_params().get(GasId::sstore_set_state_gas());
-        std::println!("sstore_set_state_gas = {state_gas}");
+        let params = crate::satin_gas_params();
+        let state_gas = params.get(GasId::sstore_set_state_gas());
+        let history_gas = params.get(GasId::code_deposit_history_gas());
+        std::println!(
+            "sstore_set_state_gas = {state_gas}, code_deposit_history_gas = {history_gas}"
+        );
 
         assert_eq!(active_satin_prices().cpsb, "312.5".parse().unwrap(), "the state byte price");
         assert_eq!(active_satin_prices().cphb, BytePrice::from_gas(400), "the history byte price");
         assert_eq!(state_gas, 20_000, "a slot's 64 bytes at 312.5 gas each");
+        assert_eq!(history_gas, 400, "one byte of deposited code at 400 gas");
     }
 
     #[test]

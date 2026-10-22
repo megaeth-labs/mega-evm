@@ -7,36 +7,47 @@ Defer to the baseline for everything not listed here; the rules below take prece
 
 ## Correctness and safety
 
-### Spec backward compatibility
+### Spec compatibility
 
-This is the single most important correctness concern in mega-evm.
-
-- **Existing stable specs must never change behavior.**
-  Check `CLAUDE.md` for which spec is currently unstable — all others are frozen.
-  New EVM behavior, gas cost changes, or opcode modifications must introduce a new spec and be gated with `spec.is_enabled(MegaSpecId::NEW_SPEC)`.
-- System contract changes (Solidity sources or Rust integration) require a new spec.
-- Modified constants must be gated per-spec — verify that old spec paths still use the old values.
-- If a PR claims to "fix" behavior for an existing spec, scrutinize whether this changes consensus.
-  A true bug fix in a frozen spec is rare and must be justified.
+- Satin is the one spec of this engine and it is unstable: it has no activation timestamp yet, so a PR may change its behavior, and `docs/spec/upgrades/satin.md` and `AGENTS.md` change with it.
+  The legacy engine (`Equivalence` through `Rex6`) is frozen on `main` and is not edited here; flag a PR that adds a legacy spec, an alias rung or a ported legacy mechanism.
+- There are no spec gates yet.
+  The next spec is added as the spec system in `AGENTS.md` describes; from then on Satin's path is fixed, and a change to behavior or to a constant that Satin shipped is gated on the new spec, with Satin's path left as it is.
+  Flag a PR that adds an `is_enabled` gate before a second spec exists.
+- A change that makes Satin differ from op-revm on purpose updates `tests/satin/equivalence.rs`; a change that makes it differ from Ethereum's fixtures on purpose registers a deviation (see Test gates).
+- System contract changes need a decision of their own: the Solidity sources and bindings carry over unchanged, so a change to one is not a side effect of an engine change.
+- A change to a limit, a price or a constant says which of the spec's numbers moved, and regenerates the documents rendered from them.
 
 ### Consensus-critical execution
 
 - All execution logic must be **deterministic and architecture-independent** — no `mem::transmute`, no native-endian byte conversions, no platform-dependent operations in consensus paths.
-- Pre-block helpers (system contract deploys, pre-exec system calls, etc.) must return `Option<EvmState>` for the block executor to commit — never call `db.commit(...)` directly.
-  Even idempotent "no change" paths must return `Some(EvmState)` with a read-only account entry; silently returning `None` drops the account from the stateless witness read set and produces an incomplete proof.
-  On `main` the full contract is in `crates/mega-evm/src/system/AGENTS.md` → `PRE-BLOCK STATE CHANGE CONTRACT`; on `satin` the helpers that exist live in `crates/mega-evm/src/block/eips.rs` and the block executor is what commits them, and the rest arrive with the pre-block system calls and the system contract deployments.
-  The same applies inside execution: read through the journal (`inspect_account`), never `journal.database.basic(...)`, or the account driving the result is missing from the returned state — and an early halt placed before the sandbox state merge drops that read set entirely.
-- Per-frame gas mechanisms (stipends, adjustments) must handle all frame termination paths: system contract interception, gas rescue on limit exceed, and frame return.
-  Missing any path causes gas leakage.
-- **Metering must be symmetric across every exit path of the instruction it wraps, and must not double-count.**
-  A `record_*` / `compute_gas!` sitting on the success arm, or after the inner revm instruction returns, is skipped by stack underflow, OOG, decode failure and inner-call failure; conversely, charge per applied action rather than per candidate, and dedup across every frame shape (top-level, `caller == target` self-transfer, repeated recipients).
-- **Ordering: guards before work, enforcement before mutation.**
-  `inspect_account` / `resize_memory!` / `keccak256` / storage-gas computation belong after the wrapped instruction's own validity checks (salt underflow, EIP-3860 size, EIP-214 static, empty initcode), and a limit must be enforced before the state change it guards — a latched flag surfacing as a `Halt` after `pre_execution` journaled the writes leaves them committed under a failed receipt.
-- **Keyless / sandbox child execution must reconcile every effect dimension into the parent and block:** gas, each limit dimension, volatile access, logs and the read set.
-  A `SandboxOutcome` carrying state but dropping logs, or a tracker allocated fresh instead of merged, is a consensus bug; and a value validated before execution (a gas-limit override) must not be mutated afterwards.
-- **The volatile-access / beneficiary-detention boundary must cover every sensitive surface** — a new volatile-derived read or side effect (Oracle SLOAD or hint, SELFDESTRUCT beneficiary, EIP-7702 delegate) has to consult the tracker; resolve the delegate before marking, and check the destructing contract itself, not only the stack target.
-- **System calls and system-address transactions:** a mandatory pre-block system call with dynamic cost needs a `block.gas_limit`-derived budget, not revm's fixed default, or a spec flipping it fail-closed rejects blocks persistently; a system-address transaction must validate nonce, chain-id and EIP-3607 against replay, and a commit step re-checking block limits must re-check the nonce too.
-- **Hot-path accounting must stay O(1)** in attacker-controlled call depth and authorization count — no frame-stack walk per opcode, no unindexed `Vec` scan per authorization.
+- Pre-block helpers (the activation block's predeploy check, pre-block system calls, the registry's due-change read, the L1 block info read) return their state (an `EvmState`, or a `ResultAndState` for a system call) for the block executor to commit on its own, in order; they never call `db.commit(...)`.
+  An idempotent "no change" path returns an `EvmState` that carries the observed account as a read-only entry; returning nothing drops the account from the stateless witness read set and produces an incomplete proof.
+  The same applies inside execution: read through the journal with revm's own loads (`load_account`, `sload`), never `journal.database.basic(...)`, or the account driving the result is missing from the returned state.
+- **The Host only observes; the opcode's wrapper commits.**
+  `sstore`, `log` and `selfdestruct` stage a record and record nothing; the wrapper commits it after the opcode completed and discards it if the opcode failed.
+  A record, a charge or a read mark made before the opcode can still fail counts a write that never happened.
+  Check that every exit path of a wrapped instruction (stack underflow, out of gas, decode failure, a failed inner call) leaves the staged record discarded and nothing counted.
+- **A limit is enforced before the write it guards.**
+  A limit — the transaction's or a frame's budget — stops the frame that crosses it with a revert carrying `MegaLimitExceeded`, never with a halt, and its caller resumes within every limit; a stop of the transaction's own frame keeps the gas its frames hold, and nothing is taken from the sender on a stop.
+  Flag a stop that surfaces as a halt, a limit that is checked after the state change it guards, a stopped frame whose writes, logs or counted bytes survive into its caller, and an answer the engine turns into the stop whose journal is not taken back.
+  The outcome's `limit_exceeded`, not the output bytes, tells a stop from a contract that reverts with the same bytes.
+- **Lanes, pools and ledgers stay aligned with frames.**
+  `frame_init` pushes one lane per frame result revm returns, including a frame answered without running; a synthetic frame result carries the caller's pools (`synthetic_frame_result`), never `Gas::new(limit)`.
+  A mechanism that adds a state charge goes through `Host::state_gas_price` at the site the state lands on and does not price the charge itself; a charge is given back at the price it was made at.
+  The three ledgers (regular, state, history) add up to the raw spend, and the block counts `max(regular, floor)` with history taken out first.
+- **Gas detention caps a frame inside the frame's own tracker.**
+  It withholds a part of the frame's regular gas (`Gas::limit_spendable`) that every reader but a regular charge counts, so there is nothing to move or release; a mechanism that caps a frame's gas uses the same part, holds the frame at its start and after every credit, and never releases a creating frame's withheld part before `return_create`.
+  A read of volatile data is marked where the Host loads the value and committed by the opcode's wrapper once the opcode completed; a new volatile-derived read or side effect (the block environment, the beneficiary's account through any account opcode, the Oracle's storage, an EIP-7702 delegate) has to be marked, and the delegate resolved before marking.
+  Flag a bound or an economic claim in a comment or the spec that the code does not meet.
+- **Keyless deployment is a native creation.**
+  The `keylessDeploy` call's frame runs no code and makes its actions by hand; check that the creation's outcome returns into the call through `frame_return_result`, that every effect (gas, the data-size lane, volatile access, logs, state) is reconciled in the one frame stack, that the signer's nonce rule holds on success and on failure, and that a value validated before execution (a gas-limit override) is not mutated afterwards.
+- **The interceptor dispatch is ordered cheapest-first and fails closed.**
+  The call-scheme guard, then the address, then the selector, then the method's value policy; only `CALL` and `STATICCALL` reach an interceptor; an unknown selector is not intercepted and falls through to the contract's bytecode; a method that takes no value answers a value-bearing call with its error.
+- **System calls and system-address transactions:** a system call and a system-originated transaction are exempt from the per-transaction limits and history gas, priced at the minimum SALT bucket and not detained; a pre-block call with dynamic cost takes a `block.gas_limit`-derived budget; a database error the database calls fatal is an internal error and any other failure refuses the block with the call's own validation error; a system-address transaction validates nonce, chain id and EIP-3607 against replay, and a commit step that re-checks block limits re-checks the sender's nonce and balance too.
+- **The stateless witness must hold every read.**
+  A change that makes block execution read state outside a transaction's journal commits the read as a read-only entry of a pre-block state or exports it, and adds a witness-replay case; nothing may depend on which source (the database, the SALT environment, the oracle service) answered.
+- **Hot-path accounting stays O(1)** in attacker-controlled call depth and authorization count — no frame-stack walk per opcode, no unindexed `Vec` scan per authorization.
 
 ## Design and architecture
 
@@ -64,12 +75,13 @@ This is the single most important correctness concern in mega-evm.
 - A test that asserts one of the spec's own byte-price numbers must return early when the process runs at other prices (`runs_at_measurement_prices`).
   A measurement build fixes other prices through the `satin-price-override` feature, and a test without the guard fails there on a price the developer asked for.
   Flag a new state-gas assertion that lacks it: the failure only shows in the configuration nobody watches.
+- Every other test holds at a byte price of nothing and at any price from one gas per byte up to the grid's dearest point, and the byte-price grid job checks it.
+  Below one gas per byte the schedule's entries round to nothing one at a time, and past the grid a fixed-size scenario outgrows any transaction below the execution cap; no test is held there.
+  A gas limit is its regular room on top of what the scenario adds at the prices in effect, read off the schedule and `history_gas`, not a number that happened to cover it at the constants; a call or creation that forwards all but a 64th of its gas keeps 64 times the history of the records it pays for.
+  A case whose scenario is state or history gas — a limit to cross, a bucket to scale, a charge that cannot be paid — returns early where that byte costs nothing (`state_is_free`, `history_is_free` in each test target's `common.rs`), and its other assertions still run.
 - **Benchmark methodology.**
   A perf-comparison PR must pin comparable hardforks on both arms.
   Missing the required explicit hardfork pin can silently bench the wrong fork when a shared bench subject defaults to a different one.
-  For the paired Criterion-style harness, use an even round count.
-  Odd defeats A/B alternation there.
-  Do not apply that even-round rule to the replay ABBA harness.
   Adjudicate quantitatively.
   Don't drop a `saturating_sub`/guard "for speed" without a measured, attributable gain.
 - **Storage-layout parity.**
@@ -85,6 +97,12 @@ This is the single most important correctness concern in mega-evm.
 These checks guard every change to the Satin engine.
 `lint`, `test`, `no-std` and `require-label` are the required checks on `satin`; the rest inform the review, and the reviewer reads them.
 
+### The op-revm baseline
+
+- `crates/mega-evm/tests/satin/equivalence.rs` runs ordinary transactions through `MegaEvm` and through op-revm on the same configuration, and holds Satin to op-revm's total plus the history ledger, on op-revm's own state gas, logs and state.
+- It runs in the `test` check.
+- A change that makes Satin differ from op-revm on purpose updates a case or adds one, so the difference is pinned; a case changed to absorb a difference nobody chose is the defect.
+
 ### Differential harness
 
 - The differential harness, which runs JSON scenarios through `MegaEvm` and through stock revm and compares them field by field, is maintained outside this repository.
@@ -93,14 +111,48 @@ These checks guard every change to the Satin engine.
 
 ### Execution-spec tests
 
-- No check in this repository runs execution-spec tests on `MegaEvm` itself until the state-test tool is ported to Satin.
 - `.github/workflows/exec-spec.yml` runs the fork's own runner on the execution-spec-test fixtures, at the fork tag `Cargo.lock` pins, and checks the Osaka and Amsterdam executed and skipped counts pinned in the workflow.
-  It checks the fork `MegaEvm` runs on, not `MegaEvm`, and it is not a required check.
-- It runs when `Cargo.toml` or `Cargo.lock` changes (the pin may have moved); a change that moves the pin updates the pinned counts and says why they moved.
+  It checks the fork `MegaEvm` runs on, not `MegaEvm`.
+  It runs when `Cargo.toml` or `Cargo.lock` changes (the pin may have moved); a change that moves the pin updates the pinned counts and says why they moved.
+- `.github/workflows/exec-spec-satin.yml` runs the same fixture releases through `MegaEvm` with the state-test runner (`crates/mega-state-test`).
+  Equivalence mode is the gate: Satin's machinery priced as the fixture's fork prices it, where every failure must be explained by a deviation registered in `crates/mega-state-test/src/deviations.rs`, with its reason and the exact entries it explains, each with the hashes Satin produces; every listed entry must fail exactly as listed, and the executed and skipped counts equal the fork runner's pins.
+  Satin mode reports the same fixtures under Satin's own configuration in the step summary, and does not fail the job.
+  The gate runs when a pull request changes the engine, the runner, the system contracts, the toolchain or the lock; the workflow's `execution-spec gate on Satin` job runs on every pull request and reports it, passing when the gate passed or had nothing to run.
+- The same workflow imports the main release's Osaka blockchain tests through Satin's block executor (`state-test btest`, `crates/mega-state-test/src/blockchain/`), in equivalence mode's configuration: every accepted block's gas used, logs bloom, receipts root and state root are held to its header, every block the fixture expects to be invalid must be refused for an exception it names, and the chain must end at the fixture's last block and post-state.
+  A block that differs passes only when a deviation the registry already has lists that test and block with exactly the outcome Satin produces — gas used, logs bloom, receipts root and state root — and the chain goes on from Satin's state, so a listed block exempts nothing after it; a block listed as differing only by an earlier block's state must run as on Ethereum otherwise, and a chain that ends on a listed block's state says why its post-state is not compared.
+  The summary counts the blocks checked against Ethereum apart from those matched to a deviation; the executed tests and the skips of each class are pinned in the workflow.
+  A skip is decided from the fixture before anything runs, and a class added to the list says what Ethereum's block has that an OP block does not, or which check a node makes before the executor does.
+  The accounts the runner and a Satin block add — the predeploys, which the runner seeds as Rex6 left them where the fixture's pre-state lacks them, and the fee vaults op-revm credits — are taken out of the state root only when the fixture's pre-state does not hold them and they hold exactly what was put there (`SATIN_ACCOUNTS`); widening that rule is reviewed like a deviation.
+- A deviation is a rule Satin keeps on purpose and is reviewed as one: an entry added to explain a failure that is a bug is the defect, and an entry added, removed or given new hashes says which fixtures moved and why.
+  `crates/mega-state-test/DEVIATIONS.md` is rendered from the registry, and a test keeps the two equal.
+- Neither workflow is a required check; `execution-spec gate on Satin` is the job a branch rule would require.
+
+### Witness replay
+
+- `crates/mega-evm/tests/block/witness/` executes a block on a recorder of every read and replays the transactions it included twice, on a strict database and environments that serve exactly a witness and refuse everything else: once on the record of every database read, once on the witness a node builds from the states the block committed — the pre-block steps' and the included transactions' returned states — and the engine's exports.
+  `witness::check_replay` in `crates/mega-state-test` does the same for a fixture's transaction; an entry the engine rejects has no returned state and replays on the record alone.
+  Its test over the execution-spec fixtures is always ignored by default: it runs only with `-- --ignored` (or `--include-ignored`) and `MEGA_STATE_TEST_FIXTURES` set to the fixtures, and setting the variable alone runs nothing.
+- The replay on the node's witness is the one that finds a read the witness lacks; the replay on the record of every read shows the block has no input outside its database and environments.
+  A change that makes block execution read state outside a transaction's journal commits the read as a read-only entry of a pre-block state, or exports it, and adds the case that makes the read.
+- The block cases run in the `test` check.
+  `.github/workflows/exec-spec-satin.yml` runs the fixture replay after the equivalence gate, on the same fixture releases: every Osaka and Amsterdam entry, in equivalence and in Satin mode; an entry that does not replay fails the job, and so `execution-spec gate on Satin`, and so does a run that prints no single well-formed summary, executes nothing or reports a failed entry.
+  The step summary counts the entries replayed on both witnesses apart from the rejected ones.
+
+### Byte-price grid
+
+- `.github/workflows/price-grid.yml` runs the `mega-evm` suite at byte prices other than the constants, through `scripts/price_grid.sh`: a cost per state byte and a cost per history byte per point, each run with `--no-fail-fast`.
+- On a pull request it runs five points: both bytes free (0 / 0), both at one gas (1 / 1), the cheapest and the dearest pair under consideration (312.5 / 20 and 5000 / 300), and a point past every candidate (10000 / 1000).
+  Between them they have failed every test the whole grid failed; 1 / 1 is where a premise that a charge cannot be paid, true only while a byte is dear, breaks.
+- Nightly and on dispatch it runs the whole grid: CPSB 0, 1, 312.5, 700, 1530, 2000, 5000 and 10000 by CPHB 0, 1, 20, 50, 88, 100, 200, 300 and 1000, and 0.001 on both.
+- It is not a required check.
+  A failure is a test that assumes a price, a scenario that does not scale with it, or an engine defect; the first two are fixed in the test, the third is not hidden behind a guard.
+- Each point reports how many tests a price guard held back (`guarded`, from `note_price_guard`; the tests are listed in the point's `.guards` file beside its log): every point passes the same number of tests, and this column tells a point at which tests returned early from one at which they ran.
+- Locally, `scripts/price_grid.sh --pr`, `--full`, or the points named (`scripts/price_grid.sh 312.5/20 5000/300`); each point's log is under `target/price-grid/`.
 
 ### Instruction counts (CodSpeed)
 
-- The bench set is `transact` (`MegaEvm` next to op-revm's `OpEvm`, from an empty transaction to 64-deep calls and loops of storage writes and logs), `corpus` (the JSON scenarios under `benches/scenarios` through `MegaEvm`, a bench input rather than a conformance suite) and `factory` (EVM construction through `MegaEvmFactory`), all in `crates/mega-evm/benches`.
+- The bench set is `transact` (`MegaEvm` next to op-revm's `OpEvm`, from an empty transaction to 64-deep calls and loops of storage writes and logs), `corpus` (the JSON scenarios under `benches/scenarios` through `MegaEvm`, a bench input rather than a conformance suite), `factory` (EVM construction through `MegaEvmFactory`) and `block` (a block through `MegaBlockExecutor`), all in `crates/mega-evm/benches`.
+- `block` measures a chain's steady state: a block on a state holding the predeploys as Rex6 left them, under `BlockLimits::default()`; the one-off check of the activation block is not measured.
 - `codspeed.yml` runs them under instrumentation on every pull request that touches code and on every push to `satin`; the baseline a pull request is compared with is the latest `satin` push.
 - Read regressions from the CodSpeed report on the pull request (the CodSpeed comment and the `CodSpeed Performance Analysis` check).
   The regression threshold that fails that check is a setting of the repository's CodSpeed project; it is not recorded in this repository or in the reports CodSpeed posts, so this file does not state a number.
@@ -112,7 +164,7 @@ These checks guard every change to the Satin engine.
 
 - The `cargo-mutants gate` job mutates the lines a pull request changes and fails on a surviving mutant that no reviewed suppression covers.
   Reference point, the pull request that brought the Satin skeleton: 115 mutants, 49 caught, 0 survived, 1 suppressed, 65 unviable, in 7m41s on CI and 4m12s on a 15-core laptop with `JOBS=8`.
-  That population is the diff against `a8f8c7c9`, the last commit of the legacy core, and it is reproduced by `scripts/mutation_test.sh diff a8f8c7c9` followed by `python3 scripts/mutation_gate.py report --results target/mutants/mutants.out --suppressions mutants/suppressions.toml`.
+  That population is the diff against `a8f8c7c9`, the last commit of the legacy core, and it is reproduced by `scripts/mutation_test.sh diff a8f8c7c9` followed by `python3 scripts/mutation_gate.py report --results target/mutants/mutants.out --recheck target/mutants/recheck/mutants.out --suppressions mutants/suppressions.toml`.
   Take the numbers from that pair, not from `cargo mutants` on its own: the driver turns the function-scoped suppressions into `--exclude-re` before generation, and the gate filters the line-scoped ones after the run, so the bare command reports a different population and a different survivor count.
 - The job is bounded to 330 minutes.
   Shard a series whose diff lists more than 1,000 mutants (`cargo mutants --list --in-diff <diff> --package mega-evm`): at the reference rate that is about an hour, and the rate falls as the test suite grows.
@@ -120,7 +172,7 @@ These checks guard every change to the Satin engine.
 - The gate has a second scope, for its own infrastructure: `.cargo/mutants-infra.toml` and `scripts/mutation_test.sh infra` mutate the scenario runner (`crates/mega-evm/src/test_utils/scenario.rs`) against `mega-evm`'s tests.
   The production scope excludes test helpers as noise, so that code is otherwise never mutated, though the benches and later tests rest on it.
   The two scopes are disjoint and the production one keeps its exclusions; a suppression may belong to either, and the suppression-hygiene job lists both scopes into its mutant universe.
-  The `cargo-mutants infrastructure` job runs the scope on a pull request that touches those files, either configuration, the driver or the gate, and nightly; it is bounded to 90 minutes and is not a required check.
+  The `cargo-mutants infrastructure` job runs the scope nightly and on a pull request that changes `.cargo/mutants-infra.toml`, the scenario runner (`crates/mega-evm/src/test_utils/scenario.rs`), `scripts/mutation_test.sh` or `scripts/mutation_gate.py`; it never reads `.cargo/mutants.toml`, and a change to `mutants/suppressions.toml` alone does not start it on a pull request (the suppression-hygiene job and the nightly run cover that file); it is bounded to 90 minutes and is not a required check.
   Reference point: 39 mutants, 34 caught, 0 survived, 3 suppressed, 2 unviable, in 5m45s on a 15-core laptop with `JOBS=8`.
   The three suppressed ones write a `BlockEnv` field that already holds that value by default, so no test can distinguish them; the test that pins those values kills them the moment a revm upgrade moves a default.
 - The spec-gate operator pack stays in place but finds nothing on Satin: a single-spec engine has no spec gate to mutate, and the suppression-hygiene job accepts the empty plan.
@@ -129,17 +181,16 @@ These checks guard every change to the Satin engine.
 
 ### Scheduled workflows
 
-- GitHub fires a `schedule` trigger only from the default branch's copy of a workflow, so the schedules in `satin`'s copies (nightly mutation, weekly benchmark, replay-bench, doc-audit, the weekly execution-spec run) stay inert until `satin` is the default branch.
+- GitHub fires a `schedule` trigger only from the default branch's copy of a workflow, so the schedules in `satin`'s copies (nightly mutation, doc-audit, the weekly execution-spec run, the nightly byte-price grid) stay inert until `satin` is the default branch.
 - Run them on `satin` by hand: `gh workflow run <workflow>.yml --ref satin` runs `satin`'s copy of the workflow on `satin`'s head, so none of them needs a `ref` input.
-  - `mutation.yml`: the whole-crate cargo-mutants run, the spec-gate sweep and suppression hygiene.
-  - `benchmark.yml`: the Satin bench set on `satin`'s head, without a baseline (`-f aa_check=true` measures the noise floor).
+  - `mutation.yml`: the whole-crate cargo-mutants run and suppression hygiene.
   - `exec-spec.yml`: the execution-spec fixtures at the pinned fork tag.
   - `doc-audit.yml`: the documentation audit of `satin`'s docs.
-  - `replay-bench.yml`: nothing yet; its bench job is disabled on `satin` until the state-test tool is ported.
+  - `price-grid.yml`: the whole byte-price grid.
 
 ## Dev tools and test infrastructure
 
-Applies to `bin/mega-evme`, `bin/mega-t8n`, `crates/mega-state-test`, `crates/state-test`, test utilities and benches — not consensus code, but `mega-state-test` is a published library and tool output feeds fixtures and indexers. Default severity cap `[Minor]`; raise only when the defect reaches that published API or corrupts a downstream fixture.
+Applies to `bin/mega-evme`, `crates/mega-state-test`, `crates/state-test`, test utilities and benches — not consensus code, but `mega-state-test` is a published library and tool output feeds fixtures and indexers. Default severity cap `[Minor]`; raise only when the defect reaches that published API or corrupts a downstream fixture.
 
 - An input-handling path (fixture, CLI flag, file path, RPC response) must fail with a structured error instead of aborting the process: a panic, unchecked index or overflow on **untrusted** input is the defect, as is `process::exit` from a library path — an idiomatic `unwrap` on a known-good value is not. A batch loop records a per-item rejection rather than aborting and dropping the rest.
 - A computed output field — state root, receipt field, contract address, log index, provenance — must carry its real value or an explicit error; substituting a zero, `None`, `default()` or a silently clamped bound reports success for a result the tool never computed. Serialized output must be deterministically ordered, and an advertised flag must not be a stub returning `Ok(())`.
