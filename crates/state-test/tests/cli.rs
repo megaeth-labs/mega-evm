@@ -494,7 +494,12 @@ fn test_btest_the_witness_options_print_a_line_per_block() {
     assert_eq!(full[0]["witness"], compact[0]["witness"]);
     // The pre-block calls read the EIP-2935 history contract, which the pre-state does not hold.
     let history = "0x0000f90827f1c53a10cb7a02335b175320002935";
-    assert!(full[0]["reads"]["accounts"][history].is_null(), "{}", full[0]["reads"]);
+    assert_eq!(
+        full[0]["reads"]["accounts"].get(history),
+        Some(&serde_json::Value::Null),
+        "{}",
+        full[0]["reads"]
+    );
 
     // A block without a parent beacon root, which the EIP-4788 pre-block call needs, is refused
     // after what it read so far: a line of its own, which the import's failure does not drop.
