@@ -337,26 +337,25 @@ fn test_the_exemption_does_not_outlive_its_transaction() {
 /// that it is the protocol's own. Each answers for itself once it runs.
 #[test]
 fn test_what_a_transaction_pays_is_decided_when_it_is_prepared() {
-    let user = || call_from(CALLER, CONTRACT);
-    let user_deposit = || deposit(call_from(CALLER, CONTRACT));
+    let user = call_from(CALLER, CONTRACT);
     // (case, transaction, pays history, the protocol's own)
-    let cases: [(&str, fn() -> MegaTransaction, bool, bool); 3] = [
-        ("a user's transaction", user, true, false),
-        ("a user's deposit", user_deposit, false, false),
-        ("a system transaction", system_tx, false, true),
+    let cases = [
+        ("a user's transaction", user.clone(), true, false),
+        ("a user's deposit", deposit(user), false, false),
+        ("a system transaction", system_tx(), false, true),
     ];
-    for (ran, run, pays, own) in cases {
-        for (set, replacement, its_pays, its_own) in cases {
+    for (ran, run, pays, own) in cases.clone() {
+        for (set, replacement, its_pays, its_own) in cases.clone() {
             let mut evm = MegaEvm::new(context(db()));
-            evm.execute_transaction(run()).expect("the transaction is valid");
+            evm.execute_transaction(run.clone()).expect("the transaction is valid");
             assert_eq!(evm.ctx().prices_history(), pays, "{ran}");
             assert_eq!(evm.ctx().is_system_originated(), own, "{ran}");
 
-            evm.ctx_mut().set_tx(replacement());
+            evm.ctx_mut().set_tx(replacement.clone());
             assert_eq!(evm.ctx().prices_history(), pays, "{ran}, then {set} set and not run");
             assert_eq!(evm.ctx().is_system_originated(), own, "{ran}, then {set} set and not run");
 
-            evm.execute_transaction(replacement()).expect("the transaction is valid");
+            evm.execute_transaction(replacement).expect("the transaction is valid");
             assert_eq!(evm.ctx().prices_history(), its_pays, "{ran}, then {set} run");
             assert_eq!(evm.ctx().is_system_originated(), its_own, "{ran}, then {set} run");
         }
