@@ -30,6 +30,12 @@
 //! nothing ([`Accounts::is_destroyed`]). Every fact is the journal's: revm's flags of an account
 //! created and of one destroyed in the transaction, which a failed frame's revert takes back with
 //! the rest of it, the account's original info and each slot's original value.
+//!
+//! Whether a value movement journals an EIP-7708 transfer log, whose bytes a frame start and a
+//! `SELFDESTRUCT` count, is the journal's too: its own switch, read by the rule revm emits the log
+//! by ([`emits_transfer_logs`]). A caller or an inspector that turns the journal's switch through
+//! the context's mutable journal, past the configuration the spec fixes, changes what revm emits,
+//! and the count follows the logs revm emits.
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
@@ -217,7 +223,7 @@ pub(crate) fn is_transfer_log(log: &Log) -> bool {
 /// Whether a value movement journals an EIP-7708 transfer log on `journal`: from Amsterdam on, or
 /// with the switch on, unless EIP-7708 is disabled. It is the rule revm's journal emits one by,
 /// read off the journal's own copy of the configuration, so the data size counts a transfer log
-/// exactly where revm emits one.
+/// exactly where revm emits one, a switch a caller turned on the journal itself included.
 pub(crate) fn emits_transfer_logs<DB>(journal: &Journal<DB>) -> bool {
     (journal.cfg.spec.is_enabled_in(SpecId::AMSTERDAM) || journal.amsterdam_eip7708_enabled()) &&
         !journal.cfg.eip7708_disabled
