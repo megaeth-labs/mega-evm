@@ -4,8 +4,8 @@ use delegate::delegate;
 use op_revm::{transaction::deposit::DEPOSIT_TRANSACTION_TYPE, L1BlockInfo, OpSpecId};
 use revm::{
     context::{
-        BlockEnv, Cfg, CfgEnv, Context, ContextError, ContextSetters, ContextTr, Journal,
-        LocalContext, Transaction,
+        BlockEnv, CfgEnv, Context, ContextError, ContextSetters, ContextTr, Journal, LocalContext,
+        Transaction,
     },
     context_interface::{
         cfg::{gas::GasTracker, GasId},
@@ -474,16 +474,17 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
 
     /// Whether the destruction table prices state gas: a destruction of an account created in the
     /// transaction gives back the state gas of the parts the transaction made, and from that mark
-    /// the account keeps no further state gas. So under the spec's configuration, which charges
-    /// EIP-8037 state gas. The neutral configuration prices as the fixture's fork does, and
-    /// EIP-8037 gives back no state gas for this destruction; the table's counts are the same
-    /// under both.
-    pub(crate) fn destruction_table_prices_state_gas(&self) -> bool {
+    /// the account keeps no further state gas. The spec's configuration does: it always charges
+    /// EIP-8037 state gas, which no caller can switch off ([`spec_cfg`]). The neutral configuration
+    /// prices as the fixture's fork does, and EIP-8037 gives back no state gas for this
+    /// destruction; the table's counts are the same under both.
+    #[inline]
+    pub(crate) const fn destruction_table_prices_state_gas(&self) -> bool {
         #[cfg(any(test, feature = "test-utils"))]
         if self.neutral {
             return false;
         }
-        self.inner.cfg.is_amsterdam_eip8037_enabled()
+        true
     }
 
     /// Prepares the common execution layer for a transaction or a system call that is, or is not,
