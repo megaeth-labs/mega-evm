@@ -1959,7 +1959,8 @@ mod tests {
     /// nothing, its failed-deposit result leaving no reservoir. After each, a system call on
     /// revm's default gas limit reports the margin above the system-call budget; and one run
     /// through the public handler entry points without the crate's preparation, plain or
-    /// inspected, reports its own, on a gas limit no budget splits: nothing.
+    /// inspected, reports its own: nothing, even on a gas limit above the execution cap, since revm
+    /// caps no system call's gas into a reservoir and only the crate's preparation splits it.
     #[test]
     fn test_a_reused_handler_reports_each_executions_own_reservoir() {
         use crate::{
@@ -2026,7 +2027,9 @@ mod tests {
 
                 // revm's public entry points, without the crate's preparation.
                 let call = MegaTransaction::new_system_tx_with_caller(CALLER, TARGET, Bytes::new());
-                evm.inner.ctx.set_tx(call.clone());
+                let mut unprepared = call.clone();
+                unprepared.0.base.gas_limit = TX_GAS_LIMIT_CAP + MARGIN;
+                evm.inner.ctx.set_tx(unprepared);
                 let result = if inspected {
                     handler.inspect_run_system_call(&mut evm)
                 } else {

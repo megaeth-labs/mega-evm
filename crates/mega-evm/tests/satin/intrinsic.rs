@@ -450,9 +450,17 @@ fn test_the_bodys_history_is_reported_once_validation_admits_it() {
     let minimum = EMPTY_CALL + body_history(0);
     evm.transact_raw(call(CALLER, CALLEE, U256::ZERO, minimum)).expect("the minimum is admitted");
     assert_eq!(evm.ctx().intrinsic_history_gas(), body_history(0), "admitted");
-    for gas_limit in [1, EMPTY_CALL, minimum - 1] {
-        let refused = evm.transact_raw(call(CALLER, CALLEE, U256::ZERO, gas_limit));
-        assert!(refused.is_err(), "at {gas_limit}: {refused:?}");
+    for (gas_limit, initial_gas) in
+        [(EMPTY_CALL - 1, EMPTY_CALL), (EMPTY_CALL, minimum), (minimum - 1, minimum)]
+    {
+        let refused = evm
+            .transact_raw(call(CALLER, CALLEE, U256::ZERO, gas_limit))
+            .expect_err("a gas limit below the minimum is refused");
+        assert_eq!(
+            refused.as_invalid_tx_err().and_then(InvalidTxError::as_invalid_tx_err),
+            Some(&InvalidTransaction::CallGasCostMoreThanGasLimit { gas_limit, initial_gas }),
+            "at {gas_limit}: the intrinsic charge refused it",
+        );
         assert_eq!(evm.ctx().intrinsic_history_gas(), 0, "at {gas_limit}: refused");
     }
 }

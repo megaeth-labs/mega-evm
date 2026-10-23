@@ -646,13 +646,15 @@ mod tests {
         }
     }
 
-    /// A journal holding three accounts as the transaction loaded them.
+    /// A journal holding three accounts as the transaction loaded them, below Amsterdam, where the
+    /// EIP-7708 switch alone decides whether a value movement logs.
     fn journal() -> Journal<MemoryDatabase> {
         let db = MemoryDatabase::default()
             .account_balance(SENDER, U256::from(10))
             .account_balance(OTHER, U256::from(4))
             .account_balance(DESTRUCTED, U256::from(5));
         let mut journal = Journal::new(db);
+        journal.set_spec_id(SpecId::OSAKA);
         for address in [SENDER, OTHER, DESTRUCTED] {
             journal.load_account(address).unwrap();
         }
@@ -749,8 +751,6 @@ mod tests {
         let records_bytes = |records| WRITE_RECORD_SIZE * records;
 
         let mut fresh = journal();
-        // Below Amsterdam, where the switch alone decides whether the move logs.
-        fresh.set_spec_id(SpecId::OSAKA);
         fresh.set_amsterdam_eip7708_enabled(true);
         fresh.selfdestruct(DESTRUCTED, OTHER, false).unwrap();
         let (counted, history, _) = Accounts::of(&fresh).write_counted(&destruction(OTHER, 5));
