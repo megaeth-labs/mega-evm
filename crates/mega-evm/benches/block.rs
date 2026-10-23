@@ -39,13 +39,15 @@ use alloy_eips::{
 };
 use alloy_evm::{block::BlockExecutor, EvmEnv, EvmFactory};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
-use alloy_primitives::{address, hex, keccak256, Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_primitives::{
+    address, b256, hex, keccak256, Address, Bytes, Signature, TxKind, B256, U256,
+};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use mega_evm::{
     system::{MEGA_SYSTEM_ADDRESS, SEQUENCER_REGISTRY_ADDRESS},
     test_utils::{BytecodeBuilder, CommittedStates, MemoryDatabase},
     BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardforkConfig,
-    MegaSpecId, MegaTxEnvelope,
+    MegaSpecId, MegaTransactionOutcome, MegaTxEnvelope,
 };
 use op_revm::constants::L1_BLOCK_CONTRACT;
 use revm::{
@@ -87,6 +89,10 @@ const TOKEN_CODE: [u8; 492] = hex!("608060405234801561000f575f5ffd5b506004361061
 /// accounts they pay, each one per transaction.
 const TOKEN_SENDER_BASE: u64 = 0x60_0000;
 const TOKEN_HOLDER_BASE: u64 = 0x70_0000;
+
+/// The first topic of ERC-20's `Transfer(address,address,uint256)`.
+const TRANSFER_TOPIC: B256 =
+    b256!("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef");
 
 /// Code that writes 1 to the slot its first calldata word names, so every call that names a slot
 /// of its own changes storage and leaves a write record behind.
@@ -223,6 +229,31 @@ fn token_transfers() -> Vec<Recovered<MegaTxEnvelope>> {
         .collect()
 }
 
+/// Asserts that the `index`-th ERC-20 transfer did what the workload says: it returned `true`,
+/// emitted one `Transfer` log of the token with the sender, the recipient and the amount, and left
+/// the two balances moved by that amount.
+fn assert_token_transfer(index: u64, outcome: &MegaTransactionOutcome) {
+    let sender = nth_account(TOKEN_SENDER_BASE, index);
+    let holder = nth_account(TOKEN_HOLDER_BASE, index);
+    assert_eq!(
+        outcome.result.output(),
+        Some(&Bytes::from(U256::from(1_u64).to_be_bytes::<32>())),
+        "transfer {index} returns true"
+    );
+    let logs = outcome.result.logs();
+    assert_eq!(logs.len(), 1, "transfer {index} emits one log: {logs:?}");
+    assert_eq!(logs[0].address, TOKEN);
+    assert_eq!(
+        logs[0].topics(),
+        [TRANSFER_TOPIC, sender.into_word(), holder.into_word()],
+        "transfer {index} names its sender and recipient"
+    );
+    assert_eq!(logs[0].data.data, Bytes::from(U256::from(1_u64).to_be_bytes::<32>()));
+    let token = &outcome.state[&TOKEN].storage;
+    assert_eq!(token[&token_balance_slot(sender)].present_value, U256::from(999_999_u64));
+    assert_eq!(token[&token_balance_slot(holder)].present_value, U256::from(2_u64));
+}
+
 fn chain_spec() -> MegaHardforkConfig {
     MegaHardforkConfig::default().with_all_activated()
 }
@@ -309,7 +340,7 @@ fn bench_block(c: &mut Criterion) {
             let mut executor =
                 MegaBlockExecutor::new(evm, block_ctx(), &spec, OpAlloyReceiptBuilder::default());
             executor.apply_pre_execution_changes().expect("the block starts");
-            for tx in txs {
+            for (index, tx) in txs.iter().enumerate() {
                 let outcome =
                     executor.execute_transaction_without_commit(tx).expect("the transaction runs");
                 assert!(outcome.result.is_success(), "{:?}", outcome.result);
@@ -318,6 +349,9 @@ fn bench_block(c: &mut Criterion) {
                     outcome.usage.write_records, *records,
                     "every transaction of the workload keeps its write records"
                 );
+                if *name == "erc20_transfers" {
+                    assert_token_transfer(index as u64, &outcome);
+                }
                 executor.commit_transaction(outcome);
             }
             let (_, result) = executor.finish_with_counters().expect("the block finishes");
