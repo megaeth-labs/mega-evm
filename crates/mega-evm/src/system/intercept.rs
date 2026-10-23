@@ -71,7 +71,8 @@ const SYSTEM_CONTRACT_PREFIX: [u8; 19] = {
     prefix
 };
 
-/// An interceptor's answer to a call, and what follows it once the answer settled.
+/// A system contract's answer to a call — an interceptor's, or a `keylessDeploy` call's carrying
+/// value — and what follows it once the answer settled.
 #[derive(Debug)]
 pub(crate) struct Answer {
     /// The answer: a [`synthetic_call_result`].

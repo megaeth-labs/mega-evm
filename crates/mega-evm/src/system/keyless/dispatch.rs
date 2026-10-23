@@ -36,8 +36,7 @@ use crate::{
             KEYLESS_DEPLOY_CODE, KEYLESS_DEPLOY_CODE_HASH, KEYLESS_DEPLOY_OVERHEAD_GAS,
         },
     },
-    untouched_call_gas, write_record_history_gas, ExternalEnvTypes, MegaContext,
-    VolatileDataAccess,
+    untouched_call_gas, ExternalEnvTypes, MegaContext, VolatileDataAccess,
 };
 
 /// What a `keylessDeploy` call's creation is settled into the call with, kept on the context while
@@ -230,7 +229,8 @@ struct Deployment {
     charged_create_state_gas: bool,
     /// What the call paid for the record the creation's start makes on the creation, the created
     /// account's: zero when the transaction pays no history. The signer's nonce record, which the
-    /// call paid for too, is the call's own ([`signer_record_charge`]).
+    /// call paid for too, is the call's own, and its history is given back at the settlement when
+    /// the record goes.
     on_frame_record_charge: u64,
 }
 
@@ -422,24 +422,11 @@ fn prepare<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// The state gas charge for the account of `signer`, which the creation's start creates when the
 /// signer has none: one new account, at the signer's account. The call is charged it before the
 /// creation starts, and given it back, priced again at the same site, when the start never
-/// created the account; the price is the same, since a bucket's multiplier is read once per
-/// transaction.
+/// created the account. The price is the same: a bucket's multiplier is read once per
+/// transaction, and the signer is no account the transaction created, whose charges a destruction
+/// would price at nothing.
 pub(super) fn signer_account(signer: Address) -> StateGasCharge {
     StateGasCharge::one(GasId::new_account_state_gas(), StateGasSite::account(signer))
-}
-
-/// The history the call paid for the signer's nonce record when the creation's start makes one —
-/// the bump changes an account the transaction had not changed — and the transaction pays
-/// history: one write record's. It is given back, priced again, when the record goes
-/// ([`take_back_bump`](super::settle)).
-pub(super) fn signer_record_charge<DB: Database, ExtEnvs: ExternalEnvTypes>(
-    ctx: &MegaContext<DB, ExtEnvs>,
-) -> u64 {
-    if !ctx.prices_history() {
-        return 0;
-    }
-    // The call charged this price, so it has one.
-    write_record_history_gas(1).unwrap_or_default()
 }
 
 /// Prices `charge` through the SALT pricing hook. A failed lookup is the error the hook recorded,

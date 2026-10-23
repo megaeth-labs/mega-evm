@@ -18,7 +18,7 @@ use revm::{
 use crate::{
     constants,
     evm::{
-        history::{history_gas, transaction_body_bytes},
+        history::{history_gas, transaction_body_bytes, write_record_history_gas},
         schedule::{satin_gas_params, satin_gas_params_history_exempt},
     },
     limit::{Accounts, Counted},
@@ -187,6 +187,17 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     #[cfg(any(test, feature = "test-utils"))]
     pub const fn is_neutral(&self) -> bool {
         self.neutral
+    }
+
+    /// Whether the context runs the neutral configuration: never outside the test tooling, which
+    /// alone can set it.
+    #[inline]
+    const fn runs_neutral(&self) -> bool {
+        #[cfg(any(test, feature = "test-utils"))]
+        let neutral = self.neutral;
+        #[cfg(not(any(test, feature = "test-utils")))]
+        let neutral = false;
+        neutral
     }
 
     /// Replaces the block environment.
@@ -404,12 +415,14 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// minimum bucket *and* pays no history.
     ///
     /// The neutral configuration prices no history at all.
+    ///
+    /// It is read off the transaction the context holds and the exemption the transaction was
+    /// prepared with, so a caller that replaces the transaction and asks before running it gets
+    /// the new transaction's type with the last one's exemption.
     pub fn prices_history(&self) -> bool {
-        #[cfg(any(test, feature = "test-utils"))]
-        if self.neutral {
-            return false;
-        }
-        !(self.is_system_originated() || self.inner.tx.tx_type() == DEPOSIT_TRANSACTION_TYPE)
+        !(self.runs_neutral() ||
+            self.is_system_originated() ||
+            self.inner.tx.tx_type() == DEPOSIT_TRANSACTION_TYPE)
     }
 
     /// The history gas of the running (or last) transaction's body: the bytes it carries and the
@@ -424,6 +437,18 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
             return 0;
         }
         history_gas(self.additional_limit.body()).unwrap_or(u64::MAX)
+    }
+
+    /// The history gas the running transaction pays for `records` write records: their price, or
+    /// nothing for a transaction that pays no history ([`prices_history`]). Read where a charge
+    /// made earlier is carried or given back, so the records have a price: the charge had one.
+    ///
+    /// [`prices_history`]: Self::prices_history
+    pub(crate) fn records_history_charge(&self, records: u64) -> u64 {
+        if !self.prices_history() {
+            return 0;
+        }
+        write_record_history_gas(records).unwrap_or_default()
     }
 
     /// Prepares the common execution layer for a new transaction, which is a system-address
@@ -464,12 +489,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// configuration: which pool pays the protocol's own state writes, and what `GAS` reads inside
     /// a system contract, are part of executing the chain. No transaction's is, and under the
     /// neutral configuration no system call's either, as revm's own runner has it.
-    pub(crate) fn splits_system_call_gas(&self) -> bool {
-        #[cfg(any(test, feature = "test-utils"))]
-        if self.neutral {
-            return false;
-        }
-        self.system_call
+    pub(crate) const fn splits_system_call_gas(&self) -> bool {
+        !self.runs_neutral() && self.system_call
     }
 
     /// Whether the destruction table prices state gas: a destruction of an account created in the
@@ -480,11 +501,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// destruction; the table's counts are the same under both.
     #[inline]
     pub(crate) const fn destruction_table_prices_state_gas(&self) -> bool {
-        #[cfg(any(test, feature = "test-utils"))]
-        if self.neutral {
-            return false;
-        }
-        true
+        !self.runs_neutral()
     }
 
     /// Prepares the common execution layer for a transaction or a system call that is, or is not,
@@ -565,8 +582,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     ///
     /// The neutral configuration prices no history and keeps its own schedule.
     fn install_history_schedule(&mut self) {
-        #[cfg(any(test, feature = "test-utils"))]
-        if self.neutral {
+        if self.runs_neutral() {
             return;
         }
         let exempt = !self.prices_history();

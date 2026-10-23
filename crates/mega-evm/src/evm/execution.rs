@@ -308,7 +308,7 @@ where
 
     /// revm's first frame, on the transaction's pool, carrying as its start charge the history
     /// charged before execution for the write record it makes, priced again here on the journal
-    /// as pre-execution left it ([`first_frame_record_charge`]); with a read of the block
+    /// as pre-execution left it (`first_frame_records`); with a read of the block
     /// beneficiary's account marked for gas detention when the transaction's recipient delegates
     /// to the beneficiary: revm resolves that delegate through the journal, where the Host does
     /// not see it.
@@ -323,9 +323,12 @@ where
         evm: &mut Self::Evm,
         gas: &mut GasTracker,
     ) -> Result<Option<FrameInit>, Self::Error> {
-        // Priced before revm's runtime gas phase loads the recipient: on the journal the charge
-        // was made on.
-        let charge = StartCharge::new(first_frame_record_charge(evm.ctx_ref()), PoolAmounts::ZERO);
+        // Priced before revm's runtime gas phase loads the recipient, on the journal as
+        // pre-execution left it, which is the state the charge was made on: nothing between the
+        // charge and the first frame's input changes it.
+        let records = first_frame_records(evm.ctx_ref());
+        let charge =
+            StartCharge::new(evm.ctx_ref().records_history_charge(records), PoolAmounts::ZERO);
         gas.set_pools_remaining(evm.ctx_ref().additional_limit.first_frame_pools());
         let Some(mut frame) = self.op.first_frame_input(evm, gas)? else {
             // The runtime gas phase could not pay for the first frame's start: EIP-2780's charge
@@ -433,9 +436,10 @@ where
         result: FrameResult,
         result_gas: revm::context::result::ResultGas,
     ) -> Result<revm::context::result::ExecutionResult<Self::HaltReason>, Self::Error> {
-        let system_call = evm.ctx_ref().is_system_call().then(|| result.gas().reservoir());
+        let system_call_reservoir =
+            evm.ctx_ref().is_system_call().then(|| result.gas().reservoir());
         let result = self.op.execution_result(evm, result, result_gas)?;
-        if let Some(reservoir) = system_call {
+        if let Some(reservoir) = system_call_reservoir {
             evm.ctx_mut().additional_limit.set_reservoir_remaining(reservoir);
         }
         Ok(result)
@@ -599,7 +603,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         };
         let (depth, gas_limit) = (frame_init.depth, input_gas_limit(&frame_init.frame_input));
         if let Some(answer) = answer {
-            let result = settle_intercepted(&mut self.inner.ctx, depth, gas_limit, answer);
+            let result = settle_system_answer(&mut self.inner.ctx, depth, gas_limit, answer);
             return Ok(ItemOrResult::Result(result));
         }
         let ctx = &mut self.inner.ctx;
@@ -971,34 +975,34 @@ fn cap_the_shares(params: &GasParams, caps: PoolAmounts, caller: &mut Gas, child
 /// could have run on is answered out of gas and marked as a crossing, and becomes the stop as a
 /// frame that ran would ([`Detention::on_answer`]); so does a precompile whose price crosses the
 /// limit, and one the engine cannot price that ran out of the allowance it was run on
-/// ([`hold_precompile`]). An answer that halts otherwise burns what it was given. Returns whether
-/// the answer became the stop.
+/// ([`hold_precompile`]). An answer that halts otherwise burns what it was given.
 fn settle_answer<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     depth: usize,
     gas_limit: u64,
     answer: &mut FrameResult,
-) -> bool {
+) {
     let answer = answer.interpreter_result_mut();
-    let Some(stop) = ctx.detention.on_answer(answer, depth, gas_limit) else { return false };
-    stop_at_the_compute_limit(ctx, answer, stop);
-    true
+    if let Some(stop) = ctx.detention.on_answer(answer, depth, gas_limit) {
+        stop_at_the_compute_limit(ctx, answer, stop);
+    }
 }
 
-/// Settles `answer`, a `keylessDeploy` call's or an interceptor's to the frame at `depth` whose
-/// gas limit was `gas_limit` ([`settle_answer`]), then applies what follows it, unless it became
-/// gas detention's stop: the switch-off of volatile-data access `disableVolatileDataAccess()`
-/// answers its caller with. An answer that became the stop did not succeed, and the frame that
-/// catches it resumes with the switch as it was.
-fn settle_intercepted<DB: Database, ExtEnvs: ExternalEnvTypes>(
+/// Settles `answer`, a system contract's to the frame at `depth` whose gas limit was `gas_limit`
+/// — an interceptor's, or a `keylessDeploy` call's carrying value — ([`settle_answer`]), then
+/// applies what follows it once it settled as a success: the switch-off of volatile-data access
+/// `disableVolatileDataAccess()` answers its caller with. The answer that carries it succeeds
+/// unless gas detention turned it into the stop, which did not succeed, and the frame that catches
+/// the stop resumes with the switch as it was.
+fn settle_system_answer<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     depth: usize,
     gas_limit: u64,
     answer: Answer,
 ) -> FrameResult {
     let Answer { mut result, disables_access_from } = answer;
-    let stopped = settle_answer(ctx, depth, gas_limit, &mut result);
-    if let Some(from) = disables_access_from.filter(|_| !stopped) {
+    settle_answer(ctx, depth, gas_limit, &mut result);
+    if let Some(from) = disables_access_from.filter(|_| result.instruction_result().is_ok()) {
         ctx.detention.disable_access(from);
     }
     result
@@ -1576,11 +1580,11 @@ fn applied_authorities<DB: Database, ExtEnvs: ExternalEnvTypes>(
 ///
 /// The authorities' records are the transaction's own and outlive a first frame that fails; the
 /// first frame's record does not, so that frame carries what it cost as its start charge, which
-/// its failure gives back ([`first_frame_record_charge`]). A first frame revm refuses to start on
-/// its sender's account makes no record, and gets the charge back as any frame that kept nothing
-/// does: among the transactions that pay history, that is a creation from an account whose nonce
-/// cannot be bumped, which only a caller that turned the nonce check off can run, and which revm
-/// answers with a success and no address.
+/// its failure gives back (priced again where the frame's input is built). A first frame revm
+/// refuses to start on its sender's account makes no record, and gets the charge back as any frame
+/// that kept nothing does: among the transactions that pay history, that is a creation from an
+/// account whose nonce cannot be bumped, which only a caller that turned the nonce check off can
+/// run, and which revm answers with a success and no address.
 /// `false` when the transaction cannot pay, which is an out-of-gas before it runs.
 fn charge_records_made_outside_a_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &MegaContext<DB, ExtEnvs>,
@@ -1608,20 +1612,6 @@ fn first_frame_records<DB: Database, ExtEnvs: ExternalEnvTypes>(
             predicted.added
         }
     }
-}
-
-/// The history gas charged before execution for the write record the transaction's own frame
-/// makes, which the frame carries as its start charge: nothing for a transaction that pays no
-/// history. Priced on the journal as pre-execution left it, which is the state the charge was
-/// made on: nothing between the charge and the first frame's input changes it.
-fn first_frame_record_charge<DB: Database, ExtEnvs: ExternalEnvTypes>(
-    ctx: &MegaContext<DB, ExtEnvs>,
-) -> u64 {
-    if !ctx.prices_history() {
-        return 0;
-    }
-    // Pre-execution charged this price, so it has one.
-    write_record_history_gas(first_frame_records(ctx)).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -1889,7 +1879,7 @@ mod tests {
         }
     }
 
-    /// A switch-off an interceptor's answer carries applies once the answer settles without a
+    /// A switch-off a system contract's answer carries applies once the answer settles without a
     /// crossing: an answer gas detention turns into the stop leaves access as it was, one that
     /// settles within the limit switches it off, and so does one of a transaction that is not
     /// detained. The switch goes with the answer that carried it, whatever that answer settled as.
@@ -1913,22 +1903,22 @@ mod tests {
         ctx.detention.on_frame_suspend(&caller, 0, 0);
 
         let beyond = answer(BLOCK_ENV_ACCESS_COMPUTE_GAS + 1, Some(0));
-        let result = settle_intercepted(&mut ctx, 1, FORWARD, beyond);
+        let result = settle_system_answer(&mut ctx, 1, FORWARD, beyond);
         assert_eq!(result.instruction_result(), InstructionResult::Revert, "the answer crossed");
         assert!(!ctx.detention.is_access_disabled(0), "and access stays on");
 
-        settle_intercepted(&mut ctx, 1, FORWARD, answer(0, None));
+        settle_system_answer(&mut ctx, 1, FORWARD, answer(0, None));
         assert!(
             !ctx.detention.is_access_disabled(0),
             "the crossing answer took its switch with it"
         );
 
-        settle_intercepted(&mut ctx, 1, FORWARD, answer(0, Some(0)));
+        settle_system_answer(&mut ctx, 1, FORWARD, answer(0, Some(0)));
         assert!(ctx.detention.is_access_disabled(0), "an answer within the limit switches it off");
 
         let mut free = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
         assert!(!free.detention.detains());
-        settle_intercepted(&mut free, 1, FORWARD, answer(0, Some(0)));
+        settle_system_answer(&mut free, 1, FORWARD, answer(0, Some(0)));
         assert!(free.detention.is_access_disabled(0), "a transaction that is not detained");
     }
 

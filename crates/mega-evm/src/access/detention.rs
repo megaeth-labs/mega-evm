@@ -1357,7 +1357,7 @@ mod tests {
     /// both unlimited, as a system-originated one is begun, and a detention no transaction reset
     /// yet. One unlimited cap leaves its kind uncapped.
     #[test]
-    fn test_an_exempt_or_unlimited_transaction_is_not_detained() {
+    fn test_an_unlimited_cap_caps_nothing() {
         for reset in [true, false] {
             let mut detention = Detention::default();
             if reset {

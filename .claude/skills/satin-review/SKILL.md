@@ -263,7 +263,7 @@ For each module: where it is, what to check, the spec sections, and the `AGENTS.
 
 ### Gas detention
 
-- **Where:** `src/access/` (`Detention`, `VolatileDataAccess`), the volatile-read wrappers in `src/evm/instructions.rs`, the loads the Host marks or refuses in `src/evm/host.rs`, `hold_precompile`, `settle_answer`, `settle_intercepted` (which applies the switch-off an interceptor's answer carries) and `end_frame` in `src/evm/execution.rs`, the switch in `src/system/control.rs`.
+- **Where:** `src/access/` (`Detention`, `VolatileDataAccess`), the volatile-read wrappers in `src/evm/instructions.rs`, the loads the Host marks or refuses in `src/evm/host.rs`, `hold_precompile`, `settle_answer`, `settle_system_answer` (which applies the switch-off an interceptor's answer carries) and `end_frame` in `src/evm/execution.rs`, the switch in `src/system/control.rs`.
 - **Read first:** the module doc of `src/access/mod.rs`.
 - **Check:**
   - The split into spendable and withheld gas is applied when a read completes, when a frame starts or resumes, and after an `SSTORE`; only regular charges are held to the spendable part, every other reader sees both.
