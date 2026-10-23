@@ -81,8 +81,7 @@
       "spec": "Rex1",
       "tx_count": 36,
       "member": "7057359.cache.json",
-      "sha256": "0e8f6d22aa1b0376e4d31a9cc135e3d29566a0f60fcf891eac9f2c37d2e1d87a",
-      "note": "320M gas block"
+      "sha256": "0e8f6d22aa1b0376e4d31a9cc135e3d29566a0f60fcf891eac9f2c37d2e1d87a"
     },
     {
       "number": 7193432,
@@ -115,7 +114,8 @@
       "spec": "Rex2",
       "tx_count": 25,
       "member": "7921084.cache.json",
-      "sha256": "9044e11d7a812e3afcb5bca86ac003a0afb2c2072db0f9a574448eefcb76f1a5"
+      "sha256": "9044e11d7a812e3afcb5bca86ac003a0afb2c2072db0f9a574448eefcb76f1a5",
+      "note": "184 successful internal contract creations, the most in the corpus"
     },
     {
       "number": 7942160,
@@ -164,7 +164,7 @@
       "tx_count": 49,
       "member": "8652636.cache.json",
       "sha256": "2cfc84f0f44b4bb8e2e5d6fd43764b589d51e91984458761ec5ae5e698cb7e93",
-      "note": "the only successful CREATE in the corpus"
+      "note": "the only successful top-level CREATE in the corpus"
     },
     {
       "number": 8715810,
@@ -181,7 +181,7 @@
       "tx_count": 48,
       "member": "10108963.cache.json",
       "sha256": "9304875012527ad219327c4b0660aa9cfe9913e92f3939f1c305c525a2237251",
-      "note": "failed deposit"
+      "note": "failed user deposit under Rex3"
     },
     {
       "number": 12747297,
@@ -189,7 +189,8 @@
       "spec": "Rex3",
       "tx_count": 28,
       "member": "12747297.cache.json",
-      "sha256": "cf37446c9df9e0256779cd7e0f1974141afe2c8a2ce45a79498101f7d192d043"
+      "sha256": "cf37446c9df9e0256779cd7e0f1974141afe2c8a2ce45a79498101f7d192d043",
+      "note": "successful internal CREATE and CREATE2 under Rex3"
     },
     {
       "number": 12956090,
@@ -327,7 +328,8 @@
       "spec": "Rex5",
       "tx_count": 34,
       "member": "18751390.cache.json",
-      "sha256": "7a5cd3cd5e3b72753c448049648d601a3dfa68f673f3af7543c0b71d9e29b944"
+      "sha256": "7a5cd3cd5e3b72753c448049648d601a3dfa68f673f3af7543c0b71d9e29b944",
+      "note": "the only successful internal contract creations under Rex5 (CREATE2)"
     },
     {
       "number": 18843279,
@@ -384,7 +386,7 @@
       "tx_count": 27,
       "member": "22016777.cache.json",
       "sha256": "33a958fd97b15df055eba763ac5f50a1de1b59413152225ca5ec8f724b5c7a10",
-      "note": "user deposit beside the L1 attributes deposit"
+      "note": "successful user deposit beside the L1 attributes deposit, under Rex5"
     },
     {
       "number": 22018358,

@@ -9,7 +9,8 @@ cargo test -p mega-evme --test replay_corpus
 ```
 
 The archive is extracted once per test binary, and the blocks then replay concurrently inside one test, which reports every failing block at the end rather than stopping at the first.
-Block 6780842, with 21,153 transactions, dominates the run: it replays on one thread and takes over a minute in a debug build, while the other blocks finish within seconds.
+Block 6780842, with 21,153 transactions, dominates the run: it replays on one thread, mostly recovering transaction senders, while the other blocks finish within seconds.
+The workspace's dev profile optimizes the signature, hashing and JSON crates for this reason; without them the block alone takes over a minute in a debug build.
 
 ## Layout
 
@@ -24,11 +25,11 @@ The tests walk the manifest, never the archive: a consistency test requires the 
 
 ## How the blocks were chosen
 
-The block list is the mainnet fixture set of [stateless-validator](https://github.com/megaeth-labs/stateless-validator) (`test_data/mainnet/manifest.txt`), so both repositories replay the same blocks.
+The block list is stateless-validator's mainnet fixture set, [`test_data/mainnet/manifest.txt` at commit `d83dd676`](https://github.com/megaeth-labs/stateless-validator/blob/d83dd676a246598a77363c762f48da3aee6412b8/test_data/mainnet/manifest.txt), so that both repositories replay the same blocks.
 That set is a coverage cover: stateless-validator's `coverage-replayer` replays mainnet history under one build, records which coverage items of mega-evm, revm's execution crates and op-revm each block reaches, and selects a small set of blocks that together reach every item it observed.
-The current list is the cover computed under mega-evm `f78e75c` with revm 40, from [stateless-validator#233](https://github.com/megaeth-labs/stateless-validator/pull/233).
+That commit, from [stateless-validator#233](https://github.com/megaeth-labs/stateless-validator/pull/233), holds the cover computed under mega-evm `f78e75c` with revm 40.
 The cover measures those crates, not `mega-evme` itself; the shapes listed under [What the corpus covers](#what-the-corpus-covers) are what the selected blocks happen to contain.
-When stateless-validator regenerates its cover, this list can follow it again.
+Nothing checks that the two lists stay equal; when stateless-validator regenerates its cover, this list can follow it again.
 
 ## Where the data came from
 
@@ -44,9 +45,10 @@ Between them the blocks cover:
 - every spec rung mainnet has executed: `MiniRex`, the `MiniRex1` and `MiniRex2` alias rungs, `Rex`, and `Rex1` through `Rex6`;
 - the `Rex2`, `Rex5` and `Rex6` activation blocks, the first block each of those specs executed;
 - the transaction types deposit, legacy, EIP-2930 (a single type-1 transaction, in block 6780842), EIP-1559 and EIP-7702 (under `MiniRex`, `Rex4`, `Rex5` and `Rex6`, including a failed one and one carrying three authorizations);
-- contract creations that succeed (EIP-1559, in block 8652636 only) and that fail (EIP-1559 and deposit), failed deposits, and user deposits beside the L1 attributes deposit;
+- top-level contract creations that succeed (EIP-1559, in block 8652636 only) and that fail (EIP-1559 and deposit), internal `CREATE` and `CREATE2` that succeed under `Rex2`, `Rex3`, `Rex5` and `Rex6`, failed deposits, and user deposits beside the L1 attributes deposit;
 - large executions: transactions burning up to 3.29 billion gas, blocks above 320 million gas, and a block of 21,153 transactions using 2.06 billion gas.
 
+No block creates a contract successfully under `Rex4`, and none creates one from a legacy-type transaction.
 The manifest's `note` field marks the blocks that cover a shape few others do.
 
 ## SALT bucket capacities
