@@ -1339,7 +1339,10 @@ impl FrameStart {
             ),
         };
         let mark = mark(ctx.journal_mut());
-        debug_assert!(!writes_nothing || creator.is_none(), "a creation writes its account");
+        debug_assert!(
+            !writes_nothing || matches!(frame_init.frame_input, FrameInput::Call(_)),
+            "a creation writes the account it creates"
+        );
         let read = || ctx.accounts().start_before(account, other, mark.log_i);
         Ok(Self {
             before: (!writes_nothing).then(read),
@@ -1648,14 +1651,15 @@ fn applied_authorities<DB: Database, ExtEnvs: ExternalEnvTypes>(
 ///
 /// The authorities' records are the transaction's own and outlive a first frame that fails; the
 /// first frame's record does not, so that frame carries what it cost as its start charge, which
-/// its failure gives back: the history it was charged, which this answers, kept on the layer for
-/// the frame's input. A first frame revm
-/// refuses to start on its sender's account makes no record, and gets the charge back as any frame
-/// that kept nothing does: among the transactions that pay history, that is a creation from an
-/// account whose nonce cannot be bumped, which only a caller that turned the nonce check off can
-/// run, and which revm answers with a success and no address.
-/// The history gas the first frame's record was charged, nothing for a transaction that pays no
-/// history; `None` when the transaction cannot pay, which is an out-of-gas before it runs.
+/// its failure gives back. A first frame revm refuses to start on its sender's account makes no
+/// record, and gets the charge back as any frame that kept nothing does: among the transactions
+/// that pay history, that is a creation from an account whose nonce cannot be bumped, which only a
+/// caller that turned the nonce check off can run, and which revm answers with a success and no
+/// address.
+///
+/// Answers the history gas the first frame's record was charged, which pre-execution keeps for
+/// the frame's input to carry, and nothing for a transaction that pays no history; `None` when the
+/// transaction cannot pay, which is an out-of-gas before it runs.
 fn charge_records_made_outside_a_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &MegaContext<DB, ExtEnvs>,
     gas: &mut GasTracker,
