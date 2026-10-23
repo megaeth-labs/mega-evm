@@ -496,9 +496,16 @@ fn test_btest_the_witness_options_print_a_line_per_block() {
     let history = "0x0000f90827f1c53a10cb7a02335b175320002935";
     assert!(full[0]["reads"]["accounts"][history].is_null(), "{}", full[0]["reads"]);
 
-    let refused = blockchain_fixture(dir.path(), "b", |header| header.gas_limit = 0);
-    let lines = stderr_lines(&btest(&["--json-witness"], &refused));
-    assert!(lines.iter().all(|line| line["block"] == 0), "{lines:?}");
+    // A block without a parent beacon root, which the EIP-4788 pre-block call needs, is refused
+    // after what it read so far: a line of its own, which the import's failure does not drop.
+    let refused = blockchain_fixture(dir.path(), "b", |header| {
+        header.parent_beacon_block_root = None;
+    });
+    let output = btest(&["--json-witness"], &refused);
+    assert!(stdout(&output).contains("unattributed 1"), "{}", stdout(&output));
+    let lines = stderr_lines(&output);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!((&lines[0]["block"], &lines[0]["row"]), (&json!(0), &json!("refused")));
 }
 
 #[test]

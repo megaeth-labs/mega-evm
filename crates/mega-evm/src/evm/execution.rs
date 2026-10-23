@@ -1242,7 +1242,12 @@ fn take_back_a_stopped_answer<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// its value goes from the calling account to itself, which revm moves and logs nothing for, and
 /// is read rather than reasoned about. A precompile runs inside the start, and a node's own may
 /// write the start's accounts there, which are read with the start. A creation writes the account
-/// it creates.
+/// it creates. A `DELEGATECALL`'s value is its caller's, which it moves nowhere.
+///
+/// The opcode that starts a call prices its records before this, by its own rule
+/// ([`start_makes_no_records`](crate::limit::start_makes_no_records)): a call that transfers no
+/// value makes no record whatever the journal holds, a precompile's writes being no record the
+/// opcode prices.
 fn start_writes_nothing(input: &FrameInput, precompiles: &PrecompilesMap) -> bool {
     match input {
         FrameInput::Call(inputs) => {

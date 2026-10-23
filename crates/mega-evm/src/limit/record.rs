@@ -169,8 +169,14 @@ pub(crate) struct Accounts<'a> {
 /// Whether `info` differs from `original` in what a write record stands for: the nonce, the
 /// balance or the code.
 fn differs(info: &AccountInfo, original: &AccountInfo) -> bool {
+    differs_with_balance(info, info.balance, original)
+}
+
+/// Whether `info` with its balance replaced by `balance` differs from `original` in what a write
+/// record stands for ([`differs`]).
+fn differs_with_balance(info: &AccountInfo, balance: U256, original: &AccountInfo) -> bool {
     info.nonce != original.nonce ||
-        info.balance != original.balance ||
+        balance != original.balance ||
         info.code_hash != original.code_hash
 }
 
@@ -188,11 +194,7 @@ fn changed(account: &Account) -> bool {
 fn changed_now_and_with_balance(account: Option<&Account>, balance: U256) -> (bool, bool) {
     let Some(account) = account else { return (false, balance != U256::ZERO) };
     let original = account.original_info();
-    let now = differs(&account.info, &original);
-    let with_balance = account.info.nonce != original.nonce ||
-        balance != original.balance ||
-        account.info.code_hash != original.code_hash;
-    (now, with_balance)
+    (differs(&account.info, &original), differs_with_balance(&account.info, balance, &original))
 }
 
 /// The balance of `account`, the transaction's load of it; nothing for one it has not loaded.
@@ -255,6 +257,11 @@ pub(crate) struct StartBefore {
 /// journal: a call of any scheme that transfers no value, whose transfer records nothing
 /// ([`Accounts::transfer_records`]). A creation may record the account it creates and its
 /// creator's nonce.
+///
+/// This is the opcode's price, read off the value the opcode transfers, which is none for a
+/// `DELEGATECALL`. Whether revm's start then writes nothing on the frame's accounts, so that they
+/// need not be read, is decided where the frame starts, on the frame's input, which a precompile
+/// can make write (`start_writes_nothing` in `evm/execution.rs`).
 pub(crate) fn start_makes_no_records(kind: FrameStartKind, value: U256) -> bool {
     match kind {
         FrameStartKind::Create | FrameStartKind::Create2 => false,
@@ -284,6 +291,11 @@ impl<'a> Accounts<'a> {
     /// The accounts `journal` holds.
     pub(crate) const fn of<DB>(journal: &'a Journal<DB>) -> Self {
         Self { journal: &journal.inner }
+    }
+
+    /// The journal's entries, which revm clears between transactions: this transaction's.
+    fn entries(&self) -> &'a [JournalEntry] {
+        &self.journal.journal
     }
 
     /// The account at `address` as the transaction loaded it and holds it now: `None` for one
@@ -384,7 +396,7 @@ impl<'a> Accounts<'a> {
             return false;
         }
         account.is_loaded_as_not_existing() ||
-            self.journal.journal.iter().rev().find_map(|entry| match entry {
+            self.entries().iter().rev().find_map(|entry| match entry {
                 JournalEntry::AccountDestroyed { address: destroyed, destroyed_status, .. }
                     if *destroyed == address =>
                 {
@@ -403,14 +415,16 @@ impl<'a> Accounts<'a> {
             return StartRecords::NONE;
         }
         let (from, to) = (self.loaded(from), self.loaded(to));
-        let Some(from_after) = balance_of(from).checked_sub(value) else {
+        let Some(from_balance) = balance_of(from).checked_sub(value) else {
             return StartRecords::NONE;
         };
-        let to_after = balance_of(to).saturating_add(value);
-        let (from_now, from_moved) = changed_now_and_with_balance(from, from_after);
-        let (to_now, to_moved) = changed_now_and_with_balance(to, to_after);
-        let transfer = RecordDelta::of_account(from_now, from_moved)
-            .with(RecordDelta::of_account(to_now, to_moved));
+        let to_balance = balance_of(to).saturating_add(value);
+        // Before the transfer the accounts are as they are now; after it they hold the balances it
+        // leaves them with.
+        let (from_before, from_after) = changed_now_and_with_balance(from, from_balance);
+        let (to_before, to_after) = changed_now_and_with_balance(to, to_balance);
+        let transfer = RecordDelta::of_account(from_before, from_after)
+            .with(RecordDelta::of_account(to_before, to_after));
         StartRecords { transfer, ..StartRecords::NONE }
     }
 
@@ -539,6 +553,8 @@ impl<'a> Accounts<'a> {
     /// destructed account held `balance` before it, and a beneficiary that is another account its
     /// balance less `balance`, all of which it got.
     fn destruction_records(&self, address: Address, target: Address, balance: U256) -> RecordDelta {
+        // After the destruction the accounts are as they are now; before it they held the
+        // balances it moved.
         let (now, before) = changed_now_and_with_balance(self.loaded(address), balance);
         let source = RecordDelta::of_account(before, now);
         if target == address {

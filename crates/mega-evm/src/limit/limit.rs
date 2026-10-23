@@ -583,6 +583,10 @@ impl AdditionalLimit {
         for kind in COUNTED {
             let Some(pool) = kind.pool() else { continue };
             if !held && !counted.touches(pool) {
+                debug_assert!(
+                    self.transaction_crossed(kind, counted, false).within_limit(),
+                    "a dimension a count leaves alone crosses nothing"
+                );
                 continue;
             }
             let rise = counted.rise(pool);
@@ -1027,8 +1031,7 @@ mod tests {
                         .with_tx_state_growth_limit(tx_limit);
                     let mut layer = AdditionalLimit::new(limits);
                     layer.begin_transaction(class, 0);
-                    let prior = Counted::NONE;
-                    let mut prior = prior;
+                    let mut prior = Counted::NONE;
                     for pool in PoolId::ALL {
                         prior.added.set(pool, kept);
                     }
@@ -1041,14 +1044,19 @@ mod tests {
                                         for &pb in pools {
                                             for &pc in pools {
                                                 let mut counted = Counted::NONE;
+                                                let pools = [
+                                                    DATA_SIZE_POOL,
+                                                    KV_UPDATE_POOL,
+                                                    STATE_GROWTH_POOL,
+                                                ];
                                                 for (pool, (added, taken)) in
-                                                    PoolId::ALL.into_iter().zip([a, b, c])
+                                                    pools.into_iter().zip([a, b, c])
                                                 {
                                                     counted.added.set(pool, added);
                                                     counted.taken.set(pool, taken);
                                                 }
                                                 counted.transfer_log = transfer_log;
-                                                let takes_more = [PoolId::ALL[0], PoolId::ALL[1]]
+                                                let takes_more = [DATA_SIZE_POOL, KV_UPDATE_POOL]
                                                     .into_iter()
                                                     .any(|pool| counted.taken.get(pool) > kept);
                                                 if takes_more {
@@ -1058,9 +1066,9 @@ mod tests {
                                                 let mut gas = GasTracker::new(1_000, 1_000, 0);
                                                 gas.set_pools_remaining(
                                                     PoolAmounts::ZERO
-                                                        .with(PoolId::ALL[0], pa + 2)
-                                                        .with(PoolId::ALL[1], pb + 2)
-                                                        .with(PoolId::ALL[2], pc + 2),
+                                                        .with(DATA_SIZE_POOL, pa + 2)
+                                                        .with(KV_UPDATE_POOL, pb + 2)
+                                                        .with(STATE_GROWTH_POOL, pc + 2),
                                                 );
                                                 for pool in PoolId::ALL {
                                                     assert!(gas.record_pool(pool, 2));
