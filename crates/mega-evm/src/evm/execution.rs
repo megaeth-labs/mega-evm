@@ -53,7 +53,7 @@ use revm::{
 use crate::{
     access::ComputeStop,
     charge_write_records_history, history_gas,
-    limit::{Counted, CreatorBefore, StartBefore},
+    limit::{CreatorBefore, StartBefore},
     synthetic_frame_result,
     system::keyless,
     write_record_history_gas, Detention, ExternalEnvTypes, LimitCheck, LimitKind, MegaContext,
@@ -538,8 +538,8 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     ///    frame whose actions are made by hand ([`keyless::ready`]);
     /// 4. system contract interception ([`MegaEvm::intercept`]), for any other frame, which answers
     ///    the frame or lets it start;
-    /// 5. where the journal stands is marked, the records the start makes are read off it, and a
-    ///    creation's creator as it stands ([`FrameStart::of`]);
+    /// 5. where the journal stands is marked, and the accounts the start writes on its frame and a
+    ///    creation's creator are read as they stand ([`FrameStart::of`]);
     /// 6. revm builds the frame, or answers it, and the start is held to the limits on the pool its
     ///    frame starts with, where its records and transfer log are drawn
     ///    ([`AdditionalLimit::count_start`](crate::AdditionalLimit)): a frame revm built whose
@@ -631,9 +631,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         let Some(mut result) = decided else {
             ctx.additional_limit.open_start(depth, start.creator);
             let frame = self.inner.frame_stack.get();
-            let gas = frame.interpreter.gas.tracker_mut();
-            let (counted, credit) = start.made(ctx);
-            let verdict = ctx.additional_limit.count_start(gas, &counted, credit);
+            let verdict = start.count(ctx, frame.interpreter.gas.tracker_mut());
             ctx.detention.on_frame_run(&mut frame.interpreter.gas, depth);
             let first = if verdict.exceeded_limit() {
                 Some(stop_action(ctx, frame, &verdict))
@@ -666,9 +664,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         // success is held to the records its start made, which revm committed.
         ctx.additional_limit.open_start(depth, start.creator);
         if succeeded && matches!(result, FrameResult::Call(_)) {
-            let (counted, credit) = start.made(ctx);
-            let gas = result.gas_mut().tracker_mut();
-            let verdict = ctx.additional_limit.count_start(gas, &counted, credit);
+            let verdict = start.count(ctx, result.gas_mut().tracker_mut());
             stop_the_answer_at(ctx, &start, &mut result, verdict);
         }
         settle_answer(ctx, depth, gas_limit, &mut result);
@@ -1205,7 +1201,7 @@ struct FrameStart {
     mark: JournalCheckpoint,
     /// The accounts the start writes on its frame as the transaction held them before revm decided
     /// it, and the logs the journal held: what the start made is read off the journal against them
-    /// once revm decided it ([`made`](Self::made)).
+    /// once revm decided it ([`count`](Self::count)).
     before: StartBefore,
     /// The history gas the start's caller paid at its opcode for the records on the frame.
     charged: u64,
@@ -1234,7 +1230,7 @@ impl FrameStart {
         frame_init: &FrameInit,
     ) -> Result<Self, ContextError<DB::Error>> {
         let mut creator = None;
-        let (first, second, charged, reservoir, shares) = match &frame_init.frame_input {
+        let (account, other, charged, reservoir, shares) = match &frame_init.frame_input {
             FrameInput::Call(inputs) => (
                 inputs.caller,
                 Some(inputs.target_address),
@@ -1274,7 +1270,7 @@ impl FrameStart {
         };
         let mark = mark(ctx.journal_mut());
         Ok(Self {
-            before: ctx.accounts().start_before(first, second, mark.log_i),
+            before: ctx.accounts().start_before(account, other, mark.log_i),
             mark,
             charged,
             gas_limit: input_gas_limit(&frame_init.frame_input),
@@ -1284,17 +1280,19 @@ impl FrameStart {
         })
     }
 
-    /// What the start made on its frame, read off the journal once revm decided it — its records
-    /// and their bytes, its state growth and its transfer log ([`Accounts::start_made`]) — and what
-    /// its caller gets back once the frame returned with its start kept: what it paid for the
-    /// records on the frame, less the price of those the start made, and the price of those it
-    /// took back.
+    /// Holds the start, which revm just decided, to the limits on the pools of its frame, which
+    /// `gas` holds, and counts there what it made, read off the journal — its records and their
+    /// bytes, its state growth and its transfer log ([`Accounts::start_made`]) — with what its
+    /// caller gets back once the frame returned with its start kept: what it paid for the records
+    /// on the frame, less the price of those the start made, and the price of those it took back
+    /// ([`AdditionalLimit::count_start`](crate::AdditionalLimit)).
     ///
     /// [`Accounts::start_made`]: crate::limit::Accounts
-    fn made<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    fn count<DB: Database, ExtEnvs: ExternalEnvTypes>(
         &self,
-        ctx: &MegaContext<DB, ExtEnvs>,
-    ) -> (Counted, u64) {
+        ctx: &mut MegaContext<DB, ExtEnvs>,
+        gas: &mut GasTracker,
+    ) -> LimitCheck {
         let (records, counted) = ctx.accounts().start_made(&self.before);
         let credit = if ctx.prices_history() {
             let price = |records| write_record_history_gas(records).unwrap_or(0);
@@ -1302,7 +1300,7 @@ impl FrameStart {
         } else {
             0
         };
-        (counted, credit)
+        ctx.additional_limit.count_start(gas, &counted, credit)
     }
 }
 

@@ -875,7 +875,7 @@ A limit is enforced on the writes it guards before anything runs on them:
 - A frame whose start crosses a limit MUST be stopped before it runs an instruction, and what its start moved MUST be reverted with it: the value, the transfer log, a created account.
   A frame answered with a success without running — a call to an account with no code, a precompile that answers — MUST have its answer replaced by the stop, on the gas its caller forwarded, untouched.
   A frame answered with a failure kept nothing and MUST NOT have its answer replaced by a stop: a precompile that fails consumes the gas forwarded to it, as without a limit.
-  A precompile whose price crosses gas detention moves nothing and is held to the price alone: its result is the compute stop, whatever records its value transfer would have made (see [Resource Limits](#10-resource-limits)).
+  A precompile whose price crosses gas detention moves nothing, and MUST be held to the price alone: its result is the compute stop, whatever records its value transfer would have made (see [Resource Limits](#10-resource-limits)).
   A stopped creation keeps its creator's nonce bump, and that write's record MUST be counted on the creator when the creation returns: the creator MUST be held to its limits with it before it runs on, and be stopped if it crosses one.
 - A frame answered without running whose answer is then rewritten to the stop (see [Gas Detention on Withheld Gas](#12-gas-detention-on-withheld-gas)) MUST have what its start moved reverted with it, as a frame that fails has.
 - Nothing counted before the first frame crosses the data-size limit: validation rejects a transaction whose body, with a record for each entry of its authorization list, would (see [Two-Pool Gas](#4-two-pool-gas-eip-8037-replaces-the-dual-gas-model)).
@@ -961,7 +961,7 @@ A contract can revert with the same bytes, and so can a caller that re-raises th
 
 {% hint style="info" %}
 A precompile a node adds or replaces is outside the Satin set and outside this specification.
-The reference implementation has no price for one, so it runs such a precompile on the allowance and treats running out of it as the crossing: the failure has taken back the value and the transfer log, so the call is held to the allowance alone, and the stop is kind 2.
+The reference implementation has no price for one, so it runs such a precompile on the allowance and treats running out of it as the crossing, kind 2, whatever records its value transfer would have made.
 {% endhint %}
 
 ### 13. Volatile-Data Access Control and `remainingComputeGas()`

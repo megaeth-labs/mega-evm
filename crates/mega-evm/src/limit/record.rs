@@ -174,18 +174,15 @@ fn differs(info: &AccountInfo, original: &AccountInfo) -> bool {
 /// made of the creator ([`Accounts::creator_counted`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CreatorBefore {
-    /// The creator.
-    address: Address,
+    /// The creator's account.
+    account: AccountBefore,
     /// Its nonce.
     nonce: u64,
-    /// Whether the transaction had changed its account from what it loaded.
-    changed: bool,
-    /// Whether its account was empty under EIP-161.
-    empty: bool,
 }
 
-/// An account a frame's start may change on its frame, as the transaction held it before revm
-/// decided the start.
+/// An account a frame's start may change, as the transaction held it before revm decided the
+/// start: what tells, once revm did, the write record and the state growth it made of the account
+/// ([`Accounts::account_made`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AccountBefore {
     /// The account.
@@ -210,7 +207,7 @@ pub(crate) struct StartBefore {
 }
 
 /// Whether `log` is the EIP-7708 transfer log revm journals for a value movement: a log from the
-/// system address `0xff…fe` carrying ERC-20's `Transfer` event, which no contract can emit.
+/// system address `0xff…fe` carrying ERC-20's `Transfer` event.
 pub(crate) fn is_transfer_log(log: &Log) -> bool {
     log.address == ETH_TRANSFER_LOG_ADDRESS && log.topics().first() == Some(&ETH_TRANSFER_LOG_TOPIC)
 }
@@ -408,10 +405,8 @@ impl<'a> Accounts<'a> {
     /// The creator is read loaded: revm loads it first thing when it decides the creation.
     pub(crate) fn creator_before(&self, address: Address) -> CreatorBefore {
         CreatorBefore {
-            address,
+            account: self.account_before(address),
             nonce: self.loaded(address).map_or(0, |account| account.info.nonce),
-            changed: self.is_changed(address),
-            empty: self.is_empty(address),
         }
     }
 
@@ -419,7 +414,8 @@ impl<'a> Accounts<'a> {
     /// creation it decides but one it refuses on the creator's account — an endowment the creator
     /// cannot fund, a nonce at its maximum — and the bump stands whatever the creation then does.
     pub(crate) fn bumped(&self, before: &CreatorBefore) -> bool {
-        self.loaded(before.address).is_some_and(|account| account.info.nonce != before.nonce)
+        let address = before.account.address;
+        self.loaded(address).is_some_and(|account| account.info.nonce != before.nonce)
     }
 
     /// What the nonce bump of the creator `before` was read of made, read off the journal once its
@@ -428,27 +424,35 @@ impl<'a> Accounts<'a> {
     /// account. The record follows the account's net change, so a keyless deployment's settlement,
     /// which may set the signer's nonce back, is read once it did.
     pub(crate) fn creator_counted(&self, before: &CreatorBefore) -> Counted {
-        let record = RecordDelta::of_account(before.changed, self.is_changed(before.address));
-        let grows = before.empty && self.loaded(before.address).is_some_and(|a| !a.info.is_empty());
-        Counted::records(record.added, record.taken, false).with_growth(u64::from(grows), 0)
+        let (record, grew) = self.account_made(&before.account);
+        Counted::records(record.added, record.taken, false).with_growth(u64::from(grew), 0)
     }
 
-    /// The accounts at `first` and `second` as the transaction holds them before revm decides a
-    /// start that writes them on its frame, read loaded, as revm reads them, the journal holding
-    /// `logs` logs. An account named twice is read once.
+    /// The account at `address` as the transaction holds it.
+    fn account_before(&self, address: Address) -> AccountBefore {
+        AccountBefore { address, changed: self.is_changed(address), empty: self.is_empty(address) }
+    }
+
+    /// What changed of the account `before` was read of since, as the journal holds it now: its
+    /// write record, by its change ([`RecordDelta::of_account`]), and whether it became a new
+    /// account, empty under EIP-161 then and not now.
+    fn account_made(&self, before: &AccountBefore) -> (RecordDelta, bool) {
+        let record = RecordDelta::of_account(before.changed, self.is_changed(before.address));
+        let loaded = self.loaded(before.address);
+        (record, before.empty && loaded.is_some_and(|account| !account.info.is_empty()))
+    }
+
+    /// The accounts a start writes on its frame — `account` and `other`, a call's caller and
+    /// target, or a creation's created account alone — as the transaction holds them before revm
+    /// decides the start, the journal holding `logs` logs. An account named twice is read once.
     pub(crate) fn start_before(
         &self,
-        first: Address,
-        second: Option<Address>,
+        account: Address,
+        other: Option<Address>,
         logs: usize,
     ) -> StartBefore {
-        let read = |address| AccountBefore {
-            address,
-            changed: self.is_changed(address),
-            empty: self.is_empty(address),
-        };
-        let second = second.filter(|second| *second != first).map(read);
-        StartBefore { accounts: [Some(read(first)), second], logs }
+        let other = other.filter(|other| *other != account).map(|other| self.account_before(other));
+        StartBefore { accounts: [Some(self.account_before(account)), other], logs }
     }
 
     /// What the start `before` was read of made on its frame, read off the journal once revm
@@ -460,9 +464,9 @@ impl<'a> Accounts<'a> {
         let mut records = RecordDelta::NONE;
         let mut growth = 0;
         for account in before.accounts.iter().flatten() {
-            let changed = self.is_changed(account.address);
-            records = records.with(RecordDelta::of_account(account.changed, changed));
-            growth += u64::from(account.empty && !self.is_empty(account.address));
+            let (record, grew) = self.account_made(account);
+            records = records.with(record);
+            growth += u64::from(grew);
         }
         let logs = self.logs.get(before.logs..).unwrap_or_default();
         let logged = logs.iter().any(is_transfer_log);

@@ -66,7 +66,10 @@ fn stateful() -> DynPrecompile {
 /// a checkpoint it commits and one it reverts — keeps its writes in the state and the receipt, and
 /// counts none of them: the transaction's data size is its body and the start of the value call
 /// that reached the precompile, the precompile's record and its caller's and the call's transfer
-/// log, as for a precompile that writes nothing.
+/// log, as for a precompile that writes nothing. revm runs the precompile inside the call's start,
+/// and the start is read off the journal once revm decided it, so a precompile's writes to the
+/// call's own accounts would be read with the start; this one's transfer leaves the precompile's
+/// account changed, as the call's value did, and writes no other account of the start.
 #[test]
 fn test_a_precompiles_writes_through_evm_internals_count_nothing() {
     let code = BytecodeBuilder::default().call(STATEFUL, U256::from(VALUE)).stop().build();
