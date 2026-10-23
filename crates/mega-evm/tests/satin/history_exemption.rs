@@ -19,14 +19,22 @@ use mega_evm::{
         ACCOUNT_STATE_GAS, COST_PER_HISTORY_BYTE, COST_PER_STATE_BYTE, SLOT_STATE_GAS,
         TX_GAS_LIMIT_CAP,
     },
+    spec_cfg,
     system::{IOracle, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE},
-    test_utils::{op_transaction, BytecodeBuilder, MemoryDatabase},
-    transaction_body_bytes, LimitUsage, MegaEvm, MegaTransaction, MegaTransactionOutcome,
-    LOG_BASE_SIZE, TX_BODY_SIZE, WRITE_RECORD_SIZE,
+    test_utils::{
+        neutral_cfg, op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase,
+    },
+    transaction_body_bytes, EthSpecId, EvmTxRuntimeLimits, LimitUsage, MegaContext, MegaEvm,
+    MegaEvmError, MegaHandler, MegaSpecId, MegaTransaction, MegaTransactionOutcome, LOG_BASE_SIZE,
+    TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 use revm::{
     bytecode::opcode::{CALL, CREATE, LOG0, POP},
-    context::{ContextSetters, TxEnv},
+    context::{CfgEnv, ContextSetters, TxEnv},
+    handler::{EthFrame, Handler, SystemCallTx},
+    inspector::{InspectorHandler, NoOpInspector},
+    interpreter::interpreter::EthInterpreter,
+    ExecuteEvm,
 };
 
 use crate::common::{context, deposit, runs_at_measurement_prices};
@@ -34,6 +42,8 @@ use crate::common::{context, deposit, runs_at_measurement_prices};
 const CALLER: Address = address!("0000000000000000000000000000000000400000");
 const CONTRACT: Address = address!("0000000000000000000000000000000000400001");
 const PAYEE: Address = address!("0000000000000000000000000000000000400002");
+/// A contract that writes its slot 0 and stops.
+const STORER: Address = address!("0000000000000000000000000000000000400003");
 
 /// Room for the state gas of a new slot, a new account and a deployment.
 const GAS_LIMIT: u64 = 50_000_000;
@@ -359,5 +369,83 @@ fn test_what_a_transaction_pays_is_decided_when_it_is_prepared() {
             assert_eq!(evm.ctx().prices_history(), its_pays, "{ran}, then {set} run");
             assert_eq!(evm.ctx().is_system_originated(), its_own, "{ran}, then {set} run");
         }
+    }
+}
+
+/// Whether a context prices history is decided when its configuration is switched to the neutral
+/// one, as it is when a transaction is prepared, and kept until the next preparation decides
+/// again: switching back with `with_cfg` alone changes nothing. So a system call run straight
+/// through the handler's public entry points, plain or inspected, which prepare nothing, pays no
+/// history on a context switched to the neutral configuration and back: it spends what the same
+/// call spends where the neutral configuration still runs, and on exactly that gas limit it keeps
+/// the slot it writes.
+#[test]
+fn test_a_context_switched_back_from_the_neutral_configuration_prices_no_history_until_prepared() {
+    let evm = |switched_back: bool, gas_limit: Option<u64>| {
+        let db = MemoryDatabase::default()
+            .account_balance(CALLER, U256::from(10u64.pow(18)))
+            .account_code(
+                STORER,
+                BytecodeBuilder::default().sstore(U256::ZERO, U256::from(1)).stop().build(),
+            );
+        let ctx = MegaContext::new(db, MegaSpecId::SATIN)
+            .with_chain(zero_fee_l1_block_info())
+            .with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits());
+        let mut ctx = if switched_back {
+            ctx.with_neutral_cfg(neutral_cfg(EthSpecId::OSAKA).expect("Osaka has a configuration"))
+                .with_cfg(CfgEnv::new_with_spec(MegaSpecId::SATIN))
+        } else {
+            // The neutral configuration on the spec's own fields: on this call, it differs from
+            // the spec's in the history it prices alone.
+            ctx.with_neutral_cfg(spec_cfg(CfgEnv::new_with_spec(MegaSpecId::SATIN)))
+        };
+        let mut call = MegaTransaction::new_system_tx_with_caller(CALLER, STORER, Bytes::new());
+        if let Some(gas_limit) = gas_limit {
+            call.0.base.gas_limit = gas_limit;
+        }
+        ctx.set_tx(call);
+        MegaEvm::new(ctx)
+    };
+    // (gas used, history gas, history bytes, slot 0 of STORER)
+    let run = |mut evm: MegaEvm<MemoryDatabase, NoOpInspector>, inspected: bool| {
+        let mut handler = MegaHandler::<
+            _,
+            MegaEvmError<core::convert::Infallible>,
+            EthFrame<EthInterpreter>,
+        >::new();
+        let result = if inspected {
+            handler.inspect_run_system_call(&mut evm)
+        } else {
+            handler.run_system_call(&mut evm)
+        };
+        let result = result.expect("the system call runs");
+        let layer = evm.ctx().additional_limit();
+        let (history, bytes) = (layer.history_gas_spent(), layer.history_bytes());
+        let state = ExecuteEvm::finalize(&mut evm);
+        let slot = state
+            .get(&STORER)
+            .and_then(|account| account.storage.get(&U256::ZERO))
+            .map(|slot| slot.present_value)
+            .unwrap_or_default();
+        assert!(result.is_success(), "inspected {inspected}: {result:?}");
+        (result.tx_gas_used(), history, bytes, slot)
+    };
+
+    for inspected in [false, true] {
+        let (spent, history, bytes, slot) = run(evm(false, None), inspected);
+        assert_eq!((history, bytes, slot), (0, 0, U256::from(1)), "inspected {inspected}: neutral");
+
+        let back = evm(true, None);
+        assert!(!back.ctx().prices_history(), "the switch decided it, and with_cfg left it");
+        assert_eq!(
+            run(back, inspected),
+            (spent, 0, 0, U256::from(1)),
+            "inspected {inspected}: switched back, the same call at the same price",
+        );
+        assert_eq!(
+            run(evm(true, Some(spent)), inspected),
+            (spent, 0, 0, U256::from(1)),
+            "inspected {inspected}: on exactly what it spends, it keeps its slot",
+        );
     }
 }

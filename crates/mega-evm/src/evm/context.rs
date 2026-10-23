@@ -168,6 +168,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         self.inner = self.inner.with_cfg(op_cfg(&cfg));
         self.cfg = cfg;
         self.neutral = true;
+        // Decided here, as a preparation decides it, and kept until the next one: switching back
+        // to the spec's configuration alone does not price history again.
+        self.additional_limit.price_no_history();
         self
     }
 
@@ -417,10 +420,12 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// The neutral configuration prices no history at all.
     ///
     /// It is decided when the transaction is prepared, with its exemption, from what it is then
-    /// (a promoted system-address transaction is the protocol's own either way): a transaction
-    /// set in the context's hands and not run yet changes neither until it is prepared.
+    /// (a promoted system-address transaction is the protocol's own either way) and the
+    /// configuration it runs: a transaction set in the context's hands and not run yet changes
+    /// neither until it is prepared. Switching the context to the neutral configuration decides
+    /// it too, and switching back alone does not: the next preparation decides again.
     pub const fn prices_history(&self) -> bool {
-        !self.runs_neutral() && matches!(self.additional_limit.class(), TxClass::Ordinary)
+        matches!(self.additional_limit.class(), TxClass::Ordinary)
     }
 
     /// The history gas of the running (or last) transaction's body — the bytes it carries and the
@@ -526,6 +531,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
             TxClass::ProtocolOwn
         } else if self.inner.tx.tx_type() == DEPOSIT_TRANSACTION_TYPE {
             TxClass::Deposit
+        } else if self.runs_neutral() {
+            TxClass::Neutral
         } else {
             TxClass::Ordinary
         };

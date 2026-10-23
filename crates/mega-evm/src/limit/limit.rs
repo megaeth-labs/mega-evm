@@ -118,9 +118,10 @@ pub struct AdditionalLimit {
     reservoir_remaining: Option<u64>,
 }
 
-/// What the running execution is, decided when the layer begins it from what the transaction is,
-/// and kept until the next one begins: what it is held to and what it pays follow from it, so
-/// replacing the transaction the context holds without beginning it changes neither.
+/// What the running execution is, decided when the layer begins it from what the transaction is
+/// and the configuration it runs, and kept until the next one begins: what it is held to and what
+/// it pays follow from it, so replacing the transaction the context holds without beginning it
+/// changes neither.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum TxClass {
     /// The protocol's own work, a system-originated transaction or a system call: held to no
@@ -129,6 +130,11 @@ pub(crate) enum TxClass {
     /// A user's deposit: held to every limit like any transaction, and paying no history, its
     /// bytes paid for on L1.
     Deposit,
+    /// Any other transaction under the neutral configuration, which prices no history: held as
+    /// an ordinary transaction is, paying no history. Switching the context to the neutral
+    /// configuration makes an ordinary execution this until the next one begins, whatever
+    /// configuration the context is switched to in between.
+    Neutral,
     /// Any other transaction, which pays history for the bytes it appends.
     #[default]
     Ordinary,
@@ -783,6 +789,16 @@ impl AdditionalLimit {
     /// What the running (or last) execution is, decided when it was begun.
     pub(crate) const fn class(&self) -> TxClass {
         self.class
+    }
+
+    /// Makes the running (or last) execution pay no history where it would, as the neutral
+    /// configuration the context is switched to prices none; the next execution the layer begins
+    /// decides again.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) const fn price_no_history(&mut self) {
+        if matches!(self.class, TxClass::Ordinary) {
+            self.class = TxClass::Neutral;
+        }
     }
 
     /* What the settled transaction reports */
