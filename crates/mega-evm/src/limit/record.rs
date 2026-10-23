@@ -183,7 +183,7 @@ fn differs_with_balance(info: &AccountInfo, balance: U256, original: &AccountInf
 /// Whether the transaction changed `account`, which it loaded, from what it loaded: its nonce,
 /// balance or code differs from its original info.
 fn changed(account: &Account) -> bool {
-    differs(&account.info, &account.original_info())
+    differs(&account.info, account.original_info_ref())
 }
 
 /// Whether the account `account` — the transaction's load of it, `None` for one it has not loaded
@@ -193,8 +193,8 @@ fn changed(account: &Account) -> bool {
 /// The account's original info is read once for both.
 fn changed_now_and_with_balance(account: Option<&Account>, balance: U256) -> (bool, bool) {
     let Some(account) = account else { return (false, balance != U256::ZERO) };
-    let original = account.original_info();
-    (differs(&account.info, &original), differs_with_balance(&account.info, balance, &original))
+    let original = account.original_info_ref();
+    (differs(&account.info, original), differs_with_balance(&account.info, balance, original))
 }
 
 /// The balance of `account`, the transaction's load of it; nothing for one it has not loaded.
