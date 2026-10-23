@@ -43,8 +43,8 @@ use revm::{
     inspector::{InspectorEvmTr, InspectorHandler, JournalExt},
     interpreter::{
         interpreter::EthInterpreter, interpreter_action::FrameInit, interpreter_types::LoopControl,
-        CallScheme, FrameInput, Gas, InitialAndFloorGas, InstructionResult, InterpreterAction,
-        InterpreterResult,
+        CallScheme, CallValue, FrameInput, Gas, InitialAndFloorGas, InstructionResult,
+        InterpreterAction, InterpreterResult,
     },
     primitives::{Address, Bytes, TxKind, CALL_STACK_LIMIT},
     Inspector,
@@ -556,7 +556,9 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     /// 4. system contract interception ([`MegaEvm::intercept`]), for any other frame, which answers
     ///    the frame or lets it start;
     /// 5. where the journal stands is marked, and the accounts the start writes on its frame and a
-    ///    creation's creator are read as they stand ([`FrameStart::of`]);
+    ///    creation's creator are read as they stand ([`FrameStart::of`]) — unless the start writes
+    ///    nothing on them, a call that moves no value and runs no precompile
+    ///    ([`start_writes_nothing`]), whose reads would find nothing;
     /// 6. revm builds the frame, or answers it, and the start is held to the limits on the pool its
     ///    frame starts with, where its records and transfer log are drawn
     ///    ([`AdditionalLimit::count_start`](crate::AdditionalLimit)): a frame revm built whose
@@ -624,8 +626,9 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             let result = settle_system_answer(&mut self.inner.ctx, depth, gas_limit, answer);
             return Ok(ItemOrResult::Result(result));
         }
+        let writes_nothing = start_writes_nothing(&frame_init.frame_input, &self.inner.precompiles);
         let ctx = &mut self.inner.ctx;
-        let start = FrameStart::of(ctx, &frame_init)?;
+        let start = FrameStart::of(ctx, &frame_init, writes_nothing)?;
         let hold = hold_precompile(
             ctx,
             &self.inner.precompiles,
@@ -1228,6 +1231,29 @@ fn take_back_a_stopped_answer<DB: Database, ExtEnvs: ExternalEnvTypes>(
     }
 }
 
+/// Whether revm's start of the frame `input` asks for leaves the accounts it starts on as the
+/// transaction held them and journals no transfer log, so that reading them before and after the
+/// start ([`FrameStart::of`], [`FrameStart::count`]) would find no write record, no new account and
+/// no log: a call, of any scheme, that moves no value and whose code address is in none of
+/// `precompiles`, revm's own and a node's. Such a start only loads and touches its target, which
+/// changes no account's nonce, balance or code.
+///
+/// A call moving value changes its two accounts, and a `CALLCODE` moving value stays read too:
+/// its value goes from the calling account to itself, which revm moves and logs nothing for, and
+/// is read rather than reasoned about. A precompile runs inside the start, and a node's own may
+/// write the start's accounts there, which are read with the start. A creation writes the account
+/// it creates.
+fn start_writes_nothing(input: &FrameInput, precompiles: &PrecompilesMap) -> bool {
+    match input {
+        FrameInput::Call(inputs) => {
+            let moves_value =
+                matches!(inputs.value, CallValue::Transfer(value) if !value.is_zero());
+            !moves_value && precompiles.get(&inputs.bytecode_address).is_none()
+        }
+        FrameInput::Create(_) | FrameInput::Empty => false,
+    }
+}
+
 /// What holding a frame's start to the limits needs of it once revm consumed its input: where the
 /// start began, the accounts it writes as they stood before it, what its caller paid for it and
 /// what a stop answering it carries.
@@ -1238,8 +1264,13 @@ struct FrameStart {
     mark: JournalCheckpoint,
     /// The accounts the start writes on its frame as the transaction held them before revm decided
     /// it, and the logs the journal held: what the start made is read off the journal against them
-    /// once revm decided it ([`count`](Self::count)).
-    before: StartBefore,
+    /// once revm decided it ([`count`](Self::count)). None for a start that writes nothing on them
+    /// ([`start_writes_nothing`]), which makes no record, no state growth and no transfer log.
+    before: Option<StartBefore>,
+    /// For a start that writes nothing on its frame, in a debug build, the reads its `before`
+    /// skipped, which [`count`](Self::count) makes after all and asserts find nothing.
+    #[cfg(debug_assertions)]
+    skipped: Option<StartBefore>,
     /// The history gas the start's caller paid at its opcode for the records on the frame.
     charged: u64,
     /// The gas limit the frame's caller forwarded, before gas detention held a precompile to less.
@@ -1259,12 +1290,14 @@ impl FrameStart {
     /// journal stands, the accounts the start writes on its frame as the transaction holds them
     /// ([`Accounts::start_before`]) — a call's caller and target, a creation's created account —
     /// and a creation's creator. A creation's creator is not among the accounts: its nonce record
-    /// is the creator's, counted from the bump once the creation returned.
+    /// is the creator's, counted from the bump once the creation returned. The accounts are not
+    /// read for a start that `writes_nothing` on them ([`start_writes_nothing`]).
     ///
     /// [`Accounts::start_before`]: crate::limit::Accounts
     fn of<DB: Database, ExtEnvs: ExternalEnvTypes>(
         ctx: &mut MegaContext<DB, ExtEnvs>,
         frame_init: &FrameInit,
+        writes_nothing: bool,
     ) -> Result<Self, ContextError<DB::Error>> {
         let mut creator = None;
         let (account, other, charged, reservoir, shares) = match &frame_init.frame_input {
@@ -1306,8 +1339,12 @@ impl FrameStart {
             ),
         };
         let mark = mark(ctx.journal_mut());
+        debug_assert!(!writes_nothing || creator.is_none(), "a creation writes its account");
+        let read = || ctx.accounts().start_before(account, other, mark.log_i);
         Ok(Self {
-            before: ctx.accounts().start_before(account, other, mark.log_i),
+            before: (!writes_nothing).then(read),
+            #[cfg(debug_assertions)]
+            skipped: writes_nothing.then(read),
             mark,
             charged,
             gas_limit: input_gas_limit(&frame_init.frame_input),
@@ -1330,7 +1367,20 @@ impl FrameStart {
         ctx: &mut MegaContext<DB, ExtEnvs>,
         gas: &mut GasTracker,
     ) -> LimitCheck {
-        let (records, counted) = ctx.accounts().start_made(&self.before);
+        let (records, counted) = match &self.before {
+            Some(before) => ctx.accounts().start_made(before),
+            None => {
+                #[cfg(debug_assertions)]
+                if let Some(skipped) = &self.skipped {
+                    assert_eq!(
+                        ctx.accounts().start_made(skipped),
+                        (crate::limit::RecordDelta::NONE, crate::limit::Counted::NONE),
+                        "a call that moves no value and runs no precompile writes nothing"
+                    );
+                }
+                Default::default()
+            }
+        };
         let credit = if ctx.prices_history() {
             let price = |records| write_record_history_gas(records).unwrap_or(0);
             self.charged.saturating_sub(price(records.added)).saturating_add(price(records.taken))
@@ -1642,7 +1692,10 @@ mod tests {
     use alloy_primitives::{address, U256};
     use revm::{
         context_interface::journaled_state::account::JournaledAccountTr,
-        interpreter::{gas::WithheldCrossing, CallInput, CallInputs, CallValue, SharedMemory},
+        interpreter::{
+            gas::WithheldCrossing, CallInput, CallInputs, CallValue, CreateInputs, CreateScheme,
+            SharedMemory,
+        },
     };
     use std::boxed::Box;
 
@@ -2069,5 +2122,53 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The frame start skips its reads exactly for a call that moves no value and runs no
+    /// precompile: every call scheme, with no value and with value, to an account and to a
+    /// precompile of the set, and a creation, with and without an endowment.
+    #[test]
+    fn test_a_start_writes_nothing_only_when_it_moves_no_value_and_runs_no_precompile() {
+        let precompiles = crate::satin_precompiles_map();
+        let ecrecover = address!("0000000000000000000000000000000000000001");
+        assert!(precompiles.get(&ecrecover).is_some());
+        let call = |scheme, value, code| {
+            let FrameInput::Call(mut inputs) = value_call() else { unreachable!() };
+            inputs.scheme = scheme;
+            inputs.value = value;
+            inputs.bytecode_address = code;
+            FrameInput::Call(inputs)
+        };
+        let (none, one) = (U256::ZERO, U256::from(1));
+        let rows = [
+            (CallScheme::Call, CallValue::Transfer(none), TARGET, true),
+            (CallScheme::Call, CallValue::Transfer(one), TARGET, false),
+            (CallScheme::Call, CallValue::Transfer(none), ecrecover, false),
+            (CallScheme::Call, CallValue::Transfer(one), ecrecover, false),
+            (CallScheme::CallCode, CallValue::Transfer(none), TARGET, true),
+            (CallScheme::CallCode, CallValue::Transfer(one), TARGET, false),
+            (CallScheme::CallCode, CallValue::Transfer(none), ecrecover, false),
+            (CallScheme::DelegateCall, CallValue::Apparent(none), TARGET, true),
+            (CallScheme::DelegateCall, CallValue::Apparent(one), TARGET, true),
+            (CallScheme::DelegateCall, CallValue::Apparent(one), ecrecover, false),
+            (CallScheme::StaticCall, CallValue::Transfer(none), TARGET, true),
+            (CallScheme::StaticCall, CallValue::Transfer(none), ecrecover, false),
+        ];
+        for (scheme, value, code, writes_nothing) in rows {
+            let input = call(scheme, value.clone(), code);
+            assert_eq!(
+                start_writes_nothing(&input, &precompiles),
+                writes_nothing,
+                "{scheme:?} of {value:?} running {code}"
+            );
+        }
+        for value in [none, one] {
+            for scheme in [CreateScheme::Create, CreateScheme::Create2 { salt: none }] {
+                let inputs = CreateInputs::new(CALLER, scheme, value, Bytes::new(), 100_000, 0);
+                let input = FrameInput::Create(Box::new(inputs));
+                assert!(!start_writes_nothing(&input, &precompiles), "{scheme:?} of {value}");
+            }
+        }
+        assert!(!start_writes_nothing(&FrameInput::Empty, &precompiles));
     }
 }

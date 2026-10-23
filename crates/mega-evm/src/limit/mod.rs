@@ -189,7 +189,12 @@ pub(crate) use limit::{Counted, TxClass};
 pub(crate) use record::emits_transfer_logs;
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) use record::is_transfer_log;
-pub(crate) use record::{Accounts, CreatorBefore, DestroyedParts, HistoryBytes, StartBefore};
+#[cfg(debug_assertions)]
+pub(crate) use record::RecordDelta;
+pub(crate) use record::{
+    start_makes_no_records, Accounts, CreatorBefore, DestroyedParts, HistoryBytes, StartBefore,
+    StartRecords,
+};
 
 use alloy_primitives::Bytes;
 use alloy_sol_types::SolError;

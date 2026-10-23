@@ -214,6 +214,21 @@ pub(crate) struct StartBefore {
     logs: usize,
 }
 
+/// Whether a frame start of `kind` that transfers `value` makes no write record whatever the
+/// journal holds, so the opcode starting it prices its records at nothing without reading the
+/// journal: a call of any scheme that transfers no value, whose transfer records nothing
+/// ([`Accounts::transfer_records`]). A creation may record the account it creates and its
+/// creator's nonce.
+pub(crate) fn start_makes_no_records(kind: FrameStartKind, value: U256) -> bool {
+    match kind {
+        FrameStartKind::Create | FrameStartKind::Create2 => false,
+        FrameStartKind::Call |
+        FrameStartKind::CallCode |
+        FrameStartKind::DelegateCall |
+        FrameStartKind::StaticCall => value.is_zero(),
+    }
+}
+
 /// Whether `log` is the EIP-7708 transfer log revm journals for a value movement: a log from the
 /// system address `0xff…fe` carrying ERC-20's `Transfer` event.
 pub(crate) fn is_transfer_log(log: &Log) -> bool {
@@ -678,6 +693,39 @@ mod tests {
         let slot = slot(original, present, new);
         let write = CompletedWrite::Sstore { address: OTHER, key: U256::ZERO, result: &slot };
         Accounts::of(&journal).write_counted(&write).0
+    }
+
+    /// The opcode prices no record without reading the journal exactly for a call that transfers
+    /// no value, of any scheme, and never for a creation; for every such call the journal-read
+    /// price is nothing too, whichever account it calls and whatever the caller holds.
+    #[test]
+    fn test_a_start_makes_no_records_only_when_a_call_transfers_no_value() {
+        let calls = [
+            FrameStartKind::Call,
+            FrameStartKind::CallCode,
+            FrameStartKind::DelegateCall,
+            FrameStartKind::StaticCall,
+        ];
+        let creations = [FrameStartKind::Create, FrameStartKind::Create2];
+        let journal = journal();
+        let accounts = Accounts::of(&journal);
+        for (value, expected) in [(U256::ZERO, true), (U256::from(1), false)] {
+            for kind in calls {
+                assert_eq!(start_makes_no_records(kind, value), expected, "{kind:?} of {value}");
+            }
+            for kind in creations {
+                assert!(!start_makes_no_records(kind, value), "{kind:?} of {value}");
+            }
+        }
+        for kind in calls {
+            for target in [OTHER, SENDER, address!("00000000000000000000000000000000000000ee")] {
+                let records = accounts.start_records(kind, SENDER, Some(target), U256::ZERO);
+                assert_eq!(records, StartRecords::NONE, "{kind:?} to {target}");
+            }
+        }
+        // A transfer that does move value records: the skip is not a price of nothing in general.
+        let moved = accounts.start_records(FrameStartKind::Call, SENDER, Some(OTHER), U256::ONE);
+        assert_ne!(moved, StartRecords::NONE);
     }
 
     /// A slot counts once, on its first change in the transaction; writing it back to its

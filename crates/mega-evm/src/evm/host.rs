@@ -398,9 +398,14 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
     /// record of what the frame had, which detention reads where the frame ends, is written again
     /// once the forward is back: a failed charge recorded the gas left after the forward was
     /// taken, and a price that could not be computed failed before any charge.
+    ///
+    /// A call that transfers no value makes no record, whatever the journal holds
+    /// ([`start_makes_no_records`](crate::limit::start_makes_no_records)), and is charged nothing
+    /// without reading it; a debug build reads it and asserts there is nothing to charge.
     #[inline]
     fn frame_starting(&mut self, start: &mut FrameStart, gas: &mut GasTracker) -> bool {
-        let charge = if self.prices_history() {
+        let makes_no_records = crate::limit::start_makes_no_records(start.kind, start.value);
+        let charge = if self.prices_history() && !makes_no_records {
             let records =
                 self.accounts().start_records(start.kind, start.caller, start.target, start.value);
             let on_frame = records.on_frame().added;
@@ -412,6 +417,16 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
             };
             charge
         } else {
+            debug_assert!(
+                !makes_no_records ||
+                    self.accounts().start_records(
+                        start.kind,
+                        start.caller,
+                        start.target,
+                        start.value
+                    ) == crate::limit::StartRecords::NONE,
+                "a call that transfers no value makes no record"
+            );
             0
         };
         start.charge = StartCharge::new(charge, PoolAmounts::ZERO);
