@@ -643,11 +643,12 @@ impl AdditionalLimit {
         self.decided.push(Decided { depth, at_start: self.kept, credit: 0, creator });
     }
 
-    /// Holds the start revm just decided, whose frame's pools `gas` holds, to the limits, and
-    /// counts `counted`, the records and transfer log it made, on those pools
+    /// Holds the start revm just decided — a frame it built, or a call it answered with a success —
+    /// whose frame's pools `gas` holds, to the limits, and counts `counted`, the records, state
+    /// growth and transfer log it made, read off the journal, on those pools
     /// ([`draw`](Self::draw)): the verdict is the stop the frame returns before it runs, or the
-    /// one its answer gives way to. `credit` is what the start's caller gets back once the frame
-    /// returned with its start kept.
+    /// one its answer gives way to. An answer that failed kept nothing and is not held. `credit` is
+    /// what the start's caller gets back once the frame returned with its start kept.
     ///
     /// A start is held to the transaction's limits whatever it counts, nothing included: what the
     /// transaction keeps may already stand above a limit, as a frame that resumes may find it

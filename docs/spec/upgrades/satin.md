@@ -736,12 +736,9 @@ A deposit that runs to a success or a revert and creates its caller is the ordin
   The order is Rex6's order across dimensions.
   Compute (kind 2) is decided at the regular charge, before the write is counted.
   A regular charge that crosses gas detention means the opcode does not complete, so the operation's data size, KV updates and state growth are not counted, and kind 2 is the stop because the write did not happen.
-  A call to a precompile is the exception: the value has already moved when the price is consulted, so the start's records are decided before the price.
-  Those records MUST be held to these limits first, in the order of this section.
-  The price is kind 2 only when the start kept within them.
+  A call to a precompile whose price crosses gas detention is decided from the price before its value moves: it moves nothing and counts nothing, so it MUST be held to the price alone, and the stop is kind 2 whatever records its value transfer would have made.
   A value the caller cannot fund runs no precompile, counts nothing and is stopped by no limit.
-  The same order applies when a precompile the node cannot price runs out of the allowance: the start's records are held first, and running out of the allowance is kind 2 only when the start kept within them.
-  The exception begins at the price: the call's own regular charges — its static 100, its memory, the 11,300 value transfer and a cold access — MUST be decided first, as any opcode's, and one that crosses MUST stop the calling frame before anything moves, whether or not the caller can fund the value.
+  The call's own regular charges — its static 100, its memory, the 11,300 value transfer and a cold access — MUST be decided before the price, as any opcode's, and one that crosses MUST stop the calling frame before anything moves, whether or not the caller can fund the value.
   Inside data size, KV updates and state growth, the frame budget MUST be tested before the transaction limit.
   When the frame budget is crossed, the stop MUST name that budget, and `limit` is that budget, including when the transaction limit of the same dimension is crossed too.
   When the frame budget is not crossed, a crossing of the transaction limit MUST name that limit, and `limit` is the transaction limit.
@@ -753,6 +750,8 @@ A deposit that runs to a success or a revert and creates its caller is the ordin
   The body is refused at validation, so it does not cross at runtime.
   Gas detention remains kind 2 (see [Gas Detention on Withheld Gas](#12-gas-detention-on-withheld-gas)).
 - **A frame start** is held to the limits once it is decided: once the value moved and, for a creation, the creator's nonce was bumped and the created account made.
+  It MUST be held to what the start kept: the records, the state growth and the transfer log of the accounts it changed.
+  A call answered with a failure — a precompile that fails after its value moved — kept nothing, its failure taking back the value and the transfer log, so it MUST count nothing and MUST NOT be stopped by a limit; its result is the precompile's failure, which consumes the gas forwarded to it.
   A start the caller's account refuses — a value the caller cannot fund, a creation whose creator nonce cannot be bumped — MUST count nothing, be stopped by no limit, and be charged nothing at its opcode (see [History Gas](#7-history-gas)).
   A creation onto an occupied address fails on the collision after its creator's nonce was bumped, and MUST NOT be stopped for what its start would count: its failure discards the created account's record and its transfer log, and the creator's nonce record, which survives it, MUST be counted on the creator when the creation returns, the creator held to its limits with it.
   The created account was not new, so the collision adds no state growth.
@@ -874,8 +873,9 @@ A hint that would itself cross the data-size limit is neither forwarded nor coun
 A limit is enforced on the writes it guards before anything runs on them:
 
 - A frame whose start crosses a limit MUST be stopped before it runs an instruction, and what its start moved MUST be reverted with it: the value, the transfer log, a created account.
-  A frame answered without running — a call to an account with no code, a precompile, whatever it answered — MUST have its answer replaced by the stop, on the gas its caller forwarded, untouched.
-  When that answer is a precompile whose price crosses gas detention and whose start's records also cross a data-size, KV or state-growth budget, the records' stop is the result, as [Resource Limits](#10-resource-limits) orders the two.
+  A frame answered with a success without running — a call to an account with no code, a precompile that answers — MUST have its answer replaced by the stop, on the gas its caller forwarded, untouched.
+  A frame answered with a failure kept nothing and MUST NOT have its answer replaced by a stop: a precompile that fails consumes the gas forwarded to it, as without a limit.
+  A precompile whose price crosses gas detention moves nothing and is held to the price alone: its result is the compute stop, whatever records its value transfer would have made (see [Resource Limits](#10-resource-limits)).
   A stopped creation keeps its creator's nonce bump, and that write's record MUST be counted on the creator when the creation returns: the creator MUST be held to its limits with it before it runs on, and be stopped if it crosses one.
 - A frame answered without running whose answer is then rewritten to the stop (see [Gas Detention on Withheld Gas](#12-gas-detention-on-withheld-gas)) MUST have what its start moved reverted with it, as a frame that fails has.
 - Nothing counted before the first frame crosses the data-size limit: validation rejects a transaction whose body, with a record for each entry of its authorization list, would (see [Two-Pool Gas](#4-two-pool-gas-eip-8037-replaces-the-dual-gas-model)).
@@ -947,7 +947,7 @@ A contract can revert with the same bytes, and so can a caller that re-raises th
 - **Precompiles.**
   The call's own regular charges come first, as any opcode's: one that crosses MUST stop the calling frame before the price is consulted (see Order at one site in [Resource Limits](#10-resource-limits)).
   A call to a precompile forwarded more regular gas than the frame's allowance MUST be decided from the precompile's price before it runs: priced within the allowance, it runs on its whole forward; priced past the allowance but within the forward, it MUST NOT run and is the crossing; priced past its whole forward, it runs on the forward and fails, as without the read.
-  When the value has already moved, the start's records are held to the data-size, KV and state-growth limits before that crossing is the stop, and the price is kind 2 only when the start kept within them (see [Resource Limits](#10-resource-limits)).
+  The value has not moved when the price is consulted, so the call MUST be held to the price alone: the crossing is the stop, kind 2, whatever records its value transfer would have made (see [Resource Limits](#10-resource-limits)).
   Every precompile of the Satin set has a price; an input over a size limit is priced at zero, since it is refused before any gas check.
   An input priced between the allowance and the forward that would fail a check the precompile makes after its gas check is the crossing too.
   A call refused on its caller's account runs no precompile and is answered as without the read.
@@ -961,7 +961,7 @@ A contract can revert with the same bytes, and so can a caller that re-raises th
 
 {% hint style="info" %}
 A precompile a node adds or replaces is outside the Satin set and outside this specification.
-The reference implementation has no price for one, so it runs such a precompile on the allowance and treats running out of it as the crossing.
+The reference implementation has no price for one, so it runs such a precompile on the allowance and treats running out of it as the crossing: the failure has taken back the value and the transfer log, so the call is held to the allowance alone, and the stop is kind 2.
 {% endhint %}
 
 ### 13. Volatile-Data Access Control and `remainingComputeGas()`

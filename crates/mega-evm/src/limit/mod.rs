@@ -60,16 +60,21 @@
 //!   pool of the frame whose journal checkpoint holds the move, so the failure that takes the move
 //!   back takes the bytes back.
 //!
-//! A frame start's records are read off the journal before revm decides the start, as the hook
-//! that charges its caller for them reads them, and counted and held to the limits once revm
-//! decided it, on the pool its frame starts with; a debug build holds them to what revm's start
-//! made of the accounts. A frame revm builds returns the stop on its first run when its start
-//! crossed a limit, and its revert takes back the value revm moved and the transfer log it
-//! journaled; an answer revm gives without building a frame — a call to an account with no code, to
-//! a precompile — gives way to the stop, and what its start moved is taken back with it. A start
-//! revm refuses on its caller's account — a value its caller cannot fund, a creation whose
-//! creator's nonce cannot be bumped — moves and writes nothing, so it counts nothing and no limit
-//! stops it; its opcode, which reads the caller's account first, charged nothing for its records.
+//! A frame start's records are counted from what revm did, not predicted: the accounts the start
+//! writes on its frame are read before revm decides the start and again once it did, and what
+//! changed between, with the transfer log revm journaled, is counted and held to the limits on the
+//! pool its frame starts with. The hook that charges the caller for the records prices them from
+//! the journal's state at the opcode, and the start's credit settles a price that differs from
+//! what revm made. A frame revm builds returns the stop on its first run when its start crossed a
+//! limit, and its revert takes back the value revm moved and the transfer log it journaled; a
+//! success revm answers without building a frame — a call to an account with no code, to a
+//! precompile that answers — gives way to the stop, and what its start moved is taken back with
+//! it. An answer that failed kept nothing, revm having taken back what its start moved, so it is
+//! held to nothing and its result is revm's; a precompile gas detention answers from its price
+//! before revm runs it moved nothing and is held to the price alone. A start revm refuses on its
+//! caller's account — a value its caller cannot fund, a creation whose creator's nonce cannot be
+//! bumped — moves and writes nothing, so it counts nothing and no limit stops it; its opcode,
+//! which reads the caller's account first, charged nothing for its records.
 //! A start an inspector rewrote after its opcode is not charged again: what the opcode charged
 //! stands, and its declared part comes back only as it does for any start whose frame keeps
 //! nothing — a frame that fails, or a start revm refuses before it bumps a nonce or moves a value.
