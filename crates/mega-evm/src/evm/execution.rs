@@ -9,7 +9,7 @@
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use core::{cell::Cell, num::NonZeroU64};
+use core::num::NonZeroU64;
 
 use op_revm::{
     handler::{IsTxError, OpHandler},
@@ -67,23 +67,16 @@ pub const SYSTEM_CALL_REGULAR_GAS_LIMIT: u64 = 30_000_000;
 /// The Satin handler.
 ///
 /// It wraps op-revm's [`OpHandler`] and delegates every phase `MegaETH` does not extend to it.
-/// One handler runs one transaction, so what a phase learns about it is kept here.
+/// It keeps nothing of the transaction it runs: what a phase learns is kept on the context.
 #[derive(Debug)]
 pub struct MegaHandler<EVM, ERROR, FRAME> {
     op: OpHandler<EVM, ERROR, FRAME>,
-    /// The reservoir the transaction's result settled with, read by
-    /// [`post_execution`](Handler::post_execution) where revm builds the result's gas, and
-    /// consumed by the report once the result is built
-    /// ([`execution_result`](Handler::execution_result)) or by the error path
-    /// ([`catch_error`](Handler::catch_error)), so a handler reused for a system call, whose path
-    /// makes no capture, reports the system call's own reservoir.
-    settled_reservoir: Cell<Option<u64>>,
 }
 
 impl<EVM, ERROR, FRAME> MegaHandler<EVM, ERROR, FRAME> {
     /// Creates a handler.
     pub fn new() -> Self {
-        Self { op: OpHandler::new(), settled_reservoir: Cell::new(None) }
+        Self { op: OpHandler::new() }
     }
 }
 
@@ -387,10 +380,11 @@ where
         Ok(())
     }
 
-    /// revm's post-execution, with the reservoir the transaction leaves unspent read first, where
-    /// revm builds the result's gas: before the EIP-7623 floor check, which absorbs the reservoir
-    /// into the floor's cost when the floor binds. The refund before it does not move the
-    /// reservoir.
+    /// revm's post-execution, with the reservoir the transaction leaves unspent reported first
+    /// ([`AdditionalLimit::reservoir_remaining`](crate::AdditionalLimit::reservoir_remaining)),
+    /// where revm builds the result's gas: before the EIP-7623 floor check, which absorbs the
+    /// reservoir into the floor's cost when the floor binds. The refund before it does not move
+    /// the reservoir.
     fn post_execution(
         &self,
         evm: &mut Self::Evm,
@@ -398,7 +392,8 @@ where
         init_and_floor_gas: InitialAndFloorGas,
         eip7702_gas_refund: i64,
     ) -> Result<ResultGas, Self::Error> {
-        self.settled_reservoir.set(Some(exec_result.gas().reservoir()));
+        let reservoir = exec_result.gas().reservoir();
+        evm.ctx_mut().additional_limit.set_reservoir_remaining(reservoir);
         self.op.post_execution(evm, exec_result, init_and_floor_gas, eip7702_gas_refund)
     }
 
@@ -427,22 +422,24 @@ where
         self.op.reward_beneficiary(evm, exec_result)
     }
 
-    /// op-revm's result, and the reservoir it settled with reported
+    /// op-revm's result; for a system call, with the reservoir it settled with reported
     /// ([`AdditionalLimit::reservoir_remaining`](crate::AdditionalLimit::reservoir_remaining)).
     ///
-    /// revm's system-call path settles without [`post_execution`](Handler::post_execution): the
-    /// result it hands over here is the settled one, and the capture it finds is none, since the
-    /// report of the execution before consumed it. A deposit that halts is not a result: op-revm
-    /// turns it into a failed deposit, which leaves no reservoir.
+    /// revm's system-call path settles without [`post_execution`](Handler::post_execution), which
+    /// reports a transaction's: the result it hands over here is the settled one. A deposit that
+    /// halts is not a result: op-revm turns it into a failed deposit, which leaves no reservoir
+    /// ([`catch_error`](Handler::catch_error)).
     fn execution_result(
         &mut self,
         evm: &mut Self::Evm,
         result: FrameResult,
         result_gas: revm::context::result::ResultGas,
     ) -> Result<revm::context::result::ExecutionResult<Self::HaltReason>, Self::Error> {
-        let reservoir = self.settled_reservoir.take().unwrap_or_else(|| result.gas().reservoir());
+        let system_call = evm.ctx_ref().is_system_call().then(|| result.gas().reservoir());
         let result = self.op.execution_result(evm, result, result_gas)?;
-        evm.ctx_mut().additional_limit.set_reservoir_remaining(reservoir);
+        if let Some(reservoir) = system_call {
+            evm.ctx_mut().additional_limit.set_reservoir_remaining(reservoir);
+        }
         Ok(result)
     }
 
@@ -450,8 +447,8 @@ where
     /// halt and discards everything the deposit did. The halt is what the transaction reports;
     /// what the deposit counted stands, the body and the Oracle hints it forwarded before it
     /// halted, as for any transaction that halts. Any other error refuses the transaction, and the
-    /// layer's state is reset by the next one. A reservoir captured for a result that is not
-    /// reported is dropped here, so the next execution on this handler does not report it.
+    /// layer's state is reset by the next one. A reservoir reported for a result that op-revm then
+    /// refused is taken back here: a failed deposit leaves none, nor does an error.
     ///
     /// A failed deposit still bumps its caller's nonce and mints, so one whose caller had no
     /// account creates it: one account of state growth, which the transaction reports and its
@@ -462,7 +459,7 @@ where
         evm: &mut Self::Evm,
         error: Self::Error,
     ) -> Result<revm::context::result::ExecutionResult<Self::HaltReason>, Self::Error> {
-        self.settled_reservoir.take();
+        evm.ctx_mut().additional_limit.set_reservoir_remaining(0);
         let result = self.op.catch_error(evm, error);
         let failed_deposit = matches!(
             result,
@@ -1880,14 +1877,13 @@ mod tests {
         }
     }
 
-    /// One handler runs one transaction, and what a phase learns about it is kept on the handler:
-    /// the reservoir the transaction settled with is read where revm builds its result's gas and
-    /// reported once the result is built. A handler reused for a system call, whose path builds
-    /// no result gas and skips that read, reports the system call's own reservoir: the capture is
-    /// consumed by the report, and by the error path, which gives no report. A transaction below
-    /// the execution cap leaves a capture of nothing, one above it a capture of its own margin, and
-    /// a deposit that halts a capture its failed-deposit result never reports; after each, a
-    /// system call on revm's default gas limit reports the margin above the system-call budget.
+    /// The reservoir a transaction settled with is reported where revm builds its result's gas, and
+    /// a system call's, whose path builds no result gas there, once its result is built: a handler
+    /// reused for a system call reports the system call's own reservoir, not the transaction's
+    /// before it. A transaction below the execution cap reports nothing, one above it its own
+    /// margin, and a deposit that halts nothing, its failed-deposit result leaving no reservoir;
+    /// after each, a system call on revm's default gas limit reports the margin above the
+    /// system-call budget.
     #[test]
     fn test_a_reused_handler_reports_each_executions_own_reservoir() {
         use crate::{
@@ -1939,7 +1935,7 @@ mod tests {
             let result = handler.run(&mut evm).expect(case);
             assert_eq!(result.is_success(), succeeds, "{case}: {result:?}");
             let settled = evm.ctx().additional_limit().reservoir_remaining();
-            assert_ne!(settled, DEFAULT_RESERVOIR, "{case}: the capture would show");
+            assert_ne!(settled, DEFAULT_RESERVOIR, "{case}: the transaction's own would show");
 
             let call = MegaTransaction::new_system_tx_with_caller(CALLER, TARGET, Bytes::new());
             evm.inner.ctx.set_tx(call);
@@ -1949,7 +1945,7 @@ mod tests {
             assert_eq!(
                 evm.ctx().additional_limit().reservoir_remaining(),
                 DEFAULT_RESERVOIR,
-                "{case}: the system call's own reservoir, not the capture"
+                "{case}: the system call's own reservoir, not the transaction's"
             );
         }
     }
