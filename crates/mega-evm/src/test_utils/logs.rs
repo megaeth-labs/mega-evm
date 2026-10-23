@@ -22,7 +22,7 @@ pub fn transfer_log(from: Address, to: Address, value: U256) -> Log {
 
 /// Whether `log` is an EIP-7708 transfer log, rather than one a contract emitted.
 pub fn is_transfer_log(log: &Log) -> bool {
-    log.address == ETH_TRANSFER_LOG_ADDRESS && log.topics().first() == Some(&ETH_TRANSFER_LOG_TOPIC)
+    crate::limit::is_transfer_log(log)
 }
 
 #[cfg(test)]

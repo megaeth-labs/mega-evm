@@ -38,7 +38,10 @@ use revm::{
         host::{CompletedWrite, FrameStartKind},
         journaled_state::entry::{JournalEntry, SelfdestructionRevertStatus},
     },
-    primitives::{Address, StorageKey, KECCAK_EMPTY, U256},
+    primitives::{
+        eip7708::{ETH_TRANSFER_LOG_ADDRESS, ETH_TRANSFER_LOG_TOPIC},
+        Address, Log, StorageKey, KECCAK_EMPTY, U256,
+    },
     state::{Account, AccountInfo, EvmState, TransactionId},
     Journal,
 };
@@ -156,6 +159,8 @@ pub(crate) struct Accounts<'a> {
     state: &'a EvmState,
     /// The journal's entries, which revm clears between transactions: this transaction's.
     entries: &'a [JournalEntry],
+    /// The logs the journal holds, which a failed frame's revert takes back with its entries.
+    logs: &'a [Log],
     transaction_id: TransactionId,
     /// Whether a value movement journals an EIP-7708 transfer log.
     transfer_logs: bool,
@@ -184,6 +189,37 @@ pub(crate) struct CreatorBefore {
     empty: bool,
 }
 
+/// An account a frame's start may change on its frame, as the transaction held it before revm
+/// decided the start.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AccountBefore {
+    /// The account.
+    address: Address,
+    /// Whether the transaction had changed it from what it loaded.
+    changed: bool,
+    /// Whether it was empty under EIP-161.
+    empty: bool,
+}
+
+/// The accounts a frame's start writes on its frame — a call's caller and target, a creation's
+/// created account — as the transaction held them before revm decided the start, and how many logs
+/// the journal held then: what tells, once revm decided the start, what it made
+/// ([`Accounts::start_made`]). A creation's creator is not among them: its nonce record is the
+/// creator's, read off the bump once the creation returned ([`CreatorBefore`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StartBefore {
+    /// The accounts, each once.
+    accounts: [Option<AccountBefore>; 2],
+    /// The logs the journal held.
+    logs: usize,
+}
+
+/// Whether `log` is the EIP-7708 transfer log revm journals for a value movement: a log from the
+/// system address `0xff…fe` carrying ERC-20's `Transfer` event, which no contract can emit.
+pub(crate) fn is_transfer_log(log: &Log) -> bool {
+    log.address == ETH_TRANSFER_LOG_ADDRESS && log.topics().first() == Some(&ETH_TRANSFER_LOG_TOPIC)
+}
+
 impl<'a> Accounts<'a> {
     /// The accounts `journal` holds, in a transaction whose value movements journal transfer logs
     /// or not (`transfer_logs`).
@@ -191,6 +227,7 @@ impl<'a> Accounts<'a> {
         Self {
             state: &journal.state,
             entries: &journal.journal,
+            logs: &journal.logs,
             transaction_id: journal.transaction_id,
             transfer_logs,
         }
@@ -401,6 +438,42 @@ impl<'a> Accounts<'a> {
         let record = RecordDelta::of_account(before.changed, self.is_changed(before.address));
         let grows = before.empty && self.loaded(before.address).is_some_and(|a| !a.info.is_empty());
         Counted::records(record.added, record.taken, false).with_growth(u64::from(grows), 0)
+    }
+
+    /// The accounts at `first` and `second` as the transaction holds them before revm decides a
+    /// start that writes them on its frame, read loaded, as revm reads them, the journal holding
+    /// `logs` logs. An account named twice is read once.
+    pub(crate) fn start_before(
+        &self,
+        first: Address,
+        second: Option<Address>,
+        logs: usize,
+    ) -> StartBefore {
+        let read = |address| AccountBefore {
+            address,
+            changed: self.is_changed(address),
+            empty: self.is_empty(address),
+        };
+        let second = second.filter(|second| *second != first).map(read);
+        StartBefore { accounts: [Some(read(first)), second], logs }
+    }
+
+    /// What the start `before` was read of made on its frame, read off the journal once revm
+    /// decided it and before anything ran on it: each account's write record, by its change since
+    /// ([`RecordDelta::of_account`]); one account of state growth for each that was empty and is
+    /// not; and the EIP-7708 transfer log revm journaled since. The records are answered apart as
+    /// well, for the price of their history.
+    pub(crate) fn start_made(&self, before: &StartBefore) -> (RecordDelta, Counted) {
+        let mut records = RecordDelta::NONE;
+        let mut growth = 0;
+        for account in before.accounts.iter().flatten() {
+            let changed = self.is_changed(account.address);
+            records = records.with(RecordDelta::of_account(account.changed, changed));
+            growth += u64::from(account.empty && !self.is_empty(account.address));
+        }
+        let logs = self.logs.get(before.logs..).unwrap_or_default();
+        let logged = logs.iter().any(is_transfer_log);
+        (records, Counted::records(records.added, records.taken, logged).with_growth(growth, 0))
     }
 
     /// The account of state growth a transfer of `value` from `from` to `to` makes, as the
