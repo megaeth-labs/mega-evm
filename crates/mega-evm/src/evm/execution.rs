@@ -190,7 +190,7 @@ where
             eip7702_refund
         };
         let (applied, created) = applied_authorities(evm.ctx_mut(), checkpoint.journal_i);
-        if !charge_records_made_outside_a_frame(evm.ctx_mut(), gas, applied) {
+        if !charge_records_made_outside_a_frame(evm.ctx_ref(), gas, applied) {
             runtime_oog_unwind(evm.ctx(), checkpoint)?;
             return Ok(None);
         }
@@ -1583,7 +1583,7 @@ fn applied_authorities<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// answers with a success and no address.
 /// `false` when the transaction cannot pay, which is an out-of-gas before it runs.
 fn charge_records_made_outside_a_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
-    ctx: &mut MegaContext<DB, ExtEnvs>,
+    ctx: &MegaContext<DB, ExtEnvs>,
     gas: &mut GasTracker,
     applied_authorities: u64,
 ) -> bool {
