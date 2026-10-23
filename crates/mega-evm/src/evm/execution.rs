@@ -52,7 +52,7 @@ use revm::{
 
 use crate::{
     access::ComputeStop,
-    charge_write_records_history,
+    charge_write_records_history, history_gas,
     limit::{CreatorBefore, StartBefore},
     synthetic_frame_result,
     system::{keyless, Answer},
@@ -257,7 +257,7 @@ where
         }
         // A byte count with no price saturates, which no gas limit covers: the transaction is
         // rejected for not covering its own intrinsic gas.
-        let history = evm.ctx_ref().intrinsic_history_gas();
+        let history = history_gas(evm.ctx_ref().additional_limit.body()).unwrap_or(u64::MAX);
         let gas_limit = evm.ctx_ref().tx().gas_limit();
         let initial_gas = gas
             .initial_regular_gas()
@@ -267,6 +267,7 @@ where
                 InvalidTransaction::CallGasCostMoreThanGasLimit { gas_limit, initial_gas }.into()
             );
         }
+        evm.ctx_mut().additional_limit.admit_body_history();
         Ok(gas)
     }
 
@@ -1963,7 +1964,6 @@ mod tests {
     fn test_a_reused_handler_reports_each_executions_own_reservoir() {
         use crate::{
             constants::TX_GAS_LIMIT_CAP,
-            history_gas,
             test_utils::{op_transaction, zero_fee_l1_block_info},
             MegaTransaction, SYSTEM_CALL_REGULAR_GAS_LIMIT,
         };

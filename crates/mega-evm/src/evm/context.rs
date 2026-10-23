@@ -423,18 +423,18 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         !self.runs_neutral() && matches!(self.additional_limit.class(), TxClass::Ordinary)
     }
 
-    /// The history gas of the running (or last) transaction's body: the bytes it carries and the
+    /// The history gas of the running (or last) transaction's body — the bytes it carries and the
     /// write records its inclusion makes, which are known before it runs, at the cost per history
-    /// byte; nothing for a transaction that pays no history ([`prices_history`]). Its gas pays it
-    /// before the first frame, reservoir first, as intrinsic gas. A body whose bytes have no price
-    /// costs `u64::MAX`, which no gas limit covers.
+    /// byte — once validation admitted it: the gas limit covers it, and the transaction's gas pays
+    /// it before the first frame, reservoir first, as intrinsic gas. Nothing before that, so a
+    /// transaction validation refused reports none, and nothing for a transaction that pays no
+    /// history ([`prices_history`]).
     ///
     /// [`prices_history`]: Self::prices_history
     pub fn intrinsic_history_gas(&self) -> u64 {
-        if !self.prices_history() {
-            return 0;
-        }
-        history_gas(self.additional_limit.body()).unwrap_or(u64::MAX)
+        // Validation admits no body whose bytes have no price: their gas saturates, which no gas
+        // limit covers.
+        history_gas(self.additional_limit.intrinsic_history_bytes()).unwrap_or(u64::MAX)
     }
 
     /// The history gas the running transaction pays for `records` write records: their price, or

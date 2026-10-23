@@ -33,7 +33,7 @@ use revm::{
     Database, ExecuteCommitEvm, ExecuteEvm,
 };
 
-use crate::common::{call, context, create, runs_at_measurement_prices};
+use crate::common::{call, context, create, history_is_free, runs_at_measurement_prices};
 
 const CALLER: Address = address!("0000000000000000000000000000000000800000");
 const CALLEE: Address = address!("0000000000000000000000000000000000800001");
@@ -435,4 +435,24 @@ fn test_a_gas_limit_short_of_the_body_is_rejected() {
         );
     }
     assert_eq!(gas_used(funded(), call(CALLER, CALLEE, U256::ZERO, minimum)), Ok(minimum));
+}
+
+/// The history of a transaction's body is its intrinsic history gas once validation admitted it,
+/// and nothing before: a transaction validation refuses — its gas limit below the intrinsic charge
+/// alone, or short of the body's history — reports none, neither the figure it would have paid nor
+/// the one the transaction before it paid.
+#[test]
+fn test_the_bodys_history_is_reported_once_validation_admits_it() {
+    if history_is_free() {
+        return;
+    }
+    let mut evm = MegaEvm::new(context(funded()));
+    let minimum = EMPTY_CALL + body_history(0);
+    evm.transact_raw(call(CALLER, CALLEE, U256::ZERO, minimum)).expect("the minimum is admitted");
+    assert_eq!(evm.ctx().intrinsic_history_gas(), body_history(0), "admitted");
+    for gas_limit in [1, EMPTY_CALL, minimum - 1] {
+        let refused = evm.transact_raw(call(CALLER, CALLEE, U256::ZERO, gas_limit));
+        assert!(refused.is_err(), "at {gas_limit}: {refused:?}");
+        assert_eq!(evm.ctx().intrinsic_history_gas(), 0, "at {gas_limit}: refused");
+    }
 }

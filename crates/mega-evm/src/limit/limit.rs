@@ -106,6 +106,9 @@ pub struct AdditionalLimit {
     kept: Kept,
     /// One per start revm decided whose result has not returned, the latest last.
     decided: Vec<Decided>,
+    /// The bytes of the body the transaction's intrinsic history gas pays for: the body once
+    /// validation admitted that gas, and none before or for a transaction that pays no history.
+    intrinsic_history_bytes: u64,
     /// The history gas the settled transaction spent.
     history_gas_spent: u64,
     /// The history bytes the settled transaction appended.
@@ -289,6 +292,7 @@ impl AdditionalLimit {
         self.pre_frame_stop = None;
         self.kept = Kept::default();
         self.decided.clear();
+        self.intrinsic_history_bytes = 0;
         self.history_gas_spent = 0;
         self.history_bytes = 0;
         self.reservoir_remaining = None;
@@ -340,6 +344,19 @@ impl AdditionalLimit {
     /// revert takes back.
     pub(crate) const fn body(&self) -> u64 {
         self.body
+    }
+
+    /// The bytes of the body the transaction's intrinsic history gas pays for: the body once
+    /// validation admitted that gas ([`admit_body_history`](Self::admit_body_history)), and none
+    /// before or for a transaction that pays no history.
+    pub(crate) const fn intrinsic_history_bytes(&self) -> u64 {
+        self.intrinsic_history_bytes
+    }
+
+    /// Records that validation admitted the history gas of the transaction's body: its gas limit
+    /// covers it, and the transaction pays it before its first frame.
+    pub(crate) const fn admit_body_history(&mut self) {
+        self.intrinsic_history_bytes = self.body;
     }
 
     /// Whether the transaction's body, with one write record for each of its `authorizations`,
@@ -817,7 +834,7 @@ impl AdditionalLimit {
     pub(crate) fn settle_history(&mut self, priced: bool, spent: u64) {
         self.history_gas_spent = spent;
         self.history_bytes = if priced {
-            self.body
+            self.intrinsic_history_bytes
                 .saturating_add(WRITE_RECORD_SIZE.saturating_mul(self.authorities))
                 .saturating_add(positive(self.kept.net(LimitKind::DataSize) as i128))
                 .saturating_sub(TRANSFER_LOG_SIZE.saturating_mul(self.kept.transfer_logs))
