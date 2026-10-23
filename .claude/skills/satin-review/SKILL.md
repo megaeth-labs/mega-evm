@@ -1,6 +1,6 @@
 ---
 name: satin-review
-description: Guide for reviewing the Satin engine pull request (#386) in megaeth-labs/mega-evm, which holds the whole engine now that the stacked pull requests and #407 have merged into it. Use when reviewing #386 or the Satin engine, or when the user says "review satin". Gives the scope and the review range, the design changes #407 made to what the stacked pull requests describe, the module map with the invariants to check, the reading order, how to rate a finding, the revert-or-halt rule with its deliberate exceptions, and the decisions already made. Temporary: removed before the Satin pull request merges.
+description: Guide for reviewing the Satin engine pull request (#386) in megaeth-labs/mega-evm, which holds the whole engine now that the stacked pull requests and #407 have merged into it. Use when reviewing #386 or the Satin engine, or when the user says "review satin". Gives the scope and the review range, the design changes #407 and the commits after it made to what the stacked pull requests describe, the module map with the invariants to check, the reading order, how to rate a finding, the revert-or-halt rule with its deliberate exceptions, and the decisions already made. Temporary: removed before the Satin pull request merges.
 ---
 
 # Reviewing the Satin engine (pull request #386)
@@ -10,13 +10,14 @@ It is deleted before the Satin pull request merges, so nothing else may link to 
 It is a map: where each part of the engine lives, what to check there, what changed after the stacked pull requests were described, and what is already decided.
 Implementation detail lives in [`AGENTS.md`](../../../AGENTS.md) and the specification in [`docs/spec/upgrades/satin.md`](../../../docs/spec/upgrades/satin.md); this guide links them, and restates a rule only to say what changed.
 [`REVIEW.md`](../../../REVIEW.md) is the repository's own review rubric; its consensus-critical list overlaps the checks below.
-The guide describes the code at `cz/feat/satin-w2` once #407 has merged into it.
+The guide describes the code at `cz/feat/satin-w2` with #407 merged into it and the commits after it.
 
 ## What is under review
 
 - The Satin engine, in pull request #386 (`cz/feat/satin-w2`), judged at its final state.
   The stacked pull requests #387, #388, #390, #399 and #400 (with #404, merged into #400's branch) merged into it, and then #407 (`cz/feat/satin-w9`); each description explains its part as it was merged, and a later part may have changed an earlier one.
-  "Design changes a reviewer must know" below lists what #407 changed.
+  The commits after #407 on `cz/feat/satin-w2` are part of this pull request and have no description of their own.
+  "Design changes a reviewer must know" below lists what #407 and those commits changed, a change those commits made marked as such.
 - The review range is the pull request's own diff.
   Its base, `cz/feat/satin-review-base`, is `satin` before the Satin skeleton: `a8f8c7c9`, the CI-only commit before it.
   So GitHub's "Files changed" holds the skeleton (#385) and every later series: the whole engine.
@@ -45,6 +46,7 @@ The guide describes the code at `cz/feat/satin-w2` once #407 has merged into it.
 Nothing.
 #407 has merged into this branch, and with it everything its description listed as still to be added: inspectors on revm's own inspected lifecycle, a rewritten result taken as given, one fixed gas budget for the pre-block calls, the cleanups, and the KV-update and state-growth limits with their 98/100 frame shares and the destruction table's give-backs.
 It also counts a creator's nonce record when the creation returns, which its description did not list.
+The commits after it on this branch count a frame start's records from what revm did; they are part of this pull request, and the design changes below mark what they changed.
 Every module is at its final state for this review: there is no longer a table of stable and changing modules, nor a rule to hold back findings in a changing one.
 What follows this pull request changes no rule.
 The fork pins move from the reviewed commits to the merged commits of megaeth-labs/revm#76 and megaeth-labs/op-revm#8, and to release tags once the line is final.
@@ -52,7 +54,8 @@ Performance work is left for later: the optimisations #407 recorded are made tog
 
 ## Design changes a reviewer must know
 
-The stacked pull requests' descriptions predate #407, which changed parts of what they describe.
+The stacked pull requests' descriptions predate #407 and the commits after it on this branch, which changed parts of what they describe.
+A change made after #407 merged is marked as such: it is not in #407's diff.
 Each change is stated here in plain words with its reason; the specification has the rule and `AGENTS.md` the mechanism.
 
 ### Where the engine meets revm
@@ -82,6 +85,7 @@ Each change is stated here in plain words with its reason; the specification has
   The per-frame deduplication is gone, a `SELFDESTRUCT` records the account it clears as well as its beneficiary, and a creation is charged exactly the records it makes.
   Why: the record measures the state the transaction keeps, by revm's own notion of a change; the per-frame count over-counted, and charged history gas for writes that leave nothing.
 - **A frame start is held to the limits once revm decided it, on what it kept.**
+  Made after #407 merged: #407 already held a start once revm decided it — a built frame stopped before its first instruction, an answer stopped on its untouched forward, a collision not stopped for its start — but to records it predicted from the journal before revm decided, which it held the two answers below to as well; the commits after it count what revm did and hold those two answers to nothing but the price.
   Its accounts on the frame are read before revm decides the start and again once it did, and what changed between — each account's record, an account that was empty and is not, the transfer log revm journaled — is counted on the started frame's pools; nothing is predicted.
   A frame revm built returns the stop before its first instruction, and a success revm gave without building a frame gives way to the stop on the untouched forward, its value move taken back.
   An answer that failed kept nothing, revm having taken back what its start moved, and is held to nothing: a value call to a precompile that fails at a budget boundary ends as the precompile's failure, which burns its forward, not as a limit's stop.
@@ -246,7 +250,7 @@ For each module: where it is, what to check, the spec sections, and the `AGENTS.
   - A write is counted in the Host's completed-write hook (`write_completed`), which revm calls only once the opcode made every charge, so a failed opcode counts nothing; the Host's write methods count nothing, whoever calls them.
   - A completed write's record is held to the limits before its history is charged, so a record a limit refuses is not charged; at a frame start the order is the other way round, the caller paying at its opcode before revm decides the start and its records are held.
   - The frame-start hook (`frame_starting`) charges the caller the history of the start's records after the forward is taken, out of what the caller kept, and declares the frame's own part on the fork's start (`FrameStart::charge`); a caller that cannot pay gets the forward back, the halt's record re-written, and starts no frame.
-  - A start's records, state growth and transfer log are read off what revm did: its accounts before revm decides the start and again once it did (`FrameStart::of` and `FrameStart::made` in `src/evm/execution.rs`, `Accounts::start_before` and `start_made` in `src/limit/record.rs`), counted on the started frame's pools (`AdditionalLimit::count_start`) for a frame revm built or a call it answered with a success; an answer that failed, and a precompile gas detention answers from its price, count nothing and are held to nothing but the price; a start revm refuses on its caller's account counts nothing and is charged nothing.
+  - A start's records, state growth and transfer log are read off what revm did: its accounts before revm decides the start and again once it did (`FrameStart::of` and `FrameStart::count` in `src/evm/execution.rs`, `Accounts::start_before` and `start_made` in `src/limit/record.rs`), counted on the started frame's pools (`AdditionalLimit::count_start`) for a frame revm built or a call it answered with a success; an answer that failed, and a precompile gas detention answers from its price, count nothing and are held to nothing but the price; a start revm refuses on its caller's account counts nothing and is charged nothing.
   - A frame revm built whose start crossed a limit ends with the stop before its first instruction (`end_before_it_runs`); a success revm gave without building a frame gives way to the stop on its untouched forward, its value move and log taken back to the start's journal mark (`stop_the_answer_at`, `take_back_a_stopped_answer`); an answer that failed is revm's result, held to nothing.
   - Pre-frame charges (a deposit's caller account, EIP-7702 authorities, pre-frame records) either succeed or leave an included out-of-gas halt without a frame, with the journal unwound as revm unwinds it (a creation keeps its nonce bump).
   - A deposit that fails validation or cannot pay a pre-frame charge is included as a failed deposit: whole gas limit used, mint credited, nonce bumped.
