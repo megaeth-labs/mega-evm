@@ -51,7 +51,9 @@ use revm::{
         result::{ExecutionResult, Output},
         TxEnv,
     },
-    interpreter::{interpreter::EthInterpreter, CallInputs, CallOutcome, CallValue},
+    interpreter::{
+        interpreter::EthInterpreter, CallInputs, CallOutcome, CallValue, InstructionResult,
+    },
     Database, Inspector,
 };
 
@@ -1164,16 +1166,14 @@ fn test_a_value_call_its_recipient_cannot_hold_keeps_nothing() {
     }
 }
 
-/// A value call to a precompile that fails after its gas check — the BN254 pairing given an input
-/// of the wrong length — moved its value and journaled its transfer log before the precompile ran,
-/// and revm takes both back with the failure. The start is held to the limits as revm made it, on
-/// the records and the log it counted before the failure took them back: under a limit one byte
-/// short of them the call is answered with the stop rather than the failure, and either way the
-/// transaction keeps its body alone.
-#[test]
-fn test_a_failed_precompiles_start_is_held_to_the_limits_it_counted_against() {
-    const EC_PAIRING: Address = address!("0000000000000000000000000000000000000008");
-    let actor = BytecodeBuilder::default()
+/// The BN254 pairing precompile.
+const EC_PAIRING: Address = address!("0000000000000000000000000000000000000008");
+
+/// An actor that sends [`VALUE`] to the BN254 pairing precompile with an input of one byte, the
+/// wrong length, which the precompile refuses after its gas check, forwarding all the gas it may,
+/// and returns what the call returned.
+fn failing_pairing_actor() -> Bytes {
+    BytecodeBuilder::default()
         .append_many([PUSH0, PUSH0])
         .push_number(1_u8)
         .append(PUSH0)
@@ -1181,35 +1181,99 @@ fn test_a_failed_precompiles_start_is_held_to_the_limits_it_counted_against() {
         .push_address(EC_PAIRING)
         .append_many([GAS, CALL, POP])
         .return_returndata()
-        .build();
-    let db = || {
-        MemoryDatabase::default()
-            .account_balance(ACTOR, U256::from(VALUE))
-            .account_code(ACTOR, actor.clone())
-    };
+        .build()
+}
+
+/// The world [`failing_pairing_actor`] runs in, and the transaction that calls it.
+fn failing_pairing_world() -> (MemoryDatabase, MegaTransaction) {
+    let db = MemoryDatabase::default()
+        .account_balance(ACTOR, U256::from(VALUE))
+        .account_code(ACTOR, failing_pairing_actor());
     let tx = OpTx(op_transaction(TxEnv {
         caller: CALLER,
         kind: TxKind::Call(ACTOR),
         gas_limit: value_call_room(),
         ..Default::default()
     }));
+    (db, tx)
+}
+
+/// A value call to a precompile that fails after its gas check — the BN254 pairing given an input
+/// of the wrong length — moved its value and journaled its transfer log before the precompile ran,
+/// and revm takes both back with the failure, before the start is held to anything. The start kept
+/// nothing, so it is held to nothing: under a limit one byte short of what its value transfer would
+/// have counted, the call fails as it does without a limit, with the precompile's failure and not
+/// with a limit's stop, and either way the transaction keeps its body alone.
+#[test]
+fn test_a_failed_precompiles_start_kept_nothing_and_is_held_to_nothing() {
+    let (db, tx) = failing_pairing_world();
     let body = transaction_body_bytes(&tx);
     let start = 2 * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE;
 
-    let failed = execute_under(db(), tx.clone(), EvmTxRuntimeLimits::no_limits());
-    assert!(failed.result.is_success(), "{:?}", failed.result);
-    assert_eq!(failed.result.output(), Some(&Bytes::new()), "the precompile's failure");
-    assert!(failed.result.logs().is_empty(), "the failure took the transfer log back");
-    assert_eq!(failed.usage, LimitUsage { data_size: body, write_records: 0, state_growth: 0 });
-
+    let failed = execute_under(db.clone(), tx.clone(), EvmTxRuntimeLimits::no_limits());
     let limit = body + start - 1;
-    let stopped =
-        execute_under(db(), tx, EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit));
-    let budget = crate::common::share(start - 1);
-    let stop = MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit: budget };
-    assert_eq!(stopped.result.output(), Some(&Bytes::from(stop.abi_encode())), "the stop");
-    assert!(stopped.result.logs().is_empty());
-    assert_eq!(stopped.usage, LimitUsage { data_size: body, write_records: 0, state_growth: 0 });
+    let short =
+        execute_under(db, tx, EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit));
+    for outcome in [&failed, &short] {
+        assert!(outcome.result.is_success(), "{:?}", outcome.result);
+        assert_eq!(outcome.result.output(), Some(&Bytes::new()), "the precompile's failure");
+        assert!(outcome.result.logs().is_empty(), "the failure took the transfer log back");
+        assert_eq!(
+            outcome.usage,
+            LimitUsage { data_size: body, write_records: 0, state_growth: 0 }
+        );
+        assert_eq!(outcome.limit_exceeded, None, "no limit stopped it");
+        assert_eq!(balance(outcome, ACTOR), U256::from(VALUE), "the value came back");
+    }
+    assert_eq!(short.gas, failed.gas, "the same gas on every ledger");
+}
+
+/// Records how every call to [`EC_PAIRING`] ends.
+#[derive(Default)]
+struct PairingEnds(Vec<CallOutcome>);
+
+impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for PairingEnds {
+    fn call_end(
+        &mut self,
+        _context: &mut MegaContext<DB>,
+        inputs: &CallInputs,
+        outcome: &mut CallOutcome,
+    ) {
+        if inputs.target_address == EC_PAIRING {
+            self.0.push(outcome.clone());
+        }
+    }
+}
+
+/// A failed precompile answer at a frame-budget boundary burns what its caller forwarded, as revm
+/// burns the forward of any failed precompile: under a frame cap that gives the precompile's frame
+/// one byte less than its value transfer would count, the call halts with the precompile's error
+/// and no gas left, where a limit's stop would revert and hand the forward back, and the
+/// transaction uses the gas it uses without the cap. An inspector sees the call end so, and the
+/// inspected run settles as the plain one.
+#[test]
+fn test_a_failed_precompile_answer_at_a_frame_budget_boundary_burns_its_forward() {
+    let (db, tx) = failing_pairing_world();
+    let start = 2 * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE;
+    let capped = EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(cap_for(1, start - 1));
+
+    let unlimited = execute_under(db.clone(), tx.clone(), EvmTxRuntimeLimits::no_limits());
+    let plain = execute_under(db.clone(), tx.clone(), capped);
+    let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(capped))
+        .with_inspector(PairingEnds::default());
+    let inspected = evm.execute_transaction(tx).expect("the transaction is valid");
+    for outcome in [&plain, &inspected] {
+        assert!(outcome.result.is_success(), "{:?}", outcome.result);
+        assert_eq!(outcome.result.output(), Some(&Bytes::new()), "the precompile's failure");
+        assert_eq!(outcome.limit_exceeded, None);
+        assert_eq!(outcome.gas, unlimited.gas, "the gas of the run without the cap");
+        assert_eq!(outcome.usage, unlimited.usage);
+    }
+    let ends = &evm.inspector().0;
+    let [end] = ends.as_slice() else { panic!("one call to the precompile: {ends:?}") };
+    assert_eq!(end.result.result, InstructionResult::PrecompileError, "the precompile's error");
+    assert_eq!(end.result.gas.remaining(), 0, "the forward is burned");
+    assert!(end.result.output.is_empty(), "no stop's revert data");
 }
 
 /// A `CREATE` from a contract whose nonce cannot be bumped is refused by the opcode itself, which

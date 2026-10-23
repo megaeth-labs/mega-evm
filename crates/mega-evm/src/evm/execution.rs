@@ -547,12 +547,13 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     ///    frame starts with, where its records and transfer log are drawn
     ///    ([`AdditionalLimit::count_start`](crate::AdditionalLimit)): a frame revm built whose
     ///    start crossed a limit ends with the stop before it runs an instruction ([`stop_action`],
-    ///    [`end_before_it_runs`]); an answer gives way to the stop ([`stop_the_answer`]), what its
-    ///    start moved taken back to the mark, as revm takes back a frame that fails
-    ///    ([`take_back_a_stopped_answer`]). A start revm refuses on its caller's account writes
-    ///    nothing and counts nothing, and a creation revm answers kept nothing. A creation's
-    ///    creator is handed to its return, which counts the record of the nonce revm bumped
-    ///    ([`frame_return_result`](EvmTr::frame_return_result)).
+    ///    [`end_before_it_runs`]); a success revm answered gives way to the stop
+    ///    ([`stop_the_answer`]), what its start moved taken back to the mark, as revm takes back a
+    ///    frame that fails ([`take_back_a_stopped_answer`]). An answer that failed — a start revm
+    ///    refuses on its caller's account, a precompile that fails, a creation revm answers — kept
+    ///    nothing, revm having taken back what it moved, and is held to nothing: its result is
+    ///    revm's. A creation's creator is handed to its return, which counts the record of the
+    ///    nonce revm bumped ([`frame_return_result`](EvmTr::frame_return_result)).
     ///
     /// A frame revm built is held to the compute limit for its first run (gas detention's
     /// [`on_frame_run`](Detention::on_frame_run)). A `keylessDeploy` call's frame runs no
@@ -564,9 +565,9 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     /// interceptor's answer, a precompile's, revm's for a call it did not start — is held to the
     /// compute limit, as a frame that ran would be ([`settle_answer`]). A precompile, which revm
     /// runs at step 6, is decided from its price before it runs when the engine can price it, and
-    /// answered without running when that price crosses the compute limit; one it cannot price is
-    /// run on the gas the limit leaves the frame rather than on all its caller forwarded
-    /// ([`hold_precompile`]).
+    /// answered without running when that price crosses the compute limit, before revm moves
+    /// anything for it, so it is held to the price alone; one it cannot price is run on the gas
+    /// the limit leaves the frame rather than on all its caller forwarded ([`hold_precompile`]).
     ///
     /// Step 2 is the pre-frame check: it answers a frame nothing may start. No limit has a part in
     /// it: validation admits no transaction a limit would stop before its first frame, and a start
@@ -618,11 +619,10 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             &mut frame_init,
         );
         if hold == PrecompileHold::Crossing {
-            // revm never decides the start: what it would have counted is held to the limits as
-            // the hypothetical the answer gives way to. A creation is never a precompile's.
+            // revm never decides the start, so nothing moved and nothing is counted: the answer is
+            // held to the price alone, which its settlement turns into the stop. A creation is
+            // never a precompile's.
             let mut result = crossing_answer(&frame_init.frame_input);
-            let verdict = ctx.additional_limit.hypothetical_start(&start.counted, start.shares);
-            stop_the_answer_at(ctx, &start, &mut result, verdict);
             settle_answer(ctx, depth, gas_limit, &mut result);
             return Ok(ItemOrResult::Result(result));
         }
@@ -663,19 +663,17 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             Detention::restore_forward(result.interpreter_result_mut(), withheld);
         }
         let succeeded = result.instruction_result().is_ok();
-        // A creation revm answers creates nothing: refused on its creator's account, it bumped
-        // nothing; failed onto an occupied address, it is held to nothing at its start, and its
-        // failure takes its records and transfer log back. Its creator's record, if revm bumped the
-        // nonce, is counted on the creator as the answer returns, as a built creation's is.
+        // An answer that failed kept nothing: revm took back what its start moved — a value its
+        // caller could not fund, a precompile's failure — or, for a creation, what it made at an
+        // occupied address. It is held to nothing, and its result is revm's. A creation revm
+        // answers creates nothing; its creator's record, if revm bumped the nonce, is counted on
+        // the creator as the answer returns, as a built creation's is. A call revm answered with a
+        // success is held to the records its start made, which revm committed.
         ctx.additional_limit.open_start(depth, start.creator);
-        if let FrameResult::Call(_) = result {
-            let verdict = if succeeded {
-                let (counted, credit) = start.made(ctx);
-                let gas = result.gas_mut().tracker_mut();
-                ctx.additional_limit.count_start(gas, &counted, credit)
-            } else {
-                ctx.additional_limit.hypothetical_start(&start.counted, start.shares)
-            };
+        if succeeded && matches!(result, FrameResult::Call(_)) {
+            let (counted, credit) = start.made(ctx);
+            let gas = result.gas_mut().tracker_mut();
+            let verdict = ctx.additional_limit.count_start(gas, &counted, credit);
             stop_the_answer_at(ctx, &start, &mut result, verdict);
         }
         settle_answer(ctx, depth, gas_limit, &mut result);
@@ -1429,10 +1427,10 @@ fn account_nonce<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx.journal_ref().state.get(&address).map_or(0, |account| account.info.nonce)
 }
 
-/// Holds `answer`, revm's or gas detention's answer to the call `start` began, to `verdict`: a
-/// crossing is the stop the answer gives way to, on the gas its caller forwarded, untouched, as a
-/// frame stopped before it ran ([`stop_the_answer`]). What a successful answer's start moved is
-/// taken back with it ([`take_back_a_stopped_answer`]); a failed one's revm took back itself.
+/// Holds `answer`, the success revm answered the call `start` began with, to `verdict`: a crossing
+/// is the stop the answer gives way to, on the gas its caller forwarded, untouched, as a frame
+/// stopped before it ran ([`stop_the_answer`]), and what the answer's start moved is taken back
+/// with it ([`take_back_a_stopped_answer`]). A failed answer kept nothing and is held to nothing.
 fn stop_the_answer_at<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     start: &FrameStart,

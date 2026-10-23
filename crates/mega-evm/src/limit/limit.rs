@@ -623,14 +623,6 @@ impl AdditionalLimit {
         kept.transfer_logs += u64::from(counted.transfer_log);
     }
 
-    /// The verdict on a start revm is not asked to decide — a call gas detention answers without
-    /// running the precompile it targets — had revm made it: `counted`, the records and transfer
-    /// log its value transfer would make, held to `shares`, the pools its frame would start with,
-    /// and to the transaction's limits. Nothing is counted.
-    pub(crate) fn hypothetical_start(&self, counted: &Counted, shares: PoolAmounts) -> LimitCheck {
-        self.check(shares, [0; PoolId::COUNT], counted, true)
-    }
-
     /// Admits an Oracle hint of `bytes`: held to the transaction's limit before it is counted, and
     /// never taken back once counted. A hint is on no frame's budget.
     pub(crate) fn admit_hint(&mut self, bytes: u64) -> LimitCheck {

@@ -300,18 +300,15 @@ fn calls_with_value_returning(first: u8, to: Address) -> Bytes {
 }
 
 /// A value call to modexp after a read, priced past the allowance and within the forward, is
-/// answered without running with gas detention's stop — unless the start it would have made
-/// crosses the data size first. The start's records, modexp's and the caller's, and the transfer
-/// log of the value it would move are held to the transaction's limit and to the budget its frame
-/// would get before detention classifies the answer, so data size wins over compute at one start.
+/// answered without running with gas detention's stop, before revm decides the start: its value
+/// never moves, so the answer is held to the price alone, and no data size is counted for the
+/// records and the transfer log its value transfer would have made.
 ///
-/// Under a transaction limit, or a frame cap, that leaves the start one byte short of its records
-/// and its log — which the records alone fit, so the log is what crosses — the call is answered
-/// with the data-size stop, naming the budget the start crossed. With room for the start in its
-/// frame's share, it is answered with the compute stop. Nothing moves either way, and the
-/// transaction keeps its body alone.
+/// Under a transaction limit, or a frame cap, that would leave the start one byte short of its
+/// records and its log, the call is answered with the compute stop, as it is with room for the
+/// start in its frame's share. Nothing moves, and the transaction keeps its body alone.
 #[test]
-fn test_a_start_crossing_data_size_and_compute_at_once_is_the_data_size_stop() {
+fn test_a_precompile_answered_from_its_price_at_a_data_size_boundary_is_the_compute_stop() {
     use alloy_sol_types::SolError;
     use mega_evm::{LimitKind, MegaLimitExceeded};
     let above = costly_modexp_input(64, 0);
@@ -324,27 +321,20 @@ fn test_a_start_crossing_data_size_and_compute_at_once_is_the_data_size_stop() {
         let body = transaction_body_bytes(&tx);
         let limits = EvmTxRuntimeLimits::default();
         let rows = [
-            // The transaction's own frame gets what the body leaves, and the call's start the
-            // share of it, which the start crosses before the transaction's limit.
-            (
-                "the transaction's limit",
-                limits.with_tx_data_size_limit(body + start - 1),
-                Some(share(start - 1)),
-            ),
-            ("the frame cap", limits.with_frame_data_size_limit(cap), Some(start - 1)),
-            ("room for the start", limits.with_tx_data_size_limit(body + room), None),
-            ("room under the frame cap", limits.with_frame_data_size_limit(cap + 1), None),
+            // The transaction's own frame gets what the body leaves, and the call's start would
+            // get the share of it, which its value transfer's records and log would cross.
+            ("the transaction's limit", limits.with_tx_data_size_limit(body + start - 1)),
+            ("the frame cap", limits.with_frame_data_size_limit(cap)),
+            ("room for the start", limits.with_tx_data_size_limit(body + room)),
+            ("room under the frame cap", limits.with_frame_data_size_limit(cap + 1)),
         ];
-        for (case, limits, data_size) in rows {
+        for (case, limits) in rows {
             let db = accounts(calls_with_value_returning(TIMESTAMP, MODEXP), VALUE);
             let (run, _) = run_tx(db, tx.clone(), limits, false);
             assert!(run.outcome.result.is_success(), "{case}: {:?}", run.outcome.result);
-            let stop = match data_size {
-                Some(limit) => MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit },
-                None => MegaLimitExceeded {
-                    kind: LimitKind::ComputeGas.as_u8(),
-                    limit: run.limit.expect("the read set a limit"),
-                },
+            let stop = MegaLimitExceeded {
+                kind: LimitKind::ComputeGas.as_u8(),
+                limit: run.limit.expect("the read set a limit"),
             };
             assert_eq!(
                 run.outcome.result.output(),

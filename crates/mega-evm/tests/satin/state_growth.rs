@@ -1375,9 +1375,9 @@ fn test_a_deposits_new_caller_is_counted_before_its_first_frame() {
 /// its start moved goes back: a value call to a new account under a budget of nothing is answered
 /// with the stop, its value not moved, and its caller catches it. A creation's start alike: its
 /// init code never runs, and its creator keeps the nonce bump revm made before the creation's
-/// checkpoint. A call to a precompile whose start adds an account crosses the state growth before
-/// gas detention prices it: the records' stop is the answer, though the price crosses the compute
-/// limit too.
+/// checkpoint. A value call to a precompile that gas detention answers from its price moves
+/// nothing: the price is the stop, kind 2, though the account its value transfer would add has no
+/// room in the state growth either.
 #[test]
 fn test_a_start_over_the_state_growth_is_stopped_before_it_runs() {
     use revm::bytecode::opcode::TIMESTAMP;
@@ -1407,7 +1407,9 @@ fn test_a_start_over_the_state_growth_is_stopped_before_it_runs() {
     );
     let cap = EvmTxRuntimeLimits::no_limits().with_block_env_access_compute_gas_limit(50_000);
     let both = run_a(precompile.clone(), 1, cap.with_tx_state_growth_limit(0));
-    assert_eq!(output(&both), growth_stop(0), "the records first");
+    let (kind, _) = mega_evm::decode_mega_limit_exceeded(&output(&both)).expect("a stop");
+    assert_eq!(kind, LimitKind::ComputeGas, "the price alone, not the account");
+    assert!(both.state.get(&kzg).is_none_or(|account| account.info.is_empty()), "nothing moved");
     let priced = run_a(precompile, 1, cap);
     let (kind, _) = mega_evm::decode_mega_limit_exceeded(&output(&priced)).expect("a stop");
     assert_eq!(kind, LimitKind::ComputeGas, "without the state growth, the price");

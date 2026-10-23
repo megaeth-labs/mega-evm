@@ -189,17 +189,17 @@ fn test_a_creator_nonce_record_stops_the_creator_at_its_kv_budget() {
 
 /// A value `CALL` to the BN254 pairing precompile with no input, whose price, 45,000, is past
 /// what a read of the block environment under a cap of 20,000 leaves once the caller's own
-/// `CALL` is paid, and within the forward. The start's two records, the caller's
-/// balance and the precompile's, are inside every budget, so the price is the stop, kind 2, and
-/// the value, the transfer log and the records are taken back with it, the new account's state
-/// gas included. A value the caller cannot fund runs no precompile, counts nothing and is stopped
-/// by no limit.
+/// `CALL` is paid, and within the forward. Gas detention answers it from its price before revm
+/// runs it, so the value never moves: the price is the stop, kind 2, and nothing is moved, logged
+/// or recorded, the new account's state gas coming back. A value the caller cannot fund runs no
+/// precompile, counts nothing and is stopped by no limit.
 ///
-/// Under a transaction KV limit of 2 the started frame's KV share is `floor(2 × 98 / 100)` = 1,
-/// the two records cross it, and the stop is kind 1, `limit` 1, not the price. A precompile the
-/// node cannot price needs a node precompile and is not run.
+/// The answer moved nothing, so it is held to the price alone: under a transaction KV limit of 2,
+/// where the started frame's KV share, `floor(2 × 98 / 100)` = 1, could not hold the two records
+/// its value transfer would make, the stop is still kind 2. A precompile the node cannot price
+/// needs a node precompile and is not run.
 #[test]
-fn test_precompile_records_stop_at_the_kv_share_before_the_price() {
+fn test_a_precompile_answered_from_its_price_is_held_to_the_price_alone() {
     const PAIRING: alloy_primitives::Address =
         alloy_primitives::address!("0000000000000000000000000000000000000008");
     let paying = |value: u64| {
@@ -215,10 +215,10 @@ fn test_precompile_records_stop_at_the_kv_share_before_the_price() {
 
     let outcome = execute_under(world(&[(CONTRACT, paying(1))]), call_tx(gas), limits);
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert_eq!(returned_stop(&outcome).kind, 2, "the records fit: the price is the stop");
-    assert_eq!(super::balance_of(&outcome, PAIRING), U256::ZERO, "the value is taken back");
-    assert!(outcome.result.logs().is_empty(), "the transfer log is taken back");
-    assert_eq!(outcome.usage.write_records, 0, "the records are taken back");
+    assert_eq!(returned_stop(&outcome).kind, 2, "the price is the stop");
+    assert_eq!(super::balance_of(&outcome, PAIRING), U256::ZERO, "the value never moved");
+    assert!(outcome.result.logs().is_empty(), "no transfer log");
+    assert_eq!(outcome.usage.write_records, 0, "no record");
     assert_eq!(outcome.usage.data_size, super::BODY_BYTES);
     assert_eq!(outcome.gas.state, 0, "the new account's charge comes back");
 
@@ -236,24 +236,24 @@ fn test_precompile_records_stop_at_the_kv_share_before_the_price() {
         let limits = limits.with_tx_kv_update_limit(2);
         let outcome = execute_under(world(&[(CONTRACT, paying(1))]), call_tx(gas), limits);
         assert!(outcome.result.is_success(), "{:?}", outcome.result);
-        assert_eq!(returned_stop(&outcome), MegaLimitExceeded { kind: 1, limit: 1 });
+        assert_eq!(returned_stop(&outcome).kind, 2, "the price alone, not the records");
         assert_eq!(super::balance_of(&outcome, PAIRING), U256::ZERO);
         assert_eq!(outcome.usage.write_records, 0);
     }
 }
 
-/// A precompile the node installed, whose start's records are held before its answer.
+/// A precompile the node installed, which runs out of the allowance gas detention leaves it.
 ///
-/// A precompile the engine cannot price runs on what the compute limit leaves its frame, and the
-/// start's records are held to the limits before its answer is: a value `CALL` to a node's own
-/// precompile, installed through `with_dyn_precompiles`, whose price, 100,000, is past what a read
-/// of the block environment under a cap of 30,000 leaves once the caller's own `CALL` is paid, and
-/// within the forward. With the records inside every budget it runs out of that allowance, and
-/// that is the stop, kind 2, which takes the value and the records back. Under a transaction KV
-/// limit of 2 the started frame's KV share is `floor(2 × 98 / 100)` = 1, the two records cross it,
-/// and the stop is kind 1, `limit` 1: the same order as for a precompile the engine prices.
+/// A precompile the engine cannot price runs on what the compute limit leaves its frame: a value
+/// `CALL` to a node's own precompile, installed through `with_dyn_precompiles`, whose price,
+/// 100,000, is past what a read of the block environment under a cap of 30,000 leaves once the
+/// caller's own `CALL` is paid, and within the forward. It runs out of that allowance, and that is
+/// the stop, kind 2; revm took the value and the transfer log back with the precompile's failure,
+/// so the start kept nothing and is held to nothing. Under a transaction KV limit of 2, where the
+/// started frame's KV share, `floor(2 × 98 / 100)` = 1, could not hold the two records its value
+/// transfer would make, the stop is still kind 2: the same as for a precompile the engine prices.
 #[test]
-fn test_an_unpriced_precompile_records_stop_at_the_kv_share_before_its_allowance() {
+fn test_an_unpriced_precompile_out_of_its_allowance_is_held_to_the_allowance_alone() {
     use alloy_primitives::map::HashMap;
     use mega_evm::MegaEvm;
     use revm::bytecode::opcode::{CALL, GAS, PUSH0};
@@ -288,7 +288,7 @@ fn test_an_unpriced_precompile_records_stop_at_the_kv_share_before_its_allowance
 
     let (outcome, ran) = run(limits);
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert_eq!(returned_stop(&outcome).kind, 2, "the records fit: the allowance is the stop");
+    assert_eq!(returned_stop(&outcome).kind, 2, "the allowance is the stop");
     assert!(
         matches!(ran.as_slice(), [(allowance, false)] if *allowance < 30_000),
         "it ran once, on the allowance, short of its price: {ran:?}"
@@ -299,7 +299,7 @@ fn test_an_unpriced_precompile_records_stop_at_the_kv_share_before_its_allowance
 
     let (outcome, _) = run(limits.with_tx_kv_update_limit(2));
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert_eq!(returned_stop(&outcome), MegaLimitExceeded { kind: 1, limit: 1 });
+    assert_eq!(returned_stop(&outcome).kind, 2, "the allowance alone, not the records");
     assert_eq!(super::balance_of(&outcome, PRICED), U256::ZERO);
     assert_eq!(outcome.usage.write_records, 0);
     assert_eq!(outcome.usage.data_size, super::BODY_BYTES);
