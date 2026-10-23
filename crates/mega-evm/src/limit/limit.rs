@@ -102,6 +102,10 @@ pub struct AdditionalLimit {
     /// would have kept more than a limit allows and was skipped
     /// ([`skip_authorization_list`](Self::skip_authorization_list)).
     pre_frame_stop: Option<LimitCheck>,
+    /// The history gas pre-execution charged for the write record the transaction's own frame
+    /// makes, kept from that charge until the frame's input is built, which carries it as its
+    /// start charge ([`take_first_frame_charge`](Self::take_first_frame_charge)).
+    first_frame_charge: Option<u64>,
     /// What the transaction's frames keep, every running frame counted as if it succeeds.
     kept: Kept,
     /// One per start revm decided whose result has not returned, the latest last.
@@ -296,6 +300,7 @@ impl AdditionalLimit {
         self.created_authorities = 0;
         self.created_caller = false;
         self.pre_frame_stop = None;
+        self.first_frame_charge = None;
         self.kept = Kept::default();
         self.decided.clear();
         self.intrinsic_history_bytes = 0;
@@ -456,6 +461,20 @@ impl AdditionalLimit {
     /// skipped; taken once.
     pub(crate) const fn take_pre_frame_stop(&mut self) -> Option<LimitCheck> {
         self.pre_frame_stop.take()
+    }
+
+    /// Keeps `history`, the history gas pre-execution just charged for the write record the
+    /// transaction's own frame makes, for the frame's input to carry
+    /// ([`take_first_frame_charge`](Self::take_first_frame_charge)).
+    pub(crate) const fn keep_first_frame_charge(&mut self, history: u64) {
+        self.first_frame_charge = Some(history);
+    }
+
+    /// The history gas pre-execution charged for the write record the transaction's own frame
+    /// makes; taken once, by the frame's input. `None` where no pre-execution charged it since
+    /// the last was taken: a system call, which skips pre-execution.
+    pub(crate) const fn take_first_frame_charge(&mut self) -> Option<u64> {
+        self.first_frame_charge.take()
     }
 
     /// The pools of the transaction's own frame: what the transaction has left of each limit once
@@ -930,6 +949,23 @@ mod tests {
             },
             "the next transaction is held to its limits"
         );
+    }
+
+    /// The history pre-execution charged for the first frame's record reaches that frame's input
+    /// once: taken, it is gone, and an execution that skips pre-execution — a system call, begun
+    /// or run straight through the handler after a transaction — finds none and prices its own.
+    #[test]
+    fn test_the_first_frame_charge_is_taken_once_and_lasts_one_transaction() {
+        let mut limit = AdditionalLimit::default();
+        limit.begin_transaction(TxClass::Ordinary, 0);
+        assert_eq!(limit.take_first_frame_charge(), None, "nothing charged yet");
+        limit.keep_first_frame_charge(7);
+        assert_eq!(limit.take_first_frame_charge(), Some(7));
+        assert_eq!(limit.take_first_frame_charge(), None, "taken by the frame's input");
+
+        limit.keep_first_frame_charge(7);
+        limit.begin_transaction(TxClass::ProtocolOwn, 0);
+        assert_eq!(limit.take_first_frame_charge(), None, "the next execution begins without it");
     }
 
     /// Validation admits no body whose authority records cross the data-size limit, so a debug

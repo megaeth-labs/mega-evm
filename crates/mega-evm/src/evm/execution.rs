@@ -190,11 +190,14 @@ where
             eip7702_refund
         };
         let (applied, created) = applied_authorities(evm.ctx_mut(), checkpoint.journal_i);
-        if !charge_records_made_outside_a_frame(evm.ctx_ref(), gas, applied) {
+        let Some(first_frame) = charge_records_made_outside_a_frame(evm.ctx_ref(), gas, applied)
+        else {
             runtime_oog_unwind(evm.ctx(), checkpoint)?;
             return Ok(None);
-        }
-        evm.ctx_mut().additional_limit.count_authorities(applied, created);
+        };
+        let layer = &mut evm.ctx_mut().additional_limit;
+        layer.keep_first_frame_charge(first_frame);
+        layer.count_authorities(applied, created);
         Ok(Some(PreExecutionOutput { eip7702_refund, checkpoint }))
     }
 
@@ -314,11 +317,10 @@ where
     }
 
     /// revm's first frame, on the transaction's pool, carrying as its start charge the history
-    /// charged before execution for the write record it makes, priced again here on the journal
-    /// as pre-execution left it (`first_frame_records`); with a read of the block
-    /// beneficiary's account marked for gas detention when the transaction's recipient delegates
-    /// to the beneficiary: revm resolves that delegate through the journal, where the Host does
-    /// not see it.
+    /// charged before execution for the write record it makes, as pre-execution kept it
+    /// (`charge_records_made_outside_a_frame`); with a read of the block beneficiary's account
+    /// marked for gas detention when the transaction's recipient delegates to the beneficiary:
+    /// revm resolves that delegate through the journal, where the Host does not see it.
     ///
     /// The pools are what the transaction has left of its data-size, KV-update and state-growth
     /// limits once its body, the records of the authorities it applied, the accounts they created
@@ -330,12 +332,21 @@ where
         evm: &mut Self::Evm,
         gas: &mut GasTracker,
     ) -> Result<Option<FrameInit>, Self::Error> {
-        // Priced before revm's runtime gas phase loads the recipient, on the journal as
-        // pre-execution left it, which is the state the charge was made on: nothing between the
-        // charge and the first frame's input changes it.
-        let records = first_frame_records(evm.ctx_ref());
-        let charge =
-            StartCharge::new(evm.ctx_ref().records_history_charge(records), PoolAmounts::ZERO);
+        // What pre-execution charged, kept rather than priced again: nothing between the charge
+        // and the first frame's input changes the journal it was priced on, so a debug build
+        // prices it again here, before revm's runtime gas phase loads the recipient, and asserts
+        // the two agree. A system call skips pre-execution, and is priced here.
+        let kept = evm.ctx_mut().additional_limit.take_first_frame_charge();
+        let ctx = evm.ctx_ref();
+        let repriced = || ctx.records_history_charge(first_frame_records(ctx));
+        let history = match kept {
+            Some(history) => {
+                debug_assert_eq!(history, repriced(), "the journal moved since pre-execution");
+                history
+            }
+            None => repriced(),
+        };
+        let charge = StartCharge::new(history, PoolAmounts::ZERO);
         gas.set_pools_remaining(evm.ctx_ref().additional_limit.first_frame_pools());
         let Some(mut frame) = self.op.first_frame_input(evm, gas)? else {
             // The runtime gas phase could not pay for the first frame's start: EIP-2780's charge
@@ -1587,21 +1598,24 @@ fn applied_authorities<DB: Database, ExtEnvs: ExternalEnvTypes>(
 ///
 /// The authorities' records are the transaction's own and outlive a first frame that fails; the
 /// first frame's record does not, so that frame carries what it cost as its start charge, which
-/// its failure gives back (priced again where the frame's input is built). A first frame revm
+/// its failure gives back: the history it was charged, which this answers, kept on the layer for
+/// the frame's input. A first frame revm
 /// refuses to start on its sender's account makes no record, and gets the charge back as any frame
 /// that kept nothing does: among the transactions that pay history, that is a creation from an
 /// account whose nonce cannot be bumped, which only a caller that turned the nonce check off can
 /// run, and which revm answers with a success and no address.
-/// `false` when the transaction cannot pay, which is an out-of-gas before it runs.
+/// The history gas the first frame's record was charged, nothing for a transaction that pays no
+/// history; `None` when the transaction cannot pay, which is an out-of-gas before it runs.
 fn charge_records_made_outside_a_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &MegaContext<DB, ExtEnvs>,
     gas: &mut GasTracker,
     applied_authorities: u64,
-) -> bool {
+) -> Option<u64> {
     if !ctx.prices_history() {
-        return true;
+        return Some(0);
     }
-    charge_write_records_history(gas, first_frame_records(ctx), applied_authorities).is_some()
+    charge_write_records_history(gas, first_frame_records(ctx), applied_authorities)
+        .map(|(first_frame, _)| first_frame)
 }
 
 /// The write records the transaction's own frame makes, as the journal's state stands before the

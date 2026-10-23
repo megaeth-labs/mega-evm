@@ -134,6 +134,11 @@ Each change is stated here in plain words with its reason; the specification has
   Each runs on `PRE_BLOCK_CALL_GAS_LIMIT` = 31,566,720, whatever the block's gas limit: 30,000,000 of regular gas and a reservoir of sixteen fresh slots at the minimum bucket.
   Why: a pre-block call does not draw on the block's gas; Rex6's `max(block gas limit, 30,000,000)` was widened for storage gas a crowded bucket multiplied, which a system call no longer pays; a pre-block call on MegaETH's chains writes at most six fresh slots, and none of the three contracts reads `GAS`.
 
+- **The first frame's record is priced once.**
+  Made after #407 merged: the history gas pre-execution charges for the write record the transaction's own frame makes is kept on the layer (`AdditionalLimit::keep_first_frame_charge`) and taken by the frame's input as its start charge, where it used to be priced a second time on the same journal.
+  A debug build prices it again at the input and asserts the two agree; a system call, which skips pre-execution, is priced at its input as before.
+  Why: nothing between the charge and the input changes the journal it is priced on, and the second pricing cost about 550 instructions per value-transfer transaction, measured.
+
 ### Gas detention
 
 - **Compute counts the work run on a value call's stipend, and never what a halting frame burns.**
