@@ -1648,7 +1648,7 @@ mod tests {
     /// [`detained`] over `db`.
     fn detained_on(db: MemoryDatabase, cap: u64) -> MegaContext<MemoryDatabase> {
         let mut ctx = MegaContext::new(db, MegaSpecId::SATIN);
-        ctx.detention.reset(true, cap, cap);
+        ctx.detention.reset(cap, cap);
         ctx.detention.mark_before_execution(VolatileDataAccess::TIMESTAMP);
         ctx
     }

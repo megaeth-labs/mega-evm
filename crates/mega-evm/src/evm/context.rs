@@ -66,14 +66,9 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes = EmptyExternalEn
     /// The reads of the Oracle's storage the running transaction made through the oracle
     /// service, with the service's answers.
     pub(crate) oracle_reads: OracleReadRecord,
-    /// Whether the running transaction is the protocol's own, decided when it is validated. See
-    /// [`MegaContext::is_system_originated`].
-    system_originated: bool,
     /// Whether the running execution is a system call rather than a transaction. See
     /// [`MegaContext::is_system_call`].
     system_call: bool,
-    /// Whether the running transaction pays history gas. See [`MegaContext::prices_history`].
-    prices_history: bool,
     /// The creation the running transaction's `keylessDeploy` call started, while it runs. See
     /// the [`keyless`](crate::system::keyless) module.
     pub(crate) keyless_creation: Option<keyless::Started>,
@@ -114,9 +109,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
             bucket_multipliers: BucketMultipliers::default(),
             bucket_record: BucketRecord::default(),
             oracle_reads: OracleReadRecord::default(),
-            system_originated: false,
             system_call: false,
-            prices_history: true,
             keyless_creation: None,
             #[cfg(any(test, feature = "test-utils"))]
             neutral: false,
@@ -176,7 +169,6 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         self.inner = self.inner.with_cfg(op_cfg(&cfg));
         self.cfg = cfg;
         self.neutral = true;
-        self.prices_history = false;
         self
     }
 
@@ -390,9 +382,12 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// A transaction's answer is decided when it is validated: a system-address transaction is
     /// recognised by the live system address its validation reads out of the `SequencerRegistry`
     /// in the state the EVM runs on, so every EVM answers as block execution does, however it was
-    /// built.
+    /// built. It is the common execution layer's exemption, which is decided once with it
+    /// ([`AdditionalLimit::is_exempt`]): the protocol's own work is held to no per-transaction
+    /// limit, is not detained, pays no history gas and prices at the minimum bucket, all for the
+    /// one reason.
     pub const fn is_system_originated(&self) -> bool {
-        self.system_originated
+        self.additional_limit.is_exempt()
     }
 
     /// Whether the running (or last) transaction pays history gas for the bytes it appends.
@@ -408,8 +403,14 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// SALT bucket like any other transaction — it is exempt from history alone, because the
     /// bytes it appends were paid for on L1. A system transaction is both: it prices at the
     /// minimum bucket *and* pays no history.
-    pub const fn prices_history(&self) -> bool {
-        self.prices_history
+    ///
+    /// The neutral configuration prices no history at all.
+    pub fn prices_history(&self) -> bool {
+        #[cfg(any(test, feature = "test-utils"))]
+        if self.neutral {
+            return false;
+        }
+        !(self.is_system_originated() || self.inner.tx.tx_type() == DEPOSIT_TRANSACTION_TYPE)
     }
 
     /// The history gas of the running (or last) transaction's body: the bytes it carries and the
@@ -504,20 +505,20 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         // A transaction that failed with an error, or was stopped, left its `keylessDeploy` call's
         // creation unsettled.
         self.keyless_creation = None;
-        self.system_originated = system_originated;
-        let exempt = self.inner.tx.tx_type() == DEPOSIT_TRANSACTION_TYPE || system_originated;
-        self.set_history_exempt(exempt);
         // The body is data size whether or not the transaction pays history for it. A deposit,
         // a system transaction and a system call are exempt from the charge, not from the count.
         let body = transaction_body_bytes(self.tx());
         self.additional_limit.begin_transaction(system_originated, transfer_logs, body);
-        // The protocol's own transactions are not detained: they maintain the volatile data.
+        self.install_history_schedule();
+        // The protocol's own transactions are not detained: they maintain the volatile data. Their
+        // reads set no cap.
         let limits = self.additional_limit.limits();
-        self.detention.reset(
-            !system_originated,
-            limits.block_env_access_compute_gas_limit,
-            limits.oracle_access_compute_gas_limit,
-        );
+        let (block_env_cap, oracle_cap) = if system_originated {
+            (u64::MAX, u64::MAX)
+        } else {
+            (limits.block_env_access_compute_gas_limit, limits.oracle_access_compute_gas_limit)
+        };
+        self.detention.reset(block_env_cap, oracle_cap);
         self.mark_beneficiary_transaction();
     }
 
@@ -554,8 +555,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         }
     }
 
-    /// Records whether the running transaction is exempt from history gas, and installs the
-    /// schedule that matches.
+    /// Installs the schedule that matches whether the running transaction pays history gas
+    /// ([`prices_history`](Self::prices_history)).
     ///
     /// The engine's own history charges read [`prices_history`](Self::prices_history); the one
     /// charge revm makes itself reads the schedule, so an exempt transaction runs the schedule
@@ -564,13 +565,12 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// once for the process, so the swap is a shared clone.
     ///
     /// The neutral configuration prices no history and keeps its own schedule.
-    fn set_history_exempt(&mut self, exempt: bool) {
+    fn install_history_schedule(&mut self) {
         #[cfg(any(test, feature = "test-utils"))]
         if self.neutral {
-            self.prices_history = false;
             return;
         }
-        self.prices_history = !exempt;
+        let exempt = !self.prices_history();
         let id = GasId::code_deposit_history_gas();
         let params = if exempt { satin_gas_params_history_exempt() } else { satin_gas_params() };
         if self.inner.cfg.gas_params.get(id) != params.get(id) {
@@ -732,6 +732,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextSetters for MegaContext<DB,
 mod tests {
     use super::*;
     use crate::{EthSpecId, SaltEnv, TestExternalEnvs};
+    use alloy_eips::eip4788::SYSTEM_ADDRESS;
     use alloy_primitives::U256;
     use core::convert::Infallible;
     use revm::{context_interface::cfg::GasParams, database::EmptyDB};
@@ -1199,6 +1200,33 @@ mod tests {
         ctx.set_tx(call_from(Address::repeat_byte(0x11)));
         ctx.on_new_tx(false);
         assert!(ctx.additional_limit.counts_transfer_logs());
+    }
+
+    /// The protocol's own work is held to no per-transaction limit, pays no history and is not
+    /// detained, all off the one exemption the layer begins it with: a call from the EIP-4788
+    /// system address and a system call are; a user's transaction is held, pays and is detained,
+    /// and a user's deposit is held and detained but pays no history.
+    #[test]
+    fn test_the_protocols_own_work_is_exempt_from_every_hold() {
+        let mut ctx = MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN);
+        let mut deposit = call_from(Address::repeat_byte(0x22));
+        deposit.0.deposit.source_hash = revm::primitives::B256::repeat_byte(1);
+        deposit.0.base.tx_type = DEPOSIT_TRANSACTION_TYPE;
+        for (case, tx, own, pays) in [
+            ("a user's transaction", call_from(Address::repeat_byte(0x11)), false, true),
+            ("a user's deposit", deposit, false, false),
+            ("a call from the system address", call_from(SYSTEM_ADDRESS), true, false),
+        ] {
+            ctx.set_tx(tx);
+            ctx.on_new_tx(false);
+            assert_eq!(ctx.is_system_originated(), own, "{case}");
+            assert_eq!(ctx.additional_limit.is_exempt(), own, "{case}");
+            assert_eq!(ctx.detention.detains(), !own, "{case}");
+            assert_eq!(ctx.prices_history(), pays, "{case}");
+        }
+        ctx.on_new_system_call();
+        assert!(ctx.is_system_originated() && ctx.additional_limit.is_exempt());
+        assert!(!ctx.detention.detains() && !ctx.prices_history(), "a system call");
     }
 
     /// A context is not neutral unless it is asked to be.

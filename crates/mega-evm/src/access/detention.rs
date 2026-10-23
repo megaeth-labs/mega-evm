@@ -188,13 +188,10 @@ pub struct Detention {
     /// Whether the wrapper of an opcode that reads volatile data runs it: the Host refuses and
     /// marks a load only then.
     reading: bool,
-    /// Whether the transaction's reads are held to a cap. A system-originated transaction's are
-    /// not, and neither are a transaction's whose caps are both unlimited.
-    detains: bool,
-    /// The cap a read of the block environment or of the beneficiary's account sets.
-    block_env_cap: u64,
-    /// The cap a read of the Oracle's storage sets.
-    oracle_cap: u64,
+    /// The cap a read of the block environment or of the beneficiary's account sets, if any.
+    block_env_cap: Option<u64>,
+    /// The cap a read of the Oracle's storage sets, if any.
+    oracle_cap: Option<u64>,
     /// Whether the running frame's volatile reads are refused.
     refusing: bool,
     /// The depth of the shallowest frame that switched volatile-data access off, if one did.
@@ -219,16 +216,15 @@ pub struct Detention {
 impl Detention {
     /// Clears the state for a new transaction, keeping its allocation.
     ///
-    /// `detains` is whether the transaction's reads may be held to a cap at all;
-    /// `block_env_cap` and `oracle_cap` are the caps its reads set, `u64::MAX` for none. A
-    /// transaction whose caps are both unlimited is not detained: nothing it reads can cap it.
-    pub(crate) fn reset(&mut self, detains: bool, block_env_cap: u64, oracle_cap: u64) {
+    /// `block_env_cap` and `oracle_cap` are the caps the transaction's reads set, `u64::MAX` for
+    /// none. A transaction whose caps are both unlimited is not detained: nothing it reads can cap
+    /// it. The protocol's own work is begun so, whatever the limits say.
+    pub(crate) fn reset(&mut self, block_env_cap: u64, oracle_cap: u64) {
         self.observed.set(VolatileDataAccess::empty());
         self.refused.set(VolatileDataAccess::empty());
         self.reading = false;
-        self.detains = detains && (block_env_cap != u64::MAX || oracle_cap != u64::MAX);
-        self.block_env_cap = block_env_cap;
-        self.oracle_cap = oracle_cap;
+        self.block_env_cap = (block_env_cap != u64::MAX).then_some(block_env_cap);
+        self.oracle_cap = (oracle_cap != u64::MAX).then_some(oracle_cap);
         self.refusing = false;
         self.answer_disables_from = None;
         #[cfg(any(test, feature = "test-utils"))]
@@ -269,9 +265,12 @@ impl Detention {
         self.limit
     }
 
-    /// Whether the transaction's reads are held to a cap.
+    /// Whether the transaction's reads are held to a cap: one of its caps is not unlimited. The
+    /// protocol's own work is begun with both unlimited, and so is a detention no transaction
+    /// reset yet.
+    #[inline]
     pub const fn detains(&self) -> bool {
-        self.detains
+        self.block_env_cap.is_some() || self.oracle_cap.is_some()
     }
 
     /* The Host */
@@ -292,7 +291,7 @@ impl Detention {
     /// commits the read once the opcode completed. A load outside a wrapper marks nothing.
     #[inline]
     pub(crate) fn observe(&self, access: VolatileDataAccess) {
-        if self.detains && self.reading {
+        if self.detains() && self.reading {
             self.observed.set(self.observed.get() | access);
         }
     }
@@ -376,7 +375,7 @@ impl Detention {
     /// recipient that is the block beneficiary, an EIP-7702 authority that is, or a recipient that
     /// delegates to it. No compute has been spent, so the limit is the read's cap.
     pub(crate) fn mark_before_execution(&mut self, access: VolatileDataAccess) {
-        if !self.detains {
+        if !self.detains() {
             return;
         }
         self.accessed |= access;
@@ -412,7 +411,7 @@ impl Detention {
     #[inline]
     pub(crate) fn on_frame_run(&mut self, gas: &mut Gas, depth: usize) {
         self.refusing = self.disabled_from.is_some_and(|from| depth >= from);
-        if !self.detains {
+        if !self.detains() {
             debug_assert!(self.limit.is_none(), "a limit on a transaction detention does not hold");
             return;
         }
@@ -425,7 +424,7 @@ impl Detention {
     /// until the child returns.
     #[inline]
     pub(crate) fn on_frame_suspend(&mut self, gas: &Gas, depth: usize, stipend: u64) {
-        if self.detains {
+        if self.detains() {
             self.figures.on_frame_suspend(gas, depth, stipend);
         }
     }
@@ -436,7 +435,7 @@ impl Detention {
     /// ([`commit_reads`](Self::commit_reads)). A transaction detention does not hold records
     /// nothing, as the Host observes nothing for it.
     pub(crate) fn read_by_frame(&mut self, access: VolatileDataAccess, gas: &mut Gas) {
-        if self.detains {
+        if self.detains() {
             self.commit_reads(access, gas, 0);
         }
     }
@@ -466,7 +465,7 @@ impl Detention {
         if self.disabled_from.is_some_and(|from| from >= depth) {
             self.disabled_from = None;
         }
-        if !self.detains {
+        if !self.detains() {
             return None;
         }
         self.figures.on_frame_end(depth);
@@ -541,7 +540,7 @@ impl Detention {
         depth: usize,
         gas_limit: u64,
     ) -> Option<ComputeStop> {
-        if !self.detains {
+        if !self.detains() {
             return None;
         }
         if self.limit.is_none() && result.gas.withheld_crossing().is_none() {
@@ -720,10 +719,10 @@ impl Detention {
     fn cap_of(&self, access: VolatileDataAccess) -> u64 {
         let mut cap = u64::MAX;
         if access.has_block_env_access() || access.has_beneficiary_balance_access() {
-            cap = cap.min(self.block_env_cap);
+            cap = cap.min(self.block_env_cap.unwrap_or(u64::MAX));
         }
         if access.has_oracle_access() {
-            cap = cap.min(self.oracle_cap);
+            cap = cap.min(self.oracle_cap.unwrap_or(u64::MAX));
         }
         cap
     }
@@ -792,7 +791,7 @@ mod tests {
 
     fn detaining() -> Detention {
         let mut detention = Detention::default();
-        detention.reset(true, BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS);
+        detention.reset(BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS);
         detention
     }
 
@@ -800,7 +799,7 @@ mod tests {
     #[test]
     fn test_the_cap_of_a_read_is_its_kinds_lowest() {
         let mut detention = Detention::default();
-        detention.reset(true, 7, 5);
+        detention.reset(7, 5);
         assert_eq!(detention.cap_of(VolatileDataAccess::TIMESTAMP), 7);
         assert_eq!(detention.cap_of(VolatileDataAccess::SLOT_NUM), 7);
         assert_eq!(detention.cap_of(VolatileDataAccess::BENEFICIARY_BALANCE), 7);
@@ -997,7 +996,7 @@ mod tests {
     fn test_a_first_read_below_frames_counts_what_they_computed() {
         const CAP: u64 = 1_000;
         let mut detention = Detention::default();
-        detention.reset(true, CAP, CAP);
+        detention.reset(CAP, CAP);
         let mut caller = gas(1_000_000, 0);
         detention.on_frame_run(&mut caller, 0);
         assert!(caller.record_regular_cost(2_000));
@@ -1064,7 +1063,7 @@ mod tests {
         detention.on_frame_run(&mut child, 1);
         assert_eq!(detention.figures.suspended, 7_000);
 
-        detention.reset(true, BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS);
+        detention.reset(BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS);
         let mut caller = gas(1_000_000, 0);
         detention.on_frame_run(&mut caller, 0);
         assert!(caller.record_regular_cost(3_000));
@@ -1271,7 +1270,8 @@ mod tests {
     }
 
     /// A frame's own read is committed as an opcode's is: the limit is its compute at the read
-    /// plus the cap. A transaction detention does not hold records nothing.
+    /// plus the cap. A transaction detention does not hold — the protocol's own work, begun with
+    /// both caps unlimited — records nothing.
     #[test]
     fn test_a_frames_own_read_sets_the_limit_from_its_compute() {
         let mut detention = detaining();
@@ -1284,7 +1284,7 @@ mod tests {
         assert_eq!(call.spendable(), BLOCK_ENV_ACCESS_COMPUTE_GAS);
 
         let mut free = Detention::default();
-        free.reset(false, BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS);
+        free.reset(u64::MAX, u64::MAX);
         free.read_by_frame(VolatileDataAccess::BENEFICIARY_BALANCE, &mut call);
         assert_eq!((free.compute_limit(), free.accessed()), (None, VolatileDataAccess::empty()));
     }
@@ -1428,16 +1428,16 @@ mod tests {
         }
     }
 
-    /// A transaction that is not detained records nothing and caps nothing: a system-originated
-    /// one, and one whose caps are both unlimited. One unlimited cap leaves its kind uncapped.
+    /// A transaction that is not detained records nothing and caps nothing: one whose caps are
+    /// both unlimited, as a system-originated one is begun, and a detention no transaction reset
+    /// yet. One unlimited cap leaves its kind uncapped.
     #[test]
     fn test_an_exempt_or_unlimited_transaction_is_not_detained() {
-        for (detains, block_env_cap, oracle_cap) in [
-            (false, BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS),
-            (true, u64::MAX, u64::MAX),
-        ] {
+        for reset in [true, false] {
             let mut detention = Detention::default();
-            detention.reset(detains, block_env_cap, oracle_cap);
+            if reset {
+                detention.reset(u64::MAX, u64::MAX);
+            }
             assert!(!detention.detains());
             let mut frame = gas(100_000_000, 0);
             detention.on_frame_run(&mut frame, 0);
@@ -1449,7 +1449,7 @@ mod tests {
         }
 
         let mut detention = Detention::default();
-        detention.reset(true, u64::MAX, 5);
+        detention.reset(u64::MAX, 5);
         assert!(detention.detains());
         let mut frame = gas(100_000_000, 0);
         detention.on_frame_run(&mut frame, 0);
