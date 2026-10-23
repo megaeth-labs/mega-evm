@@ -35,7 +35,8 @@
 //!
 //! An answer is a [`synthetic_call_result`]: the forwarded gas untouched, the caller's reservoir
 //! carried, and the calling opcode's upfront state-gas flags, so the caller settles it exactly
-//! like a frame revm ran.
+//! like a frame revm ran. It carries what follows it once it settled ([`Answer`]), so the
+//! settlement knows no method.
 
 use alloy_evm::Database;
 use alloy_primitives::{Address, Bytes};
@@ -69,6 +70,23 @@ const SYSTEM_CONTRACT_PREFIX: [u8; 19] = {
     }
     prefix
 };
+
+/// An interceptor's answer to a call, and what follows it once the answer settled.
+#[derive(Debug)]
+pub(crate) struct Answer {
+    /// The answer: a [`synthetic_call_result`].
+    pub(crate) result: FrameResult,
+    /// The depth of the frame the answer switches volatile-data access off for, once it settled
+    /// without becoming gas detention's stop: `disableVolatileDataAccess()`'s, for its caller.
+    pub(crate) disables_access_from: Option<usize>,
+}
+
+impl Answer {
+    /// `result`, which nothing follows.
+    pub(crate) const fn new(result: FrameResult) -> Self {
+        Self { result, disables_access_from: None }
+    }
+}
 
 /// A system contract whose calls the engine answers or rewrites.
 ///
@@ -125,13 +143,16 @@ pub(crate) fn intercept<DB: Database, ExtEnvs: ExternalEnvTypes>(
     inputs: &CallInputs,
     depth: usize,
     caller_remaining: u64,
-) -> Option<FrameResult> {
+) -> Option<Answer> {
     match intercepted_contract(&inputs.target_address)? {
-        InterceptedContract::Oracle => crate::system::oracle::intercept(ctx, inputs, depth),
+        InterceptedContract::Oracle => {
+            crate::system::oracle::intercept(ctx, inputs, depth).map(Answer::new)
+        }
         InterceptedContract::KeylessDeploy => None,
         InterceptedContract::AccessControl => crate::system::control::intercept(ctx, inputs, depth),
         InterceptedContract::LimitControl => {
             crate::system::limit_control::intercept(ctx, inputs, depth, caller_remaining)
+                .map(Answer::new)
         }
     }
 }

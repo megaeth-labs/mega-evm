@@ -199,10 +199,6 @@ pub struct Detention {
     /// The depth the switch starts off from in every transaction: test tooling.
     #[cfg(any(test, feature = "test-utils"))]
     disabled_from_at_start: Option<usize>,
-    /// The depth of the frame an answer being settled switches volatile-data access off for, if
-    /// it does: applied once the answer settles without a crossing. See
-    /// [`disable_access_on_answer`](Self::disable_access_on_answer).
-    answer_disables_from: Option<usize>,
     /// What the transaction read.
     accessed: VolatileDataAccess,
     /// The most compute the transaction may reach, once it read volatile data.
@@ -226,7 +222,6 @@ impl Detention {
         self.block_env_cap = (block_env_cap != u64::MAX).then_some(block_env_cap);
         self.oracle_cap = (oracle_cap != u64::MAX).then_some(oracle_cap);
         self.refusing = false;
-        self.answer_disables_from = None;
         #[cfg(any(test, feature = "test-utils"))]
         {
             self.disabled_from = self.disabled_from_at_start;
@@ -511,30 +506,8 @@ impl Detention {
     ///
     /// Until a read sets a limit an answer can only burn: nothing it spends can cross a limit, and
     /// only the engine marks an answer as a crossing, which it does only under a limit.
-    ///
-    /// A switch-off the answer staged
-    /// ([`disable_access_on_answer`](Self::disable_access_on_answer)) is applied when the
-    /// answer did not cross, and dropped when it did.
     #[inline]
     pub(crate) fn on_answer(
-        &mut self,
-        result: &mut InterpreterResult,
-        depth: usize,
-        gas_limit: u64,
-    ) -> Option<ComputeStop> {
-        let stop = self.classify_answer(result, depth, gas_limit);
-        if let Some(caller) = self.answer_disables_from.take() {
-            if stop.is_none() {
-                self.disable_access(caller);
-            }
-        }
-        stop
-    }
-
-    /// [`on_answer`](Self::on_answer)'s verdict on `result`, the answer to the frame at `depth`
-    /// whose gas limit was `gas_limit`.
-    #[inline]
-    fn classify_answer(
         &mut self,
         result: &mut InterpreterResult,
         depth: usize,
@@ -656,15 +629,6 @@ impl Detention {
     /// The frame that steers the switch reads it when it resumes, after the call that steered it.
     pub fn disable_access(&mut self, depth: usize) {
         self.disabled_from = Some(self.disabled_from.map_or(depth, |from| from.min(depth)));
-    }
-
-    /// Switches volatile-data access off for the frame at `depth`, as
-    /// [`disable_access`](Self::disable_access) does, once the answer being built for a call it
-    /// made settles without crossing the compute limit ([`on_answer`](Self::on_answer)): an answer
-    /// that becomes the stop did not succeed, and the frame that catches it resumes with the
-    /// switch as it was.
-    pub(crate) const fn disable_access_on_answer(&mut self, depth: usize) {
-        self.answer_disables_from = Some(depth);
     }
 
     /// Switches volatile-data access back on for the frame at `depth`, and reports whether it
@@ -1155,45 +1119,6 @@ mod tests {
             assert_eq!(beyond.gas.remaining(), 90_000_000 - spill);
             assert_eq!(regular_spent(beyond.gas.tracker()), 0);
         }
-    }
-
-    /// A switch-off an answer stages applies once the answer settles without a crossing: an
-    /// answer gas detention turns into the stop leaves access as it was, one that settles within
-    /// the limit switches it off, and so does one of a transaction that is not detained. A staged
-    /// switch goes with the answer it was staged for, whatever that answer settled as.
-    #[test]
-    fn test_an_answer_switches_access_off_only_when_it_does_not_cross() {
-        let mut detention = detaining();
-        let mut caller = gas(100_000_000, 0);
-        detention.on_frame_run(&mut caller, 0);
-        detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut caller, 0);
-        assert!(caller.record_withheld_first_cost(90_000_000));
-        detention.on_frame_suspend(&caller, 0, 0);
-        let answer = |spent: u64| {
-            let mut gas = gas(90_000_000, 0);
-            assert!(gas.record_regular_cost(spent));
-            InterpreterResult::new(InstructionResult::Return, Bytes::new(), gas)
-        };
-
-        detention.disable_access_on_answer(0);
-        let mut beyond = answer(BLOCK_ENV_ACCESS_COMPUTE_GAS + 1);
-        assert!(detention.on_answer(&mut beyond, 1, 90_000_000).is_some(), "the answer crossed");
-        assert!(!detention.is_access_disabled(0), "and access stays on");
-
-        let mut unstaged = answer(0);
-        assert_eq!(detention.on_answer(&mut unstaged, 1, 90_000_000), None);
-        assert!(!detention.is_access_disabled(0), "the crossing answer took its switch with it");
-
-        detention.disable_access_on_answer(0);
-        let mut within = answer(0);
-        assert_eq!(detention.on_answer(&mut within, 1, 90_000_000), None);
-        assert!(detention.is_access_disabled(0), "an answer within the limit switches it off");
-
-        let mut free = Detention::default();
-        assert!(!free.detains());
-        free.disable_access_on_answer(0);
-        assert_eq!(free.on_answer(&mut answer(0), 1, 90_000_000), None);
-        assert!(free.is_access_disabled(0), "a transaction that is not detained switches it off");
     }
 
     /// A precompile run on the allowance gets the rest of the forward back: a success keeps it

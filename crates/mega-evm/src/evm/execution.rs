@@ -55,7 +55,7 @@ use crate::{
     charge_write_records_history,
     limit::{CreatorBefore, StartBefore},
     synthetic_frame_result,
-    system::keyless,
+    system::{keyless, Answer},
     write_record_history_gas, Detention, ExternalEnvTypes, LimitCheck, LimitKind, MegaContext,
     MegaEvm, MegaInstructions, PricedPrecompiles, VolatileDataAccess, TX_BODY_OVER_DATA_SIZE_LIMIT,
 };
@@ -593,13 +593,13 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         }
         let keyless = keyless::is_dispatched(&self.inner.ctx, &frame_init);
         let answer = if keyless {
-            keyless::ready(&mut self.inner.ctx, &mut frame_init)?
+            keyless::ready(&mut self.inner.ctx, &mut frame_init)?.map(Answer::new)
         } else {
             self.intercept(&frame_init)
         };
         let (depth, gas_limit) = (frame_init.depth, input_gas_limit(&frame_init.frame_input));
-        if let Some(mut result) = answer {
-            settle_answer(&mut self.inner.ctx, depth, gas_limit, &mut result);
+        if let Some(answer) = answer {
+            let result = settle_intercepted(&mut self.inner.ctx, depth, gas_limit, answer);
             return Ok(ItemOrResult::Result(result));
         }
         let ctx = &mut self.inner.ctx;
@@ -971,17 +971,37 @@ fn cap_the_shares(params: &GasParams, caps: PoolAmounts, caller: &mut Gas, child
 /// could have run on is answered out of gas and marked as a crossing, and becomes the stop as a
 /// frame that ran would ([`Detention::on_answer`]); so does a precompile whose price crosses the
 /// limit, and one the engine cannot price that ran out of the allowance it was run on
-/// ([`hold_precompile`]). An answer that halts otherwise burns what it was given.
+/// ([`hold_precompile`]). An answer that halts otherwise burns what it was given. Returns whether
+/// the answer became the stop.
 fn settle_answer<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     depth: usize,
     gas_limit: u64,
     answer: &mut FrameResult,
-) {
+) -> bool {
     let answer = answer.interpreter_result_mut();
-    if let Some(stop) = ctx.detention.on_answer(answer, depth, gas_limit) {
-        stop_at_the_compute_limit(ctx, answer, stop);
+    let Some(stop) = ctx.detention.on_answer(answer, depth, gas_limit) else { return false };
+    stop_at_the_compute_limit(ctx, answer, stop);
+    true
+}
+
+/// Settles `answer`, a `keylessDeploy` call's or an interceptor's to the frame at `depth` whose
+/// gas limit was `gas_limit` ([`settle_answer`]), then applies what follows it, unless it became
+/// gas detention's stop: the switch-off of volatile-data access `disableVolatileDataAccess()`
+/// answers its caller with. An answer that became the stop did not succeed, and the frame that
+/// catches it resumes with the switch as it was.
+fn settle_intercepted<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    depth: usize,
+    gas_limit: u64,
+    answer: Answer,
+) -> FrameResult {
+    let Answer { mut result, disables_access_from } = answer;
+    let stopped = settle_answer(ctx, depth, gas_limit, &mut result);
+    if let Some(from) = disables_access_from.filter(|_| !stopped) {
+        ctx.detention.disable_access(from);
     }
+    result
 }
 
 /// How gas detention holds the precompile call a frame start makes ([`hold_precompile`]).
@@ -1136,7 +1156,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     /// An answer is a [`synthetic_frame_result`](crate::synthetic_frame_result), so it settles
     /// like a frame revm ran. What each contract answers is in the `system` module.
     #[inline]
-    fn intercept(&mut self, frame_init: &FrameInit) -> Option<FrameResult> {
+    fn intercept(&mut self, frame_init: &FrameInit) -> Option<Answer> {
         let FrameInput::Call(inputs) = &frame_init.frame_input else { return None };
         if !matches!(inputs.scheme, CallScheme::Call | CallScheme::StaticCall) {
             return None;
@@ -1867,6 +1887,49 @@ mod tests {
             assert_eq!(held, clamped, "{to}");
             assert_eq!(ran_on, 1_000, "{to}: run on the allowance");
         }
+    }
+
+    /// A switch-off an interceptor's answer carries applies once the answer settles without a
+    /// crossing: an answer gas detention turns into the stop leaves access as it was, one that
+    /// settles within the limit switches it off, and so does one of a transaction that is not
+    /// detained. The switch goes with the answer that carried it, whatever that answer settled as.
+    #[test]
+    fn test_an_answer_switches_access_off_only_when_it_does_not_cross() {
+        use crate::{constants::BLOCK_ENV_ACCESS_COMPUTE_GAS, system::Answer};
+        const FORWARD: u64 = 90_000_000;
+        let answer = |spent: u64, disables_access_from| {
+            let input = static_call(TARGET, &[], FORWARD).frame_input;
+            let mut result =
+                synthetic_frame_result(&input, InstructionResult::Return, Bytes::new());
+            assert!(result.gas_mut().record_regular_cost(spent));
+            Answer { result, disables_access_from }
+        };
+        let mut ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
+        ctx.detention.reset(BLOCK_ENV_ACCESS_COMPUTE_GAS, BLOCK_ENV_ACCESS_COMPUTE_GAS);
+        let mut caller = Gas::new_with_regular_gas_and_reservoir(100_000_000, 0);
+        ctx.detention.on_frame_run(&mut caller, 0);
+        ctx.detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut caller, 0);
+        assert!(caller.record_withheld_first_cost(FORWARD));
+        ctx.detention.on_frame_suspend(&caller, 0, 0);
+
+        let beyond = answer(BLOCK_ENV_ACCESS_COMPUTE_GAS + 1, Some(0));
+        let result = settle_intercepted(&mut ctx, 1, FORWARD, beyond);
+        assert_eq!(result.instruction_result(), InstructionResult::Revert, "the answer crossed");
+        assert!(!ctx.detention.is_access_disabled(0), "and access stays on");
+
+        settle_intercepted(&mut ctx, 1, FORWARD, answer(0, None));
+        assert!(
+            !ctx.detention.is_access_disabled(0),
+            "the crossing answer took its switch with it"
+        );
+
+        settle_intercepted(&mut ctx, 1, FORWARD, answer(0, Some(0)));
+        assert!(ctx.detention.is_access_disabled(0), "an answer within the limit switches it off");
+
+        let mut free = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
+        assert!(!free.detention.detains());
+        settle_intercepted(&mut free, 1, FORWARD, answer(0, Some(0)));
+        assert!(free.detention.is_access_disabled(0), "a transaction that is not detained");
     }
 
     /// A frame answered with a success that the engine then rewrote into the stop, at any depth,

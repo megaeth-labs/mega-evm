@@ -36,7 +36,7 @@ pub use sequencer_registry::*;
 pub use timestamp::*;
 pub use tx::*;
 
-pub(crate) use intercept::intercept;
+pub(crate) use intercept::{intercept, Answer};
 pub(crate) use tx::{classify_system_transaction, validate_and_promote};
 
 #[cfg(test)]
