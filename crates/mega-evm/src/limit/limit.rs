@@ -945,4 +945,47 @@ mod tests {
         limit.begin_transaction(TxClass::Ordinary, crate::TX_BODY_SIZE);
         limit.count_authorities(2, 0);
     }
+
+    /// An authorization list may cross exactly when it has more entries than the KV or the
+    /// state-growth limit leaves the transaction, the limit less what the transaction already
+    /// counts: a list that fills the room exactly cannot cross, one entry more may. An exempt
+    /// transaction's list never may, whatever its length.
+    #[test]
+    fn test_an_authorization_list_may_cross_only_past_what_both_limits_leave() {
+        let records = |kv| Counted::records(kv, 0, false);
+        let growth = |accounts| Counted::NONE.with_growth(accounts, 0);
+        // (case, KV limit, state-growth limit, counted before the list, entries, may cross)
+        let cases = [
+            ("no entries", 3, 5, Counted::NONE, 0, false),
+            ("entries fill the KV room", 3, 10, Counted::NONE, 3, false),
+            ("one entry past the KV room", 3, 10, Counted::NONE, 4, true),
+            ("entries fill the state-growth room", 10, 3, Counted::NONE, 3, false),
+            ("one entry past the state-growth room", 10, 3, Counted::NONE, 4, true),
+            ("entries fill the KV room left after records", 5, 10, records(2), 3, false),
+            ("one entry past the KV room left after records", 5, 10, records(2), 4, true),
+            ("entries fill the state-growth room left after growth", 10, 5, growth(2), 3, false),
+            ("one entry past the state-growth room left after growth", 10, 5, growth(2), 4, true),
+            ("no KV room", 0, 10, Counted::NONE, 1, true),
+            ("no state-growth room", 10, 0, Counted::NONE, 1, true),
+            ("the longest list under no limit", u64::MAX, u64::MAX, Counted::NONE, u64::MAX, false),
+        ];
+        for (case, kv, state_growth, before, entries, may_cross) in cases {
+            let limits = EvmTxRuntimeLimits::no_limits()
+                .with_tx_kv_update_limit(kv)
+                .with_tx_state_growth_limit(state_growth);
+            let mut limit = AdditionalLimit::new(limits);
+            limit.begin_transaction(TxClass::Ordinary, crate::TX_BODY_SIZE);
+            limit.count(&before);
+            assert_eq!(limit.authorization_list_may_cross(entries), may_cross, "{case}");
+        }
+
+        let limits = EvmTxRuntimeLimits::no_limits()
+            .with_tx_kv_update_limit(0)
+            .with_tx_state_growth_limit(0);
+        let mut limit = AdditionalLimit::new(limits);
+        limit.begin_transaction(TxClass::ProtocolOwn, crate::TX_BODY_SIZE);
+        for entries in [1, u64::MAX] {
+            assert!(!limit.authorization_list_may_cross(entries), "exempt, {entries} entries");
+        }
+    }
 }
