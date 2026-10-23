@@ -749,6 +749,8 @@ mod tests {
         let records_bytes = |records| WRITE_RECORD_SIZE * records;
 
         let mut fresh = journal();
+        // Below Amsterdam, where the switch alone decides whether the move logs.
+        fresh.set_spec_id(SpecId::OSAKA);
         fresh.set_amsterdam_eip7708_enabled(true);
         fresh.selfdestruct(DESTRUCTED, OTHER, false).unwrap();
         let (counted, history, _) = Accounts::of(&fresh).write_counted(&destruction(OTHER, 5));
