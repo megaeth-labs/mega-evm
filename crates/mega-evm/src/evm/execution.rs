@@ -52,7 +52,7 @@ use revm::{
 
 use crate::{
     access::ComputeStop,
-    charge_write_records_history, history_gas,
+    charge_write_records_history,
     limit::{CreatorBefore, StartBefore},
     synthetic_frame_result,
     system::keyless,
@@ -255,10 +255,9 @@ where
         if !evm.ctx_ref().prices_history() {
             return Ok(gas);
         }
-        let bytes = evm.ctx_ref().additional_limit.body();
         // A byte count with no price saturates, which no gas limit covers: the transaction is
         // rejected for not covering its own intrinsic gas.
-        let history = history_gas(bytes).unwrap_or(u64::MAX);
+        let history = evm.ctx_ref().intrinsic_history_gas();
         let gas_limit = evm.ctx_ref().tx().gas_limit();
         let initial_gas = gas
             .initial_regular_gas()
@@ -268,7 +267,6 @@ where
                 InvalidTransaction::CallGasCostMoreThanGasLimit { gas_limit, initial_gas }.into()
             );
         }
-        evm.ctx_mut().additional_limit.set_intrinsic_history(history, bytes);
         Ok(gas)
     }
 
@@ -293,7 +291,7 @@ where
     /// the neutral configuration a system call's is not split, as revm's own runner has it.
     fn tx_gas(&self, evm: &mut Self::Evm, init_and_floor_gas: &InitialAndFloorGas) -> GasTracker {
         let mut gas = self.op.tx_gas(evm, init_and_floor_gas);
-        let history = evm.ctx_ref().additional_limit.intrinsic_history_gas();
+        let history = evm.ctx_ref().intrinsic_history_gas();
         if history != 0 {
             let spilled = gas.state_gas_spilled();
             let charged = gas.record_history_cost(history);
@@ -309,7 +307,8 @@ where
     }
 
     /// revm's first frame, on the transaction's pool, carrying as its start charge the history
-    /// charged before execution for the write record it makes; with a read of the block
+    /// charged before execution for the write record it makes, priced again here on the journal
+    /// as pre-execution left it ([`first_frame_record_charge`]); with a read of the block
     /// beneficiary's account marked for gas detention when the transaction's recipient delegates
     /// to the beneficiary: revm resolves that delegate through the journal, where the Host does
     /// not see it.
@@ -324,6 +323,9 @@ where
         evm: &mut Self::Evm,
         gas: &mut GasTracker,
     ) -> Result<Option<FrameInit>, Self::Error> {
+        // Priced before revm's runtime gas phase loads the recipient: on the journal the charge
+        // was made on.
+        let charge = StartCharge::new(first_frame_record_charge(evm.ctx_ref()), PoolAmounts::ZERO);
         gas.set_pools_remaining(evm.ctx_ref().additional_limit.first_frame_pools());
         let Some(mut frame) = self.op.first_frame_input(evm, gas)? else {
             // The runtime gas phase could not pay for the first frame's start: EIP-2780's charge
@@ -337,10 +339,6 @@ where
             evm.ctx_mut().additional_limit.take_back_authorities();
             return Ok(None);
         };
-        let charge = StartCharge::new(
-            evm.ctx_ref().additional_limit.first_frame_charge(),
-            PoolAmounts::ZERO,
-        );
         match &mut frame.frame_input {
             FrameInput::Call(inputs) => inputs.charged_start = charge,
             FrameInput::Create(inputs) => inputs.set_charged_start(charge),
@@ -1557,12 +1555,12 @@ fn applied_authorities<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// its first frame, so the account it creates is one it had not changed.
 ///
 /// The authorities' records are the transaction's own and outlive a first frame that fails; the
-/// first frame's record does not, so what it cost is kept for that frame to carry as its start
-/// charge, which its failure gives back. A first frame revm refuses to start on its sender's
-/// account makes no record, and gets the charge back as any frame that kept nothing does: among
-/// the transactions that pay history, that is a creation from an account whose nonce cannot be
-/// bumped, which only a caller that turned the nonce check off can run, and which revm answers
-/// with a success and no address.
+/// first frame's record does not, so that frame carries what it cost as its start charge, which
+/// its failure gives back ([`first_frame_record_charge`]). A first frame revm refuses to start on
+/// its sender's account makes no record, and gets the charge back as any frame that kept nothing
+/// does: among the transactions that pay history, that is a creation from an account whose nonce
+/// cannot be bumped, which only a caller that turned the nonce check off can run, and which revm
+/// answers with a success and no address.
 /// `false` when the transaction cannot pay, which is an out-of-gas before it runs.
 fn charge_records_made_outside_a_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
@@ -1572,22 +1570,38 @@ fn charge_records_made_outside_a_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
     if !ctx.prices_history() {
         return true;
     }
+    charge_write_records_history(gas, first_frame_records(ctx), applied_authorities).is_some()
+}
+
+/// The write records the transaction's own frame makes, as the journal's state stands before the
+/// first frame: the recipient's, when the value changes an account the transaction has not
+/// changed, or the account a creation creates ([`charge_records_made_outside_a_frame`]).
+fn first_frame_records<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &MegaContext<DB, ExtEnvs>,
+) -> u64 {
     let tx = ctx.tx();
-    let first_frame = match tx.kind() {
+    match tx.kind() {
         TxKind::Create => 1,
         TxKind::Call(to) => {
             let predicted = ctx.accounts().transfer_records(tx.caller(), to, tx.value()).transfer;
             debug_assert_eq!(predicted.taken, 0, "the sender's value returns no account");
             predicted.added
         }
-    };
-    let Some((first_frame, _)) =
-        charge_write_records_history(gas, first_frame, applied_authorities)
-    else {
-        return false;
-    };
-    ctx.additional_limit.set_first_frame_charge(first_frame);
-    true
+    }
+}
+
+/// The history gas charged before execution for the write record the transaction's own frame
+/// makes, which the frame carries as its start charge: nothing for a transaction that pays no
+/// history. Priced on the journal as pre-execution left it, which is the state the charge was
+/// made on: nothing between the charge and the first frame's input changes it.
+fn first_frame_record_charge<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &MegaContext<DB, ExtEnvs>,
+) -> u64 {
+    if !ctx.prices_history() {
+        return 0;
+    }
+    // Pre-execution charged this price, so it has one.
+    write_record_history_gas(first_frame_records(ctx)).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -1888,6 +1902,7 @@ mod tests {
     fn test_a_reused_handler_reports_each_executions_own_reservoir() {
         use crate::{
             constants::TX_GAS_LIMIT_CAP,
+            history_gas,
             test_utils::{op_transaction, zero_fee_l1_block_info},
             MegaTransaction, SYSTEM_CALL_REGULAR_GAS_LIMIT,
         };

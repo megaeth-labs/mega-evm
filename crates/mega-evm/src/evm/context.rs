@@ -18,7 +18,7 @@ use revm::{
 use crate::{
     constants,
     evm::{
-        history::transaction_body_bytes,
+        history::{history_gas, transaction_body_bytes},
         schedule::{satin_gas_params, satin_gas_params_history_exempt},
     },
     limit::{Accounts, Counted},
@@ -410,6 +410,20 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// minimum bucket *and* pays no history.
     pub const fn prices_history(&self) -> bool {
         self.prices_history
+    }
+
+    /// The history gas of the running (or last) transaction's body: the bytes it carries and the
+    /// write records its inclusion makes, which are known before it runs, at the cost per history
+    /// byte; nothing for a transaction that pays no history ([`prices_history`]). Its gas pays it
+    /// before the first frame, reservoir first, as intrinsic gas. A body whose bytes have no price
+    /// costs `u64::MAX`, which no gas limit covers.
+    ///
+    /// [`prices_history`]: Self::prices_history
+    pub fn intrinsic_history_gas(&self) -> u64 {
+        if !self.prices_history() {
+            return 0;
+        }
+        history_gas(self.additional_limit.body()).unwrap_or(u64::MAX)
     }
 
     /// Prepares the common execution layer for a new transaction, which is a system-address

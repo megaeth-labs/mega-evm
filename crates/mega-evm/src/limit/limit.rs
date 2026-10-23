@@ -108,15 +108,6 @@ pub struct AdditionalLimit {
     kept: Kept,
     /// One per start revm decided whose result has not returned, the latest last.
     decided: Vec<Decided>,
-    /// The history gas of the transaction's body, part of
-    /// [`history_gas_spent`](Self::history_gas_spent).
-    intrinsic_history_gas: u64,
-    /// The bytes of the body that [`intrinsic_history_gas`](Self::intrinsic_history_gas) paid
-    /// for, part of [`history_bytes`](Self::history_bytes).
-    intrinsic_history_bytes: u64,
-    /// The history gas charged before the first frame for the write record that frame makes,
-    /// which the frame carries as its start charge.
-    first_frame_charge: u64,
     /// The history gas the settled transaction spent.
     history_gas_spent: u64,
     /// The history bytes the settled transaction appended.
@@ -285,9 +276,6 @@ impl AdditionalLimit {
         self.pre_frame_stop = None;
         self.kept = Kept::default();
         self.decided.clear();
-        self.intrinsic_history_gas = 0;
-        self.intrinsic_history_bytes = 0;
-        self.first_frame_charge = 0;
         self.history_gas_spent = 0;
         self.history_bytes = 0;
         self.reservoir_remaining = 0;
@@ -766,35 +754,6 @@ impl AdditionalLimit {
         self.exempt
     }
 
-    /* What the transaction pays before its first frame */
-
-    /// The history gas of the transaction's body: the bytes the transaction carries and the write
-    /// records its inclusion makes, which are known before it runs. The transaction's gas pays it
-    /// before the first frame, reservoir first, as intrinsic gas.
-    pub const fn intrinsic_history_gas(&self) -> u64 {
-        self.intrinsic_history_gas
-    }
-
-    /// Records the history gas the transaction's body costs, and the `bytes` of the body it pays
-    /// for.
-    pub(crate) const fn set_intrinsic_history(&mut self, gas: u64, bytes: u64) {
-        self.intrinsic_history_gas = gas;
-        self.intrinsic_history_bytes = bytes;
-    }
-
-    /// Records the history gas charged before execution for the write record the transaction's own
-    /// frame makes: the recipient of its value, or the account it creates. The frame carries it as
-    /// its start charge, which its failure gives back.
-    pub(crate) const fn set_first_frame_charge(&mut self, gas: u64) {
-        self.first_frame_charge = gas;
-    }
-
-    /// The history gas charged before execution for the write record the transaction's own frame
-    /// makes.
-    pub(crate) const fn first_frame_charge(&self) -> u64 {
-        self.first_frame_charge
-    }
-
     /* What the settled transaction reports */
 
     /// The history gas the last settled transaction spent.
@@ -829,7 +788,7 @@ impl AdditionalLimit {
     pub(crate) fn settle_history(&mut self, priced: bool, spent: u64) {
         self.history_gas_spent = spent;
         self.history_bytes = if priced {
-            self.intrinsic_history_bytes
+            self.body
                 .saturating_add(WRITE_RECORD_SIZE.saturating_mul(self.authorities))
                 .saturating_add(positive(self.kept.net(LimitKind::DataSize) as i128))
                 .saturating_sub(TRANSFER_LOG_SIZE.saturating_mul(self.kept.transfer_logs))
