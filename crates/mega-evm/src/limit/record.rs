@@ -42,6 +42,7 @@ use alloc as std;
 use std::vec::Vec;
 
 use revm::{
+    context::JournalInner,
     context_interface::{
         host::{CompletedWrite, FrameStartKind},
         journaled_state::entry::{JournalEntry, SelfdestructionRevertStatus},
@@ -51,7 +52,7 @@ use revm::{
         hardfork::SpecId,
         Address, Log, StorageKey, KECCAK_EMPTY, U256,
     },
-    state::{Account, AccountInfo, EvmState, TransactionId},
+    state::{Account, AccountInfo},
     Journal,
 };
 
@@ -158,15 +159,11 @@ impl DestroyedParts {
 /// a write makes.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Accounts<'a> {
-    state: &'a EvmState,
-    /// The journal's entries, which revm clears between transactions: this transaction's.
-    entries: &'a [JournalEntry],
-    /// The logs the journal holds, which a failed frame's revert takes back with its entries.
-    logs: &'a [Log],
-    transaction_id: TransactionId,
-    /// Whether a value movement journals an EIP-7708 transfer log, as the journal's own
-    /// configuration says ([`emits_transfer_logs`]).
-    transfer_logs: bool,
+    /// The journal: its state; its entries, which revm clears between transactions, so they are
+    /// this transaction's; its logs, which a failed frame's revert takes back with its entries;
+    /// and its configuration, which says whether a value movement journals an EIP-7708 transfer
+    /// log ([`emits_transfer_logs`]), read only where a write's count needs it.
+    journal: &'a JournalInner<JournalEntry>,
 }
 
 /// Whether `info` differs from `original` in what a write record stands for: the nonce, the
@@ -278,27 +275,22 @@ pub(crate) fn is_transfer_log(log: &Log) -> bool {
 /// with the switch on, unless EIP-7708 is disabled. It is the rule revm's journal emits one by,
 /// read off the journal's own copy of the configuration, so the data size counts a transfer log
 /// exactly where revm emits one, a switch a caller turned on the journal itself included.
-pub(crate) fn emits_transfer_logs<DB>(journal: &Journal<DB>) -> bool {
+pub(crate) fn emits_transfer_logs(journal: &JournalInner<JournalEntry>) -> bool {
     (journal.cfg.spec.is_enabled_in(SpecId::AMSTERDAM) || journal.amsterdam_eip7708_enabled()) &&
         !journal.cfg.eip7708_disabled
 }
 
 impl<'a> Accounts<'a> {
     /// The accounts `journal` holds.
-    pub(crate) fn of<DB>(journal: &'a Journal<DB>) -> Self {
-        Self {
-            state: &journal.state,
-            entries: &journal.journal,
-            logs: &journal.logs,
-            transaction_id: journal.transaction_id,
-            transfer_logs: emits_transfer_logs(journal),
-        }
+    pub(crate) const fn of<DB>(journal: &'a Journal<DB>) -> Self {
+        Self { journal: &journal.inner }
     }
 
     /// The account at `address` as the transaction loaded it and holds it now: `None` for one
     /// the transaction has not loaded, which it has not changed either.
     fn loaded(&self, address: Address) -> Option<&'a Account> {
-        self.state.get(&address).filter(|account| account.transaction_id == self.transaction_id)
+        let transaction_id = self.journal.transaction_id;
+        self.journal.state.get(&address).filter(|account| account.transaction_id == transaction_id)
     }
 
     /// Whether the transaction has loaded the account at `address`. An account an earlier
@@ -357,8 +349,9 @@ impl<'a> Accounts<'a> {
         } else {
             account.info.code.as_ref().map_or(0, |code| code.len() as u64)
         };
+        let transaction_id = self.journal.transaction_id;
         let loaded =
-            account.storage.iter().filter(|(_, slot)| slot.transaction_id == self.transaction_id);
+            account.storage.iter().filter(|(_, slot)| slot.transaction_id == transaction_id);
         let mut slots = Vec::new();
         let mut deleted = 0;
         for (key, slot) in loaded {
@@ -391,7 +384,7 @@ impl<'a> Accounts<'a> {
             return false;
         }
         account.is_loaded_as_not_existing() ||
-            self.entries.iter().rev().find_map(|entry| match entry {
+            self.journal.journal.iter().rev().find_map(|entry| match entry {
                 JournalEntry::AccountDestroyed { address: destroyed, destroyed_status, .. }
                     if *destroyed == address =>
                 {
@@ -512,7 +505,7 @@ impl<'a> Accounts<'a> {
             records = records.with(record);
             growth += u64::from(grew);
         }
-        let logs = self.logs.get(before.logs..).unwrap_or_default();
+        let logs = self.journal.logs.get(before.logs..).unwrap_or_default();
         let logged = logs.iter().any(is_transfer_log);
         (records, Counted::records(records.added, records.taken, logged).with_growth(growth, 0))
     }
@@ -606,7 +599,7 @@ impl<'a> Accounts<'a> {
             CompletedWrite::SelfDestruct { address, target, balance, result } => {
                 let records = self.destruction_records(address, target, balance);
                 let moved = result.had_value && target != address;
-                let logged = self.transfer_logs && moved;
+                let logged = moved && emits_transfer_logs(self.journal);
                 let creates = moved && !result.target_exists;
                 let counted = Counted::records(records.added, records.taken, logged)
                     .with_growth(u64::from(creates), 0);

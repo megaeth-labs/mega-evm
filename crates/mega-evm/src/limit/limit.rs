@@ -247,6 +247,14 @@ impl Counted {
         self.added.is_zero() && self.taken.is_zero()
     }
 
+    /// Whether it adds anything to `pool` or takes anything back from it: a count that leaves a
+    /// pool alone crosses neither the frame's budget in it nor, unless the transaction is held to
+    /// its limits whatever it counts, the transaction's limit, and a draw and a refill of nothing
+    /// change neither the pool nor what the frames keep.
+    const fn touches(&self, pool: PoolId) -> bool {
+        self.added.get(pool) != 0 || self.taken.get(pool) != 0
+    }
+
     /// What it adds to `pool` less what it takes back from it.
     const fn rise(&self, pool: PoolId) -> i128 {
         self.added.get(pool) as i128 - self.taken.get(pool) as i128
@@ -566,29 +574,26 @@ impl AdditionalLimit {
         LimitCheck::WithinLimit
     }
 
-    /// The verdict on `counted` kept on a frame whose pools hold `remaining` after net draws of
-    /// `spent`: in each counted dimension in order, the frame's budget, then the transaction's
-    /// limit; the first crossing is the verdict. `held` holds the transaction to its limits
-    /// whatever `counted` adds.
-    fn check(
-        &self,
-        remaining: PoolAmounts,
-        spent: [i64; PoolId::COUNT],
-        counted: &Counted,
-        held: bool,
-    ) -> LimitCheck {
+    /// The verdict on `counted` kept on a frame whose pools `gas` holds: in each counted dimension
+    /// in order, the frame's budget, then the transaction's limit; the first crossing is the
+    /// verdict. `held` holds the transaction to its limits whatever `counted` adds; otherwise a
+    /// dimension `counted` leaves alone crosses nothing and is not looked at
+    /// ([`Counted::touches`]).
+    fn check(&self, gas: &GasTracker, counted: &Counted, held: bool) -> LimitCheck {
         for kind in COUNTED {
             let Some(pool) = kind.pool() else { continue };
+            if !held && !counted.touches(pool) {
+                continue;
+            }
             let rise = counted.rise(pool);
-            if rise > 0 && rise > remaining.get(pool) as i128 {
-                let check = self.budget_crossed(
-                    kind,
-                    remaining.get(pool),
-                    spent[pool.index()],
-                    rise as u64,
-                );
-                if check.exceeded_limit() {
-                    return check;
+            if rise > 0 {
+                let remaining = gas.pool_remaining(pool);
+                if rise > remaining as i128 {
+                    let spent = gas.pool_spent(pool);
+                    let check = self.budget_crossed(kind, remaining, spent, rise as u64);
+                    if check.exceeded_limit() {
+                        return check;
+                    }
                 }
             }
             let check = self.transaction_crossed(kind, counted, held);
@@ -597,11 +602,6 @@ impl AdditionalLimit {
             }
         }
         LimitCheck::WithinLimit
-    }
-
-    /// The pools `gas` holds and the nets it drew on them.
-    fn pools_of(gas: &GasTracker) -> (PoolAmounts, [i64; PoolId::COUNT]) {
-        (gas.pools_remaining(), PoolId::ALL.map(|pool| gas.pool_spent(pool)))
     }
 
     /// Counts what the frame whose pools `gas` holds keeps of `counted`, held to the frame's
@@ -613,8 +613,7 @@ impl AdditionalLimit {
         if counted.is_none() {
             return LimitCheck::WithinLimit;
         }
-        let (remaining, spent) = Self::pools_of(gas);
-        let check = self.check(remaining, spent, counted, false);
+        let check = self.check(gas, counted, false);
         if check.exceeded_limit() {
             return check;
         }
@@ -623,9 +622,13 @@ impl AdditionalLimit {
         LimitCheck::WithinLimit
     }
 
-    /// Draws `counted` on the pools `gas` holds, which the checks made sure can pay it.
+    /// Draws `counted` on the pools `gas` holds, which the checks made sure can pay it; a pool it
+    /// leaves alone is not visited.
     fn apply(gas: &mut GasTracker, counted: &Counted) {
         for pool in PoolId::ALL {
+            if !counted.touches(pool) {
+                continue;
+            }
             gas.refill_pool(pool, counted.taken.get(pool));
             let drew = gas.record_pool(pool, counted.added.get(pool));
             debug_assert!(
@@ -649,6 +652,9 @@ impl AdditionalLimit {
     fn count(&mut self, counted: &Counted) {
         let kept = &mut self.kept;
         for pool in PoolId::ALL {
+            if !counted.touches(pool) {
+                continue;
+            }
             let net = &mut kept.net[pool.index()];
             *net = net
                 .saturating_add_unsigned(counted.added.get(pool))
@@ -699,8 +705,7 @@ impl AdditionalLimit {
         counted: &Counted,
         credit: u64,
     ) -> LimitCheck {
-        let (remaining, spent) = Self::pools_of(gas);
-        let check = self.check(remaining, spent, counted, true);
+        let check = self.check(gas, counted, true);
         if check.exceeded_limit() {
             return check;
         }
@@ -949,6 +954,169 @@ mod tests {
             },
             "the next transaction is held to its limits"
         );
+    }
+
+    /// `draw` as it was before it learned to leave alone the pools a count does not touch: every
+    /// pool's budget and every dimension's limit checked off a snapshot of the pools, and every
+    /// pool drawn, refilled and counted. The reference [`draw`](AdditionalLimit::draw) is held to.
+    fn draw_by_every_pool(
+        limit: &mut AdditionalLimit,
+        gas: &mut GasTracker,
+        counted: &Counted,
+    ) -> LimitCheck {
+        if counted.is_none() {
+            return LimitCheck::WithinLimit;
+        }
+        let remaining = gas.pools_remaining();
+        let spent = PoolId::ALL.map(|pool| gas.pool_spent(pool));
+        for kind in COUNTED {
+            let Some(pool) = kind.pool() else { continue };
+            let rise = counted.rise(pool);
+            if rise > 0 && rise > remaining.get(pool) as i128 {
+                let check = limit.budget_crossed(
+                    kind,
+                    remaining.get(pool),
+                    spent[pool.index()],
+                    rise as u64,
+                );
+                if check.exceeded_limit() {
+                    return check;
+                }
+            }
+            let check = limit.transaction_crossed(kind, counted, false);
+            if check.exceeded_limit() {
+                return check;
+            }
+        }
+        for pool in PoolId::ALL {
+            gas.refill_pool(pool, counted.taken.get(pool));
+            if !gas.record_pool(pool, counted.added.get(pool)) {
+                gas.clear_pool_crossing(pool);
+            }
+            let net = &mut limit.kept.net[pool.index()];
+            *net = net
+                .saturating_add_unsigned(counted.added.get(pool))
+                .saturating_sub_unsigned(counted.taken.get(pool));
+        }
+        limit.kept.transfer_logs += u64::from(counted.transfer_log);
+        LimitCheck::WithinLimit
+    }
+
+    /// A draw that visits only the pools its count touches decides, draws and counts exactly as
+    /// one that visits every pool: for every count that adds to, takes back from or leaves alone
+    /// each of the three pools, with and without a transfer log, on frames whose budget in each
+    /// pool is exhausted, short of the count or ample, under transaction limits that the count
+    /// crosses or does not, after frames kept nothing, a little or more, and for an exempt
+    /// transaction, whose pools are unlimited. A count takes back no more data size and no more
+    /// records than the frames keep, which the engine never does and a debug build asserts.
+    #[test]
+    fn test_a_draw_over_the_pools_it_touches_matches_one_over_every_pool() {
+        // What a count does to one pool: nothing, add, take back, or both.
+        let moves = [(0, 0), (5, 0), (0, 2), (7, 3)];
+        // A frame's pool before the draw: empty, short of the count, ample; an exempt
+        // transaction's frames start with unlimited pools.
+        let mut cases = 0;
+        for (class, pools) in
+            [(TxClass::Ordinary, &[0_u64, 4, 100][..]), (TxClass::ProtocolOwn, &[u64::MAX - 2][..])]
+        {
+            for tx_limit in [10_u64, u64::MAX] {
+                for kept in [0_u64, 3, 8] {
+                    let limits = EvmTxRuntimeLimits::no_limits()
+                        .with_tx_data_size_limit(tx_limit)
+                        .with_tx_kv_update_limit(tx_limit)
+                        .with_tx_state_growth_limit(tx_limit);
+                    let mut layer = AdditionalLimit::new(limits);
+                    layer.begin_transaction(class, 0);
+                    let prior = Counted::NONE;
+                    let mut prior = prior;
+                    for pool in PoolId::ALL {
+                        prior.added.set(pool, kept);
+                    }
+                    layer.count(&prior);
+                    for a in moves {
+                        for b in moves {
+                            for c in moves {
+                                for transfer_log in [false, true] {
+                                    for &pa in pools {
+                                        for &pb in pools {
+                                            for &pc in pools {
+                                                let mut counted = Counted::NONE;
+                                                for (pool, (added, taken)) in
+                                                    PoolId::ALL.into_iter().zip([a, b, c])
+                                                {
+                                                    counted.added.set(pool, added);
+                                                    counted.taken.set(pool, taken);
+                                                }
+                                                counted.transfer_log = transfer_log;
+                                                let takes_more = [PoolId::ALL[0], PoolId::ALL[1]]
+                                                    .into_iter()
+                                                    .any(|pool| counted.taken.get(pool) > kept);
+                                                if takes_more {
+                                                    continue;
+                                                }
+                                                // Two drawn already, so a frame's net is not zero.
+                                                let mut gas = GasTracker::new(1_000, 1_000, 0);
+                                                gas.set_pools_remaining(
+                                                    PoolAmounts::ZERO
+                                                        .with(PoolId::ALL[0], pa + 2)
+                                                        .with(PoolId::ALL[1], pb + 2)
+                                                        .with(PoolId::ALL[2], pc + 2),
+                                                );
+                                                for pool in PoolId::ALL {
+                                                    assert!(gas.record_pool(pool, 2));
+                                                }
+                                                let (mut by_touched, mut by_every) =
+                                                    (layer.clone(), layer.clone());
+                                                let (mut gas_touched, mut gas_every) = (gas, gas);
+                                                let verdict =
+                                                    by_touched.draw(&mut gas_touched, &counted);
+                                                let reference = draw_by_every_pool(
+                                                    &mut by_every,
+                                                    &mut gas_every,
+                                                    &counted,
+                                                );
+                                                let case = format!(
+                                                    "{class:?}, limit {tx_limit}, kept {kept}, \
+                                                     {counted:?}, pools {pa}/{pb}/{pc}"
+                                                );
+                                                assert_eq!(verdict, reference, "{case}");
+                                                assert_eq!(
+                                                    by_touched.kept, by_every.kept,
+                                                    "{case}"
+                                                );
+                                                assert_eq!(
+                                                    gas_touched.pools_remaining(),
+                                                    gas_every.pools_remaining(),
+                                                    "{case}"
+                                                );
+                                                for pool in PoolId::ALL {
+                                                    assert_eq!(
+                                                        (
+                                                            gas_touched.pool_spent(pool),
+                                                            gas_touched.pool_crossing(pool)
+                                                        ),
+                                                        (
+                                                            gas_every.pool_spent(pool),
+                                                            gas_every.pool_crossing(pool)
+                                                        ),
+                                                        "{case}"
+                                                    );
+                                                }
+                                                cases += 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // With nothing kept, a count takes nothing back from the first two pools: 2 of 4 moves
+        // each, so 16 of the 64 moves; with 3 or 8 kept, every move. The ordinary transaction runs
+        // on 27 pool states, the exempt one on one.
+        assert_eq!(cases, 2 * (16 + 64 + 64) * 2 * (27 + 1));
     }
 
     /// The history pre-execution charged for the first frame's record reaches that frame's input
