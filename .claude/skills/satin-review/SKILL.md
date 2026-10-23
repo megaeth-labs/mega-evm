@@ -179,6 +179,7 @@ Four notes that are easy to miss:
 
 Evidence that a change alters no result: `state-test --json-digest` at two commits, detached, over both fixture releases, in equivalence mode, in Satin mode and in Satin mode under tighter limits (the `--limit-*` options), each sorted and compared byte for byte, plus the gates and the byte-price grid.
 The digest hashes each transaction's whole outcome, its gas by ledger and its usage counts included, so it catches a shift between ledgers that `--json-outcome` does not.
+`--json-witness` (and `state-test btest --json-witness`, per block) adds the hash of what each transaction read below the journal, so a change that keeps every outcome and reads other state — a code, a block hash, a SALT bucket, an account a rejected transaction loads — is caught too; it prints in the same pass as the digest, whose lines it leaves unchanged.
 A golden or snapshot changes only for a stated reason: regenerate it and read the diff.
 
 ## Reading order
@@ -365,7 +366,7 @@ For each module: where it is, what to check, the spec sections, and the `AGENTS.
 - **Check:**
   - No consensus path changed for a tool's sake; tool overrides (`--override.limits`, `with_tx_runtime_limits`, `with_protocol_limits` under `test-utils`) are explicit and never default.
   - A limits file of the first shape, without the KV-update and state-growth fields, reads with the default spec's values for them; every other field stays required, and an unknown one is refused.
-  - `state-test --json-digest` hashes each transaction's whole outcome, and the `--limit-*` options run Satin mode under tighter limits in each dimension.
+  - `state-test --json-digest` hashes each transaction's whole outcome, `--json-witness` what it read below the journal (and `btest --json-witness` what each block read), and the `--limit-*` options run Satin mode under tighter limits in each dimension.
   - A test pins a spec rule, not the implementation; a new or changed test says which rule it checks (some headers carry a `[S<section>.<n>]` tag: the spec section and item).
   - A figure the schedule determines is asserted against its derivation, not pinned; snapshots and goldens own only outputs with no computable expectation.
   - The limit matrix (`tests/satin/limit_matrix/`) runs every row, none of them ignored.

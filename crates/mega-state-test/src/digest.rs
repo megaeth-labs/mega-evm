@@ -15,6 +15,15 @@
 //! The one place that renders a type through `Debug` is a halt or success reason and a rejected
 //! transaction's error, whose names are the types' own; a dependency changing those names moves
 //! the digest of the transactions that end that way, and the full form shows it.
+//!
+//! The outcome says nothing of what a transaction read on its way to it. A change that keeps every
+//! outcome and reads other state — a code it no longer loads, a block hash, a SALT bucket it now
+//! asks for, an account a rejected transaction no longer loads — moves no digest, and changes the
+//! witness a stateless validator must be given. [`reads`] is the record of what the engine read
+//! below its journal, in the same encoding: every account, code, storage slot and block hash the
+//! database served, with the answers, every SALT bucket and Oracle slot the external environment
+//! answered, as a recording database and environment collect them ([`WitnessRecord`]). Its hash is
+//! the read-set digest two runs are compared by, as they are by the outcome's.
 
 use std::collections::BTreeMap;
 
@@ -22,8 +31,9 @@ use mega_evm::{
     revm::{
         context::result::{ExecutionResult, ResultGas},
         primitives::{keccak256, Address, Log, B256, U256},
-        state::{Account, EvmState},
+        state::{Account, AccountInfo, EvmState},
     },
+    test_utils::WitnessRecord,
     LimitCheck, LimitUsage, MegaGasUsage, MegaHaltReason, MegaTransactionOutcome, OracleRead,
 };
 use serde_json::{Map, Value};
@@ -213,6 +223,68 @@ pub fn panicked(message: &str) -> Value {
     fields([("panic", message.into())])
 }
 
+/// What the database answered for an account: its balance, code hash and nonce, or nothing for
+/// one it does not hold. The code itself is read by hash, and is in the record's codes.
+fn account_answer(info: Option<&AccountInfo>) -> Value {
+    info.map_or(Value::Null, |info| {
+        fields([
+            ("balance", number(info.balance)),
+            ("code_hash", hex(info.code_hash)),
+            ("nonce", info.nonce.into()),
+        ])
+    })
+}
+
+/// The canonical record of what the engine read below its journal: the database's accounts,
+/// codes, storage slots and block hashes, with the answers it served, and the external
+/// environment's SALT buckets and Oracle slots, with its answers. A key read twice is listed
+/// once, every list but the Oracle reads in key order; the Oracle reads keep the order they were
+/// made in, which a replay answers them in. The hints the Oracle service received are not reads,
+/// and are not in it: the outcome's data size counts them.
+pub fn reads(record: &WitnessRecord) -> Value {
+    let WitnessRecord { accounts, storage, codes, block_hashes, buckets, oracle_reads, hints: _ } =
+        record;
+    let mut slots: BTreeMap<String, BTreeMap<String, Value>> = BTreeMap::new();
+    for ((owner, key), value) in storage {
+        slots.entry(address(owner)).or_default().insert(format!("{key:#066x}"), number(*value));
+    }
+    fields([
+        (
+            "accounts",
+            object(
+                accounts.iter().map(|(addr, info)| (address(addr), account_answer(info.as_ref()))),
+            ),
+        ),
+        (
+            "block_hashes",
+            Value::Array(
+                block_hashes
+                    .iter()
+                    .map(|(block, hash)| fields([("hash", hex(hash)), ("number", (*block).into())]))
+                    .collect(),
+            ),
+        ),
+        (
+            "buckets",
+            Value::Array(
+                buckets
+                    .iter()
+                    .map(|(bucket, answer)| {
+                        let answer = match answer {
+                            Ok(capacity) => fields([("capacity", (*capacity).into())]),
+                            Err(error) => fields([("error", error.as_str().into())]),
+                        };
+                        fields([("answer", answer), ("bucket", (*bucket).into())])
+                    })
+                    .collect(),
+            ),
+        ),
+        ("codes", Value::Array(codes.keys().map(hex).collect())),
+        ("oracle_reads", Value::Array(oracle_reads.iter().map(oracle_read).collect())),
+        ("storage", object(slots.into_iter().map(|(owner, slots)| (owner, object(slots))))),
+    ])
+}
+
 /// The digest of a canonical record: the Keccak-256 of its JSON text.
 pub fn hash(canonical: &Value) -> B256 {
     keccak256(text(canonical))
@@ -354,5 +426,103 @@ mod tests {
         let rejected = hash(&canonical(Err("nonce too low")));
         assert_ne!(rejected, digest(&outcome()));
         assert_ne!(rejected, hash(&panicked("nonce too low")));
+    }
+
+    /// A record of one read on each channel: an account the database holds and one it does not,
+    /// a code, a slot, a block hash, a bucket it answered and one it failed, and an Oracle read.
+    fn record() -> WitnessRecord {
+        let mut record = WitnessRecord::default();
+        record.accounts.insert(
+            Address::repeat_byte(0xaa),
+            Some(AccountInfo { nonce: 1, balance: U256::from(5), ..Default::default() }),
+        );
+        record.accounts.insert(Address::repeat_byte(0x11), None);
+        record.codes.insert(B256::repeat_byte(0xc0), Default::default());
+        record.storage.insert((Address::repeat_byte(0xaa), U256::from(1)), U256::from(7));
+        record.block_hashes.insert(9, B256::repeat_byte(0x09));
+        record.buckets.insert(3, Ok(256));
+        record.buckets.insert(4, Err("unavailable".into()));
+        record.oracle_reads.push(OracleRead { slot: U256::from(2), answer: None });
+        record
+    }
+
+    fn read_digest(record: &WitnessRecord) -> B256 {
+        hash(&reads(record))
+    }
+
+    /// The record lists its channels and each channel's keys in sorted order, and keeps the order
+    /// of the Oracle reads, which a replay answers in order.
+    #[test]
+    fn test_the_read_set_lists_keys_in_order_and_keeps_the_oracle_order() {
+        let text = text(&reads(&record()));
+        let markers = [
+            "{\"accounts\":{\"0x1111",
+            ",\"0xaaaa",
+            "},\"block_hashes\":",
+            ",\"buckets\":[{\"answer\":{\"capacity\":256},\"bucket\":3}",
+            ",{\"answer\":{\"error\":\"unavailable\"},\"bucket\":4}",
+            ",\"codes\":",
+            ",\"oracle_reads\":",
+            ",\"storage\":{\"0xaaaa",
+        ];
+        let positions: Vec<_> = markers.iter().map(|m| text.find(m).expect(m)).collect();
+        assert!(positions.windows(2).all(|w| w[0] < w[1]), "{text}");
+
+        let mut two = record();
+        two.oracle_reads.push(OracleRead { slot: U256::from(8), answer: Some(U256::ONE) });
+        let mut swapped = two.clone();
+        swapped.oracle_reads.swap(0, 1);
+        assert_ne!(read_digest(&two), read_digest(&swapped));
+    }
+
+    /// One more read on any channel moves the record's digest: an account, absent or held, a
+    /// code, a slot, a block hash, a bucket and an Oracle read.
+    #[test]
+    fn test_one_more_read_moves_the_read_set() {
+        let base = read_digest(&record());
+        let more: [fn(&mut WitnessRecord); 7] = [
+            |r| {
+                r.accounts.insert(Address::repeat_byte(0x22), None);
+            },
+            |r| {
+                r.accounts.insert(Address::repeat_byte(0x33), Some(AccountInfo::default()));
+            },
+            |r| {
+                r.codes.insert(B256::repeat_byte(0xc1), Default::default());
+            },
+            |r| {
+                r.storage.insert((Address::repeat_byte(0xaa), U256::from(2)), U256::ZERO);
+            },
+            |r| {
+                r.block_hashes.insert(10, B256::repeat_byte(0x0a));
+            },
+            |r| {
+                r.buckets.insert(5, Ok(256));
+            },
+            |r| r.oracle_reads.push(OracleRead { slot: U256::from(2), answer: None }),
+        ];
+        for add in more {
+            let mut record = record();
+            add(&mut record);
+            assert_ne!(read_digest(&record), base, "{}", text(&reads(&record)));
+        }
+    }
+
+    /// What a source answered for a key, not only the key, is in the record.
+    #[test]
+    fn test_an_answer_alone_moves_the_read_set() {
+        let base = read_digest(&record());
+        let mut balance = record();
+        balance.accounts.get_mut(&Address::repeat_byte(0xaa)).unwrap().as_mut().unwrap().balance =
+            U256::from(6);
+        let mut slot = record();
+        slot.storage.insert((Address::repeat_byte(0xaa), U256::from(1)), U256::from(8));
+        let mut bucket = record();
+        bucket.buckets.insert(3, Ok(512));
+        let mut oracle = record();
+        oracle.oracle_reads[0].answer = Some(U256::ZERO);
+        for moved in [balance, slot, bucket, oracle] {
+            assert_ne!(read_digest(&moved), base);
+        }
     }
 }

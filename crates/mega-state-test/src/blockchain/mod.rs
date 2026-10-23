@@ -28,6 +28,10 @@
 //! anything runs, or failed; [`Report::gate`] fails on a failed test. The summary counts the
 //! blocks checked against Ethereum apart from the blocks matched to a deviation.
 //!
+//! A run can print, for every block it imports, the digest of what the block read below the
+//! journal ([`Config::witness`]), the same record the state tests print per transaction
+//! ([`digest::reads`](crate::digest::reads)).
+//!
 //! The devnet release's blockchain tests are not run: the revm fork's own runner skips them too.
 
 mod chain;
@@ -50,6 +54,7 @@ pub use fixture::NETWORK;
 use mega_evm::{
     alloy_consensus::Header,
     revm::primitives::{keccak256, B256},
+    test_utils::{SharedWitnessRecord, WitnessRecord},
 };
 use serde::Serialize;
 pub use skips::SkipReason;
@@ -60,7 +65,9 @@ use self::{
 };
 use crate::{
     deviations::{self, BlockchainEntry, Cause, ChainEnd, Deviation},
+    digest,
     exceptions::{check_names, Mismatch},
+    runner::DigestForm,
 };
 
 /// How a run executes its fixtures.
@@ -70,6 +77,11 @@ pub struct Config {
     pub threads: usize,
     /// Print one JSON line per test to standard error.
     pub json_outcome: bool,
+    /// Print the digest of what every imported block read below the journal to standard error,
+    /// in this form: the database's and the external environment's reads
+    /// ([`digest::reads`](crate::digest::reads)), recorded by a database and environments around
+    /// the ones the block runs on, which answer as those do.
+    pub witness: Option<DigestForm>,
     /// The registry whose entries explain blocks that differ:
     /// [`deviations::DEVIATIONS`](crate::deviations::DEVIATIONS) for the gate.
     pub deviations: &'static [Deviation],
@@ -502,7 +514,9 @@ pub fn run_file(path: &Path, config: Config) -> Result<Vec<TestResult>, Failure>
         let id = TestId { path: path_str.clone(), name: name.clone() };
         let (outcome, blocks) = match serde_json::from_str::<Test>(raw.get()) {
             Ok(test) => catch_unwind(AssertUnwindSafe(|| {
-                run_test(&id, &test, deviations::blockchain_entry(config.deviations, &id))
+                let witness = config.witness.map(|form| (form, &id));
+                let listed = deviations::blockchain_entry(config.deviations, &id);
+                run_test(&id, &test, listed, witness)
             }))
             .unwrap_or_else(|panic| {
                 let failure = Failure::new(FailureKind::Panic, None, panic_message(&panic));
@@ -534,18 +548,45 @@ fn print_outcome(id: &TestId, outcome: &Outcome) {
     eprintln!("{line}");
 }
 
+/// Prints the read-set line of the block at `index` of the test `id` to standard error: the test,
+/// the block's position, whether the executor `accepted` it, and the hash of the canonical record
+/// of what it read ([`digest::reads`](crate::digest::reads)); the full form carries the record
+/// too.
+fn print_witness(
+    id: &TestId,
+    index: usize,
+    accepted: bool,
+    form: DigestForm,
+    record: &WitnessRecord,
+) {
+    let reads = digest::reads(record);
+    let mut line = serde_json::json!({
+        "path": id.path,
+        "test": id.name,
+        "block": index,
+        "witness": digest::hash(&reads),
+        "row": if accepted { "accepted" } else { "refused" },
+    });
+    if form == DigestForm::Full {
+        line["reads"] = reads;
+    }
+    eprintln!("{line}");
+}
+
 /// Imports the test `id` and judges it against its fixture and the entry `listed`, the deviation
-/// that lists it and its entry for it, unless it is skipped.
+/// that lists it and its entry for it, unless it is skipped; with `witness`, printing what each
+/// block read in that form.
 fn run_test(
     id: &TestId,
     test: &Test,
     listed: Option<(&'static Deviation, &'static BlockchainEntry)>,
+    witness: Option<(DigestForm, &TestId)>,
 ) -> (Outcome, Blocks) {
     if let Some(reason) = skips::skip_test(&id.path, &id.name, test) {
         return (Outcome::Skipped { reason }, Blocks::default());
     }
     let mut blocks = Blocks::default();
-    let outcome = match import_test(test, listed.map(|(_, entry)| entry), &mut blocks) {
+    let outcome = match import_test(test, listed.map(|(_, entry)| entry), &mut blocks, witness) {
         Ok(()) => match listed {
             Some((deviation, _)) => Outcome::Deviated { deviation: deviation.id },
             None => Outcome::Passed,
@@ -659,10 +700,12 @@ fn with_differing(mut failure: Failure, differing: &[Differing]) -> Failure {
 /// the outcome Satin produced and a cause that holds; the chain is imported on from Satin's own
 /// state either way, so a failure names every block that differs, not only the first. A refusal
 /// the fixture does not expect, or a block it expects refused that is accepted, stops the test.
+/// With `witness`, each block's reads are recorded and printed once it is imported or refused.
 fn import_test(
     test: &Test,
     entry: Option<&'static BlockchainEntry>,
     blocks: &mut Blocks,
+    witness: Option<(DigestForm, &TestId)>,
 ) -> Result<(), Failure> {
     let fixture = |detail: String| Failure::new(FailureKind::Fixture, None, detail);
     let chain_id = u64::try_from(test.config.chainid)
@@ -700,7 +743,12 @@ fn import_test(
             with_differing(failure, &differing)
         })?;
         let header = &decoded.header;
-        match (&block.expect_exception, chain.import(&decoded)) {
+        let reads = witness.map(|_| SharedWitnessRecord::default());
+        let imported = chain.import(&decoded, reads.as_ref());
+        if let (Some((form, id)), Some(reads)) = (witness, &reads) {
+            print_witness(id, index, imported.is_ok(), form, &reads.borrow());
+        }
+        match (&block.expect_exception, imported) {
             (None, Ok(output)) => {
                 let differences = Differences::of(header, &output);
                 on_fixture_state = !differences.state_root;

@@ -35,6 +35,14 @@ pub(crate) struct Cmd {
     /// Print one JSON line per test to standard error.
     #[arg(long)]
     json_outcome: bool,
+    /// Print one JSON line per imported block on standard error: the test, the block's position,
+    /// whether it was accepted, and the hash of the canonical record of everything the block read
+    /// below the journal.
+    #[arg(long)]
+    json_witness: bool,
+    /// As `--json-witness`, with the canonical record of the reads in each line.
+    #[arg(long)]
+    json_witness_full: bool,
     /// Write the summary, as JSON, to this file.
     #[arg(long, value_name = "FILE")]
     summary_json: Option<PathBuf>,
@@ -85,8 +93,12 @@ pub(crate) fn main(args: impl IntoIterator<Item = std::ffi::OsString>) -> ExitCo
 
     let threads =
         cmd.threads.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
-    let config =
-        Config { threads, json_outcome: cmd.json_outcome, deviations: deviations::DEVIATIONS };
+    let config = Config {
+        threads,
+        json_outcome: cmd.json_outcome,
+        witness: crate::digest_form(cmd.json_witness, cmd.json_witness_full),
+        deviations: deviations::DEVIATIONS,
+    };
     let report = run(&files, config);
     let summary = report.summary();
     print_summary(&report, &summary);

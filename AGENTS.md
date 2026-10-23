@@ -52,6 +52,8 @@ MEGA_STATE_TEST_FIXTURES=$PWD/<main-fixtures>/state_tests MEGA_STATE_TEST_SAMPLE
   MEGA_STATE_TEST_MODE=satin cargo test --release -p mega-state-test --test witness -- --ignored --nocapture
 # The whole-outcome digest: one line per executed transaction (the canonical record of its MegaTransactionOutcome, hashed; `-full` adds the record), for a base-against-head `sort | cmp`
 cargo run --release -p state-test -- --mode satin --fork Osaka <main-fixtures>/state_tests --json-digest 2>&1 >/dev/null | grep '^{' | sort > head.digest
+# The read-set digest beside it, in the same pass: one more line per transaction, the hash of the canonical record of what it read below the journal (`-full` adds the record); `btest --json-witness` prints one per block
+cargo run --release -p state-test -- --mode satin --fork Osaka <main-fixtures>/state_tests --json-digest --json-witness 2>&1 >/dev/null | grep '^{' | sort > head.both
 # Regenerate the rendered deviation registry after changing crates/mega-state-test/src/deviations.rs
 UPDATE_DEVIATIONS=1 cargo test -p mega-state-test --lib deviations
 
