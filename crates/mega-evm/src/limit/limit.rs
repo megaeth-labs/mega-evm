@@ -110,8 +110,9 @@ pub struct AdditionalLimit {
     history_gas_spent: u64,
     /// The history bytes the settled transaction appended.
     history_bytes: u64,
-    /// The EIP-8037 reservoir the settled transaction left unspent.
-    reservoir_remaining: u64,
+    /// The EIP-8037 reservoir the settled transaction or system call left unspent: none from where
+    /// an execution builds its gas until it reports what it settled with.
+    reservoir_remaining: Option<u64>,
 }
 
 /// What a transaction's frames keep: the signed net of each counted dimension, indexed by its
@@ -274,7 +275,7 @@ impl AdditionalLimit {
         self.decided.clear();
         self.history_gas_spent = 0;
         self.history_bytes = 0;
-        self.reservoir_remaining = 0;
+        self.reservoir_remaining = None;
     }
 
     /* What the transaction keeps */
@@ -757,12 +758,27 @@ impl AdditionalLimit {
     /// ([`MegaGasUsage::reservoir_remaining`](crate::MegaGasUsage::reservoir_remaining)). It is
     /// read before the EIP-7623 floor absorbs it, and a failed deposit leaves none.
     pub const fn reservoir_remaining(&self) -> u64 {
-        self.reservoir_remaining
+        match self.reservoir_remaining {
+            Some(reservoir) => reservoir,
+            None => 0,
+        }
+    }
+
+    /// Forgets the reservoir the last execution reported: the running one builds its gas, and
+    /// reports what it leaves unspent once it settles.
+    pub(crate) const fn forget_reservoir_remaining(&mut self) {
+        self.reservoir_remaining = None;
     }
 
     /// Records the reservoir the settled transaction or system call left unspent.
     pub(crate) const fn set_reservoir_remaining(&mut self, reservoir: u64) {
-        self.reservoir_remaining = reservoir;
+        self.reservoir_remaining = Some(reservoir);
+    }
+
+    /// Records `reservoir` as what the settled execution left unspent, unless the execution
+    /// reported it already, where it read it before the result was built.
+    pub(crate) fn set_reservoir_remaining_unless_reported(&mut self, reservoir: u64) {
+        self.reservoir_remaining.get_or_insert(reservoir);
     }
 
     /// The history bytes the last settled transaction appended, whoever paid for them, which a

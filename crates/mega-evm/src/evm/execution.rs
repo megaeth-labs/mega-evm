@@ -289,7 +289,13 @@ where
     /// is no delegator. Every transaction's gas is split by the execution cap alone, the
     /// system-address transaction's included, which is a deposit and not a system call; and under
     /// the neutral configuration a system call's is not split, as revm's own runner has it.
+    ///
+    /// Every execution builds its gas here, a transaction or a system call, prepared by the crate
+    /// or run straight through revm's public entry points, so the reservoir the last one reported
+    /// is forgotten here: the running one reports its own once it settles
+    /// ([`execution_result`](Handler::execution_result)).
     fn tx_gas(&self, evm: &mut Self::Evm, init_and_floor_gas: &InitialAndFloorGas) -> GasTracker {
+        evm.ctx_mut().additional_limit.forget_reservoir_remaining();
         let mut gas = self.op.tx_gas(evm, init_and_floor_gas);
         let history = evm.ctx_ref().intrinsic_history_gas();
         if history != 0 {
@@ -423,25 +429,25 @@ where
         self.op.reward_beneficiary(evm, exec_result)
     }
 
-    /// op-revm's result; for a system call, with the reservoir it settled with reported
-    /// ([`AdditionalLimit::reservoir_remaining`](crate::AdditionalLimit::reservoir_remaining)).
+    /// op-revm's result, with the reservoir it settled with reported
+    /// ([`AdditionalLimit::reservoir_remaining`](crate::AdditionalLimit::reservoir_remaining))
+    /// unless the execution reported it already.
     ///
-    /// revm's system-call path settles without [`post_execution`](Handler::post_execution), which
-    /// reports a transaction's: the result it hands over here is the settled one. A deposit that
-    /// halts is not a result: op-revm turns it into a failed deposit, which leaves no reservoir
-    /// ([`catch_error`](Handler::catch_error)).
+    /// A transaction reports it in [`post_execution`](Handler::post_execution), before the floor
+    /// absorbs it. revm's system-call path settles without that phase, whether the crate prepared
+    /// the system call or it was run straight through the handler: the result it hands over here
+    /// is the settled one, and nothing of this execution reported a reservoir since it built its
+    /// gas ([`tx_gas`](Handler::tx_gas)). A deposit that halts is not a result: op-revm turns it
+    /// into a failed deposit, which leaves no reservoir ([`catch_error`](Handler::catch_error)).
     fn execution_result(
         &mut self,
         evm: &mut Self::Evm,
         result: FrameResult,
         result_gas: revm::context::result::ResultGas,
     ) -> Result<revm::context::result::ExecutionResult<Self::HaltReason>, Self::Error> {
-        let system_call_reservoir =
-            evm.ctx_ref().is_system_call().then(|| result.gas().reservoir());
+        let reservoir = result.gas().reservoir();
         let result = self.op.execution_result(evm, result, result_gas)?;
-        if let Some(reservoir) = system_call_reservoir {
-            evm.ctx_mut().additional_limit.set_reservoir_remaining(reservoir);
-        }
+        evm.ctx_mut().additional_limit.set_reservoir_remaining_unless_reported(reservoir);
         Ok(result)
     }
 
@@ -1948,9 +1954,11 @@ mod tests {
     /// a system call's, whose path builds no result gas there, once its result is built: a handler
     /// reused for a system call reports the system call's own reservoir, not the transaction's
     /// before it. A transaction below the execution cap reports nothing, one above it its own
-    /// margin, and a deposit that halts nothing, its failed-deposit result leaving no reservoir;
-    /// after each, a system call on revm's default gas limit reports the margin above the
-    /// system-call budget.
+    /// margin less the body's history, which the reservoir pays first, and a deposit that halts
+    /// nothing, its failed-deposit result leaving no reservoir. After each, a system call on
+    /// revm's default gas limit reports the margin above the system-call budget; and one run
+    /// through the public handler entry points without the crate's preparation, plain or
+    /// inspected, reports its own, on a gas limit no budget splits: nothing.
     #[test]
     fn test_a_reused_handler_reports_each_executions_own_reservoir() {
         use crate::{
@@ -1963,7 +1971,7 @@ mod tests {
         use revm::{
             context::{ContextSetters, TxEnv},
             handler::{system_call::SYSTEM_CALL_GAS_LIMIT, SystemCallTx},
-            inspector::NoOpInspector,
+            inspector::{InspectorHandler, NoOpInspector},
         };
         const HALTS: Address = address!("00000000000000000000000000000000000e0003");
         const DEFAULT_RESERVOIR: u64 = SYSTEM_CALL_GAS_LIMIT - SYSTEM_CALL_REGULAR_GAS_LIMIT;
@@ -1980,7 +1988,9 @@ mod tests {
             crate::MegaEvmError<core::convert::Infallible>,
             EthFrame<EthInterpreter>,
         >::new();
-        let room = 100_000 + history_gas(crate::TX_BODY_SIZE).unwrap();
+        const MARGIN: u64 = 10_000_000;
+        let body_history = history_gas(crate::TX_BODY_SIZE).unwrap();
+        let room = 100_000 + body_history;
         let tx = |to: Address, gas_limit: u64, nonce: u64| {
             OpTx(op_transaction(TxEnv {
                 caller: CALLER,
@@ -1990,31 +2000,57 @@ mod tests {
                 ..Default::default()
             }))
         };
-        let mut deposit = tx(HALTS, room, 0);
-        deposit.0.deposit.source_hash = alloy_primitives::B256::repeat_byte(0x11);
-        deposit.0.base.gas_price = 0;
 
-        for (case, tx, succeeds) in [
-            ("below the cap", tx(TARGET, room, 0), true),
-            ("above the cap", tx(TARGET, TX_GAS_LIMIT_CAP + 10_000_000, 1), true),
-            ("a halting deposit", deposit, false),
+        let mut nonce = 0;
+        for (case, to, gas_limit, deposits, settled) in [
+            ("below the cap", TARGET, room, false, 0),
+            ("above the cap", TARGET, TX_GAS_LIMIT_CAP + MARGIN, false, MARGIN - body_history),
+            ("a halting deposit", HALTS, room, true, 0),
         ] {
-            evm.inner.ctx.set_tx(tx);
-            let result = handler.run(&mut evm).expect(case);
-            assert_eq!(result.is_success(), succeeds, "{case}: {result:?}");
-            let settled = evm.ctx().additional_limit().reservoir_remaining();
-            assert_ne!(settled, DEFAULT_RESERVOIR, "{case}: the transaction's own would show");
+            for inspected in [false, true] {
+                let mut tx = tx(to, gas_limit, nonce);
+                if deposits {
+                    tx.0.deposit.source_hash = alloy_primitives::B256::repeat_byte(0x11);
+                    tx.0.base.gas_price = 0;
+                } else {
+                    nonce += 1;
+                }
+                evm.inner.ctx.set_tx(tx);
+                let result = handler.run(&mut evm).expect(case);
+                assert_eq!(result.is_success(), !deposits, "{case}: {result:?}");
+                assert_eq!(
+                    evm.ctx().additional_limit().reservoir_remaining(),
+                    settled,
+                    "{case}: the transaction's own reservoir"
+                );
 
-            let call = MegaTransaction::new_system_tx_with_caller(CALLER, TARGET, Bytes::new());
-            evm.inner.ctx.set_tx(call);
-            evm.inner.ctx.on_new_system_call();
-            let result = handler.run_system_call(&mut evm).expect("the system call runs");
-            assert!(result.is_success(), "{case}: {result:?}");
-            assert_eq!(
-                evm.ctx().additional_limit().reservoir_remaining(),
-                DEFAULT_RESERVOIR,
-                "{case}: the system call's own reservoir, not the transaction's"
-            );
+                // revm's public entry points, without the crate's preparation.
+                let call = MegaTransaction::new_system_tx_with_caller(CALLER, TARGET, Bytes::new());
+                evm.inner.ctx.set_tx(call.clone());
+                let result = if inspected {
+                    handler.inspect_run_system_call(&mut evm)
+                } else {
+                    handler.run_system_call(&mut evm)
+                };
+                let result = result.expect("the unprepared system call runs");
+                assert!(result.is_success(), "{case}: {result:?}");
+                assert_eq!(
+                    evm.ctx().additional_limit().reservoir_remaining(),
+                    0,
+                    "{case}, inspected {inspected}: the unprepared system call's own reservoir, \
+                     not the transaction's"
+                );
+
+                evm.inner.ctx.set_tx(call);
+                evm.inner.ctx.on_new_system_call();
+                let result = handler.run_system_call(&mut evm).expect("the system call runs");
+                assert!(result.is_success(), "{case}: {result:?}");
+                assert_eq!(
+                    evm.ctx().additional_limit().reservoir_remaining(),
+                    DEFAULT_RESERVOIR,
+                    "{case}: the system call's own reservoir, not the transaction's"
+                );
+            }
         }
     }
 }
