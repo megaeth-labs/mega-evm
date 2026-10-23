@@ -60,9 +60,6 @@ use crate::{
     MegaEvm, MegaInstructions, PricedPrecompiles, VolatileDataAccess, TX_BODY_OVER_DATA_SIZE_LIMIT,
 };
 
-#[cfg(debug_assertions)]
-use crate::limit::StartRecords;
-
 /// The regular gas a system call runs on, at most: EIP-8037's system-call budget. The rest of its
 /// gas limit is its state-gas reservoir ([`MegaHandler`]'s `tx_gas`).
 pub const SYSTEM_CALL_REGULAR_GAS_LIMIT: u64 = 30_000_000;
@@ -637,8 +634,6 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             let gas = frame.interpreter.gas.tracker_mut();
             let (counted, credit) = start.made(ctx);
             let verdict = ctx.additional_limit.count_start(gas, &counted, credit);
-            #[cfg(debug_assertions)]
-            start.assert_made(ctx);
             ctx.detention.on_frame_run(&mut frame.interpreter.gas, depth);
             let first = if verdict.exceeded_limit() {
                 Some(stop_action(ctx, frame, &verdict))
@@ -1201,7 +1196,8 @@ fn take_back_a_stopped_answer<DB: Database, ExtEnvs: ExternalEnvTypes>(
 }
 
 /// What holding a frame's start to the limits needs of it once revm consumed its input: where the
-/// start began, what it counts and what a stop answering it carries.
+/// start began, the accounts it writes as they stood before it, what its caller paid for it and
+/// what a stop answering it carries.
 struct FrameStart {
     /// Where the journal stood before revm decided the start: what revm journals for it — a
     /// creator's nonce bump, the value the start moves and its transfer log, a precompile's
@@ -1213,9 +1209,6 @@ struct FrameStart {
     before: StartBefore,
     /// The history gas the start's caller paid at its opcode for the records on the frame.
     charged: u64,
-    /// The records and transfer log the start makes on its frame, read off the journal before
-    /// revm decides it.
-    counted: Counted,
     /// The gas limit the frame's caller forwarded, before gas detention held a precompile to less.
     gas_limit: u64,
     /// The reservoir the frame inherits.
@@ -1226,57 +1219,50 @@ struct FrameStart {
     /// tells once the creation returned what revm's nonce bump made of it. The transaction's own
     /// creation has none: its sender's account is the transaction body's.
     creator: Option<CreatorBefore>,
-    /// The records the start makes, for a debug build to hold what revm then made to.
-    #[cfg(debug_assertions)]
-    made: MadeRecords,
 }
 
 impl FrameStart {
     /// The start of the frame `frame_init` asks for, about to be decided by revm: where the
-    /// journal stands, the records it makes on its frame as the journal's state stands
-    /// ([`Accounts::start_records`](crate::limit::Accounts)), and a creation's creator. A
-    /// creation's creator record is not among the records: it is the creator's, counted from the
-    /// bump once the creation returned.
+    /// journal stands, the accounts the start writes on its frame as the transaction holds them
+    /// ([`Accounts::start_before`]) — a call's caller and target, a creation's created account —
+    /// and a creation's creator. A creation's creator is not among the accounts: its nonce record
+    /// is the creator's, counted from the bump once the creation returned.
+    ///
+    /// [`Accounts::start_before`]: crate::limit::Accounts
     fn of<DB: Database, ExtEnvs: ExternalEnvTypes>(
         ctx: &mut MegaContext<DB, ExtEnvs>,
         frame_init: &FrameInit,
     ) -> Result<Self, ContextError<DB::Error>> {
-        // A creation's creator and address are loaded before revm decides the start, as revm
-        // loads them itself, outside the creation's checkpoint, once it decides it: the creator
-        // first thing, the address once the creator funds the endowment and its nonce bumps. The
-        // `CREATE` opcode loaded the address already unless EIP-8037 is off, and the creator is
-        // the frame that runs it, so only an inspector's rewrite, or EIP-8037 off, makes a load
-        // here that revm would not have made yet; neither changes what revm decides. An address an
-        // earlier transaction on the same journal left there is not loaded until it is again.
         let mut creator = None;
-        if let FrameInput::Create(inputs) = &frame_init.frame_input {
-            let info = &ctx.journal_mut().load_account(inputs.caller())?.data.info;
-            let bumps = info.balance >= inputs.value() && info.nonce != u64::MAX;
-            let created = inputs.created_address(info.nonce);
-            if bumps && !ctx.accounts().is_loaded(created) {
-                ctx.journal_mut().load_account(created)?;
-            }
-            if frame_init.depth > 0 {
-                creator = Some(ctx.accounts().creator_before(inputs.caller()));
-            }
-        }
-        let accounts = ctx.accounts();
-        let (records, growth, charged, reservoir, shares) = match &frame_init.frame_input {
-            FrameInput::Call(inputs) => {
-                let value = inputs.value.transfer().unwrap_or_default();
-                (
-                    accounts.transfer_records(inputs.caller, inputs.target_address, value),
-                    accounts.transfer_growth(inputs.caller, inputs.target_address, value),
-                    inputs.charged_start.history,
-                    inputs.reservoir,
-                    inputs.pool_shares,
-                )
-            }
+        let (first, second, charged, reservoir, shares) = match &frame_init.frame_input {
+            FrameInput::Call(inputs) => (
+                inputs.caller,
+                Some(inputs.target_address),
+                inputs.charged_start.history,
+                inputs.reservoir,
+                inputs.pool_shares,
+            ),
             FrameInput::Create(inputs) => {
-                let created = inputs.created_address(account_nonce(ctx, inputs.caller()));
+                // A creation's creator and address are loaded before revm decides the start, as
+                // revm loads them itself, outside the creation's checkpoint, once it decides it:
+                // the creator first thing, the address once the creator funds the endowment and
+                // its nonce bumps. The `CREATE` opcode loaded the address already unless EIP-8037
+                // is off, and the creator is the frame that runs it, so only an inspector's
+                // rewrite, or EIP-8037 off, makes a load here that revm would not have made yet;
+                // neither changes what revm decides. An address an earlier transaction on the same
+                // journal left there is not loaded until it is again.
+                let info = &ctx.journal_mut().load_account(inputs.caller())?.data.info;
+                let bumps = info.balance >= inputs.value() && info.nonce != u64::MAX;
+                let created = inputs.created_address(info.nonce);
+                if bumps && !ctx.accounts().is_loaded(created) {
+                    ctx.journal_mut().load_account(created)?;
+                }
+                if frame_init.depth > 0 {
+                    creator = Some(ctx.accounts().creator_before(inputs.caller()));
+                }
                 (
-                    accounts.creation_records(inputs.caller(), Some(created), inputs.value()),
-                    accounts.creation_growth(inputs.caller(), created, inputs.value()),
+                    created,
+                    None,
                     inputs.charged_start().history,
                     inputs.reservoir(),
                     inputs.pool_shares(),
@@ -1286,27 +1272,15 @@ impl FrameStart {
                 "a frame input always names a call or a creation, as revm's frame init asserts"
             ),
         };
-        let before = match &frame_init.frame_input {
-            FrameInput::Call(inputs) => (inputs.caller, Some(inputs.target_address)),
-            FrameInput::Create(inputs) => {
-                (inputs.created_address(account_nonce(ctx, inputs.caller())), None)
-            }
-            FrameInput::Empty => unreachable!("matched above"),
-        };
-        #[cfg(debug_assertions)]
-        let made = MadeRecords::before(ctx, frame_init, records);
         let mark = mark(ctx.journal_mut());
         Ok(Self {
-            before: ctx.accounts().start_before(before.0, before.1, mark.log_i),
+            before: ctx.accounts().start_before(first, second, mark.log_i),
             mark,
             charged,
-            counted: records.counted().with_growth(growth, 0),
             gas_limit: input_gas_limit(&frame_init.frame_input),
             reservoir,
             shares,
             creator,
-            #[cfg(debug_assertions)]
-            made,
         })
     }
 
@@ -1322,7 +1296,6 @@ impl FrameStart {
         ctx: &MegaContext<DB, ExtEnvs>,
     ) -> (Counted, u64) {
         let (records, counted) = ctx.accounts().start_made(&self.before);
-        debug_assert_eq!(counted, self.counted, "the start made what was predicted");
         let credit = if ctx.prices_history() {
             let price = |records| write_record_history_gas(records).unwrap_or(0);
             self.charged.saturating_sub(price(records.added)).saturating_add(price(records.taken))
@@ -1331,100 +1304,6 @@ impl FrameStart {
         };
         (counted, credit)
     }
-
-    /// Asserts revm's start made the records counted for it, read off the journal once revm built
-    /// the frame.
-    #[cfg(debug_assertions)]
-    fn assert_made<DB: Database, ExtEnvs: ExternalEnvTypes>(&self, ctx: &MegaContext<DB, ExtEnvs>) {
-        self.made.assert_after(ctx);
-    }
-}
-
-/// The accounts a start makes its records of on its frame and whether the transaction had changed
-/// each before it, for a debug build to hold the records the start counted to what revm's start
-/// made of them.
-#[cfg(debug_assertions)]
-#[derive(Debug)]
-struct MadeRecords {
-    /// The records predicted.
-    records: StartRecords,
-    /// The accounts, each with whether it was changed before the start.
-    accounts: MadeOn,
-}
-
-/// The accounts a start makes its records of on its frame.
-#[cfg(debug_assertions)]
-#[derive(Debug)]
-enum MadeOn {
-    /// A call's sender and recipient.
-    Call([(Address, bool); 2]),
-    /// A creation's created account. Its creator's record is the creator's, read off the journal
-    /// once the creation returned.
-    Creation((Address, bool)),
-}
-
-#[cfg(debug_assertions)]
-impl MadeRecords {
-    /// The accounts the start `frame_init` asks for writes, read before revm decides it, and the
-    /// `records` predicted for it.
-    fn before<DB: Database, ExtEnvs: ExternalEnvTypes>(
-        ctx: &MegaContext<DB, ExtEnvs>,
-        frame_init: &FrameInit,
-        records: StartRecords,
-    ) -> Self {
-        let journal = ctx.accounts();
-        let read = |address: Address| (address, journal.is_changed(address));
-        let accounts = match &frame_init.frame_input {
-            FrameInput::Call(inputs) => {
-                MadeOn::Call([read(inputs.caller), read(inputs.target_address)])
-            }
-            FrameInput::Create(inputs) => {
-                let nonce = account_nonce(ctx, inputs.caller());
-                MadeOn::Creation(read(inputs.created_address(nonce)))
-            }
-            FrameInput::Empty => MadeOn::Call([read(Address::ZERO); 2]),
-        };
-        Self { records, accounts }
-    }
-
-    /// Asserts the frame revm built made the records predicted: a call's two sides changed and
-    /// returned as its transfer's records say, a creation's created account as its record says.
-    fn assert_after<DB: Database, ExtEnvs: ExternalEnvTypes>(
-        &self,
-        ctx: &MegaContext<DB, ExtEnvs>,
-    ) {
-        use crate::limit::RecordDelta;
-        let accounts = ctx.accounts();
-        let made = |(address, before): (Address, bool)| {
-            RecordDelta::of_account(before, accounts.is_changed(address))
-        };
-        match self.accounts {
-            MadeOn::Call([first, second]) => {
-                let made = if first.0 == second.0 {
-                    RecordDelta::NONE
-                } else {
-                    made(first).with(made(second))
-                };
-                debug_assert_eq!(made, self.records.transfer, "a call's start made its records");
-            }
-            MadeOn::Creation(created) => {
-                let record = RecordDelta::of_account(false, self.records.created);
-                debug_assert_eq!(
-                    made(created),
-                    record,
-                    "a creation made its created account's record"
-                );
-            }
-        }
-    }
-}
-
-/// The nonce of an account the journal holds; zero for one it does not.
-fn account_nonce<DB: Database, ExtEnvs: ExternalEnvTypes>(
-    ctx: &MegaContext<DB, ExtEnvs>,
-    address: Address,
-) -> u64 {
-    ctx.journal_ref().state.get(&address).map_or(0, |account| account.info.nonce)
 }
 
 /// Holds `answer`, the success revm answered the call `start` began with, to `verdict`: a crossing

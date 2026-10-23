@@ -7,11 +7,13 @@
 //! original value. A write that changes an unchanged account or slot makes the record, a write that
 //! returns one to its original takes it back, and a write to one already changed adds nothing.
 //!
-//! The facts are read off revm's journal as it stands where a hook runs: before a frame's start,
-//! which is where its records are predicted, and after a completed write, where a `SELFDESTRUCT`'s
-//! accounts are rebuilt as they were before it from the balance it moved. A creator's nonce record
-//! is read off what revm did: the creator as it stood before revm decided the creation, and as it
-//! stands once the creation returned.
+//! The facts are read off revm's journal. What a frame's start made is read off what revm did:
+//! the accounts it writes on its frame as they stood before revm decided the start, and as they
+//! stand once it did ([`StartBefore`]); a creator's nonce record likewise, the creator as it stood
+//! before revm decided the creation, and as it stands once the creation returned. The opcode that
+//! starts the frame prices the start's records before revm decides it, as the journal's state
+//! stands then ([`StartRecords`]), and a completed write is read after it, where a
+//! `SELFDESTRUCT`'s accounts are rebuilt as they were before it from the balance it moved.
 //!
 //! State growth is counted at the same sites, one unit per new account or new slot, where EIP-8037
 //! charges the state gas of one: a slot an `SSTORE` makes non-zero from an original of zero, and
@@ -79,8 +81,9 @@ impl RecordDelta {
     }
 }
 
-/// The write records a frame's start makes: a call's value transfer's, and a creation's created
-/// account and creator nonce; and whether it journals a transfer log.
+/// The write records a frame's start makes, as the journal's state stands before revm decides it,
+/// which is what its opcode prices their history at: a call's value transfer's, and a creation's
+/// created account and creator nonce.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct StartRecords {
     /// The records a call's value transfer makes and takes back: the accounts it changes from what
@@ -93,25 +96,17 @@ pub(crate) struct StartRecords {
     /// had not changed. The record is the creator's, which the creation's failure leaves with it,
     /// and is counted on the creator once the creation returned ([`CreatorBefore`]).
     pub(crate) creator: bool,
-    /// Whether the start journals an EIP-7708 transfer log: value moves to another account.
-    pub(crate) transfer_log: bool,
 }
 
 impl StartRecords {
-    /// No record and no log.
+    /// No record.
     pub(crate) const NONE: Self =
-        Self { transfer: RecordDelta::NONE, created: false, creator: false, transfer_log: false };
+        Self { transfer: RecordDelta::NONE, created: false, creator: false };
 
     /// The records the start makes on the started frame, which its failure takes back: a
     /// transfer's, and the created account. The creator's is not among them.
     pub(crate) const fn on_frame(self) -> RecordDelta {
         RecordDelta { added: self.transfer.added + self.created as u64, taken: self.transfer.taken }
-    }
-
-    /// What the start counts on the started frame: its records there, and its transfer log.
-    pub(crate) const fn counted(self) -> Counted {
-        let on_frame = self.on_frame();
-        Counted::records(on_frame.added, on_frame.taken, self.transfer_log)
     }
 }
 
@@ -366,9 +361,8 @@ impl<'a> Accounts<'a> {
     }
 
     /// The records a transfer of `value` from `from` to `to` makes and takes back, as the journal's
-    /// state stands, and whether it journals a transfer log: nothing for a transfer to the same
-    /// account or of nothing, which revm moves nothing for, and nothing for a value `from` cannot
-    /// fund, which revm refuses.
+    /// state stands: nothing for a transfer to the same account or of nothing, which revm moves
+    /// nothing for, and nothing for a value `from` cannot fund, which revm refuses.
     pub(crate) fn transfer_records(&self, from: Address, to: Address, value: U256) -> StartRecords {
         if from == to || value.is_zero() {
             return StartRecords::NONE;
@@ -385,14 +379,14 @@ impl<'a> Accounts<'a> {
             self.is_changed(to),
             self.changed_with_balance(to, to_after),
         ));
-        StartRecords { transfer, transfer_log: self.transfer_logs, ..StartRecords::NONE }
+        StartRecords { transfer, ..StartRecords::NONE }
     }
 
     /// The records a creation by `creator` at `created` with an endowment of `value` makes, before
     /// revm bumps the creator's nonce: the creator's nonce, when the bump changes an account the
-    /// transaction had not changed; the account it creates, when the transaction had not changed
-    /// it; and a transfer log for an endowment. Nothing for an endowment `creator` cannot fund,
-    /// which revm refuses before it bumps the nonce, nor for a creation that takes no address.
+    /// transaction had not changed; and the account it creates, when the transaction had not
+    /// changed it. Nothing for an endowment `creator` cannot fund, which revm refuses before it
+    /// bumps the nonce, nor for a creation that takes no address.
     pub(crate) fn creation_records(
         &self,
         creator: Address,
@@ -407,7 +401,6 @@ impl<'a> Accounts<'a> {
             transfer: RecordDelta::NONE,
             created: !self.is_changed(created),
             creator: !self.is_changed(creator),
-            transfer_log: self.transfer_logs && !value.is_zero(),
         }
     }
 
@@ -474,24 +467,6 @@ impl<'a> Accounts<'a> {
         let logs = self.logs.get(before.logs..).unwrap_or_default();
         let logged = logs.iter().any(is_transfer_log);
         (records, Counted::records(records.added, records.taken, logged).with_growth(growth, 0))
-    }
-
-    /// The account of state growth a transfer of `value` from `from` to `to` makes, as the
-    /// journal's state stands: one when it moves value `from` can fund to another account that is
-    /// empty, which the transfer creates. A `CALLCODE`'s transfer is from the calling account to
-    /// itself, and a `DELEGATECALL` or `STATICCALL` carries none: none of them creates an account.
-    pub(crate) fn transfer_growth(&self, from: Address, to: Address, value: U256) -> u64 {
-        let creates =
-            from != to && !value.is_zero() && self.balance(from) >= value && self.is_empty(to);
-        u64::from(creates)
-    }
-
-    /// The account of state growth a creation by `creator` at `created` with an endowment of
-    /// `value` makes on its frame, as the journal's state stands: one when the creator can fund
-    /// the endowment and the address is empty, which the creation creates. An address that holds
-    /// a balance, a nonce or code is no new account, and a collision adds none.
-    pub(crate) fn creation_growth(&self, creator: Address, created: Address, value: U256) -> u64 {
-        u64::from(self.balance(creator) >= value && self.is_empty(created))
     }
 
     /// The records a frame start of `kind` by `caller` makes: a call's value transfer to `target`
@@ -964,18 +939,17 @@ mod tests {
         );
     }
 
-    /// A transfer's records follow the net change of both sides, on the balances the transfer
-    /// leaves them; a transfer to the same account, of nothing, or of more than the sender holds
-    /// records nothing and journals no log. A creation records its created account and its
-    /// creator's nonce only where the transaction had not changed them, keeps the creator's off
-    /// the created frame, and journals a log for an endowment.
+    /// The records a start's opcode prices follow the net change of both sides of a transfer, on
+    /// the balances the transfer leaves them; a transfer to the same account, of nothing, or of
+    /// more than the sender holds records nothing. A creation records its created account and its
+    /// creator's nonce only where the transaction had not changed them, and keeps the creator's off
+    /// the created frame.
     #[test]
-    fn test_a_starts_records_follow_the_net_change() {
+    fn test_a_starts_priced_records_follow_the_net_change() {
         let mut journal = journal();
         let accounts = Accounts::of(&journal, true);
         let both = accounts.transfer_records(OTHER, DESTRUCTED, U256::from(1));
         assert_eq!(both.transfer, RecordDelta { added: 2, taken: 0 });
-        assert!(both.transfer_log);
         assert_eq!(accounts.transfer_records(OTHER, OTHER, U256::from(1)), StartRecords::NONE);
         assert_eq!(accounts.transfer_records(OTHER, DESTRUCTED, U256::ZERO), StartRecords::NONE);
         assert_eq!(accounts.transfer_records(OTHER, DESTRUCTED, U256::from(5)), StartRecords::NONE);
@@ -984,28 +958,74 @@ mod tests {
         journal.transfer(OTHER, DESTRUCTED, U256::from(1)).unwrap();
         let back = Accounts::of(&journal, true).transfer_records(DESTRUCTED, OTHER, U256::from(1));
         assert_eq!(back.transfer, RecordDelta { added: 0, taken: 2 });
-        assert_eq!(back.counted(), Counted::records(0, 2, true));
 
         let created = address!("00000000000000000000000000000000000c4ea7");
         let accounts = Accounts::of(&journal, true);
         let creation = accounts.creation_records(SENDER, Some(created), U256::from(1));
         assert_eq!(
             creation,
-            StartRecords {
-                transfer: RecordDelta::NONE,
-                created: true,
-                creator: true,
-                transfer_log: true
-            }
+            StartRecords { transfer: RecordDelta::NONE, created: true, creator: true }
         );
         assert_eq!(creation.on_frame(), RecordDelta { added: 1, taken: 0 });
         let onto_changed = accounts.creation_records(OTHER, Some(DESTRUCTED), U256::ZERO);
-        assert!(!onto_changed.created && !onto_changed.creator && !onto_changed.transfer_log);
+        assert!(!onto_changed.created && !onto_changed.creator);
         assert_eq!(accounts.creation_records(SENDER, None, U256::ZERO), StartRecords::NONE);
         assert_eq!(
             accounts.creation_records(SENDER, Some(created), U256::from(11)),
             StartRecords::NONE,
             "an endowment the creator cannot fund"
+        );
+    }
+
+    /// What a start made is read off what revm did, against its accounts as they stood before it:
+    /// a transfer to an empty account makes both sides' records, one account of state growth and
+    /// the transfer log revm journaled since; sending the value back takes both records back and
+    /// grows nothing, the recipient no longer being empty; a start that moved nothing, or whose
+    /// move revm took back, made nothing; a log another account emitted is no transfer log; and an
+    /// account named twice is counted once.
+    #[test]
+    fn test_a_starts_records_are_read_off_what_revm_did() {
+        let empty = address!("00000000000000000000000000000000000e3e70");
+        let mut journal = journal();
+        journal.set_amsterdam_eip7708_enabled(true);
+        journal.load_account(empty).unwrap();
+        let before = |journal: &Journal<MemoryDatabase>, first, second| {
+            Accounts::of(journal, true).start_before(first, Some(second), journal.logs.len())
+        };
+        let made = |journal: &Journal<MemoryDatabase>, before| {
+            Accounts::of(journal, true).start_made(&before)
+        };
+
+        let funding = before(&journal, OTHER, empty);
+        assert_eq!(made(&journal, funding), (RecordDelta::NONE, Counted::NONE), "nothing moved");
+        journal.transfer(OTHER, empty, U256::from(1)).unwrap();
+        assert_eq!(
+            made(&journal, funding),
+            (RecordDelta { added: 2, taken: 0 }, Counted::records(2, 0, true).with_growth(1, 0))
+        );
+
+        let back = before(&journal, empty, OTHER);
+        journal.transfer(empty, OTHER, U256::from(1)).unwrap();
+        assert_eq!(
+            made(&journal, back),
+            (RecordDelta { added: 0, taken: 2 }, Counted::records(0, 2, true))
+        );
+
+        let taken_back = before(&journal, OTHER, DESTRUCTED);
+        let checkpoint = journal.checkpoint();
+        journal.transfer(OTHER, DESTRUCTED, U256::from(1)).unwrap();
+        journal.checkpoint_revert(checkpoint);
+        assert_eq!(made(&journal, taken_back), (RecordDelta::NONE, Counted::NONE), "taken back");
+
+        let logged = before(&journal, OTHER, DESTRUCTED);
+        journal.log(Log::new_unchecked(OTHER, vec![], Bytes::new()));
+        assert_eq!(made(&journal, logged), (RecordDelta::NONE, Counted::NONE), "a contract's log");
+
+        let itself = before(&journal, SENDER, SENDER);
+        journal.load_account_mut(SENDER).unwrap().data.bump_nonce();
+        assert_eq!(
+            made(&journal, itself),
+            (RecordDelta { added: 1, taken: 0 }, Counted::records(1, 0, false))
         );
     }
 
