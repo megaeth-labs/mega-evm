@@ -42,6 +42,7 @@ use revm::{
     },
     primitives::{
         eip7708::{ETH_TRANSFER_LOG_ADDRESS, ETH_TRANSFER_LOG_TOPIC},
+        hardfork::SpecId,
         Address, Log, StorageKey, KECCAK_EMPTY, U256,
     },
     state::{Account, AccountInfo, EvmState, TransactionId},
@@ -157,7 +158,8 @@ pub(crate) struct Accounts<'a> {
     /// The logs the journal holds, which a failed frame's revert takes back with its entries.
     logs: &'a [Log],
     transaction_id: TransactionId,
-    /// Whether a value movement journals an EIP-7708 transfer log.
+    /// Whether a value movement journals an EIP-7708 transfer log, as the journal's own
+    /// configuration says ([`emits_transfer_logs`]).
     transfer_logs: bool,
 }
 
@@ -212,16 +214,24 @@ pub(crate) fn is_transfer_log(log: &Log) -> bool {
     log.address == ETH_TRANSFER_LOG_ADDRESS && log.topics().first() == Some(&ETH_TRANSFER_LOG_TOPIC)
 }
 
+/// Whether a value movement journals an EIP-7708 transfer log on `journal`: from Amsterdam on, or
+/// with the switch on, unless EIP-7708 is disabled. It is the rule revm's journal emits one by,
+/// read off the journal's own copy of the configuration, so the data size counts a transfer log
+/// exactly where revm emits one.
+pub(crate) fn emits_transfer_logs<DB>(journal: &Journal<DB>) -> bool {
+    (journal.cfg.spec.is_enabled_in(SpecId::AMSTERDAM) || journal.amsterdam_eip7708_enabled()) &&
+        !journal.cfg.eip7708_disabled
+}
+
 impl<'a> Accounts<'a> {
-    /// The accounts `journal` holds, in a transaction whose value movements journal transfer logs
-    /// or not (`transfer_logs`).
-    pub(crate) fn of<DB>(journal: &'a Journal<DB>, transfer_logs: bool) -> Self {
+    /// The accounts `journal` holds.
+    pub(crate) fn of<DB>(journal: &'a Journal<DB>) -> Self {
         Self {
             state: &journal.state,
             entries: &journal.journal,
             logs: &journal.logs,
             transaction_id: journal.transaction_id,
-            transfer_logs,
+            transfer_logs: emits_transfer_logs(journal),
         }
     }
 
@@ -659,7 +669,7 @@ mod tests {
         let journal = journal();
         let slot = slot(original, present, new);
         let write = CompletedWrite::Sstore { address: OTHER, key: U256::ZERO, result: &slot };
-        Accounts::of(&journal, false).write_counted(&write).0
+        Accounts::of(&journal).write_counted(&write).0
     }
 
     /// A slot counts once, on its first change in the transaction; writing it back to its
@@ -709,7 +719,7 @@ mod tests {
     #[test]
     fn test_log_bytes() {
         let journal = journal();
-        let accounts = Accounts::of(&journal, false);
+        let accounts = Accounts::of(&journal);
         let counted = |topics, data_len| {
             let (counted, history, _) =
                 accounts.write_counted(&CompletedWrite::Log { address: OTHER, topics, data_len });
@@ -733,13 +743,14 @@ mod tests {
         let records_bytes = |records| WRITE_RECORD_SIZE * records;
 
         let mut fresh = journal();
+        fresh.set_amsterdam_eip7708_enabled(true);
         fresh.selfdestruct(DESTRUCTED, OTHER, false).unwrap();
-        let (counted, history, _) =
-            Accounts::of(&fresh, true).write_counted(&destruction(OTHER, 5));
+        let (counted, history, _) = Accounts::of(&fresh).write_counted(&destruction(OTHER, 5));
         assert_eq!(counted, Counted::records(2, 0, true));
         assert_eq!(history, HistoryBytes { appended: records_bytes(2), taken: 0 });
+        fresh.set_amsterdam_eip7708_enabled(false);
         assert_eq!(
-            Accounts::of(&fresh, false).write_counted(&destruction(OTHER, 5)).0,
+            Accounts::of(&fresh).write_counted(&destruction(OTHER, 5)).0,
             Counted::records(2, 0, false),
             "no transfer logs, no log"
         );
@@ -750,8 +761,7 @@ mod tests {
         drained.transfer(DESTRUCTED, SENDER, U256::from(1)).unwrap();
         drained.transfer(OTHER, SENDER, U256::from(4)).unwrap();
         drained.selfdestruct(DESTRUCTED, OTHER, false).unwrap();
-        let (counted, history, _) =
-            Accounts::of(&drained, false).write_counted(&destruction(OTHER, 4));
+        let (counted, history, _) = Accounts::of(&drained).write_counted(&destruction(OTHER, 4));
         assert_eq!(counted, Counted::records(0, 1, false));
         assert_eq!(history, HistoryBytes { appended: 0, taken: records_bytes(1) });
 
@@ -759,7 +769,7 @@ mod tests {
         funded.transfer(SENDER, DESTRUCTED, U256::from(2)).unwrap();
         funded.selfdestruct(DESTRUCTED, OTHER, false).unwrap();
         assert_eq!(
-            Accounts::of(&funded, false).write_counted(&destruction(OTHER, 7)).0,
+            Accounts::of(&funded).write_counted(&destruction(OTHER, 7)).0,
             Counted::records(1, 0, false),
             "the beneficiary's record alone"
         );
@@ -767,7 +777,7 @@ mod tests {
         // A pre-existing account destructing to itself keeps its balance: nothing changes.
         let to_itself = journal();
         assert_eq!(
-            Accounts::of(&to_itself, true).write_counted(&destruction(DESTRUCTED, 5)).0,
+            Accounts::of(&to_itself).write_counted(&destruction(DESTRUCTED, 5)).0,
             Counted::NONE
         );
     }
@@ -790,7 +800,7 @@ mod tests {
                 result: &result,
             };
             let journal = journal();
-            let counted = Accounts::of(&journal, true).write_counted(&write).0;
+            let counted = Accounts::of(&journal).write_counted(&write).0;
             (counted.added.get(STATE_GROWTH_POOL), counted.taken.get(STATE_GROWTH_POOL))
         };
         let fresh = address!("00000000000000000000000000000000000000f5");
@@ -834,9 +844,9 @@ mod tests {
         let fresh = address!("00000000000000000000000000000000000c4ea7");
         let slots = [(3, 1), (1, 7), (2, 1), (2, 0)];
         let mut made = created(MemoryDatabase::default(), fresh, 0, &slots, &[0x60, 0x00, 0xff]);
-        assert!(!Accounts::of(&made, true).is_destroyed(fresh));
+        assert!(!Accounts::of(&made).is_destroyed(fresh));
         made.selfdestruct(fresh, OTHER, false).unwrap();
-        let accounts = Accounts::of(&made, true);
+        let accounts = Accounts::of(&made);
         let parts = DestroyedParts {
             leaf: true,
             code: 3,
@@ -890,7 +900,7 @@ mod tests {
             let mut made = created(db, fresh, 0, &[(1, 1)], &[]);
             made.selfdestruct(fresh, OTHER, false).unwrap();
             assert_eq!(
-                Accounts::of(&made, true).destroyed_parts(fresh, false),
+                Accounts::of(&made).destroyed_parts(fresh, false),
                 Some(DestroyedParts {
                     leaf: false,
                     code: 0,
@@ -917,14 +927,14 @@ mod tests {
         loaded.create_account_checkpoint(SENDER, fresh, U256::ZERO, spec).unwrap();
         loaded.sstore(fresh, U256::from(8), U256::from(6)).unwrap();
         loaded.selfdestruct(fresh, OTHER, false).unwrap();
-        let parts = Accounts::of(&loaded, true).destroyed_parts(fresh, false).unwrap();
+        let parts = Accounts::of(&loaded).destroyed_parts(fresh, false).unwrap();
         assert_eq!(parts, DestroyedParts { leaf: false, code: 0, slots: vec![], deleted: 1 });
         assert_eq!(parts.counted(), Counted::records(1, 0, false));
 
         // An account the transaction did not create is an ordinary deletion.
         let mut older = journal();
         older.selfdestruct(DESTRUCTED, OTHER, false).unwrap();
-        let accounts = Accounts::of(&older, true);
+        let accounts = Accounts::of(&older);
         assert_eq!(accounts.destroyed_parts(DESTRUCTED, false), None);
         assert!(!accounts.is_destroyed(DESTRUCTED));
     }
@@ -951,7 +961,7 @@ mod tests {
     #[test]
     fn test_a_starts_priced_records_follow_the_net_change() {
         let mut journal = journal();
-        let accounts = Accounts::of(&journal, true);
+        let accounts = Accounts::of(&journal);
         let both = accounts.transfer_records(OTHER, DESTRUCTED, U256::from(1));
         assert_eq!(both.transfer, RecordDelta { added: 2, taken: 0 });
         assert_eq!(accounts.transfer_records(OTHER, OTHER, U256::from(1)), StartRecords::NONE);
@@ -960,11 +970,11 @@ mod tests {
 
         // OTHER sent 1 to DESTRUCTED: sending it back returns both.
         journal.transfer(OTHER, DESTRUCTED, U256::from(1)).unwrap();
-        let back = Accounts::of(&journal, true).transfer_records(DESTRUCTED, OTHER, U256::from(1));
+        let back = Accounts::of(&journal).transfer_records(DESTRUCTED, OTHER, U256::from(1));
         assert_eq!(back.transfer, RecordDelta { added: 0, taken: 2 });
 
         let created = address!("00000000000000000000000000000000000c4ea7");
-        let accounts = Accounts::of(&journal, true);
+        let accounts = Accounts::of(&journal);
         let creation = accounts.creation_records(SENDER, Some(created), U256::from(1));
         assert_eq!(
             creation,
@@ -994,11 +1004,10 @@ mod tests {
         journal.set_amsterdam_eip7708_enabled(true);
         journal.load_account(empty).unwrap();
         let before = |journal: &Journal<MemoryDatabase>, first, second| {
-            Accounts::of(journal, true).start_before(first, Some(second), journal.logs.len())
+            Accounts::of(journal).start_before(first, Some(second), journal.logs.len())
         };
-        let made = |journal: &Journal<MemoryDatabase>, before| {
-            Accounts::of(journal, true).start_made(&before)
-        };
+        let made =
+            |journal: &Journal<MemoryDatabase>, before| Accounts::of(journal).start_made(&before);
 
         let funding = before(&journal, OTHER, empty);
         assert_eq!(made(&journal, funding), (RecordDelta::NONE, Counted::NONE), "nothing moved");
@@ -1043,7 +1052,7 @@ mod tests {
         let mut journal = journal();
         journal.load_account(empty).unwrap();
         journal.transfer(OTHER, DESTRUCTED, U256::from(1)).unwrap();
-        let accounts = Accounts::of(&journal, true);
+        let accounts = Accounts::of(&journal);
         let [sender, changed, empty_before] =
             [SENDER, DESTRUCTED, empty].map(|address| accounts.creator_before(address));
         for before in [sender, changed, empty_before] {
@@ -1053,7 +1062,7 @@ mod tests {
         for address in [SENDER, DESTRUCTED, empty] {
             assert!(journal.load_account_mut(address).unwrap().data.bump_nonce());
         }
-        let accounts = Accounts::of(&journal, true);
+        let accounts = Accounts::of(&journal);
         let record = Counted::records(1, 0, false);
         for (before, counted) in
             [(sender, record), (changed, Counted::NONE), (empty_before, record.with_growth(1, 0))]
@@ -1067,7 +1076,7 @@ mod tests {
         for address in [SENDER, DESTRUCTED] {
             journal.load_account_mut(address).unwrap().data.set_nonce(0);
         }
-        let accounts = Accounts::of(&journal, true);
+        let accounts = Accounts::of(&journal);
         assert_eq!(accounts.creator_counted(&sender), Counted::NONE);
         assert_eq!(accounts.creator_counted(&changed), Counted::NONE);
     }

@@ -185,6 +185,8 @@ mod record;
 
 pub use limit::AdditionalLimit;
 pub(crate) use limit::Counted;
+#[cfg(test)]
+pub(crate) use record::emits_transfer_logs;
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) use record::is_transfer_log;
 pub(crate) use record::{Accounts, CreatorBefore, DestroyedParts, HistoryBytes, StartBefore};

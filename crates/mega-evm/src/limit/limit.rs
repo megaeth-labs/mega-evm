@@ -80,8 +80,6 @@ pub struct AdditionalLimit {
     /// Whether the transaction is exempt from every per-transaction limit, sticky for the
     /// transaction. See [`is_exempt`](Self::is_exempt).
     exempt: bool,
-    /// Whether a value movement journals an EIP-7708 transfer log.
-    transfer_logs: bool,
     /// The crossing the result of the frame returning next was made of, noted where the stop
     /// became that result ([`note_frame_stop`](Self::note_frame_stop)) and taken when the frame
     /// returns.
@@ -258,14 +256,12 @@ impl AdditionalLimit {
     }
 
     /// Clears the state for a new transaction, keeping allocations and the limits, and begins it:
-    /// exempt from every limit or not, its value movements journaling transfer logs or not, its
-    /// body weighing `body` bytes.
+    /// exempt from every limit or not, its body weighing `body` bytes.
     ///
     /// The exemption is decided before the body is counted: the protocol's own work is exempt
     /// whatever it carries.
-    pub(crate) fn begin_transaction(&mut self, exempt: bool, transfer_logs: bool, body: u64) {
+    pub(crate) fn begin_transaction(&mut self, exempt: bool, body: u64) {
         self.exempt = exempt;
-        self.transfer_logs = transfer_logs;
         self.frame_stop = None;
         self.limit_exceeded = None;
         self.body = body;
@@ -327,11 +323,6 @@ impl AdditionalLimit {
     /// revert takes back.
     pub(crate) const fn body(&self) -> u64 {
         self.body
-    }
-
-    /// Whether the transaction's value movements journal EIP-7708 transfer logs.
-    pub(crate) const fn counts_transfer_logs(&self) -> bool {
-        self.transfer_logs
     }
 
     /// Whether the transaction's body, with one write record for each of its `authorizations`,
@@ -848,7 +839,7 @@ mod tests {
     #[test]
     fn test_the_exemption_answers_every_crossing_and_lasts_one_transaction() {
         let mut limit = AdditionalLimit::default();
-        limit.begin_transaction(true, false, 0);
+        limit.begin_transaction(true, 0);
         assert!(limit.is_exempt());
         for kind in [LimitKind::DataSize, LimitKind::ComputeGas] {
             for frame_local in [false, true] {
@@ -856,7 +847,7 @@ mod tests {
                 assert_eq!(verdict, LimitCheck::WithinLimit, "{kind:?}, frame-local {frame_local}");
             }
         }
-        limit.begin_transaction(false, false, 0);
+        limit.begin_transaction(false, 0);
         assert!(!limit.is_exempt());
         assert_eq!(
             limit.crossed(LimitKind::ComputeGas, 0, 1, false),
@@ -880,7 +871,7 @@ mod tests {
         let limits = EvmTxRuntimeLimits::no_limits()
             .with_tx_data_size_limit(crate::TX_BODY_SIZE + WRITE_RECORD_SIZE);
         let mut limit = AdditionalLimit::new(limits);
-        limit.begin_transaction(false, false, crate::TX_BODY_SIZE);
+        limit.begin_transaction(false, crate::TX_BODY_SIZE);
         limit.count_authorities(2, 0);
     }
 }

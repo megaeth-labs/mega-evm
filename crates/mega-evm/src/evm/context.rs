@@ -24,9 +24,8 @@ use crate::{
     limit::{Accounts, Counted},
     system::{self, keyless},
     AdditionalLimit, BlockHashRecord, BucketError, BucketId, BucketMultipliers, BucketRecord,
-    Detention, EmptyExternalEnv, EthSpecId, EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs,
-    LimitUsage, MegaSpecId, MegaTransaction, OracleReadRecord, ProtocolLimits, SaltEnv,
-    VolatileDataAccess,
+    Detention, EmptyExternalEnv, EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs, LimitUsage,
+    MegaSpecId, MegaTransaction, OracleReadRecord, ProtocolLimits, SaltEnv, VolatileDataAccess,
 };
 
 /// The revm context the Satin engine runs on: op-revm's context shape with the `MegaETH`
@@ -297,7 +296,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
 
     /// The accounts the running transaction holds, read for the write records a write makes.
     pub(crate) fn accounts(&self) -> Accounts<'_> {
-        Accounts::of(self.journal_ref(), self.additional_limit.counts_transfer_logs())
+        Accounts::of(self.journal_ref())
     }
 
     /// Gas detention for the running (or last) transaction: the volatile data it read and the
@@ -499,7 +498,6 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// it uses is counted all the same. A user's deposit is not system-originated and is held
     /// to every one of them.
     fn prepare(&mut self, system_originated: bool) {
-        let transfer_logs = emits_transfer_logs(&self.inner.cfg);
         self.bucket_multipliers.reset();
         self.oracle_reads.clear();
         // A transaction that failed with an error, or was stopped, left its `keylessDeploy` call's
@@ -508,7 +506,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         // The body is data size whether or not the transaction pays history for it. A deposit,
         // a system transaction and a system call are exempt from the charge, not from the count.
         let body = transaction_body_bytes(self.tx());
-        self.additional_limit.begin_transaction(system_originated, transfer_logs, body);
+        self.additional_limit.begin_transaction(system_originated, body);
         self.install_history_schedule();
         // The protocol's own transactions are not detained: they maintain the volatile data. Their
         // reads set no cap.
@@ -632,16 +630,6 @@ pub fn spec_cfg(mut cfg: CfgEnv<MegaSpecId>) -> CfgEnv<MegaSpecId> {
     cfg
 }
 
-/// Whether a value movement journals an EIP-7708 transfer log under `cfg`: from Amsterdam on, or
-/// with the switch on, unless EIP-7708 is disabled. It is the rule revm's journal applies, read
-/// off the configuration the journal was synced with, so the data size counts a transfer log
-/// exactly where revm emits one.
-fn emits_transfer_logs(cfg: &CfgEnv<OpSpecId>) -> bool {
-    let spec = EthSpecId::from(cfg.spec);
-    (spec.is_enabled_in(EthSpecId::AMSTERDAM) || cfg.enable_amsterdam_eip7708()) &&
-        !cfg.is_eip7708_disabled()
-}
-
 /// The op-revm view of `cfg`: the same fields, keyed by the Optimism spec.
 fn op_cfg(cfg: &CfgEnv<MegaSpecId>) -> CfgEnv<OpSpecId> {
     cfg.clone().with_spec_and_gas_params(cfg.spec.into_op_spec(), cfg.gas_params.clone())
@@ -731,7 +719,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextSetters for MegaContext<DB,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EthSpecId, SaltEnv, TestExternalEnvs};
+    use crate::{limit::emits_transfer_logs, EthSpecId, SaltEnv, TestExternalEnvs};
     use alloy_eips::eip4788::SYSTEM_ADDRESS;
     use alloy_primitives::U256;
     use core::convert::Infallible;
@@ -1168,9 +1156,9 @@ mod tests {
         assert_satin_cfg(&ctx);
     }
 
-    /// Whether a transaction counts transfer logs follows the rule revm's journal emits them by:
-    /// the switch turns them on below Amsterdam, and disabling EIP-7708 wins over it. Each
-    /// transaction reads the configuration afresh, and Satin's emits them.
+    /// Whether a transaction counts transfer logs follows the rule revm's journal emits them by,
+    /// read off the journal's own configuration: the switch turns them on below Amsterdam, and
+    /// disabling EIP-7708 wins over it. Each configuration is read afresh, and Satin's emits them.
     #[test]
     fn test_a_transaction_counts_transfer_logs_where_revm_emits_them() {
         let counts = |cfg: CfgEnv<MegaSpecId>| {
@@ -1178,8 +1166,11 @@ mod tests {
                 MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN).with_neutral_cfg(cfg);
             ctx.set_tx(call_from(Address::repeat_byte(0x11)));
             ctx.on_new_tx(false);
-            assert_eq!(ctx.additional_limit.counts_transfer_logs(), emits_transfer_logs(ctx.cfg()));
-            emits_transfer_logs(ctx.cfg())
+            let counts = emits_transfer_logs(ctx.journal_ref());
+            let (from, to) = (Address::repeat_byte(0x11), Address::repeat_byte(0x22));
+            ctx.journal_mut().eip7708_transfer_log(from, to, U256::from(1));
+            assert_eq!(counts, !ctx.journal_ref().logs.is_empty(), "revm's journal emits it");
+            counts
         };
         let with = |enabled: bool, disabled: bool| {
             let mut cfg = osaka_cfg();
@@ -1199,7 +1190,7 @@ mod tests {
         });
         ctx.set_tx(call_from(Address::repeat_byte(0x11)));
         ctx.on_new_tx(false);
-        assert!(ctx.additional_limit.counts_transfer_logs());
+        assert!(emits_transfer_logs(ctx.journal_ref()));
     }
 
     /// The protocol's own work is held to no per-transaction limit, pays no history and is not
