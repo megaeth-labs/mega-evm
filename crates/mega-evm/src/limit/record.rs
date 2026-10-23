@@ -177,6 +177,32 @@ fn differs(info: &AccountInfo, original: &AccountInfo) -> bool {
         info.code_hash != original.code_hash
 }
 
+/// Whether the transaction changed `account`, which it loaded, from what it loaded: its nonce,
+/// balance or code differs from its original info.
+fn changed(account: &Account) -> bool {
+    differs(&account.info, &account.original_info())
+}
+
+/// Whether the account `account` — the transaction's load of it, `None` for one it has not loaded
+/// — is changed from what the transaction loaded, and whether it would be were its balance
+/// `balance`, the rest of its info as it is. What the transaction loads for an account it has not
+/// loaded is what the chain holds, so it is unchanged, and a balance it does not hold changes it.
+/// The account's original info is read once for both.
+fn changed_now_and_with_balance(account: Option<&Account>, balance: U256) -> (bool, bool) {
+    let Some(account) = account else { return (false, balance != U256::ZERO) };
+    let original = account.original_info();
+    let now = differs(&account.info, &original);
+    let with_balance = account.info.nonce != original.nonce ||
+        balance != original.balance ||
+        account.info.code_hash != original.code_hash;
+    (now, with_balance)
+}
+
+/// The balance of `account`, the transaction's load of it; nothing for one it has not loaded.
+fn balance_of(account: Option<&Account>) -> U256 {
+    account.map_or(U256::ZERO, |account| account.info.balance)
+}
+
 /// A creation's creator as the transaction held it before revm decided the creation's start: what
 /// tells, once the creation returned, whether revm bumped the creator's nonce and what the bump
 /// made of the creator ([`Accounts::creator_counted`]).
@@ -197,8 +223,21 @@ struct AccountBefore {
     address: Address,
     /// Whether the transaction had changed it from what it loaded.
     changed: bool,
-    /// Whether it was empty under EIP-161.
+    /// Whether it was empty under EIP-161 — no nonce, no balance, no code — as the transaction
+    /// held it: a value moved to it, or a creation at it, makes a new account. An account the
+    /// transaction had not loaded is not known to be empty.
     empty: bool,
+}
+
+impl AccountBefore {
+    /// The account at `address` as `account`, the transaction's load of it, holds it.
+    fn of(address: Address, account: Option<&Account>) -> Self {
+        Self {
+            address,
+            changed: account.is_some_and(changed),
+            empty: account.is_some_and(|account| account.info.is_empty()),
+        }
+    }
 }
 
 /// The accounts a frame's start writes on its frame — a call's caller and target, a creation's
@@ -272,20 +311,7 @@ impl<'a> Accounts<'a> {
     /// balance or code differs from the account's original info. An account the transaction has
     /// not loaded is unchanged.
     pub(crate) fn is_changed(&self, address: Address) -> bool {
-        self.loaded(address).is_some_and(|account| differs(&account.info, &account.original_info()))
-    }
-
-    /// Whether the account at `address` would be changed from what the transaction loaded were
-    /// its balance `balance`, the rest of its info as it is.
-    fn changed_with_balance(&self, address: Address, balance: U256) -> bool {
-        match self.loaded(address) {
-            Some(account) => {
-                differs(&AccountInfo { balance, ..account.info.clone() }, &account.original_info())
-            }
-            // What the transaction loads for an account it has not loaded is what the chain holds,
-            // so a balance it does not hold changes it.
-            None => balance != U256::ZERO,
-        }
+        self.loaded(address).is_some_and(changed)
     }
 
     /// Whether the account at `address` was created in the transaction and has been destroyed
@@ -375,38 +401,23 @@ impl<'a> Accounts<'a> {
             }) == Some(true)
     }
 
-    /// Whether the account at `address` is empty under EIP-161 — no nonce, no balance, no code —
-    /// as the transaction holds it: a value moved to it, or a creation at it, makes a new account.
-    /// An account the transaction has not loaded is not known to be empty.
-    pub(crate) fn is_empty(&self, address: Address) -> bool {
-        self.loaded(address).is_some_and(|account| account.info.is_empty())
-    }
-
-    /// The current balance of the account at `address`; nothing for one the transaction has not
-    /// loaded.
-    fn balance(&self, address: Address) -> U256 {
-        self.loaded(address).map_or(U256::ZERO, |account| account.info.balance)
-    }
-
     /// The records a transfer of `value` from `from` to `to` makes and takes back, as the journal's
     /// state stands: nothing for a transfer to the same account or of nothing, which revm moves
-    /// nothing for, and nothing for a value `from` cannot fund, which revm refuses.
+    /// nothing for, and nothing for a value `from` cannot fund, which revm refuses. Each account
+    /// is looked up once.
     pub(crate) fn transfer_records(&self, from: Address, to: Address, value: U256) -> StartRecords {
         if from == to || value.is_zero() {
             return StartRecords::NONE;
         }
-        let Some(from_after) = self.balance(from).checked_sub(value) else {
+        let (from, to) = (self.loaded(from), self.loaded(to));
+        let Some(from_after) = balance_of(from).checked_sub(value) else {
             return StartRecords::NONE;
         };
-        let to_after = self.balance(to).saturating_add(value);
-        let transfer = RecordDelta::of_account(
-            self.is_changed(from),
-            self.changed_with_balance(from, from_after),
-        )
-        .with(RecordDelta::of_account(
-            self.is_changed(to),
-            self.changed_with_balance(to, to_after),
-        ));
+        let to_after = balance_of(to).saturating_add(value);
+        let (from_now, from_moved) = changed_now_and_with_balance(from, from_after);
+        let (to_now, to_moved) = changed_now_and_with_balance(to, to_after);
+        let transfer = RecordDelta::of_account(from_now, from_moved)
+            .with(RecordDelta::of_account(to_now, to_moved));
         StartRecords { transfer, ..StartRecords::NONE }
     }
 
@@ -422,22 +433,24 @@ impl<'a> Accounts<'a> {
         value: U256,
     ) -> StartRecords {
         let Some(created) = created else { return StartRecords::NONE };
-        if self.balance(creator) < value {
+        let creator = self.loaded(creator);
+        if balance_of(creator) < value {
             return StartRecords::NONE;
         }
         StartRecords {
             transfer: RecordDelta::NONE,
             created: !self.is_changed(created),
-            creator: !self.is_changed(creator),
+            creator: !creator.is_some_and(changed),
         }
     }
 
     /// The creator at `address` of a creation revm is about to decide, as the transaction holds it.
     /// The creator is read loaded: revm loads it first thing when it decides the creation.
     pub(crate) fn creator_before(&self, address: Address) -> CreatorBefore {
+        let account = self.loaded(address);
         CreatorBefore {
-            account: self.account_before(address),
-            nonce: self.loaded(address).map_or(0, |account| account.info.nonce),
+            account: AccountBefore::of(address, account),
+            nonce: account.map_or(0, |account| account.info.nonce),
         }
     }
 
@@ -461,15 +474,15 @@ impl<'a> Accounts<'a> {
 
     /// The account at `address` as the transaction holds it.
     fn account_before(&self, address: Address) -> AccountBefore {
-        AccountBefore { address, changed: self.is_changed(address), empty: self.is_empty(address) }
+        AccountBefore::of(address, self.loaded(address))
     }
 
     /// What changed of the account `before` was read of since, as the journal holds it now: its
     /// write record, by its change ([`RecordDelta::of_account`]), and whether it became a new
-    /// account, empty under EIP-161 then and not now.
+    /// account, empty under EIP-161 then and not now. The account is looked up once.
     fn account_made(&self, before: &AccountBefore) -> (RecordDelta, bool) {
-        let record = RecordDelta::of_account(before.changed, self.is_changed(before.address));
         let loaded = self.loaded(before.address);
+        let record = RecordDelta::of_account(before.changed, loaded.is_some_and(changed));
         (record, before.empty && loaded.is_some_and(|account| !account.info.is_empty()))
     }
 
@@ -533,18 +546,15 @@ impl<'a> Accounts<'a> {
     /// destructed account held `balance` before it, and a beneficiary that is another account its
     /// balance less `balance`, all of which it got.
     fn destruction_records(&self, address: Address, target: Address, balance: U256) -> RecordDelta {
-        let source = RecordDelta::of_account(
-            self.changed_with_balance(address, balance),
-            self.is_changed(address),
-        );
+        let (now, before) = changed_now_and_with_balance(self.loaded(address), balance);
+        let source = RecordDelta::of_account(before, now);
         if target == address {
             return source;
         }
-        let before = self.balance(target).saturating_sub(balance);
-        source.with(RecordDelta::of_account(
-            self.changed_with_balance(target, before),
-            self.is_changed(target),
-        ))
+        let target = self.loaded(target);
+        let held = balance_of(target).saturating_sub(balance);
+        let (now, before) = changed_now_and_with_balance(target, held);
+        source.with(RecordDelta::of_account(before, now))
     }
 
     /// What the completed write `write` counts, the history bytes it appends and takes back, and,
