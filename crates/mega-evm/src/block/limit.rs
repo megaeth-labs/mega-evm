@@ -1,1086 +1,814 @@
-//! Block-level resource limit enforcement for `MegaETH`.
+//! What a block admits, and what it counts of the transactions it packed.
 //!
-//! This module provides comprehensive limit tracking and enforcement for block-level resources
-//! in the `MegaETH` EVM. It implements a two-phase checking system to optimize block construction
-//! while preventing spam attacks and ensuring fair resource allocation.
+//! The limits come from two places, by who must agree on them:
 //!
-//! # Overview
+//! - [`ProtocolLimits`] are the limits every node holds a chain's blocks and transactions to, fixed
+//!   per spec: the per-transaction limits the EVM enforces and the block's data-size, KV-update and
+//!   state-growth budgets.
+//! - [`BlockLimits`] is the building policy a node passes in the block execution context: the
+//!   limits only a builder applies — a transaction's declared gas, the encoded sizes and the
+//!   data-availability sizes — and the caps a builder may put on the block's three budgets below
+//!   the protocol's. It never loosens a protocol limit ([`BlockLimits::within`]), and a validator
+//!   leaves it at its default, which restricts nothing.
 //!
-//! `MegaEVM` enforces **6 types of limits**, each with both **transaction-level** and
-//! **block-level** variants:
+//! [`BlockLimiter`] is the state one block keeps while it executes, held to both.
 //!
-//! 1. **Gas Limit** - Traditional EVM gas consumption
-//! 2. **Transaction Size Limit** - EIP-2718 encoded transaction size
-//! 3. **Data Availability (DA) Size Limit** - Compressed DA size
-//! 4. **Compute Gas Limit** - Actual computational cost (separate from standard gas)
-//! 5. **Data Size Limit** - Total execution data generated
-//! 6. **KV Update Limit** - Storage operations count
+//! # When each limit is checked
 //!
-//! # Two-Phase Checking Strategy
+//! A limit known before execution is checked before the transaction runs, and refuses it:
+//! its own gas limit, encoded size and data-availability size, and what each of those would add
+//! to the block.
 //!
-//! ## Phase 1: Pre-execution Checks (Limits 1-3)
+//! The limits only known after execution — the data-size bytes, the write records and the state
+//! growth a transaction kept — are accumulated when the transaction commits. The transaction that
+//! reaches one is therefore still packed, and the ones after it are refused, the refusal naming the
+//! first reached of data size, KV updates and state growth; this is what keeps a block full rather
+//! than dropping the work already done. A block whose counter has reached its limit refuses every
+//! later transaction before it starts — a deposit excepted — so the overshoot is bounded by one
+//! transaction, besides what deposits add.
 //!
-//! **When**: Before transaction execution
-//! **What**: Validates gas limit, transaction size, and DA size
-//! **Purpose**: Fast rejection of oversized transactions without expensive execution
+//! # Deposits
 //!
-//! ### Transaction-level Violations
-//! - **Error**: [`MegaTxLimitExceededError`]
-//! - **Action**: Transaction is **rejected permanently** (invalid transaction)
-//! - **Reason**: Transaction exceeds individual limit (e.g., gas > `tx_gas_limit`)
-//! - **Example**: A transaction declares 50M gas when limit is 30M gas
+//! A deposit is an L1 message the chain cannot censor: the block derived from L1 must include it,
+//! and the builder does not choose it. So no limit only a builder applies refuses a deposit — its
+//! declared gas, its encoded size and its data-availability size, and what those add to the block
+//! — and a deposit does not count towards the block's data-availability size. The data-size,
+//! KV-update and state-growth limits are packing budgets for the transactions the builder chooses,
+//! so they do not refuse a deposit either. A deposit still counts towards each, and towards the
+//! block's encoded size, so the transactions after it find the room it used. The one limit that
+//! holds a deposit is the block's gas limit, which is the header's.
 //!
-//! ### Block-level Violations
-//! - **Error**: [`MegaBlockLimitExceededError`] or
-//!   [`BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas`]
-//! - **Action**: Transaction is **skipped**, try next transaction
-//! - **Reason**: Including this transaction would exceed block capacity
-//! - **Example**: Block has 5M gas remaining, transaction needs 10M gas
+//! A Mega System Transaction, the protocol's own oracle update, which the sequencer must be able
+//! to include whatever the block holds, is refused by none of those limits either and counts as a
+//! deposit does. Its envelope is legacy, so it also counts towards the block's data-availability
+//! size, and the data-availability footprint, which the executor checks, holds it.
 //!
-//! ## Phase 2: Post-execution Checks (Limits 4-6)
+//! The per-transaction limits the block installs on the EVM are not block limits: they hold a
+//! deposit's own execution the way they hold any transaction's, and a deposit that crosses one is
+//! included with the stop as its result.
 //!
-//! **When**: After transaction execution, before state commitment
-//! **What**: Validates compute gas, data size, and KV updates
-//! **Purpose**: Enforce limits based on actual execution results
+//! # Which dimensions are enforced
 //!
-//! ### Transaction-level Enforcement (During Execution)
-//! - **Location**: Enforced in [`crate::evm::limit::AdditionalLimit`]
-//! - **Behavior**: Transaction halts with `OutOfGas`, remaining gas preserved
-//! - **Result**: Transaction fails (status=0) but is **still included in block**
-//! - **Reason**: Failed transactions consume resources and must be recorded on-chain
-//!
-//! ### Block-level Enforcement (Before Next Transaction)
-//! - The first transaction that causes the block to exceed limits is **allowed to execute and be
-//!   included**
-//! - **Pre-execution check**: Before executing the next transaction, check if block limit has
-//!   already been exceeded
-//! - **Action**: If limit already exceeded, reject transaction before execution
-//! - **Reason**: Maximize block utilization by not wasting valid transaction execution
-//! - **Example**: Block has 10MB data limit. TX1 uses 6MB (included), TX2 uses 8MB (included, total
-//!   14MB exceeds limit), TX3 is rejected before execution
-//!
-//! # Architecture
-//!
-//! The module consists of two main types:
-//!
-//! - [`BlockLimits`]: Configuration struct defining all limit thresholds
-//! - [`BlockLimiter`]: Stateful tracker that enforces limits and accumulates resource usage
-//!
-//! # Limit Types
-//!
-//! ## Pre-execution Limits (Checked before execution)
-//!
-//! 1. **Gas Limit**
-//!    - Tx-level: `tx_gas_limit` - Maximum gas per transaction
-//!    - Block-level: `block_gas_limit` - Total gas available in block
-//!
-//! 2. **Transaction Size Limit**
-//!    - Tx-level: `tx_encode_size_limit` - Maximum encoded transaction size
-//!    - Block-level: `block_txs_encode_size_limit` - Total uncompressed transaction size in block
-//!
-//! 3. **Data Availability Size Limit**
-//!    - Tx-level: `tx_da_size_limit` - Maximum DA size per transaction
-//!    - Block-level: `block_da_size_limit` - Total compressed DA size in block
-//!    - **Note**: Deposit transactions are exempt from DA size limit checks
-//!
-//! ## Post-execution Limits (Checked during/after execution)
-//!
-//! 4. **Compute Gas Limit**
-//!    - Tx-level: `tx_compute_gas_limit` - Maximum compute gas per transaction
-//!    - Block-level: `block_compute_gas_limit` - Total compute gas in block
-//!
-//! 5. **Data Size Limit**
-//!    - Tx-level: `tx_data_limit` - Maximum data per transaction
-//!    - Block-level: `block_txs_data_limit` - Total execution data in block
-//!    - Includes: tx data, logs, storage writes, account updates, contract code
-//!
-//! 6. **KV Update Limit**
-//!    - Tx-level: `tx_kv_update_limit` - Maximum storage updates per transaction
-//!    - Block-level: `block_kv_update_limit` - Total storage updates in block
-//!    - Tracks: SSTORE operations and account updates
-//!
-//! # Deposit Transaction Exemptions
-//!
-//! Deposit transactions (Optimism Layer 1 to Layer 2 deposits) receive special treatment:
-//!
-//! - **DA Size Limit Exemption**: Deposit transactions are exempt from both transaction-level and
-//!   block-level Data Availability size limit checks during pre-execution validation
-//! - **Rationale**: Deposit transactions are trustless L1→L2 messages that cannot be censored. They
-//!   must be included in blocks regardless of their DA size to maintain bridge integrity
-//! - **Tracking**: Deposit DA sizes are **not** accumulated into the block DA usage counter
-//!   (`post_execution_update` skips them), so `block_da_size_used` reflects non-deposit
-//!   transactions only
-//! - **Other Limits**: Deposit transactions are still subject to all other limits (gas, tx size,
-//!   compute gas, data size, KV updates)
-//!
-//! # Block Building Workflow
-//!
-//! For each transaction in the mempool:
-//!
-//! 1. **Pre-execution check** - [`BlockLimiter::pre_execution_check`]
-//!    - If tx-level violation → Reject permanently
-//!    - If block-level violation → Skip, try next transaction
-//!
-//! 2. **Execute transaction** - [`crate::MegaBlockExecutor::execute_mega_transaction`]
-//!    - During execution, tx-level limits (4-6) are enforced in EVM
-//!    - If exceeded → Transaction fails but continues to step 3
-//!
-//! 3. **Post-execution update** - [`BlockLimiter::post_execution_update`]
-//!    - Accumulates resource usage from the executed transaction into block-level counters
-//!    - Does not validate post-execution limits; over-limit enforcement happens before admitting
-//!      the next transaction in [`BlockLimiter::pre_execution_check`]
-//!
-//! 4. **Commit transaction** - [`crate::MegaBlockExecutor::commit_execution_outcome`]
-//!    - Include in block (with success or failed receipt)
-//!    - Update block usage counters
-//!
-//! # Configuration
-//!
-//! ## For EQUIVALENCE Specification (Optimism Isthmus Compatible)
-//!
-//! ```rust,ignore
-//! let limits = BlockLimits::no_limits()
-//!     .with_block_gas_limit(block_env.gas_limit)
-//!     .fit_equivalence();
-//! ```
-//!
-//! ## For `MINI_REX` Specification (Enhanced with Additional Limits)
-//!
-//! ```rust,ignore
-//! use mega_evm::constants::mini_rex;
-//!
-//! let limits = BlockLimits::no_limits()
-//!     .with_block_gas_limit(block_env.gas_limit)
-//!     .fit_mini_rex();  // Sets all MINI_REX limits automatically
-//! ```
-//!
-//! Or configure manually:
-//!
-//! ```rust,ignore
-//! let limits = BlockLimits::no_limits()
-//!     .with_block_gas_limit(block_env.gas_limit)
-//!     .with_tx_compute_gas_limit(mini_rex::TX_COMPUTE_GAS_LIMIT)
-//!     .with_block_txs_data_limit(mini_rex::BLOCK_DATA_LIMIT)
-//!     .with_block_kv_update_limit(mini_rex::BLOCK_KV_UPDATE_LIMIT);
-//! ```
-//!
-//! # Error Handling
-//!
-//! ## Transaction-level Errors (Permanent Rejection)
-//! - [`MegaTxLimitExceededError::TransactionGasLimit`] - Gas limit too high
-//! - [`MegaTxLimitExceededError::TransactionEncodeSizeLimit`] - Transaction too large
-//! - [`MegaTxLimitExceededError::DataAvailabilitySizeLimit`] - DA size too large
-//!
-//! ## Block-level Errors (Skip and Try Next)
-//! - [`MegaBlockLimitExceededError::ComputeGasLimit`] - Would exceed block compute gas
-//! - [`MegaBlockLimitExceededError::TransactionDataLimit`] - Would exceed block data limit
-//! - [`MegaBlockLimitExceededError::KVUpdateLimit`] - Would exceed block KV updates
-//! - [`MegaBlockLimitExceededError::TransactionEncodeSizeLimit`] - Would exceed block tx size
-//! - [`MegaBlockLimitExceededError::DataAvailabilitySizeLimit`] - Would exceed block DA size
-//! - [`BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas`] - Insufficient gas
-//!
-//! # See Also
-//!
-//! - [`crate::evm::limit`] - Transaction-level limit enforcement during execution
-//! - [`crate::MegaBlockExecutor`] - Block executor that orchestrates limit checks
+//! The three gas ledgers the block counts ([`BlockGasCounters`]) have no block limit beside the
+//! block's gas limit, the header's, and the history bytes beside the history ledger are reported,
+//! not limited. The write-record count, which is the block's KV count, is held to
+//! [`BLOCK_KV_UPDATE_LIMIT`](crate::constants::BLOCK_KV_UPDATE_LIMIT); every record weighs forty
+//! bytes of data size, so a block held to [`BLOCK_DATA_LIMIT`](crate::constants::BLOCK_DATA_LIMIT)
+//! keeps at most 327,680 records, and at the spec's numbers the data size binds first. The state
+//! growth is held to [`BLOCK_STATE_GROWTH_LIMIT`](crate::constants::BLOCK_STATE_GROWTH_LIMIT):
+//! state gas prices the state a block adds, but the block's gas limit does not stand in for the
+//! count.
+
+use alloy_primitives::TxHash;
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
 use std::boxed::Box;
 
-use alloy_consensus::Transaction;
-use alloy_evm::{
-    block::{BlockExecutionError, BlockValidationError},
-    RecoveredTx,
-};
-use alloy_primitives::TxHash;
-use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
+use alloy_evm::block::{BlockExecutionError, BlockValidationError};
 
 use crate::{
-    BlockMegaTransactionOutcome, EvmTxRuntimeLimits, MegaBlockLimitExceededError, MegaHardfork,
-    MegaTransactionExt, MegaTxLimitExceededError,
+    constants::{
+        BLOCK_DATA_LIMIT, BLOCK_ENV_ACCESS_COMPUTE_GAS, BLOCK_KV_UPDATE_LIMIT,
+        BLOCK_STATE_GROWTH_LIMIT, ORACLE_ACCESS_COMPUTE_GAS, TX_DATA_LIMIT, TX_KV_UPDATE_LIMIT,
+        TX_STATE_GROWTH_LIMIT,
+    },
+    BlockGasCounters, EvmTxRuntimeLimits, LimitUsage, MegaBlockLimitExceededError, MegaGasUsage,
+    MegaSpecId, MegaTxLimitExceededError,
 };
 
-/// Configuration for block-level resource limits. The block-level resource limits are associated
-/// with a specific `MegaHardfork` instead of a `MegaSpecId`. In constrast, `EvmTxRuntimeLimits` is
-/// associated with a `MegaSpecId`.
+/// The limits the protocol holds every block and every transaction to, fixed per spec.
 ///
-/// This struct defines the thresholds for various resource limits that govern transaction
-/// inclusion and block construction. Limits are categorized into two groups:
+/// Each of them changes what a validator computes when it re-executes a block, so they are not
+/// configuration: [`for_spec`](Self::for_spec) is the one table of them, keyed by the spec a block
+/// executes, and every node of every chain holds a block of that spec to the same values. Block
+/// execution, the EVM factory and a bare [`MegaContext`](crate::MegaContext) read it, so an
+/// execution outside a block — a call, a gas estimate, a simulation — is held to what block
+/// execution holds it to without being told.
 ///
-/// 1. **Pre-execution limits**: Checked before transaction execution (gas, size, DA size)
-/// 2. **Post-execution limits**: Checked after execution (data size, KV updates)
+/// - [`tx_runtime_limits`](Self::tx_runtime_limits) holds each transaction's own execution: a
+///   transaction that crosses one is stopped, or a frame reverted, and that is the result its
+///   receipt records. There is no tighter setting a builder could run a transaction under and still
+///   agree with a validator; a builder that wants to avoid such a transaction leaves it out.
+/// - The block's data-size, KV-update and state-growth budgets hold what a block's transactions
+///   keep together. A validator refuses a block that packs a transaction after the block reached
+///   one of them; a builder may pack tighter ([`BlockLimits`]), never looser.
 ///
-/// # Default Behavior
+/// A tool or a test that runs under other values says so explicitly
+/// ([`MegaContext::with_tx_runtime_limits`](crate::MegaContext::with_tx_runtime_limits),
+/// [`MegaEvmFactory::with_tx_runtime_limits`](crate::MegaEvmFactory::with_tx_runtime_limits), and
+/// in block execution `MegaBlockExecutor::with_protocol_limits`, which exists for tests and tools
+/// only); what it computes is then a counterfactual, not the chain's result.
 ///
-/// By default, most limits are set to `u64::MAX` (effectively unlimited) except for:
-/// - `block_txs_data_limit`: Set to [`crate::constants::mini_rex::BLOCK_DATA_LIMIT`]
-/// - `block_kv_update_limit`: Set to [`crate::constants::mini_rex::BLOCK_KV_UPDATE_LIMIT`]
-/// - `block_gas_limit`: Auto-set from the EVM block environment (cannot be manually configured)
-///
-/// # Builder Pattern
-///
-/// Use builder methods to configure specific limits:
-///
-/// ```rust,ignore
-/// let limits = BlockLimits::default()
-///     .with_tx_gas_limit(15_000_000)
-///     .with_block_txs_encode_size_limit(1_000_000)
-///     .with_block_txs_data_limit(5_000);
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct BlockLimits {
-    /// Maximum gas limit for a single transaction.
-    ///
-    /// Transactions with gas limits exceeding this value will be rejected with
-    /// [`MegaTxLimitExceededError::TransactionGasLimit`].
-    pub tx_gas_limit: u64,
-
-    /// Total gas limit for the block.
-    ///
-    /// Transactions that would cause the cumulative block gas to exceed this limit are rejected
-    /// with [`BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas`].
-    pub block_gas_limit: u64,
-
-    /// Maximum encoded size (in bytes) for a single transaction.
-    ///
-    /// This limit applies to the transaction's EIP-2718 encoded size. Transactions exceeding
-    /// this size will be rejected with [`MegaTxLimitExceededError::TransactionEncodeSizeLimit`].
-    ///
-    /// Default: `u64::MAX` (effectively unlimited)
-    pub tx_encode_size_limit: u64,
-
-    /// Maximum cumulative size (in bytes) of all transaction bodies in a block.
-    ///
-    /// This limit applies to the **uncompressed** transaction size. For compressed data
-    /// availability limits, see [`block_da_size_limit`](Self::block_da_size_limit).
-    ///
-    /// Transactions that would cause the cumulative block transaction size to exceed this
-    /// limit are rejected with [`MegaBlockLimitExceededError::TransactionEncodeSizeLimit`].
-    ///
-    /// Default: `u64::MAX` (effectively unlimited)
-    pub block_txs_encode_size_limit: u64,
-
-    /// Maximum data availability size (in bytes) for a single transaction.
-    ///
-    /// This represents the compressed size for data availability purposes. Transactions
-    /// exceeding this size will be rejected with
-    /// [`MegaTxLimitExceededError::DataAvailabilitySizeLimit`].
-    ///
-    /// Default: `u64::MAX` (effectively unlimited)
-    pub tx_da_size_limit: u64,
-
-    /// Maximum cumulative data availability size (in bytes) for all transactions in a block.
-    ///
-    /// This applies to the **compressed** transaction size for data availability. For
-    /// uncompressed transaction body limits, see
-    /// [`block_txs_encode_size_limit`](Self::block_txs_encode_size_limit).
-    ///
-    /// Transactions that would cause the cumulative block DA size to exceed this limit are
-    /// rejected with [`MegaBlockLimitExceededError::DataAvailabilitySizeLimit`].
-    ///
-    /// Default: `u64::MAX` (effectively unlimited)
-    pub block_da_size_limit: u64,
-
-    /// Maximum data size of a single transaction's execution outcome, i.e., encoded transaction
-    /// object, encoded state changes, logs, etc. The data will need to be saved and transmitted
-    /// over network.
-    pub tx_data_limit: u64,
-
-    /// Maximum cumulative data size (in bytes) of all transactions' execution outcomes from block
-    /// execution.
-    ///
-    /// This limit is checked **after** transaction execution but **before** committing state
-    /// changes. It tracks the total data produced by all transactions in the block, including
-    /// logs, return data, and other execution artifacts.
-    ///
-    /// Transactions that would cause the cumulative block data to exceed this limit are
-    /// rejected with [`MegaBlockLimitExceededError::TransactionDataLimit`], and their state
-    /// changes are **not committed**.
-    ///
-    /// Note: Transaction-level data limits are enforced separately in the `MegaEVM`.
-    /// Transactions exceeding transaction-level limits may still be included but marked
-    /// as failed.
+/// It serializes in the shape a tool takes an override in: camelCase, no other field accepted, and
+/// every field required but the KV-update and state-growth limits, of a transaction and of a
+/// block, which the shape's first published version did not have: a file without them takes the
+/// default spec's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProtocolLimits {
+    /// The limits every transaction runs under, which the block executor installs on the EVM:
+    /// data size, per transaction and per frame, and gas detention's two caps.
+    pub tx_runtime_limits: EvmTxRuntimeLimits,
+    /// The most data-size bytes a block's transactions may keep together. The transaction that
+    /// reaches it is packed; after it, only a deposit or a Mega System Transaction is.
     pub block_txs_data_limit: u64,
-
-    /// Maximum key-value updates for a single transaction.
-    pub tx_kv_update_limit: u64,
-
-    /// Maximum cumulative key-value updates allowed in a block.
-    ///
-    /// This limit is checked **after** transaction execution but **before** committing state
-    /// changes. It tracks the total number of storage slot updates (SSTORE operations) across
-    /// all transactions in the block.
-    ///
-    /// Transactions that would cause the cumulative KV updates to exceed this limit are
-    /// rejected with [`MegaBlockLimitExceededError::KVUpdateLimit`], and their state changes
-    /// are **not committed**.
-    ///
-    /// Note: Transaction-level KV update limits are enforced separately in the `MegaEVM`.
-    /// Transactions exceeding transaction-level limits may still be included but marked
-    /// as failed.
+    /// The most write records a block's transactions may keep together: their KV count. The
+    /// transaction that reaches it is packed; after it, only a deposit or a Mega System
+    /// Transaction is. A file without it takes the default spec's.
+    #[serde(default = "default_block_kv_update_limit")]
     pub block_kv_update_limit: u64,
-
-    /// Maximum compute gas limit for a single transaction.
-    pub tx_compute_gas_limit: u64,
-
-    /// Maximum cumulative compute gas limit for all transactions in a block.
-    ///
-    /// This limit is checked **after** transaction execution but **before** committing state
-    /// changes. It tracks the total compute gas consumed by all transactions in the block.
-    ///
-    /// Transactions that would cause the cumulative block compute gas to exceed this limit are
-    /// rejected with [`MegaBlockLimitExceededError::ComputeGasLimit`], and their state changes
-    /// are **not committed**.
-    pub block_compute_gas_limit: u64,
-
-    /// Maximum state growth limit for a single transaction.
-    pub tx_state_growth_limit: u64,
-
-    /// Maximum cumulative state growth limit for all transactions in a block.
-    ///
-    /// This limit is checked **after** transaction execution but **before** committing state
-    /// changes. It tracks the total state growth consumed by all transactions in the block.
-    ///
-    /// Transactions that would cause the cumulative block state growth to exceed this limit are
-    /// rejected with [`MegaBlockLimitExceededError::StateGrowthLimit`], and their state changes
-    /// are **not committed**.
+    /// The most new accounts and new slots a block's transactions may keep together: their state
+    /// growth. The transaction that reaches it is packed; after it, only a deposit or a Mega
+    /// System Transaction is. The block's gas limit does not stand in for it. A file without it
+    /// takes the default spec's.
+    #[serde(default = "default_block_state_growth_limit")]
     pub block_state_growth_limit: u64,
-
-    /// Compute gas limit when accessing block environment data.
-    ///
-    /// When a transaction accesses volatile block environment data (e.g., TIMESTAMP, COINBASE),
-    /// the compute gas is capped to this limit to prevent `DoS` attacks.
-    pub block_env_access_compute_gas_limit: u64,
-
-    /// Compute gas limit when accessing oracle data.
-    ///
-    /// When a transaction accesses the oracle contract, the compute gas is capped to this
-    /// limit to prevent `DoS` attacks.
-    pub oracle_access_compute_gas_limit: u64,
 }
 
-impl BlockLimits {
-    /// Creates a new block limits instance with no limits.
-    pub fn no_limits() -> Self {
+/// The default spec's block KV-update budget, for a limits file that does not name one.
+fn default_block_kv_update_limit() -> u64 {
+    ProtocolLimits::for_spec(MegaSpecId::default()).block_kv_update_limit
+}
+
+/// The default spec's block state-growth budget, for a limits file that does not name one.
+fn default_block_state_growth_limit() -> u64 {
+    ProtocolLimits::for_spec(MegaSpecId::default()).block_state_growth_limit
+}
+
+impl ProtocolLimits {
+    /// The limits a block of `spec`, and every transaction in it, is held to.
+    ///
+    /// [`MegaSpecId::SATIN`]: a transaction keeps at most [`TX_DATA_LIMIT`] (13,107,200) bytes of
+    /// data size, [`TX_KV_UPDATE_LIMIT`] (500,000) write records and [`TX_STATE_GROWTH_LIMIT`]
+    /// (1,000) new accounts and slots, and a block's transactions together at most
+    /// [`BLOCK_DATA_LIMIT`] (13,107,200), [`BLOCK_KV_UPDATE_LIMIT`] (500,000) and
+    /// [`BLOCK_STATE_GROWTH_LIMIT`] (1,000);
+    /// every frame gets 98/100 of what its parent has left, the transaction's own frame what the
+    /// transaction has left, with no further per-frame cap; a read of volatile data caps the
+    /// transaction's compute at its compute at the read plus [`BLOCK_ENV_ACCESS_COMPUTE_GAS`] or
+    /// [`ORACLE_ACCESS_COMPUTE_GAS`] (20,000,000 each). Provisional, as the constants are, until
+    /// the economics sign-off fixes them.
+    ///
+    /// Every field is written out, so a limit added later cannot be left unlimited by omission.
+    pub const fn for_spec(spec: MegaSpecId) -> Self {
+        match spec {
+            MegaSpecId::SATIN => Self {
+                tx_runtime_limits: EvmTxRuntimeLimits {
+                    tx_data_size_limit: TX_DATA_LIMIT,
+                    tx_kv_update_limit: TX_KV_UPDATE_LIMIT,
+                    tx_state_growth_limit: TX_STATE_GROWTH_LIMIT,
+                    frame_data_size_limit: u64::MAX,
+                    block_env_access_compute_gas_limit: BLOCK_ENV_ACCESS_COMPUTE_GAS,
+                    oracle_access_compute_gas_limit: ORACLE_ACCESS_COMPUTE_GAS,
+                },
+                block_txs_data_limit: BLOCK_DATA_LIMIT,
+                block_kv_update_limit: BLOCK_KV_UPDATE_LIMIT,
+                block_state_growth_limit: BLOCK_STATE_GROWTH_LIMIT,
+            },
+        }
+    }
+
+    /// No limit at all, gas detention's caps included, so no transaction is detained
+    /// ([`EvmTxRuntimeLimits::no_limits`]).
+    ///
+    /// For runs that take every limit out — the execution-spec gate's equivalence mode and tests —
+    /// never for executing the chain.
+    pub const fn no_limits() -> Self {
         Self {
-            tx_gas_limit: u64::MAX,
-            block_gas_limit: u64::MAX,
-            tx_encode_size_limit: u64::MAX,
-            block_txs_encode_size_limit: u64::MAX,
-            tx_da_size_limit: u64::MAX,
-            block_da_size_limit: u64::MAX,
-            tx_data_limit: u64::MAX,
+            tx_runtime_limits: EvmTxRuntimeLimits::no_limits(),
             block_txs_data_limit: u64::MAX,
-            tx_kv_update_limit: u64::MAX,
             block_kv_update_limit: u64::MAX,
-            tx_compute_gas_limit: u64::MAX,
-            block_compute_gas_limit: u64::MAX,
-            tx_state_growth_limit: u64::MAX,
             block_state_growth_limit: u64::MAX,
-            block_env_access_compute_gas_limit: u64::MAX,
-            oracle_access_compute_gas_limit: u64::MAX,
         }
     }
 
-    /// Creates a new block limits instance from a hardfork and a block gas limit.
-    pub fn from_hardfork_and_block_gas_limit(hardfork: MegaHardfork, block_gas_limit: u64) -> Self {
-        let spec = hardfork.spec_id();
-        let tx_runtime_limits = EvmTxRuntimeLimits::from_spec(spec);
-        let limits = Self::no_limits()
-            .with_tx_runtime_limits(tx_runtime_limits)
-            .with_block_gas_limit(block_gas_limit);
-        match hardfork {
-            MegaHardfork::Rex |
-            MegaHardfork::Rex1 |
-            MegaHardfork::Rex2 |
-            MegaHardfork::Rex3 |
-            MegaHardfork::Rex4 |
-            MegaHardfork::Rex5 |
-            MegaHardfork::Rex6 |
-            MegaHardfork::Rex7 => Self {
-                block_txs_data_limit: crate::constants::mini_rex::BLOCK_DATA_LIMIT,
-                block_kv_update_limit: crate::constants::mini_rex::BLOCK_KV_UPDATE_LIMIT,
-                block_state_growth_limit: crate::constants::rex::BLOCK_STATE_GROWTH_LIMIT,
-                ..limits
-            },
-            MegaHardfork::MiniRex | MegaHardfork::MiniRex2 => Self {
-                block_txs_data_limit: crate::constants::mini_rex::BLOCK_DATA_LIMIT,
-                block_kv_update_limit: crate::constants::mini_rex::BLOCK_KV_UPDATE_LIMIT,
-                ..limits
-            },
-            MegaHardfork::MiniRex1 => limits,
-        }
-    }
-}
-
-impl BlockLimits {
-    /// Sets the related fields
-    pub fn with_tx_runtime_limits(mut self, limits: EvmTxRuntimeLimits) -> Self {
-        self.tx_data_limit = limits.tx_data_size_limit;
-        self.tx_kv_update_limit = limits.tx_kv_updates_limit;
-        self.tx_compute_gas_limit = limits.tx_compute_gas_limit;
-        self.tx_state_growth_limit = limits.tx_state_growth_limit;
-        self.block_env_access_compute_gas_limit = limits.block_env_access_compute_gas_limit;
-        self.oracle_access_compute_gas_limit = limits.oracle_access_compute_gas_limit;
+    /// Sets the limits every transaction runs under.
+    pub const fn with_tx_runtime_limits(mut self, limits: EvmTxRuntimeLimits) -> Self {
+        self.tx_runtime_limits = limits;
         self
     }
 
-    /// Set a custom transaction gas limit.
-    ///
-    /// This is a builder method that consumes self and returns a new instance
-    /// with the specified transaction gas limit. Transactions with gas limits
-    /// exceeding this value will be rejected.
-    ///
-    /// # Parameters
-    ///
-    /// - `limit`: Maximum gas limit for a single transaction
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let limits = BlockLimits::default()
-    ///     .with_tx_gas_limit(15_000_000);
-    /// ```
-    pub fn with_tx_gas_limit(mut self, limit: u64) -> Self {
-        self.tx_gas_limit = limit;
-        self
-    }
-
-    /// Set a custom block gas limit.
-    ///
-    /// **Warning**: This setting is **overridden** during block executor initialization.
-    /// The block gas limit is automatically set from the EVM block environment's gas limit.
-    /// This method exists for testing purposes only.
-    ///
-    /// # Parameters
-    ///
-    /// - `limit`: Block gas limit (will be overridden at runtime)
-    pub fn with_block_gas_limit(mut self, limit: u64) -> Self {
-        self.block_gas_limit = limit;
-        self
-    }
-
-    /// Set a custom transaction encode size limit.
-    ///
-    /// This is a builder method that consumes self and returns a new instance
-    /// with the specified transaction encode size limit.
-    pub fn with_tx_encode_size_limit(mut self, limit: u64) -> Self {
-        self.tx_encode_size_limit = limit;
-        self
-    }
-
-    /// Set a custom block transactions encode size limit.
-    ///
-    /// This is a builder method that consumes self and returns a new instance
-    /// with the specified block transactions encode size limit.
-    pub fn with_block_txs_encode_size_limit(mut self, limit: u64) -> Self {
-        self.block_txs_encode_size_limit = limit;
-        self
-    }
-
-    /// Set a custom transaction data availability size limit.
-    ///
-    /// This is a builder method that consumes self and returns a new instance
-    /// with the specified transaction data availability size limit.
-    pub fn with_tx_da_size_limit(mut self, limit: u64) -> Self {
-        self.tx_da_size_limit = limit;
-        self
-    }
-
-    /// Set a custom block data availability size limit.
-    ///
-    /// This is a builder method that consumes self and returns a new instance
-    /// with the specified data availability size limit.
-    pub fn with_block_da_size_limit(mut self, limit: u64) -> Self {
-        self.block_da_size_limit = limit;
-        self
-    }
-
-    /// Set a custom transaction data limit.
-    ///
-    /// This is a builder method that consumes self and returns a new instance
-    /// with the specified transaction data limit.
-    pub fn with_tx_data_limit(mut self, limit: u64) -> Self {
-        self.tx_data_limit = limit;
-        self
-    }
-
-    /// Set a custom block transactions data limit.
-    ///
-    /// This is a builder method that consumes self and returns a new instance
-    /// with the specified block transactions data limit.
-    pub fn with_block_txs_data_limit(mut self, limit: u64) -> Self {
+    /// Sets the block's data-size limit.
+    pub const fn with_block_txs_data_limit(mut self, limit: u64) -> Self {
         self.block_txs_data_limit = limit;
         self
     }
 
-    /// Set a custom transaction KV update limit.
-    ///
-    /// This is a builder method that consumes self and returns a new instance
-    /// with the specified transaction KV update limit.
-    pub fn with_tx_kv_update_limit(mut self, limit: u64) -> Self {
-        self.tx_kv_update_limit = limit;
-        self
-    }
-
-    /// Set a custom block KV update limit.
-    ///
-    /// This is a builder method that consumes self and returns a new instance
-    /// with the specified KV update limit.
-    pub fn with_block_kv_update_limit(mut self, limit: u64) -> Self {
+    /// Sets the block's KV-update limit.
+    pub const fn with_block_kv_update_limit(mut self, limit: u64) -> Self {
         self.block_kv_update_limit = limit;
         self
     }
 
-    /// Set a custom transaction compute gas limit.
-    ///
-    /// This is a builder method that consumes self and returns a new instance
-    /// with the specified transaction compute gas limit.
-    pub fn with_tx_compute_gas_limit(mut self, limit: u64) -> Self {
-        self.tx_compute_gas_limit = limit;
-        self
-    }
-
-    /// Set a custom block compute gas limit.
-    ///
-    /// This is a builder method that consumes self and returns a new instance
-    /// with the specified block compute gas limit.
-    pub fn with_block_compute_gas_limit(mut self, limit: u64) -> Self {
-        self.block_compute_gas_limit = limit;
-        self
-    }
-
-    /// Set a custom transaction state growth limit.
-    ///
-    /// This is a builder method that consumes self and returns a new instance
-    /// with the specified transaction state growth limit.
-    pub fn with_tx_state_growth_limit(mut self, limit: u64) -> Self {
-        self.tx_state_growth_limit = limit;
-        self
-    }
-
-    /// Set a custom block state growth limit.
-    ///
-    /// This is a builder method that consumes self and returns a new instance
-    /// with the specified block state growth limit.
-    pub fn with_block_state_growth_limit(mut self, limit: u64) -> Self {
+    /// Sets the block's state-growth limit.
+    pub const fn with_block_state_growth_limit(mut self, limit: u64) -> Self {
         self.block_state_growth_limit = limit;
         self
     }
+}
 
-    /// Set a custom compute gas limit when accessing block environment data.
+/// The building policy one block is packed under: the limits only a builder applies, and the caps
+/// it may put on the block's data-size, KV-update and state-growth budgets below the protocol's.
+///
+/// A node passes it in the block execution context. None of it is a protocol value: the
+/// protocol's limits are [`ProtocolLimits`], which the block executor reads from the spec's
+/// table, and this can only make a block tighter than they do ([`within`](Self::within)). So a
+/// builder packs under it and a validator re-executing the block leaves it at [`Default`], which
+/// restricts nothing: every block a builder packed under a policy fits the protocol's limits, and
+/// a validator that applied the builder's policy too would only refuse blocks, never accept one
+/// the protocol refuses.
+///
+/// - [`tx_gas_limit`](Self::tx_gas_limit), the two encoded-size limits and the two
+///   data-availability size limits are the builder's alone: the protocol holds a transaction's
+///   declared gas to the block's gas limit, and what a block writes to its data-size budget, which
+///   counts calldata.
+/// - [`block_txs_data_limit`](Self::block_txs_data_limit),
+///   [`block_kv_update_limit`](Self::block_kv_update_limit) and
+///   [`block_state_growth_limit`](Self::block_state_growth_limit) are the builder's caps on the
+///   protocol's packing budgets: the block executor holds a block to the smaller of each pair. None
+///   of them refuses a deposit or a Mega System Transaction.
+///
+/// The block's gas limit is not here: it is the header's, which the block executor takes from the
+/// block environment ([`BlockLimiter::block_gas_limit`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct BlockLimits {
+    /// The most gas a single transaction may declare. Deposits are exempt.
+    pub tx_gas_limit: u64,
+    /// The most bytes a single transaction's EIP-2718 encoding may take. Deposits are exempt.
+    pub tx_encode_size_limit: u64,
+    /// The most bytes the block's transaction bodies may take together, uncompressed. Deposits are
+    /// exempt, and count towards it.
+    pub block_txs_encode_size_limit: u64,
+    /// The most data-availability bytes a single transaction may take. Deposits are exempt.
+    pub tx_da_size_limit: u64,
+    /// The most data-availability bytes the block's transactions may take together. Deposits are
+    /// exempt and do not count towards it.
+    pub block_da_size_limit: u64,
+    /// The most data-size bytes the block's transactions may keep together. The transaction that
+    /// reaches it is packed; after it, only a deposit is, which it never refuses and which counts
+    /// towards it.
     ///
-    /// This is a builder method that consumes self and returns a new instance
-    /// with the specified block environment access compute gas limit.
-    pub fn with_block_env_access_compute_gas_limit(mut self, limit: u64) -> Self {
-        self.block_env_access_compute_gas_limit = limit;
-        self
-    }
+    /// A builder's cap: the block is held to the smaller of this and
+    /// [`ProtocolLimits::block_txs_data_limit`].
+    pub block_txs_data_limit: u64,
+    /// The most write records the block's transactions may keep together, as
+    /// [`block_txs_data_limit`](Self::block_txs_data_limit) holds their bytes: a builder's cap on
+    /// [`ProtocolLimits::block_kv_update_limit`].
+    pub block_kv_update_limit: u64,
+    /// The most new accounts and new slots the block's transactions may keep together, as
+    /// [`block_txs_data_limit`](Self::block_txs_data_limit) holds their bytes: a builder's cap on
+    /// [`ProtocolLimits::block_state_growth_limit`].
+    pub block_state_growth_limit: u64,
+}
 
-    /// Set a custom compute gas limit when accessing oracle data.
-    ///
-    /// This is a builder method that consumes self and returns a new instance
-    /// with the specified oracle access compute gas limit.
-    pub fn with_oracle_access_compute_gas_limit(mut self, limit: u64) -> Self {
-        self.oracle_access_compute_gas_limit = limit;
-        self
-    }
-
-    /// Create a new block limiter from these limits.
-    ///
-    /// This converts the limit configuration into a stateful [`BlockLimiter`] that tracks
-    /// resource usage and enforces the configured limits throughout block execution.
-    ///
-    /// # Returns
-    ///
-    /// A new [`BlockLimiter`] initialized with zero usage for all tracked resources.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let limits = BlockLimits::default().with_block_txs_data_limit(5_000);
-    /// let limiter = limits.to_block_limiter();
-    /// ```
-    pub fn to_block_limiter(self) -> BlockLimiter {
-        BlockLimiter {
-            limits: self,
-            block_gas_used: 0,
-            block_data_used: 0,
-            block_kv_updates_used: 0,
-            block_tx_size_used: 0,
-            block_da_size_used: 0,
-            block_compute_gas_used: 0,
-            block_state_growth_used: 0,
-        }
-    }
-
-    /// Convert the block limits to the runtime limits for a single transaction.
-    pub fn to_evm_tx_runtime_limits(&self) -> EvmTxRuntimeLimits {
-        EvmTxRuntimeLimits {
-            tx_data_size_limit: self.tx_data_limit,
-            tx_kv_updates_limit: self.tx_kv_update_limit,
-            tx_compute_gas_limit: self.tx_compute_gas_limit,
-            tx_state_growth_limit: self.tx_state_growth_limit,
-            block_env_access_compute_gas_limit: self.block_env_access_compute_gas_limit,
-            oracle_access_compute_gas_limit: self.oracle_access_compute_gas_limit,
-        }
+impl Default for BlockLimits {
+    /// No restriction: what a validator passes.
+    fn default() -> Self {
+        Self::no_limits()
     }
 }
 
-/// Stateful block resource limiter that tracks usage and enforces limits.
+impl BlockLimits {
+    /// No restriction at all: every limit unlimited, so a block is held to the protocol's limits
+    /// alone.
+    pub const fn no_limits() -> Self {
+        Self {
+            tx_gas_limit: u64::MAX,
+            tx_encode_size_limit: u64::MAX,
+            block_txs_encode_size_limit: u64::MAX,
+            tx_da_size_limit: u64::MAX,
+            block_da_size_limit: u64::MAX,
+            block_txs_data_limit: u64::MAX,
+            block_kv_update_limit: u64::MAX,
+            block_state_growth_limit: u64::MAX,
+        }
+    }
+
+    /// These limits held within `protocol`: each of the block's packing budgets — data size, KV
+    /// updates, state growth — is the smaller of this policy's cap and the protocol's limit, so a
+    /// builder's setting can tighten a budget and never loosen it. The limits only a builder
+    /// applies are kept as they are.
+    ///
+    /// A cap above the protocol's limit gives way to it without a word; a node that wants to
+    /// refuse or report such a setting compares the two itself.
+    pub fn within(self, protocol: &ProtocolLimits) -> Self {
+        Self {
+            block_txs_data_limit: self.block_txs_data_limit.min(protocol.block_txs_data_limit),
+            block_kv_update_limit: self.block_kv_update_limit.min(protocol.block_kv_update_limit),
+            block_state_growth_limit: self
+                .block_state_growth_limit
+                .min(protocol.block_state_growth_limit),
+            ..self
+        }
+    }
+
+    /// Sets the per-transaction gas limit.
+    pub const fn with_tx_gas_limit(mut self, limit: u64) -> Self {
+        self.tx_gas_limit = limit;
+        self
+    }
+
+    /// Sets the per-transaction encoded-size limit.
+    pub const fn with_tx_encode_size_limit(mut self, limit: u64) -> Self {
+        self.tx_encode_size_limit = limit;
+        self
+    }
+
+    /// Sets the block's encoded-size limit.
+    pub const fn with_block_txs_encode_size_limit(mut self, limit: u64) -> Self {
+        self.block_txs_encode_size_limit = limit;
+        self
+    }
+
+    /// Sets the per-transaction data-availability size limit.
+    pub const fn with_tx_da_size_limit(mut self, limit: u64) -> Self {
+        self.tx_da_size_limit = limit;
+        self
+    }
+
+    /// Sets the block's data-availability size limit.
+    pub const fn with_block_da_size_limit(mut self, limit: u64) -> Self {
+        self.block_da_size_limit = limit;
+        self
+    }
+
+    /// Caps the block's data size.
+    pub const fn with_block_txs_data_limit(mut self, limit: u64) -> Self {
+        self.block_txs_data_limit = limit;
+        self
+    }
+
+    /// Caps the block's KV count.
+    pub const fn with_block_kv_update_limit(mut self, limit: u64) -> Self {
+        self.block_kv_update_limit = limit;
+        self
+    }
+
+    /// Caps the block's state growth.
+    pub const fn with_block_state_growth_limit(mut self, limit: u64) -> Self {
+        self.block_state_growth_limit = limit;
+        self
+    }
+}
+
+/// What one committed transaction adds to a block's counters.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BlockUsage {
+    /// The gas by ledger, and the gas the receipt reports ([`MegaGasUsage::gas_used`]).
+    pub gas: MegaGasUsage,
+    /// The data-size bytes, write records and state growth the transaction kept.
+    pub usage: LimitUsage,
+    /// The transaction's EIP-2718 encoded size, in bytes.
+    pub tx_size: u64,
+    /// The transaction's data-availability size, in bytes.
+    pub da_size: u64,
+    /// The transaction's data-availability footprint, in gas.
+    pub da_footprint: u64,
+    /// Whether the transaction is a deposit, which the data-availability dimensions exempt and
+    /// which no limit but the block's gas limit refuses.
+    pub is_deposit: bool,
+}
+
+/// What a block has used, and the limits it is held to.
 ///
-/// This struct maintains cumulative resource usage throughout block execution and validates
-/// that each transaction stays within both transaction-level and block-level limits. It
-/// provides a two-phase checking mechanism:
-///
-/// 1. **Pre-execution**: Validates limits that can be determined before execution (gas limit,
-///    transaction size, DA size)
-/// 2. **Post-execution**: Validates limits based on execution results (data size, KV updates) and
-///    updates the usage accumulators
-///
-/// # Resource Tracking
-///
-/// The limiter tracks five cumulative metrics:
-/// - Gas consumed by all transactions
-/// - Total transaction body size
-/// - Total data availability size
-/// - Total execution data generated
-/// - Total key-value storage updates
-///
-/// # Usage Pattern
-///
-/// ```rust,ignore
-/// let mut limiter = BlockLimits::default().to_block_limiter();
-///
-/// for tx in transactions {
-///     // Pre-execution check
-///     limiter.pre_execution_check(tx.hash(), tx.gas_limit(), tx.size(), tx.da_size(), is_deposit)?;
-///
-///     let outcome = execute_transaction(tx);
-///
-///     // Post-execution update
-///     limiter.post_execution_update(&outcome)?;
-/// }
-/// ```
-#[derive(Debug, Clone)]
+/// The counters are cumulative over the transactions the block committed; a transaction that was
+/// executed and then discarded leaves them untouched.
+#[derive(Clone, Debug)]
 pub struct BlockLimiter {
-    /// The configured resource limits.
+    /// The limits this block is held to.
     pub limits: BlockLimits,
-
-    /// Cumulative gas consumed by all committed transactions in the block.
+    /// The block's gas limit, the header's: a transaction is admitted only if its declared gas
+    /// limit fits in what the block has left, and it is also the budget the data-availability
+    /// footprint of the block's transactions is held to. The block executor takes it from the
+    /// block environment; it is no building policy.
+    pub block_gas_limit: u64,
+    /// The gas the block's receipts report, which is the block header's gas used.
     pub block_gas_used: u64,
-
-    /// Cumulative encoded size of all transaction bodies in the block (uncompressed).
+    /// The gas the block's transactions spent, by ledger.
+    pub gas: BlockGasCounters,
+    /// The data-size bytes, write records and state growth the block's transactions kept.
+    pub usage: LimitUsage,
+    /// The encoded size of the block's transaction bodies, in bytes.
     pub block_tx_size_used: u64,
-
-    /// Cumulative data availability size for all transactions in the block (compressed).
+    /// The data-availability size of the block's non-deposit transactions, in bytes.
     pub block_da_size_used: u64,
-
-    /// Cumulative execution data generated by all transactions in the block.
-    ///
-    /// This includes the encoded transaction object, logs, return data, and other execution
-    /// artifacts.
-    pub block_data_used: u64,
-
-    /// Cumulative key-value storage updates performed by all transactions in the block.
-    ///
-    /// This tracks the total number of SSTORE operations across all transactions.
-    pub block_kv_updates_used: u64,
-
-    /// Cumulative compute gas consumed by all transactions in the block.
-    pub block_compute_gas_used: u64,
-
-    /// Cumulative state growth consumed by all transactions in the block.
-    pub block_state_growth_used: u64,
+    /// The data-availability footprint of the block's non-deposit transactions, in gas. This is
+    /// what the block reports as its blob gas used.
+    pub block_da_footprint_used: u64,
 }
 
 impl BlockLimiter {
-    /// Create a new block limiter with the specified limits.
-    ///
-    /// Initializes a limiter with all resource usage counters set to zero.
-    ///
-    /// # Parameters
-    ///
-    /// - `limits`: The resource limit configuration
-    ///
-    /// # Returns
-    ///
-    /// A new limiter ready to track resource usage
-    pub fn new(limits: BlockLimits) -> Self {
+    /// A limiter of a block whose gas limit is `block_gas_limit`, held to `limits`, with every
+    /// counter at zero.
+    pub const fn new(limits: BlockLimits, block_gas_limit: u64) -> Self {
         Self {
             limits,
+            block_gas_limit,
             block_gas_used: 0,
-            block_data_used: 0,
-            block_kv_updates_used: 0,
+            gas: BlockGasCounters { execution: 0, state: 0, history: 0, history_bytes: 0 },
+            usage: LimitUsage::ZERO,
             block_tx_size_used: 0,
             block_da_size_used: 0,
-            block_compute_gas_used: 0,
-            block_state_growth_used: 0,
+            block_da_footprint_used: 0,
         }
     }
 
-    /// Validate transaction against pre-execution limits.
+    /// The gas the block still has for a transaction's declared gas limit.
+    pub const fn available_gas(&self) -> u64 {
+        self.block_gas_limit.saturating_sub(self.block_gas_used)
+    }
+
+    /// The data-availability footprint the block still has. The budget is the block's gas limit,
+    /// as the fork's rule states it.
+    pub const fn available_da_footprint(&self) -> u64 {
+        self.block_gas_limit.saturating_sub(self.block_da_footprint_used)
+    }
+
+    /// Whether `tx` may execute in this block.
     ///
-    /// This method validates that a transaction can be included in the block by checking
-    /// limits that are known before execution:
-    /// - Single transaction gas limit
-    /// - Remaining block gas capacity
-    /// - Single transaction size limit
-    /// - Remaining block transaction size capacity
-    /// - Single transaction DA size limit
-    /// - Remaining block DA size capacity
-    ///
-    /// **Important**: This method does **not** modify any state. It only performs validation.
-    /// Call [`post_execution_update`](Self::post_execution_update) after execution to update
-    /// usage counters.
-    ///
-    /// # Parameters
-    ///
-    /// - `tx_hash`: Transaction hash for error reporting
-    /// - `gas_limit`: Transaction's declared gas limit
-    /// - `tx_size`: Transaction's encoded size in bytes (EIP-2718 encoding)
-    /// - `da_size`: Transaction's compressed data availability size in bytes
-    /// - `is_deposit`: Whether the transaction is an L1-to-L2 deposit (exempt from DA size limits)
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(())`: Transaction passes all pre-execution checks
-    /// - `Err(BlockExecutionError)`: Transaction violates one or more limits
+    /// Checks the transaction against its own limits, and against what the block has left; a
+    /// transaction that is `packing_exempt` — a deposit, or a Mega System Transaction — is held to
+    /// the block's gas limit alone, to no limit only a builder applies and not to the data-size
+    /// limit. It reads the counters and changes nothing;
+    /// [`post_execution_update`](Self::post_execution_update) advances the counters once the
+    /// transaction commits.
     ///
     /// # Errors
     ///
-    /// Returns [`BlockExecutionError::Validation`] containing either:
-    /// - [`MegaTxLimitExceededError`]: Transaction exceeds its own limits (invalid transaction)
-    /// - [`MegaBlockLimitExceededError`]: Transaction would exceed block capacity
-    /// - [`BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas`][] - Insufficient
-    ///   remaining gas in block
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let mut limiter = BlockLimits::default().to_block_limiter();
-    ///
-    /// limiter.pre_execution_check(
-    ///     tx.hash(),
-    ///     tx.gas_limit(),
-    ///     tx.encode_2718_len() as u64,
-    ///     tx.estimated_da_size(),
-    ///     tx.is_deposit(),
-    /// )?;
-    /// ```
+    /// A [`MegaTxLimitExceededError`] when the transaction exceeds a limit of its own — it can
+    /// never be included, in this block or any other — and a [`MegaBlockLimitExceededError`]
+    /// when the block has no room left for it, which a builder answers by trying the next
+    /// transaction.
     pub fn pre_execution_check(
         &self,
         tx_hash: TxHash,
         gas_limit: u64,
         tx_size: u64,
         da_size: u64,
-        is_deposit: bool,
+        packing_exempt: bool,
     ) -> Result<(), BlockExecutionError> {
-        // Check single transaction gas limit
-        if gas_limit > self.limits.tx_gas_limit {
-            return Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
-                hash: tx_hash,
-                error: Box::new(MegaTxLimitExceededError::TransactionGasLimit {
+        // Of the limits checked here, a packing-exempt transaction is held to the block's gas limit
+        // alone (see the module's documentation on deposits).
+        if !packing_exempt && gas_limit > self.limits.tx_gas_limit {
+            return Err(invalid_tx(
+                tx_hash,
+                MegaTxLimitExceededError::TransactionGasLimit {
                     tx_gas_limit: gas_limit,
                     limit: self.limits.tx_gas_limit,
-                }),
-            }));
-        }
-
-        // Check block gas limit
-        if self.block_gas_used.saturating_add(gas_limit) > self.limits.block_gas_limit {
-            return Err(BlockExecutionError::Validation(
-                BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas {
-                    transaction_gas_limit: gas_limit,
-                    block_available_gas: self
-                        .limits
-                        .block_gas_limit
-                        .saturating_sub(self.block_gas_used),
                 },
             ));
         }
 
-        // Check single transaction size limit
-        if tx_size > self.limits.tx_encode_size_limit {
-            return Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
-                hash: tx_hash,
-                error: Box::new(MegaTxLimitExceededError::TransactionEncodeSizeLimit {
-                    tx_size,
-                    limit: self.limits.tx_encode_size_limit,
-                }),
-            }));
+        if self.block_gas_used.saturating_add(gas_limit) > self.block_gas_limit {
+            return Err(BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas {
+                transaction_gas_limit: gas_limit,
+                block_available_gas: self.available_gas(),
+            }
+            .into());
         }
 
-        // Check block transaction size limit
+        // Nothing below refuses a packing-exempt transaction; `post_execution_update` still counts
+        // it.
+        if packing_exempt {
+            return Ok(());
+        }
+
+        if tx_size > self.limits.tx_encode_size_limit {
+            return Err(invalid_tx(
+                tx_hash,
+                MegaTxLimitExceededError::TransactionEncodeSizeLimit {
+                    tx_size,
+                    limit: self.limits.tx_encode_size_limit,
+                },
+            ));
+        }
+
         if tx_size.saturating_add(self.block_tx_size_used) > self.limits.block_txs_encode_size_limit
         {
-            return Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
-                hash: tx_hash,
-                error: Box::new(MegaBlockLimitExceededError::TransactionEncodeSizeLimit {
+            return Err(invalid_tx(
+                tx_hash,
+                MegaBlockLimitExceededError::TransactionEncodeSizeLimit {
                     block_used: self.block_tx_size_used,
                     tx_used: tx_size,
                     limit: self.limits.block_txs_encode_size_limit,
-                }),
-            }));
+                },
+            ));
         }
 
-        // Deposit transactions are exempt from data availability size limits
-        if !is_deposit {
-            // Check single transaction data availability size limit
-            if da_size > self.limits.tx_da_size_limit {
-                return Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
-                    hash: tx_hash,
-                    error: Box::new(MegaTxLimitExceededError::DataAvailabilitySizeLimit {
-                        da_size,
-                        limit: self.limits.tx_da_size_limit,
-                    }),
-                }));
-            }
-
-            // Check block data availability size limit
-            if da_size.saturating_add(self.block_da_size_used) > self.limits.block_da_size_limit {
-                return Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
-                    hash: tx_hash,
-                    error: Box::new(MegaBlockLimitExceededError::DataAvailabilitySizeLimit {
-                        block_used: self.block_da_size_used,
-                        tx_used: da_size,
-                        limit: self.limits.block_da_size_limit,
-                    }),
-                }));
-            }
+        if da_size > self.limits.tx_da_size_limit {
+            return Err(invalid_tx(
+                tx_hash,
+                MegaTxLimitExceededError::DataAvailabilitySizeLimit {
+                    da_size,
+                    limit: self.limits.tx_da_size_limit,
+                },
+            ));
         }
 
-        // Check block-level data limit
-        if self.block_data_used >= self.limits.block_txs_data_limit {
-            return Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
-                hash: tx_hash,
-                error: Box::new(MegaBlockLimitExceededError::TransactionDataLimit {
-                    block_used: self.block_data_used,
+        if da_size.saturating_add(self.block_da_size_used) > self.limits.block_da_size_limit {
+            return Err(invalid_tx(
+                tx_hash,
+                MegaBlockLimitExceededError::DataAvailabilitySizeLimit {
+                    block_used: self.block_da_size_used,
+                    tx_used: da_size,
+                    limit: self.limits.block_da_size_limit,
+                },
+            ));
+        }
+
+        // The three packing budgets, known only after a transaction ran: the transaction that
+        // reaches one is packed, and every later one is skipped before it runs. Where several are
+        // reached, the skip names the first of data size, KV updates and state growth.
+        if self.usage.data_size >= self.limits.block_txs_data_limit {
+            return Err(invalid_tx(
+                tx_hash,
+                MegaBlockLimitExceededError::TransactionDataLimit {
+                    block_used: self.usage.data_size,
                     limit: self.limits.block_txs_data_limit,
-                }),
-            }));
+                },
+            ));
         }
-
-        // Check block-level kv update limit
-        if self.block_kv_updates_used >= self.limits.block_kv_update_limit {
-            return Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
-                hash: tx_hash,
-                error: Box::new(MegaBlockLimitExceededError::KVUpdateLimit {
-                    block_used: self.block_kv_updates_used,
+        if self.usage.write_records >= self.limits.block_kv_update_limit {
+            return Err(invalid_tx(
+                tx_hash,
+                MegaBlockLimitExceededError::KvUpdateLimit {
+                    block_used: self.usage.write_records,
                     limit: self.limits.block_kv_update_limit,
-                }),
-            }));
+                },
+            ));
         }
-
-        // Check block-level compute gas limit
-        if self.block_compute_gas_used >= self.limits.block_compute_gas_limit {
-            return Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
-                hash: tx_hash,
-                error: Box::new(MegaBlockLimitExceededError::ComputeGasLimit {
-                    block_used: self.block_compute_gas_used,
-                    limit: self.limits.block_compute_gas_limit,
-                }),
-            }));
-        }
-
-        // Check block-level state growth limit
-        if self.block_state_growth_used >= self.limits.block_state_growth_limit {
-            return Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
-                hash: tx_hash,
-                error: Box::new(MegaBlockLimitExceededError::StateGrowthLimit {
-                    block_used: self.block_state_growth_used,
+        if self.usage.state_growth >= self.limits.block_state_growth_limit {
+            return Err(invalid_tx(
+                tx_hash,
+                MegaBlockLimitExceededError::StateGrowthLimit {
+                    block_used: self.usage.state_growth,
                     limit: self.limits.block_state_growth_limit,
-                }),
-            }));
+                },
+            ));
         }
+
+        // `self.gas` is accumulated and not checked: no ledger has a block limit.
 
         Ok(())
     }
 
-    /// Update usage counters after transaction execution.
+    /// Adds what one committed transaction used.
     ///
-    /// This method is called **after** transaction execution to accumulate the executed
-    /// transaction's resource usage into the limiter's block-level counters. It does **not**
-    /// validate post-execution limits — over-limit enforcement happens in
-    /// [`pre_execution_check`](Self::pre_execution_check) before admitting the next transaction.
-    /// The transaction may cause the block to exceed limits, which is intentional to maximize
-    /// block utilization.
-    ///
-    /// The return type remains `Result` to leave room for future fallible post-execution logic;
-    /// the current implementation always returns `Ok(())`.
-    ///
-    /// # Parameters
-    ///
-    /// - `outcome`: The transaction execution outcome containing resource usage information
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(())`: Usage counters updated successfully
-    ///
-    /// # State Modification
-    ///
-    /// This method updates all cumulative usage counters:
-    /// - `block_gas_used += gas_used`
-    /// - `block_tx_size_used += tx_size_used`
-    /// - `block_da_size_used += da_size_used` (only for non-deposit transactions)
-    /// - `block_data_used += data_size_used`
-    /// - `block_kv_updates_used += kv_updates_used`
-    /// - `block_compute_gas_used += compute_gas_used`
-    /// - `block_state_growth_used += state_growth_used`
-    ///
-    /// **Note**: The block may exceed limits after this update. This is intentional - the first
-    /// transaction that causes the block to exceed is allowed to be included.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let outcome = executor.execute_mega_transaction(tx)?;
-    ///
-    /// // Accumulates usage; may cause block-level counters to exceed limits.
-    /// limiter.post_execution_update(&outcome)?;
-    ///
-    /// // Commit the transaction state
-    /// executor.commit_execution_outcome(outcome)?;
-    /// ```
-    pub fn post_execution_update<T: Transaction + MegaTransactionExt>(
-        &mut self,
-        outcome: &BlockMegaTransactionOutcome<impl RecoveredTx<T>>,
-    ) -> Result<(), BlockExecutionError> {
-        let is_deposit = outcome.tx.tx().ty() == DEPOSIT_TRANSACTION_TYPE;
-
-        self.post_execution_update_raw(
-            outcome.result.gas_used(),
-            outcome.tx_size,
-            outcome.da_size,
-            outcome.data_size,
-            outcome.kv_updates,
-            outcome.compute_gas_used,
-            outcome.state_growth_used,
-            is_deposit,
-        );
-
-        Ok(())
-    }
-
-    /// Update usage counters after transaction execution using raw values.
-    ///
-    /// This mirrors [`post_execution_update`](Self::post_execution_update) but takes precomputed
-    /// resource usage values instead of a full execution outcome.
-    #[allow(clippy::too_many_arguments)]
-    pub fn post_execution_update_raw(
-        &mut self,
-        gas_used: u64,
-        tx_size: u64,
-        da_size: u64,
-        tx_data: u64,
-        kv_updates: u64,
-        compute_gas_used: u64,
-        state_growth_used: u64,
-        is_deposit: bool,
-    ) {
-        // Block gas limit. No need to check here since it's checked before transaction execution.
-        self.block_gas_used = self.block_gas_used.saturating_add(gas_used);
-
-        // Block tx size limit, no need to check here since it's checked before transaction
-        // execution.
-        self.block_tx_size_used = self.block_tx_size_used.saturating_add(tx_size);
-
-        // Block da size limit, no need to check here since it's checked before transaction
-        // execution. Only appliable for non-deposit transactions.
-        if !is_deposit {
-            self.block_da_size_used = self.block_da_size_used.saturating_add(da_size);
+    /// Every counter saturates: a block that has already crossed a limit stays crossed, and the
+    /// check before the next transaction sees it.
+    pub fn post_execution_update(&mut self, usage: &BlockUsage) {
+        self.block_gas_used = self.block_gas_used.saturating_add(usage.gas.gas_used);
+        self.gas.record(&usage.gas);
+        self.usage = self.usage.saturating_add(usage.usage);
+        self.block_tx_size_used = self.block_tx_size_used.saturating_add(usage.tx_size);
+        if !usage.is_deposit {
+            self.block_da_size_used = self.block_da_size_used.saturating_add(usage.da_size);
+            self.block_da_footprint_used =
+                self.block_da_footprint_used.saturating_add(usage.da_footprint);
         }
-
-        // Block data limit, no need to check here since we allow the last transaction to exceed the
-        // limit.
-        self.block_data_used = self.block_data_used.saturating_add(tx_data);
-
-        // Block kv updates limit, no need to check here since we allow the last transaction to
-        // exceed the limit.
-        self.block_kv_updates_used = self.block_kv_updates_used.saturating_add(kv_updates);
-
-        // Block compute gas limit, no need to check here since we allow the last transaction to
-        // exceed the limit.
-        self.block_compute_gas_used = self.block_compute_gas_used.saturating_add(compute_gas_used);
-
-        // Block state growth limit, no need to check here since we allow the last transaction to
-        // exceed the limit.
-        self.block_state_growth_used =
-            self.block_state_growth_used.saturating_add(state_growth_used);
     }
+}
 
-    /// Returns true if any block-level limit has been reached or exceeded.
-    pub fn is_block_limit_reached(&self) -> bool {
-        self.block_gas_used >= self.limits.block_gas_limit ||
-            self.block_tx_size_used >= self.limits.block_txs_encode_size_limit ||
-            self.block_da_size_used >= self.limits.block_da_size_limit ||
-            self.block_data_used >= self.limits.block_txs_data_limit ||
-            self.block_kv_updates_used >= self.limits.block_kv_update_limit ||
-            self.block_compute_gas_used >= self.limits.block_compute_gas_limit ||
-            self.block_state_growth_used >= self.limits.block_state_growth_limit
-    }
+/// Wraps a limit error as the rejection of one transaction.
+fn invalid_tx(
+    hash: TxHash,
+    error: impl alloy_evm::InvalidTxError + 'static,
+) -> BlockExecutionError {
+    BlockValidationError::InvalidTx { hash, error: Box::new(error) }.into()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{constants::MAX_TX_COMPUTE_GAS, TX_BODY_SIZE};
     use alloy_primitives::B256;
 
-    /// Alias forks must configure exactly their behavior target's block limits: the
-    /// hand-written arm grouping in `from_hardfork_and_block_gas_limit` is reconciled with
-    /// `behavior()`, mirroring the instruction-table/precompile/runtime-limit reconciliation
-    /// tests. Driven off `VARIANTS` and `is_alias`, so a future alias fork joins automatically.
+    /// Satin's limits, written out so a change to one is a visible diff: 13,107,200 bytes of data
+    /// size, 500,000 write records and 1,000 new accounts and slots, per transaction and per block,
+    /// no per-frame cap beyond the 98/100 share, and detention's caps at 20,000,000 each.
+    ///
+    /// They also hold what a chain configuration's load-time check used to hold a chain's values
+    /// to: no limit is zero, a transaction's data size holds at least a body, and both detention
+    /// caps are below the most compute a transaction can spend, so a read of volatile data is
+    /// detained.
     #[test]
-    fn test_alias_forks_use_their_behavior_targets_block_limits() {
-        const GAS: u64 = 1_000_000;
-        let alias_forks =
-            MegaHardfork::VARIANTS.iter().copied().filter(|fork| fork.spec_id().is_alias());
-        let mut seen = 0;
-        for fork in alias_forks {
-            let limits = BlockLimits::from_hardfork_and_block_gas_limit(fork, GAS);
-            let target = fork.spec_id().behavior();
-            let expected = match MegaHardfork::VARIANTS
-                .iter()
-                .copied()
-                .find(|base| base.spec_id() as u8 == target as u8)
-            {
-                Some(base_fork) => BlockLimits::from_hardfork_and_block_gas_limit(base_fork, GAS),
-                // The target predates every fork (EQUIVALENCE): no block-level limits apply.
-                None => BlockLimits::no_limits()
-                    .with_tx_runtime_limits(EvmTxRuntimeLimits::from_spec(fork.spec_id()))
-                    .with_block_gas_limit(GAS),
-            };
-            assert_eq!(limits, expected, "{fork:?} must mirror its behavior target {target:?}");
-            seen += 1;
+    fn test_the_satin_limits_are_written_out() {
+        let limits = ProtocolLimits::for_spec(MegaSpecId::SATIN);
+        assert_eq!(
+            limits,
+            ProtocolLimits {
+                tx_runtime_limits: EvmTxRuntimeLimits {
+                    tx_data_size_limit: 13_107_200,
+                    tx_kv_update_limit: 500_000,
+                    tx_state_growth_limit: 1_000,
+                    frame_data_size_limit: u64::MAX,
+                    block_env_access_compute_gas_limit: 20_000_000,
+                    oracle_access_compute_gas_limit: 20_000_000,
+                },
+                block_txs_data_limit: 13_107_200,
+                block_kv_update_limit: 500_000,
+                block_state_growth_limit: 1_000,
+            }
+        );
+
+        let EvmTxRuntimeLimits {
+            tx_data_size_limit,
+            tx_kv_update_limit,
+            tx_state_growth_limit,
+            frame_data_size_limit,
+            block_env_access_compute_gas_limit,
+            oracle_access_compute_gas_limit,
+        } = limits.tx_runtime_limits;
+        for limit in [
+            tx_data_size_limit,
+            tx_kv_update_limit,
+            tx_state_growth_limit,
+            frame_data_size_limit,
+            block_env_access_compute_gas_limit,
+            oracle_access_compute_gas_limit,
+            limits.block_txs_data_limit,
+            limits.block_kv_update_limit,
+            limits.block_state_growth_limit,
+        ] {
+            assert_ne!(limit, 0);
         }
-        assert_eq!(seen, 2, "MiniRex1 and MiniRex2 are the alias forks under reconciliation");
+        assert!(tx_data_size_limit >= TX_BODY_SIZE, "a transaction's data size holds its body");
+        assert!(block_env_access_compute_gas_limit < MAX_TX_COMPUTE_GAS, "a cap that binds");
+        assert!(oracle_access_compute_gas_limit < MAX_TX_COMPUTE_GAS, "a cap that binds");
     }
 
-    fn limits_with_block_gas(block_gas_limit: u64) -> BlockLimits {
-        let mut limits = BlockLimits::no_limits();
-        limits.block_gas_limit = block_gas_limit;
-        limits.tx_gas_limit = u64::MAX;
-        limits
+    /// The limits serialize in the shape a tool takes an override in, written out here: camelCase,
+    /// the per-transaction limits nested. A field the shape's first published version had is
+    /// required, so leaving it out is an error rather than a zero, and so is a field the type does
+    /// not have; a file in that version, without the KV-update and state-growth limits, is read
+    /// with the spec's values for them.
+    #[test]
+    fn test_protocol_limits_round_trip() {
+        let satin = ProtocolLimits::for_spec(MegaSpecId::SATIN);
+        let limits = satin
+            .with_tx_runtime_limits(satin.tx_runtime_limits.with_frame_data_size_limit(1))
+            .with_block_txs_data_limit(7)
+            .with_block_kv_update_limit(8)
+            .with_block_state_growth_limit(9);
+
+        let json = serde_json::to_string(&limits).expect("serializes");
+        assert_eq!(
+            json,
+            r#"{"txRuntimeLimits":{"txDataSizeLimit":13107200,"txKvUpdateLimit":500000,"txStateGrowthLimit":1000,"frameDataSizeLimit":1,"blockEnvAccessComputeGasLimit":20000000,"oracleAccessComputeGasLimit":20000000},"blockTxsDataLimit":7,"blockKvUpdateLimit":8,"blockStateGrowthLimit":9}"#
+        );
+        assert_eq!(serde_json::from_str::<ProtocolLimits>(&json).expect("deserializes"), limits);
+
+        let missing = json.replace(r#","blockTxsDataLimit":7"#, "");
+        assert!(serde_json::from_str::<ProtocolLimits>(&missing).is_err(), "{missing}");
+        let missing_tx = json.replace(r#""frameDataSizeLimit":1,"#, "");
+        assert!(serde_json::from_str::<ProtocolLimits>(&missing_tx).is_err(), "{missing_tx}");
+
+        // A file in the first published version of the shape.
+        let first = r#"{"txRuntimeLimits":{"txDataSizeLimit":350,"frameDataSizeLimit":1,"blockEnvAccessComputeGasLimit":5,"oracleAccessComputeGasLimit":6},"blockTxsDataLimit":7}"#;
+        let read = serde_json::from_str::<ProtocolLimits>(first).expect("a first-version file");
+        let expected = satin
+            .with_tx_runtime_limits(
+                satin
+                    .tx_runtime_limits
+                    .with_tx_data_size_limit(350)
+                    .with_frame_data_size_limit(1)
+                    .with_block_env_access_compute_gas_limit(5)
+                    .with_oracle_access_compute_gas_limit(6),
+            )
+            .with_block_txs_data_limit(7);
+        assert_eq!(read, expected, "the newer limits at Satin's values");
+        assert_eq!(read.block_kv_update_limit, 500_000);
+        assert_eq!(read.block_state_growth_limit, 1_000);
+        assert_eq!(read.tx_runtime_limits.tx_kv_update_limit, 500_000);
+        assert_eq!(read.tx_runtime_limits.tx_state_growth_limit, 1_000);
+        let unknown = json.replace(r#""blockTxsDataLimit":7"#, r#""blockTxsDataLimit":7,"x":1"#);
+        assert!(serde_json::from_str::<ProtocolLimits>(&unknown).is_err(), "{unknown}");
     }
 
-    fn limits_with_block_tx_size(block_txs_encode_size_limit: u64) -> BlockLimits {
-        let mut limits = BlockLimits::no_limits();
-        limits.block_txs_encode_size_limit = block_txs_encode_size_limit;
-        limits
+    /// `no_limits` leaves every limit unlimited, detention's caps included. Every field is named,
+    /// so a limit added later cannot be left out of it.
+    #[test]
+    fn test_no_protocol_limits_leaves_every_limit_unlimited() {
+        let ProtocolLimits {
+            tx_runtime_limits,
+            block_txs_data_limit,
+            block_kv_update_limit,
+            block_state_growth_limit,
+        } = ProtocolLimits::no_limits();
+        assert_eq!(tx_runtime_limits, EvmTxRuntimeLimits::no_limits());
+        for limit in [block_txs_data_limit, block_kv_update_limit, block_state_growth_limit] {
+            assert_eq!(limit, u64::MAX);
+        }
     }
 
-    fn limits_with_block_da_size(block_da_size_limit: u64) -> BlockLimits {
-        let mut limits = BlockLimits::no_limits();
-        limits.block_da_size_limit = block_da_size_limit;
-        limits
+    /// The default building policy restricts nothing, so a validator that leaves it holds a block
+    /// to the protocol's limits alone. Every field is named, so a limit added later cannot be left
+    /// out of it.
+    #[test]
+    fn test_the_default_building_policy_restricts_nothing() {
+        assert_eq!(BlockLimits::default(), BlockLimits::no_limits());
+        let BlockLimits {
+            tx_gas_limit,
+            tx_encode_size_limit,
+            block_txs_encode_size_limit,
+            tx_da_size_limit,
+            block_da_size_limit,
+            block_txs_data_limit,
+            block_kv_update_limit,
+            block_state_growth_limit,
+        } = BlockLimits::default();
+        for limit in [
+            tx_gas_limit,
+            tx_encode_size_limit,
+            block_txs_encode_size_limit,
+            tx_da_size_limit,
+            block_da_size_limit,
+            block_txs_data_limit,
+            block_kv_update_limit,
+            block_state_growth_limit,
+        ] {
+            assert_eq!(limit, u64::MAX);
+        }
+        assert_eq!(
+            BlockLimits::default()
+                .within(&ProtocolLimits::for_spec(MegaSpecId::SATIN))
+                .block_txs_data_limit,
+            crate::constants::BLOCK_DATA_LIMIT,
+            "held within the protocol's, the default policy is the protocol's"
+        );
+        let held = BlockLimits::default().within(&ProtocolLimits::for_spec(MegaSpecId::SATIN));
+        assert_eq!(
+            (held.block_kv_update_limit, held.block_state_growth_limit),
+            (crate::constants::BLOCK_KV_UPDATE_LIMIT, crate::constants::BLOCK_STATE_GROWTH_LIMIT),
+            "and the protocol's KV and state-growth budgets"
+        );
+    }
+
+    /// A builder's cap on each of the block's packing budgets — data size, KV updates, state growth
+    /// — holds the block only where it is below the protocol's limit: it tightens, and never
+    /// loosens. The limits only a builder applies pass through.
+    #[test]
+    fn test_a_building_policy_tightens_a_budget_and_never_loosens_it() {
+        let protocol = ProtocolLimits::for_spec(MegaSpecId::SATIN)
+            .with_block_txs_data_limit(300)
+            .with_block_kv_update_limit(301)
+            .with_block_state_growth_limit(302);
+
+        let tighter = BlockLimits::no_limits()
+            .with_block_txs_data_limit(30)
+            .with_block_kv_update_limit(31)
+            .with_block_state_growth_limit(32)
+            .with_tx_gas_limit(1)
+            .with_tx_encode_size_limit(2)
+            .with_block_txs_encode_size_limit(3)
+            .with_tx_da_size_limit(4)
+            .with_block_da_size_limit(5);
+        assert_eq!(tighter.within(&protocol), tighter, "every cap is below the protocol's");
+
+        let looser = BlockLimits::no_limits()
+            .with_block_txs_data_limit(3_000)
+            .with_block_kv_update_limit(3_001)
+            .with_block_state_growth_limit(3_002);
+        let held = looser.within(&protocol);
+        assert_eq!(held.block_txs_data_limit, 300, "a cap above the protocol's gives way to it");
+        assert_eq!(held.block_kv_update_limit, 301, "for the KV count too");
+        assert_eq!(held.block_state_growth_limit, 302, "and for the state growth");
+        assert_eq!(
+            BlockLimits { tx_gas_limit: 7, ..held },
+            BlockLimits { tx_gas_limit: 7, ..BlockLimits::no_limits().within(&protocol) },
+            "nothing else changes"
+        );
+    }
+
+    /// A limiter of a block whose gas limit is `block_gas_limit`, under no building policy.
+    fn limiter_with_block_gas(block_gas_limit: u64) -> BlockLimiter {
+        BlockLimiter::new(BlockLimits::no_limits(), block_gas_limit)
+    }
+
+    fn saturated_usage() -> BlockUsage {
+        BlockUsage {
+            gas: MegaGasUsage {
+                gas_used: u64::MAX,
+                regular: u64::MAX,
+                state: u64::MAX,
+                history: u64::MAX,
+                history_bytes: u64::MAX,
+                ..Default::default()
+            },
+            usage: LimitUsage { data_size: u64::MAX, write_records: u64::MAX, state_growth: 0 },
+            tx_size: u64::MAX,
+            da_size: u64::MAX,
+            da_footprint: u64::MAX,
+            is_deposit: false,
+        }
     }
 
     #[test]
     fn test_pre_execution_check_block_gas_addition_saturates() {
         // Block has very high accumulated usage and a transaction with a near-`u64::MAX`
         // gas limit; unchecked addition would wrap and accidentally pass the limit check.
-        let mut limiter = BlockLimiter::new(limits_with_block_gas(1_000_000));
+        let mut limiter = limiter_with_block_gas(1_000_000);
         limiter.block_gas_used = u64::MAX - 10;
         let result = limiter.pre_execution_check(B256::ZERO, u64::MAX, 0, 0, false);
         assert!(result.is_err(), "saturating_add must keep the rejection in place");
@@ -1088,7 +816,10 @@ mod tests {
 
     #[test]
     fn test_pre_execution_check_block_tx_size_addition_saturates() {
-        let mut limiter = BlockLimiter::new(limits_with_block_tx_size(1_000_000));
+        let mut limiter = BlockLimiter::new(
+            BlockLimits::no_limits().with_block_txs_encode_size_limit(1_000_000),
+            u64::MAX,
+        );
         limiter.block_tx_size_used = u64::MAX - 10;
         let result = limiter.pre_execution_check(B256::ZERO, 0, u64::MAX, 0, false);
         assert!(result.is_err());
@@ -1096,52 +827,290 @@ mod tests {
 
     #[test]
     fn test_pre_execution_check_block_da_size_addition_saturates() {
-        let mut limiter = BlockLimiter::new(limits_with_block_da_size(1_000_000));
+        let mut limiter = BlockLimiter::new(
+            BlockLimits::no_limits().with_block_da_size_limit(1_000_000),
+            u64::MAX,
+        );
         limiter.block_da_size_used = u64::MAX - 10;
         let result = limiter.pre_execution_check(B256::ZERO, 0, 0, u64::MAX, false);
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_post_execution_update_raw_saturates_all_counters() {
-        let mut limiter = BlockLimiter::new(BlockLimits::no_limits());
+    fn test_post_execution_update_saturates_all_counters() {
+        let mut limiter = BlockLimiter::new(BlockLimits::no_limits(), u64::MAX);
         limiter.block_gas_used = u64::MAX - 1;
+        limiter.gas = BlockGasCounters {
+            execution: u64::MAX - 1,
+            state: u64::MAX - 1,
+            history: u64::MAX - 1,
+            history_bytes: u64::MAX - 1,
+        };
+        limiter.usage =
+            LimitUsage { data_size: u64::MAX - 1, write_records: u64::MAX - 1, state_growth: 0 };
         limiter.block_tx_size_used = u64::MAX - 1;
         limiter.block_da_size_used = u64::MAX - 1;
-        limiter.block_data_used = u64::MAX - 1;
-        limiter.block_kv_updates_used = u64::MAX - 1;
-        limiter.block_compute_gas_used = u64::MAX - 1;
-        limiter.block_state_growth_used = u64::MAX - 1;
+        limiter.block_da_footprint_used = u64::MAX - 1;
 
-        limiter.post_execution_update_raw(
-            u64::MAX,
-            u64::MAX,
-            u64::MAX,
-            u64::MAX,
-            u64::MAX,
-            u64::MAX,
-            u64::MAX,
-            false,
-        );
+        limiter.post_execution_update(&saturated_usage());
 
         assert_eq!(limiter.block_gas_used, u64::MAX);
+        assert_eq!(
+            limiter.gas,
+            BlockGasCounters {
+                execution: u64::MAX,
+                state: u64::MAX,
+                history: u64::MAX,
+                history_bytes: u64::MAX,
+            }
+        );
+        assert_eq!(
+            limiter.usage,
+            LimitUsage { data_size: u64::MAX, write_records: u64::MAX, state_growth: 0 }
+        );
         assert_eq!(limiter.block_tx_size_used, u64::MAX);
         assert_eq!(limiter.block_da_size_used, u64::MAX);
-        assert_eq!(limiter.block_data_used, u64::MAX);
-        assert_eq!(limiter.block_kv_updates_used, u64::MAX);
-        assert_eq!(limiter.block_compute_gas_used, u64::MAX);
-        assert_eq!(limiter.block_state_growth_used, u64::MAX);
+        assert_eq!(limiter.block_da_footprint_used, u64::MAX);
     }
 
     #[test]
-    fn test_post_execution_update_raw_skips_da_for_deposits() {
-        // Deposit transactions should not advance `block_da_size_used`, even when the value
-        // would otherwise saturate.
-        let mut limiter = BlockLimiter::new(BlockLimits::no_limits());
+    fn test_post_execution_update_skips_da_for_deposits() {
+        // Deposit transactions should not advance the data-availability counters, even when the
+        // value would otherwise saturate.
+        let mut limiter = BlockLimiter::new(BlockLimits::no_limits(), u64::MAX);
         limiter.block_da_size_used = 100;
+        limiter.block_da_footprint_used = 200;
 
-        limiter.post_execution_update_raw(0, 0, u64::MAX, 0, 0, 0, 0, true);
+        limiter.post_execution_update(&BlockUsage {
+            is_deposit: true,
+            tx_size: 7,
+            ..saturated_usage()
+        });
 
         assert_eq!(limiter.block_da_size_used, 100);
+        assert_eq!(limiter.block_da_footprint_used, 200);
+        assert_eq!(limiter.block_tx_size_used, 7, "a deposit still counts as a transaction body");
+    }
+
+    /// A deposit is never refused by the block's data-size limit, however far past it the block
+    /// is, and still counts towards it: an ordinary transaction after the deposits finds the room
+    /// they used.
+    #[test]
+    fn test_data_size_limit_never_refuses_a_deposit_and_counts_it() {
+        let mut limiter =
+            BlockLimiter::new(BlockLimits::no_limits().with_block_txs_data_limit(1_000), u64::MAX);
+        let deposit = BlockUsage {
+            usage: LimitUsage { data_size: 600, write_records: 0, state_growth: 0 },
+            is_deposit: true,
+            ..Default::default()
+        };
+
+        // Two deposits cross the limit between them, and a third finds the block past it.
+        for _ in 0..3 {
+            assert!(limiter.pre_execution_check(B256::ZERO, 0, 0, 0, true).is_ok());
+            limiter.post_execution_update(&deposit);
+        }
+        assert_eq!(limiter.usage.data_size, 1_800, "every deposit counts");
+
+        let err = limiter
+            .pre_execution_check(B256::ZERO, 0, 0, 0, false)
+            .expect_err("the deposits used the room an ordinary transaction would need");
+        assert!(std::format!("{err}").contains("Block transactions data limit reached"), "{err}");
+        assert!(std::format!("{err}").contains("block_used=1800"), "{err}");
+    }
+
+    /// Every limit is an inclusive bound: a transaction that exactly fills what the limit — or
+    /// what the block has left of it — is admitted, and one unit more is refused.
+    #[test]
+    fn test_pre_execution_check_admits_what_exactly_fills_a_limit() {
+        const LIMIT: u64 = 1_000;
+        const USED: u64 = 400;
+
+        // Each case names the dimension, the limiter it is checked on, what the limit leaves for
+        // one transaction, and how that figure reaches `pre_execution_check`.
+        type Check = fn(&BlockLimiter, u64) -> Result<(), BlockExecutionError>;
+        let cases: [(&str, BlockLimiter, u64, Check); 6] = [
+            (
+                "a transaction's own gas limit",
+                BlockLimiter::new(BlockLimits::no_limits().with_tx_gas_limit(LIMIT), u64::MAX),
+                LIMIT,
+                |limiter, gas_limit| {
+                    limiter.pre_execution_check(B256::ZERO, gas_limit, 0, 0, false)
+                },
+            ),
+            (
+                "the block's gas limit",
+                BlockLimiter { block_gas_used: USED, ..limiter_with_block_gas(LIMIT) },
+                LIMIT - USED,
+                |limiter, gas_limit| {
+                    limiter.pre_execution_check(B256::ZERO, gas_limit, 0, 0, false)
+                },
+            ),
+            (
+                "a transaction's own encoded size",
+                BlockLimiter::new(
+                    BlockLimits::no_limits().with_tx_encode_size_limit(LIMIT),
+                    u64::MAX,
+                ),
+                LIMIT,
+                |limiter, tx_size| limiter.pre_execution_check(B256::ZERO, 0, tx_size, 0, false),
+            ),
+            (
+                "the block's encoded size",
+                BlockLimiter {
+                    block_tx_size_used: USED,
+                    ..BlockLimiter::new(
+                        BlockLimits::no_limits().with_block_txs_encode_size_limit(LIMIT),
+                        u64::MAX,
+                    )
+                },
+                LIMIT - USED,
+                |limiter, tx_size| limiter.pre_execution_check(B256::ZERO, 0, tx_size, 0, false),
+            ),
+            (
+                "a transaction's own data-availability size",
+                BlockLimiter::new(BlockLimits::no_limits().with_tx_da_size_limit(LIMIT), u64::MAX),
+                LIMIT,
+                |limiter, da_size| limiter.pre_execution_check(B256::ZERO, 0, 0, da_size, false),
+            ),
+            (
+                "the block's data-availability size",
+                BlockLimiter {
+                    block_da_size_used: USED,
+                    ..BlockLimiter::new(
+                        BlockLimits::no_limits().with_block_da_size_limit(LIMIT),
+                        u64::MAX,
+                    )
+                },
+                LIMIT - USED,
+                |limiter, da_size| limiter.pre_execution_check(B256::ZERO, 0, 0, da_size, false),
+            ),
+        ];
+
+        for (name, limiter, bound, check) in cases {
+            assert!(
+                check(&limiter, bound).is_ok(),
+                "{name}: {bound} exactly fills what is left and is admitted"
+            );
+            assert!(check(&limiter, bound + 1).is_err(), "{name}: one unit more is refused");
+        }
+    }
+
+    /// No limit only a builder applies refuses a deposit, which the block derived from L1 must
+    /// include: not its declared gas, not its encoded size, not what its encoding adds to the
+    /// block's. The same transaction not a deposit is refused by each, and the block's gas limit,
+    /// the header's, refuses a deposit as it refuses any transaction.
+    #[test]
+    fn test_no_building_policy_refuses_a_deposit() {
+        let cases: [(&str, BlockLimits, u64, u64); 5] = [
+            ("a declared gas", BlockLimits::no_limits().with_tx_gas_limit(100), 101, 0),
+            ("an encoded size", BlockLimits::no_limits().with_tx_encode_size_limit(10), 0, 11),
+            (
+                "the block's encoded size",
+                BlockLimits::no_limits().with_block_txs_encode_size_limit(10),
+                0,
+                11,
+            ),
+            ("a data-availability size", BlockLimits::no_limits().with_tx_da_size_limit(10), 0, 11),
+            (
+                "the block's data-availability size",
+                BlockLimits::no_limits().with_block_da_size_limit(10),
+                0,
+                11,
+            ),
+        ];
+        for (name, limits, gas_limit, size) in cases {
+            let limiter = BlockLimiter::new(limits, u64::MAX);
+            // The one size feeds both the encoded and the data-availability size.
+            let check = |is_deposit| {
+                limiter.pre_execution_check(B256::ZERO, gas_limit, size, size, is_deposit)
+            };
+            assert!(check(true).is_ok(), "{name} over the policy: a deposit is admitted");
+            assert!(check(false).is_err(), "{name} over the policy: a transaction is refused");
+        }
+
+        let limiter = limiter_with_block_gas(100);
+        let err = limiter
+            .pre_execution_check(B256::ZERO, 101, 0, 0, true)
+            .expect_err("the block's gas limit holds a deposit");
+        assert!(std::format!("{err}").contains("transaction gas limit 101 is more than"), "{err}");
+    }
+
+    /// A deposit counts towards the block's encoded size though it is never refused by it, so the
+    /// transaction after it finds the room it used.
+    #[test]
+    fn test_a_deposit_counts_towards_the_blocks_encoded_size() {
+        let mut limiter = BlockLimiter::new(
+            BlockLimits::no_limits().with_block_txs_encode_size_limit(1_000),
+            u64::MAX,
+        );
+        for _ in 0..2 {
+            assert!(limiter.pre_execution_check(B256::ZERO, 0, 600, 0, true).is_ok());
+            limiter.post_execution_update(&BlockUsage {
+                tx_size: 600,
+                is_deposit: true,
+                ..Default::default()
+            });
+        }
+        assert_eq!(limiter.block_tx_size_used, 1_200, "every deposit counts");
+
+        let err = limiter
+            .pre_execution_check(B256::ZERO, 0, 1, 0, false)
+            .expect_err("the deposits used the room an ordinary transaction would need");
+        assert!(std::format!("{err}").contains("block_used=1200"), "{err}");
+    }
+
+    /// What the block has left is what its refusal reports, and it is the limit minus what the
+    /// block used.
+    #[test]
+    fn test_available_gas_is_the_limit_less_what_the_block_used() {
+        let mut limiter = limiter_with_block_gas(1_000);
+        assert_eq!(limiter.available_gas(), 1_000, "an empty block has all of it");
+
+        limiter.post_execution_update(&BlockUsage {
+            gas: MegaGasUsage { gas_used: 400, ..Default::default() },
+            ..Default::default()
+        });
+        assert_eq!(limiter.available_gas(), 600);
+
+        let err = limiter
+            .pre_execution_check(B256::ZERO, 601, 0, 0, false)
+            .expect_err("601 does not fit in 600");
+        assert!(
+            std::format!("{err}").contains("blocks available gas 600"),
+            "the refusal reports what the block has left: {err}"
+        );
+
+        // The block cannot owe gas: a counter past the limit reports nothing left.
+        limiter.post_execution_update(&BlockUsage {
+            gas: MegaGasUsage { gas_used: u64::MAX, ..Default::default() },
+            ..Default::default()
+        });
+        assert_eq!(limiter.available_gas(), 0);
+    }
+
+    /// The state and history ledgers, the history bytes and the write records are accumulated, and
+    /// no check refuses a transaction on them.
+    #[test]
+    fn test_state_and_history_are_counted_but_not_enforced() {
+        let mut limiter = BlockLimiter::new(BlockLimits::no_limits(), u64::MAX);
+        let usage = BlockUsage {
+            gas: MegaGasUsage {
+                state: 10_000,
+                history: 20_000,
+                history_bytes: 250,
+                ..Default::default()
+            },
+            usage: LimitUsage { data_size: 0, write_records: 30, state_growth: 0 },
+            ..Default::default()
+        };
+
+        limiter.post_execution_update(&usage);
+
+        assert_eq!(limiter.gas.state, 10_000);
+        assert_eq!(limiter.gas.history, 20_000);
+        assert_eq!(limiter.gas.history_bytes, 250);
+        assert_eq!(limiter.usage.write_records, 30);
+        assert!(limiter.pre_execution_check(B256::ZERO, 0, 0, 0, false).is_ok());
     }
 }

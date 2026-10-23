@@ -1,300 +1,298 @@
-#[cfg(not(feature = "std"))]
-use alloc as std;
-use std::vec::Vec;
+//! The SALT bucket multipliers one transaction prices with.
+//!
+//! `MegaETH` keeps accounts and storage slots in SALT buckets. A bucket holds at least
+//! [`MIN_BUCKET_SIZE`] entries and grows as the region fills up; the ratio between what it holds
+//! and that minimum is the *multiplier* every EIP-8037 state gas charge on an account or slot of
+//! that bucket is scaled by. A charge in a minimum-capacity bucket pays the schedule price, and
+//! one in a bucket eight times as large pays eight times as much.
+//!
+//! Capacities are read through the transaction's [`SaltEnv`], which is a database read. The hook
+//! that prices state gas runs on every state charge and every refill of one, so the reads are
+//! cached here: [`BucketMultipliers`] queries a bucket once per transaction and answers every
+//! later charge on that bucket from the cache.
+//!
+//! [`MIN_BUCKET_SIZE`] is the smallest capacity a backend may report. A capacity below it is a
+//! broken backend rather than a cheap bucket, and is treated as a failed lookup
+//! ([`BucketError::BelowMinimum`]) rather than rounded up to the minimum: a report the engine
+//! cannot make sense of must not become a price nobody chose.
 
-use core::fmt::Debug;
-use revm::primitives::hash_map::Entry;
+use core::fmt;
 
-use alloy_primitives::{Address, BlockNumber, U256};
-use revm::{context::BlockEnv, primitives::HashMap};
+use revm::primitives::HashMap;
 
-use crate::{constants, BucketId, MegaSpecId, SaltEnv, MIN_BUCKET_SIZE};
+use crate::{BucketId, SaltEnv, MIN_BUCKET_SIZE};
 
-/// Calculator for dynamic gas costs based on bucket capacity.
-#[derive(Debug)]
-pub struct DynamicGasCost<SaltEnvImpl> {
-    /// The spec id.
-    spec: MegaSpecId,
-    /// The parent block number.
-    parent_block: BlockNumber,
-    /// The external environment for SALT bucket information.
-    salt_env: SaltEnvImpl,
-    /// Cache of the bucket cost multiplier for each bucket Id. The multiplier will be used to
-    /// multiply [`SSTORE_SET_GAS`] to get the actual gas cost for setting a storage slot.
-    bucket_cost_mulitipers: HashMap<BucketId, u64>,
+/// Why a SALT bucket's multiplier could not be established.
+///
+/// Both variants fail the transaction the same way: the pricing hook reports nothing and records
+/// the cause, and the charge site bails out. They are kept apart because they say different
+/// things about the backend — one could not answer, the other answered something a bucket cannot
+/// hold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BucketError<E> {
+    /// The SALT environment could not report the bucket's capacity.
+    Env(E),
+    /// The SALT environment reported a capacity below [`MIN_BUCKET_SIZE`], which is the smallest
+    /// a bucket can hold.
+    BelowMinimum {
+        /// The bucket that was asked for.
+        bucket: BucketId,
+        /// The capacity the environment reported for it.
+        capacity: u64,
+    },
 }
 
-impl<SaltEnvImpl: SaltEnv> DynamicGasCost<SaltEnvImpl> {
-    /// Creates a new [`DynamicGasCost`].
-    pub fn new(spec: MegaSpecId, salt_env: SaltEnvImpl, parent_block: BlockNumber) -> Self {
-        Self { spec, parent_block, salt_env, bucket_cost_mulitipers: HashMap::default() }
-    }
-
-    /// Resets the cache of the bucket cost multiplier.
-    pub fn reset(&mut self, parent_block: BlockNumber) {
-        self.bucket_cost_mulitipers.clear();
-        self.parent_block = parent_block;
-    }
-
-    /// Gets the bucket IDs used during transaction execution.
-    pub fn get_bucket_ids(&self) -> Vec<BucketId> {
-        self.bucket_cost_mulitipers.keys().copied().collect()
-    }
-
-    /// `SSTORE_SET` storage gas for an explicit bucket-capacity `multiplier` (always ≥ 1).
-    ///
-    /// Single source of the per-spec `SSTORE_SET` dynamic storage-gas formula, shared by the
-    /// SALT-driven path ([`sstore_set_gas`](Self::sstore_set_gas)) and the REX6 system-exempt
-    /// unscaled path ([`sstore_set_gas_unscaled`](Self::sstore_set_gas_unscaled)).
-    fn sstore_set_gas_for_multiplier(&self, multiplier: u64) -> u64 {
-        if self.spec.is_enabled(MegaSpecId::REX) {
-            constants::rex::SSTORE_SET_STORAGE_GAS_BASE.saturating_mul(multiplier - 1)
-        } else {
-            constants::mini_rex::SSTORE_SET_STORAGE_GAS.saturating_mul(multiplier)
-        }
-    }
-
-    /// `NEW_ACCOUNT` storage gas for an explicit bucket-capacity `multiplier` (always ≥ 1).
-    fn new_account_gas_for_multiplier(&self, multiplier: u64) -> u64 {
-        if self.spec.is_enabled(MegaSpecId::REX) {
-            constants::rex::NEW_ACCOUNT_STORAGE_GAS_BASE.saturating_mul(multiplier - 1)
-        } else {
-            constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS.saturating_mul(multiplier)
-        }
-    }
-
-    /// CREATE storage gas for an explicit bucket-capacity `multiplier` (always ≥ 1).
-    fn create_contract_gas_for_multiplier(&self, multiplier: u64) -> u64 {
-        if self.spec.is_enabled(MegaSpecId::REX) {
-            constants::rex::CONTRACT_CREATION_STORAGE_GAS_BASE.saturating_mul(multiplier - 1)
-        } else {
-            constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS.saturating_mul(multiplier)
-        }
-    }
-
-    /// Calculates the gas cost for setting a storage slot to a non-zero value. This overrides the
-    /// [`SSTORE_SET`](revm::interpreter::gas::SSTORE_SET) gas cost in the original EVM.
-    pub fn sstore_set_gas(
-        &mut self,
-        address: Address,
-        key: U256,
-    ) -> Result<u64, SaltEnvImpl::Error> {
-        // increase the gas cost according to the bucket capacity
-        let bucket_id = SaltEnvImpl::bucket_id_for_slot(address, key);
-        let multiplier = self.load_bucket_cost_multiplier(bucket_id)?;
-
-        Ok(self.sstore_set_gas_for_multiplier(multiplier))
-    }
-
-    /// Calculates the gas cost for creating a new account. This overrides the
-    /// [`NEWACCOUNT`](revm::interpreter::gas::NEWACCOUNT) gas cost in the original EVM.
-    pub fn new_account_gas(&mut self, address: Address) -> Result<u64, SaltEnvImpl::Error> {
-        // increase the gas cost according to the bucket capacity
-        let bucket_id = SaltEnvImpl::bucket_id_for_account(address);
-        let multiplier = self.load_bucket_cost_multiplier(bucket_id)?;
-
-        Ok(self.new_account_gas_for_multiplier(multiplier))
-    }
-
-    /// Calculates the gas cost for creating a new contract. This overrides the
-    /// [`CREATE`](revm::interpreter::gas::CREATE) gas cost in the original EVM.
-    pub fn create_contract_gas(&mut self, address: Address) -> Result<u64, SaltEnvImpl::Error> {
-        // increase the gas cost according to the bucket capacity
-        let bucket_id = SaltEnvImpl::bucket_id_for_account(address);
-        let multiplier = self.load_bucket_cost_multiplier(bucket_id)?;
-
-        Ok(self.create_contract_gas_for_multiplier(multiplier))
-    }
-
-    /// SALT-unscaled `SSTORE_SET` storage gas: the cost a write would pay if the target bucket
-    /// were at its minimum capacity, equivalent to taking the REX-family formula
-    /// `base × (multiplier − 1)` to `0`. REX6+ charges system-originated transactions this so
-    /// their storage cost is independent of how full SALT buckets actually are. Unlike
-    /// [`sstore_set_gas`](Self::sstore_set_gas) this does not query the SALT env or record bucket
-    /// access.
-    ///
-    /// REX-family only: the production caller (`HostExt::sstore_set_storage_gas` under the
-    /// REX6-gated `LimitCheck::Exempt` stamp) is unreachable pre-REX, and the "0 additional
-    /// storage gas" property holds only for the REX-family `base × (multiplier − 1)` formula.
-    pub fn sstore_set_gas_unscaled(&self) -> u64 {
-        debug_assert!(self.spec.is_enabled(MegaSpecId::REX));
-        // `multiplier = 1` ≡ bucket at minimum capacity, no excess to charge for —
-        // REX-family `base × (multiplier − 1)` evaluates to `0`.
-        self.sstore_set_gas_for_multiplier(1)
-    }
-
-    /// SALT-unscaled `NEW_ACCOUNT` storage gas.
-    /// See [`sstore_set_gas_unscaled`](Self::sstore_set_gas_unscaled).
-    pub fn new_account_gas_unscaled(&self) -> u64 {
-        debug_assert!(self.spec.is_enabled(MegaSpecId::REX));
-        self.new_account_gas_for_multiplier(1)
-    }
-
-    /// SALT-unscaled CREATE storage gas.
-    /// See [`sstore_set_gas_unscaled`](Self::sstore_set_gas_unscaled).
-    pub fn create_contract_gas_unscaled(&self) -> u64 {
-        debug_assert!(self.spec.is_enabled(MegaSpecId::REX));
-        self.create_contract_gas_for_multiplier(1)
-    }
-
-    /// Loads the bucket cost multiplier for a given bucket Id.
-    fn load_bucket_cost_multiplier(
-        &mut self,
-        bucket_id: BucketId,
-    ) -> Result<u64, SaltEnvImpl::Error> {
-        match self.bucket_cost_mulitipers.entry(bucket_id) {
-            Entry::Occupied(occupied_entry) => Ok(*occupied_entry.get()),
-            Entry::Vacant(vacant_entry) => {
-                let capacity = self.salt_env.get_bucket_capacity(bucket_id)?;
-                assert!(
-                    capacity >= MIN_BUCKET_SIZE as u64,
-                    "SaltEnv returned bucket_capacity={capacity} below MIN_BUCKET_SIZE ({})",
-                    MIN_BUCKET_SIZE,
-                );
-                let multiplier = capacity / MIN_BUCKET_SIZE as u64;
-                vacant_entry.insert(multiplier);
-                Ok(multiplier)
-            }
+impl<E: fmt::Display> fmt::Display for BucketError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Env(error) => write!(f, "{error}"),
+            Self::BelowMinimum { bucket, capacity } => write!(
+                f,
+                "bucket {bucket} reports capacity {capacity}, below the minimum bucket of \
+                 {MIN_BUCKET_SIZE}",
+            ),
         }
     }
 }
 
-impl<SaltEnvImpl: SaltEnv> DynamicGasCost<SaltEnvImpl> {
-    pub(crate) fn on_new_block(&mut self, block: &BlockEnv) {
-        self.reset(block.number.to::<u64>().saturating_sub(1));
+/// The SALT bucket multipliers the running transaction has looked up.
+///
+/// One entry per bucket the transaction has priced a charge in. It is cleared with the rest of
+/// the per-transaction state before every transaction and system call a
+/// [`MegaEvm`](crate::MegaEvm) runs, so a transaction never prices against a capacity an earlier
+/// transaction read.
+///
+/// The environment is passed in rather than held, so the cache adds no second copy of it and
+/// puts no `Clone` bound on the engine's external environment types.
+#[derive(Clone, Debug, Default)]
+pub struct BucketMultipliers {
+    /// Bucket id to its multiplier, for the buckets this transaction has read.
+    cached: HashMap<BucketId, u64>,
+}
+
+impl BucketMultipliers {
+    /// Forgets what the last transaction read, keeping the allocation.
+    #[inline]
+    pub(crate) fn reset(&mut self) {
+        self.cached.clear();
+    }
+
+    /// The multiplier a bucket of `capacity` entries prices with: `capacity / MIN_BUCKET_SIZE`,
+    /// or nothing when that capacity is below the minimum a bucket can hold.
+    ///
+    /// A bucket cannot hold fewer entries than the minimum, so a report that one does is a broken
+    /// backend. Rounding it up to the minimum would let a misreport pass as the cheapest price
+    /// there is; reporting nothing fails the transaction instead, the way any other unanswerable
+    /// lookup does. The one answer that must not be reachable from outside the engine —
+    /// `m = 0`, which prices every state charge in the bucket at zero — is neither.
+    #[inline]
+    pub const fn for_capacity(capacity: u64) -> Option<u64> {
+        match capacity / MIN_BUCKET_SIZE as u64 {
+            0 => None,
+            multiplier => Some(multiplier),
+        }
+    }
+
+    /// The multiplier of `bucket` this transaction has already read, if it has.
+    #[inline]
+    pub fn cached(&self, bucket: BucketId) -> Option<u64> {
+        self.cached.get(&bucket).copied()
+    }
+
+    /// Reads the capacity of `bucket` from `salt_env`, turns it into the multiplier and caches
+    /// it: the cache miss of a lookup that asks [`cached`](Self::cached) first, kept apart so the
+    /// caller knows whether the environment was asked.
+    ///
+    /// A bucket the cache already holds is asked for again, and the answer replaces the cached
+    /// multiplier. Only a multiplier is cached, so a bucket whose capacity could not be turned
+    /// into one is asked for again rather than remembered as anything.
+    #[inline]
+    pub(crate) fn fetch<S: SaltEnv>(
+        &mut self,
+        salt_env: &S,
+        bucket: BucketId,
+    ) -> Result<u64, BucketError<S::Error>> {
+        let capacity = salt_env.get_bucket_capacity(bucket).map_err(BucketError::Env)?;
+        let multiplier =
+            Self::for_capacity(capacity).ok_or(BucketError::BelowMinimum { bucket, capacity })?;
+        self.cached.insert(bucket, multiplier);
+        Ok(multiplier)
+    }
+
+    /// The buckets this transaction has read, for tests and tools that check the read set.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn cached_buckets(&self) -> impl ExactSizeIterator<Item = BucketId> + '_ {
+        self.cached.keys().copied()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::external::test_utils::TestExternalEnvs;
+    use crate::{ExternalEnvs, MegaContext, MegaSpecId, TestExternalEnvs, MIN_BUCKET_SIZE};
+    use alloy_primitives::{address, Address, U256};
+    use revm::{database::EmptyDB, primitives::StorageKey};
 
-    fn cost_with_capacity(spec: MegaSpecId, capacity: u64) -> DynamicGasCost<TestExternalEnvs> {
-        // Map the bucket id that the simple bucket hasher will produce for the zero address /
-        // zero slot to the requested capacity.
-        let bucket_for_account =
-            <TestExternalEnvs as SaltEnv>::bucket_id_for_account(Address::ZERO);
-        let bucket_for_slot =
-            <TestExternalEnvs as SaltEnv>::bucket_id_for_slot(Address::ZERO, U256::ZERO);
-        let env = TestExternalEnvs::new()
-            .with_bucket_capacity(bucket_for_account, capacity)
-            .with_bucket_capacity(bucket_for_slot, capacity);
-        DynamicGasCost::new(spec, env, 0)
+    const ACCOUNT: Address = address!("00000000000000000000000000000000000000a1");
+    const OTHER: Address = address!("00000000000000000000000000000000000000a2");
+
+    type Env = TestExternalEnvs;
+
+    fn account_bucket(account: Address) -> BucketId {
+        <Env as SaltEnv>::bucket_id_for_account(account)
     }
 
-    /// `MIN_BUCKET_SIZE * u64::MAX` cannot be represented in `u64`; verify the hardened
-    /// arithmetic does not panic and saturates instead of wrapping.
-    #[test]
-    fn test_sstore_set_gas_saturates_on_huge_multiplier() {
-        let mut cost = cost_with_capacity(MegaSpecId::REX, u64::MAX);
-        let gas = cost.sstore_set_gas(Address::ZERO, U256::ZERO).unwrap();
-        assert_eq!(gas, u64::MAX);
-
-        let mut cost = cost_with_capacity(MegaSpecId::MINI_REX, u64::MAX);
-        let gas = cost.sstore_set_gas(Address::ZERO, U256::ZERO).unwrap();
-        assert_eq!(gas, u64::MAX);
+    fn slot_bucket(address: Address, key: StorageKey) -> BucketId {
+        <Env as SaltEnv>::bucket_id_for_slot(address, key)
     }
 
-    #[test]
-    fn test_new_account_gas_saturates_on_huge_multiplier() {
-        let mut cost = cost_with_capacity(MegaSpecId::REX, u64::MAX);
-        let gas = cost.new_account_gas(Address::ZERO).unwrap();
-        assert_eq!(gas, u64::MAX);
-
-        let mut cost = cost_with_capacity(MegaSpecId::MINI_REX, u64::MAX);
-        let gas = cost.new_account_gas(Address::ZERO).unwrap();
-        assert_eq!(gas, u64::MAX);
+    /// A context over `env`: the multipliers are read through it, as every state charge reads them.
+    fn context<E: Unpin + Clone + fmt::Display>(
+        env: &TestExternalEnvs<E>,
+    ) -> MegaContext<EmptyDB, TestExternalEnvs<E>> {
+        MegaContext::new_with_external_envs(
+            EmptyDB::default(),
+            MegaSpecId::SATIN,
+            ExternalEnvs { salt_env: env.clone(), oracle_env: env.clone() },
+        )
     }
 
+    /// A bucket at the minimum capacity multiplies by one, so the schedule's own price stands.
     #[test]
-    fn test_create_contract_gas_saturates_on_huge_multiplier() {
-        let mut cost = cost_with_capacity(MegaSpecId::REX, u64::MAX);
-        let gas = cost.create_contract_gas(Address::ZERO).unwrap();
-        assert_eq!(gas, u64::MAX);
+    fn test_the_minimum_bucket_multiplies_by_one() {
+        let mut ctx = context(&Env::new());
 
-        let mut cost = cost_with_capacity(MegaSpecId::MINI_REX, u64::MAX);
-        let gas = cost.create_contract_gas(Address::ZERO).unwrap();
-        assert_eq!(gas, u64::MAX);
+        assert_eq!(ctx.account_bucket_multiplier(ACCOUNT), Ok(1));
+        assert_eq!(ctx.slot_bucket_multiplier(ACCOUNT, U256::ZERO), Ok(1));
     }
 
-    /// REX6 system-exempt path: the unscaled cost (`multiplier = 1`) is `0` for the REX-family
-    /// formula `base × (multiplier − 1)`, and is independent of the actual bucket capacity. This
-    /// is what makes a system call's storage cost immune to SALT bucket scaling.
+    /// The multiplier is the capacity in minimum buckets, over the range a capacity can take.
     #[test]
-    fn test_unscaled_gas_is_zero_for_rex_and_independent_of_capacity() {
-        for capacity in [MIN_BUCKET_SIZE as u64, 1_280_000, u64::MAX] {
-            let cost = cost_with_capacity(MegaSpecId::REX6, capacity);
-            assert_eq!(cost.sstore_set_gas_unscaled(), 0);
-            assert_eq!(cost.new_account_gas_unscaled(), 0);
-            assert_eq!(cost.create_contract_gas_unscaled(), 0);
+    fn test_the_multiplier_is_the_capacity_in_minimum_buckets() {
+        let min = MIN_BUCKET_SIZE as u64;
+        for factor in [1, 2, 8, 1_000, u32::MAX as u64] {
+            assert_eq!(BucketMultipliers::for_capacity(min * factor), Some(factor), "{factor}x");
         }
+        // A capacity between two whole multiples rounds down to the lower one: a bucket pays for
+        // the minimum buckets it has filled, not for the one it has started.
+        assert_eq!(BucketMultipliers::for_capacity(min * 2 + min / 2), Some(2));
+        assert_eq!(BucketMultipliers::for_capacity(u64::MAX), Some(u64::MAX / min));
     }
 
-    /// The unscaled helpers are REX-family API: pin the debug assert exactly at the REX
-    /// boundary (the first spec where the `base × (multiplier − 1)` formula exists), so a
-    /// tightened gate (e.g. REX1) fails here.
+    /// A capacity below the minimum is a capacity no bucket can have, so it is reported as a
+    /// failed lookup rather than rounded up to the minimum: a backend that misreports must fail
+    /// the transaction, not hand it the cheapest price there is.
     #[test]
-    fn test_unscaled_gas_is_available_from_rex_exactly() {
-        let cost = cost_with_capacity(MegaSpecId::REX, MIN_BUCKET_SIZE as u64);
-        assert_eq!(cost.sstore_set_gas_unscaled(), 0);
-        assert_eq!(cost.new_account_gas_unscaled(), 0);
-        assert_eq!(cost.create_contract_gas_unscaled(), 0);
-    }
+    fn test_a_capacity_below_the_minimum_is_a_failed_lookup() {
+        for capacity in [0, 1, MIN_BUCKET_SIZE as u64 - 1] {
+            assert_eq!(BucketMultipliers::for_capacity(capacity), None, "capacity {capacity}");
+        }
 
-    /// Pre-REX callers must trip the debug assert — a loosened gate (e.g. `MiniRex`) would
-    /// silently serve the REX-family formula to a spec that prices storage differently.
-    #[cfg(debug_assertions)]
-    #[test]
-    #[should_panic(expected = "assertion failed")]
-    fn test_sstore_set_gas_unscaled_asserts_pre_rex() {
-        let _ = cost_with_capacity(MegaSpecId::MINI_REX, MIN_BUCKET_SIZE as u64)
-            .sstore_set_gas_unscaled();
-    }
-
-    /// See [`test_sstore_set_gas_unscaled_asserts_pre_rex`].
-    #[cfg(debug_assertions)]
-    #[test]
-    #[should_panic(expected = "assertion failed")]
-    fn test_new_account_gas_unscaled_asserts_pre_rex() {
-        let _ = cost_with_capacity(MegaSpecId::MINI_REX, MIN_BUCKET_SIZE as u64)
-            .new_account_gas_unscaled();
-    }
-
-    /// See [`test_sstore_set_gas_unscaled_asserts_pre_rex`].
-    #[cfg(debug_assertions)]
-    #[test]
-    #[should_panic(expected = "assertion failed")]
-    fn test_create_contract_gas_unscaled_asserts_pre_rex() {
-        let _ = cost_with_capacity(MegaSpecId::MINI_REX, MIN_BUCKET_SIZE as u64)
-            .create_contract_gas_unscaled();
-    }
-
-    /// `MiniRex` prices contract creation with the flat `NEW_ACCOUNT_STORAGE_GAS × multiplier`
-    /// formula; REX switches to `CONTRACT_CREATION_STORAGE_GAS_BASE × (multiplier − 1)`. Pin
-    /// the boundary from the `MiniRex` side so a loosened REX gate fails here.
-    #[test]
-    fn test_create_contract_gas_uses_mini_rex_formula_before_rex() {
-        let cost = cost_with_capacity(MegaSpecId::MINI_REX, MIN_BUCKET_SIZE as u64);
+        let bucket = account_bucket(ACCOUNT);
+        let mut ctx = context(&Env::new().with_bucket_capacity(bucket, 0));
         assert_eq!(
-            cost.create_contract_gas_for_multiplier(3),
-            constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS.saturating_mul(3),
+            ctx.account_bucket_multiplier(ACCOUNT),
+            Err(BucketError::BelowMinimum { bucket, capacity: 0 }),
         );
-        assert_ne!(
-            constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS.saturating_mul(3),
-            constants::rex::CONTRACT_CREATION_STORAGE_GAS_BASE.saturating_mul(2),
-            "the two formulas must disagree for this pin to mean anything",
+        assert_eq!(ctx.bucket_multipliers().cached_buckets().len(), 0, "nothing was cached for it");
+    }
+
+    /// The two failures read differently, so a node can tell a backend that could not answer from
+    /// one that answered something impossible.
+    #[test]
+    fn test_the_two_bucket_failures_say_what_went_wrong() {
+        let unreachable: BucketError<String> = BucketError::Env("salt backend unreachable".into());
+        assert_eq!(unreachable.to_string(), "salt backend unreachable");
+
+        let below: BucketError<String> = BucketError::BelowMinimum { bucket: 7, capacity: 3 };
+        assert_eq!(
+            below.to_string(),
+            format!("bucket 7 reports capacity 3, below the minimum bucket of {MIN_BUCKET_SIZE}"),
         );
     }
 
-    /// The unscaled result equals the SALT-driven result evaluated at the minimum bucket
-    /// capacity, confirming the shared formula helper produces consistent values across both paths.
+    /// A crowded bucket scales every charge on it, and an account and a slot are read through
+    /// their own buckets.
     #[test]
-    fn test_unscaled_matches_salt_path_at_min_capacity() {
-        let mut cost = cost_with_capacity(MegaSpecId::REX6, MIN_BUCKET_SIZE as u64);
-        assert_eq!(
-            cost.sstore_set_gas_unscaled(),
-            cost.sstore_set_gas(Address::ZERO, U256::ZERO).unwrap(),
+    fn test_a_crowded_bucket_scales_the_account_and_the_slot_separately() {
+        let min = MIN_BUCKET_SIZE as u64;
+        let mut ctx = context(
+            &Env::new()
+                .with_bucket_capacity(account_bucket(ACCOUNT), min * 8)
+                .with_bucket_capacity(slot_bucket(ACCOUNT, U256::ZERO), min * 2),
         );
+
+        assert_eq!(ctx.account_bucket_multiplier(ACCOUNT), Ok(8));
+        assert_eq!(ctx.slot_bucket_multiplier(ACCOUNT, U256::ZERO), Ok(2));
+        // A slot of the same account in another bucket is untouched by either.
+        assert_eq!(ctx.slot_bucket_multiplier(ACCOUNT, U256::from(1)), Ok(1));
+        // So is another account.
+        assert_eq!(ctx.account_bucket_multiplier(OTHER), Ok(1));
+    }
+
+    /// A bucket is read from the environment once; every later charge on it is answered from the
+    /// cache. This is what keeps the pricing hook off the database on the hot path.
+    #[test]
+    fn test_a_bucket_is_read_once_and_cached() {
+        let bucket = account_bucket(ACCOUNT);
+        let env = Env::new().with_bucket_capacity(bucket, MIN_BUCKET_SIZE as u64 * 4);
+        let mut ctx = context(&env);
+
+        for _ in 0..8 {
+            assert_eq!(ctx.account_bucket_multiplier(ACCOUNT), Ok(4));
+        }
+        assert_eq!(env.bucket_queries(bucket), 1, "one capacity query for eight charges");
+        assert_eq!(ctx.bucket_multipliers().cached_buckets().collect::<Vec<_>>(), vec![bucket]);
+    }
+
+    /// The cache belongs to one transaction: a reset forgets what it read, so the next
+    /// transaction reads the capacity again.
+    #[test]
+    fn test_a_reset_forgets_what_the_transaction_read() {
+        let bucket = account_bucket(ACCOUNT);
+        let env = Env::new().with_bucket_capacity(bucket, MIN_BUCKET_SIZE as u64 * 4);
+        let mut cache = BucketMultipliers::default();
+
+        assert_eq!(cache.fetch(&env, bucket), Ok(4));
+        assert_eq!(cache.cached(bucket), Some(4));
+        cache.reset();
+        assert_eq!(cache.cached(bucket), None, "the reset emptied the cache");
+        assert_eq!(cache.cached_buckets().len(), 0);
+    }
+
+    /// A failed capacity query is reported, not swallowed: the caller must fail the transaction
+    /// rather than price the charge at some other number.
+    #[test]
+    fn test_a_failed_capacity_query_is_reported() {
+        let bucket = account_bucket(ACCOUNT);
+        let env = TestExternalEnvs::<String>::new()
+            .with_failing_bucket(bucket, "salt backend unreachable".into());
+        let mut ctx = context(&env);
+
+        assert_eq!(
+            ctx.account_bucket_multiplier(ACCOUNT),
+            Err(BucketError::Env("salt backend unreachable".into())),
+        );
+        assert_eq!(
+            ctx.bucket_multipliers().cached_buckets().len(),
+            0,
+            "a failed lookup caches nothing"
+        );
+        // It is not cached either, so the next charge asks again.
+        assert!(ctx.account_bucket_multiplier(ACCOUNT).is_err());
+        assert_eq!(env.bucket_queries(bucket), 2);
+    }
+
+    /// One bucket failing does not stop another from being priced.
+    #[test]
+    fn test_only_the_failing_bucket_fails() {
+        let mut ctx = context(
+            &TestExternalEnvs::<String>::new()
+                .with_bucket_capacity(account_bucket(OTHER), MIN_BUCKET_SIZE as u64 * 2)
+                .with_failing_bucket(account_bucket(ACCOUNT), "unreachable".into()),
+        );
+
+        assert!(ctx.account_bucket_multiplier(ACCOUNT).is_err());
+        assert_eq!(ctx.account_bucket_multiplier(OTHER), Ok(2));
     }
 }

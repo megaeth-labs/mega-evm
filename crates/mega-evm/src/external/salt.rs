@@ -24,6 +24,9 @@ pub const MIN_BUCKET_SIZE_BITS: usize = 8;
 /// Buckets hold accounts or storage slots and can grow beyond this size. The gas cost
 /// multiplier is calculated as `capacity / MIN_BUCKET_SIZE`, so a bucket at minimum
 /// capacity has a 1x multiplier.
+///
+/// This is also the smallest capacity a [`SaltEnv`] may report: a smaller answer is one no bucket
+/// can have, and is treated as a failed lookup rather than as the cheapest bucket there is.
 pub const MIN_BUCKET_SIZE: usize = 1 << MIN_BUCKET_SIZE_BITS;
 
 /// Interface for SALT bucket capacity information.
@@ -39,9 +42,9 @@ pub const MIN_BUCKET_SIZE: usize = 1 << MIN_BUCKET_SIZE_BITS;
 ///
 /// # Bucket ID Calculation
 ///
-/// The trait provides default methods [`bucket_id_for_account`](SaltEnv::bucket_id_for_account)
-/// and [`bucket_id_for_slot`](SaltEnv::bucket_id_for_slot) that can be overridden by
-/// implementations to customize bucket assignment logic.
+/// Every implementation supplies [`bucket_id_for_account`](SaltEnv::bucket_id_for_account) and
+/// [`bucket_id_for_slot`](SaltEnv::bucket_id_for_slot), which assign a key its bucket: the trait
+/// has no default for either.
 #[auto_impl(&, Box, Rc, Arc)]
 pub trait SaltEnv: Debug + Unpin {
     /// Error type returned when bucket capacity cannot be retrieved.
@@ -58,6 +61,9 @@ pub trait SaltEnv: Debug + Unpin {
     /// This multiplier scales the base storage gas costs, making operations more expensive
     /// as buckets grow.
     ///
+    /// [`MIN_BUCKET_SIZE`] is the smallest capacity an implementation may report. Reporting less
+    /// fails the transaction the way an error here does; it is not rounded up to the minimum.
+    ///
     /// # Arguments
     ///
     /// * `bucket_id` - The bucket to query
@@ -70,7 +76,6 @@ pub trait SaltEnv: Debug + Unpin {
     /// Maps an account address to its bucket ID.
     ///
     /// This method determines which bucket tracks the account creation gas costs.
-    /// The default implementation can be overridden to customize bucket assignment.
     ///
     /// # Arguments
     ///
@@ -80,7 +85,6 @@ pub trait SaltEnv: Debug + Unpin {
     /// Maps a storage slot to its bucket ID.
     ///
     /// This method determines which bucket tracks the storage slot's gas costs.
-    /// The default implementation can be overridden to customize bucket assignment.
     ///
     /// # Arguments
     ///

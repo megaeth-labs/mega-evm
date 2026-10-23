@@ -1,102 +1,162 @@
+//! What block execution needs of a transaction besides its environment.
+//!
+//! The block-level limits are stated over a transaction's hash and its two sizes, and none of
+//! them is part of revm's transaction environment. [`MegaTransactionExt`] is where block
+//! execution reads them; [`EnrichedMegaTx`] is a transaction that carries them already computed,
+//! for a caller that has them.
+
 use alloy_consensus::{transaction::Recovered, Transaction};
 use alloy_eips::{eip2930::AccessList, eip7702::SignedAuthorization, Encodable2718, Typed2718};
-use alloy_evm::{IntoTxEnv, RecoveredTx};
+use alloy_evm::{RecoveredTx, ToTxEnv};
 use alloy_primitives::{Address, Bytes, ChainId, Selector, TxHash, TxKind, B256, U256};
 use auto_impl::auto_impl;
 use delegate::delegate;
 
 use crate::MegaTxEnvelope;
 
-/// Helper trait that allows attaching extra information to a transaction.
+/// Scale [`op_revm::estimate_tx_compressed_size`] is returned in.
+const COMPRESSED_SIZE_SCALE: u64 = 1_000_000;
+
+/// The estimated size `bytes` take on data availability, in bytes.
+///
+/// The estimate is the fork's own: op-revm scales it by [`COMPRESSED_SIZE_SCALE`], and the
+/// per-transaction figure the limits are stated in is that estimate in bytes.
+pub fn estimated_da_size(bytes: &[u8]) -> u64 {
+    op_revm::estimate_tx_compressed_size(bytes) / COMPRESSED_SIZE_SCALE
+}
+
+/// What block execution reads off a transaction beside its environment.
+///
+/// A type that computes the two sizes from its own encoding and one that carries them already
+/// computed (see [`EnrichedMegaTx`]) answer the same three questions, so the executor's
+/// transaction path is written once and the choice is made at compile time — no caller picks a
+/// variant.
 #[auto_impl(&)]
 pub trait MegaTransactionExt {
-    /// Get the estimated data availability size of the transaction.
-    ///
-    /// Note: the default implementation is not efficient since it does not cache the `da_size` and
-    /// always recalculates it.
-    fn estimated_da_size(&self) -> u64
-    where
-        Self: Encodable2718,
-    {
-        op_alloy_flz::tx_estimated_size_fjord_bytes(self.encoded_2718().as_slice())
-    }
-
-    /// Get the EIP-2718 encoded size of the transaction in bytes.
-    fn tx_size(&self) -> u64
-    where
-        Self: Encodable2718,
-    {
-        self.encode_2718_len() as u64
-    }
-
-    /// Get the transaction hash.
+    /// The transaction's hash.
     fn tx_hash(&self) -> TxHash;
-}
 
-impl MegaTransactionExt for Recovered<MegaTxEnvelope> {
-    fn tx_hash(&self) -> TxHash {
-        self.inner().tx_hash()
-    }
-}
+    /// The transaction's EIP-2718 encoded size, in bytes.
+    fn tx_size(&self) -> u64;
 
-impl MegaTransactionExt for Recovered<&MegaTxEnvelope> {
-    fn tx_hash(&self) -> TxHash {
-        self.inner().tx_hash()
-    }
+    /// The size the transaction takes on data availability, in bytes.
+    fn estimated_da_size(&self) -> u64;
 }
 
 impl MegaTransactionExt for MegaTxEnvelope {
     fn tx_hash(&self) -> TxHash {
         self.tx_hash()
     }
+
+    fn tx_size(&self) -> u64 {
+        self.encode_2718_len() as u64
+    }
+
+    fn estimated_da_size(&self) -> u64 {
+        estimated_da_size(self.encoded_2718().as_slice())
+    }
 }
 
-/// A wrapper that allows attaching additional information to a transaction.
-#[derive(
-    Debug, Clone, derive_more::Deref, derive_more::DerefMut, derive_more::AsRef, derive_more::AsMut,
-)]
+impl MegaTransactionExt for Recovered<MegaTxEnvelope> {
+    fn tx_hash(&self) -> TxHash {
+        MegaTransactionExt::tx_hash(self.inner())
+    }
+
+    fn tx_size(&self) -> u64 {
+        MegaTransactionExt::tx_size(self.inner())
+    }
+
+    fn estimated_da_size(&self) -> u64 {
+        MegaTransactionExt::estimated_da_size(self.inner())
+    }
+}
+
+impl MegaTransactionExt for Recovered<&MegaTxEnvelope> {
+    fn tx_hash(&self) -> TxHash {
+        MegaTransactionExt::tx_hash(*self.inner())
+    }
+
+    fn tx_size(&self) -> u64 {
+        MegaTransactionExt::tx_size(*self.inner())
+    }
+
+    fn estimated_da_size(&self) -> u64 {
+        MegaTransactionExt::estimated_da_size(*self.inner())
+    }
+}
+
+/// A transaction that carries its hash and its two sizes already computed.
+///
+/// # Correctness
+///
+/// The carried values are trusted as they are and never checked against the transaction's real
+/// encoding. They feed the per-transaction and block-level size limits, so an understated value
+/// lets a transaction through a limit it should have been refused by. Pass only values computed
+/// from this very transaction by a party that is trusted to have done so — a sequencer's own
+/// mempool at insertion time — and use [`new_slow`](Self::new_slow) anywhere else.
+#[derive(Clone, Debug)]
 pub struct EnrichedMegaTx<T> {
-    #[deref]
-    #[deref_mut]
-    #[as_ref]
-    #[as_mut]
     inner: T,
-
-    /// The transaction hash.
+    /// The transaction's hash.
     pub tx_hash: TxHash,
-
-    /// The estimated data availability size of the transaction.
+    /// The size the transaction takes on data availability, in bytes.
     pub da_size: u64,
-
-    /// The EIP-2718 encoded size of the transaction in bytes.
+    /// The transaction's EIP-2718 encoded size, in bytes.
     pub tx_size: u64,
 }
 
 impl<T> EnrichedMegaTx<T> {
-    /// Create a new `WithDASize` wrapper with a known data availability size.
-    ///
-    /// `da_size`/`tx_size` are trusted as-is and not validated against `inner`'s actual
-    /// encoding. When this wrapper reaches [`crate::MegaBlockExecutor::run_transaction`], these
-    /// values are read via [`MegaTransactionExt`] and used directly for
-    /// `tx_da_size_limit`/`tx_encode_size_limit`/block cumulative-size enforcement, so an
-    /// inaccurate value can let a transaction bypass a limit it should have been rejected by.
-    /// Only pass values computed from `inner` itself (e.g. by a trusted mempool at insertion
-    /// time); prefer [`EnrichedMegaTx::new_slow`] when in doubt.
-    pub fn new(inner: T, tx_hash: TxHash, da_size: u64, tx_size: u64) -> Self {
+    /// A transaction carrying values the caller computed. See the type's correctness note.
+    pub const fn new(inner: T, tx_hash: TxHash, da_size: u64, tx_size: u64) -> Self {
         Self { inner, tx_hash, da_size, tx_size }
+    }
+
+    /// The transaction inside.
+    pub const fn inner(&self) -> &T {
+        &self.inner
+    }
+
+    /// Consumes the wrapper and returns the transaction inside.
+    pub fn into_inner(self) -> T {
+        self.inner
     }
 }
 
 impl<T: Encodable2718> EnrichedMegaTx<T> {
-    /// Create a new `WithDASize` wrapper and do the computation to estimate the data availability
-    /// size.
+    /// A transaction whose hash and sizes are computed here, from its own encoding.
     pub fn new_slow(inner: T) -> Self {
         Self {
             tx_hash: inner.trie_hash(),
-            da_size: op_alloy_flz::tx_estimated_size_fjord_bytes(inner.encoded_2718().as_slice()),
+            da_size: estimated_da_size(inner.encoded_2718().as_slice()),
             tx_size: inner.encode_2718_len() as u64,
             inner,
         }
+    }
+}
+
+impl<T> core::ops::Deref for EnrichedMegaTx<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<T> core::ops::DerefMut for EnrichedMegaTx<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+impl<T> AsRef<T> for EnrichedMegaTx<T> {
+    fn as_ref(&self) -> &T {
+        &self.inner
+    }
+}
+
+impl<T> AsMut<T> for EnrichedMegaTx<T> {
+    fn as_mut(&mut self) -> &mut T {
+        &mut self.inner
     }
 }
 
@@ -111,16 +171,16 @@ impl<T: Encodable2718> Encodable2718 for EnrichedMegaTx<T> {
 }
 
 impl<T> MegaTransactionExt for EnrichedMegaTx<T> {
-    fn estimated_da_size(&self) -> u64 {
-        self.da_size
+    fn tx_hash(&self) -> TxHash {
+        self.tx_hash
     }
 
     fn tx_size(&self) -> u64 {
         self.tx_size
     }
 
-    fn tx_hash(&self) -> TxHash {
-        self.tx_hash
+    fn estimated_da_size(&self) -> u64 {
+        self.da_size
     }
 }
 
@@ -177,10 +237,12 @@ impl<Tx, T: RecoveredTx<Tx>> RecoveredTx<Tx> for EnrichedMegaTx<T> {
     }
 }
 
-impl<Tx, T: IntoTxEnv<Tx>> IntoTxEnv<Tx> for EnrichedMegaTx<T> {
+/// Being both this and a [`RecoveredTx`] is what makes a reference to the wrapper an
+/// executable transaction of a block.
+impl<Tx, T: ToTxEnv<Tx>> ToTxEnv<Tx> for EnrichedMegaTx<T> {
     delegate! {
         to self.inner {
-            fn into_tx_env(self) -> Tx;
+            fn to_tx_env(&self) -> Tx;
         }
     }
 }
@@ -190,12 +252,12 @@ impl<T: Copy> Copy for EnrichedMegaTx<T> {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_consensus::{transaction::Recovered, Signed, TxLegacy};
+    use alloy_consensus::{Signed, TxLegacy};
     use alloy_primitives::{address, bytes::BufMut, Signature};
     use revm::context::TxEnv;
 
-    const CALLER: Address = address!("2000000000000000000000000000000000000001");
-    const CONTRACT: Address = address!("3000000000000000000000000000000000000001");
+    const CALLER: Address = address!("0x2000000000000000000000000000000000000001");
+    const CONTRACT: Address = address!("0x3000000000000000000000000000000000000001");
 
     #[derive(Debug, Clone)]
     struct MockTx {
@@ -307,9 +369,9 @@ mod tests {
         }
     }
 
-    impl IntoTxEnv<TxEnv> for MockRecoveredTx {
-        fn into_tx_env(self) -> TxEnv {
-            self.tx
+    impl ToTxEnv<TxEnv> for MockRecoveredTx {
+        fn to_tx_env(&self) -> TxEnv {
+            self.tx.clone()
         }
     }
 
@@ -329,7 +391,7 @@ mod tests {
         MegaTxEnvelope::Legacy(Signed::new_unchecked(
             legacy_tx(),
             Signature::test_signature(),
-            Default::default(),
+            B256::repeat_byte(9),
         ))
     }
 
@@ -337,11 +399,35 @@ mod tests {
     fn test_mega_transaction_ext_works_for_envelope_and_recovered_types() {
         let tx = legacy_envelope();
         let recovered = Recovered::new_unchecked(tx.clone(), CALLER);
+        // A recovered borrow is what a node passes when it keeps the envelope itself.
+        let borrowed = Recovered::new_unchecked(&tx, CALLER);
 
-        assert_eq!(MegaTransactionExt::tx_hash(&tx), tx.tx_hash());
-        assert_eq!(MegaTransactionExt::tx_hash(&recovered), tx.tx_hash());
-        assert!(MegaTransactionExt::estimated_da_size(&tx) > 0);
-        assert!(MegaTransactionExt::tx_size(&tx) > 0);
+        let hash = tx.tx_hash();
+        let da_size = MegaTransactionExt::estimated_da_size(&tx);
+        let tx_size = MegaTransactionExt::tx_size(&tx);
+        assert!(da_size > 0);
+        assert!(tx_size > 0);
+
+        // The three forms are the same transaction, so they report the same figures.
+        for reported in [
+            (
+                MegaTransactionExt::tx_hash(&tx),
+                MegaTransactionExt::estimated_da_size(&tx),
+                MegaTransactionExt::tx_size(&tx),
+            ),
+            (
+                MegaTransactionExt::tx_hash(&recovered),
+                MegaTransactionExt::estimated_da_size(&recovered),
+                MegaTransactionExt::tx_size(&recovered),
+            ),
+            (
+                MegaTransactionExt::tx_hash(&borrowed),
+                MegaTransactionExt::estimated_da_size(&borrowed),
+                MegaTransactionExt::tx_size(&borrowed),
+            ),
+        ] {
+            assert_eq!(reported, (hash, da_size, tx_size));
+        }
     }
 
     #[test]
@@ -353,8 +439,7 @@ mod tests {
             input: Bytes::from_static(&[0x12, 0x34, 0x56, 0x78, 0xaa]),
         };
         let expected_hash = tx.trie_hash();
-        let expected_da_size =
-            op_alloy_flz::tx_estimated_size_fjord_bytes(tx.encoded_2718().as_slice());
+        let expected_da_size = estimated_da_size(tx.encoded_2718().as_slice());
         let expected_tx_size = tx.encode_2718_len() as u64;
 
         let enriched = EnrichedMegaTx::new_slow(tx);
@@ -384,7 +469,19 @@ mod tests {
         assert_eq!(enriched.tx(), &tx_env);
         assert_eq!(*enriched.signer(), CALLER);
 
-        let converted: TxEnv = enriched.into_tx_env();
+        let converted: TxEnv = alloy_evm::IntoTxEnv::into_tx_env(enriched);
         assert_eq!(converted, tx_env);
+    }
+
+    /// The carried figures are what block execution reads, even when they disagree with the
+    /// encoding — which is the whole point of the type, and its risk.
+    #[test]
+    fn test_enriched_mega_tx_reports_the_values_it_carries() {
+        let enriched = EnrichedMegaTx::new(legacy_envelope(), TxHash::ZERO, 1, 2);
+
+        assert_eq!(MegaTransactionExt::tx_hash(&enriched), TxHash::ZERO);
+        assert_eq!(MegaTransactionExt::estimated_da_size(&enriched), 1);
+        assert_eq!(MegaTransactionExt::tx_size(&enriched), 2);
+        assert_ne!(enriched.inner().tx_hash(), TxHash::ZERO, "the transaction's own hash differs");
     }
 }

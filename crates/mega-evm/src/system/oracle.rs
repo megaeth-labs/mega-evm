@@ -1,605 +1,188 @@
-//! The oracle system contract for the `MegaETH` EVM. The oracle contract is implemented in
-//! `../../../system-contracts/contracts/Oracle.sol`.
+//! The Oracle system contract.
+//!
+//! The Oracle holds the protocol's key-value storage (`getSlot` / `setSlot`) and is the surface
+//! through which a contract reaches the node's oracle service: `sendHint` carries a message to
+//! the service backend. Its Solidity source is
+//! `crates/system-contracts/contracts/Oracle.sol`.
+//!
+//! Its storage is read through the service too, by the Host: an `SLOAD` in the Oracle's own frame
+//! loads the slot through the journal and answers the service's value when it has one, the loaded
+//! value otherwise. A node that replays a block without the service must price and witness it as
+//! the node that built it did, so the read is always priced cold and the slot is loaded whichever
+//! source answered.
 
 use alloy_evm::Database;
-use alloy_primitives::{address, b256, bytes, Address, Bytes, B256};
-use revm::{database::State, state::EvmState};
+use alloy_primitives::{address, Address};
+use alloy_sol_types::SolCall;
+use revm::{
+    handler::FrameResult,
+    interpreter::{CallInputs, InstructionResult},
+};
 
-use crate::{MegaHardforks, MegaSpecId, SystemContractSpec};
+use crate::{
+    synthetic_call_result, system::intercept::peek_selector, ExternalEnvTypes, MegaContext,
+    OracleEnv,
+};
 
-/// The address of the oracle system contract.
+/// The address of the Oracle system contract.
 pub const ORACLE_CONTRACT_ADDRESS: Address = address!("0x6342000000000000000000000000000000000001");
 
-/// The code of the oracle contract (version 1.0.0, pre-Rex2).
-pub use mega_system_contracts::oracle::V1_0_0_CODE as ORACLE_CONTRACT_CODE;
+/// The code of the Oracle contract.
+pub use mega_system_contracts::oracle::LATEST_CODE as ORACLE_CONTRACT_CODE;
 
-/// The code hash of the oracle contract (version 1.0.0, pre-Rex2).
-pub use mega_system_contracts::oracle::V1_0_0_CODE_HASH as ORACLE_CONTRACT_CODE_HASH;
-
-/// The code of the oracle contract (version 1.1.0, Rex2+).
-/// This version includes the `sendHint` function for the oracle hint mechanism.
-pub use mega_system_contracts::oracle::V1_1_0_CODE as ORACLE_CONTRACT_CODE_REX2;
-
-/// The code hash of the oracle contract (version 1.1.0, Rex2+).
-pub use mega_system_contracts::oracle::V1_1_0_CODE_HASH as ORACLE_CONTRACT_CODE_HASH_REX2;
-
-/// The code of the oracle contract (version 2.0.0, Rex5+).
-/// This version reads the authorized system address from `SequencerRegistry` instead of
-/// using a constructor `immutable`, enabling system address change without redeployment.
-pub use mega_system_contracts::oracle::V2_0_0_CODE as ORACLE_CONTRACT_CODE_REX5;
-
-/// The code hash of the oracle contract (version 2.0.0, Rex5+).
-pub use mega_system_contracts::oracle::V2_0_0_CODE_HASH as ORACLE_CONTRACT_CODE_HASH_REX5;
+/// The code hash of the Oracle contract.
+pub use mega_system_contracts::oracle::LATEST_CODE_HASH as ORACLE_CONTRACT_CODE_HASH;
 
 pub use mega_system_contracts::oracle::IOracle;
 
-/// Ensures the oracle contract is deployed in the designated address and returns the state changes.
-/// Note that the database `db` is not modified in this function. The caller is responsible to
-/// commit the changes to database.
+/// Forwards the hint of a `sendHint(bytes32,bytes)` call to the node's oracle service, and lets
+/// the deployed bytecode run; it answers the call only with the stop of a hint that would cross
+/// the transaction's data-size limit.
 ///
-/// The deployed bytecode depends on the scheduled spec:
-/// - Pre-Rex2: v1.0.0 bytecode (without `sendHint` function)
-/// - Rex2 to Rex4: v1.1.0 bytecode (with `sendHint` function for oracle hints)
-/// - Rex5+: v2.0.0 bytecode (reads the system address from the `SequencerRegistry`)
-pub fn transact_deploy_oracle_contract<DB: Database>(
-    hardforks: impl MegaHardforks,
-    block_timestamp: u64,
-    db: &mut State<DB>,
-) -> Result<Option<EvmState>, DB::Error> {
-    oracle_spec(hardforks.spec_id(block_timestamp))
-        .map(|s| crate::transact_deploy(db, &s))
-        .transpose()
-}
-
-/// Builds the [`SystemContractSpec`] for the Oracle contract active under `spec`,
-/// or `None` if `MINI_REX` is not yet enabled.
+/// `sendHint` is the one intercepted selector of the Oracle, and the only one that is a side
+/// effect rather than an answer. The Oracle's storage methods are ordinary code, and reading
+/// its storage through the node's oracle service is the Host's business.
 ///
-/// Single source of the Oracle's gate, bytecode-version selection, and upgrade
-/// semantics — shared by [`transact_deploy_oracle_contract`] and the deploy
-/// registry ([`flat_system_contract_specs`](crate::flat_system_contract_specs)).
+/// Three conditions admit a hint, and none is a statement about the frame that runs afterwards:
 ///
-/// `spec` is the scheduled spec, gated by position (`reaches`) rather than behavior: an Oracle
-/// already installed under `MINI_REX` stays installed through an alias (rollback) window.
-pub(crate) fn oracle_spec(spec: MegaSpecId) -> Option<SystemContractSpec> {
-    if !spec.reaches(MegaSpecId::MINI_REX) {
+/// - the call was forwarded gas. A call with none cannot run the dispatcher of the bytecode at all,
+///   so its hint would be a free message to the service;
+/// - the call carries no value. `sendHint` is not payable, so a value-bearing call reverts in the
+///   bytecode and its hint would be one the caller never sent;
+/// - the calling frame may read volatile data. A hint is how a contract asks the oracle service for
+///   what it will read from the Oracle's storage, and a frame whose volatile-data access
+///   `MegaAccessControl` switched off — its own switch, or one a frame above it set — cannot read
+///   it. Its hint is dropped, not refused: the call runs the bytecode as any other, because a hint
+///   is a message to the service, not state, and dropping it changes nothing the call returns.
+///
+/// The gas and switch conditions are the legacy engine's, carried over; the value condition is
+/// new. A hint that fails any of them is neither forwarded nor counted.
+///
+/// Gas above zero does not promise that the bytecode succeeds: a hint forwarded with one gas
+/// reaches the service and the frame it was sent from then runs out of gas. A forwarded hint is a
+/// synchronous, irreversible side effect — the service holds it whatever the frame, or the
+/// transaction, does next. That is one reason its bytes are counted on the transaction rather than
+/// on the frame; the other, which holds as well for an admitted payload that fails to decode and
+/// is never forwarded, is that admitting it and decoding it is work done either way.
+///
+/// A `STATICCALL` does forward: `sendHint` is a view method and writes nothing.
+///
+/// The payload is counted toward the transaction's data size before it is decoded
+/// ([`AdditionalLimit::admit_hint`](crate::AdditionalLimit)), so trailing bytes an ABI decoder
+/// ignores are paid for; a payload that would cross the transaction's limit is neither
+/// forwarded nor counted, and the call is answered with the stop: a revert carrying
+/// `MegaLimitExceeded`, on the gas it was forwarded, as the frame it would have started. So the
+/// data size a transaction keeps holds exactly the hints that were admitted.
+///
+/// `depth` is the depth of the frame the call would start; the calling frame is one level above
+/// it, and a transaction that calls the Oracle directly has no frame above it, so nothing it
+/// switched off can withhold its hint.
+pub(crate) fn intercept<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    inputs: &CallInputs,
+    depth: usize,
+) -> Option<FrameResult> {
+    let selector = peek_selector(&inputs.input, ctx)?;
+    if selector != IOracle::sendHintCall::SELECTOR ||
+        inputs.transfers_value() ||
+        inputs.gas_limit == 0 ||
+        depth.checked_sub(1).is_some_and(|caller| ctx.detention.is_access_disabled(caller))
+    {
         return None;
     }
-
-    // Select the appropriate bytecode based on the spec.
-    // - Pre-Rex2: v1.0.0 (without `sendHint`)
-    // - Rex2-Rex4: v1.1.0 (with `sendHint`)
-    // - Rex5+: v2.0.0 (reads system address from SequencerRegistry)
-    let rex5 = spec.reaches(MegaSpecId::REX5);
-    let (target_code, target_code_hash) = if rex5 {
-        (ORACLE_CONTRACT_CODE_REX5, ORACLE_CONTRACT_CODE_HASH_REX5)
-    } else if spec.reaches(MegaSpecId::REX2) {
-        (ORACLE_CONTRACT_CODE_REX2, ORACLE_CONTRACT_CODE_HASH_REX2)
-    } else {
-        (ORACLE_CONTRACT_CODE, ORACLE_CONTRACT_CODE_HASH)
-    };
-
-    // Starting from Rex5 we stop marking the account as created on in-place bytecode upgrades so
-    // that the existing Oracle storage is preserved across the upgrade. Pre-Rex5 the old behaviour
-    // is preserved to maintain canonical mainnet state at the Rex2 activation boundary (where
-    // mainnet had non-zero DB-backed Oracle storage that was cleared by the old code).
-    Some(
-        SystemContractSpec::new(ORACLE_CONTRACT_ADDRESS, target_code, target_code_hash)
-            .with_force_create_on_upgrade(!rex5),
-    )
-}
-
-/// The address of the high precision timestamp oracle contract.
-pub const HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS: Address =
-    address!("0x6342000000000000000000000000000000000002");
-
-/// The code hash of the high precision timestamp oracle contract.
-pub const HIGH_PRECISION_TIMESTAMP_ORACLE_CODE_HASH: B256 =
-    b256!("0x1b2df8ca5350cd7106d67ed95532584526f97a5ca267c8eef73a1831f53720f2");
-
-/// The code of the high precision timestamp oracle contract. The oracle contract address is
-/// embedded in to the contract code.
-pub const HIGH_PRECISION_TIMESTAMP_ORACLE_CODE: Bytes = bytes!("0x608060405234801561000f575f5ffd5b5060043610610064575f3560e01c806382ab890a1161004d57806382ab890a146100f55780638582b7bc1461010a578063b80777ea1461013f575f5ffd5b806328af7f3c146100685780633e6890fb146100a9575b5f5ffd5b61008f7f000000000000000000000000000000000000000000000000000000000000000881565b60405163ffffffff90911681526020015b60405180910390f35b6100d07f000000000000000000000000634200000000000000000000000000000000000181565b60405173ffffffffffffffffffffffffffffffffffffffff90911681526020016100a0565b6101086101033660046103b6565b610147565b005b6101317f000000000000000000000000000000000000000000000000000000000000000081565b6040519081526020016100a0565b610131610154565b6101515f82610165565b50565b5f5f61015f5f610245565b92915050565b8161016f8161031a565b73ffffffffffffffffffffffffffffffffffffffff7f00000000000000000000000063420000000000000000000000000000000000011663fbc0d0356101d5857f00000000000000000000000000000000000000000000000000000000000000006103cd565b60405160e083901b7fffffffff000000000000000000000000000000000000000000000000000000001681526004810191909152602481018590526044015f604051808303815f87803b15801561022a575f5ffd5b505af115801561023c573d5f5f3e3d5ffd5b50505050505050565b5f816102508161031a565b73ffffffffffffffffffffffffffffffffffffffff7f000000000000000000000000634200000000000000000000000000000000000116637eba7ba66102b6857f00000000000000000000000000000000000000000000000000000000000000006103cd565b6040518263ffffffff1660e01b81526004016102d491815260200190565b602060405180830381865afa1580156102ef573d5f5f3e3d5ffd5b505050506040513d601f19601f820116820180604052508101906103139190610405565b9392505050565b63ffffffff7f00000000000000000000000000000000000000000000000000000000000000081661034c8260016103cd565b10610151576040517fef94d8420000000000000000000000000000000000000000000000000000000081526004810182905263ffffffff7f000000000000000000000000000000000000000000000000000000000000000816602482015260440160405180910390fd5b5f602082840312156103c6575f5ffd5b5035919050565b8082018082111561015f577f4e487b71000000000000000000000000000000000000000000000000000000005f52601160045260245ffd5b5f60208284031215610415575f5ffd5b505191905056fea2646970667358221220290614c973d24b9016b73a6b3fa98b2485a5c324199ceeb767818495dbe785e864736f6c634300081e0033");
-
-/// Ensures the high precision timestamp oracle contract is deployed in the designated address and
-/// returns the state changes. Note that the database `db` is not modified in this function. The
-/// caller is responsible to commit the changes to database.
-pub fn transact_deploy_high_precision_timestamp_oracle<DB: Database>(
-    hardforks: impl MegaHardforks,
-    block_timestamp: u64,
-    db: &mut State<DB>,
-) -> Result<Option<EvmState>, DB::Error> {
-    high_precision_timestamp_oracle_spec(hardforks.spec_id(block_timestamp))
-        .map(|s| crate::transact_deploy(db, &s))
-        .transpose()
-}
-
-/// Builds the [`SystemContractSpec`] for the high-precision timestamp Oracle
-/// active under `spec`, or `None` if `MINI_REX` is not yet enabled.
-///
-/// `spec` is the scheduled spec, compared by position — see [`oracle_spec`].
-pub(crate) fn high_precision_timestamp_oracle_spec(spec: MegaSpecId) -> Option<SystemContractSpec> {
-    spec.reaches(MegaSpecId::MINI_REX).then(|| {
-        SystemContractSpec::new(
-            HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
-            HIGH_PRECISION_TIMESTAMP_ORACLE_CODE,
-            HIGH_PRECISION_TIMESTAMP_ORACLE_CODE_HASH,
-        )
-    })
+    let payload = inputs.input.bytes(&*ctx);
+    let check = ctx.additional_limit.admit_hint(payload.len() as u64);
+    if check.exceeded_limit() {
+        let output = ctx.additional_limit.note_frame_stop(&check);
+        return Some(synthetic_call_result(inputs, InstructionResult::Revert, output));
+    }
+    // Trailing bytes after a valid envelope are dropped by the decoder and a malformed envelope
+    // is refused; either way the payload is paid for above.
+    let call = IOracle::sendHintCall::abi_decode(&payload).ok()?;
+    ctx.external_envs().oracle_env.on_hint(inputs.caller, call.topic, call.data);
+    None
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::MegaHardforkConfig;
-
     use super::*;
-    use alloy_primitives::keccak256;
-    use revm::{
-        database::InMemoryDB,
-        state::{AccountInfo, Bytecode},
+    use crate::{
+        test_utils::MemoryDatabase, EvmTxRuntimeLimits, ExternalEnvs, LimitCheck, LimitKind,
+        MegaSpecId, TestExternalEnvs,
     };
+    use alloy_primitives::{Bytes, B256, U256};
+    use core::convert::Infallible;
+    use revm::interpreter::{CallInput, CallScheme, CallValue};
 
-    #[test]
-    fn test_oracle_contract_code_hash_matches() {
-        // Compute the keccak256 hash of the oracle contract code (v1.0.0, pre-Rex2)
-        let computed_hash = keccak256(&ORACLE_CONTRACT_CODE);
+    const CONTRACT: Address = address!("00000000000000000000000000000000000c0001");
+    const FORWARD: u64 = 100_000;
 
-        // Verify it matches the hardcoded constant
-        assert_eq!(
-            computed_hash, ORACLE_CONTRACT_CODE_HASH,
-            "Oracle contract code hash mismatch: computed {}, expected {}",
-            computed_hash, ORACLE_CONTRACT_CODE_HASH
-        );
+    /// A context recording the hints its oracle service receives, under a transaction data-size
+    /// limit of `limit` bytes and no other limit.
+    fn recording(
+        limit: u64,
+    ) -> (MegaContext<MemoryDatabase, TestExternalEnvs<Infallible>>, TestExternalEnvs<Infallible>)
+    {
+        let envs = TestExternalEnvs::<Infallible>::new();
+        let ctx = MegaContext::new_with_external_envs(
+            MemoryDatabase::default(),
+            MegaSpecId::SATIN,
+            ExternalEnvs::from(envs.clone()),
+        )
+        .with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit));
+        (ctx, envs)
     }
 
-    #[test]
-    fn test_oracle_contract_code_hash_rex2_matches() {
-        // Compute the keccak256 hash of the oracle contract code (v1.1.0, Rex2+)
-        let computed_hash = keccak256(&ORACLE_CONTRACT_CODE_REX2);
-
-        // Verify it matches the hardcoded constant
-        assert_eq!(
-            computed_hash, ORACLE_CONTRACT_CODE_HASH_REX2,
-            "Oracle contract Rex2 code hash mismatch: computed {}, expected {}",
-            computed_hash, ORACLE_CONTRACT_CODE_HASH_REX2
-        );
+    /// A `CALL` from [`CONTRACT`] to the Oracle carrying `sendHint(topic, data)`.
+    fn send_hint(data: &[u8]) -> CallInputs {
+        let input = IOracle::sendHintCall { topic: B256::ZERO, data: Bytes::copy_from_slice(data) }
+            .abi_encode();
+        CallInputs {
+            input: CallInput::Bytes(input.into()),
+            return_memory_offset: 0..0,
+            gas_limit: FORWARD,
+            reservoir: 0,
+            bytecode_address: ORACLE_CONTRACT_ADDRESS,
+            known_bytecode: Default::default(),
+            target_address: ORACLE_CONTRACT_ADDRESS,
+            caller: CONTRACT,
+            value: CallValue::Transfer(U256::ZERO),
+            scheme: CallScheme::Call,
+            is_static: false,
+            charged_new_account_state_gas: false,
+            charged_start: Default::default(),
+            pool_shares: revm::interpreter::PoolAmounts::UNLIMITED,
+            history_allowance: 0,
+        }
     }
 
+    /// A hint whose payload would cross the transaction's data-size limit answers the call it was
+    /// sent with with the stop itself: a revert carrying `MegaLimitExceeded` on the gas the call
+    /// was forwarded, untouched. Nothing is forwarded and nothing is counted. A payload exactly at
+    /// the limit is forwarded and counted, and the bytecode runs.
     #[test]
-    fn test_deploy_oracle_contract_on_fresh_db() {
-        // Create a fresh in-memory database
-        let mut db = InMemoryDB::default();
-        let mut state = State::builder().with_database(&mut db).build();
-        // with_all_activated() includes Rex5, so we expect Rex5 (v2.0.0) bytecode
-        let hardforks = MegaHardforkConfig::default().with_all_activated();
+    fn test_a_hint_that_would_cross_the_limit_answers_its_call_with_the_stop() {
+        let inputs = send_hint(&[7_u8; 64]);
+        let payload = inputs.input.len() as u64;
 
-        // Deploy the oracle contract
-        let result = transact_deploy_oracle_contract(&hardforks, 0, &mut state)
-            .expect("Deployment should succeed")
-            .expect("Should return state");
+        let (mut ctx, envs) = recording(payload - 1);
+        let answer = intercept(&mut ctx, &inputs, 1).expect("the call is answered");
+        let stop = LimitCheck::ExceedsLimit {
+            kind: LimitKind::DataSize,
+            limit: payload - 1,
+            used: payload,
+            frame_local: false,
+        };
+        let result = answer.interpreter_result();
+        assert_eq!(result.result, InstructionResult::Revert);
+        assert_eq!(result.output, stop.revert_data());
+        assert_eq!(result.gas.remaining(), FORWARD, "the forward is untouched");
+        assert!(envs.recorded_hints().is_empty(), "nothing is forwarded");
+        assert_eq!(ctx.limit_usage().data_size, 0, "nothing is counted");
 
-        // Verify that state changes were returned
-        assert_eq!(result.len(), 1, "Should have state changes for one account");
-        assert!(
-            result.contains_key(&ORACLE_CONTRACT_ADDRESS),
-            "State changes should contain oracle contract address"
-        );
-
-        // Verify the account in the state changes
-        let account = result.get(&ORACLE_CONTRACT_ADDRESS).expect("Account should exist");
-        assert!(account.is_touched(), "Account should be marked as touched");
-        assert!(account.is_created(), "Account should be marked as created");
-
-        // Verify the account info (Rex5 = v2.0.0 bytecode)
-        let info = &account.info;
-        assert_eq!(
-            info.code_hash, ORACLE_CONTRACT_CODE_HASH_REX5,
-            "Code hash should match the v2.0.0 value"
-        );
-        assert!(info.code.is_some(), "Code should be set");
-
-        let code = info.code.as_ref().unwrap();
-        assert_eq!(
-            code.original_bytes(),
-            ORACLE_CONTRACT_CODE_REX5,
-            "Code bytes should match the v2.0.0 value"
-        );
-    }
-
-    #[test]
-    fn test_deploy_oracle_contract_idempotent() {
-        // Create a database with the oracle contract already deployed correctly (Rex5 = v2.0.0)
-        let mut db = InMemoryDB::default();
-        db.insert_account_info(
-            ORACLE_CONTRACT_ADDRESS,
-            AccountInfo {
-                balance: revm::primitives::U256::ZERO,
-                nonce: 0,
-                code_hash: ORACLE_CONTRACT_CODE_HASH_REX5,
-                code: Some(Bytecode::new_raw(ORACLE_CONTRACT_CODE_REX5)),
-            },
-        );
-
-        let mut state = State::builder().with_database(&mut db).build();
-        // with_all_activated() includes Rex5
-        let hardforks = MegaHardforkConfig::default().with_all_activated();
-
-        // Deploy should return state with the account marked as read (no update needed)
-        let result = transact_deploy_oracle_contract(&hardforks, 0, &mut state)
-            .expect("Deployment should succeed")
-            .expect("Should return state");
-        assert_eq!(
-            result.len(),
-            1,
-            "Deployment should return state with account marked as read when contract is already correctly deployed"
-        );
-
-        // Verify the account is in the result
-        let account = result.get(&ORACLE_CONTRACT_ADDRESS).expect("Account should exist");
-        assert_eq!(
-            account.info.code_hash, ORACLE_CONTRACT_CODE_HASH_REX5,
-            "Code hash should match v2.0.0 bytecode"
-        );
-    }
-
-    #[test]
-    fn test_deploy_oracle_contract_with_wrong_code_hash() {
-        // Create a database with the oracle address already having different code
-        let mut db = InMemoryDB::default();
-
-        // Insert an account with wrong code hash at the oracle address
-        let wrong_code = bytes!("0x6000");
-        let wrong_code_hash = keccak256(&wrong_code);
-
-        db.insert_account_info(
-            ORACLE_CONTRACT_ADDRESS,
-            AccountInfo {
-                balance: revm::primitives::U256::ZERO,
-                nonce: 0,
-                code_hash: wrong_code_hash,
-                code: Some(Bytecode::new_raw(wrong_code)),
-            },
-        );
-
-        let mut state = State::builder().with_database(&mut db).build();
-        // with_all_activated() includes Rex2
-        let hardforks = MegaHardforkConfig::default().with_all_activated();
-
-        // Deploy should update the contract with correct code (Rex5 = v2.0.0 bytecode)
-        let result = transact_deploy_oracle_contract(&hardforks, 0, &mut state)
-            .expect("Deployment should succeed")
-            .expect("Should return state");
-
-        // Verify that state changes were returned (contract was updated)
-        assert_eq!(result.len(), 1, "Should have state changes to update the contract");
-
-        // Verify the updated account has the correct code hash
-        let account = result.get(&ORACLE_CONTRACT_ADDRESS).expect("Account should exist");
-        assert_eq!(
-            account.info.code_hash, ORACLE_CONTRACT_CODE_HASH_REX5,
-            "Code hash should be updated to v2.0.0 bytecode"
-        );
-    }
-
-    #[test]
-    fn test_deploy_oracle_contract_marks_account_as_touched() {
-        // Create a fresh in-memory database
-        let mut db = InMemoryDB::default();
-        let mut state = State::builder().with_database(&mut db).build();
-        let hardforks = MegaHardforkConfig::default().with_all_activated();
-
-        // Deploy the oracle contract
-        let result = transact_deploy_oracle_contract(&hardforks, 0, &mut state)
-            .expect("Deployment should succeed")
-            .expect("Should return state");
-
-        // Get the account from result
-        let account = result.get(&ORACLE_CONTRACT_ADDRESS).expect("Account should exist in result");
-
-        // Verify the account is marked as touched (required for state changes to be committed)
-        assert!(
-            account.is_touched(),
-            "Deployed account must be marked as touched for state changes to take effect"
-        );
-        assert!(account.is_created(), "Account should be marked as created");
-    }
-
-    #[test]
-    fn test_deploy_oracle_contract_pre_rex2() {
-        let mut db = InMemoryDB::default();
-        let mut state = State::builder().with_database(&mut db).build();
-        // A complete ladder topping out at Rex1 (pre-Rex2, pre-Rex5).
-        let hardforks = MegaHardforkConfig::default().with_all_activated_through(MegaSpecId::REX1);
-
-        let result = transact_deploy_oracle_contract(&hardforks, 0, &mut state)
-            .expect("Deployment should succeed")
-            .expect("Should return state");
-
-        let account = result.get(&ORACLE_CONTRACT_ADDRESS).expect("Account should exist");
-        assert_eq!(
-            account.info.code_hash, ORACLE_CONTRACT_CODE_HASH,
-            "Should deploy v1.0.0 bytecode pre-Rex2"
-        );
-    }
-
-    #[test]
-    fn test_deploy_oracle_contract_rex2() {
-        let mut db = InMemoryDB::default();
-        let mut state = State::builder().with_database(&mut db).build();
-        // Activate Rex2 but not Rex5
-        // A complete ladder topping out at Rex4: Rex2 reached, Rex5 not.
-        let hardforks = MegaHardforkConfig::default().with_all_activated_through(MegaSpecId::REX4);
-
-        let result = transact_deploy_oracle_contract(&hardforks, 0, &mut state)
-            .expect("Deployment should succeed")
-            .expect("Should return state");
-
-        let account = result.get(&ORACLE_CONTRACT_ADDRESS).expect("Account should exist");
-        assert_eq!(
-            account.info.code_hash, ORACLE_CONTRACT_CODE_HASH_REX2,
-            "Should deploy v1.1.0 bytecode on Rex2 (pre-Rex5)"
-        );
-    }
-
-    #[test]
-    fn test_deploy_oracle_contract_rex5() {
-        let mut db = InMemoryDB::default();
-        let mut state = State::builder().with_database(&mut db).build();
-        // Activate all including Rex5
-        let hardforks = MegaHardforkConfig::default().with_all_activated();
-
-        let result = transact_deploy_oracle_contract(&hardforks, 0, &mut state)
-            .expect("Deployment should succeed")
-            .expect("Should return state");
-
-        let account = result.get(&ORACLE_CONTRACT_ADDRESS).expect("Account should exist");
-        assert_eq!(
-            account.info.code_hash, ORACLE_CONTRACT_CODE_HASH_REX5,
-            "Should deploy v2.0.0 bytecode on Rex5"
-        );
-    }
-
-    #[test]
-    fn test_deploy_oracle_contract_upgrade_to_rex2() {
-        let mut db = InMemoryDB::default();
-        db.insert_account_info(
-            ORACLE_CONTRACT_ADDRESS,
-            AccountInfo {
-                balance: revm::primitives::U256::ZERO,
-                nonce: 0,
-                code_hash: ORACLE_CONTRACT_CODE_HASH,
-                code: Some(Bytecode::new_raw(ORACLE_CONTRACT_CODE)),
-            },
-        );
-
-        let mut state = State::builder().with_database(&mut db).build();
-        // Rex2 active, Rex5 not active
-        // A complete ladder topping out at Rex4: Rex2 reached, Rex5 not.
-        let hardforks = MegaHardforkConfig::default().with_all_activated_through(MegaSpecId::REX4);
-
-        let result = transact_deploy_oracle_contract(&hardforks, 0, &mut state)
-            .expect("Deployment should succeed")
-            .expect("Should return state");
-
-        let account = result.get(&ORACLE_CONTRACT_ADDRESS).expect("Account should exist");
-        assert_eq!(
-            account.info.code_hash, ORACLE_CONTRACT_CODE_HASH_REX2,
-            "Should upgrade to v1.1.0 bytecode on Rex2 activation"
-        );
-        assert!(account.is_touched(), "Account should be marked as touched");
-        assert!(
-            account.is_created(),
-            "Pre-Rex5 Oracle upgrades must still mark the account as created to match canonical mainnet state"
-        );
-    }
-
-    #[test]
-    fn test_deploy_oracle_contract_upgrade_to_rex5() {
-        let mut db = InMemoryDB::default();
-        db.insert_account_info(
-            ORACLE_CONTRACT_ADDRESS,
-            AccountInfo {
-                balance: revm::primitives::U256::ZERO,
-                nonce: 0,
-                code_hash: ORACLE_CONTRACT_CODE_HASH_REX2,
-                code: Some(Bytecode::new_raw(ORACLE_CONTRACT_CODE_REX2)),
-            },
-        );
-
-        let mut state = State::builder().with_database(&mut db).build();
-        let hardforks = MegaHardforkConfig::default().with_all_activated();
-
-        let result = transact_deploy_oracle_contract(&hardforks, 0, &mut state)
-            .expect("Deployment should succeed")
-            .expect("Should return state");
-
-        let account = result.get(&ORACLE_CONTRACT_ADDRESS).expect("Account should exist");
-        assert_eq!(
-            account.info.code_hash, ORACLE_CONTRACT_CODE_HASH_REX5,
-            "Should upgrade to v2.0.0 bytecode on Rex5 activation"
-        );
-        assert!(account.is_touched(), "Account should be marked as touched");
-        assert!(
-            !account.is_created(),
-            "In-place bytecode upgrade must not mark the existing account as created, otherwise existing storage gets cleared on commit"
-        );
-    }
-
-    #[test]
-    fn test_high_precision_timestamp_oracle_deployment() {
-        // Create a fresh in-memory database
-        let mut db = InMemoryDB::default();
-        let mut state = State::builder().with_database(&mut db).build();
-        let hardforks = MegaHardforkConfig::default().with_all_activated();
-
-        // Deploy the high precision timestamp oracle contract
-        let result = transact_deploy_high_precision_timestamp_oracle(&hardforks, 0, &mut state)
-            .expect("Deployment should succeed")
-            .expect("Should return state");
-
-        // Verify that state changes were returned
-        assert_eq!(result.len(), 1, "Should have state changes for one account");
-        assert!(
-            result.contains_key(&HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS),
-            "State changes should contain high precision timestamp oracle address"
-        );
-
-        // Verify the account in the state changes
-        let account =
-            result.get(&HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS).expect("Account should exist");
-        assert!(account.is_touched(), "Account should be marked as touched");
-        assert!(account.is_created(), "Account should be marked as created");
-
-        // Verify the account info
-        let info = &account.info;
-        assert_eq!(
-            info.code_hash, HIGH_PRECISION_TIMESTAMP_ORACLE_CODE_HASH,
-            "Code hash should match the expected value"
-        );
-        assert!(info.code.is_some(), "Code should be set");
-
-        // Verify code matches
-        let code = info.code.as_ref().unwrap();
-        assert_eq!(
-            code.original_bytes(),
-            HIGH_PRECISION_TIMESTAMP_ORACLE_CODE,
-            "Code bytes should match the expected value"
-        );
-
-        // Verify code hash matches computed hash
-        let computed_hash = keccak256(&HIGH_PRECISION_TIMESTAMP_ORACLE_CODE);
-        assert_eq!(
-            computed_hash, HIGH_PRECISION_TIMESTAMP_ORACLE_CODE_HASH,
-            "Code hash constant should match computed hash"
-        );
-    }
-
-    /// Canonical-state regression: upgrading Oracle v1.0.0 → v1.1.0 at the Rex2 boundary
-    /// (pre-Rex5) MUST preserve the old `mark_created()` behaviour so that replay against
-    /// canonical mainnet state (which was built with the old code) produces the same state root.
-    /// On mainnet mainnet had non-zero DB-backed Oracle storage at the Rex2 boundary, and the old
-    /// code cleared it; the gated fix must not retroactively change that.
-    #[test]
-    fn test_oracle_storage_cleared_at_rex2_upgrade_canonical_behaviour() {
-        let stored_slot = revm::primitives::U256::from(42);
-        let stored_value = revm::primitives::U256::from(0xdeadbeefu64);
-
-        let mut db = InMemoryDB::default();
-        db.insert_account_info(
-            ORACLE_CONTRACT_ADDRESS,
-            AccountInfo {
-                balance: revm::primitives::U256::ZERO,
-                nonce: 0,
-                code_hash: ORACLE_CONTRACT_CODE_HASH,
-                code: Some(Bytecode::new_raw(ORACLE_CONTRACT_CODE)),
-            },
-        );
-        db.insert_account_storage(ORACLE_CONTRACT_ADDRESS, stored_slot, stored_value)
-            .expect("Should insert storage slot");
-
-        let mut state = State::builder().with_database(&mut db).build();
-        // Rex2 active, Rex5 NOT active → pre-Rex5 path → old behaviour preserved.
-        // A complete ladder topping out at Rex4: Rex2 reached, Rex5 not.
-        let hardforks = MegaHardforkConfig::default().with_all_activated_through(MegaSpecId::REX4);
-
-        let result = transact_deploy_oracle_contract(&hardforks, 0, &mut state)
-            .expect("Deployment should succeed")
-            .expect("Should return state");
-
-        let account = result.get(&ORACLE_CONTRACT_ADDRESS).expect("Account should exist");
-        assert_eq!(account.info.code_hash, ORACLE_CONTRACT_CODE_HASH_REX2);
-        assert!(account.is_touched());
-        assert!(
-            account.is_created(),
-            "pre-Rex5: Oracle upgrade must still mark created to match canonical mainnet state"
-        );
-
-        // Commit the upgrade: because is_created=true the cache treats this as newly_created and
-        // storage is cleared — matching the canonical mainnet state root.
-        revm::DatabaseCommit::commit(&mut state, result);
-
-        let read_back = revm::Database::storage(&mut state, ORACLE_CONTRACT_ADDRESS, stored_slot)
-            .expect("Storage read should succeed");
-        assert_eq!(
-            read_back,
-            revm::primitives::U256::ZERO,
-            "pre-Rex5: Oracle storage must be cleared at Rex2 upgrade to match canonical mainnet state"
-        );
-    }
-
-    /// Regression: upgrading the Oracle bytecode from v1.1.0 (Rex2) to v2.0.0 (Rex5)
-    /// must not clear existing Oracle storage.
-    #[test]
-    fn test_oracle_storage_survives_rex2_to_rex5_upgrade() {
-        let stored_slot = revm::primitives::U256::from(7);
-        let stored_value = revm::primitives::U256::from(0xcafebabeu64);
-
-        let mut db = InMemoryDB::default();
-        db.insert_account_info(
-            ORACLE_CONTRACT_ADDRESS,
-            AccountInfo {
-                balance: revm::primitives::U256::ZERO,
-                nonce: 0,
-                code_hash: ORACLE_CONTRACT_CODE_HASH_REX2,
-                code: Some(Bytecode::new_raw(ORACLE_CONTRACT_CODE_REX2)),
-            },
-        );
-        db.insert_account_storage(ORACLE_CONTRACT_ADDRESS, stored_slot, stored_value)
-            .expect("Should insert storage slot");
-
-        let mut state = State::builder().with_database(&mut db).build();
-        // Rex5 active → upgrade target is v2.0.0.
-        let hardforks = MegaHardforkConfig::default().with_all_activated();
-
-        let result = transact_deploy_oracle_contract(&hardforks, 0, &mut state)
-            .expect("Deployment should succeed")
-            .expect("Should return state");
-
-        // Sanity check: this is an upgrade, not a fresh deploy.
-        let account = result.get(&ORACLE_CONTRACT_ADDRESS).expect("Account should exist");
-        assert_eq!(account.info.code_hash, ORACLE_CONTRACT_CODE_HASH_REX5);
-        assert!(account.is_touched());
-        assert!(!account.is_created(), "upgrade must not mark account as created");
-
-        revm::DatabaseCommit::commit(&mut state, result);
-
-        let read_back = revm::Database::storage(&mut state, ORACLE_CONTRACT_ADDRESS, stored_slot)
-            .expect("Storage read should succeed");
-        assert_eq!(read_back, stored_value, "Oracle storage must survive bytecode upgrade");
-    }
-
-    /// Covers the `account_existed = true` branch in
-    /// `transact_deploy_high_precision_timestamp_oracle`: when the account already exists with
-    /// wrong code, the deploy updates the code without marking the account as created.
-    #[test]
-    fn test_high_precision_timestamp_oracle_existing_account_not_marked_created() {
-        let wrong_code = alloy_primitives::bytes!("0x6000");
-        let wrong_code_hash = alloy_primitives::keccak256(&wrong_code);
-
-        let mut db = InMemoryDB::default();
-        db.insert_account_info(
-            HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
-            AccountInfo {
-                balance: revm::primitives::U256::ZERO,
-                nonce: 0,
-                code_hash: wrong_code_hash,
-                code: Some(Bytecode::new_raw(wrong_code)),
-            },
-        );
-
-        let mut state = State::builder().with_database(&mut db).build();
-        let hardforks = MegaHardforkConfig::default().with_all_activated();
-
-        let result = transact_deploy_high_precision_timestamp_oracle(&hardforks, 0, &mut state)
-            .expect("Deployment should succeed")
-            .expect("Should return state");
-
-        let account =
-            result.get(&HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS).expect("Account should exist");
-        assert_eq!(account.info.code_hash, HIGH_PRECISION_TIMESTAMP_ORACLE_CODE_HASH);
-        assert!(account.is_touched());
-        assert!(
-            !account.is_created(),
-            "existing account must not be marked as created on code update"
-        );
+        let (mut ctx, envs) = recording(payload);
+        assert!(intercept(&mut ctx, &inputs, 1).is_none(), "the bytecode runs");
+        assert_eq!(envs.recorded_hints().len(), 1);
+        assert_eq!(ctx.limit_usage().data_size, payload);
     }
 }

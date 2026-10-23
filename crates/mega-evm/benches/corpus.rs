@@ -1,0 +1,66 @@
+//! A set of JSON scenarios through `MegaEvm`.
+//!
+//! The inputs are the scenarios under `benches/scenarios` (the `test_utils::Scenario` format),
+//! picked to spread over the mechanisms the engine runs. They are bench inputs. Their outcome
+//! and gas are pinned by a test, `tests/satin/corpus.rs`, so a pricing change that takes a
+//! shorter path fails there instead of being timed here.
+//!
+//! A scenario is a block: one `MegaEvm`, built with the pre-state in the setup, runs all its
+//! transactions and commits each before the next (`Scenario::run_on`). What is measured is the
+//! transactions and their commits; building the EVM, like building the pre-state, is setup and is
+//! not measured, as in `transact`, so the two families measure per-transaction execution alike.
+//! The one difference is the commit to the in-memory database, which `transact` does not do.
+#![allow(missing_docs)]
+
+use std::path::Path;
+
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use mega_evm::test_utils::Scenario;
+
+/// `(bench id, scenario name)`: the scenario is `benches/scenarios/<name>.json`.
+const SLICE: &[(&str, &str)] = &[
+    ("sstore_set", "sstore_set_spills"),
+    ("create", "create_success"),
+    ("nested_revert", "nested_call_revert_with_spill"),
+    ("two_txs", "two_txs_sequential"),
+    ("system_call", "system_call"),
+    ("calldata_floor", "test_calldata_floor_with_sstore_fork_Amsterdam_state_test"),
+    (
+        "nested_refund_depth_10",
+        "test_nested_state_gas_refund_consumed_at_depth_fork_Amsterdam_state_test_consume_deepest_depth_10_sstore_restoration",
+    ),
+    ("eip7702_delegation", "eip7702_delegate_new_authority"),
+    ("access_list", "access_list_warm_slots_and_account"),
+    ("selfdestruct", "selfdestruct_created_in_same_tx_to_existing_account"),
+    ("logs", "logs_all_topic_counts"),
+    ("ecrecover", "precompile_ecrecover"),
+    ("modexp", "precompile_modexp"),
+];
+
+fn bench_corpus(c: &mut Criterion) {
+    let mut group = c.benchmark_group("corpus");
+    for (id, name) in SLICE {
+        let scenario = load(name);
+        group.bench_function(*id, |b| {
+            b.iter_batched(
+                || scenario.evm(scenario.database()),
+                |mut evm| scenario.run_on(&mut evm),
+                BatchSize::SmallInput,
+            );
+        });
+    }
+    group.finish();
+}
+
+fn load(name: &str) -> Scenario {
+    let file = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("benches/scenarios/{name}.json"));
+    let text = std::fs::read_to_string(&file).unwrap_or_else(|err| panic!("{file:?}: {err}"));
+    let scenario: Scenario = serde_json::from_str(&text).unwrap_or_else(|err| {
+        panic!("{file:?}: {err}");
+    });
+    scenario.validate().unwrap_or_else(|err| panic!("{file:?}: {err}"));
+    scenario
+}
+
+criterion_group!(benches, bench_corpus);
+criterion_main!(benches);

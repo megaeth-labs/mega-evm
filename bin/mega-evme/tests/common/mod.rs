@@ -4,13 +4,137 @@
 //! is not picked up as a standalone test target.
 //!
 //! Add helpers only when a third caller shows up; the current set is sized to
-//! the patterns shared between `tests/provider.rs` and `tests/state.rs`.
+//! the patterns shared between `tests/provider.rs` and `tests/state.rs`, and
+//! (`blocks`) between the tests that replay the recorded blocks.
 
 #![allow(dead_code)] // Each test binary uses a different subset of helpers.
+
+pub(crate) mod blocks;
+
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use clap::Parser;
 use mega_evme::common::RpcArgs;
 use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
+
+/// Resolve an archive in `tests/fixtures/` holding many fixtures, extracting
+/// all of its members, and return the directory they were extracted into.
+///
+/// `name` names the archive itself (`blocks.tar.xz`). Each member is then the
+/// file of that relative path in the returned directory. The directory is
+/// returned only once every member is in place; see [`install_archive`] for why
+/// an extraction is safe to share across runs and concurrent test binaries.
+pub(crate) fn fixture_archive(name: &str) -> PathBuf {
+    let archive = fixtures_dir().join(name);
+    assert!(
+        archive.is_file(),
+        "no fixture archive named {name}: {} does not exist",
+        archive.display()
+    );
+    extracted(&archive)
+}
+
+/// The directory `archive` is extracted into, extracting it first unless an
+/// earlier extraction already completed there.
+fn extracted(archive: &Path) -> PathBuf {
+    let destination = extraction_dir(archive);
+    if !destination.join(EXTRACTION_COMPLETE).is_file() {
+        install_archive(archive, &destination);
+    }
+    destination
+}
+
+/// Marker [`install_archive`] writes into an extraction directory once every
+/// member of the archive is in place.
+const EXTRACTION_COMPLETE: &str = ".extraction-complete";
+
+/// Directory an archive is extracted into: under [`extracted_root`], named by
+/// the keccak-256 of the archive's bytes.
+fn extraction_dir(archive: &Path) -> PathBuf {
+    let bytes =
+        std::fs::read(archive).unwrap_or_else(|e| panic!("cannot read {}: {e}", archive.display()));
+    extracted_root().join(format!("{:x}", alloy_primitives::keccak256(&bytes)))
+}
+
+/// Extract every member of `archive` into `destination`, its
+/// [`extraction_dir`], and mark the directory complete.
+///
+/// Naming the directory by the archive's digest means:
+///
+/// - an extraction is reused by every later test binary and every later run for as long as its
+///   archive is unchanged, so the directory does not grow from run to run;
+/// - a changed archive (a recapture, or a branch switch) has a different digest, so an extraction
+///   of an earlier version is never served for it; that earlier extraction stays until `cargo
+///   clean`;
+/// - concurrent extractions — parallel tests, or test binaries running at once — each unpack into a
+///   private scratch directory and rename every file into place, which is atomic, so a reader sees
+///   either no file or a complete one, and two writers write the same bytes. The completion marker
+///   is renamed into place last, so a directory carrying it holds every member.
+///
+/// Extraction shells out to `tar -xJf` rather than linking a decompressor:
+/// every platform that runs these tests has one, and this is the only place
+/// that reads an archive.
+pub(crate) fn install_archive(archive: &Path, destination: &Path) {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let scratch = extracted_root().join(format!(
+        ".extracting-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&scratch).expect("failed to create the extraction directory");
+    let status = Command::new("tar")
+        .arg("-xJf")
+        .arg(archive)
+        .arg("-C")
+        .arg(&scratch)
+        .status()
+        .expect("failed to run tar");
+    assert!(status.success(), "failed to extract {}", archive.display());
+
+    move_files(&scratch, destination);
+    let marker = scratch.join(EXTRACTION_COMPLETE);
+    std::fs::write(&marker, b"").expect("failed to write the extraction marker");
+    std::fs::rename(&marker, destination.join(EXTRACTION_COMPLETE))
+        .expect("failed to mark the extraction complete");
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// Move every file under `from` to the same path under `to`, creating the directories on the way.
+///
+/// Each file is renamed on its own, which is atomic and replaces a file of the same name, so a
+/// second writer moving the same members succeeds where renaming a directory onto one already in
+/// place would fail.
+fn move_files(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).expect("failed to create the extraction directory");
+    for entry in std::fs::read_dir(from).expect("failed to read the extraction directory") {
+        let entry = entry.expect("failed to read an extracted member");
+        let target = to.join(entry.file_name());
+        if entry.file_type().expect("failed to read an extracted member's type").is_dir() {
+            move_files(&entry.path(), &target);
+        } else {
+            std::fs::rename(entry.path(), &target)
+                .expect("failed to move an extracted fixture into place");
+        }
+    }
+}
+
+/// Directory the committed fixtures live in.
+pub(crate) fn fixtures_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+}
+
+/// Directory compressed fixtures are extracted into.
+///
+/// It lives under cargo's per-target scratch directory (`CARGO_TARGET_TMPDIR`),
+/// which persists across test runs and is removed by `cargo clean`. Exposed so a
+/// test that normalizes the paths a run prints can name it.
+pub(crate) fn extracted_root() -> PathBuf {
+    Path::new(env!("CARGO_TARGET_TMPDIR")).join("mega-evme-fixtures")
+}
 
 /// A mock JSON-RPC server tuned for mega-evme integration tests.
 ///
@@ -101,10 +225,24 @@ impl MockRpcServer {
             .await;
     }
 
+    /// Drops every mounted mock and the recorded requests.
+    pub(crate) async fn reset(&self) {
+        self.server.reset().await;
+    }
+
     /// Total number of POSTs the server has received since it started.
     pub(crate) async fn received_request_count(&self) -> usize {
         self.server.received_requests().await.expect("received_requests").len()
     }
+}
+
+/// The on-disk cache file `build_provider` uses for `url` on `chain_id` under `dir`.
+pub(crate) fn rpc_cache_path(
+    dir: &std::path::Path,
+    chain_id: u64,
+    url: &str,
+) -> std::path::PathBuf {
+    dir.join(mega_evme::rpc_cache_file_name(chain_id, url))
 }
 
 /// Build [`RpcArgs`] for a test pointed at `url` with the on-disk cache disabled.

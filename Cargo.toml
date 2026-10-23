@@ -2,22 +2,21 @@
 [workspace]
 members = [
     "bin/mega-evme",
-    "bin/mega-t8n",
     "crates/mega-evm",
     "crates/mega-state-test",
     "crates/state-test",
     "crates/system-contracts",
 ]
-default-members = ["crates/mega-evm", "bin/mega-evme", "bin/mega-t8n"]
+default-members = ["crates/mega-evm"]
 exclude = []
 
 # Explicitly set the resolver to version 2, which is the default for packages with edition >= 2021
 # https://doc.rust-lang.org/edition-guide/rust-2021/default-cargo-resolver.html
 resolver = "2"
 [workspace.package]
-version = "1.7.1"
+version = "2.0.0-alpha.1"
 edition = "2021"
-rust-version = "1.91"
+rust-version = "1.94"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/megaeth-labs/mega-evm"
 repository = "https://github.com/megaeth-labs/mega-evm"
@@ -122,67 +121,70 @@ too_long_first_doc_paragraph = "allow"
 
 [workspace.dependencies]
 # megaeth
-mega-evm = { path = "./crates/mega-evm", version = "1.7.1", default-features = false }
-mega-state-test = { path = "./crates/mega-state-test", version = "1.7.1", default-features = false }
-mega-system-contracts = { path = "./crates/system-contracts", version = "1.7.1", default-features = false }
+mega-evm = { path = "./crates/mega-evm", version = "2.0.0-alpha.1", default-features = false }
+# The `-legacy` entries are the legacy line (specs `Equivalence` through `Rex6`, crates.io revm
+# 27), linked only by the `mega-evme` tool's legacy leg and pinned exactly: the tool replays
+# history with what shipped.
+mega-evm-legacy = { package = "mega-evm", version = "=1.7.1", default-features = false }
+mega-evme-legacy = { package = "mega-evme", version = "=1.7.1", default-features = false }
+mega-state-test = { path = "./crates/mega-state-test", version = "2.0.0-alpha.1", default-features = false }
+mega-state-test-legacy = { package = "mega-state-test", version = "=1.7.1", default-features = false }
+mega-system-contracts = { path = "./crates/system-contracts", version = "2.0.0-alpha.1", default-features = false }
 
 # revm
-op-revm = { version = "8.1.0", default-features = false }
-revm = { version = "27.1.0", default-features = false }
-revm-inspectors = { version = "0.27.3", default-features = false }
+# revm stays pinned to the crates.io version the megaeth fork is based on; `[patch.crates-io]`
+# below redirects all twelve revm crates to the fork. op-revm and the OP alloy crates have no
+# crates.io release for revm 40: they come from the OP monorepo revision the node locks, and
+# op-revm is redirected to the megaeth fork of it by the second patch block.
+op-revm = { git = "https://github.com/ethereum-optimism/optimism", rev = "f67d87cd5c9992b62d215c043917b94e3f019629", default-features = false }
+revm = { version = "=40.0.3", default-features = false }
+revm-inspectors = { version = "0.40.1", default-features = false }
 
 # alloy
-alloy-consensus = { version = "1.0.23", default-features = false }
-alloy-eips = { version = "1.0.23", default-features = false }
-alloy-evm = { version = "0.15.0", default-features = false }
-alloy-hardforks = { version = "0.2.7", default-features = false }
-alloy-json-rpc = { version = "1.0.41", default-features = false }
-alloy-network = { version = "1.0.41", default-features = false }
-alloy-op-evm = { version = "0.15.0", default-features = false }
-alloy-op-hardforks = { version = "0.2.2", default-features = false }
-alloy-primitives = { version = "1.3.0", default-features = false, features = ["map-foldhash"] }
-alloy-provider = { version = "1.0.41", default-features = false }
-alloy-rlp = { version = "0.3.12", default-features = false }
-alloy-rpc-client = { version = "1.0.41", default-features = false }
-alloy-rpc-types-eth = { version = "1.0.24", default-features = false, features = ["serde"] }
-alloy-rpc-types-trace = { version = "1.0.22", default-features = false }
-alloy-serde = { version = "1.0.23", default-features = false }
-alloy-sol-types = { version = "1.0.23", default-features = false }
-alloy-transport = { version = "1.0.41", default-features = false }
-alloy-transport-http = { version = "1.0.41", default-features = false }
-op-alloy-consensus = { version = "0.18.12", default-features = false, features = ["k256"] }
-op-alloy-flz = { version = "0.13.1", default-features = false }
-op-alloy-network = { version = "0.18.12", default-features = false }
-op-alloy-rpc-types = { version = "0.18.12", default-features = false }
+alloy-consensus = { version = "2.0.5", default-features = false }
+alloy-eips = { version = "2.0.5", default-features = false }
+alloy-evm = { version = "0.36.0", default-features = false }
+alloy-hardforks = { version = "0.4.7", default-features = false }
+alloy-json-rpc = { version = "2.1.1", default-features = false }
+alloy-network = { version = "2.0.5", default-features = false }
+alloy-op-evm = { git = "https://github.com/ethereum-optimism/optimism", rev = "f67d87cd5c9992b62d215c043917b94e3f019629", default-features = false }
+alloy-op-hardforks = { git = "https://github.com/ethereum-optimism/optimism", rev = "f67d87cd5c9992b62d215c043917b94e3f019629", default-features = false }
+alloy-primitives = { version = "1.6.0", default-features = false, features = ["map-foldhash"] }
+alloy-provider = { version = "2.0.5", default-features = false }
+alloy-rlp = { version = "0.3.16", default-features = false }
+alloy-rpc-client = { version = "2.1.1", default-features = false }
+alloy-rpc-types-eth = { version = "2.0.5", default-features = false, features = ["serde"] }
+alloy-rpc-types-trace = { version = "2.0.5", default-features = false }
+alloy-serde = { version = "2.1.1", default-features = false }
+alloy-sol-types = { version = "1.6.0", default-features = false }
+alloy-transport = { version = "2.1.1", default-features = false }
+alloy-transport-http = { version = "2.1.1", default-features = false }
+alloy-trie = { version = "0.9.5", default-features = false }
+op-alloy-consensus = { git = "https://github.com/ethereum-optimism/optimism", rev = "f67d87cd5c9992b62d215c043917b94e3f019629", default-features = false, features = ["k256"] }
+op-alloy-network = { git = "https://github.com/ethereum-optimism/optimism", rev = "f67d87cd5c9992b62d215c043917b94e3f019629", default-features = false }
+op-alloy-rpc-types = { git = "https://github.com/ethereum-optimism/optimism", rev = "f67d87cd5c9992b62d215c043917b94e3f019629", default-features = false }
 
 # misc
 auto_impl = { version = "1.3", default-features = false }
-bitflags = { version = "2.6", default-features = false }
 clap = { version = "4", default-features = false, features = ["derive"] }
 delegate = { version = "0.13", default-features = false }
 derive_more = { version = "2", default-features = false }
 dirs = { version = "6", default-features = false }
-getrandom = { version = "0.3", default-features = false }
-hash-db = { version = "0.15", default-features = false }
-hex = { version = "0.4", default-features = false }
-indicatif = { version = "0.17", default-features = false }
-k256 = { version = "0.13.4", default-features = false }
-once_cell = { version = "1.21", default-features = false }
-plain_hasher = { version = "0.2", default-features = false }
-rand = { version = "0.10", default-features = false }
+insta = { version = "1.47.2", default-features = false, features = ["json"] }
+proptest = { version = "1.7", default-features = false }
 rstest = { version = "0.25", default-features = false }
 semver = { version = "1", default-features = false }
 serde = { version = "1.0", default-features = false }
 serde_json = { version = "1.0", default-features = false }
-sha2 = { version = "0.10.9", default-features = false }
 tempfile = { version = "3", default-features = false }
 thiserror = { version = "2.0", default-features = false }
 tokio = { version = "1", default-features = false }
+tower = { version = "0.5", default-features = false }
 tracing = { version = "0.1", default-features = false }
 tracing-subscriber = { version = "0.3", default-features = false }
-triehash = { version = "0.8", default-features = false }
 walkdir = { version = "2.5", default-features = false }
 wiremock = { version = "0.6", default-features = false }
+zstd = { version = "0.13", default-features = false }
 
 # Speed up compilation time for dev builds by reducing emitted debug info.
 # NOTE: Debuggers may provide less useful information with this setting.
@@ -194,6 +196,8 @@ split-debuginfo = "unpacked"
 
 # Speed up tests.
 [profile.dev.package]
+blst.opt-level = 3
+c-kzg.opt-level = 3
 proptest.opt-level = 3
 rand_chacha.opt-level = 3
 rand_xorshift.opt-level = 3
@@ -224,3 +228,24 @@ strip = "none"
 inherits = "release"
 lto = "fat"
 codegen-units = 1
+
+[patch.crates-io]
+# megaeth fork of revm (revm 40.0.3 + the revm 43 gas core + the megaeth hooks).
+# All twelve crates move together, otherwise the build resolves a second copy of revm.
+revm = { git = "https://github.com/megaeth-labs/revm", rev = "fd230a3427d1b96c88e0b581bab8a7763c8ec298" }
+revm-primitives = { git = "https://github.com/megaeth-labs/revm", rev = "fd230a3427d1b96c88e0b581bab8a7763c8ec298" }
+revm-interpreter = { git = "https://github.com/megaeth-labs/revm", rev = "fd230a3427d1b96c88e0b581bab8a7763c8ec298" }
+revm-context = { git = "https://github.com/megaeth-labs/revm", rev = "fd230a3427d1b96c88e0b581bab8a7763c8ec298" }
+revm-context-interface = { git = "https://github.com/megaeth-labs/revm", rev = "fd230a3427d1b96c88e0b581bab8a7763c8ec298" }
+revm-handler = { git = "https://github.com/megaeth-labs/revm", rev = "fd230a3427d1b96c88e0b581bab8a7763c8ec298" }
+revm-database = { git = "https://github.com/megaeth-labs/revm", rev = "fd230a3427d1b96c88e0b581bab8a7763c8ec298" }
+revm-database-interface = { git = "https://github.com/megaeth-labs/revm", rev = "fd230a3427d1b96c88e0b581bab8a7763c8ec298" }
+revm-state = { git = "https://github.com/megaeth-labs/revm", rev = "fd230a3427d1b96c88e0b581bab8a7763c8ec298" }
+revm-bytecode = { git = "https://github.com/megaeth-labs/revm", rev = "fd230a3427d1b96c88e0b581bab8a7763c8ec298" }
+revm-precompile = { git = "https://github.com/megaeth-labs/revm", rev = "fd230a3427d1b96c88e0b581bab8a7763c8ec298" }
+revm-inspector = { git = "https://github.com/megaeth-labs/revm", rev = "fd230a3427d1b96c88e0b581bab8a7763c8ec298" }
+
+[patch."https://github.com/ethereum-optimism/optimism"]
+# megaeth fork of op-revm (the OP monorepo copy ported to the revm fork's gas core), built
+# against the revm pin above.
+op-revm = { git = "https://github.com/megaeth-labs/op-revm", rev = "2ecb7dceed1c458a2b59ca4d8993a073968cb111" }

@@ -18,7 +18,8 @@ use std::{
     env,
     fmt::Write,
     fs,
-    path::Path,
+    io::ErrorKind,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
@@ -261,6 +262,38 @@ fn verify_generated_constants(
     }
 }
 
+/// One `rerun-if-changed` per Solidity file under `dir`.
+///
+/// Cargo keeps a directory trigger by that directory's own mtime, which an edit of a file inside
+/// it does not move, so each source is named on its own. The bytecode check compiles the
+/// contracts, the interfaces they import and the forge scripts that write the artifacts.
+fn emit_solidity_reruns(dir: &Path) {
+    let mut sources = Vec::new();
+    collect_sol_files(dir, &mut sources);
+    sources.sort();
+    for path in sources {
+        println!("cargo::rerun-if-changed={}", path.display());
+    }
+}
+
+/// Appends every `.sol` file under `dir`, descending into subdirectories.
+fn collect_sol_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == ErrorKind::NotFound => return,
+        Err(err) => panic!("failed to read {}: {err}", dir.display()),
+    };
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|err| panic!("failed to read {}: {err}", dir.display()));
+        let path = entry.path();
+        if path.is_dir() {
+            collect_sol_files(&path, out);
+        } else if path.extension().is_some_and(|ext| ext == "sol") {
+            out.push(path);
+        }
+    }
+}
+
 fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let crate_dir = Path::new(&manifest_dir);
@@ -294,12 +327,10 @@ fn main() {
         },
     ];
 
-    // Set up rerun-if-changed triggers
+    // Set up rerun-if-changed triggers.
+    emit_solidity_reruns(&crate_dir.join("contracts"));
+    emit_solidity_reruns(&crate_dir.join("scripts"));
     for config in &contracts {
-        println!(
-            "cargo::rerun-if-changed={}",
-            crate_dir.join(format!("contracts/{}.sol", config.name)).display()
-        );
         println!(
             "cargo::rerun-if-changed={}",
             crate_dir.join(format!("artifacts/{}-latest.json", config.name)).display()

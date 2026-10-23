@@ -1,61 +1,89 @@
+//! The Satin handler and the frame lifecycle of [`MegaEvm`].
+//!
+//! [`MegaHandler`] runs a transaction through op-revm's [`OpHandler`] and overrides the phases
+//! `MegaETH` extends. [`MegaEvm`] implements revm's [`EvmTr`] itself, so a frame's start and its
+//! return to its caller (`frame_init`, `frame_return_result`) are `MegaETH`'s own; its frame run is
+//! revm's, but for an action set on a frame before it runs, which it returns as revm's inspected
+//! run does. Its [`InspectorEvmTr`] is revm's inspected lifecycle unchanged, which starts and
+//! returns frames through the same two methods.
+
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use std::{collections::BTreeMap, string::ToString, vec::Vec};
+use core::{cell::Cell, num::NonZeroU64};
 
-use alloy_evm::{precompiles::PrecompilesMap, Database};
-use alloy_primitives::{Address, Bytes, TxKind, U256};
-use delegate::delegate;
 use op_revm::{
-    constants::{BASE_FEE_RECIPIENT, L1_FEE_RECIPIENT, OPERATOR_FEE_RECIPIENT},
     handler::{IsTxError, OpHandler},
     transaction::deposit::DEPOSIT_TRANSACTION_TYPE,
     OpHaltReason, OpTransactionError,
 };
+use std::{collections::BTreeMap, vec::Vec};
+
+use alloy_evm::{precompiles::PrecompilesMap, Database};
 use revm::{
     context::{
-        result::{ExecutionResult, FromStringError, InvalidTransaction},
-        transaction::{AuthorizationTr, TransactionType},
-        Block, Cfg, ContextError, ContextTr, FrameStack, JournalTr, LocalContextTr, Transaction,
+        result::{FromStringError, InvalidTransaction, ResultGas},
+        transaction::TransactionType,
+        ContextError, ContextTr, FrameStack, Journal, JournalTr, Transaction,
+    },
+    context_interface::{
+        cfg::{
+            gas::{GasTracker, PoolAmounts, PoolId, StartCharge},
+            GasId, GasParams, StateGasCharge, StateGasSite,
+        },
+        journaled_state::{entry::JournalEntry, JournalCheckpoint},
+        Host,
     },
     handler::{
-        evm::{ContextDbError, FrameInitResult},
-        instructions::InstructionProvider,
-        post_execution::output as post_execution_output,
-        pre_execution::validate_account_nonce_and_code,
-        EthFrame, EvmTr, EvmTrError, FrameInitOrResult, FrameResult, FrameTr, Handler,
-        ItemOrResult,
+        evm::{ContextDbError, FrameInitResult, FrameTr},
+        execution::runtime_oog_unwind,
+        pre_execution::Eip7702AuthFacts,
+        EthFrame, EvmTr, EvmTrError, FrameInitOrResult, FrameResult, Handler, ItemOrResult,
+        PreExecutionOutput,
     },
-    inspector::{
-        handler::{frame_end, frame_start},
-        inspect_instructions, InspectorEvmTr, InspectorFrame, InspectorHandler,
-    },
+    inspector::{InspectorEvmTr, InspectorHandler, JournalExt},
     interpreter::{
-        gas::get_tokens_in_calldata, interpreter::EthInterpreter, interpreter_action::FrameInit,
-        CallOutcome, CallScheme, CreateOutcome, FrameInput, Gas, InitialAndFloorGas,
-        InstructionResult, InterpreterAction, InterpreterResult,
+        interpreter::EthInterpreter, interpreter_action::FrameInit, interpreter_types::LoopControl,
+        CallScheme, FrameInput, Gas, InitialAndFloorGas, InstructionResult, InterpreterAction,
+        InterpreterResult,
     },
-    primitives::CALL_STACK_LIMIT,
-    Inspector, Journal,
+    primitives::{Address, Bytes, TxKind, CALL_STACK_LIMIT},
+    Inspector,
 };
 
 use crate::{
-    constants, dispatch_system_contract_interceptors, is_deposit_like_transaction,
-    is_mega_system_transaction_with, limit::ACCOUNT_INFO_WRITE_SIZE, sent_from_system_address,
-    ExternalEnvTypes, HostExt, JournalInspectTr, MegaContext, MegaEvm, MegaHaltReason,
-    MegaInstructions, MegaSpecId, MegaTransactionError, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
+    access::ComputeStop,
+    charge_write_records_history, history_gas,
+    limit::{CreatorBefore, StartBefore},
+    synthetic_frame_result,
+    system::keyless,
+    write_record_history_gas, Detention, ExternalEnvTypes, LimitCheck, LimitKind, MegaContext,
+    MegaEvm, MegaInstructions, PricedPrecompiles, VolatileDataAccess, TX_BODY_OVER_DATA_SIZE_LIMIT,
 };
 
-/// Revm handler for `MegaETH`. It internally wraps the [`op_revm::handler::OpHandler`] and inherits
-/// most functionalities from Optimism.
-#[allow(missing_debug_implementations)]
+/// The regular gas a system call runs on, at most: EIP-8037's system-call budget. The rest of its
+/// gas limit is its state-gas reservoir ([`MegaHandler`]'s `tx_gas`).
+pub const SYSTEM_CALL_REGULAR_GAS_LIMIT: u64 = 30_000_000;
+
+/// The Satin handler.
+///
+/// It wraps op-revm's [`OpHandler`] and delegates every phase `MegaETH` does not extend to it.
+/// One handler runs one transaction, so what a phase learns about it is kept here.
+#[derive(Debug)]
 pub struct MegaHandler<EVM, ERROR, FRAME> {
     op: OpHandler<EVM, ERROR, FRAME>,
+    /// The reservoir the transaction's result settled with, read by
+    /// [`post_execution`](Handler::post_execution) where revm builds the result's gas, and
+    /// consumed by the report once the result is built
+    /// ([`execution_result`](Handler::execution_result)) or by the error path
+    /// ([`catch_error`](Handler::catch_error)), so a handler reused for a system call, whose path
+    /// makes no capture, reports the system call's own reservoir.
+    settled_reservoir: Cell<Option<u64>>,
 }
 
 impl<EVM, ERROR, FRAME> MegaHandler<EVM, ERROR, FRAME> {
-    /// Create a new `MegaethHandler`.
+    /// Creates a handler.
     pub fn new() -> Self {
-        Self { op: OpHandler::new() }
+        Self { op: OpHandler::new(), settled_reservoir: Cell::new(None) }
     }
 }
 
@@ -69,1523 +97,1860 @@ impl<DB, EVM, ERROR, FRAME, ExtEnvs> MegaHandler<EVM, ERROR, FRAME>
 where
     DB: Database,
     ExtEnvs: ExternalEnvTypes,
-    EVM: EvmTr<Context = MegaContext<DB, ExtEnvs>>,
-    ERROR: FromStringError + From<InvalidTransaction>,
+    EVM: EvmTr<Context = MegaContext<DB, ExtEnvs>, Frame = FRAME>,
+    ERROR: EvmTrError<EVM> + From<OpTransactionError> + FromStringError + IsTxError,
+    FRAME: FrameTr<FrameResult = FrameResult, FrameInit = FrameInit>,
 {
-    /// The hook to be called in `revm::handler::Handler::run_without_catch_error` and
-    /// `revm::handler::InspectorHandler::inspect_run_without_catch_error`.
+    /// [`validate_env`](Handler::validate_env) once the live system address is known: decides
+    /// whether the transaction is a system-address transaction — of the system shape, from
+    /// `system_address` — and prepares the common execution layer for it, refuses a transaction
+    /// from `system_address` without the system shape, validates a system-address transaction and
+    /// promotes it to a deposit, then validates the transaction as op-revm does.
     ///
-    /// Promotes a legacy `system_address` transaction into the OP deposit-style path so it
-    /// bypasses signature, nonce, and fee validation. REX5+ restores nonce and chain-id
-    /// checks before the promotion (the deposit path otherwise drops them, leaving the
-    /// transaction replayable). Pre-REX5 specs preserve the original behavior so existing
-    /// chain replay is unaffected.
-    #[inline]
-    fn before_run(&self, evm: &mut EVM) -> Result<(), ERROR> {
-        let ctx = evm.ctx_mut();
-        let spec = ctx.spec;
-        if spec.is_enabled(MegaSpecId::MINI_REX) {
-            let system_address = ctx.system_address;
-            let is_rex5_enabled = spec.is_enabled(MegaSpecId::REX5);
-            // Honor the same `CfgEnv` toggles as the canonical revm validate path.
-            // Ordinary txs are already filtered by the upstream validate path before
-            // reaching this promotion logic, so keeping system txs aligned here does
-            // not introduce a separate replay-only escape hatch.
-            let cfg = ctx.cfg();
-            let cfg_chain_id = cfg.chain_id;
-            let tx_chain_id_check = cfg.tx_chain_id_check;
-            let disable_nonce_check = cfg.disable_nonce_check;
-            let disable_eip3607 = cfg.disable_eip3607;
-            let tx = ctx.tx();
-
-            if sent_from_system_address(tx, system_address) {
-                // Whitelist rejection has no canonical `InvalidTransaction` variant; keep the
-                // existing string-error shape pre-REX5 callers already expect.
-                if !is_mega_system_transaction_with(tx, system_address) {
-                    return Err(FromStringError::from_string(
-                        "Mega system transaction callee is not in the whitelist".to_string(),
-                    ));
-                }
-
-                if is_rex5_enabled {
-                    if tx_chain_id_check {
-                        match tx.chain_id() {
-                            None => return Err(InvalidTransaction::MissingChainId.into()),
-                            Some(cid) if cid != cfg_chain_id => {
-                                return Err(InvalidTransaction::InvalidChainId.into());
-                            }
-                            Some(_) => {}
-                        }
-                    }
-
-                    // Inspect without warming so validation does not mutate the EIP-2929
-                    // access list. The journal cache still lets consecutive in-block system
-                    // txs observe committed nonce bumps.
-                    let tx_nonce = tx.nonce();
-                    // EIP-3607 reads `info.code`; pass `load_code = true` so the
-                    // `code_by_hash` is paid here rather than silently bypassing the
-                    // guard against a lazy-code DB.
-                    let state_account = ctx
-                        .journal_mut()
-                        .inspect_account(system_address, true)
-                        .map_err(|e| -> ERROR {
-                            FromStringError::from_string(format!(
-                                "Mega system transaction state read failed: {e:?}"
-                            ))
-                        })?;
-                    validate_account_nonce_and_code(
-                        &mut state_account.info,
-                        tx_nonce,
-                        disable_eip3607,
-                        disable_nonce_check,
-                    )?;
-                }
-
-                // Mark the tx as deposit-style for `OpHandler` and force gas_price to 0
-                // so fee / L1 / operator / beneficiary accounting all degenerate to no-ops.
-                let tx = &mut ctx.inner.tx;
-                tx.deposit.source_hash = MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
-                tx.base.gas_price = 0;
-            }
-        }
-
-        ctx.on_new_tx();
-        Ok(())
-    }
-
-    /// The hook to be called in `revm::handler::Handler::execution` and
-    /// `revm::inspector::InspectorHandler::inspect_execution` to check if the initial gas exceeds
-    /// the tx gas limit, if so, we halt with out of gas.
-    #[inline]
-    fn before_execution(
+    /// The layer is prepared before the refusal, so a deposit the refusal turns into a failed
+    /// deposit reports its body as data size, as a deposit that fails any other check does.
+    ///
+    /// The handler reads the address out of the state, and checks the system address's nonce and
+    /// code. What validates a transaction without state
+    /// ([`validate_transaction_stateless`](crate::validate_transaction_stateless)) is given the
+    /// address and leaves the account to the state, as it leaves every sender's
+    /// (`check_system_account` false); every other step is this one.
+    pub(crate) fn validate_env_as(
         &self,
         evm: &mut EVM,
-        init_and_floor_gas: &InitialAndFloorGas,
-    ) -> Result<Option<FrameResult>, ERROR> {
-        // Check if the initial gas exceeds the tx gas limit, if so, we halt with out of gas
-        let ctx = evm.ctx();
-        let tx = ctx.tx();
-        if tx.gas_limit() < init_and_floor_gas.initial_gas {
-            // If not sufficient gas, we halt with out of gas
-            let oog_frame_result = gen_oog_frame_result(tx.kind(), tx.gas_limit());
-            return Ok(Some(oog_frame_result));
+        system_address: Option<Address>,
+        check_system_account: bool,
+    ) -> Result<(), ERROR> {
+        let ctx = evm.ctx_mut();
+        let verdict = crate::system::classify_system_transaction(ctx.tx(), system_address);
+        ctx.on_new_tx(verdict == Ok(true));
+        if verdict? {
+            crate::system::validate_and_promote::<_, _, ERROR>(ctx, check_system_account)?;
         }
-        Ok(None)
+        self.op.validate_env(evm)
     }
 }
 
-/// A fee recipient's pre-reward state, captured before delegating to op-revm so the
-/// post-reward diff can tell whether the credit changed or materialised the account.
-struct FeeRecipientSnapshot {
-    address: Address,
-    balance: U256,
-    was_empty: bool,
-}
-
-/// One EIP-7702 authorization that would actually apply, as determined by the read-only
-/// pre-application scan in [`MegaHandler::scan_applied_eip7702_authorizations`].
-struct AppliedAuthorization {
-    /// The recovered authority account the authorization delegates.
-    authority: Address,
-    /// `true` if applying the authorization materializes an account that does not yet exist.
-    creates_authority: bool,
-}
-
-impl<DB, EVM, ERROR, FRAME, ExtEnvs> MegaHandler<EVM, ERROR, FRAME>
+impl<DB, EVM, ERROR, FRAME, ExtEnvs> Handler for MegaHandler<EVM, ERROR, FRAME>
 where
     DB: Database,
     ExtEnvs: ExternalEnvTypes,
-    EVM: EvmTr<Context = MegaContext<DB, ExtEnvs>>,
-    ERROR: From<DB::Error> + FromStringError,
-{
-    /// Read-only scan of a transaction's EIP-7702 authorization list, mirroring revm's auth-list
-    /// application order: the chain-id / `u64::MAX`-nonce / non-empty-non-7702-code gates, the
-    /// per-authority account-nonce match, and the sequential simulated-nonce tracking for repeated
-    /// authorities. Returns the authorizations that would actually apply; it does not mutate
-    /// delegation bytecode (revm's `apply_eip7702_auth_list` does that later). This is the single
-    /// shared source of the gating logic for the REX5 state-growth pass and the REX6 consolidated
-    /// accounting, so the two cannot drift.
-    ///
-    /// `caller_nonce_already_bumped` selects the caller-nonce baseline: for a call tx,
-    /// `validate_against_state_and_deduct_caller` bumps the caller's nonce by 1 before
-    /// `apply_eip7702_auth_list` checks it. A scan running after that bump (REX5, in
-    /// `pre_execution`) passes `true`; one running before it (REX6, in `validate`) passes `false`,
-    /// so a self-authorization (`authority == caller`) is compared against `caller.nonce + 1` and
-    /// matches the real application. Each net-new authority appears at most once (the simulated
-    /// nonce dedupes repeats), so callers may treat the `creates_authority` entries as a set.
-    fn scan_applied_eip7702_authorizations(
-        &self,
-        evm: &mut EVM,
-        caller_nonce_already_bumped: bool,
-    ) -> Result<Vec<AppliedAuthorization>, ERROR> {
-        let ctx = evm.ctx_mut();
-        let chain_id = ctx.cfg().chain_id;
-        let (tx, journal) = ctx.tx_journal_mut();
-        let caller = tx.caller();
-        // Transaction-local simulated auth-list state, mirroring revm's sequential processing
-        // when the same authority appears multiple times in one tx. A `BTreeMap` keeps
-        // per-authorization lookup/update at O(log N) instead of the O(N) linear scan a `Vec`
-        // would need, bounding the whole pass at O(N log N) (an attacker could otherwise drive
-        // O(N²) node CPU with many unique authorities in one tx). The map is only ever keyed,
-        // never iterated for output, so the produced `applied` list is unchanged.
-        let mut simulated_authorities = BTreeMap::<Address, u64>::new();
-        let mut applied = Vec::new();
-        for authorization in tx.authorization_list() {
-            let auth_chain_id = authorization.chain_id();
-            if !auth_chain_id.is_zero() && auth_chain_id != U256::from(chain_id) {
-                continue;
-            }
-            if authorization.nonce() == u64::MAX {
-                continue;
-            }
-            let Some(authority) = authorization.authority() else {
-                continue;
-            };
-
-            let (authority_nonce, creates_authority) = if let Some(nonce) =
-                simulated_authorities.get(&authority).copied()
-            {
-                (nonce, false)
-            } else {
-                // No-warm read: this scan is a pre-flight count and must not change the
-                // access list. Authority warming is owned by revm's authorization application;
-                // `inspect_account` keeps that boundary clean.
-                let authority_acc = journal.inspect_account(authority, true)?;
-                if let Some(bytecode) = &authority_acc.info.code {
-                    if !bytecode.is_empty() && !bytecode.is_eip7702() {
-                        continue;
-                    }
-                }
-                // Mirror the call tx caller's own nonce bump for a self-authorization, unless this
-                // scan already runs after that bump. Type-4 txs are always calls (a missing `to`
-                // is rejected at validation as `Eip7702CannotBeCreate`), so no `is_call` guard is
-                // needed — the authorization list is non-empty only for calls.
-                let effective_nonce = if !caller_nonce_already_bumped && authority == caller {
-                    authority_acc.info.nonce.saturating_add(1)
-                } else {
-                    authority_acc.info.nonce
-                };
-                (
-                    effective_nonce,
-                    authority_acc.is_empty() &&
-                        authority_acc.is_loaded_as_not_existing_not_touched(),
-                )
-            };
-
-            if authorization.nonce() != authority_nonce {
-                continue;
-            }
-
-            applied.push(AppliedAuthorization { authority, creates_authority });
-            let next_nonce = authority_nonce.saturating_add(1);
-            // insert overwrites an existing entry and inserts a new one otherwise,
-            // matching the prior find-or-push.
-            simulated_authorities.insert(authority, next_nonce);
-        }
-        Ok(applied)
-    }
-
-    /// Records REX5 state growth for EIP-7702 authorizations that create authority accounts.
-    ///
-    /// Runs in `pre_execution` (after the caller nonce bump) and charges only the state-growth
-    /// dimension; overflow is latched into `AdditionalLimit::has_exceeded_limit` and surfaced as
-    /// the normal execution failure at the first frame. The caller gates this to the REX5-only
-    /// path (REX5 on, REX6 off, type-4 tx); REX6+ accounts for every per-authorization effect in
-    /// the consolidated `validate`-time scan (`record_rex6_eip7702_authority_accounting`) instead.
-    #[inline]
-    fn record_rex5_eip7702_authority_state_growth(&self, evm: &mut EVM) -> Result<(), ERROR> {
-        // Pre-execution pass runs after the caller nonce bump.
-        let applied = self.scan_applied_eip7702_authorizations(evm, true)?;
-        let authority_creations =
-            applied.iter().filter(|auth| auth.creates_authority).count() as u64;
-        if authority_creations > 0 {
-            evm.ctx_mut()
-                .additional_limit
-                .borrow_mut()
-                .on_rex5_eip7702_authority_creations(authority_creations);
-        }
-
-        Ok(())
-    }
-
-    /// Side-effect-free read of a fee recipient's balance and emptiness.
-    ///
-    /// Uses `inspect_account` (no warming) so reading the recipients to account the
-    /// post-execution reward does not perturb gas or the access list.
-    fn fee_recipient_balance_and_emptiness(
-        evm: &mut EVM,
-        address: Address,
-    ) -> Result<(U256, bool), ERROR> {
-        let info = &evm
-            .ctx_mut()
-            .journal_mut()
-            .inspect_account(address, false)
-            .map_err(|e| {
-                ERROR::from_string(format!(
-                    "Failed to inspect fee recipient {address} for REX6 reward accounting: {e:?}",
-                ))
-            })?
-            .info;
-        Ok((info.balance, info.is_empty()))
-    }
-
-    /// Snapshots the distinct accounts op-revm credits in the post-execution reward path,
-    /// each with its pre-reward balance and emptiness.
-    ///
-    /// The set is the block beneficiary plus the L1 / base-fee / operator fee vaults.
-    /// It is deduplicated because the block beneficiary may coincide with a fee vault, and
-    /// op-revm would otherwise issue two `balance_incr`s to the same on-chain account — which
-    /// is still a single account write.
-    fn snapshot_fee_recipients(evm: &mut EVM) -> Result<Vec<FeeRecipientSnapshot>, ERROR> {
-        let recipients = [
-            evm.ctx().block().beneficiary(),
-            L1_FEE_RECIPIENT,
-            BASE_FEE_RECIPIENT,
-            OPERATOR_FEE_RECIPIENT,
-        ];
-        let mut snapshots: Vec<FeeRecipientSnapshot> = Vec::with_capacity(recipients.len());
-        for address in recipients {
-            if snapshots.iter().any(|snapshot| snapshot.address == address) {
-                continue;
-            }
-            let (balance, was_empty) = Self::fee_recipient_balance_and_emptiness(evm, address)?;
-            snapshots.push(FeeRecipientSnapshot { address, balance, was_empty });
-        }
-        Ok(snapshots)
-    }
-
-    /// REX6 consolidated EIP-7702 authorization accounting.
-    ///
-    /// Runs in `validate`, before the gas-limit check and fee affordability, and is the single
-    /// source of truth for per-authorization effects — replacing the pre-REX6 split between the
-    /// ungated `before_tx_start` DataSize/KV charges and the pre-execution state-growth scan:
-    /// - charges data size +40 / KV +1 for every *applied* authority (one that passed the chain-id
-    ///   / nonce / code gates), not every recoverable one;
-    /// - charges state growth +1 for each *net-new* authority and returns its address so the caller
-    ///   can add the dynamic SALT account-creation gas to `initial_gas`;
-    /// - marks beneficiary detention when an applied authority is the block beneficiary.
-    ///
-    /// Returns the net-new authority addresses; the caller uses them both to charge SALT gas and
-    /// to avoid double-charging an auth-materialized value-transfer recipient. The caller gates
-    /// this to REX6 type-4 transactions; pre-REX6 keeps the old split frozen.
-    #[inline]
-    fn record_rex6_eip7702_authority_accounting(
-        &self,
-        evm: &mut EVM,
-    ) -> Result<Vec<Address>, ERROR> {
-        // Runs in validate, before the caller nonce bump.
-        let applied = self.scan_applied_eip7702_authorizations(evm, false)?;
-
-        // Record per-applied-authority resources + beneficiary detention. Dynamic SALT gas is
-        // charged by the caller from `materialized` (the net-new authorities).
-        let ctx = evm.ctx_mut();
-        let beneficiary = ctx.inner.block.beneficiary;
-        let mut materialized = Vec::new();
-        let mut beneficiary_applied = false;
-        for auth in applied {
-            ctx.additional_limit
-                .borrow_mut()
-                .on_rex6_eip7702_authority_applied(auth.creates_authority);
-            if auth.creates_authority {
-                // The scanner yields each net-new authority once, so `materialized` stays a set.
-                debug_assert!(!materialized.contains(&auth.authority));
-                materialized.push(auth.authority);
-            }
-            if auth.authority == beneficiary {
-                beneficiary_applied = true;
-            }
-        }
-
-        // An applied authority that is the block beneficiary mutates beneficiary state, so mark
-        // it and re-derive the REX4 beneficiary detention cap — the cap set at `on_new_tx`
-        // predates this scan and would otherwise miss the authority-side access.
-        if beneficiary_applied {
-            ctx.check_and_mark_beneficiary_balance_access(&beneficiary);
-            if let Some(limit) = ctx.volatile_data_tracker.borrow().get_compute_gas_limit() {
-                ctx.additional_limit.borrow_mut().set_compute_gas_limit(limit);
-            }
-        }
-
-        Ok(materialized)
-    }
-}
-
-impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
-    /// This is the hook to be called in the beginning of the `frame_run` and `inspect_frame_run`
-    /// functions. This function checks if the additional limit is already exceeded, if so, we
-    /// should immediately stop and synthesize an interpreter action and return it.
-    #[inline]
-    fn before_frame_run(
-        ctx: &MegaContext<DB, ExtEnvs>,
-        frame: &EthFrame<EthInterpreter>,
-    ) -> Result<Option<InterpreterAction>, ContextDbError<MegaContext<DB, ExtEnvs>>> {
-        // Check if the additional limit is already exceeded, if so, we should immediately stop
-        // and synthesize an interpreter action.
-        if ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
-            if let Some(interpreter_result) =
-                ctx.additional_limit.borrow_mut().before_frame_run(frame)
-            {
-                return Ok(Some(InterpreterAction::Return(interpreter_result)));
-            }
-        }
-        Ok(None)
-    }
-
-    /// This is the hook to be called in the `frame_run` and `inspect_frame_run`
-    /// functions after the instructions are executed. Apply `MiniRex` additional limits after
-    /// running instructions.
-    ///
-    /// This handles:
-    /// - Charging `CODEDEPOSIT_STORAGE_GAS` for successful create operations
-    /// - Updating additional limits via `after_create_frame_run`
-    /// - Recording gas remaining for later compute gas tracking
-    ///
-    /// Returns `Some(gas_remaining)` if `MiniRex` is enabled and action is a Return,
-    /// for use in `after_frame_run`.
-    #[inline]
-    fn after_frame_run_instructions(
-        ctx: &MegaContext<DB, ExtEnvs>,
-        frame: &EthFrame<EthInterpreter>,
-        action: &mut InterpreterAction,
-    ) -> Result<(), ContextDbError<MegaContext<DB, ExtEnvs>>> {
-        if !ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
-            return Ok(());
-        }
-        let is_rex5 = ctx.spec.is_enabled(MegaSpecId::REX5);
-
-        if let InterpreterAction::Return(interpreter_result) = action {
-            // Charge storage gas cost for the number of bytes
-            if frame.data.is_create() && interpreter_result.is_ok() {
-                let code_deposit_storage_gas = constants::mini_rex::CODEDEPOSIT_STORAGE_GAS *
-                    interpreter_result.output.len() as u64;
-                if !interpreter_result.gas.record_cost(code_deposit_storage_gas) {
-                    interpreter_result.result = InstructionResult::OutOfGas;
-                }
-            }
-
-            // REX5+: pre-charge canonical code-deposit compute gas before
-            // process_next_action commits the CREATE checkpoint. Skip when
-            // revm's return_create would not charge it; the existing
-            // limit-side hook below owns the result-marking on exceed.
-            if is_rex5 && frame.data.is_create() {
-                let cfg = ctx.cfg();
-                if will_return_create_charge_code_deposit(
-                    interpreter_result,
-                    cfg.max_code_size(),
-                    cfg.spec().into(),
-                    cfg.is_eip3541_disabled(),
-                ) {
-                    let code_len = interpreter_result.output.len() as u64;
-                    let canonical_code_deposit_gas =
-                        code_len.saturating_mul(revm::interpreter::gas::CODEDEPOSIT);
-                    let _ = ctx
-                        .additional_limit
-                        .borrow_mut()
-                        .record_compute_gas(canonical_code_deposit_gas);
-                }
-            }
-        }
-
-        // Update additional limits. MiniRex is guaranteed to be enabled here.
-        ctx.additional_limit.borrow_mut().after_frame_run_instructions(frame, action);
-
-        Ok(())
-    }
-
-    /// Apply `MiniRex` additional limits after frame action processing.
-    ///
-    /// Under REX5+ for CREATE results, the code-deposit compute gas was
-    /// already pre-charged in [`after_frame_run_instructions`]; pass
-    /// `None` here so the post-action hook does not double-record.
-    #[inline]
-    fn after_frame_run(
-        ctx: &MegaContext<DB, ExtEnvs>,
-        frame_output: &mut ItemOrResult<FrameInit, FrameResult>,
-        gas_remaining_before_process_action: Option<u64>,
-    ) -> Result<(), ContextDbError<MegaContext<DB, ExtEnvs>>> {
-        if !ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
-            return Ok(());
-        }
-        let is_rex5 = ctx.spec.is_enabled(MegaSpecId::REX5);
-
-        if let ItemOrResult::Result(frame_result) = frame_output {
-            // REX5+: code-deposit compute gas for CREATE results was already
-            // pre-charged. Skip post-action recording so we don't double-count.
-            let pass_through = if is_rex5 && matches!(frame_result, FrameResult::Create(_)) {
-                None
-            } else {
-                gas_remaining_before_process_action
-            };
-            ctx.additional_limit.borrow_mut().after_frame_run(frame_result, pass_through);
-        }
-
-        Ok(())
-    }
-}
-
-/// Mirrors `revm_handler::frame::return_create`'s pre-commit predicate.
-/// Returns `true` iff `return_create` would charge `code_len * CODEDEPOSIT`
-/// from the interpreter gas and commit the checkpoint.
-///
-/// REVIEW ON UPSTREAM BUMP: keep in lockstep with
-/// `revm-handler::frame::return_create`. Any revm bump that touches the
-/// predicate inputs (`is_ok`, EIP-3541 gate, EIP-170 gate, code-deposit
-/// gas availability) requires re-auditing this helper.
-fn will_return_create_charge_code_deposit(
-    interpreter_result: &InterpreterResult,
-    max_code_size: usize,
-    runtime_spec_id: revm::primitives::hardfork::SpecId,
-    is_eip3541_disabled: bool,
-) -> bool {
-    use revm::primitives::hardfork::SpecId;
-
-    if !interpreter_result.result.is_ok() {
-        return false;
-    }
-    if !is_eip3541_disabled &&
-        runtime_spec_id.is_enabled_in(SpecId::LONDON) &&
-        interpreter_result.output.first() == Some(&0xEF)
-    {
-        return false;
-    }
-    if runtime_spec_id.is_enabled_in(SpecId::SPURIOUS_DRAGON) &&
-        interpreter_result.output.len() > max_code_size
-    {
-        return false;
-    }
-    let code_deposit_gas = (interpreter_result.output.len() as u64)
-        .saturating_mul(revm::interpreter::gas::CODEDEPOSIT);
-    interpreter_result.gas.remaining() >= code_deposit_gas
-}
-
-impl<DB: Database, EVM, ERROR, FRAME, ExtEnvs: ExternalEnvTypes> Handler
-    for MegaHandler<EVM, ERROR, FRAME>
-where
     EVM: EvmTr<Context = MegaContext<DB, ExtEnvs>, Frame = FRAME>,
-    ERROR: EvmTrError<EVM>
-        + From<OpTransactionError>
-        + From<MegaTransactionError>
-        + FromStringError
-        + IsTxError
-        + core::fmt::Debug,
+    ERROR: EvmTrError<EVM> + From<OpTransactionError> + FromStringError + IsTxError,
     FRAME: FrameTr<FrameResult = FrameResult, FrameInit = FrameInit>,
 {
     type Evm = EVM;
-
     type Error = ERROR;
+    type HaltReason = OpHaltReason;
 
-    type HaltReason = MegaHaltReason;
-
-    delegate! {
-        to self.op {
-            fn validate_env(&self, evm: &mut Self::Evm) -> Result<(), Self::Error>;
-            fn validate_against_state_and_deduct_caller(
-                &self,
-                evm: &mut Self::Evm,
-            ) -> Result<(), Self::Error>;
-            fn reimburse_caller(&self, evm: &mut Self::Evm, exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult) -> Result<(), Self::Error>;
-            fn refund(&self, evm: &mut Self::Evm, exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult, eip7702_refund: i64);
-        }
-    }
-
-    fn pre_execution(&self, evm: &mut Self::Evm) -> Result<u64, Self::Error> {
-        self.validate_against_state_and_deduct_caller(evm)?;
-        self.load_accounts(evm)?;
-        // EIP-7702 authority state-growth handling, split by spec era. Only type-4 txs reach
-        // either branch, and no exempt (system-originated) tx is type-4 here — system txs are
-        // legacy-typed pre-promotion / deposit-typed post-promotion, and a type-4 system caller is
-        // rejected earlier in `before_run` — so neither branch consults `is_exempt()`.
-        if evm.ctx().tx().tx_type() == TransactionType::Eip7702 {
-            if evm.ctx().spec.is_enabled(MegaSpecId::REX6) {
-                // `validate()` (`record_rex6_eip7702_authority_accounting`) already charged every
-                // applied authority against the pre-frame resource dimensions it touches (a
-                // persistent account write on `data_size` + `kv_update`; `state_growth` for net-new
-                // authorities; and — when an applied authority is the block beneficiary — a lowered
-                // detention cap that the intrinsic `compute_gas` can then exceed). If any of those
-                // pushed the tx over a per-tx limit, the first frame halts anyway — but
-                // `apply_eip7702_auth_list` `mark_touch`es every authority in pre-execution, and a
-                // HALT (unlike an `Err`) does not roll those pre-frame writes back. Skip the whole
-                // list so the halt discards them.
-                //
-                // Gate on `AdditionalLimit::limit_exceeded()`: that is the exact condition
-                // `frame_result_if_exceeding_limit` halts on, so skipping here covers every
-                // pre-frame dimension (`DataSize`/`KVUpdate`/`ComputeGas`/`StateGrowth`) that could
-                // trigger that halt — including compute overflows and any dimension added later —
-                // with no risk of the check and the halt disagreeing. (It is false for both
-                // `WithinLimit` and `Exempt`, matching the halt path.) `Ok(0)` forgoes the
-                // existing-authority EIP-7702 refund (`post_execution::refund` records it
-                // unconditionally) — the intended all-or-nothing consequence of skipping the whole
-                // list (see `test_rex6_authority_state_growth_overflow_forgoes_refund`).
-                if evm.ctx().additional_limit.borrow().limit_exceeded() {
-                    return Ok(0);
-                }
-            } else if evm.ctx().spec.is_enabled(MegaSpecId::REX5) {
-                // REX5 runs the authority state-growth scan here in pre-execution; REX6 folds it
-                // into `validate()`'s accounting above instead.
-                self.record_rex5_eip7702_authority_state_growth(evm)?;
-            }
-        }
-
-        self.apply_eip7702_auth_list(evm)
-    }
-
-    fn run_system_call(
-        &mut self,
-        evm: &mut Self::Evm,
-    ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
-        // system call does not call `pre_execution` and `post_execution`, so we need to extract
-        // some logic from them.
-        let ctx = evm.ctx_mut();
-        ctx.on_new_tx();
-
-        // dummy values that are not used.
-        let init_and_floor_gas = InitialAndFloorGas::new(0, 0);
-        // call execution and than output.
-        match self
-            .execution(evm, &init_and_floor_gas)
-            .and_then(|exec_result| self.execution_result(evm, exec_result))
-        {
-            out @ Ok(_) => out,
-            Err(e) => self.catch_error(evm, e),
-        }
-    }
-
-    fn run_without_catch_error(
-        &mut self,
-        evm: &mut Self::Evm,
-    ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
-        self.before_run(evm)?;
-
-        let init_and_floor_gas = self.validate(evm)?;
-        let eip7702_refund = self.pre_execution(evm)? as i64;
-        let mut exec_result = self.execution(evm, &init_and_floor_gas)?;
-        self.post_execution(evm, &mut exec_result, init_and_floor_gas, eip7702_refund)?;
-
-        // Prepare the output
-        self.execution_result(evm, exec_result)
-    }
-
-    /// This function copies the logic from `revm::handler::Handler::validate` to and
-    /// add additional storage gas cost for calldata.
+    /// revm's pre-execution, with the account a deposit-like transaction creates for its caller
+    /// charged first, then the write records of the EIP-7702 authorities it applied.
     ///
-    /// REX5+ adds a final initial+floor gas validation after all Mega-side dynamic storage gas
-    /// has been accounted for. Pre-REX5 specs keep the historical mid-sequence check exactly
-    /// where it was so byte-for-byte replay is preserved.
-    fn validate(&self, evm: &mut Self::Evm) -> Result<InitialAndFloorGas, Self::Error> {
-        self.validate_env(evm)?;
-        let mut initial_and_floor_gas = self.validate_initial_tx_gas(evm)?;
-
-        // REX6 only (gated on type-4 tx + REX6 spec): consolidated EIP-7702 authorization
-        // accounting. Records the per-applied-authority DataSize/KV/StateGrowth + beneficiary
-        // detention, and returns the net-new authority addresses so the caller folds the dynamic
-        // SALT account-creation gas into `initial_gas` before the gas-limit / fee-affordability
-        // check. Pre-REX6 / non-EIP-7702 produces `Vec::new()` and the SALT-gas loop is a no-op.
-        let record_rex6_accounting = {
-            let ctx = evm.ctx();
-            ctx.spec.is_enabled(MegaSpecId::REX6) && ctx.tx().tx_type() == TransactionType::Eip7702
-        };
-        let materialized_authorities = if record_rex6_accounting {
-            self.record_rex6_eip7702_authority_accounting(evm)?
-        } else {
-            Vec::new()
-        };
-
-        let ctx = evm.ctx_mut();
-        let is_mini_rex_enabled = ctx.spec.is_enabled(MegaSpecId::MINI_REX);
-        let is_rex_enabled = ctx.spec.is_enabled(MegaSpecId::REX);
-        let is_rex5_enabled = ctx.spec.is_enabled(MegaSpecId::REX5);
-        if is_mini_rex_enabled {
-            // record the initial gas cost as compute gas cost, limit exceeding will be captured in
-            // `frame_init` function.
-            ctx.additional_limit()
-                .borrow_mut()
-                .record_compute_gas(initial_and_floor_gas.initial_gas);
-
-            // MegaETH MiniRex modification: calldata storage gas costs (10x the standard EVM rates)
-            // - Standard tokens: 40 gas per token (vs 4)
-            // - EIP-7623 floor: 100 gas per token (vs 10)
-            let tokens_in_calldata = get_tokens_in_calldata(ctx.tx().input(), true);
-            let calldata_storage_gas =
-                constants::mini_rex::CALLDATA_STANDARD_TOKEN_STORAGE_GAS * tokens_in_calldata;
-            initial_and_floor_gas.initial_gas += calldata_storage_gas;
-            let floor_calldata_storage_gas =
-                constants::mini_rex::CALLDATA_STANDARD_TOKEN_STORAGE_FLOOR_GAS * tokens_in_calldata;
-            initial_and_floor_gas.floor_gas += floor_calldata_storage_gas;
-
-            // MegaETH Rex modification: additional intrinsic storage gas cost
-            // Add 39,000 gas on top of base intrinsic gas for all transactions
-            if is_rex_enabled {
-                initial_and_floor_gas.initial_gas += constants::rex::TX_INTRINSIC_STORAGE_GAS;
-            }
-
-            // Pre-REX5: keep the historical mid-sequence initial-gas check here so existing
-            // stable-spec replays produce exactly the same OOG-after-fee-charge result on
-            // transactions whose final Mega-adjusted initial_gas exceeds gas_limit only after
-            // CREATE/new-account storage gas is added below.
-            //
-            // REX5+: this mid-sequence check is deferred to the final check below, which runs
-            // after CREATE/new-account storage gas has also been added so a transaction that
-            // cannot fit its final Mega-side intrinsic+storage gas is rejected as a validation
-            // error before pre_execution() debits the sender or bumps the nonce.
-            if !is_rex5_enabled && initial_and_floor_gas.initial_gas > ctx.tx().gas_limit() {
-                return Err(InvalidTransaction::CallGasCostMoreThanGasLimit {
-                    gas_limit: ctx.tx().gas_limit(),
-                    initial_gas: initial_and_floor_gas.initial_gas,
-                }
-                .into());
-            }
-
-            // MegaETH modification: additional storage gas cost for creating account
-            let kind = ctx.tx().kind();
-            let is_rex5_enabled = ctx.spec.is_enabled(MegaSpecId::REX5);
-            let (callee_address, storage_gas) = match kind {
-                TxKind::Create => {
-                    let caller = ctx.tx().caller();
-                    // REX5+: derive the created address from the caller's
-                    // state nonce — the same value `make_create_frame` uses
-                    // for the actual deployment. Pre-REX5 keeps `tx.nonce()`.
-                    let nonce = if is_rex5_enabled {
-                        ctx.journal_mut()
-                            .inspect_account(caller, false)
-                            .map_err(|e| {
-                                Self::Error::from_string(format!(
-                                    "Failed to inspect caller account for CREATE storage gas: {e:?}",
-                                ))
-                            })?
-                            .info
-                            .nonce
-                    } else {
-                        ctx.tx().nonce()
-                    };
-                    let created_address = caller.create(nonce);
-
-                    let storage_gas = if is_rex_enabled {
-                        // Rex spec distinguishes between contract creation and account creation.
-                        ctx.create_contract_storage_gas(created_address)
-                    } else {
-                        // Mini-Rex spec does not distinguish between contract creation and account
-                        // creation.
-                        ctx.new_account_storage_gas(created_address)
-                    };
-                    (created_address, storage_gas)
-                }
-                TxKind::Call(address) => {
-                    // Reading emptiness through the journal (instead of the raw DB) is
-                    // observationally equivalent on every spec, relying on two invariants:
-                    // pre-REX6 the journal holds no entries when `validate` runs (each
-                    // transaction's journal is drained at finalize, and access-list warming /
-                    // `deduct_caller` only run in `pre_execution`, after `validate`), so the
-                    // read observes exactly the DB value; and the cold entry the read inserts
-                    // is the call target, which frame init loads for every call transaction
-                    // anyway, so the transaction's returned state gains no new account.
-                    // Under REX6 the authority scan above may have journaled applied
-                    // authorities already; for those the read observes the applied
-                    // delegation, which is the intended REX6 semantics.
-                    let new_account = !ctx.tx().value().is_zero() &&
-                        ctx.journal_mut().inspect_account(address, false)?.info.is_empty() &&
-                        // If an applied EIP-7702 authorization materializes this recipient, its
-                        // creation gas is charged via the authority SALT gas below — don't
-                        // double-charge the value-transfer new-account gas for the same account.
-                        !materialized_authorities.contains(&address);
-                    let storage_gas =
-                        if new_account { ctx.new_account_storage_gas(address) } else { Some(0) };
-                    (address, storage_gas)
-                }
-            };
-            initial_and_floor_gas.initial_gas += storage_gas.ok_or_else(|| {
-                let err_str =
-                    format!("Failed to get storage gas for callee address: {callee_address}",);
-                Self::Error::from_string(err_str)
-            })?;
-
-            // REX6: dynamic SALT account-creation gas for each net-new EIP-7702 authority,
-            // folded into initial_gas so it is enforced against gas_limit / fee affordability.
-            // `materialized_authorities` is empty pre-REX6, so this is a no-op on stable specs.
-            for authority in &materialized_authorities {
-                let authority_storage_gas =
-                    ctx.new_account_storage_gas(*authority).ok_or_else(|| {
-                        Self::Error::from_string(format!(
-                            "Failed to get storage gas for EIP-7702 authority: {authority}",
-                        ))
-                    })?;
-                initial_and_floor_gas.initial_gas += authority_storage_gas;
-            }
-
-            // REX5+: charge dynamic new-account storage gas for a deposit-driven caller
-            // materialisation (either `tx.mint() > 0` balance increment or pre-execution
-            // nonce bump). Mirrors the `TxKind::Call(address) with value` branch above,
-            // but for the caller side. Detection runs here so we observe the pre-
-            // pre-execution state — `OpHandler::pre_execution` (run after `validate`) is
-            // what actually materialises the caller account.
-            //
-            // `data_size` / `kv_update` are intentionally NOT touched: their
-            // `before_tx_start` hooks already record the caller's account-info write
-            // unconditionally for every transaction. Only `state_growth` (which has no
-            // pre-existing caller-side accounting) and intrinsic gas need the charge.
-            // Skip this branch inside sandbox contexts: the sandbox view of `caller`'s nonce
-            // is overridden to 0 by `SandboxDb`, which would mis-classify a previously
-            // materialised signer as empty on retry. The keyless-deploy outer flow charges
-            // caller materialisation explicitly via `charge_caller_materialization_pre_sandbox`
-            // before constructing the sandbox tx, based on the parent journal-visible state.
-            if is_rex5_enabled && !ctx.is_inside_sandbox() {
-                let caller = ctx.tx().caller();
-                let system_address = ctx.system_address;
-                if is_deposit_like_transaction(&ctx.inner.tx, system_address) {
-                    // Journal read equivalence: as for the recipient emptiness check above,
-                    // the journal is empty at `validate` time on frozen specs (drained at the
-                    // previous transaction's finalize, warmed only in `pre_execution`), so
-                    // this observes the raw DB value, and the inserted cold entry is the
-                    // caller, which `deduct_caller` loads for every transaction anyway.
-                    let caller_is_empty =
-                        ctx.journal_mut().inspect_account(caller, false)?.info.is_empty();
-                    if caller_is_empty {
-                        // Self-call corner: if the deposit is a `TxKind::Call(caller)` with
-                        // non-zero `value` AND the same empty caller as callee, the existing
-                        // callee branch above has already charged `new_account_storage_gas(caller)`
-                        // for the same account materialisation. Don't charge the gas a second
-                        // time — but still record the state-growth event (the existing branch
-                        // never records state_growth; the +1 here reflects the single account
-                        // materialisation that pre_execution will perform).
-                        let already_charged_as_callee = matches!(
-                            ctx.tx().kind(),
-                            TxKind::Call(addr) if addr == caller,
-                        ) && !ctx.tx().value().is_zero();
-                        if !already_charged_as_callee {
-                            let storage_gas =
-                                ctx.new_account_storage_gas(caller).ok_or_else(|| {
-                                    let err_str = format!(
-                                        "Failed to get storage gas for deposit caller: {caller}",
-                                    );
-                                    Self::Error::from_string(err_str)
-                                })?;
-                            initial_and_floor_gas.initial_gas += storage_gas;
-                        }
-                        ctx.additional_limit.borrow_mut().record_deposit_caller_creation();
-                    }
-                }
-            }
-
-            // REX5+: final initial+floor gas validation, after every Mega-side storage gas
-            // contribution has been added. A transaction that fails either bound is rejected
-            // here as a canonical validation error so callers see Err(...) rather than an
-            // ExecutionResult::Halt with full gas spent — i.e. fees and nonce stay untouched
-            // when the tx cannot fit its final intrinsic+storage gas requirement.
-            if is_rex5_enabled {
-                let gas_limit = ctx.tx().gas_limit();
-                if initial_and_floor_gas.initial_gas > gas_limit {
-                    return Err(InvalidTransaction::CallGasCostMoreThanGasLimit {
-                        gas_limit,
-                        initial_gas: initial_and_floor_gas.initial_gas,
-                    }
-                    .into());
-                }
-                if initial_and_floor_gas.floor_gas > gas_limit {
-                    return Err(InvalidTransaction::GasFloorMoreThanGasLimit {
-                        gas_limit,
-                        gas_floor: initial_and_floor_gas.floor_gas,
-                    }
-                    .into());
-                }
+    /// The caller's account is charged where EIP-2780 charges the recipient's, and before it:
+    /// a transaction that creates both pays for both, and a transaction whose recipient is its
+    /// own caller pays once, because by the time EIP-2780 looks at the recipient the account
+    /// exists.
+    ///
+    /// The two kinds of write record made outside any frame are charged their history here, where
+    /// they are made: one per applied authority, and the one the transaction's own frame makes —
+    /// the recipient of its value, or the account it creates. Neither is known at validation: an
+    /// authority applies or does not, and whether the recipient is already written depends on the
+    /// authorities that did. A transaction that cannot pay for them runs out of gas before its
+    /// first frame, the way one that cannot pay its authorizations does.
+    ///
+    /// Validation refused every transaction whose body, with a record for each entry of its
+    /// authorization list, crosses the data-size limit, so neither the body nor the authorities'
+    /// records cross it here. The KV-update and state-growth limits can be crossed here, by the
+    /// authorization list: a list that would cross either is not applied, and the transaction's
+    /// own frame is stopped before it runs.
+    fn pre_execution(
+        &self,
+        evm: &mut Self::Evm,
+        gas: &mut GasTracker,
+    ) -> Result<Option<PreExecutionOutput>, Self::Error> {
+        self.load_accounts(evm)?;
+        let checkpoint = evm.ctx().journal_mut().checkpoint();
+        // A bail-out of the runtime gas phase unwinds as revm's does: the checkpoint is reverted
+        // and a creation's sender gets the nonce bump the frame would have made, so an included
+        // out-of-gas creation cannot be replayed. revm's own pre-execution never needs the bump,
+        // because only an EIP-7702 transaction, always a call, can bail out there; the two
+        // charges made here can fail for a creation too.
+        if deposit_created_caller(evm.ctx()) {
+            evm.ctx_mut().additional_limit.count_created_caller();
+            if !charge_created_caller(evm.ctx_mut(), gas) {
+                runtime_oog_unwind(evm.ctx(), checkpoint)?;
+                return Ok(None);
             }
         }
-
-        Ok(initial_and_floor_gas)
+        // The authorization list is decided before it is applied: a list that would keep more
+        // records or create more accounts than the transaction's limits allow is skipped whole,
+        // charged nothing, and the transaction's own frame returns the stop before it runs.
+        let stop = hold_authorization_list(evm.ctx_mut())?;
+        let eip7702_refund = if let Some(stop) = stop {
+            evm.ctx_mut().additional_limit.skip_authorization_list(stop);
+            0
+        } else {
+            let Some(eip7702_refund) = self.apply_eip7702_auth_list(evm, gas)? else {
+                runtime_oog_unwind(evm.ctx(), checkpoint)?;
+                return Ok(None);
+            };
+            eip7702_refund
+        };
+        let (applied, created) = applied_authorities(evm.ctx_mut(), checkpoint.journal_i);
+        if !charge_records_made_outside_a_frame(evm.ctx_mut(), gas, applied) {
+            runtime_oog_unwind(evm.ctx(), checkpoint)?;
+            return Ok(None);
+        }
+        evm.ctx_mut().additional_limit.count_authorities(applied, created);
+        Ok(Some(PreExecutionOutput { eip7702_refund, checkpoint }))
     }
 
-    /// This function copies the logic from `revm::handler::Handler::execution` to and
-    /// add new account storage gas
-    #[inline]
-    fn execution(
+    /// Reads the live system address out of the registry, then decides whether the transaction
+    /// is a system-address transaction and prepares the common execution layer for it, then
+    /// validates a system-address transaction and promotes it to a deposit, then validates the
+    /// transaction as op-revm does — as a deposit, when it was promoted.
+    ///
+    /// This is the handler's first phase, so the layer is prepared before anything else of the
+    /// transaction runs, and a read the database cannot serve fails the transaction through the
+    /// handler's error path, which discards what the journal loaded. Every transaction reads the
+    /// live system address, whatever its shape, and the read leaves the registry's account and
+    /// its slot warm for the rest of the transaction, as EIP-3651 leaves the block beneficiary.
+    fn validate_env(&self, evm: &mut Self::Evm) -> Result<(), Self::Error> {
+        let system_address = crate::system::load_system_address(evm.ctx_mut().journal_mut())?;
+        self.validate_env_as(evm, system_address, true)
+    }
+
+    /// Deducts the caller as op-revm does.
+    fn validate_against_state_and_deduct_caller(
+        &self,
+        evm: &mut Self::Evm,
+        init_and_floor_gas: &mut InitialAndFloorGas,
+    ) -> Result<(), Self::Error> {
+        self.op.validate_against_state_and_deduct_caller(evm, init_and_floor_gas)
+    }
+
+    /// revm's intrinsic gas, held to a gas limit that covers the history gas of the transaction's
+    /// body as well, which [`tx_gas`](Handler::tx_gas) charges.
+    ///
+    /// The body's bytes are fixed before the transaction runs, so their price is part of what a
+    /// gas limit has to cover for the transaction to be valid at all: a limit that falls short is
+    /// rejected before inclusion rather than included as an out-of-gas that burns the whole limit.
+    /// revm made that check on its own figure, so the grown figure is checked again here, with the
+    /// same error naming the same two numbers. The cap check revm made stands as it was: it tests
+    /// the regular intrinsic gas, which the body's history does not touch.
+    ///
+    /// A transaction exempt from history gas carries none of it
+    /// ([`MegaContext::prices_history`](crate::MegaContext::prices_history)), so its intrinsic gas
+    /// is revm's own.
+    ///
+    /// Before any of it, the body and a write record for each entry of the authorization list are
+    /// held to the transaction's data-size limit, on the body count the common execution layer
+    /// keeps, the one the history gas prices: a transaction over it is refused
+    /// ([`TX_BODY_OVER_DATA_SIZE_LIMIT`]), whatever its gas, a deposit included, which op-revm
+    /// then includes as a failed deposit. Those are the only bytes a transaction counts before its
+    /// first frame, so one that passes cannot cross the limit there. A system-originated
+    /// transaction is exempt from the limit, and from the check.
+    fn validate_initial_tx_gas(
+        &self,
+        evm: &mut Self::Evm,
+    ) -> Result<InitialAndFloorGas, Self::Error> {
+        let authorizations = evm.ctx_ref().tx().authorization_list_len() as u64;
+        if !evm.ctx_ref().additional_limit.admits_tx_body(authorizations) {
+            return Err(InvalidTransaction::Str(TX_BODY_OVER_DATA_SIZE_LIMIT.into()).into());
+        }
+        let gas = self.op.validate_initial_tx_gas(evm)?;
+        if !evm.ctx_ref().prices_history() {
+            return Ok(gas);
+        }
+        let bytes = evm.ctx_ref().additional_limit.body();
+        // A byte count with no price saturates, which no gas limit covers: the transaction is
+        // rejected for not covering its own intrinsic gas.
+        let history = history_gas(bytes).unwrap_or(u64::MAX);
+        let gas_limit = evm.ctx_ref().tx().gas_limit();
+        let initial_gas = gas
+            .initial_regular_gas()
+            .saturating_add(gas.initial_state_gas_final().saturating_add(history));
+        if initial_gas > gas_limit {
+            return Err(
+                InvalidTransaction::CallGasCostMoreThanGasLimit { gas_limit, initial_gas }.into()
+            );
+        }
+        evm.ctx_mut().additional_limit.set_intrinsic_history(history, bytes);
+        Ok(gas)
+    }
+
+    /// revm's transaction-level gas, with the history gas of the transaction's body charged on
+    /// it, and a system call's split as EIP-8037 has it: at most [`SYSTEM_CALL_REGULAR_GAS_LIMIT`]
+    /// of its gas limit is regular gas, which is what `GAS` reads inside it, and the rest is its
+    /// state-gas reservoir, which the state it writes draws first.
+    ///
+    /// The body's history is intrinsic: it comes out of the reservoir first and its excess off the
+    /// regular budget, as EIP-8037's intrinsic state gas does, so a body does not take the
+    /// execution cap away from computation; and, as intrinsic gas, no reservoir a frame hands back
+    /// unwinds it onto the regular budget, so it is charged as no spill. It is charged here rather
+    /// than before the first frame because revm's runtime out-of-gas fallback rebuilds the
+    /// transaction's gas through this phase, and a transaction that runs out of gas there keeps its
+    /// body charged. Validation admitted no gas limit that cannot pay for it
+    /// ([`validate_initial_tx_gas`](Handler::validate_initial_tx_gas)).
+    ///
+    /// revm builds a system call's gas here, on no intrinsic gas, and so does its runtime
+    /// out-of-gas fallback, which a system call does not reach: it carries no value and its target
+    /// is no delegator. Every transaction's gas is split by the execution cap alone, the
+    /// system-address transaction's included, which is a deposit and not a system call; and under
+    /// the neutral configuration a system call's is not split, as revm's own runner has it.
+    fn tx_gas(&self, evm: &mut Self::Evm, init_and_floor_gas: &InitialAndFloorGas) -> GasTracker {
+        let mut gas = self.op.tx_gas(evm, init_and_floor_gas);
+        let history = evm.ctx_ref().additional_limit.intrinsic_history_gas();
+        if history != 0 {
+            let spilled = gas.state_gas_spilled();
+            let charged = gas.record_history_cost(history);
+            debug_assert!(charged, "validation admits no gas limit that cannot pay for the body");
+            gas.set_state_gas_spilled(spilled);
+        }
+        if evm.ctx_ref().splits_system_call_gas() {
+            let margin = gas.remaining().saturating_sub(SYSTEM_CALL_REGULAR_GAS_LIMIT);
+            gas.set_remaining(gas.remaining() - margin);
+            gas.set_reservoir(gas.reservoir() + margin);
+        }
+        gas
+    }
+
+    /// revm's first frame, on the transaction's pool, carrying as its start charge the history
+    /// charged before execution for the write record it makes; with a read of the block
+    /// beneficiary's account marked for gas detention when the transaction's recipient delegates
+    /// to the beneficiary: revm resolves that delegate through the journal, where the Host does
+    /// not see it.
+    ///
+    /// The pools are what the transaction has left of its data-size, KV-update and state-growth
+    /// limits once its body, the records of the authorities it applied, the accounts they created
+    /// and a deposit's created caller are counted, the data size under the frame cap
+    /// ([`AdditionalLimit::first_frame_pools`](crate::AdditionalLimit)); revm hands the frame the
+    /// whole of each.
+    fn first_frame_input(
         &mut self,
         evm: &mut Self::Evm,
-        init_and_floor_gas: &InitialAndFloorGas,
-    ) -> Result<FrameResult, Self::Error> {
-        if let Some(oog_frame_result) = self.before_execution(evm, init_and_floor_gas)? {
-            return Ok(oog_frame_result);
+        gas: &mut GasTracker,
+    ) -> Result<Option<FrameInit>, Self::Error> {
+        gas.set_pools_remaining(evm.ctx_ref().additional_limit.first_frame_pools());
+        let Some(mut frame) = self.op.first_frame_input(evm, gas)? else {
+            // The runtime gas phase could not pay for the first frame's start: EIP-2780's charge
+            // for the account the frame adds, a call's recipient or a creation's account, or the
+            // access to the code a delegated recipient runs, warm or cold. A price of that account
+            // charge that could not be read ends here too: the lookup recorded its cause, which
+            // fails the transaction when it settles. In each case revm takes the phase's state
+            // back, the authorizations with their records, and drops its partial charges by
+            // rebuilding the transaction's gas from its intrinsic cost, the history charged for
+            // the first frame's write record included, which no frame carries back.
+            evm.ctx_mut().additional_limit.take_back_authorities();
+            return Ok(None);
+        };
+        let charge = StartCharge::new(
+            evm.ctx_ref().additional_limit.first_frame_charge(),
+            PoolAmounts::ZERO,
+        );
+        match &mut frame.frame_input {
+            FrameInput::Call(inputs) => inputs.charged_start = charge,
+            FrameInput::Create(inputs) => inputs.set_charged_start(charge),
+            FrameInput::Empty => {}
         }
+        evm.ctx_mut().mark_beneficiary_delegate();
+        Ok(Some(frame))
+    }
 
-        let gas_limit = evm.ctx().tx().gas_limit() - init_and_floor_gas.initial_gas;
-        // Create first frame action
-        let first_frame_input = self.first_frame_input(evm, gas_limit)?;
+    /// Settles the outermost frame into the transaction's gas as op-revm does (op-revm replaces
+    /// revm's settlement, so revm's never runs here): a transaction whose own frame a limit stopped
+    /// settles like an EIP-8037 revert, its unspent regular gas and reservoir back to the sender.
+    ///
+    /// The write record the transaction's own frame makes was charged before execution and rides
+    /// on the frame's input as its start charge, which the settlement gives back when the frame
+    /// did not succeed, the way EIP-8037 gives back the state gas of the account that frame would
+    /// have created. A frame answered without returning through
+    /// [`frame_return_result`](EvmTr::frame_return_result) — revm's answer to the first frame, an
+    /// interceptor's, an inspector's — closes its start and gives up its stop here.
+    ///
+    /// Keeps the history gas the transaction spent, which its gas holds once the frame settled into
+    /// it: what the body was charged, and what the frames charged net of what they gave back; and
+    /// the history bytes it appended, which are what those charges were made for.
+    fn last_frame_result(
+        &mut self,
+        evm: &mut Self::Evm,
+        frame_result: &mut FrameResult,
+        parent_gas: &mut GasTracker,
+    ) -> Result<(), Self::Error> {
+        let layer = &mut evm.ctx_mut().additional_limit;
+        layer.close_start(0, frame_result.instruction_result().is_ok());
+        layer.take_frame_stop(frame_result, true);
+        self.op.last_frame_result(evm, frame_result, parent_gas)?;
+        let priced = evm.ctx_ref().prices_history();
+        let history = 0_u64.saturating_add_signed(frame_result.gas().history_gas_spent());
+        evm.ctx_mut().additional_limit.settle_history(priced, history);
+        Ok(())
+    }
 
-        // Run execution loop
-        let mut frame_result = self.run_exec_loop(evm, first_frame_input)?;
+    /// revm's post-execution, with the reservoir the transaction leaves unspent read first, where
+    /// revm builds the result's gas: before the EIP-7623 floor check, which absorbs the reservoir
+    /// into the floor's cost when the floor binds. The refund before it does not move the
+    /// reservoir.
+    fn post_execution(
+        &self,
+        evm: &mut Self::Evm,
+        exec_result: &mut FrameResult,
+        init_and_floor_gas: InitialAndFloorGas,
+        eip7702_gas_refund: i64,
+    ) -> Result<ResultGas, Self::Error> {
+        self.settled_reservoir.set(Some(exec_result.gas().reservoir()));
+        self.op.post_execution(evm, exec_result, init_and_floor_gas, eip7702_gas_refund)
+    }
 
-        // Handle last frame result
-        self.last_frame_result(evm, &mut frame_result)?;
-        Ok(frame_result)
+    fn reimburse_caller(
+        &self,
+        evm: &mut Self::Evm,
+        exec_result: &mut FrameResult,
+    ) -> Result<(), Self::Error> {
+        self.op.reimburse_caller(evm, exec_result)
+    }
+
+    fn refund(
+        &self,
+        evm: &mut Self::Evm,
+        exec_result: &mut FrameResult,
+        eip7702_refund: i64,
+    ) -> Result<(), Self::Error> {
+        self.op.refund(evm, exec_result, eip7702_refund)
     }
 
     fn reward_beneficiary(
         &self,
         evm: &mut Self::Evm,
-        exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
+        exec_result: &mut FrameResult,
     ) -> Result<(), Self::Error> {
-        if evm.ctx().disable_beneficiary {
-            return Ok(());
-        }
-
-        // Pre-REX6: frozen. Delegate unchanged so stable-spec replay is byte-for-byte —
-        // the post-execution fee-reward materialisations remain unaccounted exactly as
-        // historical REX5-and-earlier blocks recorded them.
-        if !evm.ctx().spec.is_enabled(MegaSpecId::REX6) {
-            return self.op.reward_beneficiary(evm, exec_result);
-        }
-
-        // REX6: op-revm credits the beneficiary + fee vaults HERE, after `last_frame_result`
-        // finalised the trackers — so these writes escape DataSize / KV / StateGrowth unless
-        // accounted now. Deposit / keyless-sandbox txs credit nothing (op-revm early-returns),
-        // so the diff naturally records nothing for them.
-        let snapshots = Self::snapshot_fee_recipients(evm)?;
-
-        self.op.reward_beneficiary(evm, exec_result)?;
-
-        for snapshot in snapshots {
-            let (balance, now_empty) =
-                Self::fee_recipient_balance_and_emptiness(evm, snapshot.address)?;
-            if balance == snapshot.balance {
-                continue;
-            }
-            // One account-info write = 40 bytes DataSize + 1 KV update; a newly materialised
-            // account also counts as +1 StateGrowth. TX-persistent lane (frames are gone).
-            let mut limit = evm.ctx().additional_limit.borrow_mut();
-            limit.data_size.merge_persistent_usage(ACCOUNT_INFO_WRITE_SIZE);
-            limit.kv_update.merge_persistent_usage(1);
-            if snapshot.was_empty && !now_empty {
-                limit.state_growth.merge_persistent_usage(1);
-            }
-        }
-
-        Ok(())
+        self.op.reward_beneficiary(evm, exec_result)
     }
 
-    fn last_frame_result(
-        &mut self,
-        evm: &mut Self::Evm,
-        frame_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
-    ) -> Result<(), Self::Error> {
-        let is_mini_rex = evm.ctx().spec.is_enabled(MegaSpecId::MINI_REX);
-        if is_mini_rex {
-            // Update the additional limit before returning the frame result
-            evm.ctx().additional_limit.borrow_mut().before_frame_return_result::<true>(frame_result)
-        }
-
-        // Call the inner last_frame_result function first
-        // This will finalize gas accounting according to REVM's rules:
-        // - Spends all gas_limit
-        // - Only refunds remaining gas if is_ok_or_revert()
-        self.op.last_frame_result(evm, frame_result)?;
-
-        // After REVM's gas accounting, we need to return the rescued gas from additional limits.
-        if is_mini_rex {
-            let ctx = evm.ctx_mut();
-
-            let additional_limit = ctx.additional_limit.borrow();
-            let gas = frame_result.gas_mut();
-            gas.erase_cost(additional_limit.rescued_gas);
-        }
-
-        Ok(())
-    }
-
+    /// op-revm's result, and the reservoir it settled with reported
+    /// ([`AdditionalLimit::reservoir_remaining`](crate::AdditionalLimit::reservoir_remaining)).
+    ///
+    /// revm's system-call path settles without [`post_execution`](Handler::post_execution): the
+    /// result it hands over here is the settled one, and the capture it finds is none, since the
+    /// report of the execution before consumed it. A deposit that halts is not a result: op-revm
+    /// turns it into a failed deposit, which leaves no reservoir.
     fn execution_result(
         &mut self,
         evm: &mut Self::Evm,
-        result: <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
-    ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
-        // Capture volatile data info for error reporting
-        let volatile_info = evm
-            .ctx()
-            .spec
-            .is_enabled(MegaSpecId::MINI_REX)
-            .then(|| {
-                let volatile_data_tracker = evm.ctx().volatile_data_tracker.borrow();
-                volatile_data_tracker.get_volatile_data_info()
-            })
-            .flatten();
-
-        // Deposit-style sandbox txs: bypass op-revm's HaltedDepositPostRegolith conversion so
-        // that a runtime halt surfaces as `Ok(Halt(actual_reason, actual_gas_used))` instead of
-        // being squashed into `FailedDeposit(gas_limit)`. The keyless-deploy outer flow needs
-        // the real halt reason to distinguish runtime halts (which must merge sandbox state and
-        // charge `sandbox_gas_used` against the outer gas counter) from validation-rejects
-        // (which still flow through `catch_error` and produce `FailedDeposit`).
-        let result = if evm.ctx().is_inside_sandbox() &&
-            evm.ctx().tx().tx_type() == DEPOSIT_TRANSACTION_TYPE
-        {
-            match core::mem::replace(evm.ctx().error(), Ok(())) {
-                Err(ContextError::Db(e)) => return Err(e.into()),
-                Err(ContextError::Custom(e)) => return Err(Self::Error::from_string(e)),
-                Ok(_) => (),
-            }
-            let exec_result =
-                post_execution_output(evm.ctx(), result).map_haltreason(OpHaltReason::Base);
-            evm.ctx().journal_mut().commit_tx();
-            evm.ctx().chain_mut().clear_tx_l1_cost();
-            evm.ctx().local_mut().clear();
-            evm.frame_stack().clear();
-            exec_result
-        } else {
-            self.op.execution_result(evm, result)?
-        };
-        Ok(result.map_haltreason(|reason| {
-            let mut additional_limit = evm.ctx().additional_limit.borrow_mut();
-            if additional_limit.is_exceeding_limit_halt(&reason) {
-                if let Some(access_type) = volatile_info {
-                    if let Some(halt) =
-                        additional_limit.detained_compute_gas_halt_reason(access_type)
-                    {
-                        return halt;
-                    }
-                }
-                // normal additional limit exceeded (no volatile data access, or detention
-                // was not more restrictive than the per-tx compute gas limit)
-                additional_limit
-                    .check_limit()
-                    .maybe_halt_reason()
-                    .expect("should have a halt reason")
-            } else {
-                // not due to additional limit exceeded
-                MegaHaltReason::Base(reason)
-            }
-        }))
+        result: FrameResult,
+        result_gas: revm::context::result::ResultGas,
+    ) -> Result<revm::context::result::ExecutionResult<Self::HaltReason>, Self::Error> {
+        let reservoir = self.settled_reservoir.take().unwrap_or_else(|| result.gas().reservoir());
+        let result = self.op.execution_result(evm, result, result_gas)?;
+        evm.ctx_mut().additional_limit.set_reservoir_remaining(reservoir);
+        Ok(result)
     }
 
+    /// op-revm's error handling, which answers a deposit's transaction error with a failed-deposit
+    /// halt and discards everything the deposit did. The halt is what the transaction reports;
+    /// what the deposit counted stands, the body and the Oracle hints it forwarded before it
+    /// halted, as for any transaction that halts. Any other error refuses the transaction, and the
+    /// layer's state is reset by the next one. A reservoir captured for a result that is not
+    /// reported is dropped here, so the next execution on this handler does not report it.
+    ///
+    /// A failed deposit still bumps its caller's nonce and mints, so one whose caller had no
+    /// account creates it: one account of state growth, which the transaction reports and its
+    /// block counts, though it pays no state gas for it and no limit stops a deposit that already
+    /// failed.
     fn catch_error(
         &self,
         evm: &mut Self::Evm,
         error: Self::Error,
-    ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
-        let result = self.op.catch_error(evm, error)?;
-        Ok(result.map_haltreason(MegaHaltReason::Base))
+    ) -> Result<revm::context::result::ExecutionResult<Self::HaltReason>, Self::Error> {
+        self.settled_reservoir.take();
+        let result = self.op.catch_error(evm, error);
+        let failed_deposit = matches!(
+            result,
+            Ok(revm::context::result::ExecutionResult::Halt {
+                reason: OpHaltReason::FailedDeposit,
+                ..
+            })
+        );
+        if failed_deposit && deposit_created_caller(evm.ctx()) {
+            evm.ctx_mut().additional_limit.count_created_caller();
+        }
+        result
     }
 }
 
-impl<DB, EVM, ERROR, ExtEnvs: ExternalEnvTypes> InspectorHandler
-    for MegaHandler<EVM, ERROR, EthFrame<EthInterpreter>>
+impl<DB, EVM, ERROR, ExtEnvs> InspectorHandler for MegaHandler<EVM, ERROR, EthFrame<EthInterpreter>>
 where
     DB: Database,
+    ExtEnvs: ExternalEnvTypes,
     MegaContext<DB, ExtEnvs>: ContextTr<Journal = Journal<DB>>,
-    Journal<DB>: revm::inspector::JournalExt,
+    Journal<DB>: JournalExt,
     EVM: InspectorEvmTr<
         Context = MegaContext<DB, ExtEnvs>,
         Frame = EthFrame<EthInterpreter>,
-        Inspector: Inspector<
-            <<Self as revm::handler::Handler>::Evm as EvmTr>::Context,
-            EthInterpreter,
-        >,
+        Inspector: Inspector<MegaContext<DB, ExtEnvs>, EthInterpreter>,
     >,
+    // Implied by `EvmTrError<EVM>`, but the `ContextTr<Journal = Journal<DB>>` bound above
+    // stops the compiler from normalizing the context's database type down to `DB`.
     ERROR: EvmTrError<EVM>
+        + From<DB::Error>
+        + From<ContextError<DB::Error>>
         + From<OpTransactionError>
-        + From<MegaTransactionError>
         + FromStringError
-        + IsTxError
-        + core::fmt::Debug,
+        + IsTxError,
 {
     type IT = EthInterpreter;
-
-    fn inspect_run_without_catch_error(
-        &mut self,
-        evm: &mut Self::Evm,
-    ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
-        self.before_run(evm)?;
-
-        let init_and_floor_gas = self.validate(evm)?;
-        let eip7702_refund = self.pre_execution(evm)? as i64;
-        let mut frame_result = self.inspect_execution(evm, &init_and_floor_gas)?;
-        self.post_execution(evm, &mut frame_result, init_and_floor_gas, eip7702_refund)?;
-        self.execution_result(evm, frame_result)
-    }
-
-    /// This function copies the logic from `Handler::execution` to add
-    /// new account storage gas and early OOG check with inspector support.
-    #[inline]
-    fn inspect_execution(
-        &mut self,
-        evm: &mut Self::Evm,
-        init_and_floor_gas: &InitialAndFloorGas,
-    ) -> Result<FrameResult, Self::Error> {
-        if let Some(oog_frame_result) = self.before_execution(evm, init_and_floor_gas)? {
-            return Ok(oog_frame_result);
-        }
-
-        let gas_limit = evm.ctx().tx().gas_limit() - init_and_floor_gas.initial_gas;
-        // Create first frame action
-        let first_frame_input = self.first_frame_input(evm, gas_limit)?;
-
-        // Run execution loop with inspector
-        let mut frame_result = self.inspect_run_exec_loop(evm, first_frame_input)?;
-
-        // Handle last frame result
-        self.last_frame_result(evm, &mut frame_result)?;
-        Ok(frame_result)
-    }
 }
 
-impl<DB, INSP, ExtEnvs: ExternalEnvTypes> revm::handler::EvmTr for MegaEvm<DB, INSP, ExtEnvs>
-where
-    DB: Database,
-{
+impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, ExtEnvs> {
     type Context = MegaContext<DB, ExtEnvs>;
-
     type Instructions = MegaInstructions<DB, ExtEnvs>;
-
     type Precompiles = PrecompilesMap;
-
     type Frame = EthFrame<EthInterpreter>;
 
     #[inline]
-    fn ctx(&mut self) -> &mut Self::Context {
-        &mut self.inner.ctx
+    fn all(
+        &self,
+    ) -> (&Self::Context, &Self::Instructions, &Self::Precompiles, &FrameStack<Self::Frame>) {
+        self.inner.all()
     }
 
     #[inline]
-    fn ctx_ref(&self) -> &Self::Context {
-        &self.inner.ctx
+    fn all_mut(
+        &mut self,
+    ) -> (
+        &mut Self::Context,
+        &mut Self::Instructions,
+        &mut Self::Precompiles,
+        &mut FrameStack<Self::Frame>,
+    ) {
+        self.inner.all_mut()
     }
 
+    /// Starts a frame, in this order:
+    ///
+    /// 1. the caller the start suspends, the frame on top of the stack, is settled for it
+    ///    ([`suspend`]): gas detention keeps its compute for the frame to add to the transaction's,
+    ///    and the share of its pool the frame starts with is held to the frame cap;
+    /// 2. the depth guard: a frame past the call-stack limit is answered with `CallTooDeep`, as
+    ///    revm answers it, before anything could intercept it or count its start;
+    /// 3. the keyless dispatch ([`keyless::is_dispatched`]): a `keylessDeploy` call a transaction
+    ///    makes is answered when it carries value, and otherwise readied for revm to build as the
+    ///    frame whose actions are made by hand ([`keyless::ready`]);
+    /// 4. system contract interception ([`MegaEvm::intercept`]), for any other frame, which answers
+    ///    the frame or lets it start;
+    /// 5. where the journal stands is marked, and the accounts the start writes on its frame and a
+    ///    creation's creator are read as they stand ([`FrameStart::of`]);
+    /// 6. revm builds the frame, or answers it, and the start is held to the limits on the pool its
+    ///    frame starts with, where its records and transfer log are drawn
+    ///    ([`AdditionalLimit::count_start`](crate::AdditionalLimit)): a frame revm built whose
+    ///    start crossed a limit ends with the stop before it runs an instruction ([`stop_action`],
+    ///    [`end_before_it_runs`]); a success revm answered gives way to the stop
+    ///    ([`stop_the_answer`]), what its start moved taken back to the mark, as revm takes back a
+    ///    frame that fails ([`take_back_a_stopped_answer`]). An answer that failed — a start revm
+    ///    refuses on its caller's account, a precompile that fails, a creation revm answers — kept
+    ///    nothing, revm having taken back what it moved, and is held to nothing: its result is
+    ///    revm's. A creation's creator is handed to its return, which counts the record of the
+    ///    nonce revm bumped ([`frame_return_result`](EvmTr::frame_return_result)).
+    ///
+    /// A frame revm built is held to the compute limit for its first run (gas detention's
+    /// [`on_frame_run`](Detention::on_frame_run)). A `keylessDeploy` call's frame runs no
+    /// instruction: its first action is made here ([`keyless::start`]). A refusal ends the frame
+    /// before it runs, as the stop does; the creation is set on its interpreter, which returns it
+    /// when the frame runs, and starts it through this same frame start.
+    ///
+    /// A frame answered at step 3, 4 or 6 — a `keylessDeploy` call carrying value, an
+    /// interceptor's answer, a precompile's, revm's for a call it did not start — is held to the
+    /// compute limit, as a frame that ran would be ([`settle_answer`]). A precompile, which revm
+    /// runs at step 6, is decided from its price before it runs when the engine can price it, and
+    /// answered without running when that price crosses the compute limit, before revm moves
+    /// anything for it, so it is held to the price alone; one it cannot price is run on the gas
+    /// the limit leaves the frame rather than on all its caller forwarded ([`hold_precompile`]).
+    ///
+    /// Step 2 is the pre-frame check: it answers a frame nothing may start. No limit has a part in
+    /// it: validation admits no transaction a limit would stop before its first frame, and a start
+    /// is held to the limits with the writes it makes, at step 6. The frame's own writes are
+    /// counted after the interceptor, because an intercepted frame's writes are the interceptor's
+    /// to count. A `keylessDeploy` call's frame is built as any call's, and its creation is started
+    /// by its first action, through this same frame start, as its child.
+    ///
+    /// revm's inspected frame start calls this one once the inspector's `frame_start` let the
+    /// frame start; a frame the inspector answers itself never reaches it, and its answer is taken
+    /// as given.
     #[inline]
-    fn ctx_instructions(&mut self) -> (&mut Self::Context, &mut Self::Instructions) {
-        (&mut self.inner.ctx, &mut self.inner.instruction)
-    }
-
-    #[inline]
-    fn ctx_precompiles(&mut self) -> (&mut Self::Context, &mut Self::Precompiles) {
-        (&mut self.inner.ctx, &mut self.inner.precompiles)
-    }
-
-    fn frame_stack(&mut self) -> &mut FrameStack<Self::Frame> {
-        &mut self.inner.frame_stack
-    }
-
     fn frame_init(
         &mut self,
-        mut frame_init: <Self::Frame as revm::handler::FrameTr>::FrameInit,
+        mut frame_init: FrameInit,
     ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
-        let is_mini_rex_enabled = self.ctx().spec.is_enabled(MegaSpecId::MINI_REX);
-        let is_rex_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX);
-        let is_rex3_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX3);
-        let is_rex4_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX4);
-        let is_rex5_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX5);
-        let additional_limit = self.ctx().additional_limit.clone();
-
-        // Check if this is a call to the oracle contract and mark it as accessed.
-        // This handles both direct transaction calls and internal CALL operations.
-        // Rex3+: Oracle access gas detention is triggered by SLOAD (not CALL), so skip this
-        // CALL-based check for Rex3 and later specs.
-        //
-        // The check uses `target_address` which equals the oracle address for CALL and
-        // STATICCALL, but equals the caller's address for CALLCODE and DELEGATECALL (since
-        // those execute in the caller's state context). CALLCODE and DELEGATECALL are therefore
-        // never detected here by design — they do not access oracle state.
-        //
-        // MiniRex: Only CALL triggers oracle access detection. STATICCALL, CALLCODE, and
-        //   DELEGATECALL bypass it.
-        // Rex: STATICCALL is added to oracle access detection (unifying CALL-like behavior).
-        if is_mini_rex_enabled && !is_rex3_enabled {
-            if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
-                let detect_oracle = match call_inputs.scheme {
-                    CallScheme::Call => true,
-                    // Rex fixes the bug in MiniRex where STATICCALL bypasses oracle access
-                    // detection.
-                    CallScheme::StaticCall => is_rex_enabled,
-                    // CALLCODE and DELEGATECALL have target_address = caller (not oracle),
-                    // so check_and_mark_oracle_access would never match anyway.
-                    CallScheme::CallCode | CallScheme::DelegateCall => false,
-                };
-                // Mega system address is exempted from volatile data access enforcement.
-                if detect_oracle && call_inputs.caller != self.ctx().system_address {
-                    let volatile_data_tracker = self.ctx().volatile_data_tracker.clone();
-                    let mut tracker = volatile_data_tracker.borrow_mut();
-                    if tracker.check_and_mark_oracle_access(&call_inputs.target_address) {
-                        if let Some(compute_gas_limit) = tracker.get_compute_gas_limit() {
-                            additional_limit.borrow_mut().set_compute_gas_limit(compute_gas_limit);
-                        }
-                    }
-                }
-            }
+        // The frame on top of the stack, if any, is the caller, which suspends on this start.
+        if self.inner.frame_stack.index().is_some() {
+            suspend(&mut self.inner.ctx, self.inner.frame_stack.get(), &mut frame_init);
         }
-
-        // REX4+: If a TX-level limit is already exceeded (e.g., intrinsic DataSize/KVUpdate
-        // overflow from before_tx_start), abort before interceptor dispatch. Interceptors
-        // return synthetic results that skip before_frame_init(), which would otherwise
-        // catch the exceeded limit.
-        //
-        // Gated to REX4 only: pre-REX4 specs use TX-global check_limit() which catches
-        // intrinsic overflow during execution. Changing pre-REX4 behavior would break replay.
-        if is_rex4_enabled {
-            // Separate borrow scope: the RefMut must be dropped before push_empty_frame
-            // borrows again.
-            let exceeded = additional_limit
-                .borrow_mut()
-                .frame_result_if_exceeding_limit(&frame_init.frame_input);
-            if let Some(frame_result) = exceeded {
-                additional_limit.borrow_mut().push_empty_frame();
-                return Ok(FrameInitResult::Result(frame_result));
-            }
+        if let Some(result) = call_too_deep(&frame_init) {
+            return Ok(ItemOrResult::Result(result));
         }
-
-        // REX5+: enforce `CALL_STACK_LIMIT` before interceptor dispatch. Interceptors
-        // short-circuit before revm's `make_call_frame` runs its own depth check, so
-        // without this guard a system contract could be invoked at unbounded depth.
-        // Scope mirrors interceptor dispatch (Call/StaticCall only); other schemes still
-        // flow into revm where its own depth check applies.
-        if is_rex5_enabled {
-            if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
-                if matches!(call_inputs.scheme, CallScheme::Call | CallScheme::StaticCall) &&
-                    frame_init.depth > CALL_STACK_LIMIT as usize
-                {
-                    let frame_result = gen_call_too_deep_result(call_inputs);
-                    additional_limit.borrow_mut().push_empty_frame();
-                    return Ok(FrameInitResult::Result(frame_result));
-                }
-            }
-        }
-
-        // System contract interception dispatch.
-        // Each interceptor checks target address and ABI-decodes function selectors.
-        // Side-effect interceptors (oracle hint) usually return None.
-        // Short-circuiting paths return Some(FrameResult).
-        // These synthetic results skip `AdditionalLimit::before_frame_init`; we only push an
-        // empty tracking frame to keep the additional-limit stacks aligned.
-        //
-        // Only `CALL` and `STATICCALL` enter interceptor dispatch. `CALLCODE` and
-        // `DELEGATECALL` execute in the caller's state context, so intercepting them
-        // would apply system-contract logic in the wrong state context — the scheme
-        // guard enforces this policy explicitly rather than relying on upstream
-        // call-frame semantics to keep `target_address` distinct.
-        if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
-            if matches!(call_inputs.scheme, CallScheme::Call | CallScheme::StaticCall) {
-                if let Some(result) =
-                    dispatch_system_contract_interceptors(self.ctx(), call_inputs, frame_init.depth)
-                {
-                    // Push an empty frame to keep the limit tracker stack balanced:
-                    // `frame_return_result` / `last_frame_result` will pop a frame, but
-                    // `after_frame_init` (which normally pushes) was skipped.
-                    if is_mini_rex_enabled {
-                        additional_limit.borrow_mut().push_empty_frame();
-                    }
-                    return Ok(FrameInitResult::Result(result));
-                }
-            }
-        }
-
-        if is_mini_rex_enabled {
-            if let Some(frame_result) = additional_limit
-                .borrow_mut()
-                .before_frame_init(&mut frame_init, self.ctx().journal_mut())?
+        if frame_init.depth == 0 {
+            if let Some(mut result) = stop_before_the_first_frame(&mut self.inner.ctx, &frame_init)
             {
-                return Ok(FrameInitResult::Result(frame_result));
+                let gas_limit = input_gas_limit(&frame_init.frame_input);
+                settle_answer(&mut self.inner.ctx, 0, gas_limit, &mut result);
+                return Ok(ItemOrResult::Result(result));
             }
         }
-
-        // call the inner frame_init function to initialize the frame
-        let init_result = self.inner.frame_init(frame_init)?;
-
-        // Apply the additional limits only when the `MINI_REX` spec is enabled.
-        if is_mini_rex_enabled {
-            additional_limit.borrow_mut().after_frame_init(&init_result);
+        let keyless = keyless::is_dispatched(&self.inner.ctx, &frame_init);
+        let answer = if keyless {
+            keyless::ready(&mut self.inner.ctx, &mut frame_init)?
+        } else {
+            self.intercept(&frame_init)
+        };
+        let (depth, gas_limit) = (frame_init.depth, input_gas_limit(&frame_init.frame_input));
+        if let Some(mut result) = answer {
+            settle_answer(&mut self.inner.ctx, depth, gas_limit, &mut result);
+            return Ok(ItemOrResult::Result(result));
         }
-
-        Ok(init_result)
+        let ctx = &mut self.inner.ctx;
+        let start = FrameStart::of(ctx, &frame_init)?;
+        let hold = hold_precompile(
+            ctx,
+            &self.inner.precompiles,
+            &self.priced_precompiles,
+            &mut frame_init,
+        );
+        if hold == PrecompileHold::Crossing {
+            // revm never decides the start, so nothing moved and nothing is counted: the answer is
+            // held to the price alone, which its settlement turns into the stop. A creation is
+            // never a precompile's.
+            let mut result = crossing_answer(&frame_init.frame_input);
+            settle_answer(ctx, depth, gas_limit, &mut result);
+            return Ok(ItemOrResult::Result(result));
+        }
+        let decided = match self.inner.frame_init(frame_init)? {
+            ItemOrResult::Item(_) => None,
+            ItemOrResult::Result(result) => Some(result),
+        };
+        let ctx = &mut self.inner.ctx;
+        let Some(mut result) = decided else {
+            ctx.additional_limit.open_start(depth, start.creator);
+            let frame = self.inner.frame_stack.get();
+            let verdict = start.count(ctx, frame.interpreter.gas.tracker_mut());
+            ctx.detention.on_frame_run(&mut frame.interpreter.gas, depth);
+            let first = if verdict.exceeded_limit() {
+                Some(stop_action(ctx, frame, &verdict))
+            } else if keyless {
+                Some(keyless::start(ctx, frame)?)
+            } else {
+                None
+            };
+            match first {
+                Some(action @ InterpreterAction::Return(_)) => {
+                    let result = end_before_it_runs(ctx, frame, action)?;
+                    self.inner.frame_stack.pop();
+                    return Ok(ItemOrResult::Result(result));
+                }
+                Some(action) => frame.interpreter.bytecode.set_action(action),
+                None => {}
+            }
+            return Ok(ItemOrResult::Item(self.inner.frame_stack.get()));
+        };
+        debug_assert!(!keyless, "revm builds a keylessDeploy call's frame");
+        if let PrecompileHold::Clamped(withheld) = hold {
+            Detention::restore_forward(result.interpreter_result_mut(), withheld);
+        }
+        let succeeded = result.instruction_result().is_ok();
+        // An answer that failed kept nothing: revm took back what its start moved — a value its
+        // caller could not fund, a precompile's failure — or, for a creation, what it made at an
+        // occupied address. It is held to nothing, and its result is revm's. A creation revm
+        // answers creates nothing; its creator's record, if revm bumped the nonce, is counted on
+        // the creator as the answer returns, as a built creation's is. A call revm answered with a
+        // success is held to the records its start made, which revm committed.
+        ctx.additional_limit.open_start(depth, start.creator);
+        if succeeded && matches!(result, FrameResult::Call(_)) {
+            let verdict = start.count(ctx, result.gas_mut().tracker_mut());
+            stop_the_answer_at(ctx, &start, &mut result, verdict);
+        }
+        settle_answer(ctx, depth, gas_limit, &mut result);
+        take_back_a_stopped_answer(ctx, start.mark, succeeded, &result);
+        Ok(ItemOrResult::Result(result))
     }
 
-    /// This method copies the logic from `revm::handler::EvmTr::frame_run` to and add additional
-    /// logic before `process_next_action` to handle the additional limit.
+    /// revm's frame run. The actions the engine makes for a frame outside an instruction — the
+    /// creation a `keylessDeploy` call starts and the call's answer ([`EvmTr::frame_init`],
+    /// [`EvmTr::frame_return_result`]), and the stop of a frame a child returned into over a limit
+    /// ([`EvmTr::frame_return_result`]) — are set on the frame's interpreter, and revm's run, plain
+    /// or inspected, returns an action set before it runs without running an instruction or calling
+    /// the inspector's `step`.
     #[inline]
     fn frame_run(
         &mut self,
     ) -> Result<FrameInitOrResult<Self::Frame>, ContextDbError<Self::Context>> {
-        let frame = self.inner.frame_stack.get();
-        let context = &mut self.inner.ctx;
-        let instructions = &mut self.inner.instruction;
-
-        // Before frame_run Hook
-        let mut action = if let Some(action) = Self::before_frame_run(context, frame)? {
-            action
-        } else {
-            frame.interpreter.run_plain(instructions.instruction_table(), context)
-        };
-
-        // After frame_run instructions Hook
-        Self::after_frame_run_instructions(context, frame, &mut action)?;
-
-        // Record gas remaining before frame action processing
-        let gas_remaining_before = match (&action, context.spec.is_enabled(MegaSpecId::MINI_REX)) {
-            (InterpreterAction::Return(interpreter_result), true) => {
-                Some(interpreter_result.gas.remaining())
-            }
-            _ => None,
-        };
-
-        // Process the frame action, it may need to create a new frame or return the current frame
-        // result.
-        let mut frame_output = frame
-            .process_next_action::<_, ContextDbError<Self::Context>>(context, action)
-            .inspect(|i| {
-                if i.is_result() {
-                    frame.set_finished(true);
-                }
-            })?;
-
-        // After frame_run Hook
-        Self::after_frame_run(context, &mut frame_output, gas_remaining_before)?;
-
-        Ok(frame_output)
+        self.inner.frame_run()
     }
 
+    /// Classifies the result of the frame on top of the stack, which ran and returns, for gas
+    /// detention ([`end_frame`]). revm's loops, plain and inspected, hand it here once the frame's
+    /// last action was processed — `return_create` included — and before anything else sees it:
+    /// the inspector's `call_end`, `create_end` and `frame_end`, then
+    /// [`frame_return_result`](EvmTr::frame_return_result) and the caller or, for the transaction's
+    /// own frame, [`last_frame_result`](Handler::last_frame_result). So a frame that crossed the
+    /// compute limit ends with the stop for all of them, an inspector included.
+    ///
+    /// A result [`frame_init`](EvmTr::frame_init) returns does not come here: a frame that ends
+    /// before it runs is classified where it ends ([`end_before_it_runs`]), and an answer is held
+    /// to the limit by [`settle_answer`].
+    #[inline]
+    fn frame_run_result(
+        &mut self,
+        result: &mut FrameResult,
+    ) -> Result<(), ContextDbError<Self::Context>> {
+        let depth = self.inner.frame_stack.get().depth;
+        end_frame(&mut self.inner.ctx, result, depth);
+        Ok(())
+    }
+
+    /// Returns the result to the caller as revm does, in this order:
+    ///
+    /// 1. its start is closed: a frame that kept nothing has what the transaction keeps restored to
+    ///    what it kept when its start began, and one that kept its start gives its caller back what
+    ///    the start's credit is ([`close_start`](crate::AdditionalLimit)), refilled on the result
+    ///    before revm merges it, which lands in the caller's pools as a refill after the merge
+    ///    would;
+    /// 2. revm merges the result into the caller; a creation's creator is then counted the record
+    ///    of the nonce revm bumped for it, held to its budget and then to the transaction's limit
+    ///    ([`hold_creator`]), the caller is held to the transaction's limits with what the frames
+    ///    keep after the return — a failure restores what they kept at its start, which a hint sent
+    ///    meanwhile may leave above a limit
+    ///    ([`AdditionalLimit::hold_caller`](crate::AdditionalLimit)) — and, by gas detention, to
+    ///    the compute limit for its resume ([`on_frame_run`](Detention::on_frame_run)): a caller
+    ///    over a limit returns the stop without running another instruction, set on its interpreter
+    ///    for its run to return.
+    ///
+    /// The creation a `keylessDeploy` call started returns into the call: what the call answers is
+    /// read off the creation's result before revm merges it ([`keyless::returning`]), settled into
+    /// the call after, the signer's nonce record counted there ([`keyless::settle`]), and set on
+    /// the call's interpreter, unless it has a stop to return ([`keyless::answer`]).
+    ///
+    /// A frame that ran was classified when its run returned
+    /// ([`frame_run_result`](EvmTr::frame_run_result)); what arrives here is the result the caller
+    /// settles, an inspector's rewrite included, which is taken as given.
+    #[inline]
     fn frame_return_result(
         &mut self,
-        mut result: <Self::Frame as revm::handler::FrameTr>::FrameResult,
-    ) -> Result<
-        Option<<Self::Frame as revm::handler::FrameTr>::FrameResult>,
-        ContextDbError<Self::Context>,
-    > {
-        let ctx = self.ctx_ref();
-        let is_mini_rex = ctx.spec.is_enabled(MegaSpecId::MINI_REX);
-        // Apply the additional limits only when the `MINI_REX` spec is enabled.
-        if is_mini_rex {
-            // call the `on_frame_return` function to update the `AdditionalLimit` if the limit is
-            // exceeded, return the error frame result
-            ctx.additional_limit.borrow_mut().before_frame_return_result::<false>(&mut result);
+        mut result: FrameResult,
+    ) -> Result<Option<FrameResult>, ContextDbError<Self::Context>> {
+        let stack = &mut self.inner.frame_stack;
+        let (depth, outermost) = match stack.index() {
+            Some(index) if stack.get().is_finished() => (stack.get().depth, index == 0),
+            Some(_) => (stack.get().depth + 1, false),
+            None => (0, true),
+        };
+        let layer = &mut self.inner.ctx.additional_limit;
+        let (credit, creator) = layer.close_start(depth, result.instruction_result().is_ok());
+        if credit != 0 {
+            result.gas_mut().refill_history(credit);
         }
-
-        // Call the inner frame_return_result function to return the frame result.
-        let ret = self.inner.frame_return_result(result)?;
-
-        // Rex4+: Re-enable volatile data access when the disabling frame has returned.
-        // The inner handler has already popped the frame and committed/reverted the journal,
-        // so journal depth is decremented at this point. If it dropped below disable_depth,
-        // the frame that invoked disableVolatileDataAccess() has returned and the disable
-        // should no longer restrict sibling calls.
-        if self.ctx_ref().spec.is_enabled(MegaSpecId::REX4) {
-            let depth = self.ctx_ref().journal_ref().depth();
-            self.ctx_ref().volatile_data_tracker.borrow_mut().enable_access_if_returning(depth);
+        layer.take_frame_stop(&result, outermost);
+        let creation = keyless::returning(&self.inner.ctx, &mut self.inner.frame_stack, &result);
+        let returned = self.inner.frame_return_result(result)?;
+        if returned.is_some() {
+            return Ok(returned);
         }
-
-        Ok(ret)
+        let ctx = &mut self.inner.ctx;
+        let caller = self.inner.frame_stack.get();
+        let (stop, deployment) = match creation {
+            Some(creation) => {
+                let gas = &mut caller.interpreter.gas;
+                let (deployment, stop) = keyless::settle(ctx, gas, creation, creator)?;
+                (stop, Some(deployment))
+            }
+            None => {
+                let bumped = creator.filter(|creator| ctx.accounts().bumped(creator));
+                let gas = caller.interpreter.gas.tracker_mut();
+                (bumped.and_then(|creator| hold_creator(ctx, gas, &creator)), None)
+            }
+        };
+        let stop = stop.or_else(|| ctx.additional_limit.hold_caller());
+        ctx.detention.on_frame_run(&mut caller.interpreter.gas, caller.depth);
+        let action = match (stop, deployment) {
+            (Some(stop), _) => stop_action(ctx, caller, &stop),
+            (None, Some(deployment)) => keyless::answer(ctx, &deployment, caller.interpreter.gas),
+            (None, None) => return Ok(None),
+        };
+        caller.interpreter.bytecode.set_action(action);
+        Ok(None)
     }
 }
 
-impl<DB, INSP, ExtEnvs: ExternalEnvTypes> revm::inspector::InspectorEvmTr
-    for MegaEvm<DB, INSP, ExtEnvs>
+impl<DB, INSP, ExtEnvs> InspectorEvmTr for MegaEvm<DB, INSP, ExtEnvs>
 where
     DB: Database,
-    INSP: Inspector<MegaContext<DB, ExtEnvs>>,
+    INSP: Inspector<MegaContext<DB, ExtEnvs>, EthInterpreter>,
+    ExtEnvs: ExternalEnvTypes,
 {
     type Inspector = INSP;
 
-    fn inspector(&mut self) -> &mut Self::Inspector {
-        &mut self.inner.inspector
+    #[inline]
+    fn all_inspector(
+        &self,
+    ) -> (
+        &Self::Context,
+        &Self::Instructions,
+        &Self::Precompiles,
+        &FrameStack<Self::Frame>,
+        &Self::Inspector,
+    ) {
+        let evm = &self.inner;
+        (&evm.ctx, &evm.instruction, &evm.precompiles, &evm.frame_stack, &evm.inspector)
     }
 
-    fn ctx_inspector(&mut self) -> (&mut Self::Context, &mut Self::Inspector) {
-        (&mut self.inner.ctx, &mut self.inner.inspector)
-    }
-
-    fn ctx_inspector_frame(
+    #[inline]
+    fn all_mut_inspector(
         &mut self,
-    ) -> (&mut Self::Context, &mut Self::Inspector, &mut Self::Frame) {
-        (&mut self.inner.ctx, &mut self.inner.inspector, self.inner.frame_stack.get())
-    }
-
-    fn ctx_inspector_frame_instructions(
-        &mut self,
-    ) -> (&mut Self::Context, &mut Self::Inspector, &mut Self::Frame, &mut Self::Instructions) {
+    ) -> (
+        &mut Self::Context,
+        &mut Self::Instructions,
+        &mut Self::Precompiles,
+        &mut FrameStack<Self::Frame>,
+        &mut Self::Inspector,
+    ) {
+        let evm = &mut self.inner;
         (
-            &mut self.inner.ctx,
-            &mut self.inner.inspector,
-            self.inner.frame_stack.get(),
-            &mut self.inner.instruction,
+            &mut evm.ctx,
+            &mut evm.instruction,
+            &mut evm.precompiles,
+            &mut evm.frame_stack,
+            &mut evm.inspector,
         )
     }
+}
 
-    /// Override `inspect_frame_init` to handle the case when inspector returns early.
-    ///
-    /// When an inspector's `call` or `create` hook returns `Some(outcome)`, the default
-    /// implementation returns early without calling `frame_init`. This means no frame is
-    /// pushed to the additional limit trackers. However, `frame_return_result` will still
-    /// be called and expect to pop a frame.
-    ///
-    /// To keep the frame stacks aligned, we push a dummy frame when inspector returns early.
-    #[inline]
-    fn inspect_frame_init(
-        &mut self,
-        mut frame_init: <Self::Frame as FrameTr>::FrameInit,
-    ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
-        let (ctx, inspector) = self.ctx_inspector();
-        let is_mini_rex_enabled = ctx.spec.is_enabled(MegaSpecId::MINI_REX);
-        let is_rex4_enabled = ctx.spec.is_enabled(MegaSpecId::REX4);
-        let is_rex5_enabled = ctx.spec.is_enabled(MegaSpecId::REX5);
+/// Settles `caller`, the frame on top of the stack, which suspends to start `child`: gas detention
+/// keeps its compute for the child's start to add to the transaction's, with the stipend revm
+/// gives a value call's child, which the caller did not forward
+/// ([`on_frame_suspend`](Detention::on_frame_suspend)), and the share of its pool the child starts
+/// with is held to the frame cap ([`cap_the_shares`]).
+///
+/// It runs where the start reaches [`EvmTr::frame_init`]: under an inspector, after the
+/// inspector's `frame_start` saw the start. A start the inspector answers itself settles nothing:
+/// the caller resumes on the answer as its opcode left it.
+#[inline]
+fn suspend<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    caller: &mut EthFrame<EthInterpreter>,
+    child: &mut FrameInit,
+) {
+    let stipend = value_call_stipend(&child.frame_input, ctx.gas_params().call_stipend());
+    ctx.detention.on_frame_suspend(&caller.interpreter.gas, caller.depth, stipend);
+    let caps = ctx.additional_limit.frame_caps();
+    cap_the_shares(ctx.gas_params(), caps, &mut caller.interpreter.gas, child);
+}
 
-        // Check if inspector wants to skip this call/create
-        if let Some(mut output) = frame_start(ctx, inspector, &mut frame_init.frame_input) {
-            // Inspector intercepted — `frame_init()` is skipped entirely, so neither
-            // `frame_result_if_exceeding_limit` nor `before_frame_init` would run.
-            //
-            // The priority order below mirrors `frame_init`'s exact order so that a
-            // TX-level additional-limit exceed is reported instead of being shadowed by
-            // a CallTooDeep guard:
-            //   1. TX-level limit exceed (REX4+)
-            //   2. CALL_STACK_LIMIT depth guard (REX5+)
-            //   3. Deliver the inspector's synthetic output
-            // Each early-return path calls `frame_end` to keep inspector callbacks paired.
+/// The action of `frame` that stops it at the limit `verdict` names before it runs another
+/// instruction: a revert carrying `MegaLimitExceeded` on the gas the frame holds. A frame revm just
+/// built whose start crossed the limit returns it before its first instruction: its journal
+/// checkpoint takes back what the start moved and its transfer log, and a creation keeps its
+/// creator's nonce bump, which revm makes before the checkpoint, its record counted on the creator
+/// once the creation returned. A creator that record put over a limit returns it on its resume.
+#[cold]
+#[inline(never)]
+fn stop_action<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    frame: &EthFrame<EthInterpreter>,
+    verdict: &LimitCheck,
+) -> InterpreterAction {
+    let output = ctx.additional_limit.note_frame_stop(verdict);
+    InterpreterAction::new_return(InstructionResult::Revert, output, frame.interpreter.gas)
+}
 
-            // (1) REX4+: if a TX-level limit is already exceeded (e.g., intrinsic
-            // overflow), abort to ensure correct gas rescue before inspector callbacks.
-            // Gated to REX4 to avoid changing stable spec behavior.
-            if is_rex4_enabled {
-                let exceeded = ctx
-                    .additional_limit
-                    .borrow_mut()
-                    .frame_result_if_exceeding_limit(&frame_init.frame_input);
-                if let Some(mut frame_result) = exceeded {
-                    ctx.additional_limit.borrow_mut().push_empty_frame();
-                    frame_end(ctx, inspector, &frame_init.frame_input, &mut frame_result);
-                    return Ok(ItemOrResult::Result(frame_result));
-                }
-            }
-            // (2) REX5+: enforce CALL_STACK_LIMIT for Call/StaticCall so an inspector
-            // cannot deliver a synthetic call result at unbounded depth, mirroring the
-            // protection added to `frame_init` before interceptor dispatch.
-            if is_rex5_enabled {
-                if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
-                    if matches!(call_inputs.scheme, CallScheme::Call | CallScheme::StaticCall) &&
-                        frame_init.depth > CALL_STACK_LIMIT as usize
-                    {
-                        let mut frame_result = gen_call_too_deep_result(call_inputs);
-                        ctx.additional_limit.borrow_mut().push_empty_frame();
-                        frame_end(ctx, inspector, &frame_init.frame_input, &mut frame_result);
-                        return Ok(ItemOrResult::Result(frame_result));
-                    }
-                }
-            }
-            // (3) MINI_REX+: push empty frame to keep the limit tracker stack balanced
-            // (`before_frame_return_result` will pop).
-            if is_mini_rex_enabled {
-                ctx.additional_limit.borrow_mut().push_empty_frame();
-            }
-            frame_end(ctx, inspector, &frame_init.frame_input, &mut output);
-            return Ok(ItemOrResult::Result(output));
-        }
+/// Ends `frame`, which revm just built, with `action`, the return made for it before it runs an
+/// instruction — the stop its start crossed, or a `keylessDeploy` call's refusal — as revm's
+/// frame run ends a frame that returns: revm settles the frame's journal checkpoint and builds its
+/// result, which gas detention then classifies ([`end_frame`]).
+///
+/// The frame never ran an instruction, so it is returned as an answer is, off the stack: its
+/// caller resumes on it, and an inspector sees it start and end, and neither an interpreter nor
+/// what its start journaled when the return reverts it.
+#[cold]
+#[inline(never)]
+fn end_before_it_runs<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    frame: &mut EthFrame<EthInterpreter>,
+    action: InterpreterAction,
+) -> Result<FrameResult, ContextDbError<MegaContext<DB, ExtEnvs>>> {
+    let next =
+        frame.process_next_action::<_, ContextDbError<MegaContext<DB, ExtEnvs>>>(ctx, action);
+    let ItemOrResult::Result(mut result) = next? else {
+        unreachable!("a frame that returns has a result")
+    };
+    end_frame(ctx, &mut result, frame.depth);
+    Ok(result)
+}
 
-        // Normal path - delegate to frame_init (which pushes a real frame)
-        let frame_input = frame_init.frame_input.clone();
-        if let ItemOrResult::Result(mut output) = self.frame_init(frame_init)? {
-            let (ctx, inspector) = self.ctx_inspector();
-            frame_end(ctx, inspector, &frame_input, &mut output);
-            return Ok(ItemOrResult::Result(output));
-        }
-
-        // Frame created successfully - initialize the interpreter
-        let (ctx, inspector, frame) = self.ctx_inspector_frame();
-        inspector.initialize_interp(frame.interpreter(), ctx);
-        Ok(ItemOrResult::Item(frame))
-    }
-
-    /// This method copies the logic from `MegaEvm::frame_run` with inspector support.
-    /// It adds the same additional limit checks while using `inspect_instructions` instead of
-    /// `run_plain`.
-    #[inline]
-    fn inspect_frame_run(
-        &mut self,
-    ) -> Result<FrameInitOrResult<Self::Frame>, ContextDbError<Self::Context>> {
-        let (ctx, inspector, frame, instructions) = self.ctx_inspector_frame_instructions();
-
-        let mut action = if let Some(action) = Self::before_frame_run(ctx, frame)? {
-            action
-        } else {
-            inspect_instructions(
-                ctx,
-                frame.interpreter(),
-                inspector,
-                instructions.instruction_table(),
-            )
-        };
-
-        // Apply additional limits and storage gas cost
-        Self::after_frame_run_instructions(ctx, frame, &mut action)?;
-
-        // Record gas remaining before frame action processing
-        let gas_remaining_before = match (&action, ctx.spec.is_enabled(MegaSpecId::MINI_REX)) {
-            (InterpreterAction::Return(interpreter_result), true) => {
-                Some(interpreter_result.gas.remaining())
-            }
-            _ => None,
-        };
-
-        // Process the frame action, it may need to create a new frame or return the current frame
-        // result.
-        let mut frame_output = frame
-            .process_next_action::<_, ContextDbError<Self::Context>>(ctx, action)
-            .inspect(|i| {
-                if i.is_result() {
-                    frame.set_finished(true);
-                }
-            })?;
-
-        // After frame_run Hook
-        Self::after_frame_run(ctx, &mut frame_output, gas_remaining_before)?;
-
-        // Call frame_end for inspector callback
-        if let ItemOrResult::Result(frame_result) = &mut frame_output {
-            let (ctx, inspector, frame) = self.ctx_inspector_frame();
-            frame_end(ctx, inspector, frame.frame_input(), frame_result);
-        }
-
-        Ok(frame_output)
+/// Classifies `result`, the result of a frame at `depth` that ran, for gas detention, once revm
+/// processed the frame's last action — `return_create` included, whose deposit and hash charges
+/// are the creating frame's own compute.
+///
+/// A frame that ran out of gas on a charge the withheld part of its gas would have paid crossed
+/// the compute limit rather than its own gas: its halt becomes the compute stop, a revert of that
+/// frame alone ([`stop_at_the_compute_limit`]). Every other out-of-gas halts, as it would without
+/// the read.
+#[inline]
+fn end_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    result: &mut FrameResult,
+    depth: usize,
+) {
+    let instruction_result = result.instruction_result();
+    if let Some(stop) = ctx.detention.on_frame_end(instruction_result, result.gas_mut(), depth) {
+        stop_at_the_compute_limit(ctx, result.interpreter_result_mut(), stop);
     }
 }
 
-/// Builds a `FrameResult` matching revm's `make_call_frame` `CallTooDeep` return:
-/// `Gas::new(gas_limit)` (no spend, fully refundable to caller via `erase_cost`),
-/// empty output, and the caller's `return_memory_offset`.
+/// Counts on a creator whose pools `gas` holds, once a creation it started returned into it, what
+/// the nonce bump revm made for the creation made of it ([`Accounts::creator_counted`]) — `before`
+/// is the creator as it stood before revm decided the creation — and answers the stop the creator
+/// returns before it runs on, if the count crossed a limit: the record is held to the creator's
+/// budget, then to the transaction's limit, as any count the creator makes
+/// ([`draw`](crate::AdditionalLimit)). The creation's budget was taken before the record, at its
+/// opcode, so the record is the creator's alone, and it is counted whether the creation succeeded
+/// or not, since the bump outlives it.
 ///
-/// Used by the REX5+ depth guard that runs before system-contract interceptor dispatch.
-/// Interceptors short-circuit before revm's own depth check, so without this guard a
-/// system contract could be invoked at any call-stack depth.
-fn gen_call_too_deep_result(call_inputs: &revm::interpreter::CallInputs) -> FrameResult {
-    FrameResult::Call(CallOutcome::new(
-        InterpreterResult::new(
+/// [`Accounts::creator_counted`]: crate::limit::Accounts
+pub(crate) fn hold_creator<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    gas: &mut GasTracker,
+    before: &CreatorBefore,
+) -> Option<LimitCheck> {
+    let counted = ctx.accounts().creator_counted(before);
+    let check = ctx.additional_limit.draw(gas, &counted);
+    check.exceeded_limit().then_some(check)
+}
+
+/// Holds the share of each of its caller's pools the frame `child` starts with to the share of what
+/// the caller has left, its remaining clamped to its budget, and to that pool's frame cap in
+/// `caps`, and gives what it forwarded above that back to the caller, whose pools `caller` holds.
+///
+/// A frame's remaining is `min(budget, max(0, budget − net))`: a frame whose net is negative — it
+/// took back a record or removed state a frame above it made — holds more in its pool than the
+/// budget it was given, and the share it forwards is of that budget, not of the pool, so a negative
+/// net never enlarges a child's budget. The fork forwarded the schedule's share of the pool the
+/// opcode found ([`GasParams::pool_forward_share`]); the caller had that pool and the share
+/// together, and its budget is that less its net draw.
+#[inline]
+fn cap_the_shares(params: &GasParams, caps: PoolAmounts, caller: &mut Gas, child: &mut FrameInit) {
+    let mut shares = match &child.frame_input {
+        FrameInput::Call(inputs) => inputs.pool_shares,
+        FrameInput::Create(inputs) => inputs.pool_shares(),
+        FrameInput::Empty => return,
+    };
+    let mut capped = false;
+    for pool in PoolId::ALL {
+        let share = shares.get(pool);
+        let mut allowed = caps.get(pool);
+        let spent = caller.pool_spent(pool);
+        if spent < 0 {
+            let had = caller.pool_remaining(pool).saturating_add(share);
+            let budget = had.saturating_add_signed(spent);
+            allowed = allowed.min(params.pool_forward_share(pool, budget));
+        }
+        let Some(excess) = share.checked_sub(allowed).filter(|excess| *excess != 0) else {
+            continue;
+        };
+        caller.set_pool_remaining(pool, caller.pool_remaining(pool).saturating_add(excess));
+        shares.set(pool, allowed);
+        capped = true;
+    }
+    if !capped {
+        return;
+    }
+    match &mut child.frame_input {
+        FrameInput::Call(inputs) => inputs.pool_shares = shares,
+        FrameInput::Create(inputs) => inputs.set_pool_shares(shares),
+        FrameInput::Empty => {}
+    }
+}
+
+/// Holds a frame answered without running to the compute limit: the answer to a frame of
+/// `gas_limit` at `depth`, which its caller forwarded.
+///
+/// An interceptor builds its answer on the whole gas the caller forwarded, the part gas detention
+/// withholds from the caller's regular charges included. An answer that spent more than the frame
+/// could have run on is answered out of gas and marked as a crossing, and becomes the stop as a
+/// frame that ran would ([`Detention::on_answer`]); so does a precompile whose price crosses the
+/// limit, and one the engine cannot price that ran out of the allowance it was run on
+/// ([`hold_precompile`]). An answer that halts otherwise burns what it was given.
+fn settle_answer<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    depth: usize,
+    gas_limit: u64,
+    answer: &mut FrameResult,
+) {
+    let answer = answer.interpreter_result_mut();
+    if let Some(stop) = ctx.detention.on_answer(answer, depth, gas_limit) {
+        stop_at_the_compute_limit(ctx, answer, stop);
+    }
+}
+
+/// How gas detention holds the precompile call a frame start makes ([`hold_precompile`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrecompileHold {
+    /// The call runs as it would without the limit.
+    Unheld,
+    /// The call runs on the allowance, and its answer gets back what was taken off the forward.
+    Clamped(NonZeroU64),
+    /// The call's price crosses the limit: it is answered without running ([`crossing_answer`]).
+    Crossing,
+}
+
+/// Holds a precompile the frame `frame_init` is about to call to what gas detention's limit leaves
+/// it: revm runs the precompile inside the frame's start, against its gas limit, so a precompile
+/// forwarded more than the allowance would otherwise compute past the limit before its answer
+/// could be classified.
+///
+/// A call to anything else, and a forward within the allowance, run as they are
+/// ([`Unheld`](PrecompileHold::Unheld)). A precompile the engine can price
+/// ([`PricedPrecompiles::price`]) is decided from its price before it runs:
+///
+/// - priced within the allowance, it runs on its whole forward, as without the limit: it charges
+///   its price either way;
+/// - priced past the allowance and within the forward, it needs gas the limit withholds: it is
+///   answered without running ([`Crossing`](PrecompileHold::Crossing)), out of gas and marked as a
+///   crossing, which the answer's settlement turns into the stop;
+/// - priced past its whole forward, it runs on the forward and runs out of gas, as without the
+///   limit: a failed call its caller survives.
+///
+/// The price does not tell whether the input passes the checks a precompile makes after its gas
+/// check, so an input priced past the allowance and within the forward is the stop even when
+/// those checks would fail the call. A call revm refuses on its caller's account — a value it
+/// cannot fund — runs no precompile, and revm answers it as without the limit: the answer given
+/// without running is not given in its place, which a comparison of the caller's balance with the
+/// value decides, as revm's transfer does.
+///
+/// A precompile the engine cannot price is run on the allowance and sees it as its gas limit
+/// ([`Clamped`](PrecompileHold::Clamped), with what was taken off the forward); its answer gets the
+/// rest back ([`Detention::restore_forward`]) before it is settled. One priced past the allowance
+/// runs out of gas on it and is the stop, whether its price is within the forward or not.
+#[inline]
+fn hold_precompile<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &MegaContext<DB, ExtEnvs>,
+    precompiles: &PrecompilesMap,
+    priced: &PricedPrecompiles,
+    frame_init: &mut FrameInit,
+) -> PrecompileHold {
+    if ctx.detention.compute_limit().is_none() {
+        return PrecompileHold::Unheld;
+    }
+    hold_detained_precompile(ctx, precompiles, priced, frame_init)
+}
+
+/// [`hold_precompile`] once a read set a compute limit.
+#[inline(never)]
+fn hold_detained_precompile<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &MegaContext<DB, ExtEnvs>,
+    precompiles: &PrecompilesMap,
+    priced: &PricedPrecompiles,
+    frame_init: &mut FrameInit,
+) -> PrecompileHold {
+    let FrameInput::Call(inputs) = &mut frame_init.frame_input else {
+        return PrecompileHold::Unheld;
+    };
+    let Some(allowance) = ctx.detention.allowance(frame_init.depth, inputs.gas_limit) else {
+        return PrecompileHold::Unheld;
+    };
+    let Some(withheld) = NonZeroU64::new(inputs.gas_limit.saturating_sub(allowance)) else {
+        return PrecompileHold::Unheld;
+    };
+    if precompiles.get(&inputs.bytecode_address).is_none() {
+        return PrecompileHold::Unheld;
+    }
+    let price = priced.price(precompiles, &inputs.bytecode_address, &inputs.input.as_bytes(ctx));
+    let Some(price) = price else {
+        inputs.gas_limit = allowance;
+        return PrecompileHold::Clamped(withheld);
+    };
+    if price <= allowance || price > inputs.gas_limit {
+        return PrecompileHold::Unheld;
+    }
+    let caller = ctx.journal_ref().state.get(&inputs.caller);
+    let unfunded = inputs
+        .value
+        .transfer()
+        .zip(caller)
+        .is_some_and(|(value, caller)| caller.info.balance < value);
+    if unfunded {
+        return PrecompileHold::Unheld;
+    }
+    PrecompileHold::Crossing
+}
+
+/// The answer to the precompile call `input` starts when its price crosses gas detention's limit
+/// ([`PrecompileHold::Crossing`]): out of gas without running, the forward untouched, and marked
+/// as the crossing ([`Detention::cross_at_price`]).
+#[cold]
+#[inline(never)]
+fn crossing_answer(input: &FrameInput) -> FrameResult {
+    let mut answer = synthetic_frame_result(input, InstructionResult::PrecompileOOG, Bytes::new());
+    Detention::cross_at_price(answer.interpreter_result_mut());
+    answer
+}
+
+/// The gas limit of the frame `input` starts.
+pub(crate) const fn input_gas_limit(input: &FrameInput) -> u64 {
+    match input {
+        FrameInput::Call(inputs) => inputs.gas_limit,
+        FrameInput::Create(inputs) => inputs.gas_limit(),
+        FrameInput::Empty => 0,
+    }
+}
+
+/// The stipend revm adds to the gas limit of the frame `input` starts, `call_stipend` for a call
+/// that transfers value and nothing for any other: gas the caller never paid.
+pub(crate) fn value_call_stipend(input: &FrameInput, call_stipend: u64) -> u64 {
+    match input {
+        FrameInput::Call(inputs) if inputs.transfers_value() => call_stipend,
+        _ => 0,
+    }
+}
+
+/// Turns a frame that crossed gas detention's compute limit into the compute stop: a revert of
+/// that frame alone carrying `MegaLimitExceeded` (kind: compute). The frame's gas is what it had
+/// before the charge that crossed, which goes back with the revert to its caller. The caller
+/// resumes held to what the limit leaves the transaction, which is less than the charge that
+/// crossed, so a caller that carries on is stopped at its next charge past it.
+///
+/// The crossing charge's size is not kept, so the stop reports the transaction's compute at the
+/// crossing as what was used ([`LimitCheck::ExceedsLimit`]): what its regular ledger bills, and
+/// the stipends of its value calls on top.
+fn stop_at_the_compute_limit<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    result: &mut InterpreterResult,
+    stop: ComputeStop,
+) {
+    let stop = ctx.additional_limit.crossed(LimitKind::ComputeGas, stop.limit, stop.used, false);
+    result.result = InstructionResult::Revert;
+    result.output = ctx.additional_limit.note_frame_stop(&stop);
+}
+
+impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
+    /// System contract interception: a `CALL` or `STATICCALL` to a system contract answered by
+    /// `MegaETH` instead of the contract's code.
+    ///
+    /// The scheme guard is here: `CALLCODE` and `DELEGATECALL` run the callee's code in the
+    /// caller's context, where a system contract's semantics would apply to the wrong account,
+    /// so they never reach an interceptor and revm builds their frame as it does for any other
+    /// contract. A creation reaches no interceptor either.
+    ///
+    /// An answer is a [`synthetic_frame_result`](crate::synthetic_frame_result), so it settles
+    /// like a frame revm ran. What each contract answers is in the `system` module.
+    #[inline]
+    fn intercept(&mut self, frame_init: &FrameInit) -> Option<FrameResult> {
+        let FrameInput::Call(inputs) = &frame_init.frame_input else { return None };
+        if !matches!(inputs.scheme, CallScheme::Call | CallScheme::StaticCall) {
+            return None;
+        }
+        // The calling frame is on top of the stack, suspended on this call; the transaction's own
+        // call has none.
+        let caller_remaining = match self.inner.frame_stack.index() {
+            Some(_) => self.inner.frame_stack.get().interpreter.gas.remaining(),
+            None => 0,
+        };
+        crate::system::intercept(&mut self.inner.ctx, inputs, frame_init.depth, caller_remaining)
+    }
+}
+
+/// Marks where `journal` stands, without changing its depth: a checkpoint opened and committed at
+/// once, which [`revert_to`] takes the journal back to.
+pub(crate) fn mark<DB: revm::Database>(journal: &mut Journal<DB>) -> JournalCheckpoint {
+    let position = journal.checkpoint();
+    journal.checkpoint_commit();
+    position
+}
+
+/// Takes back every journal entry, log and self-destruct made since `mark`, as revm takes back a
+/// frame that fails; the journal's depth is left as it is.
+pub(crate) fn revert_to<DB: revm::Database>(journal: &mut Journal<DB>, mark: JournalCheckpoint) {
+    let _ = journal.checkpoint();
+    journal.checkpoint_revert(mark);
+}
+
+/// Takes the journal back to `start`, where a frame's start began, when revm answered the frame
+/// with a success (`succeeded`) that the engine then rewrote into `result`, the stop.
+///
+/// revm commits an answered frame's journal checkpoint before its answer returns: a value transfer
+/// to an account with no code, or to a precompile that answers, has moved the value, created the
+/// recipient and journaled the transfer log by then. The stop is a revert of the frame alone, and
+/// the caller that resumes keeps its own writes, so the answer's writes are taken back here, as
+/// revm takes back a frame that fails; for the transaction's own frame, which has no caller, this
+/// is all that takes them back. The journal's depth is left as it is.
+fn take_back_a_stopped_answer<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    start: JournalCheckpoint,
+    succeeded: bool,
+    result: &FrameResult,
+) {
+    if succeeded && !result.instruction_result().is_ok() {
+        revert_to(ctx.journal_mut(), start);
+    }
+}
+
+/// What holding a frame's start to the limits needs of it once revm consumed its input: where the
+/// start began, the accounts it writes as they stood before it, what its caller paid for it and
+/// what a stop answering it carries.
+struct FrameStart {
+    /// Where the journal stood before revm decided the start: what revm journals for it — a
+    /// creator's nonce bump, the value the start moves and its transfer log, a precompile's
+    /// writes — comes after.
+    mark: JournalCheckpoint,
+    /// The accounts the start writes on its frame as the transaction held them before revm decided
+    /// it, and the logs the journal held: what the start made is read off the journal against them
+    /// once revm decided it ([`count`](Self::count)).
+    before: StartBefore,
+    /// The history gas the start's caller paid at its opcode for the records on the frame.
+    charged: u64,
+    /// The gas limit the frame's caller forwarded, before gas detention held a precompile to less.
+    gas_limit: u64,
+    /// The reservoir the frame inherits.
+    reservoir: u64,
+    /// The shares of its caller's pools the frame starts with: its budgets.
+    shares: PoolAmounts,
+    /// For a creation a frame makes, its creator as it stands before revm decides the start, which
+    /// tells once the creation returned what revm's nonce bump made of it. The transaction's own
+    /// creation has none: its sender's account is the transaction body's.
+    creator: Option<CreatorBefore>,
+}
+
+impl FrameStart {
+    /// The start of the frame `frame_init` asks for, about to be decided by revm: where the
+    /// journal stands, the accounts the start writes on its frame as the transaction holds them
+    /// ([`Accounts::start_before`]) — a call's caller and target, a creation's created account —
+    /// and a creation's creator. A creation's creator is not among the accounts: its nonce record
+    /// is the creator's, counted from the bump once the creation returned.
+    ///
+    /// [`Accounts::start_before`]: crate::limit::Accounts
+    fn of<DB: Database, ExtEnvs: ExternalEnvTypes>(
+        ctx: &mut MegaContext<DB, ExtEnvs>,
+        frame_init: &FrameInit,
+    ) -> Result<Self, ContextError<DB::Error>> {
+        let mut creator = None;
+        let (account, other, charged, reservoir, shares) = match &frame_init.frame_input {
+            FrameInput::Call(inputs) => (
+                inputs.caller,
+                Some(inputs.target_address),
+                inputs.charged_start.history,
+                inputs.reservoir,
+                inputs.pool_shares,
+            ),
+            FrameInput::Create(inputs) => {
+                // A creation's creator and address are loaded before revm decides the start, as
+                // revm loads them itself, outside the creation's checkpoint, once it decides it:
+                // the creator first thing, the address once the creator funds the endowment and
+                // its nonce bumps. The `CREATE` opcode loaded the address already unless EIP-8037
+                // is off, and the creator is the frame that runs it, so only an inspector's
+                // rewrite, or EIP-8037 off, makes a load here that revm would not have made yet;
+                // neither changes what revm decides. An address an earlier transaction on the same
+                // journal left there is not loaded until it is again.
+                let info = &ctx.journal_mut().load_account(inputs.caller())?.data.info;
+                let bumps = info.balance >= inputs.value() && info.nonce != u64::MAX;
+                let created = inputs.created_address(info.nonce);
+                if bumps && !ctx.accounts().is_loaded(created) {
+                    ctx.journal_mut().load_account(created)?;
+                }
+                if frame_init.depth > 0 {
+                    creator = Some(ctx.accounts().creator_before(inputs.caller()));
+                }
+                (
+                    created,
+                    None,
+                    inputs.charged_start().history,
+                    inputs.reservoir(),
+                    inputs.pool_shares(),
+                )
+            }
+            FrameInput::Empty => unreachable!(
+                "a frame input always names a call or a creation, as revm's frame init asserts"
+            ),
+        };
+        let mark = mark(ctx.journal_mut());
+        Ok(Self {
+            before: ctx.accounts().start_before(account, other, mark.log_i),
+            mark,
+            charged,
+            gas_limit: input_gas_limit(&frame_init.frame_input),
+            reservoir,
+            shares,
+            creator,
+        })
+    }
+
+    /// Holds the start, which revm just decided, to the limits on the pools of its frame, which
+    /// `gas` holds, and counts there what it made, read off the journal — its records and their
+    /// bytes, its state growth and its transfer log ([`Accounts::start_made`]) — with what its
+    /// caller gets back once the frame returned with its start kept: what it paid for the records
+    /// on the frame, less the price of those the start made, and the price of those it took back
+    /// ([`AdditionalLimit::count_start`](crate::AdditionalLimit)).
+    ///
+    /// [`Accounts::start_made`]: crate::limit::Accounts
+    fn count<DB: Database, ExtEnvs: ExternalEnvTypes>(
+        &self,
+        ctx: &mut MegaContext<DB, ExtEnvs>,
+        gas: &mut GasTracker,
+    ) -> LimitCheck {
+        let (records, counted) = ctx.accounts().start_made(&self.before);
+        let credit = if ctx.prices_history() {
+            let price = |records| write_record_history_gas(records).unwrap_or(0);
+            self.charged.saturating_sub(price(records.added)).saturating_add(price(records.taken))
+        } else {
+            0
+        };
+        ctx.additional_limit.count_start(gas, &counted, credit)
+    }
+}
+
+/// Holds `answer`, the success revm answered the call `start` began with, to `verdict`: a crossing
+/// is the stop the answer gives way to, on the gas its caller forwarded, untouched, as a frame
+/// stopped before it ran ([`stop_the_answer`]), and what the answer's start moved is taken back
+/// with it ([`take_back_a_stopped_answer`]). A failed answer kept nothing and is held to nothing.
+fn stop_the_answer_at<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    start: &FrameStart,
+    answer: &mut FrameResult,
+    verdict: LimitCheck,
+) {
+    if verdict.exceeded_limit() {
+        let output = ctx.additional_limit.note_frame_stop(&verdict);
+        stop_the_answer(answer, start, output);
+    }
+}
+
+/// Rewrites `answer`, to the call `start` began, into the stop `output`: a revert on the gas the
+/// call's caller forwarded, untouched, with the reservoir and the pools the call inherited, and no
+/// precompile output, as [`synthetic_frame_result`] answers a frame that never started.
+#[cold]
+#[inline(never)]
+fn stop_the_answer(answer: &mut FrameResult, start: &FrameStart, output: Bytes) {
+    let FrameResult::Call(outcome) = answer else {
+        unreachable!("only a call is held to the limits once revm answered it")
+    };
+    let mut gas = Gas::new_with_regular_gas_and_reservoir(start.gas_limit, start.reservoir);
+    gas.tracker_mut().set_pools_remaining(start.shares);
+    let allowance = outcome.result.gas.history_allowance();
+    gas.set_history_allowance(allowance);
+    outcome.result = InterpreterResult::new(InstructionResult::Revert, output, gas);
+    outcome.was_precompile_called = false;
+    outcome.precompile_call_logs.clear();
+}
+
+/// The answer to the transaction's own frame `frame_init` when its authorization list was skipped
+/// for a limit ([`AdditionalLimit::skip_authorization_list`](crate::AdditionalLimit)): the stop,
+/// before the frame runs and before revm moves anything for it, on the gas its input carries, with
+/// the reservoir and the start charge, which the first frame's settlement gives back.
+fn stop_before_the_first_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    frame_init: &FrameInit,
+) -> Option<FrameResult> {
+    let stop = ctx.additional_limit.take_pre_frame_stop()?;
+    let output = ctx.additional_limit.note_frame_stop(&stop);
+    Some(synthetic_frame_result(&frame_init.frame_input, InstructionResult::Revert, output))
+}
+
+/// Decides the transaction's EIP-7702 authorization list before it is applied, as the spec has
+/// it: the whole list is simulated in order — each entry with a chain id that is neither zero nor
+/// the chain's, a nonce of `2^64 − 1` or a signature that recovers no authority skipped unread;
+/// every other authority loaded once, with its code, and skipped when that code is not a
+/// delegation; a nonce compared with the authority's effective one, which the simulation bumps
+/// for each entry it accepts — and the totals it would keep are held to the transaction's KV and
+/// state-growth limits. The stop when they cross one, KV updates first; `None` when they fit, or
+/// when the list is too short to cross either.
+///
+/// The simulation writes nothing and warms nothing: the loads are taken back to a journal mark,
+/// which leaves the accounts in the transaction's state, cold, so a stateless witness holds every
+/// authority the simulation read. A database error reading one is the transaction's error.
+fn hold_authorization_list<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+) -> Result<Option<LimitCheck>, DB::Error> {
+    if ctx.tx().tx_type() != TransactionType::Eip7702 {
+        return Ok(None);
+    }
+    let entries = ctx.tx().authorization_list_len() as u64;
+    if !ctx.additional_limit.authorization_list_may_cross(entries) {
+        return Ok(None);
+    }
+    let (records, created) = simulate_authorization_list(ctx)?;
+    let check = ctx.additional_limit.hold_authorization_list(records, created);
+    Ok(check.exceeded_limit().then_some(check))
+}
+
+/// What one authority of a simulated authorization list stands at.
+struct SimulatedAuthority {
+    address: Address,
+    /// Its nonce, bumped by every entry the simulation accepted.
+    nonce: u64,
+    /// Whether its code is empty or a delegation, which an entry needs to apply.
+    applies: bool,
+    /// Whether the transaction's state did not hold it, so applying an entry creates it.
+    absent: bool,
+    /// Whether an entry for it was accepted.
+    accepted: bool,
+}
+
+/// The write records and the created accounts the transaction's authorization list would keep
+/// were it applied ([`hold_authorization_list`]): one record for each distinct authority an
+/// accepted entry changes, the sender's account being the body's, and one created account for each
+/// distinct authority it would create.
+fn simulate_authorization_list<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+) -> Result<(u64, u64), DB::Error> {
+    let chain_id = ctx.cfg().chain_id;
+    let caller = ctx.tx().caller();
+    let entries = Eip7702AuthFacts::collect(ctx.tx(), chain_id);
+    let start = mark(ctx.journal_mut());
+    let mut authorities: Vec<SimulatedAuthority> = Vec::new();
+    // Each authority's place in `authorities`, so a list of any length is simulated without a
+    // scan of what it has seen.
+    let mut seen: BTreeMap<Address, usize> = BTreeMap::new();
+    for entry in &entries {
+        let Some(authority) = entry.authority else { continue };
+        let index = match seen.get(&authority) {
+            Some(index) => *index,
+            None => {
+                let account = ctx.journal_mut().load_account_with_code(authority)?.data;
+                let applies = account
+                    .info
+                    .code
+                    .as_ref()
+                    .is_none_or(|code| code.is_empty() || code.is_eip7702());
+                let absent =
+                    account.info.is_empty() && account.is_loaded_as_not_existing_not_touched();
+                authorities.push(SimulatedAuthority {
+                    address: authority,
+                    nonce: account.info.nonce,
+                    applies,
+                    absent,
+                    accepted: false,
+                });
+                seen.insert(authority, authorities.len() - 1);
+                authorities.len() - 1
+            }
+        };
+        let simulated = &mut authorities[index];
+        if !simulated.applies || entry.nonce != simulated.nonce {
+            continue;
+        }
+        simulated.nonce += 1;
+        simulated.accepted = true;
+    }
+    revert_to(ctx.journal_mut(), start);
+    let accepted = authorities.iter().filter(|authority| authority.accepted);
+    let records = accepted.clone().filter(|authority| authority.address != caller).count();
+    let created = accepted.filter(|authority| authority.absent).count();
+    Ok((records as u64, created as u64))
+}
+
+/// The depth guard: a frame past the call-stack limit, of any call scheme or a creation, answered
+/// with `CallTooDeep`, its gas untouched and its reservoir carried — the answer revm gives it.
+///
+/// revm checks the depth first when it builds a frame, before it moves value or bumps a creator's
+/// nonce. The guard gives the same answer before anything else sees the frame: an interceptor or an
+/// inspector answers before revm builds anything, so without the guard a system contract could be
+/// reached at any depth; and a call's start is held to the limits whatever revm answers but a
+/// value its caller cannot fund, so without the guard a call past the limit would be held to them
+/// as a start revm made.
+///
+/// No transaction reaches the limit: regular gas is capped by the execution cap and every call
+/// forwards at most 98/100 of what its caller has left, so a frame at depth 1,024 has less than a
+/// gas.
+fn call_too_deep(frame_init: &FrameInit) -> Option<FrameResult> {
+    (frame_init.depth > CALL_STACK_LIMIT as usize).then(|| {
+        synthetic_frame_result(
+            &frame_init.frame_input,
             InstructionResult::CallTooDeep,
             Bytes::new(),
-            Gas::new(call_inputs.gas_limit),
-        ),
-        call_inputs.return_memory_offset.clone(),
-    ))
+        )
+    })
 }
 
-/// Builds a top-level `FrameResult` for the case where `validate()` returned an
-/// `initial_gas` that exceeds the transaction's `gas_limit` by the time
-/// `before_execution` re-checks it.
+/// Whether executing this transaction created its caller's account: a deposit-like transaction
+/// whose caller was empty when the transaction loaded it, which the deposit path materialised by
+/// bumping its nonce or by minting to it.
 ///
-/// The frame result carries `InstructionResult::OutOfGas` with `Gas::new_spent(gas_limit)`
-/// (entire tx budget burnt, no remaining), matching how an EVM-level OOG halt is
-/// represented for top-level transactions. The `FrameResult` variant (`Call` vs `Create`)
-/// is chosen by `tx_kind` so the downstream output helper can extract the right
-/// fields without re-matching on transaction kind.
+/// Read once op-revm deducted the caller, which loaded it and is what materialised it, off the
+/// info revm keeps of the account as the transaction first loaded it (`Account::original_info`),
+/// and after [`validate_env`](Handler::validate_env), which promoted a system-address transaction:
+/// a deposit-like transaction is a deposit by then. Every other transaction pays a fee its caller
+/// must hold, so it has an account already.
+fn deposit_created_caller<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &MegaContext<DB, ExtEnvs>,
+) -> bool {
+    if ctx.tx().tx_type() != DEPOSIT_TRANSACTION_TYPE {
+        return false;
+    }
+    let caller = ctx.tx().caller();
+    ctx.journal_ref().state.get(&caller).is_some_and(|account| account.original_info().is_empty())
+}
+
+/// Charges the state gas of the account a deposit-like transaction creates for its caller, as
+/// EIP-2780 charges the account a value transfer creates for its recipient. `false` when the
+/// transaction cannot pay it, which is an out-of-gas before it runs.
+fn charge_created_caller<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    gas: &mut GasTracker,
+) -> bool {
+    let caller = ctx.tx().caller();
+    let charge = StateGasCharge::one(GasId::new_account_state_gas(), StateGasSite::account(caller));
+    let Some(state_gas) = ctx.state_gas_charge(charge) else { return false };
+    gas.record_state_cost(state_gas)
+}
+
+/// The account writes of the EIP-7702 authorities applied since journal entry `journal_i`, and the
+/// accounts among them the application created: each applied authorization bumps its authority's
+/// nonce once, so the distinct authorities other than the sender are the accounts written. The
+/// sender's write is part of the transaction body.
 ///
-/// Called from `MegaHandler::before_execution` when `tx.gas_limit() < init_gas`,
-/// which can happen after `MegaHandler::validate` has added any MegaETH-specific
-/// intrinsic gas (calldata storage gas, REX intrinsic storage gas, callee-side
-/// new-account storage gas, or the REX5+ deposit-caller storage gas).
-fn gen_oog_frame_result(tx_kind: TxKind, gas_limit: u64) -> FrameResult {
-    match tx_kind {
-        TxKind::Call(_address) => FrameResult::Call(CallOutcome::new(
-            InterpreterResult::new(
-                InstructionResult::OutOfGas,
-                Bytes::new(),
-                Gas::new_spent(gas_limit),
+/// An authority the application created is one revm charged the account's state gas for: one
+/// that was empty, loaded as not existing and untouched when the application reached it. Read
+/// after the application, that is an authority the database answered no account for, empty at
+/// the transaction's start, and touched first by the application — revm's flag of a touched
+/// account outlives the transaction that set it on a journal that runs several, so an authority an
+/// earlier transaction touched was touched before. Validation's bump of the sender comes first,
+/// and never makes the sender a new account.
+fn applied_authorities<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    journal_i: usize,
+) -> (u64, u64) {
+    if ctx.tx().tx_type() != TransactionType::Eip7702 {
+        return (0, 0);
+    }
+    let caller = ctx.tx().caller();
+    let mut authorities: Vec<Address> = Vec::new();
+    let mut touched: Vec<Address> = Vec::new();
+    for entry in &ctx.journal_ref().journal()[journal_i..] {
+        match entry {
+            JournalEntry::NonceBump { address } if *address != caller => authorities.push(*address),
+            JournalEntry::AccountTouched { address } => touched.push(*address),
+            _ => {}
+        }
+    }
+    authorities.sort_unstable();
+    authorities.dedup();
+    touched.sort_unstable();
+    // An applied authority that is the block beneficiary wrote the beneficiary's account.
+    if authorities.binary_search(&ctx.block().beneficiary).is_ok() {
+        ctx.detention.mark_before_execution(VolatileDataAccess::BENEFICIARY_BALANCE);
+    }
+    let state = &ctx.journal_ref().state;
+    let created = authorities
+        .iter()
+        .filter(|authority| {
+            touched.binary_search(authority).is_ok() &&
+                state.get(*authority).is_some_and(|account| {
+                    account.is_loaded_as_not_existing() && account.original_info().is_empty()
+                })
+        })
+        .count();
+    (authorities.len() as u64, created as u64)
+}
+
+/// Charges the history of the write records a transaction makes outside any frame: one per
+/// applied authority, and the one its own frame makes — the recipient of its value, when the
+/// value changes an account the transaction has not changed, or the account it creates.
+///
+/// The recipient's record is predicted as the journal's state stands before the first frame
+/// ([`Accounts::transfer_records`](crate::limit::Accounts)): a recipient that is the sender, or an
+/// authority the transaction applied, is changed already, and gets none; the sender's side never
+/// makes one, validation having changed its account. A creation's account is charged as a record,
+/// as a `CREATE` opcode charges it; the transaction has changed no account but its sender before
+/// its first frame, so the account it creates is one it had not changed.
+///
+/// The authorities' records are the transaction's own and outlive a first frame that fails; the
+/// first frame's record does not, so what it cost is kept for that frame to carry as its start
+/// charge, which its failure gives back. A first frame revm refuses to start on its sender's
+/// account makes no record, and gets the charge back as any frame that kept nothing does: among
+/// the transactions that pay history, that is a creation from an account whose nonce cannot be
+/// bumped, which only a caller that turned the nonce check off can run, and which revm answers
+/// with a success and no address.
+/// `false` when the transaction cannot pay, which is an out-of-gas before it runs.
+fn charge_records_made_outside_a_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    gas: &mut GasTracker,
+    applied_authorities: u64,
+) -> bool {
+    if !ctx.prices_history() {
+        return true;
+    }
+    let tx = ctx.tx();
+    let first_frame = match tx.kind() {
+        TxKind::Create => 1,
+        TxKind::Call(to) => {
+            let predicted = ctx.accounts().transfer_records(tx.caller(), to, tx.value()).transfer;
+            debug_assert_eq!(predicted.taken, 0, "the sender's value returns no account");
+            predicted.added
+        }
+    };
+    let Some((first_frame, _)) =
+        charge_write_records_history(gas, first_frame, applied_authorities)
+    else {
+        return false;
+    };
+    ctx.additional_limit.set_first_frame_charge(first_frame);
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{test_utils::MemoryDatabase, MegaSpecId};
+    use alloy_primitives::{address, U256};
+    use revm::{
+        context_interface::journaled_state::account::JournaledAccountTr,
+        interpreter::{gas::WithheldCrossing, CallInput, CallInputs, CallValue, SharedMemory},
+    };
+    use std::boxed::Box;
+
+    const CALLER: Address = address!("00000000000000000000000000000000000e0001");
+    const TARGET: Address = address!("00000000000000000000000000000000000e0002");
+
+    /// A `CALL` of one wei to `TARGET`, which its opcode charged a new account for.
+    fn value_call() -> FrameInput {
+        FrameInput::Call(Box::new(CallInputs {
+            input: CallInput::Bytes(Bytes::new()),
+            return_memory_offset: 0..0,
+            gas_limit: 100_000,
+            reservoir: 0,
+            bytecode_address: TARGET,
+            known_bytecode: Default::default(),
+            target_address: TARGET,
+            caller: CALLER,
+            value: CallValue::Transfer(U256::from(1)),
+            scheme: CallScheme::Call,
+            is_static: false,
+            charged_new_account_state_gas: true,
+            charged_start: Default::default(),
+            pool_shares: PoolAmounts::UNLIMITED,
+            history_allowance: 0,
+        }))
+    }
+
+    /// A context whose transaction read the block environment before its first frame under a cap
+    /// of `cap`, so a frame at depth 0 starts with an allowance of `cap`.
+    fn detained(cap: u64) -> MegaContext<MemoryDatabase> {
+        detained_on(MemoryDatabase::default(), cap)
+    }
+
+    /// [`detained`] over `db`.
+    fn detained_on(db: MemoryDatabase, cap: u64) -> MegaContext<MemoryDatabase> {
+        let mut ctx = MegaContext::new(db, MegaSpecId::SATIN);
+        ctx.detention.reset(true, cap, cap);
+        ctx.detention.mark_before_execution(VolatileDataAccess::TIMESTAMP);
+        ctx
+    }
+
+    /// A `STATICCALL` at depth 0 to `to` with `input`, forwarded `forward`.
+    fn static_call(to: Address, input: &[u8], forward: u64) -> FrameInit {
+        FrameInit {
+            depth: 0,
+            memory: SharedMemory::new(),
+            frame_input: FrameInput::Call(Box::new(CallInputs {
+                input: CallInput::Bytes(Bytes::copy_from_slice(input)),
+                return_memory_offset: 0..0,
+                gas_limit: forward,
+                reservoir: 0,
+                bytecode_address: to,
+                known_bytecode: Default::default(),
+                target_address: to,
+                caller: CALLER,
+                value: CallValue::Apparent(U256::ZERO),
+                scheme: CallScheme::StaticCall,
+                is_static: true,
+                charged_new_account_state_gas: false,
+                charged_start: Default::default(),
+                pool_shares: PoolAmounts::UNLIMITED,
+                history_allowance: 0,
+            })),
+        }
+    }
+
+    /// What `hold_precompile` decides for a call to `to`, forwarded `forward`, under an allowance
+    /// of `cap`, with `priced`; and the gas limit the call is left to run on.
+    fn hold(
+        cap: u64,
+        priced: &PricedPrecompiles,
+        dispatched: &PrecompilesMap,
+        to: Address,
+        forward: u64,
+    ) -> (PrecompileHold, u64) {
+        hold_input(cap, priced, dispatched, to, &[0; 32], forward)
+    }
+
+    /// [`hold`] for a call of `input`.
+    fn hold_input(
+        cap: u64,
+        priced: &PricedPrecompiles,
+        dispatched: &PrecompilesMap,
+        to: Address,
+        input: &[u8],
+        forward: u64,
+    ) -> (PrecompileHold, u64) {
+        let ctx = detained(cap);
+        let mut frame_init = static_call(to, input, forward);
+        let held = hold_precompile(&ctx, dispatched, priced, &mut frame_init);
+        (held, input_gas_limit(&frame_init.frame_input))
+    }
+
+    /// A precompile the engine prices is decided from its price before it runs: within the
+    /// allowance, and past its whole forward, it runs on the forward as without the limit; past
+    /// the allowance and within the forward, it is answered without running, out of gas and
+    /// marked as a crossing whose record is the forward. A value call its caller cannot fund,
+    /// which revm refuses before it runs the precompile, runs as without the limit.
+    #[test]
+    fn test_a_priced_precompile_is_decided_from_its_price() {
+        const KZG: Address = crate::kzg_point_evaluation::ADDRESS;
+        const PRICE: u64 = crate::kzg_point_evaluation::GAS_COST;
+        let (priced, map) = (PricedPrecompiles::default(), crate::satin_precompiles_map());
+
+        // Within the allowance: runs on the forward.
+        let (held, ran_on) = hold(PRICE, &priced, &map, KZG, 3 * PRICE);
+        assert_eq!((held, ran_on), (PrecompileHold::Unheld, 3 * PRICE));
+
+        // Past the allowance, within the forward: the crossing, without running.
+        for forward in [PRICE, 3 * PRICE] {
+            let (held, ran_on) = hold(PRICE - 1, &priced, &map, KZG, forward);
+            assert_eq!((held, ran_on), (PrecompileHold::Crossing, forward), "the input as it was");
+        }
+
+        // Past the whole forward: a plain out-of-gas, run on the forward.
+        let (held, ran_on) = hold(PRICE / 2, &priced, &map, KZG, PRICE - 1);
+        assert_eq!((held, ran_on), (PrecompileHold::Unheld, PRICE - 1));
+
+        // A value call past the allowance, within the forward: the crossing when its caller can
+        // fund the value; revm's refusal, without running the precompile, when it cannot. A
+        // `DELEGATECALL` moves nothing, whatever value it carries for its callee to read and
+        // whatever its caller holds: the crossing.
+        for (scheme, balance, held) in [
+            (CallScheme::Call, 1_u64, PrecompileHold::Crossing),
+            (CallScheme::Call, 0, PrecompileHold::Unheld),
+            (CallScheme::DelegateCall, 0, PrecompileHold::Crossing),
+        ] {
+            let db = MemoryDatabase::default().account_balance(CALLER, U256::from(balance));
+            let mut ctx = detained_on(db, PRICE - 1);
+            ctx.journal_mut().load_account(CALLER).unwrap();
+            let mut frame_init = static_call(KZG, &[0; 32], 3 * PRICE);
+            let FrameInput::Call(inputs) = &mut frame_init.frame_input else { unreachable!() };
+            (inputs.scheme, inputs.is_static) = (scheme, false);
+            inputs.value = match scheme {
+                CallScheme::DelegateCall => CallValue::Apparent(U256::from(1)),
+                _ => CallValue::Transfer(U256::from(1)),
+            };
+            let case = format!("{scheme:?} holding {balance}");
+            assert_eq!(hold_precompile(&ctx, &map, &priced, &mut frame_init), held, "{case}");
+        }
+
+        // A forward within the allowance, and a call to anything but a precompile, run as they are.
+        let (held, ran_on) = hold(3 * PRICE, &priced, &map, KZG, 3 * PRICE);
+        assert_eq!((held, ran_on), (PrecompileHold::Unheld, 3 * PRICE));
+        let (held, ran_on) = hold(PRICE - 1, &priced, &map, TARGET, 3 * PRICE);
+        assert_eq!((held, ran_on), (PrecompileHold::Unheld, 3 * PRICE));
+    }
+
+    /// op-revm's size-limited precompiles in the Satin set — the BN254 pairing and the BLS12-381
+    /// G1 MSM, G2 MSM and pairing — are decided from their prices as the KZG entry is. Called
+    /// with two pairs of zeros, which their EIPs price, the call runs on its forward within the
+    /// allowance and past its forward, and is the crossing between the two. An input past the size
+    /// limit is refused before any gas check, so its price is nothing, and it runs on its forward
+    /// under any allowance, to be refused as without the limit.
+    #[test]
+    fn test_a_size_limited_precompile_is_decided_from_its_price() {
+        use op_revm::precompiles::{bls12_381, bn254_pair};
+        let (priced, map) = (PricedPrecompiles::default(), crate::satin_precompiles_map());
+        // (the precompile, the length of a pair, the size limit, the price of two pairs)
+        let wrappers = [
+            // EIP-1108: 45,000, and 34,000 a pair.
+            (bn254_pair::KARST, 192, bn254_pair::KARST_MAX_INPUT_SIZE, 45_000 + 2 * 34_000),
+            // EIP-2537: 12,000 a pair, two pairs discounted to 949 per mille.
+            (
+                bls12_381::JOVIAN_G1_MSM,
+                160,
+                bls12_381::JOVIAN_G1_MSM_MAX_INPUT_SIZE,
+                2 * 12_000 * 949 / 1_000,
             ),
-            Default::default(),
-        )),
-        TxKind::Create => FrameResult::Create(CreateOutcome::new(
-            InterpreterResult::new(
-                InstructionResult::OutOfGas,
-                Bytes::new(),
-                Gas::new_spent(gas_limit),
+            // EIP-2537: 22,500 a pair, two pairs undiscounted.
+            (bls12_381::JOVIAN_G2_MSM, 288, bls12_381::JOVIAN_G2_MSM_MAX_INPUT_SIZE, 2 * 22_500),
+            // EIP-2537: 37,700, and 32,600 a pair.
+            (
+                bls12_381::JOVIAN_PAIRING,
+                384,
+                bls12_381::JOVIAN_PAIRING_MAX_INPUT_SIZE,
+                37_700 + 2 * 32_600,
             ),
-            None,
-        )),
+        ];
+        for (precompile, pair, limit, price) in wrappers {
+            let to = *precompile.address();
+            let two_pairs = std::vec![0; 2 * pair];
+            let hold =
+                |cap, input: &[u8], forward| hold_input(cap, &priced, &map, to, input, forward);
+
+            // Within the allowance: runs on the forward.
+            assert_eq!(hold(price, &two_pairs, 3 * price), (PrecompileHold::Unheld, 3 * price));
+
+            // Past the allowance, within the forward: the crossing, without running.
+            for forward in [price, 3 * price] {
+                let held = hold(price - 1, &two_pairs, forward);
+                assert_eq!(held, (PrecompileHold::Crossing, forward), "{to}: {forward}");
+            }
+
+            // Past the whole forward: a plain out-of-gas, run on the forward.
+            let held = hold(price / 2, &two_pairs, price - 1);
+            assert_eq!(held, (PrecompileHold::Unheld, price - 1), "{to}");
+
+            // Past the size limit: priced at nothing, run on the forward.
+            let over = std::vec![0; limit + pair];
+            assert_eq!(hold(1, &over, 3 * price), (PrecompileHold::Unheld, 3 * price), "{to}");
+        }
+    }
+
+    /// The answer to a call whose price crosses the limit is out of gas without running, with its
+    /// forward untouched and the crossing recorded with the forward.
+    #[test]
+    fn test_a_crossing_answer_is_marked_with_its_forward() {
+        for forward in [1, 100_000, 3_000_000] {
+            let input = static_call(crate::kzg_point_evaluation::ADDRESS, &[0; 32], forward);
+            let FrameResult::Call(answer) = crossing_answer(&input.frame_input) else {
+                panic!("a call's answer")
+            };
+            assert!(!answer.was_precompile_called, "answered without running");
+            assert_eq!(answer.result.result, InstructionResult::PrecompileOOG);
+            assert_eq!(answer.result.gas.limit(), forward);
+            assert_eq!(answer.result.gas.remaining(), forward, "nothing spent");
+            let record = NonZeroU64::new(forward).map(WithheldCrossing::with_remaining);
+            assert_eq!(answer.result.gas.withheld_crossing(), record);
+        }
+    }
+
+    /// A precompile the engine cannot price keeps the clamp: it runs on the allowance, and its
+    /// answer is owed the rest of the forward. That is a node's own precompile, a Satin address a
+    /// node replaced, and every precompile of a set that is not the Satin one, op-revm's wrapper of
+    /// the BN254 pairing included.
+    #[test]
+    fn test_an_unpriced_precompile_runs_on_the_allowance() {
+        const KZG: Address = crate::kzg_point_evaluation::ADDRESS;
+        let pairing = *op_revm::precompiles::bn254_pair::KARST.address();
+        let own = address!("00000000000000000000000000000000000e0003");
+        let mut map = crate::satin_precompiles_map();
+        map.apply_precompile(&own, |_| {
+            Some(alloy_evm::precompiles::DynPrecompile::new(
+                revm::precompile::PrecompileId::Custom("own".into()),
+                |input| {
+                    Ok(revm::precompile::PrecompileOutput::new(1, Bytes::new(), input.reservoir))
+                },
+            ))
+        });
+        let mut replaced = PricedPrecompiles::default();
+        replaced.record_replaced(KZG);
+        let mut foreign = PricedPrecompiles::default();
+        foreign.record_foreign();
+        for (priced, to) in [
+            (&PricedPrecompiles::default(), own),
+            (&replaced, KZG),
+            (&foreign, KZG),
+            (&foreign, pairing),
+        ] {
+            let (held, ran_on) = hold(1_000, priced, &map, to, 300_000);
+            let clamped = PrecompileHold::Clamped(NonZeroU64::new(299_000).unwrap());
+            assert_eq!(held, clamped, "{to}");
+            assert_eq!(ran_on, 1_000, "{to}: run on the allowance");
+        }
+    }
+
+    /// A frame answered with a success that the engine then rewrote into the stop, at any depth,
+    /// has what its start wrote taken back to where its start began. An answer revm made a failure
+    /// took its writes back itself, and one the engine did not rewrite keeps them.
+    #[test]
+    fn test_a_success_answer_rewritten_into_the_stop_is_taken_back() {
+        for (succeeded, result, taken_back) in [
+            (true, InstructionResult::Revert, true),
+            (true, InstructionResult::Stop, false),
+            (false, InstructionResult::Revert, false),
+        ] {
+            let case = format!("succeeded {succeeded}, now {result:?}");
+            let mut ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
+            let start = mark(ctx.journal_mut());
+            // What the answer wrote: a bump of the recipient's nonce.
+            let _ = ctx.journal_mut().load_account_mut(TARGET).unwrap().data.bump_nonce();
+            let answer = synthetic_frame_result(&value_call(), result, Bytes::new());
+            take_back_a_stopped_answer(&mut ctx, start, succeeded, &answer);
+            let nonce = ctx.journal_ref().state.get(&TARGET).map_or(0, |a| a.info.nonce);
+            assert_eq!(nonce, u64::from(!taken_back), "{case}");
+        }
+    }
+
+    /// One handler runs one transaction, and what a phase learns about it is kept on the handler:
+    /// the reservoir the transaction settled with is read where revm builds its result's gas and
+    /// reported once the result is built. A handler reused for a system call, whose path builds
+    /// no result gas and skips that read, reports the system call's own reservoir: the capture is
+    /// consumed by the report, and by the error path, which gives no report. A transaction below
+    /// the execution cap leaves a capture of nothing, one above it a capture of its own margin, and
+    /// a deposit that halts a capture its failed-deposit result never reports; after each, a
+    /// system call on revm's default gas limit reports the margin above the system-call budget.
+    #[test]
+    fn test_a_reused_handler_reports_each_executions_own_reservoir() {
+        use crate::{
+            constants::TX_GAS_LIMIT_CAP,
+            test_utils::{op_transaction, zero_fee_l1_block_info},
+            MegaTransaction, SYSTEM_CALL_REGULAR_GAS_LIMIT,
+        };
+        use alloy_op_evm::OpTx;
+        use revm::{
+            context::{ContextSetters, TxEnv},
+            handler::{system_call::SYSTEM_CALL_GAS_LIMIT, SystemCallTx},
+            inspector::NoOpInspector,
+        };
+        const HALTS: Address = address!("00000000000000000000000000000000000e0003");
+        const DEFAULT_RESERVOIR: u64 = SYSTEM_CALL_GAS_LIMIT - SYSTEM_CALL_REGULAR_GAS_LIMIT;
+
+        let db = MemoryDatabase::default()
+            .account_balance(CALLER, U256::from(10u64.pow(18)))
+            .account_code(TARGET, Bytes::new())
+            .account_code(HALTS, Bytes::from_static(&[revm::bytecode::opcode::INVALID]));
+        let mut evm = MegaEvm::new(
+            MegaContext::new(db, MegaSpecId::SATIN).with_chain(zero_fee_l1_block_info()),
+        );
+        let mut handler = MegaHandler::<
+            MegaEvm<MemoryDatabase, NoOpInspector>,
+            crate::MegaEvmError<core::convert::Infallible>,
+            EthFrame<EthInterpreter>,
+        >::new();
+        let room = 100_000 + history_gas(crate::TX_BODY_SIZE).unwrap();
+        let tx = |to: Address, gas_limit: u64, nonce: u64| {
+            OpTx(op_transaction(TxEnv {
+                caller: CALLER,
+                nonce,
+                gas_limit,
+                kind: TxKind::Call(to),
+                ..Default::default()
+            }))
+        };
+        let mut deposit = tx(HALTS, room, 0);
+        deposit.0.deposit.source_hash = alloy_primitives::B256::repeat_byte(0x11);
+        deposit.0.base.gas_price = 0;
+
+        for (case, tx, succeeds) in [
+            ("below the cap", tx(TARGET, room, 0), true),
+            ("above the cap", tx(TARGET, TX_GAS_LIMIT_CAP + 10_000_000, 1), true),
+            ("a halting deposit", deposit, false),
+        ] {
+            evm.inner.ctx.set_tx(tx);
+            let result = handler.run(&mut evm).expect(case);
+            assert_eq!(result.is_success(), succeeds, "{case}: {result:?}");
+            let settled = evm.ctx().additional_limit().reservoir_remaining();
+            assert_ne!(settled, DEFAULT_RESERVOIR, "{case}: the capture would show");
+
+            let call = MegaTransaction::new_system_tx_with_caller(CALLER, TARGET, Bytes::new());
+            evm.inner.ctx.set_tx(call);
+            evm.inner.ctx.on_new_system_call();
+            let result = handler.run_system_call(&mut evm).expect("the system call runs");
+            assert!(result.is_success(), "{case}: {result:?}");
+            assert_eq!(
+                evm.ctx().additional_limit().reservoir_remaining(),
+                DEFAULT_RESERVOIR,
+                "{case}: the system call's own reservoir, not the capture"
+            );
+        }
     }
 }

@@ -1,1153 +1,927 @@
-use core::ops::Range;
+//! The per-transaction state of the common execution layer.
 
-use alloy_primitives::{Address, Bytes, U256};
-use op_revm::OpHaltReason;
+use alloy_primitives::Bytes;
 use revm::{
-    context::result::{HaltReason, OutOfGasError},
-    handler::{EthFrame, FrameResult, ItemOrResult},
-    interpreter::{
-        gas::calculate_initial_tx_gas_for_tx, interpreter::EthInterpreter,
-        interpreter_action::FrameInit, CallOutcome, CreateOutcome, FrameInput, Gas,
-        InstructionResult, InterpreterAction, InterpreterResult, SStoreResult,
-    },
+    context_interface::cfg::gas::{GasTracker, PoolAmounts, PoolId},
+    handler::FrameResult,
+    interpreter::InstructionResult,
 };
+
+#[cfg(not(feature = "std"))]
+use alloc as std;
+use std::vec::Vec;
 
 use super::{
-    compute_gas, data_size, frame_limit::TxRuntimeLimit, kv_update, state_growth,
-    storage_call_stipend,
-};
-use crate::{
-    EvmTxRuntimeLimits, JournalInspectTr, MegaHaltReason, MegaSpecId, MegaTransaction,
-    VolatileDataAccess,
+    CreatorBefore, EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, COUNTED, DATA_SIZE_POOL,
+    KV_UPDATE_POOL, STATE_GROWTH_POOL, TRANSFER_LOG_SIZE, WRITE_RECORD_SIZE,
 };
 
-use super::LimitCheck;
-
-/// Additional limits for the `MegaETH` EVM beyond standard EVM limits.
+/// What the common execution layer tracks for the running transaction: what it keeps of the
+/// data-size, KV-update and state-growth limits and of the frame budgets, the stops its frames
+/// return, whether it is exempt from every limit, and the figures the settled transaction reports.
 ///
-/// This struct coordinates four independent resource limits: compute gas, data size,
-/// key-value updates, and state growth. Each limit is tracked separately and enforced during
-/// transaction execution.
+/// It lives on the [`MegaContext`](crate::MegaContext), is begun before each transaction and
+/// system call, and is driven by the Host's hooks (a completed write, a frame's start, a code
+/// deposit) and by the frame lifecycle (a start revm decided, a frame's return, the stops).
 ///
-/// ## TX-Level Halt Enforcement
+/// # The three counted dimensions
 ///
-/// TX-level exceed is represented as `InstructionResult::OutOfGas`.
-/// Remaining gas is rescued and later refunded to the sender.
-/// - **Compute gas**: TX-level check is always active (`min(tx_limit, detained_limit)`).
-/// - **Data size / KV update**: TX-level fallthrough is active in all specs. In Rex4+ it catches
-///   intrinsic overflow (when the frame stack is empty) and serves as a safety net behind the
-///   per-frame check.
-/// - **State growth**: TX-level fallthrough catches Rex5 pre-frame authority usage and serves as a
-///   safety net behind the per-frame check.
+/// Data size, KV updates (write records) and state growth are each limited per transaction and
+/// per frame ([`COUNTED`]). A frame's budget in a dimension is a pool on its gas tracker
+/// ([`LimitKind::pool`]), which the revm fork forwards and settles as it does the reservoir: the
+/// transaction's own frame gets what the transaction has left once its body and the counts made
+/// before it are counted ([`first_frame_pools`](Self::first_frame_pools)), every child the
+/// schedule's share of what its caller has left (98/100: the caller keeps
+/// `GasId::pool_kept_percent`) under the frame cap, a failing frame's draws go back to its pool and
+/// a successful one hands its signed net to its caller. A count is drawn where it is made, on the
+/// pool of the frame that makes it ([`draw`](Self::draw)): a completed write's record or log, a
+/// frame start's records and transfer log on the started frame, deployed code on the creating
+/// frame. A creator's nonce record is the creating frame's own, drawn on its pools once the
+/// creation returned into it with the nonce bumped ([`close_start`](Self::close_start) hands back
+/// what tells): the creation's budgets were taken before it.
 ///
-/// ## Per-Frame Enforcement (Rex4+)
+/// The transaction's limits are held beside the pools, on what the transaction keeps
+/// ([`usage`](Self::usage)): its body, its Oracle hints, the records of its applied authorities,
+/// and what its frames keep ([`Kept`]), counted with every draw and restored to what it was at a
+/// start when that start's frame kept nothing ([`close_start`](Self::close_start)). The transfer
+/// logs the transaction reports apart from its bytes are kept beside them, and restored with them.
 ///
-/// In Rex4+, all four limits use per-frame budgets.
-/// Each inner call frame receives `remaining * 98 / 100` of the parent's remaining budget.
-/// When a frame exceeds its per-frame budget, it **reverts** (not halts) and gas returns to
-/// the parent frame, which can continue executing:
-/// - **State growth**: Reverted child's growth is discarded (`discardable_usage` dropped).
-/// - **Data size**: Reverted child's discardable data is dropped, protecting parent's budget.
-/// - **KV updates**: Reverted child's discardable KV ops are dropped, protecting parent's budget.
-/// - **Compute gas**: Reverted child's gas still counts toward parent (gas is always persistent).
-///   Per-frame limits act as "early termination guardrails" only, not budget protection. Compute
-///   gas still retains TX-level detained checking in all specs.
+/// An operation that crosses more than one dimension stops on the first of them in [`COUNTED`]'s
+/// order, and inside a dimension the frame's budget is tested before the transaction's limit: the
+/// stop names the budget when the budget is crossed, the transaction's limit only when it is not.
+/// A fall — a record taken back, a byte given back — crosses nothing.
 ///
-/// # Tracking Details
+/// # The stop
 ///
-/// - **Compute Gas**: Tracks gas consumption from EVM instructions during execution, monitoring the
-///   computational cost separate from the standard gas limit
-/// - **Data Size**: Tracks transaction data (110 bytes base + calldata + access lists +
-///   authorizations), caller/authority account updates (40 bytes each), log data, storage writes
-///   (40 bytes when original ≠ new), account updates from calls/creates (40 bytes), and contract
-///   code size
-/// - **KV Updates**: Tracks transaction caller + authority updates, storage writes (when original ≠
-///   new), and account updates from value transfers and creates
-/// - **State Growth**: Tracks net new accounts + net new storage slots
+/// A limit crossed stops the frame that crossed it with a revert, not a halt: the frame reverts
+/// with [`MegaLimitExceeded`](crate::MegaLimitExceeded) as its output, whether it crossed the
+/// transaction's limit or its own frame budget, and its caller resumes as after any revert. What
+/// the frame counted goes with it, so a caller that resumes is back within the limits, but where
+/// the failure put back a record a frame above made while an Oracle hint the failed frame sent
+/// stays: the caller is then stopped as it resumes ([`hold_caller`](Self::hold_caller)). A
+/// transaction never keeps more than its limit: a caller that carries on is held to what is left,
+/// and a charge that crosses again stops the frame that makes it. A crossing the transaction's own
+/// frame makes is the transaction's result, which settles like any EIP-8037 revert: its unspent
+/// regular gas and the reservoir go back to the sender, who pays only for what ran. Exceptional
+/// halts (a real out-of-gas, an invalid opcode) are not limit stops and still burn the frame's gas.
 ///
-/// Additionally, this struct manages the `STORAGE_CALL_STIPEND` (Rex4+): extra gas granted to
-/// value-transferring `CALL`/`CALLCODE` for storage operations. REX5+ tracks the stipend as a
-/// separated internal allowance drained at the `storage_gas_ext` charging sites; REX4 retains
-/// the legacy `gas.limit()` inflation with a per-frame compute gas cap and burn-on-return.
-#[derive(Debug)]
+/// # The exemption
+///
+/// The protocol's own work is held to none of the per-transaction limits: a system-originated
+/// transaction and a system call are begun exempt, before their body is counted, and the mark is
+/// sticky for the transaction ([`is_exempt`](Self::is_exempt)). Every stop the layer hands out
+/// comes from [`crossed`](Self::crossed), which answers an exempt transaction with
+/// [`LimitCheck::WithinLimit`] whatever it crossed, and an exempt transaction's pools are
+/// unlimited. What it uses is counted all the same, so its usage is reported as any other
+/// transaction's is.
+#[derive(Clone, Debug, Default)]
 pub struct AdditionalLimit {
-    /// Carries the tx's current limit-check verdict.
-    ///
-    /// Once stamped to a non-[`LimitCheck::WithinLimit`] value, the sub-tracker pass in
-    /// [`check_limit`](Self::check_limit) is bypassed and individual tracker usage values may
-    /// no longer be reliable (subsequent frames revert and their discardable usage is dropped).
-    /// Legitimate writers: [`check_limit`](Self::check_limit) (latches `ExceedsLimit`),
-    /// [`mark_exempt`](Self::mark_exempt) (stamps `Exempt`),
-    /// [`reset`](Self::reset) (clears to `WithinLimit`), and
-    /// [`before_frame_return_result`](Self::before_frame_return_result) (absorbs a frame-local
-    /// `ExceedsLimit` back to `WithinLimit`). Everything else reads via
-    /// [`check_limit`](Self::check_limit) or
-    /// [`exceeded_limit`](LimitCheck::exceeded_limit) / [`is_exempt`](LimitCheck::is_exempt).
-    pub(crate) has_exceeded_limit: LimitCheck,
-
-    /// The total remaining gas after the limit exceeds.
-    pub rescued_gas: u64,
-
-    /// The original limits set by the EVM. Some of the limits may be overridden (such as the
-    /// compute gas limit) during transaction execution. We keep the original limits to be able to
-    /// reset the limits before each transaction.
-    pub limits: EvmTxRuntimeLimits,
-
-    /// A tracker for the state growth during transaction execution.
-    pub(crate) state_growth: state_growth::StateGrowthTracker,
-
-    /// A tracker for the total data size (in bytes) generated from a transaction execution.
-    pub(crate) data_size: data_size::DataSizeTracker,
-
-    /// A tracker for the total KV updates during transaction execution.
-    pub(crate) kv_update: kv_update::KVUpdateTracker,
-
-    /// A tracker for the total compute gas consumed during transaction execution.
-    pub(crate) compute_gas: compute_gas::ComputeGasTracker,
-
-    /// A tracker for the `STORAGE_CALL_STIPEND` granted to value-transferring calls (REX4+).
-    pub(crate) storage_call_stipend: storage_call_stipend::StorageCallStipendTracker,
+    limits: EvmTxRuntimeLimits,
+    /// Whether the transaction is exempt from every per-transaction limit, sticky for the
+    /// transaction. See [`is_exempt`](Self::is_exempt).
+    exempt: bool,
+    /// Whether a value movement journals an EIP-7708 transfer log.
+    transfer_logs: bool,
+    /// The crossing the result of the frame returning next was made of, noted where the stop
+    /// became that result ([`note_frame_stop`](Self::note_frame_stop)) and taken when the frame
+    /// returns.
+    frame_stop: Option<LimitCheck>,
+    /// The crossing that produced the result of the transaction's own frame, if one did. See
+    /// [`limit_exceeded`](Self::limit_exceeded).
+    limit_exceeded: Option<LimitCheck>,
+    /// The data-size bytes of the transaction's body.
+    body: u64,
+    /// The data-size bytes of the Oracle hints the transaction forwarded, never taken back.
+    hints: u64,
+    /// The write records of the EIP-7702 authorities the transaction applied.
+    authorities: u64,
+    /// The accounts the EIP-7702 authorities the transaction applied created.
+    created_authorities: u64,
+    /// Whether the transaction created its caller's account before its first frame: a
+    /// deposit-like transaction whose caller had none. Never taken back.
+    created_caller: bool,
+    /// The stop the transaction's own frame returns before it runs, when its authorization list
+    /// would have kept more than a limit allows and was skipped
+    /// ([`skip_authorization_list`](Self::skip_authorization_list)).
+    pre_frame_stop: Option<LimitCheck>,
+    /// What the transaction's frames keep, every running frame counted as if it succeeds.
+    kept: Kept,
+    /// One per start revm decided whose result has not returned, the latest last.
+    decided: Vec<Decided>,
+    /// The history gas of the transaction's body, part of
+    /// [`history_gas_spent`](Self::history_gas_spent).
+    intrinsic_history_gas: u64,
+    /// The bytes of the body that [`intrinsic_history_gas`](Self::intrinsic_history_gas) paid
+    /// for, part of [`history_bytes`](Self::history_bytes).
+    intrinsic_history_bytes: u64,
+    /// The history gas charged before the first frame for the write record that frame makes,
+    /// which the frame carries as its start charge.
+    first_frame_charge: u64,
+    /// The history gas the settled transaction spent.
+    history_gas_spent: u64,
+    /// The history bytes the settled transaction appended.
+    history_bytes: u64,
+    /// The EIP-8037 reservoir the settled transaction left unspent.
+    reservoir_remaining: u64,
 }
 
-/// The usage of the additional limits.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct LimitUsage {
-    /// The data size usage in bytes.
-    pub data_size: u64,
-    /// The number of KV updates.
-    pub kv_updates: u64,
-    /// The compute gas usage.
-    pub compute_gas: u64,
-    /// The state growth.
-    pub state_growth: u64,
+/// What a transaction's frames keep: the signed net of each counted dimension, indexed by its
+/// pool, and, among the bytes, the EIP-7708 transfer logs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Kept {
+    /// The net count of each dimension: what the frames added less what they took back.
+    net: [i64; PoolId::COUNT],
+    /// EIP-7708 transfer logs.
+    transfer_logs: u64,
 }
 
-impl AdditionalLimit {
-    /// Creates a new `AdditionalLimit` instance from the given `MegaSpecId`.
-    pub fn new(spec: MegaSpecId, limits: EvmTxRuntimeLimits) -> Self {
+impl Kept {
+    /// The net count of `kind`.
+    const fn net(&self, kind: LimitKind) -> i64 {
+        match kind.pool() {
+            Some(pool) => self.net[pool.index()],
+            None => 0,
+        }
+    }
+}
+
+/// What one write, or one frame start, adds to what a frame keeps and takes back from it, in each
+/// counted dimension.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Counted {
+    /// What it adds, per pool: data-size bytes (records, a log's bytes, deployed code, a transfer
+    /// log), write records, new accounts and slots.
+    pub(crate) added: PoolAmounts,
+    /// What it takes back, per pool: the records of accounts and slots returned to what the
+    /// transaction loaded, with their bytes; accounts and slots it removes.
+    pub(crate) taken: PoolAmounts,
+    /// Whether an EIP-7708 transfer log is among the bytes added.
+    pub(crate) transfer_log: bool,
+}
+
+impl Counted {
+    /// Nothing counted.
+    pub(crate) const NONE: Self =
+        Self { added: PoolAmounts::ZERO, taken: PoolAmounts::ZERO, transfer_log: false };
+
+    /// `added` write records made and `taken` taken back, with an EIP-7708 transfer log when
+    /// `transfer_log`: each record is [`WRITE_RECORD_SIZE`] bytes and one KV update.
+    pub(crate) const fn records(added: u64, taken: u64, transfer_log: bool) -> Self {
+        let log = if transfer_log { TRANSFER_LOG_SIZE } else { 0 };
         Self {
-            has_exceeded_limit: LimitCheck::WithinLimit,
-            rescued_gas: 0,
-            limits,
-            state_growth: state_growth::StateGrowthTracker::new(spec, limits.tx_state_growth_limit),
-            data_size: data_size::DataSizeTracker::new(spec, limits.tx_data_size_limit),
-            kv_update: kv_update::KVUpdateTracker::new(spec, limits.tx_kv_updates_limit),
-            compute_gas: compute_gas::ComputeGasTracker::new(spec, limits.tx_compute_gas_limit),
-            storage_call_stipend: storage_call_stipend::StorageCallStipendTracker::new(spec),
+            added: PoolAmounts::ZERO
+                .with(DATA_SIZE_POOL, WRITE_RECORD_SIZE.saturating_mul(added).saturating_add(log))
+                .with(KV_UPDATE_POOL, added),
+            taken: PoolAmounts::ZERO
+                .with(DATA_SIZE_POOL, WRITE_RECORD_SIZE.saturating_mul(taken))
+                .with(KV_UPDATE_POOL, taken),
+            transfer_log,
         }
+    }
+
+    /// This count with `rise` new accounts or slots and `fall` accounts or slots it removes: its
+    /// state growth.
+    pub(crate) const fn with_growth(self, rise: u64, fall: u64) -> Self {
+        Self {
+            added: self.added.with(STATE_GROWTH_POOL, rise),
+            taken: self.taken.with(STATE_GROWTH_POOL, fall),
+            transfer_log: self.transfer_log,
+        }
+    }
+
+    /// `bytes` bytes that are no write record: a log's, or deployed code.
+    pub(crate) const fn bytes(bytes: u64) -> Self {
+        Self { added: PoolAmounts::ZERO.with(DATA_SIZE_POOL, bytes), ..Self::NONE }
+    }
+
+    /// This count with `bytes` more bytes that are no write record taken back: deployed code a
+    /// destruction takes back.
+    pub(crate) const fn plus_bytes_taken(self, bytes: u64) -> Self {
+        let taken = self.taken.get(DATA_SIZE_POOL).saturating_add(bytes);
+        Self { taken: self.taken.with(DATA_SIZE_POOL, taken), ..self }
+    }
+
+    /// This count and `other` added together: one operation's two parts, whose transfer logs are
+    /// at most one between them.
+    pub(crate) fn plus(self, other: Self) -> Self {
+        debug_assert!(!(self.transfer_log && other.transfer_log), "one transfer log per operation");
+        let mut sum = Self { transfer_log: self.transfer_log || other.transfer_log, ..self };
+        for pool in PoolId::ALL {
+            sum.added.set(pool, self.added.get(pool).saturating_add(other.added.get(pool)));
+            sum.taken.set(pool, self.taken.get(pool).saturating_add(other.taken.get(pool)));
+        }
+        sum
+    }
+
+    /// The data-size bytes it adds.
+    pub(crate) const fn bytes_added(&self) -> u64 {
+        self.added.get(DATA_SIZE_POOL)
+    }
+
+    /// The data-size bytes it takes back.
+    pub(crate) const fn bytes_taken(&self) -> u64 {
+        self.taken.get(DATA_SIZE_POOL)
+    }
+
+    /// Whether it adds nothing and takes nothing back.
+    const fn is_none(&self) -> bool {
+        self.added.is_zero() && self.taken.is_zero()
+    }
+
+    /// What it adds to `pool` less what it takes back from it.
+    const fn rise(&self, pool: PoolId) -> i128 {
+        self.added.get(pool) as i128 - self.taken.get(pool) as i128
     }
 }
 
+/// A start revm decided whose result has not returned.
+#[derive(Clone, Copy, Debug)]
+struct Decided {
+    /// The started frame's depth, which its result returns at.
+    depth: usize,
+    /// What the frames kept when the start began, before its own records.
+    at_start: Kept,
+    /// The history gas the start's caller gets back once the frame returned with its start kept:
+    /// the price of the records the start took back, less what the caller paid for records the
+    /// start did not make.
+    credit: u64,
+    /// For a creation, its creator as it stood before revm decided the start, which tells once the
+    /// creation returned what record its nonce bump made.
+    creator: Option<CreatorBefore>,
+}
+
 impl AdditionalLimit {
-    /// The [`InstructionResult`] to indicate that the limit is exceeded (TX-level).
-    ///
-    /// This constant is used for TX-level additional-limit exceeds.
-    /// For TX-level exceeds, this is `OutOfGas` (halt path, with rescued gas refund).
-    /// For frame-local exceeds (Rex4+), use
-    /// `exceeding_instruction_result()` which returns `Revert` instead.
-    pub const EXCEEDING_LIMIT_INSTRUCTION_RESULT: InstructionResult = InstructionResult::OutOfGas;
-
-    /// Returns the appropriate [`InstructionResult`] for the current limit exceed.
-    ///
-    /// - **Frame-local (Rex4+)**: `Revert` — gas returns to the parent frame naturally.
-    /// - **TX-level**: `OutOfGas` — halt, gas consumed (rescued via `rescued_gas`).
-    #[inline]
-    pub(crate) fn exceeding_instruction_result(&self) -> InstructionResult {
-        if self.has_exceeded_limit.is_frame_local() {
-            InstructionResult::Revert
-        } else {
-            Self::EXCEEDING_LIMIT_INSTRUCTION_RESULT
-        }
+    /// A layer enforcing `limits`.
+    pub fn new(limits: EvmTxRuntimeLimits) -> Self {
+        Self { limits, ..Default::default() }
     }
 
-    /// Resets the internal state for a new transaction or block.
-    ///
-    /// This method clears both the data size tracker and KV update counter,
-    /// preparing the limit system for a new execution context.
-    ///
-    /// Each tracker internally handles spec-gated behavior (e.g., `ComputeGasTracker`
-    /// resets the detained limit only for Rex1+).
-    pub fn reset(&mut self) {
-        self.has_exceeded_limit = LimitCheck::WithinLimit;
-        self.rescued_gas = 0;
-        self.compute_gas.reset();
-        self.state_growth.reset();
-        self.data_size.reset();
-        self.kv_update.reset();
-        self.storage_call_stipend.reset();
+    /// The limits enforced.
+    pub const fn limits(&self) -> &EvmTxRuntimeLimits {
+        &self.limits
     }
 
-    /// Test-only setter for [`has_exceeded_limit`](Self::has_exceeded_limit). Bypasses every
-    /// invariant maintained by the normal write paths (sticky `Exempt`, sub-tracker latching,
-    /// frame-local absorb). Integration tests use this to construct specific pre-latched states
-    /// — production code must not.
-    #[cfg(any(test, feature = "test-utils"))]
-    #[doc(hidden)]
-    pub fn set_has_exceeded_limit_for_test(&mut self, state: LimitCheck) {
-        self.has_exceeded_limit = state;
+    /// Replaces the limits enforced from the next transaction on.
+    pub(crate) const fn set_limits(&mut self, limits: EvmTxRuntimeLimits) {
+        self.limits = limits;
     }
 
-    /// Marks the current transaction as exempt from `MegaETH` per-tx resource metering by stamping
-    /// `has_exceeded_limit = LimitCheck::Exempt`. REX6+ uses this for system-originated
-    /// transactions (see [`crate::is_system_originated`]); cleared by [`reset`](Self::reset).
+    /// Clears the state for a new transaction, keeping allocations and the limits, and begins it:
+    /// exempt from every limit or not, its value movements journaling transfer logs or not, its
+    /// body weighing `body` bytes.
     ///
-    /// `Exempt` is sticky: [`check_limit`](Self::check_limit) short-circuits on it, so no later
-    /// sub-tracker overflow can latch over it, and every direct read of `has_exceeded_limit`
-    /// observes the exemption as "not exceeded" via
-    /// [`exceeded_limit`](LimitCheck::exceeded_limit). The host storage-gas charging sites
-    /// additionally consult [`is_exempt`](LimitCheck::is_exempt) to charge the SALT-unscaled
-    /// cost, since SALT-scaled storage gas is charged to interpreter gas and is not tracked here.
-    ///
-    /// `current_call_remaining_*` queries (compute gas, data size, KV updates, state growth) still
-    /// report `limit − usage` against the configured limit while exempt, but the limit is not
-    /// enforced — so a caller that uses these values to make admission or sizing decisions for an
-    /// exempt tx will get a number that is not load-bearing. Today's consumers
-    /// (`MegaLimitControl.remainingComputeGas`, the `KeylessDeploy` sandbox sub-limits, oracle
-    /// hint precompile) are unreachable from a system-originated tx; revisit this if a future
-    /// system contract joins the mega whitelist and would consult them.
-    #[inline]
-    pub(crate) fn mark_exempt(&mut self) {
-        self.has_exceeded_limit = LimitCheck::Exempt;
+    /// The exemption is decided before the body is counted: the protocol's own work is exempt
+    /// whatever it carries.
+    pub(crate) fn begin_transaction(&mut self, exempt: bool, transfer_logs: bool, body: u64) {
+        self.exempt = exempt;
+        self.transfer_logs = transfer_logs;
+        self.frame_stop = None;
+        self.limit_exceeded = None;
+        self.body = body;
+        self.hints = 0;
+        self.authorities = 0;
+        self.created_authorities = 0;
+        self.created_caller = false;
+        self.pre_frame_stop = None;
+        self.kept = Kept::default();
+        self.decided.clear();
+        self.intrinsic_history_gas = 0;
+        self.intrinsic_history_bytes = 0;
+        self.first_frame_charge = 0;
+        self.history_gas_spent = 0;
+        self.history_bytes = 0;
+        self.reservoir_remaining = 0;
     }
 
-    /// Gets the usage of the additional limits.
-    #[inline]
-    pub fn get_usage(&self) -> LimitUsage {
+    /* What the transaction keeps */
+
+    /// What the transaction keeps so far, every running frame counted as if it succeeds: its
+    /// data-size bytes, write records and state growth, each the dimension's net, never below zero.
+    pub(crate) const fn usage(&self) -> LimitUsage {
         LimitUsage {
-            data_size: self.data_size.tx_usage(),
-            kv_updates: self.kv_update.tx_usage(),
-            compute_gas: self.compute_gas.tx_usage(),
-            state_growth: self.state_growth.tx_usage(),
+            data_size: positive(self.net(LimitKind::DataSize)),
+            write_records: positive(self.net(LimitKind::KvUpdate)),
+            state_growth: positive(self.net(LimitKind::StateGrowth)),
         }
     }
 
-    /// Checks whether the Rex5 sandbox's TX-level pre-frame intrinsic usage fits inside
-    /// `limits`.
-    ///
-    /// Runs a trial `AdditionalLimit` through the same entry points production uses —
-    /// `before_tx_start` (data size / KV updates) and `record_compute_gas(initial_gas)`
-    /// (intrinsic compute gas, via `MegaHandler::validate`) — then returns its `check_limit()`
-    /// result. Reusing production logic keeps tracker changes and dimension-priority ordering
-    /// in sync automatically. Consumed by the `KeylessDeploy` preflight.
-    ///
-    /// Any future TX-level persistent usage recorded before the first frame through a different
-    /// path MUST be added here too when it can be computed from the transaction alone. DB-dependent
-    /// contributions, such as REX5 EIP-7702 net-new authority state growth, are recorded during
-    /// pre-execution once the journal is available. Missing additions do not fail open — the
-    /// `KeylessDeploy` post-merge overflow check still catches residual overflow — but the failure
-    /// mode degrades from the preflight fast-path (pre-sandbox revert with `ParentBudgetExceeded`)
-    /// to an outer `OutOfGas` halt after sandbox setup has already run.
-    pub(crate) fn intrinsic_check_for_tx(
-        spec: MegaSpecId,
-        tx: &MegaTransaction,
-        limits: EvmTxRuntimeLimits,
-    ) -> LimitCheck {
-        debug_assert!(spec.is_enabled(MegaSpecId::REX5));
-        let mut trial = Self::new(spec, limits);
-        trial.before_tx_start(tx);
-
-        let initial_and_floor_gas = calculate_initial_tx_gas_for_tx(tx, spec.into_eth_spec());
-        trial.record_compute_gas(initial_and_floor_gas.initial_gas);
-
-        trial.check_limit()
-    }
-
-    /// Pushes an empty frame to all trackers so `before_frame_return_result` can pop
-    /// them to keep stacks aligned with the EVM's call stack.
-    ///
-    /// Used when `frame_init` returns an early `Result` (e.g., inspector interception,
-    /// access control interception) without going through `after_frame_init`.
-    #[inline]
-    pub(crate) fn push_empty_frame(&mut self) {
-        self.state_growth.push_empty_frame();
-        self.data_size.push_empty_frame();
-        self.kv_update.push_empty_frame();
-        self.compute_gas.push_empty_frame();
-        self.storage_call_stipend.push_empty_frame();
-    }
-
-    /// Returns the current effective compute gas limit (may be detained/lowered by volatile
-    /// data access).
-    #[inline]
-    pub fn compute_gas_limit(&self) -> u64 {
-        self.compute_gas.tx_limit()
-    }
-
-    /// Returns the remaining compute gas of the current call.
-    ///
-    /// In Rex4+, returns the minimum of the caller's per-frame remaining compute gas
-    /// and the TX-level detained remaining, reflecting the actual gas available before
-    /// execution halts (whether due to frame budget or gas detention).
-    /// If no frame exists yet (direct TX → system contract), returns the TX-level
-    /// remaining which accounts for intrinsic compute gas.
-    /// In pre-Rex4, falls back to TX-level remaining compute gas.
-    #[inline]
-    pub fn current_call_remaining_compute_gas(&self) -> u64 {
-        self.compute_gas.current_call_remaining()
-    }
-
-    /// Returns the remaining data size budget for the current call frame.
-    #[inline]
-    pub fn current_call_remaining_data_size(&self) -> u64 {
-        self.data_size.current_call_remaining()
-    }
-
-    /// Returns the remaining KV update budget for the current call frame.
-    #[inline]
-    pub fn current_call_remaining_kv_updates(&self) -> u64 {
-        self.kv_update.current_call_remaining()
-    }
-
-    /// Returns the remaining state growth budget for the current call frame.
-    #[inline]
-    pub fn current_call_remaining_state_growth(&self) -> u64 {
-        self.state_growth.current_call_remaining()
-    }
-
-    /// Returns the detained compute gas limit (independent of the natural TX limit).
-    /// This is the limit set by volatile data access gas detention.
-    #[inline]
-    pub fn detained_compute_gas_limit(&self) -> u64 {
-        self.compute_gas.detained_limit()
-    }
-
-    /// Returns the halt reason when gas detention is the binding compute gas constraint.
-    /// Otherwise (detention was not more restrictive than the base TX limit), returns `None`.
-    #[inline]
-    pub(crate) fn detained_compute_gas_halt_reason(
-        &self,
-        access_type: VolatileDataAccess,
-    ) -> Option<MegaHaltReason> {
-        self.compute_gas.is_detained_exceed().then(|| MegaHaltReason::VolatileDataAccessOutOfGas {
-            access_type,
-            limit: self.compute_gas.detained_limit(),
-            actual: self.compute_gas.tx_usage(),
-        })
-    }
-
-    /// Sets the compute gas limit to a new value.
-    /// This is used to dynamically lower the compute gas limit when volatile data is accessed.
-    /// The new limit must be lower than the current limit.
-    #[inline]
-    pub fn set_compute_gas_limit(&mut self, new_limit: u64) {
-        self.compute_gas.set_detained_limit(new_limit);
-    }
-
-    /// Checks if any of the configured limits have been exceeded.
-    ///
-    /// This method examines data size, KV update, compute gas, and state growth in fixed order
-    /// and returns the first exceeded limit.
-    ///
-    /// # Returns
-    ///
-    /// Returns a [`LimitCheck`] indicating whether limits have been exceeded
-    /// and which specific limit was exceeded if any.
-    #[inline]
-    pub fn check_limit(&mut self) -> LimitCheck {
-        // Sticky short-circuit: `Exempt` (REX6+ system-originated tx; usage is still accumulated
-        // by individual trackers for `get_usage` and block-level accounting, only the halt
-        // decision is suppressed) and already-latched `ExceedsLimit` both bypass the sub-tracker
-        // pass. For `Exempt` this also neutralizes gas detention (which runs through
-        // `compute_gas.check_limit()` below), so protocol-mandated execution can never halt on
-        // metering — e.g. when SALT buckets grow. The standard EVM `gas_limit` remains the
-        // runaway guard.
-        if !self.has_exceeded_limit.within_limit() {
-            return self.has_exceeded_limit;
-        }
-
-        let data_size_check = self.data_size.check_limit();
-        if data_size_check.exceeded_limit() {
-            self.has_exceeded_limit = data_size_check;
-            return self.has_exceeded_limit;
-        }
-
-        let kv_update_check = self.kv_update.check_limit();
-        if kv_update_check.exceeded_limit() {
-            self.has_exceeded_limit = kv_update_check;
-            return self.has_exceeded_limit;
-        }
-
-        // Per-frame compute gas check (Rex4+) and TX-level detained check (all specs).
-        let compute_gas_check = self.compute_gas.check_limit();
-        if compute_gas_check.exceeded_limit() {
-            self.has_exceeded_limit = compute_gas_check;
-            return self.has_exceeded_limit;
-        }
-
-        // State growth check:
-        // - Rex4+: frame-local budget check.
-        // - pre-Rex4: TX-level check inside `state_growth.check_limit()`.
-        let state_growth_check = self.state_growth.check_limit();
-        if state_growth_check.exceeded_limit() {
-            self.has_exceeded_limit = state_growth_check;
-            return self.has_exceeded_limit;
-        }
-
-        self.has_exceeded_limit
-    }
-
-    /// `true` when a per-tx resource limit has already been latched as exceeded — the exact
-    /// condition [`frame_result_if_exceeding_limit`](Self::frame_result_if_exceeding_limit) halts
-    /// the transaction on. `WithinLimit` and `Exempt` both return `false`. Reads the latched
-    /// aggregate; call [`check_limit`](Self::check_limit) first if a fresh evaluation is needed.
-    #[inline]
-    pub(crate) fn limit_exceeded(&self) -> bool {
-        self.has_exceeded_limit.exceeded_limit()
-    }
-
-    /// Checks if the halt reason indicates that the limit has been exceeded.
-    ///
-    /// # Arguments
-    ///
-    /// * `halt_reason` - The halt reason to check
-    ///
-    /// # Returns
-    ///
-    /// Returns `true` if the halt reason indicates that the limit has been exceeded, `false`
-    /// otherwise.
-    pub fn is_exceeding_limit_halt(&mut self, halt_reason: &OpHaltReason) -> bool {
-        matches!(halt_reason, &OpHaltReason::Base(HaltReason::OutOfGas(OutOfGasError::Basic))) &&
-            self.check_limit().exceeded_limit()
-    }
-}
-
-/* Hooks for transaction execution lifecycle. */
-impl AdditionalLimit {
-    /// Records the compute gas used and returns `false` if the limit has been exceeded.
-    ///
-    /// This runs on every metered opcode, so it is the hottest hook in the whole tracker.
-    /// `#[inline]` lets the record + within-limit check fold directly into the per-opcode
-    /// wrapper, removing a call across the `RefMut<AdditionalLimit>` boundary.
-    #[inline]
-    pub(crate) fn record_compute_gas(&mut self, compute_gas_used: u64) -> bool {
-        // Record unconditionally, even when another dimension has already latched an exceed:
-        // the compute work was performed, and the recorded total feeds the transaction outcome
-        // and block-level compute accounting. Skipping the record would under-report compute
-        // usage for transactions halted on a non-compute dimension (e.g. intrinsic data size
-        // latched in `before_tx_start` before `validate` records the initial gas).
-        self.compute_gas.record_gas_used(compute_gas_used);
-        // Sticky short-circuit, mirroring `check_limit`: an already-latched `ExceedsLimit` is
-        // surfaced immediately, and `Exempt` (REX6+ system-originated tx) suppresses the halt
-        // decision — including the compute-gas / detained check below — while the recording
-        // above still feeds `get_usage` and block-level accounting.
-        if !self.has_exceeded_limit.within_limit() {
-            return !self.has_exceeded_limit.exceeded_limit();
-        }
-        // Debug-only guard for the latch protocol: the compute-only fast path below is sound
-        // only if every non-compute mutation site already latched its own exceed. If a
-        // non-compute dimension is over limit but not yet latched, some mutation site is missing
-        // its `check_limit()` — catch it here in tests, not in production. The sub-tracker
-        // `check_limit()` calls are non-mutating, so this compiles out of release builds. (The
-        // one pre-inner recorder, SELFDESTRUCT, routes through `record_compute_gas_all_dims`, not
-        // this method, so it never trips this.)
-        debug_assert!(
-            !self.data_size.check_limit().exceeded_limit() &&
-                !self.kv_update.check_limit().exceeded_limit() &&
-                !self.state_growth.check_limit().exceeded_limit(),
-            "non-compute limit exceeded without latching: a mutation site is missing check_limit()",
-        );
-        // Recording compute gas can only change the compute-gas dimension, so check just that one
-        // (`compute_gas.check_limit()` covers both the Rex4+ per-frame budget and the TX-level
-        // detained limit) instead of fanning out to all four sub-trackers. The other three
-        // dimensions only change at their own mutation sites (`on_sstore`, `on_log`,
-        // `record_oracle_hint_bytes`, the frame-lifecycle hooks), each of which runs
-        // `check_limit()` itself and latches any exceed into `has_exceeded_limit` — which the
-        // short-circuit above then surfaces here. The one exception is SELFDESTRUCT's pre-inner
-        // `on_selfdestruct_new_account` / `on_selfdestruct_existing_account`, which deliberately
-        // do not latch; their dimensions latch in the trailing `record_compute_gas_all_dims`.
-        let check = self.compute_gas.check_limit();
-        if check.exceeded_limit() {
-            self.has_exceeded_limit = check;
-            return false;
-        }
-        true
-    }
-
-    /// Records the compute gas used and checks ALL four limit dimensions (the
-    /// pre-optimization fan-out), returning `false` if any has been exceeded.
-    ///
-    /// Retained for SELFDESTRUCT: its REX5 storage wrapper records beneficiary
-    /// data/KV/state usage *before* the inner instruction runs, without latching
-    /// (the inner instruction may still fail, in which case the frame pops that
-    /// discardable usage). The fan-out here latches those dimensions only after the
-    /// inner instruction has succeeded, with `check_limit`'s dimension priority.
-    /// Hot-path opcodes use [`Self::record_compute_gas`] instead.
-    #[inline]
-    pub(crate) fn record_compute_gas_all_dims(&mut self, compute_gas_used: u64) -> bool {
-        self.compute_gas.record_gas_used(compute_gas_used);
-        !self.check_limit().exceeded_limit()
-    }
-
-    /// Records the current frame's remaining gas on a TX-level limit exceed so it can be
-    /// refunded to the sender. The storage-stipend tracker decides how `gas.remaining()`
-    /// maps to the refundable balance — see
-    /// `StorageCallStipendTracker::effective_remaining_for_rescue`.
-    pub(crate) fn rescue_gas(&mut self, gas: &Gas) {
-        self.rescued_gas += self.storage_call_stipend.effective_remaining_for_rescue(gas);
-    }
-
-    /// Drains up to `amount` from the current frame's storage stipend allowance and
-    /// returns the portion drained. Caller charges the residual via the original site's
-    /// gas-charging macro. Returns 0 pre-REX5 (the legacy path covers storage via
-    /// `gas.limit()` inflation).
-    pub(crate) fn try_consume_storage_stipend(&mut self, amount: u64) -> u64 {
-        self.storage_call_stipend.try_consume(amount)
-    }
-
-    /// Rescue remaining gas from a frame result if a TX-level additional limit has been
-    /// exceeded.
-    ///
-    /// This must be called before any inspector callback (`frame_end`) that might modify the
-    /// gas via `spend_all()`, so the correct `gas.remaining()` value is captured.
-    /// The rescued gas is later refunded to the transaction sender in `last_frame_result`.
-    pub(crate) fn try_rescue_gas(&mut self, gas: &Gas) {
-        let limit_check = self.check_limit();
-        if limit_check.exceeded_limit() && !limit_check.is_frame_local() {
-            self.rescue_gas(gas);
-        }
-    }
-
-    /// Hook called when a new transaction starts.
-    ///
-    /// Records transaction-only intrinsic resource usage that can be computed from the
-    /// transaction itself (calldata size, access lists, EIP-7702 authority account update
-    /// footprint, caller account update, etc.) and checks TX-level limits.
-    ///
-    /// DB-dependent pre-frame usage is recorded later once the journal is available.
-    /// In particular, REX5 EIP-7702 net-new authority state growth is accounted during
-    /// pre-execution rather than here because `before_tx_start()` cannot tell whether an
-    /// authority account already exists.
-    ///
-    /// If the recorded usage already exceeds a configured limit, sets `has_exceeded_limit`
-    /// so that the subsequent `frame_result_if_exceeding_limit()` or `before_frame_init()`
-    /// call produces a normal execution failure (Halt), keeping the failure on the standard
-    /// additional-limit path.
-    ///
-    /// Intrinsic overflow detection works through each tracker's own `check_limit()`, which
-    /// includes a TX-level fallthrough that catches `tx_usage > tx_limit` even when the frame
-    /// stack is empty (before the first frame is pushed).
-    pub(crate) fn before_tx_start(&mut self, tx: &MegaTransaction) {
-        self.state_growth.before_tx_start(tx);
-        self.data_size.before_tx_start(tx);
-        self.kv_update.before_tx_start(tx);
-        self.check_limit();
-    }
-
-    /// Records REX5 EIP-7702 authority accounts that are net-new state entries — the state-growth
-    /// dimension only. Data size and KV updates for REX5 are charged upfront in `before_tx_start`
-    /// for every authorization with a recoverable authority, independent of application.
-    ///
-    /// Runs in pre-execution after the authorization scan identifies net-new authorities and
-    /// before revm writes the delegation bytecode; the net-new check needs DB / journal state,
-    /// so this cannot live in `before_tx_start`.
-    ///
-    /// REX6+ replaces this with the per-applied-authority hook
-    /// [`AdditionalLimit::on_rex6_eip7702_authority_applied`], which records all three resource
-    /// dimensions in a single call.
-    ///
-    /// Latches any TX-level overflow into `has_exceeded_limit` via `check_limit`; the next frame
-    /// boundary surfaces it as the normal execution failure.
-    pub(crate) fn on_rex5_eip7702_authority_creations(&mut self, amount: u64) {
-        self.state_growth.record_authority_creations(amount);
-        self.check_limit();
-    }
-
-    /// Records the resource footprint of a single *applied* EIP-7702 authorization — one that
-    /// passed the chain-id / `u64::MAX`-nonce / recoverable-authority / code gates and therefore
-    /// writes the authority account — as TX-level persistent usage across all three dimensions.
-    ///
-    /// Every applied authorization writes the authority account (delegation code + nonce bump),
-    /// so it always costs data size (+40) and a KV update (+1). A net-new authority account
-    /// additionally counts as state growth (+1) — the caller passes `creates_authority` for that.
-    /// The matching dynamic SALT account-creation gas is folded into `initial_gas` by the caller.
-    ///
-    /// REX5 splits the same accounting into two paths: data size / KV charged unconditionally in
-    /// `before_tx_start` (covers skipped authorizations too), and state growth via
-    /// [`AdditionalLimit::on_rex5_eip7702_authority_creations`]. REX6 consolidates them so only
-    /// applied authorizations pay.
-    pub(crate) fn on_rex6_eip7702_authority_applied(&mut self, creates_authority: bool) {
-        self.data_size.record_persistent_account_write();
-        self.kv_update.record_persistent_account_update();
-        if creates_authority {
-            self.state_growth.record_authority_creations(1);
-        }
-        self.check_limit();
-    }
-
-    /// Hook called before a new execution frame is initialized. Returns `Some(FrameResult)` if the
-    /// limit is exceeded and the frame should terminate early with the returned `FrameResult`.
-    ///
-    /// For REX4+ value-transferring internal `CALL`/`CALLCODE`, this method also applies the
-    /// `STORAGE_CALL_STIPEND`: it inflates `gas_limit`, caps the per-frame compute gas budget
-    /// at the original gas limit, and pushes the stipend amount to the burn stack.
-    pub(crate) fn before_frame_init<JOURNAL: JournalInspectTr<DBError: core::fmt::Debug>>(
-        &mut self,
-        frame_init: &mut FrameInit,
-        journal: &mut JOURNAL,
-    ) -> Result<Option<FrameResult>, JOURNAL::DBError> {
-        // Push new frame in frame limit trackers.
-        self.state_growth.before_frame_init(frame_init, journal)?;
-        self.data_size.before_frame_init(frame_init, journal)?;
-        self.kv_update.before_frame_init(frame_init, journal)?;
-        self.compute_gas.before_frame_init(frame_init, journal)?;
-
-        // REX4+: detect value-transferring CALL/CALLCODE, inflate gas_limit, push stipend
-        // to stack, and cap per-frame compute gas budget.
-        self.storage_call_stipend.before_frame_init(frame_init, &mut self.compute_gas);
-
-        if self.check_limit().exceeded_limit() {
-            return Ok(self.create_exceeded_limit_result(&frame_init.frame_input));
-        }
-
-        Ok(None)
-    }
-
-    /// Checks whether a TX-level limit was already exceeded before the first frame starts
-    /// (e.g., intrinsic `DataSize` or `KVUpdate` overflow from `before_tx_start()`).
-    ///
-    /// Called from two sites that would otherwise skip `before_frame_init()`:
-    /// - `frame_init()` before system contract interceptor dispatch (REX4+).
-    /// - `inspect_frame_init()` before inspector early-return (REX4+).
-    ///
-    /// Without this check, an intrinsic overflow would never be converted into a real
-    /// failure and gas rescue would be missed.
-    ///
-    /// Returns `Some(FrameResult)` if a TX-level limit is already exceeded.
-    pub(crate) fn frame_result_if_exceeding_limit(
-        &mut self,
-        frame_input: &FrameInput,
-    ) -> Option<FrameResult> {
-        if !self.limit_exceeded() {
-            return None;
-        }
-        self.create_exceeded_limit_result(frame_input)
-    }
-
-    /// Creates a `FrameResult` for an exceeded limit and rescues remaining gas.
-    ///
-    /// Shared by `before_frame_init` (limit exceeded after pushing sub-tracker frames)
-    /// and `frame_result_if_exceeding_limit` (intrinsic overflow before frame push).
-    fn create_exceeded_limit_result(&mut self, frame_input: &FrameInput) -> Option<FrameResult> {
-        let (gas_limit, return_memory_offset) = match frame_input {
-            FrameInput::Call(inputs) => {
-                (inputs.gas_limit, Some(inputs.return_memory_offset.clone()))
+    /// The transaction's net count of `kind`: what sits on no frame — the body, the hints, the
+    /// authorities' records and the accounts they created, the caller a deposit created — and
+    /// what the frames keep.
+    const fn net(&self, kind: LimitKind) -> i128 {
+        let frames = self.kept.net(kind) as i128;
+        let outside = match kind {
+            LimitKind::DataSize => {
+                self.body as i128 +
+                    self.hints as i128 +
+                    WRITE_RECORD_SIZE as i128 * self.authorities as i128
             }
-            FrameInput::Create(inputs) => (inputs.gas_limit, None),
-            FrameInput::Empty => unreachable!(),
+            LimitKind::KvUpdate => self.authorities as i128,
+            LimitKind::StateGrowth => {
+                self.created_authorities as i128 + self.created_caller as i128
+            }
+            LimitKind::ComputeGas => 0,
         };
-        let output = self.has_exceeded_limit.revert_data();
-        let result = create_exceeding_limit_frame_result(
-            self.exceeding_instruction_result(),
-            Gas::new(gas_limit),
-            return_memory_offset,
-            output,
-        );
-        self.try_rescue_gas(result.gas());
-        Some(result)
+        outside + frames
     }
 
-    /// Hook called when a new execution frame is successfully initialized in `frame_init` and needs
-    /// to be run (i.e., target address has code).
-    pub(crate) fn after_frame_init(
-        &mut self,
-        init_result: &ItemOrResult<&mut EthFrame<EthInterpreter>, FrameResult>,
-    ) {
-        if let ItemOrResult::Item(frame) = &init_result {
-            self.state_growth.after_frame_init_on_frame(frame);
-            self.data_size.after_frame_init_on_frame(frame);
-            self.kv_update.after_frame_init_on_frame(frame);
-            self.compute_gas.after_frame_init_on_frame(frame);
-        } else if let ItemOrResult::Result(result) = init_result {
-            // Rescue gas if a TX-level limit was exceeded. This covers the
-            // before_frame_init early-return path and any other Result from frame_init.
-            self.try_rescue_gas(result.gas());
+    /// The transaction's limit on `kind`.
+    const fn tx_limit(&self, kind: LimitKind) -> u64 {
+        match kind {
+            LimitKind::DataSize => self.limits.tx_data_size_limit,
+            LimitKind::KvUpdate => self.limits.tx_kv_update_limit,
+            LimitKind::StateGrowth => self.limits.tx_state_growth_limit,
+            LimitKind::ComputeGas => u64::MAX,
         }
     }
 
-    /// Hook called before a frame run. If the limit is exceeded, return an interpreter result
-    /// indicating that the limit is exceeded.
-    pub(crate) fn before_frame_run(
-        &mut self,
-        frame: &EthFrame<EthInterpreter>,
-    ) -> Option<InterpreterResult> {
-        self.state_growth.before_frame_run(frame);
-        self.data_size.before_frame_run(frame);
-        self.kv_update.before_frame_run(frame);
-        self.compute_gas.before_frame_run(frame);
+    /// The data-size bytes of the transaction's body, which it counts before any frame and no
+    /// revert takes back.
+    pub(crate) const fn body(&self) -> u64 {
+        self.body
+    }
 
-        if self.check_limit().exceeded_limit() {
-            let output = self.has_exceeded_limit.revert_data();
-            return Some(create_exceeding_interpreter_result(
-                self.exceeding_instruction_result(),
-                frame.interpreter.gas,
-                output,
-            ));
+    /// Whether the transaction's value movements journal EIP-7708 transfer logs.
+    pub(crate) const fn counts_transfer_logs(&self) -> bool {
+        self.transfer_logs
+    }
+
+    /// Whether the transaction's body, with one write record for each of its `authorizations`,
+    /// fits its data-size limit: what validation holds a transaction to.
+    ///
+    /// Every entry of the authorization list counts, whether it will apply or not, so the figure is
+    /// an upper bound on what the transaction counts before its first frame — the body, then one
+    /// record for each distinct authority that applies — and a transaction validation admits
+    /// cannot cross the limit there. An exempt transaction is held to nothing.
+    pub(crate) const fn admits_tx_body(&self, authorizations: u64) -> bool {
+        self.exempt ||
+            self.body.saturating_add(WRITE_RECORD_SIZE.saturating_mul(authorizations)) <=
+                self.limits.tx_data_size_limit
+    }
+
+    /// Counts the records of the applied EIP-7702 authorities, `authorities` distinct accounts
+    /// other than the transaction's sender, and the `created` accounts among them the application
+    /// created, made before the first frame. An out-of-gas before the first frame takes them back
+    /// ([`take_back_authorities`](Self::take_back_authorities)).
+    ///
+    /// The records cannot cross the data-size limit: validation admitted the body with a record for
+    /// every entry of the authorization list ([`admits_tx_body`](Self::admits_tx_body)), and only
+    /// an entry can apply. Neither they nor the created accounts cross the KV or the state-growth
+    /// limit: a list that would was skipped before it was applied
+    /// ([`hold_authorization_list`](Self::hold_authorization_list)). A debug build asserts both.
+    pub(crate) fn count_authorities(&mut self, authorities: u64, created: u64) {
+        self.authorities = authorities;
+        self.created_authorities = created;
+        debug_assert!(
+            self.exempt || !self.usage().exceeds_data_size(self.limits.tx_data_size_limit),
+            "validation admits no body whose authority records cross the data-size limit"
+        );
+        debug_assert!(
+            self.exempt ||
+                (authorities == 0 && created == 0) ||
+                [LimitKind::KvUpdate, LimitKind::StateGrowth]
+                    .iter()
+                    .all(|&kind| self.net(kind) <= self.tx_limit(kind) as i128),
+            "an authorization list that would cross the KV or state-growth limit is skipped"
+        );
+    }
+
+    /// Takes back the authorities' records and the accounts they created, which an out-of-gas
+    /// before the first frame takes back with the authorizations.
+    pub(crate) const fn take_back_authorities(&mut self) {
+        self.authorities = 0;
+        self.created_authorities = 0;
+    }
+
+    /// Counts the caller account a deposit-like transaction creates before its first frame: one
+    /// account of state growth on the transaction, which no failure takes back, the deposit's own
+    /// included. It is one account, so it cannot cross a state-growth limit of one or more by
+    /// itself, and it is held to none: under a limit of nothing it leaves the first frame nothing.
+    /// A deposit carries no authorization list, so nothing else is counted before its frame.
+    pub(crate) const fn count_created_caller(&mut self) {
+        self.created_caller = true;
+    }
+
+    /// Whether an authorization list of `entries` could keep more than the transaction's KV or
+    /// state-growth limit allows: each entry changes one authority at most and creates one at
+    /// most, so a list no longer than what both limits leave cannot cross them, and needs no
+    /// simulation.
+    pub(crate) const fn authorization_list_may_cross(&self, entries: u64) -> bool {
+        let records = self.tx_limit(LimitKind::KvUpdate) as i128 - self.net(LimitKind::KvUpdate);
+        let created =
+            self.tx_limit(LimitKind::StateGrowth) as i128 - self.net(LimitKind::StateGrowth);
+        !self.exempt && (entries as i128 > records || entries as i128 > created)
+    }
+
+    /// The verdict on an authorization list that would keep `records` write records and create
+    /// `created` accounts were it applied, before the first frame: KV updates first, then state
+    /// growth, each against the transaction's limit, since no frame budget exists yet.
+    pub(crate) const fn hold_authorization_list(&self, records: u64, created: u64) -> LimitCheck {
+        let counted = Counted::records(records, 0, false).with_growth(created, 0);
+        let check = self.transaction_crossed(LimitKind::KvUpdate, &counted, false);
+        if check.exceeded_limit() {
+            return check;
+        }
+        self.transaction_crossed(LimitKind::StateGrowth, &counted, false)
+    }
+
+    /// Skips the transaction's authorization list, which would have kept more than `stop` allows:
+    /// none of it is applied or counted, and the transaction's own frame returns `stop` before it
+    /// runs ([`take_pre_frame_stop`](Self::take_pre_frame_stop)).
+    pub(crate) fn skip_authorization_list(&mut self, stop: LimitCheck) {
+        debug_assert!(stop.exceeded_limit(), "only a crossing skips the list");
+        self.pre_frame_stop = Some(stop);
+    }
+
+    /// The stop the transaction's own frame returns before it runs, if its authorization list was
+    /// skipped; taken once.
+    pub(crate) const fn take_pre_frame_stop(&mut self) -> Option<LimitCheck> {
+        self.pre_frame_stop.take()
+    }
+
+    /// The pools of the transaction's own frame: what the transaction has left of each limit once
+    /// its body and the counts made before the frame are counted, the data size under the frame
+    /// cap; unlimited for an exempt transaction.
+    pub(crate) const fn first_frame_pools(&self) -> PoolAmounts {
+        if self.exempt {
+            return PoolAmounts::UNLIMITED;
+        }
+        let caps = self.frame_caps();
+        let mut pools = PoolAmounts::UNLIMITED;
+        let mut index = 0;
+        while index < COUNTED.len() {
+            let kind = COUNTED[index];
+            let Some(pool) = kind.pool() else { unreachable!() };
+            let left = self.tx_limit(kind) as i128 - self.net(kind);
+            let left = if left < 0 {
+                0
+            } else if left > u64::MAX as i128 {
+                u64::MAX
+            } else {
+                left as u64
+            };
+            let cap = caps.get(pool);
+            pools.set(pool, if left < cap { left } else { cap });
+            index += 1;
+        }
+        pools
+    }
+
+    /// The most each of a frame's pools may start with: the data-size frame cap, and no cap on the
+    /// other pools; nothing for an exempt transaction.
+    pub(crate) const fn frame_caps(&self) -> PoolAmounts {
+        if self.exempt {
+            return PoolAmounts::UNLIMITED;
+        }
+        PoolAmounts::UNLIMITED.with(DATA_SIZE_POOL, self.limits.frame_data_size_limit)
+    }
+
+    /* Verdicts */
+
+    /// The verdict on `used` crossing `kind`'s `limit`, a frame budget when `frame_local` and a
+    /// transaction-level limit otherwise: the stop the running frame reverts with, alone, its
+    /// [`LimitCheck::revert_data`] naming the limit crossed.
+    ///
+    /// Every stop comes from here, so this is where the exemption applies: an exempt transaction's
+    /// verdict is [`LimitCheck::WithinLimit`], whatever it crossed.
+    pub(crate) const fn crossed(
+        &self,
+        kind: LimitKind,
+        limit: u64,
+        used: u64,
+        frame_local: bool,
+    ) -> LimitCheck {
+        if self.exempt {
+            return LimitCheck::WithinLimit;
+        }
+        LimitCheck::ExceedsLimit { kind, limit, used, frame_local }
+    }
+
+    /// The verdict on a frame budget of `kind`, whose pool holds `remaining` after a net draw of
+    /// `spent`, crossed by `rise` more: the budget is the pool the frame started with, which its
+    /// pool and its net draw add up to, and what it used is its net draw with the rise in.
+    fn budget_crossed(&self, kind: LimitKind, remaining: u64, spent: i64, rise: u64) -> LimitCheck {
+        let budget = remaining.saturating_add_signed(spent);
+        let used = positive(spent as i128 + rise as i128);
+        self.crossed(kind, budget, used, true)
+    }
+
+    /// The verdict on the transaction keeping `counted` more of `kind`: its limit crossed, or
+    /// within. A count that does not rise crosses nothing, unless `held` asks for the transaction
+    /// to be held to its limit whatever it counts.
+    const fn transaction_crossed(
+        &self,
+        kind: LimitKind,
+        counted: &Counted,
+        held: bool,
+    ) -> LimitCheck {
+        let Some(pool) = kind.pool() else { return LimitCheck::WithinLimit };
+        let rise = counted.rise(pool);
+        if !held && rise <= 0 {
+            return LimitCheck::WithinLimit;
+        }
+        let used = self.net(kind) + rise;
+        let limit = self.tx_limit(kind);
+        if used > limit as i128 {
+            return self.crossed(kind, limit, positive(used), false);
+        }
+        LimitCheck::WithinLimit
+    }
+
+    /// The verdict on `counted` kept on a frame whose pools hold `remaining` after net draws of
+    /// `spent`: in each counted dimension in order, the frame's budget, then the transaction's
+    /// limit; the first crossing is the verdict. `held` holds the transaction to its limits
+    /// whatever `counted` adds.
+    fn check(
+        &self,
+        remaining: PoolAmounts,
+        spent: [i64; PoolId::COUNT],
+        counted: &Counted,
+        held: bool,
+    ) -> LimitCheck {
+        for kind in COUNTED {
+            let Some(pool) = kind.pool() else { continue };
+            let rise = counted.rise(pool);
+            if rise > 0 && rise > remaining.get(pool) as i128 {
+                let check = self.budget_crossed(
+                    kind,
+                    remaining.get(pool),
+                    spent[pool.index()],
+                    rise as u64,
+                );
+                if check.exceeded_limit() {
+                    return check;
+                }
+            }
+            let check = self.transaction_crossed(kind, counted, held);
+            if check.exceeded_limit() {
+                return check;
+            }
+        }
+        LimitCheck::WithinLimit
+    }
+
+    /// The pools `gas` holds and the nets it drew on them.
+    fn pools_of(gas: &GasTracker) -> (PoolAmounts, [i64; PoolId::COUNT]) {
+        (gas.pools_remaining(), PoolId::ALL.map(|pool| gas.pool_spent(pool)))
+    }
+
+    /// Counts what the frame whose pools `gas` holds keeps of `counted`, held to the frame's
+    /// budgets and the transaction's limits in the order [`check`](Self::check) holds them: the
+    /// amounts `counted` takes back go back to each pool first, and the amounts it adds are drawn.
+    /// A crossing counts nothing and draws nothing, and is the stop the frame reverts with. A
+    /// count that adds nothing and takes nothing holds nothing.
+    pub(crate) fn draw(&mut self, gas: &mut GasTracker, counted: &Counted) -> LimitCheck {
+        if counted.is_none() {
+            return LimitCheck::WithinLimit;
+        }
+        let (remaining, spent) = Self::pools_of(gas);
+        let check = self.check(remaining, spent, counted, false);
+        if check.exceeded_limit() {
+            return check;
+        }
+        Self::apply(gas, counted);
+        self.count(counted);
+        LimitCheck::WithinLimit
+    }
+
+    /// Draws `counted` on the pools `gas` holds, which the checks made sure can pay it.
+    fn apply(gas: &mut GasTracker, counted: &Counted) {
+        for pool in PoolId::ALL {
+            gas.refill_pool(pool, counted.taken.get(pool));
+            let drew = gas.record_pool(pool, counted.added.get(pool));
+            debug_assert!(
+                drew || gas.pool_remaining(pool) == u64::MAX,
+                "the checks admit the draw"
+            );
+            if !drew {
+                gas.clear_pool_crossing(pool);
+            }
+        }
+    }
+
+    /// Adds `counted` to what the frames keep.
+    ///
+    /// What a frame takes back the transaction's frames counted: a record or a byte taken back was
+    /// counted by a frame that is still on the stack or merged into one, so the transaction's net
+    /// stays at or above zero, which a debug build asserts. A frame's own net goes below zero when
+    /// it takes back what another frame counted — a slot its caller wrote, cleared, or the parts of
+    /// an account the transaction created, given back to the frame that destroys it — and the
+    /// signed net merges into its caller as any net does.
+    fn count(&mut self, counted: &Counted) {
+        let kept = &mut self.kept;
+        for pool in PoolId::ALL {
+            let net = &mut kept.net[pool.index()];
+            *net = net
+                .saturating_add_unsigned(counted.added.get(pool))
+                .saturating_sub_unsigned(counted.taken.get(pool));
+        }
+        debug_assert!(
+            kept.net[DATA_SIZE_POOL.index()] >= 0 && kept.net[KV_UPDATE_POOL.index()] >= 0,
+            "a frame takes back only what the transaction's frames keep"
+        );
+        kept.transfer_logs += u64::from(counted.transfer_log);
+    }
+
+    /// Admits an Oracle hint of `bytes`: held to the transaction's limit before it is counted, and
+    /// never taken back once counted. A hint is on no frame's budget.
+    pub(crate) fn admit_hint(&mut self, bytes: u64) -> LimitCheck {
+        let check = self.transaction_crossed(LimitKind::DataSize, &Counted::bytes(bytes), false);
+        if check.within_limit() {
+            self.hints = self.hints.saturating_add(bytes);
+        }
+        check
+    }
+
+    /* A frame's start */
+
+    /// Opens the start of the frame at `depth` that revm just decided, before its records are
+    /// counted: what the frames keep now is what the frame's failure restores
+    /// ([`close_start`](Self::close_start)). A creation's `creator`, read before revm decided it,
+    /// is handed back when the creation returns.
+    pub(crate) fn open_start(&mut self, depth: usize, creator: Option<CreatorBefore>) {
+        self.decided.push(Decided { depth, at_start: self.kept, credit: 0, creator });
+    }
+
+    /// Holds the start revm just decided — a frame it built, or a call it answered with a success —
+    /// whose frame's pools `gas` holds, to the limits, and counts `counted`, the records, state
+    /// growth and transfer log it made, read off the journal, on those pools
+    /// ([`draw`](Self::draw)): the verdict is the stop the frame returns before it runs, or the
+    /// one its answer gives way to. An answer that failed kept nothing and is not held. `credit` is
+    /// what the start's caller gets back once the frame returned with its start kept.
+    ///
+    /// A start is held to the transaction's limits whatever it counts, nothing included: what the
+    /// transaction keeps may already stand above a limit, as a frame that resumes may find it
+    /// ([`hold_caller`](Self::hold_caller)), and the caller a deposit-like transaction created is
+    /// counted unchecked ([`count_created_caller`](Self::count_created_caller)); a start is where
+    /// a frame first meets it.
+    pub(crate) fn count_start(
+        &mut self,
+        gas: &mut GasTracker,
+        counted: &Counted,
+        credit: u64,
+    ) -> LimitCheck {
+        let (remaining, spent) = Self::pools_of(gas);
+        let check = self.check(remaining, spent, counted, true);
+        if check.exceeded_limit() {
+            return check;
+        }
+        Self::apply(gas, counted);
+        self.count(counted);
+        if let Some(start) = self.decided.last_mut() {
+            start.credit = credit;
+        }
+        LimitCheck::WithinLimit
+    }
+
+    /// Closes the start of the frame whose result returns at `depth`, `kept` or not, and answers
+    /// the history its caller gets back for it, with the creator of a creation as it stood before
+    /// revm decided the start: a frame whose result says it failed has what the frames keep
+    /// restored to what they kept when its start began, as its pools are, and its caller gets
+    /// nothing back; one that kept its start, the start's credit.
+    ///
+    /// A creation's creator is what its nonce record is read from once the result merged into the
+    /// creator ([`Accounts::creator_counted`](super::Accounts)): the record is the creator's, so it
+    /// is counted after the creation's own counts are closed, and outlives the creation's failure.
+    ///
+    /// A result revm did not decide the start of — the depth guard's, an interceptor's, an
+    /// inspector's — has no start to close, and no creator: revm bumped no nonce for it. The depth
+    /// guard's and an interceptor's carry the start charge their input declared, which revm gives
+    /// back; an inspector's carries what the inspector built it with.
+    pub(crate) fn close_start(&mut self, depth: usize, kept: bool) -> (u64, Option<CreatorBefore>) {
+        let Some(&start) = self.decided.last().filter(|start| start.depth == depth) else {
+            return (0, None);
+        };
+        self.decided.pop();
+        if kept {
+            (start.credit, start.creator)
+        } else {
+            self.kept = start.at_start;
+            (0, start.creator)
+        }
+    }
+
+    /// The stop the frame a child just returned into returns before it runs on, if what the
+    /// transaction keeps now stands above one of its limits: in each counted dimension in order,
+    /// held whatever the return counted.
+    ///
+    /// A child's success hands its caller nothing the limits did not hold as it was counted. A
+    /// failure restores what the frames kept when its start began, which is more than they keep
+    /// now when the child took back records or state a frame above it made, while what the
+    /// transaction keeps on no frame stays: an Oracle hint the child sent into the room the take
+    /// back freed leaves the transaction above its limit, and the caller is stopped for it.
+    pub(crate) fn hold_caller(&self) -> Option<LimitCheck> {
+        for kind in COUNTED {
+            let check = self.transaction_crossed(kind, &Counted::NONE, true);
+            if check.exceeded_limit() {
+                return Some(check);
+            }
         }
         None
     }
 
-    /// Hook called after frame action processing in `frame_run`.
+    /* The stops and the exemption */
+
+    /// The crossing that produced the result of the transaction's own frame, if one did: what
+    /// [`MegaTransactionOutcome::limit_exceeded`](crate::MegaTransactionOutcome) reports.
     ///
-    /// Records compute gas cost induced in frame action processing (e.g., code deposit cost),
-    /// marks the frame result as exceeding limit if needed, and rescues gas if a TX-level limit
-    /// was exceeded (before any inspector callback that might modify gas).
-    pub(crate) fn after_frame_run(
-        &mut self,
-        result: &mut FrameResult,
-        gas_remaining_before_process_action: Option<u64>,
-    ) {
-        if let Some(gas_remaining_before) = gas_remaining_before_process_action {
-            let compute_gas_cost = gas_remaining_before.saturating_sub(result.gas().remaining());
-            if !self.record_compute_gas(compute_gas_cost) {
-                mark_frame_result_as_exceeding_limit(
-                    result,
-                    self.exceeding_instruction_result(),
-                    Default::default(),
-                );
-            }
-        }
-        // Rescue gas if a TX-level additional limit has been exceeded.
-        // This must happen before any inspector callback (`frame_end`) that might modify
-        // the gas via `spend_all()`, so the correct `gas.remaining()` value is captured.
-        self.try_rescue_gas(result.gas());
+    /// It is a crossing the transaction's own frame made, of the transaction's limit or of its own
+    /// budget. A crossing below that frame produced the result of the frame that crossed, which its
+    /// caller caught: a caller that then reverts with the same bytes made its own result, and is no
+    /// stop. Neither is a stop an inspector rewrote into another result: the frame's result must
+    /// still be the stop's revert.
+    ///
+    /// It is the running transaction's, or the last one's until the next transaction or system
+    /// call starts: each resets it first.
+    pub const fn limit_exceeded(&self) -> Option<&LimitCheck> {
+        self.limit_exceeded.as_ref()
     }
 
-    /// Hook called when a frame finishes running in `frame_run`. If the limit is exceeded, mark
-    /// in place the interpreter result as exceeding the limit.
-    pub(crate) fn after_frame_run_instructions<'a>(
-        &mut self,
-        frame: &'a EthFrame<EthInterpreter>,
-        action: &'a mut InterpreterAction,
-    ) {
-        self.state_growth.after_frame_run(frame, action);
-        self.data_size.after_frame_run(frame, action);
-        self.kv_update.after_frame_run(frame, action);
-        self.compute_gas.after_frame_run(frame, action);
+    /// Notes `stop` as the crossing the result of the frame returning next is made of, and gives
+    /// the [`MegaLimitExceeded`](crate::MegaLimitExceeded) revert data that frame stops with.
+    ///
+    /// Every site that turns a crossing into a frame's result takes the revert data from here, and
+    /// the frame returns before any other does: so the stop is the returning frame's when its
+    /// result returns ([`take_frame_stop`](Self::take_frame_stop)), and the transaction's when
+    /// that frame is the transaction's own ([`limit_exceeded`](Self::limit_exceeded)).
+    pub(crate) fn note_frame_stop(&mut self, stop: &LimitCheck) -> Bytes {
+        debug_assert!(stop.exceeded_limit(), "only a crossing stops a frame");
+        self.frame_stop = Some(*stop);
+        stop.revert_data()
+    }
 
-        if let InterpreterAction::Return(interpreter_result) = action {
-            if frame.data.is_create() {
-                // Fast-path: a TX-level limit was latched earlier; pick it up without re-running
-                // sub-tracker checks. Under `Exempt`, the predicate is false, so the exemption
-                // passes through unchanged.
-                if self.limit_exceeded() {
-                    let output = self.has_exceeded_limit.revert_data();
-                    mark_interpreter_result_as_exceeding_limit(
-                        interpreter_result,
-                        self.exceeding_instruction_result(),
-                        output,
-                    );
-                    return;
-                }
-
-                // The sub-tracker `after_frame_run` calls above may have recorded new usage; run
-                // a fresh check to catch overflow first detected at this frame end.
-                if self.check_limit().exceeded_limit() {
-                    let output = self.has_exceeded_limit.revert_data();
-                    mark_interpreter_result_as_exceeding_limit(
-                        interpreter_result,
-                        self.exceeding_instruction_result(),
-                        output,
-                    );
-                }
-            }
+    /// Takes the stop noted for the frame whose `result` returns now; for the transaction's own
+    /// frame (`outermost`), it is the transaction's [`limit_exceeded`](Self::limit_exceeded) while
+    /// the result is still the stop's revert. A frame with no stop noted leaves the transaction's
+    /// as it is: the transaction's own frame returns through here once.
+    pub(crate) fn take_frame_stop(&mut self, result: &FrameResult, outermost: bool) {
+        let Some(noted) = self.frame_stop.take() else { return };
+        if outermost {
+            self.limit_exceeded = Some(noted).filter(|stop| is_the_revert_of(result, stop));
         }
     }
 
-    /// Hook called when returning a frame result to parent frame in `frame_return_result` or
-    /// `last_frame_result`. May modify the frame result in place if the limit is exceeded.
-    pub(crate) fn before_frame_return_result<const LAST_FRAME: bool>(
-        &mut self,
-        result: &mut FrameResult,
-    ) {
-        // TRUE if the current function is called twice for the top-level frame. If the top-level
-        // frame has child frames, the top-level frame's result will be handled twice (one via
-        // `EvmTr::frame_return_result`, the other via `Handler::last_frame_result`). This flag is
-        // used to distinguish these two cases.
-        let duplicate_return_frame_result = LAST_FRAME && !self.data_size.has_active_frame();
-
-        // Pop frame from the frame limit trackers.
-        self.state_growth.before_frame_return_result::<LAST_FRAME>(result);
-        self.data_size.before_frame_return_result::<LAST_FRAME>(result);
-        self.kv_update.before_frame_return_result::<LAST_FRAME>(result);
-        self.compute_gas.before_frame_return_result::<LAST_FRAME>(result);
-
-        // Pop stipend from stack and burn unused stipend (Rex4+).
-        self.storage_call_stipend.before_frame_return_result::<LAST_FRAME>(result);
-
-        // Frame-level limit handling (Rex4+): check if the child frame exceeded its
-        // frame-local budget. The detection may not have happened during execution, so
-        // we call check_limit() here to ensure it's caught.
-        // If frame-local, absorb it — clear the exceed flag and change to Revert so
-        // remaining gas returns to the caller. State changes are reverted by revm's
-        // Revert handling. This works at any depth including the top-level frame.
-        let limit_check = self.check_limit();
-        if limit_check.exceeded_limit() && !duplicate_return_frame_result {
-            if limit_check.is_frame_local() {
-                let output = limit_check.revert_data();
-                self.has_exceeded_limit = LimitCheck::WithinLimit;
-                match result {
-                    FrameResult::Call(o) => {
-                        o.result.result = InstructionResult::Revert;
-                        o.result.output = output;
-                    }
-                    FrameResult::Create(o) => {
-                        o.result.result = InstructionResult::Revert;
-                        o.result.output = output;
-                    }
-                }
-            } else {
-                // Gas should already have been rescued at the point where the limit was
-                // exceeded (frame_result_if_exceeding_limit, before_frame_init,
-                // after_frame_init, or after_frame_run).
-                // Just mark the result as exceeding the limit.
-                mark_frame_result_as_exceeding_limit(
-                    result,
-                    Self::EXCEEDING_LIMIT_INSTRUCTION_RESULT,
-                    Default::default(),
-                );
-            }
-        }
+    /// Whether the running transaction is exempt from every per-transaction limit.
+    pub const fn is_exempt(&self) -> bool {
+        self.exempt
     }
 
-    /// Merges resource usage from a sandbox execution into this tracker.
-    ///
-    /// Used by `KeylessDeploy` (REX5+) to propagate sandbox resource consumption
-    /// back to the parent transaction.
-    pub(crate) fn merge_usage(&mut self, usage: LimitUsage) {
-        self.compute_gas.merge_persistent_usage(usage.compute_gas);
-        self.data_size.merge_persistent_usage(usage.data_size);
-        self.kv_update.merge_persistent_usage(usage.kv_updates);
-        self.state_growth.merge_persistent_usage(usage.state_growth);
+    /* What the transaction pays before its first frame */
+
+    /// The history gas of the transaction's body: the bytes the transaction carries and the write
+    /// records its inclusion makes, which are known before it runs. The transaction's gas pays it
+    /// before the first frame, reservoir first, as intrinsic gas.
+    pub const fn intrinsic_history_gas(&self) -> u64 {
+        self.intrinsic_history_gas
     }
 
-    /// Hook called when an orginally zero storage slot is written non-zero value for the first time
-    /// in the transaction. Returns `false` if the limit has been exceeded.
-    pub(crate) fn on_sstore(
-        &mut self,
-        target_address: Address,
-        slot: U256,
-        store_result: &SStoreResult,
-    ) -> bool {
-        self.state_growth.after_sstore(target_address, slot, store_result);
-        self.data_size.after_sstore(target_address, slot, store_result);
-        self.kv_update.after_sstore(target_address, slot, store_result);
-
-        !self.check_limit().exceeded_limit()
+    /// Records the history gas the transaction's body costs, and the `bytes` of the body it pays
+    /// for.
+    pub(crate) const fn set_intrinsic_history(&mut self, gas: u64, bytes: u64) {
+        self.intrinsic_history_gas = gas;
+        self.intrinsic_history_bytes = bytes;
     }
 
-    /// REX5+: record that the current transaction's caller account is being materialised
-    /// by deposit pre-execution (mint balance increment, nonce bump, or both).
-    ///
-    /// Routes a `+1` to `state_growth`'s TX intrinsic lane only. Does **not** touch
-    /// `data_size` or `kv_update`: their `before_tx_start` hooks already record the
-    /// caller's account-info write unconditionally for every transaction (protocol-level
-    /// definition: one caller account-info write per tx). Adding a second record here
-    /// would double-count.
-    ///
-    /// Must be called exactly once per deposit-like transaction, only when the caller
-    /// account is empty at validation time (before `OpHandler::pre_execution` runs).
-    pub(crate) fn record_deposit_caller_creation(&mut self) {
-        self.state_growth.record_deposit_caller_creation();
-        let _ = self.check_limit();
+    /// Records the history gas charged before execution for the write record the transaction's own
+    /// frame makes: the recipient of its value, or the account it creates. The frame carries it as
+    /// its start charge, which its failure gives back.
+    pub(crate) const fn set_first_frame_charge(&mut self, gas: u64) {
+        self.first_frame_charge = gas;
     }
 
-    /// REX5+: meter an oracle-hint payload against the TX data-size budget.
-    ///
-    /// Records `len` bytes into the TX intrinsic data-size lane (same lane as calldata) and
-    /// runs `check_limit()` so `has_exceeded_limit` is flipped to a TX-level exceed if the
-    /// recording overflows.
-    ///
-    /// Returns `true` if the recording stayed within the limit, `false` otherwise.
-    ///
-    /// **Caller contract**: on `false`, do NOT synthesize a result. Return `None` from the
-    /// interceptor and let the next `frame_init` step (`before_frame_init` →
-    /// `create_exceeded_limit_result`) produce the canonical TX-level `OutOfGas` halt with
-    /// rescued gas. This keeps the failure shape identical to any other data-size overflow.
-    pub(crate) fn record_oracle_hint_bytes(&mut self, len: u64) -> bool {
-        self.data_size.record_oracle_hint_bytes(len);
-        !self.check_limit().exceeded_limit()
+    /// The history gas charged before execution for the write record the transaction's own frame
+    /// makes.
+    pub(crate) const fn first_frame_charge(&self) -> u64 {
+        self.first_frame_charge
     }
 
-    /// Hook called when a log is written. Returns `false` if the limit has been exceeded.
-    pub(crate) fn on_log(&mut self, num_topics: u64, data_size: u64) -> bool {
-        self.state_growth.after_log(num_topics, data_size);
-        self.data_size.after_log(num_topics, data_size);
+    /* What the settled transaction reports */
 
-        !self.check_limit().exceeded_limit()
+    /// The history gas the last settled transaction spent.
+    pub const fn history_gas_spent(&self) -> u64 {
+        self.history_gas_spent
     }
 
-    /// Hook called after a SELFDESTRUCT on a same-TX-created account (REX4+).
-    ///
-    /// Records state growth refund for the destroyed account and its new storage slots.
-    /// The caller is responsible for computing the total refund before calling this.
-    pub(crate) fn on_selfdestruct(&mut self, refund: u64) {
-        self.state_growth.after_selfdestruct(refund);
+    /// The EIP-8037 reservoir the last settled transaction or system call left unspent, which
+    /// its sender gets back, as a transaction reports it
+    /// ([`MegaGasUsage::reservoir_remaining`](crate::MegaGasUsage::reservoir_remaining)). It is
+    /// read before the EIP-7623 floor absorbs it, and a failed deposit leaves none.
+    pub const fn reservoir_remaining(&self) -> u64 {
+        self.reservoir_remaining
     }
 
-    /// Records resource usage when SELFDESTRUCT creates a new beneficiary account (REX5+).
-    ///
-    /// Charges data size (+40 for account info write), KV update (+1), and state growth (+1).
-    pub(crate) fn on_selfdestruct_new_account(&mut self) {
-        // Account info write: same as DataSizeTracker's ACCOUNT_INFO_WRITE_SIZE (40 bytes)
-        self.data_size.record_account_write();
-        self.kv_update.record_account_update();
-        self.state_growth.record_growth(1);
+    /// Records the reservoir the settled transaction or system call left unspent.
+    pub(crate) const fn set_reservoir_remaining(&mut self, reservoir: u64) {
+        self.reservoir_remaining = reservoir;
     }
 
-    /// Records resource usage when SELFDESTRUCT transfers balance to an existing
-    /// beneficiary account (REX6+).
-    ///
-    /// Charges data size (+40 for account info write) and KV update (+1). The target
-    /// already exists, so no `StateGrowth` is recorded. SELFDESTRUCT does not push a call
-    /// frame, so the `target_updated` dedup path in `FrameLimitTracker` never sees the
-    /// balance write to an existing target — hence this dedicated hook.
-    pub(crate) fn on_selfdestruct_existing_account(&mut self) {
-        self.data_size.record_account_write();
-        self.kv_update.record_account_update();
+    /// The history bytes the last settled transaction appended, whoever paid for them, which a
+    /// transaction reports as [`MegaGasUsage::history_bytes`](crate::MegaGasUsage::history_bytes);
+    /// [`history_gas_spent`](Self::history_gas_spent) is what the transaction's own gas paid of
+    /// their price.
+    pub const fn history_bytes(&self) -> u64 {
+        self.history_bytes
+    }
+
+    /// Settles the history figures once the transaction's own frame returned: `spent`, the history
+    /// gas its gas spent, and the history bytes it appended when it pays history at all (`priced`),
+    /// which are its body and the bytes it keeps but for its Oracle hints and its transfer logs.
+    pub(crate) fn settle_history(&mut self, priced: bool, spent: u64) {
+        self.history_gas_spent = spent;
+        self.history_bytes = if priced {
+            self.intrinsic_history_bytes
+                .saturating_add(WRITE_RECORD_SIZE.saturating_mul(self.authorities))
+                .saturating_add(positive(self.kept.net(LimitKind::DataSize) as i128))
+                .saturating_sub(TRANSFER_LOG_SIZE.saturating_mul(self.kept.transfer_logs))
+        } else {
+            0
+        };
     }
 }
 
-/// Creates a `FrameResult` indicating that the limit is exceeded.
-///
-/// This utility function creates a frame result that signals limit exceeded.
-///
-/// # Arguments
-///
-/// * `gas_limit` - The gas limit of the transaction
-/// * `return_memory_offset` - The memory offset of the return value if the frame is a call frame.
-///   `None` if the frame is a create frame
-///
-/// # Returns
-///
-/// A `FrameResult` indicating that the limit is exceeded with the given instruction result.
-fn create_exceeding_limit_frame_result(
-    instruction_result: InstructionResult,
-    gas: Gas,
-    return_memory_offset: Option<Range<usize>>,
-    output: Bytes,
-) -> FrameResult {
-    match return_memory_offset {
-        None => FrameResult::Create(CreateOutcome::new(
-            create_exceeding_interpreter_result(instruction_result, gas, output),
-            None,
-        )),
-        Some(return_memory_offset) => FrameResult::Call(CallOutcome::new(
-            create_exceeding_interpreter_result(instruction_result, gas, output),
-            return_memory_offset,
-        )),
+/// `value`, or zero when it is negative, as a `u64` that saturates.
+const fn positive(value: i128) -> u64 {
+    if value <= 0 {
+        0
+    } else if value > u64::MAX as i128 {
+        u64::MAX
+    } else {
+        value as u64
     }
 }
 
-/// Creates an interpreter result indicating that the limit is exceeded.
-fn create_exceeding_interpreter_result(
-    instruction_result: InstructionResult,
-    gas: Gas,
-    output: Bytes,
-) -> InterpreterResult {
-    InterpreterResult::new(instruction_result, output, gas)
-}
-
-/// Marks an existing interpreter result as exceeding the limit.
-fn mark_interpreter_result_as_exceeding_limit(
-    result: &mut InterpreterResult,
-    instruction_result: InstructionResult,
-    output: Bytes,
-) {
-    result.result = instruction_result;
-    result.output = output;
-}
-
-/// Marks a frame result as exceeding the limit.
-pub(crate) fn mark_frame_result_as_exceeding_limit(
-    result: &mut FrameResult,
-    instruction_result: InstructionResult,
-    output: Bytes,
-) {
-    match result {
-        FrameResult::Call(call_outcome) => {
-            mark_interpreter_result_as_exceeding_limit(
-                &mut call_outcome.result,
-                instruction_result,
-                output,
-            );
-        }
-        FrameResult::Create(create_outcome) => {
-            mark_interpreter_result_as_exceeding_limit(
-                &mut create_outcome.result,
-                instruction_result,
-                output,
-            );
-        }
-    }
-}
-
-#[cfg(test)]
-mod metering_exemption_tests {
-    use super::*;
-
-    /// Tiny per-dimension limits so a single recording trivially exceeds them.
-    fn tiny_limits() -> EvmTxRuntimeLimits {
-        EvmTxRuntimeLimits {
-            tx_data_size_limit: 1,
-            tx_kv_updates_limit: 1,
-            tx_compute_gas_limit: 1,
-            tx_state_growth_limit: 1,
-            block_env_access_compute_gas_limit: u64::MAX,
-            oracle_access_compute_gas_limit: u64::MAX,
-        }
-    }
-
-    #[test]
-    fn test_metering_enforced_when_not_exempt() {
-        // Default (non-exempt): halted once compute gas exceeds the (tiny) limit. The REX6 ×
-        // system-origin gate that would stamp `Exempt` lives in `MegaContext::on_new_tx`; here we
-        // exercise the tracker directly.
-        let mut al = AdditionalLimit::new(MegaSpecId::REX6, tiny_limits());
-        assert!(!al.record_compute_gas(1_000_000), "non-exempt tx must report exceeded limit");
-        assert!(al.check_limit().exceeded_limit());
-    }
-
-    #[test]
-    fn test_metering_bypassed_when_exempt() {
-        // When the system-tx exemption is stamped, `check_limit` short-circuits on the sticky
-        // `Exempt` state, covering the four dimensions *and* gas detention, so the same
-        // over-limit usage never halts. Usage is still recorded (only the halt decision is
-        // suppressed).
-        let mut al = AdditionalLimit::new(MegaSpecId::REX6, tiny_limits());
-        al.mark_exempt();
-        assert!(al.record_compute_gas(1_000_000), "exempt tx must not report exceeded limit");
-        assert!(!al.check_limit().exceeded_limit());
-        assert!(al.check_limit().is_exempt(), "check_limit must surface the sticky Exempt state");
-        assert!(al.get_usage().compute_gas >= 1_000_000, "usage is still accumulated while exempt");
-    }
-
-    #[test]
-    fn test_detained_compute_gas_does_not_halt_when_exempt() {
-        // Gas detention lowers the detained compute-gas limit; enforcement runs through the same
-        // `check_limit` chokepoint, so the exemption neutralizes detention too.
-        let mut al =
-            AdditionalLimit::new(MegaSpecId::REX6, EvmTxRuntimeLimits::from_spec(MegaSpecId::REX6));
-        al.mark_exempt();
-        al.set_compute_gas_limit(1); // detain hard
-        assert!(al.record_compute_gas(10_000_000), "exempt tx must ignore gas detention");
-        assert!(!al.check_limit().exceeded_limit());
-    }
-
-    #[test]
-    fn test_reset_clears_exempt() {
-        // The sticky `Exempt` state must not leak to the next transaction reusing the same tracker.
-        let mut al = AdditionalLimit::new(MegaSpecId::REX6, tiny_limits());
-        al.mark_exempt();
-        assert!(al.has_exceeded_limit.is_exempt());
-        al.reset();
-        assert!(!al.has_exceeded_limit.is_exempt(), "reset must clear the sticky Exempt state");
-        assert!(
-            al.has_exceeded_limit.within_limit(),
-            "reset must restore the WithinLimit baseline"
-        );
-        assert!(!al.record_compute_gas(1_000_000), "after reset, metering is enforced again");
-    }
+/// Whether `result` is the revert `stop` makes a frame return: a revert whose output is the
+/// stop's [`MegaLimitExceeded`](crate::MegaLimitExceeded).
+fn is_the_revert_of(result: &FrameResult, stop: &LimitCheck) -> bool {
+    let result = result.interpreter_result();
+    result.result == InstructionResult::Revert && result.output == stop.revert_data()
 }
 
 #[cfg(test)]
 mod tests {
-    use revm::context::tx::TxEnvBuilder;
+    use super::*;
 
-    use super::{super::LimitKind, *};
-
-    fn test_limits() -> EvmTxRuntimeLimits {
-        EvmTxRuntimeLimits {
-            tx_data_size_limit: 100,
-            tx_kv_updates_limit: 1_000,
-            tx_compute_gas_limit: 1_000_000,
-            tx_state_growth_limit: 1_000,
-            block_env_access_compute_gas_limit: 1_000_000,
-            oracle_access_compute_gas_limit: 1_000_000,
-        }
-    }
-
-    /// Returns the latched limit kind, or `None` when within limit.
-    fn latched_kind(limit: &AdditionalLimit) -> Option<LimitKind> {
-        match limit.has_exceeded_limit {
-            LimitCheck::ExceedsLimit { kind, .. } => Some(kind),
-            LimitCheck::WithinLimit | LimitCheck::Exempt => None,
-        }
-    }
-
-    /// Compute gas must be recorded even when another dimension has already latched an
-    /// exceed: the work was performed, and the recorded total feeds the transaction outcome
-    /// and block-level compute accounting. A skipped record would under-report compute usage
-    /// for transactions halted on a non-compute dimension.
-    ///
-    /// This pins the `validate()` path: `before_tx_start` latches intrinsic data-size
-    /// overflow before any frame exists, then the initial gas is recorded.
+    /// A count is none exactly when it adds and takes back nothing in every pool: `NONE` and the
+    /// default are, and so is a count of no records or no bytes; a count that adds or takes back
+    /// a record, adds bytes or a transfer log, or moves state growth either way is not.
     #[test]
-    fn test_record_compute_gas_records_after_other_dimension_latched() {
-        let mut limit = AdditionalLimit::new(MegaSpecId::REX5, test_limits());
+    fn test_a_count_is_none_only_when_it_moves_no_pool() {
+        let cases = [
+            ("NONE", Counted::NONE, true),
+            ("the default", Counted::default(), true),
+            ("no records", Counted::records(0, 0, false), true),
+            ("no bytes", Counted::bytes(0), true),
+            ("no growth", Counted::NONE.with_growth(0, 0), true),
+            ("a record made", Counted::records(1, 0, false), false),
+            ("a record taken back", Counted::records(0, 1, false), false),
+            ("a transfer log", Counted::records(0, 0, true), false),
+            ("bytes", Counted::bytes(1), false),
+            ("a rise", Counted::NONE.with_growth(1, 0), false),
+            ("a fall", Counted::NONE.with_growth(0, 1), false),
+        ];
+        for (case, counted, none) in cases {
+            assert_eq!(counted.is_none(), none, "{case}: {counted:?}");
+        }
+    }
 
-        // Latch the data-size dimension at its mutation site: intrinsic transaction data
-        // (110-byte base + 200 bytes of calldata) exceeds the 100-byte limit.
-        let tx = MegaTransaction::new(
-            TxEnvBuilder::new()
-                .caller(Address::ZERO)
-                .call(Address::ZERO)
-                .data(vec![0u8; 200].into())
-                .build_fill(),
-        );
-        limit.before_tx_start(&tx);
-        assert_eq!(latched_kind(&limit), Some(LimitKind::DataSize));
-
-        // The trailing compute-gas record of the same opcode must still surface the latched
-        // exceed AND record the gas.
-        assert!(!limit.record_compute_gas(5_000), "latched exceed must surface as false");
+    /// An exempt layer answers every crossing as within the limits, in any dimension and at the
+    /// transaction or at a frame; the next transaction begins held to its limits again.
+    #[test]
+    fn test_the_exemption_answers_every_crossing_and_lasts_one_transaction() {
+        let mut limit = AdditionalLimit::default();
+        limit.begin_transaction(true, false, 0);
+        assert!(limit.is_exempt());
+        for kind in [LimitKind::DataSize, LimitKind::ComputeGas] {
+            for frame_local in [false, true] {
+                let verdict = limit.crossed(kind, 0, 1, frame_local);
+                assert_eq!(verdict, LimitCheck::WithinLimit, "{kind:?}, frame-local {frame_local}");
+            }
+        }
+        limit.begin_transaction(false, false, 0);
+        assert!(!limit.is_exempt());
         assert_eq!(
-            limit.get_usage().compute_gas,
-            5_000,
-            "compute gas must be recorded even after another dimension latched",
+            limit.crossed(LimitKind::ComputeGas, 0, 1, false),
+            LimitCheck::ExceedsLimit {
+                kind: LimitKind::ComputeGas,
+                limit: 0,
+                used: 1,
+                frame_local: false
+            },
+            "the next transaction is held to its limits"
         );
-
-        // The latched kind is preserved (not overwritten by the compute-gas check).
-        assert_eq!(latched_kind(&limit), Some(LimitKind::DataSize));
     }
 
-    /// SELFDESTRUCT's beneficiary usage is recorded *before* the inner instruction runs and
-    /// must NOT latch at the recording site: the inner instruction can still fail (out of
-    /// gas, DB error), in which case the frame pops the discardable usage and a latch taken
-    /// at recording time would stick and misattribute the failure. The latch belongs to the
-    /// trailing all-dimension check, which only runs after the inner instruction succeeds.
+    /// Validation admits no body whose authority records cross the data-size limit, so a debug
+    /// build trips on records that do: under a limit lowered to the body and one record, two
+    /// applied authorities cross it.
     #[test]
-    fn test_selfdestruct_usage_latches_only_at_trailing_check() {
-        let mut limits = test_limits();
-        // Below the 40-byte account-info write, so the beneficiary creation exceeds it.
-        limits.tx_data_size_limit = 10;
-        let mut limit = AdditionalLimit::new(MegaSpecId::REX5, limits);
-        // Simulate an active call frame (SELFDESTRUCT always runs inside one).
-        limit.push_empty_frame();
-
-        // Recording site: usage recorded, but no latch yet (inner instruction may still fail).
-        limit.on_selfdestruct_new_account();
-        assert_eq!(latched_kind(&limit), None, "recording site must not latch");
-
-        // Trailing all-dimension check (runs only after inner success): latches and halts.
-        assert!(!limit.record_compute_gas_all_dims(100), "trailing check must surface exceed");
-        assert_eq!(latched_kind(&limit), Some(LimitKind::DataSize));
-    }
-
-    /// `intrinsic_check_for_tx` is a REX5-only preflight (EIP-7702 authority growth);
-    /// its `debug_assert!(spec.is_enabled(REX5))` precondition must reject a pre-REX5
-    /// spec. Calling it at REX4 must trip the assert.
-    ///
-    /// Kills the spec-gate mutant `is_enabled(MegaSpecId::REX5) -> is_enabled(REX4)` at
-    /// limit.rs:203: under the mutant the precondition would silently accept REX4 and the
-    /// call would return a `LimitCheck` instead of panicking.
-    #[test]
-    #[should_panic(expected = "REX5")]
     #[cfg(debug_assertions)]
-    fn test_intrinsic_check_for_tx_requires_rex5_spec() {
-        let tx = MegaTransaction::new(
-            TxEnvBuilder::new().caller(Address::ZERO).call(Address::ZERO).build_fill(),
-        );
-        // REX4 < REX5: the precondition assert must fire.
-        let _ = AdditionalLimit::intrinsic_check_for_tx(MegaSpecId::REX4, &tx, test_limits());
+    #[should_panic(expected = "validation admits no body whose authority records cross")]
+    fn test_authority_records_that_cross_the_limit_trip() {
+        let limits = EvmTxRuntimeLimits::no_limits()
+            .with_tx_data_size_limit(crate::TX_BODY_SIZE + WRITE_RECORD_SIZE);
+        let mut limit = AdditionalLimit::new(limits);
+        limit.begin_transaction(false, false, crate::TX_BODY_SIZE);
+        limit.count_authorities(2, 0);
     }
 }

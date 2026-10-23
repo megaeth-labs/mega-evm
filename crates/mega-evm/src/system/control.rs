@@ -1,218 +1,140 @@
-//! The access control system contract for the `MegaETH` EVM.
+//! The `MegaAccessControl` system contract.
 //!
-//! This contract provides functions to control access restrictions during EVM execution.
-//! The first function, `disableVolatileDataAccess()`, prevents inner calls from accessing
-//! volatile data (block env fields, beneficiary balance, oracle).
+//! It switches volatile-data access off and on for the calling frame and the frames below it,
+//! and reports whether it is off. Its methods are intercepted: the deployed bytecode only
+//! carries the ABI and reverts with `NotIntercepted()`. Its Solidity source is
+//! `crates/system-contracts/contracts/MegaAccessControl.sol`.
 
 use alloy_evm::Database;
-use alloy_primitives::{address, Address};
-use alloy_sol_types::SolError;
-use revm::{database::State, state::EvmState};
+use alloy_primitives::{address, Address, Bytes};
+use alloy_sol_types::{SolCall, SolError};
+use revm::{
+    handler::FrameResult,
+    interpreter::{CallInputs, InstructionResult},
+};
 
-use crate::{MegaHardforks, MegaSpecId, SystemContractSpec};
+use crate::{
+    synthetic_call_result,
+    system::intercept::{peek_selector, reject_non_zero_transfer},
+    ExternalEnvTypes, MegaContext,
+};
 
-/// The address of the access control system contract.
+/// The address of the `MegaAccessControl` system contract.
 pub const ACCESS_CONTROL_ADDRESS: Address = address!("0x6342000000000000000000000000000000000004");
 
-/// The code of the access control contract (version 1.0.0).
-pub use mega_system_contracts::access_control::V1_0_0_CODE as ACCESS_CONTROL_CODE;
+/// The code of the `MegaAccessControl` contract.
+pub use mega_system_contracts::access_control::LATEST_CODE as ACCESS_CONTROL_CODE;
 
-/// The code hash of the access control contract (version 1.0.0).
-pub use mega_system_contracts::access_control::V1_0_0_CODE_HASH as ACCESS_CONTROL_CODE_HASH;
+/// The code hash of the `MegaAccessControl` contract.
+pub use mega_system_contracts::access_control::LATEST_CODE_HASH as ACCESS_CONTROL_CODE_HASH;
 
 pub use mega_system_contracts::access_control::IMegaAccessControl;
 pub use IMegaAccessControl::VolatileDataAccessType;
 
-/// Selector for `VolatileDataAccessDisabled(uint8)` custom error.
-/// Selector: `keccak256("VolatileDataAccessDisabled(uint8)")[0..4]`.
+/// The revert data of `DisabledByParent()`: the answer to a frame that tries to switch
+/// volatile-data access back on after a frame above it switched it off.
+pub const DISABLED_BY_PARENT_REVERT_DATA: [u8; 4] = IMegaAccessControl::DisabledByParent::SELECTOR;
+
+/// The selector of `VolatileDataAccessDisabled(uint8)`, the error a volatile read reverts with
+/// while access is off.
 pub const VOLATILE_DATA_ACCESS_DISABLED_SELECTOR: [u8; 4] =
     IMegaAccessControl::VolatileDataAccessDisabled::SELECTOR;
 
-/// Builds the full ABI-encoded revert data for `VolatileDataAccessDisabled(uint8 accessType)`.
-pub fn volatile_data_access_disabled_revert_data(
-    access_type: VolatileDataAccessType,
-) -> alloy_primitives::Bytes {
-    alloy_primitives::Bytes::from(
-        <IMegaAccessControl::VolatileDataAccessDisabled as SolError>::abi_encode(
-            &IMegaAccessControl::VolatileDataAccessDisabled { accessType: access_type },
-        ),
-    )
-}
-
-/// ABI-encoded revert data for `DisabledByParent()` custom error.
-pub const DISABLED_BY_PARENT_REVERT_DATA: [u8; 4] = IMegaAccessControl::DisabledByParent::SELECTOR;
-
-/// Ensures the access control contract is deployed in the designated address and returns the
-/// state changes.
-/// The caller is responsible for committing the returned `EvmState` changes to the database.
-pub fn transact_deploy_access_control_contract<DB: Database>(
-    hardforks: impl MegaHardforks,
-    block_timestamp: u64,
-    db: &mut State<DB>,
-) -> Result<Option<EvmState>, DB::Error> {
-    access_control_spec(hardforks.spec_id(block_timestamp))
-        .map(|s| crate::transact_deploy(db, &s))
-        .transpose()
-}
-
-/// Builds the [`SystemContractSpec`] for the access-control contract active under
-/// `spec`, or `None` if `REX4` is not yet enabled.
+/// The access type a refused `SLOTNUM` names in `VolatileDataAccessDisabled`: 12, one past the
+/// last variant of the contract's `VolatileDataAccessType`.
 ///
-/// `spec` is the scheduled spec, compared by position — see
-/// [`oracle_spec`](crate::system::oracle::oracle_spec).
-pub(crate) fn access_control_spec(spec: MegaSpecId) -> Option<SystemContractSpec> {
-    spec.reaches(MegaSpecId::REX4).then(|| {
-        SystemContractSpec::new(
-            ACCESS_CONTROL_ADDRESS,
-            ACCESS_CONTROL_CODE,
-            ACCESS_CONTROL_CODE_HASH,
-        )
-    })
+/// The enum was written before the block's slot number became volatile data, and the system
+/// contracts are deployed as they are, so it has no variant for it. The error's argument is
+/// encoded as the `uint8` an enum encodes as, so a refused `SLOTNUM` carries 12 like any other
+/// kind carries its variant. A handler that decodes the argument as `VolatileDataAccessType`
+/// cannot name 12: Solidity's ABI decoder reverts on an enum value out of range, and this crate's
+/// `IMegaAccessControl` binding decodes it to the placeholder `__Invalid`. Solidity handlers must
+/// decode the argument as `uint8`.
+/// [`decode_volatile_data_access_disabled`](crate::decode_volatile_data_access_disabled) is the
+/// Rust side's decoder, and maps every access type the engine names, 12 included.
+pub const SLOT_NUM_ACCESS_TYPE: u8 = 12;
+
+/// Answers a call to `MegaAccessControl`, or `None` when the selector is not one of its three
+/// and the deployed bytecode runs. `depth` is the depth of the frame the call would start.
+///
+/// # The switch
+///
+/// The three methods steer and read gas detention's switch ([`Detention`](crate::Detention)),
+/// for the frame that made the call — the caller, one level above the frame the call would start:
+///
+/// - `disableVolatileDataAccess()` switches volatile-data access off for the caller and every frame
+///   below it, once its answer settles without crossing gas detention's compute limit: an answer
+///   that becomes the stop leaves the switch as it was. A switch already off from a frame above
+///   stays as it is.
+/// - `enableVolatileDataAccess()` switches it back on, and reverts with `DisabledByParent()` when a
+///   frame above the caller switched it off: a frame cannot lift a restriction its caller placed.
+///   Switching on what is not off succeeds and changes nothing.
+/// - `isVolatileDataAccessDisabled()` answers whether the switch is off for the caller.
+///
+/// While the switch is off, the Host refuses every volatile read of the caller's subtree and the
+/// reading frame reverts with `VolatileDataAccessDisabled`. The caller reads the switch as it
+/// resumes after the call, and it turns back on when the frame that switched it off returns,
+/// whatever it returns with, so a sibling called afterwards is not restricted.
+///
+/// A transaction that calls the contract directly has no frame of its own above the one the call
+/// starts: nothing runs after the answer, so disabling changes nothing, enabling succeeds and the
+/// query answers `false`.
+///
+/// All three take no value: they read or steer execution, and the contract holds no balance. A
+/// `STATICCALL` reaches them too, because the switch is not state: it lives for the transaction
+/// and leaves nothing behind.
+pub(crate) fn intercept<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    inputs: &CallInputs,
+    depth: usize,
+) -> Option<FrameResult> {
+    let selector = peek_selector(&inputs.input, ctx)?;
+    // Selector-only admission: the four bytes decide, whatever follows them.
+    let method = if selector == IMegaAccessControl::disableVolatileDataAccessCall::SELECTOR {
+        Method::Disable
+    } else if selector == IMegaAccessControl::enableVolatileDataAccessCall::SELECTOR {
+        Method::Enable
+    } else if selector == IMegaAccessControl::isVolatileDataAccessDisabledCall::SELECTOR {
+        Method::IsDisabled
+    } else {
+        return None;
+    };
+    if let Some(rejected) = reject_non_zero_transfer(inputs) {
+        return Some(rejected);
+    }
+    let caller = depth.checked_sub(1);
+    let detention = &mut ctx.detention;
+    let (result, output) = match method {
+        Method::Disable => {
+            if let Some(caller) = caller {
+                detention.disable_access_on_answer(caller);
+            }
+            (InstructionResult::Return, Bytes::new())
+        }
+        Method::Enable => {
+            if caller.is_none_or(|caller| detention.enable_access(caller)) {
+                (InstructionResult::Return, Bytes::new())
+            } else {
+                (InstructionResult::Revert, Bytes::from_static(&DISABLED_BY_PARENT_REVERT_DATA))
+            }
+        }
+        Method::IsDisabled => {
+            let disabled = caller.is_some_and(|caller| detention.is_access_disabled(caller));
+            let output =
+                IMegaAccessControl::isVolatileDataAccessDisabledCall::abi_encode_returns(&disabled);
+            (InstructionResult::Return, Bytes::from(output))
+        }
+    };
+    Some(synthetic_call_result(inputs, result, output))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use alloy_primitives::{keccak256, B256};
-    use revm::{
-        database::InMemoryDB,
-        state::{AccountInfo, Bytecode},
-    };
-
-    use crate::{MegaHardfork, MegaHardforkConfig};
-    use alloy_hardforks::ForkCondition;
-
-    #[test]
-    fn test_volatile_data_access_disabled_selector() {
-        let expected: [u8; 4] =
-            keccak256("VolatileDataAccessDisabled(uint8)")[..4].try_into().unwrap();
-        assert_eq!(
-            VOLATILE_DATA_ACCESS_DISABLED_SELECTOR, expected,
-            "Selector must match keccak256(\"VolatileDataAccessDisabled(uint8)\")[0..4]"
-        );
-    }
-
-    #[test]
-    fn test_disabled_by_parent_revert_data() {
-        let expected: [u8; 4] = keccak256("DisabledByParent()")[..4].try_into().unwrap();
-        assert_eq!(
-            DISABLED_BY_PARENT_REVERT_DATA, expected,
-            "Selector must match keccak256(\"DisabledByParent()\")[0..4]"
-        );
-    }
-
-    #[test]
-    fn test_access_control_contract_code_hash_matches() {
-        let computed_hash = keccak256(&ACCESS_CONTROL_CODE);
-        assert_eq!(computed_hash, ACCESS_CONTROL_CODE_HASH);
-    }
-
-    #[test]
-    fn test_volatile_data_access_disabled_revert_data_encodes_error() {
-        let revert_data = volatile_data_access_disabled_revert_data(VolatileDataAccessType::Oracle);
-        let decoded =
-            <IMegaAccessControl::VolatileDataAccessDisabled as SolError>::abi_decode(&revert_data)
-                .unwrap();
-
-        assert_eq!(decoded.accessType, VolatileDataAccessType::Oracle);
-    }
-
-    #[test]
-    fn test_deploy_access_control_contract_requires_rex4() {
-        let mut db = InMemoryDB::default();
-        let mut state = State::builder().with_database(&mut db).build();
-
-        let result =
-            transact_deploy_access_control_contract(MegaHardforkConfig::default(), 0, &mut state)
-                .unwrap();
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn test_deploy_access_control_contract_on_fresh_db() {
-        let mut db = InMemoryDB::default();
-        let mut state = State::builder().with_database(&mut db).build();
-        let hardforks = MegaHardforkConfig::default().with_all_activated();
-
-        let result =
-            transact_deploy_access_control_contract(&hardforks, 0, &mut state).unwrap().unwrap();
-        let account = result.get(&ACCESS_CONTROL_ADDRESS).unwrap();
-
-        assert!(account.is_touched());
-        assert!(account.is_created());
-        assert_eq!(account.info.code_hash, ACCESS_CONTROL_CODE_HASH);
-        assert_eq!(account.info.code.as_ref().unwrap().original_bytes(), ACCESS_CONTROL_CODE);
-    }
-
-    #[test]
-    fn test_deploy_access_control_contract_is_idempotent() {
-        let mut db = InMemoryDB::default();
-        db.insert_account_info(
-            ACCESS_CONTROL_ADDRESS,
-            AccountInfo {
-                balance: Default::default(),
-                nonce: 0,
-                code_hash: ACCESS_CONTROL_CODE_HASH,
-                code: Some(Bytecode::new_raw(ACCESS_CONTROL_CODE)),
-            },
-        );
-        let mut state = State::builder().with_database(&mut db).build();
-        let hardforks = MegaHardforkConfig::default().with_all_activated();
-
-        let result =
-            transact_deploy_access_control_contract(&hardforks, 0, &mut state).unwrap().unwrap();
-        let account = result.get(&ACCESS_CONTROL_ADDRESS).unwrap();
-
-        assert_eq!(account.info.code_hash, ACCESS_CONTROL_CODE_HASH);
-        assert_eq!(account.info.code.as_ref().unwrap().original_bytes(), ACCESS_CONTROL_CODE);
-        assert!(!account.is_created(), "idempotent deploy should not re-create the account");
-    }
-
-    #[test]
-    fn test_deploy_access_control_contract_at_later_timestamp() {
-        let mut db = InMemoryDB::default();
-        let mut state = State::builder().with_database(&mut db).build();
-        let hardforks =
-            MegaHardforkConfig::default().with(MegaHardfork::Rex4, ForkCondition::Timestamp(50));
-
-        assert_eq!(
-            transact_deploy_access_control_contract(&hardforks, 49, &mut state).unwrap(),
-            None,
-            "should not deploy before Rex4 activation"
-        );
-
-        let result =
-            transact_deploy_access_control_contract(&hardforks, 50, &mut state).unwrap().unwrap();
-        let account = result.get(&ACCESS_CONTROL_ADDRESS).unwrap();
-        assert!(account.is_created());
-        assert_eq!(account.info.code_hash, ACCESS_CONTROL_CODE_HASH);
-    }
-
-    #[test]
-    fn test_deploy_access_control_contract_overwrites_wrong_existing_code_hash() {
-        let mut db = InMemoryDB::default();
-        db.insert_account_info(
-            ACCESS_CONTROL_ADDRESS,
-            AccountInfo {
-                balance: Default::default(),
-                nonce: 0,
-                code_hash: B256::ZERO,
-                code: Some(Bytecode::new_raw(alloy_primitives::Bytes::from_static(&[0x60, 0x00]))),
-            },
-        );
-        let mut state = State::builder().with_database(&mut db).build();
-        let hardforks = MegaHardforkConfig::default().with_all_activated();
-
-        let result =
-            transact_deploy_access_control_contract(&hardforks, 0, &mut state).unwrap().unwrap();
-        let account = result.get(&ACCESS_CONTROL_ADDRESS).unwrap();
-
-        assert_eq!(account.info.code_hash, ACCESS_CONTROL_CODE_HASH);
-        assert_eq!(account.info.code.as_ref().unwrap().original_bytes(), ACCESS_CONTROL_CODE);
-        assert!(account.is_touched());
-        assert!(
-            !account.is_created(),
-            "in-place bytecode update of an existing account must not mark it as created"
-        );
-    }
+/// The three methods `MegaAccessControl` intercepts.
+#[derive(Clone, Copy, Debug)]
+enum Method {
+    /// `disableVolatileDataAccess()`.
+    Disable,
+    /// `enableVolatileDataAccess()`.
+    Enable,
+    /// `isVolatileDataAccessDisabled()`.
+    IsDisabled,
 }

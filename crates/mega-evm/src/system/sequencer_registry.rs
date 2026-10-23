@@ -1,1494 +1,577 @@
-//! The `SequencerRegistry` system contract for the `MegaETH` EVM.
+//! The `SequencerRegistry` system contract.
 //!
-//! Tracks two independent roles: system address (Oracle/system-tx authority) and
-//! sequencer (mini-block signing). Each role has its own change lifecycle.
+//! It holds the two rotating roles of the chain — the system address and the sequencer — and
+//! their change schedules. It runs its own bytecode: no method of it is intercepted, so a call
+//! to it is an ordinary call. Its Solidity source is
+//! `crates/system-contracts/contracts/SequencerRegistry.sol`.
 //!
-//! Unlike intercepted system contracts (`LimitControl`, `AccessControl`), this contract runs
-//! normal on-chain bytecode. It does not have an interceptor.
+//! The legacy forks deployed it (Rex5) and upgraded it to v2.0.0 (Rex6); Satin neither creates nor
+//! upgrades it. The block in which Satin activates checks that it holds v2.0.0
+//! ([`check_system_contract`](crate::system::check_system_contract)), and is invalid
+//! otherwise. A role change the registry schedules takes effect at its activation block through a
+//! pre-block call: the block executor reads whether one is due
+//! ([`is_apply_pending_changes_due`]) and, when one is, calls `applyPendingChanges()`
+//! ([`transact_apply_pending_changes`]). The call is permissionless and applies only what is due,
+//! so a block that makes it applies the same changes whoever calls.
 //!
-//! Deployed via raw state patch with initial storage seeded at deploy time.
-//! Due changes are applied via a single pre-block EVM system call to
-//! `applyPendingChanges()`, following the same pattern as EIP-2935 and EIP-4788.
-//! The current system transaction sender should always be read through
-//! [`resolve_system_address`], which returns the legacy constant for pre-REX5 and
-//! reads the on-chain `SequencerRegistry` state for REX5+.
+//! The live system address, which a system-address transaction must be sent from, is read out of
+//! the registry by every transaction when it is validated ([`load_system_address`]): the read
+//! loads the registry's account and `_currentSystemAddress` into the transaction's journal, warm,
+//! as EIP-3651 starts the block beneficiary warm, so what a transaction pays never depends on its
+//! envelope. Nothing inside a block can change the address after the pre-block call — a change can
+//! only be scheduled for a later block — so every transaction of a block reads the address the
+//! block's pre-block step left, and an EVM a node builds outside block execution reads the one in
+//! the state it runs on without being told.
 
-use alloy_evm::{
-    block::{BlockExecutionError, BlockValidationError},
-    Database,
-};
-use alloy_primitives::{address, Address, Bytes, U256};
+use alloy_evm::block::BlockExecutionError;
+use alloy_primitives::{address, Address, Bytes, B256, U256};
 use alloy_sol_types::SolCall;
-use mega_system_contracts::sequencer_registry::storage_slots::{
-    ADMIN, CURRENT_SEQUENCER, CURRENT_SYSTEM_ADDRESS, INITIAL_FROM_BLOCK, INITIAL_SEQUENCER,
-    INITIAL_SYSTEM_ADDRESS, MIN_ROTATION_DELAY, PENDING_SEQUENCER, PENDING_SYSTEM_ADDRESS,
-    SEQUENCER_ACTIVATION_BLOCK, SYSTEM_ADDRESS_ACTIVATION_BLOCK,
-};
+use op_revm::OpHaltReason;
 use revm::{
-    context_interface::result::ResultAndState,
-    database::State,
+    context::{result::ResultAndState, JournalTr},
     primitives::KECCAK_EMPTY,
-    state::{Account, Bytecode, EvmState, EvmStorageSlot},
-    Database as RevmDatabase,
+    state::{Account, EvmState, EvmStorageSlot, TransactionId},
 };
 
-#[cfg(not(feature = "std"))]
-use alloc as std;
-use std::vec::Vec;
-
-use crate::{
-    HardforkParams, HardforkParamsError, MegaHardfork, MegaHardforks, SystemContractSpec,
-    MEGA_SYSTEM_ADDRESS,
+use crate::{transact_pre_block_call, ExternalEnvTypes, MegaBlockExecutionError, MegaEvm};
+use storage_slots::{
+    CURRENT_SYSTEM_ADDRESS, PENDING_SEQUENCER, PENDING_SYSTEM_ADDRESS, SEQUENCER_ACTIVATION_BLOCK,
+    SYSTEM_ADDRESS_ACTIVATION_BLOCK,
 };
 
 /// The address of the `SequencerRegistry` system contract.
 pub const SEQUENCER_REGISTRY_ADDRESS: Address =
     address!("0x6342000000000000000000000000000000000006");
 
-/// The code of the `SequencerRegistry` contract (version 1.0.0, pre-Rex6).
-pub use mega_system_contracts::sequencer_registry::V1_0_0_CODE as SEQUENCER_REGISTRY_CODE;
+/// The code of the `SequencerRegistry` contract.
+pub use mega_system_contracts::sequencer_registry::LATEST_CODE as SEQUENCER_REGISTRY_CODE;
 
-/// The code hash of the `SequencerRegistry` contract (version 1.0.0, pre-Rex6).
-pub use mega_system_contracts::sequencer_registry::V1_0_0_CODE_HASH as SEQUENCER_REGISTRY_CODE_HASH;
+/// The code hash of the `SequencerRegistry` contract.
+pub use mega_system_contracts::sequencer_registry::LATEST_CODE_HASH as SEQUENCER_REGISTRY_CODE_HASH;
 
-/// The code of the `SequencerRegistry` contract (version 2.0.0, Rex6+).
-/// This version requires an EIP-712 possession proof by the new sequencer key and a minimum
-/// scheduling-to-activation delay when scheduling a sequencer change.
-pub use mega_system_contracts::sequencer_registry::V2_0_0_CODE as SEQUENCER_REGISTRY_CODE_REX6;
+pub use mega_system_contracts::sequencer_registry::{storage_slots, ISequencerRegistry};
 
-/// The code hash of the `SequencerRegistry` contract (version 2.0.0, Rex6+).
-pub use mega_system_contracts::sequencer_registry::V2_0_0_CODE_HASH as SEQUENCER_REGISTRY_CODE_HASH_REX6;
-
-pub use mega_system_contracts::sequencer_registry::ISequencerRegistry;
-
-/// Bootstrap configuration for `SequencerRegistry` (attached to Rex5 via [`HardforkParams`]).
+/// Whether a role change the registry holds is due at `block_number`: a pending system address
+/// or sequencer whose activation block has come.
 ///
-/// The initial system address is fixed to [`MEGA_SYSTEM_ADDRESS`] at genesis and is not
-/// configurable: pre-Rex5 components (payload executor, txpool, replay) all assume the
-/// system tx sender equals the legacy constant, and a configurable initial value would
-/// silently break those invariants. After Rex5 activation, the system address can be
-/// rotated via the registry's scheduling/apply flow.
+/// Also answers the reads that decided it, as read-only entries of the registry's account: the
+/// witness a stateless client replays the decision from, which the caller commits whether or
+/// not a change is due. Both roles' pending slots are read, and a role's activation block only
+/// when it has a change pending. A registry that does not exist has nothing due, and its absence
+/// is what the witness records; no chain Satin runs on lacks it, its activation block refusing
+/// one without the registry's code, so only a state built apart from a chain, such as a test's,
+/// reaches that answer.
 ///
-/// Field names carry an explicit `rex5_` prefix because these values seed the
-/// `SequencerRegistry` only when Rex5 activates; pre-Rex5 blocks read the system address
-/// from the legacy constant and ignore this struct entirely.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SequencerRegistryConfig {
-    /// The initial sequencer (mini-block signing key) seeded at Rex5 activation.
-    pub rex5_initial_sequencer: Address,
-    /// The initial admin for the registry, seeded at Rex5 activation.
-    pub rex5_initial_admin: Address,
-}
-
-impl HardforkParams for SequencerRegistryConfig {
-    const FORK: MegaHardfork = MegaHardfork::Rex5;
-
-    fn validate(&self) -> Result<(), HardforkParamsError> {
-        if self.rex5_initial_sequencer.is_zero() {
-            return Err(HardforkParamsError {
-                message: "SequencerRegistryConfig.rex5_initial_sequencer must not be zero".into(),
-            });
-        }
-        if self.rex5_initial_admin.is_zero() {
-            return Err(HardforkParamsError {
-                message: "SequencerRegistryConfig.rex5_initial_admin must not be zero".into(),
-            });
-        }
-        Ok(())
-    }
-}
-
-/// Rotation-hardening configuration for `SequencerRegistry` v2.0.0 (attached to Rex6 via
-/// [`HardforkParams`]).
+/// # Errors
 ///
-/// The value seeds the registry's `_minRotationDelay` storage slot when Rex6 activates:
-/// on a fresh Rex6 bootstrap it is written alongside the other seeded slots, and on the
-/// in-place v1.0.0 → v2.0.0 upgrade it is the only slot written. The contract exposes no
-/// setter, so this is the effective delay until a future bytecode upgrade.
-///
-/// Kept separate from the Rex5-pinned [`SequencerRegistryConfig`], with the same
-/// fork-prefixed field-naming convention.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SequencerRegistryRex6Config {
-    /// The minimum number of blocks between scheduling a sequencer change and its activation
-    /// block, seeded into the registry at Rex6 activation.
-    pub rex6_min_rotation_delay: u64,
-}
-
-impl HardforkParams for SequencerRegistryRex6Config {
-    const FORK: MegaHardfork = MegaHardfork::Rex6;
-
-    fn validate(&self) -> Result<(), HardforkParamsError> {
-        // A zero delay disables the reaction window the field exists to guarantee, so it is a
-        // structural invariant rather than a policy choice.
-        if self.rex6_min_rotation_delay == 0 {
-            return Err(HardforkParamsError {
-                message: "SequencerRegistryRex6Config.rex6_min_rotation_delay must not be zero"
-                    .into(),
-            });
-        }
-        Ok(())
-    }
-}
-
-/// Encodes an address into its `U256` storage representation (standard Solidity address-in-slot).
-fn address_to_storage_value(address: Address) -> U256 {
-    U256::from_be_bytes(address.into_word().0)
-}
-
-/// Reads a committed `SequencerRegistry` storage slot.
-fn read_registry_storage<DB: Database>(
-    db: &mut State<DB>,
-    slot: U256,
-) -> Result<U256, BlockExecutionError> {
-    RevmDatabase::storage(db, SEQUENCER_REGISTRY_ADDRESS, slot).map_err(BlockExecutionError::other)
-}
-
-/// Returns whether a pending role change is due and records every storage read into the witness
-/// account.
-fn is_role_due<DB: Database>(
-    db: &mut State<DB>,
-    account: &mut Account,
-    pending_slot: U256,
-    activation_slot: U256,
+/// The database's, when the registry's account or one of its slots cannot be read.
+pub fn is_apply_pending_changes_due<DB: revm::Database>(
+    db: &mut DB,
     block_number: u64,
-) -> Result<bool, BlockExecutionError> {
-    let pending = read_registry_storage(db, pending_slot)?;
-    // Read-only witness entry: record the slot access without marking it as changed.
-    account.storage.insert(pending_slot, EvmStorageSlot::new(pending, 0));
-    if pending.is_zero() {
+) -> Result<(bool, EvmState), DB::Error> {
+    let Some(info) = db.basic(SEQUENCER_REGISTRY_ADDRESS)? else {
+        let absent = Account::new_not_existing(TransactionId::ZERO);
+        return Ok((false, EvmState::from_iter([(SEQUENCER_REGISTRY_ADDRESS, absent)])));
+    };
+    let mut registry = Account::from(info);
+    let mut due = false;
+    for (pending, activation) in [
+        (PENDING_SYSTEM_ADDRESS, SYSTEM_ADDRESS_ACTIVATION_BLOCK),
+        (PENDING_SEQUENCER, SEQUENCER_ACTIVATION_BLOCK),
+    ] {
+        due |= is_role_due(db, &mut registry, pending, activation, block_number)?;
+    }
+    Ok((due, EvmState::from_iter([(SEQUENCER_REGISTRY_ADDRESS, registry)])))
+}
+
+/// Whether the role whose pending value lives at `pending` is due at `block_number`, recording
+/// each slot it reads into `registry` as a read-only entry.
+fn is_role_due<DB: revm::Database>(
+    db: &mut DB,
+    registry: &mut Account,
+    pending: U256,
+    activation: U256,
+    block_number: u64,
+) -> Result<bool, DB::Error> {
+    let pending_value = read_slot(db, registry, pending)?;
+    if pending_value.is_zero() {
         return Ok(false);
     }
-
-    let activation_block = read_registry_storage(db, activation_slot)?;
-    account.storage.insert(activation_slot, EvmStorageSlot::new(activation_block, 0));
-
-    Ok(block_number >= activation_block.saturating_to::<u64>())
+    let activation_block = read_slot(db, registry, activation)?;
+    Ok(U256::from(block_number) >= activation_block)
 }
 
-/// Deploys the `SequencerRegistry` contract and seeds initial storage.
-///
-/// The installed bytecode depends on the active hardfork:
-/// - Rex5 (pre-Rex6): v1.0.0.
-/// - Rex6+: v2.0.0 (rotation hardening: EIP-712 possession proof + minimum rotation delay).
-///
-/// On first deploy, writes the flat storage slots:
-/// - `_currentSystemAddress`, `_currentSequencer`, `_admin`
-/// - `_initialSystemAddress`, `_initialSequencer`, `_initialFromBlock`
-/// - `_minRotationDelay` (v2.0.0 only)
-///
-/// At the Rex6 boundary, an already-deployed v1.0.0 registry is upgraded **in place**: the
-/// bytecode is swapped to v2.0.0 and only the new `_minRotationDelay` slot is written, while
-/// all live state (roles, pending changes, histories) is preserved. A pending sequencer change
-/// scheduled under v1.0.0 therefore still activates normally under v2.0.0.
-///
-/// The dynamic change-history arrays remain empty on bootstrap and grow only when
-/// `applyPendingChanges()` commits a due change.
-/// If already deployed with the correct code hash, returns the account as-is.
-pub fn transact_deploy_sequencer_registry<DB: Database>(
-    hardforks: impl MegaHardforks,
-    block_timestamp: u64,
-    current_block_number: u64,
-    db: &mut State<DB>,
-    config: &SequencerRegistryConfig,
-) -> Result<Option<EvmState>, BlockExecutionError> {
-    let spec = hardforks.spec_id(block_timestamp);
-    let rex6_config = hardforks.fork_params::<SequencerRegistryRex6Config>();
-    transact_deploy_sequencer_registry_for(spec, rex6_config, current_block_number, db, config)
+/// Reads the registry's `slot` and records it into `registry` without marking it changed.
+fn read_slot<DB: revm::Database>(
+    db: &mut DB,
+    registry: &mut Account,
+    slot: U256,
+) -> Result<U256, DB::Error> {
+    let value = db.storage(SEQUENCER_REGISTRY_ADDRESS, slot)?;
+    registry.storage.insert(slot, EvmStorageSlot::new(value, TransactionId::ZERO));
+    Ok(value)
 }
 
-/// [`transact_deploy_sequencer_registry`] against an already-resolved spec.
+/// Runs the pre-block `applyPendingChanges()` call on the registry and answers its result and
+/// state. Nothing is committed.
 ///
-/// The block executor resolves the spec once per block and calls this directly; the public
-/// wrapper above resolves it for callers that hold a hardfork config. Like the flat-registry
-/// spec builders, this deliberately does not take a hardfork config — everything a deploy
-/// depends on arrives resolved (the spec and the typed params), so a per-fork activation gate
-/// cannot be reintroduced here.
-pub(crate) fn transact_deploy_sequencer_registry_for<DB: Database>(
-    spec: crate::MegaSpecId,
-    rex6_config: Option<&SequencerRegistryRex6Config>,
-    current_block_number: u64,
-    db: &mut State<DB>,
-    config: &SequencerRegistryConfig,
-) -> Result<Option<EvmState>, BlockExecutionError> {
-    // Gate and bytecode selection follow the scheduled spec, not per-fork registration:
-    // a registry once deployed stays deployed through a spec rollback, and a config that
-    // schedules only a later fork must still get the Rex5 bootstrap.
-    if !spec.reaches(crate::MegaSpecId::REX5) {
-        return Ok(None);
-    }
-
-    // Belt-and-braces: `with_params` already calls `validate()` at chain-config load time.
-    debug_assert!(
-        config.validate().is_ok(),
-        "SequencerRegistryConfig::validate() failed at deploy time — \
-         this should have been caught by with_params()"
-    );
-
-    // Select the bytecode version and, for v2.0.0, resolve the seeded minimum rotation delay.
-    // The Rex6 params are required as soon as Rex6 is active: failing fast here surfaces a
-    // misconfigured chain at the activation block instead of deploying an unseeded registry.
-    let rex6 = spec.reaches(crate::MegaSpecId::REX6);
-    let (target_code, target_code_hash) = if rex6 {
-        (SEQUENCER_REGISTRY_CODE_REX6, SEQUENCER_REGISTRY_CODE_HASH_REX6)
-    } else {
-        (SEQUENCER_REGISTRY_CODE, SEQUENCER_REGISTRY_CODE_HASH)
-    };
-    let min_rotation_delay = if rex6 {
-        let params = rex6_config.ok_or_else(|| BlockValidationError::BlockHashContractCall {
-            message: "Rex6 active but SequencerRegistryRex6Config not configured".into(),
-        })?;
-        debug_assert!(
-            params.validate().is_ok(),
-            "SequencerRegistryRex6Config::validate() failed at deploy time — \
-             this should have been caught by with_params()"
-        );
-        Some(U256::from(params.rex6_min_rotation_delay))
-    } else {
-        None
-    };
-
-    // Guard against silently overwriting a foreign stateful contract, and handle
-    // the Rex6 v1.0.0 → v2.0.0 in-place upgrade. Both are specific to the registry
-    // (which carries change history); the generic deploy below otherwise
-    // overwrites bytecode in place.
-    let acc =
-        db.load_cache_account(SEQUENCER_REGISTRY_ADDRESS).map_err(BlockExecutionError::other)?;
-    if let Some(account_info) = acc.account_info() {
-        if rex6 && account_info.code_hash == SEQUENCER_REGISTRY_CODE_HASH {
-            // Rex6 boundary: in-place, storage-preserving v1.0.0 → v2.0.0 upgrade. The account
-            // is intentionally NOT marked created (that would clear live roles, pending changes
-            // and histories on commit), so it cannot go through the generic force-create
-            // deploy below; the only storage write is the new `_minRotationDelay` slot, which
-            // no v1.0.0 code path has ever touched.
-            let mut acc_info = account_info;
-            acc_info.code_hash = target_code_hash;
-            acc_info.code = Some(Bytecode::new_raw(target_code));
-
-            let mut revm_acc: Account = acc_info.into();
-            revm_acc.mark_touch();
-
-            let original = read_registry_storage(db, MIN_ROTATION_DELAY)?;
-            let delay = min_rotation_delay.expect("Rex6 upgrade path implies Rex6 params");
-            revm_acc
-                .storage
-                .insert(MIN_ROTATION_DELAY, EvmStorageSlot::new_changed(original, delay, 0));
-
-            return Ok(Some(EvmState::from_iter([(SEQUENCER_REGISTRY_ADDRESS, revm_acc)])));
-        }
-        if account_info.code_hash != target_code_hash && account_info.code_hash != KECCAK_EMPTY {
-            return Err(BlockValidationError::BlockHashContractCall {
-                message: format!(
-                    "SequencerRegistry at {} has unexpected code hash {} (expected {}); \
-                     refusing to overwrite stateful contract storage without migration",
-                    SEQUENCER_REGISTRY_ADDRESS, account_info.code_hash, target_code_hash,
-                ),
-            }
-            .into());
-        }
-    }
-
-    // Seed initial storage (flat slots only, no dynamic arrays).
-    // The initial system address is fixed to MEGA_SYSTEM_ADDRESS at genesis — see
-    // [`SequencerRegistryConfig`] for rationale.
-    let initial_system_address = address_to_storage_value(MEGA_SYSTEM_ADDRESS);
-    let initial_sequencer = address_to_storage_value(config.rex5_initial_sequencer);
-    let initial_admin = address_to_storage_value(config.rex5_initial_admin);
-    let initial_from_block = U256::from(current_block_number);
-    let mut seed = Vec::from([
-        (CURRENT_SYSTEM_ADDRESS, initial_system_address),
-        (CURRENT_SEQUENCER, initial_sequencer),
-        (ADMIN, initial_admin),
-        (INITIAL_SYSTEM_ADDRESS, initial_system_address),
-        (INITIAL_SEQUENCER, initial_sequencer),
-        (INITIAL_FROM_BLOCK, initial_from_block),
-    ]);
-    // v2.0.0 fresh deploys additionally seed the minimum rotation delay.
-    if let Some(delay) = min_rotation_delay {
-        seed.push((MIN_ROTATION_DELAY, delay));
-    }
-
-    // The registry is always a fresh, seeded deploy (force_create), and the
-    // generic deploy returns the account read-only when it is already present
-    // with the matching code hash. (The Rex6 storage-preserving upgrade never
-    // reaches this point — it is handled above.)
-    let spec = SystemContractSpec::new(SEQUENCER_REGISTRY_ADDRESS, target_code, target_code_hash)
-        .with_seed(seed)
-        .with_force_create_on_upgrade(true);
-    let state = crate::transact_deploy(db, &spec).map_err(BlockExecutionError::other)?;
-    Ok(Some(state))
-}
-
-/// Returns `(due, witness_state)` where `due` indicates whether the caller should issue
-/// the pre-block `applyPendingChanges()` system call.
+/// It is a system call from the EIP-4788 system address on the pre-block budget
+/// ([`PRE_BLOCK_CALL_GAS_LIMIT`](crate::constants::PRE_BLOCK_CALL_GAS_LIMIT)): 30M of regular gas,
+/// the rest reservoir, its state priced at the minimum SALT bucket. One call applies whichever of
+/// the two roles is due; the block executor makes it only when [`is_apply_pending_changes_due`]
+/// says one is.
 ///
-/// The returned `EvmState` captures all reads (account + storage slots) as a witness record.
-/// The executor MUST push this into outcomes regardless of `due` so that the reads enter
-/// the stateless witness via `system_caller.on_state()`.
-pub(crate) fn is_apply_pending_changes_due<DB: Database>(
-    db: &mut State<DB>,
-    block_number: u64,
-) -> Result<(bool, EvmState), BlockExecutionError> {
-    let acc =
-        db.load_cache_account(SEQUENCER_REGISTRY_ADDRESS).map_err(BlockExecutionError::other)?;
-
-    let Some(info) = acc.account_info() else {
-        // Account does not exist — record a not-existing account entry for the witness.
-        let account = Account::new_not_existing(0);
-        let state = EvmState::from_iter([(SEQUENCER_REGISTRY_ADDRESS, account)]);
-        return Ok((false, state));
-    };
-
-    // Account exists — build a read-only account entry to record all slot reads.
-    let mut account = Account { info, ..Default::default() };
-
-    let system_address_due = is_role_due(
-        db,
-        &mut account,
-        PENDING_SYSTEM_ADDRESS,
-        SYSTEM_ADDRESS_ACTIVATION_BLOCK,
-        block_number,
-    )?;
-    let sequencer_due =
-        is_role_due(db, &mut account, PENDING_SEQUENCER, SEQUENCER_ACTIVATION_BLOCK, block_number)?;
-
-    let state = EvmState::from_iter([(SEQUENCER_REGISTRY_ADDRESS, account)]);
-    Ok((system_address_due || sequencer_due, state))
-}
-
-/// Executes the pre-block `applyPendingChanges()` system call on the `SequencerRegistry`.
+/// # Errors
 ///
-/// This single system call applies both the system address change and the sequencer
-/// change if they are due in the current block.
-/// Caller should gate this with [`is_apply_pending_changes_due`] to avoid an EVM
-/// call on every block.
-///
-/// The system call is issued with `max(block.gas_limit, SYSTEM_CALL_GAS_LIMIT_FLOOR)`
-/// instead of the upstream-fixed 30M. `applyPendingChanges()` writes role-rotation
-/// slots whose actual cost depends on REX dynamic storage gas, so the upstream default
-/// is no longer guaranteed to be enough on activation blocks.
-pub(crate) fn transact_apply_pending_changes<DB, INSP, ExtEnvs>(
-    evm: &mut crate::MegaEvm<DB, INSP, ExtEnvs>,
-) -> Result<ResultAndState<crate::MegaHaltReason>, BlockExecutionError>
+/// [`MegaBlockExecutionError::ApplyPendingChangesFailed`] when the call reverts or halts, or an
+/// error other than a fatal database error stops it: a change the registry scheduled for this
+/// block must be applied in it. A fatal database error is an internal error, as for every
+/// pre-block call: it says nothing about the block.
+pub fn transact_apply_pending_changes<DB, INSP, ExtEnvs>(
+    evm: &mut MegaEvm<DB, INSP, ExtEnvs>,
+) -> Result<ResultAndState<OpHaltReason>, BlockExecutionError>
 where
     DB: alloy_evm::Database,
-    ExtEnvs: crate::ExternalEnvTypes,
+    ExtEnvs: ExternalEnvTypes,
 {
-    let calldata = ISequencerRegistry::applyPendingChangesCall {}.abi_encode();
-    let gas_limit =
-        evm.block_env_ref().gas_limit.max(crate::constants::rex5::SYSTEM_CALL_GAS_LIMIT_FLOOR);
-    let result_and_state = match evm.transact_system_call_with_gas_limit(
-        alloy_eips::eip4788::SYSTEM_ADDRESS,
-        SEQUENCER_REGISTRY_ADDRESS,
-        Bytes::from(calldata),
-        gas_limit,
-    ) {
-        Ok(res) => res,
-        Err(e) => {
-            return Err(BlockValidationError::BlockHashContractCall {
-                message: format!("SequencerRegistry applyPendingChanges() system call failed: {e}"),
-            }
-            .into());
-        }
-    };
-
-    if !result_and_state.result.is_success() {
-        return Err(BlockValidationError::BlockHashContractCall {
-            message: "SequencerRegistry applyPendingChanges() reverted or halted".into(),
-        }
-        .into());
-    }
-
-    Ok(result_and_state)
+    let data = Bytes::from(ISequencerRegistry::applyPendingChangesCall {}.abi_encode());
+    let refused = |message| MegaBlockExecutionError::ApplyPendingChangesFailed { message }.into();
+    transact_pre_block_call(evm, "applyPendingChanges()", SEQUENCER_REGISTRY_ADDRESS, data, refused)
 }
 
-/// Resolves the current system address.
+/// The live system address in the state `db` holds: the address a system-address transaction
+/// must be sent from, as every transaction reads it when it is validated.
 ///
-/// Must be called after `commit_system_call_outcomes()` so that `SequencerRegistry` is
-/// already deployed and its storage committed.
+/// It is what a transaction pool gives
+/// [`validate_transaction_stateless`](crate::validate_transaction_stateless), read off the state
+/// the pool validates against, and it holds for the block whose pre-block changes made that
+/// state: a later block's pre-block step may change it, so a pool reads it again for every block.
+/// `None` when the registry names no address this engine trusts: it has no account, it holds
+/// other code than [`SEQUENCER_REGISTRY_CODE`], or its `_currentSystemAddress` is zero.
 ///
-/// - Pre-REX5: returns `(MEGA_SYSTEM_ADDRESS, None)`.
-/// - REX5: reads `_currentSystemAddress` from committed registry storage.
+/// It reads the registry's account and, when it holds this engine's code, the one slot, and
+/// writes nothing, so any database serves: pass `&mut db` for a [`Database`](revm::Database) the
+/// caller keeps, and `WrapDatabaseRef(&db)` ([`revm::database_interface::WrapDatabaseRef`]) for a
+/// [`DatabaseRef`](revm::DatabaseRef), such as a read-only view of a block's state.
 ///
-/// The single `spec` is read through two projections that answer different questions:
-/// `is_enabled` (behavior) gates whether dynamic system-address resolution applies — an alias
-/// window whose behavior projects below REX5 returns [`MEGA_SYSTEM_ADDRESS`] again — while
-/// `reaches` (position) selects which registry bytecode version the pre-block deploy installed,
-/// which a rollback does not change.
+/// # Errors
 ///
-/// The optional `EvmState` captures account + slot reads as a witness record.
-/// The executor MUST commit this via `system_caller.on_state()` + `db.commit()`.
-pub fn resolve_system_address<DB: Database>(
-    hardforks: impl MegaHardforks,
-    spec: crate::MegaSpecId,
-    db: &mut State<DB>,
-) -> Result<(Address, Option<EvmState>), BlockExecutionError> {
-    // One spec, two projections: `is_enabled` (behavior) gates whether dynamic resolution
-    // applies at all; `reaches` (position) selects the installed bytecode version below.
-    if !spec.is_enabled(crate::MegaSpecId::REX5) {
-        return Ok((MEGA_SYSTEM_ADDRESS, None));
+/// The database's, when the registry's account or its slot cannot be read.
+pub fn live_system_address<DB: revm::Database>(mut db: DB) -> Result<Option<Address>, DB::Error> {
+    let code_hash =
+        db.basic(SEQUENCER_REGISTRY_ADDRESS)?.map_or(KECCAK_EMPTY, |info| info.code_hash);
+    if code_hash != SEQUENCER_REGISTRY_CODE_HASH {
+        return Ok(None);
     }
+    let current = db.storage(SEQUENCER_REGISTRY_ADDRESS, CURRENT_SYSTEM_ADDRESS)?;
+    Ok(system_address_named_by(code_hash, current))
+}
 
-    // Fail fast if Rex5 is active but params are not configured.
-    hardforks.fork_params::<SequencerRegistryConfig>().ok_or_else(|| {
-        BlockValidationError::BlockHashContractCall {
-            message: "Rex5 active but SequencerRegistryConfig not configured".into(),
-        }
-    })?;
+/// The live system address, read out of the registry in the running transaction's journal: the
+/// address a system-address transaction must be sent from.
+///
+/// Every transaction makes the read when it is validated, whatever its shape and whoever sends it,
+/// so the registry's account and its `_currentSystemAddress` slot are loaded into the journal warm,
+/// as EIP-3651 starts the block beneficiary warm: a transaction's own access to either pays the
+/// warm price, whatever its envelope. Both are in the transaction's state, so a stateless witness
+/// carries the read; neither is written, so committing the transaction leaves the registry as it
+/// was. The registry's code is not loaded: its code hash is compared, not its code.
+///
+/// `None` when the registry names no address this engine trusts: it has no account, it holds other
+/// code than [`SEQUENCER_REGISTRY_CODE`], or its `_currentSystemAddress` is zero. A chain Satin
+/// runs on never holds such a registry — Satin's activation block refuses a chain whose registry
+/// does not hold this code, nothing in Satin replaces a contract's code, and the contract writes no
+/// zero address — so these are states an EVM run outside block execution, or a block a tool or a
+/// test runs on a state of its own, may meet, and in none of them is any transaction a
+/// system-address transaction. The slot is loaded in each of
+/// them all the same, so the transaction's gas does not depend on them.
+///
+/// # Errors
+///
+/// The database's, when the account or the slot cannot be read.
+pub(crate) fn load_system_address<J: JournalTr>(
+    journal: &mut J,
+) -> Result<Option<Address>, <J::Database as revm::Database>::Error> {
+    let code_hash = journal.load_account(SEQUENCER_REGISTRY_ADDRESS)?.data.info.code_hash;
+    let current = journal.sload(SEQUENCER_REGISTRY_ADDRESS, CURRENT_SYSTEM_ADDRESS)?.data;
+    Ok(system_address_named_by(code_hash, current))
+}
 
-    let acc =
-        db.load_cache_account(SEQUENCER_REGISTRY_ADDRESS).map_err(BlockExecutionError::other)?;
-
-    // Unreachable: deploy always runs and commits before resolve.
-    let Some(info) = acc.account_info() else {
-        return Err(BlockValidationError::BlockHashContractCall {
-            message: "Rex5 active but SequencerRegistry account does not exist".into(),
-        }
-        .into());
-    };
-
-    // Unreachable: deploy verifies the code hash before seeding storage. The expected version
-    // follows the scheduled spec, matching what the pre-block deploy installed: the
-    // bytecode was already swapped to v2.0.0 at the Rex6 activation block, so an exact match
-    // holds on every block.
-    let expected_code_hash = if spec.reaches(crate::MegaSpecId::REX6) {
-        SEQUENCER_REGISTRY_CODE_HASH_REX6
-    } else {
-        SEQUENCER_REGISTRY_CODE_HASH
-    };
-    if info.code_hash != expected_code_hash {
-        return Err(BlockValidationError::BlockHashContractCall {
-            message: format!(
-                "SequencerRegistry code hash mismatch: expected {}, got {}",
-                expected_code_hash, info.code_hash
-            ),
-        }
-        .into());
-    }
-
-    // Build read-only witness: account entry + slot read.
-    let mut account = Account { info, ..Default::default() };
-    let value = read_registry_storage(db, CURRENT_SYSTEM_ADDRESS)?;
-    // Read-only witness entry: record the slot access without marking it as changed.
-    account.storage.insert(CURRENT_SYSTEM_ADDRESS, EvmStorageSlot::new(value, 0));
-
-    // Unreachable: deploy seeds a non-zero initial system address.
-    if value.is_zero() {
-        return Err(BlockValidationError::BlockHashContractCall {
-            message: "SequencerRegistry deployed but _currentSystemAddress is zero".into(),
-        }
-        .into());
-    }
-
-    let state = EvmState::from_iter([(SEQUENCER_REGISTRY_ADDRESS, account)]);
-
-    Ok((Address::from_word(value.into()), Some(state)))
+/// The system address a registry whose code hash is `code_hash` names when its
+/// `_currentSystemAddress` holds `current`: none unless the registry holds this engine's code and
+/// a non-zero address.
+fn system_address_named_by(code_hash: B256, current: U256) -> Option<Address> {
+    // The expected hash is the registry code this engine requires, the latest version. When the
+    // registry is next upgraded under a later spec, the hash compared here must be chosen per
+    // spec: compared with the newer code alone, a block of this spec replayed by the newer binary
+    // finds no system address, and its system transactions are silently demoted to ordinary ones.
+    (code_hash == SEQUENCER_REGISTRY_CODE_HASH && !current.is_zero())
+        .then(|| Address::from_word(current.into()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::{address, keccak256, B256};
-    use mega_system_contracts::sequencer_registry::storage_slots::PENDING_ADMIN;
-    use revm::{
-        context::BlockEnv,
-        database::InMemoryDB,
-        state::{AccountInfo, Bytecode},
+    use crate::{
+        system::MEGA_SYSTEM_ADDRESS, MegaContext, MegaSpecId, SYSTEM_CALL_REGULAR_GAS_LIMIT,
     };
+    use alloy_primitives::address;
+    use revm::{
+        context::{BlockEnv, ContextTr, JournalTr, Transaction},
+        database::{InMemoryDB, State},
+        state::{AccountInfo, Bytecode},
+        Database, DatabaseCommit,
+    };
+    use storage_slots::CURRENT_SEQUENCER;
 
-    use crate::{MegaHardforkConfig, MegaSpecId};
+    const NEXT_SYSTEM_ADDRESS: Address = address!("0x1111111111111111111111111111111111111111");
+    const NEXT_SEQUENCER: Address = address!("0x2222222222222222222222222222222222222222");
+    const CURRENT_SEQUENCER_ADDRESS: Address =
+        address!("0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB");
 
-    const TEST_SEQUENCER: Address = address!("0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB");
-    const TEST_ADMIN: Address = address!("0xCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC");
-    /// A non-system test address, used as a stand-in for a `_currentSystemAddress` that has
-    /// already been rotated away from the genesis `MEGA_SYSTEM_ADDRESS`. Distinct from
-    /// genesis so tests can tell the two apart.
-    const TEST_SYSTEM_ADDRESS: Address = address!("0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d");
+    fn word(address: Address) -> U256 {
+        U256::from_be_bytes(address.into_word().0)
+    }
 
-    const TEST_MIN_ROTATION_DELAY: u64 = 100;
-
-    fn test_config() -> SequencerRegistryConfig {
-        SequencerRegistryConfig {
-            rex5_initial_sequencer: TEST_SEQUENCER,
-            rex5_initial_admin: TEST_ADMIN,
+    /// A database holding the registry's code and `slots`.
+    fn registry_with(slots: &[(U256, U256)]) -> InMemoryDB {
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            SEQUENCER_REGISTRY_ADDRESS,
+            AccountInfo {
+                code_hash: SEQUENCER_REGISTRY_CODE_HASH,
+                code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE)),
+                ..Default::default()
+            },
+        );
+        for &(slot, value) in slots {
+            db.insert_account_storage(SEQUENCER_REGISTRY_ADDRESS, slot, value).unwrap();
         }
+        db
     }
 
-    fn test_rex6_config() -> SequencerRegistryRex6Config {
-        SequencerRegistryRex6Config { rex6_min_rotation_delay: TEST_MIN_ROTATION_DELAY }
+    /// Asks whether a change is due at `block_number`, over a fresh cache of `db`.
+    fn due_at(db: &mut InMemoryDB, block_number: u64) -> (bool, Account) {
+        let mut state = State::builder().with_database(db).build();
+        let (due, witness) = is_apply_pending_changes_due(&mut state, block_number).unwrap();
+        assert_eq!(witness.len(), 1, "the registry is the only account read");
+        (due, witness[&SEQUENCER_REGISTRY_ADDRESS].clone())
     }
 
-    /// A chain running Rex5: the pre-upgrade world where the registry runs v1.0.0.
-    fn rex5_hardforks() -> MegaHardforkConfig {
-        MegaHardforkConfig::default()
-            .with_all_activated_through(MegaSpecId::REX5)
-            .with_params(test_config())
+    /// An EVM over `db` in a block at 1,000 whose gas limit is `gas_limit`.
+    fn evm(
+        db: &mut InMemoryDB,
+        gas_limit: u64,
+    ) -> MegaEvm<&mut InMemoryDB, revm::inspector::NoOpInspector> {
+        let block = BlockEnv { number: U256::from(1_000), gas_limit, ..Default::default() };
+        MegaEvm::new(MegaContext::new(db, MegaSpecId::SATIN).with_block(block))
     }
 
-    /// All hardforks including Rex6, with both registry param sets attached.
-    fn rex6_hardforks() -> MegaHardforkConfig {
-        MegaHardforkConfig::default()
-            .with_all_activated_through(MegaSpecId::REX6)
-            .with_params(test_config())
-            .with_params(test_rex6_config())
-    }
-
-    #[test]
-    fn test_code_hash_matches() {
-        assert_eq!(keccak256(&SEQUENCER_REGISTRY_CODE), SEQUENCER_REGISTRY_CODE_HASH);
-        assert_eq!(keccak256(&SEQUENCER_REGISTRY_CODE_REX6), SEQUENCER_REGISTRY_CODE_HASH_REX6);
-        assert_ne!(SEQUENCER_REGISTRY_CODE_HASH, SEQUENCER_REGISTRY_CODE_HASH_REX6);
-    }
-
-    /// Verifies that Rust slot constants match the Solidity storage layout.
-    /// These values come from `forge inspect SequencerRegistry storage-layout`.
-    /// If the Solidity field order changes, this test MUST be updated.
-    #[test]
-    fn test_slot_constants_match_solidity_layout() {
-        assert_eq!(CURRENT_SYSTEM_ADDRESS, U256::from(0), "_currentSystemAddress = slot 0");
-        assert_eq!(CURRENT_SEQUENCER, U256::from(1), "_currentSequencer = slot 1");
-        assert_eq!(ADMIN, U256::from(2), "_admin = slot 2");
-        assert_eq!(PENDING_ADMIN, U256::from(3), "_pendingAdmin = slot 3");
-        assert_eq!(INITIAL_SYSTEM_ADDRESS, U256::from(4), "_initialSystemAddress = slot 4");
-        assert_eq!(INITIAL_SEQUENCER, U256::from(5), "_initialSequencer = slot 5");
-        assert_eq!(INITIAL_FROM_BLOCK, U256::from(6), "_initialFromBlock = slot 6");
-        assert_eq!(PENDING_SYSTEM_ADDRESS, U256::from(7), "_pendingSystemAddress = slot 7");
-        assert_eq!(
-            SYSTEM_ADDRESS_ACTIVATION_BLOCK,
-            U256::from(8),
-            "_systemAddressActivationBlock = slot 8"
-        );
-        assert_eq!(PENDING_SEQUENCER, U256::from(9), "_pendingSequencer = slot 9");
-        assert_eq!(
-            SEQUENCER_ACTIVATION_BLOCK,
-            U256::from(10),
-            "_sequencerActivationBlock = slot 10"
-        );
-        // Slots 11 (_systemAddressHistory) and 12 (_sequencerHistory) are dynamic arrays.
-        assert_eq!(MIN_ROTATION_DELAY, U256::from(13), "_minRotationDelay = slot 13 (v2.0.0+)");
-    }
-
-    #[test]
-    fn test_deploy_requires_rex5() {
-        let mut db = InMemoryDB::default();
-        let mut state = State::builder().with_database(&mut db).build();
-
-        let result = transact_deploy_sequencer_registry(
-            MegaHardforkConfig::default(),
-            0,
-            1000,
-            &mut state,
-            &test_config(),
-        )
-        .unwrap();
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn test_validate_rejects_zero_rex5_initial_sequencer() {
-        let mut config = test_config();
-        config.rex5_initial_sequencer = Address::ZERO;
-        let err = config.validate().expect_err("zero rex5_initial_sequencer must be rejected");
-        assert!(
-            err.message.contains("rex5_initial_sequencer must not be zero"),
-            "unexpected message: {}",
-            err.message,
-        );
-    }
-
-    #[test]
-    fn test_validate_rejects_zero_rex5_initial_admin() {
-        let mut config = test_config();
-        config.rex5_initial_admin = Address::ZERO;
-        let err = config.validate().expect_err("zero rex5_initial_admin must be rejected");
-        assert!(
-            err.message.contains("rex5_initial_admin must not be zero"),
-            "unexpected message: {}",
-            err.message,
-        );
-    }
-
-    #[test]
-    fn test_deploy_seeds_storage() {
-        let mut db = InMemoryDB::default();
-        let mut state = State::builder().with_database(&mut db).build();
-        let hardforks = rex5_hardforks();
-
-        let result =
-            transact_deploy_sequencer_registry(&hardforks, 0, 1000, &mut state, &test_config())
-                .unwrap()
-                .unwrap();
-
-        let account = result.get(&SEQUENCER_REGISTRY_ADDRESS).unwrap();
-        assert!(account.is_created());
-        assert_eq!(account.info.code_hash, SEQUENCER_REGISTRY_CODE_HASH);
-        assert_eq!(account.storage.len(), 6, "should write exactly 6 flat slots");
-
-        assert_eq!(
-            account.storage.get(&CURRENT_SYSTEM_ADDRESS).unwrap().present_value(),
-            U256::from_be_bytes(MEGA_SYSTEM_ADDRESS.into_word().0),
-            "initial system address is hardcoded to MEGA_SYSTEM_ADDRESS",
-        );
-        assert_eq!(
-            account.storage.get(&INITIAL_SYSTEM_ADDRESS).unwrap().present_value(),
-            U256::from_be_bytes(MEGA_SYSTEM_ADDRESS.into_word().0),
-            "_initialSystemAddress is hardcoded to MEGA_SYSTEM_ADDRESS",
-        );
-        assert_eq!(
-            account.storage.get(&CURRENT_SEQUENCER).unwrap().present_value(),
-            U256::from_be_bytes(TEST_SEQUENCER.into_word().0),
-        );
-        assert_eq!(
-            account.storage.get(&ADMIN).unwrap().present_value(),
-            U256::from_be_bytes(TEST_ADMIN.into_word().0),
-        );
-        assert_eq!(
-            account.storage.get(&INITIAL_FROM_BLOCK).unwrap().present_value(),
-            U256::from(1000),
-        );
-    }
-
-    #[test]
-    fn test_deploy_is_idempotent() {
-        let mut db = InMemoryDB::default();
-        db.insert_account_info(
-            SEQUENCER_REGISTRY_ADDRESS,
-            AccountInfo {
-                code_hash: SEQUENCER_REGISTRY_CODE_HASH,
-                code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE)),
-                ..Default::default()
-            },
-        );
-        let mut state = State::builder().with_database(&mut db).build();
-        let hardforks = rex5_hardforks();
-
-        let result =
-            transact_deploy_sequencer_registry(&hardforks, 0, 2000, &mut state, &test_config())
-                .unwrap()
-                .unwrap();
-
-        let account = result.get(&SEQUENCER_REGISTRY_ADDRESS).unwrap();
-        assert!(!account.is_created(), "idempotent deploy should not re-create");
-        assert!(account.storage.is_empty(), "idempotent deploy should not write storage");
-    }
-
-    #[test]
-    fn test_deploy_wrong_existing_code_hash_returns_error() {
-        let wrong_code = Bytecode::new_raw(Bytes::from_static(&[0x60, 0x00]));
-        let mut db = InMemoryDB::default();
-        db.insert_account_info(
-            SEQUENCER_REGISTRY_ADDRESS,
-            AccountInfo {
-                code_hash: wrong_code.hash_slow(),
-                code: Some(wrong_code),
-                ..Default::default()
-            },
-        );
-        let mut state = State::builder().with_database(&mut db).build();
-        let hardforks = rex5_hardforks();
-
-        let err =
-            transact_deploy_sequencer_registry(&hardforks, 0, 2000, &mut state, &test_config())
-                .expect_err("wrong code hash must fail closed");
-
-        let msg = err.to_string();
-        assert!(msg.contains("unexpected code hash"), "unexpected message: {msg}");
-        assert!(msg.contains("refusing to overwrite"), "unexpected message: {msg}");
-    }
-
-    #[test]
-    fn test_deploy_on_top_of_eoa_with_balance() {
-        let mut db = InMemoryDB::default();
-        // Simulate an EOA that received ETH before Rex5.
-        db.insert_account_info(
-            SEQUENCER_REGISTRY_ADDRESS,
-            AccountInfo {
-                balance: U256::from(1_000_000),
-                ..Default::default() // code_hash = KECCAK_EMPTY
-            },
-        );
-        let mut state = State::builder().with_database(&mut db).build();
-        let hardforks = rex5_hardforks();
-
-        let result =
-            transact_deploy_sequencer_registry(&hardforks, 0, 1000, &mut state, &test_config())
-                .unwrap()
-                .unwrap();
-
-        let account = result.get(&SEQUENCER_REGISTRY_ADDRESS).unwrap();
-        assert!(account.is_created());
-        assert_eq!(account.info.code_hash, SEQUENCER_REGISTRY_CODE_HASH);
-        // Pre-existing balance is preserved.
-        assert_eq!(account.info.balance, U256::from(1_000_000));
-    }
-
-    #[test]
-    fn test_validate_rejects_zero_min_rotation_delay() {
-        let config = SequencerRegistryRex6Config { rex6_min_rotation_delay: 0 };
-        let err = config.validate().expect_err("zero rex6_min_rotation_delay must be rejected");
-        assert!(
-            err.message.contains("rex6_min_rotation_delay must not be zero"),
-            "unexpected message: {}",
-            err.message,
-        );
-    }
-
-    #[test]
-    fn test_deploy_fresh_at_rex6_seeds_v2_with_min_rotation_delay() {
-        let mut db = InMemoryDB::default();
-        let mut state = State::builder().with_database(&mut db).build();
-
-        let result = transact_deploy_sequencer_registry(
-            &rex6_hardforks(),
-            0,
-            1000,
-            &mut state,
-            &test_config(),
-        )
-        .unwrap()
-        .unwrap();
-
-        let account = result.get(&SEQUENCER_REGISTRY_ADDRESS).unwrap();
-        assert!(account.is_created());
-        assert_eq!(account.info.code_hash, SEQUENCER_REGISTRY_CODE_HASH_REX6);
-        assert_eq!(
-            account.storage.len(),
-            7,
-            "fresh Rex6 deploy writes the 6 bootstrap slots plus _minRotationDelay"
-        );
-        assert_eq!(
-            account.storage.get(&MIN_ROTATION_DELAY).unwrap().present_value(),
-            U256::from(TEST_MIN_ROTATION_DELAY),
-        );
-        assert_eq!(
-            account.storage.get(&ADMIN).unwrap().present_value(),
-            U256::from_be_bytes(TEST_ADMIN.into_word().0),
-        );
-        assert_eq!(
-            account.storage.get(&INITIAL_FROM_BLOCK).unwrap().present_value(),
-            U256::from(1000),
-        );
-    }
-
-    #[test]
-    fn test_deploy_rex6_upgrades_v1_in_place_preserving_storage() {
-        // A live V1 registry with a pending sequencer change and a non-empty history. The Rex6
-        // upgrade must swap only the bytecode and write only the new _minRotationDelay slot.
-        let pending_sequencer = address!("0x1111111111111111111111111111111111111111");
-        let sequencer_history_length_slot = U256::from(12);
-
-        let mut db = InMemoryDB::default();
-        db.insert_account_info(
-            SEQUENCER_REGISTRY_ADDRESS,
-            AccountInfo {
-                code_hash: SEQUENCER_REGISTRY_CODE_HASH,
-                code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE)),
-                ..Default::default()
-            },
-        );
-        db.insert_account_storage(
-            SEQUENCER_REGISTRY_ADDRESS,
-            CURRENT_SEQUENCER,
-            TEST_SEQUENCER.into_word().into(),
-        )
-        .unwrap();
-        db.insert_account_storage(
-            SEQUENCER_REGISTRY_ADDRESS,
-            PENDING_SEQUENCER,
-            pending_sequencer.into_word().into(),
-        )
-        .unwrap();
-        db.insert_account_storage(
-            SEQUENCER_REGISTRY_ADDRESS,
-            SEQUENCER_ACTIVATION_BLOCK,
-            U256::from(2000),
-        )
-        .unwrap();
-        db.insert_account_storage(
-            SEQUENCER_REGISTRY_ADDRESS,
-            sequencer_history_length_slot,
-            U256::from(1),
-        )
-        .unwrap();
-        let mut state = State::builder().with_database(&mut db).build();
-
-        let result = transact_deploy_sequencer_registry(
-            &rex6_hardforks(),
-            0,
-            1500,
-            &mut state,
-            &test_config(),
-        )
-        .unwrap()
-        .unwrap();
-
-        let account = result.get(&SEQUENCER_REGISTRY_ADDRESS).unwrap();
-        assert!(!account.is_created(), "in-place upgrade must not recreate the account");
-        assert!(account.is_touched());
-        assert_eq!(account.info.code_hash, SEQUENCER_REGISTRY_CODE_HASH_REX6);
-        assert_eq!(account.storage.len(), 1, "only _minRotationDelay is written on upgrade");
-        let slot = account.storage.get(&MIN_ROTATION_DELAY).unwrap();
-        assert_eq!(slot.original_value(), U256::ZERO);
-        assert_eq!(slot.present_value(), U256::from(TEST_MIN_ROTATION_DELAY));
-
-        // After commit, the live pre-upgrade storage must be intact next to the new slot.
-        revm::DatabaseCommit::commit(&mut state, result);
-        assert_eq!(
-            read_registry_storage(&mut state, PENDING_SEQUENCER).unwrap(),
-            U256::from_be_bytes(pending_sequencer.into_word().0),
-        );
-        assert_eq!(
-            read_registry_storage(&mut state, SEQUENCER_ACTIVATION_BLOCK).unwrap(),
-            U256::from(2000),
-        );
-        assert_eq!(
-            read_registry_storage(&mut state, sequencer_history_length_slot).unwrap(),
-            U256::from(1),
-        );
-        assert_eq!(
-            read_registry_storage(&mut state, MIN_ROTATION_DELAY).unwrap(),
-            U256::from(TEST_MIN_ROTATION_DELAY),
-        );
-        assert_eq!(
-            read_registry_storage(&mut state, CURRENT_SEQUENCER).unwrap(),
-            U256::from_be_bytes(TEST_SEQUENCER.into_word().0),
-        );
-    }
-
-    #[test]
-    fn test_deploy_rex6_is_idempotent_when_v2_present() {
-        let mut db = InMemoryDB::default();
-        db.insert_account_info(
-            SEQUENCER_REGISTRY_ADDRESS,
-            AccountInfo {
-                code_hash: SEQUENCER_REGISTRY_CODE_HASH_REX6,
-                code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE_REX6)),
-                ..Default::default()
-            },
-        );
-        let mut state = State::builder().with_database(&mut db).build();
-
-        let result = transact_deploy_sequencer_registry(
-            &rex6_hardforks(),
-            0,
-            2000,
-            &mut state,
-            &test_config(),
-        )
-        .unwrap()
-        .unwrap();
-
-        let account = result.get(&SEQUENCER_REGISTRY_ADDRESS).unwrap();
-        assert!(!account.is_created(), "idempotent deploy should not re-create");
-        assert!(!account.is_touched(), "idempotent deploy should not touch the account");
-        assert!(account.storage.is_empty(), "idempotent deploy should not write storage");
-    }
-
-    #[test]
-    fn test_deploy_rex6_missing_config_errors() {
-        // Rex6 active but only the Rex5 params attached: deploy must fail fast instead of
-        // installing a v2.0.0 registry with an unseeded _minRotationDelay.
-        let hardforks = MegaHardforkConfig::default()
-            .with_all_activated_through(MegaSpecId::REX6)
-            .with_params(test_config());
-        let mut db = InMemoryDB::default();
-        let mut state = State::builder().with_database(&mut db).build();
-
-        let err =
-            transact_deploy_sequencer_registry(&hardforks, 0, 1000, &mut state, &test_config())
-                .expect_err("missing Rex6 params must fail closed");
-        assert!(
-            err.to_string().contains("SequencerRegistryRex6Config not configured"),
-            "unexpected message: {err}"
-        );
-    }
-
-    #[test]
-    fn test_deploy_rex6_on_top_of_eoa_with_balance() {
-        let mut db = InMemoryDB::default();
-        // Simulate an EOA that received ETH before the registry was ever deployed. Even at
-        // Rex6 this is a fresh bootstrap, not a storage-preserving upgrade: the full seed
-        // (including _minRotationDelay) must be written.
-        db.insert_account_info(
-            SEQUENCER_REGISTRY_ADDRESS,
-            AccountInfo { balance: U256::from(1_000_000), ..Default::default() },
-        );
-        let mut state = State::builder().with_database(&mut db).build();
-
-        let result = transact_deploy_sequencer_registry(
-            &rex6_hardforks(),
-            0,
-            1000,
-            &mut state,
-            &test_config(),
-        )
-        .unwrap()
-        .unwrap();
-
-        let account = result.get(&SEQUENCER_REGISTRY_ADDRESS).unwrap();
-        assert!(account.is_created());
-        assert_eq!(account.info.code_hash, SEQUENCER_REGISTRY_CODE_HASH_REX6);
-        assert_eq!(account.info.balance, U256::from(1_000_000));
-        assert_eq!(account.storage.len(), 7);
-        assert_eq!(
-            account.storage.get(&MIN_ROTATION_DELAY).unwrap().present_value(),
-            U256::from(TEST_MIN_ROTATION_DELAY),
-        );
-    }
-
-    #[test]
-    fn test_deploy_rex6_wrong_existing_code_hash_errors() {
-        let wrong_code = Bytecode::new_raw(Bytes::from_static(&[0x60, 0x00]));
-        let mut db = InMemoryDB::default();
-        db.insert_account_info(
-            SEQUENCER_REGISTRY_ADDRESS,
-            AccountInfo {
-                code_hash: wrong_code.hash_slow(),
-                code: Some(wrong_code),
-                ..Default::default()
-            },
-        );
-        let mut state = State::builder().with_database(&mut db).build();
-
-        let err = transact_deploy_sequencer_registry(
-            &rex6_hardforks(),
-            0,
-            2000,
-            &mut state,
-            &test_config(),
-        )
-        .expect_err("wrong code hash must fail closed");
-
-        let msg = err.to_string();
-        assert!(msg.contains("unexpected code hash"), "unexpected message: {msg}");
-        assert!(msg.contains("refusing to overwrite"), "unexpected message: {msg}");
-    }
-
-    #[test]
-    fn test_resolve_rex6_expects_v2_code_hash() {
-        // A V2 registry resolves normally at REX6.
-        let mut db = InMemoryDB::default();
-        db.insert_account_info(
-            SEQUENCER_REGISTRY_ADDRESS,
-            AccountInfo {
-                code_hash: SEQUENCER_REGISTRY_CODE_HASH_REX6,
-                code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE_REX6)),
-                ..Default::default()
-            },
-        );
-        db.insert_account_storage(
-            SEQUENCER_REGISTRY_ADDRESS,
-            CURRENT_SYSTEM_ADDRESS,
-            TEST_SYSTEM_ADDRESS.into_word().into(),
-        )
-        .unwrap();
-        let mut state = State::builder().with_database(&mut db).build();
-
-        let (addr, witness) =
-            resolve_system_address(&rex6_hardforks(), MegaSpecId::REX6, &mut state).unwrap();
-        assert_eq!(addr, TEST_SYSTEM_ADDRESS);
-        assert!(witness.is_some());
-    }
-
-    #[test]
-    fn test_resolve_rex6_rejects_v1_code_hash() {
-        // At REX6 the pre-block deploy has already upgraded the bytecode, so a V1 code hash at
-        // resolve time is a broken pipeline and must fail closed.
-        let mut db = InMemoryDB::default();
-        db.insert_account_info(
-            SEQUENCER_REGISTRY_ADDRESS,
-            AccountInfo {
-                code_hash: SEQUENCER_REGISTRY_CODE_HASH,
-                code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE)),
-                ..Default::default()
-            },
-        );
-        db.insert_account_storage(
-            SEQUENCER_REGISTRY_ADDRESS,
-            CURRENT_SYSTEM_ADDRESS,
-            TEST_SYSTEM_ADDRESS.into_word().into(),
-        )
-        .unwrap();
-        let mut state = State::builder().with_database(&mut db).build();
-
-        let err = resolve_system_address(&rex6_hardforks(), MegaSpecId::REX6, &mut state)
-            .expect_err("V1 code hash at REX6 must fail closed");
-        assert!(err.to_string().contains("code hash mismatch"));
-    }
-
-    #[test]
-    fn test_resolve_pre_rex5_returns_legacy() {
-        let mut db = InMemoryDB::default();
-        let mut state = State::builder().with_database(&mut db).build();
-
-        let (addr, _) =
-            resolve_system_address(MegaHardforkConfig::default(), MegaSpecId::REX4, &mut state)
-                .unwrap();
-        assert_eq!(addr, MEGA_SYSTEM_ADDRESS);
-    }
-
-    #[test]
-    fn test_resolve_rex5_returns_stored_system_address_with_witness() {
-        let mut db = InMemoryDB::default();
-        db.insert_account_info(
-            SEQUENCER_REGISTRY_ADDRESS,
-            AccountInfo {
-                code_hash: SEQUENCER_REGISTRY_CODE_HASH,
-                code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE)),
-                ..Default::default()
-            },
-        );
-        db.insert_account_storage(
-            SEQUENCER_REGISTRY_ADDRESS,
-            CURRENT_SYSTEM_ADDRESS,
-            TEST_SYSTEM_ADDRESS.into_word().into(),
-        )
-        .unwrap();
-        let mut state = State::builder().with_database(&mut db).build();
-
-        let (addr, witness) =
-            resolve_system_address(&rex5_hardforks(), MegaSpecId::REX5, &mut state).unwrap();
-        assert_eq!(addr, TEST_SYSTEM_ADDRESS);
-
-        // Witness must capture the registry account and the CURRENT_SYSTEM_ADDRESS slot.
-        let witness = witness.expect("post-deploy resolve must produce witness");
-        let acc = witness.get(&SEQUENCER_REGISTRY_ADDRESS).expect("registry account in witness");
-        assert_eq!(acc.info.code_hash, SEQUENCER_REGISTRY_CODE_HASH);
-        assert!(
-            acc.storage.contains_key(&CURRENT_SYSTEM_ADDRESS),
-            "witness must include CURRENT_SYSTEM_ADDRESS slot"
-        );
-        assert_eq!(acc.storage.len(), 1, "witness should contain exactly one slot");
-        let slot = acc.storage.get(&CURRENT_SYSTEM_ADDRESS).expect("slot must exist");
-        assert!(!slot.is_changed(), "read-only witness slot must not be marked changed");
-        assert_eq!(slot.original_value(), slot.present_value());
-    }
-
-    #[test]
-    fn test_resolve_rex5_zero_slot_errors() {
-        let mut db = InMemoryDB::default();
-        db.insert_account_info(
-            SEQUENCER_REGISTRY_ADDRESS,
-            AccountInfo {
-                code_hash: SEQUENCER_REGISTRY_CODE_HASH,
-                code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE)),
-                ..Default::default()
-            },
-        );
-        let mut state = State::builder().with_database(&mut db).build();
-
-        let result = resolve_system_address(&rex5_hardforks(), MegaSpecId::REX5, &mut state);
-        assert!(result.is_err(), "zero _currentSystemAddress should be an error");
-    }
-
-    #[test]
-    fn test_resolve_rex5_missing_registry_errors() {
-        let mut db = InMemoryDB::default();
-        let mut state = State::builder().with_database(&mut db).build();
-        let hardforks = rex5_hardforks();
-
-        let err = resolve_system_address(&hardforks, MegaSpecId::REX5, &mut state)
-            .expect_err("missing registry at Rex5 must fail closed");
-        assert!(err.to_string().contains("does not exist"));
-    }
-
-    #[test]
-    fn test_resolve_rex5_wrong_code_hash_errors() {
-        let mut db = InMemoryDB::default();
-        db.insert_account_info(
-            SEQUENCER_REGISTRY_ADDRESS,
-            AccountInfo {
-                code_hash: B256::ZERO,
-                code: Some(Bytecode::new_raw(Bytes::from_static(&[0x60, 0x00]))),
-                ..Default::default()
-            },
-        );
-        let mut state = State::builder().with_database(&mut db).build();
-
-        let err = resolve_system_address(&rex5_hardforks(), MegaSpecId::REX5, &mut state)
-            .expect_err("wrong code hash must fail closed");
-
-        assert!(err.to_string().contains("code hash mismatch"));
-    }
-
+    /// No registry, nothing due: the witness records the account's absence and no slot.
     #[test]
     fn test_is_apply_pending_changes_due_no_registry() {
-        let mut db = InMemoryDB::default();
-        let mut state = State::builder().with_database(&mut db).build();
-
-        let (due, witness) = is_apply_pending_changes_due(&mut state, 1000).unwrap();
+        let (due, registry) = due_at(&mut InMemoryDB::default(), 1_000);
         assert!(!due);
-        // Witness must contain a not-existing account entry.
-        let acc = witness.get(&SEQUENCER_REGISTRY_ADDRESS).expect("witness should exist");
-        assert_eq!(acc.status, revm::state::AccountStatus::LoadedAsNotExisting);
-        assert!(acc.storage.is_empty(), "no-registry witness should have no slots");
+        assert!(registry.is_loaded_as_not_existing());
+        assert!(registry.storage.is_empty(), "no slot of an absent registry is read");
     }
 
+    /// A registry with nothing pending: both pending slots are read, and no activation block.
     #[test]
     fn test_is_apply_pending_changes_due_no_pending() {
-        let mut db = InMemoryDB::default();
-        db.insert_account_info(
-            SEQUENCER_REGISTRY_ADDRESS,
-            AccountInfo {
-                code_hash: SEQUENCER_REGISTRY_CODE_HASH,
-                code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE)),
-                ..Default::default()
-            },
-        );
-        let mut state = State::builder().with_database(&mut db).build();
-
-        let (due, witness) = is_apply_pending_changes_due(&mut state, 1000).unwrap();
+        let (due, registry) = due_at(&mut registry_with(&[]), 1_000);
         assert!(!due);
-        // Witness must include both PENDING_* slots (both zero = no change pending).
-        let acc = witness.get(&SEQUENCER_REGISTRY_ADDRESS).expect("witness should exist");
-        assert!(
-            acc.storage.contains_key(&PENDING_SYSTEM_ADDRESS),
-            "witness must include PENDING_SYSTEM_ADDRESS"
-        );
-        assert!(
-            acc.storage.contains_key(&PENDING_SEQUENCER),
-            "witness must include PENDING_SEQUENCER"
-        );
-        // No activation slots needed because both pending values are zero.
-        assert_eq!(acc.storage.len(), 2, "no-pending witness should have exactly 2 slots");
+        assert_eq!(registry.storage.len(), 2, "{:?}", registry.storage);
+        assert!(registry.storage.contains_key(&PENDING_SYSTEM_ADDRESS));
+        assert!(registry.storage.contains_key(&PENDING_SEQUENCER));
     }
 
+    /// A pending system address is due from its activation block on, not before.
     #[test]
     fn test_is_apply_pending_changes_due_system_address_due() {
-        let mut db = InMemoryDB::default();
-        db.insert_account_info(
-            SEQUENCER_REGISTRY_ADDRESS,
-            AccountInfo {
-                code_hash: SEQUENCER_REGISTRY_CODE_HASH,
-                code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE)),
-                ..Default::default()
-            },
-        );
-        let new_addr = address!("0x1111111111111111111111111111111111111111");
-        db.insert_account_storage(
-            SEQUENCER_REGISTRY_ADDRESS,
-            PENDING_SYSTEM_ADDRESS,
-            new_addr.into_word().into(),
-        )
-        .unwrap();
-        db.insert_account_storage(
-            SEQUENCER_REGISTRY_ADDRESS,
-            SYSTEM_ADDRESS_ACTIVATION_BLOCK,
-            U256::from(1000),
-        )
-        .unwrap();
-        // Not yet due at block 999.
-        let mut state = State::builder().with_database(&mut db).build();
-        let (due, witness) = is_apply_pending_changes_due(&mut state, 999).unwrap();
-        assert!(!due, "not yet due");
-        let acc = witness.get(&SEQUENCER_REGISTRY_ADDRESS).expect("witness");
-        assert!(acc.storage.contains_key(&PENDING_SYSTEM_ADDRESS));
-        assert!(acc.storage.contains_key(&SYSTEM_ADDRESS_ACTIVATION_BLOCK));
+        let mut db = registry_with(&[
+            (PENDING_SYSTEM_ADDRESS, word(NEXT_SYSTEM_ADDRESS)),
+            (SYSTEM_ADDRESS_ACTIVATION_BLOCK, U256::from(1_000)),
+        ]);
 
-        // Exactly due at block 1000 (fresh State to avoid cache from prior call).
-        let mut state = State::builder().with_database(&mut db).build();
-        let (due, witness) = is_apply_pending_changes_due(&mut state, 1000).unwrap();
-        assert!(due, "exactly due");
-        // Both roles' pending slots are always read into the witness.
-        let acc = witness.get(&SEQUENCER_REGISTRY_ADDRESS).expect("witness");
-        assert!(acc.storage.contains_key(&PENDING_SYSTEM_ADDRESS));
-        assert!(acc.storage.contains_key(&SYSTEM_ADDRESS_ACTIVATION_BLOCK));
-        assert!(acc.storage.contains_key(&PENDING_SEQUENCER));
+        let (due, registry) = due_at(&mut db, 999);
+        assert!(!due, "not yet due");
+        assert!(registry.storage.contains_key(&PENDING_SYSTEM_ADDRESS));
+        assert!(registry.storage.contains_key(&SYSTEM_ADDRESS_ACTIVATION_BLOCK));
+
+        let (due, registry) = due_at(&mut db, 1_000);
+        assert!(due, "due at its activation block");
+        assert!(registry.storage.contains_key(&PENDING_SYSTEM_ADDRESS));
+        assert!(registry.storage.contains_key(&SYSTEM_ADDRESS_ACTIVATION_BLOCK));
+        assert!(registry.storage.contains_key(&PENDING_SEQUENCER), "both roles are read");
     }
 
+    /// A pending sequencer is due alone; the system address, with nothing pending, costs one read.
     #[test]
     fn test_is_apply_pending_changes_due_sequencer_due() {
-        let mut db = InMemoryDB::default();
-        db.insert_account_info(
-            SEQUENCER_REGISTRY_ADDRESS,
-            AccountInfo {
-                code_hash: SEQUENCER_REGISTRY_CODE_HASH,
-                code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE)),
-                ..Default::default()
-            },
-        );
-        let new_seq = address!("0x2222222222222222222222222222222222222222");
-        db.insert_account_storage(
-            SEQUENCER_REGISTRY_ADDRESS,
-            PENDING_SEQUENCER,
-            new_seq.into_word().into(),
-        )
-        .unwrap();
-        db.insert_account_storage(
-            SEQUENCER_REGISTRY_ADDRESS,
-            SEQUENCER_ACTIVATION_BLOCK,
-            U256::from(500),
-        )
-        .unwrap();
-        let mut state = State::builder().with_database(&mut db).build();
-
-        let (due, witness) = is_apply_pending_changes_due(&mut state, 500).unwrap();
+        let mut db = registry_with(&[
+            (PENDING_SEQUENCER, word(NEXT_SEQUENCER)),
+            (SEQUENCER_ACTIVATION_BLOCK, U256::from(500)),
+        ]);
+        let (due, registry) = due_at(&mut db, 500);
         assert!(due);
-        // System address has no pending change (slot is zero) so only PENDING_SYSTEM_ADDRESS
-        // is read. Then sequencer path reads PENDING_SEQUENCER + SEQUENCER_ACTIVATION_BLOCK.
-        let acc = witness.get(&SEQUENCER_REGISTRY_ADDRESS).expect("witness");
-        assert!(acc.storage.contains_key(&PENDING_SYSTEM_ADDRESS));
-        assert!(acc.storage.contains_key(&PENDING_SEQUENCER));
-        assert!(acc.storage.contains_key(&SEQUENCER_ACTIVATION_BLOCK));
-        assert_eq!(acc.storage.len(), 3);
+        assert!(registry.storage.contains_key(&PENDING_SYSTEM_ADDRESS));
+        assert!(registry.storage.contains_key(&PENDING_SEQUENCER));
+        assert!(registry.storage.contains_key(&SEQUENCER_ACTIVATION_BLOCK));
+        assert_eq!(registry.storage.len(), 3);
     }
 
+    /// A sequencer change due in this block makes the call whether or not the system address's
+    /// is, and every slot either role read is in the witness, read-only.
     #[test]
     fn test_is_apply_pending_changes_due_checks_sequencer_when_system_not_due() {
-        let mut db = InMemoryDB::default();
-        db.insert_account_info(
-            SEQUENCER_REGISTRY_ADDRESS,
-            AccountInfo {
-                code_hash: SEQUENCER_REGISTRY_CODE_HASH,
-                code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE)),
-                ..Default::default()
-            },
-        );
-        let new_sys = address!("0x1111111111111111111111111111111111111111");
-        let new_seq = address!("0x2222222222222222222222222222222222222222");
-        db.insert_account_storage(
-            SEQUENCER_REGISTRY_ADDRESS,
-            PENDING_SYSTEM_ADDRESS,
-            new_sys.into_word().into(),
-        )
-        .unwrap();
-        db.insert_account_storage(
-            SEQUENCER_REGISTRY_ADDRESS,
-            SYSTEM_ADDRESS_ACTIVATION_BLOCK,
-            U256::from(1001),
-        )
-        .unwrap();
-        db.insert_account_storage(
-            SEQUENCER_REGISTRY_ADDRESS,
-            PENDING_SEQUENCER,
-            new_seq.into_word().into(),
-        )
-        .unwrap();
-        db.insert_account_storage(
-            SEQUENCER_REGISTRY_ADDRESS,
-            SEQUENCER_ACTIVATION_BLOCK,
-            U256::from(1000),
-        )
-        .unwrap();
-        let mut state = State::builder().with_database(&mut db).build();
-
-        let (due, witness) = is_apply_pending_changes_due(&mut state, 1000).unwrap();
-        assert!(
-            due,
-            "sequencer change should still trigger the pre-block call when the system address is not due yet"
-        );
-        // System address is not due (activation at 1001) but its pending slot + activation
-        // slot are still read.  Then the sequencer path reads its own pending + activation.
-        let acc = witness.get(&SEQUENCER_REGISTRY_ADDRESS).expect("witness");
-        assert!(acc.storage.contains_key(&PENDING_SYSTEM_ADDRESS));
-        assert!(acc.storage.contains_key(&SYSTEM_ADDRESS_ACTIVATION_BLOCK));
-        assert!(acc.storage.contains_key(&PENDING_SEQUENCER));
-        assert!(acc.storage.contains_key(&SEQUENCER_ACTIVATION_BLOCK));
-        assert_eq!(acc.storage.len(), 4, "both roles' slots should be in the witness");
-        for slot_key in [
+        let mut db = registry_with(&[
+            (PENDING_SYSTEM_ADDRESS, word(NEXT_SYSTEM_ADDRESS)),
+            (SYSTEM_ADDRESS_ACTIVATION_BLOCK, U256::from(1_001)),
+            (PENDING_SEQUENCER, word(NEXT_SEQUENCER)),
+            (SEQUENCER_ACTIVATION_BLOCK, U256::from(1_000)),
+        ]);
+        let (due, registry) = due_at(&mut db, 1_000);
+        assert!(due, "the sequencer's change is due though the system address's is not");
+        assert_eq!(registry.storage.len(), 4, "both roles' slots are in the witness");
+        assert!(!registry.is_touched(), "a read-only entry");
+        for slot in [
             PENDING_SYSTEM_ADDRESS,
             SYSTEM_ADDRESS_ACTIVATION_BLOCK,
             PENDING_SEQUENCER,
             SEQUENCER_ACTIVATION_BLOCK,
         ] {
-            let slot = acc.storage.get(&slot_key).expect("slot must exist");
-            assert!(!slot.is_changed(), "read-only witness slot must not be marked changed");
+            let slot = &registry.storage[&slot];
+            assert!(!slot.is_changed(), "a read-only slot is not marked changed");
             assert_eq!(slot.original_value(), slot.present_value());
         }
     }
 
+    /// The call applies both due roles: the pending values become current, and the pending and
+    /// activation slots are cleared.
     #[test]
     fn test_transact_apply_pending_changes_updates_and_clears_due_roles() {
-        let mut db = InMemoryDB::default();
-        db.insert_account_info(
-            SEQUENCER_REGISTRY_ADDRESS,
-            AccountInfo {
-                code_hash: SEQUENCER_REGISTRY_CODE_HASH,
-                code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE)),
-                ..Default::default()
-            },
-        );
+        let mut db = registry_with(&[
+            (CURRENT_SYSTEM_ADDRESS, word(MEGA_SYSTEM_ADDRESS)),
+            (CURRENT_SEQUENCER, word(CURRENT_SEQUENCER_ADDRESS)),
+            (PENDING_SYSTEM_ADDRESS, word(NEXT_SYSTEM_ADDRESS)),
+            (SYSTEM_ADDRESS_ACTIVATION_BLOCK, U256::from(1_000)),
+            (PENDING_SEQUENCER, word(NEXT_SEQUENCER)),
+            (SEQUENCER_ACTIVATION_BLOCK, U256::from(1_000)),
+        ]);
+        let state = transact_apply_pending_changes(&mut evm(&mut db, 30_000_000))
+            .expect("applyPendingChanges() succeeds")
+            .state;
+        db.commit(state);
 
-        let next_system_address = address!("0x1111111111111111111111111111111111111111");
-        let next_sequencer = address!("0x2222222222222222222222222222222222222222");
-
-        db.insert_account_storage(
-            SEQUENCER_REGISTRY_ADDRESS,
-            CURRENT_SYSTEM_ADDRESS,
-            TEST_SYSTEM_ADDRESS.into_word().into(),
-        )
-        .unwrap();
-        db.insert_account_storage(
-            SEQUENCER_REGISTRY_ADDRESS,
-            CURRENT_SEQUENCER,
-            TEST_SEQUENCER.into_word().into(),
-        )
-        .unwrap();
-        db.insert_account_storage(
-            SEQUENCER_REGISTRY_ADDRESS,
+        let mut slot = |slot| db.storage(SEQUENCER_REGISTRY_ADDRESS, slot).unwrap();
+        assert_eq!(slot(CURRENT_SYSTEM_ADDRESS), word(NEXT_SYSTEM_ADDRESS));
+        assert_eq!(slot(CURRENT_SEQUENCER), word(NEXT_SEQUENCER));
+        for cleared in [
             PENDING_SYSTEM_ADDRESS,
-            next_system_address.into_word().into(),
-        )
-        .unwrap();
-        db.insert_account_storage(
-            SEQUENCER_REGISTRY_ADDRESS,
             SYSTEM_ADDRESS_ACTIVATION_BLOCK,
-            U256::from(1000),
-        )
-        .unwrap();
-        db.insert_account_storage(
-            SEQUENCER_REGISTRY_ADDRESS,
             PENDING_SEQUENCER,
-            next_sequencer.into_word().into(),
-        )
-        .unwrap();
-        db.insert_account_storage(
-            SEQUENCER_REGISTRY_ADDRESS,
             SEQUENCER_ACTIVATION_BLOCK,
-            U256::from(1000),
-        )
-        .unwrap();
-
-        let block =
-            BlockEnv { number: U256::from(1000), gas_limit: 30_000_000, ..Default::default() };
-        let mut context = crate::MegaContext::new(&mut db, MegaSpecId::REX5).with_block(block);
-        context.modify_chain(|chain| {
-            chain.operator_fee_scalar = Some(U256::ZERO);
-            chain.operator_fee_constant = Some(U256::ZERO);
-        });
-        let mut evm = crate::MegaEvm::new(context);
-
-        let result =
-            transact_apply_pending_changes(&mut evm).expect("applyPendingChanges() should succeed");
-        let state = result.state;
-        drop(evm);
-
-        revm::DatabaseCommit::commit(&mut db, state);
-
-        assert_eq!(
-            revm::Database::storage(&mut db, SEQUENCER_REGISTRY_ADDRESS, CURRENT_SYSTEM_ADDRESS)
-                .unwrap(),
-            address_to_storage_value(next_system_address),
-        );
-        assert_eq!(
-            revm::Database::storage(&mut db, SEQUENCER_REGISTRY_ADDRESS, CURRENT_SEQUENCER)
-                .unwrap(),
-            address_to_storage_value(next_sequencer),
-        );
-        assert_eq!(
-            revm::Database::storage(&mut db, SEQUENCER_REGISTRY_ADDRESS, PENDING_SYSTEM_ADDRESS)
-                .unwrap(),
-            U256::ZERO,
-        );
-        assert_eq!(
-            revm::Database::storage(&mut db, SEQUENCER_REGISTRY_ADDRESS, PENDING_SEQUENCER)
-                .unwrap(),
-            U256::ZERO,
-        );
-        assert_eq!(
-            revm::Database::storage(
-                &mut db,
-                SEQUENCER_REGISTRY_ADDRESS,
-                SYSTEM_ADDRESS_ACTIVATION_BLOCK,
-            )
-            .unwrap(),
-            U256::ZERO,
-        );
-        assert_eq!(
-            revm::Database::storage(
-                &mut db,
-                SEQUENCER_REGISTRY_ADDRESS,
-                SEQUENCER_ACTIVATION_BLOCK,
-            )
-            .unwrap(),
-            U256::ZERO,
-        );
+        ] {
+            assert_eq!(slot(cleared), U256::ZERO);
+        }
     }
 
+    /// The call runs on the pre-block budget whatever the block's gas limit, of which 30M is
+    /// regular gas and the rest the reservoir: a registry with nothing due writes nothing, and all
+    /// of the reservoir is left, in a block of 1M and in one of 250M.
     #[test]
-    fn test_transact_apply_pending_changes_uses_block_gas_limit() {
-        // Block gas_limit > 30M must be passed through to the system call so that
-        // applyPendingChanges() can absorb the variable cost from REX dynamic
-        // storage gas instead of being capped at the upstream-fixed 30M.
-        let mut db = InMemoryDB::default();
-        db.insert_account_info(
-            SEQUENCER_REGISTRY_ADDRESS,
-            AccountInfo {
-                code_hash: SEQUENCER_REGISTRY_CODE_HASH,
-                code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE)),
-                ..Default::default()
-            },
-        );
-
-        let block =
-            BlockEnv { number: U256::from(1000), gas_limit: 250_000_000, ..Default::default() };
-        let mut context = crate::MegaContext::new(&mut db, MegaSpecId::REX5).with_block(block);
-        context.modify_chain(|chain| {
-            chain.operator_fee_scalar = Some(U256::ZERO);
-            chain.operator_fee_constant = Some(U256::ZERO);
-        });
-        let mut evm = crate::MegaEvm::new(context);
-
-        transact_apply_pending_changes(&mut evm).expect("system call should succeed");
-        assert_eq!(revm::handler::EvmTr::ctx_ref(&evm).tx.base.gas_limit, 250_000_000);
+    fn test_transact_apply_pending_changes_runs_on_the_pre_block_budget() {
+        use crate::constants::PRE_BLOCK_CALL_GAS_LIMIT;
+        for block_gas_limit in [1_000_000, 250_000_000] {
+            let mut db = registry_with(&[]);
+            let mut evm = evm(&mut db, block_gas_limit);
+            transact_apply_pending_changes(&mut evm).expect("the call succeeds");
+            assert_eq!(evm.ctx().tx().gas_limit(), PRE_BLOCK_CALL_GAS_LIMIT, "{block_gas_limit}");
+            assert_eq!(
+                evm.ctx().additional_limit().reservoir_remaining(),
+                PRE_BLOCK_CALL_GAS_LIMIT - SYSTEM_CALL_REGULAR_GAS_LIMIT,
+                "{block_gas_limit}"
+            );
+        }
     }
 
+    /// A read the database cannot serve during the call is the database's error, not a verdict on
+    /// the block.
     #[test]
-    fn test_transact_apply_pending_changes_respects_30m_floor() {
-        // When the block gas limit is below the 30M floor, the system call must
-        // still receive at least the historical default budget.
-        let mut db = InMemoryDB::default();
-        db.insert_account_info(
-            SEQUENCER_REGISTRY_ADDRESS,
-            AccountInfo {
-                code_hash: SEQUENCER_REGISTRY_CODE_HASH,
-                code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE)),
-                ..Default::default()
-            },
-        );
-
+    fn test_transact_apply_pending_changes_reports_a_database_error_as_one() {
+        use crate::test_utils::{ErrorInjectingDatabase, MemoryDatabase};
+        let mut db = ErrorInjectingDatabase::new(MemoryDatabase::default());
+        db.fail_on_account = Some(SEQUENCER_REGISTRY_ADDRESS);
         let block =
-            BlockEnv { number: U256::from(1000), gas_limit: 1_000_000, ..Default::default() };
-        let mut context = crate::MegaContext::new(&mut db, MegaSpecId::REX5).with_block(block);
-        context.modify_chain(|chain| {
-            chain.operator_fee_scalar = Some(U256::ZERO);
-            chain.operator_fee_constant = Some(U256::ZERO);
-        });
-        let mut evm = crate::MegaEvm::new(context);
-
-        transact_apply_pending_changes(&mut evm).expect("system call should succeed");
-        assert_eq!(
-            revm::handler::EvmTr::ctx_ref(&evm).tx.base.gas_limit,
-            crate::constants::rex5::SYSTEM_CALL_GAS_LIMIT_FLOOR,
-        );
+            BlockEnv { number: U256::from(1_000), gas_limit: 30_000_000, ..Default::default() };
+        let mut evm = MegaEvm::new(MegaContext::new(&mut db, MegaSpecId::SATIN).with_block(block));
+        let err = transact_apply_pending_changes(&mut evm).expect_err("the read fails");
+        assert!(matches!(err, BlockExecutionError::Internal(_)), "{err:?}");
+        assert!(err.to_string().contains("injected basic() error"), "{err}");
     }
 
+    /// A registry whose code reverts fails the call, and the block with it: the refusal is a
+    /// validation error, a verdict on the block, and not an internal one a node would retry.
     #[test]
     fn test_transact_apply_pending_changes_errors_when_registry_reverts() {
-        let revert_code = Bytecode::new_legacy(Bytes::from_static(&[0x60, 0x00, 0x60, 0x00, 0xfd]));
-
+        let revert = Bytecode::new_legacy(Bytes::from_static(&[0x60, 0x00, 0x60, 0x00, 0xfd]));
         let mut db = InMemoryDB::default();
         db.insert_account_info(
             SEQUENCER_REGISTRY_ADDRESS,
-            AccountInfo {
-                code_hash: revert_code.hash_slow(),
-                code: Some(revert_code),
-                ..Default::default()
-            },
+            AccountInfo { code_hash: revert.hash_slow(), code: Some(revert), ..Default::default() },
         );
+        let err = transact_apply_pending_changes(&mut evm(&mut db, 30_000_000))
+            .expect_err("a reverting registry fails closed");
+        let BlockExecutionError::Validation(alloy_evm::block::BlockValidationError::Other(error)) =
+            &err
+        else {
+            panic!("a reverting registry refuses the block: {err:?}");
+        };
+        assert!(
+            matches!(
+                error.downcast_ref(),
+                Some(MegaBlockExecutionError::ApplyPendingChangesFailed { .. })
+            ),
+            "{err:?}"
+        );
+        assert!(
+            err.to_string().starts_with(
+                "the SequencerRegistry's pending changes could not be applied: \
+                 the applyPendingChanges() pre-block call did not succeed: Revert {"
+            ),
+            "{err}"
+        );
+    }
 
-        let block =
-            BlockEnv { number: U256::from(1000), gas_limit: 30_000_000, ..Default::default() };
-        let mut context = crate::MegaContext::new(&mut db, MegaSpecId::REX5).with_block(block);
-        context.modify_chain(|chain| {
-            chain.operator_fee_scalar = Some(U256::ZERO);
-            chain.operator_fee_constant = Some(U256::ZERO);
-        });
-        let mut evm = crate::MegaEvm::new(context);
+    /// A database whose registry holds `code` and `current` as its system address.
+    fn registry_holding(code: Bytes, current: Option<Address>) -> InMemoryDB {
+        let code = Bytecode::new_raw(code);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            SEQUENCER_REGISTRY_ADDRESS,
+            AccountInfo { code_hash: code.hash_slow(), code: Some(code), ..Default::default() },
+        );
+        if let Some(current) = current {
+            db.insert_account_storage(
+                SEQUENCER_REGISTRY_ADDRESS,
+                CURRENT_SYSTEM_ADDRESS,
+                word(current),
+            )
+            .unwrap();
+        }
+        db
+    }
 
-        let err = transact_apply_pending_changes(&mut evm)
-            .expect_err("reverting registry bytecode must fail closed");
+    /// Reads the live system address out of `db` through a fresh journal, and answers it with the
+    /// journal the read left behind.
+    fn load(db: InMemoryDB) -> (Option<Address>, revm::Journal<InMemoryDB>) {
+        let mut journal = revm::Journal::new(db);
+        let address = load_system_address(&mut journal).expect("the read succeeds");
+        (address, journal)
+    }
 
-        assert!(err.to_string().contains("reverted or halted"));
+    /// Asserts the read left the registry's account and its system-address slot in `journal`,
+    /// warm, untouched and unchanged, the slot holding `current`: a witness of the read, and what
+    /// the transaction's own access to either finds warm.
+    fn assert_warm_and_unchanged(journal: &revm::Journal<InMemoryDB>, current: U256) {
+        let registry = &journal.inner.state[&SEQUENCER_REGISTRY_ADDRESS];
+        assert!(!registry.is_cold_transaction_id(journal.transaction_id), "the account is warm");
+        assert!(!registry.is_touched(), "a read-only entry");
+        assert_eq!(registry.storage.len(), 1, "exactly the one slot read");
+        let slot = &registry.storage[&CURRENT_SYSTEM_ADDRESS];
+        assert!(!slot.is_cold, "the slot is warm");
+        assert!(!slot.is_changed());
+        assert_eq!(slot.present_value(), current);
+    }
+
+    /// A registry holding the code this engine requires names the address it stores, and the read
+    /// leaves the account and the slot warm, without loading the code.
+    #[test]
+    fn test_the_read_answers_the_stored_system_address_and_warms_the_registry() {
+        let db = registry_holding(SEQUENCER_REGISTRY_CODE, Some(NEXT_SYSTEM_ADDRESS));
+        let (address, journal) = load(db);
+        assert_eq!(address, Some(NEXT_SYSTEM_ADDRESS));
+        assert_warm_and_unchanged(&journal, word(NEXT_SYSTEM_ADDRESS));
+        assert_eq!(
+            journal.inner.state[&SEQUENCER_REGISTRY_ADDRESS].info.code_hash,
+            SEQUENCER_REGISTRY_CODE_HASH
+        );
+    }
+
+    /// A registry still holding the legacy engine's first bytecode is not the one this engine
+    /// requires: it names no address. Its slot is read all the same, so what a transaction pays
+    /// does not depend on the registry's code.
+    #[test]
+    fn test_the_read_refuses_the_v1_code_hash() {
+        use mega_system_contracts::sequencer_registry::V1_0_0_CODE;
+        let (address, journal) = load(registry_holding(V1_0_0_CODE, Some(NEXT_SYSTEM_ADDRESS)));
+        assert_eq!(address, None);
+        assert_warm_and_unchanged(&journal, word(NEXT_SYSTEM_ADDRESS));
+    }
+
+    /// A registry holding foreign code names no address, whatever it stores.
+    #[test]
+    fn test_the_read_refuses_foreign_code() {
+        let db = registry_holding(Bytes::from_static(&[0x60, 0x00]), Some(NEXT_SYSTEM_ADDRESS));
+        let (address, journal) = load(db);
+        assert_eq!(address, None);
+        assert_warm_and_unchanged(&journal, word(NEXT_SYSTEM_ADDRESS));
+    }
+
+    /// A registry whose system address is zero names none: no caller, the zero address included,
+    /// is the system address of an empty registry.
+    #[test]
+    fn test_the_read_answers_no_address_for_a_zero_slot() {
+        let (address, journal) = load(registry_holding(SEQUENCER_REGISTRY_CODE, None));
+        assert_eq!(address, None);
+        assert_warm_and_unchanged(&journal, U256::ZERO);
+    }
+
+    /// A state without the registry names no address, and the read records the account's
+    /// absence and the slot it would hold, zero.
+    #[test]
+    fn test_the_read_answers_no_address_without_a_registry() {
+        let (address, journal) = load(InMemoryDB::default());
+        assert_eq!(address, None);
+        assert!(journal.inner.state[&SEQUENCER_REGISTRY_ADDRESS].is_loaded_as_not_existing());
+        assert_warm_and_unchanged(&journal, U256::ZERO);
+    }
+
+    /// Read off a database, the live system address is what a transaction's validation reads:
+    /// the address the registry stores when it holds this engine's code, and none otherwise.
+    #[test]
+    fn test_live_system_address_reads_what_validation_reads() {
+        let read = |db: InMemoryDB| live_system_address(db).expect("the read succeeds");
+        assert_eq!(
+            read(registry_holding(SEQUENCER_REGISTRY_CODE, Some(NEXT_SYSTEM_ADDRESS))),
+            Some(NEXT_SYSTEM_ADDRESS)
+        );
+        assert_eq!(read(registry_holding(SEQUENCER_REGISTRY_CODE, None)), None);
+        assert_eq!(
+            read(registry_holding(Bytes::from_static(&[0x60, 0x00]), Some(NEXT_SYSTEM_ADDRESS))),
+            None
+        );
+        assert_eq!(read(InMemoryDB::default()), None);
+
+        // A database the caller keeps, and one it can only read through `DatabaseRef`.
+        let mut db = registry_holding(SEQUENCER_REGISTRY_CODE, Some(NEXT_SYSTEM_ADDRESS));
+        assert_eq!(live_system_address(&mut db).unwrap(), Some(NEXT_SYSTEM_ADDRESS));
+        let wrapped = revm::database_interface::WrapDatabaseRef(&db);
+        assert_eq!(live_system_address(wrapped).unwrap(), Some(NEXT_SYSTEM_ADDRESS));
+    }
+
+    /// A read the database cannot serve is the database's error, not an absent address.
+    #[test]
+    fn test_the_read_reports_a_database_error() {
+        use crate::test_utils::{ErrorInjectingDatabase, MemoryDatabase};
+        let mut db = ErrorInjectingDatabase::new(
+            MemoryDatabase::default()
+                .account_code(SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE),
+        );
+        db.fail_on_storage = Some((SEQUENCER_REGISTRY_ADDRESS, CURRENT_SYSTEM_ADDRESS));
+        let mut journal: revm::Journal<_> = revm::Journal::new(db);
+        let err = load_system_address(&mut journal).expect_err("the read fails");
+        assert!(err.to_string().contains("injected storage() error"), "{err}");
     }
 }

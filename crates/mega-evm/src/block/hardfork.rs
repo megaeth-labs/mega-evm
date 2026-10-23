@@ -1,177 +1,84 @@
+//! `MegaETH` hardforks of the Satin engine, and the schedule a chain activates them on.
+//!
+//! [`MegaHardfork`] is the fork; [`MegaHardforkConfig`] is a schedule that mixes it with the
+//! Ethereum and Optimism forks; [`MegaHardforks`] is what block execution reads a schedule
+//! through. A schedule is checked once, when it is loaded
+//! ([`validate_schedule`](MegaHardforks::validate_schedule)), so a malformed chain configuration
+//! fails at load rather than at the fork's first block.
+
 #[cfg(not(feature = "std"))]
 use alloc as std;
+use core::fmt;
+use std::{boxed::Box, vec, vec::Vec};
 
 use alloy_hardforks::{hardfork, EthereumHardfork, EthereumHardforks, ForkCondition, Hardfork};
 use alloy_op_hardforks::{OpHardfork, OpHardforks};
 use alloy_primitives::{BlockTimestamp, U256};
 use auto_impl::auto_impl;
-use core::any::Any;
-use std::{boxed::Box, sync::Arc, vec::Vec};
 
-use crate::{MegaSpecId, SequencerRegistryConfig, SequencerRegistryRex6Config};
+use crate::MegaSpecId;
+
+/// The Ethereum forks Satin runs on that a schedule activates by timestamp: every one from the
+/// first after the Merge up to Osaka.
+const SATIN_BASE_ETHEREUM_FORKS: [EthereumHardfork; 4] = [
+    EthereumHardfork::Shanghai,
+    EthereumHardfork::Cancun,
+    EthereumHardfork::Prague,
+    EthereumHardfork::Osaka,
+];
+
+/// The Optimism forks Satin runs on that a schedule activates by timestamp: every one from the
+/// first after Bedrock up to Karst.
+const SATIN_BASE_OP_FORKS: [OpHardfork; 9] = [
+    OpHardfork::Regolith,
+    OpHardfork::Canyon,
+    OpHardfork::Ecotone,
+    OpHardfork::Fjord,
+    OpHardfork::Granite,
+    OpHardfork::Holocene,
+    OpHardfork::Isthmus,
+    OpHardfork::Jovian,
+    OpHardfork::Karst,
+];
 
 hardfork! {
-    /// The name of MegaETH hardforks. It is expected to mix with [`EthereumHardfork`] and
-    /// [`OpHardfork`].
+    /// `MegaETH` network upgrades that schedule a Satin-engine spec. It is expected to mix with
+    /// `EthereumHardfork` and `OpHardfork`.
+    ///
+    /// The forks of the legacy engine (`MiniRex` through `Rex6`) are not variants here; a chain
+    /// runs them on the legacy engine up to the Satin activation.
     #[derive(serde::Serialize, serde::Deserialize)]
     MegaHardfork {
-        /// The first hardfork.
-        MiniRex,
-        /// The first alias hardfork: rolls behavior back to Equivalence on its own rung.
-        MiniRex1,
-        /// The second alias hardfork: restores MiniRex behavior on its own rung.
-        MiniRex2,
-        /// The fourth hardfork.
-        Rex,
-        /// The fifth hardfork (first patch to Rex).
-        Rex1,
-        /// The sixth hardfork (second patch to Rex).
-        Rex2,
-        /// The seventh hardfork (third patch to Rex).
-        Rex3,
-        /// The eighth hardfork (fourth patch to Rex).
-        Rex4,
-        /// The ninth hardfork (fifth patch to Rex).
-        Rex5,
-        /// The tenth hardfork (sixth patch to Rex).
-        Rex6,
-        /// The eleventh hardfork (seventh patch to Rex).
-        Rex7,
+        /// Activates [`MegaSpecId::SATIN`].
+        Satin,
     }
 }
 
 impl MegaHardfork {
-    /// Whether this fork introduces new behavior — its spec is not an alias. Alias forks
-    /// (`MiniRex1`, `MiniRex2`) schedule a rung whose behavior belongs to an earlier spec.
-    pub(crate) fn introduces_behavior(self) -> bool {
-        !self.spec_id().is_alias()
-    }
-
-    /// Gets the `MegaSpecId` associated with this hardfork.
-    #[allow(clippy::match_same_arms)]
+    /// The spec this hardfork activates.
     pub const fn spec_id(&self) -> MegaSpecId {
-        // Note: MiniRex1 and MiniRex2 map to alias specs: rungs of their own whose
-        // behavior projects to previously released specs.
         match self {
-            Self::MiniRex => MegaSpecId::MINI_REX,
-            Self::MiniRex1 => MegaSpecId::MINI_REX_1,
-            Self::MiniRex2 => MegaSpecId::MINI_REX_2,
-            Self::Rex => MegaSpecId::REX,
-            Self::Rex1 => MegaSpecId::REX1,
-            Self::Rex2 => MegaSpecId::REX2,
-            Self::Rex3 => MegaSpecId::REX3,
-            Self::Rex4 => MegaSpecId::REX4,
-            Self::Rex5 => MegaSpecId::REX5,
-            Self::Rex6 => MegaSpecId::REX6,
-            Self::Rex7 => MegaSpecId::REX7,
+            Self::Satin => MegaSpecId::SATIN,
         }
     }
 }
 
-/// Whether each fork in `forks` maps to a strictly higher spec rung than the fork before it.
+/// Extends [`OpHardforks`] with the `MegaETH` forks.
 ///
-/// This is the invariant the fork→spec map rests on: the reverse scan in
-/// [`MegaHardforks::hardfork`] and the skipped-rung rule in
-/// [`MegaHardforks::validate_schedule`] assume declaration order climbs the ladder, and
-/// strictness pins injectivity — no two forks share a rung, so the map stays 1:1 and the
-/// resolved spec is monotone on any ordered schedule.
-///
-/// Shared by the compile-time assertion below and by the test that feeds it malformed lists,
-/// so the checker itself is exercised — the real `VARIANTS` always satisfies the property it
-/// checks.
-const fn climbs_the_spec_ladder(forks: &[MegaHardfork]) -> bool {
-    let mut i = 1;
-    while i < forks.len() {
-        if forks[i - 1].spec_id() as u8 >= forks[i].spec_id() as u8 {
-            return false;
-        }
-        i += 1;
-    }
-    true
-}
-
-const _: () = assert!(
-    climbs_the_spec_ladder(MegaHardfork::VARIANTS),
-    "every hardfork must map to a strictly higher spec rung than the fork declared before it — \
-     express a rollback as a new alias rung, not by reusing an earlier spec"
-);
-
-/// Validation error returned by [`HardforkParams::validate`].
-#[derive(Debug, Clone, PartialEq, Eq, derive_more::Display, derive_more::Error)]
-#[display("{message}")]
-pub struct HardforkParamsError {
-    /// Human-readable description of the invalid field or invariant.
-    pub message: std::string::String,
-}
-
-/// Marker trait for per-fork parameters.
-///
-/// Each params type is pinned to exactly one [`MegaHardfork`] variant via `FORK`.
-/// This lets [`MegaHardforks::fork_params`] return a typed reference without
-/// requiring the caller to specify the fork separately.
-pub trait HardforkParams: Any + core::fmt::Debug + Send + Sync {
-    /// The hardfork this params type belongs to.
-    const FORK: MegaHardfork;
-
-    /// Validates construction-time invariants (no cross-fork context required).
-    ///
-    /// Called by [`MegaHardforkConfig::with_params`] so misconfiguration is caught
-    /// at chain-config load time rather than at the first block where the fork activates.
-    /// The default implementation accepts any value.
-    fn validate(&self) -> Result<(), HardforkParamsError> {
-        Ok(())
-    }
-}
-
-/// Extends [`OpHardforks`] with `MegaETH` helper methods.
-///
-/// Forks map 1:1 onto specs, so [`spec_id`](Self::spec_id) — the latest activated fork's spec —
-/// is monotone: it only ever climbs. Rollbacks are expressed by *alias specs* (`MINI_REX_1`,
-/// `MINI_REX_2`): rungs of their own whose behavior projects to an earlier spec. One resolved
-/// value is therefore read through two projections:
-///
-/// - `spec.is_enabled(X)` — the BEHAVIOR gate: both sides project through [`MegaSpecId::behavior`],
-///   so execution semantics roll back inside an alias window.
-/// - `spec.reaches(X)` — the POSITION gate: raw rung comparison for one-way chain setup
-///   (predeploys, bytecode versions, pre-block rules), which a rollback does not retract.
-///
-/// The `is_<fork>_active_at_timestamp` predicates are position projections for
-/// behavior-introducing forks (additive on schedules that omit a predecessor) and raw event
-/// queries for alias forks, whose occurrence is not recoverable from the ladder. To ask about
-/// the raw scheduling event of any fork, use `mega_fork_activation` directly. To check a
-/// schedule for well-formedness (rung gaps, ordering, required params), use
-/// [`validate_schedule`](Self::validate_schedule).
+/// Satin is the only `MegaETH` fork, so a schedule answers two questions: whether the chain has
+/// reached it at a timestamp, and which spec it runs there. Before the Satin activation the chain
+/// does not run this engine at all, which is why
+/// [`spec_id`](Self::spec_id) answers `None` rather than an earlier spec.
 #[auto_impl(&, Box, Arc)]
 pub trait MegaHardforks: OpHardforks {
-    /// Retrieves [`ForkCondition`] by a [`MegaHardfork`]. If `fork` is not present, returns
-    /// [`ForkCondition::Never`].
+    /// The activation condition of `fork`, or [`ForkCondition::Never`] if the schedule does not
+    /// carry it.
     fn mega_fork_activation(&self, fork: MegaHardfork) -> ForkCondition;
 
-    /// Returns a type-erased reference to per-fork parameters, if configured.
+    /// The latest `MegaETH` fork active at `timestamp`, or `None` before the first one.
     ///
-    /// Most forks carry no parameters and the default implementation returns `None`.
-    fn fork_params_any(&self, _fork: MegaHardfork) -> Option<&(dyn Any + Send + Sync)> {
-        None
-    }
-
-    /// Returns a typed reference to per-fork parameters.
-    ///
-    /// `P::FORK` identifies the fork. Returns `None` if the fork has no params configured.
-    fn fork_params<P: HardforkParams>(&self) -> Option<&P> {
-        self.fork_params_any(P::FORK)?.downcast_ref::<P>()
-    }
-
-    /// Returns the current `MegaHardfork` active at the given timestamp.
-    ///
-    /// Resolution walks the declaration ladder from the top: the latest-declared fork whose
-    /// activation event has occurred wins. Declaration order is chronological, so at equal
-    /// activation timestamps the later-declared fork prevails. Driven off
-    /// [`MegaHardfork::VARIANTS`] so a newly declared fork joins resolution without a second
-    /// hand-written ladder here.
-    ///
-    /// Resolution reads raw activation events
-    /// ([`mega_fork_activation`](Self::mega_fork_activation)); with the 1:1 ascending fork->spec
-    /// map, the resolved spec is monotone in time on any ordered schedule.
+    /// Resolution reads raw activation events and walks [`MegaHardfork::VARIANTS`] from the top,
+    /// so a fork declared later wins at an equal timestamp.
     fn hardfork(&self, timestamp: BlockTimestamp) -> Option<MegaHardfork> {
         MegaHardfork::VARIANTS
             .iter()
@@ -180,241 +87,163 @@ pub trait MegaHardforks: OpHardforks {
             .copied()
     }
 
-    /// Returns the current `MegaSpecId` for the given block timestamp.
-    fn spec_id(&self, timestamp: BlockTimestamp) -> MegaSpecId {
-        self.hardfork(timestamp).map_or(MegaSpecId::EQUIVALENCE, |h| h.spec_id())
+    /// The spec this engine executes at `timestamp`, or `None` when no `MegaETH` fork is active
+    /// there — the chain runs its pre-Satin engine, which this crate does not execute.
+    fn spec_id(&self, timestamp: BlockTimestamp) -> Option<MegaSpecId> {
+        self.hardfork(timestamp).map(|fork| fork.spec_id())
     }
 
-    /// Returns `true` once the scheduled spec has reached [`MegaSpecId::MINI_REX`], the
-    /// spec introduced by [`MegaHardfork::MiniRex`]. Position-projected (`reaches`) — see the trait
-    /// docs; for the raw activation event use
-    /// [`mega_fork_activation`](Self::mega_fork_activation).
-    fn is_mini_rex_active_at_timestamp(&self, timestamp: BlockTimestamp) -> bool {
-        self.spec_id(timestamp).reaches(MegaSpecId::MINI_REX)
+    /// Whether [`MegaHardfork::Satin`] has activated at `timestamp`.
+    fn is_satin_active_at_timestamp(&self, timestamp: BlockTimestamp) -> bool {
+        self.mega_fork_activation(MegaHardfork::Satin).active_at_timestamp(timestamp)
     }
 
-    /// Returns `true` if the [`MegaHardfork::MiniRex1`] activation event has occurred at the
-    /// given block timestamp.
+    /// Whether the block at `block_timestamp`, whose parent is at `parent_timestamp`, is the one
+    /// in which Satin activates: Satin is active at the block and not at its parent.
     ///
-    /// `MiniRex1` schedules the alias rung [`MegaSpecId::MINI_REX_1`], whose occurrence is not
-    /// recoverable from the ladder position (later rungs stand above it whether or not it was
-    /// ever scheduled), so this predicate stays a raw event query, unlike the
-    /// position-projected predicates of behavior-introducing forks.
-    fn is_mini_rex_1_active_at_timestamp(&self, timestamp: BlockTimestamp) -> bool {
-        self.mega_fork_activation(MegaHardfork::MiniRex1).active_at_timestamp(timestamp)
+    /// A chain whose schedule has Satin from genesis has no such block, and neither does a
+    /// schedule that never activates it. A block that follows a gap in the timestamps is the
+    /// activation block when the activation falls in the gap.
+    fn is_satin_activation_block(&self, parent_timestamp: u64, block_timestamp: u64) -> bool {
+        self.is_satin_active_at_timestamp(block_timestamp) &&
+            !self.is_satin_active_at_timestamp(parent_timestamp)
     }
 
-    /// Returns `true` if the [`MegaHardfork::MiniRex2`] activation event has occurred at the
-    /// given block timestamp.
+    /// Whether the block at `block_timestamp`, whose parent is at `parent_timestamp`, admits
+    /// only deposit transactions.
     ///
-    /// `MiniRex2` schedules the alias rung [`MegaSpecId::MINI_REX_2`], whose occurrence is not
-    /// recoverable from the ladder position, so this predicate stays a raw event query, unlike
-    /// the position-projected predicates of behavior-introducing forks.
-    fn is_mini_rex_2_active_at_timestamp(&self, timestamp: BlockTimestamp) -> bool {
-        self.mega_fork_activation(MegaHardfork::MiniRex2).active_at_timestamp(timestamp)
+    /// A block in which a fork activates carries the chain's own transactions only. This is true
+    /// of a `MegaETH` fork and of an Optimism fork at or after Jovian, which
+    /// [`OpHardforks::is_no_user_tx_activation_block`] answers for; block execution reads one
+    /// flag, so the two are asked together here.
+    fn admits_only_deposits(&self, parent_timestamp: u64, block_timestamp: u64) -> bool {
+        MegaHardfork::VARIANTS.iter().any(|fork| {
+            let activation = self.mega_fork_activation(*fork);
+            activation.active_at_timestamp(block_timestamp) &&
+                !activation.active_at_timestamp(parent_timestamp)
+        }) || self.is_no_user_tx_activation_block(parent_timestamp, block_timestamp)
     }
 
-    /// Returns `true` once the scheduled spec has reached [`MegaSpecId::REX`], the rung
-    /// introduced by [`MegaHardfork::Rex`]. Position-projected (`reaches`) — see the trait docs;
-    /// for the raw activation event use [`mega_fork_activation`](Self::mega_fork_activation).
-    fn is_rex_active_at_timestamp(&self, timestamp: BlockTimestamp) -> bool {
-        self.spec_id(timestamp).reaches(MegaSpecId::REX)
-    }
-
-    /// Returns `true` once the scheduled spec has reached [`MegaSpecId::REX1`], the rung
-    /// introduced by [`MegaHardfork::Rex1`]. Position-projected (`reaches`) — see the trait docs;
-    /// for the raw activation event use [`mega_fork_activation`](Self::mega_fork_activation).
-    fn is_rex_1_active_at_timestamp(&self, timestamp: BlockTimestamp) -> bool {
-        self.spec_id(timestamp).reaches(MegaSpecId::REX1)
-    }
-
-    /// Returns `true` once the scheduled spec has reached [`MegaSpecId::REX2`], the rung
-    /// introduced by [`MegaHardfork::Rex2`]. Position-projected (`reaches`) — see the trait docs;
-    /// for the raw activation event use [`mega_fork_activation`](Self::mega_fork_activation).
-    fn is_rex_2_active_at_timestamp(&self, timestamp: BlockTimestamp) -> bool {
-        self.spec_id(timestamp).reaches(MegaSpecId::REX2)
-    }
-
-    /// Returns `true` once the scheduled spec has reached [`MegaSpecId::REX3`], the rung
-    /// introduced by [`MegaHardfork::Rex3`]. Position-projected (`reaches`) — see the trait docs;
-    /// for the raw activation event use [`mega_fork_activation`](Self::mega_fork_activation).
-    fn is_rex_3_active_at_timestamp(&self, timestamp: BlockTimestamp) -> bool {
-        self.spec_id(timestamp).reaches(MegaSpecId::REX3)
-    }
-
-    /// Returns `true` once the scheduled spec has reached [`MegaSpecId::REX4`], the rung
-    /// introduced by [`MegaHardfork::Rex4`]. Position-projected (`reaches`) — see the trait docs;
-    /// for the raw activation event use [`mega_fork_activation`](Self::mega_fork_activation).
-    fn is_rex_4_active_at_timestamp(&self, timestamp: BlockTimestamp) -> bool {
-        self.spec_id(timestamp).reaches(MegaSpecId::REX4)
-    }
-
-    /// Returns `true` once the scheduled spec has reached [`MegaSpecId::REX5`], the rung
-    /// introduced by [`MegaHardfork::Rex5`]. Position-projected (`reaches`) — see the trait docs;
-    /// for the raw activation event use [`mega_fork_activation`](Self::mega_fork_activation).
-    fn is_rex_5_active_at_timestamp(&self, timestamp: BlockTimestamp) -> bool {
-        self.spec_id(timestamp).reaches(MegaSpecId::REX5)
-    }
-
-    /// Returns `true` once the scheduled spec has reached [`MegaSpecId::REX6`], the rung
-    /// introduced by [`MegaHardfork::Rex6`]. Position-projected (`reaches`) — see the trait docs;
-    /// for the raw activation event use [`mega_fork_activation`](Self::mega_fork_activation).
-    fn is_rex_6_active_at_timestamp(&self, timestamp: BlockTimestamp) -> bool {
-        self.spec_id(timestamp).reaches(MegaSpecId::REX6)
-    }
-
-    /// Returns `true` once the scheduled spec has reached [`MegaSpecId::REX7`], the rung
-    /// introduced by [`MegaHardfork::Rex7`]. Position-projected (`reaches`) — see the trait docs;
-    /// for the raw activation event use [`mega_fork_activation`](Self::mega_fork_activation).
-    fn is_rex_7_active_at_timestamp(&self, timestamp: BlockTimestamp) -> bool {
-        self.spec_id(timestamp).reaches(MegaSpecId::REX7)
-    }
-
-    /// Checks the schedule for well-formedness, i.e., that it describes a chain climbing the
-    /// spec ladder rung by rung.
+    /// Checks that this schedule is one a chain can run, so a configuration mistake is caught
+    /// when the chain configuration is loaded rather than at the fork's first block.
     ///
-    /// This is the fail-fast complement to the fail-safe execution layer: block execution
-    /// tolerates a malformed schedule (setup gates compare rung positions, so a skipped rung's
-    /// setup still runs), but a real chain's published schedule with a skipped rung is almost
-    /// certainly a configuration mistake. Chain-config authors and node startup
-    /// paths should call this and refuse a schedule that does not validate.
+    /// Checked:
     ///
-    /// Checked, in order:
+    /// - Every registered `MegaETH` fork activates by [`ForkCondition::Timestamp`] (or is
+    ///   [`ForkCondition::Never`]). Resolution is timestamp-scoped, so a block-number or
+    ///   total-difficulty condition would silently never activate the fork.
+    /// - Every fork Satin runs on that the schedule activates by timestamp — the Ethereum forks
+    ///   from Shanghai to Osaka and the Optimism forks from Regolith to Karst — is active at
+    ///   Satin's activation, so the engine and the rest of the node, which reads the same schedule,
+    ///   do not apply different rules to one block. The other half of that timing rule, that
+    ///   Jovian, Karst and Osaka do not activate before Satin, is the node's to check: before Satin
+    ///   the chain runs its pre-Satin engine, which this crate does not execute.
     ///
-    /// - Every registered `MegaHardfork` activates by [`ForkCondition::Timestamp`] (or is
-    ///   [`ForkCondition::Never`]). Block-number and TTD conditions never report active to the
-    ///   timestamp-scoped resolution here and would silently deactivate the fork.
-    /// - Scheduled forks activate in declaration order: a later-declared fork must not activate
-    ///   strictly before an earlier-declared one.
-    /// - No skipped rungs: a behavior-introducing fork may be unscheduled only if no scheduled fork
-    ///   maps to an equal-or-higher rung. Alias forks are exempt as the *missing* side — testnet
-    ///   legitimately never schedules `MiniRex1`/`MiniRex2` — but an alias scheduled without its
-    ///   base is itself a skipped rung (the alias's rung sits above the base's).
-    /// - Per-fork parameters required by a scheduled fork are present (`Rex5` requires
-    ///   [`SequencerRegistryConfig`](crate::SequencerRegistryConfig), `Rex6` requires
-    ///   [`SequencerRegistryRex6Config`](crate::SequencerRegistryRex6Config)). This surfaces a
-    ///   missing config at load time rather than at the first block of the fork. A new
-    ///   [`HardforkParams`] type must be registered here.
+    /// There is no ordering or gap check: a single fork has nothing to be out of order with. The
+    /// spec that follows Satin brings the ladder back, and with it those checks.
     fn validate_schedule(&self) -> Result<(), ScheduleError> {
-        let scheduled =
-            |fork: MegaHardfork| self.mega_fork_activation(fork) != ForkCondition::Never;
-
-        let mut prev: Option<(MegaHardfork, u64)> = None;
         for fork in MegaHardfork::VARIANTS {
             match self.mega_fork_activation(*fork) {
-                ForkCondition::Never => {}
-                ForkCondition::Timestamp(timestamp) => {
-                    if let Some((earlier, earlier_timestamp)) = prev {
-                        if timestamp < earlier_timestamp {
-                            return Err(ScheduleError::UnorderedForks {
-                                earlier,
-                                earlier_timestamp,
-                                later: *fork,
-                                later_timestamp: timestamp,
-                            });
-                        }
-                    }
-                    prev = Some((*fork, timestamp));
-                }
+                ForkCondition::Never | ForkCondition::Timestamp(_) => {}
                 _ => return Err(ScheduleError::NonTimestampActivation { fork: *fork }),
             }
         }
 
-        for fork in MegaHardfork::VARIANTS {
-            if !fork.introduces_behavior() || scheduled(*fork) {
-                continue;
-            }
-            if let Some(above) = MegaHardfork::VARIANTS
-                .iter()
-                .find(|g| scheduled(**g) && g.spec_id() >= fork.spec_id())
-            {
-                return Err(ScheduleError::SkippedRung { missing: *fork, scheduled: *above });
-            }
-        }
-
-        if scheduled(MegaHardfork::Rex5) && self.fork_params::<SequencerRegistryConfig>().is_none()
-        {
-            return Err(ScheduleError::MissingParams {
-                fork: MegaHardfork::Rex5,
-                params: "SequencerRegistryConfig",
-            });
-        }
-        if scheduled(MegaHardfork::Rex6) &&
-            self.fork_params::<SequencerRegistryRex6Config>().is_none()
-        {
-            return Err(ScheduleError::MissingParams {
-                fork: MegaHardfork::Rex6,
-                params: "SequencerRegistryRex6Config",
-            });
-        }
-
-        Ok(())
+        require_base_forks(self)
     }
 }
 
-/// A malformed hardfork schedule, as reported by [`MegaHardforks::validate_schedule`].
-#[derive(Debug, Clone, PartialEq, Eq, derive_more::Display, derive_more::Error)]
+/// Refuses a schedule that activates Satin at a timestamp at which a fork it runs on is not
+/// active: the half of the timing rule
+/// [`validate_schedule`](MegaHardforks::validate_schedule) states that the engine checks.
+///
+/// The forks checked are those a schedule activates by timestamp, the Ethereum forks from Shanghai
+/// to Osaka and the Optimism forks from Regolith to Karst, each read as block execution reads
+/// it: active at Satin's activation timestamp. A fork scheduled by block number or total
+/// difficulty instead, or not at all, is not active at any timestamp, and is refused. The forks
+/// up to the Merge, and Bedrock, are scheduled by block number or total difficulty, which a
+/// timestamp cannot be compared with, and every one of them precedes the first fork scheduled
+/// by timestamp; they are not checked. A schedule that does not activate Satin is not checked
+/// either.
+fn require_base_forks<H: MegaHardforks + ?Sized>(schedule: &H) -> Result<(), ScheduleError> {
+    let ForkCondition::Timestamp(satin_time) = schedule.mega_fork_activation(MegaHardfork::Satin)
+    else {
+        return Ok(());
+    };
+    let ethereum = SATIN_BASE_ETHEREUM_FORKS
+        .iter()
+        .map(|fork| (fork.name(), schedule.ethereum_fork_activation(*fork)));
+    let op =
+        SATIN_BASE_OP_FORKS.iter().map(|fork| (fork.name(), schedule.op_fork_activation(*fork)));
+    for (base, condition) in ethereum.chain(op) {
+        if !condition.active_at_timestamp(satin_time) {
+            return Err(ScheduleError::InactiveBaseFork {
+                fork: MegaHardfork::Satin,
+                activation: satin_time,
+                base,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// A schedule a chain cannot run, as [`MegaHardforks::validate_schedule`] reports it.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ScheduleError {
-    /// A later-declared fork activates strictly before an earlier-declared one.
-    #[display(
-        "hardfork {later:?} (t={later_timestamp}) activates before {earlier:?} (t={earlier_timestamp})"
-    )]
-    UnorderedForks {
-        /// The earlier-declared fork.
-        earlier: MegaHardfork,
-        /// Activation timestamp of the earlier-declared fork.
-        earlier_timestamp: u64,
-        /// The later-declared fork that activates too early.
-        later: MegaHardfork,
-        /// Activation timestamp of the later-declared fork.
-        later_timestamp: u64,
-    },
-    /// A spec-introducing fork is unscheduled while a fork of an equal-or-higher spec is
-    /// scheduled — the ladder skips a rung.
-    #[display("hardfork {missing:?} is unscheduled but {scheduled:?} is scheduled above it")]
-    SkippedRung {
-        /// The unscheduled spec-introducing fork.
-        missing: MegaHardfork,
-        /// A scheduled fork whose spec is equal or higher.
-        scheduled: MegaHardfork,
-    },
-    /// A `MegaHardfork` is registered with a block-number or TTD condition, which the
-    /// timestamp-scoped resolution never reports as active.
-    #[display("hardfork {fork:?} must activate by timestamp, not block number or TTD")]
+    /// A `MegaETH` fork is registered with a block-number or total-difficulty condition, which
+    /// the timestamp-scoped resolution never reports as active.
     NonTimestampActivation {
-        /// The fork with a non-timestamp activation condition.
+        /// The fork with the wrong condition.
         fork: MegaHardfork,
     },
-    /// A scheduled fork requires per-fork parameters that are not attached.
-    #[display("hardfork {fork:?} is scheduled but its {params} params are not configured")]
-    MissingParams {
-        /// The scheduled fork whose params are missing.
+    /// A fork a scheduled `MegaETH` fork runs on is not active when that fork activates.
+    InactiveBaseFork {
+        /// The scheduled fork.
         fork: MegaHardfork,
-        /// The required params type.
-        params: &'static str,
+        /// The timestamp it activates at.
+        activation: BlockTimestamp,
+        /// The fork it runs on that is not active then, as [`Hardfork::name`] names it.
+        base: &'static str,
     },
 }
 
-/// A single fork entry: identity, activation condition, and optional per-fork parameters.
+impl fmt::Display for ScheduleError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NonTimestampActivation { fork } => {
+                write!(f, "hardfork {fork:?} must activate by timestamp, not block number or TTD")
+            }
+            Self::InactiveBaseFork { fork, activation, base } => {
+                write!(
+                    f,
+                    "hardfork {fork:?} activates at timestamp {activation}, where the {base} fork \
+                     it runs on is not active"
+                )
+            }
+        }
+    }
+}
+
+impl core::error::Error for ScheduleError {}
+
+/// One fork of a schedule: which fork, and when it activates.
 #[derive(Debug)]
 struct ForkEntry {
     fork: Box<dyn Hardfork>,
     condition: ForkCondition,
-    params: Option<Arc<dyn Any + Send + Sync>>,
 }
 
 impl Clone for ForkEntry {
     fn clone(&self) -> Self {
-        Self { fork: self.fork.clone(), condition: self.condition, params: self.params.clone() }
+        Self { fork: self.fork.clone(), condition: self.condition }
     }
 }
 
-/// Configuration of the hardforks for `MegaETH`. It by default includes no `MegaHardfork` but
-/// includes all hardforks before and including Optimism Isthmus. Optimism Isthmus is the hardfork
-/// where `MegaETH` is established.
+/// A chain's hardfork schedule.
 ///
-/// Per-fork parameters (e.g., [`SequencerRegistryConfig`](crate::SequencerRegistryConfig)) are
-/// embedded in the corresponding fork entry via [`with_params`](Self::with_params).
+/// [`new`](Self::new) activates every Ethereum and Optimism fork up to and including the base
+/// Satin runs on (Osaka / Karst) from the first block, and no `MegaETH` fork: those the caller
+/// schedules, with [`with`](Self::with) or [`with_all_activated`](Self::with_all_activated).
 #[derive(Debug, Clone)]
 pub struct MegaHardforkConfig {
     entries: Vec<ForkEntry>,
@@ -434,10 +263,9 @@ where
     fn from(iter: I) -> Self {
         Self {
             entries: iter
-                .map(|(h, c)| ForkEntry {
-                    fork: Box::new(h) as Box<dyn Hardfork>,
-                    condition: c,
-                    params: None,
+                .map(|(fork, condition)| ForkEntry {
+                    fork: Box::new(fork) as Box<dyn Hardfork>,
+                    condition,
                 })
                 .collect(),
         }
@@ -445,9 +273,13 @@ where
 }
 
 impl MegaHardforkConfig {
-    /// Creates a new hardfork configuration with the default hardforks, i.e., all hardforks before
-    /// and including Optimism Isthmus are enabled. Optimism Isthmus is the hardfork where
-    /// `MegaETH` is established.
+    /// A schedule with every Ethereum and Optimism fork up to Osaka / Karst active from the first
+    /// block, and no `MegaETH` fork.
+    ///
+    /// Karst is the base [`MegaSpecId::SATIN`] runs on, so a chain executing Satin has already
+    /// passed every fork below it; the schedule states that rather than leaving the node to
+    /// repeat it. A chain that ran the legacy forks activated them later than its first block, by
+    /// Satin's activation, which no Satin block can tell apart from the first block.
     pub fn new() -> Self {
         let forks: Vec<(Box<dyn Hardfork>, ForkCondition)> = vec![
             (EthereumHardfork::Frontier.boxed(), ForkCondition::Block(0)),
@@ -480,192 +312,93 @@ impl MegaHardforkConfig {
             (OpHardfork::Holocene.boxed(), ForkCondition::Timestamp(0)),
             (EthereumHardfork::Prague.boxed(), ForkCondition::Timestamp(0)),
             (OpHardfork::Isthmus.boxed(), ForkCondition::Timestamp(0)),
+            (OpHardfork::Jovian.boxed(), ForkCondition::Timestamp(0)),
+            (EthereumHardfork::Osaka.boxed(), ForkCondition::Timestamp(0)),
+            (OpHardfork::Karst.boxed(), ForkCondition::Timestamp(0)),
         ];
         Self {
             entries: forks
                 .into_iter()
-                .map(|(fork, condition)| ForkEntry { fork, condition, params: None })
+                .map(|(fork, condition)| ForkEntry { fork, condition })
                 .collect(),
         }
     }
 
-    /// Sets all `MegaHardfork` to be activated at timestamp 0.
-    pub fn with_all_activated(self) -> Self {
-        self.with_all_activated_through(MegaSpecId::default())
-    }
-
-    /// Activates every `MegaHardfork` whose spec is enabled under `spec` at timestamp 0, and
-    /// leaves every later fork unregistered.
-    ///
-    /// This is how to express "a chain running spec N": the resulting config resolves to `spec`
-    /// at any timestamp. Removing only the next fork up is not equivalent — the ladder runs past
-    /// it, so the config would resolve to the newest fork still registered rather than to `spec`,
-    /// and it would silently drift again the next time a spec is introduced. On top of the wrong
-    /// resolved spec, the leftover later forks also keep the scheduled spec high, so every
-    /// pre-block setup gate below them stays open.
-    ///
-    /// The *activations* in the result are a function of `spec` alone, not of what the config
-    /// held before: a later fork already registered is removed rather than left in place, so the
-    /// resolved spec does not depend on builder call order. Per-fork params are the exception:
-    /// params on a kept fork are preserved, while params on a removed fork are dropped with its
-    /// entry and are not restored by a later climb back up — re-attach them with
-    /// [`with_params`](Self::with_params).
-    ///
-    /// Alias forks sit on their own rungs above their base (`MINI_REX_1`/`MINI_REX_2` above
-    /// `MINI_REX`), so climbing through a rung includes everything below it — aliases and
-    /// bases alike — with no special casing.
-    pub fn with_all_activated_through(mut self, spec: MegaSpecId) -> Self {
+    /// Activates every `MegaETH` fork at timestamp 0.
+    pub fn with_all_activated(mut self) -> Self {
         for fork in MegaHardfork::VARIANTS {
-            if spec.reaches(fork.spec_id()) {
-                self.insert(*fork, ForkCondition::Timestamp(0));
-            } else {
-                self = self.without(*fork);
-            }
+            self.insert(*fork, ForkCondition::Timestamp(0));
         }
         self
     }
 
-    /// Attaches per-fork parameters to the entry identified by `P::FORK`.
-    ///
-    /// The fork must already exist in the config (via [`with`](Self::with) or default).
-    /// Panics if the fork is not found or if `params.validate()` returns an error.
-    pub fn with_params<P: HardforkParams>(mut self, params: P) -> Self {
-        if let Err(e) = params.validate() {
-            panic!("Invalid params for fork {:?}: {}", P::FORK, e.message,);
-        }
-        let entry =
-            self.entries.iter_mut().find(|e| e.fork.name() == P::FORK.name()).unwrap_or_else(
-                || {
-                    panic!(
-                        "Cannot attach params to fork {:?}: fork not registered in config. \
-                     Call .with({:?}, condition) first.",
-                        P::FORK,
-                        P::FORK,
-                    )
-                },
-            );
-        entry.params = Some(Arc::new(params));
+    /// Removes a `MegaETH` fork, which is what [`ForkCondition::Never`] means.
+    pub fn without(mut self, hardfork: MegaHardfork) -> Self {
+        self.entries.retain(|entry| entry.fork.name() != hardfork.name());
         self
     }
 
-    /// Removes a `MegaHardfork` from the configuration, i.e., equivalent to setting the fork
-    /// condition to [`ForkCondition::Never`].
-    ///
-    /// Deliberately private: `with_all_activated().without(fork)` reads as "a chain running the
-    /// spec below `fork`" but does not express it — the forks above `fork` stay registered, so
-    /// the config resolves above the intended rung and silently climbs again with the next spec.
-    /// Say it with [`with_all_activated_through`](Self::with_all_activated_through) instead.
-    ///
-    /// This narrows an idiom, not a capability: [`with`](Self::with) with
-    /// [`ForkCondition::Never`] produces the same unregistered fork, and must stay public because
-    /// the canonical schedules use it for exactly that (testnet's `MiniRex1` / `MiniRex2` never
-    /// activate). Writing a gap that way is at least visibly deliberate, and it keeps the entry
-    /// so [`with_params`](Self::with_params) can still attach to it.
-    fn without(mut self, hardfork: MegaHardfork) -> Self {
-        self.entries.retain(|e| e.fork.name() != hardfork.name());
-        self
-    }
-
-    /// Creates a new hardfork configuration with the given hardfork and condition.
+    /// Adds `hardfork` with `condition`, or replaces its condition if it is already there.
     pub fn with(mut self, hardfork: impl Hardfork, condition: ForkCondition) -> Self {
         self.insert(hardfork, condition);
         self
     }
 
-    /// Inserts a new hardfork into the configuration. If the hardfork is already present, it will
-    /// be overwritten (condition updated, params preserved).
+    /// Adds `hardfork` with `condition`. An entry that is already there takes the new condition.
     pub fn insert(&mut self, hardfork: impl Hardfork, condition: ForkCondition) {
-        let index = self.entries.iter().position(|e| e.fork.name() == hardfork.name());
+        let index = self.entries.iter().position(|entry| entry.fork.name() == hardfork.name());
         if let Some(index) = index {
             self.entries[index].condition = condition;
         } else {
-            self.entries.push(ForkEntry { fork: Box::new(hardfork), condition, params: None });
+            self.entries.push(ForkEntry { fork: Box::new(hardfork), condition });
         }
     }
 
-    /// Gets `ForkCondition` by a [`Hardfork`]. If the hardfork is not present, returns `None`.
+    /// The condition `hardfork` activates on, or `None` if the schedule does not carry it.
     pub fn get(&self, hardfork: impl Hardfork) -> Option<&ForkCondition> {
-        self.entries.iter().find(|e| e.fork.name() == hardfork.name()).map(|e| &e.condition)
+        self.entries
+            .iter()
+            .find(|entry| entry.fork.name() == hardfork.name())
+            .map(|entry| &entry.condition)
     }
 }
 
 impl EthereumHardforks for MegaHardforkConfig {
     fn ethereum_fork_activation(&self, fork: EthereumHardfork) -> ForkCondition {
-        match self.get(fork) {
-            Some(condition) => *condition,
-            None => ForkCondition::Never,
-        }
+        self.get(fork).copied().unwrap_or(ForkCondition::Never)
     }
 }
 
 impl OpHardforks for MegaHardforkConfig {
     fn op_fork_activation(&self, fork: OpHardfork) -> ForkCondition {
-        match self.get(fork) {
-            Some(condition) => *condition,
-            None => ForkCondition::Never,
-        }
+        self.get(fork).copied().unwrap_or(ForkCondition::Never)
     }
 }
 
 impl MegaHardforks for MegaHardforkConfig {
     fn mega_fork_activation(&self, fork: MegaHardfork) -> ForkCondition {
-        match self.get(fork) {
-            Some(condition) => *condition,
-            None => ForkCondition::Never,
-        }
-    }
-
-    fn fork_params_any(&self, fork: MegaHardfork) -> Option<&(dyn Any + Send + Sync)> {
-        self.entries.iter().find(|e| e.fork.name() == fork.name()).and_then(|e| e.params.as_deref())
+        self.get(fork).copied().unwrap_or(ForkCondition::Never)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SequencerRegistryConfig;
+    use core::str::FromStr;
 
     #[test]
-    fn test_climbs_the_spec_ladder_rejects_malformed_lists() {
-        // The real `VARIANTS` is checked at compile time by the const assertion; only
-        // rejection cases can detect a weakened guard inside the checker.
-        assert!(climbs_the_spec_ladder(MegaHardfork::VARIANTS));
-        assert!(climbs_the_spec_ladder(&[]), "the empty list climbs trivially");
-        assert!(climbs_the_spec_ladder(&[MegaHardfork::Rex]), "a single fork climbs trivially");
-        assert!(
-            climbs_the_spec_ladder(&[MegaHardfork::MiniRex, MegaHardfork::Rex5]),
-            "gaps are fine — strictly ascending is the property, contiguity is not"
-        );
-
-        assert!(
-            !climbs_the_spec_ladder(&[MegaHardfork::Rex, MegaHardfork::MiniRex]),
-            "a fork mapping below its predecessor must be rejected"
-        );
-        assert!(
-            !climbs_the_spec_ladder(&[MegaHardfork::Rex, MegaHardfork::Rex]),
-            "two forks sharing a rung must be rejected — the map must stay 1:1"
-        );
+    fn test_satin_fork_schedules_the_satin_spec() {
+        assert_eq!(MegaHardfork::VARIANTS, &[MegaHardfork::Satin]);
+        assert_eq!(MegaHardfork::Satin.spec_id(), MegaSpecId::SATIN);
+        assert_eq!(Hardfork::name(&MegaHardfork::Satin), "Satin");
+        assert_eq!(MegaHardfork::Satin.to_string(), "Satin");
     }
 
     #[test]
-    fn test_mega_hardfork_spec_ids_match_expected_specs() {
-        // Note: MiniRex1 and MiniRex2 map to alias rungs whose behavior reverts to earlier specs.
-        let cases = [
-            (MegaHardfork::MiniRex, MegaSpecId::MINI_REX),
-            (MegaHardfork::MiniRex1, MegaSpecId::MINI_REX_1),
-            (MegaHardfork::MiniRex2, MegaSpecId::MINI_REX_2),
-            (MegaHardfork::Rex, MegaSpecId::REX),
-            (MegaHardfork::Rex1, MegaSpecId::REX1),
-            (MegaHardfork::Rex2, MegaSpecId::REX2),
-            (MegaHardfork::Rex3, MegaSpecId::REX3),
-            (MegaHardfork::Rex4, MegaSpecId::REX4),
-            (MegaHardfork::Rex5, MegaSpecId::REX5),
-            (MegaHardfork::Rex6, MegaSpecId::REX6),
-            (MegaHardfork::Rex7, MegaSpecId::REX7),
-        ];
-
-        for (hardfork, expected_spec) in cases {
-            assert_eq!(hardfork.spec_id(), expected_spec);
+    fn test_legacy_fork_names_do_not_parse() {
+        assert_eq!(MegaHardfork::from_str("Satin").unwrap(), MegaHardfork::Satin);
+        for legacy in ["MiniRex", "MiniRex1", "MiniRex2", "Rex", "Rex1", "Rex6"] {
+            assert!(MegaHardfork::from_str(legacy).is_err(), "{legacy} must not parse");
         }
     }
 
@@ -681,35 +414,39 @@ mod tests {
             config.ethereum_fork_activation(EthereumHardfork::Prague),
             ForkCondition::Timestamp(0)
         );
+        assert_eq!(
+            config.ethereum_fork_activation(EthereumHardfork::Osaka),
+            ForkCondition::Timestamp(0)
+        );
         assert_eq!(config.op_fork_activation(OpHardfork::Isthmus), ForkCondition::Timestamp(0));
-        assert_eq!(config.mega_fork_activation(MegaHardfork::MiniRex), ForkCondition::Never);
-        assert!(config.fork_params::<SequencerRegistryConfig>().is_none());
+        assert_eq!(config.op_fork_activation(OpHardfork::Karst), ForkCondition::Timestamp(0));
+        assert_eq!(config.mega_fork_activation(MegaHardfork::Satin), ForkCondition::Never);
     }
 
     #[test]
     fn test_config_builder_helpers_override_and_remove_hardforks() {
-        let mut config = MegaHardforkConfig::new()
-            .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(10))
-            .with(MegaHardfork::Rex4, ForkCondition::Timestamp(80));
+        let mut config =
+            MegaHardforkConfig::new().with(MegaHardfork::Satin, ForkCondition::Timestamp(10));
 
-        assert_eq!(config.get(MegaHardfork::MiniRex), Some(&ForkCondition::Timestamp(10)));
-        assert_eq!(config.get(MegaHardfork::Rex4), Some(&ForkCondition::Timestamp(80)));
+        assert_eq!(config.get(MegaHardfork::Satin), Some(&ForkCondition::Timestamp(10)));
 
-        config.insert(MegaHardfork::MiniRex, ForkCondition::Timestamp(20));
-        assert_eq!(config.get(MegaHardfork::MiniRex), Some(&ForkCondition::Timestamp(20)));
+        config.insert(MegaHardfork::Satin, ForkCondition::Timestamp(20));
+        assert_eq!(config.get(MegaHardfork::Satin), Some(&ForkCondition::Timestamp(20)));
 
-        let config = config.without(MegaHardfork::MiniRex);
-        assert_eq!(config.get(MegaHardfork::MiniRex), None);
+        // Removing one fork leaves the rest of the schedule as it was.
+        config.insert(EthereumHardfork::Prague, ForkCondition::Timestamp(30));
+        let config = config.without(MegaHardfork::Satin);
+        assert_eq!(config.get(MegaHardfork::Satin), None);
+        assert_eq!(
+            config.get(EthereumHardfork::Prague),
+            Some(&ForkCondition::Timestamp(30)),
+            "the other entries are untouched"
+        );
 
         let from_iter = MegaHardforkConfig::from(
-            [
-                (MegaHardfork::MiniRex, ForkCondition::Timestamp(1)),
-                (MegaHardfork::Rex2, ForkCondition::Timestamp(2)),
-            ]
-            .into_iter(),
+            [(MegaHardfork::Satin, ForkCondition::Timestamp(1))].into_iter(),
         );
-        assert_eq!(from_iter.get(MegaHardfork::MiniRex), Some(&ForkCondition::Timestamp(1)));
-        assert_eq!(from_iter.get(MegaHardfork::Rex2), Some(&ForkCondition::Timestamp(2)));
+        assert_eq!(from_iter.get(MegaHardfork::Satin), Some(&ForkCondition::Timestamp(1)));
     }
 
     #[test]
@@ -718,8 +455,7 @@ mod tests {
 
         // Driven off `VARIANTS`, which the `hardfork!` macro generates from the same variant list
         // that declares the enum. A second hand-written list here would assert only that the
-        // forks someone remembered to name are activated — a new fork missing from both the
-        // builder and the list would fail neither.
+        // forks someone remembered to name are activated.
         for hardfork in MegaHardfork::VARIANTS {
             assert_eq!(
                 config.mega_fork_activation(*hardfork),
@@ -729,439 +465,77 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_fork_params_typed_access() {
-        let params = SequencerRegistryConfig {
-            rex5_initial_sequencer: alloy_primitives::address!(
-                "0x2222222222222222222222222222222222222222"
-            ),
-            rex5_initial_admin: alloy_primitives::address!(
-                "0x3333333333333333333333333333333333333333"
-            ),
-        };
-
-        let config = MegaHardforkConfig::default()
-            .with(MegaHardfork::Rex5, ForkCondition::Timestamp(0))
-            .with_params(params.clone());
-
-        let retrieved = config
-            .fork_params::<SequencerRegistryConfig>()
-            .expect("should have SequencerRegistryConfig");
-        assert_eq!(retrieved, &params);
-    }
-
-    #[test]
-    fn test_fork_params_none_when_not_configured() {
-        let config =
-            MegaHardforkConfig::default().with(MegaHardfork::Rex5, ForkCondition::Timestamp(0));
-
-        assert!(config.fork_params::<SequencerRegistryConfig>().is_none());
-    }
-
-    #[test]
-    fn test_default_validate_accepts_any_value() {
-        #[derive(Debug)]
-        struct NullParams;
-
-        impl HardforkParams for NullParams {
-            const FORK: MegaHardfork = MegaHardfork::Rex4;
-        }
-
-        assert!(NullParams.validate().is_ok());
-    }
-
-    #[test]
-    fn test_hardfork_params_error_display() {
-        let e = HardforkParamsError { message: "something went wrong".into() };
-        assert_eq!(e.to_string(), "something went wrong");
-    }
-
-    #[test]
-    #[should_panic(expected = "Invalid params for fork")]
-    fn test_with_params_panics_on_validation_error() {
-        #[derive(Debug)]
-        struct AlwaysErrParams;
-
-        impl HardforkParams for AlwaysErrParams {
-            const FORK: MegaHardfork = MegaHardfork::Rex4;
-
-            fn validate(&self) -> Result<(), HardforkParamsError> {
-                Err(HardforkParamsError { message: "intentional test error".into() })
-            }
-        }
-
-        MegaHardforkConfig::default().with_all_activated().with_params(AlwaysErrParams);
-    }
-
-    /// Mainnet runs a real behavior rollback: inside the `MiniRex1` window the scheduled spec
-    /// is the alias rung `MINI_REX_1` — behavior projects to `EQUIVALENCE` while position keeps
-    /// one-way setup (the Oracle predeploys) enabled.
-    #[test]
-    fn test_mainnet_rollback_window_behavior_rolls_back_setup_stays() {
-        let hf = crate::mainnet_hardforks();
-        let ForkCondition::Timestamp(rollback_start) =
-            hf.mega_fork_activation(MegaHardfork::MiniRex1)
-        else {
-            panic!("mainnet must schedule MiniRex1 by timestamp");
-        };
-        let ForkCondition::Timestamp(rollback_end) =
-            hf.mega_fork_activation(MegaHardfork::MiniRex2)
-        else {
-            panic!("mainnet must schedule MiniRex2 by timestamp");
-        };
-        assert!(rollback_start < rollback_end, "the rollback window must be non-empty");
-
-        for ts in [rollback_start, rollback_start + 1, rollback_end - 1] {
-            let spec = hf.spec_id(ts);
-            assert_eq!(spec, MegaSpecId::MINI_REX_1, "the scheduled spec is monotone");
-            assert_eq!(spec.behavior(), MegaSpecId::EQUIVALENCE, "behavior rolls back");
-            // Behavior gates turn MiniRex features off; position gates keep its setup.
-            assert!(!spec.is_enabled(MegaSpecId::MINI_REX));
-            assert!(spec.reaches(MegaSpecId::MINI_REX));
-            assert!(hf.is_mini_rex_active_at_timestamp(ts));
-        }
-    }
-
-    /// The scheduled spec's position reproduces every per-fork activation event exactly, for
-    /// every behavior-introducing fork, on every canonical schedule. This is what makes the
-    /// position-projected predicates a no-op switch on well-formed ladders.
-    ///
-    /// Forks that introduce no new behavior — `MiniRex1` (rollback to `EQUIVALENCE`) and
-    /// `MiniRex2` (restoration to `MINI_REX`) — may be omitted from a schedule whose ladder
-    /// climbs past their rungs, so their activation events are not recoverable from position and
-    /// nothing may gate on them this way. The predicate is derived rather than hardcoded so a
-    /// future rollback fork is classified automatically.
-    #[test]
-    fn test_position_matches_per_fork_activation_for_behavior_introducing_forks() {
-        for hf in [
-            crate::mainnet_hardforks(),
-            crate::testnet_hardforks(),
-            crate::all_activated_hardforks(),
-        ] {
-            let mut stamps = std::vec![0u64, u64::MAX];
-            for fork in MegaHardfork::VARIANTS {
-                if let ForkCondition::Timestamp(t) = hf.mega_fork_activation(*fork) {
-                    stamps.extend([t.saturating_sub(1), t, t.saturating_add(1)]);
-                }
-            }
-
-            for ts in stamps {
-                let resolved = hf.spec_id(ts);
-                for fork in MegaHardfork::VARIANTS {
-                    if !fork.introduces_behavior() {
-                        continue;
-                    }
-                    assert_eq!(
-                        resolved.reaches(fork.spec_id()),
-                        hf.mega_fork_activation(*fork).active_at_timestamp(ts),
-                        "position disagrees with per-fork activation for {fork:?} at ts={ts}"
-                    );
-                }
-            }
-        }
-    }
-
-    /// On a partial ladder — a config that schedules a later fork without its predecessors — the
-    /// resolved spec still enables every lower spec, and the spec-introducing predicates, being
-    /// position projections, report active for forks that were never scheduled. Gating on either
-    /// can therefore not silently skip a predecessor's behavior; only the raw activation events
-    /// distinguish the missing rungs.
-    #[test]
-    fn test_partial_ladder_resolved_spec_enables_unscheduled_predecessors() {
-        let hf = MegaHardforkConfig::new()
-            .with(MegaHardfork::Rex5, ForkCondition::Never)
-            .with(MegaHardfork::Rex6, ForkCondition::Timestamp(0));
-
-        assert_eq!(hf.mega_fork_activation(MegaHardfork::Rex5), ForkCondition::Never);
-        assert_eq!(hf.mega_fork_activation(MegaHardfork::MiniRex), ForkCondition::Never);
-
-        let resolved = hf.spec_id(0);
-        assert_eq!(resolved, MegaSpecId::REX6);
-        for spec in [MegaSpecId::MINI_REX, MegaSpecId::REX2, MegaSpecId::REX4, MegaSpecId::REX5] {
-            assert!(resolved.is_enabled(spec), "{spec:?} must be enabled on a partial ladder");
-        }
-        // The predicates project the position: unscheduled predecessors still report active.
-        assert!(hf.is_rex_5_active_at_timestamp(0), "Rex5 predicate projects the position");
-        assert!(hf.is_mini_rex_active_at_timestamp(0), "MiniRex predicate projects the position");
-    }
-
-    /// `with_all_activated_through` is the well-formed way to express "a chain running spec N":
-    /// the resolved spec is exactly `N` at any timestamp. The specs under test come from
-    /// [`MegaSpecId::ALL`], so a newly introduced spec is covered here automatically instead of
-    /// depending on a hand-written list.
-    #[test]
-    fn test_with_all_activated_through_resolves_to_that_spec() {
-        for spec in MegaSpecId::ALL.iter().copied() {
-            let config = MegaHardforkConfig::default().with_all_activated_through(spec);
-            assert_eq!(config.spec_id(0), spec, "{spec:?} at genesis");
-            assert_eq!(config.spec_id(u64::MAX), spec, "{spec:?} must be terminal");
-
-            // The same contract must hold when the config already carries later forks: the
-            // builder states the whole ladder, so it removes what it does not activate. Without
-            // that, the resolved spec would depend on which builder ran last.
-            let downgraded =
-                MegaHardforkConfig::default().with_all_activated().with_all_activated_through(spec);
-            assert_eq!(downgraded.spec_id(u64::MAX), spec, "{spec:?} from an activated config");
-        }
-    }
-
-    /// Removing a middle rung does NOT express "a chain running spec N". It is the partial-ladder
-    /// shape: the resolved spec follows the newest fork still registered, and — with the
-    /// predicate projected from its position — keeps every lower gate open.
-    #[test]
-    fn test_removing_a_middle_rung_does_not_lower_the_spec() {
-        let partial =
-            MegaHardforkConfig::default().with_all_activated().without(MegaHardfork::Rex4);
-
-        assert_eq!(
-            partial.mega_fork_activation(MegaHardfork::Rex4),
-            ForkCondition::Never,
-            "Rex4 itself is unregistered"
-        );
-        assert_ne!(partial.spec_id(0), MegaSpecId::REX4, "the resolved spec is not lowered");
-        assert!(
-            partial.spec_id(0).is_enabled(MegaSpecId::REX4),
-            "the resolved spec still enables the removed fork's spec"
-        );
-        assert!(partial.is_rex_4_active_at_timestamp(0), "the projected predicate stays open");
-    }
-
-    /// Documented domain limit: resolution is timestamp-scoped, so a `MegaHardfork` registered
-    /// by block number never contributes its own spec to it. `spec_id`/`hardfork` share this
-    /// limitation; every canonical schedule uses `Timestamp` or `Never`, and
-    /// `validate_schedule` rejects anything else.
+    /// Documented domain limit: resolution is timestamp-scoped, so a `MegaHardfork` registered by
+    /// block number never contributes its spec. `validate_schedule` rejects such a schedule at
+    /// load rather than leaving the fork silently inactive.
     #[test]
     fn test_resolution_ignores_block_numbered_forks() {
-        let hf = MegaHardforkConfig::new()
-            .with(MegaHardfork::MiniRex, ForkCondition::Block(0))
-            .with(MegaHardfork::Rex, ForkCondition::Timestamp(0));
+        let hf = MegaHardforkConfig::new().with(MegaHardfork::Satin, ForkCondition::Block(0));
 
         assert!(
-            !hf.mega_fork_activation(MegaHardfork::MiniRex).active_at_timestamp(0),
+            !hf.mega_fork_activation(MegaHardfork::Satin).active_at_timestamp(0),
             "block-numbered forks are not timestamped"
         );
-        // The resolved spec comes from Rex alone; it still covers MINI_REX by ordinal
-        // inclusion, so the projected predicate reports active even though the MiniRex event
-        // itself never fires.
-        assert_eq!(hf.spec_id(0), MegaSpecId::REX);
-        assert!(hf.spec_id(0).is_enabled(MegaSpecId::MINI_REX));
-        assert!(hf.is_mini_rex_active_at_timestamp(0));
+        assert_eq!(hf.spec_id(0), None);
+        assert!(!hf.is_satin_active_at_timestamp(0));
         assert_eq!(
             hf.validate_schedule(),
-            Err(ScheduleError::NonTimestampActivation { fork: MegaHardfork::MiniRex })
+            Err(ScheduleError::NonTimestampActivation { fork: MegaHardfork::Satin })
         );
     }
 
-    /// The resolved spec must equal the naive maximum over all activated forks, on every
-    /// schedule shape: canonical ladders, rollback windows, partial ladders, block-numbered
-    /// conditions, and the empty config. Under the 1:1 ascending fork→spec map the latest
-    /// activated fork IS the maximum; the const assertion on `climbs_the_spec_ladder` pins that
-    /// statically for declaration order, and this pins it dynamically across schedule shapes.
+    /// The block a fork activates in carries the chain's own transactions only, and only that
+    /// block: the one before it and the ones after it are ordinary.
     #[test]
-    fn test_resolved_spec_is_the_maximum_over_activated_forks() {
-        let configs = [
-            crate::mainnet_hardforks(),
-            crate::testnet_hardforks(),
-            crate::all_activated_hardforks(),
-            MegaHardforkConfig::new(),
-            // Partial ladders: a lone top rung, and a lone alias fork.
-            MegaHardforkConfig::new().with(MegaHardfork::Rex6, ForkCondition::Timestamp(7)),
-            MegaHardforkConfig::new().with(MegaHardfork::MiniRex2, ForkCondition::Timestamp(7)),
-            // Non-timestamp conditions never contribute.
-            MegaHardforkConfig::new()
-                .with(MegaHardfork::MiniRex, ForkCondition::Block(0))
-                .with(MegaHardfork::Rex2, ForkCondition::Timestamp(7)),
-        ];
-        let rungs: Vec<MegaHardforkConfig> = MegaSpecId::ALL
-            .iter()
-            .map(|spec| MegaHardforkConfig::default().with_all_activated_through(*spec))
-            .collect();
+    fn test_activation_block_admits_only_deposits() {
+        let config =
+            MegaHardforkConfig::default().with(MegaHardfork::Satin, ForkCondition::Timestamp(100));
 
-        for hf in configs.iter().chain(rungs.iter()) {
-            let mut stamps = std::vec![0u64, u64::MAX];
-            for fork in MegaHardfork::VARIANTS {
-                if let ForkCondition::Timestamp(t) = hf.mega_fork_activation(*fork) {
-                    stamps.extend([t.saturating_sub(1), t, t.saturating_add(1)]);
-                }
-            }
-            for ts in stamps {
-                let naive = MegaHardfork::VARIANTS
-                    .iter()
-                    .filter(|fork| hf.mega_fork_activation(**fork).active_at_timestamp(ts))
-                    .map(|fork| fork.spec_id())
-                    .max()
-                    .unwrap_or(MegaSpecId::EQUIVALENCE);
-                assert_eq!(hf.spec_id(ts), naive, "resolved spec diverges at ts={ts}");
-            }
-        }
+        assert!(config.admits_only_deposits(99, 100), "the first block at the activation");
+        assert!(config.admits_only_deposits(99, 101), "and the first block after a gap");
+        assert!(!config.admits_only_deposits(98, 99), "not before the activation");
+        assert!(!config.admits_only_deposits(100, 101), "and not once the parent had it too");
     }
 
-    /// Alias-fork predicates stay raw event queries: they are not recoverable from a spec
-    /// ordinal, so they must not be projected from the resolved spec. Testnet is the live case
-    /// — its resolved spec climbs the whole ladder while `MiniRex1`/`MiniRex2` are never
-    /// scheduled.
+    /// Satin's activation block is the block at which Satin is active and at whose parent it is
+    /// not: the first block at the activation, and the first after a gap over it; not the block
+    /// after it, nor any block of a chain with Satin from genesis or without Satin. An Optimism
+    /// fork's activation block, which admits only deposits too, is not Satin's.
     #[test]
-    fn test_alias_fork_predicates_stay_event_scoped() {
-        let hf = crate::testnet_hardforks();
-        let ts = u64::MAX;
-        assert!(hf.spec_id(ts).is_enabled(MegaSpecId::REX5), "the resolved spec is high");
-        assert!(!hf.is_mini_rex_1_active_at_timestamp(ts), "MiniRex1 never happened on testnet");
-        assert!(!hf.is_mini_rex_2_active_at_timestamp(ts), "MiniRex2 never happened on testnet");
+    fn test_satin_activation_block_follows_the_parent_timestamp() {
+        let satin_at = |timestamp| {
+            MegaHardforkConfig::default()
+                .with(MegaHardfork::Satin, ForkCondition::Timestamp(timestamp))
+        };
+        let config = satin_at(100);
+        assert!(config.is_satin_activation_block(99, 100), "the activation block");
+        assert!(config.is_satin_activation_block(90, 105), "the first block after a gap over it");
+        assert!(!config.is_satin_activation_block(100, 101), "the block after it");
+        assert!(!config.is_satin_activation_block(98, 99), "a block before it");
 
-        // On mainnet both events did happen, and the predicates report them.
-        let hf = crate::mainnet_hardforks();
-        assert!(hf.is_mini_rex_1_active_at_timestamp(ts));
-        assert!(hf.is_mini_rex_2_active_at_timestamp(ts));
-    }
+        let genesis = satin_at(0);
+        assert!(!genesis.is_satin_activation_block(0, 1), "Satin from genesis has none");
+        assert!(!genesis.is_satin_activation_block(99, 100));
+        assert!(!MegaHardforkConfig::default().is_satin_activation_block(99, 100), "nor no Satin");
 
-    /// Every canonical schedule and every `with_all_activated_through` rung is well-formed.
-    /// `with_all_activated_through(EQUIVALENCE)` is the edge worth pinning: it registers no
-    /// fork at all (a patch without its base would be an orphan) and resolves to
-    /// `EQUIVALENCE` by default.
-    #[test]
-    fn test_validate_schedule_accepts_well_formed_ladders() {
-        assert_eq!(crate::mainnet_hardforks().validate_schedule(), Ok(()));
-        assert_eq!(crate::testnet_hardforks().validate_schedule(), Ok(()));
-        assert_eq!(crate::all_activated_hardforks().validate_schedule(), Ok(()));
-        assert_eq!(MegaHardforkConfig::new().validate_schedule(), Ok(()), "no mega forks is fine");
-
-        for spec in MegaSpecId::ALL.iter().copied() {
-            let mut config = MegaHardforkConfig::default().with_all_activated_through(spec);
-            if spec.is_enabled(MegaSpecId::REX5) {
-                config = config.with_params(SequencerRegistryConfig {
-                    rex5_initial_sequencer: crate::MEGA_SYSTEM_ADDRESS,
-                    rex5_initial_admin: crate::MEGA_SYSTEM_ADDRESS,
-                });
-            }
-            if spec.is_enabled(MegaSpecId::REX6) {
-                config =
-                    config.with_params(SequencerRegistryRex6Config { rex6_min_rotation_delay: 1 });
-            }
-            assert_eq!(config.validate_schedule(), Ok(()), "{spec:?} rung must validate");
-        }
-    }
-
-    /// A partial ladder is executable (position-gated setup stays additive) but not a valid
-    /// published schedule: `validate_schedule` is the fail-fast side of that split.
-    #[test]
-    fn test_validate_schedule_rejects_skipped_rungs() {
-        let hf = MegaHardforkConfig::new()
-            .with(MegaHardfork::Rex6, ForkCondition::Timestamp(0))
-            .with_params(SequencerRegistryRex6Config { rex6_min_rotation_delay: 1 });
-
-        assert_eq!(
-            hf.validate_schedule(),
-            Err(ScheduleError::SkippedRung {
-                missing: MegaHardfork::MiniRex,
-                scheduled: MegaHardfork::Rex6
-            })
-        );
-    }
-
-    /// A gap in the middle of the ladder is flagged too, naming the first missing rung. Unlike
-    /// the lowest rung (whose empty prefix makes it trivially spec-introducing), this exercises
-    /// the prefix classification for real: `Rex` counts as a rung only because every
-    /// earlier-declared fork maps strictly below it.
-    #[test]
-    fn test_validate_schedule_rejects_skipped_middle_rung() {
-        let hf = MegaHardforkConfig::new()
-            .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0))
-            .with(MegaHardfork::Rex2, ForkCondition::Timestamp(0));
-
-        assert_eq!(
-            hf.validate_schedule(),
-            Err(ScheduleError::SkippedRung {
-                missing: MegaHardfork::Rex,
-                scheduled: MegaHardfork::Rex2
-            })
-        );
-    }
-
-    /// Scheduling an alias fork without its base is the rollback of a fork that never
-    /// happened. Under the ascending 1:1 map this is just a skipped rung — the alias's spec
-    /// sits above its base's — so the general rung check catches it without a dedicated rule.
-    #[test]
-    fn test_validate_schedule_rejects_alias_without_base() {
-        let hf =
-            MegaHardforkConfig::new().with(MegaHardfork::MiniRex1, ForkCondition::Timestamp(0));
-
-        assert_eq!(hf.spec_id(0), MegaSpecId::MINI_REX_1);
-        assert_eq!(hf.spec_id(0).behavior(), MegaSpecId::EQUIVALENCE, "execution unaffected");
-        assert_eq!(
-            hf.validate_schedule(),
-            Err(ScheduleError::SkippedRung {
-                missing: MegaHardfork::MiniRex,
-                scheduled: MegaHardfork::MiniRex1
-            })
-        );
-    }
-
-    #[test]
-    fn test_validate_schedule_rejects_unordered_forks() {
-        let hf = MegaHardforkConfig::new()
-            .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(100))
-            .with(MegaHardfork::Rex, ForkCondition::Timestamp(50));
-
-        assert_eq!(
-            hf.validate_schedule(),
-            Err(ScheduleError::UnorderedForks {
-                earlier: MegaHardfork::MiniRex,
-                earlier_timestamp: 100,
-                later: MegaHardfork::Rex,
-                later_timestamp: 50,
-            })
-        );
-    }
-
-    /// A scheduled fork whose required params are missing fails at validation time instead of at
-    /// the first block of the fork.
-    #[test]
-    fn test_validate_schedule_requires_scheduled_fork_params() {
-        let rex5_no_params =
-            MegaHardforkConfig::default().with_all_activated_through(MegaSpecId::REX5);
-        assert_eq!(
-            rex5_no_params.validate_schedule(),
-            Err(ScheduleError::MissingParams {
-                fork: MegaHardfork::Rex5,
-                params: "SequencerRegistryConfig"
-            })
-        );
-
-        let rex6_no_params = MegaHardforkConfig::default()
-            .with_all_activated_through(MegaSpecId::REX6)
-            .with_params(SequencerRegistryConfig {
-                rex5_initial_sequencer: crate::MEGA_SYSTEM_ADDRESS,
-                rex5_initial_admin: crate::MEGA_SYSTEM_ADDRESS,
-            });
-        assert_eq!(
-            rex6_no_params.validate_schedule(),
-            Err(ScheduleError::MissingParams {
-                fork: MegaHardfork::Rex6,
-                params: "SequencerRegistryRex6Config"
-            })
-        );
+        let jovian = genesis
+            .with(OpHardfork::Jovian, ForkCondition::Timestamp(100))
+            .with(OpHardfork::Karst, ForkCondition::Timestamp(200));
+        assert!(jovian.admits_only_deposits(99, 100), "Jovian's activation block is deposit-only");
+        assert!(!jovian.is_satin_activation_block(99, 100), "but not Satin's activation block");
     }
 
     #[test]
     fn test_hardfork_and_spec_id_follow_latest_active_timestamp() {
-        let config = MegaHardforkConfig::default()
-            .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(100))
-            .with(MegaHardfork::Rex4, ForkCondition::Timestamp(200))
-            .with(MegaHardfork::Rex5, ForkCondition::Timestamp(300))
-            .with(MegaHardfork::Rex6, ForkCondition::Timestamp(400))
-            .with(MegaHardfork::Rex7, ForkCondition::Timestamp(500));
+        let config =
+            MegaHardforkConfig::default().with(MegaHardfork::Satin, ForkCondition::Timestamp(100));
 
         assert_eq!(config.hardfork(99), None);
-        assert_eq!(config.hardfork(100), Some(MegaHardfork::MiniRex));
-        assert_eq!(config.hardfork(200), Some(MegaHardfork::Rex4));
-        assert_eq!(config.hardfork(300), Some(MegaHardfork::Rex5));
-        assert_eq!(config.hardfork(400), Some(MegaHardfork::Rex6));
-        assert_eq!(config.hardfork(500), Some(MegaHardfork::Rex7));
-        assert_eq!(config.spec_id(99), MegaSpecId::EQUIVALENCE);
-        assert_eq!(config.spec_id(100), MegaSpecId::MINI_REX);
-        assert_eq!(config.spec_id(200), MegaSpecId::REX4);
-        assert_eq!(config.spec_id(300), MegaSpecId::REX5);
-        assert_eq!(config.spec_id(400), MegaSpecId::REX6);
-        assert_eq!(config.spec_id(500), MegaSpecId::REX7);
+        assert_eq!(config.spec_id(99), None);
+        assert!(!config.is_satin_active_at_timestamp(99));
+        assert_eq!(config.hardfork(100), Some(MegaHardfork::Satin));
+        assert_eq!(config.spec_id(100), Some(MegaSpecId::SATIN));
+        assert!(config.is_satin_active_at_timestamp(100));
+        assert_eq!(config.spec_id(u64::MAX), Some(MegaSpecId::SATIN));
     }
 }

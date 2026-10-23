@@ -4,6 +4,10 @@
 //! - **SALT**: Bucket capacity information for dynamic gas pricing
 //! - **Oracle**: Storage from the `MegaETH` oracle contract
 //!
+//! [`BucketMultipliers`] is what execution reads the SALT side through: it turns the capacities
+//! [`SaltEnv`] reports into the multipliers EIP-8037 state gas is scaled by, and caches them for
+//! the running transaction.
+//!
 //! # Architecture
 //!
 //! External environments follow a factory pattern:

@@ -1,57 +1,78 @@
 # AGENTS.md
 
 ## OVERVIEW
-System contract integration layer with canonical addresses, deployment transactions, and frame-init interception logic.
+The six system contracts: their addresses and bytecode, the interceptor dispatch over four of them (`MegaAccessControl` and `MegaLimitControl` answer, the Oracle's `sendHint` runs a side effect and falls through, and `KeylessDeploy` is routed but left to the keyless dispatch), the system-address transaction, the check Satin's activation block makes of the six and the EIP-7997 factory, which the legacy forks and OP's genesis tooling installed and Satin never deploys, and the registry's pre-block steps: the due-change read and the `applyPendingChanges()` system call. The live system address is read by every transaction when it is validated, not before the block.
 
 ## STRUCTURE
-- `deploy.rs`: shared deployment primitive — declarative `SystemContractSpec`, the uniform `transact_deploy` state patch, and the `flat_system_contract_specs()` registry of all flat (storage-less) contracts.
-- `oracle.rs`: oracle contract address, code constants, spec builder.
-- `keyless_deploy.rs`: keyless deploy address, code constants, spec builder.
-- `control.rs`: MegaAccessControl address, selectors, spec builder, revert payload builders.
-- `limit_control.rs`: MegaLimitControl address and spec builder.
-- `sequencer_registry.rs`: SequencerRegistry address, seeded deploy, role-change application, system-address resolution.
-- `intercept.rs`: interceptor dispatch and synthetic frame-result handling.
-- `tx.rs`: helpers for system/deposit-like transaction construction.
+- `oracle.rs`: the Oracle's address, code and ABI, and the `sendHint` side effect. Its storage is read by the Host (`evm/host.rs`), through the oracle environment.
+- `timestamp.rs`: the High-Precision Timestamp wrapper's address and code. No interceptor.
+- `keyless/`: native keyless deployment. The `KeylessDeploy` address, code and ABI and the semantics of a deployment (`mod.rs`); the dispatch, the call's frame and its first run — the overhead, the nine rules, the charges of the creation's start and the creation it starts (`dispatch.rs`); the creation's return into its call and the ABI answer on the call's resume (`settle.rs`); the pre-EIP-155 transaction format and the error ABI (`tx.rs`, `error.rs`).
+- `control.rs`: `MegaAccessControl`'s address, code, ABI and revert payloads, `SLOT_NUM_ACCESS_TYPE`, and its interceptor, which steers gas detention's switch.
+- `limit_control.rs`: `MegaLimitControl`'s address, code, ABI and its interceptor, which answers the compute the calling frame could still spend.
+- `sequencer_registry.rs`: the `SequencerRegistry`'s address, code and ABI, its two pre-block helpers — `is_apply_pending_changes_due` (the read-only due check and its witness) and `transact_apply_pending_changes` (the system call on `PRE_BLOCK_CALL_GAS_LIMIT`) — and `load_system_address`, the warming journal read of the registry's account and `_currentSystemAddress` every transaction makes (no address unless the registry holds this engine's code and a non-zero address). No interceptor.
+- `predeploys.rs`: the list of the seven predeploys (`system_contract_specs`: address, code, code hash), the EIP-7997 factory's constants, and `check_system_contract`, the read Satin's activation block makes of each: exactly the expected code, whatever the nonce, balance and storage, or `SystemContractCheckError::UnexpectedCode` naming the address and both hashes.
+- `intercept.rs`: the dispatch — the address test, the selector peek, the value policy and the shape of an answer.
+- `tx.rs`: the system-address transaction, its whitelist and shape, the per-transaction decision and the refusal of another shape from the system address (`classify_system_transaction`), and the validation that precedes its promotion to a deposit.
 
 ## KEY PATTERNS
-- Deployment helpers are idempotent and keyed by code hash equality.
-- Gating happens in each contract's `<name>_spec()` builder, which takes the resolved `MegaSpecId` and gates on `spec.reaches(...)` — POSITION comparison, so alias (rollback) windows do not retract deploys. Nothing in the deploy layer takes a hardfork config — the spec builders and the crate-private `*_for` helpers receive the resolved spec and typed params, so a per-fork activation gate cannot be reintroduced. The `pub` `transact_deploy_*` wrappers keep their `(hardforks, block_timestamp)` shape for external callers and resolve everything themselves.
-- Builders must never gate on `is_enabled` (behavior): predeploys are one-way, and a hardfork that rolls behavior back does not un-deploy them or change which bytecode version is expected to be installed.
-- Interceptors return `None` to fall through to on-chain bytecode on unknown selectors.
-- View/control interceptors reject non-zero transfer values with `NonZeroTransfer()`.
-- Synthetic interceptor results bypass normal child-frame init and require empty tracking frame push by caller.
-- Keep selector constants and ABI encode/decode paths aligned with `mega-system-contracts` interfaces.
-- Pre-block helpers (`transact_deploy_*`, `transact_apply_pending_changes`, etc.) return `Option<EvmState>` and let the block executor commit. They never call `db.commit(...)` directly — the executor fires `system_caller.on_state(source, &state)` between collection and commit, and that hook feeds the stateless witness generator. See `PRE-BLOCK STATE CHANGE CONTRACT` below.
+- The dispatch order is: the scheme guard (`MegaEvm::intercept`), the address, the selector, then the method's value policy. Each step is cheaper than the next; the address test is one comparison against the shared `0x6342…` prefix and runs on every call a transaction makes.
+- `keylessDeploy` is not intercepted: a call a transaction makes is taken by the keyless dispatch, which runs before interception in `frame_init`, and is built as a frame on the contract in which no code runs; its first run starts a native `CREATE` of its signer. Its test costs one comparison on every frame: the depth, then the address and the selector.
+- A selector is admitted on its four bytes alone. Trailing bytes are accepted; an input shorter than four bytes is not a selector and is not admitted.
+- An unknown selector is never intercepted: the call falls through to the deployed bytecode, and what that bytecode answers is the contract's own. The two control contracts revert with `NotIntercepted()` from their fallback; `KeylessDeploy` has no fallback, so a selector it does not declare reverts with empty data while a `keylessDeploy` call a contract makes reaches the method body's `NotIntercepted()`; the Oracle runs its other methods, and reverts with empty data on a selector it does not declare.
+- `CALL` and `STATICCALL` reach the dispatch. `CALLCODE` and `DELEGATECALL` run the callee's code in the caller's context, so they are refused by the scheme guard before any interceptor.
+- A method that takes no value answers a value-bearing call with `NonZeroTransfer()`, or with the error its own ABI names (`KeylessDeploy` answers `NoEtherTransfer()`). The policy is per method and is applied after the selector matched, so a value-bearing call to an unknown selector still falls through.
+- An answer is a `synthetic_call_result`: the forwarded gas untouched, the reservoir share the call inherited carried, the calling opcode's upfront state-gas flags kept. Never `Gas::new(limit)`, which carries no reservoir and bills the sender for the whole state-gas pool.
+- An interceptor that lets the frame run charges nothing: the frame starts as it was built.
+- A keyless deployment's call is a real frame at depth 0 in which no code runs: revm builds it on the contract, with its journal checkpoint and its gas, the byte pool among it, as any depth-0 call, and its actions are made by hand, where revm built it and where its creation returns into it, and set on its interpreter, which revm's frame run, plain or inspected, returns without running an instruction. Its first action (`keyless::start`, in `frame_init`), once gas detention held the frame as any frame's, pays the overhead and what the `CREATE` opcode charges its frame, runs as the signer, and is the creation as its child at depth 1, or a refusal, which ends the frame before it runs. The creation returns into it through `frame_return_result`, which reads the creation's outcome before revm's merge (`keyless::returning`), applies the nonce take-back after (`keyless::settle`, while `MegaContext::keyless_creation` holds what the call started) and sets the call's answer in the ABI (`keyless::answer`), unless it has a stop to return. The contract's account is touched as any call's target is, and its code never runs for a dispatched call.
+- What stands after a keyless deployment is what its call keeps: a call that succeeds — the deployment deployed, or failed and reported it — keeps what the creation's start wrote, a signer's nonce spent from 0 to 1, its account and its record; a call that reverts with a stop takes the whole deployment back through its checkpoint. A creation that never started (one an inspector answered) gives the signer's account back. A deployment from nonce 1 keeps no bump when the bump is the last nonce change it made, whether it deployed or failed: the settlement sets the nonce back, so the signer stays at 1, nobody can use up its attempts, and a resubmission of one that deployed is refused `ContractAlreadyExists()`, as in the legacy engine. It takes the record and its history back with the bump, unless the creation succeeded and moved value out of the signer, whose account then keeps a write of its own. A signer whose own code spends a nonce in the constructor that survives it — on a default configuration, a delegated signer's `CREATE` or `CREATE2`, successful or not — keeps every bump, because a later bump may stand for an account and the nonce is never moved back under it; that signer ends above 1 and every later deployment of it is refused `SignerNonceTooHigh`.
+- The Oracle's `sendHint` is a side effect, not an answer: it forwards the hint and returns `None`, so the contract's own bytecode runs. It forwards only for a call that could deliver it — no value, some gas, a calling frame whose volatile-data access is on — and the payload is counted on the transaction's data size before it is decoded. A hint that fails one of those conditions is neither forwarded nor counted, and neither is one whose payload would cross the transaction's data-size limit: the limit is checked before the bytes are counted, the call is answered with the stop, a revert of the call alone, and the transaction keeps none of the hint's bytes. A payload that is admitted and does not decode is counted and forwards nothing.
+- An interceptor that acts for its caller takes the caller as the frame one level above the frame the call would start (`depth - 1`). A transaction that calls a system contract directly has no calling frame: `MegaAccessControl` then switches nothing off, enables without refusal and answers `false`, and `remainingComputeGas()` answers the transaction's own frame's regular gas, or detention's cap when it is detained from its start (its sender is the block beneficiary).
+- `remainingComputeGas()` is read when the call reaches the dispatch, after the calling opcode charged its own costs: the lesser of the caller's regular gas with the forward counted back (`MegaEvm::intercept` passes what the caller has left; the answer returns the forward untouched) and gas detention's allowance at the call. That is the caller's spendable regular gas before the forward, which detention caps. This departs from the legacy engine's figure, which came from a separate compute ledger, with per-frame budgets of 98/100 of the caller's remaining compute under the transaction's compute limit, so it could exceed the caller's gas; here compute is regular gas, and the answer is at most the caller's own. The one property carried over is that forwarded gas is not counted.
+- `VolatileDataAccessDisabled`'s argument is a `uint8` on the wire. A refused `SLOTNUM` names 12 (`SLOT_NUM_ACCESS_TYPE`), past the contract's enum, so Solidity handlers decode the argument as `uint8`; the contracts are not changed for it, and their code hashes stay.
+- A transaction is a system-address transaction when it has the system shape (a legacy call to a whitelisted contract) and its caller is the address the registry names. Every transaction reads the registry when it is validated, whatever its shape, and the read leaves the registry's account and `_currentSystemAddress` warm for the rest of the transaction, as EIP-3651 leaves the block beneficiary, so what a transaction pays never depends on its envelope. A transaction from the system address without the shape is invalid (`SYSTEM_ADDRESS_WITHOUT_SYSTEM_SHAPE`), a deposit from it a failed deposit; every other sender is an ordinary one.
+- The system-address transaction is validated before it is promoted to a deposit, because the deposit path validates nothing. The chain id is checked there always, as the spec checks every transaction's, and must be present; the nonce and EIP-3607 each under the configuration switch a user transaction obeys.
+- Accounts and slots read during validation are read with revm's own loads, which warm them: the registry's account and slot, warm for every transaction by rule, and the system address's account, the transaction's caller, which the transaction starts warm anyway.
 
 ## PRE-BLOCK STATE CHANGE CONTRACT
 
-Pre-block helpers in this module participate in the `pre_execution_changes` → `commit_system_call_outcomes` pipeline on `MegaBlockExecutor`. The contract for a new or modified helper:
+Pre-block helpers in this module participate in `apply_pre_execution_changes` on `MegaBlockExecutor`.
+The contract for a new or modified helper:
 
-- **Never call `db.commit(...)` inside the helper.** Return the prepared state; let the executor commit.
-- **Return `Ok(None)` only when the step is gated out entirely** — wrong hardfork, feature disabled, etc. Not as an "already up to date" shortcut.
-- **On an idempotent no-change path** (e.g., the contract is already deployed with the correct code hash), return `Some(EvmState)` that carries the observed account as a read-only entry: `Account { info, ..Default::default() }` with no `touched`/`created` flags. Returning `None` here is a bug — the account disappears from the stateless witness read set and the generated proof is incomplete.
-- **On a real-change path**, include every account and storage slot the helper touched, including slots read in preparation for the change. The witness recorder must see the complete set.
+- Never call `db.commit(...)` inside the helper.
+  Return the prepared state; let the executor commit.
+- On a read that changes nothing (a predeploy holding the expected code, the registry's due check), return `EvmState` that carries the observed account as a read-only entry: neither `touched` nor `created`.
+  Returning nothing here is a bug — the account disappears from the stateless witness read set.
+- On a step that writes (`applyPendingChanges()`), include every account and storage slot the helper touched.
+- A predeploy holding other code is an error, never an overwrite or an upgrade: Satin's activation block refuses a chain that does not hold the seven at the versions it runs.
 
-The returned `EvmState` serves two purposes, both load-bearing:
-
-1. **Commit** — `db.commit(state)` applies the writes.
-2. **Witness recording** — `system_caller.on_state(source, &state)` runs before commit and feeds the stateless witness generator with the full read/write set for that outcome. Without this, a stateless client cannot verify the block against its pre-state.
-
-The counterpart block-executor side (collection, `on_state`, commit order) is documented in `crates/mega-evm/src/block/AGENTS.md`.
+The returned `EvmState` is both the commit and the witness record of that step.
+The executor commits it on its own, in the order the steps run: a commit hook on the block's state receives each committed state whole, read-only entries included, and that sequence is the witness a stateless client needs.
 
 ## ANTI-PATTERNS
-- Do not intercept unknown selectors with a synthetic revert unless spec requires it.
-- Preserve on-chain-bytecode fallback for unknown calls.
-- Do not accept value transfers for view/control interceptors unless explicitly specified and tested.
-- Do not deploy system bytecode by raw literals in this crate.
-- Reuse constants generated by `mega-system-contracts`.
-- Do not call `db.commit(...)` inside a helper that participates in `pre_execution_changes`. It bypasses the `on_state` witness-recorder hook and silently produces incomplete stateless proofs.
-- Do not return `None` from a helper on a "no change needed" path. Return `Some(EvmState)` with the account entries observed, even when nothing is written.
+- Do not answer an unknown selector with a synthetic revert: the on-chain bytecode is the fall-through, and what it answers is the contract's own business.
+- Do not materialise calldata before the address and the selector matched. `peek_selector` borrows four bytes; `CallInput::bytes` copies the whole payload.
+- Do not build an answer from a bare gas limit. Use `synthetic_call_result`, which carries the reservoir and the upfront-charge flags.
+- Do not charge a keyless deployment's start out of the creation's gas, and do not read the creation's result anywhere but where it returns into the call (`frame_return_result`, before revm's merge, which keeps nothing of it but its gas): the call pays the start as a `CREATE`'s frame does, and every creation's result, one answered at its start included, returns there.
+- Do not rebuild a step of the frame lifecycle by hand for a keyless deployment's call: its start, its suspension on the creation, the merge of the creation's gas, its checkpoint and its stops are revm's and the engine's frame wrappers'. Only its two actions are hand-made.
+- Do not turn a failed read or SALT lookup of a keyless deployment into an ABI error: it fails the transaction with its cause, as it does at every other site.
+- Do not add a length check to a selector match. Admission is the four bytes.
+- Do not accept value on a read-only or control method without saying why in the interceptor and pinning it with a test.
+- Do not deploy system bytecode from a literal in this crate; the `mega-system-contracts` crate ships the code and its hash. The timestamp wrapper is the one exception, because the Oracle's address is baked into its code.
+- Do not read the system address from a constant or hold it on the context: the address can be rotated, and the registry in the state the EVM runs on is the one source.
+- Do not skip the registry read for a transaction of some shape: every transaction starts with the registry warm, and a read that depends on the envelope makes the gas depend on it too.
+- Do not call `db.commit(...)` inside a helper that participates in `apply_pre_execution_changes`.
+  It takes the step out of the executor's sequence: the executor commits each step's state on its own, in order, and only once the step succeeded, and that sequence is the witness.
+- Do not return nothing from a helper on a "no change needed" path.
+  Return the account entries observed, even when nothing is written.
+- Do not create, overwrite or upgrade a predeploy from the engine: the legacy forks installed them, and Satin's activation block only checks them.
 
 ## WHERE TO LOOK
-- Add a new flat (storage-less) system contract deployment: new `<name>.rs` with a `<name>_spec()` builder, registered in `deploy.rs::flat_system_contract_specs()`.
-- Add a stateful system contract with bespoke deploy logic (seeded storage, migration guards): own `transact_deploy_*` helper called from `block/executor.rs::pre_execution_changes` — see `sequencer_registry.rs`.
-- Add interceptor method behavior: `intercept.rs` for decode/dispatch and revert policy.
-- Change access-control volatile disable semantics: `control.rs` + `intercept.rs` + `access/tracker.rs`.
-- Change keyless deploy interception entrypoint: `intercept.rs` and `keyless_deploy.rs`.
-- Update system contract address or code hash references: corresponding module constant definitions.
+- Add a method to an intercepted contract: the contract's own module, next to the selectors it already answers, and a boundary test per `tests/system/`.
+- Change what a call to a system contract costs: `intercept.rs` for the dispatch, the contract's module for what its own method charges.
+- Change a keyless deployment: `keyless/dispatch.rs` for what is dispatched, the rules and the charges of the creation's start; `keyless/settle.rs` for the creation's return into the call and the answer; `evm/execution.rs` for where they are called — `frame_init` and `frame_return_result`, which set the actions on the call's interpreter for revm's run to return; `tests/system/keyless/` for the tests.
+- Change the system transaction's validation: `tx.rs::validate_and_promote`, which `MegaHandler::validate_env_as` calls for both the handler's `validate_env` and the stateless pool validation (`evm/validation.rs`, which leaves the system address's nonce and code to the state).
+- Change what a deposit-like transaction pays for the account it creates: `evm/execution.rs`, where the charge is made in the pre-execution phase.
+- Add a predeploy: a spec in `predeploys.rs::system_contract_specs`, which Satin's activation block then checks; a contract Satin itself would install needs a mechanism of its own, which the engine no longer has.
+- Change how the activation block checks the predeploys: `block/executor.rs::apply_pre_execution_changes` iterates the spec list when `MegaBlockExecutionCtx::satin_activation_block` is set, commits each read as a state of its own, and refuses the block on the first unexpected code.
+- Change when a role change is applied: `sequencer_registry.rs`, whose two pre-block helpers `block/executor.rs::apply_pre_execution_changes` calls after the predeploy check, in that order.
+- Change how the live system address is read: `sequencer_registry.rs::load_system_address`, which `MegaHandler::validate_env` calls, and `MegaHandler::validate_env_as`, which decides from the address whether the transaction is a system-address transaction; the answer lives on the context as the transaction's system-originated flag (`MegaContext::is_system_originated`). `sequencer_registry.rs::live_system_address` makes the same read off a database, for a pool.

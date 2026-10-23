@@ -1,18 +1,30 @@
-# MegaEVM state test
+# state-test
 
-The `state-test` CLI is a thin front-end over the `mega-state-test` runner library (`crates/mega-state-test`), which is a fork of `revme` in the official `revm` repository. 
+The command-line front end of the `mega-state-test` runner (`crates/mega-state-test`): it runs Ethereum's execution-spec state-test fixtures through the Satin engine.
 
-The changes made to run `execution-specification-tests` on MegaEVM is: 
-- `MegaTransaction`'s `enveloped_tx` is always set to `Some(vec![].into())` so that there is no L1 data fee induced. 
-- State changes to the `BaseFeeVault` (`0x4200000000000000000000000000000000000019`) are pruned after transaction execution. 
-- The EVM spec of all Ethereum's official test cases are forced to be `MegaSpecId::EQUIVALENCE`, which is equivalent to `SpecId::PRAGUE`. 
+```bash
+state-test [--mode equivalence|satin] --fork Osaka|Amsterdam [options] <paths>...
+```
 
-## Modes
+- `--mode equivalence` (the default) is the gate: it exits non-zero when a failure is not explained by a registered deviation, when a fixture file cannot be read, or when a count differs from the pin it is given.
+- `--mode satin` is the report: it runs the same entries under Satin's own configuration, prints the counts by outcome, and exits zero unless a fixture file cannot be read.
+- `--fork` names the fork whose fixture entries run.
+- `--expect-executed N`, `--expect-skipped N` and `--expect-deviations` pin the counts of a full run; CI passes all three.
+- `--json-digest` prints one JSON line per executed transaction on standard error: the test's identity and the hash of the canonical record of the transaction's whole Mega outcome.
+  `--json-digest-full` adds the record itself to each line.
+  The two make a whole-outcome differential: run both at two revisions, sort and compare (`sort | cmp`), and read the full lines of the ids that differ.
+- `--limit-data-size BYTES`, `--limit-frame-data-size BYTES`, `--limit-kv-updates RECORDS`, `--limit-state-growth UNITS` and `--limit-compute-gas GAS` (Satin mode only) hold every transaction to tighter per-transaction limits than the spec's, so the limit-stop paths run across the corpus; the frame budget follows `--limit-data-size`.
+  The verdicts of such a run are expected to fail; it is for comparing digests.
+- `--summary-json FILE` writes the counts as JSON, `--json-outcome` prints one JSON line per test on standard error, `--trace` runs every test under an EIP-3155 tracer and `--threads` sets the worker count.
 
-Every mode operates on self-contained EEST fixtures (`TestUnit { env, pre, transaction, post, out }`); none need a network.
+```bash
+state-test btest [options] <paths>...
+```
 
-- **Validate** (default) — `state-test <paths>` executes each fixture and checks its recorded `post` (state root, logs root, gas, status). This is how the official Ethereum tests and the replay corpus (`bench/replay/fixtures/`, via `replay_corpus.rs`) are checked.
-- **`--bench`** — `state-test --bench [--bench-runs N] [--bench-warmup W] [--bench-spec SPEC] <paths>` times each fixture's isolated EVM execution and prints `{ gas_used, success, bench: { min/median/mean, mgasPerSec } }` as JSON instead of validating. This is the only EVM-throughput benchmark entry point; the replay-throughput benchmark (`bench/replay/run.py`) drives it.
-- **`--fill`** — `state-test --fill --bench-spec SPEC <paths>` computes each fixture's `post` and writes it back in place (atomically, via a temp file). This is the offline analog of `mega-evme replay --dump-fixture`'s post-fill step, for a fixture that has no on-chain origin (a hand-built case, or a `prestateTracer` snapshot such as `bench/replay/fixtures/attack_deploy.json`). After filling, the fixture is self-validating like any dumped one. A fixture that already has a non-empty `post` is refused unless `--force` is passed — filling replaces the whole `post` map with circularly-derived expectations, so an accidental run against real expectations (e.g. the official test suites) would destroy them. Filenames on the validation skip list and the Constantinople spec are refused outright, since validation would never check the result.
+`btest` imports the execution-spec blockchain tests through Satin's block executor: the Osaka tests of the main release's `blockchain_tests`.
 
-`--bench-spec` selects the spec to run under; without it, the fixture's single `post` spec is used (so `--fill` needs it when the `post` is still empty).
+- It exits non-zero when a test fails — a block differs from its header without the exact outcome a registered deviation lists for it, or a listed test does not deviate as listed — when a fixture file cannot be read, or when a count differs from the pin it is given.
+- `--expect-executed N` pins the tests executed, `--expect-skipped REASON=N` the tests skipped for one reason (repeated for each; once one is given, every reason not given is pinned at zero), and `--expect-deviations` requires every blockchain test a registered deviation lists to deviate exactly as listed; CI passes all three.
+- `--summary-json FILE`, `--json-outcome` and `--threads` work as for the state tests; the summary gives each skip class's reason beside its count, and the JSON summary lists every class's reason under `skip_reasons`.
+
+What the two modes are, how a state test and a blockchain test are judged and the deviation registry are described in the `mega-state-test` crate's `README.md` and `DEVIATIONS.md`.

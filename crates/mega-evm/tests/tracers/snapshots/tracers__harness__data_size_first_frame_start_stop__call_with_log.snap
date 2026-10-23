@@ -1,0 +1,15 @@
+---
+source: crates/mega-evm/tests/tracers/harness.rs
+expression: "&redacted(&traced.call_frame(true))"
+---
+{
+  "error": "execution reverted",
+  "from": "0x0000000000000000000000000000000000400000",
+  "gas": "[gas]",
+  "gasUsed": "[gas]",
+  "input": "0x",
+  "output": "0x84b9026700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+  "to": "0x0000000000000000000000000000000000400002",
+  "type": "CALL",
+  "value": "0x1"
+}

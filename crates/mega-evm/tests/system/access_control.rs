@@ -1,0 +1,816 @@
+//! `MegaAccessControl` steering gas detention's switch: a frame that calls
+//! `disableVolatileDataAccess()` has every volatile read of its own and of the frames below it
+//! refused with `VolatileDataAccessDisabled`, until it switches access back on or returns; a frame
+//! below cannot switch back on what a frame above switched off; `isVolatileDataAccessDisabled()`
+//! answers for the caller.
+//!
+//! The legacy engine's rows, on Satin's switch. The beneficiary is the block's, `Address::ZERO` in
+//! these tests.
+
+use alloy_primitives::{address, keccak256, Address, Bytes, B256, U256};
+use alloy_sol_types::{SolCall, SolError};
+use mega_evm::{
+    constants::TX_GAS_LIMIT_CAP,
+    system::{
+        IMegaAccessControl, VolatileDataAccessType, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE,
+        ORACLE_CONTRACT_ADDRESS,
+    },
+    test_utils::{zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
+    volatile_data_access_disabled_revert_data, ExternalEnvs, MegaContext, MegaEvm, MegaSpecId,
+    MegaTransaction, TestExternalEnvs, VolatileDataAccess,
+};
+use revm::{bytecode::opcode::*, context::BlockEnv};
+
+use crate::common::{block, call_tx_with_gas, steer, system_db, Run, GAS_LIMIT};
+
+const PARENT: Address = address!("0x0000000000000000000000000000000000200001");
+const CHILD: Address = address!("0x0000000000000000000000000000000000200002");
+const GRANDCHILD: Address = address!("0x0000000000000000000000000000000000200003");
+const SIBLING: Address = address!("0x0000000000000000000000000000000000200004");
+
+/// The block's beneficiary in these tests.
+const BENEFICIARY: Address = Address::ZERO;
+
+const DISABLE: [u8; 4] = IMegaAccessControl::disableVolatileDataAccessCall::SELECTOR;
+const ENABLE: [u8; 4] = IMegaAccessControl::enableVolatileDataAccessCall::SELECTOR;
+const IS_DISABLED: [u8; 4] = IMegaAccessControl::isVolatileDataAccessDisabledCall::SELECTOR;
+const DISABLED_BY_PARENT: [u8; 4] = IMegaAccessControl::DisabledByParent::SELECTOR;
+
+/* ---------- running a transaction ---------- */
+
+/// Runs `tx` over `db`, with an oracle service that holds slot 0 of the Oracle.
+fn execute(db: MemoryDatabase, tx: MegaTransaction) -> Run {
+    execute_in(db, tx, block())
+}
+
+/// [`execute`] in `block`.
+fn execute_in(db: MemoryDatabase, tx: MegaTransaction, block: BlockEnv) -> Run {
+    let envs = TestExternalEnvs::<core::convert::Infallible>::new()
+        .with_oracle_storage(U256::ZERO, U256::from(0x1234));
+    let ctx = MegaContext::new_with_external_envs(db, MegaSpecId::SATIN, ExternalEnvs::from(envs))
+        .with_block(block)
+        .with_chain(zero_fee_l1_block_info());
+    let mut evm = MegaEvm::new(ctx);
+    let outcome = evm.execute_transaction(tx).expect("the transaction is valid");
+    let detention = evm.ctx().detention();
+    Run { outcome, accessed: detention.accessed(), limit: detention.compute_limit() }
+}
+
+/// Runs a call to [`PARENT`] with the contracts `code` holds deployed.
+fn run(code: &[(Address, Bytes)]) -> Run {
+    let db = code
+        .iter()
+        .fold(system_db(), |db, (address, code)| db.account_code(*address, code.clone()));
+    execute(db, call_tx_with_gas(PARENT, [], U256::ZERO, GAS_LIMIT))
+}
+
+/* ---------- code ---------- */
+
+fn disable(code: BytecodeBuilder) -> BytecodeBuilder {
+    steer(code, DISABLE)
+}
+
+fn enable(code: BytecodeBuilder) -> BytecodeBuilder {
+    steer(code, ENABLE)
+}
+
+/// Appends a call of `target` through `scheme` with `gas`, leaving its status on the stack.
+fn call(code: BytecodeBuilder, scheme: u8, target: Address, gas: u64) -> BytecodeBuilder {
+    let code = code.push_number(0_u8).push_number(0_u8).push_number(0_u8).push_number(0_u8);
+    let code = if scheme == CALL || scheme == CALLCODE { code.push_number(0_u8) } else { code };
+    code.push_address(target).push_number(gas).append(scheme)
+}
+
+/// Appends a `LOG0` of the status on the stack.
+fn log_status(code: BytecodeBuilder) -> BytecodeBuilder {
+    code.append_many([PUSH0, MSTORE]).push_number(32_u8).append_many([PUSH0, LOG0])
+}
+
+/// Appends a return of the word on the stack.
+fn return_word(code: BytecodeBuilder) -> Bytes {
+    code.append_many([PUSH0, MSTORE]).push_number(32_u8).append_many([PUSH0, RETURN]).build()
+}
+
+/// Appends a call of `target`, then returns what it returned or reverted with.
+fn call_and_return_data(code: BytecodeBuilder, target: Address) -> Bytes {
+    call(code, CALL, target, 50_000_000)
+        .append(POP)
+        .append_many([RETURNDATASIZE, PUSH0, PUSH0, RETURNDATACOPY, RETURNDATASIZE, PUSH0, RETURN])
+        .build()
+}
+
+/// Code that runs `opcode` once and stops; `BLOCKHASH` and `BLOBHASH` are given an operand.
+fn reads(opcode: u8) -> Bytes {
+    let code = BytecodeBuilder::default();
+    let code = if matches!(opcode, BLOCKHASH | BLOBHASH) { code.append(PUSH0) } else { code };
+    code.append_many([opcode, POP, STOP]).build()
+}
+
+/// Code that runs `opcode` on the account at `target` and stops.
+fn reads_account(opcode: u8, target: Address) -> Bytes {
+    BytecodeBuilder::default().push_address(target).append_many([opcode, POP, STOP]).build()
+}
+
+/// The access type a `VolatileDataAccessDisabled` revert names.
+fn refused_type(data: &[u8]) -> VolatileDataAccessType {
+    IMegaAccessControl::VolatileDataAccessDisabled::abi_decode(data)
+        .expect("a VolatileDataAccessDisabled revert")
+        .accessType
+}
+
+/// The parent that switches access off, calls [`CHILD`] and logs its status.
+fn disables_then_calls_child(scheme: u8) -> Bytes {
+    log_status(call(disable(BytecodeBuilder::default()), scheme, CHILD, 50_000_000)).stop().build()
+}
+
+/* ---------- 1. disableVolatileDataAccess() ---------- */
+
+/// A child that reads `TIMESTAMP` after its caller switched access off reverts.
+#[test]
+fn test_inner_call_timestamp_reverts() {
+    let run = run(&[(PARENT, disables_then_calls_child(CALL)), (CHILD, reads(TIMESTAMP))]);
+    assert!(run.outcome.result.is_success());
+    assert!(!run.logged_status(0), "the child's read was refused");
+}
+
+/// The frame that switched access off is restricted itself.
+#[test]
+fn test_caller_frame_is_restricted() {
+    let parent = disable(BytecodeBuilder::default()).append_many([TIMESTAMP, POP, STOP]).build();
+    let run = run(&[(PARENT, parent)]);
+    assert!(!run.outcome.result.is_success(), "{:?}", run.outcome.result);
+    assert_eq!(
+        run.outcome.result.output().cloned().unwrap_or_default(),
+        volatile_data_access_disabled_revert_data(VolatileDataAccess::TIMESTAMP),
+    );
+}
+
+/// A child that reads nothing volatile is not restricted.
+#[test]
+fn test_inner_call_without_volatile_access_succeeds() {
+    let child = BytecodeBuilder::default()
+        .push_number(1_u8)
+        .push_number(2_u8)
+        .append_many([ADD, POP, STOP])
+        .build();
+    let run = run(&[(PARENT, disables_then_calls_child(CALL)), (CHILD, child)]);
+    assert!(run.logged_status(0));
+}
+
+/* ---------- 2. which opcodes are refused ---------- */
+
+/// Every block-environment opcode is refused in a child, `SLOTNUM` included; `BLOBHASH` is not,
+/// because it reads the transaction's own blob hashes, which Satin does not count as volatile.
+#[test]
+fn test_volatile_opcodes_all_revert_in_inner_call() {
+    for (opcode, refused) in [
+        (TIMESTAMP, true),
+        (NUMBER, true),
+        (COINBASE, true),
+        (DIFFICULTY, true),
+        (GASLIMIT, true),
+        (BASEFEE, true),
+        (BLOCKHASH, true),
+        (BLOBBASEFEE, true),
+        (SLOTNUM, true),
+        (BLOBHASH, false),
+    ] {
+        let run = run(&[(PARENT, disables_then_calls_child(CALL)), (CHILD, reads(opcode))]);
+        assert!(run.outcome.result.is_success(), "{opcode:#04x}");
+        assert_eq!(!run.logged_status(0), refused, "{opcode:#04x}");
+    }
+}
+
+/// The refusal reverts with `VolatileDataAccessDisabled(uint8)` naming what the opcode reads.
+#[test]
+fn test_revert_data_contains_error_with_access_type() {
+    let parent = call_and_return_data(disable(BytecodeBuilder::default()), CHILD);
+    let run = run(&[(PARENT, parent), (CHILD, reads(TIMESTAMP))]);
+    let output = run.output();
+    assert_eq!(output[..4], IMegaAccessControl::VolatileDataAccessDisabled::SELECTOR);
+    assert_eq!(refused_type(&output), VolatileDataAccessType::Timestamp);
+}
+
+/// A refused `SLOTNUM` names access type 12, which the contract's enum does not declare: the
+/// engine's decoder names it, and the enum-typed binding cannot.
+#[test]
+fn test_a_slotnum_refusal_names_access_type_12() {
+    use mega_evm::{decode_volatile_data_access_disabled, system::SLOT_NUM_ACCESS_TYPE};
+
+    let parent = call_and_return_data(disable(BytecodeBuilder::default()), CHILD);
+    let run = run(&[(PARENT, parent), (CHILD, reads(SLOTNUM))]);
+    let output = run.output();
+    assert_eq!(output.len(), 36);
+    assert_eq!(output[35], SLOT_NUM_ACCESS_TYPE);
+    assert_eq!(decode_volatile_data_access_disabled(&output), Some(VolatileDataAccess::SLOT_NUM));
+    assert_eq!(refused_type(&output), VolatileDataAccessType::__Invalid);
+}
+
+/* ---------- 3. nested calls and call schemes ---------- */
+
+/// The restriction reaches every frame below the one that switched it off: a grandchild's read is
+/// refused, and the child, which read nothing, returns normally.
+#[test]
+fn test_nested_call_volatile_access_reverts() {
+    let child =
+        log_status(call(BytecodeBuilder::default(), CALL, GRANDCHILD, 40_000_000)).stop().build();
+    let run = run(&[
+        (PARENT, disables_then_calls_child(CALL)),
+        (CHILD, child),
+        (GRANDCHILD, reads(TIMESTAMP)),
+    ]);
+    assert!(run.outcome.result.is_success());
+    assert!(!run.logged_status(0), "the grandchild was refused");
+    assert!(run.logged_status(1), "the child returned");
+}
+
+/// A child reached with `STATICCALL` or `DELEGATECALL` is restricted too: the switch is by frame,
+/// not by scheme.
+#[test]
+fn test_staticcall_also_restricted() {
+    let run = run(&[(PARENT, disables_then_calls_child(STATICCALL)), (CHILD, reads(TIMESTAMP))]);
+    assert!(!run.logged_status(0));
+}
+
+/// See [`test_staticcall_also_restricted`].
+#[test]
+fn test_delegatecall_also_restricted() {
+    let run = run(&[(PARENT, disables_then_calls_child(DELEGATECALL)), (CHILD, reads(TIMESTAMP))]);
+    assert!(!run.logged_status(0));
+}
+
+/* ---------- 4. the beneficiary's account ---------- */
+
+/// An account opcode is refused on the beneficiary only: `BALANCE` and `EXTCODESIZE` of another
+/// account are not volatile reads.
+#[test]
+fn test_balance_non_beneficiary_not_restricted() {
+    let run =
+        run(&[(PARENT, disables_then_calls_child(CALL)), (CHILD, reads_account(BALANCE, CHILD))]);
+    assert!(run.logged_status(0));
+}
+
+/// See [`test_balance_non_beneficiary_not_restricted`].
+#[test]
+fn test_extcodesize_non_beneficiary_not_restricted() {
+    let run = run(&[
+        (PARENT, disables_then_calls_child(CALL)),
+        (CHILD, reads_account(EXTCODESIZE, CHILD)),
+    ]);
+    assert!(run.logged_status(0));
+}
+
+/// `BALANCE` of the beneficiary is refused, naming the beneficiary.
+#[test]
+fn test_balance_beneficiary_restricted() {
+    let parent = call_and_return_data(disable(BytecodeBuilder::default()), CHILD);
+    let run = run(&[(PARENT, parent), (CHILD, reads_account(BALANCE, BENEFICIARY))]);
+    assert_eq!(refused_type(&run.output()), VolatileDataAccessType::Beneficiary);
+}
+
+/// A call of the beneficiary is refused through each of the four schemes, naming the beneficiary.
+#[test]
+fn test_call_beneficiary_restricted() {
+    for scheme in [CALL, STATICCALL, DELEGATECALL, CALLCODE] {
+        let child = call(BytecodeBuilder::default(), scheme, BENEFICIARY, 100_000).stop().build();
+        let parent = call_and_return_data(disable(BytecodeBuilder::default()), CHILD);
+        let run = run(&[(PARENT, parent), (CHILD, child)]);
+        assert_eq!(
+            refused_type(&run.output()),
+            VolatileDataAccessType::Beneficiary,
+            "{scheme:#04x}"
+        );
+    }
+}
+
+/// A call of another account is not restricted.
+#[test]
+fn test_call_non_beneficiary_not_restricted() {
+    let child = call(BytecodeBuilder::default(), CALL, GRANDCHILD, 100_000).stop().build();
+    let run = run(&[
+        (PARENT, disables_then_calls_child(CALL)),
+        (CHILD, child),
+        (GRANDCHILD, BytecodeBuilder::default().stop().build()),
+    ]);
+    assert!(run.logged_status(0));
+}
+
+/// Without the switch, calling the beneficiary is an ordinary call.
+#[test]
+fn test_call_beneficiary_not_restricted_without_disable() {
+    let child = call(BytecodeBuilder::default(), CALL, BENEFICIARY, 100_000).stop().build();
+    let parent =
+        log_status(call(BytecodeBuilder::default(), CALL, CHILD, 50_000_000)).stop().build();
+    let run = run(&[(PARENT, parent), (CHILD, child)]);
+    assert!(run.logged_status(0));
+}
+
+/// `SELFDESTRUCT` to the beneficiary is refused, naming the beneficiary; to another account it is
+/// not, and without the switch neither is.
+#[test]
+fn test_selfdestruct_beneficiary_restricted() {
+    let child = reads_account(SELFDESTRUCT, BENEFICIARY);
+    let parent = call_and_return_data(disable(BytecodeBuilder::default()), CHILD);
+    let run = run(&[(PARENT, parent), (CHILD, child)]);
+    assert_eq!(refused_type(&run.output()), VolatileDataAccessType::Beneficiary);
+}
+
+/// See [`test_selfdestruct_beneficiary_restricted`].
+#[test]
+fn test_selfdestruct_non_beneficiary_not_restricted() {
+    let run = run(&[
+        (PARENT, disables_then_calls_child(CALL)),
+        (CHILD, reads_account(SELFDESTRUCT, GRANDCHILD)),
+    ]);
+    assert!(run.logged_status(0));
+}
+
+/// See [`test_selfdestruct_beneficiary_restricted`].
+#[test]
+fn test_selfdestruct_beneficiary_not_restricted_without_disable() {
+    let parent =
+        log_status(call(BytecodeBuilder::default(), CALL, CHILD, 50_000_000)).stop().build();
+    let run = run(&[(PARENT, parent), (CHILD, reads_account(SELFDESTRUCT, BENEFICIARY))]);
+    assert!(run.logged_status(0));
+}
+
+/* ---------- 4b. a creation's own loads ---------- */
+
+/// Appends a creation through `scheme` of empty init code carrying `value`, salt zero for a
+/// `CREATE2`, leaving the created address on the stack.
+fn create_empty(code: BytecodeBuilder, scheme: u8, value: u8) -> BytecodeBuilder {
+    let code = if scheme == CREATE2 { code.append(PUSH0) } else { code };
+    code.append_many([PUSH0, PUSH0]).push_number(value).append(scheme)
+}
+
+/// Where a creation of empty init code by `creator`, whose nonce is `nonce`, lands through
+/// `scheme`.
+fn created_address(creator: Address, scheme: u8, nonce: u64) -> Address {
+    if scheme == CREATE2 {
+        creator.create2(B256::ZERO, keccak256([]))
+    } else {
+        creator.create(nonce)
+    }
+}
+
+/// Asserts that the account at `address` was created, holding `balance`.
+fn assert_created(run: &Run, address: Address, balance: u64, case: &str) {
+    let account = run.outcome.state.get(&address).unwrap_or_else(|| panic!("{case}: not created"));
+    assert_eq!(account.info.nonce, 1, "{case}: a created account's nonce");
+    assert_eq!(account.info.balance, U256::from(balance), "{case}");
+}
+
+/// The status of the call the parent logged last, after the logs its callee left.
+fn last_logged_status(run: &Run) -> bool {
+    run.logged_status(run.outcome.result.logs().len() - 1)
+}
+
+/// A frame running as the beneficiary that switched access off creates: a `CREATE` carrying value
+/// and a `CREATE2` load the creator's account, which is the beneficiary's, for its balance and
+/// nonce, and neither load is a volatile read, so neither is refused. The beneficiary's frame
+/// succeeds and both accounts are created, the first holding the value.
+#[test]
+fn test_a_beneficiary_frame_with_access_off_creates() {
+    let beneficiary =
+        create_empty(create_empty(disable(BytecodeBuilder::default()), CREATE, 1), CREATE2, 0);
+    let parent =
+        log_status(call(BytecodeBuilder::default(), CALL, BENEFICIARY, 50_000_000)).stop().build();
+    let db = system_db()
+        .account_code(PARENT, parent)
+        .account_code(BENEFICIARY, beneficiary.stop().build())
+        .account_balance(BENEFICIARY, U256::from(10));
+    let run = execute(db, call_tx_with_gas(PARENT, [], U256::ZERO, GAS_LIMIT));
+    assert!(last_logged_status(&run), "the beneficiary's frame succeeded");
+    assert_created(&run, created_address(BENEFICIARY, CREATE, 0), 1, "CREATE");
+    assert_created(&run, created_address(BENEFICIARY, CREATE2, 1), 0, "CREATE2");
+    assert_eq!(run.accessed, VolatileDataAccess::BENEFICIARY_BALANCE, "the parent's call of it");
+}
+
+/// A value `CALL` from a frame running as the beneficiary that switched access off moves the
+/// value: the check of the caller's balance is no volatile read, as a creation's is not.
+#[test]
+fn test_a_value_call_from_a_beneficiary_frame_with_access_off_moves_the_value() {
+    let beneficiary = disable(BytecodeBuilder::default())
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
+        .push_number(1_u8)
+        .push_address(SIBLING)
+        .push_number(100_000_u32)
+        .append_many([CALL, STOP]);
+    let parent =
+        log_status(call(BytecodeBuilder::default(), CALL, BENEFICIARY, 50_000_000)).stop().build();
+    let db = system_db()
+        .account_code(PARENT, parent)
+        .account_code(BENEFICIARY, beneficiary.build())
+        .account_balance(BENEFICIARY, U256::from(10));
+    let run = execute(db, call_tx_with_gas(PARENT, [], U256::ZERO, GAS_LIMIT));
+    assert!(last_logged_status(&run), "the beneficiary's frame succeeded");
+    assert_eq!(run.outcome.state[&SIBLING].info.balance, U256::ONE, "the value moved");
+}
+
+/// A frame running as the beneficiary that switched access off is still refused its explicit reads
+/// of its own account: `SELFBALANCE`, and `BALANCE` and `EXTCODESIZE` of `ADDRESS`.
+#[test]
+fn test_a_beneficiary_frame_with_access_off_is_refused_its_own_account() {
+    for (name, read) in [
+        ("SELFBALANCE", &[SELFBALANCE][..]),
+        ("BALANCE", &[ADDRESS, BALANCE][..]),
+        ("EXTCODESIZE", &[ADDRESS, EXTCODESIZE][..]),
+    ] {
+        let beneficiary = disable(BytecodeBuilder::default())
+            .append_many(read.iter().copied())
+            .append_many([POP, STOP])
+            .build();
+        let parent = call_and_return_data(BytecodeBuilder::default(), BENEFICIARY);
+        let run = run(&[(PARENT, parent), (BENEFICIARY, beneficiary)]);
+        assert_eq!(refused_type(&run.output()), VolatileDataAccessType::Beneficiary, "{name}");
+    }
+}
+
+/// A `CREATE` or `CREATE2` whose created address is the block beneficiary loads that address's
+/// account to decide the created account's state gas, and the load is no volatile read: it marks
+/// nothing and sets no compute limit with access on, and is not refused with access off. The
+/// creating frame then runs a wrapped read of non-volatile data, `SLOAD` of its own slot, which
+/// commits nothing either.
+#[test]
+fn test_a_creation_at_the_beneficiary_is_no_read() {
+    const NONCE: u64 = 1;
+    for scheme in [CREATE, CREATE2] {
+        for switched_off in [false, true] {
+            let case = format!("{scheme:#04x}, access off: {switched_off}");
+            let code = BytecodeBuilder::default();
+            let code = if switched_off { disable(code) } else { code };
+            let parent = log_status(create_empty(code, scheme, 0).append_many([PUSH0, SLOAD, POP]))
+                .stop()
+                .build();
+            let created = created_address(PARENT, scheme, NONCE);
+            let db = system_db().account_code(PARENT, parent).account_nonce(PARENT, NONCE);
+            let block = BlockEnv { beneficiary: created, ..block() };
+            let run = execute_in(db, call_tx_with_gas(PARENT, [], U256::ZERO, GAS_LIMIT), block);
+            assert!(run.outcome.result.is_success(), "{case}: {:?}", run.outcome.result);
+            assert_created(&run, created, 0, &case);
+            assert_eq!(run.accessed, VolatileDataAccess::empty(), "{case}");
+            assert_eq!(run.limit, None, "{case}");
+        }
+    }
+}
+
+/* ---------- 5. a refused read reads nothing ---------- */
+
+/// A refused read records nothing and sets no compute limit: the block environment, the
+/// beneficiary's balance, a call of the beneficiary, a `SELFDESTRUCT` to it, and the Oracle's
+/// storage.
+#[test]
+fn test_blocked_volatile_access_does_not_set_bitmap() {
+    let oracle_read = BytecodeBuilder::default().append_many([PUSH0, SLOAD, POP, STOP]).build();
+    for (name, target, child) in [
+        ("TIMESTAMP", CHILD, reads(TIMESTAMP)),
+        ("BALANCE", CHILD, reads_account(BALANCE, BENEFICIARY)),
+        (
+            "CALL",
+            CHILD,
+            call(BytecodeBuilder::default(), CALL, BENEFICIARY, 100_000).stop().build(),
+        ),
+        ("SELFDESTRUCT", CHILD, reads_account(SELFDESTRUCT, BENEFICIARY)),
+        ("SLOAD", ORACLE_CONTRACT_ADDRESS, oracle_read),
+    ] {
+        let parent =
+            log_status(call(disable(BytecodeBuilder::default()), CALL, target, 50_000_000))
+                .stop()
+                .build();
+        let run = run(&[(PARENT, parent), (target, child)]);
+        assert!(run.outcome.result.is_success(), "{name}");
+        assert!(!run.logged_status(0), "{name}: refused");
+        assert_eq!(run.accessed, VolatileDataAccess::empty(), "{name}");
+        assert_eq!(run.limit, None, "{name}");
+    }
+}
+
+/// The Oracle's storage is refused in the Oracle's own frame below a frame that switched access
+/// off, naming the Oracle.
+#[test]
+fn test_oracle_sload_reverts_when_volatile_access_disabled() {
+    let oracle = BytecodeBuilder::default().append_many([PUSH0, SLOAD, POP, STOP]).build();
+    let parent = call_and_return_data(disable(BytecodeBuilder::default()), ORACLE_CONTRACT_ADDRESS);
+    let run = run(&[(PARENT, parent), (ORACLE_CONTRACT_ADDRESS, oracle)]);
+    assert_eq!(refused_type(&run.output()), VolatileDataAccessType::Oracle);
+}
+
+/// A creation whose init code reads volatile data fails below a frame that switched access off,
+/// and it fails on the refusal: the creation reverts with `VolatileDataAccessDisabled` naming the
+/// timestamp, which the parent returns. The parent logs the address `CREATE` left, zero for a
+/// failed creation.
+///
+/// Rule [S13.2]. Expected values `constants`: the revert data is decoded with the contract's own
+/// error binding, and the access type is the one the init code reads.
+#[test]
+fn test_create_reverts_when_volatile_access_disabled() {
+    let init_code =
+        BytecodeBuilder::default().append_many([TIMESTAMP, POP, PUSH0, PUSH0, RETURN]).build();
+    let parent = log_status(
+        disable(BytecodeBuilder::default())
+            .mstore(0x40, &init_code)
+            .push_number(init_code.len() as u64)
+            .push_number(0x40_u8)
+            .push_number(0_u8)
+            .append(CREATE),
+    )
+    .append_many([RETURNDATASIZE, PUSH0, PUSH0, RETURNDATACOPY, RETURNDATASIZE, PUSH0, RETURN])
+    .build();
+    let run = run(&[(PARENT, parent)]);
+    assert!(!run.logged_status(0), "the creation failed");
+    assert_eq!(
+        refused_type(&run.output()),
+        VolatileDataAccessType::Timestamp,
+        "on the refusal of its read"
+    );
+}
+
+/// A parent that read volatile data before switching access off still has its child refused:
+/// what the transaction read already does not lift the switch.
+#[test]
+fn test_parent_accesses_volatile_then_child_restricted() {
+    let parent = call_and_return_data(
+        disable(BytecodeBuilder::default().append_many([TIMESTAMP, POP])),
+        CHILD,
+    );
+    let run = run(&[(PARENT, parent), (CHILD, reads(TIMESTAMP))]);
+    assert_eq!(refused_type(&run.output()), VolatileDataAccessType::Timestamp);
+    assert_eq!(run.accessed, VolatileDataAccess::TIMESTAMP, "the parent's own read counts");
+}
+
+/* ---------- 6. the switch's scope ---------- */
+
+/// A sibling called after the frame that switched access off returned is not restricted, and
+/// neither is its child.
+#[test]
+fn test_sibling_call_not_restricted() {
+    let c1 = disable(BytecodeBuilder::default()).stop().build();
+    let c2 = return_word(call(BytecodeBuilder::default(), CALL, GRANDCHILD, 40_000_000));
+    let parent = call(BytecodeBuilder::default(), CALL, CHILD, 50_000_000)
+        .append(POP)
+        .push_number(32_u8) // retSize
+        .push_number(0_u8) // retOffset
+        .push_number(0_u8) // argsSize
+        .push_number(0_u8) // argsOffset
+        .push_number(0_u8) // value
+        .push_address(SIBLING)
+        .push_number(50_000_000_u32)
+        .append_many([CALL, POP])
+        .push_number(32_u8)
+        .append_many([PUSH0, RETURN])
+        .build();
+    let run = run(&[(PARENT, parent), (CHILD, c1), (SIBLING, c2), (GRANDCHILD, reads(TIMESTAMP))]);
+    assert_eq!(run.word(), U256::ONE, "the sibling's child read the timestamp");
+}
+
+/// A switch set by a child that then reverted goes with the child: a sibling reads.
+#[test]
+fn test_disable_in_reverted_child_does_not_affect_sibling() {
+    let child = disable(BytecodeBuilder::default()).revert().build();
+    let parent = log_status(call(BytecodeBuilder::default(), CALL, CHILD, 50_000_000));
+    let parent = return_word(call(parent, CALL, SIBLING, 50_000_000));
+    let run = run(&[(PARENT, parent), (CHILD, child), (SIBLING, reads(TIMESTAMP))]);
+    assert!(!run.logged_status(0), "the child reverted");
+    assert_eq!(run.word(), U256::ONE, "the sibling read");
+}
+
+/// A switch set by a child that then halted goes with the child, whether the child ran into an
+/// invalid opcode or out of gas: a sibling reads.
+#[test]
+fn test_disable_in_halted_child_does_not_affect_sibling() {
+    let invalid = disable(BytecodeBuilder::default()).append(INVALID).build();
+    // A loop that runs until the child's gas is gone.
+    let mut out_of_gas = disable(BytecodeBuilder::default()).build_vec();
+    let start = u8::try_from(out_of_gas.len()).expect("the loop starts within a PUSH1");
+    out_of_gas.extend([JUMPDEST, PUSH1, start, JUMP]);
+
+    for child in [invalid, Bytes::from(out_of_gas)] {
+        let parent = log_status(call(BytecodeBuilder::default(), CALL, CHILD, 1_000_000));
+        let parent = return_word(call(parent, CALL, SIBLING, 1_000_000));
+        let run = run(&[(PARENT, parent), (CHILD, child), (SIBLING, reads(TIMESTAMP))]);
+        assert!(!run.logged_status(0), "the child halted");
+        assert_eq!(run.word(), U256::ONE, "the sibling read");
+    }
+}
+
+/// A switch does not outlive its transaction: after a transaction whose own frame switched access
+/// off, had a child refused, and then stopped or halted, the next transaction on the same EVM
+/// reads.
+#[test]
+fn test_the_switch_does_not_carry_into_the_next_transaction() {
+    let refused = || log_status(call(disable(BytecodeBuilder::default()), CALL, CHILD, 1_000_000));
+    for (first, halts) in
+        [(refused().stop().build(), false), (refused().append(INVALID).build(), true)]
+    {
+        let db = system_db()
+            .account_code(PARENT, first)
+            .account_code(CHILD, reads(TIMESTAMP))
+            .account_code(SIBLING, reads(TIMESTAMP));
+        let ctx = MegaContext::new(db, MegaSpecId::SATIN)
+            .with_block(block())
+            .with_chain(zero_fee_l1_block_info());
+        let mut evm = MegaEvm::new(ctx);
+
+        let one = evm
+            .execute_transaction(call_tx_with_gas(PARENT, [], U256::ZERO, GAS_LIMIT))
+            .expect("the transaction is valid");
+        if halts {
+            assert!(one.result.is_halt(), "{:?}", one.result);
+        } else {
+            assert!(one.result.is_success(), "{:?}", one.result);
+            let status = U256::from_be_slice(&one.result.logs()[0].data.data);
+            assert_eq!(status, U256::ZERO, "the child was refused");
+        }
+        assert_eq!(evm.ctx().detention().accessed(), VolatileDataAccess::empty());
+
+        let two = evm
+            .execute_transaction(call_tx_with_gas(SIBLING, [], U256::ZERO, GAS_LIMIT))
+            .expect("the transaction is valid");
+        assert!(two.result.is_success(), "halted first: {halts}: {:?}", two.result);
+        assert_eq!(evm.ctx().detention().accessed(), VolatileDataAccess::TIMESTAMP);
+    }
+}
+
+/* ---------- 7. enableVolatileDataAccess() ---------- */
+
+/// The frame that switched access off can switch it back on, and its child then reads.
+#[test]
+fn test_enable_after_disable_succeeds() {
+    let parent = enable(disable(BytecodeBuilder::default()));
+    let run = run(&[
+        (PARENT, return_word(call(parent, CALL, CHILD, 50_000_000))),
+        (CHILD, reads(TIMESTAMP)),
+    ]);
+    assert_eq!(run.word(), U256::ONE);
+}
+
+/// A child cannot switch back on what its caller switched off: its call reverts with
+/// `DisabledByParent()`.
+#[test]
+fn test_enable_by_child_reverts_when_parent_disabled() {
+    let child = enable(BytecodeBuilder::default())
+        .append_many([RETURNDATASIZE, PUSH0, PUSH0, RETURNDATACOPY, RETURNDATASIZE, PUSH0, RETURN])
+        .build();
+    let parent = call_and_return_data(disable(BytecodeBuilder::default()), CHILD);
+    let run = run(&[(PARENT, parent), (CHILD, child)]);
+    assert_eq!(run.output(), Bytes::from_static(&DISABLED_BY_PARENT));
+}
+
+/// Switching on what is not off succeeds and changes nothing.
+#[test]
+fn test_enable_when_not_disabled_is_noop() {
+    let run = run(&[(PARENT, enable(BytecodeBuilder::default()).append(TIMESTAMP).stop().build())]);
+    assert!(run.outcome.result.is_success(), "{:?}", run.outcome.result);
+    assert_eq!(run.accessed, VolatileDataAccess::TIMESTAMP);
+}
+
+/// A `STATICCALL` steers the switch as a `CALL` does: the switch is not state.
+#[test]
+fn test_staticcall_disable_volatile_data_access_is_intercepted() {
+    let static_steer = |code: BytecodeBuilder, selector: [u8; 4]| {
+        code.mstore(0x0, selector)
+            .append_many([PUSH0, PUSH0])
+            .push_number(4_u8)
+            .append(PUSH0)
+            .push_address(ACCESS_CONTROL_ADDRESS)
+            .push_number(100_000_u32)
+            .append(STATICCALL)
+    };
+    let parent = log_status(static_steer(BytecodeBuilder::default(), DISABLE));
+    let parent = log_status(call(parent, CALL, CHILD, 50_000_000)).stop().build();
+    let run1 = run(&[(PARENT, parent), (CHILD, reads(TIMESTAMP))]);
+    assert!(run1.logged_status(0), "the static call succeeded");
+    assert!(!run1.logged_status(1), "and switched access off");
+
+    let parent = log_status(static_steer(disable(BytecodeBuilder::default()), ENABLE));
+    let parent = log_status(call(parent, CALL, CHILD, 50_000_000)).stop().build();
+    let run2 = run(&[(PARENT, parent), (CHILD, reads(TIMESTAMP))]);
+    assert!(run2.logged_status(0), "the static call succeeded");
+    assert!(run2.logged_status(1), "and switched access back on");
+}
+
+/* ---------- 8. isVolatileDataAccessDisabled() ---------- */
+
+/// The answer at four depths, with the switch set at the second: `false` above it, before it is
+/// set and after the frame that set it returned; `true` in that frame and in the two below it.
+#[test]
+fn test_the_query_answers_for_the_caller_at_every_depth() {
+    // Each frame queries and keeps its answer in memory at 0x80.. by its own slot, calls the next,
+    // and returns all the answers it knows of.
+    let query_into = |code: BytecodeBuilder, slot: u64| {
+        code.mstore(0x0, IS_DISABLED)
+            .push_number(32_u8)
+            .push_number(0x80 + 0x20 * slot)
+            .push_number(4_u8)
+            .push_number(0_u8)
+            .push_number(0_u8)
+            .push_address(ACCESS_CONTROL_ADDRESS)
+            .push_number(100_000_u32)
+            .append_many([CALL, POP])
+    };
+    // Calls `target`, copying what it returns to 0x80 + 0x20 * `from`.
+    let call_into = |code: BytecodeBuilder, target: Address, from: u64, words: u64| {
+        code.push_number(0x20 * words)
+            .push_number(0x80 + 0x20 * from)
+            .push_number(0_u8)
+            .push_number(0_u8)
+            .push_number(0_u8)
+            .push_address(target)
+            .push_number(10_000_000_u32)
+            .append_many([CALL, POP])
+    };
+    let returning = |code: BytecodeBuilder, from: u64, words: u64| {
+        code.push_number(0x20 * words).push_number(0x80 + 0x20 * from).append(RETURN).build()
+    };
+    // Depth 3: queries.
+    let grandchild_child = returning(query_into(BytecodeBuilder::default(), 3), 3, 1);
+    // Depth 2: queries, calls depth 3.
+    let grandchild =
+        returning(call_into(query_into(BytecodeBuilder::default(), 2), SIBLING, 3, 1), 2, 2);
+    // Depth 1: queries, switches off, queries, calls depth 2.
+    let child = query_into(BytecodeBuilder::default(), 0);
+    let child = call_into(query_into(disable(child), 1), GRANDCHILD, 2, 2);
+    let child = returning(child, 0, 4);
+    // Depth 0: queries before and after the child.
+    let parent = query_into(BytecodeBuilder::default(), 5);
+    let parent = query_into(call_into(parent, CHILD, 0, 4), 4);
+    let parent = returning(parent, 0, 6);
+
+    let run = run(&[
+        (PARENT, parent),
+        (CHILD, child),
+        (GRANDCHILD, grandchild),
+        (SIBLING, grandchild_child),
+    ]);
+    let output = run.output();
+    let answers: Vec<bool> =
+        output.chunks(32).map(|word| U256::from_be_slice(word) == U256::ONE).collect();
+    assert_eq!(
+        answers,
+        vec![
+            false, // depth 1, before it switches access off
+            true,  // depth 1, after
+            true,  // depth 2
+            true,  // depth 3
+            false, // depth 0, after depth 1 returned
+            false, // depth 0, before calling depth 1
+        ]
+    );
+}
+
+/* ---------- 9. schemes that do not reach the interceptor ---------- */
+
+/// `DELEGATECALL` and `CALLCODE` of `disableVolatileDataAccess()` run the contract's bytecode,
+/// which reverts with `NotIntercepted()`, and switch nothing off: the child reads.
+#[test]
+fn test_delegatecall_to_access_control_not_intercepted() {
+    for scheme in [DELEGATECALL, CALLCODE] {
+        let parent = BytecodeBuilder::default().mstore(0x0, DISABLE);
+        let parent = parent.append_many([PUSH0, PUSH0]).push_number(4_u8).append(PUSH0);
+        let parent = if scheme == CALLCODE { parent.append(PUSH0) } else { parent };
+        let parent =
+            parent.push_address(ACCESS_CONTROL_ADDRESS).push_number(100_000_u32).append(scheme);
+        let parent = return_word(call(log_status(parent), CALL, CHILD, 50_000_000));
+        let run = run(&[
+            (PARENT, parent),
+            (CHILD, reads(TIMESTAMP)),
+            (ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE),
+        ]);
+        assert!(!run.logged_status(0), "{scheme:#04x}: the bytecode reverted");
+        assert_eq!(run.word(), U256::ONE, "{scheme:#04x}: and the child read");
+    }
+}
+
+/* ---------- 10. below and above the execution cap ---------- */
+
+/// The switch behaves the same whether the transaction carries a state-gas reservoir or not, and
+/// the transaction costs the same: the answers carry the reservoir back untouched.
+#[test]
+fn test_the_switch_is_the_same_below_and_above_the_execution_cap() {
+    let parent = log_status(call(disable(BytecodeBuilder::default()), CALL, CHILD, 50_000_000));
+    let parent = log_status(call(enable(parent), CALL, CHILD, 50_000_000)).stop().build();
+    let at = |gas_limit: u64| {
+        let db =
+            system_db().account_code(PARENT, parent.clone()).account_code(CHILD, reads(TIMESTAMP));
+        execute(db, call_tx_with_gas(PARENT, [], U256::ZERO, gas_limit))
+    };
+    let (below, above) = (at(GAS_LIMIT), at(TX_GAS_LIMIT_CAP + 100_000_000));
+    for run in [&below, &above] {
+        assert!(run.outcome.result.is_success());
+        assert!(!run.logged_status(0), "refused while off");
+        assert!(run.logged_status(1), "read once on again");
+    }
+    assert_eq!(below.outcome.result.tx_gas_used(), above.outcome.result.tx_gas_used());
+    let (below, above) = (below.outcome.gas, above.outcome.gas);
+    assert_eq!(
+        (below.regular, below.state, below.history),
+        (above.regular, above.state, above.history),
+        "every ledger is the same",
+    );
+    assert_eq!(below.reservoir_remaining, 0, "there is no reservoir below the cap");
+    assert_eq!(
+        above.reservoir_remaining,
+        100_000_000 - above.history,
+        "above it, the reservoir paid the history and the answers carried the rest back",
+    );
+}
