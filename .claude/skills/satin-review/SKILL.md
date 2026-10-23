@@ -1,6 +1,6 @@
 ---
 name: satin-review
-description: Guide for reviewing the Satin engine pull request (#386) in megaeth-labs/mega-evm, which holds the whole engine: the stacked pull requests merged into it, and #407 merges into it before it is retargeted. Use when reviewing #386 or the Satin engine, or when the user says "review satin". Gives the scope and the review range, the design changes #407 made to what the stacked pull requests describe, the module map with the invariants to check, the reading order, how to rate a finding, the revert-or-halt rule with its deliberate exceptions, and the decisions already made. Temporary: removed before the Satin pull request merges.
+description: Guide for reviewing the Satin engine pull request (#386) in megaeth-labs/mega-evm, which holds the whole engine now that the stacked pull requests and #407 have merged into it. Use when reviewing #386 or the Satin engine, or when the user says "review satin". Gives the scope and the review range, the design changes #407 made to what the stacked pull requests describe, the module map with the invariants to check, the reading order, how to rate a finding, the revert-or-halt rule with its deliberate exceptions, and the decisions already made. Temporary: removed before the Satin pull request merges.
 ---
 
 # Reviewing the Satin engine (pull request #386)
@@ -15,7 +15,7 @@ The guide describes the code at `cz/feat/satin-w2` once #407 has merged into it.
 ## What is under review
 
 - The Satin engine, in pull request #386 (`cz/feat/satin-w2`), judged at its final state.
-  The stacked pull requests #387, #388, #390, #399 and #400 (with #404, merged into #400's branch) merged into it, and #407 (`cz/feat/satin-w9`) merges into it next; each description explains its part as it was merged, and a later part may have changed an earlier one.
+  The stacked pull requests #387, #388, #390, #399 and #400 (with #404, merged into #400's branch) merged into it, and then #407 (`cz/feat/satin-w9`); each description explains its part as it was merged, and a later part may have changed an earlier one.
   "Design changes a reviewer must know" below lists what #407 changed.
 - The review range is the pull request's own diff.
   Its base, `cz/feat/satin-review-base`, is `satin` before the Satin skeleton: `a8f8c7c9`, the CI-only commit before it.
@@ -42,11 +42,10 @@ The guide describes the code at `cz/feat/satin-w2` once #407 has merged into it.
 
 ## What is still moving
 
-Nothing, once #407 merges into this branch.
-#407 holds everything its description listed as still to be added: inspectors on revm's own inspected lifecycle, a rewritten result taken as given, one fixed gas budget for the pre-block calls, the cleanups, and the KV-update and state-growth limits with their 98/100 frame shares and the destruction table's give-backs.
+Nothing.
+#407 has merged into this branch, and with it everything its description listed as still to be added: inspectors on revm's own inspected lifecycle, a rewritten result taken as given, one fixed gas budget for the pre-block calls, the cleanups, and the KV-update and state-growth limits with their 98/100 frame shares and the destruction table's give-backs.
 It also counts a creator's nonce record when the creation returns, which its description did not list.
-Until #407 merges, the final code of the modules it changes is on its head (`cz/feat/satin-w9`).
-With #407 merged, every module is at its final state for this review: there is no longer a table of stable and changing modules, nor a rule to hold back findings in a changing one.
+Every module is at its final state for this review: there is no longer a table of stable and changing modules, nor a rule to hold back findings in a changing one.
 What follows this pull request changes no rule.
 The fork pins move from the reviewed commits to the merged commits of megaeth-labs/revm#76 and megaeth-labs/op-revm#8, and to release tags once the line is final.
 Performance work is left for later: the optimisations #407 recorded are made together once the structural work is done, measured against CodSpeed's report.
