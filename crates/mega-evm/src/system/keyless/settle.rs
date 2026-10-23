@@ -26,7 +26,7 @@ use crate::{
     ExternalEnvTypes, LimitCheck, MegaContext, MegaHaltReason,
 };
 
-use super::dispatch::Started;
+use super::dispatch::{signer_account, signer_record_charge, state_gas, Started};
 
 /// What a `keylessDeploy` call answers from, once its creation returned into it.
 #[derive(Debug)]
@@ -159,8 +159,8 @@ pub(crate) fn settle<DB: Database, ExtEnvs: ExternalEnvTypes>(
     // all the same; one an inspector answered in its place never started, and adds no account.
     // A signer that had an account was charged nothing, and gets nothing back.
     let nonce = account_nonce(ctx, started.signer);
-    if nonce == started.signer_nonce {
-        gas.refill_reservoir(started.signer_account_charge);
+    if nonce == started.signer_nonce && started.signer_account_charged {
+        gas.refill_reservoir(state_gas(ctx, signer_account(started.signer))?);
     }
     let bumped = signer.filter(|signer| ctx.accounts().bumped(signer));
     // A deployment from nonce 1 keeps no bump of its own: a failure leaves the address
@@ -255,6 +255,12 @@ fn holds_code<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// as the transaction loaded it, and stays when the account keeps another write it stands for —
 /// the value a creation that succeeded moved out of it, or into it. A creation that failed took
 /// its value transfer back with the rest of its writes.
+///
+/// A signer the nonce set back leaves as the transaction loaded it was one the transaction had not
+/// changed when the call charged the record: a signer it had changed is its sender or an applied
+/// EIP-7702 authority, whose nonce the transaction moved from 0 to 1 before the call, so setting
+/// it back to 1 never returns it to what the transaction loaded. So the history given back is the
+/// one record's the call paid ([`signer_record_charge`]).
 fn take_back_bump<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     gas: &mut Gas,
@@ -262,7 +268,7 @@ fn take_back_bump<DB: Database, ExtEnvs: ExternalEnvTypes>(
 ) -> Result<(), ContextError<DB::Error>> {
     ctx.journal_mut().load_account_mut(started.signer)?.data.set_nonce(started.signer_nonce);
     if !ctx.accounts().is_changed(started.signer) {
-        gas.refill_history(started.signer_record_charge);
+        gas.refill_history(signer_record_charge(ctx));
     }
     Ok(())
 }
