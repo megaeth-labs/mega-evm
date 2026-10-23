@@ -38,6 +38,7 @@ fn config(mode: Mode, fork: Fork) -> Config {
         json_outcome: false,
         trace: false,
         digest: None,
+        witness: None,
         limits: None,
         deviations: DEVIATIONS,
     }
@@ -544,6 +545,37 @@ fn test_the_digest_is_stable_across_runs_and_thread_counts() {
     let hashes: std::collections::BTreeSet<_> =
         one.iter().flatten().map(state_test::digest::hash).collect();
     assert_eq!(hashes.len(), 6, "six distinct values, two files of each");
+}
+
+/// Recording what a run reads changes nothing it computes: with the read sets printed, every
+/// test's record and verdict are the ones the run makes without them, in both modes, for
+/// transactions that execute and one the engine rejects.
+#[test]
+fn test_recording_the_reads_changes_no_record_and_no_verdict() {
+    let dir = tempfile::tempdir().unwrap();
+    let units: serde_json::Map<_, _> = (0..3)
+        .map(|n| {
+            let unit = unit(
+                &[Fork::Osaka],
+                json!({ "gasLimit": ["0x0f4240"], "value": [format!("0x{n:02x}")] }),
+            );
+            (format!("call_{n}"), fill_from_ethereum(unit))
+        })
+        .chain([(
+            "rejected".to_string(),
+            fill_from_ethereum(unit(&[Fork::Osaka], json!({ "gasLimit": ["0x5208"] }))),
+        )])
+        .collect();
+    let path = write(dir.path(), "a.json", units.into());
+    for mode in Mode::ALL {
+        let plain = run(std::slice::from_ref(&path), config(mode, Fork::Osaka));
+        let witness = Some(state_test::runner::DigestForm::Full);
+        let recorded =
+            run(std::slice::from_ref(&path), Config { witness, ..config(mode, Fork::Osaka) });
+        assert_eq!(records(&plain), records(&recorded), "{mode}");
+        assert_eq!(outcomes(&plain), outcomes(&recorded), "{mode}");
+        assert!(records(&plain).iter().all(Option::is_some), "{mode}: every transaction ended");
+    }
 }
 
 /// A test that fails its fixture still has the record of what ran, and a transaction the engine

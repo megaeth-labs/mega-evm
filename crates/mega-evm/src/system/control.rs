@@ -8,14 +8,11 @@
 use alloy_evm::Database;
 use alloy_primitives::{address, Address, Bytes};
 use alloy_sol_types::{SolCall, SolError};
-use revm::{
-    handler::FrameResult,
-    interpreter::{CallInputs, InstructionResult},
-};
+use revm::interpreter::{CallInputs, InstructionResult};
 
 use crate::{
     synthetic_call_result,
-    system::intercept::{peek_selector, reject_non_zero_transfer},
+    system::intercept::{peek_selector, reject_non_zero_transfer, Answer},
     ExternalEnvTypes, MegaContext,
 };
 
@@ -63,9 +60,9 @@ pub const SLOT_NUM_ACCESS_TYPE: u8 = 12;
 /// for the frame that made the call — the caller, one level above the frame the call would start:
 ///
 /// - `disableVolatileDataAccess()` switches volatile-data access off for the caller and every frame
-///   below it, once its answer settles without crossing gas detention's compute limit: an answer
-///   that becomes the stop leaves the switch as it was. A switch already off from a frame above
-///   stays as it is.
+///   below it, once its answer settles without crossing gas detention's compute limit: the answer
+///   carries the switch-off ([`Answer::disables_access_from`]), and an answer that becomes the stop
+///   leaves the switch as it was. A switch already off from a frame above stays as it is.
 /// - `enableVolatileDataAccess()` switches it back on, and reverts with `DisabledByParent()` when a
 ///   frame above the caller switched it off: a frame cannot lift a restriction its caller placed.
 ///   Switching on what is not off succeeds and changes nothing.
@@ -87,7 +84,7 @@ pub(crate) fn intercept<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     inputs: &CallInputs,
     depth: usize,
-) -> Option<FrameResult> {
+) -> Option<Answer> {
     let selector = peek_selector(&inputs.input, ctx)?;
     // Selector-only admission: the four bytes decide, whatever follows them.
     let method = if selector == IMegaAccessControl::disableVolatileDataAccessCall::SELECTOR {
@@ -100,16 +97,14 @@ pub(crate) fn intercept<DB: Database, ExtEnvs: ExternalEnvTypes>(
         return None;
     };
     if let Some(rejected) = reject_non_zero_transfer(inputs) {
-        return Some(rejected);
+        return Some(Answer::new(rejected));
     }
     let caller = depth.checked_sub(1);
     let detention = &mut ctx.detention;
     let (result, output) = match method {
         Method::Disable => {
-            if let Some(caller) = caller {
-                detention.disable_access_on_answer(caller);
-            }
-            (InstructionResult::Return, Bytes::new())
+            let result = synthetic_call_result(inputs, InstructionResult::Return, Bytes::new());
+            return Some(Answer { result, disables_access_from: caller });
         }
         Method::Enable => {
             if caller.is_none_or(|caller| detention.enable_access(caller)) {
@@ -125,7 +120,7 @@ pub(crate) fn intercept<DB: Database, ExtEnvs: ExternalEnvTypes>(
             (InstructionResult::Return, Bytes::from(output))
         }
     };
-    Some(synthetic_call_result(inputs, result, output))
+    Some(Answer::new(synthetic_call_result(inputs, result, output)))
 }
 
 /// The three methods `MegaAccessControl` intercepts.

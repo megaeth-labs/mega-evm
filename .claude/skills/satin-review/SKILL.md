@@ -92,6 +92,11 @@ Each change is stated here in plain words with its reason; the specification has
   A precompile gas detention answers from its price before revm runs it moved nothing and is held to the price alone: its stop is kind 2, whatever records its value transfer would have made.
   A creation onto an occupied address fails on the collision, and is not stopped for what its start would count.
   Why: the limit judges what the journal kept, by the same rule at every start, instead of a prediction of revm's start held to the journal only in debug builds and checked hypothetically for the two answers that leave nothing to read; the opcode's history charge is still priced from the journal's state before revm decides, which on the plain path is exact because the opcode makes revm's refusal checks first, and the start's credit settles a price that differs from what revm made.
+- **A call that moves no value is not read at its start.**
+  Made after #407 merged: a call of any scheme that moves no value and whose code address is not a precompile of the EVM's set skips the reads before and after revm decides its start (`start_writes_nothing` in `src/evm/execution.rs`), and the opcode charges a call that transfers no value nothing without reading the journal (`start_makes_no_records` in `src/limit/record.rs`); such a start is still opened and held to the transaction's limits.
+  A debug build makes the skipped reads and asserts they find nothing, and each decision has a truth-table test.
+  A `CALLCODE` moving value and any call to a precompile stay read: a node's own precompile runs inside the start and may write the start's accounts there (`tests/satin/tool_writes.rs`).
+  Why: revm's start of such a call only loads and touches its target, which changes no nonce, balance or code and journals no log, and the reads cost about 900 instructions per start, measured, on every contract call and every internal call that moves nothing.
 - **A creator's nonce record is counted on the creator when the creation returns with the nonce bumped.**
   The creation's budget is the share taken at the opcode, before that record, which is Rex6's order.
   The record is held to the creator's budget, not the creation's, and survives the creation's failure; a keyless signer's is counted on the call at its settlement, and the keyless creation's share is of the call's whole pools, which the call draws nothing from before it.
@@ -133,6 +138,11 @@ Each change is stated here in plain words with its reason; the specification has
 - **One fixed gas budget for the pre-block calls.**
   Each runs on `PRE_BLOCK_CALL_GAS_LIMIT` = 31,566,720, whatever the block's gas limit: 30,000,000 of regular gas and a reservoir of sixteen fresh slots at the minimum bucket.
   Why: a pre-block call does not draw on the block's gas; Rex6's `max(block gas limit, 30,000,000)` was widened for storage gas a crowded bucket multiplied, which a system call no longer pays; a pre-block call on MegaETH's chains writes at most six fresh slots, and none of the three contracts reads `GAS`.
+
+- **The first frame's record is priced once.**
+  Made after #407 merged: the history gas pre-execution charges for the write record the transaction's own frame makes is kept on the layer (`AdditionalLimit::keep_first_frame_charge`) and taken by the frame's input as its start charge, where it used to be priced a second time on the same journal.
+  A debug build prices it again at the input and asserts the two agree; a system call, which skips pre-execution, is priced at its input as before.
+  Why: nothing between the charge and the input changes the journal it is priced on, and the second pricing cost about 550 instructions per value-transfer transaction, measured.
 
 ### Gas detention
 
@@ -179,6 +189,7 @@ Four notes that are easy to miss:
 
 Evidence that a change alters no result: `state-test --json-digest` at two commits, detached, over both fixture releases, in equivalence mode, in Satin mode and in Satin mode under tighter limits (the `--limit-*` options), each sorted and compared byte for byte, plus the gates and the byte-price grid.
 The digest hashes each transaction's whole outcome, its gas by ledger and its usage counts included, so it catches a shift between ledgers that `--json-outcome` does not.
+`--json-witness` (and `state-test btest --json-witness`, per block) adds the hash of what each transaction read below the journal, so a change that keeps every outcome and reads other state — a code, a block hash, a SALT bucket, an account a rejected transaction loads — is caught too; it prints in the same pass as the digest, whose lines it leaves unchanged.
 A golden or snapshot changes only for a stated reason: regenerate it and read the diff.
 
 ## Reading order
@@ -250,7 +261,7 @@ For each module: where it is, what to check, the spec sections, and the `AGENTS.
   - A write is counted in the Host's completed-write hook (`write_completed`), which revm calls only once the opcode made every charge, so a failed opcode counts nothing; the Host's write methods count nothing, whoever calls them.
   - A completed write's record is held to the limits before its history is charged, so a record a limit refuses is not charged; at a frame start the order is the other way round, the caller paying at its opcode before revm decides the start and its records are held.
   - The frame-start hook (`frame_starting`) charges the caller the history of the start's records after the forward is taken, out of what the caller kept, and declares the frame's own part on the fork's start (`FrameStart::charge`); a caller that cannot pay gets the forward back, the halt's record re-written, and starts no frame.
-  - A start's records, state growth and transfer log are read off what revm did: its accounts before revm decides the start and again once it did (`FrameStart::of` and `FrameStart::count` in `src/evm/execution.rs`, `Accounts::start_before` and `start_made` in `src/limit/record.rs`), counted on the started frame's pools (`AdditionalLimit::count_start`) for a frame revm built or a call it answered with a success; an answer that failed counts nothing and is held to no records limit, and a precompile gas detention answers from its price counts nothing and is held to the price alone; a start revm refuses on its caller's account counts nothing and is charged nothing.
+  - A start's records, state growth and transfer log are read off what revm did: its accounts before revm decides the start and again once it did (`FrameStart::of` and `FrameStart::count` in `src/evm/execution.rs`, `Accounts::start_before` and `start_made` in `src/limit/record.rs`), but for a call that moves no value and runs no precompile, which writes nothing on them (`start_writes_nothing`), counted on the started frame's pools (`AdditionalLimit::count_start`) for a frame revm built or a call it answered with a success; an answer that failed counts nothing and is held to no records limit, and a precompile gas detention answers from its price counts nothing and is held to the price alone; a start revm refuses on its caller's account counts nothing and is charged nothing.
   - A frame revm built whose start crossed a limit ends with the stop before its first instruction (`end_before_it_runs`); a success revm gave without building a frame gives way to the stop on its untouched forward, its value move and log taken back to the start's journal mark (`stop_the_answer_at`, `take_back_a_stopped_answer`); an answer that failed is revm's result, held to nothing.
   - Pre-frame charges (a deposit's caller account, EIP-7702 authorities, pre-frame records) either succeed or leave an included out-of-gas halt without a frame, with the journal unwound as revm unwinds it (a creation keeps its nonce bump).
   - A deposit that fails validation or cannot pay a pre-frame charge is included as a failed deposit: whole gas limit used, mint credited, nonce bumped.
@@ -263,7 +274,7 @@ For each module: where it is, what to check, the spec sections, and the `AGENTS.
 
 ### Gas detention
 
-- **Where:** `src/access/` (`Detention`, `VolatileDataAccess`), the volatile-read wrappers in `src/evm/instructions.rs`, the loads the Host marks or refuses in `src/evm/host.rs`, `hold_precompile`, `settle_answer` and `end_frame` in `src/evm/execution.rs`, the switch in `src/system/control.rs`.
+- **Where:** `src/access/` (`Detention`, `VolatileDataAccess`), the volatile-read wrappers in `src/evm/instructions.rs`, the loads the Host marks or refuses in `src/evm/host.rs`, `hold_precompile`, `settle_answer`, `settle_system_answer` (which applies the switch-off an interceptor's answer carries) and `end_frame` in `src/evm/execution.rs`, the switch in `src/system/control.rs`.
 - **Read first:** the module doc of `src/access/mod.rs`.
 - **Check:**
   - The split into spendable and withheld gas is applied when a read completes, when a frame starts or resumes, and after an `SSTORE`; only regular charges are held to the spendable part, every other reader sees both.
@@ -365,7 +376,7 @@ For each module: where it is, what to check, the spec sections, and the `AGENTS.
 - **Check:**
   - No consensus path changed for a tool's sake; tool overrides (`--override.limits`, `with_tx_runtime_limits`, `with_protocol_limits` under `test-utils`) are explicit and never default.
   - A limits file of the first shape, without the KV-update and state-growth fields, reads with the default spec's values for them; every other field stays required, and an unknown one is refused.
-  - `state-test --json-digest` hashes each transaction's whole outcome, and the `--limit-*` options run Satin mode under tighter limits in each dimension.
+  - `state-test --json-digest` hashes each transaction's whole outcome, `--json-witness` what it read below the journal (and `btest --json-witness` what each block read), and the `--limit-*` options run Satin mode under tighter limits in each dimension.
   - A test pins a spec rule, not the implementation; a new or changed test says which rule it checks (some headers carry a `[S<section>.<n>]` tag: the spec section and item).
   - A figure the schedule determines is asserted against its derivation, not pinned; snapshots and goldens own only outputs with no computable expectation.
   - The limit matrix (`tests/satin/limit_matrix/`) runs every row, none of them ignored.

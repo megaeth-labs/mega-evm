@@ -13,7 +13,7 @@ use revm::{
     interpreter::{
         interpreter::EthInterpreter, interpreter_types::Jumps, CallInputs, CallOutcome,
         CreateInputs, CreateOutcome, CreateScheme, Gas, InstructionResult, Interpreter,
-        InterpreterResult,
+        InterpreterResult, InterpreterTypes,
     },
     primitives::KECCAK_EMPTY,
     Database, Inspector,
@@ -217,6 +217,57 @@ fn test_a_creation_an_inspector_answers_keeps_what_its_start_was_charged() {
                 Event::CallEnd(InstructionResult::Return),
             ],
         );
+    }
+}
+
+/// Answers every creation with a revert on the gas it was given, carrying back the created
+/// account's charge: a tool's rewrite, for any context.
+struct AnswersCreations;
+
+impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for AnswersCreations {
+    fn create(&mut self, _: &mut CTX, inputs: &mut CreateInputs) -> Option<CreateOutcome> {
+        Some(CreateOutcome {
+            result: InterpreterResult::new(
+                InstructionResult::Revert,
+                Bytes::new(),
+                Gas::new_with_regular_gas_and_reservoir(inputs.gas_limit(), inputs.reservoir()),
+            ),
+            address: None,
+            charged_create_state_gas: inputs.charged_create_state_gas(),
+            charged_state_gas_address: inputs.charged_state_gas_address(),
+            charged_start: Default::default(),
+        })
+    }
+}
+
+/// The signer's account a creation's start never created, because an inspector answered the
+/// creation, comes back at the price it was charged, however crowded the signer's bucket: priced
+/// again at the signer's account, whose bucket the transaction reads once. With the created
+/// account's charge, which the answer carries back, the deployment keeps no state gas.
+#[test]
+fn test_an_answered_creation_gives_the_signers_account_back_at_its_price() {
+    // A charge that costs nothing costs nothing at any capacity, and the engine asks for none.
+    if crate::common::state_is_free() {
+        return;
+    }
+    let deployment = Deployment::new(deploying(&runtime(1)));
+    for gas_limit in GAS_LIMITS {
+        for m in [1, 2, 8] {
+            let envs = crowded(TestExternalEnvs::new(), deployment.signer, m);
+            let outcome = MegaEvm::new(salt_context(system_db(), envs.clone()))
+                .with_inspector(AnswersCreations)
+                .execute_transaction(salt_tx(&deployment, gas_limit))
+                .expect("valid");
+            let case = format!("m = {m}, gas limit {gas_limit}");
+            assert!(matches!(failure(&outcome), KeylessDeployError::ExecutionReverted { .. }));
+            assert_eq!(nonce(&outcome, deployment.signer), 0, "{case}: no creation started");
+            assert_eq!(outcome.gas.state, 0, "{case}: both charges came back");
+            assert_eq!(
+                envs.bucket_queries(bucket(deployment.signer)),
+                1,
+                "{case}: one read priced the charge and its give-back",
+            );
+        }
     }
 }
 

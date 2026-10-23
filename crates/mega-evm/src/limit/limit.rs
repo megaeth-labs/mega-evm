@@ -77,11 +77,9 @@ use super::{
 #[derive(Clone, Debug, Default)]
 pub struct AdditionalLimit {
     limits: EvmTxRuntimeLimits,
-    /// Whether the transaction is exempt from every per-transaction limit, sticky for the
-    /// transaction. See [`is_exempt`](Self::is_exempt).
-    exempt: bool,
-    /// Whether a value movement journals an EIP-7708 transfer log.
-    transfer_logs: bool,
+    /// What the running execution is, decided when it is begun and sticky for it: the exemption
+    /// follows from it ([`is_exempt`](Self::is_exempt)).
+    class: TxClass,
     /// The crossing the result of the frame returning next was made of, noted where the stop
     /// became that result ([`note_frame_stop`](Self::note_frame_stop)) and taken when the frame
     /// returns.
@@ -104,25 +102,46 @@ pub struct AdditionalLimit {
     /// would have kept more than a limit allows and was skipped
     /// ([`skip_authorization_list`](Self::skip_authorization_list)).
     pre_frame_stop: Option<LimitCheck>,
+    /// The history gas pre-execution charged for the write record the transaction's own frame
+    /// makes, kept from that charge until the frame's input is built, which carries it as its
+    /// start charge ([`take_first_frame_charge`](Self::take_first_frame_charge)).
+    first_frame_charge: Option<u64>,
     /// What the transaction's frames keep, every running frame counted as if it succeeds.
     kept: Kept,
     /// One per start revm decided whose result has not returned, the latest last.
     decided: Vec<Decided>,
-    /// The history gas of the transaction's body, part of
-    /// [`history_gas_spent`](Self::history_gas_spent).
-    intrinsic_history_gas: u64,
-    /// The bytes of the body that [`intrinsic_history_gas`](Self::intrinsic_history_gas) paid
-    /// for, part of [`history_bytes`](Self::history_bytes).
+    /// The bytes of the body the transaction's intrinsic history gas pays for: the body once
+    /// validation admitted that gas, and none before or for a transaction that pays no history.
     intrinsic_history_bytes: u64,
-    /// The history gas charged before the first frame for the write record that frame makes,
-    /// which the frame carries as its start charge.
-    first_frame_charge: u64,
     /// The history gas the settled transaction spent.
     history_gas_spent: u64,
     /// The history bytes the settled transaction appended.
     history_bytes: u64,
-    /// The EIP-8037 reservoir the settled transaction left unspent.
-    reservoir_remaining: u64,
+    /// The EIP-8037 reservoir the settled transaction or system call left unspent: none from where
+    /// an execution builds its gas until it reports what it settled with.
+    reservoir_remaining: Option<u64>,
+}
+
+/// What the running execution is, decided when the layer begins it from what the transaction is
+/// and the configuration it runs, and kept until the next one begins: what it is held to and what
+/// it pays follow from it, so replacing the transaction the context holds without beginning it
+/// changes neither.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum TxClass {
+    /// The protocol's own work, a system-originated transaction or a system call: held to no
+    /// per-transaction limit, not detained, priced at the minimum bucket and paying no history.
+    ProtocolOwn,
+    /// A user's deposit: held to every limit like any transaction, and paying no history, its
+    /// bytes paid for on L1.
+    Deposit,
+    /// Any other transaction under the neutral configuration, which prices no history: held as
+    /// an ordinary transaction is, paying no history. Switching the context to the neutral
+    /// configuration makes an ordinary execution this until the next one begins, whatever
+    /// configuration the context is switched to in between.
+    Neutral,
+    /// Any other transaction, which pays history for the bytes it appends.
+    #[default]
+    Ordinary,
 }
 
 /// What a transaction's frames keep: the signed net of each counted dimension, indexed by its
@@ -228,6 +247,14 @@ impl Counted {
         self.added.is_zero() && self.taken.is_zero()
     }
 
+    /// Whether it adds anything to `pool` or takes anything back from it: a count that leaves a
+    /// pool alone crosses neither the frame's budget in it nor, unless the transaction is held to
+    /// its limits whatever it counts, the transaction's limit, and a draw and a refill of nothing
+    /// change neither the pool nor what the frames keep.
+    const fn touches(&self, pool: PoolId) -> bool {
+        self.added.get(pool) != 0 || self.taken.get(pool) != 0
+    }
+
     /// What it adds to `pool` less what it takes back from it.
     const fn rise(&self, pool: PoolId) -> i128 {
         self.added.get(pool) as i128 - self.taken.get(pool) as i128
@@ -267,14 +294,12 @@ impl AdditionalLimit {
     }
 
     /// Clears the state for a new transaction, keeping allocations and the limits, and begins it:
-    /// exempt from every limit or not, its value movements journaling transfer logs or not, its
-    /// body weighing `body` bytes.
+    /// a transaction of `class`, its body weighing `body` bytes.
     ///
     /// The exemption is decided before the body is counted: the protocol's own work is exempt
     /// whatever it carries.
-    pub(crate) fn begin_transaction(&mut self, exempt: bool, transfer_logs: bool, body: u64) {
-        self.exempt = exempt;
-        self.transfer_logs = transfer_logs;
+    pub(crate) fn begin_transaction(&mut self, class: TxClass, body: u64) {
+        self.class = class;
         self.frame_stop = None;
         self.limit_exceeded = None;
         self.body = body;
@@ -283,14 +308,13 @@ impl AdditionalLimit {
         self.created_authorities = 0;
         self.created_caller = false;
         self.pre_frame_stop = None;
+        self.first_frame_charge = None;
         self.kept = Kept::default();
         self.decided.clear();
-        self.intrinsic_history_gas = 0;
         self.intrinsic_history_bytes = 0;
-        self.first_frame_charge = 0;
         self.history_gas_spent = 0;
         self.history_bytes = 0;
-        self.reservoir_remaining = 0;
+        self.reservoir_remaining = None;
     }
 
     /* What the transaction keeps */
@@ -341,9 +365,17 @@ impl AdditionalLimit {
         self.body
     }
 
-    /// Whether the transaction's value movements journal EIP-7708 transfer logs.
-    pub(crate) const fn counts_transfer_logs(&self) -> bool {
-        self.transfer_logs
+    /// The bytes of the body the transaction's intrinsic history gas pays for: the body once
+    /// validation admitted that gas ([`admit_body_history`](Self::admit_body_history)), and none
+    /// before or for a transaction that pays no history.
+    pub(crate) const fn intrinsic_history_bytes(&self) -> u64 {
+        self.intrinsic_history_bytes
+    }
+
+    /// Records that validation admitted the history gas of the transaction's body: its gas limit
+    /// covers it, and the transaction pays it before its first frame.
+    pub(crate) const fn admit_body_history(&mut self) {
+        self.intrinsic_history_bytes = self.body;
     }
 
     /// Whether the transaction's body, with one write record for each of its `authorizations`,
@@ -354,7 +386,7 @@ impl AdditionalLimit {
     /// record for each distinct authority that applies — and a transaction validation admits
     /// cannot cross the limit there. An exempt transaction is held to nothing.
     pub(crate) const fn admits_tx_body(&self, authorizations: u64) -> bool {
-        self.exempt ||
+        self.is_exempt() ||
             self.body.saturating_add(WRITE_RECORD_SIZE.saturating_mul(authorizations)) <=
                 self.limits.tx_data_size_limit
     }
@@ -373,11 +405,11 @@ impl AdditionalLimit {
         self.authorities = authorities;
         self.created_authorities = created;
         debug_assert!(
-            self.exempt || !self.usage().exceeds_data_size(self.limits.tx_data_size_limit),
+            self.is_exempt() || !self.usage().exceeds_data_size(self.limits.tx_data_size_limit),
             "validation admits no body whose authority records cross the data-size limit"
         );
         debug_assert!(
-            self.exempt ||
+            self.is_exempt() ||
                 (authorities == 0 && created == 0) ||
                 [LimitKind::KvUpdate, LimitKind::StateGrowth]
                     .iter()
@@ -410,7 +442,7 @@ impl AdditionalLimit {
         let records = self.tx_limit(LimitKind::KvUpdate) as i128 - self.net(LimitKind::KvUpdate);
         let created =
             self.tx_limit(LimitKind::StateGrowth) as i128 - self.net(LimitKind::StateGrowth);
-        !self.exempt && (entries as i128 > records || entries as i128 > created)
+        !self.is_exempt() && (entries as i128 > records || entries as i128 > created)
     }
 
     /// The verdict on an authorization list that would keep `records` write records and create
@@ -439,11 +471,25 @@ impl AdditionalLimit {
         self.pre_frame_stop.take()
     }
 
+    /// Keeps `history`, the history gas pre-execution just charged for the write record the
+    /// transaction's own frame makes, for the frame's input to carry
+    /// ([`take_first_frame_charge`](Self::take_first_frame_charge)).
+    pub(crate) const fn keep_first_frame_charge(&mut self, history: u64) {
+        self.first_frame_charge = Some(history);
+    }
+
+    /// The history gas pre-execution charged for the write record the transaction's own frame
+    /// makes; taken once, by the frame's input. `None` where no pre-execution charged it since
+    /// the last was taken: a system call, which skips pre-execution.
+    pub(crate) const fn take_first_frame_charge(&mut self) -> Option<u64> {
+        self.first_frame_charge.take()
+    }
+
     /// The pools of the transaction's own frame: what the transaction has left of each limit once
     /// its body and the counts made before the frame are counted, the data size under the frame
     /// cap; unlimited for an exempt transaction.
     pub(crate) const fn first_frame_pools(&self) -> PoolAmounts {
-        if self.exempt {
+        if self.is_exempt() {
             return PoolAmounts::UNLIMITED;
         }
         let caps = self.frame_caps();
@@ -470,7 +516,7 @@ impl AdditionalLimit {
     /// The most each of a frame's pools may start with: the data-size frame cap, and no cap on the
     /// other pools; nothing for an exempt transaction.
     pub(crate) const fn frame_caps(&self) -> PoolAmounts {
-        if self.exempt {
+        if self.is_exempt() {
             return PoolAmounts::UNLIMITED;
         }
         PoolAmounts::UNLIMITED.with(DATA_SIZE_POOL, self.limits.frame_data_size_limit)
@@ -491,7 +537,7 @@ impl AdditionalLimit {
         used: u64,
         frame_local: bool,
     ) -> LimitCheck {
-        if self.exempt {
+        if self.is_exempt() {
             return LimitCheck::WithinLimit;
         }
         LimitCheck::ExceedsLimit { kind, limit, used, frame_local }
@@ -528,29 +574,30 @@ impl AdditionalLimit {
         LimitCheck::WithinLimit
     }
 
-    /// The verdict on `counted` kept on a frame whose pools hold `remaining` after net draws of
-    /// `spent`: in each counted dimension in order, the frame's budget, then the transaction's
-    /// limit; the first crossing is the verdict. `held` holds the transaction to its limits
-    /// whatever `counted` adds.
-    fn check(
-        &self,
-        remaining: PoolAmounts,
-        spent: [i64; PoolId::COUNT],
-        counted: &Counted,
-        held: bool,
-    ) -> LimitCheck {
+    /// The verdict on `counted` kept on a frame whose pools `gas` holds: in each counted dimension
+    /// in order, the frame's budget, then the transaction's limit; the first crossing is the
+    /// verdict. `held` holds the transaction to its limits whatever `counted` adds; otherwise a
+    /// dimension `counted` leaves alone crosses nothing and is not looked at
+    /// ([`Counted::touches`]).
+    fn check(&self, gas: &GasTracker, counted: &Counted, held: bool) -> LimitCheck {
         for kind in COUNTED {
             let Some(pool) = kind.pool() else { continue };
-            let rise = counted.rise(pool);
-            if rise > 0 && rise > remaining.get(pool) as i128 {
-                let check = self.budget_crossed(
-                    kind,
-                    remaining.get(pool),
-                    spent[pool.index()],
-                    rise as u64,
+            if !held && !counted.touches(pool) {
+                debug_assert!(
+                    self.transaction_crossed(kind, counted, false).within_limit(),
+                    "a dimension a count leaves alone crosses nothing"
                 );
-                if check.exceeded_limit() {
-                    return check;
+                continue;
+            }
+            let rise = counted.rise(pool);
+            if rise > 0 {
+                let remaining = gas.pool_remaining(pool);
+                if rise > remaining as i128 {
+                    let spent = gas.pool_spent(pool);
+                    let check = self.budget_crossed(kind, remaining, spent, rise as u64);
+                    if check.exceeded_limit() {
+                        return check;
+                    }
                 }
             }
             let check = self.transaction_crossed(kind, counted, held);
@@ -559,11 +606,6 @@ impl AdditionalLimit {
             }
         }
         LimitCheck::WithinLimit
-    }
-
-    /// The pools `gas` holds and the nets it drew on them.
-    fn pools_of(gas: &GasTracker) -> (PoolAmounts, [i64; PoolId::COUNT]) {
-        (gas.pools_remaining(), PoolId::ALL.map(|pool| gas.pool_spent(pool)))
     }
 
     /// Counts what the frame whose pools `gas` holds keeps of `counted`, held to the frame's
@@ -575,8 +617,7 @@ impl AdditionalLimit {
         if counted.is_none() {
             return LimitCheck::WithinLimit;
         }
-        let (remaining, spent) = Self::pools_of(gas);
-        let check = self.check(remaining, spent, counted, false);
+        let check = self.check(gas, counted, false);
         if check.exceeded_limit() {
             return check;
         }
@@ -585,9 +626,13 @@ impl AdditionalLimit {
         LimitCheck::WithinLimit
     }
 
-    /// Draws `counted` on the pools `gas` holds, which the checks made sure can pay it.
+    /// Draws `counted` on the pools `gas` holds, which the checks made sure can pay it; a pool it
+    /// leaves alone is not visited.
     fn apply(gas: &mut GasTracker, counted: &Counted) {
         for pool in PoolId::ALL {
+            if !counted.touches(pool) {
+                continue;
+            }
             gas.refill_pool(pool, counted.taken.get(pool));
             let drew = gas.record_pool(pool, counted.added.get(pool));
             debug_assert!(
@@ -611,6 +656,9 @@ impl AdditionalLimit {
     fn count(&mut self, counted: &Counted) {
         let kept = &mut self.kept;
         for pool in PoolId::ALL {
+            if !counted.touches(pool) {
+                continue;
+            }
             let net = &mut kept.net[pool.index()];
             *net = net
                 .saturating_add_unsigned(counted.added.get(pool))
@@ -661,8 +709,7 @@ impl AdditionalLimit {
         counted: &Counted,
         credit: u64,
     ) -> LimitCheck {
-        let (remaining, spent) = Self::pools_of(gas);
-        let check = self.check(remaining, spent, counted, true);
+        let check = self.check(gas, counted, true);
         if check.exceeded_limit() {
             return check;
         }
@@ -761,38 +808,25 @@ impl AdditionalLimit {
         }
     }
 
-    /// Whether the running transaction is exempt from every per-transaction limit.
+    /// Whether the running transaction is exempt from every per-transaction limit: the protocol's
+    /// own work is.
     pub const fn is_exempt(&self) -> bool {
-        self.exempt
+        matches!(self.class, TxClass::ProtocolOwn)
     }
 
-    /* What the transaction pays before its first frame */
-
-    /// The history gas of the transaction's body: the bytes the transaction carries and the write
-    /// records its inclusion makes, which are known before it runs. The transaction's gas pays it
-    /// before the first frame, reservoir first, as intrinsic gas.
-    pub const fn intrinsic_history_gas(&self) -> u64 {
-        self.intrinsic_history_gas
+    /// What the running (or last) execution is, decided when it was begun.
+    pub(crate) const fn class(&self) -> TxClass {
+        self.class
     }
 
-    /// Records the history gas the transaction's body costs, and the `bytes` of the body it pays
-    /// for.
-    pub(crate) const fn set_intrinsic_history(&mut self, gas: u64, bytes: u64) {
-        self.intrinsic_history_gas = gas;
-        self.intrinsic_history_bytes = bytes;
-    }
-
-    /// Records the history gas charged before execution for the write record the transaction's own
-    /// frame makes: the recipient of its value, or the account it creates. The frame carries it as
-    /// its start charge, which its failure gives back.
-    pub(crate) const fn set_first_frame_charge(&mut self, gas: u64) {
-        self.first_frame_charge = gas;
-    }
-
-    /// The history gas charged before execution for the write record the transaction's own frame
-    /// makes.
-    pub(crate) const fn first_frame_charge(&self) -> u64 {
-        self.first_frame_charge
+    /// Makes the running (or last) execution pay no history where it would, as the neutral
+    /// configuration the context is switched to prices none; the next execution the layer begins
+    /// decides again.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) const fn price_no_history(&mut self) {
+        if matches!(self.class, TxClass::Ordinary) {
+            self.class = TxClass::Neutral;
+        }
     }
 
     /* What the settled transaction reports */
@@ -807,12 +841,27 @@ impl AdditionalLimit {
     /// ([`MegaGasUsage::reservoir_remaining`](crate::MegaGasUsage::reservoir_remaining)). It is
     /// read before the EIP-7623 floor absorbs it, and a failed deposit leaves none.
     pub const fn reservoir_remaining(&self) -> u64 {
-        self.reservoir_remaining
+        match self.reservoir_remaining {
+            Some(reservoir) => reservoir,
+            None => 0,
+        }
+    }
+
+    /// Forgets the reservoir the last execution reported: the running one builds its gas, and
+    /// reports what it leaves unspent once it settles.
+    pub(crate) const fn forget_reservoir_remaining(&mut self) {
+        self.reservoir_remaining = None;
     }
 
     /// Records the reservoir the settled transaction or system call left unspent.
     pub(crate) const fn set_reservoir_remaining(&mut self, reservoir: u64) {
-        self.reservoir_remaining = reservoir;
+        self.reservoir_remaining = Some(reservoir);
+    }
+
+    /// Records `reservoir` as what the settled execution left unspent, unless the execution
+    /// reported it already, where it read it before the result was built.
+    pub(crate) fn set_reservoir_remaining_unless_reported(&mut self, reservoir: u64) {
+        self.reservoir_remaining.get_or_insert(reservoir);
     }
 
     /// The history bytes the last settled transaction appended, whoever paid for them, which a
@@ -889,7 +938,7 @@ mod tests {
     #[test]
     fn test_the_exemption_answers_every_crossing_and_lasts_one_transaction() {
         let mut limit = AdditionalLimit::default();
-        limit.begin_transaction(true, false, 0);
+        limit.begin_transaction(TxClass::ProtocolOwn, 0);
         assert!(limit.is_exempt());
         for kind in [LimitKind::DataSize, LimitKind::ComputeGas] {
             for frame_local in [false, true] {
@@ -897,7 +946,7 @@ mod tests {
                 assert_eq!(verdict, LimitCheck::WithinLimit, "{kind:?}, frame-local {frame_local}");
             }
         }
-        limit.begin_transaction(false, false, 0);
+        limit.begin_transaction(TxClass::Ordinary, 0);
         assert!(!limit.is_exempt());
         assert_eq!(
             limit.crossed(LimitKind::ComputeGas, 0, 1, false),
@@ -911,6 +960,190 @@ mod tests {
         );
     }
 
+    /// `draw` as it was before it learned to leave alone the pools a count does not touch: every
+    /// pool's budget and every dimension's limit checked off a snapshot of the pools, and every
+    /// pool drawn, refilled and counted. The reference [`draw`](AdditionalLimit::draw) is held to.
+    fn draw_by_every_pool(
+        limit: &mut AdditionalLimit,
+        gas: &mut GasTracker,
+        counted: &Counted,
+    ) -> LimitCheck {
+        if counted.is_none() {
+            return LimitCheck::WithinLimit;
+        }
+        let remaining = gas.pools_remaining();
+        let spent = PoolId::ALL.map(|pool| gas.pool_spent(pool));
+        for kind in COUNTED {
+            let Some(pool) = kind.pool() else { continue };
+            let rise = counted.rise(pool);
+            if rise > 0 && rise > remaining.get(pool) as i128 {
+                let check = limit.budget_crossed(
+                    kind,
+                    remaining.get(pool),
+                    spent[pool.index()],
+                    rise as u64,
+                );
+                if check.exceeded_limit() {
+                    return check;
+                }
+            }
+            let check = limit.transaction_crossed(kind, counted, false);
+            if check.exceeded_limit() {
+                return check;
+            }
+        }
+        for pool in PoolId::ALL {
+            gas.refill_pool(pool, counted.taken.get(pool));
+            if !gas.record_pool(pool, counted.added.get(pool)) {
+                gas.clear_pool_crossing(pool);
+            }
+            let net = &mut limit.kept.net[pool.index()];
+            *net = net
+                .saturating_add_unsigned(counted.added.get(pool))
+                .saturating_sub_unsigned(counted.taken.get(pool));
+        }
+        limit.kept.transfer_logs += u64::from(counted.transfer_log);
+        LimitCheck::WithinLimit
+    }
+
+    /// A draw that visits only the pools its count touches decides, draws and counts exactly as
+    /// one that visits every pool: for every count that adds to, takes back from or leaves alone
+    /// each of the three pools, with and without a transfer log, on frames whose budget in each
+    /// pool is exhausted, short of the count or ample, under transaction limits that the count
+    /// crosses or does not, after frames kept nothing, a little or more, and for an exempt
+    /// transaction, whose pools are unlimited. A count takes back no more data size and no more
+    /// records than the frames keep, which the engine never does and a debug build asserts.
+    #[test]
+    fn test_a_draw_over_the_pools_it_touches_matches_one_over_every_pool() {
+        // What a count does to one pool: nothing, add, take back, or both.
+        let moves = [(0, 0), (5, 0), (0, 2), (7, 3)];
+        // A frame's pool before the draw: empty, short of the count, ample; an exempt
+        // transaction's frames start with unlimited pools.
+        let mut cases = 0;
+        for (class, pools) in
+            [(TxClass::Ordinary, &[0_u64, 4, 100][..]), (TxClass::ProtocolOwn, &[u64::MAX - 2][..])]
+        {
+            for tx_limit in [10_u64, u64::MAX] {
+                for kept in [0_u64, 3, 8] {
+                    let limits = EvmTxRuntimeLimits::no_limits()
+                        .with_tx_data_size_limit(tx_limit)
+                        .with_tx_kv_update_limit(tx_limit)
+                        .with_tx_state_growth_limit(tx_limit);
+                    let mut layer = AdditionalLimit::new(limits);
+                    layer.begin_transaction(class, 0);
+                    let mut prior = Counted::NONE;
+                    for pool in PoolId::ALL {
+                        prior.added.set(pool, kept);
+                    }
+                    layer.count(&prior);
+                    for a in moves {
+                        for b in moves {
+                            for c in moves {
+                                for transfer_log in [false, true] {
+                                    for &pa in pools {
+                                        for &pb in pools {
+                                            for &pc in pools {
+                                                let mut counted = Counted::NONE;
+                                                let pools = [
+                                                    DATA_SIZE_POOL,
+                                                    KV_UPDATE_POOL,
+                                                    STATE_GROWTH_POOL,
+                                                ];
+                                                for (pool, (added, taken)) in
+                                                    pools.into_iter().zip([a, b, c])
+                                                {
+                                                    counted.added.set(pool, added);
+                                                    counted.taken.set(pool, taken);
+                                                }
+                                                counted.transfer_log = transfer_log;
+                                                let takes_more = [DATA_SIZE_POOL, KV_UPDATE_POOL]
+                                                    .into_iter()
+                                                    .any(|pool| counted.taken.get(pool) > kept);
+                                                if takes_more {
+                                                    continue;
+                                                }
+                                                // Two drawn already, so a frame's net is not zero.
+                                                let mut gas = GasTracker::new(1_000, 1_000, 0);
+                                                gas.set_pools_remaining(
+                                                    PoolAmounts::ZERO
+                                                        .with(DATA_SIZE_POOL, pa + 2)
+                                                        .with(KV_UPDATE_POOL, pb + 2)
+                                                        .with(STATE_GROWTH_POOL, pc + 2),
+                                                );
+                                                for pool in PoolId::ALL {
+                                                    assert!(gas.record_pool(pool, 2));
+                                                }
+                                                let (mut by_touched, mut by_every) =
+                                                    (layer.clone(), layer.clone());
+                                                let (mut gas_touched, mut gas_every) = (gas, gas);
+                                                let verdict =
+                                                    by_touched.draw(&mut gas_touched, &counted);
+                                                let reference = draw_by_every_pool(
+                                                    &mut by_every,
+                                                    &mut gas_every,
+                                                    &counted,
+                                                );
+                                                let case = format!(
+                                                    "{class:?}, limit {tx_limit}, kept {kept}, \
+                                                     {counted:?}, pools {pa}/{pb}/{pc}"
+                                                );
+                                                assert_eq!(verdict, reference, "{case}");
+                                                assert_eq!(
+                                                    by_touched.kept, by_every.kept,
+                                                    "{case}"
+                                                );
+                                                assert_eq!(
+                                                    gas_touched.pools_remaining(),
+                                                    gas_every.pools_remaining(),
+                                                    "{case}"
+                                                );
+                                                for pool in PoolId::ALL {
+                                                    assert_eq!(
+                                                        (
+                                                            gas_touched.pool_spent(pool),
+                                                            gas_touched.pool_crossing(pool)
+                                                        ),
+                                                        (
+                                                            gas_every.pool_spent(pool),
+                                                            gas_every.pool_crossing(pool)
+                                                        ),
+                                                        "{case}"
+                                                    );
+                                                }
+                                                cases += 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // With nothing kept, a count takes nothing back from the first two pools: 2 of 4 moves
+        // each, so 16 of the 64 moves; with 3 or 8 kept, every move. The ordinary transaction runs
+        // on 27 pool states, the exempt one on one.
+        assert_eq!(cases, 2 * (16 + 64 + 64) * 2 * (27 + 1));
+    }
+
+    /// The history pre-execution charged for the first frame's record reaches that frame's input
+    /// once: taken, it is gone, and an execution that skips pre-execution — a system call, begun
+    /// or run straight through the handler after a transaction — finds none and prices its own.
+    #[test]
+    fn test_the_first_frame_charge_is_taken_once_and_lasts_one_transaction() {
+        let mut limit = AdditionalLimit::default();
+        limit.begin_transaction(TxClass::Ordinary, 0);
+        assert_eq!(limit.take_first_frame_charge(), None, "nothing charged yet");
+        limit.keep_first_frame_charge(7);
+        assert_eq!(limit.take_first_frame_charge(), Some(7));
+        assert_eq!(limit.take_first_frame_charge(), None, "taken by the frame's input");
+
+        limit.keep_first_frame_charge(7);
+        limit.begin_transaction(TxClass::ProtocolOwn, 0);
+        assert_eq!(limit.take_first_frame_charge(), None, "the next execution begins without it");
+    }
+
     /// Validation admits no body whose authority records cross the data-size limit, so a debug
     /// build trips on records that do: under a limit lowered to the body and one record, two
     /// applied authorities cross it.
@@ -921,7 +1154,50 @@ mod tests {
         let limits = EvmTxRuntimeLimits::no_limits()
             .with_tx_data_size_limit(crate::TX_BODY_SIZE + WRITE_RECORD_SIZE);
         let mut limit = AdditionalLimit::new(limits);
-        limit.begin_transaction(false, false, crate::TX_BODY_SIZE);
+        limit.begin_transaction(TxClass::Ordinary, crate::TX_BODY_SIZE);
         limit.count_authorities(2, 0);
+    }
+
+    /// An authorization list may cross exactly when it has more entries than the KV or the
+    /// state-growth limit leaves the transaction, the limit less what the transaction already
+    /// counts: a list that fills the room exactly cannot cross, one entry more may. An exempt
+    /// transaction's list never may, whatever its length.
+    #[test]
+    fn test_an_authorization_list_may_cross_only_past_what_both_limits_leave() {
+        let records = |kv| Counted::records(kv, 0, false);
+        let growth = |accounts| Counted::NONE.with_growth(accounts, 0);
+        // (case, KV limit, state-growth limit, counted before the list, entries, may cross)
+        let cases = [
+            ("no entries", 3, 5, Counted::NONE, 0, false),
+            ("entries fill the KV room", 3, 10, Counted::NONE, 3, false),
+            ("one entry past the KV room", 3, 10, Counted::NONE, 4, true),
+            ("entries fill the state-growth room", 10, 3, Counted::NONE, 3, false),
+            ("one entry past the state-growth room", 10, 3, Counted::NONE, 4, true),
+            ("entries fill the KV room left after records", 5, 10, records(2), 3, false),
+            ("one entry past the KV room left after records", 5, 10, records(2), 4, true),
+            ("entries fill the state-growth room left after growth", 10, 5, growth(2), 3, false),
+            ("one entry past the state-growth room left after growth", 10, 5, growth(2), 4, true),
+            ("no KV room", 0, 10, Counted::NONE, 1, true),
+            ("no state-growth room", 10, 0, Counted::NONE, 1, true),
+            ("the longest list under no limit", u64::MAX, u64::MAX, Counted::NONE, u64::MAX, false),
+        ];
+        for (case, kv, state_growth, before, entries, may_cross) in cases {
+            let limits = EvmTxRuntimeLimits::no_limits()
+                .with_tx_kv_update_limit(kv)
+                .with_tx_state_growth_limit(state_growth);
+            let mut limit = AdditionalLimit::new(limits);
+            limit.begin_transaction(TxClass::Ordinary, crate::TX_BODY_SIZE);
+            limit.count(&before);
+            assert_eq!(limit.authorization_list_may_cross(entries), may_cross, "{case}");
+        }
+
+        let limits = EvmTxRuntimeLimits::no_limits()
+            .with_tx_kv_update_limit(0)
+            .with_tx_state_growth_limit(0);
+        let mut limit = AdditionalLimit::new(limits);
+        limit.begin_transaction(TxClass::ProtocolOwn, crate::TX_BODY_SIZE);
+        for entries in [1, u64::MAX] {
+            assert!(!limit.authorization_list_may_cross(entries), "exempt, {entries} entries");
+        }
     }
 }

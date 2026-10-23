@@ -26,7 +26,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use mega_evm::{
     alloy_consensus::transaction::{Recovered, SignerRecoverable},
-    alloy_evm::block::{BlockExecutionError, BlockExecutor, BlockValidationError},
+    alloy_evm::{
+        block::{BlockExecutionError, BlockExecutor, BlockValidationError},
+        Database,
+    },
     alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder,
     alloy_primitives::Bloom,
     op_revm::constants::{BASE_FEE_RECIPIENT, L1_FEE_RECIPIENT, OPERATOR_FEE_RECIPIENT},
@@ -34,17 +37,22 @@ use mega_evm::{
         bytecode::Bytecode,
         context::BlockEnv,
         database::{CacheState, PlainAccount, State},
+        inspector::NoOpInspector,
         primitives::{keccak256, Address, B256, KECCAK_EMPTY, U256},
         state::AccountInfo,
+        DatabaseCommit,
     },
     system::{
         keyless::KEYLESS_DEPLOY_ADDRESS, ACCESS_CONTROL_ADDRESS, CREATE2_FACTORY_ADDRESS,
         HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS, LIMIT_CONTROL_ADDRESS, MEGA_SYSTEM_ADDRESS,
         ORACLE_CONTRACT_ADDRESS, SEQUENCER_REGISTRY_ADDRESS,
     },
-    test_utils::{rex6_predeploys, SequencerRegistryRoles},
-    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaHardforkConfig, MegaHardforks,
-    ProtocolLimits,
+    test_utils::{
+        rex6_predeploys, RecordingDatabase, RecordingEnvFactory, SequencerRegistryRoles,
+        SharedWitnessRecord,
+    },
+    BlockLimits, EmptyExternalEnv, ExternalEnvFactory, ExternalEnvTypes, MegaBlockExecutionCtx,
+    MegaBlockExecutor, MegaEvm, MegaHardforkConfig, MegaHardforks, ProtocolLimits,
 };
 
 use super::fixture::DecodedBlock;
@@ -369,13 +377,63 @@ impl Chain {
     /// Imports `block`: runs it through the executor on a copy of the chain's state, and, when the
     /// executor accepts it, makes it the head and answers what it produced. A refused block leaves
     /// the chain as it was.
-    pub(crate) fn import(&mut self, block: &DecodedBlock) -> Result<BlockOutput, Refusal> {
+    ///
+    /// With `reads`, the block runs on a database and environments around the state and the
+    /// default environments that record into it what the block read below the journal, and answer
+    /// as those do.
+    pub(crate) fn import(
+        &mut self,
+        block: &DecodedBlock,
+        reads: Option<&SharedWitnessRecord>,
+    ) -> Result<BlockOutput, Refusal> {
         let header = &block.header;
         let mut state = State::builder().with_cached_prestate(self.state.clone()).build();
         let window = header.number.saturating_sub(BLOCK_HASH_WINDOW);
         state.block_hashes.extend(self.hashes.range(window..).map(|(n, hash)| (*n, *hash)));
 
-        let evm = Mode::Equivalence.evm(FORK, &mut state, self.block_env(block), self.chain_id);
+        let env = self.block_env(block);
+        let (gas_used, receipts, bloom) = match reads {
+            None => {
+                self.execute(Mode::Equivalence.evm(FORK, &mut state, env, self.chain_id), block)
+            }
+            Some(reads) => {
+                let factory = RecordingEnvFactory::new(EmptyExternalEnv, reads.clone());
+                let envs = factory.external_envs(header.number);
+                let db = RecordingDatabase::new(&mut state, reads.clone());
+                self.execute(
+                    Mode::Equivalence.evm_with_envs(FORK, db, env, self.chain_id, envs),
+                    block,
+                )
+            }
+        }?;
+
+        let routed_base_fee = self.routed_base_fee +
+            U256::from(header.base_fee_per_gas.unwrap_or_default()) * U256::from(gas_used);
+        self.state = state.cache;
+        self.routed_base_fee = routed_base_fee;
+        self.head = header.hash_slow();
+        self.head_timestamp = header.timestamp;
+        self.hashes.insert(header.number, self.head);
+        Ok(BlockOutput {
+            gas_used,
+            receipts_root: receipts,
+            logs_bloom: bloom,
+            state_root: self.state_root(),
+        })
+    }
+
+    /// Runs `block` through the executor on `evm`: its gas used, receipts root and logs bloom, or
+    /// the refusal.
+    fn execute<DB, E>(
+        &self,
+        evm: MegaEvm<DB, NoOpInspector, E>,
+        block: &DecodedBlock,
+    ) -> Result<(u64, B256, Bloom), Refusal>
+    where
+        DB: Database + DatabaseCommit,
+        E: ExternalEnvTypes,
+    {
+        let header = &block.header;
         let only_deposits = self.spec.admits_only_deposits(self.head_timestamp, header.timestamp);
         let activates_satin =
             self.spec.is_satin_activation_block(self.head_timestamp, header.timestamp);
@@ -399,20 +457,7 @@ impl Chain {
             executor.execute_transaction(&Recovered::new_unchecked(tx, signer)).map_err(refusal)?;
         }
         let (_, result) = executor.finish().map_err(refusal)?;
-
-        let routed_base_fee = self.routed_base_fee +
-            U256::from(header.base_fee_per_gas.unwrap_or_default()) * U256::from(result.gas_used);
-        self.state = state.cache;
-        self.routed_base_fee = routed_base_fee;
-        self.head = header.hash_slow();
-        self.head_timestamp = header.timestamp;
-        self.hashes.insert(header.number, self.head);
-        Ok(BlockOutput {
-            gas_used: result.gas_used,
-            receipts_root: receipts_root(&result.receipts),
-            logs_bloom: logs_bloom(&result.receipts),
-            state_root: self.state_root(),
-        })
+        Ok((result.gas_used, receipts_root(&result.receipts), logs_bloom(&result.receipts)))
     }
 }
 
@@ -522,15 +567,17 @@ mod tests {
         let mut chain = Chain::new(&pre, (0, B256::ZERO), ACTIVATION - 1, 1, 5_007_716).unwrap();
         chain.spec = satin_at_activation;
         let refusal = chain
-            .import(&block(1, ACTIVATION, vec![tx.clone()]))
+            .import(&block(1, ACTIVATION, vec![tx.clone()]), None)
             .expect_err("a user transaction in Satin's activation block");
         assert!(
             refusal.detail.contains("non-deposit transaction in fork activation block"),
             "{}",
             refusal.detail
         );
-        chain.import(&block(1, ACTIVATION, vec![])).expect("the activation block, without it");
-        chain.import(&block(2, ACTIVATION + 1, vec![tx])).expect("the block after admits it");
+        chain
+            .import(&block(1, ACTIVATION, vec![]), None)
+            .expect("the activation block, without it");
+        chain.import(&block(2, ACTIVATION + 1, vec![tx]), None).expect("the block after admits it");
 
         assert!(
             !chain_spec().admits_only_deposits(0, u64::MAX),

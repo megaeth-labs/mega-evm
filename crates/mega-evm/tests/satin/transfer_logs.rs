@@ -49,7 +49,7 @@ use revm::{
     },
     context::{
         result::{ExecutionResult, Output},
-        TxEnv,
+        ContextTr, JournalTr, TxEnv,
     },
     interpreter::{
         interpreter::EthInterpreter, CallInputs, CallOutcome, CallValue, InstructionResult,
@@ -58,7 +58,7 @@ use revm::{
 };
 
 use crate::common::{
-    account_state_gas, context, execute_under, history_rounds, share, value_call_room,
+    account_state_gas, call, context, execute_under, history_rounds, share, value_call_room,
 };
 
 const CALLER: Address = address!("0000000000000000000000000000000000d00000");
@@ -775,6 +775,60 @@ fn test_no_transfer_log_where_no_value_moves_to_another_account() {
     assert_eq!(balance(&burned, ACTOR), U256::from(9 * VALUE));
     let older = execute_under(db(actor()), call(DESTRUCTOR, 0), EvmTxRuntimeLimits::no_limits());
     assert_eq!(balance(&older, DESTRUCTOR), value, "an older account keeps its balance");
+}
+
+/// The data size counts a transfer log where revm's journal emits one, read off the journal's own
+/// switch: a caller or an inspector that turns the journal's EIP-7708 switch off through the
+/// context's mutable journal, past the configuration the spec fixes, gets no transfer log and has
+/// none counted. Here a `SELFDESTRUCT` moves a balance to an account that does not exist: its two
+/// records and the account it adds are counted, and no 160 bytes of a log, so a data-size limit of
+/// exactly the body and the two records holds it as no limit does. With the switch the spec fixes,
+/// the same destruction logs the move, and the same limit stops it.
+#[test]
+fn test_a_journal_switched_off_neither_logs_nor_counts_a_transfer_log() {
+    let value = U256::from(1);
+    let db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(10u64.pow(18)))
+        .account_balance(DESTRUCTOR, value)
+        .account_code(DESTRUCTOR, BytecodeBuilder::default().selfdestruct(PAYEE).build());
+    let tx = call(CALLER, DESTRUCTOR, U256::ZERO, 20_000_000);
+    let records = 2 * WRITE_RECORD_SIZE;
+    let kept = transaction_body_bytes(&tx) + records;
+    let unlimited = EvmTxRuntimeLimits::no_limits();
+    let tight = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(kept);
+    let run = |switched_off: bool, limits: EvmTxRuntimeLimits| {
+        let mut ctx = context(db.clone()).with_tx_runtime_limits(limits);
+        if switched_off {
+            ctx.journal_mut().set_amsterdam_eip7708_enabled(false);
+        }
+        MegaEvm::new(ctx).execute_transaction(tx.clone()).expect("the transaction is valid")
+    };
+
+    for (case, limits) in [("no limit", unlimited), ("a limit of what it keeps", tight)] {
+        let outcome = run(true, limits);
+        assert!(outcome.result.is_success(), "{case}: {:?}", outcome.result);
+        assert!(outcome.result.logs().is_empty(), "{case}: no transfer log");
+        assert_eq!(
+            outcome.usage,
+            LimitUsage { data_size: kept, write_records: 2, state_growth: 1 },
+            "{case}: the records and the new account, and no log",
+        );
+        assert_eq!(outcome.gas.history_bytes, kept, "{case}");
+        assert_eq!(balance(&outcome, PAYEE), value, "{case}: the balance moved");
+    }
+
+    let logged = run(false, unlimited);
+    assert_eq!(transfer_logs(&logged), [transfer_log(DESTRUCTOR, PAYEE, value)]);
+    assert_eq!(logged.usage.data_size, kept + TRANSFER_LOG_SIZE, "the spec's switch");
+    let stopped = run(false, tight);
+    let stop = MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit: records };
+    assert_eq!(
+        stopped.result.output(),
+        Some(&Bytes::from(stop.abi_encode())),
+        "the log crosses what the body leaves the transaction's own frame: {:?}",
+        stopped.result,
+    );
+    assert_eq!(balance(&stopped, PAYEE), U256::ZERO, "the stop took the move back");
 }
 
 /// A start revm refuses on its caller's account moves nothing and writes nothing, so nothing is

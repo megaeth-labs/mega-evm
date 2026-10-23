@@ -9,7 +9,7 @@
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use core::{cell::Cell, num::NonZeroU64};
+use core::num::NonZeroU64;
 
 use op_revm::{
     handler::{IsTxError, OpHandler},
@@ -43,8 +43,8 @@ use revm::{
     inspector::{InspectorEvmTr, InspectorHandler, JournalExt},
     interpreter::{
         interpreter::EthInterpreter, interpreter_action::FrameInit, interpreter_types::LoopControl,
-        CallScheme, FrameInput, Gas, InitialAndFloorGas, InstructionResult, InterpreterAction,
-        InterpreterResult,
+        CallScheme, CallValue, FrameInput, Gas, InitialAndFloorGas, InstructionResult,
+        InterpreterAction, InterpreterResult,
     },
     primitives::{Address, Bytes, TxKind, CALL_STACK_LIMIT},
     Inspector,
@@ -55,7 +55,7 @@ use crate::{
     charge_write_records_history, history_gas,
     limit::{CreatorBefore, StartBefore},
     synthetic_frame_result,
-    system::keyless,
+    system::{keyless, Answer},
     write_record_history_gas, Detention, ExternalEnvTypes, LimitCheck, LimitKind, MegaContext,
     MegaEvm, MegaInstructions, PricedPrecompiles, VolatileDataAccess, TX_BODY_OVER_DATA_SIZE_LIMIT,
 };
@@ -67,23 +67,16 @@ pub const SYSTEM_CALL_REGULAR_GAS_LIMIT: u64 = 30_000_000;
 /// The Satin handler.
 ///
 /// It wraps op-revm's [`OpHandler`] and delegates every phase `MegaETH` does not extend to it.
-/// One handler runs one transaction, so what a phase learns about it is kept here.
+/// It keeps nothing of the transaction it runs: what a phase learns is kept on the context.
 #[derive(Debug)]
 pub struct MegaHandler<EVM, ERROR, FRAME> {
     op: OpHandler<EVM, ERROR, FRAME>,
-    /// The reservoir the transaction's result settled with, read by
-    /// [`post_execution`](Handler::post_execution) where revm builds the result's gas, and
-    /// consumed by the report once the result is built
-    /// ([`execution_result`](Handler::execution_result)) or by the error path
-    /// ([`catch_error`](Handler::catch_error)), so a handler reused for a system call, whose path
-    /// makes no capture, reports the system call's own reservoir.
-    settled_reservoir: Cell<Option<u64>>,
 }
 
 impl<EVM, ERROR, FRAME> MegaHandler<EVM, ERROR, FRAME> {
     /// Creates a handler.
     pub fn new() -> Self {
-        Self { op: OpHandler::new(), settled_reservoir: Cell::new(None) }
+        Self { op: OpHandler::new() }
     }
 }
 
@@ -197,11 +190,14 @@ where
             eip7702_refund
         };
         let (applied, created) = applied_authorities(evm.ctx_mut(), checkpoint.journal_i);
-        if !charge_records_made_outside_a_frame(evm.ctx_mut(), gas, applied) {
+        let Some(first_frame) = charge_records_made_outside_a_frame(evm.ctx_ref(), gas, applied)
+        else {
             runtime_oog_unwind(evm.ctx(), checkpoint)?;
             return Ok(None);
-        }
-        evm.ctx_mut().additional_limit.count_authorities(applied, created);
+        };
+        let layer = &mut evm.ctx_mut().additional_limit;
+        layer.keep_first_frame_charge(first_frame);
+        layer.count_authorities(applied, created);
         Ok(Some(PreExecutionOutput { eip7702_refund, checkpoint }))
     }
 
@@ -262,10 +258,9 @@ where
         if !evm.ctx_ref().prices_history() {
             return Ok(gas);
         }
-        let bytes = evm.ctx_ref().additional_limit.body();
         // A byte count with no price saturates, which no gas limit covers: the transaction is
         // rejected for not covering its own intrinsic gas.
-        let history = history_gas(bytes).unwrap_or(u64::MAX);
+        let history = history_gas(evm.ctx_ref().additional_limit.body()).unwrap_or(u64::MAX);
         let gas_limit = evm.ctx_ref().tx().gas_limit();
         let initial_gas = gas
             .initial_regular_gas()
@@ -275,7 +270,7 @@ where
                 InvalidTransaction::CallGasCostMoreThanGasLimit { gas_limit, initial_gas }.into()
             );
         }
-        evm.ctx_mut().additional_limit.set_intrinsic_history(history, bytes);
+        evm.ctx_mut().additional_limit.admit_body_history();
         Ok(gas)
     }
 
@@ -298,9 +293,15 @@ where
     /// is no delegator. Every transaction's gas is split by the execution cap alone, the
     /// system-address transaction's included, which is a deposit and not a system call; and under
     /// the neutral configuration a system call's is not split, as revm's own runner has it.
+    ///
+    /// Every execution builds its gas here, a transaction or a system call, prepared by the crate
+    /// or run straight through revm's public entry points, so the reservoir the last one reported
+    /// is forgotten here: the running one reports its own once it settles
+    /// ([`execution_result`](Handler::execution_result)).
     fn tx_gas(&self, evm: &mut Self::Evm, init_and_floor_gas: &InitialAndFloorGas) -> GasTracker {
+        evm.ctx_mut().additional_limit.forget_reservoir_remaining();
         let mut gas = self.op.tx_gas(evm, init_and_floor_gas);
-        let history = evm.ctx_ref().additional_limit.intrinsic_history_gas();
+        let history = evm.ctx_ref().intrinsic_history_gas();
         if history != 0 {
             let spilled = gas.state_gas_spilled();
             let charged = gas.record_history_cost(history);
@@ -316,10 +317,10 @@ where
     }
 
     /// revm's first frame, on the transaction's pool, carrying as its start charge the history
-    /// charged before execution for the write record it makes; with a read of the block
-    /// beneficiary's account marked for gas detention when the transaction's recipient delegates
-    /// to the beneficiary: revm resolves that delegate through the journal, where the Host does
-    /// not see it.
+    /// charged before execution for the write record it makes, as pre-execution kept it
+    /// (`charge_records_made_outside_a_frame`); with a read of the block beneficiary's account
+    /// marked for gas detention when the transaction's recipient delegates to the beneficiary:
+    /// revm resolves that delegate through the journal, where the Host does not see it.
     ///
     /// The pools are what the transaction has left of its data-size, KV-update and state-growth
     /// limits once its body, the records of the authorities it applied, the accounts they created
@@ -331,6 +332,21 @@ where
         evm: &mut Self::Evm,
         gas: &mut GasTracker,
     ) -> Result<Option<FrameInit>, Self::Error> {
+        // What pre-execution charged, kept rather than priced again: nothing between the charge
+        // and the first frame's input changes the journal it was priced on, so a debug build
+        // prices it again here, before revm's runtime gas phase loads the recipient, and asserts
+        // the two agree. A system call skips pre-execution, and is priced here.
+        let kept = evm.ctx_mut().additional_limit.take_first_frame_charge();
+        let ctx = evm.ctx_ref();
+        let repriced = || ctx.records_history_charge(first_frame_records(ctx));
+        let history = match kept {
+            Some(history) => {
+                debug_assert_eq!(history, repriced(), "the journal moved since pre-execution");
+                history
+            }
+            None => repriced(),
+        };
+        let charge = StartCharge::new(history, PoolAmounts::ZERO);
         gas.set_pools_remaining(evm.ctx_ref().additional_limit.first_frame_pools());
         let Some(mut frame) = self.op.first_frame_input(evm, gas)? else {
             // The runtime gas phase could not pay for the first frame's start: EIP-2780's charge
@@ -344,10 +360,6 @@ where
             evm.ctx_mut().additional_limit.take_back_authorities();
             return Ok(None);
         };
-        let charge = StartCharge::new(
-            evm.ctx_ref().additional_limit.first_frame_charge(),
-            PoolAmounts::ZERO,
-        );
         match &mut frame.frame_input {
             FrameInput::Call(inputs) => inputs.charged_start = charge,
             FrameInput::Create(inputs) => inputs.set_charged_start(charge),
@@ -387,10 +399,11 @@ where
         Ok(())
     }
 
-    /// revm's post-execution, with the reservoir the transaction leaves unspent read first, where
-    /// revm builds the result's gas: before the EIP-7623 floor check, which absorbs the reservoir
-    /// into the floor's cost when the floor binds. The refund before it does not move the
-    /// reservoir.
+    /// revm's post-execution, with the reservoir the transaction leaves unspent reported first
+    /// ([`AdditionalLimit::reservoir_remaining`](crate::AdditionalLimit::reservoir_remaining)),
+    /// where revm builds the result's gas: before the EIP-7623 floor check, which absorbs the
+    /// reservoir into the floor's cost when the floor binds. The refund before it does not move
+    /// the reservoir.
     fn post_execution(
         &self,
         evm: &mut Self::Evm,
@@ -398,7 +411,8 @@ where
         init_and_floor_gas: InitialAndFloorGas,
         eip7702_gas_refund: i64,
     ) -> Result<ResultGas, Self::Error> {
-        self.settled_reservoir.set(Some(exec_result.gas().reservoir()));
+        let reservoir = exec_result.gas().reservoir();
+        evm.ctx_mut().additional_limit.set_reservoir_remaining(reservoir);
         self.op.post_execution(evm, exec_result, init_and_floor_gas, eip7702_gas_refund)
     }
 
@@ -427,22 +441,25 @@ where
         self.op.reward_beneficiary(evm, exec_result)
     }
 
-    /// op-revm's result, and the reservoir it settled with reported
-    /// ([`AdditionalLimit::reservoir_remaining`](crate::AdditionalLimit::reservoir_remaining)).
+    /// op-revm's result, with the reservoir it settled with reported
+    /// ([`AdditionalLimit::reservoir_remaining`](crate::AdditionalLimit::reservoir_remaining))
+    /// unless the execution reported it already.
     ///
-    /// revm's system-call path settles without [`post_execution`](Handler::post_execution): the
-    /// result it hands over here is the settled one, and the capture it finds is none, since the
-    /// report of the execution before consumed it. A deposit that halts is not a result: op-revm
-    /// turns it into a failed deposit, which leaves no reservoir.
+    /// A transaction reports it in [`post_execution`](Handler::post_execution), before the floor
+    /// absorbs it. revm's system-call path settles without that phase, whether the crate prepared
+    /// the system call or it was run straight through the handler: the result it hands over here
+    /// is the settled one, and nothing of this execution reported a reservoir since it built its
+    /// gas ([`tx_gas`](Handler::tx_gas)). A deposit that halts is not a result: op-revm turns it
+    /// into a failed deposit, which leaves no reservoir ([`catch_error`](Handler::catch_error)).
     fn execution_result(
         &mut self,
         evm: &mut Self::Evm,
         result: FrameResult,
         result_gas: revm::context::result::ResultGas,
     ) -> Result<revm::context::result::ExecutionResult<Self::HaltReason>, Self::Error> {
-        let reservoir = self.settled_reservoir.take().unwrap_or_else(|| result.gas().reservoir());
+        let reservoir = result.gas().reservoir();
         let result = self.op.execution_result(evm, result, result_gas)?;
-        evm.ctx_mut().additional_limit.set_reservoir_remaining(reservoir);
+        evm.ctx_mut().additional_limit.set_reservoir_remaining_unless_reported(reservoir);
         Ok(result)
     }
 
@@ -450,8 +467,8 @@ where
     /// halt and discards everything the deposit did. The halt is what the transaction reports;
     /// what the deposit counted stands, the body and the Oracle hints it forwarded before it
     /// halted, as for any transaction that halts. Any other error refuses the transaction, and the
-    /// layer's state is reset by the next one. A reservoir captured for a result that is not
-    /// reported is dropped here, so the next execution on this handler does not report it.
+    /// layer's state is reset by the next one. A reservoir reported for a result that op-revm then
+    /// refused is taken back here: a failed deposit leaves none, nor does an error.
     ///
     /// A failed deposit still bumps its caller's nonce and mints, so one whose caller had no
     /// account creates it: one account of state growth, which the transaction reports and its
@@ -462,7 +479,7 @@ where
         evm: &mut Self::Evm,
         error: Self::Error,
     ) -> Result<revm::context::result::ExecutionResult<Self::HaltReason>, Self::Error> {
-        self.settled_reservoir.take();
+        evm.ctx_mut().additional_limit.set_reservoir_remaining(0);
         let result = self.op.catch_error(evm, error);
         let failed_deposit = matches!(
             result,
@@ -539,7 +556,9 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     /// 4. system contract interception ([`MegaEvm::intercept`]), for any other frame, which answers
     ///    the frame or lets it start;
     /// 5. where the journal stands is marked, and the accounts the start writes on its frame and a
-    ///    creation's creator are read as they stand ([`FrameStart::of`]);
+    ///    creation's creator are read as they stand ([`FrameStart::of`]) — unless the start writes
+    ///    nothing on them, a call that moves no value and runs no precompile
+    ///    ([`start_writes_nothing`]), whose reads would find nothing;
     /// 6. revm builds the frame, or answers it, and the start is held to the limits on the pool its
     ///    frame starts with, where its records and transfer log are drawn
     ///    ([`AdditionalLimit::count_start`](crate::AdditionalLimit)): a frame revm built whose
@@ -598,17 +617,18 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         }
         let keyless = keyless::is_dispatched(&self.inner.ctx, &frame_init);
         let answer = if keyless {
-            keyless::ready(&mut self.inner.ctx, &mut frame_init)?
+            keyless::ready(&mut self.inner.ctx, &mut frame_init)?.map(Answer::new)
         } else {
             self.intercept(&frame_init)
         };
         let (depth, gas_limit) = (frame_init.depth, input_gas_limit(&frame_init.frame_input));
-        if let Some(mut result) = answer {
-            settle_answer(&mut self.inner.ctx, depth, gas_limit, &mut result);
+        if let Some(answer) = answer {
+            let result = settle_system_answer(&mut self.inner.ctx, depth, gas_limit, answer);
             return Ok(ItemOrResult::Result(result));
         }
+        let writes_nothing = start_writes_nothing(&frame_init.frame_input, &self.inner.precompiles);
         let ctx = &mut self.inner.ctx;
-        let start = FrameStart::of(ctx, &frame_init)?;
+        let start = FrameStart::of(ctx, &frame_init, writes_nothing)?;
         let hold = hold_precompile(
             ctx,
             &self.inner.precompiles,
@@ -989,6 +1009,26 @@ fn settle_answer<DB: Database, ExtEnvs: ExternalEnvTypes>(
     }
 }
 
+/// Settles `answer`, a system contract's to the frame at `depth` whose gas limit was `gas_limit`
+/// — an interceptor's, or a `keylessDeploy` call's carrying value — ([`settle_answer`]), then
+/// applies what follows it once it settled as a success: the switch-off of volatile-data access
+/// `disableVolatileDataAccess()` answers its caller with. The answer that carries it succeeds
+/// unless gas detention turned it into the stop, which did not succeed, and the frame that catches
+/// the stop resumes with the switch as it was.
+fn settle_system_answer<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    depth: usize,
+    gas_limit: u64,
+    answer: Answer,
+) -> FrameResult {
+    let Answer { mut result, disables_access_from } = answer;
+    settle_answer(ctx, depth, gas_limit, &mut result);
+    if let Some(from) = disables_access_from.filter(|_| result.instruction_result().is_ok()) {
+        ctx.detention.disable_access(from);
+    }
+    result
+}
+
 /// How gas detention holds the precompile call a frame start makes ([`hold_precompile`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PrecompileHold {
@@ -1141,7 +1181,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     /// An answer is a [`synthetic_frame_result`](crate::synthetic_frame_result), so it settles
     /// like a frame revm ran. What each contract answers is in the `system` module.
     #[inline]
-    fn intercept(&mut self, frame_init: &FrameInit) -> Option<FrameResult> {
+    fn intercept(&mut self, frame_init: &FrameInit) -> Option<Answer> {
         let FrameInput::Call(inputs) = &frame_init.frame_input else { return None };
         if !matches!(inputs.scheme, CallScheme::Call | CallScheme::StaticCall) {
             return None;
@@ -1191,6 +1231,34 @@ fn take_back_a_stopped_answer<DB: Database, ExtEnvs: ExternalEnvTypes>(
     }
 }
 
+/// Whether revm's start of the frame `input` asks for leaves the accounts it starts on as the
+/// transaction held them and journals no transfer log, so that reading them before and after the
+/// start ([`FrameStart::of`], [`FrameStart::count`]) would find no write record, no new account and
+/// no log: a call, of any scheme, that moves no value and whose code address is in none of
+/// `precompiles`, revm's own and a node's. Such a start only loads and touches its target, which
+/// changes no account's nonce, balance or code.
+///
+/// A call moving value changes its two accounts, and a `CALLCODE` moving value stays read too:
+/// its value goes from the calling account to itself, which revm moves and logs nothing for, and
+/// is read rather than reasoned about. A precompile runs inside the start, and a node's own may
+/// write the start's accounts there, which are read with the start. A creation writes the account
+/// it creates. A `DELEGATECALL`'s value is its caller's, which it moves nowhere.
+///
+/// The opcode that starts a call prices its records before this, by its own rule
+/// ([`start_makes_no_records`](crate::limit::start_makes_no_records)): a call that transfers no
+/// value makes no record whatever the journal holds, a precompile's writes being no record the
+/// opcode prices.
+fn start_writes_nothing(input: &FrameInput, precompiles: &PrecompilesMap) -> bool {
+    match input {
+        FrameInput::Call(inputs) => {
+            let moves_value =
+                matches!(inputs.value, CallValue::Transfer(value) if !value.is_zero());
+            !moves_value && precompiles.get(&inputs.bytecode_address).is_none()
+        }
+        FrameInput::Create(_) | FrameInput::Empty => false,
+    }
+}
+
 /// What holding a frame's start to the limits needs of it once revm consumed its input: where the
 /// start began, the accounts it writes as they stood before it, what its caller paid for it and
 /// what a stop answering it carries.
@@ -1201,8 +1269,13 @@ struct FrameStart {
     mark: JournalCheckpoint,
     /// The accounts the start writes on its frame as the transaction held them before revm decided
     /// it, and the logs the journal held: what the start made is read off the journal against them
-    /// once revm decided it ([`count`](Self::count)).
-    before: StartBefore,
+    /// once revm decided it ([`count`](Self::count)). None for a start that writes nothing on them
+    /// ([`start_writes_nothing`]), which makes no record, no state growth and no transfer log.
+    before: Option<StartBefore>,
+    /// For a start that writes nothing on its frame, in a debug build, the reads its `before`
+    /// skipped, which [`count`](Self::count) makes after all and asserts find nothing.
+    #[cfg(debug_assertions)]
+    skipped: Option<StartBefore>,
     /// The history gas the start's caller paid at its opcode for the records on the frame.
     charged: u64,
     /// The gas limit the frame's caller forwarded, before gas detention held a precompile to less.
@@ -1222,12 +1295,14 @@ impl FrameStart {
     /// journal stands, the accounts the start writes on its frame as the transaction holds them
     /// ([`Accounts::start_before`]) — a call's caller and target, a creation's created account —
     /// and a creation's creator. A creation's creator is not among the accounts: its nonce record
-    /// is the creator's, counted from the bump once the creation returned.
+    /// is the creator's, counted from the bump once the creation returned. The accounts are not
+    /// read for a start that `writes_nothing` on them ([`start_writes_nothing`]).
     ///
     /// [`Accounts::start_before`]: crate::limit::Accounts
     fn of<DB: Database, ExtEnvs: ExternalEnvTypes>(
         ctx: &mut MegaContext<DB, ExtEnvs>,
         frame_init: &FrameInit,
+        writes_nothing: bool,
     ) -> Result<Self, ContextError<DB::Error>> {
         let mut creator = None;
         let (account, other, charged, reservoir, shares) = match &frame_init.frame_input {
@@ -1269,8 +1344,15 @@ impl FrameStart {
             ),
         };
         let mark = mark(ctx.journal_mut());
+        debug_assert!(
+            !writes_nothing || matches!(frame_init.frame_input, FrameInput::Call(_)),
+            "a creation writes the account it creates"
+        );
+        let read = || ctx.accounts().start_before(account, other, mark.log_i);
         Ok(Self {
-            before: ctx.accounts().start_before(account, other, mark.log_i),
+            before: (!writes_nothing).then(read),
+            #[cfg(debug_assertions)]
+            skipped: writes_nothing.then(read),
             mark,
             charged,
             gas_limit: input_gas_limit(&frame_init.frame_input),
@@ -1293,7 +1375,20 @@ impl FrameStart {
         ctx: &mut MegaContext<DB, ExtEnvs>,
         gas: &mut GasTracker,
     ) -> LimitCheck {
-        let (records, counted) = ctx.accounts().start_made(&self.before);
+        let (records, counted) = match &self.before {
+            Some(before) => ctx.accounts().start_made(before),
+            None => {
+                #[cfg(debug_assertions)]
+                if let Some(skipped) = &self.skipped {
+                    assert_eq!(
+                        ctx.accounts().start_made(skipped),
+                        (crate::limit::RecordDelta::NONE, crate::limit::Counted::NONE),
+                        "a call that moves no value and runs no precompile writes nothing"
+                    );
+                }
+                Default::default()
+            }
+        };
         let credit = if ctx.prices_history() {
             let price = |records| write_record_history_gas(records).unwrap_or(0);
             self.charged.saturating_sub(price(records.added)).saturating_add(price(records.taken))
@@ -1560,37 +1655,43 @@ fn applied_authorities<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// its first frame, so the account it creates is one it had not changed.
 ///
 /// The authorities' records are the transaction's own and outlive a first frame that fails; the
-/// first frame's record does not, so what it cost is kept for that frame to carry as its start
-/// charge, which its failure gives back. A first frame revm refuses to start on its sender's
-/// account makes no record, and gets the charge back as any frame that kept nothing does: among
-/// the transactions that pay history, that is a creation from an account whose nonce cannot be
-/// bumped, which only a caller that turned the nonce check off can run, and which revm answers
-/// with a success and no address.
-/// `false` when the transaction cannot pay, which is an out-of-gas before it runs.
+/// first frame's record does not, so that frame carries what it cost as its start charge, which
+/// its failure gives back. A first frame revm refuses to start on its sender's account makes no
+/// record, and gets the charge back as any frame that kept nothing does: among the transactions
+/// that pay history, that is a creation from an account whose nonce cannot be bumped, which only a
+/// caller that turned the nonce check off can run, and which revm answers with a success and no
+/// address.
+///
+/// Answers the history gas the first frame's record was charged, which pre-execution keeps for
+/// the frame's input to carry, and nothing for a transaction that pays no history; `None` when the
+/// transaction cannot pay, which is an out-of-gas before it runs.
 fn charge_records_made_outside_a_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
-    ctx: &mut MegaContext<DB, ExtEnvs>,
+    ctx: &MegaContext<DB, ExtEnvs>,
     gas: &mut GasTracker,
     applied_authorities: u64,
-) -> bool {
+) -> Option<u64> {
     if !ctx.prices_history() {
-        return true;
+        return Some(0);
     }
+    charge_write_records_history(gas, first_frame_records(ctx), applied_authorities)
+        .map(|(first_frame, _)| first_frame)
+}
+
+/// The write records the transaction's own frame makes, as the journal's state stands before the
+/// first frame: the recipient's, when the value changes an account the transaction has not
+/// changed, or the account a creation creates ([`charge_records_made_outside_a_frame`]).
+fn first_frame_records<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &MegaContext<DB, ExtEnvs>,
+) -> u64 {
     let tx = ctx.tx();
-    let first_frame = match tx.kind() {
+    match tx.kind() {
         TxKind::Create => 1,
         TxKind::Call(to) => {
             let predicted = ctx.accounts().transfer_records(tx.caller(), to, tx.value()).transfer;
             debug_assert_eq!(predicted.taken, 0, "the sender's value returns no account");
             predicted.added
         }
-    };
-    let Some((first_frame, _)) =
-        charge_write_records_history(gas, first_frame, applied_authorities)
-    else {
-        return false;
-    };
-    ctx.additional_limit.set_first_frame_charge(first_frame);
-    true
+    }
 }
 
 #[cfg(test)]
@@ -1600,7 +1701,10 @@ mod tests {
     use alloy_primitives::{address, U256};
     use revm::{
         context_interface::journaled_state::account::JournaledAccountTr,
-        interpreter::{gas::WithheldCrossing, CallInput, CallInputs, CallValue, SharedMemory},
+        interpreter::{
+            gas::WithheldCrossing, CallInput, CallInputs, CallValue, CreateInputs, CreateScheme,
+            SharedMemory,
+        },
     };
     use std::boxed::Box;
 
@@ -1637,7 +1741,7 @@ mod tests {
     /// [`detained`] over `db`.
     fn detained_on(db: MemoryDatabase, cap: u64) -> MegaContext<MemoryDatabase> {
         let mut ctx = MegaContext::new(db, MegaSpecId::SATIN);
-        ctx.detention.reset(true, cap, cap);
+        ctx.detention.reset(cap, cap);
         ctx.detention.mark_before_execution(VolatileDataAccess::TIMESTAMP);
         ctx
     }
@@ -1858,6 +1962,49 @@ mod tests {
         }
     }
 
+    /// A switch-off a system contract's answer carries applies once the answer settles without a
+    /// crossing: an answer gas detention turns into the stop leaves access as it was, one that
+    /// settles within the limit switches it off, and so does one of a transaction that is not
+    /// detained. The switch goes with the answer that carried it, whatever that answer settled as.
+    #[test]
+    fn test_an_answer_switches_access_off_only_when_it_does_not_cross() {
+        use crate::{constants::BLOCK_ENV_ACCESS_COMPUTE_GAS, system::Answer};
+        const FORWARD: u64 = 90_000_000;
+        let answer = |spent: u64, disables_access_from| {
+            let input = static_call(TARGET, &[], FORWARD).frame_input;
+            let mut result =
+                synthetic_frame_result(&input, InstructionResult::Return, Bytes::new());
+            assert!(result.gas_mut().record_regular_cost(spent));
+            Answer { result, disables_access_from }
+        };
+        let mut ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
+        ctx.detention.reset(BLOCK_ENV_ACCESS_COMPUTE_GAS, BLOCK_ENV_ACCESS_COMPUTE_GAS);
+        let mut caller = Gas::new_with_regular_gas_and_reservoir(100_000_000, 0);
+        ctx.detention.on_frame_run(&mut caller, 0);
+        ctx.detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut caller, 0);
+        assert!(caller.record_withheld_first_cost(FORWARD));
+        ctx.detention.on_frame_suspend(&caller, 0, 0);
+
+        let beyond = answer(BLOCK_ENV_ACCESS_COMPUTE_GAS + 1, Some(0));
+        let result = settle_system_answer(&mut ctx, 1, FORWARD, beyond);
+        assert_eq!(result.instruction_result(), InstructionResult::Revert, "the answer crossed");
+        assert!(!ctx.detention.is_access_disabled(0), "and access stays on");
+
+        settle_system_answer(&mut ctx, 1, FORWARD, answer(0, None));
+        assert!(
+            !ctx.detention.is_access_disabled(0),
+            "the crossing answer took its switch with it"
+        );
+
+        settle_system_answer(&mut ctx, 1, FORWARD, answer(0, Some(0)));
+        assert!(ctx.detention.is_access_disabled(0), "an answer within the limit switches it off");
+
+        let mut free = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
+        assert!(!free.detention.detains());
+        settle_system_answer(&mut free, 1, FORWARD, answer(0, Some(0)));
+        assert!(free.detention.is_access_disabled(0), "a transaction that is not detained");
+    }
+
     /// A frame answered with a success that the engine then rewrote into the stop, at any depth,
     /// has what its start wrote taken back to where its start began. An answer revm made a failure
     /// took its writes back itself, and one the engine did not rewrite keeps them.
@@ -1880,14 +2027,16 @@ mod tests {
         }
     }
 
-    /// One handler runs one transaction, and what a phase learns about it is kept on the handler:
-    /// the reservoir the transaction settled with is read where revm builds its result's gas and
-    /// reported once the result is built. A handler reused for a system call, whose path builds
-    /// no result gas and skips that read, reports the system call's own reservoir: the capture is
-    /// consumed by the report, and by the error path, which gives no report. A transaction below
-    /// the execution cap leaves a capture of nothing, one above it a capture of its own margin, and
-    /// a deposit that halts a capture its failed-deposit result never reports; after each, a
-    /// system call on revm's default gas limit reports the margin above the system-call budget.
+    /// The reservoir a transaction settled with is reported where revm builds its result's gas, and
+    /// a system call's, whose path builds no result gas there, once its result is built: a handler
+    /// reused for a system call reports the system call's own reservoir, not the transaction's
+    /// before it. A transaction below the execution cap reports nothing, one above it its own
+    /// margin less the body's history, which the reservoir pays first, and a deposit that halts
+    /// nothing, its failed-deposit result leaving no reservoir. After each, a system call on
+    /// revm's default gas limit reports the margin above the system-call budget; and one run
+    /// through the public handler entry points without the crate's preparation, plain or
+    /// inspected, reports its own: nothing, even on a gas limit above the execution cap, since revm
+    /// caps no system call's gas into a reservoir and only the crate's preparation splits it.
     #[test]
     fn test_a_reused_handler_reports_each_executions_own_reservoir() {
         use crate::{
@@ -1899,7 +2048,7 @@ mod tests {
         use revm::{
             context::{ContextSetters, TxEnv},
             handler::{system_call::SYSTEM_CALL_GAS_LIMIT, SystemCallTx},
-            inspector::NoOpInspector,
+            inspector::{InspectorHandler, NoOpInspector},
         };
         const HALTS: Address = address!("00000000000000000000000000000000000e0003");
         const DEFAULT_RESERVOIR: u64 = SYSTEM_CALL_GAS_LIMIT - SYSTEM_CALL_REGULAR_GAS_LIMIT;
@@ -1916,7 +2065,9 @@ mod tests {
             crate::MegaEvmError<core::convert::Infallible>,
             EthFrame<EthInterpreter>,
         >::new();
-        let room = 100_000 + history_gas(crate::TX_BODY_SIZE).unwrap();
+        const MARGIN: u64 = 10_000_000;
+        let body_history = history_gas(crate::TX_BODY_SIZE).unwrap();
+        let room = 100_000 + body_history;
         let tx = |to: Address, gas_limit: u64, nonce: u64| {
             OpTx(op_transaction(TxEnv {
                 caller: CALLER,
@@ -1926,31 +2077,107 @@ mod tests {
                 ..Default::default()
             }))
         };
-        let mut deposit = tx(HALTS, room, 0);
-        deposit.0.deposit.source_hash = alloy_primitives::B256::repeat_byte(0x11);
-        deposit.0.base.gas_price = 0;
 
-        for (case, tx, succeeds) in [
-            ("below the cap", tx(TARGET, room, 0), true),
-            ("above the cap", tx(TARGET, TX_GAS_LIMIT_CAP + 10_000_000, 1), true),
-            ("a halting deposit", deposit, false),
+        let mut nonce = 0;
+        for (case, to, gas_limit, deposits, settled) in [
+            ("below the cap", TARGET, room, false, 0),
+            ("above the cap", TARGET, TX_GAS_LIMIT_CAP + MARGIN, false, MARGIN - body_history),
+            ("a halting deposit", HALTS, room, true, 0),
         ] {
-            evm.inner.ctx.set_tx(tx);
-            let result = handler.run(&mut evm).expect(case);
-            assert_eq!(result.is_success(), succeeds, "{case}: {result:?}");
-            let settled = evm.ctx().additional_limit().reservoir_remaining();
-            assert_ne!(settled, DEFAULT_RESERVOIR, "{case}: the capture would show");
+            for inspected in [false, true] {
+                let mut tx = tx(to, gas_limit, nonce);
+                if deposits {
+                    tx.0.deposit.source_hash = alloy_primitives::B256::repeat_byte(0x11);
+                    tx.0.base.gas_price = 0;
+                } else {
+                    nonce += 1;
+                }
+                evm.inner.ctx.set_tx(tx);
+                let result = handler.run(&mut evm).expect(case);
+                assert_eq!(result.is_success(), !deposits, "{case}: {result:?}");
+                assert_eq!(
+                    evm.ctx().additional_limit().reservoir_remaining(),
+                    settled,
+                    "{case}: the transaction's own reservoir"
+                );
 
-            let call = MegaTransaction::new_system_tx_with_caller(CALLER, TARGET, Bytes::new());
-            evm.inner.ctx.set_tx(call);
-            evm.inner.ctx.on_new_system_call();
-            let result = handler.run_system_call(&mut evm).expect("the system call runs");
-            assert!(result.is_success(), "{case}: {result:?}");
+                // revm's public entry points, without the crate's preparation.
+                let call = MegaTransaction::new_system_tx_with_caller(CALLER, TARGET, Bytes::new());
+                let mut unprepared = call.clone();
+                unprepared.0.base.gas_limit = TX_GAS_LIMIT_CAP + MARGIN;
+                evm.inner.ctx.set_tx(unprepared);
+                let result = if inspected {
+                    handler.inspect_run_system_call(&mut evm)
+                } else {
+                    handler.run_system_call(&mut evm)
+                };
+                let result = result.expect("the unprepared system call runs");
+                assert!(result.is_success(), "{case}: {result:?}");
+                assert_eq!(
+                    evm.ctx().additional_limit().reservoir_remaining(),
+                    0,
+                    "{case}, inspected {inspected}: the unprepared system call's own reservoir, \
+                     not the transaction's"
+                );
+
+                evm.inner.ctx.set_tx(call);
+                evm.inner.ctx.on_new_system_call();
+                let result = handler.run_system_call(&mut evm).expect("the system call runs");
+                assert!(result.is_success(), "{case}: {result:?}");
+                assert_eq!(
+                    evm.ctx().additional_limit().reservoir_remaining(),
+                    DEFAULT_RESERVOIR,
+                    "{case}: the system call's own reservoir, not the transaction's"
+                );
+            }
+        }
+    }
+
+    /// The frame start skips its reads exactly for a call that moves no value and runs no
+    /// precompile: every call scheme, with no value and with value, to an account and to a
+    /// precompile of the set, and a creation, with and without an endowment.
+    #[test]
+    fn test_a_start_writes_nothing_only_when_it_moves_no_value_and_runs_no_precompile() {
+        let precompiles = crate::satin_precompiles_map();
+        let ecrecover = address!("0000000000000000000000000000000000000001");
+        assert!(precompiles.get(&ecrecover).is_some());
+        let call = |scheme, value, code| {
+            let FrameInput::Call(mut inputs) = value_call() else { unreachable!() };
+            inputs.scheme = scheme;
+            inputs.value = value;
+            inputs.bytecode_address = code;
+            FrameInput::Call(inputs)
+        };
+        let (none, one) = (U256::ZERO, U256::from(1));
+        let rows = [
+            (CallScheme::Call, CallValue::Transfer(none), TARGET, true),
+            (CallScheme::Call, CallValue::Transfer(one), TARGET, false),
+            (CallScheme::Call, CallValue::Transfer(none), ecrecover, false),
+            (CallScheme::Call, CallValue::Transfer(one), ecrecover, false),
+            (CallScheme::CallCode, CallValue::Transfer(none), TARGET, true),
+            (CallScheme::CallCode, CallValue::Transfer(one), TARGET, false),
+            (CallScheme::CallCode, CallValue::Transfer(none), ecrecover, false),
+            (CallScheme::DelegateCall, CallValue::Apparent(none), TARGET, true),
+            (CallScheme::DelegateCall, CallValue::Apparent(one), TARGET, true),
+            (CallScheme::DelegateCall, CallValue::Apparent(one), ecrecover, false),
+            (CallScheme::StaticCall, CallValue::Transfer(none), TARGET, true),
+            (CallScheme::StaticCall, CallValue::Transfer(none), ecrecover, false),
+        ];
+        for (scheme, value, code, writes_nothing) in rows {
+            let input = call(scheme, value.clone(), code);
             assert_eq!(
-                evm.ctx().additional_limit().reservoir_remaining(),
-                DEFAULT_RESERVOIR,
-                "{case}: the system call's own reservoir, not the capture"
+                start_writes_nothing(&input, &precompiles),
+                writes_nothing,
+                "{scheme:?} of {value:?} running {code}"
             );
         }
+        for value in [none, one] {
+            for scheme in [CreateScheme::Create, CreateScheme::Create2 { salt: none }] {
+                let inputs = CreateInputs::new(CALLER, scheme, value, Bytes::new(), 100_000, 0);
+                let input = FrameInput::Create(Box::new(inputs));
+                assert!(!start_writes_nothing(&input, &precompiles), "{scheme:?} of {value}");
+            }
+        }
+        assert!(!start_writes_nothing(&FrameInput::Empty, &precompiles));
     }
 }
