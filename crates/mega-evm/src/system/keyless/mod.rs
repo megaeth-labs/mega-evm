@@ -6,13 +6,14 @@
 //!
 //! A `keylessDeploy(bytes,uint256)` call a transaction makes is dispatched before any interceptor
 //! sees it ([`is_dispatched`]), and its frame is built as any call's is, but runs no code: its
-//! actions are made by hand ([`run`]). On its first run it pays the fixed overhead and what the
-//! `CREATE` opcode charges its frame, then starts the creation as its child — as the signer, at
-//! the signer's Nick's-Method address, with `gasLimitOverride` capped to what the call has left.
-//! From there the creation is an ordinary `CREATE` frame: priced, limited and journaled as one,
-//! and returned into the call as one returns into the frame that started it ([`settle`]). On its
-//! resume the call answers in the `IKeylessDeploy` ABI. An inspector sees both frames: the call,
-//! and the creation as its child. There is no second EVM and no state to merge.
+//! actions are made by hand and set on its interpreter, which returns each when the frame runs.
+//! Its first ([`start`]) pays the fixed overhead and what the `CREATE` opcode charges its frame,
+//! then starts the creation as its child — as the signer, at the signer's Nick's-Method address,
+//! with `gasLimitOverride` capped to what the call has left. From there the creation is an
+//! ordinary `CREATE` frame: priced, limited and journaled as one, and returned into the call as
+//! one returns into the frame that started it ([`settle`]). The call then answers in the
+//! `IKeylessDeploy` ABI ([`answer`]). An inspector sees both frames: the call, and the creation as
+//! its child. There is no second EVM and no state to merge.
 //!
 //! What the native frame means for a deployment:
 //!
@@ -22,7 +23,10 @@
 //!   transaction's first frame, as for any transaction to the contract, so a witness holds them
 //!   either way; the frame touches the account, as a call touches its target, and a call that
 //!   reverts takes the touch back. An inspector sees one call frame, started and ended as any
-//!   call's, with no interpreter initialized and no step in it.
+//!   call's, in which no interpreter is initialized and no step runs: revm's inspected run returns
+//!   the action set on the frame before any `step`, and hands a frame built with one to no
+//!   `initialize_interp`; a call a rule refuses ends before it runs, and is seen to start and end
+//!   and nothing else.
 //! - A call carrying value is refused `NoEtherTransfer()`, having paid the overhead, before revm
 //!   builds its frame: no value moves, and nothing its start would write is counted.
 //! - The dispatch is by address and selector, whatever the address holds: where the state holds no
@@ -73,8 +77,8 @@
 //!   crosses — reverts with the stop, taking back the signer's nonce with everything else.
 //!
 //! A creation an inspector revives — a tool's `create_end` that turns a failed creation into a
-//! success at an address of its own, as Foundry's `expectRevert` does — settles as a frame that
-//! kept nothing, and the call answers `AddressMismatch()` when that address is not the deploy
+//! success at an address of its own, as Foundry's `expectRevert` does — is taken as given, as
+//! revm takes it, and the call answers `AddressMismatch()` when that address is not the deploy
 //! address.
 //!
 //! # The error ABI
@@ -108,8 +112,8 @@ mod tx;
 pub use error::*;
 pub use tx::*;
 
-pub(crate) use dispatch::{is_dispatched, ready, run, runs, KeylessFrame};
-pub(crate) use settle::{refuses_empty_deposit, returning, settle};
+pub(crate) use dispatch::{is_dispatched, ready, start, Started};
+pub(crate) use settle::{answer, refuses_empty_deposit, returning, settle};
 
 use alloy_primitives::{address, Address};
 

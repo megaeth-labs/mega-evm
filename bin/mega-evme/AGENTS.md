@@ -14,6 +14,7 @@ Two engines: the in-tree sources run Satin; a spec from `Equivalence` to `Rex6` 
 - `src/tx/`: full transaction execution command with raw-tx override support.
 - `src/replay/`: RPC-backed historical transaction replay through block executor (Satin; a legacy spec is the 1.7.1 CLI's).
 - `src/block/`: `replay --block`, whole blocks on either engine compared with the chain: inputs and the block cache (`inputs.rs`), the parent state in plain data (`state.rs`), one executor per engine exchanging only plain data (`satin.rs`, `legacy.rs`), the plain data both hand back (`exec.rs`), records and the comparison (`record.rs`), the driver (`cmd.rs`).
+- `tests/fixtures/blocks.tar.xz`: the three recorded Rex6 blocks and their code store in the block cache layout, one deterministic archive extracted once per test binary (`tests/common/mod.rs`); `scripts/pack_blocks_fixture.py <cache-dir>` repacks it, `--check` requires a repack of the committed archive to be byte-identical.
 - `tests/satin-differences.md`: the pinned differences between the engines, rendered by `tests/differences.rs` (`UPDATE_EVME_DIFFERENCES=1` rewrites it).
 
 ## KEY PATTERNS

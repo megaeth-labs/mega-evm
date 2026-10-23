@@ -20,11 +20,13 @@ use revm::{
 };
 
 use crate::{
+    hold_creator,
+    limit::CreatorBefore,
     system::keyless::{encode_error_result, IKeylessDeploy, KeylessDeployError},
-    ExternalEnvTypes, MegaContext, MegaHaltReason,
+    ExternalEnvTypes, LimitCheck, MegaContext, MegaHaltReason,
 };
 
-use super::dispatch::{KeylessFrame, Started};
+use super::dispatch::Started;
 
 /// What a `keylessDeploy` call answers from, once its creation returned into it.
 #[derive(Debug)]
@@ -55,9 +57,7 @@ pub(crate) fn returning<DB: Database, ExtEnvs: ExternalEnvTypes>(
     stack: &mut FrameStack<EthFrame<EthInterpreter>>,
     result: &FrameResult,
 ) -> Option<Creation> {
-    if !matches!(ctx.keyless_frame, Some(KeylessFrame::Deploying(_))) {
-        return None;
-    }
+    ctx.keyless_creation.as_ref()?;
     if !returns_into_the_call(stack) {
         return None;
     }
@@ -99,12 +99,12 @@ fn returns_into_the_call(stack: &mut FrameStack<EthFrame<EthInterpreter>>) -> bo
 /// constructor that destroyed its own account (`destroyed`) is left as it is: the account does not
 /// keep what it returned, and the answer reads that off the journal ([`holds_code`]).
 pub(crate) fn refuses_empty_deposit(
-    frame: &mut Option<KeylessFrame>,
+    creation: &mut Option<Started>,
     deposit: &CodeDeposit<'_>,
     destroyed: bool,
 ) -> bool {
-    match frame {
-        Some(KeylessFrame::Deploying(started))
+    match creation {
+        Some(started)
             if deposit.code.is_empty() &&
                 deposit.address == started.deploy_address &&
                 !destroyed =>
@@ -117,7 +117,7 @@ pub(crate) fn refuses_empty_deposit(
 }
 
 /// Settles `creation`, which revm has just merged into the `keylessDeploy` call whose gas is
-/// `gas`, and keeps what the call answers from on its resume ([`answer`]).
+/// `gas`, and returns what the call answers from ([`answer`]).
 ///
 /// The merge is revm's own, as for a `CREATE`'s frame: the unspent forward, the reservoir, the
 /// creation's state and history gas when it succeeded, and the created account's charge when it
@@ -128,25 +128,30 @@ pub(crate) fn refuses_empty_deposit(
 /// the creation's start never created it. And a deployment from nonce 0 keeps the creation's nonce
 /// bump, while from nonce 1 the bump is taken back, whether the deployment succeeded or failed,
 /// only when it is the last nonce change the deployment made ([`take_back_bump`]), leaving the
-/// nonce at 1, as the legacy engine did; its write record and that record's history go with it,
-/// unless the creation succeeded and moved value out of the signer. The call is permissionless
-/// and the signed transaction public, so a nonce every failure spent would let anybody make a
-/// signer's address undeployable with two failing calls; and a success that spent it would answer
-/// a resubmission with `SignerNonceTooHigh` rather than `ContractAlreadyExists`. When the signer's
-/// own code spent a nonce in the constructor that survived it — on a default configuration, a
-/// delegated signer's `CREATE` or `CREATE2`, successful or not — nothing is taken back: a later
-/// bump may stand for an account, so the nonce is never moved back under one. That signer ends
-/// above 1, and a resubmission is refused `SignerNonceTooHigh`.
+/// nonce at 1, as the legacy engine did; that record's history goes with it, unless the creation
+/// succeeded and moved value out of the signer. The call is permissionless and the signed
+/// transaction public, so a nonce every failure spent would let anybody make a signer's address
+/// undeployable with two failing calls; and a success that spent it would answer a resubmission
+/// with `SignerNonceTooHigh` rather than `ContractAlreadyExists`. When the signer's own code spent
+/// a nonce in the constructor that survived it — on a default configuration, a delegated signer's
+/// `CREATE` or `CREATE2`, successful or not — nothing is taken back: a later bump may stand for an
+/// account, so the nonce is never moved back under one. That signer ends above 1, and a
+/// resubmission is refused `SignerNonceTooHigh`.
 ///
-/// It runs before the call resumes, because the record it takes back may be what put the call
-/// over a limit: the call is held to its limits again without it, and the stop it returns on
-/// its resume, if any, is the one that stands then.
+/// Then the signer's nonce record is counted on the call, as a `CREATE`'s creator's is on the
+/// creator once its creation returned ([`hold_creator`]): read off the signer's account as the
+/// settlement left it — `signer` is the signer as it stood before revm decided the creation — when
+/// revm bumped the nonce, held to the call's budget and then to the transaction's limit. A nonce
+/// set back leaves no record to count, unless the account keeps the value the creation moved. A
+/// crossing is the stop the call returns on its resume, before its answer; it runs before the
+/// call resumes for that reason.
 pub(crate) fn settle<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     gas: &mut Gas,
     creation: Creation,
-) -> Result<(), ContextError<DB::Error>> {
-    let Some(KeylessFrame::Deploying(started)) = ctx.keyless_frame.take() else {
+    signer: Option<CreatorBefore>,
+) -> Result<(Returned, Option<LimitCheck>), ContextError<DB::Error>> {
+    let Some(started) = ctx.keyless_creation.take() else {
         unreachable!("a creation returns into a keylessDeploy call that started it")
     };
     // The creation's start is what creates an empty signer's account. revm bumps the nonce of
@@ -157,6 +162,7 @@ pub(crate) fn settle<DB: Database, ExtEnvs: ExternalEnvTypes>(
     if nonce == started.signer_nonce {
         gas.refill_reservoir(started.signer_account_charge);
     }
+    let bumped = signer.filter(|signer| ctx.accounts().bumped(signer));
     // A deployment from nonce 1 keeps no bump of its own: a failure leaves the address
     // deployable, a success leaves it occupied. The creation's bump is the one above the nonce
     // the call started from, and it is taken back only when it is the last one: a later bump the
@@ -164,16 +170,17 @@ pub(crate) fn settle<DB: Database, ExtEnvs: ExternalEnvTypes>(
     if started.signer_nonce > 0 && nonce == started.signer_nonce + 1 {
         take_back_bump(ctx, gas, &started)?;
     }
-    ctx.keyless_frame = Some(KeylessFrame::Returned(Returned { started, creation }));
-    Ok(())
+    let stop = bumped.and_then(|signer| hold_creator(ctx, gas.tracker_mut(), &signer));
+    Ok((Returned { started, creation }, stop))
 }
 
 /// The action of a `keylessDeploy` call resuming on `gas` once its creation `returned` into it, a
-/// stop aside: `keylessDeploy`'s return — the deployed address when the creation left code at it,
-/// or the zero address and the error the creation failed with, `ExecutionReverted`,
-/// `ExecutionHalted`, or `EmptyCodeDeployed` for a creation that left no code, having deployed none
-/// or destroyed itself. The call succeeds, and keeps what the creation's start wrote: a signer at
-/// nonce 0 whose deployment failed has spent its nonce all the same.
+/// stop aside, set on the call's interpreter for its run to return: `keylessDeploy`'s return — the
+/// deployed address when the creation left code at it, or the zero address and the error the
+/// creation failed with, `ExecutionReverted`, `ExecutionHalted`, or `EmptyCodeDeployed` for a
+/// creation that left no code, having deployed none or destroyed itself. The call succeeds, and
+/// keeps what the creation's start wrote: a signer at nonce 0 whose deployment failed has spent its
+/// nonce all the same.
 ///
 /// `gasUsed` is what the creation spent: its regular gas and the state and history gas it kept,
 /// from whichever pool paid it. It is the same whether the transaction has a state-gas reservoir
@@ -224,20 +231,25 @@ fn answer_of<DB: Database, ExtEnvs: ExternalEnvTypes>(
 }
 
 /// Whether the deployment left code at `address`. The code the journal holds, not the code the
-/// constructor returned: a constructor that destroyed its own account (EIP-6780) returned code
-/// the account does not keep.
+/// constructor returned: a constructor that destroyed its own account (EIP-6780) in this
+/// transaction returned code the account does not keep. A destruction an earlier transaction on
+/// the same journal made, whose mark revm keeps on the account, is not this one.
 fn holds_code<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &MegaContext<DB, ExtEnvs>,
     address: Address,
 ) -> bool {
-    ctx.journal_ref().state.get(&address).is_some_and(|account| {
-        account.info.code_hash != KECCAK_EMPTY && !account.is_selfdestructed()
-    })
+    let code = ctx
+        .journal_ref()
+        .state
+        .get(&address)
+        .is_some_and(|account| account.info.code_hash != KECCAK_EMPTY);
+    code && !ctx.accounts().is_destroyed(address)
 }
 
-/// Takes back the creation's nonce bump of a signer whose nonce was already 1, with its write
-/// record and that record's history, so what stands is what would stand had the creation's start
-/// not bumped the nonce: the signer stays at 1, however many deployments it makes.
+/// Takes back the creation's nonce bump of a signer whose nonce was already 1, with that record's
+/// history, so what stands is what would stand had the creation's start not bumped the nonce: the
+/// signer stays at 1, however many deployments it makes. The record itself is counted afterwards,
+/// off the account as this leaves it, so a nonce set back leaves none to take back.
 ///
 /// The record follows the signer's account: it goes when the nonce set back leaves the account
 /// as the transaction loaded it, and stays when the account keeps another write it stands for —
@@ -248,12 +260,8 @@ fn take_back_bump<DB: Database, ExtEnvs: ExternalEnvTypes>(
     gas: &mut Gas,
     started: &Started,
 ) -> Result<(), ContextError<DB::Error>> {
-    let changed = ctx.accounts().is_changed(started.signer);
     ctx.journal_mut().load_account_mut(started.signer)?.data.set_nonce(started.signer_nonce);
-    if changed && !ctx.accounts().is_changed(started.signer) {
-        // A stop the record would leave the call, by putting it over a limit, goes with it: the
-        // call is held to its limits without the record once it is settled.
-        ctx.additional_limit.take_back_record(gas.tracker_mut());
+    if !ctx.accounts().is_changed(started.signer) {
         gas.refill_history(started.signer_record_charge);
     }
     Ok(())

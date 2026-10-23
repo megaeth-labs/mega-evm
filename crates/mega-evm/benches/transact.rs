@@ -5,8 +5,8 @@
 //!
 //! - `empty_transaction`, `ether_transfer`: the per-transaction cost.
 //! - `deep_calls`: a contract calling itself 64 deep, each frame writing a slot and logging, so
-//!   every frame pays the frame lifecycle's lanes and every `SSTORE` and `LOG` its completed-write
-//!   hook.
+//!   every frame pays the frame lifecycle's start and return — its start held to the limits, its
+//!   byte pool forwarded and settled — and every `SSTORE` and `LOG` its completed-write hook.
 //! - `storage_writes`: 200 first writes to fresh slots, then 200 writes back, in one frame: the
 //!   `SSTORE`'s completed-write hook, its commit and its refund.
 //! - `logs`: 200 two-topic logs in one frame: the `LOG`'s completed-write hook, and the one
@@ -555,19 +555,23 @@ fn bench_transact(c: &mut Criterion) {
     assert!(at_limit.result.is_success(), "data_size_limit: {:?}", at_limit.result);
     assert_eq!(
         at_limit.usage,
-        LimitUsage { data_size: LIMITED_KEPT, write_records: REPEAT },
+        LimitUsage { data_size: LIMITED_KEPT, write_records: REPEAT, state_growth: REPEAT },
         "data_size_limit: the arm must keep every byte and record it is sized for",
     );
     let stopped = MegaEvm::new(limited(LIMITED_KEPT - 1))
         .execute_transaction(OpTx(limited_tx.clone()))
         .unwrap();
+    // The transaction's own frame keeps everything but the body, so the last log crosses that
+    // frame's budget, what the limit leaves after the body, together with the limit, and the stop
+    // names the budget.
+    let body = TX_BODY_SIZE + limited_tx.base.data.len() as u64;
     assert_eq!(
         stopped.limit_exceeded,
         Some(LimitCheck::ExceedsLimit {
             kind: LimitKind::DataSize,
-            limit: LIMITED_KEPT - 1,
-            used: LIMITED_KEPT,
-            frame_local: false,
+            limit: LIMITED_KEPT - 1 - body,
+            used: LIMITED_KEPT - body,
+            frame_local: true,
         }),
         "data_size_limit/stopped: the last log must be the byte that crosses",
     );

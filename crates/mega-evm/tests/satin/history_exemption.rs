@@ -218,8 +218,10 @@ fn test_a_system_transaction_pays_no_history_gas() {
         LimitUsage {
             data_size: transaction_body_bytes(&system_tx()) + WRITE_RECORD_SIZE,
             write_records: 1,
+            state_growth: 2,
         },
-        "the body and the slot's record are counted, though neither pays history",
+        "the body and the slot's record are counted, though neither pays history, and the new slot \
+         and the system address's new account are its state growth",
     );
     // The state is charged as usual: the new slot, and the system address's own account, which
     // the database leaves empty, so the transaction creates it, as it does a deposit's caller.

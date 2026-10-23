@@ -1,6 +1,6 @@
-//! A Mega System Transaction against the block's packing budgets: like a deposit, no data-size
-//! budget and no building policy refuses it, and it counts towards both; the header's gas limit and
-//! the data-availability footprint still hold it.
+//! A Mega System Transaction against the block's packing budgets: like a deposit, no data-size,
+//! KV-update or state-growth budget and no building policy refuses it, and it counts towards them;
+//! the header's gas limit and the data-availability footprint still hold it.
 
 use alloy_consensus::transaction::Recovered;
 use alloy_eips::Encodable2718;
@@ -41,33 +41,40 @@ fn tightest_policy() -> BlockLimits {
         .with_tx_da_size_limit(0)
         .with_block_da_size_limit(0)
         .with_block_txs_data_limit(0)
+        .with_block_kv_update_limit(0)
+        .with_block_state_growth_limit(0)
 }
 
-/// A block whose data-size budget is spent before it starts refuses an ordinary transaction and
-/// admits a Mega System Transaction, which counts towards the budget all the same.
+/// A block whose data-size, KV-update or state-growth budget is spent before it starts refuses an
+/// ordinary transaction and admits a Mega System Transaction, which counts towards each budget all
+/// the same: its body's bytes, and the system address's account, which it creates.
 #[test]
-fn test_a_mega_system_transaction_is_admitted_at_a_full_data_size_budget() {
-    let mut state = common::state();
-    let mut executor = executor(
-        &mut state,
-        common::block_ctx(BlockLimits::no_limits().with_block_txs_data_limit(0)),
-    );
-    executor.apply_pre_execution_changes().expect("the block starts");
+fn test_a_mega_system_transaction_is_admitted_at_a_full_budget() {
+    for (name, policy) in [
+        ("data size", BlockLimits::no_limits().with_block_txs_data_limit(0)),
+        ("KV updates", BlockLimits::no_limits().with_block_kv_update_limit(0)),
+        ("state growth", BlockLimits::no_limits().with_block_state_growth_limit(0)),
+    ] {
+        let mut state = common::state();
+        let mut executor = executor(&mut state, common::block_ctx(policy));
+        executor.apply_pre_execution_changes().expect("the block starts");
 
-    executor
-        .execute_transaction(&user_tx(0, empty_call_gas()))
-        .expect_err("an ordinary transaction finds the budget spent");
+        executor
+            .execute_transaction(&user_tx(0, empty_call_gas()))
+            .expect_err("an ordinary transaction finds the budget spent");
 
-    let outcome =
-        executor.run_transaction(&system_tx()).expect("the system transaction is admitted");
-    assert!(outcome.inner.result.is_success(), "{:?}", outcome.inner.result);
-    let data_size = outcome.inner.usage.data_size;
-    assert!(data_size > 0);
-    executor.commit_transaction_outcome(outcome).expect("and committed");
+        let outcome =
+            executor.run_transaction(&system_tx()).expect("the system transaction is admitted");
+        assert!(outcome.inner.result.is_success(), "{name}: {:?}", outcome.inner.result);
+        let usage = outcome.inner.usage;
+        assert!(usage.data_size > 0, "{name}");
+        assert_eq!(usage.state_growth, 1, "{name}: the system address's new account");
+        executor.commit_transaction_outcome(outcome).expect("and committed");
 
-    assert_eq!(executor.limiter().usage.data_size, data_size, "it counts towards the budget");
-    let (_, result) = executor.finish_with_counters().expect("the block finishes");
-    assert_eq!(result.receipts().len(), 1);
+        assert_eq!(executor.limiter().usage, usage, "{name}: it counts towards the budgets");
+        let (_, result) = executor.finish_with_counters().expect("the block finishes");
+        assert_eq!(result.receipts().len(), 1, "{name}");
+    }
 }
 
 /// A building policy at its tightest refuses an ordinary transaction and no system transaction:

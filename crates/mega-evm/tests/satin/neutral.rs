@@ -30,8 +30,8 @@ use op_revm::{
 };
 use revm::{
     bytecode::opcode::{
-        ADDRESS, BALANCE, CALL, EXTCODESIZE, GAS, LOG1, LOG3, NUMBER, POP, PUSH0, PUSH1, SSTORE,
-        TIMESTAMP,
+        ADDRESS, BALANCE, CALL, DELEGATECALL, EXTCODESIZE, GAS, LOG1, LOG3, NUMBER, POP, PUSH0,
+        PUSH1, SELFDESTRUCT, SSTORE, STOP, TIMESTAMP,
     },
     context::{
         result::{ExecResultAndState, ExecutionResult},
@@ -184,6 +184,56 @@ fn test_neutral_creation_matches_op_revm() {
         };
         let outcome = run_both(fork, funded(), tx);
         assert!(outcome.0.result.is_success(), "{:?}", outcome.0.result);
+        assert_same(fork, outcome);
+    }
+}
+
+/// A `CREATE` from a contract whose nonce is at its maximum. On Osaka, where EIP-8037 is off, the
+/// opcode starts the creation without the address it would take, and revm refuses it before the
+/// bump; on Amsterdam the opcode refuses it itself. Either way nothing is created and nothing is
+/// counted, and the run is op-revm's.
+#[test]
+fn test_neutral_creation_from_a_nonce_at_its_maximum_matches_op_revm() {
+    let code = BytecodeBuilder::default().create(U256::ZERO, [STOP]).return_top().build();
+    for fork in FORKS {
+        let db = funded().account_code(CALLEE, code.clone()).account_nonce(CALLEE, u64::MAX);
+        let outcome = run_both(fork, db, call(Bytes::new(), U256::ZERO));
+        assert!(outcome.0.result.is_success(), "{fork:?}: {:?}", outcome.0.result);
+        assert_eq!(outcome.0.result.output(), Some(&Bytes::from(vec![0; 32])), "{fork:?}");
+        assert_eq!(outcome.0.state[&CALLEE].info.nonce, u64::MAX, "{fork:?}: not bumped");
+        assert_same(fork, outcome);
+    }
+}
+
+/// A creation whose constructor writes a fresh slot, destroys its own account through a
+/// `DELEGATECALL`, writes another fresh slot and returns code. On Satin's configuration the
+/// destruction gives back the leaf and the slot's state gas, the slot written after it keeps none,
+/// and the code deposited after it keeps none; EIP-8037 gives back nothing for this destruction,
+/// and the neutral configuration prices as the fork does, so the run is op-revm's on both forks,
+/// Amsterdam's state gas included.
+#[test]
+fn test_neutral_creation_that_destroys_itself_matches_op_revm() {
+    const DESTROYER: Address = address!("0x5000000000000000000000000000000000000003");
+    let destroyer = BytecodeBuilder::default().push_address(CALLER).append(SELFDESTRUCT).build();
+    let init = BytecodeBuilder::default()
+        .sstore(U256::from(1), U256::from(1))
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
+        .push_address(DESTROYER)
+        .append_many([GAS, DELEGATECALL, POP])
+        .sstore(U256::from(2), U256::from(1))
+        .return_with_data([STOP, STOP])
+        .build();
+    let code = BytecodeBuilder::default().create(U256::ZERO, &init).append(POP).stop().build();
+    for fork in FORKS {
+        let db =
+            funded().account_code(CALLEE, code.clone()).account_code(DESTROYER, destroyer.clone());
+        let outcome = run_both(fork, db, call(Bytes::new(), U256::ZERO));
+        assert!(outcome.0.result.is_success(), "{fork:?}: {:?}", outcome.0.result);
+        let created = CALLEE.create(0);
+        assert!(
+            outcome.0.state[&created].is_selfdestructed(),
+            "{fork:?}: the account is destroyed"
+        );
         assert_same(fork, outcome);
     }
 }
@@ -370,5 +420,40 @@ fn test_neutral_kzg_call_matches_ethereum() {
             "{fork:?}: the evaluation succeeded"
         );
         assert_same(fork, outcome);
+    }
+}
+
+/// A creation onto an address an earlier transaction run on the same journal loaded — two
+/// transactions in a row, without the journal finalized between them, as a block builder runs one
+/// after another — makes a new account, and counts its unit of state growth, as on a fresh
+/// journal. On Osaka the `CREATE2` opcode does not load the address itself, EIP-8037 being off, so
+/// what the earlier transaction left of the account in the journal is all the start finds.
+#[test]
+fn test_neutral_creation_onto_an_address_an_earlier_transaction_loaded_counts_its_account() {
+    const READER: Address = address!("0x5000000000000000000000000000000000000002");
+    let init = Bytes::from_static(&[STOP]);
+    let created = CALLEE.create2(alloy_primitives::B256::ZERO, alloy_primitives::keccak256(&init));
+    let factory = BytecodeBuilder::default().create2(U256::ZERO, &init, U256::ZERO).stop().build();
+    let reader =
+        BytecodeBuilder::default().push_address(created).append_many([BALANCE, POP]).stop().build();
+    for fork in FORKS {
+        let db =
+            funded().account_code(CALLEE, factory.clone()).account_code(READER, reader.clone());
+        let ctx = MegaContext::new(db, MegaSpecId::SATIN)
+            .with_neutral_cfg(neutral_cfg(fork).expect("a neutral fork"))
+            .with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits())
+            .with_block(block())
+            .with_chain(zero_fee_l1_block_info());
+        let mut evm = MegaEvm::new(ctx);
+        neutralize_evm(&mut evm, fork).expect("a neutral fork");
+        let read = TxEnv { kind: TxKind::Call(READER), ..call(Bytes::new(), U256::ZERO) };
+        let read = ExecuteEvm::transact_one(&mut evm, OpTx(op_transaction(read))).unwrap();
+        assert!(read.is_success(), "{fork:?}: {read:?}");
+        let create = TxEnv { nonce: 1, ..call(Bytes::new(), U256::ZERO) };
+        let create = ExecuteEvm::transact_one(&mut evm, OpTx(op_transaction(create))).unwrap();
+        assert!(create.is_success(), "{fork:?}: {create:?}");
+        let state = ExecuteEvm::finalize(&mut evm);
+        assert_eq!(state[&created].info.nonce, 1, "{fork:?}: the account was created");
+        assert_eq!(evm.ctx().limit_usage().state_growth, 1, "{fork:?}: its unit of growth");
     }
 }

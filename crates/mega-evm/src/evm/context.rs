@@ -1,9 +1,5 @@
 //! The execution context of the Satin engine.
 
-#[cfg(not(feature = "std"))]
-use alloc as std;
-use std::vec::Vec;
-
 use delegate::delegate;
 use op_revm::{transaction::deposit::DEPOSIT_TRANSACTION_TYPE, L1BlockInfo, OpSpecId};
 use revm::{
@@ -19,20 +15,14 @@ use revm::{
     Database,
 };
 
-#[cfg(debug_assertions)]
-use crate::limit::StartRecords;
 use crate::{
     constants,
     evm::{
         history::transaction_body_bytes,
-        inspector::UpfrontRecord,
         schedule::{satin_gas_params, satin_gas_params_history_exempt},
     },
     limit::{Accounts, Counted},
-    system::{
-        self,
-        keyless::{self, KeylessFrame},
-    },
+    system::{self, keyless},
     AdditionalLimit, BlockHashRecord, BucketError, BucketId, BucketMultipliers, BucketRecord,
     Detention, EmptyExternalEnv, EthSpecId, EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs,
     LimitUsage, MegaSpecId, MegaTransaction, OracleReadRecord, ProtocolLimits, SaltEnv,
@@ -68,9 +58,6 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes = EmptyExternalEn
     pub(crate) additional_limit: AdditionalLimit,
     /// Gas detention for the running transaction.
     pub(crate) detention: Detention,
-    /// What the calling opcode charged upfront for each running frame of an inspected transaction,
-    /// by depth, taken before the inspector could rewrite the call.
-    pub(crate) upfront_records: Vec<Option<UpfrontRecord>>,
     pub(crate) block_hash_record: BlockHashRecord,
     /// The SALT bucket multipliers the running transaction has read.
     bucket_multipliers: BucketMultipliers,
@@ -87,13 +74,9 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes = EmptyExternalEn
     system_call: bool,
     /// Whether the running transaction pays history gas. See [`MegaContext::prices_history`].
     prices_history: bool,
-    /// Where the running transaction's `keylessDeploy` call stands, from the start of its frame
-    /// to its answer. See the [`keyless`](crate::system::keyless) module.
-    pub(crate) keyless_frame: Option<KeylessFrame>,
-    /// The records the last frame start's hook charged its caller for, which a debug build holds
-    /// the start revm then decides to.
-    #[cfg(debug_assertions)]
-    pub(crate) charged_records: Option<StartRecords>,
+    /// The creation the running transaction's `keylessDeploy` call started, while it runs. See
+    /// the [`keyless`](crate::system::keyless) module.
+    pub(crate) keyless_creation: Option<keyless::Started>,
     /// Whether the context runs the neutral configuration. See [`MegaContext::with_neutral_cfg`].
     #[cfg(any(test, feature = "test-utils"))]
     neutral: bool,
@@ -127,7 +110,6 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
             external_envs,
             additional_limit: AdditionalLimit::new(limits),
             detention: Detention::default(),
-            upfront_records: Vec::new(),
             block_hash_record: BlockHashRecord::default(),
             bucket_multipliers: BucketMultipliers::default(),
             bucket_record: BucketRecord::default(),
@@ -135,9 +117,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
             system_originated: false,
             system_call: false,
             prices_history: true,
-            keyless_frame: None,
-            #[cfg(debug_assertions)]
-            charged_records: None,
+            keyless_creation: None,
             #[cfg(any(test, feature = "test-utils"))]
             neutral: false,
         }
@@ -478,6 +458,20 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         self.system_call
     }
 
+    /// Whether the destruction table prices state gas: a destruction of an account created in the
+    /// transaction gives back the state gas of the parts the transaction made, and from that mark
+    /// the account keeps no further state gas. So under the spec's configuration, which charges
+    /// EIP-8037 state gas. The neutral configuration prices as the fixture's fork does, and
+    /// EIP-8037 gives back no state gas for this destruction; the table's counts are the same
+    /// under both.
+    pub(crate) fn destruction_table_prices_state_gas(&self) -> bool {
+        #[cfg(any(test, feature = "test-utils"))]
+        if self.neutral {
+            return false;
+        }
+        self.inner.cfg.is_amsterdam_eip8037_enabled()
+    }
+
     /// Prepares the common execution layer for a transaction or a system call that is, or is not,
     /// `system_originated`: the layer begins it, counting its body.
     ///
@@ -493,15 +487,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         let transfer_logs = emits_transfer_logs(&self.inner.cfg);
         self.bucket_multipliers.reset();
         self.oracle_reads.clear();
-        // A transaction that failed with an error, or was stopped, left its `keylessDeploy` call
-        // unanswered.
-        self.keyless_frame = None;
-        // The records a start's hook charged for are that start's, and no start outlives its
-        // transaction.
-        #[cfg(debug_assertions)]
-        {
-            self.charged_records = None;
-        }
+        // A transaction that failed with an error, or was stopped, left its `keylessDeploy` call's
+        // creation unsettled.
+        self.keyless_creation = None;
         self.system_originated = system_originated;
         let exempt = self.inner.tx.tx_type() == DEPOSIT_TRANSACTION_TYPE || system_originated;
         self.set_history_exempt(exempt);
@@ -703,12 +691,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextTr for MegaContext<DB, ExtE
         deposit: &CodeDeposit<'_>,
         gas: &mut GasTracker,
     ) -> Result<(), Bytes> {
-        let destroyed = self
-            .journal_ref()
-            .state
-            .get(&deposit.address)
-            .is_some_and(|account| account.is_selfdestructed());
-        if keyless::refuses_empty_deposit(&mut self.keyless_frame, deposit, destroyed) {
+        // Destroyed in this transaction: the flag revm keeps for the whole journal may stand from
+        // an earlier transaction on it.
+        let destroyed = self.accounts().is_destroyed(deposit.address);
+        if keyless::refuses_empty_deposit(&mut self.keyless_creation, deposit, destroyed) {
             return Err(Bytes::new());
         }
         let check = self.additional_limit.draw(gas, &Counted::bytes(deposit.code.len() as u64));

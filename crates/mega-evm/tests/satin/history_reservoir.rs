@@ -5,7 +5,7 @@
 //! gas. Below the cap the reservoir is empty, every charge spills straight onto regular gas, and
 //! a charge that is silently given back looks exactly like a charge that was made and kept.
 //!
-//! So the rule this lane carries, and the next mechanism inherits: **every ledger invariant gets
+//! So the rule these tests carry, and the next mechanism inherits: **every ledger invariant gets
 //! at least one case above the cap**. Each holds its transaction to
 //!
 //! ```text
@@ -188,7 +188,7 @@ fn test_a_reverting_child_gives_its_records_back_to_the_reservoir() {
     assert!(outcome.result.is_success(), "the caller survives its child's revert");
     assert_eq!(
         outcome.usage,
-        LimitUsage { data_size: mega_evm::TX_BODY_SIZE, write_records: 0 },
+        LimitUsage { data_size: mega_evm::TX_BODY_SIZE, write_records: 0, state_growth: 0 },
         "the reverted transfer kept nothing but the body"
     );
     assert_eq!(outcome.gas.history, BODY, "the body alone");
@@ -199,10 +199,10 @@ fn test_a_reverting_child_gives_its_records_back_to_the_reservoir() {
     );
 }
 
-/// A value call a system contract's interceptor refuses never starts a frame: its lane is empty
-/// and the whole charge comes back. It is the path where the caller is paid back twice if the
-/// frame inherited the caller's reservoir from before the charge, because the empty lane refills
-/// what the adoption already restored.
+/// A value call a system contract's interceptor refuses never starts a frame: its start counts
+/// nothing and the whole charge comes back. It is the path where the caller is paid back twice if
+/// the frame inherited the caller's reservoir from before the charge, because the refund of the
+/// start charge refills what the adoption already restored.
 #[test]
 fn test_an_intercepted_value_call_gives_its_records_back_once() {
     if runs_at_measurement_prices() {
@@ -222,7 +222,7 @@ fn test_an_intercepted_value_call_gives_its_records_back_once() {
     assert!(outcome.result.is_success(), "the caller survives the refusal");
     assert_eq!(
         outcome.usage,
-        LimitUsage { data_size: mega_evm::TX_BODY_SIZE, write_records: 0 },
+        LimitUsage { data_size: mega_evm::TX_BODY_SIZE, write_records: 0, state_growth: 0 },
         "the refused call wrote nothing but the body"
     );
     assert_eq!(outcome.gas.history, BODY, "the body alone");
@@ -341,5 +341,8 @@ fn test_an_out_of_gas_before_the_first_frame_keeps_the_body_the_reservoir_paid()
     assert_eq!(outcome.gas.state, 0, "the account was not created");
     assert_eq!(outcome.gas.reservoir_remaining, reservoir - body, "the reservoir paid the body");
     assert_eq!(outcome.gas.gas_used, TX_GAS_LIMIT_CAP + body, "the regular budget is consumed");
-    assert_eq!(outcome.usage, LimitUsage { data_size: TX_BODY_SIZE, write_records: 0 });
+    assert_eq!(
+        outcome.usage,
+        LimitUsage { data_size: TX_BODY_SIZE, write_records: 0, state_growth: 0 }
+    );
 }

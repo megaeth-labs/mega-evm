@@ -151,6 +151,12 @@ pub(crate) struct Budgets {
     pub(crate) data: Budget,
     /// The policy's cap on the same, which only tightens.
     pub(crate) policy_data: Budget,
+    /// The block's KV-update budget, in write records, and the policy's cap on it.
+    pub(crate) kv: Budget,
+    pub(crate) policy_kv: Budget,
+    /// The block's state-growth budget, in new accounts and slots, and the policy's cap on it.
+    pub(crate) growth: Budget,
+    pub(crate) policy_growth: Budget,
     /// The policy's cap on a transaction's declared gas.
     pub(crate) policy_tx_gas: Option<u32>,
     /// The policy's cap on a transaction's encoded size, in bytes.
@@ -163,6 +169,8 @@ fn budgets() -> impl Strategy<Value = Budgets> {
     (
         budget(300..=600, 1_000..=5_000),
         budget(300..=600, 1_000..=5_000),
+        (budget(1..=3, 4..=12), budget(1..=3, 4..=12)),
+        (budget(1..=3, 4..=12), budget(1..=3, 4..=12)),
         proptest::option::weighted(
             0.3,
             prop_oneof![Just(100_000u32), Just(1_000_000), Just(50_000_000)],
@@ -170,13 +178,21 @@ fn budgets() -> impl Strategy<Value = Budgets> {
         proptest::option::weighted(0.3, prop_oneof![Just(80u16), Just(150), Just(2_000)]),
         proptest::option::weighted(0.3, prop_oneof![Just(200u16), Just(500), Just(5_000)]),
     )
-        .prop_map(|(data, pd, tx_gas, tx_size, block_size)| Budgets {
-            data,
-            policy_data: pd,
-            policy_tx_gas: tx_gas,
-            policy_tx_size: tx_size,
-            policy_block_size: block_size,
-        })
+        .prop_map(
+            |(data, pd, (kv, policy_kv), (growth, policy_growth), tx_gas, tx_size, block_size)| {
+                Budgets {
+                    data,
+                    policy_data: pd,
+                    kv,
+                    policy_kv,
+                    growth,
+                    policy_growth,
+                    policy_tx_gas: tx_gas,
+                    policy_tx_size: tx_size,
+                    policy_block_size: block_size,
+                }
+            },
+        )
 }
 
 /// A block: a world with its programs (the case's transaction is not used), the transactions, the
@@ -198,6 +214,8 @@ impl BlockCase {
         ProtocolLimits {
             tx_runtime_limits: self.base.world.limits.runtime(),
             block_txs_data_limit: self.budgets.data.value(),
+            block_kv_update_limit: self.budgets.kv.value(),
+            block_state_growth_limit: self.budgets.growth.value(),
         }
     }
 
@@ -208,6 +226,8 @@ impl BlockCase {
             tx_encode_size_limit: b.policy_tx_size.map_or(u64::MAX, u64::from),
             block_txs_encode_size_limit: b.policy_block_size.map_or(u64::MAX, u64::from),
             block_txs_data_limit: b.policy_data.value(),
+            block_kv_update_limit: b.policy_kv.value(),
+            block_state_growth_limit: b.policy_growth.value(),
             ..BlockLimits::no_limits()
         }
     }
@@ -317,8 +337,8 @@ impl BlockCase {
 
 /// Whether the block admits a transaction of `gas_limit` and `tx_size` before it runs, by the
 /// limiter's rules: a deposit is held to the header's gas limit alone; any other transaction to
-/// the policy's per-transaction caps and to the data-size packing budget, which refuses the next
-/// transaction once reached.
+/// the policy's per-transaction caps and to the data-size, KV-update and state-growth packing
+/// budgets, each of which refuses the next transaction once reached.
 fn admits_before(limiter: &BlockLimiter, gas_limit: u64, tx_size: u64, is_deposit: bool) -> bool {
     let limits = &limiter.limits;
     if !is_deposit && gas_limit > limits.tx_gas_limit {
@@ -332,7 +352,9 @@ fn admits_before(limiter: &BlockLimiter, gas_limit: u64, tx_size: u64, is_deposi
     }
     tx_size <= limits.tx_encode_size_limit &&
         tx_size.saturating_add(limiter.block_tx_size_used) <= limits.block_txs_encode_size_limit &&
-        limiter.usage.data_size < limits.block_txs_data_limit
+        limiter.usage.data_size < limits.block_txs_data_limit &&
+        limiter.usage.write_records < limits.block_kv_update_limit &&
+        limiter.usage.state_growth < limits.block_state_growth_limit
 }
 
 /// Whether a refusal names a block or transaction limit rather than the transaction's validity:
@@ -419,6 +441,7 @@ fn run_block(case: &BlockCase) -> Result<BlockRun, proptest::test_runner::TestCa
                         expected_gas_used += gas.gas_used;
                         expected_usage.data_size += usage.data_size;
                         expected_usage.write_records += usage.write_records;
+                        expected_usage.state_growth += usage.state_growth;
                         let receipt = executor
                             .receipts()
                             .last()

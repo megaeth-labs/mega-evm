@@ -42,7 +42,7 @@ use revm::{
 };
 
 use crate::common::{
-    account_state_gas, call, call_with_data, context, create, deposit, history, run,
+    account_state_gas, call, call_with_data, context, create, deposit, grown, history, run,
     value_call_room,
 };
 
@@ -52,17 +52,21 @@ const CONTRACT: Address = address!("0000000000000000000000000000000000100002");
 const CONTRACT2: Address = address!("0000000000000000000000000000000000100003");
 /// The transaction body and nothing else.
 const fn body_only() -> LimitUsage {
-    LimitUsage { data_size: TX_BODY_SIZE, write_records: 0 }
+    LimitUsage { data_size: TX_BODY_SIZE, write_records: 0, state_growth: 0 }
 }
 
 /// `n` write records on top of the transaction body.
 const fn records(n: u64) -> LimitUsage {
-    LimitUsage { data_size: TX_BODY_SIZE + n * WRITE_RECORD_SIZE, write_records: n }
+    LimitUsage {
+        data_size: TX_BODY_SIZE + n * WRITE_RECORD_SIZE,
+        write_records: n,
+        state_growth: 0,
+    }
 }
 
 /// `n` write records and no body: the difference between two transactions that carry the same one.
 const fn records_only(n: u64) -> LimitUsage {
-    LimitUsage { data_size: n * WRITE_RECORD_SIZE, write_records: n }
+    LimitUsage { data_size: n * WRITE_RECORD_SIZE, write_records: n, state_growth: 0 }
 }
 
 fn with_extra(usage: LimitUsage, bytes: u64) -> LimitUsage {
@@ -106,8 +110,9 @@ fn test_two_value_calls_record_the_sender_once() {
     assert!(result.result.is_success());
     assert_eq!(
         usage,
-        with_extra(records(3), 2 * TRANSFER_LOG_SIZE),
-        "CALLEE once, CONTRACT, CONTRACT2, and a transfer log for each transfer"
+        grown(with_extra(records(3), 2 * TRANSFER_LOG_SIZE), 2),
+        "CALLEE once, CONTRACT, CONTRACT2, and a transfer log for each transfer; CONTRACT and \
+         CONTRACT2 are new"
     );
 }
 
@@ -128,8 +133,9 @@ fn test_value_calls_to_one_recipient_record_it_once() {
     assert!(result.result.is_success());
     assert_eq!(
         usage,
-        with_extra(records(2), 3 * TRANSFER_LOG_SIZE),
-        "CALLEE once, CONTRACT once, and a transfer log for each transfer"
+        grown(with_extra(records(2), 3 * TRANSFER_LOG_SIZE), 1),
+        "CALLEE once, CONTRACT once, and a transfer log for each transfer; the first transfer \
+         creates CONTRACT"
     );
 }
 
@@ -189,8 +195,8 @@ fn test_one_transfer_records_its_sender_and_its_recipient() {
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
     assert_eq!(
         outcome.usage,
-        guarded(with_extra(records(2), TRANSFER_LOG_SIZE)),
-        "CALLEE, CONTRACT, a log"
+        guarded(grown(with_extra(records(2), TRANSFER_LOG_SIZE), 1)),
+        "CALLEE, CONTRACT, a log; CONTRACT, which holds no code, is new"
     );
     if !crate::common::history_rounds() {
         assert_eq!(outcome.gas.history, body_and_records(2));
@@ -353,7 +359,11 @@ fn test_nested_creations_record_each_account_once() {
         call(CALLER, CALLEE, U256::ZERO, value_call_room()),
     );
     assert!(result.result.is_success(), "{:?}", result.result);
-    assert_eq!(usage, records(3), "CALLEE, the account it created, and the one that created");
+    assert_eq!(
+        usage,
+        grown(records(3), 2),
+        "CALLEE, the account it created, and the one that created; both created accounts are new"
+    );
     let created = CALLEE.create(0);
     assert_eq!(result.state[&created].info.nonce, 2, "it created one account of its own");
     assert!(result.state.contains_key(&created.create(1)));
@@ -412,18 +422,18 @@ fn test_a_destruction_to_a_fresh_and_to_a_changed_beneficiary() {
     );
     for (case, callee, contract, balance, expected) in [
         (
-            "to a fresh beneficiary",
+            "to a fresh beneficiary, which the destruction creates",
             destruct_to(BytecodeBuilder::default(), CONTRACT).build(),
             Bytes::new(),
             5,
-            guarded(with_extra(records(2), TRANSFER_LOG_SIZE)),
+            guarded(grown(with_extra(records(2), TRANSFER_LOG_SIZE), 1)),
         ),
         (
-            "to a beneficiary a transfer changed",
+            "to a beneficiary a transfer changed, which the transfer creates",
             sends_then_destructs.build(),
             Bytes::new(),
             5,
-            guarded(with_extra(records(2), 2 * TRANSFER_LOG_SIZE)),
+            guarded(grown(with_extra(records(2), 2 * TRANSFER_LOG_SIZE), 1)),
         ),
         (
             "of an account whose balance the transaction gave it, back to the giver",
@@ -503,23 +513,32 @@ fn test_a_creation_records_its_account_only_when_it_changes_it() {
     let fund: Prelude = |code, x| code.call(x, U256::from(5)).append(POP);
     let destruct: Prelude = |code, _| code.call(DESTRUCTOR, U256::ZERO).append(POP);
     // (case, what runs before the creation, the creation, the records kept, the transfer logs
-    // kept)
-    let rows: [(&str, Prelude, Created, u64, u64); 6] = [
-        ("fund X only: CALLEE and X", fund, None, 2, 1),
-        ("create X only: CALLEE's nonce and X", nothing, Some((SUCCEEDS, 0)), 2, 0),
-        ("fund X, then create X: CALLEE and X", fund, Some((SUCCEEDS, 0)), 2, 1),
-        ("fund X, then create X with an endowment: CALLEE and X", fund, Some((SUCCEEDS, 1)), 2, 2),
+    // kept, the new accounts kept: X, by the first write that reaches it — a creation onto an
+    // address the transaction funded adds none)
+    let rows: [(&str, Prelude, Created, u64, u64, u64); 6] = [
+        ("fund X only: CALLEE and X", fund, None, 2, 1, 1),
+        ("create X only: CALLEE's nonce and X", nothing, Some((SUCCEEDS, 0)), 2, 0, 1),
+        ("fund X, then create X: CALLEE and X", fund, Some((SUCCEEDS, 0)), 2, 1, 1),
+        (
+            "fund X, then create X with an endowment: CALLEE and X",
+            fund,
+            Some((SUCCEEDS, 1)),
+            2,
+            2,
+            1,
+        ),
         (
             "a destruction pays X, then create X: DESTRUCTOR, X and CALLEE's nonce",
             destruct,
             Some((SUCCEEDS, 0)),
             3,
             1,
+            1,
         ),
-        ("fund X, then a creation at X that fails: CALLEE and X", fund, Some((FAILS, 0)), 2, 1),
+        ("fund X, then a creation at X that fails: CALLEE and X", fund, Some((FAILS, 0)), 2, 1, 1),
     ];
     for creation in [Creation::Create2, Creation::Create] {
-        for (case, prelude, created, records_kept, logs) in rows {
+        for (case, prelude, created, records_kept, logs, growth) in rows {
             let case = format!("{creation:?}, {case}");
             let x = creation.address(created.map_or(SUCCEEDS, |(init, _)| init));
             let mut code = prelude(BytecodeBuilder::default(), x);
@@ -541,7 +560,7 @@ fn test_a_creation_records_its_account_only_when_it_changes_it() {
             );
             assert_eq!(
                 outcome.usage,
-                with_extra(records(records_kept), logs * TRANSFER_LOG_SIZE),
+                grown(with_extra(records(records_kept), logs * TRANSFER_LOG_SIZE), growth),
                 "{case}"
             );
             if !crate::common::history_rounds() {
@@ -567,8 +586,9 @@ fn test_create_then_call_record_the_frame_account_once() {
     assert!(result.result.is_success());
     assert_eq!(
         usage,
-        with_extra(records(3), 2 * TRANSFER_LOG_SIZE),
-        "CALLEE once, the created account, CONTRACT, and a transfer log for each endowment"
+        grown(with_extra(records(3), 2 * TRANSFER_LOG_SIZE), 2),
+        "CALLEE once, the created account, CONTRACT, and a transfer log for each endowment; the \
+         created account and CONTRACT are new"
     );
 }
 
@@ -584,8 +604,9 @@ fn test_two_creates_record_the_creator_once() {
     assert!(result.result.is_success());
     assert_eq!(
         usage,
-        with_extra(records(3), 2 * TRANSFER_LOG_SIZE),
-        "CALLEE once, two created accounts, and a transfer log for each endowment"
+        grown(with_extra(records(3), 2 * TRANSFER_LOG_SIZE), 2),
+        "CALLEE once, two created accounts, and a transfer log for each endowment; both created \
+         accounts are new"
     );
 }
 
@@ -625,8 +646,9 @@ fn test_failed_first_child_lets_the_next_transfer_record_the_sender() {
     assert!(result.result.is_success());
     assert_eq!(
         usage,
-        with_extra(records(2), TRANSFER_LOG_SIZE),
-        "CALLEE and CONTRACT2 and the transfer log, from the second transfer"
+        grown(with_extra(records(2), TRANSFER_LOG_SIZE), 1),
+        "CALLEE and CONTRACT2 and the transfer log, from the second transfer, which creates \
+         CONTRACT2"
     );
 }
 
@@ -659,11 +681,14 @@ fn test_a_delegates_record_of_its_callers_account_follows_the_delegate() {
         let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, value_call_room()));
         assert!(result.result.is_success(), "the caller succeeds");
         let expected = if fails {
-            with_extra(records(2), TRANSFER_LOG_SIZE)
+            grown(with_extra(records(2), TRANSFER_LOG_SIZE), 1)
         } else {
-            with_extra(records(3), 2 * TRANSFER_LOG_SIZE)
+            grown(with_extra(records(3), 2 * TRANSFER_LOG_SIZE), 2)
         };
-        assert_eq!(usage, expected, "CALLEE once, then CONTRACT2, and CONTRACT unless it failed");
+        assert_eq!(
+            usage, expected,
+            "CALLEE once, then CONTRACT2, and CONTRACT unless it failed; each recipient is new"
+        );
     }
 }
 
@@ -729,7 +754,11 @@ fn test_top_level_self_transfer_no_double_count() {
 /// A top-level transfer to another account records the recipient.
 #[test]
 fn test_top_level_transfer_counts_the_recipient() {
-    assert_eq!(value_delta(B), with_extra(records_only(1), TRANSFER_LOG_SIZE), "and its log");
+    assert_eq!(
+        value_delta(B),
+        grown(with_extra(records_only(1), TRANSFER_LOG_SIZE), 1),
+        "and its log; the value creates B"
+    );
 }
 
 /// `CALLDATASIZE; JUMPI` to a body that calls `targets` with `value`, so an inner call with empty
@@ -773,8 +802,8 @@ fn nested_delta(targets: &[Address]) -> LimitUsage {
 fn test_nested_self_transfer_after_recorded_sender_counts_nothing() {
     assert_eq!(
         nested_delta(&[B, SELF_CALLER]),
-        with_extra(records_only(2), TRANSFER_LOG_SIZE),
-        "the transfer to B and its log"
+        grown(with_extra(records_only(2), TRANSFER_LOG_SIZE), 1),
+        "the transfer to B and its log; the transfer creates B"
     );
 }
 
@@ -784,9 +813,10 @@ fn test_nested_self_transfer_after_recorded_sender_counts_nothing() {
 #[test]
 fn test_sstore_first_change_records_and_write_back_refunds() {
     type Writes = &'static [(u64, u64)];
+    // (writes, the slot's original value, what is kept: a slot written from zero is new)
     let cases: [(Writes, u64, LimitUsage); 4] = [
-        (&[(0, 1)], 0, records(1)),
-        (&[(0, 1), (0, 2)], 0, records(1)),
+        (&[(0, 1)], 0, grown(records(1), 1)),
+        (&[(0, 1), (0, 2)], 0, grown(records(1), 1)),
         (&[(0, 1), (0, 0)], 0, body_only()),
         (&[(0, 0)], 5, records(1)),
     ];
@@ -811,7 +841,8 @@ fn test_write_back_in_a_child_refunds_the_caller_record() {
     let child = BytecodeBuilder::default().sstore(U256::ZERO, U256::ZERO).stop().build();
     let failing_child =
         BytecodeBuilder::default().sstore(U256::ZERO, U256::ZERO).append(INVALID).build();
-    for (code, expected) in [(child, body_only()), (failing_child, records(1))] {
+    // The write-back takes back the caller's new slot with its record, and dies with the child.
+    for (code, expected) in [(child, body_only()), (failing_child, grown(records(1), 1))] {
         // CALLEE writes slot 0, then DELEGATECALLs CONTRACT, which writes it back in CALLEE's
         // storage.
         let parent = BytecodeBuilder::default()
@@ -844,7 +875,8 @@ fn test_selfdestruct_records_the_beneficiary_when_value_moves() {
         BytecodeBuilder::default().push_address(beneficiary).append(SELFDESTRUCT).build()
     };
     let cases = [
-        (U256::from(5), CONTRACT, with_extra(records(2), TRANSFER_LOG_SIZE)),
+        // CONTRACT does not exist: the move creates it.
+        (U256::from(5), CONTRACT, grown(with_extra(records(2), TRANSFER_LOG_SIZE), 1)),
         (U256::from(5), CALLEE, body_only()),
         (U256::from(5), CALLER, with_extra(records(1), TRANSFER_LOG_SIZE)),
         (U256::ZERO, CONTRACT, body_only()),
@@ -868,7 +900,7 @@ fn test_top_level_create_records_the_created_account() {
         create(CALLER, Bytes::from_static(&[STOP]), value_call_room()),
     );
     assert!(result.result.is_success());
-    assert_eq!(usage, with_extra(records(1), 1));
+    assert_eq!(usage, grown(with_extra(records(1), 1), 1), "the created account is new");
 
     let (result, usage) = run(
         MemoryDatabase::default(),
@@ -1072,7 +1104,7 @@ fn test_completed_sstore_commits_its_record() {
     let code = BytecodeBuilder::default().sstore(U256::ZERO, U256::from(1)).stop().build();
     let steps =
         probe(MemoryDatabase::default().account_code(CALLEE, code), value_call_room(), false);
-    assert_eq!(after_sstore(&steps), records(1));
+    assert_eq!(after_sstore(&steps), grown(records(1), 1), "a new slot");
 }
 
 /// An `SSTORE` that runs out of gas after its Host call wrote the slot counts nothing: the
@@ -1101,7 +1133,11 @@ fn test_a_tools_log_in_step_counts_nothing() {
     let code = BytecodeBuilder::default().sstore(U256::ZERO, U256::from(1)).stop().build();
     let steps =
         probe(MemoryDatabase::default().account_code(CALLEE, code), value_call_room(), true);
-    assert_eq!(after_sstore(&steps), records(1), "the SSTORE's record, and not the tool's log");
+    assert_eq!(
+        after_sstore(&steps),
+        grown(records(1), 1),
+        "the SSTORE's record and its new slot, and not the tool's log"
+    );
 }
 
 /* ---------- applied EIP-7702 authorities ---------- */
@@ -1137,8 +1173,9 @@ fn test_applied_authorities_record_once_each() {
         authorizing_call(CONTRACT, 0, &[(AUTHORITY_1, 0), (AUTHORITY_2, 0), (AUTHORITY_1, 1)]),
     );
     assert!(result.result.is_success(), "{:?}", result.result);
-    // Three authorization tuples travel in the body; two distinct authorities are applied.
-    assert_eq!(usage, with_extra(records(2), 3 * mega_evm::AUTHORIZATION_SIZE));
+    // Three authorization tuples travel in the body; two distinct authorities are applied, and
+    // the first authorization of each creates it.
+    assert_eq!(usage, grown(with_extra(records(2), 3 * mega_evm::AUTHORIZATION_SIZE), 2));
 
     let (result, usage) = run(db(), authorizing_call(CONTRACT, 0, &[(AUTHORITY_1, 7)]));
     assert!(result.result.is_success());
@@ -1158,8 +1195,9 @@ fn test_value_to_an_applied_authority_records_it_once() {
     assert!(result.result.is_success(), "{:?}", result.result);
     assert_eq!(
         usage,
-        with_extra(records(1), mega_evm::AUTHORIZATION_SIZE + TRANSFER_LOG_SIZE),
-        "the authority, its authorization and the transfer log"
+        grown(with_extra(records(1), mega_evm::AUTHORIZATION_SIZE + TRANSFER_LOG_SIZE), 1),
+        "the authority, its authorization and the transfer log; the authorization creates the \
+         authority, and the value finds it"
     );
 
     // And is charged for once: the transaction's own frame writes no recipient, because the
@@ -1215,8 +1253,8 @@ fn test_frames_running_as_the_sender_do_not_record_it() {
     assert_eq!(result.state[&CONTRACT2].info.balance, U256::from(1), "the transfer happened");
     assert_eq!(
         usage,
-        with_extra(records(1), TRANSFER_LOG_SIZE),
-        "CONTRACT2 and the transfer log only; the sender is part of the body"
+        grown(with_extra(records(1), TRANSFER_LOG_SIZE), 1),
+        "CONTRACT2 and the transfer log only; the sender is part of the body; CONTRACT2 is new"
     );
 }
 
@@ -1235,7 +1273,8 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for OverfundCreati
 }
 
 /// A creation that fails before bumping the creator's nonce (here, an endowment an inspector
-/// raised past the creator's balance) takes its creator record back with it.
+/// raised past the creator's balance) records nothing: the creator's record is counted from the
+/// bump, and there is none.
 #[test]
 fn test_creation_failing_before_the_nonce_bump_records_nothing() {
     let code = append_value_create(BytecodeBuilder::default()).append(POP).append(STOP).build();
@@ -1265,8 +1304,9 @@ fn test_colliding_creation_keeps_the_creator_record() {
 /// is bumped and its record kept, the created account's record goes.
 #[test]
 fn test_creation_stopped_at_init_bumps_the_creator_nonce() {
-    // CALLEE writes a slot (40 bytes of its 100-byte budget), then creates: the creation's two
-    // records (80 bytes) exceed the 60 bytes left to it. CALLEE stores the created address.
+    // CALLEE writes a slot (40 bytes of its 80-byte budget), then creates: the creation's share
+    // of the 40 bytes left, 39, is one short of the created account's record. CALLEE keeps its
+    // nonce record in those 40 once the creation returned, and stores the created address.
     let code = BytecodeBuilder::default()
         .sstore(U256::from(1), U256::from(1))
         .append_many([PUSH0, PUSH0, PUSH0])
@@ -1276,7 +1316,7 @@ fn test_creation_stopped_at_init_bumps_the_creator_nonce() {
         .stop()
         .build();
     let db = MemoryDatabase::default().account_code(CALLEE, code);
-    let limits = mega_evm::EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(100);
+    let limits = mega_evm::EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(80);
     let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits));
     let result =
         alloy_evm::Evm::transact_raw(&mut evm, call(CALLER, CALLEE, U256::ZERO, value_call_room()))
@@ -1284,7 +1324,12 @@ fn test_creation_stopped_at_init_bumps_the_creator_nonce() {
     assert!(result.result.is_success(), "{:?}", result.result);
     assert_eq!(result.state[&CALLEE].info.nonce, 1, "the stopped creation bumped the nonce");
     assert_eq!(result.state[&CALLEE].storage[&U256::ZERO].present_value(), U256::ZERO, "it failed");
-    assert_eq!(evm.ctx().limit_usage(), records(2), "slot 1 and the creator's nonce");
+    assert_eq!(
+        evm.ctx().limit_usage(),
+        grown(records(2), 1),
+        "slot 1 and the creator's nonce; slot 1 is new, and the failed creation's zero address \
+         leaves slot 0 empty"
+    );
 }
 
 /// A transaction is held at validation to its body and a record for every entry of its
@@ -1310,7 +1355,11 @@ fn test_authority_records_are_held_to_the_limit_at_validation() {
     let largest = TX_BODY_SIZE + tuple + WRITE_RECORD_SIZE;
     let at_the_cap = with_cap(largest, &once).expect("a transaction at the limit is valid");
     assert!(at_the_cap.result.is_success(), "{:?}", at_the_cap.result);
-    assert_eq!(at_the_cap.usage, with_extra(records(1), tuple));
+    assert_eq!(
+        at_the_cap.usage,
+        grown(with_extra(records(1), tuple), 1),
+        "the authority, which the authorization creates"
+    );
     let code = at_the_cap.state[&AUTHORITY_1].info.code.as_ref();
     assert_eq!(code.and_then(|code| code.eip7702_address()), Some(DELEGATE), "it is applied");
     assert!(refused(largest - 1, &once), "one byte of limit less rejects it");
@@ -1320,7 +1369,11 @@ fn test_authority_records_are_held_to_the_limit_at_validation() {
     assert!(refused(bound - 1, &twice), "two entries are held to two records");
     let ran = with_cap(bound, &twice).expect("valid at two records");
     assert!(ran.result.is_success(), "{:?}", ran.result);
-    assert_eq!(ran.usage, with_extra(records(1), 2 * tuple), "the one authority makes one record");
+    assert_eq!(
+        ran.usage,
+        grown(with_extra(records(1), 2 * tuple), 1),
+        "the one authority makes one record, and is new once"
+    );
 }
 
 /// A funded caller's database, for the runtime out-of-gas tests.
@@ -1554,8 +1607,9 @@ fn test_value_receiving_child_records_itself_once() {
     assert_eq!(result.state[&CONTRACT].info.balance, U256::ZERO, "as it was loaded");
     assert_eq!(
         usage,
-        with_extra(records(2), 2 * TRANSFER_LOG_SIZE),
-        "CALLEE, CONTRACT2, and two transfer logs: CONTRACT passed on what it received"
+        grown(with_extra(records(2), 2 * TRANSFER_LOG_SIZE), 1),
+        "CALLEE, CONTRACT2, and two transfer logs: CONTRACT passed on what it received; CONTRACT2 \
+         is new"
     );
 }
 
@@ -1583,8 +1637,8 @@ fn test_zero_value_child_starts_unrecorded() {
     assert!(result.result.is_success());
     assert_eq!(
         usage,
-        with_extra(records(3), 2 * TRANSFER_LOG_SIZE),
-        "CALLEE as the recipient, CONTRACT, CONTRACT2, and two transfer logs"
+        grown(with_extra(records(3), 2 * TRANSFER_LOG_SIZE), 1),
+        "CALLEE as the recipient, CONTRACT, CONTRACT2, and two transfer logs; CONTRACT2 is new"
     );
 }
 
@@ -1617,8 +1671,8 @@ fn test_delegatecall_child_inherits_the_frame_account_record() {
     assert_eq!(result.state[&CONTRACT2].info.balance, U256::from(1), "CALLEE's value moved");
     assert_eq!(
         usage,
-        with_extra(records(1), 2 * TRANSFER_LOG_SIZE),
-        "CONTRACT2 and two transfer logs: CALLEE passed on the value it received"
+        grown(with_extra(records(1), 2 * TRANSFER_LOG_SIZE), 1),
+        "CONTRACT2 and two transfer logs: CALLEE passed on the value it received; CONTRACT2 is new"
     );
 }
 
@@ -1642,8 +1696,8 @@ fn test_created_frame_delegatecall_inherits_the_created_account_record() {
     // The init code travels in the body. `STOP` deploys nothing.
     assert_eq!(
         usage,
-        with_extra(records(2), delegate_to_d().len() as u64 + 2 * TRANSFER_LOG_SIZE),
-        "the created account, CONTRACT2, and two transfer logs"
+        grown(with_extra(records(2), delegate_to_d().len() as u64 + 2 * TRANSFER_LOG_SIZE), 2),
+        "the created account, CONTRACT2, and two transfer logs; both are new"
     );
 }
 
@@ -1663,7 +1717,11 @@ fn test_top_level_self_call_counts_the_sender_as_recorded() {
     let (result, usage) = run(db, call(CALLER, CALLER, U256::ZERO, value_call_room()));
     assert!(result.result.is_success(), "{:?}", result.result);
     assert_eq!(result.state[&CONTRACT2].info.balance, U256::from(1));
-    assert_eq!(usage, with_extra(records(1), TRANSFER_LOG_SIZE), "CONTRACT2 and its log only");
+    assert_eq!(
+        usage,
+        grown(with_extra(records(1), TRANSFER_LOG_SIZE), 1),
+        "CONTRACT2 and its log only; CONTRACT2 is new"
+    );
 }
 
 /// Answers every call to `CONTRACT` itself.
@@ -1688,10 +1746,10 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for AnswerContract
     }
 }
 
-/// A call an inspector answers gets an empty lane of its own, so its caller's lane is intact for
-/// what the caller does next.
+/// A call an inspector answers counts nothing of its own, so what its caller does next is counted
+/// as it is without the call.
 #[test]
-fn test_inspector_answered_call_keeps_the_caller_lane() {
+fn test_inspector_answered_call_counts_nothing_of_its_own() {
     let a = BytecodeBuilder::default()
         .append_many([PUSH0, PUSH0, PUSH0, PUSH0, PUSH0])
         .push_address(CONTRACT)
@@ -1707,8 +1765,8 @@ fn test_inspector_answered_call_keeps_the_caller_lane() {
     assert!(result.result.is_success());
     assert_eq!(
         evm.ctx().limit_usage(),
-        with_extra(records(2), TRANSFER_LOG_SIZE),
-        "CALLEE and CONTRACT2, and the transfer log"
+        grown(with_extra(records(2), TRANSFER_LOG_SIZE), 1),
+        "CALLEE and CONTRACT2, and the transfer log; CONTRACT2 is new"
     );
 }
 
@@ -2031,14 +2089,12 @@ fn test_every_kept_write_pays_one_record_of_history() {
     }
 }
 
-/// A value call an inspector answers makes none of the writes its caller paid for, so all of that
-/// history comes back — whatever the inspector answered with.
-///
-/// A frame answered without running is the one case where a *successful* result must still give
-/// the caller its charge back: the records were never made. An interceptor's refusal and the
-/// depth guard both fail, so only an inspector reaches this.
+/// A value call an inspector answers makes none of the writes its caller paid for, and counts none.
+/// The answer is taken as given, as revm takes it: it carries no start charge for revm to give
+/// back, so the history its caller paid at its `CALL` for the records the start would make stays
+/// paid, as for the call that runs, while the transaction counts its body alone.
 #[test]
-fn test_an_inspector_answered_value_call_gives_its_history_back() {
+fn test_an_inspector_answered_value_call_keeps_its_history_charged() {
     if crate::common::runs_at_measurement_prices() {
         return;
     }
@@ -2065,17 +2121,17 @@ fn test_an_inspector_answered_value_call_gives_its_history_back() {
     let (ran_usage, ran_history) = run_with(None);
     let body = mega_evm::TX_BODY_SIZE * mega_evm::constants::COST_PER_HISTORY_BYTE;
 
-    assert_eq!(answered_usage, body_only(), "the answered call wrote nothing");
-    assert_eq!(answered_history, body, "so its caller pays for nothing beyond its body");
     assert_eq!(
         ran_usage,
-        with_extra(records(2), TRANSFER_LOG_SIZE),
-        "the transfer that ran wrote two accounts and left its log"
+        grown(with_extra(records(2), TRANSFER_LOG_SIZE), 1),
+        "the transfer that ran wrote two accounts and left its log, and created CONTRACT"
     );
     assert_eq!(
         ran_history,
         body + 2 * WRITE_RECORD_SIZE * mega_evm::constants::COST_PER_HISTORY_BYTE
     );
+    assert_eq!(answered_usage, body_only(), "the answered call wrote nothing");
+    assert_eq!(answered_history, ran_history, "and its caller's charge for the records stays");
 }
 
 /* ---------- the KV count and the data size ---------- */

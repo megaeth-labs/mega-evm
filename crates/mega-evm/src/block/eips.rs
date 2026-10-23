@@ -5,7 +5,8 @@
 //! sequence of committed states, read and write sets whole, is what a node's witness generator
 //! collects through a commit hook on the block's state.
 //!
-//! A pre-block call is a system call on [`pre_block_call_gas_limit`], and a block whose
+//! A pre-block call is a system call on
+//! [`PRE_BLOCK_CALL_GAS_LIMIT`](crate::constants::PRE_BLOCK_CALL_GAS_LIMIT), and a block whose
 //! pre-block call does not succeed is refused: the state the protocol maintains before the
 //! block's transactions is not optional, and a block that could not write it is not one the
 //! chain can build on. A database error the database calls fatal is not a verdict on the block:
@@ -35,29 +36,15 @@ use revm::context::{
     Block, ContextTr, DBErrorMarker,
 };
 
-use crate::{ExternalEnvTypes, MegaEvm, SYSTEM_CALL_REGULAR_GAS_LIMIT};
+use crate::{ExternalEnvTypes, MegaEvm};
 
 /// The caller every pre-block system call runs as.
 pub use alloy_eips::eip4788::SYSTEM_ADDRESS;
 
-/// The gas limit of every pre-block system call in a block whose gas limit is `block_gas_limit`:
-/// the block's gas limit, and never less than 30,000,000.
-///
-/// It is the legacy engine's budget, kept as it was rather than replaced by a number nobody
-/// chose. The legacy engine sized it to absorb the storage gas a crowded SALT bucket multiplies,
-/// which could take a pre-block write past revm's 30M default. On Satin neither half of that
-/// holds: a system call prices its state at the minimum bucket, and it runs on at most
-/// 30,000,000 of regular gas, the rest of its gas limit being its state-gas reservoir. So what
-/// this budget adds above 30M is reservoir, which the call's writes draw first and which nobody
-/// pays for when they do not, and the regular budget is 30M whatever the block. In a block whose
-/// gas limit is 30M or less the call has no reservoir, and its writes are paid out of the
-/// regular budget, which holds them many times over.
-pub fn pre_block_call_gas_limit(block_gas_limit: u64) -> u64 {
-    block_gas_limit.max(SYSTEM_CALL_REGULAR_GAS_LIMIT)
-}
-
 /// Runs the pre-block call `name`: a system call from [`SYSTEM_ADDRESS`] to `target` with `data`,
-/// on the pre-block budget of the block `evm` is set up for ([`pre_block_call_gas_limit`]).
+/// on the pre-block budget
+/// ([`PRE_BLOCK_CALL_GAS_LIMIT`](crate::constants::PRE_BLOCK_CALL_GAS_LIMIT)), whatever the
+/// block's gas limit.
 /// Answers its result and state; nothing is committed.
 ///
 /// One rule holds for every pre-block call, and it is the rule alloy-evm's block executor holds a
@@ -82,15 +69,13 @@ where
     DB: alloy_evm::Database,
     ExtEnvs: ExternalEnvTypes,
 {
-    let gas_limit = pre_block_call_gas_limit(evm.ctx().block().gas_limit());
-    let outcome =
-        match evm.transact_system_call_with_gas_limit(SYSTEM_ADDRESS, target, data, gas_limit) {
-            Ok(outcome) => outcome,
-            Err(EVMError::Database(error)) if error.is_fatal() => {
-                return Err(BlockExecutionError::other(error))
-            }
-            Err(error) => return Err(refused(error.to_string())),
-        };
+    let outcome = match evm.transact_pre_block_system_call(SYSTEM_ADDRESS, target, data) {
+        Ok(outcome) => outcome,
+        Err(EVMError::Database(error)) if error.is_fatal() => {
+            return Err(BlockExecutionError::other(error))
+        }
+        Err(error) => return Err(refused(error.to_string())),
+    };
     if !outcome.result.is_success() {
         let message = format!("the {name} pre-block call did not succeed: {:?}", outcome.result);
         return Err(refused(message));

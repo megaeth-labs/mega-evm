@@ -9,11 +9,12 @@
 //! [`test_the_history_ledger_is_what_satin_adds_to_every_transaction`] pins what that ledger is
 //! made of. One baseline case runs above the execution cap, because a transaction that has an
 //! EIP-8037 reservoir pays its history out of it, and a charge that is given back behind the
-//! ledger's back shows up nowhere else. The six cases at the end are the ones that diverge for a
+//! ledger's back shows up nowhere else. The seven cases at the end are the ones that diverge for a
 //! reason of their own — the
 //! system contract interceptors, keyless deployment, the system-address transaction,
-//! the account a deposit creates for its sender, a crowded SALT bucket and the history ledger —
-//! and they pin both sides, so a divergence is never silently absorbed. Later changes (the
+//! the account a deposit creates for its sender, a crowded SALT bucket, a creation that destroys
+//! itself and the history ledger — and they pin both sides, so a divergence is never silently
+//! absorbed. Later changes (the
 //! limits) add their own.
 //!
 //! Every Satin transaction also reads the live system address when it is validated, which leaves
@@ -54,7 +55,8 @@ use revm::{
 
 use crate::{
     common::{
-        account_state_gas, body_history, history, runs_at_measurement_prices, slot_state_gas,
+        account_state_gas, body_history, history, holding_to_keep, runs_at_measurement_prices,
+        slot_state_gas,
     },
     op_reference::{self, Op, OpContext, Settled},
 };
@@ -775,6 +777,47 @@ fn test_a_crowded_salt_bucket_is_where_satin_leaves_op_revm() {
 
     // Everything the transaction did is the same: the fees are zero here, so the multiplier
     // moves the gas ledgers and nothing else.
+    assert_eq!(mega.result.logs(), op.result.logs(), "logs");
+    assert_eq!(mega.result.output(), op.result.output(), "output");
+    assert_eq!(but_the_system_address_read(&mega.state), op.state, "state");
+}
+
+/// A contract whose constructor destroys the account it is creating: Satin's destruction table
+/// gives back what the transaction made of an account its first effective destruction removes —
+/// here the new account's state gas, and its write record with the record's history — where
+/// EIP-8037, which op-revm runs, gives back nothing for this destruction. Everything else the two
+/// engines do is the same, so beside the history ledger the whole difference is the account's state
+/// gas.
+#[test]
+fn test_a_creation_that_destroys_itself_diverges_from_op_revm() {
+    use revm::bytecode::opcode::{ADDRESS, SELFDESTRUCT};
+
+    let code =
+        BytecodeBuilder::default().create(U256::ZERO, [ADDRESS, SELFDESTRUCT]).stop().build();
+    let db = MemoryDatabase::default().account_code(CALLEE, code);
+    // The `CREATE` pays the history of its two records out of the 2 per cent it keeps.
+    let gas_limit = 1_000_000 +
+        account_state_gas() +
+        body_history(0) +
+        holding_to_keep(history(2 * WRITE_RECORD_SIZE));
+    let tx = TxEnv { caller: CALLER, kind: TxKind::Call(CALLEE), gas_limit, ..Default::default() };
+    let (mega, op, cfg) = run_both(db, tx);
+    assert_satin_cfg(&cfg);
+    assert!(mega.result.is_success() && op.result.is_success(), "{:?}", mega.result);
+    assert!(but_the_system_address_read(&mega.state)[&CALLEE.create(0)].is_selfdestructed());
+
+    // The one difference, and its exact size.
+    let (m, o) = (mega.result.gas(), op.result.gas());
+    assert_eq!(o.state_gas_spent_final(), account_state_gas(), "op-revm keeps the account's");
+    assert_eq!(m.state_gas_spent_final(), 0, "Satin gives it back");
+    assert_eq!(
+        m.total_gas_spent() + account_state_gas(),
+        o.total_gas_spent() + mega.gas.history,
+        "beside the history ledger, the state gas given back is the whole difference",
+    );
+    // The history ledger keeps the body and the creator's record; the created account's record
+    // went with the account.
+    assert_eq!(mega.gas.history, body_history(0) + history(WRITE_RECORD_SIZE));
     assert_eq!(mega.result.logs(), op.result.logs(), "logs");
     assert_eq!(mega.result.output(), op.result.output(), "output");
     assert_eq!(but_the_system_address_read(&mega.state), op.state, "state");

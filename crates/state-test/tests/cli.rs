@@ -196,6 +196,8 @@ fn test_the_limit_options_need_satin_mode() {
         ["--limit-data-size", "1024"],
         ["--limit-frame-data-size", "1024"],
         ["--limit-compute-gas", "30000"],
+        ["--limit-kv-updates", "10"],
+        ["--limit-state-growth", "10"],
     ] {
         let mut args = vec!["--fork", "Osaka"];
         args.extend(option);

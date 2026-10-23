@@ -67,7 +67,12 @@ fn test_outcome_reports_the_ledgers() {
     );
     assert_eq!(
         outcome.usage,
-        LimitUsage { data_size: TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE, write_records: 2 }
+        LimitUsage {
+            data_size: TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE,
+            write_records: 2,
+            state_growth: 2
+        },
+        "the two write records; both slots are new"
     );
     assert_eq!(outcome.limit_exceeded, None);
 
@@ -92,14 +97,15 @@ fn test_outcome_reports_the_stop() {
         outcome.limit_exceeded,
         Some(LimitCheck::ExceedsLimit {
             kind: LimitKind::DataSize,
-            limit: TX_BODY_SIZE + 40,
-            used: TX_BODY_SIZE + 80,
-            frame_local: false
-        })
+            limit: 40,
+            used: 80,
+            frame_local: true
+        }),
+        "the transaction's own frame crossed its budget, what the body leaves of the limit"
     );
     assert_eq!(
         outcome.usage,
-        LimitUsage { data_size: TX_BODY_SIZE, write_records: 0 },
+        LimitUsage { data_size: TX_BODY_SIZE, write_records: 0, state_growth: 0 },
         "the stop drops the writes and keeps the body"
     );
 }

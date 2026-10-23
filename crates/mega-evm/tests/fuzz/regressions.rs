@@ -29,7 +29,9 @@ use crate::{
         case::Case,
         program::{End, Forward, InitCode, Op, Program, Scheme, Target},
         tx::{GasTier, Price, Shape, Tx},
-        world::{AccountShape, Balance, BeneficiaryIs, BlockShape, Limits, Salt, World},
+        world::{
+            AccountShape, Balance, BeneficiaryIs, BlockShape, Delegation, Limits, Salt, World,
+        },
         Value, Who,
     },
     harness::{history_rounds, runs_at_measurement_prices},
@@ -149,6 +151,61 @@ fn test_an_out_of_gas_before_the_first_frame_pays_the_operator_fee_on_the_whole_
     );
 }
 
+/// A sender delegated to `B` calls itself, so `B`'s program runs as the sender: it funds the
+/// account its `CREATE2` lands on, then creates it, and the init code destroys the account back to
+/// the sender. The record-count property's own check holds: the transaction reports the net change
+/// of its state, and the account it funded and created, which did not exist at the start, is taken
+/// back with its one record by its destruction, which a creation that records its created account
+/// whether or not the transaction had changed it would count twice. The case runs on the large gas
+/// tier, which the dearest byte prices do not exhaust.
+#[test]
+fn test_a_delegated_sender_that_funds_then_creates_reports_the_net_change() {
+    let mut world = plain_world();
+    world.caller.balance = Balance::Small;
+    world.delegation = Some(Delegation { delegator: Who::Caller, delegate: Who::B });
+    let b = Program {
+        ops: vec![
+            Op::Call {
+                scheme: Scheme::Call,
+                target: Target::Created { nth: 0 },
+                value: Value::One,
+                forward: Forward::All,
+                args_len: 0,
+            },
+            Op::Create {
+                value: Value::Zero,
+                salt: Some(0),
+                init: InitCode::Selfdestructs { to: Who::Caller },
+            },
+        ],
+        end: End::Stop,
+    };
+    let case = Case {
+        world,
+        tx: Tx {
+            shape: Shape::Call { to: Who::Caller, data_len: 0, access_list: vec![] },
+            value: Value::Zero,
+            gas: GasTier::Large,
+            price: Price::Free,
+            nonce_ok: true,
+        },
+        main: stop(),
+        a: stop(),
+        b,
+    };
+    let execution = case.execute();
+    let rendered = render(&execution);
+    let outcome = execution.as_ref().expect("the transaction is valid");
+    assert!(outcome.result.is_success(), "{rendered}");
+    if let Err(error) = crate::properties::check_record_count(&case) {
+        panic!("{error}\n{rendered}");
+    }
+    assert_eq!(
+        outcome.usage.write_records, 0,
+        "the account funded and created goes with its destruction\n{rendered}"
+    );
+}
+
 /// A program that funds the account its `CREATE2` lands on, named by [`Target::Created`], then
 /// creates it, keeps one record for the account and one for itself: the transfer changed both, so
 /// neither the creation nor the bump of the program's nonce adds a record. The creation lands on
@@ -210,8 +267,10 @@ fn test_a_program_that_funds_the_account_it_then_creates_keeps_one_record_for_it
         LimitUsage {
             data_size: body + 2 * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE,
             write_records: 2,
+            state_growth: 1,
         },
-        "the contract and the account it funded and created, and the transfer log\n{rendered}"
+        "the contract and the account it funded and created, and the transfer log; the funding \
+         made the account, so the creation onto it adds none\n{rendered}"
     );
     if !history_rounds() {
         assert_eq!(

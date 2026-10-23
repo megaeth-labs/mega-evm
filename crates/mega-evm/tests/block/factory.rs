@@ -151,16 +151,20 @@ fn test_direct_construction_stops_a_transaction_over_the_blocks_data_size_limit(
         outcome.limit_exceeded,
         Some(LimitCheck::ExceedsLimit {
             kind: LimitKind::DataSize,
-            limit: DATA_SIZE_LIMIT,
-            used: mega_evm::TX_BODY_SIZE + 2 * 40,
-            frame_local: false,
-        })
+            limit: DATA_SIZE_LIMIT - mega_evm::TX_BODY_SIZE,
+            used: 2 * 40,
+            frame_local: true,
+        }),
+        "the transaction's own frame crosses its budget, what the body leaves of the limit"
     );
     match &outcome.result {
         ExecutionResult::Revert { output, .. } => assert_eq!(
             output.as_ref(),
-            MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit: DATA_SIZE_LIMIT }
-                .abi_encode(),
+            MegaLimitExceeded {
+                kind: LimitKind::DataSize.as_u8(),
+                limit: DATA_SIZE_LIMIT - mega_evm::TX_BODY_SIZE,
+            }
+            .abi_encode(),
             "the stop's revert data"
         ),
         other => panic!("expected a revert-class stop, got {other:?}"),

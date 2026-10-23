@@ -48,16 +48,17 @@ fn call_frame(code: revm::state::Bytecode, data: Bytes, gas_limit: u64) -> Frame
             is_static: false,
             charged_new_account_state_gas: false,
             charged_start: Default::default(),
-            bytes_share: u64::MAX,
+            pool_shares: revm::interpreter::PoolAmounts::UNLIMITED,
             history_allowance: 0,
         })),
     }
 }
 
-/// The call is a frame on revm's stack, driven through revm's frame lifecycle by hand: revm builds
-/// it at depth 0; its first run starts the creation as its child, at depth 1, which revm builds
-/// above it on the stack; the creation returns into it; and on its resume it answers in the ABI,
-/// as the outermost frame.
+/// The call is a frame on revm's stack, driven through revm's frame lifecycle by hand, as revm's
+/// loop drives it, a frame's run result handed over before it returns: revm builds it at depth 0;
+/// its first run starts the creation as its child, at depth 1, which revm builds above it on the
+/// stack; the creation returns into it; and on its resume it answers in the ABI, as the outermost
+/// frame.
 #[test]
 fn test_the_call_is_a_frame_on_revms_stack() {
     let deployment = Deployment::new(deploying(&runtime(1)));
@@ -88,17 +89,19 @@ fn test_the_call_is_a_frame_on_revms_stack() {
     };
     assert_eq!(EvmTr::frame_stack(&mut evm).index(), Some(1), "above the call on the stack");
 
-    let ItemOrResult::Result(created) = EvmTr::frame_run(&mut evm).unwrap() else {
+    let ItemOrResult::Result(mut created) = EvmTr::frame_run(&mut evm).unwrap() else {
         panic!("the creation runs to its end");
     };
+    EvmTr::frame_run_result(&mut evm, &mut created).unwrap();
     assert!(matches!(&created, FrameResult::Create(outcome) if outcome.result.is_ok()));
     let returned = EvmTr::frame_return_result(&mut evm, created).unwrap();
     assert!(returned.is_none(), "the creation returns into the call");
     assert_eq!(EvmTr::frame_stack(&mut evm).index(), Some(0));
 
-    let ItemOrResult::Result(answer) = EvmTr::frame_run(&mut evm).unwrap() else {
+    let ItemOrResult::Result(mut answer) = EvmTr::frame_run(&mut evm).unwrap() else {
         panic!("the call answers on its resume");
     };
+    EvmTr::frame_run_result(&mut evm, &mut answer).unwrap();
     let answer = EvmTr::frame_return_result(&mut evm, answer).unwrap();
     let Some(FrameResult::Call(outcome)) = answer else {
         panic!("the call is the outermost frame: {answer:?}");

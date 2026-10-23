@@ -71,7 +71,7 @@ fn call_frame_init(depth: usize) -> FrameInit {
             reservoir: RESERVOIR,
             charged_new_account_state_gas: false,
             charged_start: Default::default(),
-            bytes_share: u64::MAX,
+            pool_shares: revm::interpreter::PoolAmounts::UNLIMITED,
             history_allowance: 0,
         })),
     }
@@ -201,10 +201,12 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for AlwaysAnsw
     }
 }
 
-/// An inspector's answer to a call past the limit gives way to `CallTooDeep`, and the inspector
-/// still sees the call end.
+/// An inspector's answer to a call past the limit is taken as given, as revm's inspected frame
+/// start takes it: the depth guard is the engine's frame start, which a frame the inspector
+/// answers never reaches, so the answer is the inspector's `Stop` on the gas it built, and the
+/// inspector sees the call end.
 #[test]
-fn test_inspect_frame_init_depth_guard_overrides_inspector() {
+fn test_an_inspectors_answer_past_the_depth_limit_is_taken_as_given() {
     let mut evm =
         MegaEvm::new(context(MemoryDatabase::default())).with_inspector(AlwaysAnswers::default());
     let result = InspectorEvmTr::inspect_frame_init(
@@ -212,8 +214,12 @@ fn test_inspect_frame_init_depth_guard_overrides_inspector() {
         call_frame_init(CALL_STACK_LIMIT as usize + 1),
     )
     .expect("inspect_frame_init does not fail");
-    let ItemOrResult::Result(result) = result else { panic!("the frame was answered") };
-    assert_call_too_deep(&result);
+    let ItemOrResult::Result(FrameResult::Call(outcome)) = result else {
+        panic!("the frame was answered")
+    };
+    assert_eq!(outcome.result.result, InstructionResult::Stop, "the inspector's answer");
+    assert_eq!(outcome.result.gas.remaining(), GAS_LIMIT, "on the gas the inspector built");
+    assert_eq!(outcome.result.gas.reservoir(), 0, "which carries no reservoir");
     assert_eq!(
         (evm.inspector().calls, evm.inspector().call_ends),
         (1, 1),
@@ -242,62 +248,6 @@ fn test_stopped_first_frame_keeps_the_reservoir_at_any_gas_limit() {
     assert_eq!(large_reservoir, 1_000_000_000 - TX_GAS_LIMIT_CAP - body_history(0));
     assert_eq!(small.tx_gas_used(), large.tx_gas_used());
     assert_eq!(small.state_gas_spent_final(), large.state_gas_spent_final());
-}
-
-/// `settle_frame_result` settles a result into its caller's gas exactly as revm's frame return
-/// does, for a success, a revert and a halt, with state gas drawn from the reservoir and spilled
-/// onto regular gas.
-#[test]
-fn test_settle_frame_result_matches_revms_frame_return() {
-    use mega_evm::{settle_frame_result, synthetic_frame_result};
-    use revm::context::result::EVMError;
-
-    for result_kind in
-        [InstructionResult::Stop, InstructionResult::Revert, InstructionResult::OutOfGas]
-    {
-        let code = Bytes::from_static(&[revm::bytecode::opcode::STOP]);
-        let mut evm =
-            MegaEvm::new(context(MemoryDatabase::default().account_code(TARGET, code.clone())));
-        let journal = evm.ctx_mut().journal_mut();
-        journal.load_account(CALLER).unwrap();
-        journal.load_account(TARGET).unwrap();
-        let mut caller_init = call_frame_init(1);
-        if let FrameInput::Call(inputs) = &mut caller_init.frame_input {
-            let bytecode = revm::state::Bytecode::new_raw(code.clone());
-            inputs.known_bytecode = (bytecode.hash_slow(), bytecode);
-        }
-        let ItemOrResult::Item(_) = EvmTr::frame_init(&mut evm, caller_init).unwrap() else {
-            panic!("the caller frame is built");
-        };
-
-        // The child the caller starts: 30,000 gas of the caller's, and its reservoir.
-        let (ctx, _, _, frames) = EvmTr::all_mut(&mut evm);
-        let caller_frame = frames.get();
-        assert!(caller_frame.interpreter.gas.record_regular_cost(30_000));
-        let child_input = {
-            let FrameInput::Call(mut inputs) = call_frame_init(2).frame_input else {
-                unreachable!()
-            };
-            inputs.gas_limit = 30_000;
-            inputs.reservoir = caller_frame.interpreter.gas.reservoir();
-            FrameInput::Call(inputs)
-        };
-        let mut result = synthetic_frame_result(&child_input, result_kind, Bytes::new());
-        // The child spent regular gas, and state gas beyond the reservoir that spilled.
-        let child_gas = result.gas_mut();
-        assert!(child_gas.record_regular_cost(1_000));
-        assert!(child_gas.record_state_cost(RESERVOIR + 500));
-
-        let mut expected = *caller_frame.interpreter.gas.tracker();
-        settle_frame_result::<_, EVMError<core::convert::Infallible>>(
-            ctx,
-            &mut expected,
-            &mut result.clone(),
-        )
-        .unwrap();
-        caller_frame.return_result::<_, EVMError<core::convert::Infallible>>(ctx, result).unwrap();
-        assert_eq!(caller_frame.interpreter.gas.tracker(), &expected, "{result_kind:?}");
-    }
 }
 
 /// A gas limit below the execution cap: the transaction has no state-gas reservoir.
@@ -524,13 +474,14 @@ fn test_the_keyless_value_refusal_keeps_the_reservoir() {
 }
 
 /// A `keylessDeploy` call forwarded less regular gas than the overhead runs out of gas on its
-/// first run, with the reservoir it inherited carried, and that result settles into a caller
-/// exactly as revm's own frame return settles a frame that ran out.
+/// first action, with the reservoir it inherited carried: the frame revm built for it ends before
+/// it runs, and its frame start returns the out-of-gas as an answer is returned. revm's frame
+/// return hands its caller none of the call's regular gas back and the reservoir whole, as for
+/// any frame that ran out.
 #[test]
 fn test_a_keyless_call_below_the_overhead_runs_out_of_gas() {
     use core::convert::Infallible;
 
-    use mega_evm::settle_frame_result;
     use revm::context::result::EVMError;
 
     let forwarded = KEYLESS_DEPLOY_OVERHEAD_GAS - 1;
@@ -540,15 +491,12 @@ fn test_a_keyless_call_below_the_overhead_runs_out_of_gas() {
     journal.load_account(CALLER).unwrap();
     journal.load_account_with_code(KEYLESS_DEPLOY_ADDRESS).unwrap();
     let init = call_frame_init_to(0, KEYLESS_DEPLOY_ADDRESS, keyless_deploy_call(), forwarded);
-    let ItemOrResult::Item(_) =
+    let ItemOrResult::Result(result) =
         EvmTr::frame_init(&mut evm, init).expect("frame_init does not fail")
-    else {
-        panic!("the call's frame is built");
-    };
-    let ItemOrResult::Result(result) = EvmTr::frame_run(&mut evm).expect("frame_run does not fail")
     else {
         panic!("a call that cannot pay the overhead starts no creation");
     };
+    assert_eq!(EvmTr::all(&evm).3.index(), None, "the call's frame is off the stack");
     let FrameResult::Call(outcome) = &result else { panic!("expected a call result: {result:?}") };
     assert_eq!(outcome.result.result, InstructionResult::OutOfGas);
     assert!(outcome.result.output.is_empty());
@@ -572,9 +520,13 @@ fn test_a_keyless_call_below_the_overhead_runs_out_of_gas() {
 
     let (ctx, _, _, frames) = EvmTr::all_mut(&mut evm);
     let caller_frame = frames.get();
-    let mut expected = *caller_frame.interpreter.gas.tracker();
-    settle_frame_result::<_, EVMError<Infallible>>(ctx, &mut expected, &mut result.clone())
-        .unwrap();
+    let before = *caller_frame.interpreter.gas.tracker();
+    // The call's opcode took the reservoir the answer carries out of the caller, which the answer's
+    // return adds back to what the caller kept.
+    caller_frame.interpreter.gas.tracker_mut().forward_reservoir(result.gas().reservoir());
     caller_frame.return_result::<_, EVMError<Infallible>>(ctx, result).unwrap();
-    assert_eq!(caller_frame.interpreter.gas.tracker(), &expected);
+    let after = caller_frame.interpreter.gas.tracker();
+    assert_eq!(after.remaining(), before.remaining(), "a halt hands none of its gas back");
+    assert_eq!(after.reservoir(), RESERVOIR, "and the inherited reservoir comes back whole");
+    assert_eq!(after.state_gas_spent(), before.state_gas_spent());
 }

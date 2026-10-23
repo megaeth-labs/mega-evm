@@ -1,7 +1,7 @@
 //! Gas detention against every other reader of a frame's gas, and against every out-of-gas.
 //!
 //! A detained frame's spendable gas is held at what the limit leaves the transaction, and the rest
-//! is withheld: only a regular charge sees the difference. `GAS`, the 63/64 forward, the `SSTORE`
+//! is withheld: only a regular charge sees the difference. `GAS`, the 98/100 forward, the `SSTORE`
 //! sentry, the skip-cold checks and a callee's inheritance see the whole regular gas. So a
 //! transaction that reads volatile data runs as it does without the read — the same result and the
 //! same bill on every ledger — unless its compute crosses the limit, which is a regular charge the
@@ -426,8 +426,8 @@ fn test_a_callees_out_of_gas_is_caught_as_without_the_read() {
 ///
 /// The callee's charge fails on an operand, a memory expansion, a hash, four copies, a log and an
 /// invalid opcode, all on all the gas; and on the history of the write records a value call makes,
-/// after the call forwarded 63/64 of its gas to a frame that never starts. That callee is given
-/// 400,000, or less where it would pay that history out of the 64th it keeps, and its caller
+/// after the call forwarded 98/100 of its gas to a frame that never starts. That callee is given
+/// 400,000, or less where it would pay that history out of the fiftieth it keeps, and its caller
 /// computes twenty rounds further, so the limit is left less than the callee forwards. Above the
 /// execution cap the reservoir pays that history, so that case runs below it. A precompile that
 /// rejects its input halts without running a frame, and burns all it was forwarded too.
@@ -456,12 +456,13 @@ fn test_what_a_halting_callee_burns_is_not_compute() {
     ];
     // 6,396 rounds: 19,878,768 of compute before the call.
     let rounds = 6_396;
-    // The value call's callee keeps a 64th of what it has at its `CALL`, which has to be less than
-    // the history of the records the call makes. It spends at most 40,000 before the forward — the
-    // value transfer, the new account and the cold access. Where 64 times that history is under
-    // 100,000, as where a history byte costs nothing, the callee cannot also forward past the
-    // margin its caller leaves, and the case has nothing to show.
-    let middle_gas = (64 * history(2 * WRITE_RECORD_SIZE)).saturating_sub(1).min(400_000);
+    // The value call's callee keeps a fiftieth of what it has at its `CALL` once the forward is
+    // taken, which has to be less than the history of the records the call makes: given less than
+    // 50 times that history, it keeps less whatever it spends before the forward — the value
+    // transfer, the new account and the cold access. Where 50 times that history is under 100,000,
+    // as where a history byte costs nothing, the callee cannot also forward past the margin its
+    // caller leaves, and the case has nothing to show.
+    let middle_gas = (50 * history(2 * WRITE_RECORD_SIZE)).saturating_sub(1).min(400_000);
     for gas_limit in TIERS {
         for (name, callee) in &cases {
             let records = name.starts_with("a value call");
@@ -486,11 +487,11 @@ fn test_what_a_halting_callee_burns_is_not_compute() {
             assert_eq!(slot(&detained, 0), Some(U256::ZERO), "{name}: the call failed");
             if records {
                 // `MIDDLE` halted on all it was given; the rest of the regular ledger is compute,
-                // and it leaves the limit less than the 63/64 `MIDDLE` forwarded, so counting that
+                // and it leaves the limit less than the 98/100 `MIDDLE` forwarded, so counting that
                 // forward as compute would have stopped the transaction.
                 let compute = plain.outcome.gas.regular - intrinsic(gas_limit) - middle_gas;
                 let margin = detained.limit.unwrap() - compute;
-                let forwarded = (middle_gas - 40_000) * 63 / 64;
+                let forwarded = (middle_gas - 40_000) * 98 / 100;
                 assert!(margin < forwarded, "{name}: {margin} short of the limit");
             }
         }
@@ -1802,38 +1803,34 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for AnswersPastThe
     }
 }
 
-/// An answer past the allowance is the stop, billed the intrinsic gas alone, whatever state or
-/// history gas the answer charged: the answer's spending is the charge that crossed, so none of it
-/// is made, and the frame, detained from its start, computed nothing before it. Below the
-/// execution cap the state or history gas spills onto regular gas and the stop's revert gives it
-/// back; above the cap the reservoir pays it and nothing spills.
+/// An inspector's answer is taken as given, as revm's inspected frame start takes it: gas
+/// detention holds the engine's answers to the compute limit, and an inspector's answer never
+/// reaches the engine's frame start. An answer to a frame detained from its start that spent past
+/// the cap, with state or history gas on top, is no stop: the transaction succeeds and is billed
+/// what the answer spent, the regular gas on the regular ledger and the state or history gas on
+/// its own, below the execution cap where it spills onto regular gas and above it where the
+/// reservoir pays it.
 #[test]
-fn test_an_answer_past_the_allowance_with_a_spill_is_billed_nothing_of_it() {
+fn test_an_inspectors_answer_to_the_transactions_frame_past_the_cap_is_taken_as_given() {
     for gas_limit in TIERS {
         for history in [false, true] {
+            let case = format!("{gas_limit}, history {history}");
             let db = MemoryDatabase::default().account_code(CONTRACT, Bytes::from_static(&[STOP]));
-            let intrinsic = run_on(
+            let plain = run_on(
                 &mut MegaEvm::new(context(db.clone())),
                 tx(BENEFICIARY, CONTRACT, gas_limit),
             )
             .outcome
-            .gas
-            .regular;
+            .gas;
             let mut evm =
                 MegaEvm::new(context(db)).with_inspector(AnswersPastTheCapWithASpill { history });
             let run = run_on(&mut evm, tx(BENEFICIARY, CONTRACT, gas_limit));
-            assert_eq!(run.outcome.result.output(), Some(&stop_data(CAP)), "{gas_limit} {history}");
-            assert_eq!(
-                run.outcome.limit_exceeded,
-                Some(LimitCheck::ExceedsLimit {
-                    kind: LimitKind::ComputeGas,
-                    limit: CAP,
-                    used: 0,
-                    frame_local: false
-                }),
-                "{gas_limit}, history {history}"
-            );
-            assert_eq!(run.outcome.gas.regular, intrinsic, "{gas_limit}, history {history}");
+            assert!(run.outcome.result.is_success(), "{case}: {:?}", run.outcome.result);
+            assert_eq!(run.outcome.limit_exceeded, None, "{case}: no stop");
+            assert_eq!(run.outcome.gas.regular, plain.regular + CAP + 1, "{case}: regular");
+            let (state, kept_history) = if history { (0, 1_000) } else { (1_000, 0) };
+            assert_eq!(run.outcome.gas.state, plain.state + state, "{case}: state");
+            assert_eq!(run.outcome.gas.history, plain.history + kept_history, "{case}: history");
         }
     }
 }

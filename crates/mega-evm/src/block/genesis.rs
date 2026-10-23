@@ -304,13 +304,16 @@ impl<'de> Visitor<'de> for EntryVisitor {
     /// `arbitrary_precision` feature, which a node's dependencies may switch on, hands every number
     /// over as a one-entry map from [`ARBITRARY_PRECISION_NUMBER`] to the number's text. That
     /// number is read as the same number is read without the feature, so the feature changes
-    /// nothing a reader accepts.
+    /// nothing a reader accepts: its text is decimal digits alone, with no sign, which a JSON
+    /// number cannot carry and `u64::from_str` would otherwise take.
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Entry, A::Error> {
         let mut entry = Entry::Other;
         if let Some(key) = map.next_key::<String>()? {
             if key == ARBITRARY_PRECISION_NUMBER {
                 let text = map.next_value::<String>()?;
-                entry = text.parse::<u64>().map_or(Entry::Other, Entry::Unsigned);
+                if text.bytes().all(|byte| byte.is_ascii_digit()) {
+                    entry = text.parse::<u64>().map_or(Entry::Other, Entry::Unsigned);
+                }
             } else {
                 map.next_value::<IgnoredAny>()?;
             }
@@ -547,8 +550,9 @@ mod tests {
     }
 
     /// A number `serde_json` hands over as its `arbitrary_precision` feature does — a map from
-    /// its token to the number's text — reads as the number, and what the text does not hold as
-    /// an integer in 64 bits is refused as the number would be; any other map is refused.
+    /// its token to the number's text — reads as the number. Text that is not an integer in 64
+    /// bits written in decimal digits alone — with a sign before them, for one — is refused as the
+    /// number would be; any other map is refused.
     #[test]
     fn test_an_arbitrary_precision_number_reads_as_the_number() {
         let with_time = |value: Value| {
@@ -564,7 +568,9 @@ mod tests {
             key: SATIN_TIME_KEY,
             expected: "an integer from 0 to 2^64 - 1",
         });
-        for text in ["1.5", "-1", "18446744073709551616", "1e3"] {
+        // Decimal digits alone: no sign, which `u64::from_str` would take and the number form
+        // cannot carry.
+        for text in ["1.5", "-1", "+7", "+1800000000", "", "18446744073709551616", "1e3"] {
             assert_eq!(with_time(number(text)), refused, "{text}");
         }
         let mut two = number("1");

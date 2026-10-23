@@ -21,7 +21,7 @@ use mega_evm::{
     test_utils::{is_transfer_log, op_transaction, BytecodeBuilder, MemoryDatabase},
     untouched_create_gas, EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaTransaction,
     MegaTransactionOutcome, ACCESS_LIST_ADDRESS_SIZE, ACCESS_LIST_SLOT_SIZE, AUTHORIZATION_SIZE,
-    LOG_BASE_SIZE, LOG_TOPIC_SIZE, STORAGE_CALL_STIPEND_BYTES, TRANSFER_LOG_SIZE, TX_BODY_SIZE,
+    HISTORY_ALLOWANCE_BYTES, LOG_BASE_SIZE, LOG_TOPIC_SIZE, TRANSFER_LOG_SIZE, TX_BODY_SIZE,
     WRITE_RECORD_SIZE,
 };
 use revm::{
@@ -240,9 +240,11 @@ impl Inspector<MegaContext<MemoryDatabase>, EthInterpreter> for AnswersCreations
     }
 }
 
-/// A creation answered without running deposits nothing, whatever the answer's output: the bytes
-/// the transaction reports are what the history ledger charged for, and the charge its caller made
-/// for the creation's records comes back with the creation that never made them.
+/// A creation answered without running deposits nothing, whatever the answer's output: no byte of
+/// code is counted. The answer is taken as given, as revm takes it: no record is counted, the
+/// creator's nonce never having been bumped, and what the `CREATE` was charged for the records its
+/// start would make stays charged, so the history ledger carries both records beyond the bytes the
+/// transaction reports.
 #[test]
 fn test_a_creation_answered_without_running_appends_no_code() {
     if runs_at_measurement_prices() {
@@ -256,9 +258,13 @@ fn test_a_creation_answered_without_running_appends_no_code() {
             .expect("the transaction is valid");
 
         assert!(outcome.result.is_success(), "{:?}", outcome.result);
-        assert_eq!(outcome.usage.write_records, 0, "the creation that never ran wrote nothing");
-        assert_eq!(outcome.gas.history_bytes, TX_BODY_SIZE, "and appended nothing: its body");
-        assert_eq!(outcome.gas.history, TX_BODY_SIZE * CPHB);
+        assert_eq!(outcome.usage.write_records, 0, "no bump, no record");
+        assert_eq!(outcome.gas.history_bytes, TX_BODY_SIZE, "the body alone: no record, no code");
+        assert_eq!(
+            outcome.gas.history,
+            (TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE) * CPHB,
+            "the two records' history stays charged"
+        );
         assert_reservoir_paid("a creation answered without running", gas_limit, &outcome);
     }
 }
@@ -440,7 +446,7 @@ fn test_the_bytes_exceed_the_history_gas_by_what_the_allowances_paid() {
                     .account_code(RECEIVER, event().stop().build())
             },
             TX_BODY_SIZE + transfer + log_bytes(3, 32),
-            STORAGE_CALL_STIPEND_BYTES,
+            HISTORY_ALLOWANCE_BYTES,
         ),
         (
             "an event larger than the allowance: the receiver's gas pays the rest",
@@ -449,7 +455,7 @@ fn test_the_bytes_exceed_the_history_gas_by_what_the_allowances_paid() {
                     .account_code(RECEIVER, log(BytecodeBuilder::default(), 3, 64).stop().build())
             },
             TX_BODY_SIZE + transfer + log_bytes(3, 64),
-            STORAGE_CALL_STIPEND_BYTES,
+            HISTORY_ALLOWANCE_BYTES,
         ),
         (
             "two events: the allowance pays the first",
@@ -459,7 +465,7 @@ fn test_the_bytes_exceed_the_history_gas_by_what_the_allowances_paid() {
                     .account_code(RECEIVER, code)
             },
             TX_BODY_SIZE + transfer + 2 * log_bytes(3, 32),
-            STORAGE_CALL_STIPEND_BYTES,
+            HISTORY_ALLOWANCE_BYTES,
         ),
         (
             "the receiver reverts: the event is not appended, and the transfer's records neither",
@@ -485,7 +491,7 @@ fn test_the_bytes_exceed_the_history_gas_by_what_the_allowances_paid() {
             },
             // The sender's account is written once; each receiver's once.
             TX_BODY_SIZE + 3 * WRITE_RECORD_SIZE + 2 * log_bytes(3, 32),
-            2 * STORAGE_CALL_STIPEND_BYTES,
+            2 * HISTORY_ALLOWANCE_BYTES,
         ),
     ];
 
@@ -542,8 +548,6 @@ enum Run {
     /// Under a transaction data-size limit of this many bytes, which a frame below the
     /// transaction's own crosses, whose caller catches the stop.
     Caught(u64),
-    /// With an inspector that answers every creation without running it.
-    AnsweringCreations,
 }
 
 /// The history bytes a transaction reports and the data size it kept are counted from one byte
@@ -562,7 +566,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
     let hint = hint_call().len() as u64;
     type Case =
         (&'static str, fn() -> MemoryDatabase, fn(u64) -> MegaTransaction, Run, u64, u64, u64);
-    let cases: [Case; 35] = [
+    let cases: [Case; 34] = [
         (
             "the body",
             || callee_running(BytecodeBuilder::default()),
@@ -733,15 +737,6 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             || beside_access_control(asks_access_control(BytecodeBuilder::default(), 1)),
             |gas| call(CALLER, CALLEE, U256::ZERO, gas),
             Run::Plain,
-            TX_BODY_SIZE,
-            0,
-            0,
-        ),
-        (
-            "a creation an inspector answers without running it",
-            || callee_running(creating(BytecodeBuilder::default(), &deploying())),
-            |gas| call(CALLER, CALLEE, U256::ZERO, gas),
-            Run::AnsweringCreations,
             TX_BODY_SIZE,
             0,
             0,
@@ -937,21 +932,13 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
         for gas_limit in GAS_LIMITS {
             let limit = match run {
                 Run::Limited(limit) | Run::Caught(limit) => limit,
-                Run::Plain | Run::AnsweringCreations => u64::MAX,
+                Run::Plain => u64::MAX,
             };
             // A limit the body alone crosses would stop every case before its first write, and the
             // case would pin the body's stop rather than its own.
             assert!(limit > TX_BODY_SIZE, "{name}: the body fits under the limit");
             let mut evm = MegaEvm::new(context(db()).with_tx_runtime_limits(limited_to(limit)));
-            let outcome = match run {
-                Run::AnsweringCreations => {
-                    evm.with_inspector(AnswersCreations).execute_transaction(tx(gas_limit))
-                }
-                Run::Plain | Run::Limited(_) | Run::Caught(_) => {
-                    evm.execute_transaction(tx(gas_limit))
-                }
-            }
-            .expect("the transaction is valid");
+            let outcome = evm.execute_transaction(tx(gas_limit)).expect("the transaction is valid");
             assert_eq!(
                 outcome.limit_exceeded.is_some(),
                 matches!(run, Run::Limited(_)),

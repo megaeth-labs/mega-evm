@@ -6,7 +6,9 @@
 //! crosses again stops it in turn. A transaction whose own frame is stopped settles like an
 //! EIP-8037 revert: the sender gets the unspent regular gas and the whole reservoir back. A real
 //! out-of-gas still halts and burns. The limit here is the configurable data-size cap of
-//! `EvmTxRuntimeLimits`; a write record is 40 bytes.
+//! `EvmTxRuntimeLimits`; a write record is 40 bytes. A frame that crosses the transaction's limit
+//! crosses its own budget too — the budgets of the frames on the stack add up to what the
+//! transaction has left — and the stop names the budget, which is tested first.
 
 use alloy_evm::Evm;
 use alloy_primitives::{address, Address, Bytes, U256};
@@ -150,16 +152,19 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Probe {
 /// Crossing the cap at depth 3 reverts `D` alone, and every caller resumes, held to what the
 /// transaction has left: `C`'s log after its second write crosses the cap again and stops `C`,
 /// `B` writes and logs within it, and `A`'s second write crosses it once more and stops the
-/// transaction's own frame, which takes back everything below it. Each stop names the cap, and
-/// at no point does the transaction keep more than it.
+/// transaction's own frame, which takes back everything below it. At no point does the
+/// transaction keep more than the cap.
 ///
 /// What each crossing reached, above the body: `A`, `B`, `C` and `D`'s first writes are four
 /// records (160 bytes), and `D`'s second makes 200; `C`'s second write makes 160 again, and its
-/// log 192; `B`'s second write and log make 152; `A`'s second write 192.
+/// log 192; `B`'s second write and log make 152; `A`'s second write 192. Each crossing crosses the
+/// frame's own budget too, so each stop names that budget: `A`'s is the 180 the transaction has
+/// left; `B` gets 98% of the 140 `A` has after its write, 137; `C` 98% of `B`'s 97, 95; `D` 98% of
+/// `C`'s 55, 53.
 #[test]
 fn test_cap_crossed_at_depth_three_stops_each_frame_that_crosses_it() {
     let limit = mega_evm::TX_BODY_SIZE + 180;
-    let stop = limit_exceeded(LimitKind::DataSize, limit);
+    let stop = |budget| limit_exceeded(LimitKind::DataSize, budget);
     for inspect in [false, true] {
         let mut evm = evm_with(
             chain(),
@@ -169,16 +174,16 @@ fn test_cap_crossed_at_depth_three_stops_each_frame_that_crosses_it() {
         alloy_evm::Evm::set_inspector_enabled(&mut evm, inspect);
         let outcome = evm.execute_transaction(call(CALLER, A, U256::ZERO, GAS_LIMIT)).unwrap();
 
-        assert_stopped(&outcome.result, LimitKind::DataSize, limit);
+        assert_stopped(&outcome.result, LimitKind::DataSize, 180);
         assert_eq!(
             outcome.limit_exceeded,
             Some(LimitCheck::ExceedsLimit {
                 kind: LimitKind::DataSize,
-                limit,
-                used: mega_evm::TX_BODY_SIZE + 192,
-                frame_local: false
+                limit: 180,
+                used: 192,
+                frame_local: true
             }),
-            "A's own crossing produced its result"
+            "A's own crossing of its budget produced its result"
         );
         assert!(outcome.result.logs().is_empty());
         for account in [A, B, C, D] {
@@ -196,10 +201,10 @@ fn test_cap_crossed_at_depth_three_stops_each_frame_that_crosses_it() {
             assert_eq!(
                 probe.call_results,
                 vec![
-                    (D, InstructionResult::Revert, stop.clone()),
-                    (C, InstructionResult::Revert, stop.clone()),
+                    (D, InstructionResult::Revert, stop(53)),
+                    (C, InstructionResult::Revert, stop(95)),
                     (B, InstructionResult::Stop, Bytes::new()),
-                    (A, InstructionResult::Revert, stop.clone()),
+                    (A, InstructionResult::Revert, stop(180)),
                 ],
                 "each frame that crossed returned the stop, the deepest first"
             );
@@ -213,7 +218,7 @@ fn test_cap_crossed_at_depth_three_stops_each_frame_that_crosses_it() {
 fn test_stop_refills_the_reservoir_at_any_gas_limit() {
     let at = |gas_limit: u64| {
         let result = run(chain(), cap(180), call(CALLER, A, U256::ZERO, gas_limit));
-        assert_stopped(&result.result, LimitKind::DataSize, mega_evm::TX_BODY_SIZE + 180);
+        assert_stopped(&result.result, LimitKind::DataSize, 180);
         result
     };
     let small = at(100_000_000);
@@ -275,9 +280,10 @@ fn test_child_out_of_gas_under_a_cap_is_no_stop() {
         result.usage,
         mega_evm::LimitUsage {
             data_size: mega_evm::TX_BODY_SIZE + mega_evm::WRITE_RECORD_SIZE,
-            write_records: 1
+            write_records: 1,
+            state_growth: 1,
         },
-        "A's record alone, which meets the cap and does not cross it"
+        "A's record alone, which meets the cap and does not cross it, and its fresh slot"
     );
 }
 
@@ -293,13 +299,17 @@ fn test_cap_crossed_before_the_first_frame_reverts_without_running() {
     let funded = || MemoryDatabase::default().account_balance(CALLER, U256::from(1_000_000));
     let mut evm = evm_with(funded().account_code(B, writer()), cap(39), Probe::default());
     let result = evm.transact_raw(call(CALLER, B, U256::from(5), GAS_LIMIT)).unwrap();
-    assert_stopped(&result.result, LimitKind::DataSize, mega_evm::TX_BODY_SIZE + 39);
+    assert_stopped(&result.result, LimitKind::DataSize, 39);
     assert!(evm.inspector().steps.is_empty(), "the recipient's code never ran");
     assert_eq!(result.state.get(&B).map(|b| b.info.balance).unwrap_or_default(), U256::ZERO);
 
     assert_eq!(
         evm.ctx().limit_usage(),
-        mega_evm::LimitUsage { data_size: mega_evm::TX_BODY_SIZE, write_records: 0 },
+        mega_evm::LimitUsage {
+            data_size: mega_evm::TX_BODY_SIZE,
+            write_records: 0,
+            state_growth: 0
+        },
         "the body stays; the recipient record does not"
     );
 
@@ -372,7 +382,11 @@ fn test_frame_budget_of_the_outermost_frame_reverts_the_transaction() {
     );
     assert_eq!(
         result.usage,
-        mega_evm::LimitUsage { data_size: mega_evm::TX_BODY_SIZE, write_records: 0 },
+        mega_evm::LimitUsage {
+            data_size: mega_evm::TX_BODY_SIZE,
+            write_records: 0,
+            state_growth: 0
+        },
         "the body is all the transaction keeps"
     );
 }
@@ -401,7 +415,11 @@ fn test_the_stop_does_not_outlive_its_transaction() {
     assert!(!stopped(&evm));
     assert_eq!(
         evm.ctx().limit_usage(),
-        mega_evm::LimitUsage { data_size: mega_evm::TX_BODY_SIZE, write_records: 0 },
+        mega_evm::LimitUsage {
+            data_size: mega_evm::TX_BODY_SIZE,
+            write_records: 0,
+            state_growth: 0
+        },
         "an empty call keeps its body"
     );
 
@@ -430,7 +448,7 @@ fn test_create_transaction_stopped_before_its_first_frame_bumps_the_nonce() {
     let room = init_code.len() as u64 + mega_evm::WRITE_RECORD_SIZE - 1;
     let tx = crate::common::create(CALLER, init_code.clone(), GAS_LIMIT);
     let result = run(MemoryDatabase::default(), cap(room), tx);
-    assert_stopped(&result.result, LimitKind::DataSize, mega_evm::TX_BODY_SIZE + room);
+    assert_stopped(&result.result, LimitKind::DataSize, room - init_code.len() as u64);
     assert!(result.limit_exceeded.is_some());
     assert_eq!(result.state[&CALLER].info.nonce, 1, "the sender's nonce is bumped");
     assert!(result.state.get(&CALLER.create(0)).is_none_or(|a| a.info.is_empty_code_hash()));
@@ -458,7 +476,7 @@ fn test_usage_equal_to_the_limit_does_not_stop() {
     let result = run(db(), budget, call(CALLER, A, U256::ZERO, GAS_LIMIT));
     assert!(result.result.is_success(), "{:?}", result.result);
     let result = run(db(), cap(119), call(CALLER, A, U256::ZERO, GAS_LIMIT));
-    assert_stopped(&result.result, LimitKind::DataSize, mega_evm::TX_BODY_SIZE + 119);
+    assert_stopped(&result.result, LimitKind::DataSize, 119);
 }
 
 /// A tool's inspector that writes to the running frame's gas.
@@ -525,7 +543,7 @@ fn test_stop_refills_the_state_gas_drawn_from_the_reservoir() {
     assert_eq!(plain.gas.state, 9 * slot_state_gas(), "the chain's nine slots are state gas");
 
     let stopped = execute_with(chain(), cap(180), charger(), gas_limit);
-    assert_stopped(&stopped.result, LimitKind::DataSize, mega_evm::TX_BODY_SIZE + 180);
+    assert_stopped(&stopped.result, LimitKind::DataSize, 180);
     assert_eq!(stopped.gas.reservoir_remaining, reservoir, "refilled by the stop");
     assert_eq!(stopped.gas.state, 0);
 }
@@ -553,6 +571,6 @@ fn test_outcome_reports_history_gas() {
     // The body is charged before the first frame, so the stop keeps it and takes back every
     // charge the frames made, the inspector's included.
     let stopped = execute_with(chain(), cap(180), charger(), GAS_LIMIT);
-    assert_stopped(&stopped.result, LimitKind::DataSize, mega_evm::TX_BODY_SIZE + 180);
+    assert_stopped(&stopped.result, LimitKind::DataSize, 180);
     assert_eq!(stopped.gas.history, body_history());
 }

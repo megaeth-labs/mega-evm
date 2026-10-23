@@ -606,6 +606,7 @@ fn test_tightened_limits_reach_the_limit_stop_paths() {
     let (spec, tight) = (records(&spec)[0].unwrap(), records(&tight)[0].unwrap());
     assert!(spec["limit_exceeded"].is_null());
     assert_eq!(tight["limit_exceeded"]["kind"], "DataSize");
-    assert_eq!(tight["limit_exceeded"]["limit"], 400);
+    // The transaction's own frame crosses its budget, what the body leaves of the 400 bytes.
+    assert_eq!(tight["limit_exceeded"]["limit"], 400 - mega_evm::TX_BODY_SIZE);
     assert_ne!(state_test::digest::hash(spec), state_test::digest::hash(tight));
 }

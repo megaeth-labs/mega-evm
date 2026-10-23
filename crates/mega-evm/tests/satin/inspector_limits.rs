@@ -4,29 +4,32 @@
 //!   frame's gas into the result it returns, so what `step_end` writes to the interpreter's gas
 //!   after it reaches nobody. What a frame returns is changed on its result, in `call_end`.
 //! - An inspector cannot overdraw a frame: a charge the frame's spendable gas cannot pay is refused
-//!   and takes nothing, the frame runs on, and nothing is left behind to classify its end — not
-//!   even under gas detention, where the same refusal of an opcode's charge is the crossing, nor
-//!   for what a later halt of the frame burns.
-//! - An answer carries only the regular gas its inspector chose: the frame never ran, so its caller
-//!   merges back the reservoir it forwarded, whatever `Gas` the answer was built on.
+//!   and takes nothing, and the frame runs on. Under gas detention the refusal of an opcode's
+//!   charge is the crossing; an inspector's leaves the same record on the frame's gas, as revm
+//!   leaves it, which stops nothing in a frame that ends without an out-of-gas, and which a later
+//!   halt that records nothing of its own is read off.
+//! - An answer settles on the gas its inspector built it on, as revm settles it: its caller takes
+//!   the answer's reservoir as its own, and the charges the answer carries as a success's.
 
 use alloy_primitives::{address, Address, Bytes, Log, U256};
 use mega_evm::{
     constants::TX_GAS_LIMIT_CAP,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    untouched_call_gas, with_pools_of, EvmTxRuntimeLimits, MegaContext, MegaEvm,
+    untouched_call_gas, EvmTxRuntimeLimits, LimitCheck, MegaContext, MegaEvm,
     MegaTransactionOutcome,
 };
 use revm::{
-    bytecode::opcode::{BALANCE, CALL, JUMP, JUMPDEST, LOG0, POP, PUSH0, TIMESTAMP},
+    bytecode::opcode::{BALANCE, CALL, JUMP, JUMPDEST, LOG0, POP, PUSH0, PUSH20, TIMESTAMP},
     interpreter::{
-        interpreter::EthInterpreter, interpreter_types::LoopControl, CallInputs, CallOutcome, Gas,
-        InstructionResult, Interpreter, InterpreterAction, InterpreterResult,
+        instructions::gas_table_spec, interpreter::EthInterpreter, interpreter_types::LoopControl,
+        CallInputs, CallOutcome, Gas, InstructionResult, Interpreter, InterpreterAction,
+        InterpreterResult, PoolId,
     },
+    primitives::hardfork::SpecId,
     Database, Inspector,
 };
 
-use crate::common::{call, context};
+use crate::common::{body_history, call, context, reservoir_share};
 
 const CALLER: Address = address!("0000000000000000000000000000000000e00000");
 const A: Address = address!("0000000000000000000000000000000000e00001");
@@ -256,15 +259,17 @@ fn test_an_inspector_cannot_overdraw_a_frame() {
     }
 }
 
-/// A charge an inspector's callback could not pay leaves nothing behind for what the frame burns
-/// when it halts. `A` reads the block's timestamp, calls `B` with 2,000 gas, then loops until the
-/// compute limit stops it. `B`'s callback charge is refused; `B` then pushes and pops a hundred
-/// words and halts on a cold `BALANCE` it cannot pay, which the interpreter refuses before any
-/// charge, so no failed deduction records what `B` had. What `B` burns is what it had at that
-/// halt, not at the refused charge: counted as compute, the difference would leave `A` a longer
-/// run to the limit, and a larger bill, than the transaction no inspector runs.
+/// A charge an inspector's callback could not pay is refused and leaves its record of what the
+/// frame had, as revm leaves it: revm does not guard what a callback writes to the interpreter's
+/// gas, and neither does the engine. `A` reads the block's timestamp, calls `B` with 2,000 gas,
+/// then loops until the compute limit stops it. `B`'s callback charge is refused; `B` then pushes
+/// and pops a hundred words and halts on a cold `BALANCE` it cannot pay, which the interpreter
+/// refuses before any charge, so no failed deduction of its own records what `B` had. What `B`
+/// burns is read off the refused charge's record: what `B` had at the callback, not at its halt.
+/// The gas `B` ran in between counts as burned rather than as compute, so `A` runs that much longer
+/// to the limit, and is billed that much more, than in the transaction no inspector runs.
 #[test]
-fn test_a_refused_charge_leaves_nothing_for_a_later_halt() {
+fn test_a_refused_charge_is_read_as_what_a_later_halt_burns() {
     let b = BytecodeBuilder::default()
         .append_many([PUSH0, POP].repeat(100))
         .push_address(COLD)
@@ -282,13 +287,34 @@ fn test_a_refused_charge_leaves_nothing_for_a_later_halt() {
     let detained = EvmTxRuntimeLimits::default().with_block_env_access_compute_gas_limit(20_000);
     let (plain, _) = run::<Overdraws>(db(), detained, GAS_LIMIT, None);
     assert!(plain.limit_exceeded.is_some(), "the loop runs to the limit: {:?}", plain.result);
-    for from in [Callback::InitializeInterp, Callback::Step, Callback::StepEnd] {
+    // What `B` runs before its halt: the pushes and pops, the address and `BALANCE`'s static gas.
+    let static_gas = gas_table_spec(SpecId::AMSTERDAM);
+    let to_the_halt = 100 * u64::from(static_gas[PUSH0 as usize] + static_gas[POP as usize]) +
+        u64::from(static_gas[PUSH20 as usize] + static_gas[BALANCE as usize]);
+    // What `B` ran before the callback: nothing before its first step, its first `PUSH0` before
+    // the step's end.
+    for (from, before) in [
+        (Callback::InitializeInterp, 0),
+        (Callback::Step, 0),
+        (Callback::StepEnd, u64::from(static_gas[PUSH0 as usize])),
+    ] {
         let (overdrawn, inspector) =
             run(db(), detained, GAS_LIMIT, Some(Overdraws::new(from, Frames::B)));
         assert_eq!(inspector.unwrap().refused, Some(true), "{from:?}: the charge was refused");
-        assert_eq!(overdrawn.limit_exceeded, plain.limit_exceeded, "{from:?}: the same stop");
-        assert_eq!(overdrawn.result, plain.result, "{from:?}");
-        assert_eq!(overdrawn.gas, plain.gas, "{from:?}: the same run to the limit");
+        let stop = |outcome: &MegaTransactionOutcome| match outcome.limit_exceeded {
+            Some(LimitCheck::ExceedsLimit { kind, limit, .. }) => Some((kind, limit)),
+            _ => None,
+        };
+        assert_eq!(stop(&overdrawn), stop(&plain), "{from:?}: the same limit stops it");
+        // The stop lands on the first of `A`'s loop charges the limit leaves no room for, so the
+        // bill grows by the extra room to within the loop's dearest charge, its `JUMP`.
+        let grown = overdrawn.gas.regular - plain.gas.regular;
+        assert!(
+            grown.abs_diff(to_the_halt - before) < u64::from(static_gas[JUMP as usize]),
+            "{from:?}: what B ran after the callback is burned, and A runs that much longer: \
+             {grown} for {}",
+            to_the_halt - before
+        );
     }
 }
 
@@ -300,7 +326,7 @@ enum AnswerGas {
     /// `Gas::new` of the call's gas limit, as Foundry answers a cheatcode: no reservoir.
     Fresh,
     /// Fresh regular gas carrying the pools of the untouched gas after a state and a history
-    /// charge ([`with_pools_of`]): charges the frame, which never ran, did not make.
+    /// charge: charges the frame, which never ran, did not make.
     Charged,
 }
 
@@ -322,7 +348,16 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for AnswersB {
                     assert!(
                         charged.record_state_cost(40_000) && charged.record_history_cost(3_000)
                     );
-                    with_pools_of(inputs.gas_limit, &charged)
+                    let mut gas = Gas::new(inputs.gas_limit);
+                    gas.set_reservoir(charged.reservoir());
+                    gas.set_state_gas_spent(charged.state_gas_spent());
+                    gas.set_state_gas_spilled(charged.state_gas_spilled());
+                    gas.set_history_gas_spent(charged.history_gas_spent());
+                    for pool in PoolId::ALL {
+                        gas.set_pool_remaining(pool, charged.pool_remaining(pool));
+                        gas.set_pool_spent(pool, charged.pool_spent(pool));
+                    }
+                    gas
                 }
             };
             CallOutcome::new(
@@ -333,19 +368,23 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for AnswersB {
     }
 }
 
-/// An answered frame never ran, so its gas carries nothing but the regular gas its inspector
-/// chose: its caller merges back the reservoir it forwarded, whatever `Gas` the answer was built
-/// on. Above the execution cap, an answer on the frame's untouched gas, one on `Gas::new` — which
-/// carries no reservoir — and one carrying charges the frame never made settle alike, a success, a
-/// revert and a halt each, and the transaction keeps the reservoir it keeps when `B` runs. The
-/// charges are rolled back against the answer's own reservoir before the inherited one replaces
-/// it, so neither the reservoir nor a ledger counts them.
+/// An answered frame never ran, and its caller settles the answer on the gas its inspector built
+/// it on, as revm does. Above the execution cap, an answer on the frame's untouched gas carries the
+/// reservoir share it inherited, and the transaction keeps the reservoir it keeps when `B` runs;
+/// one on `Gas::new`, which carries none, leaves its caller only the part of its reservoir it kept
+/// from the share, a success, a revert and a halt alike.
+/// One carrying charges the frame never made merges them as a success's — the state and history
+/// gas on their ledgers, drawn from the reservoir — and a revert or a halt rolls them back.
 #[test]
-fn test_an_answer_carries_the_reservoir_its_caller_merges() {
+fn test_an_answer_settles_on_the_gas_it_is_built_on() {
     let gas_limit = TX_GAS_LIMIT_CAP + 100_000_000;
     let limits = EvmTxRuntimeLimits::no_limits();
     let (plain, _) = run::<AnswersB>(a_calls_b(), limits, gas_limit, None);
-    assert!(plain.gas.reservoir_remaining > 0, "the reservoir comes back");
+    // Nothing draws the reservoir: `A` holds all of it when it calls `B`, which takes its share.
+    let whole = gas_limit - TX_GAS_LIMIT_CAP - body_history(0);
+    assert_eq!(plain.gas.reservoir_remaining, whole, "the reservoir comes back");
+    let kept = whole - reservoir_share(whole);
+    assert_ne!(kept, 0);
 
     for result in [InstructionResult::Stop, InstructionResult::Revert, InstructionResult::OutOfGas]
     {
@@ -354,12 +393,27 @@ fn test_an_answer_carries_the_reservoir_its_caller_merges() {
             run(a_calls_b(), limits, gas_limit, Some(inspector)).0
         };
         let untouched = answer(AnswerGas::Untouched);
+        assert!(untouched.result.is_success(), "{result:?}: `A` ignores the answer");
         assert_eq!(untouched.gas.reservoir_remaining, plain.gas.reservoir_remaining, "{result:?}");
-        for gas in [AnswerGas::Fresh, AnswerGas::Charged] {
-            let answered = answer(gas);
-            assert!(answered.result.is_success(), "{result:?}, {gas:?}: `A` ignores the answer");
-            assert_eq!(answered.gas, untouched.gas, "{result:?}, {gas:?}: every ledger");
-            assert_eq!(answered.usage, untouched.usage, "{result:?}, {gas:?}: every count");
+
+        let fresh = answer(AnswerGas::Fresh);
+        assert!(fresh.result.is_success(), "{result:?}, fresh: `A` ignores the answer");
+        assert_eq!(fresh.gas.reservoir_remaining, kept, "{result:?}: `Gas::new` carries none");
+        assert_eq!(fresh.usage, untouched.usage, "{result:?}, fresh: every count");
+
+        let charged = answer(AnswerGas::Charged);
+        assert!(charged.result.is_success(), "{result:?}, charged: `A` ignores the answer");
+        assert_eq!(charged.usage, untouched.usage, "{result:?}, charged: every count");
+        if result.is_ok() {
+            assert_eq!(charged.gas.state, untouched.gas.state + 40_000, "{result:?}: merged");
+            assert_eq!(charged.gas.history, untouched.gas.history + 3_000, "{result:?}: merged");
+            assert_eq!(
+                charged.gas.reservoir_remaining,
+                untouched.gas.reservoir_remaining - 43_000,
+                "{result:?}: drawn from the reservoir"
+            );
+        } else {
+            assert_eq!(charged.gas, untouched.gas, "{result:?}: rolled back, on every ledger");
         }
     }
 }

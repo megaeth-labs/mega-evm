@@ -60,6 +60,11 @@ impl Case {
     /// The pre-state: the predeploys as a chain that ran Rex6 holds them, the registry naming the
     /// system address, the fixed accounts with their programs, the delegation, and, for a keyless
     /// deployment, its signer's account and what its deploy address holds.
+    ///
+    /// An account that would hold nothing — no balance, nonce, code or slot — is left out, as no
+    /// chain past EIP-161 holds one: revm's EIP-7702 application counts an account its database
+    /// holds as existing, empty or not, where a value transfer counts an empty one as new, so an
+    /// empty account in the pre-state would make the two disagree on a state no chain reaches.
     pub(crate) fn database(&self) -> MemoryDatabase {
         let mut db = MemoryDatabase::default().rex6_predeploys(SYSTEM_ADDRESS);
         let world = &self.world;
@@ -67,7 +72,10 @@ impl Case {
         install(&mut db, Who::Contract.address(), &world.contract, Some(self.main.assemble()));
         install(&mut db, Who::A.address(), &world.a, Some(self.a.assemble()));
         install(&mut db, Who::B.address(), &world.b, Some(self.b.assemble()));
-        db.set_account_balance(Who::Beneficiary.address(), world.beneficiary_balance.wei());
+        let beneficiary_balance = world.beneficiary_balance.wei();
+        if !beneficiary_balance.is_zero() {
+            db.set_account_balance(Who::Beneficiary.address(), beneficiary_balance);
+        }
         if let Some(delegation) = world.delegation {
             let address = delegation.delegator.address();
             let balance = db.basic_ref_balance(address);
@@ -299,14 +307,23 @@ fn init_destroys(init: &super::program::InitCode) -> bool {
     }
 }
 
-/// Installs `account` at `address`, with `code` when it has any.
+/// Installs `account` at `address`, with `code` when it has any; an account that would hold nothing
+/// is not installed.
 fn install(
     db: &mut MemoryDatabase,
     address: Address,
     account: &AccountShape,
     code: Option<Vec<u8>>,
 ) {
-    if let Some(code) = code.filter(|code| !code.is_empty()) {
+    let code = code.filter(|code| !code.is_empty());
+    if code.is_none() &&
+        account.balance.wei().is_zero() &&
+        account.nonce == 0 &&
+        account.slots.is_empty()
+    {
+        return;
+    }
+    if let Some(code) = code {
         db.set_account_code(address, Bytes::from(code));
     }
     db.set_account_balance(address, account.balance.wei());

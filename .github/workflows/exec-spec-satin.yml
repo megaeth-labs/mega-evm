@@ -144,7 +144,7 @@ jobs:
       - name: Read the fork pin from Cargo.lock
         id: pin
         run: |
-          # The fork's tag or `rev`, and the commit the lock resolved it to.
+          # A release tag, or a release's commit until its tag is cut.
           sources=$(grep -oE 'git\+https://github.com/megaeth-labs/revm\?(tag|rev)=[^"#]*#[0-9a-f]*' Cargo.lock | sort -u)
           if [ "$(printf '%s\n' "$sources" | grep -c .)" -ne 1 ]; then
             printf 'expected exactly one revm fork revision in Cargo.lock, found:\n%s\n' "$sources" >&2

@@ -268,7 +268,7 @@ fn test_inspector_early_return_with_additional_limits() {
     assert_eq!(inspector.calls_intercepted.get(), 1, "the nested call was answered");
     assert_eq!(inspector.call_ends.get(), 2, "and both calls ended");
     let body = transaction_body_bytes(&tx);
-    assert_eq!(outcome.usage, LimitUsage { data_size: body, write_records: 0 });
+    assert_eq!(outcome.usage, LimitUsage { data_size: body, write_records: 0, state_growth: 0 });
     assert_eq!(outcome.gas.state, 0);
     assert_eq!(in_block.inner.usage, outcome.usage, "a block and a tool settle it alike");
 }

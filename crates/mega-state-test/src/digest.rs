@@ -104,7 +104,12 @@ fn gas_usage(gas: &MegaGasUsage) -> Value {
 }
 
 fn usage(usage: &LimitUsage) -> Value {
-    fields([("data_size", usage.data_size.into()), ("write_records", usage.write_records.into())])
+    let LimitUsage { data_size, write_records, state_growth } = *usage;
+    fields([
+        ("data_size", data_size.into()),
+        ("state_growth", state_growth.into()),
+        ("write_records", write_records.into()),
+    ])
 }
 
 fn log(log: &Log) -> Value {
@@ -256,7 +261,7 @@ mod tests {
                 state,
             ),
             gas: MegaGasUsage::new(&gas(), 10_000, 125, 5_000),
-            usage: LimitUsage { data_size: 500, write_records: 3 },
+            usage: LimitUsage { data_size: 500, write_records: 3, state_growth: 0 },
             limit_exceeded: None,
             oracle_reads: vec![OracleRead { slot: U256::from(4), answer: Some(U256::from(5)) }],
         }
@@ -319,8 +324,11 @@ mod tests {
         data.usage.data_size += 1;
         let mut records = outcome();
         records.usage.write_records += 1;
+        let mut growth = outcome();
+        growth.usage.state_growth += 1;
         assert_ne!(digest(&base), digest(&data));
         assert_ne!(digest(&base), digest(&records));
+        assert_ne!(digest(&base), digest(&growth));
     }
 
     /// A slot's original value alone, its present value kept, moves the digest.

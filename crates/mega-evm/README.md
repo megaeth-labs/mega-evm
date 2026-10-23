@@ -26,6 +26,7 @@ The legacy spec names do not parse: `"Rex6".parse::<MegaSpecId>()` fails with `P
 
 Satin is under construction.
 Today it runs transactions through its own handler over op-revm's, with EIP-8037 and the EIP-2780 intrinsic cost switched on and a 200,000,000 execution cap; gas above the cap goes to the EIP-8037 reservoir.
+A call or creation forwards at most `remaining − remaining × 2 / 100` of its caller's regular gas, Rex6's rule in place of EIP-150's 63/64, and its child takes the same share of the reservoir its caller has left, whatever regular gas the call asks for; the transaction's own frame and a system call's outermost frame take the whole reservoir.
 
 The gas schedule is Amsterdam's, EIP-8038's state-access prices included, with two changes: the EIP-8037 state-gas entries are rebuilt from MegaETH's own cost per state byte, so a new storage slot draws 97,920 state gas and a new account 183,600, and a byte of deployed code is priced at MegaETH's cost per history byte.
 The schedule also brings the Amsterdam opcodes (`DUPN`, `SWAPN`, `EXCHANGE`, `SLOTNUM`) and raises the code-size limits to 512 KiB of contract and 1 MiB of initcode.
@@ -38,7 +39,7 @@ Its byte prices are an input: the `satin-price-override` feature, off by default
 The precompile set is op-revm's Karst set with KZG point evaluation repriced to 100,000.
 It is carried as an alloy-evm `PrecompilesMap`, so a node can add or replace an address through `MegaEvmFactory::with_dyn_precompiles_builder`.
 
-The common execution layer is in place: the frame lifecycle the later mechanisms plug into, the count of data-size bytes and write records per frame, the stop protocol that reverts the frame crossing a limit, which its caller may catch, and the inspector contract: what a rewrite does not change.
+The common execution layer is in place: the frame lifecycle the later mechanisms plug into, the count of data-size bytes, write records and new state per frame, the stop protocol that reverts the frame crossing a limit, which its caller may catch, and the inspector contract: what a rewrite does not change.
 
 The data-size limit is in place on top of it.
 A transaction is held to a data-size limit, and every frame to a budget: the transaction's own frame gets what its body leaves, and a child 98% of what its parent has left.
@@ -47,16 +48,16 @@ A transfer log counts what a `LOG3` of one word counts, 160 bytes, where the val
 A frame start revm refuses on its caller's account — a value the caller cannot fund, a creation whose creator's nonce cannot be bumped — counts nothing; a creation onto an occupied address is counted, and revm refuses it after the count.
 A frame that crosses its budget reverts alone; a transaction that crosses its limit is stopped with a revert carrying `MegaLimitExceeded`, and pays only for what ran.
 A record is checked before its history is charged, so a record the limit rejects costs nothing and the stop is what the transaction reports.
-The limits are fixed per spec, `ProtocolLimits::for_spec`: Satin holds each transaction and the block to 12.5 MiB of data size and a detained transaction to 20,000,000 of compute past its read, and every EVM, a bare one included, runs under them; `EvmTxRuntimeLimits` sets others on an EVM, a tool's or a test's counterfactual.
-The block's data size is a packing budget: the transaction that crosses it is packed and the next one refused.
+The limits are fixed per spec, `ProtocolLimits::for_spec`: Satin holds each transaction and the block to 12.5 MiB of data size, 500,000 write records and 1,000 new accounts and slots, and a detained transaction to 20,000,000 of compute past its read, and every EVM, a bare one included, runs under them; `EvmTxRuntimeLimits` sets others on an EVM, a tool's or a test's counterfactual.
+The block's data size, write records and state growth are packing budgets: the transaction that reaches one is packed and the next ordinary one refused.
 `MegaEvm::execute_transaction` returns the result with the gas split into its regular, state and history ledgers beside the history bytes, the usage counted and the limit that stopped the transaction, if any.
 
 Block execution is in place too: `MegaBlockExecutor` is alloy-evm's `BlockExecutor` over a `MegaEvm`, with the block rules of the Karst base — a fork's activation block admits only deposit transactions, the data-availability footprint of the block's transactions is held to the block's gas limit and reported as its blob gas, and the L1 block info is read by the first transaction that prices against it, so the block's own L1 info deposit is what the transactions after it are priced with.
 Every transaction is held to the spec's limits, and the block counts what its transactions spent on each of the three ledgers and the history bytes they appended.
-The limits that change a result are protocol values fixed per spec, `ProtocolLimits::for_spec`: the per-transaction runtime limits and the block's data-size budget, the same on every chain, so no chain configuration carries them and a node passes none of them.
-The block context a node passes carries only building policy (`BlockLimits`): a transaction's declared gas, the encoded sizes and the data-availability sizes, which only a builder applies and never to a deposit, and a cap that can lower the block's data-size budget and never raise it, so a validator that leaves it at its default computes the block a builder packed under any policy.
+The limits that change a result are protocol values fixed per spec, `ProtocolLimits::for_spec`: the per-transaction runtime limits and the block's three packing budgets, the same on every chain, so no chain configuration carries them and a node passes none of them.
+The block context a node passes carries only building policy (`BlockLimits`): a transaction's declared gas, the encoded sizes and the data-availability sizes, which only a builder applies and never to a deposit, and caps that can lower the block's three packing budgets and never raise them, so a validator that leaves it at its default computes the block a builder packed under any policy.
 The execution figure a block counts for a transaction is its regular ledger — its gas less state and history, read off revm's `Gas` — at least its EIP-7623 floor.
-The block's data-size cap never refuses a deposit, which the block must include; a deposit still counts towards it.
+The block's packing budgets never refuse a deposit, which the block must include, or a Mega System Transaction; both still count towards them.
 A builder that executes candidates and chooses among them commits through `commit_transaction_outcome`, which checks the block's counters again; alloy-evm's `commit_transaction` cannot fail and expects each outcome to commit before the next transaction executes, and a debug build asserts it.
 `apply_pre_execution_changes` makes the EIP-2935 and EIP-4788 calls, in the block in which Satin activates — which the node says with `MegaBlockExecutionCtx::satin_activation_block` — checks that the six MegaETH system contracts and the EIP-7997 `CREATE2` factory hold the code Satin runs, which the legacy forks and OP's genesis tooling installed and without which that block is invalid, applies a role change the `SequencerRegistry` has due in the block with its `applyPendingChanges()` call, and last reads the L1 block contract's account and the five slots the block's transactions can be priced against, which op-revm and the executor read on the database rather than through a transaction.
 It commits each pre-block state on its own, in order, read-only entries included — the two EIP calls, the activation block's seven reads, the read of the registry's pending changes and its call, and the L1 block info; with the included transactions' states and oracle reads, and the block hashes and buckets the executor exports, the sequence of committed states is the witness a stateless client needs, and a node collects it with a commit hook on its `State` (`State::set_state_hook`).
@@ -64,8 +65,8 @@ A database that cannot serve one of those L1 reads fails the block before its fi
 
 A system call runs as EIP-8037 has it: at most 30,000,000 of its gas limit is regular gas, which is what `GAS` reads inside it, and the rest is its state-gas reservoir, which the state it writes draws first.
 revm's default system-call gas limit, 31,566,720, is 30,000,000 and a reservoir of sixteen fresh slots.
-The block's pre-block calls run on the block's gas limit and never less than 30,000,000, the legacy engine's budget kept as it was; what it adds above 30,000,000 is reservoir, not regular gas.
-The legacy engine widened it for the storage gas a crowded SALT bucket multiplied, which a system call no longer pays: it prices its state at the minimum bucket.
+The block's pre-block calls run on `constants::PRE_BLOCK_CALL_GAS_LIMIT`, 31,566,720, whatever the block's gas limit: 30,000,000 of regular gas and a reservoir of sixteen fresh slots at the minimum bucket, which a system call prices its state at.
+The legacy engine's budget, the block's gas limit and never less than 30,000,000, is gone: it was widened for the storage gas a crowded SALT bucket multiplied, which a system call no longer pays.
 A pre-block call that does not succeed refuses the block with the call's own validation error; a database error the database calls fatal is an internal error instead, since it says nothing about the block.
 That is the rule alloy-evm's block executor holds a transaction's database error to.
 A system call pays no history gas, is held to no per-transaction limit and is not detained.
@@ -121,7 +122,7 @@ The body is charged at validation, in the EIP-8037 intrinsic state-gas slot so t
 Everything else is charged where the write is made and given back, at the same price, by whoever's failure takes it back.
 The records a `CALL`, `CALLCODE`, `CREATE` or `CREATE2` starts a frame for are charged to the caller out of what it kept after forwarding gas: a caller that cannot pay halts, and the frame does not start.
 A deposit, a transaction the protocol itself sent and a system call pay no history at all.
-The last two are held to no per-transaction limit either, for the same reason — the protocol's maintenance must not fail on a resource limit: no data-size limit and no frame budget stops them, and what they use is counted and reported all the same.
+The last two are held to no per-transaction limit either, for the same reason — the protocol's maintenance must not fail on a resource limit: no data-size, KV-update or state-growth limit and no frame budget stops them, and what they use is counted and reported all the same.
 A user's deposit is held to every limit.
 
 The pairing between the two counts is per record, not per transaction.
@@ -133,11 +134,13 @@ The history bytes a transaction reports count those bytes all the same, so a blo
 The transfer log of the value that granted an allowance draws nothing from it.
 The byte column is the history the schedule prices, not the chain's physical growth: a transaction exempt from history gas reports none, a body counts its five fixed write records even when fewer fee accounts are written, and the transfer logs are not in it.
 
-No limit holds the KV count or the state a transaction adds.
-The KV count is the write-record count the layer keeps — one record per account or storage write the transaction keeps, the sender and the fee accounts being the body's.
-Every record is forty bytes of data size, so at the production data-size caps a transaction or a block keeps at most 327,680 records.
-The transaction's KV count is in its outcome's usage and the block's in its result.
-A transaction's state growth is the EIP-8037 state gas it spends, at the price of the SALT bucket it lands in: what bounds it is what it costs.
+The KV-update limit is in place beside it.
+The KV count is the write-record count the layer keeps — one record per account or storage write the transaction keeps, the sender and the fee accounts being the body's — and a transaction is held to 500,000 of them and every frame to 98% of what its parent has left.
+Every record is forty bytes of data size, so at the production data-size caps a transaction or a block keeps at most 327,680 records and the data size binds first; the KV check is still made.
+The state-growth limit is in place too: the net count of new accounts and new slots a transaction keeps, where EIP-8037 charges the state gas of one, is held to 1,000, and every frame to 98% of what its parent has left.
+A slot written back to zero falls, a failed frame's net goes with it, and a negative net never enlarges the next child's budget; EIP-8037 still prices the state a transaction adds, but the count is what stops the 1,001st slot.
+An EIP-7702 list that would keep more records or create more accounts than the transaction may is skipped whole, and the transaction's own frame is stopped before it runs.
+The transaction's KV count and state growth are in its outcome's usage and the block's in its result.
 
 Gas detention is in place: a transaction that reads volatile data — the block environment, the block beneficiary's account, the Oracle's storage — may compute at most 20,000,000 more gas after the read than it had spent at it.
 Compute is the regular gas spent: the state and history gas that spilled onto regular gas are not compute, and neither is what a halting frame burns, whatever charge it could not pay, an opcode's static gas included.
@@ -158,15 +161,16 @@ The error's argument is a `uint8`: a refused `SLOTNUM` names access type 12, whi
 The two caps are runtime limits, 20,000,000 each by default; `EvmTxRuntimeLimits::no_limits()` leaves them unlimited, and a transaction whose caps are both unlimited is not detained.
 The protocol's own transactions and the system calls are not detained either.
 
-Every limit — the transaction's data size, a frame's data-size budget and gas detention's compute limit — stops the frame that crosses it the same way.
+Every limit — the transaction's data size, KV updates and state growth, a frame's budget in each, and gas detention's compute limit — stops the frame that crosses it the same way.
 That frame reverts with `MegaLimitExceeded(kind, limit)`, keeping nothing it wrote or logged, and its caller resumes as after any revert: the call fails, the stop is its return data, and the gas the frame had comes back.
 The caller is held to what the transaction has left, so a write or a charge of its own that crosses again stops it in turn, and a caller that catches the stop and ends lets the transaction succeed.
 Only a stop of the transaction's own frame is the transaction's result, and `LimitStop` reports only that one.
 It settles like any EIP-8037 revert: the transaction keeps nothing it wrote or logged, its sender pays the intrinsic gas and what ran, and gets back the rest of its regular gas and the reservoir, less the body's history.
 Nothing is rescued, because nothing was taken: detention withholds gas inside a frame's own tracker and never spends it.
-An inspector may rewrite a stop as it may any failure; a frame that kept nothing settles as one whatever the inspector made of its result.
+An inspector may rewrite a stop as it may any failure, and the result it hands back is taken as given, as revm takes it.
+An inspector sees a frame that crosses the compute limit end with the stop: the stop is made once the frame's run returns, before the inspector's `call_end`, `create_end` and `frame_end`, so a tracer shows the frame as the receipt bills it.
 A real out-of-gas and a precompile given less than its price still halt and burn what their frame was given.
-`tests/satin/stops.rs` pins every limit crossed by the transaction's own frame and by a frame three calls down, whose callers catch the stop and succeed, below and above the execution cap, with and without an inspector that records every frame's end, and a column of stopped creations an inspector revives, which settle as frames that kept nothing.
+`tests/satin/stops.rs` pins every limit crossed by the transaction's own frame and by a frame three calls down, whose callers catch the stop and succeed, below and above the execution cap, with and without an inspector that records every frame's end, and a column of stopped creations an inspector revives, which settle as the successes it made of them.
 
 ## Quick start
 
@@ -204,13 +208,14 @@ let (evm, result) = executor.finish_with_counters()?;
 ```
 
 Block execution admits any inspector: a node decides which inspectors may run on block production, and the engine no longer refuses one.
+An inspector runs on revm's inspected lifecycle unchanged: the engine's frame start and return are the ones both loops share, and it does nothing extra for an inspector.
 An inspector sees a block's transactions, user and system alike, and nothing else: the pre-block calls run no inspector, and the end of the block runs no code.
 An inspector may rewrite what execution produces — Foundry's cheatcodes are built on that — within the inspector contract.
+A rewritten result is taken as given, as revm takes it: revm commits or reverts the frame's journal before the inspector sees the result, and the caller settles what the inspector hands back, its gas, reservoir and byte pool included.
+A failed frame turned into a success keeps its journal reverted and settles as a success, its charges and records merged; a success turned into a failure keeps its journal and settles as a failure; a frame answered in place of running keeps what its caller's opcode was charged for it, and settles on the gas the answer is built on — `Gas::new(limit)` carries no reservoir.
 A failed creation rewritten into a success hands its creator the address the inspector gave, with nothing deployed there.
-A frame an inspector answered in place of running, or a failed frame it turned into a success, settles into its caller as a frame that kept nothing: the caller sees the success, the output and the regular gas the inspector chose, and no state gas, history gas, refund or write record of writes the journal does not hold.
-An answer hands its caller back the reservoir it forwarded, whatever gas the inspector built it on.
-A success an inspector rewrites into a failure has its journal taken back as a failed frame's is, so the state follows the failure its ledgers settle as.
-Gas an inspector writes after a frame's last instruction reaches nobody, and a charge a frame cannot pay is refused without stopping it.
+Gas an inspector writes after a frame's last instruction reaches nobody, and a charge a frame cannot pay is refused without stopping it, its record left on the frame's gas as revm leaves it.
+An answer an inspector gives in place of a frame is taken as given too: no limit holds it.
 `tests/satin/inspector_cheatcodes.rs` drives `deal`, `store`, `pauseGasMetering` / `resumeGasMetering` and `expectRevert` through the engine as Foundry's inspector does.
 
 ## Node integration

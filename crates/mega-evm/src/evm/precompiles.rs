@@ -285,7 +285,7 @@ mod tests {
             is_static: false,
             charged_new_account_state_gas: false,
             charged_start: Default::default(),
-            bytes_share: u64::MAX,
+            pool_shares: revm::interpreter::PoolAmounts::UNLIMITED,
             history_allowance: 0,
         }
     }

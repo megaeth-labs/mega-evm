@@ -448,10 +448,14 @@ impl Detention {
     /// (`failed_charge_remaining`); for any other halt, which zeroes nothing, the gas the frame
     /// returns.
     ///
-    /// Returns the stop when the frame ran out of gas on a charge the withheld part of its gas
+    /// Returns the stop when the frame halted out of gas on a charge the withheld part of its gas
     /// would have paid ([`stop`](Self::stop)): the frame crossed the limit, and must revert with
     /// the stop rather than halt. The stop's compute is the transaction's with the frame's gas
-    /// put back.
+    /// put back. A crossing only ever ends a frame on an out-of-gas, so a frame that returns with
+    /// any other result crossed nothing, whatever record its gas carries: the record of a charge
+    /// an inspector's callback failed stops no frame that ran on and ended otherwise. The frame's
+    /// result is read as its run left it, before an inspector sees it, so what an inspector makes
+    /// of it afterwards is taken as given.
     #[inline]
     pub(crate) fn on_frame_end(
         &mut self,
@@ -466,14 +470,17 @@ impl Detention {
             return None;
         }
         self.figures.on_frame_end(depth);
-        if let Some(limit) = self.stop(gas) {
-            return Some(ComputeStop { limit, used: self.compute(gas.tracker()) });
+        if !result.is_halt() {
+            return None;
         }
-        if result.is_halt() {
-            // The settlement rolls the spill back into regular gas and burns it all.
-            let left = gas.failed_charge_remaining().unwrap_or_else(|| gas.remaining());
-            self.burned = self.burned.saturating_add(left).saturating_add(gas.state_gas_spilled());
+        if is_out_of_gas(result) {
+            if let Some(limit) = self.stop(gas) {
+                return Some(ComputeStop { limit, used: self.compute(gas.tracker()) });
+            }
         }
+        // The settlement rolls the spill back into regular gas and burns it all.
+        let left = gas.failed_charge_remaining().unwrap_or_else(|| gas.remaining());
+        self.burned = self.burned.saturating_add(left).saturating_add(gas.state_gas_spilled());
         None
     }
 
@@ -487,7 +494,8 @@ impl Detention {
 
     /// The frame at `depth`, whose gas limit was `gas_limit`, was answered without running —
     /// `result` is the answer: a precompile's, an interceptor's, a `keylessDeploy` call's that
-    /// carries value, an inspector's, or revm's for a call it did not start.
+    /// carries value, or revm's for a call it did not start. An inspector's answer never reaches
+    /// the engine's frame start, and is taken as given.
     ///
     /// An answer marked as a crossing — a precompile whose price crosses the limit
     /// ([`cross_at_price`](Self::cross_at_price)), or one the engine cannot price that ran out of
@@ -571,9 +579,8 @@ impl Detention {
             // The answer spent more than the allowance, and no more than the gas limit, so the
             // gas limit is above the allowance and the frame would have had the rest withheld. The
             // one answer of the engine's own that spends regular gas is that of a `keylessDeploy`
-            // call carrying value; the limit is set to the forward all the same, so
-            // an inspector's answer built on another limit is settled on what the frame was
-            // forwarded.
+            // call carrying value, which is built on the forward; the limit is set to the forward,
+            // so the stop settles on what the frame was forwarded.
             //
             // The record holds the regular gas the frame had before the charge: the gas limit,
             // less the state and history gas that spilled onto it, which the revert that settles
@@ -753,6 +760,19 @@ pub fn decode_volatile_data_access_disabled(revert_data: &[u8]) -> Option<Volati
     VolatileDataAccess::from_access_type(low[0])
 }
 
+/// Whether `result` is an out-of-gas, the only way a frame that crossed the compute limit ends.
+const fn is_out_of_gas(result: InstructionResult) -> bool {
+    matches!(
+        result,
+        InstructionResult::OutOfGas |
+            InstructionResult::MemoryOOG |
+            InstructionResult::MemoryLimitOOG |
+            InstructionResult::PrecompileOOG |
+            InstructionResult::InvalidOperandOOG |
+            InstructionResult::ReentrancySentryOOG
+    )
+}
+
 /// The regular gas a frame spent: its limit, less what it has left — the withheld part included —
 /// less the state and history gas that spilled onto its regular gas.
 #[inline]
@@ -857,6 +877,38 @@ mod tests {
             assert_eq!(frame.remaining(), 100_000_000 - 10);
             assert_eq!(frame.withheld_crossing(), None);
             assert_eq!(regular_spent(frame.tracker()), 10, "the charge that crossed is not made");
+        }
+    }
+
+    /// A frame that ends with anything but an out-of-gas crossed nothing, whatever record of a
+    /// crossing its gas carries — a charge an inspector's callback failed, left on a frame that
+    /// ran on and ended otherwise: it is no stop, its gas is left as it ended, and a halt burns
+    /// what its failed charge recorded.
+    #[test]
+    fn test_only_an_out_of_gas_is_a_crossings_end() {
+        for result in [
+            InstructionResult::Return,
+            InstructionResult::Revert,
+            InstructionResult::InvalidFEOpcode,
+            InstructionResult::OutOfGas,
+        ] {
+            let mut detention = detaining();
+            let mut frame = gas(100_000_000, 0);
+            detention.on_frame_run(&mut frame, 0);
+            detention.commit_reads(VolatileDataAccess::TIMESTAMP, &mut frame, 0);
+            assert!(frame.record_regular_cost(10));
+            assert!(!frame.record_regular_cost(BLOCK_ENV_ACCESS_COMPUTE_GAS));
+            let stop = detention.on_frame_end(result, &mut frame, 0);
+            if result == InstructionResult::OutOfGas {
+                let limit = BLOCK_ENV_ACCESS_COMPUTE_GAS;
+                assert_eq!(stop, Some(ComputeStop { limit, used: 10 }), "{result:?}");
+                continue;
+            }
+            assert_eq!(stop, None, "{result:?}: no stop");
+            assert!(frame.withheld_crossing().is_some(), "{result:?}: the record is left as it is");
+            assert_eq!(frame.remaining(), 100_000_000 - 10, "{result:?}: the gas as it ended");
+            let burned = if result.is_halt() { 100_000_000 - 10 } else { 0 };
+            assert_eq!(detention.burned, burned, "{result:?}: a halt burns what it had");
         }
     }
 

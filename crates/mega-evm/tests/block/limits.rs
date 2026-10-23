@@ -122,28 +122,127 @@ fn state_with_incrementing_contract(
     revm::database::State::builder().with_database(db).build()
 }
 
-/// The block's KV count is the write records its transactions kept, summed, and no limit refuses a
-/// transaction on it: three transactions that keep fifty records each are all packed.
-#[test]
-fn test_the_block_reports_its_kv_count_and_refuses_nothing_on_it() {
-    let mut state = state_with_incrementing_contract(50);
-    // Room in the block's gas for every transaction whatever fifty slots cost.
+/// A contract that writes the fresh slots `from..from + count`, for a transaction that keeps that
+/// many new slots and records.
+fn fresh_writer(from: u64, count: u64) -> Bytes {
+    (from..from + count)
+        .fold(BytecodeBuilder::default(), |code, slot| code.sstore(U256::from(slot), U256::from(1)))
+        .stop()
+        .build()
+}
+
+/// A second contract, which a deposit calls.
+const WRITER: Address = address!("0x1000000000000000000000000000000000000009");
+
+/// A block over `state` with room in its gas for every transaction, whatever the slots cost,
+/// packed under `policy`.
+fn counting_executor(
+    state: &mut revm::database::State<mega_evm::test_utils::MemoryDatabase>,
+    policy: BlockLimits,
+) -> common::TestExecutor<'_> {
     let mut env = common::evm_env();
     env.block_env.gas_limit = 10_000_000_000;
+    common::executor_with_env(state, common::block_ctx(policy), env)
+}
+
+/// The block's KV count is the write records its transactions kept, summed, and its KV-update
+/// budget packs the transaction that reaches it and refuses the next one before it runs: under a
+/// builder's cap of 100, two transactions that keep fifty records each are packed and a third is
+/// refused. A deposit is not refused, and counts.
+#[test]
+fn test_the_block_kv_budget_packs_the_transaction_that_reaches_it() {
+    let mut state = state_with_incrementing_contract(50);
+    state.database.set_account_code(WRITER, fresh_writer(1, 3));
     let mut executor =
-        common::executor_with_env(&mut state, common::block_ctx(BlockLimits::no_limits()), env);
+        counting_executor(&mut state, BlockLimits::no_limits().with_block_kv_update_limit(100));
     executor.apply_pre_execution_changes().expect("the block starts");
 
-    for nonce in 0..3 {
+    for nonce in 0..2 {
         executor
             .execute_transaction(&user_tx(nonce, incrementing_gas(50)))
             .unwrap_or_else(|err| panic!("transaction {nonce} is packed: {err}"));
     }
-    assert_eq!(executor.limiter().usage.write_records, 150);
+    assert_eq!(executor.limiter().usage.write_records, 100, "the budget is reached");
+    let err = executor
+        .execute_transaction(&user_tx(2, incrementing_gas(50)))
+        .expect_err("the block has no KV updates left");
+    assert!(format!("{err}").contains("Block KV update limit reached"), "{err}");
+
+    let deposit = common::deposit_tx_to(WRITER, Bytes::new(), incrementing_gas(3));
+    executor.execute_transaction(&deposit).expect("no packing budget refuses a deposit");
+    assert_eq!(executor.limiter().usage.write_records, 103, "and it counts");
 
     let (_, result) = executor.finish_with_counters().expect("the block finishes");
     assert_eq!(result.receipts().len(), 3);
-    assert_eq!(result.usage.write_records, 150, "the block reports its KV count");
+    assert_eq!(result.usage.write_records, 103, "the block reports its KV count");
+}
+
+/// The block's state growth is the new accounts and slots its transactions kept, and its
+/// protocol budget is 1,000: a transaction that keeps 1,000 fresh slots reaches it and is packed,
+/// the next ordinary transaction is refused before it runs, and a deposit after it is not, counts
+/// its new slots, and leaves the block as full for the ordinary transactions that follow. The
+/// block's gas limit, ten billion here, does not stand in for the budget.
+#[test]
+fn test_the_block_state_growth_budget_is_the_protocols_1000() {
+    assert_eq!(mega_evm::constants::BLOCK_STATE_GROWTH_LIMIT, 1_000);
+    let mut state = state_with_incrementing_contract(1_000);
+    state.database.set_account_code(WRITER, fresh_writer(1, 3));
+    let mut executor = counting_executor(&mut state, BlockLimits::no_limits());
+    executor.apply_pre_execution_changes().expect("the block starts");
+
+    // Each increment's regular gas, its cold load and its write, on top of what the helper gives.
+    let gas = incrementing_gas(1_000) + 1_000 * 25_000;
+    let outcome = executor
+        .run_transaction(&user_tx(0, gas))
+        .expect("the transaction that reaches the budget is packed");
+    assert!(outcome.inner.result.is_success(), "{:?}", outcome.inner.result);
+    executor.commit_transaction_outcome(outcome).expect("and committed");
+    assert_eq!(executor.limiter().usage.state_growth, 1_000);
+    let ordinary = || user_tx(1, incrementing_gas(1));
+    let err = executor.execute_transaction(&ordinary()).expect_err("the budget is reached");
+    assert!(format!("{err}").contains("Block state growth limit reached"), "{err}");
+
+    let deposit = common::deposit_tx_to(WRITER, Bytes::new(), incrementing_gas(3));
+    executor.execute_transaction(&deposit).expect("no packing budget refuses a deposit");
+    assert_eq!(executor.limiter().usage.state_growth, 1_003, "the deposit's three new slots");
+    let err = executor.execute_transaction(&ordinary()).expect_err("the block is still full");
+    assert!(format!("{err}").contains("Block state growth limit reached"), "{err}");
+
+    let (_, result) = executor.finish_with_counters().expect("the block finishes");
+    assert_eq!(result.receipts().len(), 2);
+    assert_eq!(result.usage.state_growth, 1_003, "the block reports its state growth");
+}
+
+/// Where more than one packing budget is reached, the refusal names the first of data size, KV
+/// updates and state growth; the transaction is refused whichever it names.
+#[test]
+fn test_a_block_full_on_several_budgets_names_them_in_order() {
+    let cases = [
+        (
+            BlockLimits::no_limits()
+                .with_block_txs_data_limit(1)
+                .with_block_kv_update_limit(1)
+                .with_block_state_growth_limit(1),
+            "Block transactions data limit reached",
+        ),
+        (
+            BlockLimits::no_limits().with_block_kv_update_limit(1).with_block_state_growth_limit(1),
+            "Block KV update limit reached",
+        ),
+        (BlockLimits::no_limits().with_block_state_growth_limit(1), "Block state growth limit"),
+    ];
+    for (policy, named) in cases {
+        let mut state = state_with_incrementing_contract(1);
+        let mut executor = counting_executor(&mut state, policy);
+        executor.apply_pre_execution_changes().expect("the block starts");
+        executor
+            .execute_transaction(&user_tx(0, incrementing_gas(1)))
+            .expect("the first transaction reaches every budget the case sets");
+        let err = executor
+            .execute_transaction(&user_tx(1, incrementing_gas(1)))
+            .expect_err("the block is full");
+        assert!(format!("{err}").contains(named), "{named}: {err}");
+    }
 }
 
 /// A transaction refused before it runs changes nothing: no receipt, and no state.
@@ -596,4 +695,159 @@ fn test_commit_time_da_footprint_check_parallel_simulation() {
     let (_, result) = executor.finish_with_counters().expect("the block finishes");
     assert_eq!(result.receipts().len(), 1, "only the transaction that fit was packed");
     assert!(result.blob_gas_used <= budget, "the block stays within its footprint budget");
+}
+
+/// A database error, fatal as a storage failure or not as a read an EIP-7928 block access list
+/// does not cover.
+#[derive(Debug)]
+struct AuthorityReadError {
+    fatal: bool,
+}
+
+impl core::fmt::Display for AuthorityReadError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "the authority's account cannot be read (fatal: {})", self.fatal)
+    }
+}
+
+impl core::error::Error for AuthorityReadError {}
+
+impl revm::context::DBErrorMarker for AuthorityReadError {
+    fn is_fatal(&self) -> bool {
+        self.fatal
+    }
+}
+
+/// A database that refuses to read one account, if it names one, with an error that is fatal or
+/// not.
+#[derive(Debug)]
+struct RefusesAnAccount {
+    db: mega_evm::test_utils::MemoryDatabase,
+    refused: Option<Address>,
+    fatal: bool,
+}
+
+impl revm::Database for RefusesAnAccount {
+    type Error = AuthorityReadError;
+
+    fn basic(&mut self, address: Address) -> Result<Option<revm::state::AccountInfo>, Self::Error> {
+        if self.refused == Some(address) {
+            return Err(AuthorityReadError { fatal: self.fatal });
+        }
+        Ok(self.db.basic(address).expect("the memory database serves"))
+    }
+
+    fn code_by_hash(
+        &mut self,
+        code_hash: alloy_primitives::B256,
+    ) -> Result<revm::state::Bytecode, Self::Error> {
+        Ok(self.db.code_by_hash(code_hash).expect("the memory database serves"))
+    }
+
+    fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {
+        Ok(self.db.storage(address, index).expect("the memory database serves"))
+    }
+
+    fn block_hash(&mut self, number: u64) -> Result<alloy_primitives::B256, Self::Error> {
+        Ok(self.db.block_hash(number).expect("the memory database serves"))
+    }
+}
+
+/// An authorization list is simulated before the first frame when it may cross the transaction's
+/// KV or state-growth limit, and a database error while it reads an authority gives the
+/// transaction no outcome: the block executor reports it as an internal error when the database
+/// declares it fatal, and refuses the block for any other, including when an earlier prefix
+/// would already have crossed. Three new authorities under a state-growth limit of one: the first
+/// two cross it, and the third cannot be read; served, the list is skipped and the transaction
+/// included with the stop. A skipped list is not applied, so the simulation is the only read of
+/// the third.
+///
+/// revm's `State`, which a block runs on, declares every error of the database below it fatal and
+/// only a read its EIP-7928 block access list does not cover not fatal, so a block shows the fatal
+/// half. The other half is the engine's part of the same rule: it hands back the database's own
+/// error, which the executor maps by its fatality (`BlockExecutionError::evm`).
+#[test]
+fn test_a_database_error_in_the_authorization_list_simulation_is_internal_only_when_fatal() {
+    use alloy_consensus::{SignableTransaction, TxEip7702};
+    use alloy_eips::eip7702::{Authorization, SignedAuthorization};
+    use alloy_evm::{
+        block::{BlockExecutionError, BlockValidationError},
+        Evm, EvmFactory,
+    };
+    use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
+    use alloy_primitives::{Signature, B256};
+    use mega_evm::{LimitCheck, LimitKind, MegaBlockExecutor, MegaEvmFactory};
+
+    let authorization = |delegate: Address| {
+        let word = U256::from_be_bytes([0x22; 32]);
+        let auth = Authorization { chain_id: U256::ZERO, address: delegate, nonce: 0 };
+        let signed = SignedAuthorization::new_unchecked(auth, 0, word, word);
+        let authority = signed.recover_authority().expect("a Nick's-Method signature recovers");
+        (signed, authority)
+    };
+    let (first, _) = authorization(CONTRACT);
+    let (second, _) = authorization(CALLER3);
+    let (third, refused) = authorization(CALLER2);
+    let tx = TxEip7702 {
+        chain_id: common::CHAIN_ID,
+        nonce: 0,
+        gas_limit: 1_000_000 + common::body_history(0) + 4 * common::new_account_state_gas(),
+        max_fee_per_gas: 0,
+        max_priority_fee_per_gas: 0,
+        to: CONTRACT,
+        value: U256::ZERO,
+        access_list: Default::default(),
+        authorization_list: vec![first, second, third],
+        input: Bytes::new(),
+    };
+    let tx = Recovered::new_unchecked(
+        MegaTxEnvelope::Eip7702(tx.into_signed(Signature::test_signature())),
+        CALLER,
+    );
+    let limits = common::loosest()
+        .with_tx_runtime_limits(common::loosest_tx().with_tx_state_growth_limit(1));
+    let database = |refused: Option<Address>, fatal: bool| RefusesAnAccount {
+        db: common::database(),
+        refused,
+        fatal,
+    };
+    let in_a_block = |db: RefusesAnAccount| {
+        let mut state = revm::database::State::builder().with_database(db).build();
+        let evm = MegaEvmFactory::new().create_evm(&mut state, common::evm_env());
+        let mut executor = MegaBlockExecutor::new(
+            evm,
+            common::unlimited_ctx(),
+            common::chain_spec(),
+            OpAlloyReceiptBuilder::default(),
+        )
+        .with_protocol_limits(limits);
+        executor.apply_pre_execution_changes().expect("the block starts");
+        executor.execute_transaction_without_commit(&tx).map(|result| result.inner.limit_exceeded)
+    };
+
+    let stop = in_a_block(database(None, false)).expect("served, the transaction is included");
+    assert!(
+        matches!(stop, Some(LimitCheck::ExceedsLimit { kind: LimitKind::StateGrowth, .. })),
+        "the list is skipped and the first frame stopped: {stop:?}"
+    );
+    let err = in_a_block(database(Some(refused), true)).expect_err("the read fails");
+    assert!(matches!(err, BlockExecutionError::Internal(_)), "{err:?}");
+    assert!(err.to_string().contains("cannot be read"), "{err}");
+
+    for fatal in [true, false] {
+        let mut evm =
+            MegaEvmFactory::new().create_evm(database(Some(refused), fatal), common::evm_env());
+        evm.set_tx_runtime_limits(limits.tx_runtime_limits);
+        let err = evm.transact(&tx).expect_err("the read fails");
+        let err = BlockExecutionError::evm(err, B256::ZERO);
+        if fatal {
+            assert!(matches!(err, BlockExecutionError::Internal(_)), "{err:?}");
+        } else {
+            assert!(
+                matches!(err, BlockExecutionError::Validation(BlockValidationError::EVM { .. })),
+                "{err:?}"
+            );
+        }
+        assert!(err.to_string().contains("cannot be read"), "{err}");
+    }
 }

@@ -32,13 +32,12 @@ pub use access::{
     VolatileDataAccess,
 };
 pub use block::{
-    chain_activation, estimated_da_size, hardfork_schedule, mainnet_hardforks,
-    pre_block_call_gas_limit, read_l1_block_info, testnet_hardforks,
-    transact_beacon_root_contract_call, transact_blockhashes_contract_call, BlockGasCounters,
-    BlockLimiter, BlockLimits, BlockUsage, ChainActivation, EnrichedMegaTx, MegaBlockExecutionCtx,
-    MegaBlockExecutionError, MegaBlockExecutionResult, MegaBlockExecutor, MegaBlockExecutorFactory,
-    MegaBlockLimitExceededError, MegaBlockTxResult, MegaFinishedBlock, MegaHardfork,
-    MegaHardforkConfig, MegaHardforks, MegaTransactionExt, MegaTxLimitExceededError,
+    chain_activation, estimated_da_size, hardfork_schedule, mainnet_hardforks, read_l1_block_info,
+    testnet_hardforks, transact_beacon_root_contract_call, transact_blockhashes_contract_call,
+    BlockGasCounters, BlockLimiter, BlockLimits, BlockUsage, ChainActivation, EnrichedMegaTx,
+    MegaBlockExecutionCtx, MegaBlockExecutionError, MegaBlockExecutionResult, MegaBlockExecutor,
+    MegaBlockExecutorFactory, MegaBlockLimitExceededError, MegaBlockTxResult, MegaFinishedBlock,
+    MegaHardfork, MegaHardforkConfig, MegaHardforks, MegaTransactionExt, MegaTxLimitExceededError,
     ProtocolLimits, SatinChainConfig, SatinChainConfigError, ScheduleError, CHAIN_ACTIVATIONS,
     L1_BLOCK_INFO_SLOTS, MAINNET_CHAIN_ID, SATIN_CHAIN_CONFIG_KEYS, SATIN_TIME_KEY, SYSTEM_ADDRESS,
     TESTNET_CHAIN_ID,
@@ -46,17 +45,16 @@ pub use block::{
 #[cfg(feature = "satin-price-override")]
 pub use evm::install_satin_prices;
 pub use evm::{
-    active_satin_prices, history_gas, kzg_point_evaluation, name, satin_gas_params,
-    satin_gas_params_at, satin_gas_params_history_exempt, satin_precompiles, satin_precompiles_map,
-    settle_frame_result, spec_cfg, storage_call_stipend, synthetic_call_result,
-    synthetic_frame_result, transaction_body_bytes, tx_body_history_bytes, untouched_call_gas,
-    untouched_create_gas, validate_transaction_stateless, with_pools_of, write_record_history_gas,
-    BlockHashRecord, BucketRecord, BytePrice, DynPrecompilesBuilder, EthSpecId, IntrinsicGas,
-    MegaContext, MegaEvm, MegaEvmError, MegaEvmFactory, MegaGasUsage, MegaHandler, MegaSpecId,
-    MegaTransactionOutcome, OpSpecId, OracleRead, OracleReadRecord, ParseMegaSpecError,
-    SatinPriceError, SatinPrices, CPHB_ENV_VAR, CPSB_ENV_VAR, HISTORY_GAS_PRICED,
-    LEGACY_SPEC_NAMES, STATE_GAS_REPRICED, STORAGE_CALL_STIPEND_BYTES,
-    SYSTEM_CALL_REGULAR_GAS_LIMIT,
+    active_satin_prices, history_allowance_gas, history_gas, kzg_point_evaluation, name,
+    satin_gas_params, satin_gas_params_at, satin_gas_params_history_exempt, satin_precompiles,
+    satin_precompiles_map, spec_cfg, synthetic_call_result, synthetic_frame_result,
+    transaction_body_bytes, tx_body_history_bytes, untouched_call_gas, untouched_create_gas,
+    validate_transaction_stateless, write_record_history_gas, BlockHashRecord, BucketRecord,
+    BytePrice, DynPrecompilesBuilder, EthSpecId, IntrinsicGas, MegaContext, MegaEvm, MegaEvmError,
+    MegaEvmFactory, MegaGasUsage, MegaHandler, MegaSpecId, MegaTransactionOutcome, OpSpecId,
+    OracleRead, OracleReadRecord, ParseMegaSpecError, SatinPriceError, SatinPrices, CPHB_ENV_VAR,
+    CPSB_ENV_VAR, HISTORY_ALLOWANCE_BYTES, HISTORY_GAS_PRICED, LEGACY_SPEC_NAMES,
+    STATE_GAS_REPRICED, SYSTEM_CALL_REGULAR_GAS_LIMIT,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use external::{
@@ -79,7 +77,9 @@ pub use types::{
 
 /* Items the crate's modules share through the root, not part of the public surface */
 pub(crate) use block::transact_pre_block_call;
-pub(crate) use evm::{charge_write_records_history, MegaInstructions, PricedPrecompiles};
+pub(crate) use evm::{
+    charge_write_records_history, hold_creator, MegaInstructions, PricedPrecompiles,
+};
 
 /* Re-export of upstream crates, so consumers build against the exact versions used here */
 pub use alloy_consensus;

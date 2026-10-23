@@ -667,17 +667,21 @@ fn test_a_deployment_another_limit_stops_keeps_the_reads_its_creation_made() {
     let prefix =
         BytecodeBuilder::default().append_many([TIMESTAMP, POP]).sstore(U256::ZERO, U256::ONE);
     let deployment = Deployment::new(constructor(&prefix.build_vec(), &runtime(1)));
-    // The body, the creation's two start records and the slot's record, one byte short.
+    // The body, the signer's nonce record, the created account's record and one byte: the
+    // creation's share of the 81 bytes the call has, 79, holds its start's record and not the
+    // slot's, and the call keeps the signer's record once the creation returned.
     let body = reference(deployment.call_data(LARGE_OVERRIDE), GAS_LIMITS[0]).usage.data_size;
-    let limit = body + 3 * mega_evm::WRITE_RECORD_SIZE - 1;
+    let limit = body + 2 * mega_evm::WRITE_RECORD_SIZE + 1;
     for gas_limit in GAS_LIMITS {
         let run = run_both(&deployment, gas_limit, capped(CAP).with_tx_data_size_limit(limit));
         let KeylessDeployError::ExecutionReverted { output, .. } = failure(&run.outcome) else {
             panic!("expected the creation's data-size stop, got {:?}", run.outcome.result);
         };
+        // The creation's budget is 98% of what the call has, which the slot's record crosses.
+        let budget = (limit - body) * 98 / 100;
         assert_eq!(
             MegaLimitExceeded::abi_decode(&output).unwrap(),
-            MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit },
+            MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit: budget },
         );
         assert_eq!(run.accessed, VolatileDataAccess::TIMESTAMP);
         assert!(run.limit.is_some());

@@ -46,7 +46,8 @@ pub struct MegaTransactionOutcome {
     /// is [`LimitUsage::write_records`].
     pub usage: LimitUsage,
     /// The crossing that produced the result of the transaction's own frame, if one did: a
-    /// transaction-level limit, or that frame's own data-size budget. The result is then a revert
+    /// transaction-level limit, or that frame's own budget in data size, KV updates or state
+    /// growth. The result is then a revert
     /// whose output is its [`MegaLimitExceeded`](crate::MegaLimitExceeded); this, not the output,
     /// tells a limit stop from a contract reverting with the same bytes, or re-raising those a
     /// frame below it was stopped with.

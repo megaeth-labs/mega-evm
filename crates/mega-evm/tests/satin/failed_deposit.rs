@@ -22,7 +22,7 @@ use revm::{
     context::{result::ExecutionResult, TxEnv},
 };
 
-use crate::common::{account_state_gas, block, call, context};
+use crate::common::{account_state_gas, block, call, context, grown};
 
 const CALLER: Address = address!("0000000000000000000000000000000000f00000");
 const CALLEE: Address = address!("0000000000000000000000000000000000f00001");
@@ -65,7 +65,7 @@ fn test_a_system_deposit_over_the_limit_reports_the_failed_deposit() {
     );
     assert_eq!(outcome.gas.gas_used, 100_000, "a failed deposit bills its gas limit");
     assert_eq!(outcome.limit_exceeded, None, "the halt is what the deposit reports");
-    assert_eq!(outcome.usage, LimitUsage { data_size: body, write_records: 0 });
+    assert_eq!(outcome.usage, LimitUsage { data_size: body, write_records: 0, state_growth: 0 });
     assert_eq!(outcome.state[&CALLER].info.nonce, 1, "a failed deposit bumps its sender's nonce");
 }
 
@@ -108,7 +108,11 @@ fn test_a_deposit_whose_body_is_over_the_limit_is_a_failed_deposit() {
         );
         assert_eq!(outcome.gas.gas_used, 100_000, "{case}: a failed deposit bills its gas limit");
         assert_eq!(outcome.limit_exceeded, None, "{case}: the failure is what it reports");
-        assert_eq!(outcome.usage, LimitUsage { data_size: body, write_records: 0 }, "{case}");
+        assert_eq!(
+            outcome.usage,
+            LimitUsage { data_size: body, write_records: 0, state_growth: 0 },
+            "{case}"
+        );
         assert_eq!(outcome.state[&CALLER].info.nonce, 1, "{case}: the sender's nonce is bumped");
     }
 }
@@ -144,7 +148,7 @@ fn test_a_deposit_over_the_limit_fails_at_every_gas_limit() {
     const INTRINSIC: u64 = 12_000 + 3_000;
     const MINT: u64 = 7;
     let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(TX_BODY_SIZE - 1);
-    let body = LimitUsage { data_size: TX_BODY_SIZE, write_records: 0 };
+    let body = LimitUsage { data_size: TX_BODY_SIZE, write_records: 0, state_growth: 0 };
     let run = |sender: Address, gas_limit: u64, system: bool| {
         let mut tx = op_transaction(TxEnv {
             caller: sender,
@@ -193,10 +197,58 @@ fn test_a_deposit_over_the_limit_fails_at_every_gas_limit() {
             (gas_limit, 0, 0),
             "{row}: all of it regular gas"
         );
-        assert_eq!(outcome.usage, body, "{row}: the body stays counted");
+        let created = u64::from(sender == ABSENT);
+        assert_eq!(
+            outcome.usage,
+            grown(body, created),
+            "{row}: the body stays counted, and an absent sender's new account is state growth"
+        );
         let sender = &outcome.state[&sender].info;
         assert_eq!(sender.nonce, 1, "{row}: the sender's nonce is bumped");
         assert_eq!(sender.balance, U256::from(balance_before + MINT), "{row}: the mint");
+    }
+}
+
+/// A failed deposit whose sender had no account creates it, as its nonce bump and mint stand: one
+/// account of state growth, which the transaction reports and its block counts, with no state gas
+/// for it on any ledger. The deposit has already failed, so no limit stops it, a state-growth limit
+/// of nothing included. A sender that had an account adds nothing.
+#[test]
+fn test_a_failed_deposit_counts_the_caller_it_creates() {
+    const INTRINSIC: u64 = 12_000 + 3_000;
+    let run = |sender: Address, limits: EvmTxRuntimeLimits| {
+        let mut tx = op_transaction(TxEnv {
+            caller: sender,
+            kind: TxKind::Call(CALLEE),
+            gas_limit: INTRINSIC - 1,
+            ..Default::default()
+        });
+        tx.deposit.source_hash = B256::repeat_byte(0x22);
+        let db = MemoryDatabase::default().account_balance(CALLER, U256::from(1));
+        MegaEvm::new(context(db).with_tx_runtime_limits(limits))
+            .execute_transaction(OpTx(tx))
+            .expect("the deposit is included")
+    };
+    let unlimited = EvmTxRuntimeLimits::no_limits();
+    let none_left = unlimited.with_tx_state_growth_limit(0);
+    for (case, sender, limits, created) in [
+        ("an absent sender", ABSENT, unlimited, 1),
+        ("an absent sender under a limit of nothing", ABSENT, none_left, 1),
+        ("a sender with an account", CALLER, unlimited, 0),
+    ] {
+        let outcome = run(sender, limits);
+        assert!(
+            matches!(
+                outcome.result,
+                ExecutionResult::Halt { reason: MegaHaltReason::FailedDeposit, .. }
+            ),
+            "{case}: {:?}",
+            outcome.result
+        );
+        assert_eq!(outcome.limit_exceeded, None, "{case}: no stop");
+        assert_eq!(outcome.usage.state_growth, created, "{case}");
+        assert_eq!(outcome.gas.state, 0, "{case}: no state gas for the account");
+        assert_eq!(outcome.state[&sender].info.nonce, 1, "{case}: the account exists");
     }
 }
 
@@ -253,6 +305,7 @@ fn test_a_failed_deposit_keeps_the_hints_it_forwarded() {
     let kept = LimitUsage {
         data_size: mega_evm::transaction_body_bytes(&deposit) + payload.len() as u64,
         write_records: 0,
+        state_growth: 0,
     };
 
     let (outcome, hints) = run_hint_then_halt(deposit, &payload);

@@ -13,8 +13,9 @@
 //!
 //! Every gas figure here is built by hand from the spec and the schedule, never read off a run
 //! of the engine. The creation's regular budget is set exactly: `A` calls the creator `B` with an
-//! explicit gas, `B` spends a known amount before its `CREATE`, and the EIP-150 split forwards all
-//! but a 64th of what `B` holds, which [`holding_for`] inverts. Each case is one gas short of a
+//! explicit gas, `B` spends a known amount before its `CREATE`, and the split forwards all but 2
+//! per cent of what `B` holds under Satin (all but a 64th under Osaka's EIP-150, on the neutral
+//! configuration), which [`holding_for`] inverts. Each case is one gas short of a
 //! charge, or exactly enough, and reads every ledger against its derivation. The data-size limit
 //! holds the deposit after the last of those charges and before `return_create` commits it: with
 //! exactly enough gas a limit the deposit crosses stops the creation, and one gas short the
@@ -46,7 +47,7 @@ use crate::{
 const CALLER: Address = address!("0000000000000000000000000000000000a00000");
 /// Calls `B` with a chosen gas and stops.
 const A: Address = address!("0000000000000000000000000000000000a00001");
-/// Creates the code with all but a 64th of what it has, and stops.
+/// Creates the code with all the gas the split forwards, and stops.
 const B: Address = address!("0000000000000000000000000000000000a00002");
 
 /// The words of zeros the creation deploys, and their bytes.
@@ -55,9 +56,9 @@ const CODE_LEN: u64 = DEPLOYED_WORDS * 32;
 
 /// The words of memory the init code touches before it returns, so that the creation is forwarded
 /// millions of gas at any byte price: below the execution cap `B` pays the history of the
-/// creation's two write records out of the 64th it keeps, which must cover them whatever a
+/// creation's two write records out of the fiftieth it keeps, which must cover them whatever a
 /// history byte costs — at the dearest price the grid runs, 1,000 a byte, the two records are
-/// 80,000 gas, and a 64th of the memory's cost alone is 82,400. [`call_gas`] asserts it.
+/// 80,000 gas, and a fiftieth of the memory's cost alone is 105,472. [`call_gas`] asserts it.
 const BURNT_WORDS: u64 = 51_200;
 
 /// The reservoir the runs above the execution cap carry: ample for every charge here.
@@ -81,7 +82,7 @@ enum Pool {
 
 impl Pool {
     /// The transaction's gas limit: above the cap by [`RESERVOIR`]; below it, room for `A` to
-    /// forward the largest gas any case calls `B` with — a 64th more than the forward, and a
+    /// forward the largest gas any case calls `B` with — a 49th more than the forward, and a
     /// million of slack — which stays below the cap at any byte price the grid runs; or Osaka's
     /// own ceiling (EIP-7825 holds a transaction to 2^24 gas).
     fn gas_limit(self) -> u64 {
@@ -89,7 +90,7 @@ impl Pool {
             Self::AboveCap => TX_GAS_LIMIT_CAP + RESERVOIR,
             Self::BelowCap => {
                 let largest = call_gas(Self::BelowCap, deposits_at(Self::BelowCap));
-                let limit = (largest * 64).div_ceil(63) + 1_000_000;
+                let limit = (largest * 50).div_ceil(49) + 1_000_000;
                 assert!(limit <= TX_GAS_LIMIT_CAP, "below the cap at these prices: {limit}");
                 limit
             }
@@ -121,12 +122,25 @@ impl Pool {
     /// `MSTORE` that puts the init code in memory, with the first word of memory; three `PUSH8`;
     /// EIP-3860's 2 gas for the one word of init code; and `CREATE`'s own charge, Amsterdam's
     /// 12,000 under Satin and 32,000 under Osaka.
+    ///
+    /// The forward's quotient is in [`Pool::quotient`].
     const fn b_before_the_split(self) -> u64 {
         let create = match self {
             Self::AboveCap | Self::BelowCap => 12_000,
             Self::NeutralOsaka => 32_000,
         };
         3 + 3 + (3 + 3) + 3 * 3 + 2 + create
+    }
+}
+
+impl Pool {
+    /// The quotient of the split: a caller keeps `holding / quotient`, 50 under Satin, Rex6's
+    /// 98/100, and EIP-150's 64 under Osaka.
+    const fn quotient(self) -> u64 {
+        match self {
+            Self::AboveCap | Self::BelowCap => 50,
+            Self::NeutralOsaka => 64,
+        }
     }
 }
 
@@ -189,12 +203,12 @@ fn deposits_at(pool: Pool) -> u64 {
     }
 }
 
-/// The least gas `B` can hold at its `CREATE`'s split for the creation to be forwarded exactly
-/// `forward`: EIP-150 forwards all but a 64th, `r - r / 64`, which `64 (f / 63) + f mod 63`
-/// inverts.
-fn holding_for(forward: u64) -> u64 {
-    let holding = 64 * (forward / 63) + forward % 63;
-    assert_eq!(holding - holding / 64, forward, "the split inverted");
+/// A gas `B` can hold at its `CREATE`'s split for the creation to be forwarded exactly `forward` in
+/// `pool`: the split forwards `r - r / q`, which `q (f / (q - 1)) + f mod (q - 1)` inverts.
+fn holding_for(pool: Pool, forward: u64) -> u64 {
+    let q = pool.quotient();
+    let holding = q * (forward / (q - 1)) + forward % (q - 1);
+    assert_eq!(holding - holding / q, forward, "the split inverted");
     holding
 }
 
@@ -207,11 +221,11 @@ fn call_gas(pool: Pool, forward: u64) -> u64 {
         Pool::BelowCap => created_account_state_gas(),
         Pool::AboveCap | Pool::NeutralOsaka => 0,
     };
-    let holding = holding_for(forward);
+    let holding = holding_for(pool, forward);
     if pool == Pool::BelowCap {
         assert!(
-            holding / 64 >= history(2 * WRITE_RECORD_SIZE) + B_AFTER,
-            "B's 64th pays the creation's two records and B's POP at these prices",
+            holding / pool.quotient() >= history(2 * WRITE_RECORD_SIZE) + B_AFTER,
+            "what B keeps pays the creation's two records and B's POP at these prices",
         );
     }
     holding + pool.b_before_the_split() + spilled
@@ -437,7 +451,11 @@ fn assert_runs_out(name: &str, pool: Pool, forward: u64, left: u64, state_charge
     assert!(!deployed(&outcome), "{name}: no code is left");
     assert_eq!(
         outcome.usage,
-        LimitUsage { data_size: TX_BODY_SIZE + WRITE_RECORD_SIZE, write_records: 1 },
+        LimitUsage {
+            data_size: TX_BODY_SIZE + WRITE_RECORD_SIZE,
+            write_records: 1,
+            state_growth: 0
+        },
         "{name}: the creator's nonce record outlives the creation, nothing else does",
     );
     assert_ledgers(name, pool, forward, &outcome, 0, TX_BODY_SIZE + WRITE_RECORD_SIZE);
@@ -469,8 +487,9 @@ fn assert_deposits(name: &str, pool: Pool, forward: u64) {
     let bytes = TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE + CODE_LEN;
     assert_eq!(
         outcome.usage,
-        LimitUsage { data_size: bytes, write_records: 2 },
-        "{name}: the creator's nonce, the created account, and the code",
+        LimitUsage { data_size: bytes, write_records: 2, state_growth: 1 },
+        "{name}: the creator's nonce, the created account, and the code; the created account is \
+         new",
     );
     assert_ledgers(name, pool, regular_deposit(pool), &outcome, state, bytes);
 }

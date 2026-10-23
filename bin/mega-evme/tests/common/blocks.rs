@@ -1,4 +1,4 @@
-//! The recorded mainnet blocks under `tests/fixtures/blocks`, and running the binary on them.
+//! The recorded mainnet blocks of `tests/fixtures/blocks.tar.xz`, and running the binary on them.
 //!
 //! The fixtures are three `MegaETH` mainnet blocks (Rex6) in the block cache layout, recorded
 //! from the chain: each block with its transactions, the chain's receipts, and the state its
@@ -9,6 +9,7 @@
 use std::{
     path::{Path, PathBuf},
     process::Command,
+    sync::OnceLock,
 };
 
 use alloy_primitives::{address, Address, B256, U256};
@@ -41,9 +42,11 @@ pub(crate) fn overhead_slot() -> B256 {
     B256::with_last_byte(5)
 }
 
-/// The recorded block cache.
+/// The recorded block cache: `tests/fixtures/blocks.tar.xz` extracted once per test binary (see
+/// `super::fixture_archive`). Read-only; a test that writes takes [`cache_copy`].
 pub(crate) fn fixtures() -> &'static Path {
-    Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/blocks"))
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| super::fixture_archive("blocks.tar.xz"))
 }
 
 /// Where block `number` lives in the cache at `dir`.

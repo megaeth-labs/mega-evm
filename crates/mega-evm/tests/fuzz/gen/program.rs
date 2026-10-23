@@ -392,9 +392,9 @@ fn precompile_input() -> impl Strategy<Value = PrecompileInput> {
 /// How much gas a call forwards.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Forward {
-    /// Everything (`GAS`), which the 63/64 rule caps.
+    /// Everything (`GAS`), which the 98/100 rule caps.
     All,
-    /// A fixed amount, which the 63/64 rule may cap lower.
+    /// A fixed amount, which the 98/100 rule may cap lower.
     Gas(u32),
 }
 

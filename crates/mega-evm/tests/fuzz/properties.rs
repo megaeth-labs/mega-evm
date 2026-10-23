@@ -9,6 +9,7 @@ use std::{collections::BTreeMap, sync::Mutex};
 use alloy_primitives::{Address, U256};
 use mega_evm::{
     constants::TX_GAS_LIMIT_CAP,
+    op_revm::constants::BASE_FEE_RECIPIENT,
     system::is_system_originated,
     test_utils::{GasInspector, MemoryDatabase},
     transaction_body_bytes, LimitCheck, LimitKind, MegaContext, MegaTransaction,
@@ -128,6 +129,21 @@ fn is_exempt(tx: &MegaTransaction) -> bool {
 /// engine sees it.
 fn pre_account(db: &mut MemoryDatabase, address: Address) -> Option<revm::state::AccountInfo> {
     db.basic(address).unwrap_or_default().filter(|info| !info.is_empty())
+}
+
+/// What the case's world held at `address`, an account empty under EIP-161 included: `None` where
+/// it held no account at all, the leaf a destruction of an account created in the transaction
+/// takes back.
+fn leaf_at_start(db: &mut MemoryDatabase, address: Address) -> Option<revm::state::AccountInfo> {
+    db.basic(address).unwrap_or_default()
+}
+
+/// Whether the outcome's `account` was created in the transaction and destroyed since: its first
+/// effective destruction took back every part of it the transaction made — each slot it made
+/// non-zero, and, where its leaf was absent at the start, the account's record and its unit of
+/// state growth — and from that mark it counted nothing more.
+fn destroyed_in_the_transaction(account: &revm::state::Account) -> bool {
+    account.is_created() && account.is_selfdestructed()
 }
 
 /// The gas ledgers, as the spec defines them:
@@ -317,15 +333,159 @@ fn test_property_kv_weighs_no_more_than_data_size() {
                 "the body and the {hints} bytes of hints forwarded are counted: {usage:?}"
             );
             if !is_exempt(&tx) {
-                let limit = case.world.limits.runtime().tx_data_size_limit;
+                let limits = case.world.limits.runtime();
+                let limit = limits.tx_data_size_limit;
                 prop_check!(
                     usage.data_size <= limit,
                     "a user's transaction keeps more than its limit of {limit}: {usage:?}"
+                );
+                let limit = limits.tx_kv_update_limit;
+                prop_check!(
+                    usage.write_records <= limit,
+                    "a user's transaction keeps more records than its limit of {limit}: {usage:?}"
                 );
             }
             Ok(())
         },
     );
+}
+
+/// The write records a transaction reports are the net change of what it kept, computed from the
+/// case's pre-state and the outcome's state alone: one for every storage slot whose value differs
+/// from its original, and one for every account but the sender whose nonce, balance or code
+/// differs from what the case's world held. The sender's account is the body's, and so are the
+/// settlement's fee credits, which are taken out of the fee accounts' balances first: the fuzz
+/// world prices L1 and operator fees at nothing, so the settlement credits the beneficiary its tip
+/// and the base-fee vault the base fee, on the gas the receipt bills, and a transaction that pays
+/// no fee — a deposit, or one the protocol sent — credits nothing. What is left of a fee account's
+/// change is a write its execution made, a record like any other.
+///
+/// An account the transaction created and destroyed keeps no slot's record, and the account's own
+/// only where the world held an account there, a balance or an account empty under EIP-161: a
+/// leaf that existed at the start is an ordinary deletion, whose record stands, and one that did
+/// not is taken back with what the transaction made of it.
+#[test]
+fn test_property_the_record_count_is_the_net_change() {
+    check("record_count", CASES, || case(Flavor::Satin), check_record_count);
+}
+
+/// What [`test_property_the_record_count_is_the_net_change`] checks of a case.
+pub(crate) fn check_record_count(case: &Case) -> Result<(), proptest::test_runner::TestCaseError> {
+    let tx = case.transaction();
+    let Ok(outcome) = case.execute() else { return Ok(()) };
+    let credit = fee_credits(case, &tx, &outcome);
+    let mut pre = case.database();
+    let mut expected = 0;
+    for (address, account) in &outcome.state {
+        if destroyed_in_the_transaction(account) {
+            expected += u64::from(leaf_at_start(&mut pre, *address).is_some());
+            continue;
+        }
+        let slots = account.storage.values().filter(|slot| slot.is_changed()).count();
+        expected += slots as u64;
+        if *address == tx.caller() {
+            continue;
+        }
+        let before = pre_account(&mut pre, *address).unwrap_or_default();
+        let Some(balance) = account.info.balance.checked_sub(credit(*address)) else {
+            return Err(crate::harness::fail(format!("{address} holds less than its fee credit")));
+        };
+        let changed = account.info.nonce != before.nonce ||
+            balance != before.balance ||
+            account.info.code_hash != before.code_hash;
+        expected += u64::from(changed);
+    }
+    prop_eq!(
+        outcome.usage.write_records,
+        expected,
+        "the records reported are not the net change of the state"
+    );
+    Ok(())
+}
+
+/// What the settlement credits each account for `tx`'s fees, which `outcome` billed: the fuzz
+/// world prices L1 and operator fees at nothing, so the beneficiary gets the tip and the base-fee
+/// vault the base fee, on the gas the receipt bills, and a transaction that pays no fee — a
+/// deposit, or one the protocol sent — credits nothing.
+fn fee_credits(
+    case: &Case,
+    tx: &MegaTransaction,
+    outcome: &MegaTransactionOutcome,
+) -> impl Fn(Address) -> U256 {
+    let block = case.block();
+    let basefee = u128::from(block.basefee);
+    let used = u128::from(outcome.gas.gas_used);
+    let tip = tx.effective_gas_price(basefee).saturating_sub(basefee);
+    let pays_fees = !is_exempt(tx);
+    move |address: Address| {
+        let mut credit = 0;
+        if pays_fees && address == block.beneficiary {
+            credit += tip * used;
+        }
+        if pays_fees && address == BASE_FEE_RECIPIENT {
+            credit += basefee * used;
+        }
+        U256::from(credit)
+    }
+}
+
+/// The state growth a transaction reports is the net count of the new accounts and new slots it
+/// kept, computed from the case's pre-state and the outcome's state alone: one for every slot whose
+/// original value is zero and whose present value is not, and one for every account the case's
+/// world held empty, or not at all, that the outcome holds non-empty once the settlement's fee
+/// credits are taken out of its balance — a fee credit is no rise. The sender's account is the
+/// body's, and is a rise only as the caller a deposit-like transaction created.
+///
+/// An account the transaction created and destroyed keeps none of its slots, and its leaf only
+/// where the world held it as an account empty under EIP-161: the creation added that account and
+/// the destruction does not take a leaf back that existed at the start. One the world did not hold
+/// is taken back, and one that held a balance was no new account.
+#[test]
+fn test_property_state_growth_is_the_net_count_of_new_state() {
+    check("state_growth", CASES, || case(Flavor::Satin), check_state_growth);
+}
+
+/// What [`test_property_state_growth_is_the_net_count_of_new_state`] checks of a case.
+pub(crate) fn check_state_growth(case: &Case) -> Result<(), proptest::test_runner::TestCaseError> {
+    let tx = case.transaction();
+    let Ok(outcome) = case.execute() else { return Ok(()) };
+    let credit = fee_credits(case, &tx, &outcome);
+    let deposit_like =
+        tx.0.deposit.source_hash != alloy_primitives::B256::ZERO || tx.caller() == SYSTEM_ADDRESS;
+    let mut pre = case.database();
+    let mut expected = 0;
+    for (address, account) in &outcome.state {
+        if destroyed_in_the_transaction(account) {
+            let empty_leaf = leaf_at_start(&mut pre, *address).is_some_and(|info| info.is_empty());
+            expected += u64::from(empty_leaf);
+            continue;
+        }
+        let slots = account
+            .storage
+            .values()
+            .filter(|slot| slot.original_value.is_zero() && !slot.present_value.is_zero())
+            .count();
+        expected += slots as u64;
+        if *address == tx.caller() && !deposit_like {
+            continue;
+        }
+        if pre_account(&mut pre, *address).is_some() {
+            continue;
+        }
+        let Some(balance) = account.info.balance.checked_sub(credit(*address)) else {
+            return Err(crate::harness::fail(format!("{address} holds less than its fee credit")));
+        };
+        let exists = account.info.nonce != 0 ||
+            !balance.is_zero() ||
+            account.info.code_hash != revm::primitives::KECCAK_EMPTY;
+        expected += u64::from(exists);
+    }
+    prop_eq!(
+        outcome.usage.state_growth,
+        expected,
+        "the state growth reported is not the net count of new state"
+    );
+    Ok(())
 }
 
 /// What the Oracle hints `evm`'s transaction forwarded weigh as data size. A forwarded hint's
@@ -342,8 +502,9 @@ fn forwarded_hint_bytes<I>(evm: &mega_evm::MegaEvm<MemoryDatabase, I, Envs>) -> 
 }
 
 /// A stopped transaction keeps only what the spec says survives: the stop is the crossing of its
-/// own frame, which names a limit the case runs under — the transaction's data-size limit, that
-/// frame's budget, which is below it, or a compute limit, which no frame budget is — and reverts
+/// own frame, which names a limit the case runs under — the transaction's data-size, KV or
+/// state-growth limit, that frame's budget in one of them, which is below it, or a compute limit,
+/// which no frame budget is — and reverts
 /// that frame and so everything below it; it is a revert carrying `MegaLimitExceeded`, with no
 /// log; no storage write stands; no account changes but the sender's
 /// nonce and fee, the fee recipients' credit, an applied EIP-7702 authority's nonce and
@@ -387,16 +548,22 @@ pub(crate) fn check_survivors(
             "a reported stop that is within the limit\n{rendered}"
         )));
     };
-    let tx_limit = case.world.limits.runtime().tx_data_size_limit;
+    let runtime = case.world.limits.runtime();
+    let tx_limit = match kind {
+        LimitKind::DataSize => runtime.tx_data_size_limit,
+        LimitKind::KvUpdate => runtime.tx_kv_update_limit,
+        LimitKind::StateGrowth => runtime.tx_state_growth_limit,
+        LimitKind::ComputeGas => u64::MAX,
+    };
     match (kind, frame_local) {
-        (LimitKind::DataSize, false) => {
-            prop_eq!(limit, tx_limit, "the stop names the transaction's limit\n{rendered}");
-        }
-        (LimitKind::DataSize, true) => {
-            prop_check!(limit < tx_limit, "a frame budget is below the limit\n{rendered}");
-        }
         (LimitKind::ComputeGas, frame_local) => {
             prop_check!(!frame_local, "a compute stop is no frame budget\n{rendered}");
+        }
+        (_, false) => {
+            prop_eq!(limit, tx_limit, "the stop names the transaction's limit\n{rendered}");
+        }
+        (_, true) => {
+            prop_check!(limit <= tx_limit, "a frame budget is within the limit\n{rendered}");
         }
     }
     match &outcome.result {

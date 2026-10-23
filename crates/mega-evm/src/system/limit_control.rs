@@ -59,7 +59,7 @@ pub use mega_system_contracts::limit_control::IMegaLimitControl;
 /// what a block-environment read's cap leaves it when its frame holds more.
 ///
 /// The figure is taken before the forward: taken after it, a caller that forwards what `GAS`
-/// reports would hear back one sixty-fourth of its gas. That is the one property carried over
+/// reports would hear back the 2 per cent of its gas it kept. That is the one property carried over
 /// from the legacy engine, whose compute never counted the gas a call forwarded. The figure
 /// itself departs from the legacy engine's, which came from a separate compute ledger, with
 /// per-frame budgets of 98/100 of the caller's remaining compute under the transaction's compute

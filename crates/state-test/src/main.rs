@@ -66,6 +66,15 @@ struct Cmd {
     /// read volatile data, instead of the spec's.
     #[arg(long, value_name = "GAS")]
     limit_compute_gas: Option<u64>,
+    /// Satin mode: hold every transaction to this many write records, its KV count, instead of
+    /// the spec's; every frame's budget is its share of what its parent has left.
+    #[arg(long, value_name = "RECORDS")]
+    limit_kv_updates: Option<u64>,
+    /// Satin mode: hold every transaction to this many new accounts and new slots, its state
+    /// growth, instead of the spec's; every frame's budget is its share of what its parent has
+    /// left.
+    #[arg(long, value_name = "UNITS")]
+    limit_state_growth: Option<u64>,
     /// Trace every test with an EIP-3155 tracer on standard error; runs on one thread.
     #[arg(long)]
     trace: bool,
@@ -172,7 +181,9 @@ fn main() -> ExitCode {
 fn tightened_limits(cmd: &Cmd) -> Result<Option<EvmTxRuntimeLimits>, String> {
     if cmd.limit_data_size.is_none() &&
         cmd.limit_frame_data_size.is_none() &&
-        cmd.limit_compute_gas.is_none()
+        cmd.limit_compute_gas.is_none() &&
+        cmd.limit_kv_updates.is_none() &&
+        cmd.limit_state_growth.is_none()
     {
         return Ok(None);
     }
@@ -192,6 +203,12 @@ fn tightened_limits(cmd: &Cmd) -> Result<Option<EvmTxRuntimeLimits>, String> {
         limits = limits
             .with_block_env_access_compute_gas_limit(gas)
             .with_oracle_access_compute_gas_limit(gas);
+    }
+    if let Some(records) = cmd.limit_kv_updates {
+        limits = limits.with_tx_kv_update_limit(records);
+    }
+    if let Some(units) = cmd.limit_state_growth {
+        limits = limits.with_tx_state_growth_limit(units);
     }
     Ok(Some(limits))
 }

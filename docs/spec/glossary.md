@@ -64,6 +64,14 @@ _(Satin, unstable)_ The [EIP-8037](https://eips.ethereum.org/EIPS/eip-8037) gas 
 
 Drawn from the [reservoir](#reservoir) first, then from regular gas.
 
+The accounts and fresh slots this gas prices are what Satin counts as state growth, limited per transaction, per frame and per block.
+
+The first effective `SELFDESTRUCT` of an account created in the same transaction refills this gas only for a part that was absent at the transaction's start: the account leaf, the code deposit and each new slot.
+That refill goes to the destroying frame, including when another frame paid it.
+A part that existed at the start is not refilled, and state growth does not fall for it.
+
+A failed deposit's created caller is counted as state growth and pays no state gas, and the limit does not stop that deposit.
+
 See the [Satin](upgrades/satin.md) network upgrade.
 
 ## History gas
@@ -71,6 +79,10 @@ See the [Satin](upgrades/satin.md) network upgrade.
 _(Satin, unstable)_ Gas a transaction pays for the bytes it appends to the chain's history — its body, its logs, its [write records](#write-record) and its deployed code — at MegaETH's cost per history byte.
 
 Drawn from the [reservoir](#reservoir) first, then from regular gas, and never scaled by SALT.
+
+The first effective `SELFDESTRUCT` of an account created in the same transaction gives this gas back for each [write record](#write-record) it takes back, and for deployed code that was absent at the transaction's start and is deleted with the account.
+That give-back goes to the destroying frame, including when another frame paid it.
+Every other give-back of this gas goes to whoever paid it.
 
 See the [Satin](upgrades/satin.md) network upgrade.
 
@@ -83,10 +95,28 @@ Gas limit above the cap goes to the [reservoir](#reservoir).
 
 _(Satin, unstable)_ The [EIP-8037](https://eips.ethereum.org/EIPS/eip-8037) state-gas reservoir: the part of a transaction's gas limit above the [execution cap](#execution-cap), which pays [state gas](#state-gas) and [history gas](#history-gas) before they spill onto regular gas.
 
+The transaction's own frame, and a system call's outermost frame, receive the whole reservoir.
+
+A child frame of `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, `CREATE` or `CREATE2`, and the creation a keyless deployment starts, receives `remaining − remaining × 2 / 100` of the caller's remaining reservoir, taken after every charge the caller makes for that start.
+
+The explicit gas argument does not bound that share.
+
+What the child does not spend returns to the caller, and a failed child's charges roll back as EIP-8037 specifies.
+On every such return, whether the start was answered without building a frame or a built frame returns, the reservoir the child returns first unwinds the caller's outstanding spill, and the rest joins the reservoir the caller kept.
+The part the caller kept is not drawn.
+State gas and history gas share that spill.
+The caller's own charge for a leaf the child did not add is given back after that.
+
 ## Write record
 
 _(Satin, unstable)_ One account or storage write a transaction keeps, 40 bytes of data size and of [history gas](#history-gas): an account's record exists while the account's nonce, balance or code differs from what the transaction loaded, whichever writes changed it — a creation's created account included — and a slot's while its value differs from its original value in the transaction.
 The KV-update count is the number of write records.
+The first effective `SELFDESTRUCT` of an account created in the same transaction takes back the write record of each part that was absent at the transaction's start — the account leaf and each new slot — with that record's data size and history gas.
+A part that existed at the start keeps its record, because the account or the slot now differs from its original.
+Deployed code is not a write record; the same destruction gives back the data size and history gas of code that was absent at the start.
+A write to the account or to one of its slots after that mark makes no record.
+
+Satin limits that count per transaction, per frame and per block: `TX_KV_UPDATE_LIMIT` and `BLOCK_KV_UPDATE_LIMIT` are 500,000.
 
 ## History allowance
 
@@ -180,6 +210,8 @@ One of four independent limits enforced per transaction: compute gas, data size,
 
 See [resource limits](evm/resource-limits.md).
 
+_(Satin, unstable)_ Satin keeps data size, KV updates and state growth as limited dimensions, each per transaction, per frame and per block, and enforces compute through gas detention on regular gas, with no separate compute-gas limit.
+
 ## Call frame
 
 A single execution context within a transaction, corresponding to a message call (CALL, STATICCALL, DELEGATECALL, CALLCODE) or a contract creation (CREATE, CREATE2) as defined in the [Ethereum Yellow Paper](https://ethereum.github.io/yellowpaper/paper.pdf).
@@ -190,6 +222,8 @@ Call frames nest: each CALL or CREATE within a transaction creates a child call 
 
 Resource trackers (data size, KV updates, state growth) are call-frame-aware — usage within a child call frame is discarded if the child reverts.
 
+_(Satin, unstable)_ A child frame's budget in each of data size, KV updates and state growth is `parent_remaining × 98 / 100`, rounded down.
+
 ## Call-frame-local exceed
 
 When a call frame exceeds its per-call-frame resource budget, the call frame **reverts** with `MegaLimitExceeded(uint8 kind, uint64 limit)`.
@@ -199,6 +233,10 @@ The parent call frame can continue executing.
 Distinct from a transaction-level exceed, which **halts** the entire transaction.
 
 Per-call-frame resource budgets are introduced in Rex4.
+
+_(Satin, unstable)_ Satin stops the frame that crosses a limit with that same revert, the transaction's own frame included, and the caller continues.
+
+The `kind` values are 0 for data size, 1 for KV updates, 2 for detention's compute limit and 3 for state growth.
 
 ## Spec (`MegaSpecId`)
 

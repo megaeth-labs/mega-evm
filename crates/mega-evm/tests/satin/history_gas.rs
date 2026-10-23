@@ -12,15 +12,15 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{
-        CALL, CALLCODE, CREATE, CREATE2, DELEGATECALL, GAS, LOG0, POP, PUSH0, PUSH1, REVERT,
-        STATICCALL, STOP,
+        CALL, CALLCODE, CREATE, CREATE2, DELEGATECALL, GAS, LOG0, POP, PUSH0, PUSH1, RETURN,
+        REVERT, STATICCALL, STOP,
     },
     context_interface::cfg::GasId,
 };
 
 use crate::common::{
     body_history, call, call_with_data, create, deploying, execute, history, history_is_free,
-    history_rounds, runs_at_measurement_prices,
+    history_rounds, reservoir_share, runs_at_measurement_prices,
 };
 
 const CALLER: Address = address!("0000000000000000000000000000000000200000");
@@ -160,7 +160,7 @@ fn test_a_log_pays_history_on_top_of_the_schedules_price() {
 /* ---------- a frame-start charge the caller cannot pay ---------- */
 
 /// `CALL(GAS, target, 1 wei, [], [])`, discarding the flag, then `STOP`: a value transfer that
-/// forwards everything the caller may forward, so the caller keeps a sixty-fourth of what it held.
+/// forwards everything the caller may forward, so the caller keeps 2 per cent of what it held.
 fn transfers_everything_to(target: Address) -> Bytes {
     BytecodeBuilder::default()
         .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
@@ -191,8 +191,8 @@ fn caller_running(code: Bytes) -> MemoryDatabase {
     funded().account_balance(CALLEE, U256::from(10_000_000)).account_code(CALLEE, code)
 }
 
-/// The two records a value call's start makes cost more than a caller under roughly 450,000 gas
-/// keeps after the sixty-fourth it may not forward. Such a caller pays for none of them by
+/// The two records a value call's start makes cost more than a caller under roughly 352,000 gas
+/// at the forward keeps after the 98 per cent it forwards. Such a caller pays for none of them by
 /// halting: the frame it was starting does not run.
 #[test]
 fn test_a_call_whose_caller_cannot_pay_its_records_starts_no_frame() {
@@ -200,7 +200,7 @@ fn test_a_call_whose_caller_cannot_pay_its_records_starts_no_frame() {
         return;
     }
     let code = transfers_everything_to(CONTRACT);
-    let short = execute(caller_running(code.clone()), call(CALLER, CALLEE, U256::ZERO, 600_000));
+    let short = execute(caller_running(code.clone()), call(CALLER, CALLEE, U256::ZERO, 560_000));
     let ample = execute(caller_running(code), call(CALLER, CALLEE, U256::ZERO, 1_000_000));
 
     assert!(!short.result.is_success(), "the caller halts rather than starting the frame");
@@ -219,7 +219,7 @@ fn test_a_creation_whose_creator_cannot_pay_its_records_starts_no_frame() {
         return;
     }
     let code = creates_everything();
-    let short = execute(caller_running(code.clone()), call(CALLER, CALLEE, U256::ZERO, 600_000));
+    let short = execute(caller_running(code.clone()), call(CALLER, CALLEE, U256::ZERO, 560_000));
     let ample = execute(caller_running(code), call(CALLER, CALLEE, U256::ZERO, 1_000_000));
 
     assert!(!short.result.is_success(), "the creator halts rather than starting the creation");
@@ -236,9 +236,9 @@ fn test_a_creation_whose_creator_cannot_pay_its_records_starts_no_frame() {
 /// record alone. `CONTRACT` funds the address `CALLEE`'s `CREATE2` lands on with one wei, a call
 /// answered without running, then calls `CALLEE` with the gas each case gives it. `CALLEE` runs
 /// `CREATE2` of empty init code, which charges four `PUSH0` and the creation's own gas — no state
-/// gas, for an account that exists — and forwards all but a 64th of what is left, keeping that
-/// 64th to pay the start's records with. Given 64 times one record's price on top of its charges,
-/// it starts the creation; one gas less, it does not.
+/// gas, for an account that exists — and forwards all but 2 per cent of what is left, keeping that
+/// fiftieth to pay the start's records with. Given 50 times one record's price on top of its
+/// charges, it starts the creation; one gas less, it does not.
 #[test]
 fn test_a_creation_onto_an_account_the_transaction_changed_charges_its_creator_one_record() {
     // Records that cost nothing leave no price to be short of, and records priced at a fraction of
@@ -269,12 +269,12 @@ fn test_a_creation_onto_an_account_the_transaction_changed_charges_its_creator_o
         outcome
     };
 
-    let short = run(charges + 64 * price - 1);
+    let short = run(charges + 50 * price - 1);
     assert_eq!(short.state[&created].info.nonce, 0, "a gas short, the creation never started");
     assert_eq!(short.usage.write_records, 2, "the funding call's: CONTRACT's and the address's");
     assert_eq!(short.gas.history, body_history(0) + 2 * price);
 
-    let exact = run(charges + 64 * price);
+    let exact = run(charges + 50 * price);
     assert_eq!(exact.state[&created].info.nonce, 1, "the creation ran");
     assert_eq!(exact.usage.write_records, 3, "and added its creator's record alone");
     assert_eq!(exact.gas.history, body_history(0) + 3 * price);
@@ -341,10 +341,12 @@ fn test_every_call_kind_charges_its_records_after_its_forward() {
         let price = records * WRITE_RECORD_SIZE * CPHB;
         for reservoir in [None, Some(price / 2)] {
             let case = format!("scheme {scheme:#04x}, reservoir {reservoir:?}");
-            // What the caller's own gas pays once the reservoir is spent, and a forward that leaves
-            // it one gas less than that, the most the 63/64 rule lets it forward.
-            let spill = price - reservoir.unwrap_or(0);
-            let forward = 63 * (spill - 1);
+            // What the caller's own gas pays once the reservoir it was given is spent — its
+            // caller's share of the transaction's — and a forward that leaves it one gas less than
+            // that, the most the 98/100 rule lets it forward.
+            let given = reservoir.map_or(0, reservoir_share);
+            let spill = price - given;
+            let forward = 49 * (spill - 1);
             let (code, charges) = start(scheme, forward);
 
             let (started, short) = run(code.clone(), charges + forward + spill - 1, reservoir);
@@ -359,8 +361,14 @@ fn test_every_call_kind_charges_its_records_after_its_forward() {
             assert!(started, "{case}: the gas in full, the frame starts");
             assert_eq!(exact.usage.write_records, records, "{case}");
             assert_eq!(exact.gas.history, body(0) + price, "{case}: the body and the records");
+            // The share paid first. The part of the reservoir its caller kept comes back with the
+            // transaction's own frame, which merged the spill: it unwinds that spill onto regular
+            // gas before any of it joins the reservoir, so none is left.
             if reservoir.is_some() {
-                assert_eq!(exact.gas.reservoir_remaining, 0, "{case}: the reservoir paid first");
+                assert_eq!(
+                    exact.gas.reservoir_remaining, 0,
+                    "{case}: the spill took what was kept"
+                );
             }
 
             // A value `CALLCODE` moves the value from the calling account to itself and makes
@@ -494,4 +502,44 @@ fn test_a_beneficiary_that_is_a_fee_vault_changes_nothing() {
     assert_eq!(distinct.gas.history, body(0));
     assert_eq!(a_vault.gas.history, distinct.gas.history);
     assert_eq!(a_vault.usage.write_records, 0);
+}
+
+/// The record the transaction's own frame makes — its value's recipient — is charged before the
+/// frame and given back once: by the frame itself, when the recipient sends the value back and its
+/// account returns to what the transaction loaded, so a frame that then succeeds keeps none of it
+/// and the settlement gives nothing back again; by the settlement, when the frame fails, its own
+/// give-back discarded with it. A recipient that keeps the value keeps the record and its history.
+///
+/// Independence: constants — the body and the record are the byte table's, at the price in effect.
+#[test]
+fn test_the_first_frames_record_is_given_back_once() {
+    let one = U256::from(1);
+    let returning = |end: u8| {
+        BytecodeBuilder::default()
+            .call(CALLER, one)
+            .append(POP)
+            .append_many([PUSH0, PUSH0, end])
+            .build()
+    };
+    let cases = [
+        ("returns the value and succeeds", returning(RETURN), true, 0),
+        ("keeps the value", BytecodeBuilder::default().stop().build(), true, 1),
+        ("returns the value and reverts", returning(REVERT), false, 0),
+    ];
+    for (name, code, succeeds, records) in cases {
+        let outcome =
+            execute(funded().account_code(CONTRACT, code), call(CALLER, CONTRACT, one, GAS_LIMIT));
+        assert_eq!(outcome.result.is_success(), succeeds, "{name}: {:?}", outcome.result);
+        assert_eq!(
+            outcome.gas.history,
+            body_history(0) + history(WRITE_RECORD_SIZE * records),
+            "{name}: the body, and the recipient's record where it is kept"
+        );
+        assert_eq!(outcome.usage.write_records, records, "{name}");
+        assert_eq!(
+            outcome.gas.history_bytes,
+            TX_BODY_SIZE + WRITE_RECORD_SIZE * records,
+            "{name}: the history bytes follow"
+        );
+    }
 }

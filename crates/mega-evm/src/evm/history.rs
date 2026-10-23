@@ -61,22 +61,22 @@ pub(crate) fn charge_write_records_history(
 
 /// The history bytes the allowance of a value-transferring call covers: one three-topic event
 /// carrying a single word, which is what a `receive()` hook emits.
-pub const STORAGE_CALL_STIPEND_BYTES: u64 = LOG_BASE_SIZE + 3 * LOG_TOPIC_SIZE + 32;
+pub const HISTORY_ALLOWANCE_BYTES: u64 = LOG_BASE_SIZE + 3 * LOG_TOPIC_SIZE + 32;
 
 /// The history allowance a value-transferring `CALL` or `CALLCODE` grants the frame it starts.
 ///
 /// EVM's own `CALL_STIPEND` buys the recipient of a transfer enough computation to notice it; on
 /// a chain that prices the bytes a log appends it buys no log at all, so a `receive()` hook that
 /// emits an event would be unreachable through `transfer()`. The allowance is that stipend's
-/// counterpart on the history ledger: [`STORAGE_CALL_STIPEND_BYTES`] at the cost per history
+/// counterpart on the history ledger: [`HISTORY_ALLOWANCE_BYTES`] at the cost per history
 /// byte, enough for one event and nothing else.
 ///
 /// It is separate from the frame's gas in every sense. It never enters the frame's `Gas`, so no
 /// settlement can hand it back as gas; it pays history charges and only those, so it cannot buy
 /// computation or a write record; and what it pays for appears on no ledger, because no pool of
 /// the transaction's gas paid it.
-pub fn storage_call_stipend() -> u64 {
-    history_gas(STORAGE_CALL_STIPEND_BYTES).unwrap_or(u64::MAX)
+pub fn history_allowance_gas() -> u64 {
+    history_gas(HISTORY_ALLOWANCE_BYTES).unwrap_or(u64::MAX)
 }
 
 /// The data-size bytes of `tx`'s body: the fixed body, the calldata, one record per EIP-7702
@@ -152,10 +152,10 @@ mod tests {
         if runs_at_measurement_prices() {
             return;
         }
-        assert_eq!(STORAGE_CALL_STIPEND_BYTES, log_history_bytes(3, 32));
-        assert_eq!(STORAGE_CALL_STIPEND_BYTES, 160);
-        assert_eq!(storage_call_stipend(), 160 * COST_PER_HISTORY_BYTE);
-        assert_eq!(storage_call_stipend(), history_gas(log_history_bytes(3, 32)).unwrap());
+        assert_eq!(HISTORY_ALLOWANCE_BYTES, log_history_bytes(3, 32));
+        assert_eq!(HISTORY_ALLOWANCE_BYTES, 160);
+        assert_eq!(history_allowance_gas(), 160 * COST_PER_HISTORY_BYTE);
+        assert_eq!(history_allowance_gas(), history_gas(log_history_bytes(3, 32)).unwrap());
     }
 
     /// Every way a transaction moves value, as a name, a database, the transaction at a gas limit

@@ -4,10 +4,10 @@
 //! an ordinary creation is: its share of the data-size budget, the transaction's limits. A limit
 //! the creation crosses, its budget or the transaction's, reverts the creation alone, and the call
 //! answers `ExecutionReverted` with the stop's revert data, keeping what the creation's start
-//! wrote. A limit the call itself crosses — its budget, crossed by the nonce record a failed
-//! creation leaves it — reverts the call with the stop, which takes back everything the deployment
-//! wrote, the signer's nonce included, and the sender pays for what ran and gets the rest of its
-//! gas and its reservoir back.
+//! wrote. A limit the call itself crosses — its budget, or the transaction's limit, crossed by the
+//! signer's nonce record, counted on the call once the creation returned — reverts the call with
+//! the stop, which takes back everything the deployment wrote, the signer's nonce included, and the
+//! sender pays for what ran and gets the rest of its gas and its reservoir back.
 //!
 //! The creation's stop is pinned as a column of the matrix: every limit a creation can cross,
 //! from a signer at nonce 0 and at nonce 1, below the execution cap and above it, with and without
@@ -17,13 +17,14 @@
 //! caller or to the sender: an answer built without a frame, the settlement of a stopped
 //! transaction, and the return of the frame's unspent gas.
 
-use alloy_sol_types::SolError;
+use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
-    constants::TX_GAS_LIMIT_CAP, system::keyless::KEYLESS_DEPLOY_OVERHEAD_GAS, LimitCheck,
-    LimitKind, MegaLimitExceeded, LOG_BASE_SIZE, WRITE_RECORD_SIZE,
+    constants::TX_GAS_LIMIT_CAP,
+    system::{keyless::KEYLESS_DEPLOY_OVERHEAD_GAS, IOracle, ORACLE_CONTRACT_ADDRESS},
+    LimitCheck, LimitKind, MegaLimitExceeded, LOG_BASE_SIZE, WRITE_RECORD_SIZE,
 };
 use revm::{
-    bytecode::opcode::{PUSH0, REVERT, TIMESTAMP},
+    bytecode::opcode::{CALL, GAS, POP, PUSH0, REVERT, TIMESTAMP},
     interpreter::{
         interpreter::EthInterpreter, CallInputs, CallOutcome, CreateInputs, CreateOutcome,
         InstructionResult,
@@ -123,10 +124,9 @@ fn test_a_deployment_crossing_its_data_size_budget_reverts_alone() {
             gas_limit,
             EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(1_000),
         );
-        // The call's own lane gets the frame cap, which the signer's nonce record, counted on the
-        // call before the creation's budget is taken, takes 40 of; the creation gets 98% of the
-        // 960 left. Before the record moved to the call the creation got 98% of the cap, 980.
-        assert_eq!(creation_stop(&outcome), MegaLimitExceeded { kind: 0, limit: 940 });
+        // The call's own pool gets the frame cap, and the creation 98% of it; the signer's nonce
+        // record is counted on the call once the creation returned.
+        assert_eq!(creation_stop(&outcome), MegaLimitExceeded { kind: 0, limit: 980 });
         assert_eq!(outcome.limit_exceeded, None);
         assert_eq!(nonce(&outcome, deployment.signer), 1);
         assert_eq!(outcome.usage.write_records, 1, "the signer's nonce record");
@@ -135,8 +135,8 @@ fn test_a_deployment_crossing_its_data_size_budget_reverts_alone() {
 
 /// The records the creation's start makes are held before the creation is built: a transaction
 /// limit that holds one record but not two stops the creation before its init code runs. The
-/// start still bumps the signer's nonce, whose record the call keeps within the limit, and the
-/// call answers the stop.
+/// start still bumps the signer's nonce, whose record the call keeps within the limit once the
+/// creation returned, and the call answers the stop.
 #[test]
 fn test_the_creations_start_crossing_the_limit_stops_the_creation() {
     let deployment = Deployment::new(deploying(&runtime(1)));
@@ -147,7 +147,9 @@ fn test_the_creations_start_crossing_the_limit_stops_the_creation() {
             gas_limit,
             EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit),
         );
-        assert_eq!(creation_stop(&outcome), MegaLimitExceeded { kind: 0, limit });
+        // The call has the one record's room, and the creation 98% of it, which its own record
+        // crosses.
+        assert_eq!(creation_stop(&outcome), MegaLimitExceeded { kind: 0, limit: 39 });
         assert_eq!(outcome.limit_exceeded, None, "at {gas_limit}");
         assert_eq!(nonce(&outcome, deployment.signer), 1, "at {gas_limit}");
         assert_eq!(
@@ -161,10 +163,10 @@ fn test_the_creations_start_crossing_the_limit_stops_the_creation() {
     }
 }
 
-/// A failed creation leaves its creator's nonce record on the call's lane, which no check held it
-/// to: a call whose budget cannot hold that record reverts alone with its own stop, and takes the
-/// nonce back with it. The outcome names the call's budget, whose crossing produced the result of
-/// the transaction's own frame.
+/// A failed creation leaves its creator's nonce record to the call, counted on the call's pool
+/// once the creation returned and held to the call's budget: a call whose budget cannot hold that
+/// record reverts alone with its own stop, and takes the nonce back with it. The outcome names the
+/// call's budget, whose crossing produced the result of the transaction's own frame.
 #[test]
 fn test_the_signers_record_can_put_the_call_over_its_budget() {
     let deployment = Deployment::new(deploying(&runtime(1)));
@@ -189,6 +191,57 @@ fn test_the_signers_record_can_put_the_call_over_its_budget() {
     }
 }
 
+/// The signer's nonce record is counted on the call once the creation returned, after the hint
+/// the creation's constructor sent to the Oracle: the hint used what the transaction had left, and
+/// the record crosses the transaction's limit, with room to spare in the call's budget. The call
+/// reverts with that stop, which takes the whole deployment back; the hint stays counted.
+#[test]
+fn test_a_hint_the_creation_sent_leaves_the_signers_record_over_the_transaction_limit() {
+    let hint = Bytes::from(
+        IOracle::sendHintCall { topic: B256::repeat_byte(0x7a), data: Bytes::from(vec![0x5a; 64]) }
+            .abi_encode(),
+    );
+    let hint_bytes = hint.len() as u64;
+    let prefix = mega_evm::test_utils::BytecodeBuilder::default()
+        .mstore(0, &hint)
+        .append_many([PUSH0, PUSH0])
+        .push_number(hint_bytes)
+        .append_many([PUSH0, PUSH0])
+        .push_address(ORACLE_CONTRACT_ADDRESS)
+        .append_many([GAS, CALL, POP])
+        .build_vec();
+    let deployment = Deployment::new(constructor(&prefix, &runtime(1)));
+    let body = body_bytes(&deployment);
+    // The created account's record, the hint and the deployed byte, and one byte short of the
+    // signer's record.
+    let limit = body + WRITE_RECORD_SIZE + hint_bytes + 1 + WRITE_RECORD_SIZE - 1;
+    for gas_limit in GAS_LIMITS {
+        let outcome = limited(
+            &deployment,
+            gas_limit,
+            EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit),
+        );
+        assert_eq!(stop(&outcome), MegaLimitExceeded { kind: 0, limit }, "at {gas_limit}");
+        assert_eq!(
+            outcome.limit_exceeded,
+            Some(LimitCheck::ExceedsLimit {
+                kind: LimitKind::DataSize,
+                limit,
+                used: limit + 1,
+                frame_local: false,
+            }),
+            "at {gas_limit}: the transaction's limit, not the call's budget"
+        );
+        assert_eq!(nonce(&outcome, deployment.signer), 0, "at {gas_limit}: the bump goes back");
+        assert!(
+            code_hash(&outcome, deployment.address).is_none_or(|hash| hash == KECCAK_EMPTY),
+            "at {gas_limit}: no code is deployed"
+        );
+        assert_eq!(outcome.usage.data_size, body + hint_bytes, "at {gas_limit}: the hint stays");
+        assert_eq!(outcome.usage.write_records, 0, "at {gas_limit}");
+    }
+}
+
 /// A failed creation by a signer at nonce 1 leaves no record on the call: its nonce bump is taken
 /// back, and the record with it. The same budget then holds the call, which answers with the
 /// creation's own stop, and the signer stays at 1.
@@ -202,13 +255,56 @@ fn test_a_failure_from_nonce_one_leaves_the_call_within_its_budget() {
             gas_limit,
             EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(39),
         );
-        // The call's lane gets the frame cap, which the signer's nonce record, counted on the
-        // call before the creation's budget is taken, uses up: the creation gets 98% of nothing.
-        // Before the record moved to the call the creation got 98% of the cap, 38.
-        assert_eq!(creation_stop(&outcome), MegaLimitExceeded { kind: 0, limit: 0 });
+        // The call's pool gets the frame cap, and the creation 98% of it, 38, which its own
+        // record crosses.
+        assert_eq!(creation_stop(&outcome), MegaLimitExceeded { kind: 0, limit: 38 });
         assert_eq!(outcome.limit_exceeded, None);
         assert_eq!(nonce(&outcome, deployment.signer), 1, "at {gas_limit}");
         assert_eq!(outcome.usage.write_records, 0, "at {gas_limit}");
+    }
+}
+
+/// Init code that fills the fresh slots `1..=slots` and deploys a one-byte runtime.
+fn filling(slots: u64) -> Bytes {
+    let prefix = (1..=slots)
+        .fold(mega_evm::test_utils::BytecodeBuilder::default(), |code, slot| {
+            code.sstore(U256::from(slot), U256::from(1))
+        });
+    constructor(&prefix.build_vec(), &runtime(1))
+}
+
+/// A signer the creation's nonce bump creates is one account of state growth on the call, counted
+/// with the signer's record once the creation returned, and the empty deploy address is the
+/// creation's first rise against its share of what the call has left: under the spec's 1,000 the
+/// creation gets `1,000 × 98 / 100` = 980. Under a limit of ten the creation gets 9, of which the
+/// deploy address takes one: init code filling eight fresh slots deploys, the call keeping the
+/// signer's account in the one it kept, and a ninth slot stops the creation, naming 9, which the
+/// call answers, the signer's bump and its new account kept. A signer that exists adds nothing,
+/// and its creation gets the same 9: the address and eight slots.
+#[test]
+fn test_a_new_signer_and_its_deploy_address_are_state_growth() {
+    assert_eq!(1_000 * 98 / 100, 980);
+    let limits = EvmTxRuntimeLimits::no_limits().with_tx_state_growth_limit(10);
+    let (fits, over) = (Deployment::new(filling(8)), Deployment::new(filling(9)));
+    for gas_limit in GAS_LIMITS {
+        let deployed = limited(&fits, gas_limit, limits);
+        assert_eq!(returned(&deployed).deployedAddress, fits.address, "at {gas_limit}");
+        assert_eq!(deployed.usage.state_growth, 10, "at {gas_limit}: the signer, the address, 8");
+
+        let stopped = limited(&over, gas_limit, limits);
+        assert_eq!(creation_stop(&stopped), MegaLimitExceeded { kind: 3, limit: 9 });
+        assert_eq!(stopped.limit_exceeded, None, "at {gas_limit}: the call answered");
+        assert_eq!(nonce(&stopped, over.signer), 1, "at {gas_limit}");
+        assert_eq!(stopped.usage.state_growth, 1, "at {gas_limit}: the signer's new account");
+
+        let existing = run_with(
+            system_db().account_balance(fits.signer, U256::from(1)),
+            fits.call_data(LARGE_OVERRIDE),
+            gas_limit,
+            limits,
+        );
+        assert_eq!(returned(&existing).deployedAddress, fits.address, "at {gas_limit}");
+        assert_eq!(existing.usage.state_growth, 9, "at {gas_limit}: the address and eight slots");
     }
 }
 
@@ -355,14 +451,17 @@ impl Crossing {
         let limits = EvmTxRuntimeLimits::no_limits();
         match self {
             Self::DataSize => {
-                // The body, the two records of the creation's start and 100 bytes more; the
-                // constructor's log crosses with all its bytes.
+                // The body, the two records of the deployment's start and 100 bytes more; the
+                // constructor's log crosses with all its bytes the transaction's limit and the
+                // creation's budget, which the stop names: 98% of what the call has left, the
+                // signer's nonce record being counted on the call once the creation returned.
                 let start = body_bytes(deployment) + 2 * WRITE_RECORD_SIZE;
                 let limit = start + 100;
-                let used = start + LOG_BASE_SIZE + 2_000;
+                let budget = (limit - body_bytes(deployment)) * 98 / 100;
+                let used = WRITE_RECORD_SIZE + LOG_BASE_SIZE + 2_000;
                 (
                     limits.with_tx_data_size_limit(limit),
-                    Crossed::new(LimitKind::DataSize, limit, used),
+                    Crossed::new(LimitKind::DataSize, budget, used),
                 )
             }
             Self::Compute => {
@@ -484,7 +583,8 @@ fn test_every_limit_stops_a_deployment_from_either_nonce_at_either_tier() {
                         let [_, regular, ..] = beyond(outcome, &reference);
                         assert_eq!(regular, used, "{cell}: computed up to the charge that crossed");
                     } else {
-                        assert!(outcome.usage.data_size <= limit, "{cell}: within the limit");
+                        let tx_limit = limits.tx_data_size_limit;
+                        assert!(outcome.usage.data_size <= tx_limit, "{cell}: within the limit");
                     }
                 }
                 assert_eq!(

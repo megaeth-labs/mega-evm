@@ -78,8 +78,9 @@
 //! and EIP-4788 calls, in the block in which Satin activates checks that the system contracts and
 //! the EIP-7997 factory hold the code Satin expects, then applies a role change the
 //! `SequencerRegistry` has due in this block. Every call is a system call
-//! on the pre-block budget ([`pre_block_call_gas_limit`](crate::pre_block_call_gas_limit)), and
-//! one that does not succeed refuses the block.
+//! on the pre-block budget
+//! ([`PRE_BLOCK_CALL_GAS_LIMIT`](crate::constants::PRE_BLOCK_CALL_GAS_LIMIT)), and one that does
+//! not succeed refuses the block.
 //!
 //! The pre-block step does not read the live system address, but it is what leaves the registry
 //! naming this block's address. The executor reads the address off the block's state before every
@@ -384,14 +385,16 @@ where
     /// test's, which a node executing the chain never runs.
     ///
     /// Their per-transaction half is installed on the EVM and before every transaction from now
-    /// on, and the block's data-size budget is theirs, lowered to the building policy where that
-    /// is lower. What the block counted so far stays counted. Behind the `test-utils` feature, so
-    /// a node build cannot reach it.
+    /// on, and the block's packing budgets are theirs, each lowered to the building policy where
+    /// that is lower. What the block counted so far stays counted. Behind the `test-utils` feature,
+    /// so a node build cannot reach it.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn with_protocol_limits(mut self, limits: ProtocolLimits) -> Self {
         self.evm.set_tx_runtime_limits(limits.tx_runtime_limits);
-        self.limiter.limits.block_txs_data_limit =
-            self.ctx.block_limits.within(&limits).block_txs_data_limit;
+        let held = self.ctx.block_limits.within(&limits);
+        self.limiter.limits.block_txs_data_limit = held.block_txs_data_limit;
+        self.limiter.limits.block_kv_update_limit = held.block_kv_update_limit;
+        self.limiter.limits.block_state_growth_limit = held.block_state_growth_limit;
         self.protocol_limits = limits;
         self
     }
@@ -609,8 +612,8 @@ where
     /// parent beacon root into their own contracts (`0x0…2935` and `0x0…4788`), which are not
     /// `MegaETH` system contracts and do not read them, so their outcome does not depend on the
     /// check that follows. Each runs on the pre-block budget
-    /// ([`pre_block_call_gas_limit`](eips::pre_block_call_gas_limit)), and one that does not
-    /// succeed refuses the block before its state is committed.
+    /// ([`PRE_BLOCK_CALL_GAS_LIMIT`](crate::constants::PRE_BLOCK_CALL_GAS_LIMIT)), and one that
+    /// does not succeed refuses the block before its state is committed.
     ///
     /// The check is made once, in the block in which Satin activates
     /// ([`MegaBlockExecutionCtx::satin_activation_block`]): each of the seven predeploys must hold
@@ -1052,6 +1055,14 @@ mod tests {
             executor.limiter().limits.block_txs_data_limit,
             crate::constants::BLOCK_DATA_LIMIT
         );
+        assert_eq!(
+            (
+                executor.limiter().limits.block_kv_update_limit,
+                executor.limiter().limits.block_state_growth_limit
+            ),
+            (crate::constants::BLOCK_KV_UPDATE_LIMIT, crate::constants::BLOCK_STATE_GROWTH_LIMIT),
+            "and the spec's KV and state-growth budgets"
+        );
         executor.evm_mut().set_inspector_enabled(true);
         assert!(executor.into_evm().is_inspecting());
     }
@@ -1076,11 +1087,16 @@ mod tests {
         assert_eq!(*executor.evm().tx_runtime_limits(), satin.tx_runtime_limits);
         assert_eq!(executor.limiter().limits.block_txs_data_limit, 13_107_200);
 
-        let counterfactual = ProtocolLimits::no_limits().with_block_txs_data_limit(7);
+        let counterfactual = ProtocolLimits::no_limits()
+            .with_block_txs_data_limit(7)
+            .with_block_kv_update_limit(8)
+            .with_block_state_growth_limit(9);
         let executor = executor.with_protocol_limits(counterfactual);
         assert_eq!(executor.protocol_limits(), &counterfactual);
         assert_eq!(*executor.evm().tx_runtime_limits(), counterfactual.tx_runtime_limits);
         assert_eq!(executor.limiter().limits.block_txs_data_limit, 7);
+        assert_eq!(executor.limiter().limits.block_kv_update_limit, 8);
+        assert_eq!(executor.limiter().limits.block_state_growth_limit, 9);
 
         let tighter = MegaBlockExecutor::new(
             MegaEvm::new(MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN)),

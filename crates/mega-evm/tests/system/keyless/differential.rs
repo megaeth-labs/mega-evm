@@ -540,6 +540,9 @@ fn scenarios() -> Vec<Scenario> {
         /* Limits. */
         let data_size = Deployment::new(logging(2_000));
         let body = reference(data_size.call_data(LARGE_OVERRIDE), GAS_LIMITS[0]).usage.data_size;
+        // The call keeps 40 bytes for the signer's record, and the creation's share of them, 39,
+        // is one short of its start.
+        let small_body = reference(small.call_data(LARGE_OVERRIDE), GAS_LIMITS[0]).usage.data_size;
         let compute = Deployment::new(reads_then_burns(TIMESTAMP, 1_000));
         for nonce in [0, 1] {
             let db = |d: &Deployment| system_db().account_nonce(d.signer, nonce);
@@ -588,7 +591,7 @@ fn scenarios() -> Vec<Scenario> {
                     &small,
                     gas_limit,
                 )
-                .limits(EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(body + 40)),
+                .limits(EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(small_body + 40)),
             );
         }
         all.push(

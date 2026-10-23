@@ -884,19 +884,20 @@ fn test_a_deployment_carrying_value_logs_the_move() {
     }
 }
 
-/// The transfer log is counted with the creation's start: a creation whose budget holds its two
-/// records and not the log is stopped at its start, alone, before it runs, and its revert takes
+/// The transfer log is counted with the creation's start: a creation whose budget holds its
+/// record and not the log is stopped at its start, alone, before it runs, and its revert takes
 /// back the value revm moved and the log it journaled. The same deployment without value deploys
 /// under the same limit.
 #[test]
 fn test_a_creation_is_stopped_on_its_transfer_log_before_the_value_moves() {
     let with_value = Deployment::with_value(deploying(&runtime(1)), U256::from(7_777));
     let without = Deployment::new(deploying(&runtime(1)));
-    // The creation gets 98% of what the call leaves: 235 bytes, room for its records' 80 and
-    // its byte of code, not for the log's 160 on top of the records.
+    // The creation gets 98% of the 200 bytes the call has: 196, room for the created account's
+    // record and its byte of code, not for the log's 160 on top of the record. The call keeps the
+    // signer's nonce record in what the creation leaves it.
     let limits = |deployment: &Deployment, gas_limit| {
         let body = reference(deployment.call_data(LARGE_OVERRIDE), gas_limit).usage.data_size;
-        EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(body + 240)
+        EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(body + 200)
     };
     for gas_limit in GAS_LIMITS {
         let stopped = run_with(
@@ -923,5 +924,79 @@ fn test_a_creation_is_stopped_on_its_transfer_log_before_the_value_moves() {
             limits(&without, gas_limit),
         );
         assert_eq!(returned(&deployed).deployedAddress, without.address, "at {gas_limit}");
+    }
+}
+
+/// A constructor that returns empty code for the deploy address is refused, unless it destroyed
+/// the address in this transaction, and code a constructor returns is kept unless it destroyed the
+/// address in this transaction: a destruction an earlier transaction on the same journal made —
+/// two transactions run one after another without the journal finalized between them, as a block
+/// builder runs them — is not this one. The constructor destroys its account while a probe address
+/// is empty, and returns empty code, or one byte, otherwise. The first deployment destroys it; a
+/// transfer then funds the probe; the same deployment again returns code for an account it did not
+/// destroy: empty code is refused, so the deploy address is not created, and one byte is deployed.
+#[test]
+fn test_a_destruction_an_earlier_transaction_made_is_not_the_deployments() {
+    use revm::{
+        bytecode::opcode::{BALANCE, ISZERO, JUMPDEST, JUMPI, SELFDESTRUCT},
+        context::ContextTr,
+        ExecuteEvm,
+    };
+    const PROBE: Address = address!("0x00000000000000000000000000000000000ba1a0");
+    for returned in [0_u8, 1] {
+        // `PUSH20 probe; BALANCE; ISZERO; PUSH1 destroy; JUMPI; PUSH1 returned; PUSH0; RETURN;
+        // JUMPDEST` at 30, then the destruction.
+        let init = BytecodeBuilder::default()
+            .push_address(PROBE)
+            .append_many([BALANCE, ISZERO])
+            .push_number(30_u8)
+            .append(JUMPI)
+            .push_number(returned)
+            .append_many([PUSH0, RETURN, JUMPDEST])
+            .push_address(NOBODY)
+            .append(SELFDESTRUCT)
+            .build();
+        assert_eq!(init[30], JUMPDEST);
+        let deployment = Deployment::new(init);
+        let mut evm = MegaEvm::new(
+            context(db_for(&deployment, U256::ZERO))
+                .with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits()),
+        );
+        let deploy = |nonce| {
+            let data = deployment.call_data(LARGE_OVERRIDE);
+            let mut tx = call_tx(KEYLESS_DEPLOY_ADDRESS, data, U256::ZERO);
+            tx.0.base.nonce = nonce;
+            tx
+        };
+        let first = ExecuteEvm::transact_one(&mut evm, deploy(0)).expect("valid");
+        assert!(first.is_success(), "returning {returned}: {first:?}");
+        assert!(
+            evm.ctx().journal_ref().state[&deployment.address].is_selfdestructed(),
+            "returning {returned}: the first deployment destroyed the account"
+        );
+        let mut fund = call_tx(PROBE, Bytes::new(), U256::from(1));
+        fund.0.base.nonce = 1;
+        assert!(ExecuteEvm::transact_one(&mut evm, fund).expect("valid").is_success());
+
+        let second = ExecuteEvm::transact_one(&mut evm, deploy(2)).expect("valid");
+        let ExecutionResult::Success { output, .. } = &second else { panic!("{second:?}") };
+        let ret = IKeylessDeploy::keylessDeployCall::abi_decode_returns(output.data())
+            .expect("a keylessDeploy return");
+        let state = ExecuteEvm::finalize(&mut evm);
+        let deployed = state.get(&deployment.address);
+        if returned == 0 {
+            assert_eq!(
+                decode_error_result(&ret.errorData),
+                Some(KeylessDeployError::EmptyCodeDeployed { gas_used: ret.gasUsed }),
+                "the empty code is refused"
+            );
+            assert!(
+                deployed.is_none_or(|account| account.info.nonce == 0),
+                "the refused creation leaves the deploy address uncreated"
+            );
+        } else {
+            assert_eq!(ret.deployedAddress, deployment.address, "the byte is deployed");
+            assert!(deployed.is_some_and(|account| account.info.code_hash != KECCAK_EMPTY));
+        }
     }
 }

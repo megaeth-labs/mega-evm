@@ -23,7 +23,7 @@ use revm::{
 };
 
 use crate::common::{
-    call, call_with_data, constructor_returning, context, create, execute, execute_under,
+    call, call_with_data, constructor_returning, context, create, execute, execute_under, grown,
     records_and_moves,
 };
 
@@ -41,7 +41,7 @@ fn funded() -> MemoryDatabase {
 /// What a transaction keeps: its body with `extra` body bytes, `bytes` more from its execution,
 /// and `records` write records among those.
 const fn kept(extra: u64, bytes: u64, records: u64) -> LimitUsage {
-    LimitUsage { data_size: TX_BODY_SIZE + extra + bytes, write_records: records }
+    LimitUsage { data_size: TX_BODY_SIZE + extra + bytes, write_records: records, state_growth: 0 }
 }
 
 /// `records` write records and nothing else.
@@ -162,7 +162,7 @@ fn test_what_each_transaction_keeps() {
             "a value transfer to an account that does not exist",
             funded(),
             call(CALLER, CALLEE, U256::from(1), GAS_LIMIT),
-            records_and_moves(1, 1),
+            grown(records_and_moves(1, 1), 1),
         ),
         (
             "a value transfer to the sender itself, which moves nothing",
@@ -174,7 +174,7 @@ fn test_what_each_transaction_keeps() {
             "a creation deploying 10 bytes",
             funded(),
             create(CALLER, init.clone(), GAS_LIMIT),
-            kept(init.len() as u64, WRITE_RECORD_SIZE + 10, 1),
+            grown(kept(init.len() as u64, WRITE_RECORD_SIZE + 10, 1), 1),
         ),
         (
             "a creation endowing the account it creates",
@@ -184,19 +184,19 @@ fn test_what_each_transaction_keeps() {
                 tx.0.base.value = U256::from(1);
                 tx
             },
-            records_and_moves(1, 1),
+            grown(records_and_moves(1, 1), 1),
         ),
         (
             "a factory creating a contract of 10 bytes",
             with_code(factory(&init)),
             call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT),
-            kept(0, 2 * WRITE_RECORD_SIZE + 10, 2),
+            grown(kept(0, 2 * WRITE_RECORD_SIZE + 10, 2), 1),
         ),
         (
             "a storage write",
             with_code(BytecodeBuilder::default().sstore(U256::ZERO, U256::from(1)).stop().build()),
             call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT),
-            records(1),
+            grown(records(1), 1),
         ),
         (
             "a storage read",
@@ -236,10 +236,11 @@ fn test_what_each_transaction_keeps() {
             kept(0, 0, 0),
         ),
         (
-            "a value transfer the recipient passes on: its account is recorded once",
+            "a value transfer the recipient passes on: its account is recorded once, and the wei it \
+             passes on creates LIBRARY",
             with_code(call_to(CALL, LIBRARY, 1).stop().build()),
             call(CALLER, CALLEE, U256::from(100), GAS_LIMIT),
-            records_and_moves(2, 2),
+            grown(records_and_moves(2, 2), 1),
         ),
         (
             "a child that writes a slot and halts",
@@ -312,7 +313,7 @@ fn test_a_reverted_childs_write_and_write_back_leave_its_callers_write() {
     let db = funded().account_code(CALLEE, parent).account_code(LIBRARY, child);
     let outcome = execute(db, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert_eq!(outcome.usage, records(1));
+    assert_eq!(outcome.usage, grown(records(1), 1), "the caller's fresh slot alone");
     assert_eq!(
         outcome.state[&CALLEE].storage.get(&CALLER_SLOT).map(|slot| slot.present_value),
         Some(U256::from(1)),
@@ -399,6 +400,6 @@ fn test_each_transaction_counts_from_zero() {
     for run in 0..2 {
         let result = evm.transact_raw(call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT)).unwrap();
         assert!(result.result.is_success(), "{:?}", result.result);
-        assert_eq!(evm.ctx().limit_usage(), records(1), "run {run}");
+        assert_eq!(evm.ctx().limit_usage(), grown(records(1), 1), "run {run}: a fresh slot");
     }
 }

@@ -69,7 +69,7 @@
 //! the frame runs out of regular gas. So the cap is enforced through the frame's gas, with the
 //! revm fork's two parts of a frame's regular gas: a spendable part, the only one a regular charge
 //! draws, and a withheld part. Every other reader of the frame's gas sees the two together — `GAS`,
-//! the 63/64 forward and the clamp on an explicit call gas, the `SSTORE` sentry, the skip-cold
+//! the 98/100 forward and the clamp on an explicit call gas, the `SSTORE` sentry, the skip-cold
 //! checks, the gas a child returns, the reimbursement — and a forward or a state or history spill
 //! draws the withheld part first.
 //!

@@ -319,7 +319,7 @@ fn test_a_hint_that_crosses_the_data_size_limit_is_not_forwarded() {
     assert!(hints.is_empty(), "the hint the transaction cannot pay for is not forwarded");
     assert_eq!(
         outcome.usage,
-        LimitUsage { data_size: body, write_records: 0 },
+        LimitUsage { data_size: body, write_records: 0, state_growth: 0 },
         "a hint that was not forwarded is not counted: the body is what the transaction keeps",
     );
     assert_eq!(
@@ -515,7 +515,7 @@ fn test_consecutive_hints_add_up_on_the_transaction() {
     assert_eq!(outcome.limit_exceeded, None);
     assert_eq!(
         outcome.usage,
-        LimitUsage { data_size: nested_hint(len), write_records: 0 },
+        LimitUsage { data_size: nested_hint(len), write_records: 0, state_growth: 0 },
         "the forwarded hint stays counted and the one that crossed is not",
     );
 }
@@ -541,7 +541,7 @@ fn test_data_size_overflow_blocks_forwarding_and_stops_the_call() {
     assert_eq!(outcome.limit_exceeded, None, "a stop below is no stop of the transaction");
     assert_eq!(
         outcome.usage,
-        LimitUsage { data_size: nested_hint(0), write_records: 0 },
+        LimitUsage { data_size: nested_hint(0), write_records: 0, state_growth: 0 },
         "the transaction keeps its body: the hint never left the machine",
     );
 

@@ -22,7 +22,7 @@ use revm::{
     Inspector,
 };
 
-use crate::common::{call, context, records_and_moves, value_call_room};
+use crate::common::{call, context, grown, records_and_moves, value_call_room};
 
 const CALLER: Address = address!("0000000000000000000000000000000000e10000");
 /// The transaction's own frame.
@@ -95,7 +95,11 @@ fn test_a_precompiles_writes_through_evm_internals_count_nothing() {
         ],
         "the receipt carries the call's transfer log, then the precompile's log and transfer log",
     );
-    assert_eq!(outcome.usage, records_and_moves(2, 1), "the call's start alone is counted");
+    assert_eq!(
+        outcome.usage,
+        grown(records_and_moves(2, 1), 1),
+        "the call's start alone is counted, whose value creates STATEFUL"
+    );
 }
 
 /// An inspector that answers, in `frame_start`, the call to `target` with a success on the gas
@@ -147,28 +151,4 @@ fn test_a_value_call_answered_at_frame_start_counts_nothing() {
         assert!(outcome.result.logs().is_empty(), "{case}: nothing moved");
         assert_eq!(outcome.usage, records_and_moves(0, 0), "{case}");
     }
-}
-
-/// The records a start's hook charged its caller for are that start's alone: a start an inspector
-/// answers in `frame_start` leaves none of them to the next transaction on the same EVM, which a
-/// debug build would otherwise hold its first frame's start to once the inspector is disabled.
-#[test]
-fn test_a_start_answered_at_frame_start_leaves_its_records_with_its_transaction() {
-    let code = BytecodeBuilder::default().call(RECEIVER, U256::from(VALUE)).stop().build();
-    let db = MemoryDatabase::default()
-        .account_code(CONTRACT, code)
-        .account_balance(CONTRACT, U256::from(VALUE))
-        .account_code(RECEIVER, Bytes::from_static(&[STOP]));
-    let mut evm =
-        MegaEvm::new(context(db)).with_inspector(AnswersAtFrameStart { target: RECEIVER });
-    let answered = call(CALLER, CONTRACT, U256::ZERO, value_call_room());
-    let outcome = evm.execute_transaction(answered).expect("the transaction is valid");
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert_eq!(outcome.usage, records_and_moves(0, 0), "the answered value call counts nothing");
-
-    alloy_evm::Evm::set_inspector_enabled(&mut evm, false);
-    let plain = call(CALLER, RECEIVER, U256::ZERO, value_call_room());
-    let outcome = evm.execute_transaction(plain).expect("the transaction is valid");
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert_eq!(outcome.usage, records_and_moves(0, 0), "a call without value makes no record");
 }

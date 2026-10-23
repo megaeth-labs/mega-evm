@@ -58,16 +58,16 @@ fn deploying(runtime: &[u8]) -> Bytes {
 
 /// A gas limit with room for a creation and two new accounts at the byte prices in effect:
 /// 1,000,000 of regular gas on top of the state of two new accounts, a fresh slot and a short
-/// runtime's deposit, a kilobyte of history beyond the body, and 64 times the history of two
-/// write records — a contract that creates, or a factory that forwards all but a 64th of its gas
-/// to the creation, pays the records of the frame it starts from the 64th it keeps.
+/// runtime's deposit, a kilobyte of history beyond the body, and 50 times the history of two
+/// write records — a contract that creates, or a factory that forwards all but 2 per cent of its
+/// gas to the creation, pays the records of the frame it starts from the fiftieth it keeps.
 pub(super) fn creation_gas() -> u64 {
     1_000_000 +
         2 * common::new_account_state_gas() +
         common::slot_state_gas() +
         64 * mega_evm::satin_gas_params().get(GasId::code_deposit_state_gas()) +
         common::body_history(1_000) +
-        64 * mega_evm::write_record_history_gas(2).expect("two records have a price")
+        50 * mega_evm::write_record_history_gas(2).expect("two records have a price")
 }
 
 /// An EIP-7702 call to an authority delegating to the slot writer: the authority's absent account

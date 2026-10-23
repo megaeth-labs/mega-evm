@@ -52,7 +52,20 @@
 //! through this hook. A frame that fails instead rolls its own charges back by the amounts it
 //! recorded while running, without asking for a price at all. Both cancel exactly, for different
 //! reasons: the re-priced sites because the multiplier of a bucket is read once per transaction,
-//! the rolled-back amounts because nothing but this hook priced them in the first place.
+//! the rolled-back amounts because nothing but this hook priced them in the first place. The one
+//! exception is an inspector's: a call's upfront charge is given back for the account its frame's
+//! inputs name, as revm reads it, so an inspector that rewrites the target has it priced there.
+//!
+//! A charge on an account created in the transaction and destroyed since is priced at nothing:
+//! its destruction gave back what the transaction had charged for it, at the prices charged and
+//! outside that rule, so a re-pricing after the mark gives nothing back a second time, and the
+//! account keeps no further state gas.
+//!
+//! The destruction gives the account's leaf back only when no account stood at the address at the
+//! transaction's start: the database answered none for it, `None` from
+//! [`Database::basic`](revm::Database::basic), or an earlier transaction on the same journal
+//! destroyed it. A database that answers an empty account for an address it holds none for gives
+//! that leaf back to no destruction: an empty account is a leaf the state holds.
 //!
 //! Every other Host method delegates to op-revm's context.
 
@@ -65,8 +78,8 @@ use revm::{
     context::ContextTr,
     context_interface::{
         cfg::{
-            gas::{GasTracker, StartCharge},
-            GasId, GasParams, StateGasSite,
+            gas::{GasTracker, PoolAmounts, StartCharge},
+            GasId, GasParams, StateGasCharge, StateGasSite,
         },
         context::{ContextError, SStoreResult, SelfDestructResult, StateLoad},
         host::{CompletedWrite, FrameStart, LoadError, WriteVerdict},
@@ -77,8 +90,10 @@ use revm::{
 };
 
 use crate::{
-    charge_write_records_history, history_gas, limit::HistoryBytes,
-    system::ORACLE_CONTRACT_ADDRESS, ExternalEnvTypes, MegaContext, OracleEnv, VolatileDataAccess,
+    charge_write_records_history, history_gas,
+    limit::{DestroyedParts, HistoryBytes},
+    system::ORACLE_CONTRACT_ADDRESS,
+    ExternalEnvTypes, MegaContext, OracleEnv, VolatileDataAccess,
 };
 
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
@@ -220,42 +235,23 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
 
     /// Prices one EIP-8037 state gas unit, scaling the schedule's entry by the SALT bucket
     /// capacity of the account — or, for a slot-scoped entry, of the storage slot — the charge
-    /// lands on.
+    /// lands on ([`priced_state_gas`](MegaContext::priced_state_gas)).
     ///
-    /// `state gas = schedule entry x m`, where `m` is the bucket's capacity in minimum buckets.
-    /// A charge in a minimum-capacity bucket pays the schedule's own number, and a charge in a
-    /// bucket eight times as large pays eight times as much: state that crowds a region of the
-    /// trie costs what it makes everyone else pay to carry it. Only the state dimension scales;
-    /// regular gas is never touched by `m`.
+    /// A charge on an account created in the transaction and destroyed since is priced at
+    /// nothing: from that mark until the transaction ends the account keeps no further state gas,
+    /// so an `SSTORE` of one of its slots neither charges nor refills fresh-slot state gas, and
+    /// code its own constructor deposits after destroying it is charged no state gas, whatever gas
+    /// the frame holds. The destruction gave back what the transaction had charged for the
+    /// account at the prices charged, outside this rule. The neutral configuration prices as the
+    /// fixture's fork does ([`destruction_table_prices_state_gas`]).
     ///
-    /// Two charges are priced without reading SALT at all: an entry the schedule prices at zero,
-    /// which `m` cannot move off zero, and every charge of a system-originated transaction,
-    /// which prices at the minimum bucket by rule (see
-    /// [`is_system_originated`](crate::MegaContext::is_system_originated)).
-    ///
-    /// Reporting nothing is how a failed capacity lookup travels: the cause is recorded in the
-    /// context error the way [`Host::sload`](revm::context_interface::Host::sload) records a
-    /// database failure, and the charge site turns it into a bail-out that the transaction
-    /// surfaces as an error. A price the engine could not look up is never replaced by one
-    /// nobody chose.
+    /// [`destruction_table_prices_state_gas`]: MegaContext::destruction_table_prices_state_gas
     #[inline]
     fn state_gas_price(&mut self, id: GasId, site: StateGasSite) -> Option<u64> {
-        let base = self.inner.cfg.gas_params.get(id);
-        if base == 0 || self.is_system_originated() {
-            return Some(base);
+        if self.destruction_table_prices_state_gas() && self.accounts().is_destroyed(site.address) {
+            return Some(0);
         }
-        let multiplier = match site.slot {
-            Some(slot) => self.slot_bucket_multiplier(site.address, slot),
-            None => self.account_bucket_multiplier(site.address),
-        };
-        match multiplier {
-            Ok(multiplier) => Some(base.saturating_mul(multiplier)),
-            Err(error) => {
-                *self.error() =
-                    Err(ContextError::Custom(format!("SALT bucket lookup failed: {error}")));
-                None
-            }
-        }
+        self.priced_state_gas(id, site)
     }
 
     /// Serves the hash and records that this block read it.
@@ -306,7 +302,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
     /// pay, or a byte count with no price, is an ordinary out-of-gas.
     ///
     /// A log's history is drawn from the frame's history allowance first, and the frame's gas pays
-    /// the rest ([`storage_call_stipend`](crate::storage_call_stipend)): a write record is the
+    /// the rest ([`history_allowance_gas`](crate::history_allowance_gas)): a write record is the
     /// frame's own to pay for, and a record taken back — a slot written back to its original
     /// value, an account a `SELFDESTRUCT` returns to what the transaction loaded — gives back what
     /// the frame's gas paid, never what an allowance did. Both sides are priced the same way, so a
@@ -314,6 +310,15 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
     /// zero is reconciled when the frame merges into its caller. A write that takes records back
     /// and makes others is refilled before it is charged, so what it nets to nothing costs
     /// nothing.
+    ///
+    /// The first effective `SELFDESTRUCT` of an account created in the transaction gives back every
+    /// part of it the transaction made ([`DestroyedParts`]) to the destroying frame, whichever
+    /// frame paid: what the parts take back is in the same check as what the operation adds, so
+    /// the positive effects are held after the give-back; once the check passed, each part's
+    /// state gas is refilled at the price it was charged, with the history of its records and of
+    /// its code, before the operation's own records are charged. From that mark an `SSTORE` of
+    /// one of the account's slots counts nothing, and the pricing hook prices its state gas at
+    /// nothing ([`state_gas_price`](revm::context_interface::Host::state_gas_price)).
     ///
     /// A completed `SSTORE` holds the frame to the compute limit again: a slot restored to its
     /// original value refills the state gas (revm, before this hook) and the history gas (here)
@@ -325,15 +330,28 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
             CompletedWrite::Log { .. } => (true, false),
             CompletedWrite::SelfDestruct { .. } => (false, false),
         };
-        let (counted, history) = self.accounts().write_counted(&write);
+        let (counted, history, destroyed) = self.accounts().write_counted(&write);
         let check = self.additional_limit.draw(gas, &counted);
         if check.exceeded_limit() {
             return WriteVerdict::Revert(self.additional_limit.note_frame_stop(&check));
+        }
+        let state_given_back = match write {
+            CompletedWrite::SelfDestruct { address, .. } => destroyed
+                .as_ref()
+                .is_none_or(|parts| self.refill_destroyed_parts(address, parts, gas)),
+            CompletedWrite::Sstore { .. } | CompletedWrite::Log { .. } => true,
+        };
+        if !state_given_back {
+            return WriteVerdict::OutOfGas;
         }
         if self.prices_history() {
             let HistoryBytes { appended, taken } = history;
             if taken != 0 {
                 gas.refill_history(history_gas(taken).unwrap_or(0));
+            }
+            if let Some(parts) = &destroyed {
+                let code = usize::try_from(parts.code).unwrap_or(usize::MAX);
+                gas.refill_history(self.inner.cfg.gas_params.code_deposit_history_gas(code));
             }
             if appended != 0 {
                 let Some(cost) = history_gas(appended) else { return WriteVerdict::OutOfGas };
@@ -352,11 +370,13 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
     /// Charges the running frame the history of the write records the frame it is starting makes
     /// — the accounts a value transfer changes from what the transaction loaded, a creation's
     /// created account when the transaction had not changed it, and its creator's nonce — as the
-    /// journal's state stands ([`Accounts::start_records`](crate::limit::Accounts)), and counts the
-    /// creator's record on the running frame's pool, before the frame's share of it is forwarded.
-    /// revm calls it at `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, `CREATE` and `CREATE2`,
-    /// once the opcode made every charge and took the gas it forwards, and before it builds the
-    /// frame's input.
+    /// journal's state stands ([`Accounts::start_records`](crate::limit::Accounts)). revm calls it
+    /// at `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, `CREATE` and `CREATE2`, once the opcode
+    /// made every charge and took the gas it forwards, and before it builds the frame's input.
+    ///
+    /// It is a price, made at the opcode as revm charges a new account's gas at `CALL`, and counts
+    /// nothing: the records themselves are counted once revm decided the start, the frame's on the
+    /// pool it starts with and the creator's on the creator once the creation returned.
     ///
     /// The charge comes out of what the caller kept rather than out of what the callee gets, so
     /// the frame's allowance is free for what the recipient does. What the frame's own records
@@ -380,33 +400,106 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
     /// taken, and a price that could not be computed failed before any charge.
     #[inline]
     fn frame_starting(&mut self, start: &mut FrameStart, gas: &mut GasTracker) -> bool {
-        let records =
-            self.accounts().start_records(start.kind, start.caller, start.target, start.value);
-        let on_frame = records.on_frame().added;
-        let (charge, creator) = if self.prices_history() {
+        let charge = if self.prices_history() {
+            let records =
+                self.accounts().start_records(start.kind, start.caller, start.target, start.value);
+            let on_frame = records.on_frame().added;
             let creator = u64::from(records.creator);
-            let Some(charged) = charge_write_records_history(gas, on_frame, creator) else {
+            let Some((charge, _)) = charge_write_records_history(gas, on_frame, creator) else {
                 gas.erase_cost(start.forward);
                 gas.set_failed_charge_remaining(Some(gas.remaining()));
                 return false;
             };
-            charged
+            charge
         } else {
-            (0, 0)
+            0
         };
-        start.charge = StartCharge::new(charge, 0);
-        if records.creator {
-            self.additional_limit.count_creator_record(gas, creator);
-        }
-        #[cfg(debug_assertions)]
-        {
-            self.charged_records = Some(records);
-        }
+        start.charge = StartCharge::new(charge, PoolAmounts::ZERO);
         true
     }
 }
 
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
+    /// Prices one EIP-8037 state gas unit `id` at `site`, scaling the schedule's entry by the SALT
+    /// bucket capacity of the account — or, for a slot-scoped entry, of the storage slot — the
+    /// charge lands on.
+    ///
+    /// `state gas = schedule entry x m`, where `m` is the bucket's capacity in minimum buckets.
+    /// A charge in a minimum-capacity bucket pays the schedule's own number, and a charge in a
+    /// bucket eight times as large pays eight times as much: state that crowds a region of the
+    /// trie costs what it makes everyone else pay to carry it. Only the state dimension scales;
+    /// regular gas is never touched by `m`.
+    ///
+    /// Two charges are priced without reading SALT at all: an entry the schedule prices at zero,
+    /// which `m` cannot move off zero, and every charge of a system-originated transaction,
+    /// which prices at the minimum bucket by rule (see
+    /// [`is_system_originated`](crate::MegaContext::is_system_originated)).
+    ///
+    /// Reporting nothing is how a failed capacity lookup travels: the cause is recorded in the
+    /// context error the way [`Host::sload`](revm::context_interface::Host::sload) records a
+    /// database failure, and the charge site turns it into a bail-out that the transaction
+    /// surfaces as an error. A price the engine could not look up is never replaced by one
+    /// nobody chose.
+    fn priced_state_gas(&mut self, id: GasId, site: StateGasSite) -> Option<u64> {
+        let base = self.inner.cfg.gas_params.get(id);
+        if base == 0 || self.is_system_originated() {
+            return Some(base);
+        }
+        let multiplier = match site.slot {
+            Some(slot) => self.slot_bucket_multiplier(site.address, slot),
+            None => self.account_bucket_multiplier(site.address),
+        };
+        match multiplier {
+            Ok(multiplier) => Some(base.saturating_mul(multiplier)),
+            Err(error) => {
+                *self.error() =
+                    Err(ContextError::Custom(format!("SALT bucket lookup failed: {error}")));
+                None
+            }
+        }
+    }
+
+    /// Refills on `gas`, the destroying frame's, the state gas of the `parts` of the account at
+    /// `address` its first effective destruction gives back, each at the price it was charged:
+    /// the leaf's new account, the code deposit's bytes and each slot made non-zero, priced at the
+    /// site the charge landed on, so SALT gives back what it scaled. The leaf was charged once as a
+    /// new account, by whichever site made it — a value transfer, a `SELFDESTRUCT`'s balance, the
+    /// transaction's value, or the creation itself — and every such charge is the same entry. The
+    /// account is destroyed by now, which the pricing hook prices at nothing, so the parts are
+    /// priced as they were charged, before the mark ([`priced_state_gas`](Self::priced_state_gas)).
+    ///
+    /// Nothing is refilled where the transaction's state gas is not the spec's: the neutral
+    /// configuration prices as the fixture's fork does, and EIP-8037 gives back nothing for this
+    /// destruction. `false` when a price could not be looked up, whose cause is recorded and fails
+    /// the transaction.
+    fn refill_destroyed_parts(
+        &mut self,
+        address: Address,
+        parts: &DestroyedParts,
+        gas: &mut GasTracker,
+    ) -> bool {
+        if !self.destruction_table_prices_state_gas() {
+            return true;
+        }
+        debug_assert_eq!(
+            self.inner.cfg.gas_params.get(GasId::new_account_state_gas()),
+            self.inner.cfg.gas_params.get(GasId::create_state_gas()),
+            "a leaf a creation charged comes back at the price of one a transfer charged"
+        );
+        let account = StateGasSite::account(address);
+        let leaf = parts.leaf.then(|| StateGasCharge::one(GasId::new_account_state_gas(), account));
+        let code = (parts.code != 0)
+            .then(|| StateGasCharge::units(GasId::code_deposit_state_gas(), account, parts.code));
+        let slots = parts.slots.iter().map(|&key| {
+            StateGasCharge::one(GasId::sstore_set_state_gas(), StateGasSite::slot(address, key))
+        });
+        for charge in leaf.into_iter().chain(code).chain(slots) {
+            let Some(price) = self.priced_state_gas(charge.id, charge.site) else { return false };
+            gas.refill_reservoir(charge.total(price));
+        }
+        true
+    }
+
     /// Reads the block-environment field `access` stands for: `false` when the read is refused,
     /// and the accessor answers zero instead of the field.
     #[inline]
@@ -514,14 +607,15 @@ mod tests {
         assert!(destructed.data.had_value);
         assert_eq!(ctx.limit_usage(), LimitUsage::ZERO, "the Host counts nothing");
 
-        // The hook is what counts: the slot's first change is one write record.
+        // The hook is what counts: the slot's first change is one write record, and a slot made
+        // non-zero from an original of zero is one of state growth.
         let mut gas = GasTracker::new(1_000_000, 1_000_000, 0);
         let write =
             CompletedWrite::Sstore { address: CONTRACT, key: U256::from(1), result: &slot.data };
         assert_eq!(Host::write_completed(&mut ctx, write, &mut gas), WriteVerdict::Continue);
         assert_eq!(
             ctx.limit_usage(),
-            LimitUsage { data_size: WRITE_RECORD_SIZE, write_records: 1 }
+            LimitUsage { data_size: WRITE_RECORD_SIZE, write_records: 1, state_growth: 1 }
         );
     }
 }

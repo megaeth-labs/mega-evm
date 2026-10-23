@@ -13,10 +13,11 @@
 //!
 //! What each does to Satin's ledgers follows from the inspector contract: a journal write from a
 //! callback is on no gas ledger and in no count, a paused region spends no gas of any kind while
-//! what it writes is still counted, a failed call `expectRevert` turns into a success settles as
-//! the failure on every ledger, and a success it turns into a failure keeps none of its writes.
-//! `expectRevert` is honored on a result revm answers without running a frame — a precompile's, a
-//! call to an account with no code — as on a frame's.
+//! what it writes is still counted, and a result `expectRevert` rewrites is taken as given, as revm
+//! takes it — a failed call turned into a success keeps its writes reverted and settles as a
+//! success. `expectRevert` is honored on a result revm answers without running a frame — a
+//! precompile's, a call to an account with no code — as on a frame's. A cheatcode answered on
+//! `Gas::new`, as Foundry answers it, carries no reservoir, and its caller is left none.
 
 use alloy_primitives::{address, keccak256, Address, Bytes, B256, U256};
 use alloy_sol_types::{sol, SolCall};
@@ -38,7 +39,7 @@ use revm::{
 };
 
 use crate::{
-    common::{call, context},
+    common::{body_history, call, context, reservoir_share},
     salt::entry,
 };
 
@@ -317,8 +318,9 @@ fn test_pause_and_resume_gas_metering_hold_the_gas() {
         LimitUsage {
             data_size: idle.usage.data_size + WRITE_RECORD_SIZE,
             write_records: idle.usage.write_records + 1,
+            state_growth: idle.usage.state_growth + 1,
         },
-        "the record is counted"
+        "the record is counted, and the slot is new"
     );
     assert_eq!(worked.gas.history_bytes, idle.gas.history_bytes + WRITE_RECORD_SIZE);
 
@@ -334,8 +336,9 @@ fn test_pause_and_resume_gas_metering_hold_the_gas() {
 
 /// `expectRevert` turns the next call's revert into a success that keeps the revert data. `TARGET`
 /// fills a fresh slot and reverts with a word; the program notes the flag and the word. The
-/// failed call settles as the failure it was on every ledger — the transaction is billed and
-/// counted as it is without the cheatcode — and only the flag the program noted differs.
+/// failed call's journal was reverted, so the slot is not kept, and the call settles as the
+/// success the cheatcode made of it: the transaction is billed and counted as it is where `TARGET`
+/// fills the slot and returns the word, with no cheatcode.
 #[test]
 fn test_expect_revert_turns_a_revert_into_a_success_that_keeps_its_reason() {
     let reason = keccak256(b"reason");
@@ -364,8 +367,20 @@ fn test_expect_revert_turns_a_revert_into_a_success_that_keeps_its_reason() {
     let (reverted, _) = run(db(true), false);
     assert_eq!(slot(&reverted, TEST, 0), U256::from(1), "the caller saw the revert");
     assert_eq!(slot(&reverted, TEST, 1), U256::from_be_bytes(reason.0));
-    assert_eq!(expected.gas, reverted.gas, "every ledger");
-    assert_eq!(expected.usage, reverted.usage, "every count");
+
+    // Where `TARGET` returns the word in place of reverting with it, the call succeeds and keeps
+    // the slot: that is what the rewritten call is billed and counted as.
+    let returning = BytecodeBuilder::default()
+        .sstore(U256::from(3), U256::from(1))
+        .return_with_data(reason)
+        .build();
+    let db =
+        MemoryDatabase::default().account_code(TEST, program(true)).account_code(TARGET, returning);
+    let (returned, _) = run(db, false);
+    assert_eq!(slot(&returned, TEST, 0), U256::from(2), "the caller saw the success");
+    assert!(returned.state[&TARGET].storage[&U256::from(3)].is_changed(), "and the slot is kept");
+    assert_eq!(expected.gas, returned.gas, "every ledger");
+    assert_eq!(expected.usage, returned.usage, "every count");
 }
 
 /// `expectRevert` is honored on a result revm answers without running a frame. A point off the
@@ -396,13 +411,15 @@ fn test_expect_revert_is_honored_on_a_result_no_frame_ran_to_produce() {
 }
 
 /// At Foundry's default gas limit a test transaction runs above the execution cap, with a
-/// reservoir, and Foundry answers every cheatcode call on `Gas::new`, which carries none. The
-/// answered frame never ran, so its caller merges back the reservoir it forwarded: a program that
-/// calls `deal`, fills a fresh slot and notes `GAS` costs, on every ledger, what it costs where the
-/// cheatcode's call reaches an account with no code — its state gas drawn from the reservoir rather
-/// than spilled onto regular gas — reads the same `GAS`, and ends with the same reservoir.
+/// reservoir, and Foundry answers every cheatcode call on `Gas::new`, which carries none. Its
+/// caller adds the answer's reservoir to what it kept of its own when it handed the call its
+/// share, as revm settles an answer: a program that calls `deal`, fills a fresh slot and notes
+/// `GAS` in another is left only the 2 per cent it kept, which pays for both slots, so `GAS` reads
+/// what it reads where the cheatcode's call reaches an account with no code, which carries the
+/// whole share back. The state and history it is billed, and what it counts, are the same either
+/// way.
 #[test]
-fn test_a_cheatcode_keeps_the_reservoir_at_foundrys_default_gas_limit() {
+fn test_a_cheatcode_at_foundrys_default_gas_limit_leaves_its_caller_what_it_kept() {
     let code =
         cheat(BytecodeBuilder::default(), Vm::dealCall { who: TARGET, newBalance: U256::ONE })
             .sstore(U256::ZERO, U256::ONE)
@@ -416,8 +433,16 @@ fn test_a_cheatcode_keeps_the_reservoir_at_foundrys_default_gas_limit() {
     assert_eq!(answered, 1);
     assert_eq!(cheated.state[&TARGET].info.balance, U256::ONE, "the cheatcode ran");
     let (plain, _) = run_with_gas_limit(db(), false, FOUNDRY_GAS_LIMIT);
-    assert!(plain.gas.reservoir_remaining > 0, "the transaction runs with a reservoir");
-    assert_eq!(cheated.gas, plain.gas, "every ledger, the reservoir included");
+    // `TEST` holds the whole reservoir when it calls the cheatcode, and the two fresh slots draw
+    // it.
+    let whole = FOUNDRY_GAS_LIMIT - mega_evm::constants::TX_GAS_LIMIT_CAP - body_history(0);
+    let record = mega_evm::history_gas(WRITE_RECORD_SIZE).expect("a record has a price");
+    let slots = 2 * (entry(GasId::sstore_set_state_gas()) + record);
+    assert_eq!(plain.gas.reservoir_remaining, whole - slots, "the slots drew the reservoir");
+    let kept = whole - reservoir_share(whole);
+    assert!(kept > slots, "what `TEST` kept pays for both slots");
+    assert_eq!(cheated.gas.reservoir_remaining, kept - slots, "the answer's reservoir: none");
+    assert_eq!((cheated.gas.state, cheated.gas.history), (plain.gas.state, plain.gas.history));
     assert_eq!(cheated.usage, plain.usage, "every count");
-    assert_eq!(slot(&cheated, TEST, 1), slot(&plain, TEST, 1), "the same `GAS`");
+    assert_eq!(slot(&cheated, TEST, 1), slot(&plain, TEST, 1), "nothing spilled");
 }

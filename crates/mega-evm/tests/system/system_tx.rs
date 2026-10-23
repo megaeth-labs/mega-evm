@@ -740,8 +740,8 @@ fn test_a_deposit_over_the_data_size_limit_that_cannot_pay_for_its_caller_is_a_f
     assert_eq!(outcome.limit_exceeded, None, "the failure is not a data-size stop");
     assert_eq!(
         outcome.usage,
-        LimitUsage { data_size: mega_evm::TX_BODY_SIZE, write_records: 0 },
-        "the body stays counted",
+        LimitUsage { data_size: mega_evm::TX_BODY_SIZE, write_records: 0, state_growth: 1 },
+        "the body stays counted, and the sender's account, which the failed deposit created",
     );
 }
 
@@ -802,7 +802,8 @@ fn test_the_callee_sees_the_system_address_as_its_caller() {
 }
 
 /// The account a deposit-like transaction creates for its caller is the transaction's own
-/// account: it is part of the transaction body, so it is not a write record of its own.
+/// account: it is part of the transaction body, so it is not a write record of its own. It is a
+/// new account all the same, one of state growth on the transaction.
 #[test]
 fn test_the_created_caller_is_not_a_write_record() {
     let fresh = run_outcome(chain_db(), system_tx(0, B256::with_last_byte(0x99)));
@@ -812,10 +813,13 @@ fn test_the_created_caller_is_not_a_write_record() {
     );
     assert!(fresh.result.is_success() && existing.result.is_success());
     assert_eq!(
-        fresh.usage, existing.usage,
+        (fresh.usage.data_size, fresh.usage.write_records),
+        (existing.usage.data_size, existing.usage.write_records),
         "creating the sender's own account records nothing a transaction with an existing sender \
          does not record",
     );
+    assert_eq!(existing.usage.state_growth, 1, "the Oracle's slot, set from zero");
+    assert_eq!(fresh.usage.state_growth, 2, "and the sender's new account");
 }
 
 /// A deposit-like transaction that creates a contract pays for the account it creates for its

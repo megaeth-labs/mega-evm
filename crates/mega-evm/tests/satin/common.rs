@@ -125,6 +125,41 @@ pub(crate) fn share(remaining: u64) -> u64 {
         u128::from(mega_evm::FRAME_DATA_SHARE_DENOMINATOR)) as u64
 }
 
+/// The regular gas a call or creation forwards of the `remaining` its caller holds at the forward
+/// when it asks for all of it: all but the caller's 2 per cent, the division truncating.
+pub(crate) const fn forward_cap(remaining: u64) -> u64 {
+    remaining - remaining * 2 / 100
+}
+
+/// The most regular gas a caller can hold at the forward of a call or creation that asks for all of
+/// it and keep only `kept` once [`forward_cap`] is taken: a caller keeps a fiftieth of what it
+/// holds, rounded down.
+pub(crate) const fn holding_to_keep(kept: u64) -> u64 {
+    50 * kept + 49
+}
+
+/// The reservoir a child frame is given of the `remaining` its caller has left: all but the
+/// caller's 2 per cent, the division truncating, so a caller keeps nothing of a reservoir below 50.
+pub(crate) const fn reservoir_share(remaining: u64) -> u64 {
+    remaining - remaining * 2 / 100
+}
+
+/// The smallest reservoir a caller can hold that hands a child exactly `share`
+/// ([`reservoir_share`] takes every value, rising by one or by none at each step).
+pub(crate) fn reservoir_giving(share: u64) -> u64 {
+    let mut remaining = share + share / 50;
+    while reservoir_share(remaining) > share {
+        remaining -= 1;
+    }
+    while reservoir_share(remaining) < share {
+        remaining += 1;
+    }
+    while remaining > 0 && reservoir_share(remaining - 1) == share {
+        remaining -= 1;
+    }
+    remaining
+}
+
 /// `tx` as a user's deposit: no fee, and a source hash a user's transaction could carry.
 pub(crate) fn deposit(mut tx: MegaTransaction) -> MegaTransaction {
     tx.0.deposit.source_hash = B256::repeat_byte(0x11);
@@ -231,10 +266,16 @@ pub(crate) fn history(bytes: u64) -> u64 {
 }
 
 /// Room for the state gas of several new accounts, including in a frame that resumes after a
-/// child burned the 63/64 it was forwarded: at least 50,000,000, and 64 times what a value call to
-/// a new account costs its caller at the byte prices in effect.
+/// child burned the 98/100 it was forwarded: at least 50,000,000, and 64 times what a value call
+/// to a new account costs its caller at the byte prices in effect, more than the 50 times the
+/// fiftieth it keeps needs.
 pub(crate) fn value_call_room() -> u64 {
     (64 * (account_state_gas() + history(4 * mega_evm::WRITE_RECORD_SIZE) + 50_000)).max(50_000_000)
+}
+
+/// `usage` with `growth` new accounts and new slots kept: its state growth.
+pub(crate) const fn grown(usage: LimitUsage, growth: u64) -> LimitUsage {
+    LimitUsage { state_growth: growth, ..usage }
 }
 
 /// What a transaction with an empty calldata keeps: its body, `records` write records and the
@@ -245,6 +286,7 @@ pub(crate) const fn records_and_moves(records: u64, moves: u64) -> LimitUsage {
             records * mega_evm::WRITE_RECORD_SIZE +
             moves * mega_evm::TRANSFER_LOG_SIZE,
         write_records: records,
+        state_growth: 0,
     }
 }
 

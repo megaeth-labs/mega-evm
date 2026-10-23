@@ -15,7 +15,10 @@ use alloy_op_evm::OpTx;
 use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
 use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
-    constants::{BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS, TX_GAS_LIMIT_CAP},
+    constants::{
+        BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS, TX_GAS_LIMIT_CAP,
+        TX_STATE_GROWTH_LIMIT,
+    },
     history_gas,
     system::{IMegaLimitControl, LIMIT_CONTROL_ADDRESS, ORACLE_CONTRACT_ADDRESS},
     test_utils::{
@@ -758,6 +761,81 @@ fn test_blobhash_is_not_volatile() {
     assert_eq!(run.accessed, VolatileDataAccess::empty());
 }
 
+/// A call to the EIP-2935 history contract reads the block environment: the contract's `get` runs
+/// `NUMBER` before it loads the slot, so the call marks the block number, and in a frame whose
+/// access is off it is refused with access type 0 before it loads the slot. A call to the EIP-4788
+/// beacon-roots contract loads storage alone, state the pre-block calls committed before the
+/// block's first transaction, which is no volatile read: it marks nothing and is not refused.
+#[test]
+fn test_the_history_contract_reads_the_block_number_and_the_beacon_roots_contract_reads_state() {
+    use alloy_eips::{
+        eip2935::{HISTORY_SERVE_WINDOW, HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE},
+        eip4788::{BEACON_ROOTS_ADDRESS, BEACON_ROOTS_CODE},
+    };
+    // The ring the beacon-roots contract keeps its timestamps and roots in.
+    const HISTORY_BUFFER_LENGTH: u64 = 8_191;
+
+    let number = block().number.to::<u64>() - 1;
+    let hash = U256::from_be_bytes([0x11; 32]);
+    let timestamp = block().timestamp.to::<u64>();
+    let root = U256::from_be_bytes([0x22; 32]);
+    let history_slot = U256::from(number % HISTORY_SERVE_WINDOW as u64);
+    let beacon_slot = U256::from(timestamp % HISTORY_BUFFER_LENGTH);
+    let db = || {
+        MemoryDatabase::default()
+            .account_code(HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE.clone())
+            .account_storage(HISTORY_STORAGE_ADDRESS, history_slot, hash)
+            .account_code(BEACON_ROOTS_ADDRESS, BEACON_ROOTS_CODE.clone())
+            .account_storage(BEACON_ROOTS_ADDRESS, beacon_slot, U256::from(timestamp))
+            .account_storage(
+                BEACON_ROOTS_ADDRESS,
+                beacon_slot + U256::from(HISTORY_BUFFER_LENGTH),
+                root,
+            )
+    };
+    let get = |to: Address, key: u64| {
+        OpTx(op_transaction(TxEnv {
+            caller: CALLER,
+            kind: TxKind::Call(to),
+            data: Bytes::from(U256::from(key).to_be_bytes::<32>()),
+            gas_limit: BELOW,
+            ..Default::default()
+        }))
+    };
+    let answer = |value: U256| Bytes::from(value.to_be_bytes::<32>());
+
+    let read = execute(db(), get(HISTORY_STORAGE_ADDRESS, number));
+    assert_eq!(read.outcome.result.output(), Some(&answer(hash)), "the parent's hash");
+    assert_eq!(read.accessed, VolatileDataAccess::BLOCK_NUMBER);
+    assert!(read.limit.is_some(), "the read caps the transaction");
+    let loaded = &read.outcome.state[&HISTORY_STORAGE_ADDRESS].storage;
+    assert!(loaded.contains_key(&history_slot), "a read the state holds");
+
+    let mut evm = MegaEvm::new(context(db()).with_volatile_access_disabled_from(0));
+    let refused = run_on(&mut evm, get(HISTORY_STORAGE_ADDRESS, number));
+    match &refused.outcome.result {
+        ExecutionResult::Revert { output, .. } => {
+            let refusal =
+                volatile_data_access_disabled_revert_data(VolatileDataAccess::BLOCK_NUMBER);
+            assert_eq!(output, &refusal);
+            assert_eq!(output[4..], [0; 32], "access type 0");
+        }
+        other => panic!("the history contract is refused: {other:?}"),
+    }
+    let storage = &refused.outcome.state[&HISTORY_STORAGE_ADDRESS].storage;
+    assert!(!storage.contains_key(&history_slot), "refused before it loads the slot");
+
+    for disabled in [false, true] {
+        let ctx = context(db());
+        let ctx = if disabled { ctx.with_volatile_access_disabled_from(0) } else { ctx };
+        let run = run_on(&mut MegaEvm::new(ctx), get(BEACON_ROOTS_ADDRESS, timestamp));
+        let case = format!("access disabled: {disabled}");
+        assert_eq!(run.outcome.result.output(), Some(&answer(root)), "{case}: the root");
+        assert_eq!(run.accessed, VolatileDataAccess::empty(), "{case}");
+        assert_eq!(run.limit, None, "{case}");
+    }
+}
+
 /// A read answers with the block's own field: the Host marks the read and serves the value it
 /// loaded, whether or not the read caps anything.
 #[test]
@@ -1298,7 +1376,14 @@ fn test_running_out_of_the_frames_own_gas_still_halts() {
 /// halts.
 #[test]
 fn test_writes_after_a_read_stop_at_the_cap_or_run_out_of_their_own_gas() {
+    // More fresh slots than the 1,000 the spec's state-growth limit lets a transaction keep, so
+    // the rows run with that limit lifted: under it the 1,001st slot stops the frame first.
     let slots = CAP / fresh_write() + 1;
+    assert!(slots > TX_STATE_GROWTH_LIMIT, "{slots} fresh slots");
+    let execute = |db: MemoryDatabase, tx| {
+        let limits = EvmTxRuntimeLimits::default().with_tx_state_growth_limit(u64::MAX);
+        run_on(&mut MegaEvm::new(context(db).with_tx_runtime_limits(limits)), tx)
+    };
     let mut code = op(BytecodeBuilder::default(), TIMESTAMP);
     for slot in 1..=slots {
         code = code.sstore(U256::from(slot), U256::from(1));
@@ -1620,7 +1705,7 @@ fn test_the_switch_is_scoped_to_its_subtree() {
 
 /// An interceptor's answer carries the forwarded gas back without running a frame: the caller
 /// is held to the limit as it resumes. The call forwards what it forwards without the read — the
-/// withheld part of the caller's gas is part of the 63/64 — and gets all of it back, so the
+/// withheld part of the caller's gas is part of the 98/100 — and gets all of it back, so the
 /// caller holds the same gas after the call with the read and without it.
 ///
 /// What `remainingComputeGas()` answers is what the caller could still spend: without the read,
@@ -1758,9 +1843,13 @@ fn test_state_and_history_gas_are_not_compute() {
     // Each slot as (slot, original, present), by slot.
     let written: Vec<_> =
         (1..=slots).map(|slot| (U256::from(slot), U256::ZERO, U256::from(1))).collect();
+    // At cheaper byte prices the cap's compute pays for more fresh slots than the 1,000 the spec's
+    // state-growth limit lets a transaction keep, so the rows run with that limit lifted.
+    let limits = EvmTxRuntimeLimits::default().with_tx_state_growth_limit(u64::MAX);
     for gas_limit in TIERS {
-        let run = execute(
-            MemoryDatabase::default().account_code(CONTRACT, code.clone()),
+        let db = MemoryDatabase::default().account_code(CONTRACT, code.clone());
+        let run = run_on(
+            &mut MegaEvm::new(context(db).with_tx_runtime_limits(limits)),
             tx(CALLER, CONTRACT, gas_limit),
         );
         assert!(run.outcome.result.is_success(), "{:?}", run.outcome.result);
@@ -1781,8 +1870,8 @@ fn test_state_and_history_gas_are_not_compute() {
         assert_eq!(run.limit, Some(2 + CAP), "{case}: TIMESTAMP set the limit, first");
         assert_eq!(
             run.outcome.usage,
-            LimitUsage { data_size: history_bytes, write_records: slots },
-            "{case}: one write record a slot",
+            LimitUsage { data_size: history_bytes, write_records: slots, state_growth: slots },
+            "{case}: one write record and one new slot a slot",
         );
     }
 }
@@ -1860,11 +1949,11 @@ fn test_a_history_refill_after_the_read_does_not_lift_the_cap() {
 /// the caller's charges up to its forward and no more, and is stopped at the cap exactly where
 /// those and its own reach it; its regular ledger bills the burned gas on top.
 ///
-/// `MIDDLE` starts each kind of frame that makes records, with all but a 64th of what it holds, a
-/// 64th short of the records' price; and a value call with an explicit forward that leaves it one
-/// gas short. One gas less forwarded leaves it the price: that frame starts, its callee returns
-/// the stipend, and the transaction computes the same. A value `CALLCODE` is not among them: it
-/// moves nothing and makes no record, so there is no price to fall short of.
+/// `MIDDLE` starts each kind of frame that makes records, with all but 2 per cent of what it holds,
+/// a fiftieth short of the records' price; and a value call with an explicit forward that leaves
+/// it one gas short. One gas less forwarded leaves it the price: that frame starts, its callee
+/// returns the stipend, and the transaction computes the same. A value `CALLCODE` is not among
+/// them: it moves nothing and makes no record, so there is no price to fall short of.
 #[test]
 fn test_a_start_its_caller_cannot_pay_for_counts_none_of_its_forward() {
     // Records that cost nothing leave no price to be short of, and records priced at a fraction of
@@ -1894,7 +1983,7 @@ fn test_a_start_its_caller_cannot_pay_for_counts_none_of_its_forward() {
     };
     /// A start `MIDDLE` makes: its code, its charges up to its forward, the price of the start's
     /// records, the state gas it spills before its forward, and the gas it is given — `None` for
-    /// 64 times the price less one, which leaves it a 64th of what it holds a gas short.
+    /// 50 times the price less one, which leaves it a fiftieth of what it holds a gas short.
     struct Start {
         name: &'static str,
         code: Bytes,
@@ -1923,11 +2012,11 @@ fn test_a_start_its_caller_cannot_pay_for_counts_none_of_its_forward() {
         creation("a CREATE", &[PUSH0, PUSH0, PUSH0, CREATE], vec![2, 2, 2, create]),
         creation("a CREATE2", &[PUSH0, PUSH0, PUSH0, PUSH0, CREATE2], vec![2, 2, 2, 2, create]),
     ];
-    // An explicit forward: `MIDDLE`, given its charges and 64 times the price less one, forwards
-    // all but a 64th of it less the price's 64th, and keeps the price less one.
+    // An explicit forward: `MIDDLE`, given its charges and 50 times the price less one, forwards
+    // all but 2 per cent of it, and keeps the price less one.
     let charges = value_call_charges(true);
-    let given = charges.iter().sum::<u64>() + 64 * (price(2) - 1);
-    let forward = 63 * (price(2) - 1);
+    let given = charges.iter().sum::<u64>() + 50 * (price(2) - 1);
+    let forward = 49 * (price(2) - 1);
     rows.push(Start {
         name: "a value CALL forwarding one gas too many",
         code: value_call(CALL, Some(forward)),
@@ -1971,9 +2060,9 @@ fn test_a_start_its_caller_cannot_pay_for_counts_none_of_its_forward() {
 
     for Start { name, code: middle, charges, price, spilled, given } in rows {
         let spent: u64 = charges.iter().sum();
-        let given = given.unwrap_or(64 * price - 1);
+        let given = given.unwrap_or(50 * price - 1);
         if given <= spent + spilled {
-            note_price_guard("a new account's state gas outweighs 64 times two records' history");
+            note_price_guard("a new account's state gas outweighs 50 times two records' history");
             continue;
         }
         let (run, called_other) = run(middle, given);

@@ -4,10 +4,10 @@ use alloy_evm::Evm;
 use alloy_primitives::{address, Address, Bytes, Log, U256};
 use mega_evm::{
     test_utils::{transfer_log, BytecodeBuilder, GasInspector, MemoryDatabase, ReadOnlyObserver},
-    MegaContext, MegaEvm, TX_BODY_SIZE, WRITE_RECORD_SIZE,
+    MegaContext, MegaEvm, LOG_BASE_SIZE, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 use revm::{
-    bytecode::opcode::{CALL, CREATE, GAS, INVALID, PUSH0, REVERT, SSTORE},
+    bytecode::opcode::{CALL, CREATE, GAS, INVALID, LOG0, PUSH0, REVERT, SSTORE},
     context::result::EVMError,
     interpreter::{
         interpreter::EthInterpreter, interpreter_types::Jumps, CallInputs, CallOutcome, CallValue,
@@ -18,7 +18,7 @@ use revm::{
 use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 
 use crate::common::{
-    account_state_gas, body_history, call, context, execute_under, history, slot_state_gas,
+    account_state_gas, body_history, call, context, execute_under, history, share, slot_state_gas,
 };
 
 const CALLER: Address = address!("0000000000000000000000000000000000400000");
@@ -27,16 +27,16 @@ const B: Address = address!("00000000000000000000000000000000000000B1");
 const FAKE: Address = address!("00000000000000000000000000000000000FA4E0");
 
 /// 1,000,000 of regular gas on top of what these scenarios add at the byte prices in effect: two
-/// fresh slots and a new account, the body and four records, and 64 times the history of two
-/// records, which a call or a creation that forwards all but a 64th of its gas pays for the frame
-/// it starts from the 64th it keeps.
+/// fresh slots and a new account, the body and four records, and 50 times the history of two
+/// records, which a call or a creation that forwards all but 2 per cent of its gas pays for the
+/// frame it starts from the fiftieth it keeps.
 fn gas_limit() -> u64 {
     1_000_000 +
         2 * slot_state_gas() +
         account_state_gas() +
         body_history(0) +
         history(4 * WRITE_RECORD_SIZE) +
-        64 * history(2 * WRITE_RECORD_SIZE)
+        50 * history(2 * WRITE_RECORD_SIZE)
 }
 
 /// Calls `B` with `value` and stores the call's success flag in slot 0.
@@ -239,48 +239,53 @@ fn test_create_end_address_rewrite_reaches_the_caller_not_the_code() {
 }
 
 /// A creation its own frame budget stops, revived by an inspector: the stop is the creation's alone
-/// and no stop of the transaction, so the creation failed as any failed creation does and its
-/// revival settles as the failure — the transaction is not refused. Under a data-size limit of the
-/// body and 121 bytes, the creator keeps its nonce record, 40, and the creation 98% of the 81
-/// left, 79: the creation's start makes the created account's record, 40 bytes, and the write in
-/// its init code a second, 40 more, over its budget, which the transaction's limit still holds.
-/// Under the body and 160 bytes the budget holds it, and so does the transaction's limit once the
-/// creator stores the address, a fourth record: the same creation succeeds.
+/// and no stop of the transaction, so the creation failed as any failed creation does, and its
+/// revival settles as the success the inspector made of it — the transaction is not refused. Under
+/// a data-size limit of the body and 4,000 bytes the creation gets 98% of them, 3,920: its start
+/// makes the created account's record, 40 bytes, and the log in its init code 3,881 more, one byte
+/// over its budget, which the transaction's limit still holds. Revived, it hands its creator the
+/// record it counted, and the creator keeps that, its nonce record and the address it stores. Under
+/// the body and 4,100 bytes the budget, 4,018, holds the log, and the creator keeps its two records
+/// on top: the same creation succeeds.
 #[test]
 fn test_a_creation_its_frame_budget_stops_may_be_revived() {
-    // A write of 1 to slot 1, short enough for `create_and_store_address`.
+    // A log one byte past the creation's share once the created account's record is counted.
+    const LOGGED: u64 = 3_849;
+    assert_eq!(WRITE_RECORD_SIZE + LOG_BASE_SIZE + LOGGED, share(4_000) + 1);
     let init_code = BytecodeBuilder::default()
-        .push_number(1_u8)
-        .push_number(1_u8)
-        .append(SSTORE)
+        .push_number(LOGGED)
+        .push_number(0_u8)
+        .append(LOG0)
         .stop()
         .build();
+    // What `gas_limit` covers, and the log the creation keeps when its budget holds it.
+    let gas_limit = gas_limit() + history(LOG_BASE_SIZE + LOGGED) + 100_000;
     let db = || MemoryDatabase::default().account_code(A, create_and_store_address(&init_code));
     let under = |bytes: u64| {
         mega_evm::EvmTxRuntimeLimits::default().with_tx_data_size_limit(TX_BODY_SIZE + bytes)
     };
     let plain =
-        |bytes: u64| execute_under(db(), call(CALLER, A, U256::ZERO, gas_limit()), under(bytes));
+        |bytes: u64| execute_under(db(), call(CALLER, A, U256::ZERO, gas_limit), under(bytes));
     let created = |outcome: &mega_evm::MegaTransactionOutcome| {
         outcome.state[&A]
             .storage
             .get(&U256::ZERO)
             .is_some_and(|slot| !slot.present_value().is_zero())
     };
-    let roomy = plain(160);
+    let roomy = plain(4_100);
     assert!(roomy.result.is_success() && created(&roomy), "{:?}", roomy.result);
 
     // Without the inspector the creation fails alone: its creator stores no address and succeeds,
     // and the transaction is not stopped.
-    let stopped = plain(121);
+    let stopped = plain(4_000);
     assert!(stopped.result.is_success(), "{:?}", stopped.result);
     assert_eq!(stopped.limit_exceeded, None, "a frame budget below is no stop");
     assert!(!created(&stopped), "the creation failed");
 
-    let limits = under(121);
+    let limits = under(4_000);
     let revived = MegaEvm::new(context(db()).with_tx_runtime_limits(limits))
         .with_inspector(Rewriter { create_succeeds: true, ..Default::default() })
-        .execute_transaction(call(CALLER, A, U256::ZERO, gas_limit()))
+        .execute_transaction(call(CALLER, A, U256::ZERO, gas_limit))
         .unwrap();
     assert!(revived.result.is_success(), "{:?}", revived.result);
     assert_eq!(revived.limit_exceeded, None, "and the revival is no stop either");
@@ -663,10 +668,11 @@ impl<CTX> Inspector<CTX, EthInterpreter> for Seen {
 }
 
 /// A system call runs on the handler's plain system-call path wherever the engine and alloy-evm
-/// make one — the pre-block calls' entry point, alloy-evm's and revm's — so the EVM's inspector
-/// sees nothing of it, as alloy-evm's own EVMs have it. revm's inspecting entry point is the one
-/// that hands it to the inspector, and there the call keeps every exemption a system call has: a
-/// data-size limit of zero, which would stop a transaction before its first frame, stops nothing.
+/// make one — alloy-evm's and revm's entry points here, the block's pre-block calls in the block
+/// tests — so the EVM's inspector sees nothing of it, as alloy-evm's own EVMs have it. revm's
+/// inspecting entry point is the one that hands it to the inspector, and there the call keeps every
+/// exemption a system call has: a data-size limit of zero, which would stop a transaction before
+/// its first frame, stops nothing.
 #[test]
 fn test_only_the_inspecting_system_call_entry_point_runs_the_inspector() {
     use revm::{InspectSystemCallEvm, SystemCallEvm};
@@ -676,8 +682,6 @@ fn test_only_the_inspecting_system_call_entry_point_runs_the_inspector() {
     let mut evm =
         MegaEvm::new(context(db).with_tx_runtime_limits(limits)).with_inspector(Seen::default());
 
-    let result = evm.transact_system_call_with_gas_limit(CALLER, A, Bytes::new(), 30_000_000);
-    assert!(result.unwrap().result.is_success());
     assert!(Evm::transact_system_call(&mut evm, CALLER, A, Bytes::new())
         .unwrap()
         .result

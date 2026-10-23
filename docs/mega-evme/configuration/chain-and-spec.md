@@ -63,7 +63,8 @@ On Satin, every output field keeps its legacy name and meaning, and one field is
 | `floor_gas`           | The EIP-7623 floor the receipt's gas used cannot fall below                                                                   |
 | `data_size`           | Data-size bytes the transaction kept                                                                                          |
 | `write_records`       | Account and storage write records it kept: its KV count                                                                       |
-| `limit_exceeded`      | `null`, or the limit that stopped it: `kind` (`data_size`, `compute_gas`), `limit`, `used`                                    |
+| `state_growth`        | New accounts and new storage slots it kept, net: its state growth                                                             |
+| `limit_exceeded`      | `null`, or the limit that stopped it: `kind` (`data_size`, `kv_updates`, `state_growth`, `compute_gas`), `limit`, `used`      |
 | `limits_override`     | Present only under `--override.limits`: the protocol limits the run was held to, in the shape the flag takes                  |
 
 In text mode the same numbers follow the summary under `=== Satin Gas ===`.
@@ -76,7 +77,11 @@ A Satin run is held to Satin's protocol limits, which the spec fixes and no chai
 | Limit                                                                    | Value      |
 | ------------------------------------------------------------------------ | ---------- |
 | A transaction's data size (`txDataSizeLimit`)                            | 13,107,200 |
+| A transaction's KV updates (`txKvUpdateLimit`)                           | 500,000    |
+| A transaction's state growth (`txStateGrowthLimit`)                      | 1,000      |
 | A block's data size (`blockTxsDataLimit`)                                | 13,107,200 |
+| A block's KV updates (`blockKvUpdateLimit`)                              | 500,000    |
+| A block's state growth (`blockStateGrowthLimit`)                         | 1,000      |
 | Compute after a block-environment read (`blockEnvAccessComputeGasLimit`) | 20,000,000 |
 | Compute after an Oracle read (`oracleAccessComputeGasLimit`)             | 20,000,000 |
 | A frame's data size beyond its share (`frameDataSizeLimit`)              | unlimited  |
@@ -87,17 +92,22 @@ The values are provisional, as Satin is.
 `--override.limits` runs under other limits, a counterfactual.
 It takes a JSON object in the limits' shape, inline or as the path of a file.
 The fields it names replace Satin's, and every other stays.
+A file written for the shape's first published version, without the KV-update and state-growth limits, runs with Satin's values for them.
 The whole shape, at Satin's values:
 
 ```json
 {
   "txRuntimeLimits": {
     "txDataSizeLimit": 13107200,
+    "txKvUpdateLimit": 500000,
+    "txStateGrowthLimit": 1000,
     "frameDataSizeLimit": 18446744073709551615,
     "blockEnvAccessComputeGasLimit": 20000000,
     "oracleAccessComputeGasLimit": 20000000
   },
-  "blockTxsDataLimit": 13107200
+  "blockTxsDataLimit": 13107200,
+  "blockKvUpdateLimit": 500000,
+  "blockStateGrowthLimit": 1000
 }
 ```
 

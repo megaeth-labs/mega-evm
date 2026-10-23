@@ -1,39 +1,29 @@
-//! Two costs Satin inherits from Ethereum where the legacy engine departed from it.
+//! A cost Satin inherits from Ethereum where the legacy engine departed from it: **a preload-warm
+//! address is charged warm.** The precompiles, the block beneficiary and an access-list address
+//! are warm from the transaction's start, and the first call to one costs what the second does.
+//! The legacy engine's pricing inspected the callee's account before the opcode's own access and
+//! charged that first touch cold; Satin's pricing hook inspects no account, so the warmth revm
+//! preloads is what the opcode sees.
 //!
-//! - **A preload-warm address is charged warm.** The precompiles, the block beneficiary and an
-//!   access-list address are warm from the transaction's start, and the first call to one costs
-//!   what the second does. The legacy engine's pricing inspected the callee's account before the
-//!   opcode's own access and charged that first touch cold; Satin's pricing hook inspects no
-//!   account, so the warmth revm preloads is what the opcode sees.
-//! - **A call or creation forwards all but a 64th of its gas**, as EIP-150 has it, where the legacy
-//!   engine forwarded 98/100. The 98% share lives on in the data-size and KV frame budgets, which
-//!   are not gas.
-//!
-//! Both are read off the regular ledger, which is the gas the opcodes charge.
+//! It is read off the regular ledger, which is the gas the opcodes charge.
 
 use alloy_op_evm::OpTx;
 use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
 use mega_evm::{
-    constants::TX_GAS_LIMIT_CAP,
     test_utils::{op_transaction, BytecodeBuilder, MemoryDatabase},
-    MegaContext, MegaEvm, MegaTransaction, MegaTransactionOutcome,
+    MegaTransaction,
 };
 use revm::{
-    bytecode::opcode::{CALL, CALLCODE, CREATE, GAS, POP, PUSH0, STATICCALL, STOP},
+    bytecode::opcode::{CALL, CALLCODE, POP, PUSH0, STATICCALL, STOP},
     context::{
         transaction::{AccessList, AccessListItem, TransactionType},
         TxEnv,
     },
     context_interface::cfg::GasId,
-    interpreter::{
-        interpreter::EthInterpreter, interpreter_types::Jumps, CallInputs, CallOutcome,
-        CreateInputs, CreateOutcome, Interpreter,
-    },
-    Database, Inspector,
 };
 
 use crate::{
-    common::{block, call, context, execute},
+    common::{block, call, execute},
     salt::entry,
 };
 
@@ -154,87 +144,4 @@ fn test_the_first_callcode_to_an_access_list_address_is_charged_warm() {
 fn test_the_first_call_to_the_beneficiary_is_charged_warm() {
     let beneficiary = block().beneficiary;
     assert_eq!(first_call_over_second(CALL, beneficiary, plain), 0);
-}
-
-/* ---------- forwarding ---------- */
-
-/// The regular gas a frame holds as its call or creation starts, and what it forwards.
-#[derive(Default)]
-struct Forward {
-    opcode: u8,
-    held: Option<u64>,
-    forwarded: Option<u64>,
-}
-
-impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Forward {
-    fn step(&mut self, interp: &mut Interpreter<EthInterpreter>, _context: &mut MegaContext<DB>) {
-        self.opcode = interp.bytecode.opcode();
-        if matches!(self.opcode, CALL | CREATE) {
-            self.held = Some(interp.gas.remaining());
-        }
-    }
-
-    fn call(
-        &mut self,
-        _context: &mut MegaContext<DB>,
-        inputs: &mut CallInputs,
-    ) -> Option<CallOutcome> {
-        if inputs.target_address == EXISTING {
-            self.forwarded = Some(inputs.gas_limit);
-        }
-        None
-    }
-
-    fn create(
-        &mut self,
-        _context: &mut MegaContext<DB>,
-        inputs: &mut CreateInputs,
-    ) -> Option<CreateOutcome> {
-        self.forwarded = Some(inputs.gas_limit());
-        None
-    }
-}
-
-/// Runs `CONTRACT` holding `code` above the execution cap, where the reservoir pays every state
-/// and history charge, and returns the regular gas held at the opcode and the gas forwarded.
-fn forward_of(code: Bytes) -> (u64, u64, MegaTransactionOutcome) {
-    let db = MemoryDatabase::default()
-        .account_balance(CALLER, U256::from(10u64.pow(18)))
-        .account_code(CONTRACT, code);
-    let mut evm = MegaEvm::new(context(db)).with_inspector(Forward::default());
-    let outcome = evm
-        .execute_transaction(call(CALLER, CONTRACT, U256::ZERO, 5 * TX_GAS_LIMIT_CAP))
-        .expect("the transaction is valid");
-    let forward = evm.inspector();
-    (forward.held.expect("the opcode ran"), forward.forwarded.expect("a frame started"), outcome)
-}
-
-/// A `CALL` given all the gas forwards all but a 64th of what its caller holds once the call's own
-/// charge — the cold access to its target — is paid.
-#[test]
-fn test_a_call_forwards_all_but_a_64th_of_its_gas() {
-    let code = BytecodeBuilder::default()
-        .append_many([PUSH0, PUSH0, PUSH0, PUSH0, PUSH0])
-        .push_address(EXISTING)
-        .append_many([GAS, CALL, STOP])
-        .build();
-    let (held, forwarded, outcome) = forward_of(code);
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    let left = held - entry(GasId::warm_storage_read_cost()) - cold_over_warm();
-    assert_eq!(forwarded, left - left / 64);
-}
-
-/// A `CREATE` forwards all but a 64th of what its creator holds once the creation's own charges —
-/// the `create` entry, EIP-3860's word and the memory the init code occupies — are paid; the
-/// created account's state gas comes out of the reservoir.
-#[test]
-fn test_a_creation_forwards_all_but_a_64th_of_its_gas() {
-    let code = BytecodeBuilder::default()
-        .push_number(10_u8)
-        .append_many([PUSH0, PUSH0, CREATE, STOP])
-        .build();
-    let (held, forwarded, outcome) = forward_of(code);
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    let left = held - entry(GasId::create()) - entry(GasId::initcode_per_word()) - 3;
-    assert_eq!(forwarded, left - left / 64);
 }
