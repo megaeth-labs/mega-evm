@@ -3,7 +3,10 @@
 //! What a transaction keeps is counted where its own execution writes: at the completed-write and
 //! frame-start hooks, and where revm decides a start. A precompile's writes through
 //! `EvmInternals` and an inspector's are not the transaction's own execution, and neither is
-//! counted; neither is a start an inspector answers before revm decides it.
+//! counted; neither is a start an inspector answers before revm decides it. The one exception is a
+//! precompile's in a success answer, which revm runs inside the call's start: the start is read
+//! off the journal once revm decided it, so what the precompile changes of the start's own
+//! accounts, and a transfer log it journals, are read with the start.
 
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{address, map::HashMap, Address, Bytes, Log, LogData, B256, U256};
@@ -67,9 +70,11 @@ fn stateful() -> DynPrecompile {
 /// counts none of them: the transaction's data size is its body and the start of the value call
 /// that reached the precompile, the precompile's record and its caller's and the call's transfer
 /// log, as for a precompile that writes nothing. revm runs the precompile inside the call's start,
-/// and the start is read off the journal once revm decided it, so a precompile's writes to the
-/// call's own accounts would be read with the start; this one's transfer leaves the precompile's
-/// account changed, as the call's value did, and writes no other account of the start.
+/// and the start is read off the journal once revm decided it, so what a precompile changes of the
+/// call's own accounts, and a transfer log it journals, would be read with the start, which counts
+/// one transfer log; its storage writes and its writes to any other account are not. This one's
+/// transfer leaves the precompile's account changed, as the call's value did, its transfer log is
+/// the start's second, and [`PAYEE`] is no account of the start.
 #[test]
 fn test_a_precompiles_writes_through_evm_internals_count_nothing() {
     let code = BytecodeBuilder::default().call(STATEFUL, U256::from(VALUE)).stop().build();
@@ -102,6 +107,40 @@ fn test_a_precompiles_writes_through_evm_internals_count_nothing() {
         outcome.usage,
         grown(records_and_moves(2, 1), 1),
         "the call's start alone is counted, whose value creates STATEFUL"
+    );
+}
+
+/// A precompile that moves one wei of its own to [`CONTRACT`], which calls it, through
+/// `EvmInternals`.
+fn paying_its_caller() -> DynPrecompile {
+    DynPrecompile::new(PrecompileId::Custom("paying its caller".into()), |mut input| {
+        assert_eq!(input.internals.transfer(STATEFUL, CONTRACT, U256::from(1)).unwrap(), None);
+        Ok(PrecompileOutput::new(0, Bytes::new(), input.reservoir))
+    })
+}
+
+/// A node's own precompile that, reached by a call moving no value, moves value between the call's
+/// own accounts in its success answer has that move read with the call's start, which revm runs it
+/// inside: the start counts both accounts' records and the precompile's transfer log, as a value
+/// call between them would have, where the call alone counts nothing.
+#[test]
+fn test_a_precompiles_writes_to_the_starts_own_accounts_are_read_with_the_start() {
+    let code = BytecodeBuilder::default().call(STATEFUL, U256::ZERO).stop().build();
+    let db = MemoryDatabase::default()
+        .account_code(CONTRACT, code)
+        .account_balance(STATEFUL, U256::from(VALUE));
+    let tx = call(CALLER, CONTRACT, U256::ZERO, value_call_room());
+    let mut evm = MegaEvm::new(context(db))
+        .with_dyn_precompiles(HashMap::from_iter([(STATEFUL, paying_its_caller())]));
+    let outcome = evm.execute_transaction(tx).expect("the transaction is valid");
+
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    assert_eq!(outcome.state[&CONTRACT].info.balance, U256::from(1), "the precompile's move");
+    assert_eq!(outcome.result.logs(), [transfer_log(STATEFUL, CONTRACT, U256::from(1))]);
+    assert_eq!(
+        outcome.usage,
+        records_and_moves(2, 1),
+        "the call's two accounts and the precompile's transfer log, read with the start"
     );
 }
 

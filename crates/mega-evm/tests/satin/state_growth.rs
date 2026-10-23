@@ -1371,6 +1371,44 @@ fn test_a_deposits_new_caller_is_counted_before_its_first_frame() {
     assert!(none_left.state[&A].storage.values().all(|slot| slot.present_value.is_zero()));
 }
 
+/// Under a state-growth limit of nothing a deposit's created caller alone is over it. A first frame
+/// revm answers with a success — a precompile that answers — is held to the transaction's limit
+/// with what its start adds, nothing, and is the stop; one revm answers with a failure — a
+/// precompile whose input fails its check — kept nothing and is held to no limit, so the deposit
+/// fails as its frame's halt has it, a failed deposit, and reports no stop.
+#[test]
+fn test_a_deposits_failed_first_answer_is_held_to_no_limit() {
+    let fresh = address!("00000000000000000000000000000000006000fe");
+    let deposit = |input: u8| {
+        let mut tx = call(fresh, revm::precompile::bn254::add::ADDRESS, U256::ZERO, room(0));
+        tx.0.base.data = Bytes::from(vec![input; 128]);
+        crate::common::deposit(tx)
+    };
+    let answered = execute_under(funded(), deposit(0), growth(0));
+    assert_eq!(
+        answered.limit_exceeded,
+        Some(LimitCheck::ExceedsLimit {
+            kind: LimitKind::StateGrowth,
+            limit: 0,
+            used: 1,
+            frame_local: false
+        }),
+        "two points at infinity add up: the answer is held, and the caller is over the limit"
+    );
+    let failed = execute_under(funded(), deposit(0xff), growth(0));
+    assert!(
+        matches!(
+            failed.result,
+            ExecutionResult::Halt { reason: mega_evm::MegaHaltReason::FailedDeposit, .. }
+        ),
+        "coordinates above the field's modulus fail the precompile: {:?}",
+        failed.result
+    );
+    assert_eq!(failed.limit_exceeded, None, "the failed answer is held to nothing");
+    assert_eq!(failed.usage.state_growth, 1, "the caller stays counted");
+    assert_eq!(failed.state[&fresh].info.nonce, 1, "and exists");
+}
+
 /// A frame whose start adds a new account it has no budget for is stopped before it runs, and what
 /// its start moved goes back: a value call to a new account under a budget of nothing is answered
 /// with the stop, its value not moved, and its caller catches it. A creation's start alike: its
