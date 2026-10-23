@@ -534,7 +534,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         // The protocol's own transactions are not detained: they maintain the volatile data. Their
         // reads set no cap.
         let limits = self.additional_limit.limits();
-        let (block_env_cap, oracle_cap) = if system_originated {
+        let (block_env_cap, oracle_cap) = if class == TxClass::ProtocolOwn {
             (u64::MAX, u64::MAX)
         } else {
             (limits.block_env_access_compute_gas_limit, limits.oracle_access_compute_gas_limit)
