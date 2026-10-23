@@ -21,7 +21,7 @@ use crate::{
         history::{history_gas, transaction_body_bytes, write_record_history_gas},
         schedule::{satin_gas_params, satin_gas_params_history_exempt},
     },
-    limit::{Accounts, Counted},
+    limit::{Accounts, Counted, TxClass},
     system::{self, keyless},
     AdditionalLimit, BlockHashRecord, BucketError, BucketId, BucketMultipliers, BucketRecord,
     Detention, EmptyExternalEnv, EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs, LimitUsage,
@@ -416,13 +416,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     ///
     /// The neutral configuration prices no history at all.
     ///
-    /// It is read off the transaction the context holds and the exemption the transaction was
-    /// prepared with, so a caller that replaces the transaction and asks before running it gets
-    /// the new transaction's type with the last one's exemption.
-    pub fn prices_history(&self) -> bool {
-        !(self.runs_neutral() ||
-            self.is_system_originated() ||
-            self.inner.tx.tx_type() == DEPOSIT_TRANSACTION_TYPE)
+    /// It is decided when the transaction is prepared, with its exemption, from what it is then
+    /// (a promoted system-address transaction is the protocol's own either way): a transaction
+    /// set in the context's hands and not run yet changes neither until it is prepared.
+    pub const fn prices_history(&self) -> bool {
+        !self.runs_neutral() && matches!(self.additional_limit.class(), TxClass::Ordinary)
     }
 
     /// The history gas of the running (or last) transaction's body: the bytes it carries and the
@@ -524,7 +522,14 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         // The body is data size whether or not the transaction pays history for it. A deposit,
         // a system transaction and a system call are exempt from the charge, not from the count.
         let body = transaction_body_bytes(self.tx());
-        self.additional_limit.begin_transaction(system_originated, body);
+        let class = if system_originated {
+            TxClass::ProtocolOwn
+        } else if self.inner.tx.tx_type() == DEPOSIT_TRANSACTION_TYPE {
+            TxClass::Deposit
+        } else {
+            TxClass::Ordinary
+        };
+        self.additional_limit.begin_transaction(class, body);
         self.install_history_schedule();
         // The protocol's own transactions are not detained: they maintain the volatile data. Their
         // reads set no cap.

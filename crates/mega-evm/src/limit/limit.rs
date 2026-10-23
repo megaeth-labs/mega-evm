@@ -77,9 +77,9 @@ use super::{
 #[derive(Clone, Debug, Default)]
 pub struct AdditionalLimit {
     limits: EvmTxRuntimeLimits,
-    /// Whether the transaction is exempt from every per-transaction limit, sticky for the
-    /// transaction. See [`is_exempt`](Self::is_exempt).
-    exempt: bool,
+    /// What the running execution is, decided when it is begun and sticky for it: the exemption
+    /// follows from it ([`is_exempt`](Self::is_exempt)).
+    class: TxClass,
     /// The crossing the result of the frame returning next was made of, noted where the stop
     /// became that result ([`note_frame_stop`](Self::note_frame_stop)) and taken when the frame
     /// returns.
@@ -113,6 +113,22 @@ pub struct AdditionalLimit {
     /// The EIP-8037 reservoir the settled transaction or system call left unspent: none from where
     /// an execution builds its gas until it reports what it settled with.
     reservoir_remaining: Option<u64>,
+}
+
+/// What the running execution is, decided when the layer begins it from what the transaction is,
+/// and kept until the next one begins: what it is held to and what it pays follow from it, so
+/// replacing the transaction the context holds without beginning it changes neither.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum TxClass {
+    /// The protocol's own work, a system-originated transaction or a system call: held to no
+    /// per-transaction limit, not detained, priced at the minimum bucket and paying no history.
+    ProtocolOwn,
+    /// A user's deposit: held to every limit like any transaction, and paying no history, its
+    /// bytes paid for on L1.
+    Deposit,
+    /// Any other transaction, which pays history for the bytes it appends.
+    #[default]
+    Ordinary,
 }
 
 /// What a transaction's frames keep: the signed net of each counted dimension, indexed by its
@@ -257,12 +273,12 @@ impl AdditionalLimit {
     }
 
     /// Clears the state for a new transaction, keeping allocations and the limits, and begins it:
-    /// exempt from every limit or not, its body weighing `body` bytes.
+    /// a transaction of `class`, its body weighing `body` bytes.
     ///
     /// The exemption is decided before the body is counted: the protocol's own work is exempt
     /// whatever it carries.
-    pub(crate) fn begin_transaction(&mut self, exempt: bool, body: u64) {
-        self.exempt = exempt;
+    pub(crate) fn begin_transaction(&mut self, class: TxClass, body: u64) {
+        self.class = class;
         self.frame_stop = None;
         self.limit_exceeded = None;
         self.body = body;
@@ -334,7 +350,7 @@ impl AdditionalLimit {
     /// record for each distinct authority that applies — and a transaction validation admits
     /// cannot cross the limit there. An exempt transaction is held to nothing.
     pub(crate) const fn admits_tx_body(&self, authorizations: u64) -> bool {
-        self.exempt ||
+        self.is_exempt() ||
             self.body.saturating_add(WRITE_RECORD_SIZE.saturating_mul(authorizations)) <=
                 self.limits.tx_data_size_limit
     }
@@ -353,11 +369,11 @@ impl AdditionalLimit {
         self.authorities = authorities;
         self.created_authorities = created;
         debug_assert!(
-            self.exempt || !self.usage().exceeds_data_size(self.limits.tx_data_size_limit),
+            self.is_exempt() || !self.usage().exceeds_data_size(self.limits.tx_data_size_limit),
             "validation admits no body whose authority records cross the data-size limit"
         );
         debug_assert!(
-            self.exempt ||
+            self.is_exempt() ||
                 (authorities == 0 && created == 0) ||
                 [LimitKind::KvUpdate, LimitKind::StateGrowth]
                     .iter()
@@ -390,7 +406,7 @@ impl AdditionalLimit {
         let records = self.tx_limit(LimitKind::KvUpdate) as i128 - self.net(LimitKind::KvUpdate);
         let created =
             self.tx_limit(LimitKind::StateGrowth) as i128 - self.net(LimitKind::StateGrowth);
-        !self.exempt && (entries as i128 > records || entries as i128 > created)
+        !self.is_exempt() && (entries as i128 > records || entries as i128 > created)
     }
 
     /// The verdict on an authorization list that would keep `records` write records and create
@@ -423,7 +439,7 @@ impl AdditionalLimit {
     /// its body and the counts made before the frame are counted, the data size under the frame
     /// cap; unlimited for an exempt transaction.
     pub(crate) const fn first_frame_pools(&self) -> PoolAmounts {
-        if self.exempt {
+        if self.is_exempt() {
             return PoolAmounts::UNLIMITED;
         }
         let caps = self.frame_caps();
@@ -450,7 +466,7 @@ impl AdditionalLimit {
     /// The most each of a frame's pools may start with: the data-size frame cap, and no cap on the
     /// other pools; nothing for an exempt transaction.
     pub(crate) const fn frame_caps(&self) -> PoolAmounts {
-        if self.exempt {
+        if self.is_exempt() {
             return PoolAmounts::UNLIMITED;
         }
         PoolAmounts::UNLIMITED.with(DATA_SIZE_POOL, self.limits.frame_data_size_limit)
@@ -471,7 +487,7 @@ impl AdditionalLimit {
         used: u64,
         frame_local: bool,
     ) -> LimitCheck {
-        if self.exempt {
+        if self.is_exempt() {
             return LimitCheck::WithinLimit;
         }
         LimitCheck::ExceedsLimit { kind, limit, used, frame_local }
@@ -741,9 +757,15 @@ impl AdditionalLimit {
         }
     }
 
-    /// Whether the running transaction is exempt from every per-transaction limit.
+    /// Whether the running transaction is exempt from every per-transaction limit: the protocol's
+    /// own work is.
     pub const fn is_exempt(&self) -> bool {
-        self.exempt
+        matches!(self.class, TxClass::ProtocolOwn)
+    }
+
+    /// What the running (or last) execution is, decided when it was begun.
+    pub(crate) const fn class(&self) -> TxClass {
+        self.class
     }
 
     /* What the settled transaction reports */
@@ -855,7 +877,7 @@ mod tests {
     #[test]
     fn test_the_exemption_answers_every_crossing_and_lasts_one_transaction() {
         let mut limit = AdditionalLimit::default();
-        limit.begin_transaction(true, 0);
+        limit.begin_transaction(TxClass::ProtocolOwn, 0);
         assert!(limit.is_exempt());
         for kind in [LimitKind::DataSize, LimitKind::ComputeGas] {
             for frame_local in [false, true] {
@@ -863,7 +885,7 @@ mod tests {
                 assert_eq!(verdict, LimitCheck::WithinLimit, "{kind:?}, frame-local {frame_local}");
             }
         }
-        limit.begin_transaction(false, 0);
+        limit.begin_transaction(TxClass::Ordinary, 0);
         assert!(!limit.is_exempt());
         assert_eq!(
             limit.crossed(LimitKind::ComputeGas, 0, 1, false),
@@ -887,7 +909,7 @@ mod tests {
         let limits = EvmTxRuntimeLimits::no_limits()
             .with_tx_data_size_limit(crate::TX_BODY_SIZE + WRITE_RECORD_SIZE);
         let mut limit = AdditionalLimit::new(limits);
-        limit.begin_transaction(false, crate::TX_BODY_SIZE);
+        limit.begin_transaction(TxClass::Ordinary, crate::TX_BODY_SIZE);
         limit.count_authorities(2, 0);
     }
 }

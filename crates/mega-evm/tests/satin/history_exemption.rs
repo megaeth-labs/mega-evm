@@ -26,7 +26,7 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{CALL, CREATE, LOG0, POP},
-    context::TxEnv,
+    context::{ContextSetters, TxEnv},
 };
 
 use crate::common::{context, deposit, runs_at_measurement_prices};
@@ -327,4 +327,38 @@ fn test_the_exemption_does_not_outlive_its_transaction() {
     assert!(paying.result.is_success(), "{:?}", paying.result);
     assert!(paying.gas.history > 0, "the next transaction pays for its own bytes");
     assert_eq!(paying.gas.history, PROGRAM_HISTORY_BYTES * COST_PER_HISTORY_BYTE, "all of them");
+}
+
+/// Whether a transaction pays history, and whether it is the protocol's own, are decided when the
+/// transaction is prepared to run, from what it is: a transaction set in the context's hands but
+/// not run yet changes neither. After a user's transaction, a deposit or a system transaction set
+/// in its place still answers as the user's transaction did; after a deposit, a user's transaction
+/// still answers that it pays none; after a system transaction, a user's transaction still answers
+/// that it is the protocol's own. Each answers for itself once it runs.
+#[test]
+fn test_what_a_transaction_pays_is_decided_when_it_is_prepared() {
+    let user = || call_from(CALLER, CONTRACT);
+    let user_deposit = || deposit(call_from(CALLER, CONTRACT));
+    // (case, transaction, pays history, the protocol's own)
+    let cases: [(&str, fn() -> MegaTransaction, bool, bool); 3] = [
+        ("a user's transaction", user, true, false),
+        ("a user's deposit", user_deposit, false, false),
+        ("a system transaction", system_tx, false, true),
+    ];
+    for (ran, run, pays, own) in cases {
+        for (set, replacement, its_pays, its_own) in cases {
+            let mut evm = MegaEvm::new(context(db()));
+            evm.execute_transaction(run()).expect("the transaction is valid");
+            assert_eq!(evm.ctx().prices_history(), pays, "{ran}");
+            assert_eq!(evm.ctx().is_system_originated(), own, "{ran}");
+
+            evm.ctx_mut().set_tx(replacement());
+            assert_eq!(evm.ctx().prices_history(), pays, "{ran}, then {set} set and not run");
+            assert_eq!(evm.ctx().is_system_originated(), own, "{ran}, then {set} set and not run");
+
+            evm.execute_transaction(replacement()).expect("the transaction is valid");
+            assert_eq!(evm.ctx().prices_history(), its_pays, "{ran}, then {set} run");
+            assert_eq!(evm.ctx().is_system_originated(), its_own, "{ran}, then {set} run");
+        }
+    }
 }

@@ -184,7 +184,7 @@ mod limit;
 mod record;
 
 pub use limit::AdditionalLimit;
-pub(crate) use limit::Counted;
+pub(crate) use limit::{Counted, TxClass};
 #[cfg(test)]
 pub(crate) use record::emits_transfer_logs;
 #[cfg(any(test, feature = "test-utils"))]
